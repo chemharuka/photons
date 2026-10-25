@@ -66,13 +66,34 @@ public struct RenderOptions: Sendable {
     /// both — so this is a cost knob, never a quality knob.
     public var maskTiling: MaskTiling
 
+    /// Measure a histogram of the display-encoded output (see `Histogram`).
+    ///
+    /// Off by default and free when off: no texture, no dispatch, no extra key, and the pixels are
+    /// bit-identical either way (`HistogramTests.testPixelsAreIdenticalWithAndWithout`). When on, the
+    /// frame's own command buffer gains one dispatch that reduces the result to a grid of at most
+    /// 1024 pixels on the long edge, and the one readback the render already does for `wantsPixels`
+    /// is joined by one readback of that grid — 4.6 MB at 4.10 Mpx instead of 32 MB
+    /// (`Histogram.maxLongEdge` carries the argument and the error bound).
+    public var collectHistogram: Bool
+    /// Bins per channel for `collectHistogram`; 256 is an 8-bit output's own resolution.
+    public var histogramBins: Int
+    /// Measure only this part of the frame, in **canvas pixels** (`nil` = all of it).
+    ///
+    /// Canvas pixels, not content pixels: the histogram's job is to answer "what does the file/panel
+    /// get", and the file/panel is the canvas. A ROI that leaves the canvas is clamped into it; a ROI
+    /// with no area produces an empty measurement rather than a guess.
+    public var histogramROI: ImageRect?
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
                 display: DisplayOptions = DisplayOptions(),
                 useCache: Bool = true,
                 wantsPixels: Bool = true,
-                maskTiling: MaskTiling = .auto) {
+                maskTiling: MaskTiling = .auto,
+                collectHistogram: Bool = false,
+                histogramBins: Int = 256,
+                histogramROI: ImageRect? = nil) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -80,6 +101,9 @@ public struct RenderOptions: Sendable {
         self.useCache = useCache
         self.wantsPixels = wantsPixels
         self.maskTiling = maskTiling
+        self.collectHistogram = collectHistogram
+        self.histogramBins = histogramBins
+        self.histogramROI = histogramROI
     }
 }
 
@@ -155,10 +179,15 @@ public final class RenderResult {
     /// own, which is what makes "`showMask == nil` changes nothing" checkable per frame rather than
     /// by inspection.
     public let showsMask: Bool
+    /// Present when `RenderOptions.collectHistogram` was set: R/G/B/luma over the display-encoded
+    /// output, with the clipping ratios and the ROI it was measured over. `nil` otherwise, so
+    /// "nothing was measured" and "everything was black" cannot be confused.
+    public let histogram: Histogram?
 
     init(canvas: ImageSize, content: ImageSize, window: ImageRect, keys: StageKeys,
          trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
-         maskReport: MaskStageReport? = nil, showsMask: Bool = false) {
+         maskReport: MaskStageReport? = nil, showsMask: Bool = false,
+         histogram: Histogram? = nil) {
         self.canvas = canvas
         self.content = content
         self.window = window
@@ -168,6 +197,7 @@ public final class RenderResult {
         self.output = output
         self.maskReport = maskReport
         self.showsMask = showsMask
+        self.histogram = histogram
     }
 }
 
@@ -508,6 +538,11 @@ public final class RenderGraph {
     private var atlasPool: (key: String, texture: MTLTexture)?
     private var maskTables: [String: MaskTable] = [:]
 
+    /// 005f: the histogram's downsample pipeline, compiled on the first frame that asks for a
+    /// histogram (`makeLibrary(source:)` compiles once per process, so it cannot be a per-frame cost,
+    /// and a session that never draws a histogram never pays for it).
+    private var histogramPipeline: MTLComputePipelineState?
+
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
                 semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider()) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
@@ -812,6 +847,40 @@ public final class RenderGraph {
             report?.showMaskSlice = slice
         }
 
+        // MARK: the histogram's downsample (005f)
+        //
+        // One dispatch appended to the frame's *own* command buffer, so the sample costs no second
+        // submission and no second wait, and the readback below is the only CPU/GPU transfer this
+        // measurement adds. It reads `finish` — the same display-encoded texture the caller gets — so
+        // the numbers describe exactly the pixels the export or the screen would carry, `showMask`
+        // overlay included.
+        //
+        // Nothing here runs when `collectHistogram` is false: no texture, no pipeline, no dispatch,
+        // so the frame is byte-for-byte and cycle-for-cycle the pre-005f frame.
+        var histogramTarget: MTLTexture?
+        var histogramRequest: (roi: ImageRect, bins: Int)?
+        var histogramPayload: Histogram?
+        if options.collectHistogram, let shown = finish {
+            let bins = min(max(options.histogramBins, 2), 1 << 16)
+            let whole = ImageRect(x: 0, y: 0, width: plan.canvas.width, height: plan.canvas.height)
+            if let requested = options.histogramROI, requested.isEmpty {
+                // An empty selection is a measurement of nothing, not a measurement of pixel (0,0).
+                histogramPayload = Histogram.empty(bins: bins, canvas: plan.canvas, roi: requested,
+                                                   primaries: options.display.primaries)
+            } else {
+                let roi = (options.histogramROI?.clamped(in: plan.canvas)) ?? whole
+                if histogramPipeline == nil {
+                    histogramPipeline = try HistogramGather.makePipeline(device)
+                }
+                guard let pipeline = histogramPipeline else { throw RenderError.commandBufferFailed }
+                let sample = try pool.obtain(Histogram.sampleSize(for: roi))
+                try HistogramGather.encode(cb, source: shown, roi: roi, target: sample,
+                                           pipeline: pipeline)
+                histogramTarget = sample
+                histogramRequest = (roi, bins)
+            }
+        }
+
         let t0 = CFAbsoluteTimeGetCurrent()
         cb.commit()
         cb.waitUntilCompleted()
@@ -826,6 +895,16 @@ public final class RenderGraph {
 
         for t in transient { pool.recycle(t) }
 
+        // The measurement's single readback: the reduced grid, never the frame. 1024 × 1024 half
+        // float is 8 MB worst case against 32 MB for a 4.10 Mpx rgba16Float frame, and the CPU then
+        // bins ~0.3–1 Mpx instead of 4.10 M (let alone a 60 MP export).
+        if let target = histogramTarget, let request = histogramRequest {
+            let sample = readSample(target, primaries: options.display.primaries)
+            histogramPayload = Histogram.compute(sample, bins: request.bins)
+                .relabelled(canvas: plan.canvas, roi: request.roi)
+            pool.recycle(target)
+        }
+
         guard let finalTexture = finish else { throw RenderError.executeFailed("no display output") }
 
         if options.wantsPixels {
@@ -834,12 +913,12 @@ public final class RenderGraph {
             return RenderResult(canvas: plan.canvas, content: plan.content,
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
-                                showsMask: showsMask)
+                                showsMask: showsMask, histogram: histogramPayload)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
-                            showsMask: showsMask)
+                            showsMask: showsMask, histogram: histogramPayload)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
@@ -884,6 +963,27 @@ public final class RenderGraph {
         }
         let rgba = raw.map { Float16(bitPattern: $0) }
         return DisplayImage(width: w, height: h, rgba: rgba, primaries: primaries, bitDepth: bitDepth)
+    }
+
+    /// The histogram's readback: half float out of a half-float texture is a **copy**, not a
+    /// conversion, so it is one `getBytes` straight into `[Float16]`.
+    ///
+    /// `readback(_:primaries:bitDepth:)` is the general path and maps 4·w·h `UInt16`s through
+    /// `Float16(bitPattern:)`; the bits are identical either way, but that map is O(pixels) of closure
+    /// work on a buffer that is already in the right format (measured on a 4.10 Mpx frame in a debug
+    /// build: the histogram's frame went from 324 ms to 90 ms, of which the rest is the CPU binning).
+    /// This does not replace the general path, it just refuses to pay for the conversion twice per
+    /// frame.
+    private func readSample(_ texture: MTLTexture, primaries: OutputPrimaries) -> DisplayImage {
+        let w = texture.width, h = texture.height
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        rgba.withUnsafeMutableBytes { buf in
+            texture.getBytes(buf.baseAddress!,
+                             bytesPerRow: w * 4 * MemoryLayout<Float16>.size,
+                             from: MTLRegionMake2D(0, 0, w, h),
+                             mipmapLevel: 0)
+        }
+        return DisplayImage(width: w, height: h, rgba: rgba, primaries: primaries, bitDepth: 16)
     }
 
     // MARK: encoding

@@ -27,7 +27,7 @@ let valueFlags: Set<String> = [
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
-    "--ids", "--tier", "--strategy",
+    "--ids", "--tier", "--strategy", "--roi", "--bins",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -619,6 +619,7 @@ guard let cmd = argv.first else {
 
       photonsctl render <raw> --edit <json> [--edit <json> …] --out <file> [options]
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
+      photonsctl histogram <raw> [--edit <json>] [--roi x,y,w,h] [--bins 256] [--json|--csv]
 
       photonsctl library create  <pkg.photonslibrary>
       photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
@@ -669,6 +670,7 @@ do {
     case "cache":  try cmdCache(rest)
     case "render":   try cmdRender(rest)
     case "bench":    try cmdBench(rest)
+    case "histogram": try cmdHistogram(rest)
     case "library":  try cmdLibrary(rest)
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)

@@ -1,0 +1,135 @@
+import Foundation
+import PhotonsCore
+
+// MARK: - photonsctl histogram
+//
+// The acceptance harness for `RenderOptions.collectHistogram`: render one document, print the four
+// series and the clipping ratios. Deliberately `wantsPixels: false` — the histogram does not need the
+// frame readback, and running it that way is the proof: the measurement comes off the GPU's own
+// reduced grid, not off the pixels the caller would otherwise be handed (32 MB at 4.10 Mpx).
+//
+// Two machine forms, because two consumers exist:
+//   · `--json`  — one line, bins base64 (little-endian UInt32 each), the form a script or a UI reads.
+//   · `--csv`   — four lines of comma-separated counts, the form a person pipes into a plot.
+// The default text output is the same base64 as JSON plus the human-readable summary.
+
+/// `x,y,w,h` in canvas pixels. Anything else is a typo, and a typo must not silently measure the
+/// whole frame.
+func parseHistogramROI(_ s: String) -> ImageRect {
+    let parts = s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard parts.count == 4, let x = Int(parts[0]), let y = Int(parts[1]),
+          let w = Int(parts[2]), let h = Int(parts[3]), w >= 0, h >= 0 else {
+        die("bad --roi '\(s)' (want x,y,w,h in pixels, e.g. 120,80,640,480)")
+    }
+    return ImageRect(x: x, y: y, width: w, height: h)
+}
+
+/// Four bytes per bin, little-endian, base64 — 1.4 KB for 256 bins instead of a 1.1 KB decimal list
+/// that has to be re-parsed with a split.
+func base64HistogramBins(_ bins: [Int]) -> String {
+    var data = Data(capacity: bins.count * 4)
+    for b in bins {
+        var word = UInt32(max(0, b)).littleEndian
+        withUnsafeBytes(of: &word) { data.append(contentsOf: $0) }
+    }
+    return data.base64EncodedString()
+}
+
+func csvHistogramBins(_ bins: [Int]) -> String {
+    bins.map(String.init).joined(separator: ",")
+}
+
+func percent(_ v: Double) -> String { String(format: "%.3f%%", v * 100) }
+
+func cmdHistogram(_ a: Args) throws {
+    let url = requireRaw(a)
+    let scale = a.value("--scale").flatMap(Double.init) ?? 1
+    let display = displayOptions(a)
+    let bins = a.value("--bins").flatMap(Int.init) ?? 256
+    let (edits, names) = try loadEdits(a)
+    let edit = edits[0]
+
+    let probe = try makeDecoder().probe(url)
+    let version = a.value("--version") ?? probe.defaultVersion
+    let fileHash = try FileDigest.sha256(of: url)
+    let decodeScale = a.value("--decode-scale").flatMap(Float.init) ?? decodeScaleLadder(scale)
+    let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
+                                                 fileHash: fileHash, version: version)
+
+    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
+    var opts = RenderOptions(canvas: nil, scale: scale / Double(decodeScale), display: display,
+                             useCache: false, wantsPixels: false)
+    opts.collectHistogram = true
+    opts.histogramBins = bins
+    if let roi = a.value("--roi") { opts.histogramROI = parseHistogramROI(roi) }
+
+    let result = try graph.render(edit, options: opts)
+    if let texture = result.output { graph.recycle(output: texture) }
+    guard let histogram = result.histogram else { die("the render produced no histogram") }
+
+    let whole = ImageRect(x: 0, y: 0, width: histogram.canvas.width, height: histogram.canvas.height)
+    let roiLabel = histogram.roi == whole ? "whole frame" : histogram.roi.keyString
+
+    if a.has("--json") {
+        var clipping: [String: Any] = [:]
+        var bins64: [String: Any] = [:]
+        for channel in Histogram.Channel.allCases {
+            let c = histogram[channel]
+            clipping[channel.rawValue] = ["high": c.clippedHigh, "low": c.clippedLow]
+            bins64[channel.rawValue] = base64HistogramBins(c.bins)
+        }
+        note(jsonLine([
+            "raw": url.lastPathComponent,
+            "edit": names[0],
+            "scale": scale,
+            "primaries": display.primaries.rawValue,
+            "bitDepth": display.bitDepth,
+            "canvas": ["width": histogram.canvas.width, "height": histogram.canvas.height],
+            "roi": ["x": histogram.roi.x, "y": histogram.roi.y,
+                    "width": histogram.roi.width, "height": histogram.roi.height],
+            "sampleSize": ["width": histogram.sampleSize.width,
+                           "height": histogram.sampleSize.height],
+            "sampleCount": histogram.sampleCount,
+            "sampleFraction": histogram.sampleFraction,
+            "binCount": histogram.binCount,
+            "clipping": clipping,
+            "base64": bins64,
+            "gpuMilliseconds": result.trace.gpuMilliseconds,
+        ]))
+        return
+    }
+
+    if a.has("--csv") {
+        for channel in Histogram.Channel.allCases {
+            note("\(channel.rawValue),\(csvHistogramBins(histogram[channel].bins))")
+        }
+        err(String(format: "canvas %d×%d  roi %@  samples %d (%.1f%%)  bins %d  gpu %.2f ms",
+                   histogram.canvas.width, histogram.canvas.height, roiLabel,
+                   histogram.sampleCount, histogram.sampleFraction * 100, histogram.binCount,
+                   result.trace.gpuMilliseconds))
+        for channel in Histogram.Channel.allCases {
+            let c = histogram[channel]
+            err("       \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
+                + "high \(percent(c.clippedHigh))  low \(percent(c.clippedLow))")
+        }
+        return
+    }
+
+    note("source     \(url.lastPathComponent)  v\(decoded.decoderVersion)  edit \(names[0])")
+    note("canvas     \(histogram.canvas.width)×\(histogram.canvas.height)"
+         + "  \(display.primaries.displayName) \(display.bitDepth)-bit")
+    note("roi        \(roiLabel)")
+    note(String(format: "sample     %d of %d pixels (%.1f%%) on a %d×%d grid, %d bins",
+                histogram.sampleCount, histogram.roi.area, histogram.sampleFraction * 100,
+                histogram.sampleSize.width, histogram.sampleSize.height, histogram.binCount))
+    for channel in Histogram.Channel.allCases {
+        let c = histogram[channel]
+        note("clip \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
+             + "high \(percent(c.clippedHigh))  low \(percent(c.clippedLow))")
+    }
+    for channel in Histogram.Channel.allCases {
+        note("\(channel.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
+             + base64HistogramBins(histogram[channel].bins))
+    }
+    note(String(format: "gpu        %.2f ms", result.trace.gpuMilliseconds))
+}
