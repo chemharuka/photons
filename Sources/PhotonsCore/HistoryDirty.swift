@@ -1,0 +1,159 @@
+import Foundation
+
+// MARK: - Semantic parameter diff (group level, D10)
+
+/// Says *which panels* differ between two documents — never which parameter.
+///
+/// Everything here is a **semantic** comparison, not `==`:
+///
+/// - floats compare within `EditHistory.dirtyTolerance` (1e-6), because a document that has been
+///   through JSON, or a slider value reconstructed by the UI, is not bit-identical to the one that
+///   produced the pixels on screen. Reporting that as dirty means recomputing a stage for nothing;
+///   at 1e-6 the worst case is a sub-quantum change no eye and no 8-bit encode can see.
+/// - `masks` empty and absent are the same thing (an absent key decodes to `[]` in `EditModel`),
+///   and a mask param that is absent counts as 0, so `params: ["a": 0]` and `params: [:]` agree.
+/// - a `schemaVersion` / `processVersion` bump dirties **every** group: the parameters did not
+///   change meaning, their interpretation did.
+extension EditHistory {
+
+    /// Groups whose parameters differ between two documents.
+    ///
+    /// This is the whole dirty-marking contract: caller redraws the union of `stages` for the
+    /// returned set, and downstream stages are handled by the cache-key chain (D6), not listed here.
+    public static func dirtyGroups(from before: EditModel, to after: EditModel) -> Set<RenderGroup> {
+        guard before.schemaVersion == after.schemaVersion,
+              before.processVersion == after.processVersion else {
+            return Set(RenderGroup.allCases)
+        }
+        var dirty: Set<RenderGroup> = []
+        if !EditParameters.areEqual(before.light, after.light) { dirty.insert(.light) }
+        if !EditParameters.areEqual(before.curve, after.curve) { dirty.insert(.curve) }
+        if !EditParameters.areEqual(before.color, after.color) { dirty.insert(.color) }
+        if !EditParameters.areEqual(before.detail, after.detail) { dirty.insert(.detail) }
+        if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
+        if !EditParameters.areEqual(before.geometry, after.geometry) { dirty.insert(.geometry) }
+        if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }
+        return dirty
+    }
+
+    /// Instance spelling of the same question, for call sites that already hold a history.
+    public func dirtyGroups(from before: EditModel, to after: EditModel) -> Set<RenderGroup> {
+        EditHistory.dirtyGroups(from: before, to: after)
+    }
+
+    /// True when the two documents are **the same document**: no group is dirty *and* nothing
+    /// invisible-to-the-renderer changed either. Used by `commit` to drop no-op snapshots.
+    ///
+    /// Deliberately stricter than `dirtyGroups(...).isEmpty`. A mask rename changes no pixels, so
+    /// it is not dirty — but it is still an edit the user must be able to undo, so it must be
+    /// committable. Two different questions, two different answers.
+    public static func isSemanticallyIdentical(_ a: EditModel, _ b: EditModel) -> Bool {
+        dirtyGroups(from: a, to: b).isEmpty && a.masks == b.masks
+    }
+
+    /// Stages a dirty set invalidates directly (union of `RenderGroup.stages`).
+    public static func dirtyStages(for groups: Set<RenderGroup>) -> Set<RenderStage> {
+        groups.reduce(into: Set<RenderStage>()) { $0.formUnion($1.stages) }
+    }
+}
+
+// MARK: - the comparisons
+
+/// Tolerant equality for every value type in `EditModel`. Internal: the public surface is the
+/// group question, not "is this double close enough".
+enum EditParameters {
+
+    static func areEqual(_ a: Double, _ b: Double) -> Bool {
+        let tol = EditHistory.dirtyTolerance
+        if a == b { return true }                    // covers ±inf and ±0
+        if a.isNaN && b.isNaN { return true }        // a poisoned value stays "the same" value
+        return abs(a - b) <= tol
+    }
+
+    static func areEqual(_ a: Bool, _ b: Bool) -> Bool { a == b }
+
+    static func areEqual(_ a: NormalizedRect, _ b: NormalizedRect) -> Bool {
+        areEqual(a.x, b.x) && areEqual(a.y, b.y)
+            && areEqual(a.width, b.width) && areEqual(a.height, b.height)
+    }
+
+    static func areEqual(_ a: [CurvePoint], _ b: [CurvePoint]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { areEqual($0.x, $1.x) && areEqual($0.y, $1.y) }
+    }
+
+    static func areEqual(_ a: [HSLBand], _ b: [HSLBand]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy {
+            areEqual($0.hue, $1.hue) && areEqual($0.saturation, $1.saturation)
+                && areEqual($0.luminance, $1.luminance)
+        }
+    }
+
+    static func areEqual(_ a: GeometryGroup, _ b: GeometryGroup) -> Bool {
+        areEqual(a.crop, b.crop)
+            && areEqual(a.rotationDegrees, b.rotationDegrees)
+            && areEqual(a.flipHorizontal, b.flipHorizontal)
+            && areEqual(a.flipVertical, b.flipVertical)
+    }
+
+    static func areEqual(_ a: LightGroup, _ b: LightGroup) -> Bool {
+        areEqual(a.exposure, b.exposure)
+            && areEqual(a.contrast, b.contrast)
+            && areEqual(a.highlights, b.highlights)
+            && areEqual(a.shadows, b.shadows)
+            && areEqual(a.whites, b.whites)
+            && areEqual(a.blacks, b.blacks)
+            && areEqual(a.temperature, b.temperature)
+            && areEqual(a.tint, b.tint)
+            && areEqual(a.highlightRecovery, b.highlightRecovery)
+    }
+
+    static func areEqual(_ a: CurveGroup, _ b: CurveGroup) -> Bool {
+        areEqual(a.rgb, b.rgb) && areEqual(a.red, b.red)
+            && areEqual(a.green, b.green) && areEqual(a.blue, b.blue)
+    }
+
+    static func areEqual(_ a: ColorGroup, _ b: ColorGroup) -> Bool {
+        areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
+            && areEqual(a.bands, b.bands)
+    }
+
+    static func areEqual(_ a: DetailGroup, _ b: DetailGroup) -> Bool {
+        areEqual(a.sharpening, b.sharpening)
+            && areEqual(a.sharpeningRadius, b.sharpeningRadius)
+            && areEqual(a.noiseLuminance, b.noiseLuminance)
+            && areEqual(a.noiseColor, b.noiseColor)
+            && areEqual(a.lensCorrections, b.lensCorrections)
+    }
+
+    static func areEqual(_ a: EffectsGroup, _ b: EffectsGroup) -> Bool {
+        areEqual(a.vignetteAmount, b.vignetteAmount)
+            && areEqual(a.vignetteMidpoint, b.vignetteMidpoint)
+            && areEqual(a.vignetteFeather, b.vignetteFeather)
+            && areEqual(a.vignetteRoundness, b.vignetteRoundness)
+            && areEqual(a.grain, b.grain)
+    }
+
+    /// Do two mask stacks contribute the same render material?
+    ///
+    /// Empty and absent are the same thing: `EditModel` decodes a missing or null `masks` key to
+    /// `[]`, so a document that never used a mask must not look dirty against one that explicitly
+    /// has none. Array order is combination order, so it is part of the answer.
+    static func renderMaterialEqual(_ a: [Mask], _ b: [Mask]) -> Bool {
+        guard !a.isEmpty || !b.isEmpty else { return true }
+        guard a.count == b.count else { return false }
+        return zip(a, b).allSatisfy { areEqual($0, $1) }
+    }
+
+    /// A mask is *semantically* identified by its two key materials: exactly the resolution at which
+    /// the renderer and the cache can tell two masks apart (1e-5, docs/tasks/005-masks.md §2).
+    /// `name` is absent on purpose — renaming a mask dirties nothing, and adjustments live in
+    /// `applyKey` while geometry lives in `selectionKey`, so the two stages stay separable (§3.2).
+    ///
+    /// This is why the masks group is the one group whose tolerance is not `dirtyTolerance`: the
+    /// canonical key formatter quantises at 1e-5, which is coarser than 1e-6 but still far below
+    /// anything a mask handle can express or a pixel can show. A rename is *not* invisible to
+    /// history, only to the renderer — see `isSemanticallyIdentical`.
+    static func areEqual(_ a: Mask, _ b: Mask) -> Bool {
+        a.selectionKey == b.selectionKey && a.applyKey == b.applyKey
+    }
+}
