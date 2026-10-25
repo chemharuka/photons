@@ -338,7 +338,7 @@ func cmdRender(_ a: Args) throws {
     // which is already at `decodeScale`, so the pass scale is the remainder.
     let renderScale = scale / Double(decodeScale)
 
-    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity))
+    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
     guard let goldenMode = a.value("--golden") else {
         try renderAll(a, graph: graph, edits: edits, names: names, outURL: outURL,
                       scale: scale, renderScale: renderScale, display: display, trace: trace,
@@ -442,7 +442,7 @@ func cmdBench(_ a: Args) throws {
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
                                                   fileHash: fileHash, version: version)
 
-    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity))
+    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
     let opts = RenderOptions(canvas: viewport, scale: 1, display: display,
                              useCache: false, wantsPixels: false)
 
