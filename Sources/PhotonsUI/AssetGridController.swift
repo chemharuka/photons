@@ -20,11 +20,22 @@ public final class AssetCollectionView: NSCollectionView {
     }
 }
 
-/// One card: colour block + filename + stars, drawn by hand (no thumbnails in M3).
+/// One card: the thumbnail (when we have one), else the hash-derived placeholder block, plus the
+/// filename and stars.
+///
+/// The placeholder is never removed: a missing, failed or still-loading thumbnail draws the
+/// M3 swatch underneath, so a cell is never a white hole and a failure looks like "not yet",
+/// not like "broken" (docs/tasks/006-thumbnails.md §2).
 public final class AssetCardView: NSView {
     public var asset: Asset? { didSet { needsDisplay = true } }
     public var isActive: Bool = false { didSet { needsDisplay = true } }
     public var isPicked: Bool = false { didSet { needsDisplay = true } }
+
+    /// The decoded thumbnail for this asset, or nil while the placeholder is all we have.
+    public var thumbnail: CGImage? { didSet { if thumbnail !== oldValue { needsDisplay = true } } }
+    /// Which tier the current image came from — printed by `--ui-smoke` and used to prove the cell
+    /// asked for the size it should have (006 §1).
+    public var thumbnailTier: ThumbTier?
 
     public override var isFlipped: Bool { true }
     public override var wantsUpdateLayer: Bool { false }
@@ -44,16 +55,23 @@ public final class AssetCardView: NSView {
         let secondary = PlaceholderSwatch.secondaryColor(for: asset.contentHash)
         NSGradient(starting: primary, ending: secondary)?.draw(in: path, angle: -90)
 
-        // A thin "this is a placeholder" rule set: one diagonal + the extension, no image work.
-        NSColor.black.withAlphaComponent(0.12).setStroke()
-        let diag = NSBezierPath()
-        diag.move(to: NSPoint(x: swatchRect.minX, y: swatchRect.maxY))
-        diag.line(to: NSPoint(x: swatchRect.maxX, y: swatchRect.minY))
-        diag.lineWidth = 1
-        diag.stroke()
+        if let thumbnail {
+            // Aspect-fill inside the swatch: the cell decides the crop, never the image. Drawing a
+            // smaller cached tier larger is intentional — the alternative is an empty cell, and the
+            // tier is clamped at request time so this is never a cache lie (see ThumbnailProvider).
+            drawThumbnail(thumbnail, in: swatchRect)
+        } else {
+            // A thin "this is a placeholder" rule set: one diagonal + the extension, no image work.
+            NSColor.black.withAlphaComponent(0.12).setStroke()
+            let diag = NSBezierPath()
+            diag.move(to: NSPoint(x: swatchRect.minX, y: swatchRect.maxY))
+            diag.line(to: NSPoint(x: swatchRect.maxX, y: swatchRect.minY))
+            diag.lineWidth = 1
+            diag.stroke()
 
-        let ext = asset.ext.uppercased()
-        (ext as NSString).draw(at: NSPoint(x: 8, y: 6), withAttributes: PlaceholderStyle.captionAttributes)
+            let ext = asset.ext.uppercased()
+            (ext as NSString).draw(at: NSPoint(x: 8, y: 6), withAttributes: PlaceholderStyle.captionAttributes)
+        }
         NSGraphicsContext.restoreGraphicsState()
 
         // Selection / active ring: accent for the anchor, softer accent for the rest of the selection.
@@ -75,6 +93,18 @@ public final class AssetCardView: NSView {
                                                  y: swatchRect.maxY + 5),
                                      withAttributes: PlaceholderStyle.starsAttributes)
         }
+    }
+
+    /// Aspect-fill, centre-anchored. `NSGraphicsContext` is already clipped to the rounded swatch.
+    private func drawThumbnail(_ image: CGImage, in rect: NSRect) {
+        let iw = CGFloat(image.width), ih = CGFloat(image.height)
+        guard iw > 0, ih > 0 else { return }
+        let scale = max(rect.width / iw, rect.height / ih)
+        let size = NSSize(width: iw * scale, height: ih * scale)
+        let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+        let target = NSRect(origin: origin, size: size)
+        NSGraphicsContext.current?.cgContext.interpolationQuality = .medium
+        NSGraphicsContext.current?.cgContext.draw(image, in: target)
     }
 }
 
@@ -99,6 +129,10 @@ public final class AssetGridItem: NSCollectionViewItem {
     }
 
     public func configure(asset: Asset, isActive: Bool) {
+        // A recycled cell must not show the previous photo for one frame: clear first, the
+        // controller re-applies from the memory cache (a synchronous `NSCache` hit) right after.
+        card.thumbnail = nil
+        card.thumbnailTier = nil
         card.asset = asset
         card.isActive = isActive
         card.isPicked = isSelected
@@ -116,6 +150,20 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var isApplyingModel = false
     private(set) public var metrics = GridLayout.metrics(forWidth: 800)
     public private(set) var reloadCount = 0
+
+    // MARK: thumbnails
+
+    /// Created on first use: the cache only exists once a library is open.
+    private var thumbnailProvider: ThumbnailProvider?
+    /// Outstanding loads by item index. One per index, cancelled the moment the cell scrolls away.
+    private var thumbRequests: [Int: ThumbnailRequest] = [:]
+    private var reconcileWork: DispatchWorkItem?
+    private var cellTier: ThumbTier = .t256
+    /// Signatures of the last reconcile pass, so the scroll handler does no work when nothing
+    /// visible changed (the main thread budget is 8 ms, 006 §5).
+    private var lastWanted: Set<Int> = []
+    private var lastTier: ThumbTier?
+    private var lastLibraryURL: URL?
 
     /// Open the anchor in the loupe (double-click / Return).
     public var onActivate: ((String) -> Void)?
@@ -149,7 +197,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        // Scrolling is what changes "what is visible", and that is what decides which in-flight
+        // requests stay alive (006 §5). `postsBoundsChangedNotifications` is the cheapest hook —
+        // no delegate, no timer.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipViewBoundsChanged),
+                                              name: NSView.boundsDidChangeNotification,
+                                              object: scroll.contentView)
         view = scroll
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     public override func viewDidLoad() {
@@ -161,6 +220,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     public override func viewDidLayout() {
         super.viewDidLayout()
         updateMetrics()
+        scheduleThumbnailReconcile()
+    }
+
+    @objc private func clipViewBoundsChanged() {
+        scheduleThumbnailReconcile()
     }
 
     // MARK: model plumbing
@@ -179,12 +243,21 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     public func refresh() {
         guard isViewLoaded else { return }
+        // A different library means a different cache directory: drop the memory layer so the grid
+        // can never show the previous library's pixels.
+        if let url = session?.libraryURL, url != lastLibraryURL {
+            lastLibraryURL = url
+            resetThumbnails()
+        }
         let before = collectionView.numberOfItems(inSection: 0)
         updateMetrics()
         collectionView.reloadData()
         reloadCount += 1
         applySelectionFromModel()
         if before == 0 { collectionView.scroll(.zero) }
+        // `reloadData` recycles every visible cell, so every visible cell re-asks for its image.
+        // Deferred by one runloop turn because the flow layout has not produced attributes yet.
+        DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
     }
 
     private func updateMetrics() {
@@ -216,7 +289,166 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         let asset = session.assets[indexPath.item]
         cell.configure(asset: asset, isActive: session.anchorID == asset.id)
+        applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
+    }
+
+    /// Show the best image we already hold, and queue a load when we hold none.
+    ///
+    /// The memory layer is synchronous on purpose: a cell that scrolls back into view must draw in
+    /// the same frame (a spinner or a flash of placeholder would be a visible regression).
+    private func applyThumbnail(to cell: AssetGridItem, index: Int, asset: Asset) {
+        guard let provider = provider() else { return }
+        let tier = tier(for: asset)
+        cell.cardView.thumbnailTier = tier
+        // `serveFromMemory` (not `memoryImage`) so a warm cell is counted as a hit rather than
+        // disappearing from the statistics.
+        if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
+            cell.cardView.thumbnail = cached
+            return
+        }
+        requestThumbnail(index: index, asset: asset, tier: tier)
+    }
+
+    // MARK: thumbnails
+
+    private var backingScale: CGFloat {
+        view.window?.backingScaleFactor ?? 2
+    }
+
+    /// The tier this cell should ask for: cell edge in points × DPR, clamped to what the source
+    /// can actually fill. `GridLayout` gives the cell size; the grid never invents a number.
+    private func tier(for asset: Asset) -> ThumbTier {
+        ThumbnailProvider.tier(cellEdgePoints: max(metrics.itemSize.width, metrics.itemSize.height),
+                               backingScale: backingScale,
+                               sourceLongEdge: ThumbnailProvider.sourceLongEdge(of: asset))
+    }
+
+    private func provider() -> ThumbnailProvider? {
+        if let thumbnailProvider { return thumbnailProvider }
+        guard let cache = session?.thumbnailCache else { return nil }
+        let made = ThumbnailProvider(cache: cache)
+        thumbnailProvider = made
+        return made
+    }
+
+    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier) {
+        guard let provider = provider(), thumbRequests[index] == nil else { return }
+        guard let session, let url = session.fileURL(for: asset) else { return }
+        let token = provider.request(index: index, asset: asset, fileURL: url, tier: tier) { [weak self] idx, _, image in
+            self?.thumbnailDidLoad(index: idx, image: image)
+        }
+        thumbRequests[index] = token
+    }
+
+    private func thumbnailDidLoad(index: Int, image: CGImage?) {
+        thumbRequests[index] = nil
+        // A nil image is a real answer ("no preview / unreadable"): the card keeps its placeholder.
+        guard let image, let session, index >= 0, index < session.assets.count else { return }
+        let path = IndexPath(item: index, section: 0)
+        guard let cell = collectionView.item(at: path) as? AssetGridItem else { return }
+        // The cell may have been recycled between request and delivery; the asset id is the guard.
+        guard cell.cardView.asset?.id == session.assets[index].id else { return }
+        cell.cardView.thumbnail = image
+    }
+
+    private func scheduleThumbnailReconcile() {
+        reconcileWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.reconcileThumbnails(force: false)
+        }
+        reconcileWork = work
+        // One frame of coalescing: a live scroll fires this dozens of times per second and the
+        // answer only changes when the visible *row range* changes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+    }
+
+    /// Visible items plus exactly one row either side (006 §5: prefetch is "visible + one row",
+    /// computed from the layout function, not guessed in pixels). Everything else is cancelled.
+    private func reconcileThumbnails(force: Bool) {
+        guard isViewLoaded, let session, !session.assets.isEmpty else { return }
+        guard let provider = provider() else { return }
+
+        // The tier is a property of the cell, so a resize can invalidate every request at once.
+        if let first = session.assets.first {
+            let wantedTier = tier(for: first)
+            if wantedTier != lastTier {
+                lastTier = wantedTier
+                cellTier = wantedTier
+                for (_, token) in thumbRequests { token.cancel() }
+                thumbRequests.removeAll()
+                lastWanted = []
+            }
+        }
+
+        let wanted = wantedIndexes()
+        if !force, wanted == lastWanted { return }
+        lastWanted = wanted
+
+        for (index, token) in thumbRequests where !wanted.contains(index) {
+            token.cancel()
+            thumbRequests.removeValue(forKey: index)
+        }
+
+        for index in wanted {
+            guard index < session.assets.count else { continue }
+            let asset = session.assets[index]
+            if provider.memoryImage(contentHash: asset.contentHash, tier: cellTier) != nil { continue }
+            if thumbRequests[index] != nil { continue }
+            requestThumbnail(index: index, asset: asset, tier: cellTier)
+        }
+    }
+
+    private func wantedIndexes() -> Set<Int> {
+        guard let scroll = collectionView.enclosingScrollView else { return [] }
+        let bounds = scroll.contentView.bounds
+        // One row of slack on each side. `rowHeight` already includes the caption strip.
+        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight))
+        guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
+        else { return [] }
+        return Set(attributes.compactMap { $0.indexPath?.item })
+    }
+
+    // MARK: thumbnail probes (used by `--ui-smoke`)
+
+    public var thumbnailStats: ThumbnailProvider.Stats {
+        thumbnailProvider?.stats ?? ThumbnailProvider.Stats()
+    }
+
+    public var currentThumbnailTier: ThumbTier { cellTier }
+
+    /// Requests the grid believes are still outstanding (queued or running).
+    public var pendingThumbnailRequests: Int { thumbRequests.count }
+
+    /// Outstanding requests for item indices that are no longer visible or prefetched. Must be 0
+    /// once the scroll handler has run: "cancel what scrolled away" is an invariant, not a hope.
+    public var pendingThumbnailIndexesOutsideWindow: Int {
+        Set(thumbRequests.keys).subtracting(wantedIndexes()).count
+    }
+
+    /// Worker-pool depth at this instant — queued + running.
+    public var thumbnailQueueDepth: Int { thumbnailProvider?.queueDepth ?? 0 }
+
+    /// Cells currently on screen.
+    public var visibleCellCount: Int { collectionView.indexPathsForVisibleItems().count }
+
+    /// Cells on screen that are drawing a real thumbnail rather than the placeholder. This is the
+    /// assertion that separates "the grid streams images" from "the grid still draws swatches".
+    public var visibleThumbnailCount: Int {
+        collectionView.indexPathsForVisibleItems().reduce(0) { total, path in
+            guard let cell = collectionView.item(at: path) as? AssetGridItem,
+                  cell.cardView.thumbnail != nil else { return total }
+            return total + 1
+        }
+    }
+
+    /// Cancel everything and drop the memory layer — used when the library changes under the grid.
+    public func resetThumbnails() {
+        for (_, token) in thumbRequests { token.cancel() }
+        thumbRequests.removeAll()
+        lastWanted = []
+        lastTier = nil
+        thumbnailProvider = nil
     }
 
     // MARK: selection

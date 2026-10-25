@@ -4,13 +4,13 @@ import PhotonsCore
 
 /// The inspector: SwiftUI inside `NSHostingView`, bound to the one `CatalogSession`.
 ///
-/// §2b item 5 keeps the big surfaces matte and uses glass only for small widget containers, and §7
-/// of research `ui-stack.md` says to write the panel in SwiftUI *now* — it is not connected to the
-/// render loop in M3, so the 120 Hz-slider question (redlamp measured AppKit 34% vs SwiftUI 100% of
-/// a core) is not yet being answered, it is being deferred with a measurement still owed in M4.
+/// §2b item 5 keeps the big surfaces matte and uses glass only for small widget containers. The
+/// panel is a *leaf*: it holds no state of its own, and every slider writes through
+/// `CatalogSession.applyEdit` — the only mutation point, which is what bumps `editRevision` and
+/// wakes the loupe's debounced renderer (50 ms, single-flight).
 ///
-/// Every field writes through to `session.edit`; the values are the document, and the loupe does
-/// not follow yet (M3 scope).
+/// The drag/release split matters: `onEditingChanged` fires once when the drag ends, and that is
+/// exactly one `EditHistory` snapshot. Committing per tick would make ⌘Z undo 1/100 EV at a time.
 public struct InspectorView: View {
     @Bindable public var session: CatalogSession
 
@@ -21,6 +21,7 @@ public struct InspectorView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
+            historyStrip
             ScrollView {
                 VStack(spacing: 10) {
                     lightCard
@@ -49,26 +50,42 @@ public struct InspectorView: View {
         .padding(.horizontal, 16)
     }
 
+    /// The undo stack, visible: label of the step ⌘Z would take back, and whether ⇧⌘Z has a future.
+    private var historyStrip: some View {
+        HStack(spacing: 8) {
+            Text(session.undoLabel.map { "⌘Z \($0)" } ?? "⌘Z —")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(session.canUndo ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(session.redoLabel.map { "⇧⌘Z \($0)" } ?? "⇧⌘Z —")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(session.canRedo ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+    }
+
     // MARK: cards
 
     private var lightCard: some View {
         card("Light") {
-            row("曝光", $session.edit.light.exposure, -5 ... 5, "%.2f EV")
-            row("对比", $session.edit.light.contrast, -100 ... 100, "%.0f")
-            row("高光", $session.edit.light.highlights, -100 ... 100, "%.0f")
-            row("阴影", $session.edit.light.shadows, -100 ... 100, "%.0f")
-            row("白色", $session.edit.light.whites, -100 ... 100, "%.0f")
-            row("黑色", $session.edit.light.blacks, -100 ... 100, "%.0f")
+            row("曝光", \.light.exposure, -5 ... 5, "%.2f EV")
+            row("对比", \.light.contrast, -100 ... 100, "%.0f")
+            row("高光", \.light.highlights, -100 ... 100, "%.0f")
+            row("阴影", \.light.shadows, -100 ... 100, "%.0f")
+            row("白色", \.light.whites, -100 ... 100, "%.0f")
+            row("黑色", \.light.blacks, -100 ... 100, "%.0f")
             divider
-            row("色温", $session.edit.light.temperature, 2000 ... 12000, "%.0f K")
-            row("色调", $session.edit.light.tint, -150 ... 150, "%.0f")
+            row("色温", \.light.temperature, 2000 ... 12000, "%.0f K")
+            row("色调", \.light.tint, -150 ... 150, "%.0f")
         }
     }
 
     private var colorCard: some View {
         card("Color") {
-            row("自然饱和", $session.edit.color.vibrance, -100 ... 100, "%.0f")
-            row("饱和", $session.edit.color.saturation, -100 ... 100, "%.0f")
+            row("自然饱和", \.color.vibrance, -100 ... 100, "%.0f")
+            row("饱和", \.color.saturation, -100 ... 100, "%.0f")
         }
     }
 
@@ -116,9 +133,10 @@ public struct InspectorView: View {
         )
     }
 
-    private func row(_ title: String, _ value: Binding<Double>,
+    private func row(_ title: String, _ keyPath: WritableKeyPath<EditModel, Double>,
                      _ range: ClosedRange<Double>, _ format: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+        let value = binding(keyPath)
+        return VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
                 Text(title)
                     .font(.system(size: 10, weight: .medium))
@@ -128,9 +146,20 @@ public struct InspectorView: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.primary)
             }
-            Slider(value: value, in: range)
-                .controlSize(.mini)
+            Slider(value: value, in: range) { editing in
+                // Drag end = one edit action = one history snapshot (never per tick).
+                if !editing { session.commitEdit() }
+            }
+            .controlSize(.mini)
         }
+    }
+
+    /// A slider binding that writes through the session, so every tick is observed by the loupe.
+    private func binding(_ keyPath: WritableKeyPath<EditModel, Double>) -> Binding<Double> {
+        Binding(get: { session.edit[keyPath: keyPath] },
+                set: { newValue in
+                    session.applyEdit { $0[keyPath: keyPath] = newValue }
+                })
     }
 
     private var divider: some View {

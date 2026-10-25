@@ -3,9 +3,13 @@
 #
 #   1000 synthetic photos + 1 real RAW  →  library  →  Photons --ui-smoke
 #
-# The app asserts: grid item count == library rows, three window widths produce the columns/row
-# height of the pure layout function, the filmstrip mirrors the library and shares the selection,
-# and the loupe renders one frame through RenderGraph. Screenshots land in local/out/.
+# The app asserts, in order: grid item count == library rows; three window widths produce the
+# columns/row height of the pure layout function; the grid draws real thumbnails from
+# `ThumbnailCache` (tier = cell edge × DPR, warm pass = memory hits only, off-screen loads
+# cancelled, worker queue bounded); the filmstrip mirrors the library and shares the selection;
+# the loupe renders a frame through RenderGraph; a slider drag changes the presented frame hash,
+# ⌘Z returns it to the previous hash and ⇧⌘Z returns it again; the undo/redo menu items validate
+# to disabled with an empty history. Screenshots land in local/out/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

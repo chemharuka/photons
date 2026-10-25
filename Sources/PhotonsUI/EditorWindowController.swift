@@ -81,6 +81,21 @@ public final class EditorWindowController: NSWindowController {
         session.setSelection(Set(session.assets.map(\.id)), anchor: session.anchorID ?? session.assets.first?.id)
     }
 
+    // MARK: history commands
+
+    /// ⌘Z. The loupe re-renders because `undo()` bumps `editRevision`, the same signal a slider
+    /// produces — an undo is not special-cased anywhere in the render path.
+    @discardableResult
+    public func undoEdit() -> Bool {
+        session.undo()
+    }
+
+    /// ⇧⌘Z.
+    @discardableResult
+    public func redoEdit() -> Bool {
+        session.redo()
+    }
+
     // MARK: menu actions (nil-target items: AppKit walks the responder chain and lands here,
     // because a window controller sits between its window and the application)
 
@@ -98,10 +113,22 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func selectAllAction(_ sender: Any?) { selectAllAssets() }
 
+    @objc public func undoAction(_ sender: Any?) { undoEdit() }
+
+    @objc public func redoAction(_ sender: Any?) { redoEdit() }
+
     // MARK: menu validation
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(undoAction(_:)):
+            // Title carries the action being taken back ("撤销 Exposure"), and the item is grey
+            // when there is nothing behind the cursor — a menu that lies about undo is a bug.
+            item.title = session.undoLabel.map { "撤销 \($0)" } ?? "撤销"
+            return session.canUndo
+        case #selector(redoAction(_:)):
+            item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
+            return session.canRedo
         case #selector(showGridAction(_:)):
             item.state = session.mode == .grid ? .on : .off
             return true

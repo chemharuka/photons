@@ -29,6 +29,10 @@ public final class CatalogSession {
     public private(set) var stats: CatalogStats?
     public private(set) var loadError: String?
 
+    /// Content-addressed thumbnail files for this library (`~/Library/Caches/Photons/<hash>/thumbs`).
+    /// Owned by the session so every view shares one instance (and one set of cache counters).
+    public private(set) var thumbnailCache: ThumbnailCache?
+
     // MARK: selection
 
     /// Multi-selection by asset id (⌘/⇧ in the grid, mirrored by the filmstrip).
@@ -38,9 +42,31 @@ public final class CatalogSession {
 
     // MARK: document
 
-    /// The live document for the anchor photo. The inspector writes here; M3 does not re-render on
-    /// change (that wiring lands with the render loop in M4).
-    public var edit: EditModel = .neutral
+    /// The live document for the anchor photo. **Read-only from outside**: a slider goes through
+    /// `applyEdit`, which is what bumps `editRevision` — the one signal the render loop listens to.
+    /// A second writer that assign to `edit` directly would move pixels without invalidating them.
+    public private(set) var edit: EditModel = .neutral
+
+    /// Monotonic counter of document changes. The loupe observes *this* instead of diffing
+    /// `EditModel` (a struct comparison on every observation pass, for no extra information).
+    public private(set) var editRevision = 0
+
+    /// When the last document change landed. Slider→frame latency is measured from here, so the
+    /// reported number includes the 50 ms debounce window rather than hiding it.
+    public private(set) var lastEditChangedAt: CFAbsoluteTime = 0
+
+    /// The undo stack (D10: snapshots plus a cursor, not a command log). Seeded with the state the
+    /// document was opened in, so the floor of undo is "Original", never "neutral".
+    public private(set) var history = EditHistory()
+
+    /// The asset whose document is loaded in `edit` / `history`.
+    public private(set) var loadedEditAssetID: String?
+
+    public var canUndo: Bool { history.canUndo }
+    public var canRedo: Bool { history.canRedo }
+    /// Label of the action ⌘Z would take back — what the menu item should read.
+    public var undoLabel: String? { history.undoLabel }
+    public var redoLabel: String? { history.redoLabel }
 
     // MARK: view state (mirrors, never duplicates, model state)
 
@@ -65,6 +91,10 @@ public final class CatalogSession {
         let c = try Catalog.open(at: url)
         catalog = c
         libraryURL = url.standardizedFileURL
+        // A missing cache directory is created by the initialiser; a failure here only means the
+        // grid falls back to placeholders, which must not stop the library from opening.
+        thumbnailCache = try? ThumbnailCache(layout: c.layout)
+        loadedEditAssetID = nil
         reload()
     }
 
@@ -88,6 +118,9 @@ public final class CatalogSession {
         if let a = anchorID, !ids.contains(a) { anchorID = assets.first?.id }
         if anchorID == nil { anchorID = assets.first?.id }
         if selection.isEmpty, let first = anchorID { selection = [first] }
+        // A fresh library (or a new root) can leave `edit` pointing at the previous document; load
+        // the anchor's stored document now instead of waiting for the next selection change.
+        if let a = anchorAsset, loadedEditAssetID != a.id { loadEditForAnchor() }
     }
 
     // MARK: selection
@@ -176,18 +209,77 @@ public final class CatalogSession {
 
     // MARK: documents
 
-    public func loadEditForAnchor() {
-        guard let a = anchorAsset else { return }
-        // `developJson` is the document truth (D7/D9). M3 keeps the schema but does not save.
-        if let data = a.developJson.data(using: .utf8),
-           let model = try? JSONDecoder().decode(EditModel.self, from: data) {
-            edit = model
-        } else {
+    /// The one way a slider (or a test) moves the document.
+    ///
+    /// Bumps `editRevision` only when the value actually changed, so an idle drag calls the
+    /// renderer zero times instead of once per mouse move.
+    public func applyEdit(_ mutate: (inout EditModel) -> Void) {
+        var next = edit
+        mutate(&next)
+        guard !EditHistory.isSemanticallyIdentical(edit, next) else { return }
+        edit = next
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// End of one edit action (a slider release, a toggle, a menu command): push a snapshot.
+    /// `EditHistory.commit` is a no-op when nothing changed, so a click on a slider that did not
+    /// move does not grow the stack or truncate the redo branch.
+    @discardableResult
+    public func commitEdit(label: String = "") -> Bool {
+        history.commit(edit, label: label) != nil
+    }
+
+    /// ⌘Z. Restores a whole snapshot — never an inverse operation (§History).
+    @discardableResult
+    public func undo() -> Bool {
+        guard let model = history.undo() else { return false }
+        restore(model)
+        return true
+    }
+
+    /// ⇧⌘Z.
+    @discardableResult
+    public func redo() -> Bool {
+        guard let model = history.redo() else { return false }
+        restore(model)
+        return true
+    }
+
+    private func restore(_ model: EditModel) {
+        edit = model
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// `force` re-reads the stored document (after an external save or a develop-json change).
+    /// Without it, re-selecting the same photo keeps the live edit *and its history* — a selection
+    /// change must not silently throw away the undo stack.
+    public func loadEditForAnchor(force: Bool = false) {
+        guard let a = anchorAsset else {
             edit = .neutral
+            history = EditHistory(baseline: .neutral)
+            loadedEditAssetID = nil
+            return
         }
+        if !force, loadedEditAssetID == a.id { return }
+        // `developJson` is the document truth (D7/D9). M3 keeps the schema but does not save.
+        let model: EditModel
+        if let data = a.developJson.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
+            model = decoded
+        } else {
+            model = .neutral
+        }
+        edit = model
+        history = EditHistory(baseline: model)
+        loadedEditAssetID = a.id
     }
 
     public func recordCapabilities(_ c: DecoderCapabilities) {
+        // Equality-guarded: every presented frame reports the same facts, and an unconditional write
+        // would re-render the SwiftUI inspector once per slider frame for no information.
+        guard capabilities != c else { return }
         capabilities = c
     }
 

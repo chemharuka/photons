@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import CryptoKit
 import Metal
 import PhotonsCore
 import PhotonsCatalog
@@ -63,6 +64,11 @@ public final class LoupeController: NSViewController {
         public let usedCachedDecode: Bool
         public let capabilities: DecoderCapabilities?
         public let primaries: OutputPrimaries
+        public let editRevision: Int
+        /// SHA-256 of the presented pixels, captured before the texture goes back to the pool.
+        /// Only computed when `hashesFrames` is on (it costs a 16-bit readback), which is how
+        /// `--ui-smoke` asserts "undo returned to the previous pixels" rather than "a frame arrived".
+        public let displayHash: String?
     }
 
     public let canvasView = LoupeCanvasView()
@@ -81,6 +87,28 @@ public final class LoupeController: NSViewController {
 
     /// `--ui-smoke` turns this off so its synchronous frame does not race the automatic ladder.
     public var autoRenderEnabled = true
+
+    /// Read back every presented frame and hash it. Off by default: a 2560×1600 readback is 32 MB.
+    public var hashesFrames = false
+
+    // MARK: edit re-render (slider → frame)
+
+    /// 50 ms: long enough that a 30–120 Hz slider stream collapses into one render, short enough
+    /// that the frame still feels attached to the hand.
+    public var debounceInterval: TimeInterval = 0.05
+    private var editDebounce: DispatchWorkItem?
+    /// Single-flight: at most one edit render in the queue. Requests that arrive while it runs are
+    /// *collapsed* into one follow-up with the newest document (never queued individually).
+    private var editInFlight = false
+    private var editPending = false
+    private var lastHandledRevision = 0
+    public private(set) var editRenderCount = 0
+    public private(set) var editRenderCoalesced = 0
+    /// Slider tick → new pixels, in ms. Includes the debounce window on purpose.
+    public private(set) var editLatencies: [Double] = []
+    /// Decode scale the current `decoded` buffer was made at; edit renders reuse it so a slider
+    /// never pays for ImageIO again.
+    public private(set) var currentDecodeScale: Float = 0.5
 
     /// Last measured frames — printed by `--ui-smoke` and the 10k bench.
     public private(set) var firstFrameMilliseconds: Double = 0
@@ -114,13 +142,104 @@ public final class LoupeController: NSViewController {
     }
 
     private func observeModel() {
+        lastHandledRevision = session?.editRevision ?? 0
         bridge.observe({ [weak self] in
             guard let self else { return }
             _ = self.session?.anchorID
             _ = self.session?.mode
+            _ = self.session?.editRevision
         }, { [weak self] in
-            self?.scheduleRender()
+            guard let self else { return }
+            // One observer, two jobs: a document change re-renders the current decode (cheap,
+            // ~ms); a photo change needs a new decode (expensive, the 0.5 → 1.0 ladder).
+            let revision = self.session?.editRevision ?? 0
+            if revision != self.lastHandledRevision {
+                self.lastHandledRevision = revision
+                self.requestEditRender()
+            } else {
+                self.scheduleRender()
+            }
         })
+    }
+
+    // MARK: edit re-render (50 ms debounce, single-flight)
+
+    /// A slider tick landed. Coalesce for `debounceInterval`; if the loupe is not on screen this
+    /// costs nothing at all (no decode, no render, no queue entry).
+    public func requestEditRender() {
+        guard autoRenderEnabled, let session, session.mode == .loupe else { return }
+        guard session.anchorAsset != nil else { return }
+        editDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.startEditRender() }
+        editDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+    }
+
+    private func startEditRender() {
+        guard autoRenderEnabled, let session, session.mode == .loupe,
+              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return }
+        if editInFlight {
+            // Only the newest document survives: the follow-up render reads `session.edit` itself.
+            editPending = true
+            editRenderCoalesced += 1
+            return
+        }
+        let viewport = viewportPixels
+        guard viewport.width > 8, viewport.height > 8 else { return }
+        let edit = session.edit
+        let changedAt = session.lastEditChangedAt
+        let decodeScale = currentDecodeScale
+        let gen = generation
+        editInFlight = true
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let frame = try self.makeFrame(asset: asset, url: url, viewport: viewport,
+                                               decodeScale: decodeScale, edit: edit,
+                                               hashPixels: self.hashesFrames)
+                DispatchQueue.main.async {
+                    guard self.generation == gen else { self.finishEditRender(); return }
+                    self.present(frame: frame, renderMilliseconds: frame.renderMilliseconds, isFirst: false)
+                    self.editRenderCount += 1
+                    if changedAt > 0 {
+                        self.editLatencies.append((CFAbsoluteTimeGetCurrent() - changedAt) * 1000)
+                    }
+                    self.finishEditRender()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.lastPresentError = "\(error)"
+                    self.finishEditRender()
+                }
+            }
+        }
+    }
+
+    private func finishEditRender() {
+        editInFlight = false
+        guard editPending else { return }
+        editPending = false
+        // The latest edit wins; no fresh debounce wait, this request is already old enough.
+        startEditRender()
+    }
+
+    /// Slider→pixels distribution, computed the way the other benches do it (sorted, nearest-rank).
+    public func editLatencyPercentiles() -> (p50: Double, p95: Double, count: Int) {
+        let sorted = editLatencies.sorted()
+        guard !sorted.isEmpty else { return (0, 0, 0) }
+        func pct(_ p: Double) -> Double { sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * p))] }
+        return (pct(0.5), pct(0.95), sorted.count)
+    }
+
+    public func resetEditLatencies() { editLatencies.removeAll() }
+
+    /// One synchronous frame with the given document, on the caller's thread. `--ui-smoke` uses it
+    /// to prove pixel-sensitivity without a window animation in the way.
+    public func renderEditNow(asset: Asset, url: URL, viewport: ImageSize, decodeScale: Float,
+                              edit: EditModel) throws -> FrameResult {
+        try makeFrame(asset: asset, url: url, viewport: viewport, decodeScale: decodeScale,
+                      edit: edit, hashPixels: true)
     }
 
     // MARK: rendering
@@ -172,7 +291,13 @@ public final class LoupeController: NSViewController {
     }
 
     /// The whole GPU path for one frame, callable synchronously (ui-smoke uses this).
-    public func makeFrame(asset: Asset, url: URL, viewport: ImageSize, decodeScale: Float) throws -> FrameResult {
+    ///
+    /// `edit` defaults to the live document; passing it explicitly is what makes an edit frame
+    /// deterministic (the caller snapshotted the document on the main thread — the render queue
+    /// must never read `session.edit` itself and race a slider).
+    public func makeFrame(asset: Asset, url: URL, viewport: ImageSize, decodeScale: Float,
+                          edit: EditModel? = nil, hashPixels: Bool = false) throws -> FrameResult {
+        let model = edit ?? session?.edit ?? .neutral
         // Decode (cached per url+scale, so the second render measures the graph, not ImageIO).
         let key = "\(asset.contentHash)|\(decodeScale)|\(asset.id)"
         var image: LinearImage
@@ -194,6 +319,7 @@ public final class LoupeController: NSViewController {
             graph = nil                      // a new source needs a new graph
             graphIdentity = nil
         }
+        currentDecodeScale = decodeScale
 
         let identity = "\(asset.contentHash)-s\(decodeScale)"
         if graph == nil || graphIdentity != identity {
@@ -207,7 +333,7 @@ public final class LoupeController: NSViewController {
         let scale = min(1.0, max(0.01, fit))
         let primaries: OutputPrimaries = (presenter?.storage ?? .linear16) == .linear16 ? .displayP3 : .sRGB
         let t1 = CFAbsoluteTimeGetCurrent()
-        let result = try graph.render(session?.edit ?? .neutral, options: RenderOptions(
+        let result = try graph.render(model, options: RenderOptions(
             canvas: viewport,
             scale: scale,
             display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: 1),
@@ -215,11 +341,27 @@ public final class LoupeController: NSViewController {
             wantsPixels: false))
         let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
         guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
+        let hash = hashPixels ? LoupeController.hash(texture) : nil
         let frame = FrameResult(texture: texture, canvas: result.canvas, content: result.content,
                                 decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                                 renderMilliseconds: renderMs, usedCachedDecode: usedCache,
-                                capabilities: decodedCaps, primaries: primaries)
+                                capabilities: decodedCaps, primaries: primaries,
+                                editRevision: session?.editRevision ?? 0, displayHash: hash)
         return frame
+    }
+
+    /// SHA-256 of an rgba16f texture's bytes, taken while it is still out of the pool.
+    static func hash(_ texture: MTLTexture) -> String {
+        let w = texture.width, h = texture.height
+        var raw = [UInt16](repeating: 0, count: w * h * 4)
+        raw.withUnsafeMutableBytes { buf in
+            texture.getBytes(buf.baseAddress!, bytesPerRow: w * 4 * MemoryLayout<UInt16>.size,
+                             from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return raw.withUnsafeBytes { buf in
+            let digest = SHA256.hash(data: Data(bytes: buf.baseAddress!, count: buf.count))
+            return digest.map { String(format: "%02x", $0) }.joined()
+        }
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, isFirst: Bool) {

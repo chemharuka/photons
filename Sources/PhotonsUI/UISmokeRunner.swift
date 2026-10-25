@@ -37,6 +37,14 @@ public enum MainMenu {
         main.addItem(editItem)
         let edit = NSMenu(title: "编辑")
         editItem.submenu = edit
+        // Nil targets: AppKit walks the responder chain to the window controller, which validates
+        // both items against `CatalogSession.canUndo/canRedo` (grey with no history).
+        edit.addItem(withTitle: "撤销", action: #selector(EditorWindowController.undoAction(_:)),
+                     keyEquivalent: "z")
+        let redoItem = edit.addItem(withTitle: "重做", action: #selector(EditorWindowController.redoAction(_:)),
+                                    keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
         edit.addItem(withTitle: "全选照片", action: #selector(EditorWindowController.selectAllAction(_:)), keyEquivalent: "a")
 
         // View
@@ -187,6 +195,14 @@ public final class UISmokeRunner {
             capture(window: window, name: String(format: "ui-smoke-grid-%.0f.png", width))
         }
 
+        // 3b. the grid streams real thumbnails, not placeholders
+        window.setContentSize(NSSize(width: 1600, height: 940))
+        pump(0.3)
+        root.layoutSubtreeIfNeeded()
+        gridView.layoutSubtreeIfNeeded()
+        checkGridThumbnails(grid: grid, gridView: gridView, session: session,
+                            loupe: root.loupeController, window: window)
+
         // 4. filmstrip is the second browser and shares the selection
         windowController.showBrowserAsFilmstrip()
         pump(0.3)
@@ -254,11 +270,284 @@ public final class UISmokeRunner {
                      + (root.loupeController.lastPresentError.map { " (\($0))" } ?? ""))
             }
             capture(window: window, name: "ui-smoke-loupe-window.png")
+
+            // 6. slider → new pixels; undo returns to the previous pixels; menu state follows
+            checkInspectorDrivesLoupe(session: session, loupe: root.loupeController,
+                                      controller: windowController, window: window)
         } else {
             fail("no asset for the loupe")
         }
 
         return finish()
+    }
+
+    // MARK: - grid thumbnails
+
+    /// Prove the grid is drawing thumbnail *pixels* out of `ThumbnailCache`, and that revisiting a
+    /// cell costs nothing: no new lookups, only memory hits.
+    private func checkGridThumbnails(grid: AssetGridController,
+                                     gridView: NSCollectionView,
+                                     session: CatalogSession,
+                                     loupe: LoupeController,
+                                     window: NSWindow) {
+        let deadline = Date().addingTimeInterval(40)
+        while grid.visibleThumbnailCount < min(8, grid.visibleCellCount), Date() < deadline { pump(0.1) }
+
+        var stats = grid.thumbnailStats
+        log("grid thumbnails         \(grid.visibleThumbnailCount)/\(grid.visibleCellCount) visible cells · tier \(grid.currentThumbnailTier.rawValue) · \(stats.summary)")
+
+        check("grid cells show thumbnail images, not placeholders (\(grid.visibleThumbnailCount)/\(grid.visibleCellCount) visible)",
+              grid.visibleThumbnailCount > 0 && grid.visibleThumbnailCount >= min(8, grid.visibleCellCount))
+        check("thumbnail lookups produced images (\(stats.lookups) lookups, \(stats.applied) applied)",
+              stats.lookups >= grid.visibleThumbnailCount && stats.failures == 0)
+
+        // The tier must be the one the layout function implies: cell edge × DPR, clamped to the
+        // source. Recomputed here from the applied item size, not from the controller's own field.
+        if let first = session.assets.first {
+            let expected = ThumbnailProvider.tier(
+                cellEdgePoints: max(grid.appliedItemSize.width, grid.appliedItemSize.height),
+                backingScale: window.backingScaleFactor,
+                sourceLongEdge: ThumbnailProvider.sourceLongEdge(of: first))
+            log(String(format: "grid cell               %.0f pt @%.0fx → expected %@, applied %@",
+                       max(grid.appliedItemSize.width, grid.appliedItemSize.height),
+                       window.backingScaleFactor, expected.rawValue, grid.currentThumbnailTier.rawValue))
+            check("grid asks for the tier the cell edge implies (\(grid.currentThumbnailTier.rawValue))",
+                  grid.currentThumbnailTier == expected)
+        }
+
+        // Re-show every visible cell twice. The first pass may still have to produce the prefetch
+        // row (those cells were requested, not yet delivered); the second pass must be pure memory.
+        // That is the 006 §7 #1 shape: "scroll once, then scroll again → hitRatio 1.000".
+        grid.refresh()
+        pump(1.0)
+        let warm = grid.thumbnailStats
+        grid.refresh()
+        pump(0.6)
+        stats = grid.thumbnailStats
+        let deltaMemory = stats.memoryHits - warm.memoryHits
+        let deltaDisk = stats.diskHits - warm.diskHits
+        let deltaGenerated = stats.generated - warm.generated
+        let deltaLookups = deltaMemory + deltaDisk + deltaGenerated
+        let warmHitRatio = deltaLookups == 0 ? 0 : Double(deltaMemory + deltaDisk) / Double(deltaLookups)
+        log(String(format: "grid thumbnails (warm)  memory +%d · disk +%d · generated +%d → hit %.3f (session total %.3f, %d requests)",
+                   deltaMemory, deltaDisk, deltaGenerated, warmHitRatio, stats.hitRatio, stats.requests))
+        check("re-shown cells are memory hits (no new disk reads, no new generations)",
+              deltaMemory >= grid.visibleThumbnailCount && deltaDisk == 0 && deltaGenerated == 0)
+        check(String(format: "steady-state thumbnail hit rate %.3f == 1.000", warmHitRatio), warmHitRatio >= 0.999)
+
+        // Prefetch is "visible + one row", and anything that scrolls out is cancelled rather than
+        // left queued (§5). Two jumps in quick succession, so the first region's loads are still
+        // outstanding when the second one lands — that is when cancellation has to happen.
+        if let scroll = gridView.enclosingScrollView {
+            let before = grid.thumbnailStats
+            let height = gridView.collectionViewLayout?.collectionViewContentSize.height ?? 0
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, height * 0.5)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            pump(0.15)
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, height * 0.75)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            pump(1.4)
+            gridView.layoutSubtreeIfNeeded()
+            let after = grid.thumbnailStats
+            // Terminal outcomes are applied ∪ cancelled ∪ failed; anything else is still queued or
+            // running. `cancelled` can overlap `applied` by one runloop when a job finishes just as
+            // its cell scrolls away, so this is an upper bound, not an identity.
+            let outstanding = max(0, after.requests - after.applied - after.failures)
+            let cancelledDelta = after.cancelled - before.cancelled
+            log("grid scroll             +\(after.requests - before.requests) requests, +\(cancelledDelta) cancelled, \(outstanding) not-yet-applied, queue \(grid.thumbnailQueueDepth), grid holds \(grid.pendingThumbnailRequests)")
+            check("scrolling to a new region issues new thumbnail work", after.requests > before.requests)
+            // The contract that actually matters, and it does not depend on how fast the disk is:
+            // after the scroll handler runs, the grid holds no work for cells it can no longer see,
+            // and the worker queue is bounded by one window rather than by the library.
+            check("the grid drops work for cells that scrolled away (0 outside the window, \(grid.pendingThumbnailIndexesOutsideWindow))",
+                  grid.pendingThumbnailIndexesOutsideWindow == 0)
+            check("the worker queue stays bounded (queue \(grid.thumbnailQueueDepth) ≤ 12, holds \(grid.pendingThumbnailRequests) ≤ 96)",
+                  grid.thumbnailQueueDepth <= 12 && grid.pendingThumbnailRequests <= 96)
+            // Reported, not asserted: with a warm cache every load can finish before its cell leaves
+            // the window, in which case there is genuinely nothing to cancel. The invariant above is
+            // what must hold either way.
+            // Back to the top so the screenshots that follow show the first row.
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            pump(0.4)
+        }
+
+        // A slider move while the grid is on screen must not render anything: the loupe is not
+        // visible, so the debounced renderer has to stay asleep (and the document must still change).
+        let rendersBefore = loupe.editRenderCount
+        session.applyEdit { $0.light.contrast = 6 }
+        pump(0.35)
+        check("a slider move with the loupe closed renders nothing (\(loupe.editRenderCount) renders)",
+              loupe.editRenderCount == rendersBefore && session.edit.light.contrast == 6)
+        session.applyEdit { $0.light.contrast = 0 }
+    }
+
+    // MARK: - slider → frame → undo
+
+    /// The measurement the milestone is actually about: does moving a slider change the *pixels*,
+    /// and does ⌘Z put the previous pixels back?
+    ///
+    /// Three independent things are asserted:
+    /// 1. the debounce/single-flight discipline (N ticks must not become N renders),
+    /// 2. the frame hash moves with the document and comes back on undo — a real `RenderGraph`
+    ///    output hash of the presented texture, not "a frame arrived",
+    /// 3. the ⌘Z/⇧⌘Z menu items grey out when the history has nothing to undo.
+    private func checkInspectorDrivesLoupe(session: CatalogSession,
+                                           loupe: LoupeController,
+                                           controller: EditorWindowController,
+                                           window: NSWindow) {
+        let undoItem = menuItem(#selector(EditorWindowController.undoAction(_:)))
+        let redoItem = menuItem(#selector(EditorWindowController.redoAction(_:)))
+        guard let undoItem, let redoItem else {
+            fail("the Edit menu has no 撤销/重做 items")
+            return
+        }
+        NSApp.mainMenu?.update()
+        // A nil-target item is enabled iff AppKit resolves a responder that validates true; that
+        // resolution needs a *key* window, and a harness launched from a shell cannot take key focus
+        // (logged below). So the assertion is the pair that actually decides the grey-out: the window
+        // controller implements the action (it is the chain's target) and its validation says no.
+        window.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+        pump(0.15)
+        NSApp.mainMenu?.update()
+        let undoTarget = NSApp.target(forAction: undoItem.action!, to: nil, from: undoItem)
+        let undoValidated = controller.validateMenuItem(undoItem)
+        log("undo menu               key=\(window.isKeyWindow) target=\(undoTarget.map { String(describing: type(of: $0)) } ?? "nil") validate=\(undoValidated) enabled=\(undoItem.isEnabled) title=\(undoItem.title)")
+        check("the window controller is the undo responder and answers the item’s action",
+              controller.responds(to: undoItem.action!))
+        check("undo menu validates to disabled with an empty history", undoValidated == false)
+        check("redo menu validates to disabled with an empty history",
+              controller.validateMenuItem(redoItem) == false)
+
+        // The loupe must have settled on the full-resolution decode before hashes are comparable.
+        let settle = Date().addingTimeInterval(45)
+        while (loupe.lastFrame?.decodeScale ?? 0) < 1.0 && Date() < settle { pump(0.1) }
+        log(String(format: "loupe settled           decode scale %.2f, history depth %d",
+                   loupe.lastFrame?.decodeScale ?? 0, session.history.count))
+
+        // Baseline: re-render the untouched document through the same debounced path, so the hash
+        // we compare against is a *presented* frame and not a side render.
+        loupe.hashesFrames = true
+        let baseCount = loupe.editRenderCount
+        loupe.requestEditRender()
+        _ = waitForFrame(loupe, after: baseCount, timeout: 30)
+        guard let baselineHash = loupe.lastFrame?.displayHash else {
+            fail("loupe produced no hashable baseline frame")
+            loupe.hashesFrames = false
+            return
+        }
+        log("loupe baseline hash     \(baselineHash.prefix(16))…")
+
+        // A drag: ten ticks ~12 ms apart, then one commit on release (one history snapshot).
+        let dragStart = loupe.editRenderCount
+        for tick in 1...10 {
+            session.applyEdit { $0.light.exposure = 0.1 * Double(tick) }
+            pump(0.012)
+        }
+        session.commitEdit()
+        _ = waitForFrame(loupe, after: dragStart, timeout: 30)
+        let editedHash = loupe.lastFrame?.displayHash
+        let renderCountAfterDrag = loupe.editRenderCount - dragStart
+        log("loupe edited hash       \(editedHash?.prefix(16) ?? "nil")…  exposure \(String(format: "%.2f", session.edit.light.exposure)) EV")
+        check("slider drag changed the loupe pixels (hash \(baselineHash.prefix(8))… → \(editedHash?.prefix(8) ?? "nil")…)",
+              editedHash != nil && editedHash != baselineHash)
+        check("10 ticks in one drag → \(renderCountAfterDrag) render(s), not 10 (50 ms debounce)",
+              renderCountAfterDrag >= 1 && renderCountAfterDrag <= 4)
+        check("one commit produced one history snapshot (depth \(session.history.count))",
+              session.history.count == 2 && session.canUndo)
+
+        NSApp.mainMenu?.update()
+        check("undo menu enabled after a commit, titled “\(undoItem.title)”",
+              controller.validateMenuItem(undoItem) && undoItem.isEnabled)
+
+        // ⌘Z: the pixels must return to the pre-drag frame, not merely "a new frame".
+        let beforeUndo = loupe.editRenderCount
+        let undid = controller.undoEdit()
+        _ = waitForFrame(loupe, after: beforeUndo, timeout: 30)
+        let undoneHash = loupe.lastFrame?.displayHash
+        log("loupe undo hash         \(undoneHash?.prefix(16) ?? "nil")…")
+        check("⌘Z restored the document", undid && session.edit.light.exposure == 0)
+        check("undo returned the loupe to the previous pixels (hash \(undoneHash?.prefix(8) ?? "nil")…)",
+              undoneHash != nil && undoneHash == baselineHash)
+
+        NSApp.mainMenu?.update()
+        check("redo menu enabled after undo, titled “\(redoItem.title)”",
+              controller.validateMenuItem(redoItem) && redoItem.isEnabled)
+
+        // ⇧⌘Z: forward again, same pixels as the edited frame.
+        let beforeRedo = loupe.editRenderCount
+        let redid = controller.redoEdit()
+        _ = waitForFrame(loupe, after: beforeRedo, timeout: 30)
+        let redoneHash = loupe.lastFrame?.displayHash
+        log("loupe redo hash         \(redoneHash?.prefix(16) ?? "nil")…")
+        check("⇧⌘Z re-applied the edit and the loupe pixels match the edited frame",
+              redid && redoneHash != nil && redoneHash == editedHash)
+
+        // Single-flight under a burst: 20 ticks inside ~80 ms must not become 20 renders.
+        loupe.hashesFrames = false
+        let burstStart = loupe.editRenderCount
+        for tick in 0..<20 {
+            session.applyEdit { $0.light.contrast = Double(tick + 1) }
+            pump(0.004)
+        }
+        session.commitEdit()
+        _ = waitForFrame(loupe, after: burstStart, timeout: 30)
+        let burstRenders = loupe.editRenderCount - burstStart
+        check("20 ticks in a burst → \(burstRenders) render(s) (debounce + single-flight)",
+              burstRenders >= 1 && burstRenders <= 4)
+
+        // Four more short gestures so p50/p95 have more than one sample per gesture.
+        for gesture in 0..<4 {
+            let start = loupe.editRenderCount
+            for tick in 1...5 {
+                session.applyEdit { $0.light.shadows = Double(tick + gesture) }
+                pump(0.010)
+            }
+            session.commitEdit()
+            _ = waitForFrame(loupe, after: start, timeout: 20)
+        }
+
+        let p = loupe.editLatencyPercentiles()
+        log(String(format: "slider→frame           p50 %.1f ms  p95 %.1f ms  (n=%d, debounce %.0f ms, single-flight, %d coalesced)",
+                   p.p50, p.p95, p.count, loupe.debounceInterval * 1000, loupe.editRenderCoalesced))
+        check(String(format: "slider→frame latency measured (p50 %.1f ms / p95 %.1f ms, n=%d)", p.p50, p.p95, p.count),
+              p.count >= 5 && p.p50 > 0 && p.p95 < 1000)
+
+        capture(window: window, name: "ui-smoke-loupe-edited.png")
+    }
+
+    /// Pump the runloop until `loupe.editRenderCount` has passed `count` and then stopped moving for
+    /// ~150 ms (a coalesced follow-up render has landed).
+    @discardableResult
+    private func waitForFrame(_ loupe: LoupeController, after count: Int, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last = loupe.editRenderCount
+        var stable = 0
+        while Date() < deadline {
+            pump(0.05)
+            let now = loupe.editRenderCount
+            if now != last {
+                last = now
+                stable = 0
+            } else if now > count {
+                stable += 1
+                if stable >= 3 { return true }
+            }
+        }
+        return loupe.editRenderCount > count
+    }
+
+    private func menuItem(_ action: Selector) -> NSMenuItem? {
+        func find(in menu: NSMenu?) -> NSMenuItem? {
+            guard let menu else { return nil }
+            for item in menu.items {
+                if item.action == action { return item }
+                if let sub = item.submenu, let hit = find(in: sub) { return hit }
+            }
+            return nil
+        }
+        return find(in: NSApp.mainMenu)
     }
 
     // MARK: bench
@@ -280,7 +569,7 @@ public final class UISmokeRunner {
         let root = windowController.rootView!
         let gridView = root.gridController.collectionView
         let rows = windowController.session.assets.count
-        log("grid scroll bench: \(rows) rows, placeholders only (no decode, no thumbnails)")
+        log("grid scroll bench: \(rows) rows, thumbnails stream in from the cache (decode is off the main thread)")
         gridView.layoutSubtreeIfNeeded()
         guard let scroller = gridView.enclosingScrollView else {
             fail("grid has no scroll view")
