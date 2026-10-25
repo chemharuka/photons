@@ -73,9 +73,10 @@ final class LoupeQueueTests: XCTestCase {
                                 windowed: Bool = true) -> LoupeController {
         let controller = LoupeController(session: CatalogSession())
         controller.autoRenderEnabled = false     // each test arms rendering itself
-        // The histogram card is a separate ~104 ms of GPU work per windowed frame (measured in
-        // `DecodeRenderParallelTests.testWindowFrameCostFromEachRung`); every pan bench in this repo
-        // quotes its numbers with it off (§11.10: 4.0–4.6 ms). It is not what this file measures.
+        // The histogram card used to cost every windowed 1:1 frame +8 ms (release; +104 ms in a debug
+        // build). Q30 made it a *settled-camera* measurement — a pan frame skips it — so keeping it off
+        // here is about matching the pre-005f baseline these numbers quote (§11.10: 4.0–4.6 ms), not
+        // about hiding a cost: `HistogramCadenceTests` measures a pan with the card on.
         controller.collectsHistogram = false
         controller.frameSource = source
         if windowed {

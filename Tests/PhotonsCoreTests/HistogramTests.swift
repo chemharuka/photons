@@ -461,4 +461,168 @@ final class HistogramTests: XCTestCase {
         XCTAssertLessThanOrEqual(offP50, max(onP50 * 1.4, onP50 + 1.0),
                                  "collecting a histogram off must not cost more than on")
     }
+
+    // MARK: - 10. a window is a crop (Q30)
+
+    /// The 1:1 path renders a **window** of the frame into a canvas that is the window's own size,
+    /// and `fit` renders the whole frame into the same canvas. The histogram must be a function of
+    /// *the region asked about*, not of which of those two framings produced it: otherwise pressing
+    /// Z would change the numbers in the card, which is the defect this guards.
+    ///
+    /// The strongest form of that claim is available here: with the window at scale 1 and a canvas
+    /// the window's own size, neither measurement is reduced (600 × 450 < `maxLongEdge`), so the two
+    /// are reading the *same source pixels* and the bins must agree exactly.
+    func testWindowFrameAndFullFrameAgreeOnTheSameROI() throws {
+        let w = 1200, h = 900
+        let graph = try makeGraph(texturedImage(width: w, height: h))
+        let region = ImageRect(x: 300, y: 200, width: 600, height: 450)
+
+        // ① the whole frame, measuring that region through an explicit canvas-coordinate ROI…
+        var wholeOptions = RenderOptions(scale: 1, useCache: false, wantsPixels: true,
+                                         collectHistogram: true)
+        wholeOptions.histogramROI = region
+        let wholeResult = try graph.render(.neutral, options: wholeOptions)
+        let whole = try XCTUnwrap(wholeResult.histogram)
+
+        // ② …and the same region as a window whose canvas *is* the region.
+        let windowedResult = try graph.render(.neutral, options: RenderOptions(
+            canvas: ImageSize(width: region.width, height: region.height),
+            scale: 1, outputWindow: region, useCache: false, wantsPixels: true,
+            collectHistogram: true))
+        let windowed = try XCTUnwrap(windowedResult.histogram)
+
+        XCTAssertEqual(whole.canvas, ImageSize(width: w, height: h))
+        XCTAssertEqual(whole.roi, region)
+        XCTAssertEqual(windowed.canvas, ImageSize(width: 600, height: 450))
+        XCTAssertEqual(windowed.roi, ImageRect(x: 0, y: 0, width: 600, height: 450),
+                       "a window's default ROI is the whole canvas: inside a window, that is the picture")
+        XCTAssertEqual(whole.sampleSize, windowed.sampleSize)
+        XCTAssertEqual(whole.sampleCount, 600 * 450)
+        XCTAssertEqual(windowed.sampleCount, 600 * 450)
+
+        // ③ the exact claim: the window's numbers are the histogram of *the window's own pixels*,
+        // computed independently on the CPU. No reduction happens at 600 × 450, so this is an identity
+        // — the same statement `testGraphROIMatchesTheCPUHistogramOfThosePixels` makes for a ROI.
+        let reference = Histogram.compute(try XCTUnwrap(windowedResult.display), rect: windowed.roi)
+        XCTAssertEqual(reference.sampleCount, windowed.sampleCount)
+        for channel in Histogram.Channel.allCases {
+            XCTAssertEqual(windowed[channel].bins, reference[channel].bins,
+                           "\(channel): a 1:1 window must count its own pixels, bin for bin")
+            XCTAssertEqual(windowed[channel].clippedHigh, reference[channel].clippedHigh,
+                           accuracy: 1e-12)
+            XCTAssertEqual(windowed[channel].clippedLow, reference[channel].clippedLow,
+                           accuracy: 1e-12)
+        }
+
+        // ④ the same region through the other framing: the same distribution. Not bin-for-bin — the
+        // two renders are two S0 dispatches, and the window's samples the source on its own half-pixel
+        // grid, so a value can land one code over — but the *distribution* must be the same
+        // measurement, and 0.5 % of the pixels is the room resampling needs (measured: ≤ 0.3 %).
+        var worst = 0.0
+        for channel in Histogram.Channel.allCases {
+            let a = fractions(windowed[channel]), b = fractions(whole[channel])
+            let diff = zip(a, b).map { abs($0 - $1) }.max() ?? 0
+            worst = max(worst, diff)
+            XCTAssertEqual(windowed[channel].clippedHigh, whole[channel].clippedHigh, accuracy: 0.002)
+            XCTAssertEqual(windowed[channel].clippedLow, whole[channel].clippedLow, accuracy: 0.002)
+        }
+        print(String(format: "Q30 window vs full frame, same region: worst bin error %.3f %% of total",
+                     worst * 100))
+        XCTAssertLessThan(worst, 0.005,
+                          "a window and a ROI over the same region must be one measurement")
+    }
+
+    /// The default ROI is the **picture**, not the matte around it.
+    ///
+    /// A canvas that is not the picture's aspect has letterbox bars (the loupe renders the window
+    /// into the viewport, and `fit` into any box). "The whole canvas" used to include them, so the
+    /// card's bin 0 collected the bars — a distribution of the *output surface* instead of the
+    /// photograph. The ROI is now `plan.origin + plan.content`, which is the whole canvas exactly when
+    /// there is no letterboxing (which is why every other test in this file is unchanged).
+    func testDefaultROIIsThePictureNotTheLetterbox() throws {
+        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
+        let window = ImageRect(x: 100, y: 100, width: 600, height: 600)   // square → 1.5× fit
+        let result = try graph.render(.neutral, options: RenderOptions(
+            canvas: ImageSize(width: 1200, height: 900), scale: 1, outputWindow: window,
+            useCache: false, wantsPixels: true, collectHistogram: true))
+        let measured = try XCTUnwrap(result.histogram)
+
+        XCTAssertEqual(measured.canvas, ImageSize(width: 1200, height: 900))
+        // 600 × 600 into a 1200 × 900 box: 900 × 900, centred → 150 px of matte on each side.
+        XCTAssertEqual(measured.roi, ImageRect(x: 150, y: 0, width: 900, height: 900))
+        XCTAssertNotEqual(measured.roi, ImageRect(x: 0, y: 0, width: 1200, height: 900),
+                          "the matte is not the picture")
+        for channel in Histogram.Channel.allCases {
+            XCTAssertEqual(measured[channel].bins[0], 0,
+                           "\(channel): no matte pixel may reach the black bin")
+        }
+        // The measurement still describes real pixels: a 900 × 900 picture is a 0.81 Mpx sample grid.
+        XCTAssertEqual(measured.sampleSize, Histogram.sampleSize(for: measured.roi))
+        XCTAssertEqual(measured.sampleCount, measured.sampleSize.pixelCount)
+
+        if let t = result.output { graph.recycle(output: t) }
+    }
+
+    /// A **windowed** frame is byte-identical with and without the measurement — the same claim as
+    /// `testPixelsAndKeysAreIdenticalWithAndWithout`, on the framing the loupe actually pans with.
+    func testWindowedFramePixelsAreIdenticalWithAndWithout() throws {
+        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
+        let window = ImageRect(x: 300, y: 200, width: 600, height: 450)
+        let off = try graph.render(.neutral, options: RenderOptions(
+            canvas: Self.windowCanvas, scale: 1, outputWindow: window,
+            useCache: false, wantsPixels: true))
+        let on = try graph.render(.neutral, options: RenderOptions(
+            canvas: Self.windowCanvas, scale: 1, outputWindow: window,
+            useCache: false, wantsPixels: true, collectHistogram: true))
+
+        XCTAssertNil(off.histogram)
+        XCTAssertNotNil(on.histogram)
+        let a = try XCTUnwrap(off.display), b = try XCTUnwrap(on.display)
+        XCTAssertEqual(a.sha256(), b.sha256(), "measuring must not touch a pixel of a windowed frame")
+        XCTAssertEqual(off.keys, on.keys)
+        XCTAssertEqual(off.window, on.window)
+        XCTAssertEqual(off.trace.executed, on.trace.executed,
+                       "no stage may appear because a histogram was asked for")
+    }
+
+    /// The loupe's canvas: the viewport, which is *not* the picture's aspect in general.
+    private static let windowCanvas = ImageSize(width: 900, height: 700)
+
+    // MARK: - 11. the runtime compile happens once per process, not once per graph
+
+    /// `HistogramGather` compiles its own `.metal` source at runtime — measured at +5–8 ms on the first
+    /// frame that asks (34.5 ms against a 9.1 ms steady state, of which 20.6 ms is the graph's own pool
+    /// warm-up; `Q30Warm`, printed in the report). The pipeline used to live on the graph, and a graph
+    /// is rebuilt for every decode rung and every photo, so that compile came back with every rung —
+    /// possibly on a frame in the middle of a pan. It is process-wide now, and this asserts it: the
+    /// second graph's first measurement may not cost more than the first graph's.
+    func testTheRuntimeCompileIsOncePerProcess() throws {
+        let source = texturedImage(width: 1500, height: 1000)
+        let canvas = ImageSize(width: 2560, height: 1600)
+        var options = RenderOptions(canvas: canvas, scale: 1, useCache: true, wantsPixels: false)
+        options.collectHistogram = true
+
+        func firstAndSteady(_ graph: RenderGraph) throws -> (first: Double, steady: Double) {
+            var times: [Double] = []
+            for _ in 0..<5 {
+                let t0 = CFAbsoluteTimeGetCurrent()
+                if let t = try graph.render(.neutral, options: options).output { graph.recycle(output: t) }
+                times.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            }
+            return (times[0], times[4])
+        }
+
+        let a = try makeGraph(source, identity: "compile-a")
+        let b = try makeGraph(source, identity: "compile-b")
+        let first = try firstAndSteady(a)
+        let second = try firstAndSteady(b)
+
+        print(String(format: "histogram first frame per graph: A first %.2f / steady %.2f ms · "
+                        + "B first %.2f / steady %.2f ms (compile is per process)",
+                     first.first, first.steady, second.first, second.steady))
+        // Both graphs pay their own pool warm-up; only the *compile* is the difference, and it must not
+        // be paid twice. 2 ms of slack for a machine that is doing something else.
+        XCTAssertLessThan(second.first, first.first + 2.0,
+                          "the second graph recompiled the histogram kernel")
+    }
 }

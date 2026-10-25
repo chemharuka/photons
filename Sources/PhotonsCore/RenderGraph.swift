@@ -857,20 +857,58 @@ public final class RenderGraph {
         //
         // Nothing here runs when `collectHistogram` is false: no texture, no pipeline, no dispatch,
         // so the frame is byte-for-byte and cycle-for-cycle the pre-005f frame.
+        // Arithmetic, not a knob: a window cannot be more than its frame, and it may now be the
+        // *floor* as well. Three ideas, in order:
+        //
+        //   1. **A window's default ROI is the picture, not the letterbox.** `plan.canvas` is the
+        //      output surface (the viewport, when the loupe renders) and a canvas whose aspect differs
+        //      from the picture's has matte bars: measuring "the whole canvas" counted those bars as a
+        //      spike in bin 0 — a distribution of the *surface*, not of the photograph. For a **windowed**
+        //      render the picture's rect in canvas pixels is `plan.origin` + `plan.content`, and that is
+        //      what a 1:1 frame measures.
+        //      A *full-frame* render keeps the whole canvas: there the caller asked for a canvas and
+        //      sized it (`photonsctl`, export, and `fit`, where canvas == content — the letterbox is
+        //      only possible when the caller padded a canvas, and that padding is the caller's
+        //      measurement). It is also the contract `--ui-smoke` asserts by recounting clipping over
+        //      the whole presented texture: "at 720 × 420 the sample grid *is* the frame".
+        //   2. **The sample is the canvas, never the frame.** The downsample reads `finish`, which is
+        //      at most one canvas: a 1:1 window is measured at the window's own pixels from the
+        //      window's own texture, so a pan's measurement is a function of what is on screen.
+        //   3. **A window's histogram is the window's** — the ROI is in canvas coordinates, and the
+        //      canvas *is* the window when the loupe asked for one, so the same picture measured at
+        //      fit and at 1:1 gives the same numbers over the same region (HistogramTests asserts
+        //      this bin for bin).
+        //
+        // What is *not* here is a per-frame budget trick: the CPU binning of the reduced grid is the
+        // expensive part (~3.4 ms release, ~94 ms in a debug build for a 0.65 Mpx grid), and no
+        // choice of ROI makes it free. `LoupeController` owns the cadence — it skips the measurement
+        // while the camera is moving and measures once the hand stops — which is where a frame
+        // budget belongs; this stage simply does what it is asked, once per frame that asks.
         var histogramTarget: MTLTexture?
         var histogramRequest: (roi: ImageRect, bins: Int)?
         var histogramPayload: Histogram?
         if options.collectHistogram, let shown = finish {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
-            let whole = ImageRect(x: 0, y: 0, width: plan.canvas.width, height: plan.canvas.height)
             if let requested = options.histogramROI, requested.isEmpty {
                 // An empty selection is a measurement of nothing, not a measurement of pixel (0,0).
                 histogramPayload = Histogram.empty(bins: bins, canvas: plan.canvas, roi: requested,
                                                    primaries: options.display.primaries)
             } else {
-                let roi = (options.histogramROI?.clamped(in: plan.canvas)) ?? whole
+                // The default region: a window measures the picture inside its canvas (see note 1);
+                // a full-frame render measures the canvas it was handed, which is what
+                // `--ui-smoke`'s whole-texture recount assumes. An explicit ROI is exactly that.
+                let picture = ImageRect(x: Int(plan.origin.x.rounded()),
+                                        y: Int(plan.origin.y.rounded()),
+                                        width: plan.content.width, height: plan.content.height)
+                let defaultROI = plan.isFullFrame
+                    ? ImageRect(x: 0, y: 0, width: plan.canvas.width, height: plan.canvas.height)
+                    : picture
+                let roi = (options.histogramROI?.clamped(in: plan.canvas))
+                    ?? defaultROI.clamped(in: plan.canvas)
                 if histogramPipeline == nil {
-                    histogramPipeline = try HistogramGather.makePipeline(device)
+                    // Once per process, not once per graph: the runtime compile is ~5 ms and a graph
+                    // is rebuilt for every rung and every photo (`HistogramGather.pipeline`).
+                    histogramPipeline = try HistogramGather.pipeline(device)
                 }
                 guard let pipeline = histogramPipeline else { throw RenderError.commandBufferFailed }
                 let sample = try pool.obtain(Histogram.sampleSize(for: roi))

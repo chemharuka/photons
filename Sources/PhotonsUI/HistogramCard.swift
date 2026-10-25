@@ -18,6 +18,12 @@ import PhotonsCore
 //     (one dispatch inside the frame's own command buffer) and hands the payload to the session
 //     when the frame is presented. A card that rendered separately would double the cost of every
 //     slider tick and could describe a different document than the photo next to it.
+//   · **The numbers are of a *settled* camera (Q30).** While the loupe is panning or zooming the
+//     controller skips the measurement and keeps the last one on screen — a plot that changes 10
+//     times a second is unreadable anyway — then measures once, ~60 ms after the hand stops, on a
+//     frame it does not present. So a stale plot here is the design, not a bug: `histogram` is
+//     always "the last measurement of the picture that was on screen", and it never goes nil
+//     mid-gesture (which is why `LoupeController.recordMeasurements` publishes only non-nil).
 //
 // The card is AppKit rather than SwiftUI because it has to be *measurable*: the smoke reads the
 // histogram it drew, the bin count of the path it built, and the exact text of the 削顶 percentage,

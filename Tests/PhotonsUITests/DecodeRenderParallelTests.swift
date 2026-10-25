@@ -44,9 +44,11 @@ final class DecodeRenderParallelTests: XCTestCase {
     private func makeController() -> LoupeController {
         let controller = LoupeController(session: CatalogSession())
         controller.autoRenderEnabled = false     // these tests drive every frame themselves
-        // The histogram card is a *separate* ~104 ms of GPU work on a windowed 1:1 frame (measured:
-        // `testWindowFrameCostFromEachRung`), and it is off in every pan bench in this repo (§11.10
-        // quotes 4.0–4.6 ms with it off). It is not the subject here: a pan frame's own cost is.
+        // The histogram card used to cost every windowed 1:1 frame +8 ms (release; +104 ms in a debug
+        // build — 0.65 Mpx of CPU binning). Q30 made it a *settled-camera* measurement, so a pan frame
+        // no longer pays for it either way; it stays off here so these numbers are the pre-005f ones
+        // the repo quotes (§11.10: 4.0–4.6 ms), and `HistogramCadenceTests` measures the shipped
+        // cadence with the card on.
         controller.collectsHistogram = false
         _ = controller.view
         return controller

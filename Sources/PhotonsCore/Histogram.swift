@@ -363,6 +363,28 @@ enum HistogramGather {
     }
     """
 
+    /// The one pipeline this process owns.
+    ///
+    /// `makeLibrary(source:)` is a **runtime compile**: measured on an M1 Pro at ~5 ms of extra frame
+    /// time on the first measurement (34.5 ms for that frame, of which 20.6 ms is the graph's own pool
+    /// warm-up and 9.1 ms the steady-state measurement; `HistogramTests.testTheRuntimeCompileIsOnce-
+    /// PerProcess`). The graph used to hold the pipeline, so every graph paid that compile again — and
+    /// a graph is rebuilt for each decode rung and each photo, so it could land on a frame in the
+    /// middle of a pan. One process-wide slot makes it what this file always claimed: a *session*
+    /// cost, never a per-frame one.
+    private static let pipelineLock = NSLock()
+    nonisolated(unsafe) private static var sharedPipeline: MTLComputePipelineState?
+
+    /// The shared downsample pipeline, compiled on first use.
+    static func pipeline(_ device: MTLDevice) throws -> MTLComputePipelineState {
+        pipelineLock.lock()
+        defer { pipelineLock.unlock() }
+        if let sharedPipeline { return sharedPipeline }
+        let made = try makePipeline(device)
+        sharedPipeline = made
+        return made
+    }
+
     static func makePipeline(_ device: MTLDevice) throws -> MTLComputePipelineState {
         let library: MTLLibrary
         do {
