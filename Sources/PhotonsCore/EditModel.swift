@@ -9,7 +9,10 @@ import Foundation
 /// XMP `crs:` mapping is mechanical. A missing key in an older document decodes to its default —
 /// never to zero, never to a decode failure.
 public struct EditModel: Sendable, Equatable, Codable {
-    public static let currentSchemaVersion = 1
+    /// 2 = M4: `masks` changed from the placeholder `params: [String: Double]` to the real
+    /// `Mask`/`MaskComponent`/`MaskShape` union (docs/tasks/005-masks.md §2). Not released, so
+    /// there is no migration; the placeholder is simply dropped.
+    public static let currentSchemaVersion = 2
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     public static let currentProcessVersion = 1
@@ -22,7 +25,8 @@ public struct EditModel: Sendable, Equatable, Codable {
     public var color: ColorGroup
     public var detail: DetailGroup
     public var effects: EffectsGroup
-    /// Reserved for M4. Present in the schema from day one, empty and **not rendered** in M1.
+    /// Local masks (M4). Empty = the graph has no mask stages at all (§3.2): the key chain stays the
+    /// M1 seven-link chain and the pixels are byte-identical to M1.
     public var masks: [Mask]
 
     public init(schemaVersion: Int = EditModel.currentSchemaVersion,
@@ -106,9 +110,28 @@ public struct EditModel: Sendable, Equatable, Codable {
         if curve != old.curve { s.insert(.curve) }
         if color != old.color { s.insert(.color) }
         if effects != old.effects { s.insert(.vignette) }
+        // Masks split across the two new stages: geometry/combination invalidates the atlas,
+        // adjustments invalidate only S1.6, and a rename invalidates nothing (§3.2). Both stages go
+        // dirty when a mask appears or disappears, because the keys stop existing.
+        if masks != old.masks {
+            var oldByID: [String: Mask] = [:]
+            for m in old.masks { oldByID[m.id] = m }
+            var newIDs = Set<String>()
+            for m in masks {
+                newIDs.insert(m.id)
+                guard let o = oldByID[m.id] else {
+                    s.insert(.maskAtlas); s.insert(.localApply)
+                    continue
+                }
+                if m.selectionKey != o.selectionKey { s.insert(.maskAtlas) }
+                if m.applyKey != o.applyKey { s.insert(.localApply) }
+            }
+            for o in old.masks where !newIDs.contains(o.id) {
+                s.insert(.maskAtlas); s.insert(.localApply)
+            }
+        }
         // `detail` (sharpening / noise reduction) is stored but not rendered by the M1 graph:
         // those two controls will be mapped onto CIRAWFilter in the decoder, not onto a kernel.
-        // `masks` is reserved for M4 and also renders nothing yet.
         return s
     }
 
@@ -124,6 +147,14 @@ public struct EditModel: Sendable, Equatable, Codable {
         case .sceneLinear:
             return "ev=\(k(light.exposure));temp=\(k(light.temperature));tint=\(k(light.tint))"
                 + ";hlr=\(k(light.highlightRecovery))"
+
+        // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
+        // rebuild the atlas (§3.3 item 4), and `name` is in neither.
+        case .maskAtlas:
+            return "masks=\(maskSelectionMaterial)"
+
+        case .localApply:
+            return "local=\(maskApplyMaterial)"
 
         case .toneMap:
             return "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
@@ -480,19 +511,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     public var keyString: String {
         "vig=\(k(vignetteAmount));mid=\(k(vignetteMidpoint));fea=\(k(vignetteFeather))"
             + ";rou=\(k(vignetteRoundness))"
-    }
-}
-
-/// M4 placeholder: masks are a first-class value from day one but render nothing in M1.
-public struct Mask: Sendable, Equatable, Codable {
-    public var id: String
-    public var kind: String            // "brush" | "radial" | "linearGradient" | "sky" | "subject"
-    public var params: [String: Double]
-
-    public init(id: String = UUID().uuidString, kind: String, params: [String: Double] = [:]) {
-        self.id = id
-        self.kind = kind
-        self.params = params
     }
 }
 

@@ -92,6 +92,39 @@ public final class RenderResult {
     }
 }
 
+// MARK: - mask atlas readback
+
+/// The S1.5 output, copied back to the CPU: one slice per enabled mask, in id order.
+///
+/// This exists for verification (`photonsctl maskdump`, the 005b acceptance tests) and for the
+/// `showMask` overlay, which reads the same buffer instead of re-evaluating the predicate a second
+/// way (docs/tasks/005-masks.md §3.1).
+public struct MaskAtlasDump: Sendable {
+    public let width: Int
+    public let height: Int
+    /// `Mask.id` per slice, ascending — the order the atlas was built in.
+    public let maskIDs: [String]
+    /// Slice-major rows: `slices[slice][y * width + x]`, coverage in 0…1.
+    public let slices: [[Float]]
+
+    public init(width: Int, height: Int, maskIDs: [String], slices: [[Float]]) {
+        self.width = width
+        self.height = height
+        self.maskIDs = maskIDs
+        self.slices = slices
+    }
+
+    public func value(slice: Int, x: Int, y: Int) -> Float? {
+        guard slices.indices.contains(slice), x >= 0, y >= 0, x < width, y < height else { return nil }
+        return slices[slice][y * width + x]
+    }
+
+    public func slice(forMask id: String) -> [Float]? {
+        guard let i = maskIDs.firstIndex(of: id) else { return nil }
+        return slices[i]
+    }
+}
+
 // MARK: - uniform blocks (must mirror the .metal structs byte for byte)
 
 private struct S0Params {
@@ -131,6 +164,49 @@ private struct DisplayParams {
     var a: SIMD4<Float>   // identityMatrix
 }
 
+// MARK: - mask uniforms (mirror of s1_5_mask_atlas.metal / s1_6_local.metal, byte for byte)
+
+private struct MaskAtlasParams {
+    var a: SIMD4<Float>   // canvasSize.xy, contentOrigin.xy
+    var b: SIMD4<Float>   // contentSize.xy, sourceSize.xy
+    var c: SIMD4<Float>   // crop rect
+    var d: SIMD4<Float>   // cos, sin, flipH, flipV
+    var e: SIMD4<Int32>   // maskCount
+}
+
+private struct MaskDescU {
+    var meta: SIMD4<Int32>   // firstComponent, componentCount, invert, pad
+    var misc: SIMD4<Float>   // opacity
+}
+
+private struct MaskShapeDescU {
+    var meta: SIMD4<Int32>   // kind (0 linear, 1 radial, −1 not evaluated yet), componentInvert, op, pad
+    var p0: SIMD4<Float>     // linear: start.xy end.xy | radial: centre.xy radius.xy
+    var p1: SIMD4<Float>     // linear: midpoint, feather | radial: cos, sin, feather
+}
+
+private struct LocalParamsU {
+    var a: SIMD4<Int32>   // anyActive, maskCount
+}
+
+private struct LocalAdjustU {
+    var a: SIMD4<Float>   // gainR, gainG, gainB, amountScale
+    var b: SIMD4<Float>   // contrast, highlights, shadows, whites
+    var c: SIMD4<Float>   // blacks, hueDegrees, saturation, enabled
+}
+
+/// Per-render mask tables, derived from `EditModel.masks` in atlas order. Buffers are cached by the
+/// two key materials, so a frame with unchanged masks allocates nothing.
+private struct MaskTable {
+    let ids: [String]
+    let masks: [MaskDescU]
+    let shapes: [MaskShapeDescU]
+    let adjust: [LocalAdjustU]
+    let maskBuffer: MTLBuffer
+    let shapeBuffer: MTLBuffer
+    let adjustBuffer: MTLBuffer
+}
+
 extension ColorGroup {
     /// Lightroom's eight band centres, in degrees on the HSL colour wheel.
     public static let bandCentresDegrees: [Double] = [0, 30, 60, 120, 180, 240, 285, 315]
@@ -167,6 +243,18 @@ public final class RenderGraph {
 
     private var lutBuffers: [String: (buffer: MTLBuffer, isIdentity: Bool)] = [:]
     private var bandBuffers: [String: MTLBuffer] = [:]
+
+    /// The atlas is a side output, so it lives beside the stage cache instead of in it: one slot,
+    /// keyed by `maskAtlasKey`. `ids` is the slice order the atlas was built in.
+    private struct AtlasEntry {
+        let key: String
+        let texture: MTLTexture
+        let ids: [String]
+    }
+    private var atlasCache: AtlasEntry?
+    /// One reusable array texture (allocation on a size/count change only).
+    private var atlasPool: (key: String, texture: MTLTexture)?
+    private var maskTables: [String: MaskTable] = [:]
 
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
@@ -210,6 +298,10 @@ public final class RenderGraph {
         let origin: SIMD2<Float>
         let crop: NormalizedRect
         let keys: StageKeys
+
+        /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
+        /// document have masks" has exactly one answer on the whole render path.
+        var stages: [RenderStage] { keys.pipeline }
     }
 
     private func plan(_ edit: EditModel, _ options: RenderOptions) -> Plan {
@@ -224,32 +316,13 @@ public final class RenderGraph {
         let origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
                                   Float((canvas.height - content.height) / 2))
 
-        let geoKey = KeyBuilder("photons-render-v1")
-            .add(input.identity)
-            .add(sourceSize)
-            .add(canvas)
-            .add(content)
-            .add(edit.keyMaterial(.geometry))
-            .digest()
-
-        let linKey = KeyBuilder(geoKey).add(edit.keyMaterial(.sceneLinear)).digest()
-        let preNRKey = KeyBuilder(linKey).add(edit.keyMaterial(.toneMap)).digest()
-        let curveKey = KeyBuilder(preNRKey).add(edit.keyMaterial(.curve)).digest()
-        let colorKey = KeyBuilder(curveKey).add(edit.keyMaterial(.color)).digest()
-        let vignetteKey = KeyBuilder(colorKey).add(edit.keyMaterial(.vignette)).digest()
-        let displayKey = KeyBuilder(vignetteKey)
-            .add(options.display.keyString)
-            .add(canvas)
-            .digest()
-
-        let keys = StageKeys(inputIdentity: input.identity,
-                             geometry: geoKey,
-                             sceneLinear: linKey,
-                             toneMap: preNRKey,
-                             curve: curveKey,
-                             color: colorKey,
-                             vignette: vignetteKey,
-                             display: displayKey)
+        let keys = RenderKeyChain.keys(RenderKeyChain.links(identity: input.identity,
+                                                            sourceSize: sourceSize,
+                                                            canvas: canvas,
+                                                            content: content,
+                                                            edit: edit,
+                                                            display: options.display),
+                                       identity: input.identity)
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, keys: keys)
     }
 
@@ -258,6 +331,8 @@ public final class RenderGraph {
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
         let plan = plan(edit, options)
         var trace = RenderTrace()
+        let table = try maskTable(for: edit)
+        if table == nil { atlasCache = nil }
 
         guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
 
@@ -265,8 +340,26 @@ public final class RenderGraph {
         var transient: [MTLTexture] = []
         var finish: MTLTexture?
 
-        for stage in RenderStage.allCases {
+        for stage in plan.stages {
             let key = plan.keys.key(for: stage)
+
+            // S1.5 writes a side texture (`texture2d_array`, one slice per mask) rather than the
+            // pipeline image: it is the predicate every later consumer reads, so it is cached on its
+            // own and `current` keeps pointing at S1's output.
+            if stage == .maskAtlas {
+                if options.useCache, let hit = atlasCache, hit.key == key {
+                    trace.record(stage, executed: false)
+                    continue
+                }
+                guard let table else {
+                    throw RenderError.executeFailed("mask stage present without a mask table")
+                }
+                let atlas = try atlasTexture(for: table, size: plan.canvas)
+                try encodeAtlas(cb: cb, into: atlas, from: current, table: table, plan: plan, edit: edit)
+                trace.record(stage, executed: true)
+                atlasCache = AtlasEntry(key: key, texture: atlas, ids: table.ids)
+                continue
+            }
 
             // S4 is never cached: its output is handed to the caller (or read back), so it must not
             // be a texture the pool or the cache could later reuse.
@@ -277,7 +370,8 @@ public final class RenderGraph {
             }
 
             let out = try pool.obtain(plan.canvas)
-            try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan, options: options)
+            try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
+                       options: options, table: table)
             trace.record(stage, executed: true)
 
             if options.useCache && stage != .display {
@@ -324,6 +418,7 @@ public final class RenderGraph {
         cache.removeAll()
         cacheOrder.removeAll()
         cacheBytes = 0
+        atlasCache = nil
     }
 
     private func insertCache(_ stage: RenderStage, key: String, texture: MTLTexture) {
@@ -380,7 +475,7 @@ public final class RenderGraph {
 
     private func encode(_ stage: RenderStage, cb: MTLCommandBuffer, into out: MTLTexture,
                         from src: MTLTexture, edit: EditModel, plan: Plan,
-                        options: RenderOptions) throws {
+                        options: RenderOptions, table: MaskTable?) throws {
         switch stage {
         case .geometry:
             let p = try kernels.pipeline(file: "s0_geometry", function: "s0_geometry")
@@ -412,6 +507,29 @@ public final class RenderGraph {
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
+
+        case .localApply:
+            // S1.6: pointwise, reads the atlas slice per mask. Only reached when the document has
+            // masks, in which case the atlas stage ran first in this same command buffer.
+            guard let table, let atlas = atlasCache else {
+                throw RenderError.executeFailed("local stage without an atlas")
+            }
+            let p = try kernels.pipeline(file: "s1_6_local", function: "s1_6_local")
+            let anyActive = table.adjust.contains { $0.c.w > 0.5 }
+            var params = LocalParamsU(a: SIMD4(anyActive ? 1 : 0, Int32(table.adjust.count), 0, 0))
+            guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            enc.setComputePipelineState(p)
+            enc.setTexture(src, index: 0)
+            enc.setTexture(atlas.texture, index: 1)
+            enc.setTexture(out, index: 2)
+            enc.setBytes(&params, length: MemoryLayout<LocalParamsU>.stride, index: 0)
+            enc.setBuffer(table.adjustBuffer, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
+        case .maskAtlas:
+            // Handled before the stage loop: it writes a side texture, not the pipeline image.
+            throw RenderError.executeFailed("mask atlas must be encoded by encodeAtlas")
 
         case .toneMap:
             let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
@@ -480,6 +598,159 @@ public final class RenderGraph {
 
     private func sintheta(_ edit: EditModel) -> Float {
         Float(sin(edit.geometry.rotationDegrees * .pi / 180))
+    }
+
+    // MARK: masks (S1.5 / S1.6)
+
+    /// Descriptor tables for the enabled masks, in atlas order. Cached on the two key materials so a
+    /// frame that only moves a slider reuses the buffers.
+    private func maskTable(for edit: EditModel) throws -> MaskTable? {
+        let active = edit.activeMasks
+        guard !active.isEmpty else { return nil }
+
+        let selection = edit.maskSelectionMaterial
+        let apply = edit.maskApplyMaterial
+        let cacheKey = selection + "##" + apply
+        if let hit = maskTables[cacheKey] { return hit }
+
+        var masks: [MaskDescU] = []
+        var shapes: [MaskShapeDescU] = []
+        var adjust: [LocalAdjustU] = []
+        for m in active {
+            let first = Int32(shapes.count)
+            for c in m.components { shapes.append(shapeDesc(c)) }
+            masks.append(MaskDescU(meta: SIMD4(first, Int32(m.components.count), m.invert ? 1 : 0, 0),
+                                   misc: SIMD4(Float(min(max(m.opacity, 0), 1)), 0, 0, 0)))
+            adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled))
+        }
+        // Metal requires a bound buffer even when the count is zero; one neutral entry keeps the
+        // binding valid without inventing a mask.
+        if masks.isEmpty { masks.append(MaskDescU(meta: .zero, misc: .zero)) }
+        if shapes.isEmpty { shapes.append(MaskShapeDescU(meta: .zero, p0: .zero, p1: .zero)) }
+        if adjust.isEmpty { adjust.append(LocalAdjustU(a: SIMD4(1, 1, 1, 0), b: .zero, c: SIMD4(0, 0, 0, 0))) }
+
+        let table = MaskTable(ids: active.map(\.id),
+                              masks: masks, shapes: shapes, adjust: adjust,
+                              maskBuffer: try buffer(masks, "mask descs"),
+                              shapeBuffer: try buffer(shapes, "mask shapes"),
+                              adjustBuffer: try buffer(adjust, "mask adjustments"))
+        if maskTables.count > 8 { maskTables.removeAll() }
+        maskTables[cacheKey] = table
+        return table
+    }
+
+    private func shapeDesc(_ c: MaskComponent) -> MaskShapeDescU {
+        let op: Int32 = c.op == .subtract ? 1 : (c.op == .intersect ? 2 : 0)
+        let invert: Int32 = c.invert ? 1 : 0
+        let feather = Float(min(max(c.feather, 0), 1))
+        switch c.shape {
+        case .linearGradient(let g):
+            return MaskShapeDescU(meta: SIMD4(0, invert, op, 0),
+                                  p0: SIMD4(Float(g.start.x), Float(g.start.y),
+                                            Float(g.end.x), Float(g.end.y)),
+                                  p1: SIMD4(Float(g.midpoint), feather, 0, 0))
+        case .radialGradient(let g):
+            // cos/sin are computed in double and handed over as floats so the reference
+            // implementation in the tests and the kernel rotate identically.
+            let radians = g.angle * .pi / 180
+            return MaskShapeDescU(meta: SIMD4(1, invert, op, 0),
+                                  p0: SIMD4(Float(g.center.x), Float(g.center.y),
+                                            Float(max(g.radius.x, 0)), Float(max(g.radius.y, 0))),
+                                  p1: SIMD4(Float(cos(radians)), Float(sin(radians)), feather, 0))
+        default:
+            // Not evaluated by this pass (005b scope): zero coverage, never a guess.
+            return MaskShapeDescU(meta: SIMD4(-1, invert, op, 0), p0: .zero, p1: .zero)
+        }
+    }
+
+    private func adjustDesc(_ a: LocalAdjustments, enabled: Bool) -> LocalAdjustU {
+        let gain = a.gain
+        let active = enabled && !a.isIdentity
+        return LocalAdjustU(
+            a: SIMD4(gain.r, gain.g, gain.b, Float(min(max(a.amount, 0), 100) / 100)),
+            b: SIMD4(Float(a.contrast), Float(a.highlights), Float(a.shadows), Float(a.whites)),
+            c: SIMD4(Float(a.blacks), Float(a.hue), Float(a.saturation), active ? 1 : 0))
+    }
+
+    private func buffer<T>(_ values: [T], _ label: String) throws -> MTLBuffer {
+        let length = MemoryLayout<T>.stride * values.count
+        guard let b = device.makeBuffer(bytes: values, length: length, options: .storageModeShared) else {
+            throw RenderError.allocationFailed(label)
+        }
+        return b
+    }
+
+    private func atlasTexture(for table: MaskTable, size: ImageSize) throws -> MTLTexture {
+        let key = "\(size.keyString)x\(table.ids.count)"
+        if let hit = atlasPool, hit.key == key { return hit.texture }
+
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2DArray
+        desc.pixelFormat = .r16Float
+        desc.width = size.width
+        desc.height = size.height
+        desc.arrayLength = max(1, table.ids.count)
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .shared
+        guard let t = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("mask atlas \(key)")
+        }
+        atlasPool = (key, t)
+        return t
+    }
+
+    private func encodeAtlas(cb: MTLCommandBuffer, into atlas: MTLTexture, from src: MTLTexture,
+                             table: MaskTable, plan: Plan, edit: EditModel) throws {
+        let p = try kernels.pipeline(file: "s1_5_mask_atlas", function: "s1_5_mask_atlas")
+        var params = MaskAtlasParams(
+            a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
+            b: SIMD4(Float(plan.content.width), Float(plan.content.height),
+                     Float(sourceSize.width), Float(sourceSize.height)),
+            c: SIMD4(Float(plan.crop.x), Float(plan.crop.y), Float(plan.crop.width), Float(plan.crop.height)),
+            d: SIMD4(costheta(edit), sintheta(edit),
+                     edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
+            e: SIMD4(Int32(table.ids.count), 0, 0, 0))
+        guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        enc.setComputePipelineState(p)
+        enc.setTexture(src, index: 0)
+        enc.setTexture(atlas, index: 1)
+        enc.setBytes(&params, length: MemoryLayout<MaskAtlasParams>.stride, index: 0)
+        enc.setBuffer(table.maskBuffer, offset: 0, index: 1)
+        enc.setBuffer(table.shapeBuffer, offset: 0, index: 2)
+        dispatch(enc, p, plan.canvas)
+        enc.endEncoding()
+    }
+
+    /// Render `edit` and hand back the atlas it produced: the same numbers S1.6 consumed, so a test
+    /// (or `photonsctl maskdump`) can compare against the analytic reference instead of eyeballing a
+    /// picture. `nil` when the document has no enabled mask — the stage does not exist then.
+    public func maskAtlas(_ edit: EditModel,
+                          options: RenderOptions = RenderOptions()) throws -> MaskAtlasDump? {
+        guard edit.hasActiveMasks else { return nil }
+        var opts = options
+        opts.wantsPixels = false
+        let result = try render(edit, options: opts)
+        if let t = result.output { pool.recycle(t) }
+        guard let entry = atlasCache else { return nil }
+
+        let tex = entry.texture
+        let w = tex.width, h = tex.height
+        var slices: [[Float]] = []
+        slices.reserveCapacity(tex.arrayLength)
+        for s in 0..<tex.arrayLength {
+            var raw = [UInt16](repeating: 0, count: w * h)
+            raw.withUnsafeMutableBytes { buf in
+                tex.getBytes(buf.baseAddress!,
+                             bytesPerRow: w * 2,
+                             bytesPerImage: w * h * 2,
+                             from: MTLRegionMake2D(0, 0, w, h),
+                             mipmapLevel: 0,
+                             slice: s)
+            }
+            slices.append(raw.map { Float(Float16(bitPattern: $0)) })
+        }
+        return MaskAtlasDump(width: w, height: h, maskIDs: entry.ids, slices: slices)
     }
 
     // MARK: resource caches

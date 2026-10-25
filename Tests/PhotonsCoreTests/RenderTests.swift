@@ -230,7 +230,10 @@ final class RenderTests: XCTestCase {
 
     func testDocumentRoundTripsThroughJSON() throws {
         var model = try edit("edit-push")
-        model.masks = [Mask(id: "m1", kind: "radial", params: ["feather": 0.4])]
+        model.masks = [Mask(id: "m1", name: "Radial",
+                            components: [MaskComponent(id: "c1", feather: 0.4,
+                                                       shape: .radialGradient(RadialGradientShape(angle: 15)))],
+                            adjustments: LocalAdjustments(exposure: 0.5))]
         let data = try JSONEncoder().encode(model)
         let back = try JSONDecoder().decode(EditModel.self, from: data)
         XCTAssertEqual(back, model)
