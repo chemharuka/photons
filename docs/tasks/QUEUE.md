@@ -27,11 +27,15 @@
 | Q10 | **XMP 导出实现** | Q3 规格 ✅ | `Sources/PhotonsExport/XMP*.swift`、`Sources/photonsctl/main.swift`、`Tests/PhotonsExportTests/`、`Package.swift` | 往返测试（写→读→比对）+ 不可映射项缺席 | **完成 `5e6993b`**：XMP.swift 835 行 + 20 项往返单测 + `photonsctl xmp export` |
 | Q11 | **文档刷新** | Q1 完成 | `docs/architecture-decisions.md`（新增 §12 UI 架构）、`docs/STATUS.md` | `make verify` 仍绿（文档不动代码） | 待开工（主线写） |
 
-| Q12 | **UI 接真数据** | Q1/Q8 | `Sources/PhotonsUI/**`、`Sources/PhotonsApp/**`、`Makefile` | ui-smoke 新增：缩略图命中、滑杆改帧、撤销回原 hash、无历史置灰 | 已派（第 4 轮） |
-| Q9d | **蒙版 005d** | 005c | `Masks.swift`、`Kernels/s1_5*`、`s1_6*`、`RenderGraph.swift`（蒙版段）、`MaskTests` | tile 与全幅逐像素相等；3 蒙版 @4.1Mpx p95 ≤16.7 ms | 已派（第 4 轮） |
-| Q13 | **缩略图服务层** | Q8 | `Sources/PhotonsCatalog/ThumbnailService.swift`、`photonctl/thumbs.swift`、`Tests/PhotonsCatalogTests` | 同键合并一次、取消不写盘、优先级、并发上限、G 通路键不等 | 已派（第 4 轮） |
+| Q12 | **UI 接真数据** | Q1/Q8 | `Sources/PhotonsUI/**`、`Sources/PhotonsApp/**`、`Makefile` | ui-smoke 新增：缩略图命中、滑杆改帧、撤销回原 hash、无历史置灰 | **完成 `0b489a6`**（40 项 smoke：缩略图命中 1.000、滑杆→上屏 p50 62.4/p95 90.8 ms、撤销回原 hash） |
+| Q9d | **蒙版 005d** | 005c | `Masks.swift`、`Kernels/s1_5*`、`s1_6*`、`RenderGraph.swift`（蒙版段）、`MaskTests` | tile 与全幅逐像素相等；3 蒙版 @4.1Mpx p95 ≤16.7 ms | **完成 `09cef91`**（feather+refine+tile；3 蒙版 @4.1Mpx p95 16.6 ms；MPS guided filter 实测否决改手写） |
+| Q13 | **缩略图服务层** | Q8 | `Sources/PhotonsCatalog/ThumbnailService.swift`、`photonctl/thumbs.swift`、`Tests/PhotonsCatalogTests` | 同键合并一次、取消不写盘、优先级、并发上限、G 通路键不等 | **完成 `0b489a6`**（优先级/合并/取消/并发上限 + G 通路；1000 key 冷批 828 ms，前 20 onScreen 22 ms） |
 
-## 第 2 轮并发约定（已验证有效，第 3/4 轮沿用）
+| Q14 | **缩略图收敛成一套** | Q12/Q13 | `Sources/PhotonsUI/ThumbnailProvider.swift`、`FilmstripController.swift`、`UISmokeRunner.swift`、`scripts/ui-smoke.sh` | 胶片条 36/36 有图；同一 contentHash 只生成一次；DNG 请求 t1024 降级并记 dngCeiling | 已派（第 5 轮） |
+| Q9e | **蒙版 005e** | 005d | `Masks.swift`、`EditModel.swift` 的 showMask、`RenderGraph.swift`、`Kernels/` | 语义不可用→0 覆盖不崩；showMask=nil 像素不变；showMask 一帧性能 | 已派（第 5 轮） |
+| Q15 | **1:1 + EDR 画面侧** | M3 | `Sources/PhotonsUI/LoupeController.swift`、画布 view、`CanvasPresenter.swift`、`Tests/PhotonsUITests` | 屏幕点↔图像像素往返；倍率 1…8 钳制；逐屏 headroom；SDR 降级 | 已派（第 5 轮） |
+
+## 第 2 轮并发约定（已验证有效，第 3/4/5 轮沿用）
 
 三个代码工作流同时跑，但**各自用独立 scratch 路径**（`swift build --scratch-path /tmp/photons-<q>`），
 不跑 `make verify`（`.build` 会互相踩）；由主 session 在所有分支落盘后统一跑一次 `make verify` 定档。
