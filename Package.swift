@@ -32,6 +32,7 @@ let package = Package(
         .target(name: "PhotonsUI", dependencies: ["PhotonsCore", "PhotonsCatalog"], resources: []),
         .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsUI"]),
         .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
+        .testTarget(name: "PhotonsExportTests", dependencies: ["PhotonsExport", "PhotonsCore"]),
         .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog"]),
         .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI"]),
     ],

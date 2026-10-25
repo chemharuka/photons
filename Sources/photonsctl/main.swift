@@ -27,6 +27,7 @@ let valueFlags: Set<String> = [
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
+    "--ids",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -483,6 +484,117 @@ func cmdBench(_ a: Args) throws {
     }
 }
 
+// MARK: - xmp export (docs/xmp-mapping.md; D7: XMP is a derived artifact, never the truth)
+
+func editForAsset(_ asset: Asset) -> EditModel {
+    // `develop_json` is the document truth (D9). A row written before the schema existed holds
+    // "{}", which decodes to `EditModel.neutral` by design.
+    guard let data = asset.developJson.data(using: .utf8),
+          let model = try? JSONDecoder().decode(EditModel.self, from: data) else {
+        return .neutral
+    }
+    return model
+}
+
+func cmdXMP(_ a: Args) throws {
+    guard let sub = a.positional.first, sub == "export" else {
+        die("xmp needs a subcommand: export")
+    }
+    guard a.positional.count >= 2 else {
+        die("xmp export <pkg> --out <dir> [--ids id…|--rating N] [--embed] [--json]")
+    }
+    guard let outPath = a.value("--out") else { die("xmp export needs --out <dir>") }
+    let outDir = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
+    let catalog = openLibrary(a, index: 1)
+
+    var assets: [Asset] = []
+    let ids = a.all("--ids")
+    if !ids.isEmpty {
+        for id in ids {
+            guard let asset = try catalog.asset(id: id) else { die("no asset with id \(id)") }
+            assets.append(asset)
+        }
+    } else {
+        var filter = AssetFilter()
+        filter.ratingAtLeast = a.value("--rating").flatMap(Int.init)
+        filter.limit = a.value("--limit").flatMap(Int.init) ?? 500
+        assets = try catalog.assets(filter)
+    }
+    guard !assets.isEmpty else { die("no assets matched") }
+
+    var total = XMPExportReport()
+    var sidecars = 0, embedded = 0, failed = 0
+    var failures: [String] = []
+    let wantsEmbed = a.has("--embed")
+
+    for asset in assets {
+        let edit = editForAsset(asset)
+        let file = try? catalog.fileURL(for: asset)
+        var context = XMPWriteContext()
+        // The container's own EXIF orientation is what our flips must compose onto.
+        context.exifOrientation = try? catalog.metadata(assetId: asset.id)?.orientation
+
+        // Sidecar: mirror the catalog's relative path so two same-named files never collide.
+        let rel = (asset.relPath as NSString).deletingPathExtension
+        let sidecar = outDir.appendingPathComponent(rel).appendingPathExtension("xmp")
+        do {
+            let report = try XMPWriter.writeSidecar(for: edit, to: sidecar, context: context)
+            total.merge(report)
+            sidecars += 1
+        } catch {
+            failed += 1
+            failures.append("\(asset.relPath): \(error.localizedDescription)")
+        }
+
+        // Containers are opt-in: the default export never touches an original.
+        guard wantsEmbed, let file else { continue }
+        guard XMPWriter.canEmbed(file) else {
+            total.notes.append("\(asset.filename): \(asset.ext) cannot carry XMP — sidecar only")
+            continue
+        }
+        do {
+            var embedContext = context
+            embedContext.exifOrientation = nil      // embed() reads it from the file
+            let report = try XMPWriter.embed(edit, into: file, context: embedContext)
+            // Same document, second output: the unmappable fields were already counted with the
+            // sidecar, so only the paths and caveats of the container write are added here.
+            total.written.append(contentsOf: report.written)
+            total.notes.append(contentsOf: report.notes)
+            embedded += 1
+        } catch {
+            failed += 1
+            failures.append("\(asset.relPath): \(error.localizedDescription)")
+        }
+    }
+
+    let skipped = total.unmapped.sorted { $0.key < $1.key }
+    if a.has("--json") {
+        note(jsonLine([
+            "assets": assets.count,
+            "files": sidecars + embedded,
+            "sidecars": sidecars,
+            "embedded": embedded,
+            "failed": failed,
+            "skippedFields": total.unmapped,
+            "skippedTotal": total.unmappedCount,
+            "failures": failures,
+        ]))
+    } else {
+        let breakdown = skipped.isEmpty ? "none"
+            : skipped.map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+        note("xmp        wrote \(sidecars + embedded) file\(sidecars + embedded == 1 ? "" : "s")"
+             + " (\(sidecars) sidecar\(sidecars == 1 ? "" : "s"), \(embedded) embedded)"
+             + "  skipped \(total.unmappedCount) unmappable field\(total.unmappedCount == 1 ? "" : "s")"
+             + "  [\(breakdown)]"
+             + (failed > 0 ? "  failed \(failed)" : ""))
+        if !a.has("--quiet") {
+            for note_ in Set(total.notes).sorted() { note("           · " + note_) }
+        }
+        for f in failures { err("failed     " + f) }
+    }
+    if failed > 0 { exit(2) }
+}
+
 extension JSONEncoder {
     static var pretty: JSONEncoder {
         let e = JSONEncoder()
@@ -514,6 +626,7 @@ guard let cmd = argv.first else {
       photonsctl library assets  <pkg> [--rating N] [--camera key] [--since YYYY-MM-DD] [--limit N] [--json]
       photonsctl library stats   <pkg> [--json]
       photonsctl library verify  <pkg> [--rehash] [--json]
+      photonsctl xmp export <pkg> --out <dir> [--ids id…|--rating N] [--embed] [--json]
       photonsctl fixtures <dir> [--count 100] [--dupes 10] [--size 320x240]
 
     render options:
@@ -547,6 +660,7 @@ do {
     case "render":   try cmdRender(rest)
     case "bench":    try cmdBench(rest)
     case "library":  try cmdLibrary(rest)
+    case "xmp":      try cmdXMP(rest)
     case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")
     }
