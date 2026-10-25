@@ -26,6 +26,7 @@ public struct InspectorView: View {
                 VStack(spacing: 10) {
                     lightCard
                     colorCard
+                    PresetPanel(session: session)
                     MaskListPanel(session: session)
                     decodeCard
                 }

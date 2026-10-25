@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsExport
 
 /// The one and only source of truth for the workspace.
 ///
@@ -76,6 +77,42 @@ public final class CatalogSession {
     /// reached the database instead of only the undo stack.
     public private(set) var persistCount = 0
 
+    // MARK: catalog metadata (rating / flag / colour label)
+    //
+    // These are **library facts**, not document edits: they live in `assets.rating` /
+    // `assets.flag` / `assets.color_label`, they never enter `EditModel`, `EditHistory` or
+    // `develop_json`, and therefore ⌘Z never walks one back and `editRevision` never moves for
+    // them. `metadataRevision` is the one signal the views watch to redraw badges, exactly like
+    // `editRevision` is the one the loupe watches for pixels.
+
+    /// Bumped on every metadata write. The grid/filmstrip observe *this* to refresh badges without
+    /// a full `reload()` (row order and membership do not change unless a filter is on).
+    public private(set) var metadataRevision = 0
+
+    /// Number of metadata transactions issued this session — one per keystroke, however many
+    /// photos are selected. The smoke asserts "5 selected → 1 transaction, 5 rows".
+    public private(set) var metadataWriteCount = 0
+
+    /// Rows the last metadata statement actually changed (`db.changesCount`).
+    public private(set) var lastMetadataAffectedRows = 0
+
+    /// What the grid is narrowed to. Survives a selection change by construction: only
+    /// `applyFilter`/`clearFilter` write it, and `reload()` reads it.
+    public private(set) var filter = CatalogFilter.none
+
+    /// Distinct camera keys in the library, for the filter bar's popup. Refreshed when an
+    /// unfiltered load runs, so narrowing the grid does not shrink the list of cameras to choose.
+    public private(set) var allCameraKeys: [String] = []
+
+    /// The assets a metadata command applies to: the whole selection, or the anchor when the
+    /// selection is empty (a filter can leave nothing selected while the anchor is still visible).
+    public var metadataTargetIDs: [String] {
+        let ids = selectedAssets.map(\.id)
+        if !ids.isEmpty { return ids }
+        if let anchorID, assets.contains(where: { $0.id == anchorID }) { return [anchorID] }
+        return []
+    }
+
     public var canUndo: Bool { history.canUndo }
     public var canRedo: Bool { history.canRedo }
     /// Label of the action ⌘Z would take back — what the menu item should read.
@@ -141,6 +178,9 @@ public final class CatalogSession {
         thumbnailCache = try? ThumbnailCache(layout: c.layout)
         loadedEditAssetID = nil
         reload()
+        // The preset card and the Develop menu read this cache; fill it as soon as the library is
+        // open instead of waiting for the panel's first `onAppear`.
+        reloadPresets()
     }
 
     public func reload() {
@@ -149,9 +189,22 @@ public final class CatalogSession {
             roots = try c.roots()
             // The grid is the library view: everything the catalog has, newest first (the query
             // already orders by capture_time DESC). M3 has no paging; 10k rows is the design point.
-            assets = try c.assets(AssetFilter(sourceRootId: selectedRootID, limit: 200_000))
+            // The filter bar's value is folded into the *same* query the source list uses, so the
+            // visible rows, their order and the count in the top bar can never disagree.
+            let f = filter
+            assets = try c.assets(AssetFilter(ratingAtLeast: f.ratingAtLeast,
+                                              cameraKey: f.cameraKey,
+                                              sourceRootId: selectedRootID,
+                                              limit: 200_000,
+                                              flagEquals: f.flag,
+                                              colorLabelEquals: f.colorLabel))
             stats = try c.stats()
             loadError = nil
+            // The camera list is a property of the library, not of the current filter: derive it
+            // only from an unfiltered load so narrowing never removes a choice from its own popup.
+            if !f.isActive {
+                allCameraKeys = Array(Set(assets.compactMap(\.cameraKey))).sorted()
+            }
         } catch {
             loadError = error.localizedDescription
             assets = []
@@ -250,6 +303,85 @@ public final class CatalogSession {
 
     public func showGrid() {
         mode = .grid
+    }
+
+    // MARK: rating / flag / colour label (catalog metadata, never an edit)
+
+    /// 0–5 stars on the whole selection. One transaction for the selection, because the shortcut
+    /// runs per keystroke and a 10k-row selection must not become 10k writes.
+    @discardableResult
+    public func setRatingForSelection(_ rating: Int) -> Bool {
+        let value = max(0, min(5, rating))
+        return writeMetadata({ catalog, ids in try catalog.setRating(value, forAssets: ids) },
+                             apply: { $0.rating = value })
+    }
+
+    /// P / X / U. `nil` clears the flag.
+    @discardableResult
+    public func setFlagForSelection(_ flag: String?) -> Bool {
+        let value = AssetFlag.normalized(flag)?.rawValue
+        return writeMetadata({ catalog, ids in try catalog.setFlag(value, forAssets: ids) },
+                             apply: { $0.flag = value })
+    }
+
+    /// ⌥1–⌥6. `nil` clears the label.
+    @discardableResult
+    public func setColorLabelForSelection(_ label: String?) -> Bool {
+        let value = ColorLabel.normalized(label)?.rawValue
+        return writeMetadata({ catalog, ids in try catalog.setColorLabel(value, forAssets: ids) },
+                             apply: { $0.colorLabel = value })
+    }
+
+    /// The one path a metadata write takes.
+    ///
+    /// Nothing here commits history or calls `persist()`: `develop_json`, `asset_history` and
+    /// `editRevision` are untouched by construction, which is what makes "a rating is not an edit"
+    /// an invariant rather than a promise. With a filter on, membership can change (a photo rated 2
+    /// leaves "≥3"), so the query is re-run instead of patching rows in place.
+    @discardableResult
+    private func writeMetadata(_ write: (Catalog, [String]) throws -> Int,
+                               apply: (inout Asset) -> Void) -> Bool {
+        guard let catalog else { return false }
+        let ids = metadataTargetIDs
+        guard !ids.isEmpty else { return false }
+        do {
+            let affected = try write(catalog, ids)
+            metadataWriteCount += 1
+            lastMetadataAffectedRows = affected
+            metadataRevision &+= 1
+            lastPersistError = nil
+            if filter.isActive {
+                reload()
+            } else {
+                let touched = Set(ids)
+                var next = assets
+                for i in next.indices where touched.contains(next[i].id) { apply(&next[i]) }
+                assets = next
+            }
+            return true
+        } catch {
+            lastPersistError = "\(error)"
+            return false
+        }
+    }
+
+    // MARK: filter
+
+    /// Narrow (or widen) the grid. Re-runs the catalog query; the selection is intersected with
+    /// what is left, exactly like a source change. Never touches the document or history.
+    public func applyFilter(_ next: CatalogFilter) {
+        guard next != filter else { return }
+        filter = next
+        reload()
+    }
+
+    public func clearFilter() {
+        applyFilter(.none)
+    }
+
+    /// Drop one facet — what clicking a chip does.
+    public func clearFilter(_ facet: CatalogFilter.Facet) {
+        applyFilter(filter.without(facet))
     }
 
     // MARK: documents
@@ -403,6 +535,170 @@ public final class CatalogSession {
         // would re-render the SwiftUI inspector once per slider frame for no information.
         guard capabilities != c else { return }
         capabilities = c
+    }
+
+    // MARK: presets (M5)
+    //
+    // A preset is a named *subset* of the document (`Preset` in PhotonsCore) stored in
+    // `presets.develop_json`. `Presets.swift` owns the storage rules; the session's job is to keep
+    // the live `edit`/`history` and the database in step:
+    //
+    //   · applying merges through `Preset.apply(to:)` — only the preset's groups move, masks and
+    //     `showMaskID` stay the target's own — then commits **once**, so ⌘Z takes the whole preset
+    //     back in one press (the same granularity as paste settings);
+    //   · that commit is an ordinary `EditHistory.commit`, so the pixels, the blob and the undo
+    //     label travel the path a slider does: a preset is not a special kind of edit;
+    //   · the list is cached here (`presetRecords`) and rebuilt after every write, because the
+    //     inspector card, the menu and the CLI-facing name lookups all draw from it.
+
+    public private(set) var presetRecords: [PresetRecord] = []
+    /// Bumped on every refresh — the panel observes this, not the array.
+    public private(set) var presetsRevision = 0
+    public private(set) var lastPresetError: String?
+
+    public var defaultPresetName: String? { presetRecords.first(where: { $0.isDefault })?.name }
+
+    public func reloadPresets() {
+        guard let catalog else {
+            presetRecords = []
+            presetsRevision &+= 1
+            return
+        }
+        do {
+            presetRecords = try catalog.presetRecords()
+            lastPresetError = nil
+        } catch {
+            presetRecords = []
+            lastPresetError = error.localizedDescription
+        }
+        presetsRevision &+= 1
+    }
+
+    /// Apply a preset to the anchor photo as **one** undo step.
+    @discardableResult
+    public func applyPreset(named name: String) -> Bool {
+        guard let catalog, anchorAsset != nil else {
+            lastPresetError = "先打开库并选中一张照片"
+            return false
+        }
+        do {
+            let record = try catalog.requirePreset(named: name)
+            let merged = record.preset.apply(to: edit)
+            guard !EditHistory.isSemanticallyIdentical(edit, merged) else {
+                // Nothing to change is not an error — `commitEdit` would be a no-op too, and a
+                // preset that is already applied must not grow the undo stack.
+                lastPresetError = nil
+                return false
+            }
+            applyEdit { $0 = merged }
+            let committed = commitEdit(label: "预设 \(record.name)")
+            lastPresetError = committed ? nil : "预设没有落地"
+            return committed
+        } catch {
+            lastPresetError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Capture the anchor's document (minus the overlay, minus masks) as a new preset.
+    ///
+    /// `groups` defaults to every group, which is what "从当前照片新建" means: the whole look. The
+    /// fragment is projected onto those groups by `Preset.init(name:from:groups:)`, so the stored
+    /// preset can only carry what it claims to.
+    @discardableResult
+    public func createPresetFromCurrent(named name: String,
+                                        groups: Set<PresetGroup> = Set(PresetGroup.allCases))
+        -> PresetRecord? {
+        guard let catalog else {
+            lastPresetError = "未打开库"
+            return nil
+        }
+        guard anchorAsset != nil else {
+            lastPresetError = "未选择照片"
+            return nil
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastPresetError = "预设需要一个名字"
+            return nil
+        }
+        do {
+            let preset = Preset(name: trimmed, from: MaskViewState.documentOnly(edit), groups: groups)
+            let record = try catalog.savePreset(preset)
+            lastPresetError = nil
+            reloadPresets()
+            return record
+        } catch {
+            lastPresetError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func deletePreset(named name: String) -> Bool {
+        guard let catalog else { return false }
+        do {
+            let removed = try catalog.deletePreset(named: name)
+            lastPresetError = removed ? nil : "没有名为“\(name)”的预设"
+            reloadPresets()
+            return removed
+        } catch {
+            lastPresetError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func setDefaultPreset(named name: String?) -> Bool {
+        guard let catalog else { return false }
+        do {
+            _ = try catalog.setDefaultPreset(named: name)
+            lastPresetError = nil
+            reloadPresets()
+            return true
+        } catch {
+            lastPresetError = error.localizedDescription
+            return false
+        }
+    }
+
+    // MARK: export items
+
+    /// The photos an export acts on: the selection, in library order.
+    public var exportableSelection: [Asset] { selectedAssets }
+
+    /// One `ExportItem` per asset — the engine's input, built from the catalog.
+    ///
+    /// The document is the catalog's (`develop_json`), except for the photo whose document is live
+    /// in `edit`: that one is *this* session's, which is what makes "edit, then export" export the
+    /// edit that is on screen rather than the last committed one.
+    public func exportItems(for assets: [Asset]) -> [ExportItem] {
+        assets.map { asset in
+            let document: EditModel
+            if asset.id == loadedEditAssetID {
+                document = MaskViewState.documentOnly(edit)
+            } else if let catalog, let stored = try? catalog.develop(forAsset: asset.id) {
+                document = MaskViewState.documentOnly(stored)
+            } else {
+                document = .neutral
+            }
+            return ExportItem(id: asset.id,
+                              name: (asset.filename as NSString).deletingPathExtension,
+                              captureDate: Self.captureDate(asset.captureTime),
+                              rating: asset.rating,
+                              edit: document,
+                              sourceURL: fileURL(for: asset))
+        }
+    }
+
+    /// `assets.capture_time` is ISO8601 UTC. `{date}` in a name template wants a `Date`.
+    static func captureDate(_ iso: String?) -> Date? {
+        guard let iso, !iso.isEmpty else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        if let date = f.date(from: iso) { return date }
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: iso)
     }
 
     // MARK: paths

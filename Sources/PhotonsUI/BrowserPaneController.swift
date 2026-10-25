@@ -123,6 +123,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             _ = session.selection
             _ = session.anchorID
             _ = session.stats
+            _ = session.metadataRevision
         }, { [weak self] in
             self?.refresh()
         })
@@ -144,7 +145,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             ? "未选择"
             : "已选 \(session.selection.count)"
         sourcesTable.reloadData()
+        // `reloadData` clamps the table's selection to what still exists and posts
+        // `tableViewSelectionDidChange` for it. That transient row count is not the user's
+        // selection: writing it back would collapse a 5-photo selection to one row on every
+        // refresh (the grid's ⌘-click range, then any metadata write). The model is the truth, so
+        // the transient notification is ignored here and the real selection is installed below.
+        isApplyingModel = true
         photosTable.reloadData()
+        isApplyingModel = false
         applySelectionFromModel()
         selectSourceRow()
     }

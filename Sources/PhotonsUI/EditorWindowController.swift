@@ -81,6 +81,67 @@ public final class EditorWindowController: NSWindowController {
         session.setSelection(Set(session.assets.map(\.id)), anchor: session.anchorID ?? session.assets.first?.id)
     }
 
+    // MARK: export (M5)
+
+    /// The live export sheet, when one is up. Held so the window owns its sheet's lifetime (and so
+    /// `--ui-smoke` can assert on the same object the 导出… menu item created).
+    public private(set) var exportSheet: ExportSheetController?
+
+    /// File ▸ 导出… — disabled with an empty selection, because an export of nothing writes nothing.
+    public func showExportSheet() {
+        guard let window, !session.selection.isEmpty else { return }
+        if let existing = exportSheet, existing.isPresented { return }
+        let controller = ExportSheetController(session: session)
+        exportSheet = controller
+        controller.present(in: window)
+    }
+
+    @objc public func exportAction(_ sender: Any?) { showExportSheet() }
+
+    // MARK: develop presets (M5)
+
+    /// Develop ▸ 预设 ▸ <name>. The name travels in `representedObject` (a menu is rebuilt from the
+    /// library, so a tag index would go stale the moment a preset is renamed).
+    @objc public func applyPresetAction(_ sender: Any?) {
+        guard let name = presetName(sender) else { return }
+        session.applyPreset(named: name)
+    }
+
+    /// 从当前照片新建预设… — one name, then the capture. No group picker: "the whole look" is what
+    /// the menu command means, and the panel is where a narrower save belongs.
+    @objc public func newPresetFromCurrentAction(_ sender: Any?) {
+        guard session.anchorAsset != nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "新建预设"
+        alert.informativeText = "当前照片的外观会保存为预设（不含蒙版）。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "预设名称"
+        field.stringValue = "预设 \(session.presetRecords.count + 1)"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        session.createPresetFromCurrent(named: field.stringValue)
+    }
+
+    @objc public func deletePresetAction(_ sender: Any?) {
+        guard let name = presetName(sender) else { return }
+        session.deletePreset(named: name)
+    }
+
+    @objc public func setDefaultPresetAction(_ sender: Any?) {
+        guard let name = presetName(sender) else { return }
+        session.setDefaultPreset(named: name)
+    }
+
+    private func presetName(_ sender: Any?) -> String? {
+        if let item = sender as? NSMenuItem, let name = item.representedObject as? String {
+            return name
+        }
+        return session.presetRecords.first?.name
+    }
+
     // MARK: history commands
 
     /// ⌘Z. The loupe re-renders because `undo()` bumps `editRevision`, the same signal a slider
@@ -94,6 +155,36 @@ public final class EditorWindowController: NSWindowController {
     @discardableResult
     public func redoEdit() -> Bool {
         session.redo()
+    }
+
+    // MARK: rating / flag / colour label commands
+    //
+    // These write `assets.rating` / `assets.flag` / `assets.color_label` and nothing else — no
+    // snapshot, no `develop_json`, no `editRevision`. That is why the menu can offer them while ⌘Z
+    // stays grey with an empty history: a rating is not something to undo.
+
+    /// Tagged 0…5.
+    @discardableResult
+    public func applyRating(_ stars: Int) -> Bool {
+        session.setRatingForSelection(stars)
+    }
+
+    /// Tagged like `AssetFlag`: 1 = pick, 2 = reject; 0 or anything else clears (U).
+    @discardableResult
+    public func applyFlag(tag: Int) -> Bool {
+        session.setFlagForSelection(AssetFlag(rawValue: tag == 1 ? "pick" : "reject")?.rawValue)
+    }
+
+    @discardableResult
+    public func clearFlag() -> Bool {
+        session.setFlagForSelection(nil)
+    }
+
+    /// Tagged 0…5 into `ColorLabel.allCases`.
+    @discardableResult
+    public func applyColorLabel(tag: Int) -> Bool {
+        guard ColorLabel.allCases.indices.contains(tag) else { return false }
+        return session.setColorLabelForSelection(ColorLabel.allCases[tag].rawValue)
     }
 
     // MARK: menu actions (nil-target items: AppKit walks the responder chain and lands here,
@@ -116,6 +207,24 @@ public final class EditorWindowController: NSWindowController {
     @objc public func undoAction(_ sender: Any?) { undoEdit() }
 
     @objc public func redoAction(_ sender: Any?) { redoEdit() }
+
+    /// All six rating items share this action; the stars come from the item's tag.
+    @objc public func ratingAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        applyRating(item.tag)
+    }
+
+    @objc public func pickAction(_ sender: Any?) { applyFlag(tag: 1) }
+
+    @objc public func rejectAction(_ sender: Any?) { applyFlag(tag: 2) }
+
+    @objc public func clearFlagAction(_ sender: Any?) { clearFlag() }
+
+    /// Six colour items share this action; the label index comes from the tag.
+    @objc public func colorLabelAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        applyColorLabel(tag: item.tag)
+    }
 
     // MARK: menu validation
 
@@ -145,6 +254,44 @@ public final class EditorWindowController: NSWindowController {
             return !session.assets.isEmpty
         case #selector(openLibraryAction(_:)):
             return true
+        case #selector(ratingAction(_:)):
+            // Ticked when the whole selection already holds that rating — a menu that shows 3 stars
+            // while the selection is mixed would be lying about what the next click does.
+            let ratings = Set(session.selectedAssets.map(\.rating))
+            item.state = (ratings.count == 1 && ratings.first == item.tag) ? .on : .off
+            return !session.metadataTargetIDs.isEmpty
+        case #selector(pickAction(_:)), #selector(rejectAction(_:)):
+            let want = item.action == #selector(pickAction(_:)) ? "pick" : "reject"
+            let flags = Set(session.selectedAssets.map { $0.flag ?? "" })
+            item.state = (flags.count == 1 && flags.first == want) ? .on : .off
+            return !session.metadataTargetIDs.isEmpty
+        case #selector(clearFlagAction(_:)):
+            item.state = session.selectedAssets.allSatisfy { $0.flag == nil } ? .on : .off
+            return !session.metadataTargetIDs.isEmpty
+        case #selector(colorLabelAction(_:)):
+            let want = ColorLabel.allCases.indices.contains(item.tag)
+                ? ColorLabel.allCases[item.tag].rawValue : ""
+            let labels = Set(session.selectedAssets.map { $0.colorLabel ?? "" })
+            item.state = (labels.count == 1 && labels.first == want) ? .on : .off
+            return !session.metadataTargetIDs.isEmpty
+        case #selector(exportAction(_:)):
+            // Nothing selected = nothing to export: grey, not a sheet that says "将导出 0 张".
+            item.title = session.selection.count > 1
+                ? "导出 \(session.selection.count) 张…"
+                : "导出…"
+            return !session.selection.isEmpty
+        case #selector(applyPresetAction(_:)):
+            // Tick the default, so the menu shows which look a new photo would get.
+            if let name = item.representedObject as? String {
+                item.state = session.defaultPresetName == name ? .on : .off
+            }
+            return session.anchorID != nil && session.presetRecords.contains {
+                $0.name == (item.representedObject as? String)
+            }
+        case #selector(newPresetFromCurrentAction(_:)):
+            return session.anchorID != nil
+        case #selector(deletePresetAction(_:)), #selector(setDefaultPresetAction(_:)):
+            return session.presetRecords.contains { $0.name == (item.representedObject as? String) }
         default:
             return true
         }

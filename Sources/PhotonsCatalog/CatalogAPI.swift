@@ -10,15 +10,22 @@ public struct AssetFilter: Sendable {
     public var sourceRootId: String?
     public var includeDeleted: Bool
     public var limit: Int
+    /// Catalog metadata facets (M5). `flag` is `"pick"` / `"reject"`, `colorLabel` is one of
+    /// `red…purple`. Equality against the `assets` columns, so `nil` means "any".
+    public var flagEquals: String?
+    public var colorLabelEquals: String?
 
     public init(ratingAtLeast: Int? = nil, cameraKey: String? = nil, sinceLocalDate: String? = nil,
-                sourceRootId: String? = nil, includeDeleted: Bool = false, limit: Int = 200) {
+                sourceRootId: String? = nil, includeDeleted: Bool = false, limit: Int = 200,
+                flagEquals: String? = nil, colorLabelEquals: String? = nil) {
         self.ratingAtLeast = ratingAtLeast
         self.cameraKey = cameraKey
         self.sinceLocalDate = sinceLocalDate
         self.sourceRootId = sourceRootId
         self.includeDeleted = includeDeleted
         self.limit = limit
+        self.flagEquals = flagEquals
+        self.colorLabelEquals = colorLabelEquals
     }
 }
 
@@ -162,6 +169,8 @@ extension Catalog {
         if !filter.includeDeleted { sql += " AND deleted = 0" }
         if let r = filter.ratingAtLeast { sql += " AND rating >= ?"; args.append(r) }
         if let c = filter.cameraKey { sql += " AND camera_key = ?"; args.append(c.lowercased()) }
+        if let f = filter.flagEquals { sql += " AND flag = ?"; args.append(f) }
+        if let l = filter.colorLabelEquals { sql += " AND color_label = ?"; args.append(l) }
         if let d = filter.sinceLocalDate { sql += " AND capture_local_date >= ?"; args.append(d) }
         if let s = filter.sourceRootId { sql += " AND source_root_id = ?"; args.append(s) }
         sql += " ORDER BY capture_time DESC, id LIMIT ?"
@@ -216,6 +225,44 @@ extension Catalog {
     public func setColorLabel(_ label: String?, forAsset id: String) throws {
         try dbQueue.write { db in
             try db.execute(sql: "UPDATE assets SET color_label = ? WHERE id = ?", arguments: [label, id])
+        }
+    }
+
+    // MARK: batch metadata (a whole selection, one statement, one transaction)
+
+    /// Rating a 200-photo selection is **one** `UPDATE`, not 200: the grid's 0–5 shortcuts run on
+    /// every keypress over the selection, and a per-row loop would make a 10k selection 10k
+    /// transactions (and 10k fsyncs) for one keystroke.
+    ///
+    /// Returns the number of rows the statement actually changed, which is what the smoke asserts
+    /// on ("5 selected, 5 rows").
+    @discardableResult
+    public func setRating(_ rating: Int, forAssets ids: [String]) throws -> Int {
+        try updateMetadata(set: "rating = ?", value: rating, ids: ids)
+    }
+
+    /// `nil` clears the flag. Same one-transaction contract as `setRating(_:forAssets:)`.
+    @discardableResult
+    public func setFlag(_ flag: String?, forAssets ids: [String]) throws -> Int {
+        try updateMetadata(set: "flag = ?", value: flag, ids: ids)
+    }
+
+    /// `nil` clears the colour label.
+    @discardableResult
+    public func setColorLabel(_ label: String?, forAssets ids: [String]) throws -> Int {
+        try updateMetadata(set: "color_label = ?", value: label, ids: ids)
+    }
+
+    private func updateMetadata(set clause: String, value: (any DatabaseValueConvertible)?,
+                                ids: [String]) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        var args: [any DatabaseValueConvertible] = [value ?? DatabaseValue.null]
+        args.append(contentsOf: ids)
+        return try dbQueue.write { db -> Int in
+            try db.execute(sql: "UPDATE assets SET \(clause) WHERE id IN (\(placeholders))",
+                           arguments: StatementArguments(args))
+            return db.changesCount
         }
     }
 

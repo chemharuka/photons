@@ -167,6 +167,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             _ = session.assets.count
             _ = session.selection
             _ = session.anchorID
+            _ = session.metadataRevision
         }, { [weak self] in
             self?.refresh()
         })
@@ -174,7 +175,13 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     public func refresh() {
         guard isViewLoaded else { return }
+        // Same trap as the grid: `reloadData` clears the selection and posts `didDeselectItemsAt`,
+        // and this view observes the session even while it is hidden (the strip is a second browser,
+        // not a lazy one). Writing that transient state back would collapse a 5-photo selection to
+        // one row every time anything refreshed — from either browser.
+        isApplyingModel = true
         collectionView.reloadData()
+        isApplyingModel = false
         applySelectionFromModel()
         DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
     }
@@ -403,6 +410,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let session else { return false }
+        // Same table as the grid: the strip is a second browser over the same selection.
+        if RatingShortcuts.handle(event, session: session) { return true }
         switch event.keyCode {
         case 123: return session.moveAnchor(by: -1, extend: event.modifierFlags.contains(.shift))
         case 124: return session.moveAnchor(by: 1, extend: event.modifierFlags.contains(.shift))

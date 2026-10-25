@@ -31,6 +31,14 @@ public final class AssetCardView: NSView {
     public var isActive: Bool = false { didSet { needsDisplay = true } }
     public var isPicked: Bool = false { didSet { needsDisplay = true } }
 
+    /// What the last `draw` painted in the corners ("stars:3", "flag:pick", "color:red"). The smoke
+    /// reads this back off the cell that actually painted, so "the badge is drawn" is an observation
+    /// and not an inference from `asset.rating`.
+    public private(set) var lastDrawnBadges: [String] = []
+
+    /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
+    public var badgeSignature: String { asset.map { AssetBadges(asset: $0).signature } ?? "—" }
+
     /// The decoded thumbnail for this asset, or nil while the placeholder is all we have.
     public var thumbnail: CGImage? { didSet { if thumbnail !== oldValue { needsDisplay = true } } }
     /// Which tier the current image came from — printed by `--ui-smoke` and used to prove the cell
@@ -86,13 +94,13 @@ public final class AssetCardView: NSView {
         let captionRect = NSRect(x: 2, y: swatchRect.maxY + 4, width: bounds.width - 4,
                                  height: labelHeight - 6)
         (asset.filename as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
-        if asset.rating > 0 {
-            let stars = PlaceholderSwatch.stars(asset.rating)
-            let size = (stars as NSString).size(withAttributes: PlaceholderStyle.starsAttributes)
-            (stars as NSString).draw(at: NSPoint(x: bounds.width - size.width - 3,
-                                                 y: swatchRect.maxY + 5),
-                                     withAttributes: PlaceholderStyle.starsAttributes)
-        }
+
+        // Stars / flag / colour label go *on* the thumbnail, in its corners — not in the caption
+        // strip. The placeholder block stays underneath (006 §2), so a cell without a thumbnail
+        // still shows its rating.
+        let badges = AssetBadges(asset: asset)
+        badges.draw(in: swatchRect)
+        lastDrawnBadges = badges.drawn
     }
 
     /// Aspect-fill, centre-anchored. `NSGraphicsContext` is already clipped to the rounded swatch.
@@ -144,6 +152,10 @@ public final class AssetGridItem: NSCollectionViewItem {
 public final class AssetGridController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate {
 
     public let collectionView = AssetCollectionView()
+    public let scrollView = NSScrollView()
+    /// The filter strip: 星级 ≥ N / 旗标 / 色标 / 相机 + one chip per active facet.
+    public let filterBar = FilterBarView()
+    private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
     private weak var session: CatalogSession?
@@ -193,7 +205,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         doubleClick.delaysPrimaryMouseButtonEvents = false
         collectionView.addGestureRecognizer(doubleClick)
 
-        let scroll = NSScrollView()
+        let scroll = scrollView
         scroll.documentView = collectionView
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
@@ -206,7 +218,31 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         NotificationCenter.default.addObserver(self, selector: #selector(clipViewBoundsChanged),
                                               name: NSView.boundsDidChangeNotification,
                                               object: scroll.contentView)
-        view = scroll
+
+        // Filter strip on top, grid below: the bar is a view of `CatalogSession.filter`, so the
+        // grid area and the row order come from one query, never from a post-hoc UI filter.
+        filterBar.onChange = { [weak self] next in self?.session?.applyFilter(next) }
+        filterBar.onClearFacet = { [weak self] facet in self?.session?.clearFilter(facet) }
+        filterBar.onClearAll = { [weak self] in self?.session?.clearFilter() }
+        container.addSubview(filterBar)
+        container.addSubview(scroll)
+        view = container
+    }
+
+    /// The frame below the filter strip — the flow layout's input.
+    public override func viewDidLayout() {
+        super.viewDidLayout()
+        layoutGrid()
+        updateMetrics()
+        scheduleThumbnailReconcile()
+    }
+
+    private func layoutGrid() {
+        let h = FilterBarView.height
+        let b = view.bounds
+        filterBar.frame = NSRect(x: 0, y: 0, width: b.width, height: h)
+        scrollView.frame = NSRect(x: 0, y: h, width: b.width, height: max(0, b.height - h))
+        filterBar.needsLayout = true
     }
 
     deinit {
@@ -217,12 +253,6 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         super.viewDidLoad()
         refresh()
         observeModel()
-    }
-
-    public override func viewDidLayout() {
-        super.viewDidLayout()
-        updateMetrics()
-        scheduleThumbnailReconcile()
     }
 
     @objc private func clipViewBoundsChanged() {
@@ -238,6 +268,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             _ = session.assets.count
             _ = session.selection
             _ = session.anchorID
+            // A rating/flag/colour write repaints the badges; a filter change re-ran the query.
+            _ = session.metadataRevision
+            _ = session.filter
+            _ = session.allCameraKeys
         }, { [weak self] in
             self?.refresh()
         })
@@ -253,8 +287,16 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         let before = collectionView.numberOfItems(inSection: 0)
         updateMetrics()
+        // `reloadData` clears the collection view's selection, which posts `didDeselectItemsAt`
+        // for every row it dropped. Those are *not* the user's doing — writing them back would
+        // collapse a 5-photo selection to whatever AppKit kept, one photo after every metadata
+        // write or filter change. The model is the truth here, so the transient callbacks are
+        // ignored and `applySelectionFromModel()` below re-installs the real selection.
+        isApplyingModel = true
         collectionView.reloadData()
+        isApplyingModel = false
         reloadCount += 1
+        filterBar.update(filter: session?.filter ?? .none, cameraKeys: session?.allCameraKeys ?? [])
         applySelectionFromModel()
         if before == 0 { collectionView.scroll(.zero) }
         // `reloadData` recycles every visible cell, so every visible cell re-asks for its image.
@@ -510,6 +552,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let session else { return false }
+        // 0–5 / P / X / U / ⌥1–⌥6 are catalog metadata, handled by the one shared table.
+        if RatingShortcuts.handle(event, session: session) { return true }
         let columns = max(1, metrics.columns)
         let extend = event.modifierFlags.contains(.shift)
         switch event.keyCode {
@@ -556,6 +600,21 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// was drawn matches the pure function.
     public var appliedItemSize: CGSize { flow.itemSize }
     public var appliedSectionInset: NSEdgeInsets { flow.sectionInset }
+
+    /// The live cell for an asset, if it is on screen. The smoke reads `lastDrawnBadges` off *this*
+    /// to prove the corner badge was painted, not merely that the model says `rating == 3`.
+    public func visibleItem(forAssetID id: String) -> AssetGridItem? {
+        guard let session, let index = session.assets.firstIndex(where: { $0.id == id }) else { return nil }
+        return collectionView.item(at: IndexPath(item: index, section: 0)) as? AssetGridItem
+    }
+
+    /// The card the filter strip occupies above the grid (0 when the view has not laid out yet).
+    public var filterBarFrame: NSRect { filterBar.frame }
+}
+
+/// Top-left origin, so the filter strip is at y = 0 and the grid fills what is left.
+final class FlippedCanvasView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 extension Array {

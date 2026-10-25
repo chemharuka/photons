@@ -4,6 +4,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsExport
 
 /// The main menu, built in code (no XIB), with nil targets so AppKit resolves each item through the
 /// responder chain and validates it against `EditorWindowController.validateMenuItem`.
@@ -31,6 +32,13 @@ public enum MainMenu {
         let file = NSMenu(title: "文件")
         fileItem.submenu = file
         file.addItem(withTitle: "打开库…", action: #selector(EditorWindowController.openLibraryAction(_:)), keyEquivalent: "o")
+        file.addItem(.separator())
+        // ⌘⇧E, the shortcut every photo app puts on "export the selection". Grey with an empty
+        // selection (`validateMenuItem`), so the menu cannot promise a batch that has no items.
+        let exportItem = file.addItem(withTitle: "导出…",
+                                      action: #selector(EditorWindowController.exportAction(_:)),
+                                      keyEquivalent: "e")
+        exportItem.keyEquivalentModifierMask = [.command, .shift]
 
         // Edit
         let editItem = NSMenuItem()
@@ -46,6 +54,52 @@ public enum MainMenu {
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         edit.addItem(.separator())
         edit.addItem(withTitle: "全选照片", action: #selector(EditorWindowController.selectAllAction(_:)), keyEquivalent: "a")
+
+        // Photo — rating / flag / colour label. Catalog metadata, not edits, so these live outside
+        // the undo pair above. Bare digits and letters (no ⌘) because that is the convention every
+        // photo app uses, and ⌘0–⌘5 would collide with the view menu.
+        let photoItem = NSMenuItem()
+        main.addItem(photoItem)
+        let photo = NSMenu(title: "照片")
+        photoItem.submenu = photo
+        for stars in 0...5 {
+            let item = photo.addItem(withTitle: stars == 0 ? "清除星级" : "\(stars) 星",
+                                     action: #selector(EditorWindowController.ratingAction(_:)),
+                                     keyEquivalent: "\(stars)")
+            item.keyEquivalentModifierMask = []
+            item.tag = stars
+        }
+        photo.addItem(.separator())
+        let pick = photo.addItem(withTitle: "标记为选取 (P)",
+                                 action: #selector(EditorWindowController.pickAction(_:)), keyEquivalent: "p")
+        pick.keyEquivalentModifierMask = []
+        pick.tag = 1
+        let reject = photo.addItem(withTitle: "标记为拒绝 (X)",
+                                   action: #selector(EditorWindowController.rejectAction(_:)), keyEquivalent: "x")
+        reject.keyEquivalentModifierMask = []
+        reject.tag = 2
+        let unflag = photo.addItem(withTitle: "清除旗标 (U)",
+                                   action: #selector(EditorWindowController.clearFlagAction(_:)), keyEquivalent: "u")
+        unflag.keyEquivalentModifierMask = []
+        photo.addItem(.separator())
+        for (index, label) in ColorLabel.allCases.enumerated() {
+            let item = photo.addItem(withTitle: "色标：\(label.displayName)",
+                                     action: #selector(EditorWindowController.colorLabelAction(_:)),
+                                     keyEquivalent: "\(index + 1)")
+            item.keyEquivalentModifierMask = [.option]
+            item.tag = index
+        }
+
+        // Develop — presets. The list is the library's, so the menu is rebuilt every time it opens
+        // (`PresetMenu.menuNeedsUpdate`): a preset created in the inspector card shows up here
+        // without a relaunch, and a deleted one cannot be applied from a stale item.
+        let developItem = NSMenuItem()
+        main.addItem(developItem)
+        let develop = NSMenu(title: "显影")
+        developItem.submenu = develop
+        let presetItem = NSMenuItem(title: "预设", action: nil, keyEquivalent: "")
+        presetItem.submenu = PresetMenu(kind: .apply)
+        develop.addItem(presetItem)
 
         // View
         let viewItem = NSMenuItem()
@@ -74,6 +128,104 @@ public enum MainMenu {
         NSApp.windowsMenu = windowMenu
 
         return main
+    }
+}
+
+/// Develop ▸ 预设 — rebuilt from the library each time it opens.
+///
+/// A menu that is a static list of names goes stale the moment the inspector card creates or
+/// deletes one, and a "delete shape 3" style tag map is the classic way to delete the wrong preset.
+/// So the items carry the **name** in `representedObject` and the list is re-read from the session
+/// in `menuNeedsUpdate` — the same `presetRecords` cache the panel draws.
+///
+/// The session is found through the responder chain's owner (the window controller), not passed in:
+/// the menu is built by `MainMenu.build()` at launch, before any library is open, and must still be
+/// correct for the second library the user opens.
+@MainActor
+final class PresetMenu: NSMenu, NSMenuDelegate {
+
+    enum Kind {
+        /// The preset list itself, plus 新建/设为默认/删除.
+        case apply
+        case setDefault
+        case delete
+    }
+
+    private let kind: Kind
+
+    init(kind: Kind) {
+        self.kind = kind
+        super.init(title: "")
+        title = kind == .apply ? "预设" : (kind == .setDefault ? "设为默认" : "删除预设")
+        delegate = self
+    }
+
+    required init(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    // MARK: building
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let controller = Self.activeEditor()
+        let records = controller?.session.presetRecords ?? []
+        menu.removeAllItems()
+
+        guard !records.isEmpty else {
+            let empty = NSMenuItem(title: "（还没有预设）", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            if kind == .apply { addCreateItem(to: menu) }
+            return
+        }
+
+        let defaultName = controller?.session.defaultPresetName
+        for record in records {
+            let item = NSMenuItem(title: record.name, action: action(), keyEquivalent: "")
+            item.representedObject = record.name
+            if kind == .apply { item.state = record.isDefault ? .on : .off }
+            menu.addItem(item)
+        }
+
+        if kind == .apply {
+            menu.addItem(.separator())
+            addCreateItem(to: menu)
+            menu.addItem(.separator())
+            let defaults = NSMenuItem(title: "设为默认", action: nil, keyEquivalent: "")
+            defaults.submenu = PresetMenu(kind: .setDefault)
+            menu.addItem(defaults)
+            let delete = NSMenuItem(title: "删除预设", action: nil, keyEquivalent: "")
+            delete.submenu = PresetMenu(kind: .delete)
+            menu.addItem(delete)
+            if let defaultName {
+                menu.addItem(.separator())
+                let note = NSMenuItem(title: "默认：\(defaultName)", action: nil, keyEquivalent: "")
+                note.isEnabled = false
+                menu.addItem(note)
+            }
+        }
+    }
+
+    private func addCreateItem(to menu: NSMenu) {
+        menu.addItem(withTitle: "从当前照片新建预设…",
+                     action: #selector(EditorWindowController.newPresetFromCurrentAction(_:)),
+                     keyEquivalent: "")
+    }
+
+    private func action() -> Selector {
+        switch kind {
+        case .apply: return #selector(EditorWindowController.applyPresetAction(_:))
+        case .setDefault: return #selector(EditorWindowController.setDefaultPresetAction(_:))
+        case .delete: return #selector(EditorWindowController.deletePresetAction(_:))
+        }
+    }
+
+    private static func activeEditor() -> EditorWindowController? {
+        if let controller = NSApp.keyWindow?.windowController as? EditorWindowController {
+            return controller
+        }
+        if let controller = NSApp.mainWindow?.windowController as? EditorWindowController {
+            return controller
+        }
+        return NSApp.windows.compactMap { $0.windowController as? EditorWindowController }.first
     }
 }
 
@@ -203,6 +355,10 @@ public final class UISmokeRunner {
         checkGridThumbnails(grid: grid, gridView: gridView, session: session,
                             loupe: root.loupeController, window: window)
 
+        // 3c. rating / flag / colour label + the filter strip (catalog metadata, never an edit)
+        checkRatingAndFilter(session: session, grid: grid, gridView: gridView,
+                             controller: windowController, window: window)
+
         // 4. filmstrip is the second browser and shares the selection
         windowController.showBrowserAsFilmstrip()
         pump(0.3)
@@ -287,11 +443,291 @@ public final class UISmokeRunner {
             checkMaskEditing(session: session, loupe: root.loupeController,
                              controller: windowController, window: window,
                              asset: asset, url: url)
+
+            // 8. export sheet + develop presets (M5): real files, one broken source, one undo step
+            checkExportAndPresets(session: session, loupe: root.loupeController,
+                                  controller: windowController, window: window,
+                                  asset: asset, url: url)
         } else {
             fail("no asset for the loupe")
         }
 
         return finish()
+    }
+
+    // MARK: - export sheet + develop presets (M5)
+
+    /// The two M5 surfaces, asserted end to end rather than by inspection:
+    ///
+    ///   1. **the export sheet** (what 文件 ▸ 导出… opens) writes real files, at the preset's size,
+    ///      with the preset's name template — counted on disk and measured by decoding each file;
+    ///   2. **one broken photo does not take the batch with it** — its source is overwritten with
+    ///      junk (a genuine decode failure, not an injected error), the other two still export, and
+    ///      the sheet shows exactly one failure row with a reason;
+    ///   3. **applying a preset is one undo step** — the pixel hash moves, the history grows by
+    ///      exactly one snapshot *and* one `asset_history` row, and ⌘Z puts the hash back.
+    ///
+    /// The last check is the menu's promise: with nothing selected, 导出… validates to disabled.
+    private func checkExportAndPresets(session: CatalogSession, loupe: LoupeController,
+                                       controller: EditorWindowController, window: NSWindow,
+                                       asset: Asset, url: URL) {
+        let exportDir = screenshotDirectory.appendingPathComponent("ui-smoke-export")
+        let brokenDir = screenshotDirectory.appendingPathComponent("ui-smoke-export-broken")
+        try? FileManager.default.removeItem(at: exportDir)
+        try? FileManager.default.removeItem(at: brokenDir)
+
+        // Photos from the *old* end of the library: the grid's prefetch window never touched them,
+        // so overwriting one cannot disturb a thumbnail assertion that ran earlier.
+        let pool = session.assets.filter { $0.kind != .raw }
+        guard pool.count >= 5 else {
+            fail("只有 \(pool.count) 张 JPEG，导出的验收做不了")
+            return
+        }
+        let tail = Array(pool.suffix(5))
+        let good = Array(tail.prefix(3))
+        let broken = tail[3]
+
+        // MARK: helpers
+
+        func files(in dir: URL) -> [URL] {
+            let all = (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+            return all.filter { $0.pathExtension.lowercased() == "jpg" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+        func pixelSize(of file: URL) -> ImageSize? {
+            guard let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+                  let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                  let w = props[kCGImagePropertyPixelWidth] as? Int,
+                  let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+            return ImageSize(width: w, height: h)
+        }
+        /// What the file *must* contain: the crop's size scaled by the preset, via the same two
+        /// functions `BatchExporter` uses (`ExportSizing`), so the assertion is a forecast, not a
+        /// restatement of what was measured.
+        func expectedSize(_ asset: Asset, _ preset: ExportPreset) -> ImageSize? {
+            guard let w = asset.width, let h = asset.height, w > 0, h > 0,
+                  let edit = session.exportItems(for: [asset]).first?.edit else { return nil }
+            let native = ImageSize(width: w, height: h)
+            let content = CropMath.outputSize(edit.geometry.renderCrop(source: native), in: native)
+            return ExportSizing.outputSize(content: content,
+                                           scale: preset.renderScale(content: content))
+        }
+        func waitForExport(_ sheet: ExportSheetController, _ timeout: TimeInterval) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while sheet.model.phase != .finished && Date() < deadline { pump(0.1) }
+            return sheet.model.phase == .finished
+        }
+        func sizeText(_ sizes: [ImageSize?]) -> String {
+            sizes.map { $0.map { "\($0.width)×\($0.height)" } ?? "?" }.joined(separator: ", ")
+        }
+
+        // MARK: 1. three photos → three files at the preset's size
+
+        session.setSelection(Set(good.map(\.id)), anchor: good[0].id)
+        controller.showExportSheet()
+        pump(0.3)
+        guard let sheet = controller.exportSheet else {
+            fail("文件 ▸ 导出… 没有开出弹窗")
+            return
+        }
+        check("导出弹窗以窗口 sheet 呈现，并显示“将导出 \(good.count) 张”（selectionCount \(sheet.model.selectionCount)，捕获 \(sheet.items.count) 个条目）",
+              window.attachedSheet != nil && window.attachedSheet === sheet.sheetWindow
+              && sheet.model.selectionCount == good.count && sheet.items.count == good.count)
+
+        sheet.model.outputDirectory = exportDir
+        sheet.model.preset = ExportPreset(name: "Smoke Web", format: .jpeg, longEdge: 512,
+                                          quality: 0.85, colorSpace: .sRGB, writeXMP: false,
+                                          nameTemplate: "{seq}-{name}")
+        let runStarted = CFAbsoluteTimeGetCurrent()
+        sheet.runExport()
+        let finishedA = waitForExport(sheet, 180)
+        let secondsA = CFAbsoluteTimeGetCurrent() - runStarted
+        let filesA = files(in: exportDir)
+        let sizesA = filesA.map { pixelSize(of: $0) }
+        let expectedA = good.map { expectedSize($0, sheet.model.preset) }
+        let expectedNames = good.enumerated().map { index, photo in
+            String(format: "%04d-%@.jpg", index + 1,
+                   (photo.filename as NSString).deletingPathExtension)
+        }.sorted()
+        let namesA = filesA.map(\.lastPathComponent)
+        log(String(format: "export sheet            %d/%d 已写 · %d 个文件 · %.2f s · 尺寸 %@ · 预设 %@ · 报告 %.2f s (p50 %.2f / p95 %.2f)",
+                   sheet.model.writtenCount, sheet.model.total, filesA.count, secondsA,
+                   sizeText(sizesA), sheet.model.preset.summary,
+                   sheet.model.report?.seconds ?? 0,
+                   sheet.model.report?.p50 ?? 0, sheet.model.report?.p95 ?? 0))
+        check("导出 3 张 → 磁盘多 3 个文件（\(filesA.count)），名字来自 {seq}-{name}（\(namesA.joined(separator: ", "))）",
+              finishedA && filesA.count == 3 && namesA == expectedNames
+              && sheet.model.writtenCount == 3 && sheet.model.failedCount == 0)
+        check("每个文件的像素尺寸 == 预设（实测 \(sizeText(sizesA))，预测 \(sizeText(expectedA))；512 px 长边对 320 px 的源不放大）",
+              !expectedA.isEmpty && sizesA.count == expectedA.count
+              && zip(sizesA, expectedA).allSatisfy { measured, want in
+                  guard let measured, let want else { return false }
+                  return measured == want
+              })
+        check("逐张结果行也报了尺寸与耗时（\(sheet.model.rows.first?.detail ?? "—")），「在 Finder 中显示」拿到的正是这 3 个存在的文件",
+              sheet.model.rows.count == 3
+              && sheet.model.rows.allSatisfy { $0.detail.contains("×") && $0.detail.contains(" s") }
+              && sheet.model.writtenURLs.count == 3
+              && sheet.model.writtenURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+
+        // MARK: 1b. a real downscale — the 60 MP RAW at long edge 512 must be exactly 512 px
+
+        if let sheetWindow = sheet.sheetWindow {
+            // The sheet itself, for a human: three green rows with size + time.
+            capture(window: sheetWindow, name: "ui-smoke-export-sheet.png")
+        }
+
+        let rawDir = screenshotDirectory.appendingPathComponent("ui-smoke-export-raw")
+        try? FileManager.default.removeItem(at: rawDir)
+        sheet.dismiss()
+        pump(0.2)
+        session.selectOnly(asset.id)
+        controller.showExportSheet()
+        pump(0.3)
+        if let rawSheet = controller.exportSheet {
+            rawSheet.model.outputDirectory = rawDir
+            rawSheet.model.preset = ExportPreset(name: "Smoke 512", format: .jpeg, longEdge: 512,
+                                                 quality: 0.9, colorSpace: .sRGB,
+                                                 nameTemplate: "{name}")
+            rawSheet.runExport()
+            let finishedRaw = waitForExport(rawSheet, 300)
+            let rawFiles = files(in: rawDir)
+            let rawSize = rawFiles.first.flatMap { pixelSize(of: $0) }
+            let wantRaw = expectedSize(asset, rawSheet.model.preset)
+            log("export raw              \(rawFiles.first?.lastPathComponent ?? "—") \(rawSize.map { "\($0.width)×\($0.height)" } ?? "?") "
+                + "预测 \(wantRaw.map { "\($0.width)×\($0.height)" } ?? "?") · \(String(format: "%.2f", rawSheet.model.report?.seconds ?? 0)) s · "
+                + "p50 \(String(format: "%.2f", rawSheet.model.report?.p50 ?? 0)) s")
+            check("60 MP RAW 按 512 px 长边导出 → \(rawSize.map { "\($0.width)×\($0.height)" } ?? "?")，与预设预测一致（真下采样，不是不放大）",
+                  finishedRaw && rawFiles.count == 1 && rawSize == wantRaw
+                  && (wantRaw.map { max($0.width, $0.height) } == 512))
+            rawSheet.dismiss()
+            pump(0.2)
+        } else {
+            fail("RAW 的导出弹窗没有开出来")
+        }
+
+        // MARK: 2. one deliberately broken source → the rest still export, the sheet says why
+
+        if let brokenURL = session.fileURL(for: broken) {
+            // Junk bytes under the original name: `CIRAWFilter` cannot open it, so this is the
+            // decode-failure path `BatchExporter` is supposed to isolate, not a synthesised throw.
+            try? Data(repeating: 0x5A, count: 4096).write(to: brokenURL)
+        } else {
+            fail("坏图没有文件路径")
+        }
+        sheet.dismiss()
+        pump(0.2)
+        session.setSelection(Set([good[0].id, good[1].id, broken.id]), anchor: good[0].id)
+        controller.showExportSheet()
+        pump(0.3)
+        guard let brokenSheet = controller.exportSheet else {
+            fail("第二个导出弹窗没有开出来")
+            return
+        }
+        brokenSheet.model.outputDirectory = brokenDir
+        brokenSheet.model.preset = ExportPreset(name: "Smoke Thumb", format: .jpeg, longEdge: 160,
+                                                quality: 0.8, colorSpace: .sRGB,
+                                                nameTemplate: "{name}")
+        brokenSheet.runExport()
+        let finishedB = waitForExport(brokenSheet, 180)
+        let filesB = files(in: brokenDir)
+        let sizesB = filesB.map { pixelSize(of: $0) }
+        let failureRows = brokenSheet.model.rows.filter(\.isFailure)
+        if let brokenWindow = brokenSheet.sheetWindow {
+            // The isolation receipt: two green rows, one red with the decode error.
+            capture(window: brokenWindow, name: "ui-smoke-export-failed.png")
+        }
+        log("export broken           \(filesB.count) 个文件 \(sizeText(sizesB)) · \(failureRows.count) 行失败 · "
+            + (failureRows.first?.detail ?? "—"))
+        check("1 张坏图 → 其余 2 张照旧导出（\(filesB.count) 个文件，尺寸 \(sizeText(sizesB))，长边 160）",
+              finishedB && filesB.count == 2
+              && sizesB.allSatisfy { $0 == ImageSize(width: 160, height: 120) }
+              && brokenSheet.model.writtenCount == 2)
+        check("弹窗逐张列结果：\(failureRows.count) 行失败且写明原因（“\(failureRows.first?.detail ?? "—")”），失败的是 \(failureRows.first?.name ?? "—")",
+              brokenSheet.model.rows.count == 3 && failureRows.count == 1
+              && brokenSheet.model.failedCount == 1
+              && failureRows.first?.name == (broken.filename as NSString).deletingPathExtension
+              && failureRows.first?.detail.hasPrefix("失败：") == true
+              && (failureRows.first?.detail.count ?? 0) > 4)
+
+        // MARK: 3. preset apply = one history step, and ⌘Z takes it back
+
+        loupe.autoRenderEnabled = false
+        session.selectOnly(asset.id)
+        func pixelHash(_ model: EditModel) -> String? {
+            (try? loupe.makeFrame(url: url, viewport: ImageSize(width: 640, height: 420),
+                                  decodeScale: 0.5, edit: MaskViewState.documentOnly(model),
+                                  state: .fit, hashPixels: true))?.displayHash
+        }
+
+        session.applyEdit { $0 = .neutral }
+        session.commitEdit(label: "Reset")
+        session.applyEdit { $0.light.exposure = 1.2 }
+        session.applyEdit { $0.light.contrast = 30 }
+        session.commitEdit(label: "Smoke look")
+        let created = session.createPresetFromCurrent(named: "Smoke Punch", groups: [.light])
+        check("“从当前照片新建预设”落库，面板/菜单读的是同一份缓存（\(session.presetRecords.map(\.name).joined(separator: "、"))）",
+              created != nil && session.presetRecords.contains { $0.name == "Smoke Punch" }
+              && session.presetRecords.contains { $0.name == "Smoke Punch" && $0.preset.groups == [.light] })
+
+        // The Develop menu rebuilds from the same cache — the card and the menu cannot disagree.
+        if let develop = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "显影" }),
+           let presetItem = develop.items.first(where: { $0.submenu is PresetMenu }),
+           let presetMenu = presetItem.submenu as? PresetMenu {
+            presetMenu.menuNeedsUpdate(presetMenu)
+            let titles = presetMenu.items.map(\.title)
+            let applied = presetMenu.items.first { $0.title == "Smoke Punch" }
+            log("preset menu             \(titles.prefix(6).joined(separator: " · "))")
+            check("显影 ▸ 预设 从库里重建，带出“Smoke Punch”并指向应用动作（\(titles.prefix(4).joined(separator: "、"))…）",
+                  applied?.action == #selector(EditorWindowController.applyPresetAction(_:))
+                  && (applied?.representedObject as? String) == "Smoke Punch"
+                  && presetMenu.items.contains { $0.action == #selector(EditorWindowController.newPresetFromCurrentAction(_:)) })
+        } else {
+            fail("主菜单里没有 显影 ▸ 预设")
+        }
+
+        session.applyEdit { $0.light.exposure = 0 }
+        session.applyEdit { $0.light.contrast = 0 }
+        session.commitEdit(label: "Reset")
+        let preApplyHash = pixelHash(session.edit)
+        let preApplyDepth = session.history.count
+        let preApplyRows = session.lastSaveResult?.historyRows ?? 0
+        let applied = session.applyPreset(named: "Smoke Punch")
+        let postApplyHash = pixelHash(session.edit)
+        let postApplyRows = session.lastSaveResult?.historyRows ?? 0
+        log("preset apply            exposure \(String(format: "%.2f", session.edit.light.exposure)) EV · hash "
+            + "\(preApplyHash?.prefix(8) ?? "nil")… → \(postApplyHash?.prefix(8) ?? "nil")… · history "
+            + "\(preApplyDepth)→\(session.history.count) · asset_history \(preApplyRows)→\(postApplyRows)")
+        check("应用预设改像素（hash \(preApplyHash?.prefix(8) ?? "nil")… → \(postApplyHash?.prefix(8) ?? "nil")…），只产生一条开发历史（history +\(session.history.count - preApplyDepth)，asset_history +\(postApplyRows - preApplyRows) 行）",
+              applied && preApplyHash != nil && postApplyHash != nil
+              && postApplyHash != preApplyHash
+              && session.history.count == preApplyDepth + 1
+              && postApplyRows == preApplyRows + 1)
+
+        _ = controller.undoEdit()
+        let undoneHash = pixelHash(session.edit)
+        log("preset undo             hash \(undoneHash?.prefix(16) ?? "nil")… · exposure "
+            + "\(String(format: "%.2f", session.edit.light.exposure)) EV · history \(session.history.count)")
+        check("⌘Z 撤销预设 → 像素回到应用前（\(undoneHash?.prefix(8) ?? "nil")… == \(preApplyHash?.prefix(8) ?? "nil")…），曝光回到 0",
+              undoneHash != nil && undoneHash == preApplyHash && session.edit.light.exposure == 0)
+
+        // MARK: 4. the menu item tells the truth about an empty selection
+
+        brokenSheet.dismiss()
+        session.setSelection([])
+        if let exportItem = menuItem(#selector(EditorWindowController.exportAction(_:))) {
+            let enabledWhenEmpty = controller.validateMenuItem(exportItem)
+            session.selectOnly(asset.id)
+            let enabledWithSelection = controller.validateMenuItem(exportItem)
+            log("export menu             empty → validate=\(enabledWhenEmpty) · 选中 1 张 → validate=\(enabledWithSelection) · title=\(exportItem.title)")
+            check("空选中时 文件 ▸ 导出… 置灰，选中后恢复可用",
+                  enabledWhenEmpty == false && enabledWithSelection == true)
+        } else {
+            fail("文件菜单里没有 导出… 项")
+        }
+
+        loupe.autoRenderEnabled = true
     }
 
     // MARK: - grid thumbnails
@@ -393,6 +829,203 @@ public final class UISmokeRunner {
         check("a slider move with the loupe closed renders nothing (\(loupe.editRenderCount) renders)",
               loupe.editRenderCount == rendersBefore && session.edit.light.contrast == 6)
         session.applyEdit { $0.light.contrast = 0 }
+    }
+
+    // MARK: - rating / flag / colour label + filter bar
+
+    /// The rating UI, asserted on the **database** and on what the cell actually painted.
+    ///
+    /// Seven things this pins:
+    ///   1. a real key event ("3") through `AssetCollectionView.keyDown` writes `assets.rating`;
+    ///   2. the cell draws the badge — `lastDrawnBadges` read back after a real `display()`, not
+    ///      inferred from `asset.rating`;
+    ///   3. five selected photos + one "P" is **one** transaction and five rows;
+    ///   4. ⌥3 writes a colour label, and the badge shows it next to the stars;
+    ///   5. "≥3 星" narrows the grid to exactly the rows the same query returns, with a chip;
+    ///   6. clicking the chip clears that facet and the library comes back;
+    ///   7. a rating is metadata, not an edit: history does not grow, `editRevision` does not move,
+    ///      and ⌘Z is grey (and a no-op if forced) because of it.
+    private func checkRatingAndFilter(session: CatalogSession, grid: AssetGridController,
+                                      gridView: NSCollectionView, controller: EditorWindowController,
+                                      window: NSWindow) {
+        guard let reader = try? Catalog.open(at: libraryURL) else {
+            fail("could not open the library a second time to read the metadata back")
+            return
+        }
+        let rowsBefore = session.assets.count
+        let historyBefore = session.history.count
+        let revisionBefore = session.editRevision
+        let canUndoBefore = session.canUndo
+        guard let target = session.anchorAsset ?? session.assets.first else {
+            fail("no anchor photo to rate")
+            return
+        }
+        session.selectOnly(target.id)
+        pump(0.2)
+
+        // 3c.1 — "3" through the shipped key path (grid keyDown → RatingShortcuts → session).
+        let writesBefore = session.metadataWriteCount
+        let known = press("3", in: gridView, window: window)
+        let storedAsset: Asset? = try? reader.asset(id: target.id)
+        let storedRating = storedAsset?.rating ?? -1
+        let modelRating = session.assets.first(where: { $0.id == target.id })?.rating ?? -1
+        log("rating key             “3” recognised=\(known) → db \(storedRating), model \(modelRating), \(session.metadataWriteCount - writesBefore) transaction(s), \(session.lastMetadataAffectedRows) row(s)")
+        check("按 “3” 写库：assets.rating 读回 \(storedRating) == 3，模型里也是 \(modelRating)",
+              known && storedRating == 3 && modelRating == 3)
+
+        // 3c.2 — the badge on the cell that is on screen (draw, then read what it painted).
+        grid.showAnchor()
+        pump(0.25)
+        gridView.layoutSubtreeIfNeeded()
+        let ratedCell = grid.visibleItem(forAssetID: target.id)
+        ratedCell?.cardView.display()
+        let ratedDrawn = ratedCell?.cardView.lastDrawnBadges ?? []
+        let ratedSignature = ratedCell?.cardView.badgeSignature ?? "no cell"
+        log("badge                  \(target.filename) → “\(ratedSignature)”, painted \(ratedDrawn)")
+        check("角标画出：格子上 3 颗星（painted \(ratedDrawn)，签名 “\(ratedSignature)”）",
+              ratedDrawn.contains("stars:3") && ratedSignature.contains("★3"))
+
+        // 3c.3 — five photos, one "P", one transaction, five rows.
+        let batch = Array(session.assets.prefix(5))
+        session.setSelection(Set(batch.map(\.id)), anchor: batch.first?.id)
+        pump(0.2)
+        let writesBeforeFlag = session.metadataWriteCount
+        _ = press("p", in: gridView, window: window)
+        let batchRows: [Asset] = batch.compactMap { try? reader.asset(id: $0.id) }
+        let picked = batchRows.filter { $0.flag == "pick" }.count
+        let transactions = session.metadataWriteCount - writesBeforeFlag
+        log("flag P                 \(batch.count) selected → \(picked) rows flag=pick, \(transactions) batch write, db.changesCount \(session.lastMetadataAffectedRows)")
+        check("多选 \(batch.count) 张按 P：\(picked) 行 flag=pick，一次按键只写 \(transactions) 遍事务（db 变更 \(session.lastMetadataAffectedRows) 行）",
+              picked == batch.count && transactions == 1
+              && session.lastMetadataAffectedRows == batch.count)
+
+        // 3c.4 — ⌥3 (yellow), same selection, and the badge is stars + colour together.
+        _ = press("3", option: true, in: gridView, window: window)
+        let labelled = batch.compactMap { (try? reader.asset(id: $0.id)) as Asset? }
+            .filter { $0.colorLabel == "yellow" }.count
+        let firstCell = batch.first.flatMap { grid.visibleItem(forAssetID: $0.id) }
+        firstCell?.cardView.display()
+        let comboDrawn = firstCell?.cardView.lastDrawnBadges ?? []
+        // Not just "draw() was called": render the card and look for the label's own colour in the
+        // corner where the dot is painted. A badge that is computed but invisible fails here.
+        let dotPainted = firstCell.map { badgeDotPresent(in: $0.cardView, label: .yellow) } ?? false
+        log("colour ⌥3              \(labelled)/\(batch.count) rows color_label=yellow, badge \(comboDrawn), dot painted=\(dotPainted)")
+        check("⌥3 给 \(batch.count) 张写色标 yellow（\(labelled) 行），角标画星级 + 旗标 + 色标（\(comboDrawn)，色点像素 \(dotPainted)）",
+              labelled == batch.count && comboDrawn.contains("color:yellow")
+              && comboDrawn.contains("flag:pick") && dotPainted)
+
+        // 3c.5 — "≥3 星": the grid narrows to the rows the same query returns, and says so in a chip.
+        let queryRows = (try? reader.assets(AssetFilter(ratingAtLeast: 3, limit: 200_000)).count) ?? -1
+        session.applyFilter(CatalogFilter(ratingAtLeast: 3))
+        pump(0.4)
+        gridView.layoutSubtreeIfNeeded()
+        grid.filterBar.layoutSubtreeIfNeeded()
+        let filteredRows = session.assets.count
+        let filteredItems = gridView.numberOfItems(inSection: 0)
+        let allQualify = session.assets.allSatisfy { $0.rating >= 3 }
+        let chipCount = grid.filterBar.chipCount
+        let chip = grid.filterBar.chipText(0) ?? "-"
+        log("filter ≥3 star         query \(queryRows) rows, grid \(filteredRows) rows / \(filteredItems) items, chips \(chipCount) “\(chip)”")
+        check("筛选“≥3 星”后网格只剩达标项（查询 \(queryRows) 行 = 网格 \(filteredRows) 行 = collectionView \(filteredItems) 项，且全部 rating≥3：\(allQualify)）",
+              queryRows > 0 && filteredRows == queryRows && filteredItems == filteredRows
+              && filteredRows < rowsBefore && allQualify)
+        check("筛选条件显示成可清除的 chip（\(chipCount) 个，第一个 “\(chip)” 对应星级）",
+              chipCount == 1 && grid.filterBar.chipFacet(0) == .rating && chip.contains("3"))
+
+        // 3c.6 — another photo does not widen the filter (it lives in the session, not the selection).
+        if let otherID = session.assets.last?.id {
+            session.selectOnly(otherID)
+            pump(0.2)
+        }
+        check("切换照片时筛选不变（仍 \(session.assets.count) 行，\(session.filter.summary)，anchor \(session.anchorID?.prefix(8) ?? "nil")…）",
+              session.filter.ratingAtLeast == 3 && session.assets.count == filteredRows)
+
+        // 3c.7 — clicking the chip clears that facet, exactly like a user would.
+        var cleared = false
+        if let rect = grid.filterBar.chipRect(0),
+           let event = mouseDownEvent(in: grid.filterBar,
+                                      at: NSPoint(x: rect.midX, y: rect.midY), window: window) {
+            grid.filterBar.mouseDown(with: event)
+            pump(0.4)
+            cleared = session.filter == .none && session.assets.count == rowsBefore
+        }
+        log("filter chip click      cleared=\(cleared) → \(session.assets.count)/\(rowsBefore) rows, chips \(grid.filterBar.chipCount), grid items \(gridView.numberOfItems(inSection: 0))")
+        check("点 chip 清筛选：库回到 \(rowsBefore) 行、chip 清空（\(grid.filterBar.chipCount) 个），collectionView \(gridView.numberOfItems(inSection: 0)) 项",
+              cleared && grid.filterBar.chipCount == 0
+              && gridView.numberOfItems(inSection: 0) == rowsBefore)
+
+        // 3c.8 — metadata, not an edit: no snapshot, no revision bump, no undo entry.
+        session.selectOnly(target.id)
+        pump(0.15)
+        let undoItem = menuItem(#selector(EditorWindowController.undoAction(_:)))
+        let undoValidated = undoItem.map { controller.validateMenuItem($0) } ?? true
+        let ratingBeforeUndo: Int = (try? reader.asset(id: target.id)).map { $0?.rating ?? -1 } ?? -1
+        let undone = controller.undoEdit()
+        let ratingAfterUndo: Int = (try? reader.asset(id: target.id)).map { $0?.rating ?? -1 } ?? -1
+        log("rating vs history      history \(historyBefore)→\(session.history.count), editRevision +\(session.editRevision - revisionBefore), canUndo \(canUndoBefore)→\(session.canUndo), undo validates=\(undoValidated), ⌘Z applied=\(undone), rating \(ratingBeforeUndo)→\(ratingAfterUndo)")
+        check("评级不产生开发历史（history 仍为 \(session.history.count)，editRevision 不动 +\(session.editRevision - revisionBefore)，canUndo 不变）",
+              session.history.count == historyBefore && session.editRevision == revisionBefore
+              && session.canUndo == canUndoBefore)
+        check("⌘Z 不撤销评级（菜单 validate=\(undoValidated)、undo() 返回 \(undone)，库内 rating 仍 \(ratingAfterUndo)）",
+              undone == false && ratingAfterUndo == 3 && !undoValidated)
+
+        capture(window: window, name: "ui-smoke-filter.png")
+    }
+
+    /// Render the card and look for the colour-label dot's own colour in the corner it is painted in.
+    ///
+    /// `lastDrawnBadges` proves the badge code ran; this proves a pixel changed. The search is
+    /// confined to the 22 × 20 pt box at the swatch's top-right where `AssetBadges.drawColorDot`
+    /// paints, so a yellowish photo underneath cannot pass for the dot. The match is in HSB, not
+    /// RGB: the card is rendered through the display's colour profile, so the dot's blue channel
+    /// comes back lifted (0.40 for a 0.20 dot) while its hue and saturation stay put.
+    private func badgeDotPresent(in card: AssetCardView, label: ColorLabel) -> Bool {
+        let rect = card.bounds
+        guard rect.width > 40, rect.height > 40,
+              let rep = card.bitmapImageRepForCachingDisplay(in: rect) else { return false }
+        card.cacheDisplay(in: rect, to: rep)
+        let targetColor = label.color.usingColorSpace(.sRGB) ?? label.color
+        var tHue: CGFloat = 0, tSat: CGFloat = 0, tBri: CGFloat = 0, tAlpha: CGFloat = 0
+        targetColor.getHue(&tHue, saturation: &tSat, brightness: &tBri, alpha: &tAlpha)
+        let sx = CGFloat(rep.pixelsWide) / max(1, rect.width)
+        let sy = CGFloat(rep.pixelsHigh) / max(1, rect.height)
+        // The card is flipped, so `minY` is the top edge and the dot sits at (maxX - 14, minY + 5).
+        let box = NSRect(x: rect.maxX - 22, y: rect.minY + 1, width: 20, height: 18)
+        guard box.maxX <= rect.width, box.maxY <= rect.height else { return false }
+        for py in Int(box.minY * sy)..<Int(box.maxY * sy) {
+            for px in Int(box.minX * sx)..<Int(box.maxX * sx) {
+                guard let c = rep.colorAt(x: px, y: py)?.usingColorSpace(.sRGB) else { continue }
+                var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
+                c.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
+                let hueDelta = min(abs(hue - tHue), 1 - abs(hue - tHue))
+                if hueDelta < 0.06, abs(sat - tSat) < 0.30, abs(bri - tBri) < 0.20 {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Post one key down into a view's own `keyDown` — the shipped path, not a call into the model.
+    /// Returns whether the shared rating table recognises the event (the *effect* is asserted after).
+    @discardableResult
+    private func press(_ key: String, option: Bool = false, in view: NSView, window: NSWindow) -> Bool {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                           modifierFlags: option ? [.option] : [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil,
+                                           characters: key, charactersIgnoringModifiers: key,
+                                           isARepeat: false, keyCode: 0) else { return false }
+        view.keyDown(with: event)
+        pump(0.2)
+        return RatingShortcuts.command(for: event) != nil
+    }
+
+    private func mouseDownEvent(in view: NSView, at point: NSPoint, window: NSWindow) -> NSEvent? {
+        NSEvent.mouseEvent(with: .leftMouseDown, location: view.convert(point, to: nil),
+                           modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                           windowNumber: window.windowNumber, context: nil,
+                           eventNumber: 0, clickCount: 1, pressure: 1)
     }
 
     // MARK: - filmstrip thumbnails

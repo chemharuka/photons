@@ -16,6 +16,16 @@
 # changes the presented frame hash, ⌘Z returns it to the previous hash and ⇧⌘Z returns it again;
 # the undo/redo menu items validate to disabled with an empty history.
 #
+# M5 (export + presets) is driven through the shipped commands, not through the model:
+#   · 文件 ▸ 导出… opens a real window sheet (`NSHostingController`), which reports "将导出 3 张";
+#   · running it writes 3 JPEGs whose pixel size is exactly what `ExportSizing` forecasts for the
+#     preset (long edge 512 does not upscale a 320 px fixture), named by the `{seq}-{name}` template;
+#   · one source file is then overwritten with junk: the other two still export, and the sheet shows
+#     exactly one failure row with the decode error — a batch is not all-or-nothing;
+#   · 从当前照片新建预设 → 应用预设 changes the loupe's pixel hash and adds exactly one history
+#     snapshot and one `asset_history` row, and ⌘Z puts the pre-apply hash back;
+#   · the 导出… menu item validates to disabled with an empty selection.
+#
 # Masks (Q22) are driven through the shipped event path — synthesised mouse events into
 # `LoupeCanvasView` → `LoupeController` → `MaskCanvasController` → the document:
 #   · a new mask covers nothing and its `showMask` overlay changes no pixel at all;
@@ -26,6 +36,17 @@
 #   · the document is written to the catalog on every commit (`develop_version`, `asset_history`
 #     rows), and a **brand-new session** reading the same library renders the same pixel hash;
 #   · deleting the mask returns the frame to the hash it had with no mask.
+#
+# Rating / flag / colour label + the filter strip (catalog metadata — never an edit):
+#   · a real "3" key event through `AssetCollectionView.keyDown` writes `assets.rating` = 3, read
+#     back from a second `Catalog` on the same library, and the cell paints `stars:3` (read back
+#     from the card that actually drew, via `lastDrawnBadges`);
+#   · five selected photos + one "P" = **one** transaction and five rows (`db.changesCount`), and
+#     ⌥3 adds `color_label = yellow` to the same five with stars + flag + colour on one badge;
+#   · "≥3 星" narrows the grid to exactly the rows the same `AssetFilter` query returns, as a chip;
+#   · selecting another photo keeps the filter; clicking the chip clears it and the library returns;
+#   · a rating grows neither `EditHistory` nor `editRevision`, and ⌘Z stays grey / a no-op
+#     (a rating is library metadata, so it must not be undoable).
 # Screenshots land in local/out/.
 set -euo pipefail
 
