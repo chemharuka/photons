@@ -1,0 +1,15 @@
+{
+  "colorSpace" : "extendedLinearSRGB",
+  "createdAt" : "2026-10-25T12:23:07Z",
+  "decoderVersion" : "8",
+  "draft" : false,
+  "exposureEV" : 0,
+  "hash" : "7a568ad29960bf146710b30e3f556a5b69081b7d35fbfce0d0f323989643b8cf",
+  "height" : 6336,
+  "note" : "Recorded by photonsctl on Version 27.2 (Build 26B118). Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.",
+  "osVersion" : "Version 27.2 (Build 26B118)",
+  "raw" : "L1030433.dng",
+  "rawSHA256" : "3c33888215a1969a3d9fb82fddf6c9bcfd389dc5b647737dd0d78826a832ebd1",
+  "scale" : 1,
+  "width" : 9520
+}

@@ -1,0 +1,33 @@
+.build/
+.swiftpm/
+.DS_Store
+*.xcodeproj
+*.xcworkspace
+
+# ─────────────────────────────────────────────────────────────────────────────
+# local/ — everything a session produces that must NOT be published:
+# research reports, throwaway probes, ad-hoc tests, RAW fixtures, source clones.
+# Only local/README.md (the convention itself) is tracked. See local/README.md.
+# ─────────────────────────────────────────────────────────────────────────────
+local/*
+!local/README.md
+
+# decoded image caches (large, regenerable)
+.cache/
+out/
+*.linear
+*.linear.json
+
+# RAW fixtures are the user's own photos — never vendored
+*.dng
+*.cr3
+*.cr2
+*.nef
+*.arw
+*.raf
+*.rw2
+*.orf
+
+# scratch by-products
+*.bak
+*.tmp
