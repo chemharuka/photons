@@ -6,8 +6,6 @@
 
 ## M0 — acceptance harness · **DONE (green)**
 
-`make verify` → build + unit tests + L1 determinism + L2 golden, all pass.
-
 | Check | Result |
 |---|---|
 | unit tests + L2 golden | 6/6 pass; `Tests/Golden/L1030433-v8-s1.0.json` |
@@ -51,15 +49,17 @@ an explicit default.
 
 **开工前必须先落三件事（全部来自 `docs/architecture-decisions.md` §11，别跳过）：**
 
-1. **D2' 能力集**：默认全 v8；`EditModel` 增加 `decoderCapabilities`，v9 下把 CNR / 细节 / 摩尔纹置灰
-   （v9 里这三项写进去对像素零效果，导出会静默丢失）。
+1. **D2' 能力集**：默认全 v8；`EditModel` 增加 `decoderCapabilities`。v9 导出档门控 **`ISO ≥ ~800`** 且
+   机身 ∈ v9 白名单（69 台）；启用时 CNR / 细节 / 摩尔纹置灰。**赋值后必须回读 `decoderVersion` 断言**——
+   非白名单机体会静默退回 v8，不报错。
 2. **解码显式置线性**：`boostAmount = 0` + `isGamutMappingEnabled = false`，否则曝光不是严格 ×2。
 3. **缩略图走 `previewImage`**：它是内嵌的全尺寸 JPEG（CR3 8192×5464），比真解码快约 4×。
+4. **别拿 DNG 标定原生管线**：DNG 源能到的版本是 `9.dng`，同一机身出图比 `9` 约 25% 更噪。
 
 ## Deferred (do not start)
 
-Local masks (M4/v0.3), HDR merge and super-resolution (**impossible**: no mosaic access), DNG export
-(v0.9+), print/slideshow/map/video, sharpening/NR (they belong on `CIRAWFilter`, not on a kernel).
+Local masks (M4/v0.3), HDR merge + super-resolution (**impossible**: no mosaic access), DNG export (v0.9+),
+print/slideshow/map/video, sharpening/NR (they belong on `CIRAWFilter`, not on a kernel).
 
 ## How to run
 
