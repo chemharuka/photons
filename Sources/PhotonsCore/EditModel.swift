@@ -28,6 +28,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// Local masks (M4). Empty = the graph has no mask stages at all (§3.2): the key chain stays the
     /// M1 seven-link chain and the pixels are byte-identical to M1.
     public var masks: [Mask]
+    /// `showMask` (§3.1, 005e): when non-nil, the frame is the image with **that mask's atlas slice**
+    /// painted over 50 % red — the same buffer S1.6 consumed, not a second evaluation of the
+    /// predicate. `nil` (the default) is the pre-005e frame, pixel for pixel: the field is not part
+    /// of the display key while it is nil, and no overlay pass is encoded.
+    public var showMaskID: String?
 
     public init(schemaVersion: Int = EditModel.currentSchemaVersion,
                 processVersion: Int = EditModel.currentProcessVersion,
@@ -37,7 +42,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 color: ColorGroup = .identity,
                 detail: DetailGroup = .identity,
                 effects: EffectsGroup = .identity,
-                masks: [Mask] = []) {
+                masks: [Mask] = [],
+                showMaskID: String? = nil) {
         self.schemaVersion = schemaVersion
         self.processVersion = processVersion
         self.geometry = geometry
@@ -47,6 +53,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.detail = detail
         self.effects = effects
         self.masks = masks
+        self.showMaskID = showMaskID
     }
 
     /// The all-defaults document: renders as "decode → display encode", nothing else.
@@ -64,6 +71,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.detail = c.val("detail", v.detail)
         v.effects = c.val("effects", v.effects)
         v.masks = c.val("masks", v.masks)
+        v.showMaskID = c.val("showMaskID", v.showMaskID)
         self = v
     }
 
@@ -132,6 +140,9 @@ public struct EditModel: Sendable, Equatable, Codable {
         }
         // `detail` (sharpening / noise reduction) is stored but not rendered by the M1 graph:
         // those two controls will be mapped onto CIRAWFilter in the decoder, not onto a kernel.
+        // 005e: showing a different mask changes only the last pass (the overlay reads the atlas the
+        // mask stages already produced), so it dirties nothing but `.display`.
+        if showMaskID != old.showMaskID { s.insert(.display) }
         return s
     }
 

@@ -416,8 +416,17 @@ public enum OKLabMetric {
     }
 }
 
+/// §5 — which system model answers a semantic mask.
+///
+/// The order is the documented one of 005e (§5.1 then §5.2): `sky`, `hair`, `skin`, `teeth`,
+/// `glasses` and `person` can come from `CIRAWFilter`'s read-only mattes; `subject` is the Vision
+/// foreground instance mask. `foreground` is the pre-005e spelling of `subject` and is kept so an
+/// existing document round-trips byte for byte — it resolves through the same Vision request.
 public enum SemanticKind: String, Codable, Sendable, CaseIterable {
-    case sky, foreground, person, skin, hair
+    case sky, subject, person, hair, skin, teeth, glasses
+    /// Legacy spelling of `subject` (docs/tasks/005-masks.md §2 used it before 005e named the seven
+    /// kinds). Same route, same raster: it is an alias, not a second model.
+    case foreground
 }
 
 public enum SemanticProvider: String, Codable, Sendable, CaseIterable {
@@ -508,13 +517,14 @@ public enum MaskShape: Sendable, Equatable {
         }
     }
 
-    /// Shapes this build can actually evaluate. `semantic` and `unsupported` decode, round-trip and
-    /// key correctly but contribute **zero coverage** until 005e lands; the renderer is explicit
-    /// about that instead of pretending a semantic matte is a gradient.
+    /// Shapes this build can evaluate. `semantic` joined the list in 005e: it is evaluated from a
+    /// raster the OS produced (see `MaskSemantics.swift`), and when no route can produce one it
+    /// contributes zero coverage with a recorded reason instead of an approximation.
     public var isRenderableNow: Bool {
         switch self {
-        case .linearGradient, .radialGradient, .brush, .colorRange, .luminanceRange: return true
-        case .semantic, .unsupported: return false
+        case .linearGradient, .radialGradient, .brush, .colorRange, .luminanceRange, .semantic:
+            return true
+        case .unsupported: return false
         }
     }
 
@@ -1245,8 +1255,14 @@ public enum MaskBounds {
             // Content-dependent: the extent is a property of the picture, not of the parameters, so
             // the honest bound is the frame. A guess here would be a bound that is sometimes small.
             return MaskRect(0, 0, source.width, source.height)
-        case .semantic, .unsupported:
-            return nil   // no coverage in this build (§5, 005e)
+        case .semantic:
+            // 005e: the matte comes from the picture too, and its extent is whatever the OS model
+            // found — so it gets the same honest answer as the content-dependent predicates. (A
+            // document whose matte is unavailable therefore declares the whole frame as dirty; the
+            // tile plan then falls back to a full pass, which is a cost, never a wrong pixel.)
+            return MaskRect(0, 0, source.width, source.height)
+        case .unsupported:
+            return nil   // no coverage: a kind this build cannot interpret
         }
     }
 

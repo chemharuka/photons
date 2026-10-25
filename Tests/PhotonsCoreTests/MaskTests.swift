@@ -783,11 +783,14 @@ final class MaskTests: XCTestCase {
         }
     }
 
-    /// Shapes this build does not evaluate contribute zero coverage — never a guess, never a crash.
-    /// Since 005c the brush, colour and luminance ranges are real shapes; what is left unevaluated
-    /// is the semantic matte, which needs an OS model (005e).
+    /// Shapes that produce no coverage contribute zero — never a guess, never a crash.
+    ///
+    /// Since 005c the brush, colour and luminance ranges are real shapes, and since 005e a semantic
+    /// matte is real *when a route can produce one*. This pins the other half of 005e: with no model
+    /// and no system matte, the selection is still empty and the document still renders.
     func testUnimplementedShapesContributeNoCoverage() throws {
         let image = rampImage()
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         let shapes: [MaskShape] = [
             .semantic(SemanticShape(kind: .sky)),
             .semantic(SemanticShape(kind: .person, provider: .visionForeground)),
@@ -798,10 +801,15 @@ final class MaskTests: XCTestCase {
             edit.masks = [Mask(id: "m-\(shape.kind)",
                                components: [MaskComponent(id: "c", shape: shape)],
                                adjustments: LocalAdjustments(exposure: 2))]
-            let dump = try atlas(edit, image)
+            // The stub answers "no matte" for every kind, which is what this machine's DNGs answer
+            // through `CIRAWFilter` (§5.1) — and it keeps the suite off a 120 ms Vision call.
+            let graph = try RenderGraph(input: RenderInput(image: image, identity: "shape-coverage"),
+                                        semanticMatte: StubSemanticProvider())
+            let dump = try XCTUnwrap(try graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
             XCTAssertEqual(dump.slices.first?.max() ?? 0, 0,
                            "\(shape.kind) must be empty, not approximated")
-            XCTAssertFalse(shape.isRenderableNow, "\(shape.kind) is not renderable in this build")
+            XCTAssertEqual(shape.isRenderableNow, shape.isKnownKind,
+                           "\(shape.kind): only a kind this build cannot interpret is unrenderable")
         }
     }
 

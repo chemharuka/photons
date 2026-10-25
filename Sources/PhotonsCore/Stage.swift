@@ -255,15 +255,18 @@ public enum RenderKeyChain {
         let curve = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(edit.keyMaterial(.curve)).canonical
         let color = KeyBuilder(KeyBuilder.digest(of: curve)).add(edit.keyMaterial(.color)).canonical
         let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(edit.keyMaterial(.vignette)).canonical
-        let displayKey = KeyBuilder(KeyBuilder.digest(of: vignette))
+        var displayKey = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(display.keyString)
             .add(canvas)
-            .canonical
+        // 005e: `showMask` changes the last pass's pixels, so showing a different mask must move the
+        // display key — and *only* then. Appending unconditionally would change every pinned M1 key
+        // and every recorded golden for a field that is nil in all of them (§3.2 discipline).
+        if let shown = edit.showMaskID { displayKey = displayKey.add("show=" + shown) }
 
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply,
                      toneMap: toneMap, curve: curve, color: color,
-                     vignette: vignette, display: displayKey)
+                     vignette: vignette, display: displayKey.canonical)
     }
 
     public static func keys(_ links: Links, identity: String) -> StageKeys {

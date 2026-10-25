@@ -10,10 +10,17 @@ public struct RenderInput: Sendable {
     /// Identity of the decoded buffer (the `DecodeCacheKey.digest`, not a pixel hash — hashing 60 MP
     /// on every render would cost more than the render itself).
     public let identity: String
+    /// The file the buffer was decoded from, when the caller knows it.
+    ///
+    /// 005e uses it for exactly one thing: the `CIRAWFilter` semantic-matte probe, which needs to
+    /// open the file (§5.1). Without it a semantic mask still works through Vision — the file is a
+    /// route, not a requirement.
+    public let sourceURL: URL?
 
-    public init(image: LinearImage, identity: String) {
+    public init(image: LinearImage, identity: String, sourceURL: URL? = nil) {
         self.image = image
         self.identity = identity
+        self.sourceURL = sourceURL
     }
 }
 
@@ -113,11 +120,18 @@ public final class RenderResult {
     /// Hand it back with `RenderGraph.recycle(output:)` or the pool will not get it back.
     public let output: MTLTexture?
     /// 005d: what the mask stages actually did — the kernels they ran and the tile plan they
-    /// dispatched. `nil` for a document without masks (the stages do not exist then).
+    /// dispatched. `nil` for a document without masks (the stages do not exist then). 005e adds the
+    /// semantic-matte receipts to it.
     public let maskReport: MaskStageReport?
+    /// 005e: true when the `showMask` overlay pass actually ran, i.e. `showMaskID` was set **and**
+    /// named an enabled mask whose atlas slice existed. False means the pixels are the document's
+    /// own, which is what makes "`showMask == nil` changes nothing" checkable per frame rather than
+    /// by inspection.
+    public let showsMask: Bool
 
     init(canvas: ImageSize, content: ImageSize, keys: StageKeys, trace: RenderTrace,
-         display: DisplayImage?, output: MTLTexture?, maskReport: MaskStageReport? = nil) {
+         display: DisplayImage?, output: MTLTexture?, maskReport: MaskStageReport? = nil,
+         showsMask: Bool = false) {
         self.canvas = canvas
         self.content = content
         self.keys = keys
@@ -125,6 +139,47 @@ public final class RenderResult {
         self.display = display
         self.output = output
         self.maskReport = maskReport
+        self.showsMask = showsMask
+    }
+}
+
+/// One mask component's semantic outcome, as a value the UI can print verbatim.
+///
+/// §5.1 requires "zero coverage **and** a reason" — so the unavailable case carries the reason rather
+/// than a nil, and the graph never throws for a matte the OS cannot produce.
+public enum MaskSemanticEvent: Sendable, Equatable {
+    case semanticAvailable(maskID: String, componentID: String, kind: SemanticKind,
+                           provider: SemanticProvider, digest: String)
+    case semanticUnavailable(maskID: String, componentID: String, kind: SemanticKind,
+                             reason: SemanticUnavailableReason)
+    /// The document recorded a `rasterDigest` and the OS produced a different one: the model changed
+    /// under the selection (§5.3). Reported, never applied silently.
+    case semanticDigestChanged(maskID: String, kind: SemanticKind,
+                               stored: String, produced: String)
+
+    public var kind: SemanticKind {
+        switch self {
+        case .semanticAvailable(_, _, let k, _, _): return k
+        case .semanticUnavailable(_, _, let k, _): return k
+        case .semanticDigestChanged(_, let k, _, _): return k
+        }
+    }
+
+    public var isAvailable: Bool {
+        if case .semanticAvailable = self { return true }
+        return false
+    }
+
+    /// Canonical text for key material and for a log line; sorted before it enters a key.
+    public var keyString: String {
+        switch self {
+        case .semanticAvailable(let m, let c, let k, let p, let d):
+            return "sem=\(k.rawValue)@\(m)/\(c)=\(p.rawValue):\(d.prefix(16))"
+        case .semanticUnavailable(let m, let c, let k, let r):
+            return "sem=\(k.rawValue)@\(m)/\(c)=unavailable(\(r.rawValue))"
+        case .semanticDigestChanged(let m, let k, let stored, let produced):
+            return "sem=\(k.rawValue)@\(m)=digest(\(stored.prefix(8))→\(produced.prefix(8)))"
+        }
     }
 }
 
@@ -146,12 +201,37 @@ public struct MaskStageReport: Sendable {
     public var localPlan: TilePlan = .fullFrame(ImageSize(width: 1, height: 1))
     /// The tile lattice the plan used.
     public var grid: TileGrid = TileGrid()
+    /// 005e: one entry per semantic component — resolved with a digest, or unavailable with a reason.
+    public var semanticEvents: [MaskSemanticEvent] = []
+    /// 005e: the mask the `showMask` overlay painted, and the atlas slice it read (proof that the
+    /// overlay and S1.6 consumed the same buffer, §6 005e ⑤).
+    public var showMaskID: String?
+    public var showMaskSlice: Int?
 
     public init() {}
 
     /// Total pixels the S1.6 pass wrote.
     public var localPixelCount: Int { localPlan.pixelCount }
     public var localPixelFraction: Double { localPlan.fraction }
+
+    /// The kinds this frame could not produce a matte for, in report order (deduplicated).
+    public var semanticUnavailableKinds: [SemanticKind] {
+        var seen = Set<SemanticKind>()
+        var out: [SemanticKind] = []
+        for e in semanticEvents {
+            guard case .semanticUnavailable(_, _, let kind, _) = e else { continue }
+            if seen.insert(kind).inserted { out.append(kind) }
+        }
+        return out
+    }
+
+    /// The resolved rasters' digests, in report order — the "did the model change" answer.
+    public var semanticDigests: [String] {
+        semanticEvents.compactMap { e in
+            if case .semanticAvailable(_, _, _, _, let d) = e { return d }
+            return nil
+        }
+    }
 }
 
 // MARK: - mask atlas readback
@@ -269,6 +349,12 @@ private struct LocalAdjustU {
     var c: SIMD4<Float>   // blacks, hueDegrees, saturation, enabled
 }
 
+/// 005e — mirror of `ShowMaskParams` in `s4_show_mask.metal`.
+private struct ShowMaskParams {
+    var a: SIMD4<Int32>   // slice, pad, pad, pad
+    var b: SIMD4<Float>   // strength, red.r, red.g, red.b
+}
+
 /// 005d — mirror of `MaskBlurParams` in `s1_7_mask_neighbourhood.metal`.
 private struct MaskBlurParams {
     var a: SIMD4<Int32>   // canvasW, canvasH, segment length, sliceCount
@@ -339,6 +425,17 @@ public final class RenderGraph {
     private var lutBuffers: [String: (buffer: MTLBuffer, isIdentity: Bool)] = [:]
     private var bandBuffers: [String: MTLBuffer] = [:]
 
+    /// 005e: the semantic routes (system matte, then Vision) and the in-memory raster cache of §5.2.
+    /// The cache lives with the graph because its lifetime is the session's, and it is keyed by
+    /// `contentHash + kind + modelVersion` — no disk, deliberately.
+    private let semanticProvider: SemanticMatteProvider
+    private let semanticStore: SemanticMatteStore
+    /// One reusable array texture holding the resolved mattes, recreated only when the digests move.
+    private var semanticTextureCache: (key: String, texture: MTLTexture)?
+    /// A 1×1 stand-in bound when the document has no semantic component. Metal requires a texture at
+    /// the binding even when the kernel never samples it.
+    private var semanticDummyTexture: MTLTexture?
+
     /// The atlas is a side output, so it lives beside the stage cache instead of in it: one slot,
     /// keyed by `maskAtlasKey`. `ids` is the slice order the atlas was built in.
     private struct AtlasEntry {
@@ -370,7 +467,8 @@ public final class RenderGraph {
     private var atlasPool: (key: String, texture: MTLTexture)?
     private var maskTables: [String: MaskTable] = [:]
 
-    public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000) throws {
+    public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
+                semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider()) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
         guard let queue = device.makeCommandQueue() else { throw RenderError.noMetalDevice }
         self.device = device
@@ -380,6 +478,8 @@ public final class RenderGraph {
         self.input = input
         self.cacheBudgetBytes = cacheBudgetBytes
         self.pool = TexturePool(device: device)
+        self.semanticProvider = semanticMatte
+        self.semanticStore = SemanticMatteStore()
         self.sourceSize = ImageSize(width: input.image.width, height: input.image.height)
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
@@ -447,7 +547,11 @@ public final class RenderGraph {
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
         let plan = plan(edit, options)
         var trace = RenderTrace()
-        let table = try maskTable(for: edit, content: plan.content)
+        // 005e: the semantic mattes are resolved before the table is built, because a semantic
+        // component's descriptor carries the slice index of its raster. The resolution is cached
+        // (contentHash + kind + modelVersion), so this is free on every frame but the first.
+        let semantics = resolveSemantics(edit)
+        let table = try maskTable(for: edit, content: plan.content, semantics: semantics)
         if table == nil { atlasCache = nil }
 
         // 005d: the tiling material joins the two mask keys. A local-stage texture computed under a
@@ -455,7 +559,13 @@ public final class RenderGraph {
         // frame's output — `TileDependency` is a promise about *pixels*, and a promise belongs in the
         // key, not only in a comment. Off (the 005c path) leaves both keys byte-identical.
         let tilingSuffix = maskTilingSuffix(options: options, table: table)
+        // 005e: what the OS answered is environment, not document — so it cannot enter the document's
+        // key material. It enters the *stage* key instead, exactly like the tiling suffix: two frames
+        // whose mattes differ must never share a cached atlas.
+        let semanticSuffix = semantics.keyMaterial.isEmpty
+            ? "" : "|" + KeyBuilder.digest(of: semantics.keyMaterial)
         var report: MaskStageReport? = table == nil ? nil : MaskStageReport()
+        report?.semanticEvents = semantics.events
 
         guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
 
@@ -464,7 +574,13 @@ public final class RenderGraph {
         var finish: MTLTexture?
 
         for stage in plan.stages {
-            let key = plan.keys.key(for: stage) + (stage.isMaskStage ? tilingSuffix : "")
+            // The environment suffix has to reach **every** stage the atlas feeds, not just the two
+            // mask stages: the document's key chain cannot know that a matte appeared (it is not in
+            // the document), so a downstream cache hit would otherwise hand back a frame computed
+            // from a different selection.
+            let key = plan.keys.key(for: stage)
+                + (stage.isMaskStage ? tilingSuffix : "")
+                + (stage.index >= RenderStage.maskAtlas.index ? semanticSuffix : "")
 
             // S1.6 keeps its own slot (like the atlas) because it can be updated **in place**: the
             // same texture, a smaller dispatch. A plain stage-cache entry cannot express that.
@@ -472,8 +588,8 @@ public final class RenderGraph {
                 guard let table, let atlas = atlasCache else {
                     throw RenderError.executeFailed("local stage without an atlas")
                 }
-                let atlasKey = plan.keys.key(for: .maskAtlas) + tilingSuffix
-                let localKey = plan.keys.key(for: .localApply) + tilingSuffix
+                let atlasKey = plan.keys.key(for: .maskAtlas) + tilingSuffix + semanticSuffix
+                let localKey = plan.keys.key(for: .localApply) + tilingSuffix + semanticSuffix
                 let applyKeys = Dictionary(uniqueKeysWithValues: edit.activeMasks.map { ($0.id, $0.applyKey) })
 
                 // (a) nothing moved: the whole stage is a hit.
@@ -538,7 +654,7 @@ public final class RenderGraph {
                 }
                 let atlas = try atlasTexture(for: table, size: plan.canvas)
                 let stageReport = try encodeAtlas(cb: cb, into: atlas, from: current, table: table,
-                                                  plan: plan, edit: edit)
+                                                  plan: plan, edit: edit, semantics: semantics)
                 if report != nil {
                     report?.atlasPasses = stageReport.atlasPasses
                     report?.featherMaskCount = stageReport.featherMaskCount
@@ -573,6 +689,33 @@ public final class RenderGraph {
             if stage == .display { finish = out }
         }
 
+        // 005e — `showMask`, the atlas's second exit (§3.1). One pointwise pass on the display-encoded
+        // frame, reading the slice S1.6 consumed. When no id is set — or the id names no enabled mask
+        // — nothing is encoded and `finish` is the frame the document produced, byte for byte.
+        var showsMask = false
+        if let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
+           let slice = atlas.ids.firstIndex(of: wanted) {
+            let overlay = try pool.obtain(plan.canvas)
+            let p = try kernels.pipeline(file: "s4_show_mask", function: "s4_show_mask")
+            guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            enc.setComputePipelineState(p)
+            enc.setTexture(shown, index: 0)
+            enc.setTexture(atlas.texture, index: 1)
+            enc.setTexture(overlay, index: 2)
+            var params = ShowMaskParams(a: SIMD4(Int32(slice), 0, 0, 0),
+                                        b: SIMD4(0.5, 1, 0, 0))
+            enc.setBytes(&params, length: MemoryLayout<ShowMaskParams>.stride, index: 0)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+            // The display texture is never a cache entry (`render` skips the cache for `.display`),
+            // so recycling it here is what keeps the pool honest.
+            pool.recycle(shown)
+            finish = overlay
+            showsMask = true
+            report?.showMaskID = wanted
+            report?.showMaskSlice = slice
+        }
+
         let t0 = CFAbsoluteTimeGetCurrent()
         cb.commit()
         cb.waitUntilCompleted()
@@ -593,10 +736,12 @@ public final class RenderGraph {
             let pixels = readback(finalTexture, primaries: options.display.primaries, bitDepth: options.display.bitDepth)
             pool.recycle(finalTexture)
             return RenderResult(canvas: plan.canvas, content: plan.content, keys: plan.keys,
-                                trace: trace, display: pixels, output: nil, maskReport: report)
+                                trace: trace, display: pixels, output: nil, maskReport: report,
+                                showsMask: showsMask)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content, keys: plan.keys,
-                            trace: trace, display: nil, output: finalTexture, maskReport: report)
+                            trace: trace, display: nil, output: finalTexture, maskReport: report,
+                            showsMask: showsMask)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
@@ -798,9 +943,161 @@ public final class RenderGraph {
     // The feather is a running sum, not an O(r) convolution: at radius 273 (feather 1.0) it costs what
     // radius 4 costs, which is why the maximum feather is not a frame-time cliff.
 
+    // MARK: - 005e: semantic mattes
+
+    /// What the OS answered for this document's semantic components, in atlas order.
+    ///
+    /// `slices[mask][component]` is the raster's index in the matte array texture, or `nil` when no
+    /// route could produce one. `keyMaterial` is the canonical text of the events: it enters the two
+    /// mask stage keys and the descriptor-table key, so a frame rendered before and after the model
+    /// changed can never share a cached atlas.
+    struct SemanticResolution {
+        var rasters: [SemanticRaster] = []
+        var slices: [[Int?]] = []
+        var events: [MaskSemanticEvent] = []
+        var keyMaterial: String = ""
+
+        func slice(mask: Int, component: Int) -> Int? {
+            guard slices.indices.contains(mask), slices[mask].indices.contains(component) else {
+                return nil
+            }
+            return slices[mask][component]
+        }
+    }
+
+    /// Resolve every semantic component of the enabled masks, one cached provider call per
+    /// `(contentHash, kind, modelVersion, route)`.
+    ///
+    /// A `nil` result is a value: the component keeps its place in the combination order with zero
+    /// coverage, so `add` leaves the other components' union alone and `intersect` empties the
+    /// selection — the same arithmetic any other empty shape gets (§3.3).
+    private func resolveSemantics(_ edit: EditModel) -> SemanticResolution {
+        var out = SemanticResolution()
+        let active = edit.activeMasks
+        let wantsMatte = active.contains { mask in
+            mask.components.contains { component in
+                if case .semantic = component.shape { return true }
+                return false
+            }
+        }
+        guard wantsMatte else { return out }
+
+        let source = SemanticMatteSource(image: input.image, contentHash: input.identity,
+                                        url: input.sourceURL)
+        // Two components asking for the same kind share one slice: the raster is identical, and a
+        // 4 MB copy per duplicate is not.
+        var sliceForDigest: [String: Int] = [:]
+
+        for mask in active {
+            var row: [Int?] = []
+            for component in mask.components {
+                guard case .semantic(let semantic) = component.shape else {
+                    row.append(nil)
+                    continue
+                }
+                let result = semanticStore.resolve(kind: semantic.kind, route: semantic.provider,
+                                                   source: source, provider: semanticProvider)
+                switch result {
+                case .raster(let raster):
+                    let slice: Int
+                    if let existing = sliceForDigest[raster.digest] {
+                        slice = existing
+                    } else {
+                        out.rasters.append(raster)
+                        slice = out.rasters.count - 1
+                        sliceForDigest[raster.digest] = slice
+                    }
+                    row.append(slice)
+                    out.events.append(.semanticAvailable(maskID: mask.id,
+                                                         componentID: component.id,
+                                                         kind: semantic.kind,
+                                                         provider: raster.provider,
+                                                         digest: raster.digest))
+                    if let stored = semantic.rasterDigest, stored != raster.digest {
+                        out.events.append(.semanticDigestChanged(maskID: mask.id,
+                                                                kind: semantic.kind,
+                                                                stored: stored,
+                                                                produced: raster.digest))
+                    }
+                case .unavailable(let reason):
+                    row.append(nil)
+                    out.events.append(.semanticUnavailable(maskID: mask.id,
+                                                          componentID: component.id,
+                                                          kind: semantic.kind,
+                                                          reason: reason))
+                }
+            }
+            out.slices.append(row)
+        }
+        // Sorted so two processes produce the same key text (D6): the events are already in atlas
+        // order, but the sort also makes a duplicated kind's ordering irrelevant.
+        out.keyMaterial = out.events.map(\.keyString).sorted().joined(separator: ";")
+        return out
+    }
+
+    /// One array texture for the resolved mattes, R32F (a mask is not a display value; 32-bit keeps
+    /// the digest and the sampled number the same quantity). Recreated only when a digest moves.
+    private func semanticTexture(for rasters: [SemanticRaster]) throws -> MTLTexture {
+        guard !rasters.isEmpty else { return try semanticDummy() }
+        let key = rasters.map(\.digest).joined(separator: "|")
+        if let hit = semanticTextureCache, hit.key == key { return hit.texture }
+
+        // One size for every slice — `resized` is bilinear on the same texel-centre grid the kernel
+        // samples, so the resize adds no shift.
+        let w = rasters.map(\.width).max() ?? 1
+        let h = rasters.map(\.height).max() ?? 1
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2DArray
+        desc.pixelFormat = .r32Float
+        desc.width = w
+        desc.height = h
+        desc.arrayLength = rasters.count
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("semantic mattes \(w)x\(h)x\(rasters.count)")
+        }
+        for (slice, raster) in rasters.enumerated() {
+            let values = raster.resized(width: w, height: h)
+            values.withUnsafeBytes { raw in
+                texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, slice: slice,
+                                withBytes: raw.baseAddress!, bytesPerRow: w * 4,
+                                bytesPerImage: w * h * 4)
+            }
+        }
+        semanticTextureCache = (key, texture)
+        return texture
+    }
+
+    /// 1×1 zero, bound where the kernel declares `texture(2)` but no semantic component exists.
+    private func semanticDummy() throws -> MTLTexture {
+        if let hit = semanticDummyTexture { return hit }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2DArray
+        desc.pixelFormat = .r32Float
+        desc.width = 1
+        desc.height = 1
+        desc.arrayLength = 1
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("semantic dummy")
+        }
+        var zero: Float = 0
+        withUnsafeBytes(of: &zero) { raw in
+            texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, slice: 0,
+                            withBytes: raw.baseAddress!, bytesPerRow: 4, bytesPerImage: 4)
+        }
+        semanticDummyTexture = texture
+        return texture
+    }
+
     /// Descriptor tables for the enabled masks, in atlas order. Cached on the two key materials so a
     /// frame that only moves a slider reuses the buffers.
-    private func maskTable(for edit: EditModel, content: ImageSize) throws -> MaskTable? {
+    private func maskTable(for edit: EditModel, content: ImageSize,
+                           semantics: SemanticResolution) throws -> MaskTable? {
         let active = edit.activeMasks
         guard !active.isEmpty else { return nil }
 
@@ -808,8 +1105,10 @@ public final class RenderGraph {
         let apply = edit.maskApplyMaterial
         // The content size is part of the key because the two radii (feather, guided) are pixel
         // lengths derived from it: the same document at thumbnail and at export must produce
-        // different descriptors from the same selection key.
+        // different descriptors from the same selection key. 005e adds the semantic material for the
+        // same reason: which slice a semantic component points at is not in the document.
         let cacheKey = selection + "##" + apply + "##" + content.keyString
+            + "##" + semantics.keyMaterial
         if let hit = maskTables[cacheKey] { return hit }
 
         var masks: [MaskDescU] = []
@@ -819,10 +1118,12 @@ public final class RenderGraph {
         var points: [SIMD4<Float>] = []
         var colours: [SIMD4<Float>] = []
         var dependency: TileDependency = .pointwise
-        for m in active {
+        for (maskIndex, m) in active.enumerated() {
             let first = Int32(shapes.count)
-            for c in m.components {
-                shapes.append(shapeDesc(c, strokes: &strokes, points: &points, colours: &colours))
+            for (componentIndex, c) in m.components.enumerated() {
+                let slice = semantics.slice(mask: maskIndex, component: componentIndex)
+                shapes.append(shapeDesc(c, slice: slice, strokes: &strokes,
+                                        points: &points, colours: &colours))
             }
             // 005d: the atlas's two neighbourhood operators, in canvas pixels (§4.6, `MaskRadius`).
             let featherPx = Float(MaskRadius.featherPixels(m.feather, content: content))
@@ -860,8 +1161,10 @@ public final class RenderGraph {
     }
 
     /// One component → the GPU's fixed-layout descriptor, appending any variable-length payload
-    /// (brush points, colour samples) to the shared side arrays.
-    private func shapeDesc(_ c: MaskComponent,
+    /// (brush points, colour samples) to the shared side arrays. `slice` is the semantic raster's
+    /// index in the matte array texture, or `nil` when the OS could not produce one (then the
+    /// component covers 0 and the report says why).
+    private func shapeDesc(_ c: MaskComponent, slice: Int?,
                            strokes: inout [MaskStrokeDescU],
                            points: inout [SIMD4<Float>],
                            colours: inout [SIMD4<Float>]) -> MaskShapeDescU {
@@ -939,7 +1242,16 @@ public final class RenderGraph {
                                   p0: SIMD4(Float(o.low), Float(o.high),
                                             Float(o.lowFeather), Float(o.highFeather)),
                                   p1: SIMD4(feather, 0, 0, 0))
-        case .semantic, .unsupported:
+        case .semantic(let s):
+            // 005e: kind 5 samples the OS raster at this component's slice, then applies `softEdge`.
+            // No raster ⇒ kind −1, i.e. exactly the pre-005e "zero coverage, never a guess".
+            guard let slice else {
+                return MaskShapeDescU(meta: SIMD4(-1, invert, op, 0), p0: .zero, p1: .zero)
+            }
+            return MaskShapeDescU(meta: SIMD4(5, invert, op, 0),
+                                  p0: SIMD4(Float(slice), 0, 0, 0),
+                                  p1: SIMD4(Float(min(max(s.softEdge, 0), 1)), feather, 0, 0))
+        case .unsupported:
             // Not evaluated by this pass: zero coverage, never a guess.
             return MaskShapeDescU(meta: SIMD4(-1, invert, op, 0), p0: .zero, p1: .zero)
         }
@@ -983,7 +1295,8 @@ public final class RenderGraph {
     }
 
     private func encodeAtlas(cb: MTLCommandBuffer, into atlas: MTLTexture, from src: MTLTexture,
-                             table: MaskTable, plan: Plan, edit: EditModel) throws -> MaskStageReport {
+                             table: MaskTable, plan: Plan, edit: EditModel,
+                             semantics: SemanticResolution) throws -> MaskStageReport {
         var report = MaskStageReport()
         let count = table.ids.count
         let canvas = plan.canvas
@@ -1003,6 +1316,8 @@ public final class RenderGraph {
         enc.setComputePipelineState(p)
         enc.setTexture(src, index: 0)
         enc.setTexture(atlas, index: 1)
+        // 005e: the resolved mattes (or the 1×1 stand-in). The kernel only samples this for kind 5.
+        enc.setTexture(try semanticTexture(for: semantics.rasters), index: 2)
         enc.setBytes(&params, length: MemoryLayout<MaskAtlasParams>.stride, index: 0)
         enc.setBuffer(table.maskBuffer, offset: 0, index: 1)
         enc.setBuffer(table.shapeBuffer, offset: 0, index: 2)

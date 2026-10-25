@@ -39,7 +39,11 @@ using namespace metal;
 // (guided filter steered by S1's luma). Both are declared as `TileDependency.neighborhood(r + g)`
 // in `Masks.swift`, which is what makes the stage's dirty rectangle provably wide enough.
 //
-// Still not evaluated here: `semantic` shapes produce 0 coverage (005e).
+// Still not evaluated here: shapes this build cannot interpret (kind −1) contribute 0. Since 005e
+// a `semantic` shape is evaluated from a raster the OS produced (`MaskSemantics.swift`): the graph
+// uploads the resolved mattes as a `texture2d_array` and this kernel samples it bilinearly at the
+// source `uv`, then applies `softEdge`. No raster ⇒ the component is kind −1 and covers 0 — the
+// contract of §5.1 ("zero coverage with a recorded reason, never a guess").
 
 struct MaskAtlasParams {
     float4 a;   // canvasSize.xy, contentOrigin.xy
@@ -54,14 +58,22 @@ struct MaskDesc {
     float4 misc;   // opacity, featherRadiusPx (005d), refine strength, guidedRadiusPx (005d)
 };
 
-// kind: 0 linear, 1 radial, 2 brush, 3 colour range, 4 luminance range, −1 not evaluated here.
+// kind: 0 linear, 1 radial, 2 brush, 3 colour range, 4 luminance range, 5 semantic matte,
+//       −1 not evaluated here.
 struct MaskShapeDesc {
     int4   meta;   // kind, componentInvert, op, pad
     float4 p0;     // linear: start.xy, end.xy   |  radial: centre.xy, radius.xy
                    // brush: firstStroke, strokeCount |  colour: firstSample, count, tol, smooth
                    // luma: low, high, lowFeather, highFeather
+                   // semantic: rasterSlice, pad, pad, pad
     float4 p1;     // linear: midpoint, feather   |  radial: cos, sin, feather
+                   // semantic: softEdge, feather, pad, pad
 };
+
+/// Bilinear like the matte's own resolution: the model runs at ≤ 1024 long edge (§5.2) and this is
+/// the upsample, so `filter::linear` is the cheapest correct answer and `clamp_to_edge` keeps a
+/// matte that does not quite reach the frame border from darkening it.
+constexpr sampler kSemanticSampler(coord::normalized, filter::linear, address::clamp_to_edge);
 
 struct MaskStrokeDesc {
     int4   meta;   // pointFirst, pointCount, closed, pad
@@ -243,8 +255,23 @@ static inline float luminance_range_alpha(float3 linearRGB, MaskShapeDesc d) {
     return clamp(inLow * inHigh, 0.0, 1.0);
 }
 
+/// §5 — a raster the OS produced, sampled in **source** uv (the same coordinates every other shape
+/// is measured in), then re-edged by `softEdge`: `smoothstep(½ − s/2, ½ + s/2, raw)`. Mirrors
+/// `SemanticRaster.coverage` exactly, so the analytic reference in the tests is the same formula.
+static inline float semantic_alpha(float2 uv, MaskShapeDesc d,
+                                   texture2d_array<float, access::sample> mattes) {
+    int slice = int(d.p0.x);
+    if (slice < 0 || slice >= int(mattes.get_array_size())) { return 0.0; }
+    float raw = clamp(mattes.sample(kSemanticSampler, uv, uint(slice)).r, 0.0, 1.0);
+    float s = clamp(d.p1.x, 0.0, 1.0);
+    float lo = 0.5 - 0.5 * s;
+    float hi = max(0.5 + 0.5 * s, lo + 1e-5);
+    return smoothstep(lo, hi, raw);
+}
+
 kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
                             texture2d_array<float, access::write> atlas [[texture(1)]],
+                            texture2d_array<float, access::sample> mattes [[texture(2)]],
                             constant MaskAtlasParams &p [[buffer(0)]],
                             constant MaskDesc *masks [[buffer(1)]],
                             constant MaskShapeDesc *shapes [[buffer(2)]],
@@ -279,7 +306,8 @@ kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
                 case 2: v = brush_alpha(ppx, uv, d, strokes, points, srcSize, minSide); break;
                 case 3: v = colour_range_alpha(linearRGB, d, colours); break;
                 case 4: v = luminance_range_alpha(linearRGB, d); break;
-                default: v = 0.0; break;   // semantic / unknown: no coverage, never a guess
+                case 5: v = semantic_alpha(uv, d, mattes); break;
+                default: v = 0.0; break;   // unknown kind: no coverage, never a guess
                 }
                 if (d.meta.y != 0) { v = 1.0 - v; }
 
