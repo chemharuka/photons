@@ -48,16 +48,20 @@
 4. **外接 27G7K-Ultra 的 maxEDR 也是 1.2**（不是 SDR），所以现在两台屏都走 HDR 路径；SDR 降级只在 maxEDR ≤ 1 时触发。
 5. UI 与 CLI 已补 `RenderInput.sourceURL`（loupe 与 `photonsctl render/bench`），否则 `CIRAWFilter` 语义路线在 App 里是死的。
 
+| Q23 | **评级/旗标/色标 + 筛选条** | 无 | `Sources/PhotonsUI/**` | 快捷键写库；按 ≥N 星筛选；评级不进开发历史 | 已派（第 8 轮） |
+| Q24 | **导出弹窗 + 预设面板** | Q18/Q19 | `Sources/PhotonsUI/**` | 导出 3 张落盘；坏张不中断；预设应用可 ⌘Z | 已派（第 8 轮） |
+| Q25 | **直方图与削顶统计** | 无 | `Sources/PhotonsCore/Histogram.swift`、`RenderGraph.swift`、`photonsctl/histogram.swift` | 四组 256 bin + 削顶比例 + ROI；开关帧耗时差 | 已派（第 8 轮） |
+
 ## 第 6 轮候选（按依赖排序，可直接派）
 
 | # | 工作流 | 前置 | 文件所有权 | 验收 |
 |---|---|---|---|---|
 | Q16 | **编辑持久化进库**（**完成 `9e39800`**，迁移 v3）：`develop_json` / `edit_history` 表落盘 + 打开库时恢复 | M2 + 历史（c50d2a7） | `Sources/PhotonsCatalog/**`（迁移 v3）、`Sources/PhotonsCore/History.swift`（只读调用） | 改一个滑杆 → 重开库 → 像素 hash 一致；`edit_history` 行 1:1 映射；迁移自动快照 |
 | Q17 | **方向映射**：EXIF orientation（含 `irot`）在解码与预览两条路都应用 | M3.5 | `Sources/PhotonsCore/PreviewImage.swift`、`RAWDecoder.swift` | `L1030433.dng` 180° 修正；方向矩阵 8 种组合单测；golden 更新说明 |
-| Q18 | **M5 预设 + 复制粘贴设置** | 历史 | `Sources/PhotonsCatalog/Presets*`、`Sources/PhotonsCore/EditModel.swift`（只加不改变语义） | 预设往返 Codable；复制粘贴只带非默认字段；单测 |
+| Q18 | **M5 预设 + 复制粘贴设置**（**完成 `d8a6cb1`**，40 项测试，迁移 v4） | 历史 | `Sources/PhotonsCatalog/Presets*`、`Sources/PhotonsCore/EditModel.swift`（只加不改变语义） | 预设往返 Codable；复制粘贴只带非默认字段；单测 |
 | Q21 | **核心 output window rect**（**完成 `9c962d5`**）：`RenderOptions.windowRect` 替代“用 crop 模拟取景”，暗角/feather 按整帧归一化 | Q15 | `Sources/PhotonsCore/RenderGraph.swift`、`Stage.swift`（键）、`s0_geometry.metal` | 9° 拉直下窗口中心与整帧渲染逐像素对齐（<0.001）；1:1 平移一帧 p95 不退化 |
-| Q22 | **蒙版 UI**（画笔拖拽、叠加显示开关、语义蒙版菜单）+ showMask 历史修法 | Q9e | `Sources/PhotonsUI/**`（新 MaskOverlayController） | 画一笔 → 蒙版覆盖变化且可撤销；showMask 开关不进历史 |
-| Q19 | **批量导出 + 导出对话框** | M5 | `Sources/PhotonsExport/**`、`Sources/PhotonsUI/**` | 20 张批量导出、命名模板、失败逐个报告 |
+| Q22 | **蒙版 UI**（**完成 `3166850`**，brush 全链路 + 持久化 + showMask 视图态；ui-smoke 65 项） | Q9e | `Sources/PhotonsUI/**`（新 MaskOverlayController） | 画一笔 → 蒙版覆盖变化且可撤销；showMask 开关不进历史 |
+| Q19 | **批量导出**（**完成 `d8a6cb1`**，23 项测试，20 张 19.36 s；弹窗在第 8 轮） | M5 | `Sources/PhotonsExport/**`、`Sources/PhotonsUI/**` | 20 张批量导出、命名模板、失败逐个报告 |
 | Q20 | **文档 §12：UI 架构** | Q12/Q15 | `docs/architecture-decisions.md` | 只写文档；主线写，不派子代理 |
 
 ## 排序原则

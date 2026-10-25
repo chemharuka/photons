@@ -2,7 +2,7 @@
 
 > Checkpoint file. A new session should be able to read this plus
 > `docs/architecture-decisions.md` and start working. Keep it under ~80 lines.
-> Updated: 2026-10-26 02:10 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
+> Updated: 2026-10-26 02:55 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
 
 ## Milestones
 
@@ -16,7 +16,7 @@
 | **M2** catalog | 1000 files → `added=900 duplicate=100` 3.8 s; `kill -9`@300 → resume 900, 0 dupes; move/offline/user_version 守卫全过；真 DNG → `camera_key=leica camera ag\|leica sl3`, `xmp_blob=21,573 B`, 不写 sidecar |
 | **M3** UI skeleton | `make ui-smoke` 18 checks: 1001 行库→1001 item；1200/1600/2400→3/6/11 列且与纯布局函数一致；loupe 走 `RenderGraph`（3712×1808，首帧 526–744 ms 含 0.5 缩放解码，二次 2–3 ms）；10k 占位网格 p99 **1.87 ms**（占位图，不含解码） |
 | **M3.5** thumbnails | P 通路 = **ImageIO 内嵌预览**（比 `CIRAWFilter.previewImage` 快 2.6×，§11.2）。19 张真实 RAW：t256 冷 p50 62.1/p95 111.5 ms、t512 63.3/119.1、t1024 48.6/74.1；热 p50 1.2 ms、p95 1.3 ms、命中 1.000；DNG preview 上限 t512。服务层/预取/G 通路在跑 |
-| **M4** masks（核心完成） | 005a/005b/005c 已落地：蒙版第一类值 + S1.5 atlas + S1.6 local；**空 masks 时 7 个旧键逐字节不变**（display `f0ac628a…`），neutral golden `93eeddc8…` 复现；`amount=0` 位等价（`abba6229…` = 无蒙版帧）；画笔（距离场/硬度/流量）、颜色范围（OKLab）、亮度范围已可用。005d/005e 也已完成：feather+refine 3 蒙版 @4.1Mpx p95 **16.6 ms**、tile 增量 == 全幅逐像素；语义蒙版本机只 subject 可用（Vision），其余 kind 0 覆盖；`showMask` 叠加 +0.4 ms。**UI 还没接** |
+| **M4** masks（核心 + UI 的画笔） | 005a/005b/005c 已落地：蒙版第一类值 + S1.5 atlas + S1.6 local；**空 masks 时 7 个旧键逐字节不变**（display `f0ac628a…`），neutral golden `93eeddc8…` 复现；`amount=0` 位等价（`abba6229…` = 无蒙版帧）；画笔（距离场/硬度/流量）、颜色范围（OKLab）、亮度范围已可用。005d/005e 也已完成：feather+refine 3 蒙版 @4.1Mpx p95 **16.6 ms**、tile 增量 == 全幅逐像素；语义蒙版本机只 subject 可用（Vision），其余 kind 0 覆盖；`showMask` 叠加 +0.4 ms。**UI 已接画笔**（画/擦/浏览、蒙版列表、showMask 开关、大小/硬度/流量）；其余形状无 UI 入口 |
 
 ## 已落地但尚未进里程碑表的部件
 
@@ -44,6 +44,15 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
   `photonsctl library develop get|set|history`；1000 资产读 p50 0.117 ms。`9e39800`
 - **outputWindow**：1:1 取景不再用 crop 模拟，暗角/feather 回整帧归一化；与整帧裁切**逐像素一致**，`nil` 时 7 键不变。`9c962d5`
 - **方向**：8 值 `ImageOrientation` + 解码/预览同结论；方向进 geoKey 不进 EditModel。
+
+## M5 已落地部分
+
+- **预设与复制粘贴**：`Preset`（6 组、应用只覆盖子集，不抹其它组）/ `EditSnapshot` 稀疏快照（全量 57 叶，改 9 处 → 22 叶）；
+  Catalog 迁移 **v4**（`presets` 表 + name NOCASE 唯一 + 单默认约束，未 ALTER 既有表，迁移前快照实测 `library.bak-v3.db`）。
+- **批量导出**：`ExportPreset`（jpeg/heic/tiff/png/avif、长边不放大、质量、sRGB/P3、XMP、命名模板）+ `BatchExporter`
+  （并发 2，实测 1.7×；逐张 outcome，失败隔离；同名 `-1/-2` 不覆盖）。20×60MP → 6000×3993：总 **19.36 s**、每张 p50 **1.91 s**。
+  峰值 RSS 5.0 GB；**debug 构建不能用于性能**（同批 60 s/张）。
+- **UI**：导出弹窗与开发预设面板正在做（第 8 轮）。
 
 ## 下一步（并行队列见 `docs/tasks/QUEUE.md`）
 
