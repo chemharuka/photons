@@ -96,6 +96,33 @@ public struct ImageSize: Sendable, Equatable, Hashable, Codable {
     }
 }
 
+/// A rectangle in **content pixels**: the pixel grid of the cropped frame at a render's `scale`,
+/// origin top-left, half-open on the far edge.
+///
+/// Same value type as `PixelRect` — a rectangle is a rectangle — but the alias is the thing
+/// `RenderOptions.outputWindow` is expressed in, which is a different coordinate system from a crop
+/// in the document (`CropRect`, normalized source) and from a canvas (letterboxed output). Naming
+/// it keeps "which pixels?" answerable at every call site.
+public typealias ImageRect = PixelRect
+
+extension PixelRect {
+    /// Pull the rect inside `frame`: at least one pixel, and never reaching past the frame's edge.
+    ///
+    /// A window that would leave the frame is *moved and shrunk* rather than refused — the renderer
+    /// owes the caller pixels that exist, and `fit`/1:1 framing already clamps the same way
+    /// (`LoupeFraming.clampedCenter`).
+    public func clamped(in frame: ImageSize) -> PixelRect {
+        let w = min(max(width, 1), max(frame.width, 1))
+        let h = min(max(height, 1), max(frame.height, 1))
+        let cx = min(max(x, 0), max(frame.width, 1) - w)
+        let cy = min(max(y, 0), max(frame.height, 1) - h)
+        return PixelRect(x: cx, y: cy, width: w, height: h)
+    }
+
+    /// Canonical text for cache keys: `wxh+x+y`.
+    public var windowKeyString: String { "\(width)x\(height)+\(x)+\(y)" }
+}
+
 // MARK: - output
 
 public enum OutputPrimaries: String, Sendable, Codable, CaseIterable {
@@ -215,14 +242,31 @@ public enum RenderKeyChain {
 
     public static func links(identity: String, sourceSize: ImageSize, canvas: ImageSize,
                              content: ImageSize, edit: EditModel,
-                             display: DisplayOptions) -> Links {
-        let geometry = KeyBuilder("photons-render-v1")
+                             display: DisplayOptions,
+                             outputWindow: ImageRect? = nil,
+                             orientation: ImageOrientation = .up) -> Links {
+        var geometryKey = KeyBuilder("photons-render-v1")
             .add(identity)
             .add(sourceSize)
             .add(canvas)
             .add(content)
             .add(edit.keyMaterial(.geometry))
-            .canonical
+        // Orientation is a **file** fact, not an edit (docs/architecture-decisions.md §11.2): it is
+        // deliberately absent from `EditModel`, so the key has to carry it here — otherwise two
+        // renders over differently-oriented decodes of the same bytes could share cached geometry.
+        // Appended only when it is not `.up`, so every document that came before this field (and
+        // every file whose tag says 1) keeps its key verbatim (§3.2 discipline).
+        if orientation != .up {
+            geometryKey = geometryKey.add("orient=" + orientation.keyString)
+        }
+        // The output window changes which pixels S0 samples for a given output pixel, so it belongs
+        // in the geometry link — the same link, not a side channel: everything downstream of S0 has
+        // different pixels and must therefore miss. `nil` (the whole frame, i.e. every pre-window
+        // render: fit, thumbnails, export) appends nothing, so those keys stay byte-identical.
+        if let window = outputWindow {
+            geometryKey = geometryKey.add("win=" + window.windowKeyString)
+        }
+        let geometry = geometryKey.canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry))
             .add(edit.keyMaterial(.sceneLinear))
             .canonical

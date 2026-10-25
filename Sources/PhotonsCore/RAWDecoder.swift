@@ -243,12 +243,128 @@ public final class RAWDecoder {
                              from: MTLRegionMake2D(0, 0, w, h),
                              mipmapLevel: 0)
         }
-        let rgba = raw.map { Float16(bitPattern: $0) }
+        var rgba = raw.map { Float16(bitPattern: $0) }
+        // ── row order ───────────────────────────────────────────────────────────────────────
+        // `CIContext.render(to: MTLTexture)` writes the picture **bottom-up** in Metal's memory
+        // order: a marker in the image's top-left row lands in the *last* row of the buffer
+        // (measured — local/probes/orient/readbackconvention.swift, and the same probe shows a
+        // 60 MP SL3 decode is the vertical mirror of the file's own embedded preview and of
+        // `CIContext.createCGImage`). `LinearImage`'s contract is row 0 = top, so the flip is
+        // undone here, once, instead of asking every consumer to remember it. Before this line
+        // every render of every file was up-down mirrored — which reads as "rotated 180°" the
+        // moment a picture contains signage (L1030433), and is why it looked file-specific.
+        Self.flipRows(&rgba, width: w, height: h)
+
         let image = LinearImage(width: w, height: h, rgba: rgba,
-                                colorSpace: colorSpaceID.rawValue, decoderVersion: effective)
+                                colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
+                                orientation: Self.sourceOrientation(of: url))
         let capabilities = DecoderCapabilities(requestedVersion: options.decoderVersion,
                                                effectiveVersion: effective,
                                                defaultVersion: filterDefault)
         return DecodeOutcome(image: image, capabilities: capabilities)
+    }
+
+    /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).
+    static func flipRows(_ rgba: inout [Float16], width: Int, height: Int) {
+        let stride = width * 4
+        var y = 0
+        while y < height / 2 {
+            let top = y * stride
+            let bottom = (height - 1 - y) * stride
+            for i in 0..<stride { rgba.swapAt(top + i, bottom + i) }
+            y += 1
+        }
+    }
+
+    // MARK: - orientation of a source file
+
+    /// The one reader both paths use: preview (`PreviewImage.swift`) and decode (here).
+    ///
+    /// Order of authority, and why:
+    /// 1. **HEIF `irot`** — an HEIC carries its display rotation in the container box, and ImageIO
+    ///    reports `kCGImagePropertyOrientation` as 1 (or absent) for those files, so the box is the
+    ///    only honest source (§11.5). A *real* EXIF tag still wins when it says something other
+    ///    than "normal", because that is what every other viewer reads.
+    /// 2. **EXIF/TIFF tag** via `kCGImagePropertyOrientation` — JPEG, TIFF, and RAW bodies that
+    ///    write one (`CIRAWFilter` reads it too: on this machine `filter.orientation` agrees).
+    /// 3. **`CIRAWFilter.orientation`** — for RAW containers ImageIO's property dictionary may omit
+    ///    the tag while the RAW pipeline parsed it.
+    /// Anything unreadable is `.up`: a guess would be worse than the common case.
+    public static func sourceOrientation(of url: URL) -> ImageOrientation {
+        let exif = imageIOOrientation(of: url)
+        if let irot = heifContainerOrientation(of: url), exif == nil || exif == ImageOrientation.up.rawValue {
+            return irot
+        }
+        if let exif { return ImageOrientation(exifOrDefault: exif) }
+        if let filter = CIRAWFilter(imageURL: url) {
+            let o = Int(filter.orientation.rawValue)
+            if o != ImageOrientation.up.rawValue { return ImageOrientation(exif: o) ?? .up }
+        }
+        return .up
+    }
+
+    static func imageIOOrientation(of url: URL) -> Int? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        else { return nil }
+        return (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+    }
+
+    /// `irot` from an ISO-BMFF container, as an EXIF orientation. `nil` for non-HEIF files and for
+    /// containers without the box.
+    static func heifContainerOrientation(of url: URL) -> ImageOrientation? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        guard let angle = heifRotationAngle(in: data) else { return nil }
+        return ImageOrientation(heifRotationQuarterTurnsCCW: angle)
+    }
+
+    /// Walks `ftyp`-rooted boxes looking for `irot`; returns its angle in 90° **counter-clockwise**
+    /// quarter turns (0…3), which is what the box stores.
+    ///
+    /// Extracted from the file reader so it can be tested against synthesized boxes — no HEIC with
+    /// a non-zero `irot` exists on this machine to test against, and a parser nobody tested is a
+    /// parser that does not work.
+    public static func heifRotationAngle(in data: Data) -> Int? {
+        guard data.count >= 16 else { return nil }
+        let bytes = [UInt8](data)
+        guard bytes[4] == 0x66, bytes[5] == 0x74, bytes[6] == 0x79, bytes[7] == 0x70 else { return nil } // "ftyp"
+        // Only still-image brands; a QuickTime .mov also starts with ftyp and has no irot.
+        let brandWindow = bytes[8..<min(bytes.count, 32)]
+        let brands = String(decoding: brandWindow, as: UTF8.self)
+        let still: [String] = ["heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1", "avif", "avis"]
+        guard still.contains(where: { brands.contains($0) }) else { return nil }
+        return findIrot(bytes, start: 0, end: bytes.count, depth: 0)
+    }
+
+    private static func be32(_ b: [UInt8], _ o: Int) -> Int {
+        (Int(b[o]) << 24) | (Int(b[o + 1]) << 16) | (Int(b[o + 2]) << 8) | Int(b[o + 3])
+    }
+
+    private static func findIrot(_ b: [UInt8], start: Int, end: Int, depth: Int) -> Int? {
+        guard depth < 8 else { return nil }
+        var o = start
+        while o + 8 <= end {
+            let size = be32(b, o)
+            let type = String(decoding: b[(o + 4)..<(o + 8)], as: UTF8.self)
+            let boxEnd = size == 0 ? end : min(o + size, end)
+            guard boxEnd > o + 8 || (size == 0) else { return nil }   // corrupt size: stop, do not loop
+            switch type {
+            case "irot":
+                // FullBox in ISO/IEC 23008-12 (`version/flags` then one byte holding the angle);
+                // Apple writes a 9-byte box with the single byte alone. The angle lives in the
+                // last payload byte either way (`unsigned int(6) reserved; unsigned int(2) angle`).
+                if let last = b[o + 8..<boxEnd].last { return Int(last) & 0x03 }
+                return nil
+            case "meta":   // FullBox: 4 bytes of version/flags before the children
+                if let r = findIrot(b, start: o + 12, end: boxEnd, depth: depth + 1) { return r }
+            case "iprp", "ipco", "moov", "trak", "mdia", "minf", "stbl":
+                if let r = findIrot(b, start: o + 8, end: boxEnd, depth: depth + 1) { return r }
+            default:
+                break
+            }
+            if size == 0 { return nil }
+            o = boxEnd
+        }
+        return nil
     }
 }

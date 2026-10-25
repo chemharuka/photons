@@ -743,21 +743,24 @@ public final class LoupeController: NSViewController {
         }
         guard let graph else { throw RenderError.allocationFailed("loupe graph") }
 
-        // The camera: a fit frame is the document's own crop; 1:1 and beyond is a source-pixel
-        // window, expressed as a derived crop so `RenderGraph` needs no new knob (D12).
+        // The camera: the document's own crop is the frame at every zoom, and 1:1 (or beyond) is an
+        // **output window** into it — S0 crops/straightens/flips the whole frame and hands back that
+        // rectangle, so the projection, the vignette and the mask feather are the frame's, not the
+        // window's (`RenderOptions.outputWindow`). `fit` names no window, i.e. the whole frame.
         let projected = LoupeFraming(viewport: viewport,
                                      decoded: ImageSize(width: image.width, height: image.height),
                                      decodeScale: ds,
                                      edit: model)
-        let renderEdit = projected.zoomedEdit(model, for: state)
+        let outputWindow = projected.outputWindow(of: state)
         let scale = max(0.01, projected.renderScale(of: state, decodeScale: ds))
         let window = projected.windowPixels(of: state)
         let primaries: OutputPrimaries = (presenter?.storage ?? .linear16) == .linear16 ? .displayP3 : .sRGB
         let ceiling = displayHeadroom.headroom
         let t1 = CFAbsoluteTimeGetCurrent()
-        let result = try graph.render(renderEdit, options: RenderOptions(
+        let result = try graph.render(model, options: RenderOptions(
             canvas: viewport,
             scale: scale,
+            outputWindow: outputWindow,
             display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
             useCache: true,
             wantsPixels: false))

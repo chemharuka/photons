@@ -1,11 +1,124 @@
 import Foundation
 import CryptoKit
 
-/// A decoded image in linear light: RGBA, half precision, row-major, not premultiplied.
+// MARK: - orientation
+
+/// How a stored buffer's rows relate to the upright picture: the eight EXIF values
+/// (`tiff:Orientation`, TIFF tag 0x0112, `kCGImagePropertyOrientation`).
+///
+/// The case names and raw values are deliberately `CGImagePropertyOrientation`'s, so a value can
+/// cross an API boundary without a lookup table (`CGImagePropertyOrientation(rawValue: o.rawValue)`)
+/// and so log lines and JSON read the same everywhere.
+///
+/// **Why this is a `PhotonsCore` type and not an `EditModel` field.** Orientation is a property of
+/// the *file*, not of the user's edit: the camera wrote it, the user never chose it, and a document
+/// that carried a copy would go stale the moment the same sidecar is applied to a re-imported file.
+/// It belongs to the decode, travels on `LinearImage`, and is folded into the render key so cached
+/// pixels cannot be reused across a different orientation (docs/architecture-decisions.md §11.2).
+public enum ImageOrientation: Int, Sendable, Hashable, Codable, CaseIterable {
+    case up = 1             // 0th row top, 0th column left      — no transform
+    case upMirrored = 2     // 0th row top, 0th column right     — mirror horizontal
+    case down = 3           // 0th row bottom, 0th column right  — rotate 180°
+    case downMirrored = 4   // 0th row bottom, 0th column left   — mirror vertical
+    case leftMirrored = 5   // 0th row left, 0th column top      — transpose
+    case right = 6          // 0th row right, 0th column top     — rotate 90° CW
+    case rightMirrored = 7  // 0th row right, 0th column bottom  — anti-transpose
+    case left = 8           // 0th row left, 0th column bottom   — rotate 270° CW
+
+    // Semantic aliases, so call sites can say what they mean instead of quoting a number.
+    // (`CaseIterable`/`Codable` still see exactly eight values: these are statics, not cases.)
+    public static let identity = ImageOrientation.up
+    public static let mirroredHorizontally = ImageOrientation.upMirrored
+    public static let rotated180 = ImageOrientation.down
+    public static let mirroredVertically = ImageOrientation.downMirrored
+    public static let mirroredHorizontallyRotated90CCW = ImageOrientation.leftMirrored
+    public static let rotated90CW = ImageOrientation.right
+    public static let mirroredHorizontallyRotated90CW = ImageOrientation.rightMirrored
+    public static let rotated90CCW = ImageOrientation.left
+
+    /// `nil` for anything outside 1…8 — a corrupt tag must not become a random transform.
+    public init?(exif value: Int) { self.init(rawValue: value) }
+
+    /// Lenient reader for metadata: anything unreadable is `.up`, which is the correct assumption
+    /// for the overwhelming majority of files and never worse than guessing a rotation.
+    public init(exifOrDefault value: Int?) { self = ImageOrientation(rawValue: value ?? 1) ?? .up }
+
+    /// HEIF `irot`: the box stores a rotation in 90° **counter-clockwise** quarter turns (0…3), with
+    /// no mirror flag in the base spec (ISO/IEC 23008-12 §6.5.10). EXIF's 90° values are clockwise,
+    /// hence 1 ↔ 8 and 3 ↔ 6 — the two translations that are easy to get backwards, so they are
+    /// pinned by a test rather than by a comment.
+    ///
+    /// `nil` for an out-of-range angle, which is the box being wrong rather than the picture.
+    public init?(heifRotationQuarterTurnsCCW angle: Int) {
+        switch angle {
+        case 0: self = .up              // 0° (and the value an all-zero box carries)
+        case 1: self = .rotated90CCW    // EXIF 8: rotate 270° CW
+        case 2: self = .rotated180      // EXIF 3
+        case 3: self = .rotated90CW     // EXIF 6: rotate 90° CW
+        default: return nil
+        }
+    }
+
+    /// True for 5…8, the orientations that swap the frame's width and height.
+    public var exchangesDimensions: Bool { rawValue >= 5 }
+
+    /// The upright size for a stored `width × height` buffer.
+    public func uprightSize(width: Int, height: Int) -> (width: Int, height: Int) {
+        exchangesDimensions ? (height, width) : (width, height)
+    }
+
+    /// Where upright pixel `(x, y)` comes from in the stored buffer (`x` right, `y` down, both
+    /// measured on the **upright** frame, so the valid range is `uprightSize`).
+    ///
+    /// This is the single definition of the eight transforms in the codebase; `LinearImage.oriented`
+    /// is the only thing that needs to loop over it, and the test pins every value against an
+    /// independent rotation/mirror composition.
+    public func sourceCoordinate(x: Int, y: Int, width w: Int, height h: Int) -> (x: Int, y: Int) {
+        switch self {
+        case .up: return (x, y)
+        case .upMirrored: return (w - 1 - x, y)
+        case .down: return (w - 1 - x, h - 1 - y)
+        case .downMirrored: return (x, h - 1 - y)
+        case .leftMirrored: return (y, x)
+        case .right: return (y, h - 1 - x)
+        case .rightMirrored: return (w - 1 - y, h - 1 - x)
+        case .left: return (w - 1 - y, x)
+        }
+    }
+
+    /// Stable text for the render key. `1` is the default and callers omit it, so an upright file
+    /// keeps the pre-orientation key verbatim (§3.2 discipline: a new field must not move keys for
+    /// the documents that do not use it).
+    public var keyString: String { "\(rawValue)" }
+
+    public var displayName: String {
+        switch self {
+        case .up: return "upright"
+        case .upMirrored: return "mirrored horizontally"
+        case .down: return "rotated 180°"
+        case .downMirrored: return "mirrored vertically"
+        case .leftMirrored: return "transposed"
+        case .right: return "rotated 90° CW"
+        case .rightMirrored: return "anti-transposed"
+        case .left: return "rotated 270° CW"
+        }
+    }
+}
+
+// MARK: - the linear buffer
+
+/// A decoded image in linear light: RGBA, half precision, **row-major, row 0 = top of the picture**,
+/// not premultiplied.
 ///
 /// This is the single pixel truth of the pipeline (see docs/architecture-decisions.md §3 D4).
 /// Everything downstream (editing graph, thumbnails, export) reads from this representation,
 /// never from the RAW file directly.
+///
+/// The top-down row order is part of the contract, not an accident: `CIContext.render(to:)` +
+/// `MTLTexture.getBytes` hands back the picture **bottom-up** (measured:
+/// `local/probes/orient/readbackconvention.swift` puts a top-left marker in the last row), so
+/// `RAWDecoder` flips once at the decode boundary and every consumer below this type may assume
+/// row 0 is the top.
 public struct LinearImage: Sendable {
     public let width: Int
     public let height: Int
@@ -14,17 +127,57 @@ public struct LinearImage: Sendable {
     public let colorSpace: String
     /// Decoder version the samples were produced with (e.g. `"8"`, `"9.dng"`).
     public let decoderVersion: String
+    /// Orientation the *stored* rows still carry, as the file declared it (EXIF 1…8 / HEIF `irot`).
+    ///
+    /// `.up` means the buffer is already upright. `rgba` is never rotated by the decoder: the
+    /// transform is applied once, before S0, by `oriented()` — so a rotation costs one buffer copy
+    /// per render ingestion and never a second RAW decode.
+    public let orientation: ImageOrientation
 
-    public init(width: Int, height: Int, rgba: [Float16], colorSpace: String, decoderVersion: String) {
+    public init(width: Int, height: Int, rgba: [Float16], colorSpace: String, decoderVersion: String,
+                orientation: ImageOrientation = .up) {
         precondition(rgba.count == width * height * 4, "rgba must be width*height*4")
         self.width = width
         self.height = height
         self.rgba = rgba
         self.colorSpace = colorSpace
         self.decoderVersion = decoderVersion
+        self.orientation = orientation
     }
 
     public var byteCount: Int { rgba.count * MemoryLayout<Float16>.size }
+
+    /// Size of the upright picture: differs from `(width, height)` for the four rotating
+    /// orientations, and is what the graph, crop math and masks must see.
+    public var uprightSize: (width: Int, height: Int) {
+        orientation.uprightSize(width: width, height: height)
+    }
+
+    public var isUpright: Bool { orientation == .up }
+
+    /// The upright buffer, with `orientation` reset to `.up`.
+    ///
+    /// `.up` returns `self` — identity by value, no copy, so the common case costs nothing and the
+    /// pixel digest of an upright file is untouched by this type existing.
+    public func oriented() -> LinearImage {
+        guard !isUpright else { return self }
+        let (w, h) = uprightSize
+        var out = [Float16](repeating: 0, count: w * h * 4)
+        let srcW = width, srcH = height
+        for y in 0..<h {
+            for x in 0..<w {
+                let s = orientation.sourceCoordinate(x: x, y: y, width: srcW, height: srcH)
+                let so = (s.y * srcW + s.x) * 4
+                let do_ = (y * w + x) * 4
+                out[do_] = rgba[so]
+                out[do_ + 1] = rgba[so + 1]
+                out[do_ + 2] = rgba[so + 2]
+                out[do_ + 3] = rgba[so + 3]
+            }
+        }
+        return LinearImage(width: w, height: h, rgba: out, colorSpace: colorSpace,
+                           decoderVersion: decoderVersion, orientation: .up)
+    }
 
     /// Byte-exact digest of the samples. Used by the L1 determinism check and by
     /// golden-image regression; must not depend on timestamps or paths.
@@ -65,6 +218,30 @@ public struct LinearImage: Sendable {
                           overUnityRatio: Double(over) / Double(Swift.max(n, 1)))
     }
 
+    /// Mean luma of the top and bottom halves, in **row** terms (row 0 = top).
+    ///
+    /// This is the objective "which way up is this?" measurement used by the orientation tests: a
+    /// scene with a sky and a ground has a different vertical gradient in one direction than the
+    /// other, and a flipped decode inverts it.
+    public func halfMeans(sampleStride: Int = 5) -> (top: Double, bottom: Double) {
+        var top = 0.0, bottom = 0.0
+        var nt = 0, nb = 0
+        let half = height / 2
+        var y = 0
+        while y < height {
+            let row = y * width
+            var x = 0
+            while x < width {
+                let o = (row + x) * 4
+                let l = 0.2126 * Double(rgba[o]) + 0.7152 * Double(rgba[o + 1]) + 0.0722 * Double(rgba[o + 2])
+                if y < half { top += l; nt += 1 } else { bottom += l; nb += 1 }
+                x += sampleStride
+            }
+            y += 1
+        }
+        return (top / Double(Swift.max(nt, 1)), bottom / Double(Swift.max(nb, 1)))
+    }
+
     /// Downscale to a smaller linear image by box averaging (M0-quality; replaced by a
     /// mip chain in M3). Keeps the pipeline honest in tests without a second code path.
     public func downscaled(factor: Int) -> LinearImage {
@@ -88,6 +265,7 @@ public struct LinearImage: Sendable {
                 for c in 0..<4 { out[o + c] = Float16(acc[c] * inv) }
             }
         }
-        return LinearImage(width: nw, height: nh, rgba: out, colorSpace: colorSpace, decoderVersion: decoderVersion)
+        return LinearImage(width: nw, height: nh, rgba: out, colorSpace: colorSpace,
+                           decoderVersion: decoderVersion, orientation: orientation)
     }
 }

@@ -30,6 +30,28 @@ public struct RenderOptions: Sendable {
     public var canvas: ImageSize?
     /// Output pixels relative to crop pixels. 1 = 1:1, 0.25 = quarter-size preview.
     public var scale: Double
+    /// Render only this part of the frame, in **content pixels** — the cropped picture's own pixel
+    /// grid at `scale` (`LoupeFraming` computes it for a 1:1 loupe window).
+    ///
+    /// `nil` (the default) is the whole frame and is what every pre-window caller gets: thumbnails,
+    /// fit, export. A window is *not* a crop: S0 still rotates/crops/flips the **whole frame** and
+    /// then takes the window out of it, so
+    ///
+    ///   · a window render is the whole-frame render with a rectangle cut out of it — the same
+    ///     projection to within a texel of rounding, not a different one (a crop-shaped window at
+    ///     9° straighten was ~0.29 % off, because S0 rotated in crop space);
+    ///   · S3c's vignette and the mask descriptors' feather normalize to the **whole frame**, so a
+    ///     vignette or a feather keeps its physical size at 1:1 instead of shrinking to the window.
+    ///
+    /// The rect is clamped into the frame and a window covering the whole frame is normalized to
+    /// `nil`, so "1:1 on an image smaller than the viewport" costs no extra key.
+    ///
+    /// One honest limitation: the mask atlas is a canvas-sized texture, so a **neighbourhood**
+    /// operator (feather blur, guided refine) clamps at the window's edge instead of the frame's.
+    /// The radii themselves are the frame's, so the affected band is at most `feather + guided` pixels
+    /// wide, at the window's border — the same edge-clamp rule the frame's own border has always had,
+    /// measured in `WindowTests.testMaskFeatherKeepsItsPhysicalSizeInsideAWindow`.
+    public var outputWindow: ImageRect?
     public var display: DisplayOptions
     /// Stage reuse. Off for benchmarks (otherwise iteration 2 measures a cache hit, not a frame).
     public var useCache: Bool
@@ -46,12 +68,14 @@ public struct RenderOptions: Sendable {
 
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
+                outputWindow: ImageRect? = nil,
                 display: DisplayOptions = DisplayOptions(),
                 useCache: Bool = true,
                 wantsPixels: Bool = true,
                 maskTiling: MaskTiling = .auto) {
         self.canvas = canvas
         self.scale = scale
+        self.outputWindow = outputWindow
         self.display = display
         self.useCache = useCache
         self.wantsPixels = wantsPixels
@@ -112,6 +136,9 @@ public struct DisplayImage: Sendable {
 public final class RenderResult {
     public let canvas: ImageSize
     public let content: ImageSize
+    /// The part of the frame these pixels are, in content pixels of the full frame at this render's
+    /// `scale`; the whole frame when no window was asked for.
+    public let window: ImageRect
     public let keys: StageKeys
     public let trace: RenderTrace
     /// Present when `RenderOptions.wantsPixels` was set.
@@ -129,11 +156,12 @@ public final class RenderResult {
     /// by inspection.
     public let showsMask: Bool
 
-    init(canvas: ImageSize, content: ImageSize, keys: StageKeys, trace: RenderTrace,
-         display: DisplayImage?, output: MTLTexture?, maskReport: MaskStageReport? = nil,
-         showsMask: Bool = false) {
+    init(canvas: ImageSize, content: ImageSize, window: ImageRect, keys: StageKeys,
+         trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
+         maskReport: MaskStageReport? = nil, showsMask: Bool = false) {
         self.canvas = canvas
         self.content = content
+        self.window = window
         self.keys = keys
         self.trace = trace
         self.display = display
@@ -275,6 +303,7 @@ private struct S0Params {
     var c: SIMD4<Float>   // crop rect
     var d: SIMD4<Float>   // cos, sin, flipH, flipV
     var e: SIMD4<Float>   // identity
+    var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 }
 
 private struct S1Params {
@@ -297,8 +326,8 @@ private struct ColorParams {
 
 private struct VignetteParams {
     var a: SIMD4<Float>   // amount, midpoint, feather, roundness
-    var b: SIMD4<Float>   // contentWidth, contentHeight, originX, originY
-    var c: SIMD4<Float>   // identity
+    var b: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (the whole frame, in content pixels)
+    var c: SIMD4<Float>   // identity, contentOrigin.x, contentOrigin.y, pad
 }
 
 private struct DisplayParams {
@@ -314,6 +343,7 @@ private struct MaskAtlasParams {
     var c: SIMD4<Float>   // crop rect
     var d: SIMD4<Float>   // cos, sin, flipH, flipV
     var e: SIMD4<Int32>   // maskCount
+    var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 }
 
 private struct MaskDescU {
@@ -402,14 +432,25 @@ extension ColorGroup {
 /// re-run S1 (docs/architecture-decisions.md D5/D6/D12).
 public final class RenderGraph {
     public let deviceName: String
-    /// Decoded source dimensions.
+    /// Upright source dimensions.
+    ///
+    /// Orientation is applied **before S0** (here, at ingestion), so every stage below sees the
+    /// picture the way the photographer saw it: crop math, mask radii, straighten and the canvas
+    /// aspect are all expressed in this frame, never in the stored-buffer frame. For `.up` — every
+    /// file this build has ever decoded — `oriented()` is `self` and nothing is copied.
     public let sourceSize: ImageSize
+    /// The orientation that ingestion resolved, kept so the render key can name it.
+    public let orientation: ImageOrientation
 
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let kernels: KernelLibrary
     private let input: RenderInput
     private let sourceTexture: MTLTexture
+    /// The source after orientation, i.e. exactly what `sourceTexture` holds. Identical to
+    /// `input.image` for `.up` (no copy), so the semantic matte raster and the GPU texture can
+    /// never disagree about which way up the picture is.
+    private let uprightImage: LinearImage
     private let pool: TexturePool
     private let cacheBudgetBytes: Int
 
@@ -480,22 +521,28 @@ public final class RenderGraph {
         self.pool = TexturePool(device: device)
         self.semanticProvider = semanticMatte
         self.semanticStore = SemanticMatteStore()
-        self.sourceSize = ImageSize(width: input.image.width, height: input.image.height)
+        // Orientation is applied here, once, before S0 sees a pixel (§11.2). `oriented()` is
+        // identity for `.up`, so the pre-orientation path allocates nothing and its output is
+        // byte-identical to before.
+        self.orientation = input.image.orientation
+        let upright = input.image.oriented()
+        self.uprightImage = upright
+        self.sourceSize = ImageSize(width: upright.width, height: upright.height)
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
-                                                            width: input.image.width,
-                                                            height: input.image.height,
+                                                            width: upright.width,
+                                                            height: upright.height,
                                                             mipmapped: false)
         desc.usage = [.shaderRead, .shaderWrite]
         desc.storageMode = .shared
         guard let tex = device.makeTexture(descriptor: desc) else {
             throw RenderError.allocationFailed(sourceSize.keyString)
         }
-        input.image.rgba.withUnsafeBytes { raw in
-            tex.replace(region: MTLRegionMake2D(0, 0, input.image.width, input.image.height),
+        upright.rgba.withUnsafeBytes { raw in
+            tex.replace(region: MTLRegionMake2D(0, 0, upright.width, upright.height),
                         mipmapLevel: 0,
                         withBytes: raw.baseAddress!,
-                        bytesPerRow: input.image.width * 8)
+                        bytesPerRow: upright.width * 8)
         }
         self.sourceTexture = tex
     }
@@ -512,11 +559,34 @@ public final class RenderGraph {
         let origin: SIMD2<Float>
         /// Edge-spelled crop, already resolved from `aspectLock` and clamped: what S0 samples.
         let crop: CropRect
+        /// The whole cropped frame's own pixel grid at this render's `scale`. `RenderOptions.outputWindow`
+        /// is expressed in it, and it is the frame every spatially normalized parameter belongs to.
+        let frame: ImageSize
+        /// The part of `frame` this render produces, or `nil` for the whole frame (the pre-window
+        /// behaviour, and what every caller that does not name a window gets).
+        let window: ImageRect?
+        /// `frame` and `window.origin` in **content pixels** — the units S0/S1.5/S3c address a pixel
+        /// in. They differ from `frame`'s own units only when letterboxing rescaled the content rect
+        /// (`content < requested`), which is the same proportional squeeze the whole-frame path has
+        /// always applied.
+        let frameSize: SIMD2<Float>
+        let frameOrigin: SIMD2<Float>
+        /// `frame` in canvas pixels: what mask radii (feather, guided) normalize against (§4.6), so a
+        /// feather keeps its physical size inside a window. Equal to `content` without a window, so
+        /// the no-window path keeps 005d's exact numbers.
+        let frameInCanvas: ImageSize
         let keys: StageKeys
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
         var stages: [RenderStage] { keys.pipeline }
+
+        var isFullFrame: Bool { window == nil }
+
+        /// The window as pixels, for the result and for the tests.
+        var windowRect: ImageRect {
+            window ?? ImageRect(x: 0, y: 0, width: frame.width, height: frame.height)
+        }
     }
 
     private func plan(_ edit: EditModel, _ options: RenderOptions) -> Plan {
@@ -525,21 +595,45 @@ public final class RenderGraph {
         let crop = edit.geometry.renderCrop(source: sourceSize)
         let cropPixels = CropMath.outputSize(crop, in: sourceSize)
         let scale = max(0.01, options.scale)
-        let requested = ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
-                                  height: Int((Double(cropPixels.height) * scale).rounded()))
+        // The frame: the full cropped picture at this scale. Its pixel grid is what a window indexes,
+        // which is why the window is resolved after it and not before.
+        let frame = ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
+                              height: Int((Double(cropPixels.height) * scale).rounded()))
+        let whole = ImageRect(x: 0, y: 0, width: frame.width, height: frame.height)
+        // A window covering the frame *is* no window: normalizing here means "1:1 on a picture smaller
+        // than the viewport" shares the whole-frame key instead of minting one for a full-frame cut.
+        let window = options.outputWindow
+            .map { $0.clamped(in: frame) }
+            .flatMap { $0 == whole ? nil : $0 }
+
+        let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? frame
         let canvas = options.canvas ?? requested
         let content = canvas == requested ? requested : ImageSize.fit(requested, in: canvas)
         let origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
                                   Float((canvas.height - content.height) / 2))
+
+        // Content pixels per frame pixel: 1 unless letterboxing rescaled the content rect. Pre-scaling
+        // the frame here is what lets the kernels stay one add and one divide per pixel.
+        let kx = Float(Double(content.width) / Double(requested.width))
+        let ky = Float(Double(content.height) / Double(requested.height))
+        let frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
+        let frameOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
+        let frameInCanvas = window == nil ? content
+            : ImageSize(width: Int((Double(frameSize.x)).rounded()),
+                        height: Int((Double(frameSize.y)).rounded()))
 
         let keys = RenderKeyChain.keys(RenderKeyChain.links(identity: input.identity,
                                                             sourceSize: sourceSize,
                                                             canvas: canvas,
                                                             content: content,
                                                             edit: edit,
-                                                            display: options.display),
+                                                            display: options.display,
+                                                            outputWindow: window,
+                                                            orientation: orientation),
                                        identity: input.identity)
-        return Plan(canvas: canvas, content: content, origin: origin, crop: crop, keys: keys)
+        return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
+                    window: window, frameSize: frameSize, frameOrigin: frameOrigin,
+                    frameInCanvas: frameInCanvas, keys: keys)
     }
 
     // MARK: render
@@ -551,7 +645,9 @@ public final class RenderGraph {
         // component's descriptor carries the slice index of its raster. The resolution is cached
         // (contentHash + kind + modelVersion), so this is free on every frame but the first.
         let semantics = resolveSemantics(edit)
-        let table = try maskTable(for: edit, content: plan.content, semantics: semantics)
+        // The radii normalize to the frame, not to the visible window: a feather is 10 % of the
+        // *picture's* short edge, so 1:1 must not soften differently from fit (§4.6).
+        let table = try maskTable(for: edit, content: plan.frameInCanvas, semantics: semantics)
         if table == nil { atlasCache = nil }
 
         // 005d: the tiling material joins the two mask keys. A local-stage texture computed under a
@@ -735,11 +831,13 @@ public final class RenderGraph {
         if options.wantsPixels {
             let pixels = readback(finalTexture, primaries: options.display.primaries, bitDepth: options.display.bitDepth)
             pool.recycle(finalTexture)
-            return RenderResult(canvas: plan.canvas, content: plan.content, keys: plan.keys,
+            return RenderResult(canvas: plan.canvas, content: plan.content,
+                                window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask)
         }
-        return RenderResult(canvas: plan.canvas, content: plan.content, keys: plan.keys,
+        return RenderResult(canvas: plan.canvas, content: plan.content,
+                            window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask)
     }
@@ -820,6 +918,7 @@ public final class RenderGraph {
                 && edit.geometry.rotationDegrees == 0
                 && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
                 && plan.content == sourceSize && plan.canvas == sourceSize
+                && plan.isFullFrame
             var params = S0Params(
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
@@ -828,7 +927,8 @@ public final class RenderGraph {
                          Float(plan.crop.width), Float(plan.crop.height)),
                 d: SIMD4(costheta(edit), sintheta(edit),
                          edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
-                e: SIMD4(identity ? 1 : 0, 0, 0, 0))
+                e: SIMD4(identity ? 1 : 0, 0, 0, 0),
+                f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -894,8 +994,10 @@ public final class RenderGraph {
             var params = VignetteParams(
                 a: SIMD4(Float(edit.effects.vignetteAmount), Float(edit.effects.vignetteMidpoint),
                          Float(edit.effects.vignetteFeather), Float(edit.effects.vignetteRoundness)),
-                b: SIMD4(Float(plan.content.width), Float(plan.content.height), plan.origin.x, plan.origin.y),
-                c: SIMD4(identity ? 1 : 0, 0, 0, 0))
+                // Frame-relative, not content-relative: a vignette is a property of the photograph, so
+                // a 1:1 window sees the same falloff in the same physical place as the whole frame.
+                b: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
+                c: SIMD4(identity ? 1 : 0, plan.origin.x, plan.origin.y, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<VignetteParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -982,7 +1084,7 @@ public final class RenderGraph {
         }
         guard wantsMatte else { return out }
 
-        let source = SemanticMatteSource(image: input.image, contentHash: input.identity,
+        let source = SemanticMatteSource(image: uprightImage, contentHash: input.identity,
                                         url: input.sourceURL)
         // Two components asking for the same kind share one slice: the raster is identical, and a
         // 4 MB copy per duplicate is not.
@@ -1311,7 +1413,10 @@ public final class RenderGraph {
                          Float(plan.crop.width), Float(plan.crop.height)),
             d: SIMD4(costheta(edit), sintheta(edit),
                      edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
-            e: SIMD4(Int32(count), 0, 0, 0))
+            e: SIMD4(Int32(count), 0, 0, 0),
+            // Masks live in the *frame* (§4). A 1:1 window must therefore evaluate them through the
+            // same frame-relative mapping S0 used, or the selection would slide with the window.
+            f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))
         guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         enc.setComputePipelineState(p)
         enc.setTexture(src, index: 0)
@@ -1374,9 +1479,7 @@ public final class RenderGraph {
         }
 
         // 4 — the receipts: per-mask bounds (halo included) and the dependency they justify.
-        let mapping = MaskCanvasMapping(geometry: edit.geometry, source: sourceSize,
-                                        content: plan.content, canvas: canvas,
-                                        origin: (Double(plan.origin.x), Double(plan.origin.y)))
+        let mapping = canvasMapping(edit, plan)
         for m in edit.activeMasks {
             if let r = MaskBounds.canvasRect(for: m, mapping: mapping) { report.bounds[m.id] = r }
         }
@@ -1567,9 +1670,7 @@ public final class RenderGraph {
         guard !order.isEmpty else { return full }
         let needed = active.filter { order.contains($0.id) }
 
-        let mapping = MaskCanvasMapping(geometry: edit.geometry, source: sourceSize,
-                                        content: plan.content, canvas: canvas,
-                                        origin: (Double(plan.origin.x), Double(plan.origin.y)))
+        let mapping = canvasMapping(edit, plan)
         let dirty = MaskBounds.dirtySet(needed, mapping: mapping)
         guard !dirty.isEmpty else { return full }
 
@@ -1585,14 +1686,25 @@ public final class RenderGraph {
     /// Per-mask canvas bounds for the enabled masks (halo included) — the same numbers the atlas report
     /// carries, kept on the entry so a later frame can answer "which region holds this mask".
     private func localBounds(edit: EditModel, plan: Plan) -> [String: MaskRect] {
-        let mapping = MaskCanvasMapping(geometry: edit.geometry, source: sourceSize,
-                                       content: plan.content, canvas: plan.canvas,
-                                       origin: (Double(plan.origin.x), Double(plan.origin.y)))
+        let mapping = canvasMapping(edit, plan)
         var out: [String: MaskRect] = [:]
         for m in edit.activeMasks {
             if let r = MaskBounds.canvasRect(for: m, mapping: mapping) { out[m.id] = r }
         }
         return out
+    }
+
+    /// S0's mapping, in the form the bounds code needs — for the **frame**, never for the window.
+    ///
+    /// `MaskCanvasMapping` walks normalized source coordinates to canvas pixels; giving it the frame's
+    /// size and the frame's origin inside the canvas is what makes its bounds comparable with the atlas
+    /// pixels of a windowed render (the atlas also measures against the frame). Without a window both
+    /// numbers are the content rect and its centring, i.e. exactly what 005c/005d used.
+    private func canvasMapping(_ edit: EditModel, _ plan: Plan) -> MaskCanvasMapping {
+        MaskCanvasMapping(geometry: edit.geometry, source: sourceSize,
+                          content: plan.frameInCanvas, canvas: plan.canvas,
+                          origin: (Double(plan.origin.x - plan.frameOrigin.x),
+                                   Double(plan.origin.y - plan.frameOrigin.y)))
     }
 
     /// §3.4 step 3, the incremental case: which tiles hold the masks whose `applyKey` moved.

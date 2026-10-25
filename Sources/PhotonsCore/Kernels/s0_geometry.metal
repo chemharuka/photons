@@ -1,11 +1,19 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// S0 — geometry: crop, straighten, flips.
+// S0 — geometry: crop, straighten, flips, then the output window.
 //
 // Output is the *canvas*: the content rect sits inside it (letterboxed when the requested canvas
 // aspect differs, which is exactly what an on-screen viewport does), and everything outside the
 // content rect is transparent. Export passes canvas == content, so no padding is produced.
+//
+// Two-phase, in the order the user thinks in (docs D5): the **whole frame** is cropped, rotated and
+// flipped, and only then is the requested **window** taken out of it. `p.f.xy` is the frame's size and
+// `p.f.zw` the window's origin, both in content pixels (`RenderOptions.outputWindow`). A window is
+// therefore literally the whole-frame picture with a rectangle cut out of it — same projection, same
+// texel phase — instead of a second crop that would rotate about a different centre. With no window
+// (`p.f.zw == 0`, `p.f.xy == content`) the mapping collapses to the content-normalized one S0 has
+// always used, so the neutral/identity path stays bit-exact.
 //
 // Sampling is bilinear with clamp-to-edge. Because the crop rect stays the output frame, over-
 // rotating a crop pulls edge samples rather than growing the canvas — the honest M1 behaviour;
@@ -17,6 +25,7 @@ struct S0Params {
     float4 c;   // crop rect (x, y, w, h) normalized
     float4 d;   // cos, sin, flipH, flipV
     float4 e;   // identity, pad, pad, pad
+    float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 };
 
 static inline float4 sample_bilinear(texture2d<float, access::read> src,
@@ -44,8 +53,8 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     if (int(gid.x) >= canvas.x || int(gid.y) >= canvas.y) { return; }
     int2 srcSize = int2(p.b.zw);
 
-    // Identity: crop is full, no rotation, no flip, canvas == source. Copy texel-for-texel so the
-    // neutral path stays bit-exact (the determinism and identity tests depend on it).
+    // Identity: crop is full, no rotation, no flip, canvas == source, whole frame. Copy texel-for-
+    // texel so the neutral path stays bit-exact (the determinism and identity tests depend on it).
     if (p.e.x > 0.5) {
         dst.write(src.read(uint2(clamp(int2(gid), int2(0), srcSize - 1))), gid);
         return;
@@ -58,7 +67,10 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
-    float2 uv = local / content;
+    // Content pixel → position inside the whole frame (flips and rotation happen in *frame* space, so
+    // a window at the frame's edge mirrors the same way the whole frame does).
+    float2 framePx = local + p.f.zw;
+    float2 uv = framePx / max(p.f.xy, float2(1.0));
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 

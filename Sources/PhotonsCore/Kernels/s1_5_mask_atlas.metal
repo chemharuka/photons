@@ -51,6 +51,7 @@ struct MaskAtlasParams {
     float4 c;   // crop rect (x, y, w, h) normalised
     float4 d;   // cos, sin, flipH, flipV
     int4   e;   // maskCount, pad, pad, pad
+    float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 };
 
 struct MaskDesc {
@@ -88,13 +89,19 @@ constant float kChromaInverseSpan = 1.0 / 0.4;
 
 /// Inverse of `s0_geometry`: canvas pixel → normalised **uncropped source** position.
 /// Returns x < 0 outside the content rect (letterbox padding), where every mask is 0.
+///
+/// Frame-relative, like S0 (`p.f.xy` = frame size, `p.f.zw` = window origin, in content pixels): a
+/// mask's coefficients are properties of the photograph, so evaluating this against the visible
+/// window instead of the frame would slide the selection by the window's pan — and would make a 1:1
+/// render disagree with the fit render about where a gradient sits.
 static inline float2 source_uv(float2 pixel, constant MaskAtlasParams &p) {
     float2 local = pixel + 0.5 - p.a.zw;
     float2 content = p.b.xy;
     if (local.x < 0.0 || local.y < 0.0 || local.x >= content.x || local.y >= content.y) {
         return float2(-1.0, -1.0);
     }
-    float2 uv = local / content;
+    float2 framePx = local + p.f.zw;
+    float2 uv = framePx / max(p.f.xy, float2(1.0));
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 

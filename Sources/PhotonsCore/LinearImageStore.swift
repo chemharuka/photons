@@ -6,10 +6,12 @@ import CryptoKit
 /// Bumped whenever the *decode settings* change, because an already-written linear buffer must not
 /// be reused by a build that decodes differently. `v1` = the D2′ recipe of M3:
 /// `boostAmount = 0` + `isGamutMappingEnabled = false` (docs/architecture-decisions.md §11.4).
-/// Before this field existed the key had no way to say "those buffers were made with the defaults",
-/// so the first launch after the change would have hit stale pixels.
+/// `v2` = top-down rows: `CIContext.render(to: MTLTexture)` + `getBytes` reads back **bottom-up**,
+/// so every buffer written by v1 was vertically mirrored (the bug behind the "`L1030433.dng` renders
+/// 180°" report — it was never an orientation tag; every file was affected). v2 flips rows at
+/// ingest, so v1 buffers on disk must never be reused.
 public enum DecodeRecipe {
-    public static let current = "v1-boost0-gamutOff"
+    public static let current = "v2-topdown-rows"
 }
 
 /// Identity of a decode result: everything that can change the pixels.

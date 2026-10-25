@@ -220,24 +220,42 @@ public struct LoupeFraming: Equatable, Sendable {
         return ImageSize(width: Int(content.width.rounded()), height: Int(content.height.rounded()))
     }
 
-    /// The document the renderer should be given for this state.
+    /// The window as `RenderOptions.outputWindow`: **content pixels** of the full crop frame at the
+    /// state's `scale`. `nil` for `fit`, which is the whole frame by definition.
     ///
-    /// A 1:1 window **is** a crop — `RenderGraph` has exactly two knobs (`canvas` and `scale`) and
-    /// neither can offset the sampling, so the window is expressed as the crop rect and the scale
-    /// carries the magnification. The derived document is never written back to the session: the
-    /// user's crop stays the frame, and ⌘Z never sees a zoom.
+    /// This is the render-side description of a 1:1 window: the frame is cropped/straightened/flipped
+    /// once, and this rect is the part of *that* picture the viewport shows. One source pixel is
+    /// `zoom` content pixels, so the arithmetic is the source-pixel window minus the crop's origin,
+    /// scaled by `zoom` — no rotation of its own, because the window lives in the frame, not in the
+    /// source (`ZoomedEditCarriesTheWindow…` pins the two descriptions against each other).
+    public func outputWindow(of state: LoupeViewState) -> ImageRect? {
+        guard state.mode == .actual else { return nil }
+        let z = zoom(of: state)
+        guard z.isFinite, z > 0 else { return nil }
+        let size = windowSize(of: state)
+        let centre = windowCenter(of: state)
+        let left = (centre.x - size.width / 2 - cropOriginX) * z
+        let top = (centre.y - size.height / 2 - cropOriginY) * z
+        return ImageRect(x: Int(left.rounded()), y: Int(top.rounded()),
+                         width: Int((size.width * z).rounded()),
+                         height: Int((size.height * z).rounded()))
+    }
+
+    /// The document the renderer should be given for this state, **as an output window** routed
+    /// through the crop (`zoomedEdit`) — kept only as the mapping's own expression of the window.
     ///
-    /// The window rect is axis-aligned in *source* space even when the frame is straightened; S0
-    /// rotates inside the crop, so the visible region is the rotated window either way — see
-    /// `LoupeFramingTests.testWindowMappingMatchesTheWholeFrameMapping`.
-    ///
-    /// Two consequences of expressing a window as a crop, both inherited from S0/S3c being written
-    /// against "the crop is the frame" and both bounded:
+    /// `outputWindow(of:)` is what the loupe actually renders with: it hands the frame's crop to S0
+    /// untouched and names the window, so the projection, the vignette and the mask feather all stay
+    /// frame-relative. Expressing the window as a crop instead costs three things, all inherited from
+    /// S0/S3c being written before windows existed:
     ///   · S0 rotates in *normalized crop* space, so a window whose aspect differs from the crop's
-    ///     is a very slightly different projection (~0.3 % of the window at 9° straighten).
-    ///   · S3c vignette and the mask feather normalize to the **content rect**, which for a 1:1
-    ///     window is the window — a vignette is measured against what is visible, not the frame.
-    /// Fixing either for real needs a render-side output-window rect, i.e. a `PhotonsCore` change.
+    ///     is a slightly different projection (~0.3 % of the window at 9° straighten);
+    ///   · S3c vignette and the mask feather normalize to the content rect, which for a 1:1 window is
+    ///     the window — a vignette measured against what is visible rather than the frame;
+    ///   · the derivation has to keep the user's aspect lock out of the way.
+    /// `WindowTests` measures all three. What this function is still good for is the *mapping*: the
+    /// rect it produces and `outputWindow(of:)` name the same region, which
+    /// `testOutputWindowAndTheDerivedCropNameTheSameRegion` checks.
     public func zoomedEdit(_ edit: EditModel, for state: LoupeViewState) -> EditModel {
         guard state.mode == .actual else { return edit }
         var e = edit

@@ -227,12 +227,19 @@ final class LoupeZoomTests: XCTestCase {
         }
     }
 
-    /// S0 rotates in normalized crop space (`r = R(θ)·(uv−0.5)`) and only then scales to pixels, so
-    /// the effective pixel-space angle depends on the rect's aspect ratio. A 1:1 window is
-    /// `viewport ÷ zoom` — the viewport's aspect, not the crop's — so a straightened frame differs
-    /// from its fit projection by a fraction of a percent of the window. Pinned here so the number
-    /// is known and bounded; removing it for real needs an S0 that rotates in pixel space, which is
-    /// a `PhotonsCore` change and out of scope for this task.
+    /// S0 rotates in normalized **frame** space (`r = R(θ)·(uv−0.5)`) and only then scales to pixels,
+    /// so the effective pixel-space angle depends on the frame's aspect ratio. This test measures the
+    /// same aspect sensitivity in `LoupeFraming.mapping`, i.e. in the *hit-testing* projection: a 1:1
+    /// window is `viewport ÷ zoom` — the viewport's aspect, not the crop's — so the window-shaped
+    /// mapping deviates from the whole-frame pitch by a fraction of a percent of the window when the
+    /// frame is straightened.
+    ///
+    /// Since the renderer takes `RenderOptions.outputWindow` the *pixels* no longer have this
+    /// deviation (S0 samples the frame and cuts the window out of it — `WindowTests` measures it at
+    /// 0). What is pinned here is the remaining, purely geometric offset between the frame projection
+    /// the renderer uses and the window projection this mapping still uses for pan/zoom anchoring;
+    /// closing it is a `LoupeMapping` change (frame size + window origin instead of a crop-shaped
+    /// window), deliberately not part of the output-window task.
     func testStraightenAngleFollowsTheCropAspectNotTheWindow() {
         let f = framing(degrees: 9)
         let zoom = 2.0
@@ -384,6 +391,41 @@ final class LoupeZoomTests: XCTestCase {
         let edit = EditModel.neutral
         let f = framing()
         XCTAssertTrue(f.zoomedEdit(edit, for: .fit) == edit)
+    }
+
+    /// `outputWindow(of:)` is what the loupe renders with; `cropRect(of:)` is the mapping's own
+    /// description of the same rectangle. Moving the window from the document into
+    /// `RenderOptions` must not move the *region*: same origin, same size, in content pixels
+    /// (`zoom` content pixels per source pixel, measured from the crop's corner).
+    func testOutputWindowAndTheDerivedCropNameTheSameRegion() {
+        let crop = CropRect(left: 0.1, top: 0.08, right: 0.85, bottom: 0.72)
+        for degrees in [0.0, 7.0] {
+            let f = framing(degrees: degrees, crop: crop)
+            XCTAssertNil(f.outputWindow(of: .fit), "fit is the whole frame, so it names no window")
+            for zoom in [1.0, 2.5, 8.0] {
+                for centre in [(3000.0, 2000.0), (1200.0, 700.0), (5200.0, 3500.0)] {
+                    let state = actual(zoom: zoom, x: centre.0, y: centre.1)
+                    let rect = f.cropRect(of: state)
+                    let window = f.outputWindow(of: state)
+                    XCTAssertNotNil(window)
+                    guard let window else { continue }
+                    // crop rect (source pixels) → content pixels, relative to the crop's origin.
+                    XCTAssertEqual(Double(window.x), (rect.left * f.sourceWidth - f.cropOriginX) * zoom,
+                                   accuracy: 1.0 * zoom,
+                                   "θ=\(degrees) z=\(zoom): window origin x drifted")
+                    XCTAssertEqual(Double(window.y), (rect.top * f.sourceHeight - f.cropOriginY) * zoom,
+                                   accuracy: 1.0 * zoom,
+                                   "θ=\(degrees) z=\(zoom): window origin y drifted")
+                    XCTAssertEqual(Double(window.width), rect.width * f.sourceWidth * zoom,
+                                   accuracy: 1.0 * zoom)
+                    XCTAssertEqual(Double(window.height), rect.height * f.sourceHeight * zoom,
+                                   accuracy: 1.0 * zoom)
+                    // And it never leaves the frame: the crop bounds it.
+                    XCTAssertGreaterThanOrEqual(window.x, 0)
+                    XCTAssertGreaterThanOrEqual(window.y, 0)
+                }
+            }
+        }
     }
 
     // MARK: 9. display headroom

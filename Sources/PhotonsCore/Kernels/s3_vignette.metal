@@ -5,13 +5,19 @@ using namespace metal;
 //
 // Shape blends between a square falloff and a radial one via `roundness`; `midpoint` moves where
 // darkening starts; `feather` sets how soft the transition is. Amount < 0 darkens the corners,
-// > 0 lightens them. Distances are measured in *content* space so a letterboxed canvas vignettes
-// the photograph, not the black padding.
+// > 0 lightens them. Distances are measured in **frame** space, never in window space: a vignette is
+// a property of the photograph, so a 1:1 window must see exactly the falloff the whole frame has at
+// the same physical place — and the letterbox padding must not be vignetted at all.
+//
+// `p.b.xy` is the frame's size, `p.b.zw` the window's origin, both in content pixels
+// (`RenderOptions.outputWindow`); `p.c.yz` is the content rect's origin inside the canvas. Without a
+// window the three numbers reduce to the content rect, which is what this pass used before windows
+// existed.
 
 struct VignetteParams {
     float4 a;   // amount, midpoint, feather, roundness
-    float4 b;   // contentWidth, contentHeight, contentOriginX, contentOriginY
-    float4 c;   // identity, pad, pad, pad
+    float4 b;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
+    float4 c;   // identity, contentOrigin.x, contentOrigin.y, pad
 };
 
 kernel void s3_vignette(texture2d<float, access::read> src [[texture(0)]],
@@ -24,8 +30,10 @@ kernel void s3_vignette(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
+    // Canvas pixel → position inside the whole frame, then the guard in `uv` — byte for byte the
+    // test this pass has always made, so the whole-frame path keeps its recorded pixels.
     float2 size = max(p.b.xy, float2(1.0));
-    float2 uv = (float2(gid) + 0.5 - p.b.zw) / size;
+    float2 uv = (float2(gid) + 0.5 - p.c.yz + p.b.zw) / size;
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
         dst.write(c, gid);
         return;
