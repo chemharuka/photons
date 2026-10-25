@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 2,
+  "processVersion": 1,
+  "geometry": {
+    "cropRect": { "left": 0.2, "top": 0.15, "right": 0.7, "bottom": 0.65 },
+    "rotationDegrees": -12.5,
+    "aspectLock": "original"
+  }
+}

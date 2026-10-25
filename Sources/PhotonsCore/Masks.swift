@@ -196,9 +196,9 @@ public struct RadialGradientShape: Sendable, Equatable, Codable {
     }
 }
 
-/// One brush stroke: a flat polyline walked as a capsule chain (§4.1). Present in the schema from
-/// day one so documents need no migration when the brush lands; **not rendered by the 005b pass**
-/// (see `MaskShape.isRenderableNow`).
+/// One brush stroke: a flat polyline walked as a capsule chain (§4.1). Coverage is a distance field
+/// over the S1.5 atlas: `alpha = 1 − smoothstep(r(1−f), r, distToSegment)`, accumulated with `max`
+/// inside one stroke so joints never double-expose.
 public struct Stroke: Sendable, Equatable, Codable {
     /// Flat `[x0, y0, x1, y1, …]`, normalised to the uncropped source.
     public var points: [Float]
@@ -211,17 +211,21 @@ public struct Stroke: Sendable, Equatable, Codable {
     /// 0…1, a per-stroke alpha multiplier.
     public var flow: Double
     public var erase: Bool
+    /// Joins the last point back to the first (§2/§4.1: "one stroke, several segments, closable").
+    public var closed: Bool
 
     public static let `default` = Stroke()
 
     public init(points: [Float] = [], pressure: [Float] = [], radius: Double = 0.06,
-                feather: Double = 0.5, flow: Double = 1, erase: Bool = false) {
+                feather: Double = 0.5, flow: Double = 1, erase: Bool = false,
+                closed: Bool = false) {
         self.points = points
         self.pressure = pressure
         self.radius = radius
         self.feather = feather
         self.flow = flow
         self.erase = erase
+        self.closed = closed
     }
 
     public init(from decoder: any Decoder) throws {
@@ -233,18 +237,27 @@ public struct Stroke: Sendable, Equatable, Codable {
         v.feather = c.val("feather", v.feather)
         v.flow = c.val("flow", v.flow)
         v.erase = c.val("erase", v.erase)
+        v.closed = c.val("closed", v.closed)
         self = v
+    }
+
+    /// Radius actually painted, short-edge units. A stroke carries its own radius (§2); `size` is
+    /// only the UI's current diameter and is the fallback for a stroke that carries none.
+    public func resolvedRadius(fallbackSize size: Double) -> Double {
+        radius > 0 ? radius : max(size, 0) * 0.5
     }
 
     public var keyString: String {
         // 5 decimals is the 1e-5 coordinate quantisation of §2 (~0.6 px at 60 MP).
         let p = points.map { k(Double($0)) }.joined(separator: ",")
         let pr = pressure.isEmpty ? "" : pressure.map { k(Double($0)) }.joined(separator: ",")
-        return "st(r=\(k(radius));f=\(k(feather));fl=\(k(flow));e=\(erase ? 1 : 0);p=[\(p)];pr=[\(pr)])"
+        return "st(r=\(k(radius));f=\(k(feather));fl=\(k(flow));e=\(erase ? 1 : 0);c=\(closed ? 1 : 0);p=[\(p)];pr=[\(pr)])"
     }
 }
 
 public struct BrushShape: Sendable, Equatable, Codable {
+    /// The UI's current diameter (short-edge units). Each stroke carries its own radius, which is
+    /// what the renderer paints with (§2).
     public var size: Double
     public var strokes: [Stroke]
 
@@ -268,12 +281,15 @@ public struct BrushShape: Sendable, Equatable, Codable {
     }
 }
 
-/// §4.4 — up to eight sRGB sample colours, nearest-colour distance in OKLab. Schema only for now.
+/// §4.4 — up to eight sRGB sample colours, nearest-colour distance in OKLab.
 public struct ColorRangeShape: Sendable, Equatable, Codable {
     public static let maxSamples = 8
     /// sRGB 0…1 triples.
     public var samples: [[Double]]
+    /// Soft threshold in OKLab metric units (see `OKLabMetric`).
     public var tolerance: Double
+    /// Width of the value-domain transition, as a fraction of the remaining distance to the far end
+    /// of the ramp: `alpha = 1 − smoothstep(tol, tol + smooth·(0.5 − tol), d)` (§4.4).
     public var smoothness: Double
 
     public static let `default` = ColorRangeShape()
@@ -293,13 +309,24 @@ public struct ColorRangeShape: Sendable, Equatable, Codable {
         self = v
     }
 
+    /// The metric-space coordinates the shader compares against: `(L, a/0.4, b/0.4)` per sample.
+    /// Samples are stored sRGB-encoded (§2), so they are decoded to linear before OKLab — the same
+    /// transform the pixel side takes, which keeps one comparison space (§4.4).
+    public var metricSamples: [[Double]] {
+        samples.map { s in
+            guard s.count >= 3 else { return [0, 0, 0] }
+            let lab = OKLabMetric.fromSRGB(s[0], s[1], s[2])
+            return [lab.L, lab.a / OKLabMetric.chromaSpan, lab.b / OKLabMetric.chromaSpan]
+        }
+    }
+
     public var keyString: String {
         let s = samples.map { $0.map { k($0) }.joined(separator: ",") }.joined(separator: ";")
         return "colour(n=\(samples.count);s=[\(s)];tol=\(k(tolerance));smo=\(k(smoothness)))"
     }
 }
 
-/// §4.5 — OKLab L with two-sided feather. Schema only for now.
+/// §4.5 — OKLab L with two-sided feather.
 public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     public var low: Double
     public var high: Double
@@ -326,8 +353,66 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
         self = v
     }
 
+    public var isOrdered: Bool { !(low > high) }
+
+    /// `low`/`high` with the documented repair for an inverted pair: the two bounds swap **with
+    /// their own feathers**, so a mirrored range renders as the mirror of the original — never as
+    /// an empty selection and never with the feathers silently exchanged (§4.5).
+    public var ordered: (low: Double, high: Double, lowFeather: Double, highFeather: Double) {
+        guard low > high else { return (low, high, lowFeather, highFeather) }
+        return (high, low, highFeather, lowFeather)
+    }
+
     public var keyString: String {
         "luma(lo=\(k(low));hi=\(k(high));loF=\(k(lowFeather));hiF=\(k(highFeather)))"
+    }
+}
+
+// MARK: - the OKLab metric (§4.4)
+
+/// Ottosson's OKLab (2020) — two matrices and a cube root, written from the published formulas.
+/// Neither this nor any other file copies an in-tree implementation: ART, RawTherapee, darktable
+/// (GPL-3.0) and RapidRAW (AGPL-3.0) stay read-only (§7).
+///
+/// **Metric space.** `L` is the OKLab lightness, which is already 0…1 for in-gamut colours. `a`/`b`
+/// span roughly ±0.4 for sRGB, so they are divided by `chromaSpan` — one tolerance number then means
+/// "this fraction of the gamut on either axis", and the two ranges are comparable (§4.4).
+public enum OKLabMetric {
+    /// The natural half-span of OKLab `a`/`b` for sRGB primaries.
+    public static let chromaSpan = 0.4
+
+    /// sRGB EOTF: encoded 0…1 → linear 0…1.
+    public static func sRGBToLinear(_ v: Double) -> Double {
+        let c = min(max(v, 0), 1)
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
+    /// Linear sRGB (the graph's working space) → OKLab.
+    public static func fromLinear(_ r: Double, _ g: Double, _ b: Double)
+        -> (L: Double, a: Double, b: Double) {
+        let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+        let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+        let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+        let l_ = cbrt(max(l, 0)), m_ = cbrt(max(m, 0)), s_ = cbrt(max(s, 0))
+        return (L: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+                a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+                b: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+    }
+
+    /// sRGB-encoded 0…1 (the storage space of `ColorRangeShape.samples`) → OKLab.
+    public static func fromSRGB(_ r: Double, _ g: Double, _ b: Double)
+        -> (L: Double, a: Double, b: Double) {
+        fromLinear(sRGBToLinear(r), sRGBToLinear(g), sRGBToLinear(b))
+    }
+
+    /// Distance in the normalised metric space, i.e. what the colour range compares against its
+    /// tolerance.
+    public static func distance(_ p: (L: Double, a: Double, b: Double),
+                                _ q: (L: Double, a: Double, b: Double)) -> Double {
+        let dL = p.L - q.L
+        let da = (p.a - q.a) / chromaSpan
+        let db = (p.b - q.b) / chromaSpan
+        return (dL * dL + da * da + db * db).squareRoot()
     }
 }
 
@@ -423,13 +508,13 @@ public enum MaskShape: Sendable, Equatable {
         }
     }
 
-    /// Shapes this build can actually evaluate. The other kinds decode, round-trip and key
-    /// correctly but contribute **zero coverage** until their pass lands (005c–e); the renderer is
-    /// explicit about that instead of pretending a brush is a gradient.
+    /// Shapes this build can actually evaluate. `semantic` and `unsupported` decode, round-trip and
+    /// key correctly but contribute **zero coverage** until 005e lands; the renderer is explicit
+    /// about that instead of pretending a semantic matte is a gradient.
     public var isRenderableNow: Bool {
         switch self {
-        case .linearGradient, .radialGradient: return true
-        default: return false
+        case .linearGradient, .radialGradient, .brush, .colorRange, .luminanceRange: return true
+        case .semantic, .unsupported: return false
         }
     }
 

@@ -1,0 +1,53 @@
+{
+  "atlasSHA256" : "b95ad7528daf5a0ee76f504391303d658e1bf4af0187cf1b7c2e1fd8524eefab",
+  "displaySHA256" : "b376eecc316840ec9649d53af1c50cbaa1bc75405475a993a8e2b5f0a215b777",
+  "maskIDs" : [
+    "m-br",
+    "m-cr"
+  ],
+  "note" : "Recorded by MaskTests on the synthetic 96×65 ramp image; masks m-br (brush: 3-point paint stroke + erase stroke, +0.5 EV) and m-cr (colour range over the two ramp ends, tolerance 0.15 \/ smoothness 0.6, amount 60, −0.8 EV, +20 sat). 8-bit quantised digests so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended.",
+  "sampleX" : [
+    6,
+    24,
+    48,
+    72,
+    90,
+    60
+  ],
+  "sampleY" : [
+    8,
+    32,
+    32,
+    32,
+    60,
+    46
+  ],
+  "samples" : [
+    [
+      0,
+      0.1605224609375
+    ],
+    [
+      0.0870361328125,
+      0.484130859375
+    ],
+    [
+      0.94970703125,
+      0.5615234375
+    ],
+    [
+      0.02667236328125,
+      0.42724609375
+    ],
+    [
+      0,
+      0.270263671875
+    ],
+    [
+      0,
+      0.51171875
+    ]
+  ],
+  "sourceHeight" : 65,
+  "sourceWidth" : 96
+}

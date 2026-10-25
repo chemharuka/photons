@@ -166,7 +166,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     // MARK: model plumbing
 
     private func observeModel() {
-        guard let session else { return }
+        guard session != nil else { return }
         bridge.observe({ [weak self] in
             guard let self, let session = self.session else { return }
             _ = session.assets.count

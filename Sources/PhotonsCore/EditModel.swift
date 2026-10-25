@@ -140,9 +140,16 @@ public struct EditModel: Sendable, Equatable, Codable {
     public func keyMaterial(_ stage: RenderStage) -> String {
         switch stage {
         case .geometry:
-            return "pv=\(processVersion);crop=\(geometry.crop.keyString)"
-                + ";rot=\(k(geometry.rotationDegrees))"
+            // Byte-identical to the M1 material for every document that predates `aspectLock`
+            // (the lock is only appended when it actually constrains the rect), so the pinned key
+            // vector in MaskTests keeps holding.
+            var s = "pv=\(processVersion);crop=\(geometry.crop.keyString)"
+                + ";rot=\(k(geometry.straightenDegrees))"
                 + ";flip=\(geometry.flipHorizontal ? 1 : 0)\(geometry.flipVertical ? 1 : 0)"
+            if geometry.aspectLock.ratio != nil {
+                s += ";asp=\(geometry.aspectLock.code)"
+            }
+            return s
 
         case .sceneLinear:
             return "ev=\(k(light.exposure));temp=\(k(light.temperature));tint=\(k(light.tint))"
@@ -181,35 +188,97 @@ public struct EditModel: Sendable, Equatable, Codable {
 // MARK: - Groups
 
 /// S0 — geometry: crop, straighten, flips.
+///
+/// The document stores the crop as `crop` (origin + size) because that is the key the first
+/// documents were written with; `cropRect` is the *same* rectangle viewed as four edges
+/// (`right`/`bottom` are boundaries, XMP `crs:Crop*` order) and is the form the crop math speaks.
+/// One stored truth, two spellings — a document can never carry two crop rects that disagree.
 public struct GeometryGroup: Sendable, Equatable, Codable {
+    /// The straighten control's range: a dial that turns the picture more than 45° is a rotate, and
+    /// rotation lives in `orientation` (future), not here.
+    public static let straightenLimit = 45.0
+
     public var crop: NormalizedRect
     /// Straighten angle in degrees, positive = clockwise. Applied *inside* the crop rect (the crop
     /// stays the output frame, so over-rotating reveals clamped edges rather than growing the canvas).
+    /// Stored as given; `straightenDegrees` is the value S0 actually consumes (clamped to ±45).
     public var rotationDegrees: Double
     public var flipHorizontal: Bool
     public var flipVertical: Bool
+    /// Ratio the crop is constrained to. `.original` (the default) means "no constraint": the stored
+    /// rect is the frame, which is what keeps pre-existing documents pixel-identical.
+    public var aspectLock: AspectLock
 
     public static let identity = GeometryGroup(crop: .full, rotationDegrees: 0,
-                                               flipHorizontal: false, flipVertical: false)
+                                               flipHorizontal: false, flipVertical: false,
+                                               aspectLock: .original)
 
     public init(crop: NormalizedRect = .full,
                 rotationDegrees: Double = 0,
                 flipHorizontal: Bool = false,
-                flipVertical: Bool = false) {
+                flipVertical: Bool = false,
+                aspectLock: AspectLock = .original) {
         self.crop = crop
         self.rotationDegrees = rotationDegrees
         self.flipHorizontal = flipHorizontal
         self.flipVertical = flipVertical
+        self.aspectLock = aspectLock
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = GeometryGroup.identity
         v.crop = c.val("crop", v.crop)
+        // Edge-spelled crop (the XMP-facing form). When both keys are present the explicit edges win:
+        // a writer that emits both writes them consistently, and a hand-edited document says what it
+        // means once, in the newer spelling.
+        if let edges = try? c.decodeIfPresent(CropRect.self, forKey: AnyCodingKey("cropRect")) {
+            v.crop = edges.clamped().normalizedRect
+        }
         v.rotationDegrees = c.val("rotationDegrees", v.rotationDegrees)
         v.flipHorizontal = c.val("flipHorizontal", v.flipHorizontal)
         v.flipVertical = c.val("flipVertical", v.flipVertical)
+        v.aspectLock = c.val("aspectLock", v.aspectLock)
         self = v
+    }
+
+    // MARK: explicit crop / straighten semantics
+
+    /// The crop as four edges in normalized source coordinates (0…1). `right`/`bottom` are
+    /// boundaries, so `cropRect.full` is `(0, 0, 1, 1)` and not `(0, 0, 0, 0)`.
+    public var cropRect: CropRect {
+        get { CropRect(crop) }
+        set { crop = newValue.clamped().normalizedRect }
+    }
+
+    public var flipH: Bool {
+        get { flipHorizontal }
+        set { flipHorizontal = newValue }
+    }
+
+    public var flipV: Bool {
+        get { flipVertical }
+        set { flipVertical = newValue }
+    }
+
+    /// Straighten angle as S0 uses it: the stored value clamped to ±`straightenLimit`.
+    public var straightenDegrees: Double {
+        min(max(rotationDegrees, -GeometryGroup.straightenLimit), GeometryGroup.straightenLimit)
+    }
+
+    /// The rect the renderer feeds to S0: the stored crop, re-shaped by `aspectLock` when the lock
+    /// names a ratio (the lock wins over a rect that disagrees with it), then clamped.
+    public func renderCrop(source: ImageSize) -> CropRect {
+        CropMath.lockedCrop(aspectLock, in: cropRect, source: source).clamped()
+    }
+
+    /// `renderCrop` in the stored `NormalizedRect` form.
+    public func renderCropRect(source: ImageSize) -> NormalizedRect {
+        renderCrop(source: source).normalizedRect
+    }
+
+    public var isIdentity: Bool {
+        self == GeometryGroup.identity
     }
 }
 

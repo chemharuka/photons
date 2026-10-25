@@ -79,9 +79,13 @@ kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
     for (uint i = 0; i < uint(max(p.a.y, 0)); ++i) {
         LocalAdjustDesc d = adjust[i];
         if (d.c.w < 0.5) { continue; }                  // neutral adjustments: skip entirely
-        float a = atlas.read(gid, i).r;
-        if (a <= 0.0) { continue; }
-        v = mix(v, local_adjust(v, d), clamp(a * d.a.w, 0.0, 1.0));
+        float a = atlas.read(gid, i).r;                 // opacity · combine · invert, from S1.5
+        // `acc · amount`: the atlas already carries the mask-level opacity, `d.a.w` carries the
+        // adjustment's amount (0…1). Zero weight returns before `local_adjust`, so a mask with
+        // amount 0 is bit-identical to no mask even if a slider would have produced a NaN (§3.3).
+        float w = clamp(a * d.a.w, 0.0, 1.0);
+        if (w <= 0.0) { continue; }
+        v = mix(v, local_adjust(v, d), w);
     }
     dst.write(float4(v, c.a), gid);
 }

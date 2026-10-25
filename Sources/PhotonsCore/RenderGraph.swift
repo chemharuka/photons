@@ -180,9 +180,21 @@ private struct MaskDescU {
 }
 
 private struct MaskShapeDescU {
-    var meta: SIMD4<Int32>   // kind (0 linear, 1 radial, −1 not evaluated yet), componentInvert, op, pad
+    var meta: SIMD4<Int32>   // kind (0 linear, 1 radial, 2 brush, 3 colour, 4 luma, −1 not evaluated), componentInvert, op, pad
     var p0: SIMD4<Float>     // linear: start.xy end.xy | radial: centre.xy radius.xy
+                             // brush: firstStroke, strokeCount | colour: firstSample, count, tol, smooth
+                             // luma: low, high, lowFeather, highFeather
     var p1: SIMD4<Float>     // linear: midpoint, feather | radial: cos, sin, feather
+}
+
+/// One brush stroke, flattened for the GPU. The point list lives in a separate `float4` array
+/// (`x, y, pressure`); the document keeps the same three pieces — points, radius, flow — and never a
+/// bitmap (§2).
+private struct MaskStrokeDescU {
+    var meta: SIMD4<Int32>   // pointFirst, pointCount, closed, pad
+    var misc: SIMD4<Float>   // radius (short edge), feather, flow, erase
+    var bmin: SIMD4<Float>   // bounding box in normalised source, already grown by the radius
+    var bmax: SIMD4<Float>
 }
 
 private struct LocalParamsU {
@@ -202,9 +214,15 @@ private struct MaskTable {
     let masks: [MaskDescU]
     let shapes: [MaskShapeDescU]
     let adjust: [LocalAdjustU]
+    let strokes: [MaskStrokeDescU]
+    let points: [SIMD4<Float>]
+    let colours: [SIMD4<Float>]
     let maskBuffer: MTLBuffer
     let shapeBuffer: MTLBuffer
     let adjustBuffer: MTLBuffer
+    let strokeBuffer: MTLBuffer
+    let pointBuffer: MTLBuffer
+    let colourBuffer: MTLBuffer
 }
 
 extension ColorGroup {
@@ -296,7 +314,8 @@ public final class RenderGraph {
         let canvas: ImageSize
         let content: ImageSize
         let origin: SIMD2<Float>
-        let crop: NormalizedRect
+        /// Edge-spelled crop, already resolved from `aspectLock` and clamped: what S0 samples.
+        let crop: CropRect
         let keys: StageKeys
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
@@ -305,9 +324,10 @@ public final class RenderGraph {
     }
 
     private func plan(_ edit: EditModel, _ options: RenderOptions) -> Plan {
-        let crop = edit.geometry.crop.clamped()
-        let cropPixels = ImageSize(width: Int((Double(sourceSize.width) * crop.width).rounded()),
-                                   height: Int((Double(sourceSize.height) * crop.height).rounded()))
+        // The aspect lock and the ±45 straighten limit are resolved here, once: S0 receives a plain
+        // normalized rect plus cos/sin, exactly the shape it always had.
+        let crop = edit.geometry.renderCrop(source: sourceSize)
+        let cropPixels = CropMath.outputSize(crop, in: sourceSize)
         let scale = max(0.01, options.scale)
         let requested = ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
                                   height: Int((Double(cropPixels.height) * scale).rounded()))
@@ -487,7 +507,8 @@ public final class RenderGraph {
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
                          Float(sourceSize.width), Float(sourceSize.height)),
-                c: SIMD4(Float(plan.crop.x), Float(plan.crop.y), Float(plan.crop.width), Float(plan.crop.height)),
+                c: SIMD4(Float(plan.crop.left), Float(plan.crop.top),
+                         Float(plan.crop.width), Float(plan.crop.height)),
                 d: SIMD4(costheta(edit), sintheta(edit),
                          edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
                 e: SIMD4(identity ? 1 : 0, 0, 0, 0))
@@ -592,12 +613,14 @@ public final class RenderGraph {
         }
     }
 
+    // S0 and the mask atlas must rotate by the same angle, so both read `straightenDegrees`
+    // (the stored value clamped to the ±45 straighten range) instead of the raw field.
     private func costheta(_ edit: EditModel) -> Float {
-        Float(cos(edit.geometry.rotationDegrees * .pi / 180))
+        Float(cos(edit.geometry.straightenDegrees * .pi / 180))
     }
 
     private func sintheta(_ edit: EditModel) -> Float {
-        Float(sin(edit.geometry.rotationDegrees * .pi / 180))
+        Float(sin(edit.geometry.straightenDegrees * .pi / 180))
     }
 
     // MARK: masks (S1.5 / S1.6)
@@ -616,9 +639,14 @@ public final class RenderGraph {
         var masks: [MaskDescU] = []
         var shapes: [MaskShapeDescU] = []
         var adjust: [LocalAdjustU] = []
+        var strokes: [MaskStrokeDescU] = []
+        var points: [SIMD4<Float>] = []
+        var colours: [SIMD4<Float>] = []
         for m in active {
             let first = Int32(shapes.count)
-            for c in m.components { shapes.append(shapeDesc(c)) }
+            for c in m.components {
+                shapes.append(shapeDesc(c, strokes: &strokes, points: &points, colours: &colours))
+            }
             masks.append(MaskDescU(meta: SIMD4(first, Int32(m.components.count), m.invert ? 1 : 0, 0),
                                    misc: SIMD4(Float(min(max(m.opacity, 0), 1)), 0, 0, 0)))
             adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled))
@@ -628,18 +656,32 @@ public final class RenderGraph {
         if masks.isEmpty { masks.append(MaskDescU(meta: .zero, misc: .zero)) }
         if shapes.isEmpty { shapes.append(MaskShapeDescU(meta: .zero, p0: .zero, p1: .zero)) }
         if adjust.isEmpty { adjust.append(LocalAdjustU(a: SIMD4(1, 1, 1, 0), b: .zero, c: SIMD4(0, 0, 0, 0))) }
+        if strokes.isEmpty {
+            strokes.append(MaskStrokeDescU(meta: .zero, misc: .zero, bmin: .zero, bmax: .zero))
+        }
+        if points.isEmpty { points.append(.zero) }
+        if colours.isEmpty { colours.append(.zero) }
 
         let table = MaskTable(ids: active.map(\.id),
                               masks: masks, shapes: shapes, adjust: adjust,
+                              strokes: strokes, points: points, colours: colours,
                               maskBuffer: try buffer(masks, "mask descs"),
                               shapeBuffer: try buffer(shapes, "mask shapes"),
-                              adjustBuffer: try buffer(adjust, "mask adjustments"))
+                              adjustBuffer: try buffer(adjust, "mask adjustments"),
+                              strokeBuffer: try buffer(strokes, "mask strokes"),
+                              pointBuffer: try buffer(points, "mask brush points"),
+                              colourBuffer: try buffer(colours, "mask colour samples"))
         if maskTables.count > 8 { maskTables.removeAll() }
         maskTables[cacheKey] = table
         return table
     }
 
-    private func shapeDesc(_ c: MaskComponent) -> MaskShapeDescU {
+    /// One component → the GPU's fixed-layout descriptor, appending any variable-length payload
+    /// (brush points, colour samples) to the shared side arrays.
+    private func shapeDesc(_ c: MaskComponent,
+                           strokes: inout [MaskStrokeDescU],
+                           points: inout [SIMD4<Float>],
+                           colours: inout [SIMD4<Float>]) -> MaskShapeDescU {
         let op: Int32 = c.op == .subtract ? 1 : (c.op == .intersect ? 2 : 0)
         let invert: Int32 = c.invert ? 1 : 0
         let feather = Float(min(max(c.feather, 0), 1))
@@ -657,8 +699,65 @@ public final class RenderGraph {
                                   p0: SIMD4(Float(g.center.x), Float(g.center.y),
                                             Float(max(g.radius.x, 0)), Float(max(g.radius.y, 0))),
                                   p1: SIMD4(Float(cos(radians)), Float(sin(radians)), feather, 0))
-        default:
-            // Not evaluated by this pass (005b scope): zero coverage, never a guess.
+        case .brush(let b):
+            let first = Int32(strokes.count)
+            let minSide = Double(min(sourceSize.width, sourceSize.height))
+            for stroke in b.strokes {
+                let r = min(max(stroke.resolvedRadius(fallbackSize: b.size), 0), 1)
+                let pointFirst = Int32(points.count)
+                // Pressure only scales the radius (§4.1). Absent pressure is a constant 1 so the
+                // kernel has no second layout to handle.
+                let n = stroke.points.count / 2
+                var lo = SIMD4<Float>(Float.infinity, Float.infinity, 0, 0)
+                var hi = SIMD4<Float>(-Float.infinity, -Float.infinity, 0, 0)
+                for i in 0..<n {
+                    let x = Float(stroke.points[i * 2])
+                    let y = Float(stroke.points[i * 2 + 1])
+                    let p = i < stroke.pressure.count ? max(stroke.pressure[i], 0.02) : 1
+                    points.append(SIMD4(x, y, p, 0))
+                    lo.x = min(lo.x, x); lo.y = min(lo.y, y)
+                    hi.x = max(hi.x, x); hi.y = max(hi.y, y)
+                }
+                // The bounding box is grown by the radius in *its own* axis units: the radius is a
+                // short-edge length, so it covers `r·minSide/W` in x and `r·minSide/H` in y.
+                if n > 0 {
+                    let rx = Float(r * minSide / Double(max(sourceSize.width, 1)))
+                    let ry = Float(r * minSide / Double(max(sourceSize.height, 1)))
+                    lo.x -= rx; lo.y -= ry
+                    hi.x += rx; hi.y += ry
+                } else {
+                    lo = .zero
+                    hi = .zero
+                }
+                strokes.append(MaskStrokeDescU(
+                    meta: SIMD4(pointFirst, Int32(n), stroke.closed ? 1 : 0, 0),
+                    misc: SIMD4(Float(r), Float(min(max(stroke.feather, 0), 0.999)),
+                                Float(min(max(stroke.flow, 0), 1)), stroke.erase ? 1 : 0),
+                    bmin: lo, bmax: hi))
+            }
+            return MaskShapeDescU(meta: SIMD4(2, invert, op, 0),
+                                  p0: SIMD4(Float(first), Float(b.strokes.count), 0, 0),
+                                  p1: SIMD4(feather, 0, 0, 0))
+        case .colorRange(let g):
+            let first = Int32(colours.count)
+            for s in g.metricSamples {
+                colours.append(SIMD4(Float(s[0]), Float(s[1]), Float(s[2]), 0))
+            }
+            return MaskShapeDescU(meta: SIMD4(3, invert, op, 0),
+                                  p0: SIMD4(Float(first), Float(g.metricSamples.count),
+                                            Float(max(g.tolerance, 0)),
+                                            Float(min(max(g.smoothness, 0), 1))),
+                                  p1: SIMD4(feather, 0, 0, 0))
+        case .luminanceRange(let g):
+            // An inverted pair is repaired here, once, so the kernel and every reference agree on
+            // the same ordered window (§4.5).
+            let o = g.ordered
+            return MaskShapeDescU(meta: SIMD4(4, invert, op, 0),
+                                  p0: SIMD4(Float(o.low), Float(o.high),
+                                            Float(o.lowFeather), Float(o.highFeather)),
+                                  p1: SIMD4(feather, 0, 0, 0))
+        case .semantic, .unsupported:
+            // Not evaluated by this pass: zero coverage, never a guess.
             return MaskShapeDescU(meta: SIMD4(-1, invert, op, 0), p0: .zero, p1: .zero)
         }
     }
@@ -707,7 +806,8 @@ public final class RenderGraph {
             a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
             b: SIMD4(Float(plan.content.width), Float(plan.content.height),
                      Float(sourceSize.width), Float(sourceSize.height)),
-            c: SIMD4(Float(plan.crop.x), Float(plan.crop.y), Float(plan.crop.width), Float(plan.crop.height)),
+            c: SIMD4(Float(plan.crop.left), Float(plan.crop.top),
+                         Float(plan.crop.width), Float(plan.crop.height)),
             d: SIMD4(costheta(edit), sintheta(edit),
                      edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
             e: SIMD4(Int32(table.ids.count), 0, 0, 0))
@@ -718,6 +818,9 @@ public final class RenderGraph {
         enc.setBytes(&params, length: MemoryLayout<MaskAtlasParams>.stride, index: 0)
         enc.setBuffer(table.maskBuffer, offset: 0, index: 1)
         enc.setBuffer(table.shapeBuffer, offset: 0, index: 2)
+        enc.setBuffer(table.strokeBuffer, offset: 0, index: 3)
+        enc.setBuffer(table.pointBuffer, offset: 0, index: 4)
+        enc.setBuffer(table.colourBuffer, offset: 0, index: 5)
         dispatch(enc, p, plan.canvas)
         enc.endEncoding()
     }
