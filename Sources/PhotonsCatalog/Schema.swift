@@ -9,6 +9,7 @@ import GRDB
 /// | v1 | the catalog: assets, source roots, keywords, albums, import ledger, `asset_history` |
 /// | v2 | `assets.history_end` — the persisted snapshot cursor (D10's `history_end`) |
 /// | v3 | `assets.edit_time` + `develop_quarantine` — the develop document actually lands |
+/// | v4 | `presets` — named partial documents for M5's preset panel |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -17,7 +18,7 @@ import GRDB
 /// only things missing were a write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 3
+    public static let version = 4
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -27,6 +28,7 @@ public enum Schema {
         ("v1", v1),
         ("v2", v2),
         ("v3", v3),
+        ("v4", v4),
     ]
 
     static var migrator: DatabaseMigrator {
@@ -225,5 +227,36 @@ public enum Schema {
       quarantined_at  TEXT NOT NULL
     );
     CREATE INDEX idx_develop_quarantine_asset ON develop_quarantine(asset_id, quarantined_at);
+    """
+
+    // MARK: - v4
+
+    /// Presets: named **partial** documents (M5).
+    ///
+    /// There is no `presets` table before this step, so v4 is pure `CREATE` — nothing to ALTER and
+    /// therefore **no new columns on existing tables**. A library that never uses presets ends up
+    /// with one empty table, which is the cheapest honest shape for an additive feature.
+    ///
+    /// Two decisions worth the ink:
+    ///
+    /// - `develop_json` holds the whole preset envelope (schemaVersion, name, groups, fragment),
+    ///   encoded with the same canonical encoder as `assets.develop_json` (`Catalog.encode`). Name
+    ///   and groups are duplicated in the envelope *on purpose*: the row is a cache of facts the
+    ///   envelope owns, so a preset can be exported to a file and re-imported with nothing lost.
+    /// - `is_default` has a **partial unique index**, so "exactly one default preset" is enforced by
+    ///   SQLite rather than by remembering to clear the previous one. `setDefaultPreset` still clears
+    ///   in the same transaction, because a constraint violation is a worse error message than a
+    ///   successful swap.
+    private static let v4 = """
+    CREATE TABLE presets(
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      develop_json TEXT NOT NULL,
+      is_default   INTEGER NOT NULL DEFAULT 0,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_presets_name ON presets(name COLLATE NOCASE);
+    CREATE UNIQUE INDEX idx_presets_default ON presets(is_default) WHERE is_default = 1;
     """
 }

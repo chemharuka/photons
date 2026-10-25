@@ -83,6 +83,13 @@ public final class Catalog {
 
     public var developDecodeFailures: Int { developFailureCounter.value }
 
+    /// Preset rows that did not decode since this handle opened (M5). Same contract as
+    /// `developDecodeFailures`: the evidence stays in the row, the count is a "this library has
+    /// something this build cannot read" signal.
+    let presetFailureCounter = AtomicCounter()
+
+    public var presetDecodeFailures: Int { presetFailureCounter.value }
+
     private init(layout: LibraryLayout, dbQueue: DatabaseQueue) {
         self.layout = layout
         self.dbQueue = dbQueue

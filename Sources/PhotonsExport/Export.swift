@@ -10,12 +10,20 @@ public enum ExportFormat: String, Sendable, CaseIterable {
     case jpeg
     case heic
     case tiff
+    /// Lossless, 8/16-bit, and the one container ImageIO cannot copy-image-source — XMP embedding
+    /// re-encodes (docs/xmp-mapping.md §4.2).
+    case png
+    /// AVIF is free on macOS 14+: ImageIO ships the encoder, so it costs no dependency
+    /// (docs/architecture-decisions.md §11.5). 8-bit only in practice.
+    case avif
 
     public var utType: UTType {
         switch self {
         case .jpeg: return .jpeg
         case .heic: return .heic
         case .tiff: return .tiff
+        case .png: return .png
+        case .avif: return UTType("public.avif") ?? UTType(filenameExtension: "avif") ?? .heic
         }
     }
 
@@ -24,16 +32,28 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         case .jpeg: return "jpg"
         case .heic: return "heic"
         case .tiff: return "tif"
+        case .png: return "png"
+        case .avif: return "avif"
         }
     }
 
     public var supportsQuality: Bool {
-        self == .jpeg || self == .heic
+        self == .jpeg || self == .heic || self == .avif
     }
 
-    /// Formats that can carry 16 bits per channel.
+    /// Formats that can carry 16 bits per channel. AVIF is nominally 10/12-bit; asking ImageIO for
+    /// 16 bpc on this path produces a file that reads back as 8, so it is not offered.
     public var supports16Bit: Bool {
-        self != .jpeg
+        switch self {
+        case .jpeg, .avif: return false
+        case .heic, .tiff, .png: return true
+        }
+    }
+
+    /// Containers ImageIO can rewrite in place with XMP (`XMPWriter.canEmbed`). AVIF is absent:
+    /// ImageIO's AVIF path drops the packet, so the writer falls back to a sidecar.
+    public var supportsXMPEmbedding: Bool {
+        self != .avif
     }
 }
 
@@ -52,6 +72,8 @@ public struct ExportOptions: Sendable {
         switch url.pathExtension.lowercased() {
         case "heic", "heif": return ExportOptions(format: .heic)
         case "tif", "tiff": return ExportOptions(format: .tiff, bitDepth: 16)
+        case "png": return ExportOptions(format: .png)
+        case "avif": return ExportOptions(format: .avif)
         default: return ExportOptions(format: .jpeg)
         }
     }

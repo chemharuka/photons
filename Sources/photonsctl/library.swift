@@ -18,12 +18,21 @@ func openLibrary(_ a: Args, index: Int) -> Catalog {
 
 func cmdLibrary(_ a: Args) throws {
     guard let sub = a.positional.first else {
-        die("library needs a subcommand: create | import | rescan | assets | stats | verify | develop")
+        die("library needs a subcommand: create | import | rescan | assets | stats | verify | develop"
+            + " | copy-settings | paste-settings")
     }
 
     switch sub {
     case "develop":
         try cmdLibraryDevelop(a)
+
+    // M5: the settings clipboard. Both sides parse their own options (`preset.swift`) so `--asset`
+    // does not have to be registered in `main.swift`'s `valueFlags`.
+    case "copy-settings":
+        try cmdLibraryCopySettings()
+
+    case "paste-settings":
+        try cmdLibraryPasteSettings()
 
     case "create":
         guard a.positional.count >= 2 else { die("library create <pkg>") }
@@ -177,6 +186,7 @@ func cmdLibrary(_ a: Args) throws {
         exit(report.isClean ? 0 : 1)
 
     default:
-        die("unknown library subcommand '\(sub)' (create|import|rescan|assets|stats|verify|develop)")
+        die("unknown library subcommand '\(sub)' (create|import|rescan|assets|stats|verify|develop"
+            + "|copy-settings|paste-settings)")
     }
 }

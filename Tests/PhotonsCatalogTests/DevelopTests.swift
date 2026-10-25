@@ -406,7 +406,9 @@ final class DevelopTests: XCTestCase {
 
         // Open through the product path: snapshot first, then migrate.
         let migrated = try Catalog.open(at: pkg)
-        XCTAssertEqual(migrated.schemaVersionApplied, 3)
+        // M5 bumped the schema to v4, so this open runs v3 *and* v4. Compare against the current
+        // version rather than a literal so the next additive migration does not break this test.
+        XCTAssertEqual(migrated.schemaVersionApplied, Schema.version, "v3 and everything after it ran")
         XCTAssertEqual(try migrated.integrityCheck(), "ok")
 
         // 1. The backup exists, is named for the version it came from, and still holds the old rows.
@@ -468,7 +470,7 @@ final class DevelopTests: XCTestCase {
         try queue.close()
 
         let opened = try Catalog.open(at: pkg)
-        XCTAssertEqual(opened.schemaVersionApplied, 3, "v2 and v3 both ran")
+        XCTAssertEqual(opened.schemaVersionApplied, Schema.version, "v2 and every later step ran")
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: layout.backupsURL.path)
             .contains("library.bak-v1.db"), "the snapshot names the file it came from")
         XCTAssertEqual(try storedBlob(opened, assetID), blob)

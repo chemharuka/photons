@@ -626,7 +626,16 @@ guard let cmd = argv.first else {
       photonsctl library assets  <pkg> [--rating N] [--camera key] [--since YYYY-MM-DD] [--limit N] [--json]
       photonsctl library stats   <pkg> [--json]
       photonsctl library verify  <pkg> [--rehash] [--json]
+      photonsctl library copy-settings  <pkg> --asset <id> [--out file.json]
+      photonsctl library paste-settings <pkg> --asset <id> --from <file.json|->
+      photonsctl preset list    <pkg> [--json]
+      photonsctl preset save    <pkg> <name> --asset <id> [--groups light,curve] [--default]
+      photonsctl preset apply   <pkg> <name> --asset <id> [--label L]
+      photonsctl preset delete  <pkg> <name>
+      photonsctl preset rename  <pkg> <old> <new>
+      photonsctl preset default <pkg> <name> | --none
       photonsctl xmp export <pkg> --out <dir> [--ids id…|--rating N] [--embed] [--json]
+      photonsctl export batch <pkg> --out <dir> --preset <file.json> [--ids id…|--rating N] [--json]
       photonsctl thumbs <pkg> --out <dir> [--tier grid|filmstrip|full] [--limit N] [--strategy auto|filter|thumbnail] [--reset] [--json]
       photonsctl fixtures <dir> [--count 100] [--dupes 10] [--size 320x240]
 
@@ -661,7 +670,9 @@ do {
     case "render":   try cmdRender(rest)
     case "bench":    try cmdBench(rest)
     case "library":  try cmdLibrary(rest)
+    case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)
+    case "export":   try cmdExport(rest)
     case "thumbs":   try cmdThumbs(rest)
     case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")

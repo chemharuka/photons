@@ -119,15 +119,16 @@ final class AtomicCounter: @unchecked Sendable {
 
 extension Catalog {
 
-    /// Canonical bytes for `assets.develop_json`.
+    /// Canonical JSON for a value that goes into the catalog.
     ///
-    /// Sorted keys, no whitespace, no pretty printing: two processes writing the same document must
-    /// produce the same bytes, because the thumbnail cache keys on this text.
-    public static func encode(_ edit: EditModel) throws -> String {
+    /// Sorted keys, no whitespace, no pretty printing: two processes writing the same value must
+    /// produce the same bytes, because the thumbnail cache keys on this text. One encoder for
+    /// `assets.develop_json` and `presets.develop_json` — two encoders would eventually disagree.
+    static func canonicalJSON<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         do {
-            let data = try encoder.encode(edit)
+            let data = try encoder.encode(value)
             guard let s = String(data: data, encoding: .utf8) else {
                 throw DevelopError.notEncodable("not UTF-8")
             }
@@ -137,6 +138,16 @@ extension Catalog {
         } catch {
             throw DevelopError.notEncodable(error.localizedDescription)
         }
+    }
+
+    /// Canonical bytes for `assets.develop_json`.
+    public static func encode(_ edit: EditModel) throws -> String {
+        try canonicalJSON(edit)
+    }
+
+    /// Canonical bytes for `presets.develop_json` (the preset envelope, §v4 in Schema.swift).
+    public static func encode(_ preset: Preset) throws -> String {
+        try canonicalJSON(preset)
     }
 
     /// Why a blob failed, or the document it decodes to.
