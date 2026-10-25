@@ -1,7 +1,7 @@
 # 架构决策定稿（9 份源码精读 + 本机实测汇总）
 
 > 生成：2026-10-25 · 依据：`darktable.md` `rawtherapee-art.md` `rapidraw.md` `ansel-vkdt.md` `digikam.md` `apple-raw-stack.md` `licensing.md` `lightcraft-engine.md` `lightcraft-product.md`
-> 状态：可行范围已验证（探针可复跑）；**代码一行未写**
+> 状态：M0（解码层）与 M1（编辑图）已落地并 `make verify` 全绿；结论见 §10 与 `docs/STATUS.md`
 
 ## 0. 一句话架构
 
@@ -149,5 +149,21 @@ masks(photo_id, mask_id, kind, params_json)       -- 预留，v0.3 启用
 ## 9. 未决
 
 - `v9-vs-v8-measured.md`（白名单机身的真实 RAW 对比）仍在跑
-- Apple 解码器的**确定性**未实测 → M0 第一件事
+- Apple 解码器的**确定性**：已在 M0 实测为确定（同进程/跨进程 digest 相同，见 `docs/STATUS.md`）
 - `linearSpaceFilter` 的语义（能否把我们的处理插进 Apple 管线内部）未实验 → 决定"捆绑深度"上限
+
+## 10. M1 落地时定下的实现细节（代码即如此）
+
+| # | 结论 | 依据 / 代价 |
+|---|---|---|
+| M1-1 | **kernel 以资源形式随包发布，运行时 `MTLLibrary(source:)` 编译** | SwiftPM 没有可靠的 `.metal` 构建步骤；Metal toolchain 是网络下载（本机失败过）。代价：每进程首次 ~0.2 s，永不在帧内 |
+| M1-2 | **S0 输出的是 canvas，不是 crop**：`canvas` 与 `content` 分离，视口比例不同时照片居中留空（alpha 0），导出时二者相等 | 同一 kernel 覆盖"屏幕"与"导出"，不产生第二套实现（D12）。content 之外的像素写 0，不做 clamp |
+| M1-3 | **`--scale` 相对全分辨率**；解码走阶梯 `1 / 0.5 / 0.25 / 0.125`，选刚好覆盖输出的一档，剩余缩放交给 S0 | 只重采样一次。解码过细 = 白花 0.5 s 与 480 MB；过粗 = 重采样两次 |
+| M1-4 | **缓存键链 6 环**：`geo → lin(S1) → preNR(S2) → curve → color → vignette → display` | D6 的三级是下界；每个阶段边界都要能单独命中。上游键变则下游键必变，所以"S3 改动不重跑 S1"是结构性的，不是特例分支（单测断言只执行 s3-color / s3-vignette / s4） |
+| M1-5 | **S4 永不进缓存**：它的纹理要交给调用方（或回读），缓存它等于把池里的纹理借出去 | 避免下一帧复用到正在被读的纹理 |
+| M1-6 | **"中性"是 kernel 里的真实分支**，不是近似：参数全零时直接 `dst.write(src.read(uv))` | 否则"不编辑"会与"解码"缓慢漂移，golden 与 UI 都失去基准。identity 测试把偏差钉在 < 0.002（显示单位） |
+| M1-7 | **白平衡在 M1 是相对近似**：Planckian 拟合（1000–15000 K），以 6500 K 归一 → 解码结果即中性参考 | 真正的 WB 应从 as-shot 元数据做 Bradford 适应，等解码侧吐出该元数据（M2）。宁可写"近似"，也不假装是相机白平衡 |
+| M1-8 | **S2 解析式而非 LUT**：blacks/whites 重映射 → 绕 0.18 中灰的对比 → 按输出亮度加权的阴影/高光提升 | 每个滑块单调、零值恒等、没有需要同步的表。用户控制点的曲线才用 LUT（`CurveLUT`，单调三次插值防折叠） |
+| M1-9 | **bench 量上屏路径**：不读回 CPU（2560×1600 一帧 32 MB）、关缓存、3 帧预热，`gpu only` 单列 | 读回会让 16.7 ms 预算失真；开缓存则第 2 帧起测的是命中而不是渲染 |
+| M1-10 | **`detail`（锐化/降噪）不进图**：将来映射到 `CIRAWFilter`（`sharpnessAmount` / `luminanceNoiseReductionAmount`），属解码侧变更 | 存字段、不渲染，避免"两处降噪、结果不一致" |
+

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "processVersion": 1,
+  "color": {
+    "vibrance": 0,
+    "saturation": 24,
+    "bands": [
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 }
+    ]
+  }
+}

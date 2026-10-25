@@ -1,0 +1,72 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// S0 — geometry: crop, straighten, flips.
+//
+// Output is the *canvas*: the content rect sits inside it (letterboxed when the requested canvas
+// aspect differs, which is exactly what an on-screen viewport does), and everything outside the
+// content rect is transparent. Export passes canvas == content, so no padding is produced.
+//
+// Sampling is bilinear with clamp-to-edge. Because the crop rect stays the output frame, over-
+// rotating a crop pulls edge samples rather than growing the canvas — the honest M1 behaviour;
+// "zoom to fill after straighten" needs the crop UI that is a non-goal for this task.
+
+struct S0Params {
+    float4 a;   // canvasSize.xy, contentOrigin.xy
+    float4 b;   // contentSize.xy, srcSize.xy
+    float4 c;   // crop rect (x, y, w, h) normalized
+    float4 d;   // cos, sin, flipH, flipV
+    float4 e;   // identity, pad, pad, pad
+};
+
+static inline float4 sample_bilinear(texture2d<float, access::read> src,
+                                     float2 px,
+                                     int2 srcSize) {
+    float2 p = px - 0.5;
+    float2 f = floor(p);
+    float2 t = p - f;
+    int2 i0 = int2(f);
+    int2 i1 = i0 + 1;
+    int2 lo = int2(0);
+    int2 hi = srcSize - 1;
+    float4 v00 = src.read(uint2(clamp(i0, lo, hi)));
+    float4 v10 = src.read(uint2(clamp(int2(i1.x, i0.y), lo, hi)));
+    float4 v01 = src.read(uint2(clamp(int2(i0.x, i1.y), lo, hi)));
+    float4 v11 = src.read(uint2(clamp(i1, lo, hi)));
+    return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
+}
+
+kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        constant S0Params &p [[buffer(0)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    int2 canvas = int2(p.a.xy);
+    if (int(gid.x) >= canvas.x || int(gid.y) >= canvas.y) { return; }
+    int2 srcSize = int2(p.b.zw);
+
+    // Identity: crop is full, no rotation, no flip, canvas == source. Copy texel-for-texel so the
+    // neutral path stays bit-exact (the determinism and identity tests depend on it).
+    if (p.e.x > 0.5) {
+        dst.write(src.read(uint2(clamp(int2(gid), int2(0), srcSize - 1))), gid);
+        return;
+    }
+
+    float2 local = float2(gid) + 0.5 - p.a.zw;
+    float2 content = p.b.xy;
+    if (local.x < 0.0 || local.y < 0.0 || local.x >= content.x || local.y >= content.y) {
+        dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
+        return;
+    }
+
+    float2 uv = local / content;
+    if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
+    if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
+
+    float2 o = uv - 0.5;
+    float cs = p.d.x;
+    float sn = p.d.y;
+    float2 r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
+
+    float2 px = (p.c.xy + r * p.c.zw) * float2(srcSize);
+    dst.write(sample_bilinear(src, px, srcSize), gid);
+}

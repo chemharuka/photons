@@ -8,11 +8,13 @@
 
 RAW ?= $(HOME)/Desktop/test/L1030433.dng
 GOLDEN_DIR ?= Tests/Golden
+EDIT_DIR ?= Tests/Fixtures
 CONFIG ?= release
 BIN := .build/$(CONFIG)/photonsctl
 CACHE_DIR ?= $(HOME)/Library/Caches/Photons/linear
+VIEWPORT ?= 2560x1600
 
-.PHONY: all build test l1 l2 verify record clean info cache
+.PHONY: all build test l1 l2 l3 bench verify record clean info cache render
 
 all: build
 
@@ -43,9 +45,40 @@ l2: build
 		$(BIN) golden check "$(RAW)" --dir $(GOLDEN_DIR); \
 	fi
 
-verify: build test l1 l2
+## L3 — the M1 editing graph: determinism, edit sensitivity, stage cache, golden pixels
+l3: build
+	@test -f "$(RAW)" || { echo "L3 SKIP: no fixture at $(RAW)"; exit 1; }
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-l3-a.jpg --scale 0.25 > /tmp/photons-l3-a.txt 2>&1 || { cat /tmp/photons-l3-a.txt; exit 1; }
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-l3-b.jpg --scale 0.25 > /tmp/photons-l3-b.txt 2>&1 || { cat /tmp/photons-l3-b.txt; exit 1; }
+	@A=$$(shasum -a 256 /tmp/photons-l3-a.jpg | cut -d' ' -f1); B=$$(shasum -a 256 /tmp/photons-l3-b.jpg | cut -d' ' -f1); \
+	 if [ "$$A" = "$$B" ]; then echo "L3 determinism  PASS  $${A}"; else echo "L3 determinism  FAIL  $$A != $$B"; exit 1; fi
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-l3-c.jpg --scale 0.25 > /tmp/photons-l3-c.txt 2>&1 || { cat /tmp/photons-l3-c.txt; exit 1; }
+	@C=$$(shasum -a 256 /tmp/photons-l3-c.jpg | cut -d' ' -f1); A=$$(shasum -a 256 /tmp/photons-l3-a.jpg | cut -d' ' -f1); \
+	 if [ "$$C" != "$$A" ]; then echo "L3 edit-sensitivity PASS"; else echo "L3 edit-sensitivity FAIL: push == neutral"; exit 1; fi
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --edit $(EDIT_DIR)/edit-color.json \
+		--out /tmp/photons-l3-t.jpg --scale 0.25 --trace-stages > /tmp/photons-l3-t.txt 2>&1 || { cat /tmp/photons-l3-t.txt; exit 1; }
+	@awk '/^edit       edit-color/{f=1} f&&/^stages/{print;exit}' /tmp/photons-l3-t.txt | grep -qv "s0-geometry" \
+		&& echo "L3 stage-cache   PASS  (S3-only change skipped S0/S1/S2)" \
+		|| { echo "L3 stage-cache   FAIL: S0 re-ran on an S3-only change"; cat /tmp/photons-l3-t.txt; exit 1; }
+	@if [ -z "$$(ls -A $(GOLDEN_DIR)/render-*.json 2>/dev/null)" ]; then \
+		echo "L3 render golden (recording)"; \
+		$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-l3-g.jpg --scale 0.25 --golden record > /dev/null; \
+		$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-l3-g2.jpg --scale 0.25 --golden record > /dev/null; \
+	fi
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-l3-g.jpg --scale 0.25 --golden check | grep "golden"
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-l3-g2.jpg --scale 0.25 --golden check | grep "golden"
+
+## frame budget: full S0→S4 at viewport size must fit 60 fps
+bench: build
+	@test -f "$(RAW)" || { echo "bench SKIP: no fixture at $(RAW)"; exit 1; }
+	@$(BIN) bench "$(RAW)" --viewport $(VIEWPORT) --iterations 60 --edit $(EDIT_DIR)/edit-push.json
+
+render: build
+	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-render.jpg --scale 0.25 --trace-stages
+
+verify: build test l1 l2 l3 bench
 	@echo "------------------------------------------------"
-	@echo "ALL GREEN: build + unit tests + L1 determinism + L2 golden"
+	@echo "ALL GREEN: build + unit tests + L1 determinism + L2 golden + L3 graph + bench"
 
 record: build
 	$(BIN) golden record "$(RAW)" --dir $(GOLDEN_DIR)

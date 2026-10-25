@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "processVersion": 1,
+  "geometry": {
+    "crop": { "x": 0.05, "y": 0.02, "width": 0.9, "height": 0.9 },
+    "rotationDegrees": 0.8
+  },
+  "light": {
+    "exposure": 0.45,
+    "contrast": 22,
+    "highlights": -38,
+    "shadows": 30,
+    "whites": 8,
+    "blacks": -12,
+    "temperature": 7150,
+    "tint": 7,
+    "highlightRecovery": 0.35
+  },
+  "curve": {
+    "rgb": [
+      { "x": 0, "y": 0 },
+      { "x": 0.22, "y": 0.17 },
+      { "x": 0.55, "y": 0.58 },
+      { "x": 1, "y": 1 }
+    ]
+  },
+  "color": {
+    "vibrance": 18,
+    "saturation": 6,
+    "bands": [
+      { "hue": 4, "saturation": 8, "luminance": 0 },
+      { "hue": 0, "saturation": 6, "luminance": 2 },
+      { "hue": -6, "saturation": 4, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": -5, "saturation": 10, "luminance": -6 },
+      { "hue": 0, "saturation": 0, "luminance": 0 },
+      { "hue": 0, "saturation": 0, "luminance": 0 }
+    ]
+  },
+  "effects": {
+    "vignetteAmount": -22,
+    "vignetteMidpoint": 45,
+    "vignetteFeather": 60
+  }
+}
