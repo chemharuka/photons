@@ -320,3 +320,39 @@ M3 时记录的"`L1030433.dng` 渲染成 180°，因为文件里读不到 orient
 
 残留：`LoupeMapping`（命中测试/捏合锚点）仍是窗口形状，9° 拉直下与渲染投影差 ≤0.29%（7.5 px @2560），
 属于 hit-testing 的近似，不在渲染路径上。
+
+## 12. UI 架构（M3 定案，2026-10-25/26 落地）
+
+**起点：AppKit 外壳 + SwiftUI 叶子。** 依据是读码而非偏好（`local/research/ui-stack.md`）：走到 LR Classic 规模的
+两个开源项目（redlamp 421.8 kLOC、PixelLoupe 95.9 kLOC）UI 都落在 AppKit，SwiftUI 网格项目（LumaHarbor 等）
+选择语义均被简化；redlamp 把 SwiftUI 面板改回 AppKit 后主线程占用 100% → 34%。
+
+**一套状态，两层视图。** `CatalogSession`（`@MainActor @Observable`）是唯一模型；AppKit 视图用
+`ObservationBridge`（`withObservationTracking` 重新注册，30 行）订阅，SwiftUI 卡片用 `@Bindable` 读同一对象。
+不存在第二份状态副本。
+
+**窗口与布局**（数字来自 Phos 的 `WINDOW_INTEGRATION.md`，MIT，只取数值）：自绘 36 pt 顶栏与交通灯同行
+（不用 `NSToolbar`）；左列表 212 pt（196–260）/行高 46；胶片条 122 pt、缩略 74×50（⌃⌘B）；检查器 330 pt（300–364）；
+大面板 matte、小组件 glass；最小安全编辑区 560×420。
+
+**网格**：`NSCollectionView` + `FlowLayout` + 复用 item + prefetch（`NSCollectionViewPrefetching`）；
+自绘图层网格（redlamp 的 5,736 行）是上界，不是起点——只有需要 justified 布局/吸顶分组/连续尺寸时才值得换。
+
+**画布**：自绘 `NSView` + `CAMetalLayer`；缩放 = 改渲染倍率重渲，**不缩放图层**；
+1:1 取景走 core 的 `outputWindow`（§11.10），不用 crop 冒充。
+
+**EDR**：`headroom = clamp(1 + (maxEDR − 1), 1…16)`，按窗口所在屏取值；**不能**写成 `maxEDR − 1`
+（1.2 会变 0.2 → 钳到 1 → 唯一 HDR 屏上 EDR 被关掉）。SDR 自动降级为 headroom 1。
+
+**缩略图**：P 通路 = ImageIO 内嵌预览（比 `CIRAWFilter.previewImage` 快 2.6×，§11.2）；G 通路 = 同一条
+`RenderGraph`（D12）；**只有一个服务层** `ThumbnailService`（优先级/同键合并/取消/并发 3），UI 的 provider
+只是它的生产者适配层。DNG 的 preview 上限 t512。
+
+**编辑的三种写入通道**（不要混淆）：
+1. **文档编辑** → `EditModel` → `EditHistory` 快照 → `Catalog.saveDevelop`（迁移 v3 落 `develop_json` + `asset_history`）；
+2. **目录元数据**（星级/旗标/色标）→ 直接写库，**不进**开发历史，⌘Z 不撤销它；
+3. **视图态**（`showMaskID`、倍率、筛选）→ 只 bump `editRevision`，**不落盘、不进历史**；撤销时用
+   `restoring(_:keeping:)` 把当前视图态贴回快照。
+
+**已知近似**：`LoupeMapping`（命中测试/捏合锚点）仍是窗口形状，9° 拉直下与渲染投影差 ≤0.29%（7.5 px @2560）；
+蒙版 feather/refine 在 `outputWindow` 边缘按 halo 截断（内部精确到 5.7e-5）。
