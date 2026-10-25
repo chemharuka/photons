@@ -153,8 +153,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     // MARK: thumbnails
 
-    /// Created on first use: the cache only exists once a library is open.
+    /// Created on first use: the cache only exists once a library is open. Obtained from
+    /// `ThumbnailProvider.shared(for:)` so the filmstrip draws from the *same* service and LRU.
     private var thumbnailProvider: ThumbnailProvider?
+    private var providerCache: ThumbnailCache?
     /// Outstanding loads by item index. One per index, cancelled the moment the cell scrolls away.
     private var thumbRequests: [Int: ThumbnailRequest] = [:]
     private var reconcileWork: DispatchWorkItem?
@@ -307,7 +309,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             cell.cardView.thumbnail = cached
             return
         }
-        requestThumbnail(index: index, asset: asset, tier: tier)
+        requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
     }
 
     // MARK: thumbnails
@@ -317,25 +319,34 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     /// The tier this cell should ask for: cell edge in points × DPR, clamped to what the source
-    /// can actually fill. `GridLayout` gives the cell size; the grid never invents a number.
+    /// can actually fill, then to the preview ceiling (a DNG never gets a `> t512` placeholder,
+    /// 006 §6.1). `GridLayout` gives the cell size; the grid never invents a number.
     private func tier(for asset: Asset) -> ThumbTier {
-        ThumbnailProvider.tier(cellEdgePoints: max(metrics.itemSize.width, metrics.itemSize.height),
-                               backingScale: backingScale,
-                               sourceLongEdge: ThumbnailProvider.sourceLongEdge(of: asset))
+        let requested = ThumbnailProvider.tier(
+            cellEdgePoints: max(metrics.itemSize.width, metrics.itemSize.height),
+            backingScale: backingScale,
+            sourceLongEdge: ThumbnailProvider.sourceLongEdge(of: asset))
+        return ThumbnailProvider.effectiveTier(requested: requested, ext: asset.ext).tier
     }
 
     private func provider() -> ThumbnailProvider? {
-        if let thumbnailProvider { return thumbnailProvider }
         guard let cache = session?.thumbnailCache else { return nil }
-        let made = ThumbnailProvider(cache: cache)
+        if let thumbnailProvider, providerCache === cache { return thumbnailProvider }
+        // A different library is a different cache directory: never keep drawing the previous
+        // library's pixels (the service and its memory LRU belong to that cache).
+        for (_, token) in thumbRequests { token.cancel() }
+        thumbRequests.removeAll()
+        providerCache = cache
+        let made = ThumbnailProvider.shared(for: cache)
         thumbnailProvider = made
         return made
     }
 
-    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier) {
+    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
-        let token = provider.request(index: index, asset: asset, fileURL: url, tier: tier) { [weak self] idx, _, image in
+        let token = provider.request(index: index, asset: asset, fileURL: url, tier: tier,
+                                     priority: priority) { [weak self] idx, _, image in
             self?.thumbnailDidLoad(index: idx, image: image)
         }
         thumbRequests[index] = token
@@ -390,12 +401,15 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             thumbRequests.removeValue(forKey: index)
         }
 
+        let visible = Set(collectionView.indexPathsForVisibleItems().map { $0.item })
         for index in wanted {
             guard index < session.assets.count else { continue }
             let asset = session.assets[index]
             if provider.memoryImage(contentHash: asset.contentHash, tier: cellTier) != nil { continue }
             if thumbRequests[index] != nil { continue }
-            requestThumbnail(index: index, asset: asset, tier: cellTier)
+            // §4 ②③: what is on screen is on-screen work; the one-row slack is prefetch.
+            requestThumbnail(index: index, asset: asset, tier: cellTier,
+                             priority: visible.contains(index) ? .onScreen : .prefetch)
         }
     }
 
@@ -426,8 +440,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         Set(thumbRequests.keys).subtracting(wantedIndexes()).count
     }
 
-    /// Worker-pool depth at this instant — queued + running.
+    /// Worker-pool depth at this instant — queued + running, from the shared service.
     public var thumbnailQueueDepth: Int { thumbnailProvider?.queueDepth ?? 0 }
+
+    /// The provider this grid draws from — `--ui-smoke` asserts it is the filmstrip's too.
+    public var thumbnailProviderForSmoke: ThumbnailProvider? { provider() }
 
     /// Cells currently on screen.
     public var visibleCellCount: Int { collectionView.indexPathsForVisibleItems().count }
@@ -449,6 +466,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         lastWanted = []
         lastTier = nil
         thumbnailProvider = nil
+        providerCache = nil
     }
 
     // MARK: selection

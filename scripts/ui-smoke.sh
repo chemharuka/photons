@@ -6,10 +6,16 @@
 # The app asserts, in order: grid item count == library rows; three window widths produce the
 # columns/row height of the pure layout function; the grid draws real thumbnails from
 # `ThumbnailCache` (tier = cell edge × DPR, warm pass = memory hits only, off-screen loads
-# cancelled, worker queue bounded); the filmstrip mirrors the library and shares the selection;
-# the loupe renders a frame through RenderGraph; a slider drag changes the presented frame hash,
-# ⌘Z returns it to the previous hash and ⇧⌘Z returns it again; the undo/redo menu items validate
-# to disabled with an empty history. Screenshots land in local/out/.
+# cancelled, worker queue bounded); the filmstrip mirrors the library and shares the selection
+# **and draws its own real thumbnails** (74 × 50 pt cells at the DPR tier, every cell the sweep
+# showed has an image, ≥ 36 of them, nothing left queued for cells that scrolled away); the grid
+# and the strip turn out to share one `ThumbnailProvider`/`ThumbnailService` (no cache key — and
+# no `contentHash` — is ever generated twice, and re-asking from the other view is a memory hit);
+# a `t1024` DNG request is downgraded to `t512` with `skipReason= dngCeiling` and leaves no
+# `t1024` file behind (006 §6.1); the loupe renders a frame through RenderGraph; a slider drag
+# changes the presented frame hash, ⌘Z returns it to the previous hash and ⇧⌘Z returns it again;
+# the undo/redo menu items validate to disabled with an empty history. Screenshots land in
+# local/out/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

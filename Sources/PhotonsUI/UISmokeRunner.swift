@@ -206,7 +206,8 @@ public final class UISmokeRunner {
         // 4. filmstrip is the second browser and shares the selection
         windowController.showBrowserAsFilmstrip()
         pump(0.3)
-        let strip = root.filmstripController.collectionView
+        let stripController = root.filmstripController
+        let strip = stripController.collectionView
         check("filmstrip item count \(strip.numberOfItems(inSection: 0)) == library rows \(rows)",
               strip.numberOfItems(inSection: 0) == rows)
         check(String(format: "filmstrip container %.0f pt == 122", root.geometry.filmstrip?.height ?? 0),
@@ -216,6 +217,13 @@ public final class UISmokeRunner {
                   (strip.selectionIndexPaths.first.map { session.assets[safe: $0.item]?.id }) == id
                   || session.selection.contains(id))
         }
+
+        // 4b. real thumbnails in the strip, from the same service the grid used
+        checkFilmstripThumbnails(controller: stripController, session: session, window: window)
+        checkSharedThumbnailService(grid: grid, strip: stripController, session: session)
+        // 4c. §6.1 — a DNG above t512 is downgraded, not upscaled
+        checkDNGCeiling(session: session, grid: grid)
+
         capture(window: window, name: "ui-smoke-filmstrip.png")
         windowController.showBrowserAsList()
         pump(0.2)
@@ -380,6 +388,219 @@ public final class UISmokeRunner {
         check("a slider move with the loupe closed renders nothing (\(loupe.editRenderCount) renders)",
               loupe.editRenderCount == rendersBefore && session.edit.light.contrast == 6)
         session.applyEdit { $0.light.contrast = 0 }
+    }
+
+    // MARK: - filmstrip thumbnails
+
+    /// The strip must draw the same kind of *pixels* the grid does — not the hash swatch — and it
+    /// must ask for the tier its 74 × 50 pt cell implies at this DPR (006 §1).
+    ///
+    /// "Every visible cell" is asserted twice: once for the screenful the strip opens on, and once
+    /// over a sweep of pages (the union of cells that were visible while scrolling), so a cell that
+    /// only renders when it is the first one cannot pass. The sweep needs ≥ 36 distinct cells —
+    /// more than any single screenful — which is why the number is a union, not a viewport count.
+    private func checkFilmstripThumbnails(controller: FilmstripController,
+                                          session: CatalogSession,
+                                          window: NSWindow) {
+        let strip = controller.collectionView
+        let deadline = Date().addingTimeInterval(40)
+        while controller.visibleThumbnailCount < controller.visibleCellCount, Date() < deadline { pump(0.1) }
+
+        var stats = controller.thumbnailStats
+        log("filmstrip thumbnails    \(controller.visibleThumbnailCount)/\(controller.visibleCellCount) visible cells · tier \(controller.currentThumbnailTier.rawValue) · \(stats.summary)")
+
+        check("filmstrip cells show thumbnail images, not placeholders (\(controller.visibleThumbnailCount)/\(controller.visibleCellCount) visible)",
+              controller.visibleCellCount > 0
+              && controller.visibleThumbnailCount == controller.visibleCellCount)
+
+        if let first = session.assets.first {
+            let edge = max(WorkspaceLayout.filmstripCell.width, WorkspaceLayout.filmstripCell.height)
+            let requested = ThumbnailProvider.tier(cellEdgePoints: edge,
+                                                   backingScale: window.backingScaleFactor,
+                                                   sourceLongEdge: ThumbnailProvider.sourceLongEdge(of: first))
+            let expected = ThumbnailProvider.effectiveTier(requested: requested, ext: first.ext).tier
+            log(String(format: "filmstrip cell          %.0f×%.0f pt @%.0fx → expected %@, applied %@",
+                       WorkspaceLayout.filmstripCell.width, WorkspaceLayout.filmstripCell.height,
+                       window.backingScaleFactor, expected.rawValue, controller.currentThumbnailTier.rawValue))
+            check("filmstrip asks for the tier its cell implies (\(controller.currentThumbnailTier.rawValue))",
+                  controller.currentThumbnailTier == expected)
+        }
+
+        // Sweep: pages of the same width, two pages apart so each page shows fresh cells.
+        var seen = Set<Int>()
+        var imaged = Set<Int>()
+        let items = strip.numberOfItems(inSection: 0)
+        let stride = max(1, controller.visibleCellCount) * 2
+        var start = 0
+        var pages = 0
+        while pages < 6, start < items, seen.count < 36 {
+            strip.scrollToItems(at: [IndexPath(item: start, section: 0)], scrollPosition: .left)
+            pump(0.2)
+            strip.layoutSubtreeIfNeeded()
+            let pageDeadline = Date().addingTimeInterval(12)
+            while controller.visibleThumbnailCount < controller.visibleCellCount, Date() < pageDeadline { pump(0.1) }
+            for path in strip.indexPathsForVisibleItems() {
+                seen.insert(path.item)
+                if let cell = strip.item(at: path) as? FilmstripCell, cell.cardView.thumbnail != nil {
+                    imaged.insert(path.item)
+                }
+            }
+            pages += 1
+            start += stride
+        }
+        let missing = seen.subtracting(imaged).sorted()
+        log("filmstrip sweep         \(imaged.count)/\(seen.count) cells over \(pages) pages have images"
+            + (missing.isEmpty ? "" : " · missing \(missing.prefix(8))"))
+        check("every filmstrip cell the sweep showed has an image (\(imaged.count)/\(seen.count), ≥ 36)",
+              !seen.isEmpty && seen.count >= 36 && missing.isEmpty && imaged.count == seen.count)
+
+        // Nothing for cells that are no longer visible or in the one-cell slack band (§5).
+        pump(0.3)
+        check("the filmstrip drops work for cells that scrolled away (0 outside the window, \(controller.pendingThumbnailIndexesOutsideWindow))",
+              controller.pendingThumbnailIndexesOutsideWindow == 0)
+
+        // Back to the first cell so the screenshot shows the same place the grid does.
+        strip.scrollToItems(at: [IndexPath(item: 0, section: 0)], scrollPosition: .left)
+        pump(0.3)
+        stats = controller.thumbnailStats
+        log("filmstrip thumbnails    \(stats.summary) · queue \(controller.thumbnailProviderForSmoke?.queueDepth ?? 0)")
+    }
+
+    // MARK: - one service, one LRU
+
+    /// The point of collapsing the two queues: the grid and the strip are *clients of the same
+    /// `ThumbnailService`*, so a `contentHash` the grid already rendered is one disk/memory hit for
+    /// the strip, never a second producer run (006 §4 单飞, §3 content addressing).
+    private func checkSharedThumbnailService(grid: AssetGridController,
+                                            strip: FilmstripController,
+                                            session: CatalogSession) {
+        guard let gridProvider = grid.thumbnailProviderForSmoke,
+              let stripProvider = strip.thumbnailProviderForSmoke else {
+            fail("no thumbnail provider to inspect")
+            return
+        }
+        check("the grid and the filmstrip share one ThumbnailProvider (one service, one memory LRU)",
+              gridProvider === stripProvider)
+
+        let provider = gridProvider
+        let stats = provider.stats
+        let runsPerKey = provider.generationCounts
+        let runsPerContent = provider.generationsPerContent
+        let runs = runsPerKey.values.reduce(0, +)
+        let maxPerKey = runsPerKey.values.max() ?? 0
+        let service = provider.serviceStats
+        log("thumbnail service       \(ThumbServiceReport(service).summaryLine)")
+        log("thumbnail queue         \(ThumbServiceReport(service).queueLine)")
+        log("thumbnail producer      \(runs) runs over \(runsPerKey.count) keys / \(runsPerContent.count) contentHashes · max \(maxPerKey)/key · dropped in flight \(service.cancelledInFlight) · \(stats.skipSummary)")
+
+        // §5: a cancelled job's bytes are dropped, so the *next* request for that key is a genuine
+        // miss. Every extra producer run is therefore explained by a discarded in-flight job —
+        // "one key, one generated file" holds with that correction, and not shakily so.
+        let extraRuns = runs - runsPerKey.count
+        // A fully warm cache (the previous smoke run left every tier on disk) legitimately
+        // generates nothing — `0 keys` is not a failure, it is the steady state. Assert the
+        // invariant that still means something in that case: everything came from a cache.
+        if runsPerKey.isEmpty {
+            check("warm cache: nothing regenerated and the grid+filmstrip hit cache (\(stats.hitRatio.formatted(.number.precision(.fractionLength(3)))) hit ratio)",
+                  stats.hitRatio >= 0.999)
+        } else {
+            check("no cache key was generated twice across grid + filmstrip (\(runsPerKey.count) keys, \(runs) producer runs, \(extraRuns) extra = \(service.cancelledInFlight) dropped in flight)",
+                  extraRuns >= 0 && extraRuns <= service.cancelledInFlight)
+        }
+
+        // The literal single-flight case, driven through both views' code path: one cold asset,
+        // asked for twice before either request can complete, at the tier both views agree on.
+        // Two subscriptions, one job, one producer run — and `coalesced` says so.
+        if let cold = coldAsset(session: session, provider: provider, tier: strip.currentThumbnailTier) {
+            let appliedBefore = provider.stats.applied
+            let coalescedBefore = provider.serviceStats.coalesced
+            let runsBefore = provider.generationsPerContent[cold.asset.contentHash] ?? 0
+            let fromGrid = provider.request(index: 0, asset: cold.asset, fileURL: cold.url,
+                                            tier: strip.currentThumbnailTier) { _, _, _ in }
+            let fromStrip = provider.request(index: 1, asset: cold.asset, fileURL: cold.url,
+                                             tier: strip.currentThumbnailTier) { _, _, _ in }
+            let deadline = Date().addingTimeInterval(20)
+            while provider.stats.applied < appliedBefore + 2, Date() < deadline { pump(0.05) }
+            let after = provider.serviceStats
+            let runsAfter = provider.generationsPerContent[cold.asset.contentHash] ?? 0
+            log("single flight           \(cold.asset.filename) @ \(cold.key.tier.rawValue) asked by grid + filmstrip → "
+                + "\(runsAfter - runsBefore) generation(s), coalesced +\(after.coalesced - coalescedBefore), "
+                + "\(provider.stats.applied - appliedBefore) delivery(ies)")
+            check("grid + filmstrip asking for one contentHash/tier share one job (1 generation, \(runsAfter - runsBefore) run(s), coalesced +\(after.coalesced - coalescedBefore))",
+                  fromGrid.key == fromStrip.key
+                  && runsAfter - runsBefore == 1
+                  && after.coalesced > coalescedBefore
+                  && provider.stats.applied >= appliedBefore + 2)
+        }
+
+        // Re-asking from the *other* view must be a memory hit: no disk read, no producer run.
+        if let first = session.assets.first, let url = session.fileURL(for: first) {
+            let before = provider.stats
+            _ = provider.request(index: -2, asset: first, fileURL: url,
+                                 tier: strip.currentThumbnailTier) { _, _, _ in }
+            pump(0.2)
+            let after = provider.stats
+            check("re-asking the filmstrip's key serves it from the shared memory LRU (memory \(before.memoryHits)→\(after.memoryHits), generated \(before.generated)→\(after.generated))",
+                  after.memoryHits == before.memoryHits + 1 && after.generated == before.generated
+                  && after.diskHits == before.diskHits)
+        }
+    }
+
+    /// An asset neither view has touched yet: no generation recorded for its key, nothing on disk.
+    /// Picked from deep inside the library so neither the grid's prefetch window nor the strip's
+    /// sweep could have reached it.
+    private func coldAsset(session: CatalogSession,
+                           provider: ThumbnailProvider,
+                           tier: ThumbTier) -> (asset: Asset, url: URL, key: ThumbKey)? {
+        let generated = provider.generationCounts
+        var index = 200
+        while index < session.assets.count {
+            if let asset = session.assets[safe: index] {
+                let key = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
+                if generated[key.digest] == nil, !provider.cache.peek(key),
+                   let url = session.fileURL(for: asset) {
+                    return (asset, url, key)
+                }
+            }
+            index += 37
+        }
+        return nil
+    }
+
+    // MARK: - §6.1 DNG ceiling
+
+    /// `ThumbPolicy.dngPreviewMaxTier` was dead code: nothing consulted it, so a DNG asked for
+    /// `t1024` would have been served an Adobe-rendered embedded preview far above the tier that
+    /// policy trusts (§6.1: "不允许用 Adobe 的观感充当我们的首屏大图"). Now the request path
+    /// downgrades and *counts* the downgrade, and the file that would have been the lie is absent.
+    private func checkDNGCeiling(session: CatalogSession, grid: AssetGridController) {
+        guard let provider = grid.thumbnailProviderForSmoke else {
+            fail("no thumbnail provider for the DNG ceiling probe")
+            return
+        }
+        let asked = ThumbnailProvider.effectiveTier(requested: .t1024, ext: "dng")
+        let atLimit = ThumbnailProvider.effectiveTier(requested: .t512, ext: "dng")
+        let other = ThumbnailProvider.effectiveTier(requested: .t1024, ext: "arw")
+        check("DNG preview ceiling is t512 (t1024 → \(asked.tier.rawValue) \(asked.skipReason ?? "-"), t512 → \(atLimit.tier.rawValue) \(atLimit.skipReason ?? "-"), arw t1024 → \(other.tier.rawValue))",
+              asked.tier == .t512 && asked.skipReason == "dngCeiling"
+              && atLimit.tier == .t512 && atLimit.skipReason == nil
+              && other.tier == .t1024 && other.skipReason == nil)
+
+        guard let dng = session.assets.first(where: { $0.ext.lowercased() == "dng" }) else {
+            log("dng ceiling             no DNG in this library — the policy is asserted, the request path is not")
+            return
+        }
+        let before = provider.stats.skipReasons["dngCeiling"] ?? 0
+        let token = provider.request(index: -1, asset: dng,
+                                     fileURL: session.fileURL(for: dng), tier: .t1024) { _, _, _ in }
+        pump(0.3)
+        let after = provider.stats.skipReasons["dngCeiling"] ?? 0
+        let aboveLadder = ThumbKey.preview(contentHash: dng.contentHash, tier: .t1024)
+        let onDisk = provider.cache.peek(aboveLadder)
+        log("dng ceiling             \(dng.filename) asked t1024 → \(token.key.tier.rawValue) · skipReason=dngCeiling ×\(after) · t1024 on disk \(onDisk ? "YES" : "no")")
+        check("a t1024 DNG request is downgraded to t512 and recorded as skipReason=dngCeiling (\(after) so far)",
+              token.key.tier == .t512 && after == before + 1)
+        check("no t1024 preview file was written for the DNG (\(dng.filename))", onDisk == false)
     }
 
     // MARK: - slider → frame → undo
