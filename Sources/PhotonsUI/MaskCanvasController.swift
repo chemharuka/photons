@@ -144,11 +144,10 @@ extension CatalogSession {
         setShowMask(isShowingSelectedMask ? nil : selectedMaskID)
     }
 
-    /// Mutate one mask, commit, persist.
+    /// Mutate one mask, commit, persist — the click/toggle door. The slider door is `writeMask`
+    /// with `commit: false` during the drag (`MaskParameters.swift`), so both share one writer.
     public func updateMask(_ id: String, label: String = "蒙版", _ body: (inout Mask) -> Void) {
-        guard let index = edit.masks.firstIndex(where: { $0.id == id }) else { return }
-        applyEdit { body(&$0.masks[index]) }
-        commitEdit(label: label)
+        writeMask(id, label: label, commit: true, body)
     }
 
     /// Write one brush stroke (or replace the one at `strokeIndex`) into `mask`.

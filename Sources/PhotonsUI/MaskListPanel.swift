@@ -1,11 +1,13 @@
 import SwiftUI
 import PhotonsCore
 
-/// The mask panel: what exists, which one is selected, what a drag on the canvas means, and the
-/// three brush numbers (Q22, `docs/tasks/005-masks.md` §1/§7).
+/// The mask panel: what exists, which one is selected, what a drag on the canvas means, and every
+/// number the selected mask owns — the three brush numbers (Q22), the mask-level parameters
+/// (`opacity` / `invert` / `feather` / `refine` / the component's blend mode) and the whole
+/// `LocalAdjustments` set (Q28).
 ///
 /// A leaf view like the rest of the inspector: it holds **no** copy of anything. Selecting a mask,
-/// arming the brush, toggling the overlay and dragging a brush slider all write straight into
+/// arming the brush, toggling the overlay and dragging any slider all write straight into
 /// `CatalogSession` — the same object the canvas and the loupe read — which is what keeps the three
 /// surfaces from drifting apart.
 ///
@@ -15,8 +17,17 @@ import PhotonsCore
 ///     rewrite a stroke already on the photo — and must not grow the undo stack.
 ///   · 显示蒙版 is view state too: it repaints the last pass and nothing else, so ⌘Z after toggling
 ///     it does not turn the overlay off (`MaskViewState`).
+///
+/// A third rule arrived with the parameters: every **document** slider is one snapshot per gesture,
+/// never one per tick. The drag writes through `writeMask(commit: false)` — `applyEdit`, so the
+/// revision moves and the loupe's 50 ms debounce turns a hundred ticks into a few frames — and the
+/// mouse-up calls `commitEdit` once. Committing per tick would make ⌘Z walk back 1/100 EV at a time.
 public struct MaskListPanel: View {
     @Bindable public var session: CatalogSession
+
+    /// The name being typed. View state, deliberately: a keystroke must not grow the undo stack, so
+    /// the document is written once — on ⏎ or the ✓ — and this is only what the field shows.
+    @State private var nameDraft: String = ""
 
     public init(session: CatalogSession) {
         self.session = session
@@ -30,7 +41,9 @@ public struct MaskListPanel: View {
             list
             divider
             tools
-            if session.selectedMaskID != nil {
+            if let mask = selectedMask {
+                maskSection(mask)
+                adjustmentsSection(mask)
                 // The brush numbers belong to a brush mask; a gradient's own parameters are below.
                 if selectedIsBrush { dividers }
                 shapeSection
@@ -45,6 +58,14 @@ public struct MaskListPanel: View {
         .overlay(
             RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        // The readback seam `--ui-smoke` uses to prove these controls are in the live view tree
+        // (SwiftUI sliders are not `NSSlider`s a test can count). 1 × 1 pt, never a hit target.
+        .background(
+            MaskPanelProbeHost(rows: parameterLabels,
+                               listOrder: masks.map(\.name),
+                               selectedName: selectedMask?.name ?? "")
+                .frame(width: 1, height: 1)
         )
     }
 
@@ -134,9 +155,13 @@ public struct MaskListPanel: View {
                 .foregroundStyle(mask.isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Text(strokeSummary(mask))
+            // "径向渐变 · 局部 2 项": what it is, and how much of it is doing something. A mask with
+            // no adjustments is S1.6's identity branch, and the row says "0 项" instead of implying
+            // it changes pixels.
+            Text(MaskRowSummary.text(mask))
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
             Button {
                 session.setMaskEnabled(mask.id, !mask.isEnabled)
             } label: {
@@ -156,16 +181,139 @@ public struct MaskListPanel: View {
         .onTapGesture { session.selectMask(mask.id) }
     }
 
-    /// "2 笔" / "空" / "线性渐变" — enough to tell what a mask *is* at a glance.
-    private func strokeSummary(_ mask: Mask) -> String {
-        guard let first = mask.components.first else { return "空" }
-        if case .brush(let brush) = first.shape {
-            return brush.strokes.isEmpty ? "空" : "\(brush.strokes.count) 笔"
+    // MARK: mask-level parameters
+
+    /// 不透明度 / 羽化 / 精修 / 反转 / 混合 — the mask's own fields (005/M4 §2), plus the rename field
+    /// and the ▲▼ that move it in the list.
+    ///
+    /// The blend picker edits the **active** component's `op`. Core ignores the first component's op
+    /// ("The first component's `op` is ignored"), so the picker is disabled while the selected mask
+    /// holds a single component: a control that writes a field nothing reads is worse than no control.
+    private func maskSection(_ mask: Mask) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Text("蒙版级")
+                    .font(.system(size: 10, weight: .bold))
+                Spacer(minLength: 4)
+                Button {
+                    session.moveMask(mask.id, by: -1)
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.mini)
+                .disabled(!session.canMoveMask(mask.id, by: -1))
+                .help("上移（列表与 develop_json 的数组顺序）")
+                Button {
+                    session.moveMask(mask.id, by: 1)
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.mini)
+                .disabled(!session.canMoveMask(mask.id, by: 1))
+                .help("下移（列表与 develop_json 的数组顺序）")
+            }
+
+            HStack(spacing: 4) {
+                TextField("名称", text: $nameDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10))
+                    .controlSize(.mini)
+                    .onSubmit { commitRename(mask) }
+                Button {
+                    commitRename(mask)
+                } label: {
+                    Image(systemName: "checkmark")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.mini)
+                .disabled(nameDraft == mask.name)
+                .help("重命名（⏎ 亦可）：改名不进任何键，不重渲，但会进一次历史——Core 的语义比较按值比 masks，名字在内")
+            }
+            .padding(.horizontal, 3)
+            .padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(Color.primary.opacity(0.05)))
+            .onChange(of: mask.name) { _, next in nameDraft = next }
+            .onAppear { nameDraft = mask.name }
+
+            ForEach(MaskLevelParameter.allCases, id: \.rawValue) { parameter in
+                sliderRow(parameter.label,
+                          value: parameter.isPercent ? parameter.value(mask) * 100
+                                                     : parameter.value(mask),
+                          range: parameter.isPercent ? 0 ... 100 : parameter.range,
+                          format: parameter.isPercent ? "%.0f%%" : parameter.format,
+                          set: { value in
+                              session.setMaskLevel(mask.id, parameter,
+                                                   parameter.isPercent ? value / 100 : value)
+                          },
+                          commit: { session.commitEdit(label: "蒙版\(parameter.label)") })
+                    .help(parameter.help)
+            }
+
+            Toggle(isOn: invertBinding(mask)) {
+                Text("反转")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.mini)
+            .help("作用在合成后的选区上：1 − a。覆盖面积会翻过来（蒙版内变外）")
+
+            HStack(spacing: 5) {
+                Text("混合")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Picker("", selection: combineBinding(mask)) {
+                    ForEach(CombineOp.allCases, id: \.rawValue) { op in
+                        Text(op.displayName).tag(op)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.mini)
+                .fixedSize()
+                .disabled(mask.components.count < 2)
+                .help(mask.components.count < 2
+                      ? "只有一个组件时 Core 忽略 op（第一个组件的运算没有左值）——再加一个组件才生效"
+                      : (mask.components.last?.op.help ?? ""))
+            }
         }
-        if case .semantic(let semantic) = first.shape {
-            return semantic.kind.displayName
+    }
+
+    // MARK: local adjustments
+
+    /// 局部调整: `amount` plus the ten sliders, straight from `LocalAdjustments`.
+    ///
+    /// Order and ranges are `MaskAdjustmentParameter`'s (Core's numbers, cited there). The section is
+    /// always visible — a disclosure that hides them would also hide the fact that a mask with no
+    /// adjustments renders nothing, which is the identity branch S1.6 relies on.
+    private func adjustmentsSection(_ mask: Mask) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Text("局部调整")
+                    .font(.system(size: 10, weight: .bold))
+                Spacer(minLength: 4)
+                Text("\(MaskRowSummary.adjustmentCount(mask)) 项")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(MaskAdjustmentParameter.allCases, id: \.rawValue) { parameter in
+                    sliderRow(parameter.label,
+                              value: mask.adjustments[keyPath: parameter.keyPath],
+                              range: parameter.range,
+                              format: parameter.format,
+                              set: { value in
+                                  session.setMaskAdjustment(mask.id, parameter, value)
+                              },
+                              commit: { session.commitEdit(label: "局部\(parameter.label)") })
+                        .help(parameter.help)
+                }
+            }
         }
-        return MaskCreationKind.of(first.shape)?.label ?? first.shape.kind
     }
 
     // MARK: the selected shape's own parameters
@@ -183,6 +331,12 @@ public struct MaskListPanel: View {
         guard let entry = selectedComponent else { return false }
         if case .brush = entry.component.shape { return true }
         return false
+    }
+
+    /// The rows this panel built, in order — what the smoke reads back to prove the controls exist.
+    private var parameterLabels: [String] {
+        MaskLevelParameter.allCases.map(\.label) + ["反转", "混合"]
+            + MaskAdjustmentParameter.allCases.map(\.label)
     }
 
     /// The rows that belong to the shape the mask actually holds.
@@ -226,18 +380,18 @@ public struct MaskListPanel: View {
     @ViewBuilder private func shapeParameters(shape: MaskShape) -> some View {
         switch shape {
         case .linearGradient(let g):
-            shapeSlider("中点", value: g.midpoint, range: 0.05 ... 0.95, format: "%.2f", set: { value in
+            sliderRow("中点", value: g.midpoint, range: 0.05 ... 0.95, format: "%.2f", set: { value in
                 writeShape(.linearGradient(LinearGradientShape(start: g.start, end: g.end,
                                                                midpoint: value)))
             }, commit: { session.commitEdit(label: "渐变中点") })
         case .radialGradient(let g):
-            shapeSlider("半径", value: max(g.radius.x, g.radius.y), range: 0.02 ... 1.2, format: "%.3f",
-                        set: { value in
-                            writeShape(.radialGradient(RadialGradientShape(
-                                center: g.center,
-                                radius: NormalizedPoint(value, value), angle: g.angle)))
-                        }, commit: { session.commitEdit(label: "椭圆半径") })
-            shapeSlider("角度", value: g.angle, range: -180 ... 180, format: "%.0f°", set: { value in
+            sliderRow("半径", value: max(g.radius.x, g.radius.y), range: 0.02 ... 1.2, format: "%.3f",
+                      set: { value in
+                          writeShape(.radialGradient(RadialGradientShape(
+                              center: g.center,
+                              radius: NormalizedPoint(value, value), angle: g.angle)))
+                      }, commit: { session.commitEdit(label: "椭圆半径") })
+            sliderRow("角度", value: g.angle, range: -180 ... 180, format: "%.0f°", set: { value in
                 writeShape(.radialGradient(RadialGradientShape(center: g.center,
                                                                radius: g.radius, angle: value)))
             }, commit: { session.commitEdit(label: "椭圆角度") })
@@ -258,23 +412,23 @@ public struct MaskListPanel: View {
                     .font(.system(size: 8, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
-            shapeSlider("容差", value: c.tolerance, range: 0.02 ... 1.0, format: "%.2f", set: { value in
+            sliderRow("容差", value: c.tolerance, range: 0.02 ... 1.0, format: "%.2f", set: { value in
                 writeShape(.colorRange(ColorRangeShape(samples: c.samples, tolerance: value,
                                                        smoothness: c.smoothness)))
             }, commit: { session.commitEdit(label: "颜色容差") })
         case .luminanceRange(let l):
-            shapeSlider("下限", value: l.low, range: 0 ... 1, format: "%.2f", set: { value in
+            sliderRow("下限", value: l.low, range: 0 ... 1, format: "%.2f", set: { value in
                 writeShape(.luminanceRange(LuminanceRangeShape(low: min(value, l.high), high: l.high,
                                                                lowFeather: l.lowFeather,
                                                                highFeather: l.highFeather)))
             }, commit: { session.commitEdit(label: "亮度下限") })
-            shapeSlider("上限", value: l.high, range: 0 ... 1, format: "%.2f", set: { value in
+            sliderRow("上限", value: l.high, range: 0 ... 1, format: "%.2f", set: { value in
                 writeShape(.luminanceRange(LuminanceRangeShape(low: l.low, high: max(value, l.low),
                                                                lowFeather: l.lowFeather,
                                                                highFeather: l.highFeather)))
             }, commit: { session.commitEdit(label: "亮度上限") })
         case .semantic(let s):
-            shapeSlider("软边", value: s.softEdge, range: 0 ... 0.6, format: "%.2f", set: { value in
+            sliderRow("软边", value: s.softEdge, range: 0 ... 0.6, format: "%.2f", set: { value in
                 var next = s
                 next.softEdge = value
                 writeShape(.semantic(next))
@@ -306,9 +460,12 @@ public struct MaskListPanel: View {
         }
     }
 
-    private func shapeSlider(_ title: String, value: Double, range: ClosedRange<Double>,
-                             format: String, set: @escaping (Double) -> Void,
-                             commit: @escaping () -> Void) -> some View {
+    /// One document slider: label + live number on top, the control underneath, and **one commit on
+    /// mouse-up** (`onEditingChanged` fires once when the drag ends). `set` runs for every tick and
+    /// must not commit — that is what keeps ⌘Z at gesture granularity.
+    private func sliderRow(_ title: String, value: Double, range: ClosedRange<Double>,
+                           format: String, set: @escaping (Double) -> Void,
+                           commit: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
                 Text(title)
@@ -367,6 +524,8 @@ public struct MaskListPanel: View {
         }
     }
 
+    /// A **view-state** slider (the brush). No commit hook on purpose: these numbers are captured by
+    /// each stroke, so moving them must not rewrite the picture or the undo stack.
     private func slider(_ title: String, value: Binding<Double>,
                         range: ClosedRange<Double>, format: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -411,9 +570,70 @@ public struct MaskListPanel: View {
         Binding(get: { session.adjustShapeOnDrag }, set: { session.adjustShapeOnDrag = $0 })
     }
 
+    /// A checkbox is one click = one gesture = one snapshot (no drag, so no debounce needed).
+    private func invertBinding(_ mask: Mask) -> Binding<Bool> {
+        Binding(get: { mask.invert }, set: { session.setMaskInverted(mask.id, $0) })
+    }
+
+    /// The selected mask's **last** component is the one the shape section edits, so it is the one
+    /// the blend picker reads and writes (the first component's op is ignored by Core).
+    private func combineBinding(_ mask: Mask) -> Binding<CombineOp> {
+        let component = max(0, mask.components.count - 1)
+        return Binding(get: { mask.components[safe: component]?.op ?? .add },
+                       set: { session.setMaskCombineOp(mask.id, component: component, $0) })
+    }
+
+    private func commitRename(_ mask: Mask) {
+        guard nameDraft != mask.name else { return }
+        if !session.renameMask(mask.id, to: nameDraft) { nameDraft = mask.name }
+    }
+
     private var divider: some View {
         Rectangle()
             .fill(Color.primary.opacity(0.08))
             .frame(height: 1)
     }
 }
+
+// MARK: - the readback seam
+//
+// The inspector is SwiftUI; its `Slider`s are drawn by SwiftUI and are not `NSSlider`s a harness can
+// count, and a screenshot cannot tell a slider from a label. So the panel publishes what it built
+// through one invisible AppKit view — the same seam `HistogramCard` uses for the histogram it drew
+// (`lastDrawnSeries`). The smoke walks the window's view tree, finds this, and asserts on the rows.
+
+public final class MaskPanelProbe: NSView {
+    /// Parameter rows the panel built, in draw order ("不透明度" … "饱和").
+    public private(set) var rows: [String] = []
+    /// The list rows' text, in list order — proves a move reordered the *panel*, not only the model.
+    public private(set) var listOrder: [String] = []
+    /// The selected mask's document name (what the rename field committed to).
+    public private(set) var selectedName: String = ""
+
+    /// Never a hit target and never drawn: it exists to be read.
+    public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    public override var isOpaque: Bool { false }
+
+    public func publish(rows: [String], listOrder: [String], selectedName: String) {
+        self.rows = rows
+        self.listOrder = listOrder
+        self.selectedName = selectedName
+    }
+}
+
+struct MaskPanelProbeHost: NSViewRepresentable {
+    var rows: [String]
+    var listOrder: [String]
+    var selectedName: String
+
+    func makeNSView(context: Context) -> MaskPanelProbe {
+        let probe = MaskPanelProbe()
+        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName)
+        return probe
+    }
+
+    func updateNSView(_ probe: MaskPanelProbe, context: Context) {
+        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName)
+    }
+}
+
