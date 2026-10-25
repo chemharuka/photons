@@ -475,7 +475,7 @@ func cmdThumbs(_ a: Args) throws {
         guard let spec = resolvedSpec[item.asset.contentHash] else { return nil }
         return (item.asset, spec)
     }
-    var hotTickets = enqueue(hotItems, prefix: "hot")
+    let hotTickets = enqueue(hotItems, prefix: "hot")
     _ = service.waitUntilIdle(timeout: 3600)
     var hotTimes: [Double] = []
     for (i, item) in hotItems.enumerated() where i < hotTickets.count {

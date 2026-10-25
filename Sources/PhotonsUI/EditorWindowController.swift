@@ -204,6 +204,24 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func selectAllAction(_ sender: Any?) { selectAllAssets() }
 
+    // MARK: zoom (显示 ▸ 适应窗口 / 1:1 … 8:1 / 放大 / 缩小)
+
+    /// 适应窗口 (⌘0). The same destination as Z from 1:1 and as Escape — one `LoupeViewState.change`.
+    @objc public func zoomFitAction(_ sender: Any?) { rootView.loupeController.zoomToFit() }
+
+    /// 1:1 / 2:1 / 4:1 / 8:1 — the stop travels in the item's `tag`, because a menu item is rebuilt
+    /// from a static list and a tag is the one field AppKit keeps without a model object.
+    @objc public func zoomStopAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, item.tag > 0 else { return }
+        rootView.loupeController.zoom(to: Double(item.tag))
+    }
+
+    /// 放大 (⌘=, and ⌘+ on a US keyboard lands here too). Disabled outside the loupe.
+    @objc public func zoomInAction(_ sender: Any?) { rootView.loupeController.zoomIn() }
+
+    /// 缩小 (⌘−): below 1:1 there is only fit, so this is the inverse of `zoomIn`'s first half.
+    @objc public func zoomOutAction(_ sender: Any?) { rootView.loupeController.zoomOut() }
+
     @objc public func undoAction(_ sender: Any?) { undoEdit() }
 
     @objc public func redoAction(_ sender: Any?) { redoEdit() }
@@ -252,6 +270,21 @@ public final class EditorWindowController: NSWindowController {
             return true
         case #selector(selectAllAction(_:)):
             return !session.assets.isEmpty
+        case #selector(zoomFitAction(_:)):
+            // Ticked when the camera shows the whole frame — the state Z returns to.
+            item.state = rootView.loupeController.viewState.isActualSize ? .off : .on
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(zoomStopAction(_:)):
+            // Exactly on this stop, not "at least": 2:1 and 4:1 cannot both be ticked, and a pinch
+            // between stops ticks none of them (the readout still says 1.7:1).
+            let current = rootView.loupeController.currentZoomStop
+            item.state = (current.map { abs($0 - Double(item.tag)) < 0.005 } ?? false) ? .on : .off
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(zoomInAction(_:)):
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(zoomOutAction(_:)):
+            return session.mode == .loupe && session.anchorID != nil
+                && rootView.loupeController.viewState.isActualSize
         case #selector(openLibraryAction(_:)):
             return true
         case #selector(ratingAction(_:)):

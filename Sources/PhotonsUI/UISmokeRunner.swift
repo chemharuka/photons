@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Metal
 import ImageIO
 import UniformTypeIdentifiers
@@ -117,6 +118,27 @@ public enum MainMenu {
                                 action: #selector(EditorWindowController.showBrowserListAction(_:)),
                                 keyEquivalent: "a")
         list.keyEquivalentModifierMask = [.control, .command]
+        view.addItem(.separator())
+        // 倍率. The four stops are the ladder `LoupeController.zoomStops` defines, ticked by
+        // `validateMenuItem` when the camera is exactly on one; 适应窗口 and 放大/缩小 are the
+        // keyboard path (⌘0, ⌘=, ⌘−) every photo app has.
+        view.addItem(withTitle: "适应窗口",
+                     action: #selector(EditorWindowController.zoomFitAction(_:)),
+                     keyEquivalent: "0")
+        for (index, stop) in LoupeController.zoomStops.enumerated() {
+            let item = view.addItem(withTitle: stop == 1 ? "1:1" : "\(Int(stop)):1",
+                                    action: #selector(EditorWindowController.zoomStopAction(_:)),
+                                    keyEquivalent: "\(index + 1)")
+            item.keyEquivalentModifierMask = [.command, .option]
+            item.tag = Int(stop)
+        }
+        view.addItem(.separator())
+        view.addItem(withTitle: "放大",
+                     action: #selector(EditorWindowController.zoomInAction(_:)),
+                     keyEquivalent: "=")
+        view.addItem(withTitle: "缩小",
+                     action: #selector(EditorWindowController.zoomOutAction(_:)),
+                     keyEquivalent: "-")
 
         // Window
         let windowItem = NSMenuItem()
@@ -443,6 +465,21 @@ public final class UISmokeRunner {
             checkMaskEditing(session: session, loupe: root.loupeController,
                              controller: windowController, window: window,
                              asset: asset, url: url)
+
+            // 9. the histogram card + the clipping warning (005f's UI half)
+            checkHistogramCard(session: session, loupe: root.loupeController,
+                               controller: windowController, window: window,
+                               asset: asset, url: url)
+
+            // 10. the six mask shapes, drawn and created through the inspector's own API
+            checkMaskShapes(session: session, loupe: root.loupeController,
+                            controller: windowController, window: window,
+                            asset: asset, url: url)
+
+            // 11. 显示 ▸ 倍率: four stops, ticks, ⌘= / ⌘−, and no document movement
+            checkZoomMenu(session: session, loupe: root.loupeController,
+                          controller: windowController, window: window,
+                          asset: asset, url: url)
 
             // 8. export sheet + develop presets (M5): real files, one broken source, one undo step
             checkExportAndPresets(session: session, loupe: root.loupeController,
@@ -1668,6 +1705,662 @@ public final class UISmokeRunner {
                              from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
         return raw
+    }
+
+    // MARK: - 直方图卡片 + 高光警告（005f 的 UI）
+
+    /// The histogram card, asserted on the **frame's own measurement** rather than on a re-count of
+    /// its own numbers:
+    ///
+    ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series of 256 bins;
+    ///   2. every channel's bins sum to the sample count (the measurement's own invariant);
+    ///   3. the 削顶 percentage is **Core's** number — checked twice: the card's text against
+    ///      `HistogramCardFormat`, and Core's ratio against an independent full-resolution recount of
+    ///      the very pixels that frame presented (at 720 × 420 the sample grid *is* the frame, so the
+    ///      two agree exactly and the check is not a downsample estimate);
+    ///   4. clicking 削顶 toggles the canvas warning, and doing so moves **no** document: same
+    ///      document hash, same history depth, same `editRevision`, same persistence count.
+    private func checkHistogramCard(session: CatalogSession, loupe: LoupeController,
+                                    controller: EditorWindowController, window: NSWindow,
+                                    asset: Asset, url: URL) {
+        loupe.autoRenderEnabled = false
+        session.maskTool = .off
+        session.applyEdit { $0 = .neutral }
+        session.commitEdit(label: "Reset")
+
+        guard let card = findHistogramCard(in: window.contentView) else {
+            fail("检查器里没有直方图卡片（视图树里找不到 HistogramCardView）")
+            loupe.autoRenderEnabled = true
+            return
+        }
+
+        // A canvas whose long edge is under `Histogram.maxLongEdge`, i.e. the measurement's sample
+        // grid is the frame itself. That is what makes check 3 an equality rather than a bound.
+        let viewport = ImageSize(width: 720, height: 420)
+        guard let frame = try? loupe.makeFrame(asset: asset, url: url, viewport: viewport,
+                                               decodeScale: 0.5,
+                                               edit: MaskViewState.documentOnly(session.edit),
+                                               state: .fit, hashPixels: false),
+              let histogram = frame.histogram else {
+            fail("直方图：这一帧没有 measurement（collectHistogram 没生效）")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        // The same hand-off `present` performs: the card's input is the frame's own measurement.
+        loupe.recordMeasurements(frame)
+        let cardDeadline = Date().addingTimeInterval(6)
+        while card.histogram != histogram && Date() < cardDeadline { pump(0.1) }
+        card.needsDisplay = true
+        card.display()
+
+        log("histogram frame         \(histogram.sampleCount) px sampled on \(histogram.sampleSize.width)×\(histogram.sampleSize.height) · canvas \(histogram.canvas.width)×\(histogram.canvas.height) · \(histogram.binCount) bins · publishes \(loupe.histogramPublishCount)")
+        check("直方图卡片在检查器里，并画出 4 组 × \(histogram.binCount) bin（实测 series \(card.lastDrawnSeries) / bins \(card.lastDrawnBins)）",
+              card.lastDrawnSeries == 4 && card.lastDrawnBins == histogram.binCount
+              && card.histogram != nil)
+
+        let totals = [histogram.red.total, histogram.green.total,
+                      histogram.blue.total, histogram.luma.total]
+        check("bin 和 == 采样像素数（R/G/B/L 四组 \(totals) 全 == sampleCount \(histogram.sampleCount)，卡片读的是同一份）",
+              histogram.sampleCount > 0 && totals.allSatisfy { $0 == histogram.sampleCount }
+              && card.histogram == histogram)
+
+        // Independent recount: the ratio Core reports, recomputed from the presented pixels with the
+        // same 0.999 threshold, and the luma with the same Rec.709 weights.
+        let recounted = clipFractions(of: frame.texture)
+        let coreValues = [histogram.red, histogram.green, histogram.blue, histogram.luma]
+            .map(\.clippedHigh)
+        let deltas = zip(recounted, coreValues).map { abs($0 - $1) }
+        log("clipped recount         card “\(card.clipHighText)” · Core luma \(String(format: "%.5f", histogram.luma.clippedHigh)) · 逐通道 Core \(coreValues.map { String(format: "%.5f", $0) }) · 独立重数 \(recounted.map { String(format: "%.5f", $0) }) · 最大差 \(deltas.max() ?? -1)")
+        check("削顶百分比与 Core 一致：Core 的 4 个 clippedHigh 与对同一帧像素独立重数的最大差 \(String(format: "%.2e", deltas.max() ?? -1))（< 1e-5，即 0.001 个百分点以内）",
+              deltas.allSatisfy { $0 < 1e-5 })
+        let expectedText = [Histogram.Channel.red, .green, .blue, .luma]
+            .map { HistogramCardFormat.clipHigh(histogram, $0) }
+        check("卡片上的削顶数字就是 Core 的值（\(card.clipHighTextByChannel.joined(separator: " / ")) == \(expectedText.joined(separator: " / "))，削底 \(card.clipLowText)）",
+              card.clipHighTextByChannel == expectedText
+              && card.clipHighText == HistogramCardFormat.clipHigh(histogram, .luma)
+              && card.clipLowText == HistogramCardFormat.clipLow(histogram, .luma))
+
+        // The warning: a real click on the number, then a frame that carries the clipped grid.
+        let documentBefore = documentHash(session.edit)
+        let historyBefore = session.history.count
+        let revisionBefore = session.editRevision
+        let persistsBefore = session.persistCount
+        let warningBefore = session.highlightWarning
+        let hit = card.clipHighHitRect
+        var clicked = false
+        if hit.width > 1, let event = mouseDownEvent(in: card, at: NSPoint(x: hit.midX, y: hit.midY),
+                                                     window: window) {
+            card.mouseDown(with: event)
+            clicked = true
+        }
+        pump(0.2)
+        let toggled = session.highlightWarning != warningBefore
+        if let warnedFrame = try? loupe.makeFrame(asset: asset, url: url, viewport: viewport,
+                                                  decodeScale: 0.5,
+                                                  edit: MaskViewState.documentOnly(session.edit),
+                                                  state: .fit) {
+            loupe.recordMeasurements(warnedFrame)
+        }
+        pump(0.2)
+        let grid = loupe.lastClipped
+        log("highlight warning       click=\(clicked) \(warningBefore) → \(session.highlightWarning) · grid \(grid.map { "\($0.columns)×\($0.rows)" } ?? "nil") · clipped \(grid?.clippedFraction ?? -1) · cells \(grid?.clippedCellCount ?? -1)")
+        check("点削顶数字切换高光警告（\(warningBefore) → \(session.highlightWarning)），叠色网格 \(grid.map { "\($0.columns)×\($0.rows)" } ?? "nil") 有 \(grid?.clippedCellCount ?? 0) 个格子被点亮",
+              clicked && toggled && (grid.map { !$0.isEmpty } ?? false))
+
+        let documentAfter = documentHash(session.edit)
+        log("highlight doc hash      \(documentBefore.prefix(16))… → \(documentAfter.prefix(16))… · history \(session.history.count) · editRevision \(session.editRevision) · persist \(session.persistCount)")
+        check("高光警告开关不改文档：hash 不变（\(documentBefore.prefix(8))…）、history 仍 \(historyBefore) 条、editRevision +\(session.editRevision - revisionBefore)、persistCount +\(session.persistCount - persistsBefore)",
+              documentAfter == documentBefore && session.history.count == historyBefore
+              && session.editRevision == revisionBefore
+              && session.persistCount == persistsBefore)
+
+        // The warning's threshold is the histogram's, proved on a frame that *is* clipped: a
+        // synthetic white source must light every grid cell and report 100 % in both measurements.
+        // (This photo has no clipped pixels, so its own grid is legitimately empty — that is the
+        // honest half of the pair.)
+        var whiteGrid: ClippedGrid?
+        var whiteHistogram: Histogram?
+        let whiteWidth = 128, whiteHeight = 96
+        var whitePixels = [Float16](repeating: 0, count: whiteWidth * whiteHeight * 4)
+        for i in stride(from: 0, to: whitePixels.count, by: 4) {
+            whitePixels[i] = 8
+            whitePixels[i + 1] = 8
+            whitePixels[i + 2] = 8
+            whitePixels[i + 3] = 1
+        }
+        let white = LinearImage(width: whiteWidth, height: whiteHeight, rgba: whitePixels,
+                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let whiteCanvas = ImageSize(width: whiteWidth, height: whiteHeight)
+        if let graph = try? RenderGraph(input: RenderInput(image: white, identity: "ui-smoke-white")),
+           let rendered = try? graph.render(EditModel(), options: RenderOptions(
+                canvas: whiteCanvas, wantsPixels: false,
+                collectHistogram: true, histogramBins: 256)),
+           let texture = rendered.output {
+            whiteGrid = HighlightWarning.grid(of: texture)
+            whiteHistogram = rendered.histogram
+            graph.recycle(output: texture)
+        }
+        let whiteCells = whiteGrid?.clippedCellCount ?? -1
+        let whiteGridFraction = whiteGrid?.clippedFraction ?? -1
+        let whiteHistogramFraction = whiteHistogram?.luma.clippedHigh ?? -1
+        log("clip threshold probe    cells \(whiteCells)/\(HighlightWarning.columns * HighlightWarning.rows) · grid \(String(format: "%.3f", whiteGridFraction)) · histogram luma \(String(format: "%.3f", whiteHistogramFraction))")
+        check("高光警告与削顶百分比共用 0.999 阈值：纯白源（线性 8）整网格点亮 \(whiteCells)/\(HighlightWarning.columns * HighlightWarning.rows) 格，网格 \(String(format: "%.3f", whiteGridFraction)) == histogram.luma.clippedHigh \(String(format: "%.3f", whiteHistogramFraction))",
+              whiteCells == HighlightWarning.columns * HighlightWarning.rows
+              && whiteGridFraction > 0.99 && whiteHistogramFraction > 0.99)
+
+        // Back off, so the frames the later checks render are the plain ones.
+        if session.highlightWarning { card.toggleHighlightWarning() }
+        pump(0.15)
+        loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - 蒙版形状（线性 / 径向 / 颜色 / 亮度 / 语义）
+
+    /// The six shapes M4's document model has, exercised through the UI's own paths:
+    ///
+    ///   · **linear and radial are drawn**, not created with a default: the gesture goes through
+    ///     `LoupeCanvasView.mouseDown/Dragged/Up` → `LoupeController` → `addShapeMask`, and ⌘Z takes
+    ///     the whole gesture back (one snapshot, not "new mask" + "move it");
+    ///   · a second drag on a selected gradient **adjusts** it (centre → rim), also one snapshot;
+    ///   · colour range / luminance range / semantic are created from the inspector's 新建 menu API,
+    ///     with their coverage measured the same way the brush's is — the frame with the mask's
+    ///     overlay against the frame with none, so "nonzero area" means pixels, not parameters;
+    ///   · a **pure-colour source** makes the colour-range mask select ~100 % of the picture, which
+    ///     is the one case where the area is predictable without knowing the photo.
+    private func checkMaskShapes(session: CatalogSession, loupe: LoupeController,
+                                 controller: EditorWindowController, window: NSWindow,
+                                 asset: Asset, url: URL) {
+        loupe.autoRenderEnabled = false
+        session.maskTool = .off
+        session.setShowMask(nil)
+        session.applyEdit { $0 = .neutral }
+        session.commitEdit(label: "Reset")
+        let viewport = ImageSize(width: 720, height: 420)
+
+        func frame(_ edit: EditModel) -> LoupeController.FrameResult? {
+            do {
+                return try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
+                                           edit: edit, state: .fit, hashPixels: true)
+            } catch {
+                fail("mask shape frame threw: \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        /// The document with no masks at all — the denominator every coverage is measured against.
+        func withoutMasks(_ model: EditModel) -> EditModel {
+            var document = MaskViewState.documentOnly(model)
+            document.masks = []
+            return document
+        }
+
+        guard let plain = frame(withoutMasks(session.edit)) else {
+            fail("蒙版形状：没有基线帧")
+            loupe.autoRenderEnabled = true
+            return
+        }
+
+        /// Measured area of one mask: its `showMask` overlay against the no-mask frame. Reads the
+        /// atlas slice S1.6 consumed, so a nonzero number means a real selection reached the GPU.
+        ///
+        /// The live document is rendered **unstripped**: `documentOnly` would take the overlay away
+        /// (`showMaskID` is view state), and then the overlay would measure zero by construction.
+        func coverageOf(_ maskID: String) -> Double {
+            session.setShowMask(maskID)
+            defer { session.setShowMask(nil) }
+            guard let over = frame(session.edit) else { return -1 }
+            return coverage(over.texture, plain.texture)
+        }
+
+        let canvas = loupe.canvasView
+        let bounds = canvas.bounds
+
+        // MARK: 10.1 linear: drawn on the canvas, one snapshot, ⌘Z removes it
+
+        let depthBeforeLinear = session.history.count
+        session.createMask(.linearGradient)
+        let armed = loupe.isShapeDragArmed
+        let emptyWhileArmed = session.edit.masks.isEmpty
+        let events = synthesizeStroke(in: canvas, window: window,
+                                      from: CGPoint(x: bounds.width * 0.28, y: bounds.height * 0.30),
+                                      to: CGPoint(x: bounds.width * 0.74, y: bounds.height * 0.68),
+                                      steps: 24)
+        let linearMask = session.edit.masks.last
+        var linearGeometry = "—"
+        var linearForward = false
+        if case .linearGradient(let g)? = linearMask?.components.first?.shape {
+            linearGeometry = String(format: "%.2f,%.2f → %.2f,%.2f", g.start.x, g.start.y,
+                                    g.end.x, g.end.y)
+            linearForward = g.end.x > g.start.x && g.end.y > g.start.y
+        }
+        let linearCoverage = linearMask.map { coverageOf($0.id) } ?? -1
+        log("mask linear             \(events) 事件 · kind=\(linearMask?.components.first?.shape.kind ?? "nil") · \(linearGeometry) · 覆盖 \(String(format: "%.4f", linearCoverage)) · history \(depthBeforeLinear)→\(session.history.count)")
+        check("线性渐变：画布拖拽创建（armed=\(armed)，按下时还没有 mask=\(emptyWhileArmed)），一个蒙版一笔历史，\(linearGeometry)，覆盖面积 \(String(format: "%.4f", linearCoverage))",
+              armed && emptyWhileArmed && loupe.shapeDragsCreated == 1
+              && session.edit.masks.count == 1
+              && linearMask?.components.first?.shape.kind == MaskShape.linearKind
+              && linearForward && linearCoverage > 0.01
+              && session.history.count == depthBeforeLinear + 1)
+
+        let undidLinear = controller.undoEdit()
+        pump(0.1)
+        check("线性渐变拖拽创建后 ⌘Z 一次撤掉整个蒙版（mask 1 → \(session.edit.masks.count)，pending \(session.pendingMaskShape?.rawValue ?? "nil")）",
+              undidLinear && session.edit.masks.isEmpty && session.pendingMaskShape == nil)
+
+        // MARK: 10.2 radial: drawn as centre → rim
+
+        session.createMask(.radialGradient)
+        _ = synthesizeStroke(in: canvas, window: window,
+                             from: CGPoint(x: bounds.midX, y: bounds.midY),
+                             to: CGPoint(x: bounds.midX + bounds.width * 0.16,
+                                         y: bounds.midY + bounds.height * 0.20),
+                             steps: 20)
+        let radialMask = session.edit.masks.last
+        var radialBefore = 0.0
+        if case .radialGradient(let g)? = radialMask?.components.first?.shape {
+            radialBefore = max(g.radius.x, g.radius.y)
+        }
+        let radialCoverage = radialMask.map { coverageOf($0.id) } ?? -1
+        log("mask radial             kind=\(radialMask?.components.first?.shape.kind ?? "nil") · r=\(String(format: "%.3f", radialBefore)) · 覆盖 \(String(format: "%.4f", radialCoverage))")
+        check("径向渐变：中心→边缘拖拽创建，半径 \(String(format: "%.3f", radialBefore))（短边单位），覆盖面积 \(String(format: "%.4f", radialCoverage))",
+              radialMask?.components.first?.shape.kind == MaskShape.radialKind
+              && radialBefore > 0.05 && radialCoverage > 0.01
+              && loupe.shapeDragsCreated == 2)
+
+        // MARK: 10.3 radial adjustment: a second drag reshapes it, one snapshot, ⌘Z restores
+
+        func radialRadius() -> Double {
+            guard let shape = session.edit.masks.first?.components.first?.shape,
+                  case .radialGradient(let g) = shape else { return 0 }
+            return max(g.radius.x, g.radius.y)
+        }
+
+        let depthBeforeAdjust = session.history.count
+        _ = synthesizeStroke(in: canvas, window: window,
+                             from: CGPoint(x: bounds.midX, y: bounds.midY),
+                             to: CGPoint(x: bounds.midX + bounds.width * 0.26,
+                                         y: bounds.midY + bounds.height * 0.30),
+                             steps: 20)
+        let radialAfter = radialRadius()
+        log("mask radial adjust      r \(String(format: "%.3f", radialBefore)) → \(String(format: "%.3f", radialAfter)) · history \(depthBeforeAdjust)→\(session.history.count)")
+        check("径向渐变可在画布上拖动调整（半径 \(String(format: "%.3f", radialBefore)) → \(String(format: "%.3f", radialAfter))，一次拖拽一条历史 +\(session.history.count - depthBeforeAdjust)）",
+              radialAfter > radialBefore + 0.02 && session.history.count == depthBeforeAdjust + 1
+              && loupe.shapeDragsAdjusted == 1)
+
+        _ = controller.undoEdit()
+        pump(0.1)
+        let radialRestored = radialRadius()
+        check("调整后再 ⌘Z 回到拖动前的半径（\(String(format: "%.3f", radialRestored)) ≈ \(String(format: "%.3f", radialBefore))）",
+              abs(radialRestored - radialBefore) < 0.01 && session.edit.masks.count == 1)
+
+        // Clean the gradients away; the remaining shapes are created by the panel's menu API.
+        for mask in session.edit.masks { session.deleteMask(mask.id) }
+
+        // MARK: 10.4 colour range: sampled from the picture itself
+
+        let depthBeforeColor = session.history.count
+        let colorMask = session.addMask(kind: .colorRange)
+        var colorCoverage = -1.0
+        if let colorMask {
+            // "从画面取色": the frame's mean display colour, encoded the way `ColorRangeShape.samples`
+            // is stored (sRGB). A tolerance of 0.35 in the normalised OKLab metric then means "this
+            // neighbourhood of colours", which is what a colour-range mask is.
+            let sample = averageSample(of: plain.texture)
+            session.setMaskComponentShape(colorMask.id, component: 0,
+                                          shape: .colorRange(ColorRangeShape(samples: [sample],
+                                                                             tolerance: 0.35,
+                                                                             smoothness: 0.5)),
+                                          commit: false, label: "")
+            colorCoverage = coverageOf(colorMask.id)
+            log("mask colour             kind=\(colorMask.components.first?.shape.kind ?? "nil") · 样本 \(sample.map { String(format: "%.3f", $0) }) · 覆盖 \(String(format: "%.4f", colorCoverage))")
+        }
+        check("颜色范围蒙版（样本取自画面均值）覆盖面积 \(String(format: "%.4f", colorCoverage))，新建即一条历史（+\(session.history.count - depthBeforeColor)）",
+              colorMask != nil && colorMask?.components.first?.shape.kind == MaskShape.colorRangeKind
+              && colorCoverage > 0.01 && colorCoverage <= 1.0
+              && session.history.count == depthBeforeColor + 1)
+
+        // MARK: 10.5 luminance range: the full span covers the picture
+
+        let lumaMask = session.addMask(kind: .luminanceRange)
+        let lumaCoverage = lumaMask.map { coverageOf($0.id) } ?? -1
+        log("mask luminance          kind=\(lumaMask?.components.first?.shape.kind ?? "nil") · 0…1 · 覆盖 \(String(format: "%.4f", lumaCoverage))")
+        check("亮度范围蒙版 0…1 覆盖面积 \(String(format: "%.4f", lumaCoverage))（几乎整幅，扣掉两端羽化）",
+              lumaMask?.components.first?.shape.kind == MaskShape.luminanceRangeKind
+              && lumaCoverage > 0.5)
+
+        // MARK: 10.6 semantic: created with the route the capability table picks
+
+        let semanticMask = session.addMask(kind: .semantic, semanticKind: .subject)
+        var semanticKind = "-"
+        var semanticProvider = "-"
+        if case .semantic(let s)? = semanticMask?.components.first?.shape {
+            semanticKind = s.kind.rawValue
+            semanticProvider = s.provider.rawValue
+        }
+        let semanticCoverage = semanticMask.map { coverageOf($0.id) } ?? -1
+        log("mask semantic           kind=\(semanticMask?.components.first?.shape.kind ?? "nil") · \(semanticKind)/\(semanticProvider) · 覆盖 \(String(format: "%.4f", semanticCoverage))（OS 模型决定，可能为 0）")
+        check("语义蒙版按能力表选路线创建（subject → \(semanticProvider)），进文档与列表（掩码数 \(session.edit.masks.count)）",
+              semanticMask?.components.first?.shape.kind == MaskShape.semanticKind
+              && semanticKind == "subject" && semanticProvider == SemanticProvider.visionForeground.rawValue
+              && session.edit.masks.contains { $0.id == semanticMask?.id })
+
+        // MARK: 10.7 the brush still creates its own (regression: the menu did not replace it)
+
+        let brushMask = session.addMask(kind: .brush)
+        var brushIsEmpty = false
+        if case .brush(let b)? = brushMask?.components.first?.shape { brushIsEmpty = b.strokes.isEmpty }
+        check("画笔（原有形状）仍能从同一菜单新建：空笔刷组件、kind=brush、覆盖 0",
+              brushMask?.components.first?.shape.kind == MaskShape.brushKind && brushIsEmpty
+              && (brushMask.map { coverageOf($0.id) } ?? -1) == 0)
+
+        // MARK: 10.8 a pure-colour source: the colour-range mask selects all of it
+
+        let side = 192
+        let linearColour = (r: 0.18, g: 0.42, b: 0.62)
+        var solidPixels = [Float16]()
+        solidPixels.reserveCapacity(side * side * 4)
+        for _ in 0..<(side * side) {
+            solidPixels.append(Float16(linearColour.r))
+            solidPixels.append(Float16(linearColour.g))
+            solidPixels.append(Float16(linearColour.b))
+            solidPixels.append(1)
+        }
+        let solid = LinearImage(width: side, height: side, rgba: solidPixels,
+                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let solidSample = [srgbEncoded(linearColour.r), srgbEncoded(linearColour.g),
+                           srgbEncoded(linearColour.b)]
+        let solidMask = Mask(id: "m-solid", name: "纯色",
+                             components: [MaskComponent(id: "c-solid", shape:
+                                .colorRange(ColorRangeShape(samples: [solidSample], tolerance: 0.30,
+                                                            smoothness: 0.5)))])
+        var solidDocument = EditModel(masks: [solidMask])
+        solidDocument.showMaskID = solidMask.id
+        let solidCanvas = ImageSize(width: side, height: side)
+        var solidArea = -1.0
+        if let graph = try? RenderGraph(input: RenderInput(image: solid, identity: "ui-smoke-solid")),
+           let masked = try? graph.render(solidDocument,
+                                          options: RenderOptions(canvas: solidCanvas, wantsPixels: true)),
+           let maskedPixels = masked.display,
+           let plainSolid = try? graph.render(EditModel(),
+                                              options: RenderOptions(canvas: solidCanvas, wantsPixels: true)),
+           let plainPixels = plainSolid.display {
+            solidArea = differingFraction(maskedPixels, plainPixels)
+            log("solid colour probe      \(side)×\(side) 单体色 · 样本 \(solidSample.map { String(format: "%.3f", $0) }) · 覆盖 \(String(format: "%.4f", solidArea)) · masks \(masked.showsMask)")
+        }
+        check("纯色源的颜色范围蒙版覆盖面积 ≈ 1（实测 \(String(format: "%.4f", solidArea))，源是单一线性色）",
+              solidArea > 0.95)
+
+        // Leave the document as clean as the checks found it.
+        for mask in session.edit.masks { session.deleteMask(mask.id) }
+        session.setShowMask(nil)
+        session.maskTool = .off
+        loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - 倍率菜单（显示 ▸ 适应窗口 / 1:1 … 8:1 / 放大 / 缩小）
+
+    /// The zoom commands, asserted on what the renderer is actually asked for:
+    ///
+    ///   · all four stops exist in the 显示 menu and are ticked exactly one at a time;
+    ///   · after a stop, the frame's `canvas` is the viewport and its `zoom` is the stop, and the
+    ///     visible window is `viewport / zoom` source pixels (the crop clamped);
+    ///   · ⌘= and ⌘− walk the ladder through the real menu key equivalents;
+    ///   · none of it is an edit: the document hash, the history and `editRevision` do not move.
+    private func checkZoomMenu(session: CatalogSession, loupe: LoupeController,
+                               controller: EditorWindowController, window: NSWindow,
+                               asset: Asset, url: URL) {
+        loupe.autoRenderEnabled = false
+        let viewport = loupe.viewportPixels
+        let document = MaskViewState.documentOnly(session.edit)
+        let hashBefore = documentHash(session.edit)
+        let historyBefore = session.history.count
+        let revisionBefore = session.editRevision
+
+        let items = zoomMenuItems()
+        let titles = items.map(\.title).joined(separator: " / ")
+        check("显示菜单有四档倍率 + 适应窗口 + 放大/缩小（\(titles)）",
+              items.count == 4 && items.map(\.tag) == [1, 2, 4, 8]
+              && menuItem(#selector(EditorWindowController.zoomFitAction(_:))) != nil
+              && menuItem(#selector(EditorWindowController.zoomInAction(_:))) != nil
+              && menuItem(#selector(EditorWindowController.zoomOutAction(_:))) != nil)
+
+        /// What the renderer would be asked for, at the camera's current state.
+        func renderShape() -> (canvas: ImageSize, zoom: Double, window: ImageSize)? {
+            guard let frame = try? loupe.makeFrame(asset: asset, url: url, viewport: viewport,
+                                                   decodeScale: 0.5, edit: document,
+                                                   state: loupe.viewState) else { return nil }
+            return (frame.canvas, frame.zoom, frame.window)
+        }
+
+        var stopResults: [String] = []
+        var stopsOK = true
+        for item in items {
+            controller.zoomStopAction(item)
+            pump(0.05)
+            let shape = renderShape()
+            let ticked = items.filter { controller.validateMenuItem($0) && $0.state == .on }
+            let label = loupe.zoomLabel
+            let expectedWindow = expectedWindowSize(loupe: loupe, zoom: Double(item.tag))
+            stopResults.append(String(format: "%d:1→canvas %@ zoom %.0f window %@ label %@ ticked %d",
+                                      item.tag,
+                                      shape.map { "\($0.canvas.width)×\($0.canvas.height)" } ?? "nil",
+                                      shape?.zoom ?? -1,
+                                      shape.map { "\($0.window.width)×\($0.window.height)" } ?? "nil",
+                                      label, ticked.count))
+            var stopOK = true
+            if let shape {
+                stopOK = shape.canvas == viewport
+                    && abs(shape.zoom - Double(item.tag)) < 0.001
+                    && abs(shape.window.width - Int(expectedWindow.width)) <= 1
+                    && abs(shape.window.height - Int(expectedWindow.height)) <= 1
+            } else {
+                stopOK = false
+            }
+            stopOK = stopOK && ticked.count == 1 && ticked.first?.tag == item.tag
+            stopOK = stopOK && label == (item.tag == 1 ? "1:1"
+                                            : String(format: "%.1f:1", Double(item.tag)))
+            stopsOK = stopsOK && stopOK
+        }
+        log("zoom stops              \(stopResults.joined(separator: " · "))")
+        check("四档倍率切换后 canvas == 视口、渲染倍率 == 档位、可见窗口 == 视口/倍率，且状态条文字同步（\(stopResults.joined(separator: " · "))）",
+              stopsOK)
+
+        // ⌘0 → fit; ⌘= → 1:1; ⌘= → 2:1; ⌘− → 1:1; ⌘− → fit.
+        //
+        // The key equivalent is posted through the main menu, which is the shipped path. A harness
+        // launched from a shell cannot hold key-window focus, so AppKit finds the item and then has
+        // nowhere to send its nil-target action; when that happens the same action is delivered to
+        // the window controller — the responder AppKit would have chosen — and the log says which
+        // route ran. The *wiring* (item + key equivalent + action) is asserted either way.
+        func shortcut(_ characters: String) -> (matched: Bool, moved: Bool, via: String) {
+            let before = loupe.viewState.isActualSize ? "a:\(loupe.zoomLabel)" : "f"
+            let matched = performMenuKey(characters, modifiers: [.command], window: window)
+            pump(0.05)
+            var after = loupe.viewState.isActualSize ? "a:\(loupe.zoomLabel)" : "f"
+            var via = "menu"
+            if after == before, let item = menuKeyItem(characters, modifiers: [.command]),
+               let action = item.action, controller.responds(to: action) {
+                _ = controller.perform(action, with: item)
+                pump(0.05)
+                after = loupe.viewState.isActualSize ? "a:\(loupe.zoomLabel)" : "f"
+                via = "controller"
+            }
+            return (matched, after != before, via)
+        }
+
+        let fitKey = shortcut("0")
+        let fitState = loupe.viewState.isActualSize
+        let zoomInKey = shortcut("=")
+        let afterIn = loupe.zoomLabel
+        _ = shortcut("=")
+        let afterSecondIn = loupe.zoomLabel
+        let zoomOutKey = shortcut("-")
+        let afterOut = loupe.zoomLabel
+        _ = shortcut("-")
+        let backToFit = loupe.viewState.isActualSize
+        log("zoom keys               ⌘0 matched=\(fitKey.matched) via \(fitKey.via) → actual \(fitState) · ⌘= \(zoomInKey.matched)/\(zoomInKey.via) → \(afterIn) · ⌘= → \(afterSecondIn) · ⌘− \(zoomOutKey.matched)/\(zoomOutKey.via) → \(afterOut) · ⌘− → fit \(!backToFit)")
+        check("⌘0/⌘=/⌘− 命中真实菜单快捷键（matched \(fitKey.matched)/\(zoomInKey.matched)/\(zoomOutKey.matched)）并走完倍率阶梯：适应窗口 → \(afterIn) → \(afterSecondIn) → \(afterOut) → 适应窗口（\(!backToFit)）",
+              fitKey.matched && zoomInKey.matched && zoomOutKey.matched
+              && !fitState && afterIn == "1:1" && afterSecondIn == "2.0:1"
+              && afterOut == "1:1" && !backToFit)
+
+        let hashAfter = documentHash(session.edit)
+        log("zoom vs document        hash \(hashBefore.prefix(8))… → \(hashAfter.prefix(8))… · history \(session.history.count) · editRevision +\(session.editRevision - revisionBefore)")
+        check("⌘= / ⌘− / 倍率菜单不改文档：hash 不变（\(hashBefore.prefix(8))…）、history 仍 \(historyBefore) 条、editRevision +\(session.editRevision - revisionBefore)",
+              hashAfter == hashBefore && session.history.count == historyBefore
+              && session.editRevision == revisionBefore)
+
+        loupe.zoomToFit()
+        loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - helpers for the three sections above
+
+    /// The inspector's histogram card, wherever SwiftUI put it.
+    private func findHistogramCard(in view: NSView?) -> HistogramCardView? {
+        guard let view else { return nil }
+        if let card = view as? HistogramCardView { return card }
+        for subview in view.subviews {
+            if let found = findHistogramCard(in: subview) { return found }
+        }
+        return nil
+    }
+
+    /// The four 倍率 items of 显示, in ladder order.
+    private func zoomMenuItems() -> [NSMenuItem] {
+        guard let view = NSApp.mainMenu?.items.compactMap(\.submenu)
+            .first(where: { $0.title == "显示" }) else { return [] }
+        return view.items.filter { $0.action == #selector(EditorWindowController.zoomStopAction(_:)) }
+    }
+
+    /// What `viewport / zoom` is in source pixels, clamped to the crop — computed through
+    /// `LoupeFraming`, i.e. the same projection the loupe hit-tests with, not from the frame result.
+    private func expectedWindowSize(loupe: LoupeController, zoom: Double) -> (width: Double, height: Double) {
+        guard let framing = loupe.framing() else { return (0, 0) }
+        let state = LoupeViewState(mode: .actual, zoom: zoom,
+                                   centerX: framing.cropOriginX + framing.cropWidthPixels / 2,
+                                   centerY: framing.cropOriginY + framing.cropHeightPixels / 2)
+        return framing.windowSize(of: state)
+    }
+
+    /// A canonical hash of the document: JSON with sorted keys, SHA-256. Two documents that render
+    /// the same bytes encode the same way, so this is the "did anything move" question in one number.
+    private func documentHash(_ model: EditModel) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(MaskViewState.documentOnly(model)) else {
+            return "unencodable"
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Post a key equivalent through the **main menu** — the shipped shortcut path.
+    @discardableResult
+    private func performMenuKey(_ characters: String, modifiers: NSEvent.ModifierFlags,
+                                window: NSWindow) -> Bool {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                           modifierFlags: modifiers,
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil,
+                                           characters: characters,
+                                           charactersIgnoringModifiers: characters,
+                                           isARepeat: false, keyCode: 0) else { return false }
+        return NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
+    }
+
+    /// The menu item a key equivalent would fire, so the harness can deliver its action itself when
+    /// AppKit has no key window to resolve the responder chain against.
+    private func menuKeyItem(_ characters: String, modifiers: NSEvent.ModifierFlags) -> NSMenuItem? {
+        func find(in menu: NSMenu?) -> NSMenuItem? {
+            guard let menu else { return nil }
+            for item in menu.items {
+                if item.keyEquivalent == characters,
+                   item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask)
+                    == modifiers.intersection(.deviceIndependentFlagsMask) {
+                    return item
+                }
+                if let sub = item.submenu, let hit = find(in: sub) { return hit }
+            }
+            return nil
+        }
+        return find(in: NSApp.mainMenu)
+    }
+
+    /// Clipped fraction per channel (R, G, B, Rec.709 luma) counted from a presented texture.
+    ///
+    /// The independent half of "the card's percentage is Core's": Core measures a *downsampled*
+    /// grid, this walks the frame itself, and at the smoke's canvas size the two describe the same
+    /// pixels — which is what makes the assertion an equality.
+    private func clipFractions(of texture: MTLTexture) -> [Double] {
+        let width = texture.width, height = texture.height
+        let raw = rgba16(texture)
+        let threshold = Float(Histogram.clipHighThreshold)
+        let weights = (Float(Histogram.lumaWeights.r), Float(Histogram.lumaWeights.g),
+                       Float(Histogram.lumaWeights.b))
+        var hits = [0, 0, 0, 0]
+        for i in stride(from: 0, to: raw.count, by: 4) {
+            let r = Float(Float16(bitPattern: raw[i]))
+            let g = Float(Float16(bitPattern: raw[i + 1]))
+            let b = Float(Float16(bitPattern: raw[i + 2]))
+            let luma = weights.0 * r + weights.1 * g + weights.2 * b
+            if r > threshold { hits[0] += 1 }
+            if g > threshold { hits[1] += 1 }
+            if b > threshold { hits[2] += 1 }
+            if luma > threshold { hits[3] += 1 }
+        }
+        let total = Double(max(1, width * height))
+        return hits.map { Double($0) / total }
+    }
+
+    /// The frame's average display colour, sRGB-encoded — a `ColorRangeShape` sample taken "from the
+    /// picture" the way a user's eyedropper would.
+    private func averageSample(of texture: MTLTexture) -> [Double] {
+        let width = texture.width, height = texture.height
+        let raw = rgba16(texture)
+        let stepY = max(1, height / 64)
+        let stepX = max(1, width / 64)
+        var sum = (r: 0.0, g: 0.0, b: 0.0)
+        var count = 0.0
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let offset = (y * width + x) * 4
+                sum.r += Double(Float(Float16(bitPattern: raw[offset])))
+                sum.g += Double(Float(Float16(bitPattern: raw[offset + 1])))
+                sum.b += Double(Float(Float16(bitPattern: raw[offset + 2])))
+                count += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        guard count > 0 else { return [0.5, 0.5, 0.5] }
+        return [min(max(sum.r / count, 0), 1), min(max(sum.g / count, 0), 1),
+                min(max(sum.b / count, 0), 1)]
+    }
+
+    /// Fraction of pixels that differ between two rendered display images — the pure-colour probe's
+    /// "how much of the picture did the mask select".
+    private func differingFraction(_ a: DisplayImage, _ b: DisplayImage, threshold: Float = 1.0 / 512) -> Double {
+        guard a.width == b.width, a.height == b.height, a.width > 0 else { return -1 }
+        var differing = 0
+        let count = a.width * a.height
+        for i in 0..<count {
+            let base = i * 4
+            for c in 0..<3 {
+                if abs(Float(a.rgba[base + c]) - Float(b.rgba[base + c])) > threshold {
+                    differing += 1
+                    break
+                }
+            }
+        }
+        return Double(differing) / Double(count)
+    }
+
+    /// Linear light → sRGB-encoded 0…1, the storage space of `ColorRangeShape.samples`.
+    private func srgbEncoded(_ linear: Double) -> Double {
+        let v = min(max(linear, 0), 1)
+        return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055
     }
 
     // MARK: bench

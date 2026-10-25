@@ -24,6 +24,9 @@ public struct InspectorView: View {
             historyStrip
             ScrollView {
                 VStack(spacing: 10) {
+                    card("直方图") {
+                        HistogramCard(session: session)
+                    }
                     lightCard
                     colorCard
                     PresetPanel(session: session)

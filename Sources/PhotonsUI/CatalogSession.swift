@@ -147,6 +147,23 @@ public final class CatalogSession {
     /// 0…1 per-stroke alpha multiplier.
     public var brushFlow: Double = 1.0
 
+    /// What the next drag on the canvas creates, when a shape gradient is waiting for one.
+    ///
+    /// View state like `maskTool`: selecting 线性/径向渐变 in the inspector's 新建 menu arms a drag,
+    /// and the mask is created **when the drag ends** with the geometry the user drew. That ordering
+    /// is what makes one gesture one snapshot instead of "new mask" + "move it".
+    public var pendingMaskShape: MaskCreationKind?
+
+    /// Drag on the canvas adjusts the selected linear/radial mask instead of panning.
+    ///
+    /// On by default because "I just drew an ellipse" is followed by "…a bit more to the left" far
+    /// more often than by a pan, and only armed while a *shape* mask is selected — a brush mask, or
+    /// no mask, leaves the camera alone.
+    public var adjustShapeOnDrag: Bool = true
+
+    /// The semantic sub-kind the next 语义 mask uses (the 新建 menu's submenu).
+    public var pendingSemanticKind: SemanticKind = .subject
+
     /// The mask the frame is painting over, or nil.
     public var shownMaskID: String? { edit.showMaskID }
 
@@ -503,6 +520,8 @@ public final class CatalogSession {
             history = EditHistory(baseline: .neutral)
             loadedEditAssetID = nil
             selectedMaskID = nil
+            pendingMaskShape = nil
+            recordHistogram(nil)
             return
         }
         if !force, loadedEditAssetID == a.id { return }
@@ -528,6 +547,10 @@ public final class CatalogSession {
         loadedEditAssetID = a.id
         selectedMaskID = edit.masks.first?.id
         maskTool = .off
+        // A document change retires the pending shape and the previous photo's histogram: both
+        // describe the picture that is no longer on screen.
+        pendingMaskShape = nil
+        recordHistogram(nil)
     }
 
     public func recordCapabilities(_ c: DecoderCapabilities) {
@@ -535,6 +558,41 @@ public final class CatalogSession {
         // would re-render the SwiftUI inspector once per slider frame for no information.
         guard capabilities != c else { return }
         capabilities = c
+    }
+
+    // MARK: measured facts — the histogram and the clipping warning
+    //
+    // Neither of these is a document edit: `lastHistogram` is a *reading* of the frame the loupe
+    // already rendered (handed over when that frame is presented, so there is never a second
+    // render), and `highlightWarning` is a display preference. `editRevision`, `EditHistory` and
+    // `develop_json` are untouched by both — which is exactly what `--ui-smoke` asserts when it
+    // toggles the warning and compares the document hash.
+
+    /// The last frame's histogram, or nil before the first frame. Read by the inspector card.
+    public private(set) var lastHistogram: Histogram?
+
+    /// Paint clipped pixels magenta on the canvas. A toggle, not an edit.
+    public private(set) var highlightWarning = false
+
+    /// Bumped whenever the warning is switched, so the loupe (an AppKit observer of this object)
+    /// has something cheap to watch that is not `editRevision`.
+    public private(set) var highlightWarningRevision = 0
+
+    /// The loupe hands over what its frame measured. Equality-guarded: a frame that measured the
+    /// same distribution must not re-render the inspector.
+    public func recordHistogram(_ h: Histogram?) {
+        guard h != lastHistogram else { return }
+        lastHistogram = h
+    }
+
+    public func setHighlightWarning(_ on: Bool) {
+        guard on != highlightWarning else { return }
+        highlightWarning = on
+        highlightWarningRevision &+= 1
+    }
+
+    public func toggleHighlightWarning() {
+        setHighlightWarning(!highlightWarning)
     }
 
     // MARK: presets (M5)

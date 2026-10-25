@@ -47,6 +47,25 @@
 #   · selecting another photo keeps the filter; clicking the chip clears it and the library returns;
 #   · a rating grows neither `EditHistory` nor `editRevision`, and ⌘Z stays grey / a no-op
 #     (a rating is library metadata, so it must not be undoable).
+# 直方图卡片 + 高光警告 (005f 的 UI 一半):
+#   · 检查器里有一张 直方图 卡片，画的是**这一帧自己的**测量（R/G/B/luma、256 bin），四个通道的
+#     bin 和都等于采样像素数；
+#   · 卡片上的削顶百分比就是 Core 的 `clippedHigh`，两边各证一次：一次对
+#     `HistogramCardFormat`，一次对同一帧像素的独立重数（0.999 阈值、Rec.709 权重）；
+#   · 点削顶数字武装画布上的高光警告（64×48 的削顶网格，品红叠色），且**不动文档**：文档 hash、
+#     开发历史、editRevision、写库次数全都不变。
+#
+# 蒙版形状 (M4 的六种形状，全部补齐):
+#   · 线性渐变 / 径向渐变是**在画布上画出来的**（按下→拖动→抬起 ⇒ 一个蒙版、一条历史），选中后
+#     再拖一次就是调整（中心→边缘），每次手势 ⌘Z 一次撤销；
+#   · 颜色范围 / 亮度范围 / 语义 从 新建 菜单创建，覆盖面积按渲染出来的叠加实测（颜色样本取自
+#     画面、亮度 0…1、语义按 OS 能力表选路线）；
+#   · 一张纯色合成源证明颜色范围蒙版能选中它 ~100 %。
+#
+# 倍率 (显示 菜单):
+#   · 适应窗口 / 1:1 / 2:1 / 4:1 / 8:1，勾选跟着相机走，⌘= / ⌘− 走真实快捷键；每一档都要求
+#     canvas == 视口、渲染倍率 == 档位、可见窗口 == 视口/倍率，且不改文档。
+#
 # Screenshots land in local/out/.
 set -euo pipefail
 

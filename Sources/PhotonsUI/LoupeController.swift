@@ -30,6 +30,8 @@ public final class LoupeCanvasView: NSView {
     private var lastDragPoint: CGPoint = .zero
     private var isDragging = false
     private var isPainting = false
+    /// A gradient drag: creating a linear/radial mask, or reshaping the selected one.
+    private var isShaping = false
 
     public init() {
         super.init(frame: .zero)
@@ -66,7 +68,9 @@ public final class LoupeCanvasView: NSView {
         case "z", " ":
             controller?.toggleActualSize()
         case "\u{1b}":
-            controller?.zoomToFit()
+            // Escape abandons a gradient drag before it becomes a mask, and otherwise means "fit".
+            if isShaping { isShaping = false; controller?.cancelShapeDrag() }
+            else { controller?.zoomToFit() }
         default:
             super.keyDown(with: event)
         }
@@ -75,6 +79,13 @@ public final class LoupeCanvasView: NSView {
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        // A gradient drag is the innermost gesture: it exists only while a shape is armed, and it is
+        // what turns two clicks into a linear ramp / an ellipse (or reshapes the selected one).
+        if controller?.isShapeDragArmed == true {
+            isShaping = true
+            controller?.beginShapeDrag(at: point)
+            return
+        }
         // A paint drag is a paint drag: it never pans, and a double-click while a brush is armed is
         // two dabs rather than a zoom. Turning the tool off is what gives the camera back.
         if maskPainter?.isArmed == true {
@@ -91,6 +102,10 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        if isShaping {
+            controller?.continueShapeDrag(at: convert(event.locationInWindow, from: nil))
+            return
+        }
         if isPainting {
             controller?.continuePaint(at: convert(event.locationInWindow, from: nil),
                                       pressure: Self.pressure(of: event))
@@ -104,6 +119,11 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        if isShaping {
+            isShaping = false
+            controller?.endShapeDrag(at: convert(event.locationInWindow, from: nil))
+            return
+        }
         if isPainting {
             isPainting = false
             controller?.endPaint()
@@ -137,6 +157,11 @@ public final class LoupeCanvasView: NSView {
     /// What the cursor should say: a crosshair for a brush, a pointing hand only when there is
     /// something to drag.
     public override func resetCursorRects() {
+        if controller?.isShapeDragArmed == true {
+            // Two clicks will become a gradient: the pointer has to say "draw here".
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if maskPainter?.isArmed == true {
             addCursorRect(bounds, cursor: .crosshair)
             return
@@ -148,14 +173,17 @@ public final class LoupeCanvasView: NSView {
 
 /// Fits or zooms the anchor photo through `RenderGraph` and presents the S4 texture.
 ///
-/// Two ladders live here, both keyed on `LoupeViewState` (a camera position in **source pixels**):
+/// One ladder, keyed on `LoupeViewState` (a camera position in **source pixels**) and on the
+/// *rung* the frame is rendered from (`DecodeLadder`, §11.10):
 ///
-///   · **fit** — the M3 ladder unchanged: a 0.5 decode renders immediately, the full-resolution
-///     decode replaces it.
-///   · **1:1 and beyond** — one frame at the full decode, with the visible window expressed as a
-///     derived crop rect (`LoupeFraming.zoomedEdit`). Panning and pinching re-render that window;
-///     they never scale the layer. A pan frame is a stage-cache miss by construction (the crop is
-///     part of the key chain), which is the honest cost of `D12`: one renderer, one path.
+///   · **fit** and **1:1 and beyond** ask the ladder for the same target rung, the full decode; a
+///     window (`RenderOptions.outputWindow`) is what makes 1:1 cheap to *render*, and the rung is
+///     what makes it expensive to *develop*. Neither is scaled by the layer, and panning re-renders
+///     the window — it never moves a layer around.
+///   · **The first frame never waits for a development.** If the full rung is not resident yet the
+///     ladder hands over the 0.5 rung that is, so 1:1 opens on a magnified preview in one render and
+///     the full-resolution frame replaces it when ImageIO is done. That preview is a *stage*, not a
+///     steady state: a resident full rung is what every later frame (pan, pinch, edit) renders from.
 public final class LoupeController: NSViewController {
 
     public struct FrameResult {
@@ -179,6 +207,14 @@ public final class LoupeController: NSViewController {
         public let headroom: Double
         /// The visible window in source pixels.
         public let window: ImageSize
+
+        /// The frame's own histogram (005f), when `collectsHistogram` asked for it. Measured on the
+        /// *same* command buffer and the same pixels the layer is about to show, so the inspector
+        /// card updates with the re-render instead of paying for a second one.
+        public let histogram: Histogram?
+        /// Clipped-pixel grid (the highlight warning's input), when the warning was armed. `nil`
+        /// otherwise — the readback only happens when someone is looking at it.
+        public let clipped: ClippedGrid?
     }
 
     /// One frame's cost, in milliseconds, as measured on the render queue.
@@ -198,6 +234,10 @@ public final class LoupeController: NSViewController {
     public let canvasView = LoupeCanvasView()
     private let container = NSView()
     private let statusChip = LoupeStatusChip()
+    /// The two UI-only overlays. Both are transparent siblings of the `CAMetalLayer`, both refuse
+    /// hit tests, and neither is part of a document or of any cache key.
+    private let highlightOverlay = HighlightOverlayView()
+    private let draftOverlay = MaskDraftOverlayView()
 
     /// The mask painter: pointer → sampled points → `Stroke` (Q22). Owned here because the paint
     /// gesture is a canvas gesture, and handed to the view so `mouseDown` knows which of the two
@@ -210,9 +250,15 @@ public final class LoupeController: NSViewController {
     private var presenter: CanvasPresenter?
     private var graph: RenderGraph?
     private var graphIdentity: String?
+    /// The decoded buffers of the photo on screen, keyed by rung (§11.10). A single `(key, buffer)`
+    /// slot here is what made `fit → 1:1 → fit → 1:1` develop the same 60 MP file three times: the
+    /// preview rung and the full rung evicted each other, so every visit to either paid ImageIO
+    /// again. The ladder keys on (photo, scale) and keeps one photo resident.
+    private let ladder = DecodeLadder()
+    /// The rung the last presented frame came from — what `framing()` measures and what an edit
+    /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
     private var decoded: LinearImage?
     private var decodedScale: Double = 0.5
-    private var decodedKey: String?
     private var decodedCaps: DecoderCapabilities?
     private var decodeMilliseconds: Double = 0
     private var generation = 0
@@ -224,6 +270,16 @@ public final class LoupeController: NSViewController {
 
     /// Read back every presented frame and hash it. Off by default: a 2560×1600 readback is 32 MB.
     public var hashesFrames = false
+
+    /// Ask every frame for its histogram (one dispatch in the frame's own command buffer plus the
+    /// reduced readback — see `RenderOptions.collectHistogram`). On by default because the inspector
+    /// card is always on screen in this build; a bench that wants the pre-005f frame turns it off.
+    public var collectsHistogram = true
+
+    /// The last clipping grid the warning produced (nil while the warning is off or before a frame).
+    public private(set) var lastClipped: ClippedGrid?
+    /// Frames whose histogram reached the session — the smoke asserts it is not a second render.
+    public private(set) var histogramPublishCount = 0
 
     // MARK: camera (fit / 1:1 / pan / pinch)
 
@@ -289,8 +345,16 @@ public final class LoupeController: NSViewController {
         canvasView.controller = self
         canvasView.maskPainter = maskCanvas
         container.addSubview(canvasView)
+        // Over the canvas, under the readout: the clipping wash and the shape-drag rubber band. Both
+        // are `hitTest → nil`, so every click still belongs to the canvas.
+        for overlay in [highlightOverlay as NSView, draftOverlay as NSView] {
+            overlay.frame = container.bounds
+            overlay.autoresizingMask = [.width, .height]
+            container.addSubview(overlay)
+        }
         container.addSubview(statusChip)
         view = container
+        highlightOverlay.isArmed = session?.highlightWarning ?? false
     }
 
     public override func viewDidLoad() {
@@ -334,7 +398,29 @@ public final class LoupeController: NSViewController {
                 self.scheduleRender()
             }
         })
+        // The clipping warning is a display preference, not an edit: it has its own signal, so
+        // arming it never looks like a document change to the renderer (`editRevision` stays put).
+        bridge.observe({ [weak self] in
+            _ = self?.session?.highlightWarningRevision
+        }, { [weak self] in
+            self?.applyHighlightWarning()
+        })
     }
+
+    /// The warning was switched on the session. Nothing in the document moved; the canvas just needs
+    /// a frame to read the grid from (the previous texture is already back in the graph's pool).
+    private func applyHighlightWarning() {
+        let armed = session?.highlightWarning ?? false
+        highlightOverlay.isArmed = armed
+        if !armed {
+            lastClipped = nil
+            highlightOverlay.grid = nil
+        }
+        // One frame, no document change: the same `editRevision`, the same pixels, one readback.
+        if armed, autoRenderEnabled { requestViewportRender() }
+    }
+
+    public var showsHighlightWarning: Bool { session?.highlightWarning ?? false }
 
     // MARK: display / EDR (screen by screen, with degradation)
 
@@ -416,6 +502,63 @@ public final class LoupeController: NSViewController {
         var next = viewState
         next.mode = .fit
         setViewState(next)
+    }
+
+    // MARK: the zoom ladder (显示 ▸ 倍率)
+
+    /// The four stops the menu offers, in order. `1` is 1:1; the ceiling is
+    /// `LoupeViewState.maximumZoom`, and above 8:1 a 60 MP frame is being shown through 64 canvas
+    /// pixels per source pixel — nothing left to reveal.
+    public static let zoomStops: [Double] = [1, 2, 4, 8]
+
+    /// Canvas pixels per source pixel the frame is being drawn at — `fit`'s own ratio included, so a
+    /// readout can say "0.31:1 (fit)" without a special case.
+    public var effectiveZoom: Double { framing()?.zoom(of: viewState) ?? 1 }
+
+    /// "fit" / "1:1" / "2:1" — the number the status chip and the menu tick both use.
+    public var zoomLabel: String { viewState.zoomLabel }
+
+    /// The menu stop the camera is exactly on, or nil (fit, or a pinch between stops) — what the
+    /// View menu ticks.
+    public var currentZoomStop: Double? {
+        guard viewState.isActualSize else { return nil }
+        let zoom = LoupeViewState.clampZoom(viewState.zoom)
+        return LoupeController.zoomStops.first { abs($0 - zoom) < 0.005 }
+    }
+
+    /// A menu stop (1 / 2 / 4 / 8): same centre, new scale, one re-render.
+    ///
+    /// Unlike a pinch this does not need a cursor anchor — the command's subject is the picture in
+    /// the window, so the centre is kept and the window shrinks around it.
+    public func zoom(to stop: Double) {
+        guard let framing = framing() else { return }
+        var next = viewState
+        next.mode = .actual
+        next.zoom = LoupeViewState.clampZoom(stop)
+        let centre = framing.visibleCenter(of: viewState)
+        next.centerX = centre.x
+        next.centerY = centre.y
+        setViewState(framing.centering(next, onSource: centre))
+    }
+
+    /// ⌘+ / ⌘=: the next stop up, or 8:1 from anything between. From `fit` it lands on 1:1 — the
+    /// same destination as Z, because "zoom in from the whole frame" means full size first.
+    public func zoomIn() {
+        guard viewState.isActualSize else { zoomToActualSize(); return }
+        let current = LoupeViewState.clampZoom(viewState.zoom)
+        let next = LoupeController.zoomStops.first { $0 > current + 0.005 } ?? LoupeViewState.maximumZoom
+        zoom(to: next)
+    }
+
+    /// ⌘−: the next stop down, and below 1:1 back to the whole frame (there is no 0.5:1 mode).
+    public func zoomOut() {
+        guard viewState.isActualSize else { return }
+        let current = LoupeViewState.clampZoom(viewState.zoom)
+        guard let next = LoupeController.zoomStops.last(where: { $0 < current - 0.005 }) else {
+            zoomToFit()
+            return
+        }
+        zoom(to: next)
     }
 
     /// Double-click: into 1:1 at the clicked pixel, or back to fit. (Both halves of the brief:
@@ -553,6 +696,124 @@ public final class LoupeController: NSViewController {
         maskCanvas.end()
     }
 
+    // MARK: shape masks drawn by hand (linear / radial)
+
+    /// What a drag on the canvas means while a gradient is armed. Two cases, one gesture handler:
+    /// a **creation** armed from the inspector's 新建 menu (no mask exists yet), and an
+    /// **adjustment** of the selected mask's own geometry.
+    private enum ShapeDragMode {
+        case create(MaskCreationKind)
+        case adjust(maskID: String, component: Int, kind: MaskCreationKind)
+
+        var kind: MaskCreationKind {
+            switch self {
+            case .create(let kind): return kind
+            case .adjust(_, _, let kind): return kind
+            }
+        }
+    }
+
+    /// The drag's first point, in view points and in normalised source coordinates. Both are kept:
+    /// the overlay draws in view space, the document is written in source space.
+    private var shapeDragStartView: CGPoint?
+    private var shapeDragStartSource: NormalizedPoint?
+
+    /// Gestures that landed a new mask / a new geometry, and gestures that were refused because the
+    /// drag was shorter than a click (the smoke prints both; a refused gesture is not a failure).
+    public private(set) var shapeDragsCreated = 0
+    public private(set) var shapeDragsAdjusted = 0
+    public private(set) var shapeDragsRefused = 0
+
+    /// True when a drag should draw a gradient instead of panning — what `LoupeCanvasView` asks.
+    public var isShapeDragArmed: Bool { shapeDragMode != nil }
+
+    private var shapeDragMode: ShapeDragMode? {
+        guard let session, session.anchorAsset != nil else { return nil }
+        if let kind = session.pendingMaskShape, kind.isDragCreated { return .create(kind) }
+        // An armed brush outranks an armed gradient: if the user picked 画笔, a drag paints — a
+        // selected ellipse must not steal the gesture from the tool they just chose.
+        guard !session.maskTool.isPainting else { return nil }
+        guard session.adjustShapeOnDrag,
+              let target = session.selectedAdjustableShape() else { return nil }
+        return .adjust(maskID: target.maskID, component: target.component, kind: target.kind)
+    }
+
+    public func beginShapeDrag(at point: CGPoint) {
+        guard let mode = shapeDragMode,
+              let source = normalizedSourcePoint(forViewPoint: point) else { return }
+        shapeDragStartView = point
+        shapeDragStartSource = source
+        draftOverlay.draft = (kind: mode.kind, start: point, current: point)
+    }
+
+    public func continueShapeDrag(at point: CGPoint) {
+        guard let start = shapeDragStartView, let mode = shapeDragMode else { return }
+        draftOverlay.draft = (kind: mode.kind, start: start, current: point)
+        // An adjustment follows the hand live (the same rule as a brush stroke: the pixels move
+        // while the mouse is down, the history grows once on mouse-up).
+        guard case .adjust(let maskID, let component, let kind) = mode,
+              let startSource = shapeDragStartSource,
+              let end = normalizedSourcePoint(forViewPoint: point) else { return }
+        guard let shape = draggedShape(kind: kind, from: startSource, to: end) else { return }
+        session?.setMaskComponentShape(maskID, component: component, shape: shape,
+                                       commit: false, label: "")
+    }
+
+    /// Mouse-up: the geometry becomes the document — **one** commit, so ⌘Z takes the whole gesture
+    /// back (for a creation that means the mask itself disappears).
+    public func endShapeDrag(at point: CGPoint? = nil) {
+        defer {
+            shapeDragStartView = nil
+            shapeDragStartSource = nil
+            draftOverlay.draft = nil
+        }
+        guard let mode = shapeDragMode, let start = shapeDragStartSource else { return }
+        let endPoint = point ?? shapeDragStartView ?? .zero
+        guard let end = normalizedSourcePoint(forViewPoint: endPoint),
+              let shape = draggedShape(kind: mode.kind, from: start, to: end) else {
+            shapeDragsRefused += 1
+            // A refused creation must not stay armed forever: the next drag would be refused too.
+            if case .create = mode { session?.pendingMaskShape = nil }
+            return
+        }
+        switch mode {
+        case .create(let kind):
+            if session?.addShapeMask(kind, from: start, to: end) != nil {
+                shapeDragsCreated += 1
+            } else {
+                shapeDragsRefused += 1
+            }
+        case .adjust(let maskID, let component, let kind):
+            session?.setMaskComponentShape(maskID, component: component, shape: shape,
+                                           commit: false, label: "")
+            session?.commitEdit(label: "调整\(kind.label)蒙版")
+            shapeDragsAdjusted += 1
+        }
+    }
+
+    /// Escape during a shape drag: nothing is written and nothing is committed.
+    public func cancelShapeDrag() {
+        shapeDragStartView = nil
+        shapeDragStartSource = nil
+        draftOverlay.draft = nil
+    }
+
+    /// The shape a drag means, or nil when it is too short to be one (a click, not a gradient).
+    private func draggedShape(kind: MaskCreationKind, from start: NormalizedPoint,
+                              to end: NormalizedPoint) -> MaskShape? {
+        guard let session else { return nil }
+        let source = session.maskSourceSize
+        guard MaskDragGeometry.isMeaningful(from: start, to: end, source: source) else { return nil }
+        switch kind {
+        case .linearGradient:
+            return .linearGradient(MaskDragGeometry.linear(from: start, to: end))
+        case .radialGradient:
+            return .radialGradient(MaskDragGeometry.radial(center: start, to: end, source: source))
+        default:
+            return nil
+        }
+    }
+
     // MARK: edit re-render (50 ms debounce, single-flight)
 
     /// A slider tick landed. Coalesce for `debounceInterval`; if the loupe is not on screen this
@@ -663,24 +924,21 @@ public final class LoupeController: NSViewController {
 
         queue.async { [weak self] in
             guard let self else { return }
-            do {
-                // Zoom always samples the full decode: half-resolution pixels magnified 1:1 is the
-                // one thing a loupe must never show.
-                let frame = try self.makeFrame(asset: asset, url: url, viewport: viewport,
-                                               decodeScale: 1.0, edit: edit, state: state,
-                                               hashPixels: self.hashesFrames)
-                DispatchQueue.main.async {
-                    guard self.generation == gen else { self.finishViewRender(); return }
-                    self.present(frame: frame, renderMilliseconds: frame.renderMilliseconds, isFirst: false)
-                    self.viewRenderCount += 1
-                    self.finishViewRender()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.lastPresentError = "\(error)"
-                    self.finishViewRender()
-                }
-            }
+            // A pan/pinch frame always resolves to the full rung — half-resolution pixels magnified
+            // at 1:1 is the one thing a loupe must never show as a steady state — but the plan lets
+            // the frame that is *already* resident go up first, so entering 1:1 never holds the hand
+            // hostage to a 60 MP development.
+            let plan = self.ladder.plan(identity: self.ladderIdentity(asset),
+                                        target: DecodeLadder.fullScale)
+            self.pumpLadder(asset: asset, url: url, viewport: viewport, plan: plan,
+                            edit: edit, state: state, generation: gen,
+                            onPresent: { [weak self] frame, ms, _ in
+                                guard let self else { return }
+                                self.present(frame: frame, renderMilliseconds: ms, isFirst: false)
+                                self.viewRenderCount += 1
+                            },
+                            onDone: { [weak self] in self?.finishViewRender() },
+                            onFailure: { [weak self] message in self?.lastPresentError = message })
         }
     }
 
@@ -714,37 +972,63 @@ public final class LoupeController: NSViewController {
 
         queue.async { [weak self] in
             guard let self else { return }
-            if state.mode == .actual {
-                // One frame, full decode: the 0.5 stand-in would be a 2× blow-up of a blur.
-                self.pump(asset: asset, url: url, viewport: viewport, decodeScale: 1.0,
-                          edit: edit, state: state, generation: gen, isFirst: false)
-                return
-            }
-            // Frame 1: decode 0.5 (fast). Frame 2: full resolution, then re-render into the same fit.
-            self.pump(asset: asset, url: url, viewport: viewport, decodeScale: 0.5,
-                      edit: edit, state: state, generation: gen, isFirst: true)
-            guard self.generation == gen else { return }
-            self.pump(asset: asset, url: url, viewport: viewport, decodeScale: 1.0,
-                      edit: edit, state: state, generation: gen, isFirst: false)
+            // Whatever the camera is doing — a new photo, a resize, fit ↔ 1:1 — the answer is "the
+            // full rung, and the best rung we already have in front of it". The window is what makes
+            // 1:1 a cheap render; the ladder is what makes it a cheap *entry*.
+            let plan = self.ladder.plan(identity: self.ladderIdentity(asset),
+                                        target: DecodeLadder.fullScale)
+            self.pumpLadder(asset: asset, url: url, viewport: viewport, plan: plan,
+                            edit: edit, state: state, generation: gen,
+                            onPresent: { [weak self] frame, ms, isFirst in
+                                self?.present(frame: frame, renderMilliseconds: ms, isFirst: isFirst)
+                            },
+                            onDone: {},
+                            onFailure: { [weak self] message in self?.lastPresentError = message })
         }
     }
 
-    /// One decode + one render + one present. Runs on `queue`; only the present hops to main.
-    private func pump(asset: Asset, url: URL, viewport: ImageSize, decodeScale: Float,
-                      edit: EditModel, state: LoupeViewState, generation gen: Int, isFirst: Bool) {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        do {
-            let frame = try makeFrame(asset: asset, url: url, viewport: viewport,
-                                      decodeScale: decodeScale, edit: edit, state: state)
-            let renderMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == gen else { return }
-                self.present(frame: frame, renderMilliseconds: renderMs, isFirst: isFirst)
+    /// The ladder identity of an asset: the same string `makeFrame` keys its graph on, so a plan can
+    /// never be made for one photo and applied to another.
+    private func ladderIdentity(_ asset: Asset) -> String { "\(asset.contentHash)|\(asset.id)" }
+
+    /// Run every rung of `plan` in order: the preview (when there is one) is presented as soon as it
+    /// is rendered, the target replaces it when ImageIO is done. Always called on `queue`.
+    ///
+    /// The `generation` test between rungs is what keeps a ladder from finishing a development nobody
+    /// is looking at: a camera move during the 900 ms decode cancels the *presentation* of the next
+    /// rung — the decode is already paid for and lands in the ladder, where the next frame reuses it
+    /// — and `onDone` fires either way, so the caller's single-flight flag is always released.
+    private func pumpLadder(asset: Asset, url: URL, viewport: ImageSize, plan: DecodeLadderPlan,
+                            edit: EditModel, state: LoupeViewState, generation gen: Int,
+                            onPresent: @escaping (FrameResult, Double, Bool) -> Void,
+                            onDone: @escaping () -> Void,
+                            onFailure: @escaping (String) -> Void) {
+        for (index, decodeScale) in plan.rungs.enumerated() {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            let isFirst = index == 0
+            let isLast = index == plan.rungs.count - 1
+            do {
+                let frame = try makeFrame(asset: asset, url: url, viewport: viewport,
+                                          decodeScale: decodeScale, edit: edit, state: state,
+                                          hashPixels: hashesFrames)
+                let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if self.generation == gen { onPresent(frame, ms, isFirst) }
+                    if isLast { onDone() }
+                }
+            } catch {
+                let message = "\(error)"
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if self.generation == gen { onFailure(message) }
+                    onDone()
+                }
+                return
             }
-        } catch {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == gen else { return }
-                self.lastPresentError = "\(error)"
+            if !isLast, generation != gen {
+                DispatchQueue.main.async { onDone() }
+                return
             }
         }
     }
@@ -782,28 +1066,31 @@ public final class LoupeController: NSViewController {
                            edit model: EditModel, state: LoupeViewState,
                            hashPixels: Bool) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
-        // Decode (cached per url+scale, so the second render measures the graph, not ImageIO).
-        let key = "\(cacheIdentity)|\(decodeScale)"
-        var image: LinearImage
-        var usedCache = false
-        if decodedKey == key, let cached = decoded {
-            image = cached
-            usedCache = true
-        } else {
+        // ── the decode ladder (§11.10) ───────────────────────────────────────────────────────
+        // One photo, one development per rung. Keyed by (photo, scale), so the second visit to fit
+        // or to 1:1 is a render and nothing else; on a miss the buffer is developed here and stored,
+        // and the caller has already put the *other* rung on screen if it had one.
+        let outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
             let decoder = try RAWDecoder()
             let t0 = CFAbsoluteTimeGetCurrent()
-            let outcome = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
-                                                                                exposureEV: 0,
-                                                                                scale: decodeScale))
-            decodeMilliseconds = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-            image = outcome.image
-            decoded = image
-            decodedKey = key
-            decodedScale = ds
-            decodedCaps = outcome.capabilities
+            let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
+                                                                                  exposureEV: 0,
+                                                                                  scale: decodeScale))
+            return DecodeRung(scale: decodeScale,
+                              image: developed.image,
+                              capabilities: developed.capabilities,
+                              milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        }
+        let image = outcome.rung.image
+        let usedCache = outcome.cached
+        if !outcome.cached {
+            decodeMilliseconds = outcome.rung.milliseconds
             graph = nil                      // a new source needs a new graph
             graphIdentity = nil
         }
+        decoded = image
+        decodedScale = ds
+        decodedCaps = outcome.rung.capabilities
         currentDecodeScale = decodeScale
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
@@ -833,16 +1120,27 @@ public final class LoupeController: NSViewController {
             outputWindow: outputWindow,
             display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
             useCache: true,
-            wantsPixels: false))
+            wantsPixels: false,
+            // The histogram is measured by the *same* frame — one extra dispatch in the frame's own
+            // command buffer plus the reduced readback, never a second render (`RenderGraph`'s
+            // `collectHistogram`). That is what lets the inspector card follow a slider without
+            // doubling the cost of every tick.
+            collectHistogram: collectsHistogram,
+            histogramBins: 256))
         let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
         guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
         let hash = hashPixels ? LoupeController.hash(texture) : nil
+        // The clipping warning's input. Only read while the warning is on: it is a UI aid, and a
+        // readback nobody looks at is a millisecond nobody asked for.
+        let clipped = (session?.highlightWarning ?? false)
+            ? HighlightWarning.grid(of: texture) : nil
         return FrameResult(texture: texture, canvas: result.canvas, content: result.content,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
                            editRevision: session?.editRevision ?? 0, displayHash: hash,
-                           zoom: projected.zoom(of: state), headroom: ceiling, window: window)
+                           zoom: projected.zoom(of: state), headroom: ceiling, window: window,
+                           histogram: result.histogram, clipped: clipped)
     }
 
     /// SHA-256 of an rgba16f texture's bytes, taken while it is still out of the pool.
@@ -890,6 +1188,7 @@ public final class LoupeController: NSViewController {
         }
         lastFrame = frame
         lastPresentError = nil
+        recordMeasurements(frame)
         lastTimings = FrameTimings(decode: frame.decodeMilliseconds,
                                    render: frame.renderMilliseconds,
                                    present: presentMs,
@@ -907,6 +1206,27 @@ public final class LoupeController: NSViewController {
     }
 
     public var decodeSeconds: Double { decodeMilliseconds / 1000 }
+
+    // MARK: measurements (histogram + clipping warning)
+    //
+    // This is the "re-render finished" callback the inspector's histogram card hangs off: the frame
+    // already measured itself (`collectHistogram` in its own command buffer, and the clipping grid
+    // when the warning is on), so publishing costs a main-thread hand-off and nothing else. Called
+    // from `present`; `--ui-smoke` calls the same function for a frame it rendered synchronously, so
+    // the card is asserted through the shipped path rather than a test-only one.
+
+    public func recordMeasurements(_ frame: FrameResult) {
+        session?.recordHistogram(frame.histogram)
+        histogramPublishCount += 1
+        if let clipped = frame.clipped {
+            lastClipped = clipped
+            highlightOverlay.grid = clipped
+        } else if !(session?.highlightWarning ?? false) {
+            lastClipped = nil
+            highlightOverlay.grid = nil
+        }
+        highlightOverlay.isArmed = session?.highlightWarning ?? false
+    }
 
     // MARK: status strip
 
