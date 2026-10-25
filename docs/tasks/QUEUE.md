@@ -54,8 +54,9 @@
 
 | Q26 | **UI 收口**（直方图卡/蒙版六形状/倍率菜单） | Q23/Q25 | `Sources/PhotonsUI/**` | **完成 `0608329`**：ui-smoke 108 项；线性 0.5722 / 径向 0.1082 / 颜色 0.8746 / 亮度 0.8764 / 语义 0.1066 |
 | Q27 | **分级解码** | Q15 | `RAWDecoder.swift`、`LoupeController.swift` | **完成 `5dc6a8c`**：首帧 1231→52 ms、解码 −26%、fit↔1:1 解码 4→2 次 |
-| Q28 | **蒙版参数面板** | Q26 | `Sources/PhotonsUI/**` | 每个蒙版可调 opacity/invert/feather/refine + 局部调整滑杆；改名 | 待开工 |
-| Q29 | **解码并发** | Q27 | `Sources/PhotonsUI/LoupeController.swift`、`RAWDecoder.swift` | 全解码期间平移不被冻结（第二条队列或分段让出）；首帧不退化 | 待开工 |
+| Q28 | **蒙版参数面板** | Q26 | `Sources/PhotonsUI/**` | **完成 `387a897`**（119 项 smoke） |
+| Q29 | **解码并发** | Q27 | `Sources/PhotonsUI/LoupeController.swift`、`RAWDecoder.swift` | **完成 `760e2ce`**（平移 5816ms → p50 4.0–4.5ms；首帧 24–26ms） |
+| Q30 | **直方图每帧 +104ms 回归** | Q25/Q29 | `Histogram.swift`、`RenderGraph.swift`、`LoupeController.swift` | 1:1 平移开直方图额外成本 ≤1.5ms/帧，数值不变 | 已派（第 11 轮） |
 
 ## 第 6 轮候选（按依赖排序，可直接派）
 

@@ -2,7 +2,7 @@
 
 > Checkpoint file. A new session should be able to read this plus
 > `docs/architecture-decisions.md` and start working. Keep it under ~80 lines.
-> Updated: 2026-10-26 04:45 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
+> Updated: 2026-10-26 06:05 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
 
 ## Milestones
 
@@ -63,6 +63,22 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 - **UI**：直方图卡片（四组 + 削顶，点数字切高光警告）、六种蒙版可建（线性/径向可拖拽）、loupe 倍率菜单
   （适应/1:1/2:1/4:1/8:1 + ⌘0/⌘=/⌘−）。`ui-smoke` 87 → **108 项**。
 - 已知：0.5 阶段平移被全解码串行挡住（画面冻结 ~800 ms，不出错），真并发需第二条队列。
+
+## 第 10 轮
+
+- **蒙版参数面板**（`387a897`）：蒙版级 opacity/feather/refine/invert/混合 + 15 个局部调整滑杆 + 改名/排序；
+  拖动只重渲、松手才提交。实测 feather 0→0.4 单像素最大跳变 0.2881→**0.0237**、invert 覆盖 0.1868→**0.8131**（互为补集）、
+  opacity 减半时**面积不动**、0 EV 与无蒙版帧**位精确相等**。`ui-smoke` 108 → **119**。
+- **解码/渲染拆两条队列**（`760e2ce`）：`DecodeQueue` 专用解码串行队列（同键去重、generation 回传、可取消）；
+  渲染只用已驻留 rung。全解码期间 20 帧平移从 **5816 ms 串联 → render p50 4.0–4.5 ms / 20-20 ≤ 8 ms**；
+  1:1 首帧 24–26 ms（基线 52）；fit↔1:1 仍只解码 2 次。墙钟断言改为可数断言（解码次数/rungArrivals/viewRenderCount）。
+
+## 已知待修（下一轮）
+
+1. **直方图在窗口帧上每帧 +104 ms**（107.6 vs 4.8）——UI 每帧都开直方图卡片，所以默认配置下平移其实 ~108 ms。
+   已派代理定位并修到 ≤1.5 ms/帧。
+2. 蒙版面板改名会产生 1 条历史（`masks` 按值比较含名字），像素与 `selectionKey` 都不变——语义可选，待定。
+3. `LocalAdjustments` 没有 sharpen 字段，面板只露出 amount 作“强度”。
 
 ## 下一步（并行队列见 `docs/tasks/QUEUE.md`）
 
