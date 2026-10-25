@@ -172,7 +172,13 @@ create session(state=running) ──► 遍历文件 ──► 每文件一个�
                                         └─ 崩溃/被杀 ──► 重开时 state=running 的会话可续：
                                                         按 import_files 里 outcome='added' 的 source_path 跳过
 ```
-每文件的 `outcome`：`added`（新入库）、`duplicate`（同 content_hash 已在库，跳过并记 asset_id）、`unchanged`（quick_hash + size + mtime 命中，连文件都不读）、`failed`（附 `reason`）。
+每文件的 `outcome`：`added`（新入库）、`duplicate`（同 content_hash 已在库，跳过并记 asset_id）、
+`unchanged`（同一路径 + quick_hash + size + mtime 命中，连文件都不读）、`moved`（同 content_hash，但原路径的
+文件已消失且文件名相同 → 只改 `rel_path`，行、评级、`develop_json`、历史全部保留）、`failed`（附 `reason`）。
+`.xmp`/AAE 之类的 sidecar 记 `ignored`，只在汇总里计数——库是唯一真相，我们不读也不写 sidecar。
+
+**移动识别的启发式（刻意保守）**：旧路径消失 **且** 文件名不变 ⇒ 移动。字节相同的另一个副本（同名不同目录、
+或同目录不同名）一律算 `duplicate`，否则副本会把行「劫持」到自己的位置。改名 + 移动需要显式 relink（M3 做）。
 
 ### 4.2 单文件事务边界（顺序不可换）
 
@@ -250,11 +256,11 @@ photonsctl library fixtures <dir> --count N [--dupes 10%]   # 确定性合成样
 | 1 | 去重 | `fixtures --count 1000 --dupes 10%` → `import` | `added=900, duplicate=100`；`stats` = 900 |
 | 2 | 重复导入 | 同一目录再 `import` | 新增 0，全部 `unchanged`/`duplicate`；`stats` 不变 |
 | 3 | 可中断可续 | `import --test-interrupt-after 300` → 重开 → `import` 同目录 | 最终 `added=900`；库里无重复 `content_hash`；`import_files` 无半条记录 |
-| 4 | 移动不丢 | `mv` 5 个文件后 `rescan` | 5 条记录 `rel_path` 更新为新位置，`id` 与 `develop_json` 不变 |
+| 4 | 移动不丢 | `mv` 5 个文件后 `rescan` | `moved=5`，5 条 `rel_path` 更新为新位置，`id`、评级、`develop_json` 不变 |
 | 5 | 卷离线 | 把 root 目录改名（模拟未挂载）→ `library stats` | 根 `status=offline`，资产数**不变**，无一行被删 |
 | 6 | 迁移保护 | 手工把 `user_version` 改成 999 → 打开 | 拒绝打开，错误信息含 "newer version"，库文件未被修改 |
 | 7 | 迁移正确性 | v1 库 → 造一个 v2 迁移 → 打开 | 快照已生成，`develop_json` 逐字节不变 |
-| 8 | 查询耗时 | 1 万行库 | 网格首页、`rating>=4`、机身筛选三条各 **< 50 ms**（打印实测值） |
+| 8 | 查询耗时 | 验收库（900 行）；`make catalog-perf` 另跑 1 万行 | 三条查询各 **< 50 ms**（打印实测值） |
 | 9 | 元数据 | 导入用户真实 DNG | `rating/color_label/camera_key/lens` 与文件内嵌 XMP 一致；`xmp_blob` 非空；**未**创建任何 `.xmp` |
 | 10 | 全链 | `make verify` | build + 23 单测（M1）+ 新单测 + L1/L2/L3 + bench + catalog 全绿 |
 
@@ -292,3 +298,68 @@ UI / 目录监听 / 缩略图 / FTS 搜索 / Lightroom `.lrcat` 迁移 / XMP 写
 | security-scoped bookmark 失效（换机/重装） | bookmark 只是加速器；失效时退回 `volume_uuid + path_hint` 匹配 |
 | 时区：`capture_time` 用 UTC，日期分目录要本地日期 | 同时存 `capture_local_date`（导入时按 EXIF 里的 offset 算出） |
 | 一次导入 5 万张时的内存 | 流式遍历，不建全量数组；每 500 个文件提交一次统计（不是事务） |
+
+---
+
+## Result (measured on this machine, 2026-10-25)
+
+```
+make verify
+  build                                  OK
+  unit tests                             40 (23 M1 + 17 M2), 0 failures
+  L1 / L2 (decode)                       PASS
+  L3 (graph)                             PASS  determinism / edit sensitivity / stage cache / goldens
+  M2 catalog acceptance                  ALL PASS   ← 12 checks, ~25 s
+  bench                                  p95 4.93 ms @ 4.10 Mpx (budget 16.7)
+```
+
+| 项 | 实测 |
+|---|---|
+| 1000 文件导入（含全文件 SHA-256 + 元数据 + 每文件一个事务） | **3.8 s** ≈ 260 文件/s，其中 100 个字节相同副本判为 duplicate |
+| 重复导入同一目录 | 0.98 s，`added=0 unchanged=900 duplicate=100` |
+| 一万文件导入 | ≈ 50 s（947 MB 内嵌 XMP/EXIF 一起入库） |
+| 查询（900 行库） | 网格首页 6.8 ms / `rating>=4` 6.6 ms / 机身筛选 5.8 ms |
+| 查询（1 万行库，`make catalog-perf`） | 6.7 ms / 8.0 ms / 7.5 ms |
+| `kill -9`（`--test-interrupt-after 300`） | 已提交 300 行、会话留 `running`；续跑补 600，最终 900 行、**0 个重复 content_hash**、`verify` CLEAN |
+| 移动 5 个文件后 rescan | `moved=5`，`rel_path` 全部更新，行与评级保留，`verify` CLEAN |
+| 根目录改名（模拟未挂载） | `status=offline`、900 行一条不少、`verify` CLEAN（不把离线算 missing） |
+| `user_version=999` | 拒绝打开，错误信息含 "newer Photons"，库文件未被改动 |
+| 真实 DNG 内嵌 XMP | `camera_key=leica camera ag|leica sl3`、`local_date=2026-10-02`、`xmp_blob=21,573 B`（含 135 个 `crs:*`，只存档不解析）、**未生成任何 `.xmp`** |
+
+### 交付（2,443 行，含测试与验收脚本）
+
+| 文件 | 行数 | 作用 |
+|---|---|---|
+| `Sources/PhotonsCatalog/Database.swift` | 200 | 库包布局、连接配置（WAL/NORMAL/FK/busy_timeout）、快照、前向保护、`user_version` 维护 |
+| `Sources/PhotonsCatalog/Schema.swift` | 155 | v1 迁移与全部 DDL |
+| `Sources/PhotonsCatalog/Models.swift` | 300 | 记录类型、枚举、`camera_key` 归一化、ISO8601 助手 |
+| `Sources/PhotonsCatalog/CatalogAPI.swift` | 324 | 根/资产/关键词查询、软删、重定位、统计、verify |
+| `Sources/PhotonsCatalog/ImportService.swift` | 357 | 遍历 → 快筛 → 全哈希 → 元数据 → 复制 → 单文件事务 → 台账 |
+| `Sources/PhotonsCatalog/MetadataReader.swift` | 255 | ImageIO properties + `CGImageMetadata`（内嵌 XMP）→ 列 |
+| `Sources/PhotonsCatalog/Hashing.swift` | 51 | 全文件 SHA-256 与 quick_hash |
+| `Sources/photonsctl/library.swift` | 179 | `library create/import/rescan/assets/stats/verify` |
+| `Sources/photonsctl/fixtures.swift` | 127 | 确定性合成样本（真 EXIF + 真 XMP） |
+| `Tests/PhotonsCatalogTests/CatalogTests.swift` | 318 | 17 个单测 |
+| `Tests/catalog-acceptance.sh` | 167 | 12 条端到端验收（`make catalog`） |
+
+### 与规格的偏差（都写进代码注释了）
+
+1. **验收 #8 拆成两档**：`make catalog`（900 行）进 `make verify`；1 万行的耗时另由 `make catalog-perf` 跑
+   （1 万行导入约 50 s，放进每次 verify 会让门禁从 1 分钟涨到 2.5 分钟，收益不值）。
+2. **新增 `moved` 与 `ignored` 两种 outcome**：移动是真实且必须区分的事件；sidecar 需要一个诚实的归宿，
+   而不是伪装成 `duplicate`。
+3. **`stats`/`verify` 每次都重新判定根目录可达性**：根的可达性是派生事实，不能信任导入时写下的状态。
+4. **`PRAGMA user_version` 由我们自己维护**：GRDB 用 `grdb_migrations` 记录已应用迁移，不碰 `user_version`，
+   而我们需要它对 `sqlite3` 与快速前向检查都有意义。迁移前快照用的是 `writeWithoutTransaction`
+   ——checkpoint 在事务里会 `SQLITE_LOCKED`。
+5. **合成样本的 EXIF 必须走 properties 字典**：ImageIO 的 XMP 序列化器会**静默丢弃**
+   `exif:DateTimeOriginal` 与 ISO（实测：写进 XMP 后文件里根本没有），只有 properties 字典那条路才落进 EXIF 块。
+6. **读取数组型 XMP 必须按路径取、并且要拆一层 tag**：`CGImageMetadataEnumerateTagsUsingBlock` 对
+   `dc:subject` 回的是子 tag 的**描述字符串**（`<CGImageMetadataTag 0x…> dc:[0] = test`），
+   照抄会把关键词写成这种鬼东西。正确做法是 `CGImageMetadataCopyTagWithPath` + 数组元素本身是
+   `CGImageMetadataTag`（`CFGetTypeID == CGImageMetadataGetTypeID` 后 `unsafeBitCast` 再取 `Value`）。
+
+### 依赖
+
+`swift package resolve` 实测：`Package.resolved` 只有 **1 个 pin**（`grdb.swift 7.11.1`），
+GRDB 自带的 SQLite amalgamation 也不引入额外包。见 `THIRD_PARTY_NOTICES.md`。

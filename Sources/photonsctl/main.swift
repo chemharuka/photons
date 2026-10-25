@@ -1,6 +1,7 @@
 import Foundation
 import PhotonsCore
 import PhotonsExport
+import PhotonsCatalog
 import CryptoKit
 
 // photonsctl — the acceptance harness. Deliberately dependency-free (no
@@ -24,6 +25,8 @@ let valueFlags: Set<String> = [
     "--version", "--ev", "--scale", "--out", "--dir", "--limit-gb",
     "--edit", "--format", "--space", "--bits", "--quality",
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
+    "--mode", "--root", "--rename", "--test-interrupt-after",
+    "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -505,6 +508,14 @@ guard let cmd = argv.first else {
       photonsctl render <raw> --edit <json> [--edit <json> …] --out <file> [options]
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
 
+      photonsctl library create  <pkg.photonslibrary>
+      photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
+      photonsctl library rescan  <pkg> [--json]
+      photonsctl library assets  <pkg> [--rating N] [--camera key] [--since YYYY-MM-DD] [--limit N] [--json]
+      photonsctl library stats   <pkg> [--json]
+      photonsctl library verify  <pkg> [--rehash] [--json]
+      photonsctl fixtures <dir> [--count 100] [--dupes 10] [--size 320x240]
+
     render options:
       --scale F        output scale relative to crop pixels (default 1)
       --decode-scale F decoder scale (default: the smallest ladder step covering --scale)
@@ -533,11 +544,15 @@ do {
     case "decode": try cmdDecode(rest)
     case "golden": try cmdGolden(parseArgs(Array(argv.dropFirst())))
     case "cache":  try cmdCache(rest)
-    case "render": try cmdRender(rest)
-    case "bench":  try cmdBench(rest)
+    case "render":   try cmdRender(rest)
+    case "bench":    try cmdBench(rest)
+    case "library":  try cmdLibrary(rest)
+    case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")
     }
 } catch let e as DecodeError {
+    die(e.errorDescription ?? "\(e)")
+} catch let e as CatalogError {
     die(e.errorDescription ?? "\(e)")
 } catch {
     die("\(error)")

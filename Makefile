@@ -14,7 +14,7 @@ BIN := .build/$(CONFIG)/photonsctl
 CACHE_DIR ?= $(HOME)/Library/Caches/Photons/linear
 VIEWPORT ?= 2560x1600
 
-.PHONY: all build test l1 l2 l3 bench verify record clean info cache render
+.PHONY: all build test l1 l2 l3 catalog catalog-perf bench verify record clean info cache render
 
 all: build
 
@@ -68,6 +68,14 @@ l3: build
 	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-l3-g.jpg --scale 0.25 --golden check | grep "golden"
 	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-l3-g2.jpg --scale 0.25 --golden check | grep "golden"
 
+## M2 — catalog + import: dedupe, resume after kill, move, offline, migrations, metadata
+catalog: build
+	@BIN=$(BIN) RAW="$(RAW)" Tests/catalog-acceptance.sh
+
+## same, plus the 10k-row query timing (~90 s; not part of `make verify`)
+catalog-perf: build
+	@BIN=$(BIN) RAW="$(RAW)" Tests/catalog-acceptance.sh --perf
+
 ## frame budget: full S0→S4 at viewport size must fit 60 fps
 bench: build
 	@test -f "$(RAW)" || { echo "bench SKIP: no fixture at $(RAW)"; exit 1; }
@@ -76,9 +84,9 @@ bench: build
 render: build
 	@$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-render.jpg --scale 0.25 --trace-stages
 
-verify: build test l1 l2 l3 bench
+verify: build test l1 l2 l3 catalog bench
 	@echo "------------------------------------------------"
-	@echo "ALL GREEN: build + unit tests + L1 determinism + L2 golden + L3 graph + bench"
+	@echo "ALL GREEN: build + unit tests + L1/L2 decode + L3 graph + M2 catalog + bench"
 
 record: build
 	$(BIN) golden record "$(RAW)" --dir $(GOLDEN_DIR)
