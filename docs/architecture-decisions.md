@@ -18,7 +18,7 @@
 | 默认档 | Apple **自己默认给 v8**，不是 v9 | 三个样本实测 |
 | v9 全尺寸耗时 | DNG 样本：60MP **5.05s** / 33MP 3.92s / 24MP 1.81s（v8 为 0.50/0.50/0.19s）→ **8–10×**；原生 RAW 冷启 3.9–9.1×、预热后比 v8 快（见 §11.1） | `rawcover` |
 | 解码→线性纹理 | `rgba16Float` **0.566s @ 60MP = 106.5 Mpx/s**；`rgba32Float` 0.396s，|RGBAh−RGBAf|max=0.00049 | `arch` 探针 |
-| EDR 余量 | 线性最大值 **1.748**，45027 个采样 >1.0 | 同上 |
+| EDR 余量 | **由解码开关决定，不是一个固定数**（2026-10-25 重测，见 §11.8）：同一 DNG（Leica SL3, ISO 100）线性最大值 —— 默认（`boostAmount`=1.0、`isGamutMappingEnabled`=true）**1.018**；D2′ 档（boost=0 + gamut off）**1.695**；另一文件默认 0.961 / D2′ 0.996。`extendedDynamicRangeAmount` 在 boost=0 时**无效果**，只在 boost 默认值时把上限抬到 2.32 | `edrheadroom` 探针（`local/probes/edrheadroom.swift`） |
 | scaleFactor 0.5/0.25 | 0.32s / 0.26s → **约 0.2s 固定开销** | 同上 |
 | 语义蒙版 | `sky/hair/skin/teeth/glasses` + `portraitEffectsMatte`（部分样本为 nil） | `rawprobe` |
 | RAW 可写性 | **不可写**（ImageIO/CIRAWFilter 只能读）；导出 DNG 须自研 | `apple-raw-stack.md` |
@@ -251,3 +251,25 @@ RAW Power 首页宣传的 "Unique Hooks into Apple's RAW Engine（Control Boost,
   （唯一"免费"的机身是 ISO 3200 的 SIGMA，细节 −0.4%）。
 - 版本切换不污染缓存：`v9→v8→v9` 与 `v8→v9→v8` 在 fresh filter 下都稳定。我们的 `DecodeCacheKey`
   已包含 `decoderVersion`，所以天然安全。
+
+### 11.8 EDR 余量由解码开关决定（2026-10-25 重测，推翻"1.748 是常数"的记法）
+
+同一文件（`L1030402.dng`，Leica SL3，ISO 100）只改 `CIRAWFilter` 的两个开关，线性输出最大值：
+
+| `isGamutMappingEnabled` | `boostAmount` | `extendedDynamicRangeAmount` | 线性最大值 |
+|---|---|---|---|
+| true（默认） | 1.00（默认） | 0 | **1.018** ← M0/STATUS 记录的那个数 |
+| true | 0 | 0 | 1.046 |
+| false | 1.00 | 0 | 1.101 |
+| **false** | **0** | 0 | **1.695** ← D2′ 档（§11.4 要求的设置） |
+| true | 1.00 | 2 | 2.322 |
+| false | 0 | 2 | 1.695（`extendedDynamicRangeAmount` **无效**） |
+
+第二个文件（`L1030412.dng`）默认 0.961 / D2′ 0.996 → **绝对值随文件走**（0.96–1.70），但"默认设置削掉约 40%"这一条在两个文件上都成立。
+
+**三条结论**
+1. **§11.4 的前置 ② 有两个后果，不是一个**：除了"曝光必须严格 ×2"，它还决定 **EDR 余量是否存活**（1.695 → 1.018）。
+   之前 `swift-raw-ecosystem.md` 把 1.019 vs 1.748 归因为"tone map 吃掉了余量"——**归因错了环节**：S2 不 clamp，clamp 在 S4，而削平发生在解码侧的默认 `boostAmount`/gamut mapping。
+2. **`extendedDynamicRangeAmount` 不是可用的杠杆**：它只在 boost=默认值时抬高上限（会顺带改影调），boost=0 时完全无效。故不列入 EDR 实现手段。
+3. **EDR 显示的"数据侧"在 M3 就定了**（随前置 ②），"画面侧"才留 M3.5：S4 的 `clamp(v,0,1)` 与画布的 `CAMetalLayer`/headroom 属于 M3 的契约，
+   否则 M3.5 要同时改 S4、S2 的高光段、`DisplayOptions`、缓存键与全部 golden。
