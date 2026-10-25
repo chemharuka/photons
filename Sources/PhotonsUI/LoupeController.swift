@@ -184,6 +184,13 @@ public final class LoupeCanvasView: NSView {
 ///     ladder hands over the 0.5 rung that is, so 1:1 opens on a magnified preview in one render and
 ///     the full-resolution frame replaces it when ImageIO is done. That preview is a *stage*, not a
 ///     steady state: a resident full rung is what every later frame (pan, pinch, edit) renders from.
+///
+/// **Two queues (Q29).** Developments run on `DecodeQueue`'s own serial queue; frames run on `queue`.
+/// A 60 MP development is 800–1400 ms, and while it runs the camera keeps moving: every frame renders
+/// from whatever rung the ladder already has (0.5 while the full one is being made), and the moment a
+/// bigger rung lands the ladder stores it and **one** replacement frame goes up. A frame never
+/// develops, so it is never queued behind ImageIO — which is the difference between "the picture
+/// freezes for a second" and "the picture is briefly soft".
 public final class LoupeController: NSViewController {
 
     public struct FrameResult {
@@ -229,6 +236,65 @@ public final class LoupeController: NSViewController {
         public var window: ImageSize
     }
 
+    // MARK: where a frame's pixels come from
+
+    /// A viewport request that does not come from the catalog.
+    ///
+    /// The shipped path names a photo through `CatalogSession` (an `Asset`, its `contentHash`, the
+    /// catalog's file URL). The Q29 bench and the unit tests have no catalog row — they have a file —
+    /// and a future import preview would have the same shape. Rather than a second render path (and a
+    /// second set of bugs), they hand the loupe this, and `scheduleRender` /
+    /// `requestViewportRender` build their job from it instead of the session.
+    public struct FrameSource {
+        public let url: URL
+        /// The ladder key. Anything stable per photo and per file will do; the app uses
+        /// `contentHash|assetID`.
+        public let identity: String
+        public let viewport: ImageSize
+        public let state: LoupeViewState
+        public let edit: EditModel
+
+        public init(url: URL, identity: String, viewport: ImageSize,
+                    state: LoupeViewState = .fit, edit: EditModel = .neutral) {
+            self.url = url
+            self.identity = identity
+            self.viewport = viewport
+            self.state = state
+            self.edit = edit
+        }
+    }
+
+    /// When set, frames are made for this URL instead of the session's anchor photo (tests, the
+    /// bench, an import preview). `nil` in the app.
+    public var frameSource: FrameSource?
+
+    /// Everything one frame needs, snapshotted on the main thread: the render queue must never read
+    /// `session` itself (a slider would race it) and the decode queue must never read a view state.
+    private struct RenderJob {
+        /// Who asked for this frame. It decides which counter it lands in and — the part that is easy
+        /// to get wrong — which single-flight flag it is allowed to release: a scheduled frame must not
+        /// release a pan's flag, or a second pan frame could start while the first is still rendering
+        /// and the newest camera would stop winning.
+        enum Kind { case scheduled, view, edit }
+
+        let kind: Kind
+        let url: URL
+        let identity: String
+        let viewport: ImageSize
+        let edit: EditModel
+        let state: LoupeViewState
+        /// The caller's frame generation. `var` because `scheduleRender` bumps the counter *after* it
+        /// has decided there is something to draw, and the job it just built has to carry the new one.
+        var generation: Int
+        /// Only edit frames carry a slider timestamp.
+        let changedAt: CFAbsoluteTime
+
+        /// The rung the camera needs. Everything — fit, 1:1, 4:1 — renders from the full buffer: a
+        /// window is what makes 1:1 cheap to *render*, and the rung is what makes it expensive to
+        /// *develop*. Asking for the biggest rung once is what keeps `fit ↔ 1:1` at one development.
+        var target: Float { DecodeLadder.fullScale }
+    }
+
     // MARK: views
 
     public let canvasView = LoupeCanvasView()
@@ -247,6 +313,10 @@ public final class LoupeController: NSViewController {
     // MARK: render plumbing
 
     private let queue = DispatchQueue(label: "photons.loupe.render", qos: .userInitiated)
+    /// Developments, on their own serial queue (Q29). Nothing about a frame waits for it: this queue
+    /// owns `RAWDecoder`, the render queue owns `RenderGraph`, and the only thing they share is the
+    /// ladder's buffers (guarded by its own lock).
+    private let decodeQueue = DecodeQueue(label: "photons.loupe.decode")
     private var presenter: CanvasPresenter?
     private var graph: RenderGraph?
     private var graphIdentity: String?
@@ -302,6 +372,12 @@ public final class LoupeController: NSViewController {
     private var editPending = false
     private var lastHandledRevision = 0
     public private(set) var editRenderCount = 0
+    /// How many edit renders the debounce actually **started**.
+    ///
+    /// `editRenderCount` counts frames that reached the screen, which is zero while the decode ladder
+    /// has no rung to draw from — a property of the ladder, not of the debounce. "Ten ticks, one
+    /// render" is about this counter, and it is what the smoke asserts.
+    public private(set) var editRenderStarts = 0
     public private(set) var editRenderCoalesced = 0
     /// Slider tick → new pixels, in ms. Includes the debounce window on purpose.
     public private(set) var editLatencies: [Double] = []
@@ -322,6 +398,23 @@ public final class LoupeController: NSViewController {
     public private(set) var lastFrame: FrameResult?
     public private(set) var lastTimings: FrameTimings?
     public private(set) var lastPresentError: String?
+
+    /// True between a `scheduleRender` and the first frame it puts up. A cold open presents nothing
+    /// until the preview rung lands (there is no buffer to draw), so "first frame" cannot be "index
+    /// 0 of a loop" any more — it is the first frame after a request, whenever that arrives.
+    private var awaitingFirstFrame = false
+    /// Rungs a development delivered into the ladder, and deliveries that were **not painted**
+    /// because the frame (or the photo) they were made for was gone. Both are counters rather than
+    /// timings: "an old result never reached the canvas" is a claim about a count.
+    public private(set) var rungArrivals = 0
+    public private(set) var staleRungDrops = 0
+    /// The identity the last `scheduleRender` was for — a photo change cancels the previous photo's
+    /// queued developments instead of paying for pixels nobody will see.
+    private var pendingIdentity: String?
+    /// The rung the last frame that reached the canvas was rendered from. Set when the frame is
+    /// *handed over*, before the layer is asked for a drawable: a headless test can still say which
+    /// buffer the canvas was given, which is what the acceptance numbers are about.
+    public private(set) var lastPresentedScale: Float?
 
     public init(session: CatalogSession) {
         self.session = session
@@ -395,6 +488,11 @@ public final class LoupeController: NSViewController {
                 self.lastHandledRevision = revision
                 self.requestEditRender()
             } else {
+                // Leaving the loupe (or switching photo) is a cancellation: a development already
+                // running belongs to a picture nobody is looking at, and finishing the next one would
+                // steal ImageIO from the one they are. `scheduleRender` no-ops outside the loupe, so
+                // this is the only thing that has to run there.
+                if self.session?.mode != .loupe { self.cancelPendingFrames() }
                 self.scheduleRender()
             }
         })
@@ -828,46 +926,20 @@ public final class LoupeController: NSViewController {
     }
 
     private func startEditRender() {
-        guard autoRenderEnabled, let session, session.mode == .loupe,
-              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return }
+        guard autoRenderEnabled else { return }
+        if frameSource == nil {
+            guard let session, session.mode == .loupe, session.anchorAsset != nil else { return }
+        }
         if editInFlight {
             // Only the newest document survives: the follow-up render reads `session.edit` itself.
             editPending = true
             editRenderCoalesced += 1
             return
         }
-        let viewport = viewportPixels
-        guard viewport.width > 8, viewport.height > 8 else { return }
-        let edit = session.edit
-        let changedAt = session.lastEditChangedAt
-        // A 1:1 frame must come from the full decode; a fit frame can ride the current rung.
-        let decodeScale = viewState.isActualSize ? Float(1) : currentDecodeScale
-        let state = viewState
-        let gen = generation
+        guard let job = makeJob(kind: .edit, changedAt: session?.lastEditChangedAt ?? 0) else { return }
+        editRenderStarts += 1
         editInFlight = true
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            do {
-                let frame = try self.makeFrame(asset: asset, url: url, viewport: viewport,
-                                               decodeScale: decodeScale, edit: edit,
-                                               state: state, hashPixels: self.hashesFrames)
-                DispatchQueue.main.async {
-                    guard self.generation == gen else { self.finishEditRender(); return }
-                    self.present(frame: frame, renderMilliseconds: frame.renderMilliseconds, isFirst: false)
-                    self.editRenderCount += 1
-                    if changedAt > 0 {
-                        self.editLatencies.append((CFAbsoluteTimeGetCurrent() - changedAt) * 1000)
-                    }
-                    self.finishEditRender()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.lastPresentError = "\(error)"
-                    self.finishEditRender()
-                }
-            }
-        }
+        queue.async { [weak self] in self?.renderFrame(job) }
     }
 
     private func finishEditRender() {
@@ -901,9 +973,15 @@ public final class LoupeController: NSViewController {
     /// A pan/zoom request. Collapsed like the edit path: at most one frame in flight, and the newest
     /// camera wins the follow-up. A drag therefore renders as fast as the GPU allows instead of
     /// building a backlog it would then have to drain after the hand stops.
+    ///
+    /// Nothing here waits for a development: the frame rides the rung the ladder has (the 0.5 preview
+    /// while the full one is being made) and the full rung replaces it when it lands. That is the
+    /// whole point of the split — a pan is a *frame*, not a decode.
     public func requestViewportRender() {
-        guard autoRenderEnabled, let session, session.mode == .loupe else { return }
-        guard session.anchorAsset != nil else { return }
+        guard autoRenderEnabled else { return }
+        if frameSource == nil {
+            guard let session, session.mode == .loupe, session.anchorAsset != nil else { return }
+        }
         if viewInFlight {
             viewPending = true
             viewRenderCoalesced += 1
@@ -913,33 +991,9 @@ public final class LoupeController: NSViewController {
     }
 
     private func startViewportRender() {
-        guard autoRenderEnabled, let session, session.mode == .loupe,
-              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return }
-        let viewport = viewportPixels
-        guard viewport.width > 8, viewport.height > 8 else { return }
-        let state = viewState
-        let edit = session.edit
-        let gen = generation
+        guard let job = makeJob(kind: .view) else { return }
         viewInFlight = true
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            // A pan/pinch frame always resolves to the full rung — half-resolution pixels magnified
-            // at 1:1 is the one thing a loupe must never show as a steady state — but the plan lets
-            // the frame that is *already* resident go up first, so entering 1:1 never holds the hand
-            // hostage to a 60 MP development.
-            let plan = self.ladder.plan(identity: self.ladderIdentity(asset),
-                                        target: DecodeLadder.fullScale)
-            self.pumpLadder(asset: asset, url: url, viewport: viewport, plan: plan,
-                            edit: edit, state: state, generation: gen,
-                            onPresent: { [weak self] frame, ms, _ in
-                                guard let self else { return }
-                                self.present(frame: frame, renderMilliseconds: ms, isFirst: false)
-                                self.viewRenderCount += 1
-                            },
-                            onDone: { [weak self] in self?.finishViewRender() },
-                            onFailure: { [weak self] message in self?.lastPresentError = message })
-        }
+        queue.async { [weak self] in self?.renderFrame(job) }
     }
 
     private func finishViewRender() {
@@ -947,6 +1001,170 @@ public final class LoupeController: NSViewController {
         guard viewPending else { return }
         viewPending = false
         startViewportRender()
+    }
+
+    // MARK: one frame, two queues
+
+    /// Everything one request needs, snapshotted on the main thread — or `nil` when there is nothing
+    /// to draw (no photo, no viewport yet).
+    private func makeJob(kind: RenderJob.Kind,
+                         changedAt: CFAbsoluteTime = 0) -> RenderJob? {
+        let gen = generation
+        if let source = frameSource {
+            return RenderJob(kind: kind, url: source.url, identity: source.identity,
+                             viewport: source.viewport, edit: source.edit, state: source.state,
+                             generation: gen, changedAt: changedAt)
+        }
+        guard let session, session.mode == .loupe,
+              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
+        let viewport = viewportPixels
+        guard viewport.width > 8, viewport.height > 8 else { return nil }
+        return RenderJob(kind: kind, url: url, identity: ladderIdentity(asset), viewport: viewport,
+                         edit: session.edit, state: viewState, generation: gen,
+                         changedAt: changedAt)
+    }
+
+    /// One frame, on the render queue. It **never develops**: it renders from the rung the ladder
+    /// already has and asks the decode queue for the one the camera wants. That is the difference
+    /// between a pan that costs 5 ms while a 60 MP development runs and a pan that costs 800 ms
+    /// because the development was dispatched first on the same queue.
+    private func renderFrame(_ job: RenderJob) {
+        requestDevelopment(ladder.plan(identity: job.identity, target: job.target), job: job)
+
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let frame = residentFrame(job)
+        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // A frame whose generation moved on is not presented: the camera (or the photo) is not
+            // the one this frame was rendered for. The single-flight flag is released either way.
+            if self.generation == job.generation, let frame {
+                self.lastPresentedScale = frame.decodeScale
+                self.present(frame: frame, renderMilliseconds: ms)
+                switch job.kind {
+                case .edit:
+                    self.editRenderCount += 1
+                    if job.changedAt > 0 {
+                        self.editLatencies.append((CFAbsoluteTimeGetCurrent() - job.changedAt) * 1000)
+                    }
+                case .view, .scheduled:
+                    self.viewRenderCount += 1
+                }
+            }
+            switch job.kind {
+            case .edit: self.finishEditRender()
+            case .view: self.finishViewRender()
+            case .scheduled: break
+            }
+        }
+    }
+
+    /// The frame the ladder can produce **now**, from the biggest rung it has.
+    ///
+    /// `nil` before the first development of a photo lands: there is nothing honest to draw, and the
+    /// canvas keeps the previous picture rather than flashing black. The development that fixes it has
+    /// already been queued by `requestDevelopment`.
+    private func residentFrame(_ job: RenderJob) -> FrameResult? {
+        guard let rung = ladder.best(identity: job.identity, atOrBelow: job.target) else { return nil }
+        do {
+            let frame = try makeFrame(url: job.url, cacheIdentity: job.identity,
+                                      viewport: job.viewport, decodeScale: rung.scale,
+                                      edit: job.edit, state: job.state,
+                                      hashPixels: hashesFrames, resolve: .residentOnly)
+            decodeMilliseconds = rung.milliseconds
+            return frame
+        } catch {
+            lastPresentError = "\(error)"
+            return nil
+        }
+    }
+
+    /// Ask the decode queue for every rung the camera needs and the ladder does not have, in plan
+    /// order (the preview first, the target second).
+    ///
+    /// The queue dedupes by `(photo, rung)`, so twenty pans during one development cost **one** decode
+    /// and twenty deliveries; `rungArrived` then ignores the duplicates because the rung is resident.
+    private func requestDevelopment(_ plan: DecodeLadderPlan, job: RenderJob) {
+        for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
+            decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
+                                work: { try Self.develop(url: job.url, scale: scale) },
+                                completion: { [weak self] result, generation in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.rungArrived(result, identity: job.identity, generation: generation)
+                }
+            })
+        }
+    }
+
+    /// A development landed. The **only** way a rung enters the ladder in the loupe, which is what
+    /// makes "one replacement frame per rung" a property of this function instead of a hope.
+    ///
+    /// Three rules, in order:
+    ///  1. **Another photo's buffer is dropped outright.** Storing it would evict the rungs of the
+    ///     photo on screen (`DecodeLadder.store` clears on a new identity) — the old single-slot
+    ///     eviction bug, one queue later.
+    ///  2. **A rung that is already resident is not news.** Two pans can join one development; only
+    ///     the first arrival may repaint.
+    ///  3. **A stale generation still caches, but never paints.** The buffer is this photo's and was
+    ///     paid for, so it lands in the ladder for the next frame; the *frame* it was meant for is
+    ///     gone, so the canvas is left alone.
+    private func rungArrived(_ result: Result<DecodeRung, Error>, identity: String, generation gen: Int) {
+        let isCurrentFrame = gen == generation
+        switch result {
+        case .failure(let error):
+            if isCurrentFrame { lastPresentError = "\(error)" }
+        case .success(let rung):
+            guard isCurrentPhoto(identity) else {
+                staleRungDrops += 1
+                return
+            }
+            if ladder.resident(identity: identity, scale: rung.scale) != nil { return }
+            ladder.store(rung, identity: identity)
+            rungArrivals += 1
+            guard isCurrentFrame else {
+                staleRungDrops += 1
+                return
+            }
+            // Exactly one replacement: this render finds the rung resident and asks for nothing.
+            requestViewportRender()
+        }
+    }
+
+    /// Is `identity` the photo this loupe is showing *now*?
+    private func isCurrentPhoto(_ identity: String) -> Bool {
+        if let source = frameSource { return source.identity == identity }
+        guard let asset = session?.anchorAsset else { return false }
+        return ladderIdentity(asset) == identity
+    }
+
+    /// Stop paying for a picture nobody is looking at: leaving the loupe, or switching to another
+    /// photo, drops the queued developments and refuses the delivery of one already running.
+    ///
+    /// Bumping the generation is the whole mechanism — every arrival and every frame compares against
+    /// it — so a cancelled photo cannot paint over its successor even when ImageIO is already busy
+    /// with it and cannot be aborted.
+    public func cancelPendingFrames() {
+        generation += 1
+        viewPending = false
+        editPending = false
+        if let identity = frameSource?.identity ?? session?.anchorAsset.map({ ladderIdentity($0) }) {
+            decodeQueue.cancel(identity: identity)
+        }
+    }
+
+    /// Developments the queue has run, requests it has folded into one, deliveries it made and
+    /// results it dropped. Diagnostics: the pan budget is a timing, the decode *count* is this.
+    public var developmentStats: (decodes: Int, coalesced: Int, deliveries: Int, drops: Int) {
+        (decodeQueue.decodes, decodeQueue.coalesced, decodeQueue.deliveries, decodeQueue.drops)
+    }
+
+    /// Block until every queued development has finished — tests and the bench only. The loupe never
+    /// waits for one; that is the point of the split.
+    @discardableResult
+    public func awaitPendingDevelopments(timeout: TimeInterval = 60) -> Bool {
+        decodeQueue.waitUntilIdle(timeout: timeout)
     }
 
     // MARK: rendering
@@ -959,81 +1177,48 @@ public final class LoupeController: NSViewController {
                          height: max(1, Int((size.height * scale).rounded())))
     }
 
+    /// A new photo, a resize, fit ↔ 1:1, a new headroom: one frame from what the ladder has, plus a
+    /// development request for what it does not.
     public func scheduleRender() {
         guard autoRenderEnabled else { return }
-        guard let session, session.mode == .loupe,
-              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return }
-        let viewport = viewportPixels
-        guard viewport.width > 8, viewport.height > 8 else { return }
-        generation += 1
-        let gen = generation
-        let state = viewState
-        let edit = session.edit
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            // Whatever the camera is doing — a new photo, a resize, fit ↔ 1:1 — the answer is "the
-            // full rung, and the best rung we already have in front of it". The window is what makes
-            // 1:1 a cheap render; the ladder is what makes it a cheap *entry*.
-            let plan = self.ladder.plan(identity: self.ladderIdentity(asset),
-                                        target: DecodeLadder.fullScale)
-            self.pumpLadder(asset: asset, url: url, viewport: viewport, plan: plan,
-                            edit: edit, state: state, generation: gen,
-                            onPresent: { [weak self] frame, ms, isFirst in
-                                self?.present(frame: frame, renderMilliseconds: ms, isFirst: isFirst)
-                            },
-                            onDone: {},
-                            onFailure: { [weak self] message in self?.lastPresentError = message })
+        guard var job = makeJob(kind: .scheduled) else { return }
+        // A different photo: the old one's queued developments are waste, and finishing them would
+        // steal ImageIO from the picture that is on screen now. (A running one cannot be aborted; its
+        // delivery is refused instead — see `DecodeQueue.cancel`.)
+        if let previous = pendingIdentity, previous != job.identity {
+            decodeQueue.cancel(identity: previous)
         }
+        pendingIdentity = job.identity
+        // A scheduled render is a new intent: any frame or development still on its way was for the
+        // previous one. The *buffers* survive (the ladder is keyed by photo); the *frames* do not.
+        generation += 1
+        job.generation = generation
+        awaitingFirstFrame = true
+        queue.async { [weak self] in self?.renderFrame(job) }
     }
 
     /// The ladder identity of an asset: the same string `makeFrame` keys its graph on, so a plan can
     /// never be made for one photo and applied to another.
     private func ladderIdentity(_ asset: Asset) -> String { "\(asset.contentHash)|\(asset.id)" }
 
-    /// Run every rung of `plan` in order: the preview (when there is one) is presented as soon as it
-    /// is rendered, the target replaces it when ImageIO is done. Always called on `queue`.
-    ///
-    /// The `generation` test between rungs is what keeps a ladder from finishing a development nobody
-    /// is looking at: a camera move during the 900 ms decode cancels the *presentation* of the next
-    /// rung — the decode is already paid for and lands in the ladder, where the next frame reuses it
-    /// — and `onDone` fires either way, so the caller's single-flight flag is always released.
-    private func pumpLadder(asset: Asset, url: URL, viewport: ImageSize, plan: DecodeLadderPlan,
-                            edit: EditModel, state: LoupeViewState, generation gen: Int,
-                            onPresent: @escaping (FrameResult, Double, Bool) -> Void,
-                            onDone: @escaping () -> Void,
-                            onFailure: @escaping (String) -> Void) {
-        for (index, decodeScale) in plan.rungs.enumerated() {
-            let t0 = CFAbsoluteTimeGetCurrent()
-            let isFirst = index == 0
-            let isLast = index == plan.rungs.count - 1
-            do {
-                let frame = try makeFrame(asset: asset, url: url, viewport: viewport,
-                                          decodeScale: decodeScale, edit: edit, state: state,
-                                          hashPixels: hashesFrames)
-                let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if self.generation == gen { onPresent(frame, ms, isFirst) }
-                    if isLast { onDone() }
-                }
-            } catch {
-                let message = "\(error)"
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if self.generation == gen { onFailure(message) }
-                    onDone()
-                }
-                return
-            }
-            if !isLast, generation != gen {
-                DispatchQueue.main.async { onDone() }
-                return
-            }
-        }
-    }
-
     // MARK: frame
+
+    /// One development, wrapped as a rung.
+    ///
+    /// This is the decode queue's unit of work and the only place the loupe opens a file: a frame
+    /// calls it only on the synchronous path (`--ui-smoke`, tests), never from the render queue. A
+    /// fresh `RAWDecoder` per development is deliberate — one `CIContext` and one Metal command queue
+    /// per development, so the decode queue never shares GPU state with the render queue.
+    static func develop(url: URL, scale: Float) throws -> DecodeRung {
+        let decoder = try RAWDecoder()
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
+                                                                              exposureEV: 0,
+                                                                              scale: scale))
+        return DecodeRung(scale: scale, image: developed.image,
+                          capabilities: developed.capabilities,
+                          milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+    }
 
     /// The whole GPU path for one frame, callable synchronously (ui-smoke uses this).
     ///
@@ -1062,24 +1247,37 @@ public final class LoupeController: NSViewController {
                       state: state, hashPixels: hashPixels)
     }
 
+    /// Whether a frame may develop the rung it wants.
+    private enum RungResolution {
+        /// Develop on a miss. The synchronous path: `--ui-smoke`, the tests, an import preview — a
+        /// caller that has nothing else to put on screen and is willing to wait for ImageIO.
+        case developIfMissing
+        /// Ride what the ladder already has; a miss is a `LoupeFrameError.notResident`, never a
+        /// development. This is the loupe's own frame path: developing there would put a 60 MP
+        /// development back in front of every pan, which is the defect Q29 removed.
+        case residentOnly
+    }
+
     private func makeFrame(url: URL, cacheIdentity: String, viewport: ImageSize, decodeScale: Float,
                            edit model: EditModel, state: LoupeViewState,
-                           hashPixels: Bool) throws -> FrameResult {
+                           hashPixels: Bool, resolve: RungResolution = .developIfMissing) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
         // ── the decode ladder (§11.10) ───────────────────────────────────────────────────────
         // One photo, one development per rung. Keyed by (photo, scale), so the second visit to fit
-        // or to 1:1 is a render and nothing else; on a miss the buffer is developed here and stored,
-        // and the caller has already put the *other* rung on screen if it had one.
-        let outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
-            let decoder = try RAWDecoder()
-            let t0 = CFAbsoluteTimeGetCurrent()
-            let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
-                                                                                  exposureEV: 0,
-                                                                                  scale: decodeScale))
-            return DecodeRung(scale: decodeScale,
-                              image: developed.image,
-                              capabilities: developed.capabilities,
-                              milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        // or to 1:1 is a render and nothing else. `residentOnly` frames (every frame the loupe's
+        // queues produce) never develop: the rung they want was requested from the decode queue by
+        // the caller, and a miss here means the very first development of a photo has not landed.
+        let outcome: (rung: DecodeRung, cached: Bool)
+        switch resolve {
+        case .developIfMissing:
+            outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
+                try Self.develop(url: url, scale: decodeScale)
+            }
+        case .residentOnly:
+            guard let resident = ladder.resident(identity: cacheIdentity, scale: decodeScale) else {
+                throw LoupeFrameError.notResident(scale: decodeScale)
+            }
+            outcome = (resident, true)
         }
         let image = outcome.rung.image
         let usedCache = outcome.cached
@@ -1157,7 +1355,7 @@ public final class LoupeController: NSViewController {
         }
     }
 
-    private func present(frame: FrameResult, renderMilliseconds: Double, isFirst: Bool) {
+    private func present(frame: FrameResult, renderMilliseconds: Double) {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
@@ -1196,8 +1394,9 @@ public final class LoupeController: NSViewController {
                                    decodeScale: frame.decodeScale,
                                    zoom: frame.zoom,
                                    window: frame.window)
-        if isFirst {
+        if awaitingFirstFrame {
             firstFrameMilliseconds = renderMilliseconds
+            awaitingFirstFrame = false
         } else {
             secondFrameMilliseconds = renderMilliseconds
         }
@@ -1238,6 +1437,22 @@ public final class LoupeController: NSViewController {
 
     private func layoutStatusChip() {
         statusChip.layout(in: container.bounds)
+    }
+}
+
+/// A frame the loupe's queue path could not produce — because it must never develop one itself.
+///
+/// This is not a failure in the shipped flow: it means "no rung is resident yet", i.e. the very
+/// first development of a photo is still on its way, and the canvas is right to keep the previous
+/// picture. `rungArrived` will repaint when it lands.
+public enum LoupeFrameError: LocalizedError, Equatable {
+    case notResident(scale: Float)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notResident(let scale):
+            return "no decoded rung at scale \(scale) is resident; the development is on the decode queue"
+        }
     }
 }
 

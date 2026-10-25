@@ -476,6 +476,11 @@ public final class UISmokeRunner {
                             controller: windowController, window: window,
                             asset: asset, url: url)
 
+            // 10b. the mask's own parameters: mask-level + the eleven local sliders, rename, order
+            checkMaskParameters(session: session, loupe: root.loupeController,
+                                controller: windowController, window: window,
+                                asset: asset, url: url)
+
             // 11. 显示 ▸ 倍率: four stops, ticks, ⌘= / ⌘−, and no document movement
             checkZoomMenu(session: session, loupe: root.loupeController,
                           controller: windowController, window: window,
@@ -1707,6 +1712,128 @@ public final class UISmokeRunner {
         return raw
     }
 
+    // MARK: - 蒙版参数：从两帧的差里量出“软硬”
+
+    /// What one frame says about a mask parameter, measured against the frame with no mask.
+    ///
+    ///   · `amplitude` — the strongest luma difference anywhere. A strength parameter (opacity,
+    ///     amount, EV) moves this; a geometric one does not.
+    ///   · `maxStep` — the sharpest **single-pixel** jump in the difference image. This is the edge
+    ///     softness in one number: a hard rim changes by the whole amplitude between two neighbouring
+    ///     pixels, a blur of radius r spreads the same change over ~2r pixels, so `maxStep` falls
+    ///     roughly as 1/r. That is why it can decide "变软" without a screenshot.
+    ///   · `changed` — fraction of the frame that differs at all: the mask's **area**. Invert and a
+    ///     `subtract` component move this, and a feather barely does.
+    ///   · `partial` — of the affected pixels, the share that is *only partly* affected (between 20 %
+    ///     and 80 % of the amplitude). A hard edge is mostly all-or-nothing; a soft edge is mostly
+    ///     partial. The two numbers together are the "edge band" test.
+    ///   · `core` — the **50 % contour**: the fraction of the frame at least half the peak effect.
+    ///     This is the area a symmetric blur does *not* move (it moves the 2 %-of-peak tail, which is
+    ///     why `changed` grows by tens of percent and is the wrong number for "面积不变").
+    ///   · `mean` — the frame's mean luma, for the exposure slider's direction.
+    private struct FrameDelta {
+        var amplitude: Double = 0
+        var maxStep: Double = 0
+        var changed: Double = 0
+        var partial: Double = 0
+        var core: Double = 0
+        var mean: Double = 0
+
+        var text: String {
+            String(format: "Δ峰 %.4f · 单像素最大跳变 %.4f · 覆盖 %.4f · 半幅 %.4f · 部分覆盖 %.3f · 均值 %.4f",
+                   amplitude, maxStep, changed, core, partial, mean)
+        }
+    }
+
+    /// Rec.709 luma of every pixel, 0…1 (the display texture, i.e. what the user sees).
+    private func lumaPlane(_ texture: MTLTexture) -> [Double] {
+        let raw = rgba16(texture)
+        var out = [Double](repeating: 0, count: texture.width * texture.height)
+        for i in out.indices {
+            let base = i * 4
+            let r = Double(Float(Float16(bitPattern: raw[base])))
+            let g = Double(Float(Float16(bitPattern: raw[base + 1])))
+            let b = Double(Float(Float16(bitPattern: raw[base + 2])))
+            out[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+        return out
+    }
+
+    /// The same plane from a `DisplayImage` (what a `RenderGraph.render(..., wantsPixels: true)`
+    /// hands back — the synthetic probes' source of pixels).
+    private func lumaPlane(_ image: DisplayImage) -> [Double] {
+        var out = [Double](repeating: 0, count: image.width * image.height)
+        for i in out.indices {
+            let base = i * 4
+            out[i] = 0.2126 * Double(image.rgba[base])
+                + 0.7152 * Double(image.rgba[base + 1])
+                + 0.0722 * Double(image.rgba[base + 2])
+        }
+        return out
+    }
+
+    private func frameDelta(_ texture: MTLTexture, against base: MTLTexture) -> FrameDelta {
+        let w = base.width, h = base.height
+        guard w > 0, h > 0, texture.width == w, texture.height == h else { return FrameDelta() }
+        return frameDelta(lumaPlane(texture), lumaPlane(base), width: w, height: h)
+    }
+
+    private func frameDelta(_ image: DisplayImage, against base: DisplayImage) -> FrameDelta {
+        guard image.width == base.width, image.height == base.height else { return FrameDelta() }
+        return frameDelta(lumaPlane(image), lumaPlane(base),
+                          width: base.width, height: base.height)
+    }
+
+    private func frameDelta(_ a: [Double], _ b: [Double], width w: Int, height h: Int) -> FrameDelta {
+        guard w > 0, h > 0, a.count == w * h, b.count == w * h else { return FrameDelta() }
+        var d = [Double](repeating: 0, count: w * h)
+        var mean = 0.0
+        for i in d.indices {
+            d[i] = abs(a[i] - b[i])
+            mean += a[i]
+        }
+        mean /= Double(max(1, d.count))
+
+        var out = FrameDelta()
+        out.mean = mean
+        out.amplitude = d.max() ?? 0
+        let any = max(out.amplitude * 0.02, 1.0 / 512.0)
+        let low = out.amplitude * 0.20
+        let high = out.amplitude * 0.80
+        var changed = 0, partial = 0, core = 0
+        let half = out.amplitude * 0.50
+        for v in d {
+            guard v > any else { continue }
+            changed += 1
+            if v > half { core += 1 }
+            if v > low && v < high { partial += 1 }
+        }
+        out.changed = Double(changed) / Double(d.count)
+        out.core = Double(core) / Double(d.count)
+        out.partial = changed > 0 ? Double(partial) / Double(changed) : 0
+
+        var step = 0.0
+        for y in 0..<h {
+            let row = y * w
+            for x in 0..<(w - 1) { step = max(step, abs(d[row + x + 1] - d[row + x])) }
+        }
+        for x in 0..<w {
+            for y in 0..<(h - 1) { step = max(step, abs(d[(y + 1) * w + x] - d[y * w + x])) }
+        }
+        out.maxStep = step
+        return out
+    }
+
+    /// The mask panel's readback seam, in the live view tree (`MaskListPanel`'s 1 × 1 background).
+    private func maskProbe(in view: NSView?) -> MaskPanelProbe? {
+        guard let view else { return nil }
+        if let probe = view as? MaskPanelProbe { return probe }
+        for subview in view.subviews {
+            if let found = maskProbe(in: subview) { return found }
+        }
+        return nil
+    }
+
     // MARK: - 直方图卡片 + 高光警告（005f 的 UI）
 
     /// The histogram card, asserted on the **frame's own measurement** rather than on a re-count of
@@ -2092,6 +2219,455 @@ public final class UISmokeRunner {
 
         // Leave the document as clean as the checks found it.
         for mask in session.edit.masks { session.deleteMask(mask.id) }
+        session.setShowMask(nil)
+        session.maskTool = .off
+        loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - 蒙版参数面板（Q28：蒙版级 + 局部调整 + 改名/排序）
+
+    /// The parameter half of the mask panel, asserted on **pixels** and on the numbers that reach
+    /// `EditHistory` — never on a screenshot:
+    ///
+    ///   · `opacity` scales the effect (half the slider ⇒ a smaller Δ) and costs one snapshot;
+    ///   · `invert` flips the **area**: the fraction of the frame that differs from the no-mask frame
+    ///     is measured twice, and "outside" must be the bigger of the two;
+    ///   · `feather` softens the rim — a **box blur**, so it is measured on a flat source where the
+    ///     mask's own alpha is the only structure: the sharpest single-pixel jump drops and the share
+    ///     of *partly* covered pixels rises, while the area does not move;
+    ///   · `refine` is a **guided filter**, not a blur: on a structureless source it degrades to a
+    ///     symmetric smoothing, so the edge softens while the **50 % contour** (the `core` area) stays
+    ///     put — a blur's tail grows, its half-amplitude contour does not. On the photograph it
+    ///     re-aims coverage at image structure, which is why its 2 %-of-peak area moves (+55 %); both
+    ///     numbers are logged, the contour invariance is what is asserted;
+    ///   · the local sliders are real: ±2 EV inside the mask raises and lowers the frame's mean, and
+    ///     at 0 EV the frame is **bit-identical** to the frame with no mask at all (M1-6's identity
+    ///     branch, which is what makes "a mask with no adjustments" free);
+    ///   · the blend picker's `subtract` cuts a hole (one component only ignores its `op` by design);
+    ///   · rename redraws nothing (pixel hash *and* both keys identical) yet commits one snapshot —
+    ///     Core's `isSemanticallyIdentical` compares the masks by value, name included;
+    ///   · ▲▼ reorders the document list (and `develop_json`) while the *key material* stays put,
+    ///     because `EditModel.activeMasks` sorts by id by design (D6);
+    ///   · a 10-tick drag is one snapshot and a handful of debounced frames.
+    private func checkMaskParameters(session: CatalogSession, loupe: LoupeController,
+                                     controller: EditorWindowController, window: NSWindow,
+                                     asset: Asset, url: URL) {
+        loupe.autoRenderEnabled = false
+        session.maskTool = .off
+        session.setShowMask(nil)
+        session.applyEdit { $0 = .neutral }
+        session.commitEdit(label: "Reset")
+        for mask in session.edit.masks { session.deleteMask(mask.id) }
+
+        let viewport = ImageSize(width: 720, height: 480)
+
+        func frame(_ edit: EditModel) -> LoupeController.FrameResult? {
+            do {
+                return try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
+                                           edit: edit, state: .fit, hashPixels: true)
+            } catch {
+                fail("mask parameter frame threw: \(error.localizedDescription)")
+                return nil
+            }
+        }
+        /// The live document, minus the overlay (view state), i.e. what the renderer is judged on.
+        func document() -> EditModel { MaskViewState.documentOnly(session.edit) }
+        func shot() -> LoupeController.FrameResult? { frame(document()) }
+
+        var withoutMasks = document()
+        withoutMasks.masks = []
+        guard let base = frame(withoutMasks) else {
+            fail("蒙版参数：没有基线帧")
+            loupe.autoRenderEnabled = true
+            return
+        }
+
+        // A radial mask over the middle with a **near-hard** rim (component feather 0.02) and +2 EV
+        // inside it. The hard rim is the point: a shape whose own transition band already spans a
+        // quarter of its radius would swallow the mask-level feather this section has to measure.
+        guard let mask = session.addMask(kind: .radialGradient) else {
+            fail("蒙版参数：addMask 返回 nil")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        session.writeMask(mask.id, label: "蒙版初值", commit: true) { m in
+            if !m.components.isEmpty { m.components[0].feather = 0.02 }
+            m.adjustments.exposure = 2.0
+        }
+        func current() -> Mask? { session.edit.masks.first { $0.id == mask.id } }
+
+        guard let fullFrame = shot(), let fullHash = fullFrame.displayHash else {
+            fail("蒙版参数：全强度帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let full = frameDelta(fullFrame.texture, against: base.texture)
+        log("mask params full        \(full.text) · hash \(fullHash.prefix(16))…")
+
+        // MARK: 12.1 opacity — a strength, and one snapshot
+
+        let depthBeforeOpacity = session.history.count
+        let wroteOpacity = session.setMaskLevel(mask.id, .opacity, 0.5, commit: true)
+        guard let halfFrame = shot() else {
+            fail("蒙版参数：半强度帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let half = frameDelta(halfFrame.texture, against: base.texture)
+        let opacityRatio = full.amplitude > 0 ? half.amplitude / full.amplitude : -1
+        log(String(format: "mask opacity            100%% → 50%%: Δ峰 %.4f → %.4f (%.2f×) · 覆盖 %.4f → %.4f · history %d → %d",
+                   full.amplitude, half.amplitude, opacityRatio, full.changed, half.changed,
+                   depthBeforeOpacity, session.history.count))
+        check(String(format: "不透明度 100 %% → 50 %%：像素变了（Δ峰 %.4f → %.4f，%.2f×，覆盖 %.4f 不变），history +%d 一次快照",
+                     full.amplitude, half.amplitude, opacityRatio, half.changed,
+                     session.history.count - depthBeforeOpacity),
+              wroteOpacity && halfFrame.displayHash != fullHash
+              && session.history.count == depthBeforeOpacity + 1
+              && opacityRatio > 0.2 && opacityRatio < 0.85
+              && abs(half.changed - full.changed) < 0.01)
+
+        session.setMaskLevel(mask.id, .opacity, 1.0, commit: true)
+
+        // MARK: 12.2 invert — the area flips
+
+        let depthBeforeInvert = session.history.count
+        session.setMaskInverted(mask.id, true)
+        guard let invertedFrame = shot() else {
+            fail("蒙版参数：反转帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let inverted = frameDelta(invertedFrame.texture, against: base.texture)
+        let areaSum = full.changed + inverted.changed
+        log(String(format: "mask invert             关 %.4f · 开 %.4f · 和 %.4f（内容区）· history %d → %d",
+                   full.changed, inverted.changed, areaSum, depthBeforeInvert, session.history.count))
+        check(String(format: "反转改变覆盖面积：关 %.4f < 开 %.4f（%.1f×），两者互补（和 %.4f），history +%d",
+                     full.changed, inverted.changed, full.changed > 0 ? inverted.changed / full.changed : 0,
+                     areaSum, session.history.count - depthBeforeInvert),
+              session.history.count == depthBeforeInvert + 1
+              && full.changed < 0.45 && inverted.changed > 0.5
+              && inverted.changed > full.changed * 2 && abs(areaSum - 1) < 0.15)
+        session.setMaskInverted(mask.id, false)
+
+        // MARK: 12.3 + 12.4 feather / refine — two neighbourhood operators, two different pieces of
+        // evidence
+        //
+        // Feather is a **separable box blur** of the combined selection; refine is a **guided
+        // filter** (it follows the picture's luma, which is why it must not be judged by "the edge
+        // got blurrier on a photo"). Both are therefore measured on a source with **no structure at
+        // all**: inside a +2 EV region the difference image varies with the pixel's own value, so on
+        // a photograph the sharpest jump is a *content* edge (measured 0.4526 with feather 0 and
+        // 0.4526 with feather 0.4 — the statistic was wrong, not the blur missing). On a flat source
+        // what is left in the frame is the mask itself.
+        //
+        // The invariant both share: a smoothing operator widens the transition band but leaves the
+        // **half-amplitude contour** where it was. That contour — `core`, not the 2 %-of-peak tail
+        // `changed`, which grows by tens of percent for either operator — is what "does not move the
+        // boundary" means here.
+
+        let depthBeforeFeather = session.history.count
+        session.setMaskLevel(mask.id, .feather, 0.4, commit: true)
+        let historyAfterFeather = session.history.count
+        guard let featheredFrame = shot(), let featheredHash = featheredFrame.displayHash else {
+            fail("蒙版参数：羽化帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let feathered = frameDelta(featheredFrame.texture, against: base.texture)
+        session.setMaskLevel(mask.id, .feather, 0, commit: true)
+
+        let depthBeforeRefine = session.history.count
+        session.setMaskLevel(mask.id, .refine, 0.9, commit: true)
+        let historyAfterRefine = session.history.count
+        guard let refinedFrame = shot(), let refinedHash = refinedFrame.displayHash else {
+            fail("蒙版参数：精修帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let refined = frameDelta(refinedFrame.texture, against: base.texture)
+        session.setMaskLevel(mask.id, .refine, 0, commit: true)
+
+        // A flat 320² mid-grey source: the mask's own alpha is the only structure in the frame.
+        let side = 320
+        var flatPixels = [Float16]()
+        flatPixels.reserveCapacity(side * side * 4)
+        for _ in 0..<(side * side) {
+            flatPixels.append(Float16(0.18))
+            flatPixels.append(Float16(0.18))
+            flatPixels.append(Float16(0.18))
+            flatPixels.append(1)
+        }
+        let flatImage = LinearImage(width: side, height: side, rgba: flatPixels,
+                                    colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let flatCanvas = ImageSize(width: side, height: side)
+
+        func flatMask(feather: Double, refine: Double) -> Mask {
+            Mask(id: "m-flat", name: "flat", opacity: 1, invert: false,
+                 feather: feather, refine: refine,
+                 components: [MaskComponent(id: "c-flat", op: .add, invert: false, feather: 0.02,
+                                            shape: .radialGradient(RadialGradientShape(
+                                                center: NormalizedPoint(0.5, 0.5),
+                                                radius: NormalizedPoint(0.30, 0.30), angle: 0)))],
+                 adjustments: LocalAdjustments(exposure: 2.0))
+        }
+
+        var flatDeltas: [String: FrameDelta] = [:]
+        if let graph = try? RenderGraph(input: RenderInput(image: flatImage,
+                                                           identity: "ui-smoke-mask-params")),
+           let plain = try? graph.render(EditModel(),
+                                          options: RenderOptions(canvas: flatCanvas, wantsPixels: true)),
+           let plainPixels = plain.display {
+            for (name, feather, refine) in [("hard", 0.0, 0.0), ("feather", 0.4, 0.0),
+                                             ("refine", 0.0, 0.9)] {
+                let document = EditModel(masks: [flatMask(feather: feather, refine: refine)])
+                guard let rendered = try? graph.render(document,
+                                                       options: RenderOptions(canvas: flatCanvas,
+                                                                              wantsPixels: true)),
+                      let pixels = rendered.display else { continue }
+                flatDeltas[name] = frameDelta(pixels, against: plainPixels)
+            }
+        } else {
+            fail("蒙版参数：纯色合成源没有渲染出来（羽化/精修的软硬量不了）")
+        }
+        let flatHard = flatDeltas["hard"] ?? FrameDelta()
+        let flatFeathered = flatDeltas["feather"] ?? FrameDelta()
+        let flatRefined = flatDeltas["refine"] ?? FrameDelta()
+        let flatReady = flatDeltas.count == 3 && flatHard.amplitude > 0
+        log(String(format: "mask flat probe         %d×%d 纯色 · 硬边 跳变 %.4f / 半覆盖 %.3f / 半幅 %.4f / 覆盖 %.4f · 羽化 %.4f / %.3f / %.4f / %.4f · 精修 %.4f / %.3f / %.4f / %.4f",
+                   side, side,
+                   flatHard.maxStep, flatHard.partial, flatHard.core, flatHard.changed,
+                   flatFeathered.maxStep, flatFeathered.partial, flatFeathered.core, flatFeathered.changed,
+                   flatRefined.maxStep, flatRefined.partial, flatRefined.core, flatRefined.changed))
+
+        let featherStepRatio = flatHard.maxStep > 0 ? flatFeathered.maxStep / flatHard.maxStep : -1
+        let featherPartialRatio = flatHard.partial > 0 ? flatFeathered.partial / flatHard.partial : -1
+        let featherCoreDrift = flatHard.core > 0
+            ? abs(flatFeathered.core - flatHard.core) / flatHard.core : -1
+        let featherPhotoCore = full.core > 0 ? (feathered.core - full.core) / full.core : 0
+        log(String(format: "mask feather            0 → 0.40：无结构源 跳变 %.4f → %.4f (%.2f×) · 半覆盖 %.3f → %.3f (%.2f×) · 半幅面积 %.4f → %.4f (漂 %.2f %%) ‖ 照片 半幅 %+.2f %% · hash %@ → %@ · history %d → %d",
+                   flatHard.maxStep, flatFeathered.maxStep, featherStepRatio,
+                   flatHard.partial, flatFeathered.partial, featherPartialRatio,
+                   flatHard.core, flatFeathered.core, featherCoreDrift * 100,
+                   featherPhotoCore * 100,
+                   String(fullHash.prefix(8)), String(featheredHash.prefix(8)),
+                   depthBeforeFeather, historyAfterFeather))
+        check(String(format: "羽化 0 → 0.40 边缘变软：无结构源上单像素最大跳变 %.4f → %.4f（%.2f×），半覆盖像素占比 %.3f → %.3f（%.2f×），50 %% 等值线面积 %.4f → %.4f（只漂 %.2f %%，模糊是对称的）；照片上换了像素，history +%d 一次快照",
+                     flatHard.maxStep, flatFeathered.maxStep, featherStepRatio,
+                     flatHard.partial, flatFeathered.partial, featherPartialRatio,
+                     flatHard.core, flatFeathered.core, featherCoreDrift * 100,
+                     historyAfterFeather - depthBeforeFeather),
+              // The softening itself is the flat source's two numbers (a 3× drop in the sharpest
+              // jump plus a 3× rise in the partly-covered share). The 50 % contour is a *sanity*
+              // check, not the evidence: on a discrete grid a symmetric blur quantizes by 1–4 %.
+              flatReady
+              && historyAfterFeather == depthBeforeFeather + 1
+              && featheredHash != fullHash
+              && featherStepRatio > 0 && featherStepRatio < 0.35
+              && featherPartialRatio > 3
+              && featherCoreDrift > 0 && featherCoreDrift <= 0.05)
+
+        let refineFlatStep = flatHard.maxStep > 0 ? flatRefined.maxStep / flatHard.maxStep : -1
+        let refineCoreDrift = flatHard.core > 0
+            ? abs(flatRefined.core - flatHard.core) / flatHard.core : -1
+        log(String(format: "mask refine             0 → 0.90：无结构源 跳变 %.4f → %.4f (%.2f×) · 半覆盖 %.3f → %.3f · 半幅漂 %.2f %% ‖ 照片 覆盖 %.4f → %.4f · hash %@ → %@ · history %d → %d",
+                   flatHard.maxStep, flatRefined.maxStep, refineFlatStep,
+                   flatHard.partial, flatRefined.partial, refineCoreDrift * 100,
+                   full.changed, refined.changed,
+                   String(fullHash.prefix(8)), String(refinedHash.prefix(8)),
+                   depthBeforeRefine, historyAfterRefine))
+        check(String(format: "精修 0 → 0.90 平滑而不搬边界：无结构源上单像素最大跳变 %.4f → %.4f（%.2f×），半覆盖像素占比 %.3f → %.3f，50 %% 等值线面积 %.4f → %.4f（漂 %.2f %%，导向滤波在无结构处退化为对称平滑）；真实照片上同样换了像素（hash %@ → %@），history +%d",
+                     flatHard.maxStep, flatRefined.maxStep, refineFlatStep,
+                     flatHard.partial, flatRefined.partial,
+                     flatHard.core, flatRefined.core, refineCoreDrift * 100,
+                     String(fullHash.prefix(8)), String(refinedHash.prefix(8)),
+                     historyAfterRefine - depthBeforeRefine),
+              flatReady
+              && historyAfterRefine == depthBeforeRefine + 1
+              && refinedHash != fullHash
+              && refineFlatStep > 0 && refineFlatStep < 0.75
+              && refineCoreDrift < 0.05
+              && abs(refined.changed - full.changed) > 0.01)
+
+        // MARK: 12.5 the local sliders — ±2 EV, and bit-exact at 0
+
+        let depthBeforeExposure = session.history.count
+        session.setMaskAdjustment(mask.id, .exposure, 0, commit: true)
+        guard let zeroFrame = shot() else {
+            fail("蒙版参数：0 EV 帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        session.setMaskAdjustment(mask.id, .exposure, 2, commit: true)
+        guard let plusFrame = shot() else {
+            fail("蒙版参数：+2 EV 帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        session.setMaskAdjustment(mask.id, .exposure, -2, commit: true)
+        guard let minusFrame = shot() else {
+            fail("蒙版参数：−2 EV 帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let zero = frameDelta(zeroFrame.texture, against: base.texture)
+        let plus = frameDelta(plusFrame.texture, against: base.texture)
+        let minus = frameDelta(minusFrame.texture, against: base.texture)
+        log(String(format: "mask exposure           +2 EV 均值 %.4f · 0 EV %.4f · −2 EV %.4f（0 EV 与无蒙版帧 %@）",
+                   plus.mean, zero.mean, minus.mean,
+                   zeroFrame.displayHash == base.displayHash ? "位精确相等" : "不一致"))
+        check(String(format: "曝光滑杆 ±2 EV 改变像素：均值 +2 %.4f > 0 %.4f > −2 %.4f（各差 %.4f / %.4f），三帧 hash 两两不同，history +%d",
+                     plus.mean, zero.mean, minus.mean,
+                     plus.mean - zero.mean, zero.mean - minus.mean,
+                     session.history.count - depthBeforeExposure),
+              plus.mean > zero.mean && zero.mean > minus.mean
+              && (plus.mean - zero.mean) > 0.002 && (zero.mean - minus.mean) > 0.002
+              && Set([plusFrame.displayHash, zeroFrame.displayHash,
+                      minusFrame.displayHash].compactMap { $0 }).count == 3
+              && session.history.count == depthBeforeExposure + 3)
+        check("曝光回到 0 时这一帧与“完全没有蒙版”位精确相等（M1-6 恒等分支：无调整的蒙版不改变任何像素）",
+              zeroFrame.displayHash == base.displayHash && zero.changed == 0)
+
+        session.setMaskAdjustment(mask.id, .exposure, 2, commit: true)
+
+        // MARK: 12.6 rename — no render, but one snapshot (and why)
+
+        let depthBeforeRename = session.history.count
+        let hashBeforeRename = shot()?.displayHash
+        let keysBefore = current()
+        let docBeforeRename = documentHash(session.edit)
+        let renamed = session.renameMask(mask.id, to: "高光主体")
+        let keysAfter = current()
+        let hashAfterRename = shot()?.displayHash
+        let docAfterRename = documentHash(session.edit)
+        log("mask rename             \(renamed ? "“高光主体”" : "失败") · 像素 hash \(hashBeforeRename?.prefix(8) ?? "nil")… → \(hashAfterRename?.prefix(8) ?? "nil")… · key 变了吗 \(keysBefore?.selectionKey != keysAfter?.selectionKey || keysBefore?.applyKey != keysAfter?.applyKey) · 文档 hash 变了吗 \(docBeforeRename != docAfterRename) · history \(depthBeforeRename) → \(session.history.count)")
+        check("改名“高光主体”：像素 hash 不变、selectionKey/applyKey 都不变（Core: name 不在任何键里），文档 hash 变（JSON 里有名字），history +1 —— 这一条历史不重渲任何像素，因为 isSemanticallyIdentical 按值比 masks、名字在内",
+              renamed && keysAfter?.name == "高光主体"
+              && hashAfterRename != nil && hashAfterRename == hashBeforeRename
+              && keysBefore?.selectionKey == keysAfter?.selectionKey
+              && keysBefore?.applyKey == keysAfter?.applyKey
+              && docAfterRename != docBeforeRename
+              && session.history.count == depthBeforeRename + 1)
+
+        // MARK: 12.7 ▲▼ — the list order moves, the key material does not
+
+        guard let second = session.addMask(kind: .radialGradient) else {
+            fail("蒙版参数：第二个蒙版没有建出来")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let orderBefore = session.edit.masks.map(\.id)
+        let materialBefore = session.edit.maskSelectionMaterial
+        let docBeforeMove = documentHash(session.edit)
+        let depthBeforeMove = session.history.count
+        session.selectMask(second.id)
+        pump(0.15)
+        let moved = session.moveMask(second.id, by: -1)
+        let orderAfter = session.edit.masks.map(\.id)
+        let expectedOrder = [second.id] + orderBefore.filter { $0 != second.id }
+        pump(0.2)
+        let probeOrder = maskProbe(in: window.contentView)?.listOrder
+        log("mask order              \(orderBefore.map { String($0.suffix(4)) }) → \(orderAfter.map { String($0.suffix(4)) }) · 键材质 \(materialBefore == session.edit.maskSelectionMaterial ? "不变（按 id 排序）" : "变了") · 面板 \(probeOrder ?? []) · history \(depthBeforeMove) → \(session.history.count)")
+        check("上/下移改变顺序：文档数组重排为 \(orderAfter.map { String($0.suffix(4)) })、落盘 JSON 变了、面板列表跟着变、history +1；而键材质不变——Core 的组合顺序与键都按 id 字典序（D6），所以上下移是文档顺序，不是渲染顺序（这不是回归，是 005/M4 §3 的排序规则）",
+              moved && orderAfter == expectedOrder
+              && documentHash(session.edit) != docBeforeMove
+              && session.edit.maskSelectionMaterial == materialBefore
+              && session.history.count == depthBeforeMove + 1
+              && probeOrder == session.edit.masks.map(\.name))
+
+        // MARK: 12.8 the blend picker — subtract cuts a hole
+
+        session.selectMask(mask.id)
+        guard let beforeBlend = shot() else {
+            fail("蒙版参数：混合前帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let unionArea = frameDelta(beforeBlend.texture, against: base.texture).changed
+        session.writeMask(mask.id, label: "加第二个组件", commit: true) { m in
+            m.components.append(MaskComponent(id: "c-\(UUID().uuidString)", op: .add, invert: false,
+                                              feather: 0.02,
+                                              shape: .radialGradient(RadialGradientShape(
+                                                  center: NormalizedPoint(0.5, 0.5),
+                                                  radius: NormalizedPoint(0.12, 0.12),
+                                                  angle: 0))))
+        }
+        guard let unionFrame = shot() else {
+            fail("蒙版参数：并集帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let twoAddComponents = frameDelta(unionFrame.texture, against: base.texture).changed
+        let depthBeforeOp = session.history.count
+        let wroteOp = session.setMaskCombineOp(mask.id, component: 1, .subtract)
+        guard let subtractFrame = shot() else {
+            fail("蒙版参数：减去帧渲染失败")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let subtracted = frameDelta(subtractFrame.texture, against: base.texture).changed
+        log(String(format: "mask blend              单组件 %.4f · 两个 add（并集）%.4f · 第二个改 subtract %.4f（−%.4f）· history %d → %d",
+                   unionArea, twoAddComponents, subtracted, twoAddComponents - subtracted,
+                   depthBeforeOp, session.history.count))
+        check(String(format: "混合模式生效：第二个组件 add 时并集覆盖 %.4f（与单组件 %.4f 一致），改 subtract 后中心被擦掉 → %.4f（−%.4f），history +%d",
+                     twoAddComponents, unionArea, subtracted, twoAddComponents - subtracted,
+                     session.history.count - depthBeforeOp),
+              wroteOp && abs(twoAddComponents - unionArea) < 0.01
+              && subtracted < twoAddComponents - 0.01
+              && session.history.count == depthBeforeOp + 1)
+
+        // MARK: 12.9 a drag: ten writes, one snapshot, a few frames
+
+        loupe.autoRenderEnabled = true
+        loupe.hashesFrames = false
+        // The edit path only renders while the loupe is the shown module (`LoupeController`'s
+        // debounce guard checks `session.mode == .loupe`); a previous section may have left us in
+        // the grid, which would make "10 ticks → 0 renders" look like a debounce bug.
+        session.mode = .loupe
+        pump(0.05)
+        let depthBeforeDrag = session.history.count
+        let rendersBeforeDrag = loupe.editRenderCount
+        let startsBeforeDrag = loupe.editRenderStarts
+        for tick in 1...10 {
+            // Exactly what a slider tick does: no commit, only `applyEdit` (see `sliderRow`).
+            session.setMaskAdjustment(mask.id, .hue, Double(tick) * 2)
+            pump(0.012)
+        }
+        session.commitEdit(label: "局部色相")
+        _ = waitForFrame(loupe, after: rendersBeforeDrag, timeout: 30)
+        let dragRenders = loupe.editRenderCount - rendersBeforeDrag
+        let dragStarts = loupe.editRenderStarts - startsBeforeDrag
+        log("mask drag               10 ticks → \(dragStarts) render start(s) / \(dragRenders) presented · history \(depthBeforeDrag) → \(session.history.count) · hue \(current()?.adjustments.hue ?? -1)°")
+        // Assert the debounce, not the ladder: a presented frame also needs a resident rung, and
+        // that is the decode ladder's business (a mask edit needs no decode at all).
+        check("滑杆拖动中 10 次写入只产生 1 个快照（history +\(session.history.count - depthBeforeDrag)，松手才 commit）与 \(dragStarts) 次渲染启动（50 ms 防抖 + 单飞）",
+              session.history.count == depthBeforeDrag + 1
+              && dragStarts >= 1 && dragStarts <= 2
+              && current()?.adjustments.hue == 20)
+
+        // MARK: 12.10 the panel itself
+
+        pump(0.2)
+        let required = MaskLevelParameter.allCases.map(\.label) + ["反转", "混合"]
+            + MaskAdjustmentParameter.allCases.map(\.label)
+        guard let probe = maskProbe(in: window.contentView) else {
+            fail("检查器里找不到蒙版参数面板的读回点（MaskPanelProbe）")
+            for m in session.edit.masks { session.deleteMask(m.id) }
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let missing = required.filter { !probe.rows.contains($0) }
+        let rowText = current().map { MaskRowSummary.text($0) } ?? "—"
+        log("mask panel rows         \(probe.rows.joined(separator: " / "))")
+        log("mask panel list         \(probe.listOrder.joined(separator: " | ")) · 选中 \(probe.selectedName) · 行文字 \(rowText)")
+        check("面板在活视图树里露出蒙版级 + 局部调整的全部 \(required.count) 个控件（缺：\(missing.isEmpty ? "无" : missing.joined(separator: "、"))），改名已同步到面板，列表行写着“\(rowText)”",
+              missing.isEmpty && probe.rows.count == required.count
+              && probe.selectedName == (current()?.name ?? "—")
+              && probe.listOrder.contains(current()?.name ?? "—")
+              && rowText.hasPrefix("径向渐变 · 局部 ")
+              && rowText.hasSuffix(" 项"))
+
+        // Leave the document as clean as the checks found it.
+        for m in session.edit.masks { session.deleteMask(m.id) }
         session.setShowMask(nil)
         session.maskTool = .off
         loupe.autoRenderEnabled = true

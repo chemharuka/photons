@@ -266,7 +266,24 @@ final class DecodeLadderTests: XCTestCase {
                      previewP50 + arrival, readyMs, arrival - readyMs))
         print(String(format: "LADDER 1:1 pan: p50 %.2f ms over 20 windows (budget 6, Q15 5.8)", panP50))
         XCTAssertLessThan(panP50, 6.0, "panning a resident full rung must stay inside the 6 ms budget")
-        XCTAssertLessThan(previewP50 + arrival, 4000, "sanity: one development, not a decode storm")
+        // "One development, not a decode storm" is a **count**, not a clock. It used to be asserted as
+        // "ready in under 4000 ms", which is a wall clock: a machine that is running two other builds
+        // stretches the same two developments to 4.3 s and the test goes red for a reason that has
+        // nothing to do with the ladder. What the sentence actually means is here, and it cannot drift
+        // with the load: the cold open developed exactly two rungs, and every later visit is a hit.
+        for _ in 0..<2 {
+            let plan = ladder.plan(identity: identity, target: DecodeLadder.fullScale)
+            for scale in plan.rungs {
+                let answer = try ladder.rung(identity: identity, scale: scale) {
+                    XCTFail("a resident rung must never be developed again")
+                    return try develop(url, scale: scale)
+                }
+                XCTAssertTrue(answer.cached, "the second visit to a rung is a cache hit")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(ladder.hits, 2, "the second visit to 1:1 must be a hit")
+        XCTAssertEqual(RAWDecoder.decodeCounts().values.reduce(0, +), 2,
+                       "one development per rung (0.5, then 1.0) and nothing else: \(RAWDecoder.decodeCounts())")
         XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.previewScale: 1, DecodeLadder.fullScale: 1])
     }
 

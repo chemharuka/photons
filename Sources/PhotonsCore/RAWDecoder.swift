@@ -483,43 +483,70 @@ public struct DecodeLadderPlan: Equatable, Sendable {
 /// the biggest buffer (that is what `outputWindow` is), which means the preview rung is only ever
 /// needed while the full one is still being developed — and the steady-state footprint stays what
 /// it was before this type existed (one buffer, not two).
+///
+/// **Two queues, one lock.** Since Q29 the rungs are *written* from the decode queue (a development
+/// that just finished) while they are *read* from the render queue (the next frame), so every member
+/// below is guarded by `lock`. The one rule that keeps the lock harmless: it is never held across a
+/// development — `rung(identity:scale:decode:)` asks its question, drops the lock, develops, and
+/// re-enters to store. A decode under a lock would serialise the two queues again, which is exactly
+/// the defect this file's `DecodeQueue` exists to remove.
 public final class DecodeLadder {
     /// The rung a fit frame can afford to show first: half the linear size, ~quarter the pixels.
     public static let previewScale: Float = 0.5
     /// The rung 1:1 (and everything above it) is rendered from. One source pixel, one buffer pixel.
     public static let fullScale: Float = 1
 
+    private let lock = NSLock()
     private var identity: String?
     private var rungs: [Float: DecodeRung] = [:]
 
     /// Rungs this ladder has developed, and how many requests it answered from the cache. Exposed
     /// for the tests and for the bench; not part of any key.
-    public private(set) var decodes = 0
-    public private(set) var hits = 0
+    private var decodeCount = 0
+    private var hitCount = 0
     /// How many rungs the *last* `store` released because a bigger one replaced them.
-    public private(set) var released = 0
+    private var releaseCount = 0
+
+    public private(set) var decodes: Int {
+        get { locked { decodeCount } }
+        set { locked { decodeCount = newValue } }
+    }
+    public private(set) var hits: Int {
+        get { locked { hitCount } }
+        set { locked { hitCount = newValue } }
+    }
+    public private(set) var released: Int {
+        get { locked { releaseCount } }
+        set { locked { releaseCount = newValue } }
+    }
 
     public init() {}
 
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
+    }
+
     /// The rungs currently in memory, smallest first. Debugging/diagnostics only.
-    public var residentScales: [Float] { rungs.keys.sorted() }
+    public var residentScales: [Float] { locked { rungs.keys.sorted() } }
 
     public var best: DecodeRung? {
-        rungs.values.max { $0.scale < $1.scale }
+        locked { rungs.values.max { $0.scale < $1.scale } }
     }
 
     /// The resident rung at exactly `scale`, or `nil`. Never returns a different rung: a 0.5 buffer
     /// must never be mistaken for a 1.0 one (that is the bug class this type exists to close).
     public func resident(identity: String, scale: Float) -> DecodeRung? {
-        guard identity == self.identity else { return nil }
-        return rungs[scale]
+        locked { identity == self.identity ? rungs[scale] : nil }
     }
 
     /// The largest resident rung that is not bigger than `scale` — the best thing that can be shown
     /// while the wanted rung is being developed.
     public func best(identity: String, atOrBelow scale: Float) -> DecodeRung? {
-        guard identity == self.identity else { return nil }
-        return rungs.values.filter { $0.scale <= scale }.max { $0.scale < $1.scale }
+        locked {
+            guard identity == self.identity else { return nil }
+            return rungs.values.filter { $0.scale <= scale }.max { $0.scale < $1.scale }
+        }
     }
 
     /// What the loupe must do for a `target` rung: show `preview` first if it can, then `target`.
@@ -527,15 +554,19 @@ public final class DecodeLadder {
     /// `preview` is `nil` exactly when the target is resident, which is the case that matters for
     /// the second and every later visit to a camera position.
     public func plan(identity: String, target: Float) -> DecodeLadderPlan {
-        if resident(identity: identity, scale: target) != nil {
-            return DecodeLadderPlan(preview: nil, target: target)
+        locked {
+            if identity == self.identity, rungs[target] != nil {
+                return DecodeLadderPlan(preview: nil, target: target)
+            }
+            // Nothing smaller to show, or the only thing we have *is* the target: one rung.
+            guard target > Self.previewScale else {
+                return DecodeLadderPlan(preview: nil, target: target)
+            }
+            let residentPreview = identity == self.identity
+                ? rungs.values.filter { $0.scale <= target }.max { $0.scale < $1.scale }?.scale
+                : nil
+            return DecodeLadderPlan(preview: residentPreview ?? Self.previewScale, target: target)
         }
-        // Nothing smaller to show, or the only thing we have *is* the target: one rung.
-        guard target > Self.previewScale else {
-            return DecodeLadderPlan(preview: nil, target: target)
-        }
-        let preview = best(identity: identity, atOrBelow: target)?.scale ?? Self.previewScale
-        return DecodeLadderPlan(preview: preview, target: target)
     }
 
     /// Answer a request for one rung, developing it with `decode` on a miss.
@@ -543,39 +574,48 @@ public final class DecodeLadder {
     /// The decode closure is the caller's because only the caller knows the URL and the options;
     /// the *policy* (what a hit is, when a bigger rung releases a smaller one) lives here so the
     /// counter and the memory rule cannot drift from the code path that uses them.
+    ///
+    /// The lock is **not** held across `decode`: this call is only used by paths that develop inline
+    /// (a test, `--ui-smoke`, an import preview). The loupe's own frames go through
+    /// `resident`/`best` + `DecodeQueue`, precisely so that a development never sits inside a lock
+    /// that a frame needs.
     public func rung(identity: String, scale: Float,
                      decode: () throws -> DecodeRung) rethrows -> (rung: DecodeRung, cached: Bool) {
         if let hit = resident(identity: identity, scale: scale) {
-            hits += 1
+            locked { hitCount += 1 }
             return (hit, true)
         }
         let fresh = try decode()
-        decodes += 1
+        locked { decodeCount += 1 }
         store(fresh, identity: identity)
         return (fresh, false)
     }
 
     /// Put a developed rung in memory, dropping every smaller rung of the same photo.
     public func store(_ rung: DecodeRung, identity: String) {
-        if identity != self.identity {
-            // A different photo: nothing here can be reused, and holding it would be the memory
-            // leak the single-slot cache never had.
-            rungs.removeAll()
-            self.identity = identity
-        }
-        rungs[rung.scale] = rung
-        released = 0
-        for scale in rungs.keys where scale < rung.scale {
-            rungs.removeValue(forKey: scale)
-            released += 1
+        locked {
+            if identity != self.identity {
+                // A different photo: nothing here can be reused, and holding it would be the memory
+                // leak the single-slot cache never had.
+                rungs.removeAll()
+                self.identity = identity
+            }
+            rungs[rung.scale] = rung
+            releaseCount = 0
+            for scale in rungs.keys where scale < rung.scale {
+                rungs.removeValue(forKey: scale)
+                releaseCount += 1
+            }
         }
     }
 
     /// Forget everything (a new photo, or a decode recipe change).
     public func reset() {
-        rungs.removeAll()
-        identity = nil
-        released = 0
+        locked {
+            rungs.removeAll()
+            identity = nil
+            releaseCount = 0
+        }
     }
 }
 
