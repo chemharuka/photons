@@ -26,6 +26,7 @@ let package = Package(
         .target(name: "PhotonsCore", resources: [.copy("Kernels")]),
         .target(name: "PhotonsExport", dependencies: ["PhotonsCore"]),
         .target(name: "PhotonsCatalog", dependencies: [
+            "PhotonsCore",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog"]),
@@ -33,7 +34,7 @@ let package = Package(
         .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsUI"]),
         .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
         .testTarget(name: "PhotonsExportTests", dependencies: ["PhotonsExport", "PhotonsCore"]),
-        .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog"]),
+        .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog", "PhotonsCore"]),
         .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI"]),
     ],
     // M0 keeps Swift 5 language mode: CIRAWFilter/MTLTexture are not Sendable and

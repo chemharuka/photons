@@ -18,10 +18,13 @@ func openLibrary(_ a: Args, index: Int) -> Catalog {
 
 func cmdLibrary(_ a: Args) throws {
     guard let sub = a.positional.first else {
-        die("library needs a subcommand: create | import | rescan | assets | stats | verify")
+        die("library needs a subcommand: create | import | rescan | assets | stats | verify | develop")
     }
 
     switch sub {
+    case "develop":
+        try cmdLibraryDevelop(a)
+
     case "create":
         guard a.positional.count >= 2 else { die("library create <pkg>") }
         let url = URL(fileURLWithPath: (a.positional[1] as NSString).expandingTildeInPath)
@@ -174,6 +177,6 @@ func cmdLibrary(_ a: Args) throws {
         exit(report.isClean ? 0 : 1)
 
     default:
-        die("unknown library subcommand '\(sub)' (create|import|rescan|assets|stats|verify)")
+        die("unknown library subcommand '\(sub)' (create|import|rescan|assets|stats|verify|develop)")
     }
 }

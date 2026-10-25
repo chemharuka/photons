@@ -74,6 +74,15 @@ public final class Catalog {
     public let layout: LibraryLayout
     public let dbQueue: DatabaseQueue
 
+    /// Develop blobs that failed to decode — and were quarantined — since this handle opened.
+    ///
+    /// Per handle, not persisted: it is a "this library has damage in it" signal for the caller (the
+    /// UI shows it, the CLI prints it), and the evidence itself lives in `develop_quarantine`.
+    /// Thread-safe because a thumbnail grid reads documents from several queues at once.
+    let developFailureCounter = AtomicCounter()
+
+    public var developDecodeFailures: Int { developFailureCounter.value }
+
     private init(layout: LibraryLayout, dbQueue: DatabaseQueue) {
         self.layout = layout
         self.dbQueue = dbQueue

@@ -1,24 +1,57 @@
 import Foundation
 import GRDB
 
-/// Schema v1 — the catalog. One migration per version, each doing one thing (darktable's
-/// 57-step discipline; `docs/tasks/003-catalog.md` §3 has the annotated DDL).
+/// Schema — one migration per version, each doing one thing (darktable's 57-step discipline;
+/// `docs/tasks/003-catalog.md` §3 has the annotated DDL).
+///
+/// | version | what it adds |
+/// |---|---|
+/// | v1 | the catalog: assets, source roots, keywords, albums, import ledger, `asset_history` |
+/// | v2 | `assets.history_end` — the persisted snapshot cursor (D10's `history_end`) |
+/// | v3 | `assets.edit_time` + `develop_quarantine` — the develop document actually lands |
+///
+/// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
+/// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
+/// table under the name `asset_history` (`docs/tasks/003-catalog.md` §3, `architecture-decisions.md`
+/// §6). v3 therefore does **not** create a second table: the existing name and columns win, and the
+/// only things missing were a write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 1
+    public static let version = 3
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
+    /// The ordered steps. GRDB records the applied names in `grdb_migrations`; `user_version` is
+    /// ours to stamp (Database.swift), so both readers and `sqlite3` see the same number.
+    static let steps: [(name: String, sql: String)] = [
+        ("v1", v1),
+        ("v2", v2),
+        ("v3", v3),
+    ]
+
     static var migrator: DatabaseMigrator {
         var m = DatabaseMigrator()
-        m.registerMigration("v1") { db in
-            try db.execute(sql: v1)
+        for step in steps {
+            m.registerMigration(step.name) { db in
+                try db.execute(sql: step.sql)
+            }
         }
         return m
     }
 
     static func migrate(_ queue: DatabaseQueue) throws {
         try migrator.migrate(queue)
+    }
+
+    /// Apply only the first `version` steps.
+    ///
+    /// Tests use this to fabricate a library of an older version and then watch `Catalog.open`
+    /// migrate it (the snapshot-before-migration path is only reachable from a real older file).
+    /// Nothing in the product calls it with a target below `Schema.version`.
+    static func migrate(_ queue: DatabaseQueue, upTo version: Int) throws {
+        let target = steps.prefix(max(0, min(version, steps.count)))
+        guard let last = target.last else { return }
+        try migrator.migrate(queue, upTo: last.name)
     }
 
     private static let v1 = """
@@ -151,5 +184,46 @@ public enum Schema {
     CREATE INDEX idx_assets_camera   ON assets(deleted, camera_key, capture_time DESC, id);
     CREATE INDEX idx_assets_root     ON assets(source_root_id, rel_path);
     CREATE INDEX idx_import_files_session ON import_files(session_id, outcome);
+    """
+
+    // MARK: - v2
+
+    /// The snapshot-stack cursor.
+    ///
+    /// `asset_history` alone cannot say *where* the user is in the stack: without a persisted cursor
+    /// a reopen silently flattens every undo position to the tip, and a document saved after three
+    /// undos comes back showing the state the user walked away from. D10 calls this `history_end`
+    /// (darktable's column name); it is the seq currently on screen, 0 meaning "no row yet".
+    private static let v2 = """
+    ALTER TABLE assets ADD COLUMN history_end INTEGER NOT NULL DEFAULT 0;
+    """
+
+    // MARK: - v3
+
+    /// The develop document lands.
+    ///
+    /// `assets.develop_json` / `develop_version` have existed since v1 but nothing ever wrote them.
+    /// v3 adds the two things a write path needs and cannot invent:
+    ///
+    /// - `assets.edit_time`: when the current blob was last written. `develop_version` says *whether*
+    ///   the document changed, this says *when* — and it survives a re-render, unlike a file mtime.
+    /// - `develop_quarantine`: the parking lot for blobs that do not decode. A corrupt document is
+    ///   never repaired and never overwritten in place: the bytes are copied here verbatim, the
+    ///   asset reads as `.neutral`, and the damaged original stays recoverable (§develop).
+    ///
+    /// No foreign key on `develop_quarantine` on purpose: evidence must survive even if the asset row
+    /// is removed, otherwise a cleanup deletes the only copy of what went wrong.
+    private static let v3 = """
+    ALTER TABLE assets ADD COLUMN edit_time TEXT;
+
+    CREATE TABLE develop_quarantine(
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id        TEXT NOT NULL,
+      develop_json    TEXT NOT NULL,
+      develop_version INTEGER NOT NULL,
+      reason          TEXT NOT NULL,
+      quarantined_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_develop_quarantine_asset ON develop_quarantine(asset_id, quarantined_at);
     """
 }

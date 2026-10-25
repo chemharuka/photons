@@ -118,6 +118,10 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
     public var lens: String?
     public var developJson: String
     public var developVersion: Int
+    /// When `developJson` was last written (ISO8601 UTC). nil for a row that predates a real write.
+    public var editTime: String?
+    /// Seq in `asset_history` that is currently on screen (D10's `history_end` cursor). 0 = none.
+    public var historyEnd: Int
     public var renderVersion: Int
     public var importedAt: String
     public var checkedAt: String?
@@ -147,6 +151,8 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
                 lens: String? = nil,
                 developJson: String = "{}",
                 developVersion: Int = 1,
+                editTime: String? = nil,
+                historyEnd: Int = 0,
                 renderVersion: Int = 1,
                 importedAt: String = ISO8601.now(),
                 checkedAt: String? = nil,
@@ -175,6 +181,8 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
         self.lens = lens
         self.developJson = developJson
         self.developVersion = developVersion
+        self.editTime = editTime
+        self.historyEnd = historyEnd
         self.renderVersion = renderVersion
         self.importedAt = importedAt
         self.checkedAt = checkedAt
