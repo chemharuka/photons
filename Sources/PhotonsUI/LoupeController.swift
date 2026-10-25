@@ -20,10 +20,16 @@ public final class LoupeCanvasView: NSView {
     /// The controller that owns the zoom/pan state. Weak: the controller owns the view.
     public weak var controller: LoupeController?
 
+    /// The mask painter, when a brush is armed. Every event still goes through `LoupeController`,
+    /// which is the only thing that can turn a view point into a normalised source point; this view
+    /// only says *which* of the two gestures a drag is (Q22).
+    public weak var maskPainter: MaskCanvasController?
+
     /// Where the last drag was, in view points. Only a drag gesture's own scratch space — the
     /// *camera* position lives in the controller, in source pixels.
     private var lastDragPoint: CGPoint = .zero
     private var isDragging = false
+    private var isPainting = false
 
     public init() {
         super.init(frame: .zero)
@@ -68,8 +74,16 @@ public final class LoupeCanvasView: NSView {
 
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        // A paint drag is a paint drag: it never pans, and a double-click while a brush is armed is
+        // two dabs rather than a zoom. Turning the tool off is what gives the camera back.
+        if maskPainter?.isArmed == true {
+            isPainting = true
+            controller?.beginPaint(at: point, pressure: Self.pressure(of: event))
+            return
+        }
         if event.clickCount == 2 {
-            controller?.handleDoubleClick(at: convert(event.locationInWindow, from: nil))
+            controller?.handleDoubleClick(at: point)
             return
         }
         isDragging = true
@@ -77,6 +91,11 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        if isPainting {
+            controller?.continuePaint(at: convert(event.locationInWindow, from: nil),
+                                      pressure: Self.pressure(of: event))
+            return
+        }
         guard isDragging else { return }
         let delta = CGSize(width: event.locationInWindow.x - lastDragPoint.x,
                            height: event.locationInWindow.y - lastDragPoint.y)
@@ -85,7 +104,18 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        if isPainting {
+            isPainting = false
+            controller?.endPaint()
+            return
+        }
         isDragging = false
+    }
+
+    /// Tablet pressure, or nil. A mouse and a trackpad report a constant 1.0 (so storing it would be
+    /// a 300-entry array of ones in every stroke); only `.tabletPoint` events carry a real curve.
+    static func pressure(of event: NSEvent) -> Double? {
+        event.subtype == .tabletPoint ? Double(event.pressure) : nil
     }
 
     /// Trackpads send two axes; a wheel sends mostly y. Both mean "move the camera", never "scale a
@@ -104,8 +134,13 @@ public final class LoupeCanvasView: NSView {
     /// The interface M3 left inert, now the real thing: 1:1 in the middle of the frame.
     public func zoomToActualSize() { controller?.zoomToActualSize() }
 
-    /// What the cursor should say: a pointing hand only when there is something to drag.
+    /// What the cursor should say: a crosshair for a brush, a pointing hand only when there is
+    /// something to drag.
     public override func resetCursorRects() {
+        if maskPainter?.isArmed == true {
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         let zoomed = controller?.viewState.isActualSize ?? false
         addCursorRect(bounds, cursor: zoomed ? .openHand : .arrow)
     }
@@ -163,6 +198,11 @@ public final class LoupeController: NSViewController {
     public let canvasView = LoupeCanvasView()
     private let container = NSView()
     private let statusChip = LoupeStatusChip()
+
+    /// The mask painter: pointer → sampled points → `Stroke` (Q22). Owned here because the paint
+    /// gesture is a canvas gesture, and handed to the view so `mouseDown` knows which of the two
+    /// gestures a drag is.
+    public let maskCanvas: MaskCanvasController
 
     // MARK: render plumbing
 
@@ -229,6 +269,7 @@ public final class LoupeController: NSViewController {
 
     public init(session: CatalogSession) {
         self.session = session
+        self.maskCanvas = MaskCanvasController(session: session)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -246,6 +287,7 @@ public final class LoupeController: NSViewController {
         canvasView.frame = container.bounds
         canvasView.autoresizingMask = [.width, .height]
         canvasView.controller = self
+        canvasView.maskPainter = maskCanvas
         container.addSubview(canvasView)
         container.addSubview(statusChip)
         view = container
@@ -481,6 +523,34 @@ public final class LoupeController: NSViewController {
         guard let framing = framing() else { return nil }
         let p = framing.mapping(of: viewState).viewPoint(sourceX: source.x, sourceY: source.y)
         return CGPoint(x: p.x / backingScale, y: p.y / backingScale)
+    }
+
+    // MARK: painting (Q22)
+
+    /// View point → normalised **uncropped source** coordinates, which is the space every mask
+    /// parameter lives in (§2/§4): the crop, the straighten angle and the flips are undone here, so
+    /// the same stroke is the same shape at fit, at 1:1 and at 8:1.
+    public func normalizedSourcePoint(forViewPoint point: CGPoint) -> NormalizedPoint? {
+        guard let framing = framing() else { return nil }
+        let p = framing.mapping(of: viewState)
+            .sourcePoint(viewX: Double(point.x) * backingScale,
+                         viewY: Double(point.y) * backingScale)
+        guard p.x.isFinite, p.y.isFinite else { return nil }
+        return NormalizedPoint(p.x / max(framing.sourceWidth, 1), p.y / max(framing.sourceHeight, 1))
+    }
+
+    public func beginPaint(at point: CGPoint, pressure: Double? = nil) {
+        guard let p = normalizedSourcePoint(forViewPoint: point) else { return }
+        maskCanvas.begin(at: p, pressure: pressure)
+    }
+
+    public func continuePaint(at point: CGPoint, pressure: Double? = nil) {
+        guard let p = normalizedSourcePoint(forViewPoint: point) else { return }
+        maskCanvas.extend(to: p, pressure: pressure)
+    }
+
+    public func endPaint() {
+        maskCanvas.end()
     }
 
     // MARK: edit re-render (50 ms debounce, single-flight)

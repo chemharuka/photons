@@ -10,8 +10,10 @@ import PhotonsCore
 /// and `@Bindable` for the SwiftUI leaf views. That is the rule here: every view (grid, filmstrip,
 /// sources, loupe, inspector) reads and writes this object, and nothing keeps a copy.
 ///
-/// What is *not* here on purpose (M3 scope): thumbnails, per-photo edit documents (only one live
-/// `EditModel` for the current photo), rating writes, masks.
+/// The document is *persisted* (Q16): `develop(forAsset:)` on open, `saveDevelop(_:history:forAsset:)`
+/// after every commit, so closing the app no longer throws an edit away. What is deliberately **not**
+/// persisted and **not** in history is mask view state (`selectedMaskID`, the brush, `showMaskID`) —
+/// see `MaskViewState`.
 @MainActor
 @Observable
 public final class CatalogSession {
@@ -62,6 +64,18 @@ public final class CatalogSession {
     /// The asset whose document is loaded in `edit` / `history`.
     public private(set) var loadedEditAssetID: String?
 
+    /// What the last successful write to `develop_json` did (version, seq, row count). `nil` before
+    /// the first save of this session — a UI that shows "saved" must read *this*, not assume.
+    public private(set) var lastSaveResult: DevelopSaveResult?
+
+    /// Why the last write failed, or nil. A failed save is never silent: the smoke asserts on it,
+    /// and the inspector could surface it.
+    public private(set) var lastPersistError: String?
+
+    /// How many times `persist()` has actually written the catalog. Cheap proof that a commit
+    /// reached the database instead of only the undo stack.
+    public private(set) var persistCount = 0
+
     public var canUndo: Bool { history.canUndo }
     public var canRedo: Bool { history.canRedo }
     /// Label of the action ⌘Z would take back — what the menu item should read.
@@ -72,6 +86,37 @@ public final class CatalogSession {
 
     public var mode: Mode = .grid {
         didSet { if mode == .loupe, anchorID == nil { anchorID = assets.first?.id } }
+    }
+
+    // MARK: view state — masks (Q22)
+    //
+    // None of this is in the document, in a cache key or in history. It is what the canvas and the
+    // inspector are currently pointed at: which mask is selected, which tool a drag means, and how
+    // wide the brush is. `EditModel.showMaskID` is the one piece that lives in the document *value*
+    // (the renderer reads the document) but it too is view state — `MaskViewState` keeps it out of
+    // snapshots and out of the stored blob.
+
+    /// The mask the canvas paints into and the inspector edits.
+    public private(set) var selectedMaskID: String?
+
+    /// What a drag on the canvas means. `.off` = pan, which is the pre-mask behaviour.
+    public var maskTool: MaskTool = .off
+
+    /// Brush diameter in **short-edge units** (0.12 = 12 % of the short edge of the photo). Each
+    /// stroke stores its own radius, so changing this never changes a stroke already painted.
+    public var brushSize: Double = 0.12
+    /// 0…1. A hard brush (`1`) has a 1 px edge; `0` is a fully feathered stamp.
+    public var brushHardness: Double = 0.5
+    /// 0…1 per-stroke alpha multiplier.
+    public var brushFlow: Double = 1.0
+
+    /// The mask the frame is painting over, or nil.
+    public var shownMaskID: String? { edit.showMaskID }
+
+    /// The overlay is on for `selectedMaskID` — what the inspector's toggle reads.
+    public var isShowingSelectedMask: Bool {
+        guard let id = selectedMaskID else { return false }
+        return edit.showMaskID == id
     }
 
     // MARK: decoder facts
@@ -222,19 +267,51 @@ public final class CatalogSession {
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
     }
 
-    /// End of one edit action (a slider release, a toggle, a menu command): push a snapshot.
+    /// Publish a change that is **not** a document edit — today that is only `showMaskID`.
+    ///
+    /// `applyEdit` cannot carry it: it short-circuits on "semantically identical", which is exactly
+    /// the property that keeps the overlay out of history. This door bumps the revision (so the
+    /// loupe re-encodes the last pass) and touches nothing else — no snapshot, no `persist()`.
+    func publishViewState(_ mutate: (inout EditModel) -> Void) {
+        var next = edit
+        mutate(&next)
+        guard next.showMaskID != edit.showMaskID else { return }
+        edit = next
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// Internal door for the mask extension in `MaskCanvasController.swift` (same module, and the
+    /// selection is view state that only that file's API should move).
+    func setSelectedMaskID(_ id: String?) {
+        selectedMaskID = id
+    }
+
+    /// End of one edit action (a slider release, a toggle, a menu command): push a snapshot and
+    /// write it to the catalog.
+    ///
     /// `EditHistory.commit` is a no-op when nothing changed, so a click on a slider that did not
-    /// move does not grow the stack or truncate the redo branch.
+    /// move neither grows the stack nor truncates the redo branch (and then nothing is written).
+    /// The snapshot is `MaskViewState.documentOnly(edit)`: the overlay is view state, so a snapshot
+    /// that carried it would make ⌘Z look like it also toggled the mask display.
     @discardableResult
     public func commitEdit(label: String = "") -> Bool {
-        history.commit(edit, label: label) != nil
+        let committed = history.commit(MaskViewState.documentOnly(edit), label: label) != nil
+        if committed { persist() }
+        return committed
     }
 
     /// ⌘Z. Restores a whole snapshot — never an inverse operation (§History).
+    ///
+    /// The snapshot is the *document*; the `showMask` overlay that was on screen is pasted back on
+    /// top of it. Without that, undoing any edit would silently switch the mask display off (the
+    /// snapshot was taken before the overlay was turned on, and `showMaskID` is not an edit), which
+    /// is the Q22/Q9e conflict in `docs/tasks/QUEUE.md`.
     @discardableResult
     public func undo() -> Bool {
         guard let model = history.undo() else { return false }
         restore(model)
+        persist()
         return true
     }
 
@@ -243,37 +320,82 @@ public final class CatalogSession {
     public func redo() -> Bool {
         guard let model = history.redo() else { return false }
         restore(model)
+        persist()
         return true
     }
 
+    /// Show a snapshot on screen: its document, plus the overlay that is currently on (view state).
     private func restore(_ model: EditModel) {
-        edit = model
+        edit = MaskViewState.restoring(model, keeping: edit.showMaskID)
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// Write the stack's current document to the catalog. One transaction, `saveDevelop`'s.
+    ///
+    /// Saving `history.current` rather than `edit` is deliberate: they are the same document except
+    /// for the overlay, and the history is by construction the thing `DevelopError.historyInconsistent`
+    /// checks a save against. A no-op commit therefore cannot throw "the blob disagrees with the
+    /// cursor" just because a double moved by less than `EditHistory.dirtyTolerance`.
+    private func persist() {
+        guard let catalog, let id = loadedEditAssetID ?? anchorAsset?.id else { return }
+        var stack = history
+        if stack.isEmpty {
+            // Nothing was ever written for this asset (or its rows were quarantined): seed the floor
+            // with the live document so the edit about to land has something to undo back to.
+            stack = EditHistory(baseline: MaskViewState.documentOnly(edit))
+        }
+        guard let document = stack.current else { return }
+        do {
+            lastSaveResult = try catalog.saveDevelop(document, history: stack, forAsset: id)
+            lastPersistError = nil
+            persistCount += 1
+        } catch {
+            // A failed write is reported, never swallowed: the document is still on screen and
+            // still undoable, and the next commit retries.
+            lastPersistError = "\(error)"
+        }
     }
 
     /// `force` re-reads the stored document (after an external save or a develop-json change).
     /// Without it, re-selecting the same photo keeps the live edit *and its history* — a selection
     /// change must not silently throw away the undo stack.
+    ///
+    /// The document comes from `Catalog.develop(forAsset:)` (D9: `develop_json` is the truth; a
+    /// damaged blob is quarantined and reads as `.neutral`), and the stack from
+    /// `Catalog.editHistory(forAsset:)` so ⌘Z survives a relaunch. A library that has no rows yet
+    /// gets `EditHistory(baseline:)`, i.e. the floor is the document as it was opened.
     public func loadEditForAnchor(force: Bool = false) {
         guard let a = anchorAsset else {
             edit = .neutral
             history = EditHistory(baseline: .neutral)
             loadedEditAssetID = nil
+            selectedMaskID = nil
             return
         }
         if !force, loadedEditAssetID == a.id { return }
-        // `developJson` is the document truth (D7/D9). M3 keeps the schema but does not save.
-        let model: EditModel
-        if let data = a.developJson.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
+        var model: EditModel
+        var stack: EditHistory?
+        if let catalog {
+            model = (try? catalog.develop(forAsset: a.id)) ?? .neutral
+            stack = try? catalog.editHistory(forAsset: a.id)
+        } else if let data = a.developJson.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
             model = decoded
         } else {
             model = .neutral
         }
+        // The overlay is view state: a stored document that carries one is stale by definition.
+        model = MaskViewState.documentOnly(model)
         edit = model
-        history = EditHistory(baseline: model)
+        if let stack, !stack.isEmpty {
+            history = stack
+        } else {
+            history = EditHistory(baseline: model)
+        }
         loadedEditAssetID = a.id
+        selectedMaskID = edit.masks.first?.id
+        maskTool = .off
     }
 
     public func recordCapabilities(_ c: DecoderCapabilities) {

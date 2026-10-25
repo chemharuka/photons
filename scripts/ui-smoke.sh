@@ -14,8 +14,19 @@
 # a `t1024` DNG request is downgraded to `t512` with `skipReason= dngCeiling` and leaves no
 # `t1024` file behind (006 §6.1); the loupe renders a frame through RenderGraph; a slider drag
 # changes the presented frame hash, ⌘Z returns it to the previous hash and ⇧⌘Z returns it again;
-# the undo/redo menu items validate to disabled with an empty history. Screenshots land in
-# local/out/.
+# the undo/redo menu items validate to disabled with an empty history.
+#
+# Masks (Q22) are driven through the shipped event path — synthesised mouse events into
+# `LoupeCanvasView` → `LoupeController` → `MaskCanvasController` → the document:
+#   · a new mask covers nothing and its `showMask` overlay changes no pixel at all;
+#   · one 42-event drag is sampled down to ~21 points, one stroke and one history snapshot;
+#   · the stroke makes the measured overlay coverage go 0 → ~0.12 and the frame hash change;
+#   · toggling 显示蒙版 never grows the history (it is view state, not an edit);
+#   · ⌘Z returns to the pre-stroke pixels *and leaves the overlay on* (the QUEUE 第 5 轮 #1 fix);
+#   · the document is written to the catalog on every commit (`develop_version`, `asset_history`
+#     rows), and a **brand-new session** reading the same library renders the same pixel hash;
+#   · deleting the mask returns the frame to the hash it had with no mask.
+# Screenshots land in local/out/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

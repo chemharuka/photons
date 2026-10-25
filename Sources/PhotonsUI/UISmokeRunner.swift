@@ -282,6 +282,11 @@ public final class UISmokeRunner {
             // 6. slider → new pixels; undo returns to the previous pixels; menu state follows
             checkInspectorDrivesLoupe(session: session, loupe: root.loupeController,
                                       controller: windowController, window: window)
+
+            // 7. masks: paint on the canvas → undo → reopen → delete (Q22 + Q16 persistence)
+            checkMaskEditing(session: session, loupe: root.loupeController,
+                             controller: windowController, window: window,
+                             asset: asset, url: url)
         } else {
             fail("no asset for the loupe")
         }
@@ -769,6 +774,267 @@ public final class UISmokeRunner {
             return nil
         }
         return find(in: NSApp.mainMenu)
+    }
+
+    // MARK: - masks: paint → undo → reopen → delete (Q22, Q16)
+
+    /// The mask UI, asserted on real `RenderGraph` pixels rather than on a screenshot.
+    ///
+    /// "Coverage" here is measured, not asserted from a formula: the frame is rendered twice — once
+    /// with `showMaskID` set and once without — and the pixels that differ **are** the mask. The
+    /// overlay reads the atlas slice S1.6 consumed (`s4_show_mask.metal`), so a nonzero coverage
+    /// means the atlas has a selection, i.e. a real stroke reached the document.
+    ///
+    /// The four behaviours this pins:
+    ///   1. one gesture = one stroke = one snapshot, sampled by distance (fewer points than events);
+    ///   2. ⌘Z returns to the pre-stroke frame and keeps the overlay (the QUEUE 第 5 轮 #1 conflict);
+    ///   3. toggling 显示蒙版 grows neither the history nor a database write (view state, not an edit);
+    ///   4. close/reopen of the same library reproduces the masked frame's hash, and deleting the
+    ///      mask returns to the frame without it.
+    private func checkMaskEditing(session: CatalogSession, loupe: LoupeController,
+                                  controller: EditorWindowController, window: NSWindow,
+                                  asset: Asset, url: URL) {
+        // 7.0 — the pure half of the showMask fix, with no window and no GPU in the way.
+        let pureMask = Mask(id: "m-pure", name: "pure")
+        var pureDoc = EditModel(masks: [pureMask])
+        pureDoc.showMaskID = pureMask.id
+        let stripped = MaskViewState.documentOnly(pureDoc)
+        check("showMask 是视图态：快照剥掉它、恢复时贴回、只差叠加的两个文档仍是同一个文档",
+              stripped.showMaskID == nil
+              && MaskViewState.restoring(stripped, keeping: pureMask.id).showMaskID == pureMask.id
+              && MaskViewState.overlayIsViewState(pureDoc, stripped)
+              && !MaskViewState.overlayIsViewState(pureDoc, EditModel()))
+
+        // 7.1 — one known document, one fixed frame size. `autoRenderEnabled` goes off so the
+        // debounced path cannot race the synchronous frames below.
+        loupe.autoRenderEnabled = false
+        session.maskTool = .off
+        session.applyEdit { $0 = .neutral }
+        session.commitEdit(label: "Reset")
+        let viewport = ImageSize(width: 720, height: 480)
+
+        func frame(_ edit: EditModel) -> LoupeController.FrameResult? {
+            do {
+                return try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
+                                           edit: edit, state: .fit, hashPixels: true)
+            } catch {
+                fail("mask frame render threw: \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        guard let base = frame(MaskViewState.documentOnly(session.edit)),
+              let baseHash = base.displayHash else {
+            fail("no baseline frame for the mask checks")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        log("mask baseline           \(baseHash.prefix(16))…  \(viewport.width)×\(viewport.height) @ decode 0.5")
+
+        // 7.2 — a new mask covers nothing. Its atlas slice is all zeros, so the overlay pass copies
+        // the frame: coverage 0 and the same pixels, which is also the "empty mask is the identity"
+        // rule the mask tests assert on the GPU side.
+        guard let mask = session.addMask() else {
+            fail("addMask returned nil")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        session.setShowMask(mask.id)
+        guard let emptyOverlay = frame(session.edit), let emptyHash = emptyOverlay.displayHash else {
+            fail("no frame for the empty mask")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let emptyCoverage = coverage(emptyOverlay.texture, base.texture)
+        log(String(format: "mask empty overlay      coverage %.4f, hash %@", emptyCoverage, String(emptyHash.prefix(16))))
+        check(String(format: "空蒙版：覆盖面积 %.4f == 0，叠加一个像素都没改（hash 相同）", emptyCoverage),
+              emptyCoverage == 0 && emptyHash == baseHash)
+
+        // 7.3 — paint a stroke with real mouse events through the shipped handler chain:
+        // LoupeCanvasView.mouseDown/Dragged/Up → LoupeController → MaskCanvasController → session.
+        session.maskTool = .brush
+        session.brushSize = 0.18
+        session.brushHardness = 0.5
+        session.brushFlow = 1.0
+        let canvas = loupe.canvasView
+        let bounds = canvas.bounds
+        check("画笔已武装：光标区是十字、拖拽不再平移（canvas \(Int(bounds.width))×\(Int(bounds.height)) pt）",
+              loupe.maskCanvas.isArmed && bounds.width > 100)
+        let historyBeforeStroke = session.history.count
+        let events = synthesizeStroke(in: canvas, window: window,
+                                      from: CGPoint(x: bounds.width * 0.2, y: bounds.midY),
+                                      to: CGPoint(x: bounds.width * 0.8, y: bounds.midY),
+                                      steps: 40)
+        let pointsOnStroke = loupe.maskCanvas.lastStrokePointCount
+        let strokes = session.strokeCount(ofMask: mask.id)
+        let painterEvents = loupe.maskCanvas.eventsReceived
+        let gestures = loupe.maskCanvas.finishedStrokes
+        log("mask stroke             \(events) events posted, \(painterEvents) received → \(pointsOnStroke) points (spacing sampling), \(strokes) stroke(s), \(gestures) gesture(s), history \(historyBeforeStroke) → \(session.history.count)")
+        check("一次拖拽 = 一笔 = 一个快照（\(painterEvents) 事件按间距采成 \(pointsOnStroke) 点，history +\(session.history.count - historyBeforeStroke)）",
+              events >= 40 && painterEvents >= 40 && pointsOnStroke >= 2 && pointsOnStroke < painterEvents
+              && strokes == 1 && gestures == 1 && !loupe.maskCanvas.isPainting
+              && session.history.count == historyBeforeStroke + 1)
+
+        guard let painted = frame(session.edit), let paintedHash = painted.displayHash else {
+            fail("no frame for the painted mask")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let paintedCoverage = coverage(painted.texture, base.texture)
+        log(String(format: "mask painted overlay    coverage %.4f, hash %@", paintedCoverage, String(paintedHash.prefix(16))))
+        check(String(format: "画一笔 → 蒙版覆盖面积 0.0000 → %.4f 且帧 hash 变化", paintedCoverage),
+              paintedCoverage > 0.01 && paintedCoverage < 0.7 && paintedHash != emptyHash)
+
+        // 7.4 — the overlay is not an edit: toggling it must not grow the stack (QUEUE #1).
+        let historyBeforeToggle = session.history.count
+        let undoableBeforeToggle = session.canUndo
+        let revisionBeforeToggle = session.editRevision
+        session.toggleShowSelectedMask()
+        let hiddenHash = frame(session.edit)?.displayHash
+        session.toggleShowSelectedMask()
+        let shownAgain = frame(session.edit)?.displayHash
+        log("mask toggle             history \(historyBeforeToggle) → \(session.history.count), revision +\(session.editRevision - revisionBeforeToggle), hidden hash \(hiddenHash?.prefix(8) ?? "nil")…")
+        check("显示蒙版 开关不产生历史（history 仍为 \(session.history.count)，canUndo 不变）且叠加确实换了像素",
+              session.history.count == historyBeforeToggle
+              && session.canUndo == undoableBeforeToggle
+              && hiddenHash != nil && hiddenHash != paintedHash && shownAgain == paintedHash)
+
+        // 7.5 — ⌘Z: back to the pre-stroke pixels, overlay untouched.
+        let undone = controller.undoEdit()
+        guard let afterUndo = frame(session.edit) else {
+            fail("no frame after undo")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let undoneCoverage = coverage(afterUndo.texture, base.texture)
+        log(String(format: "mask undo               coverage %.4f, hash %@, showMask %@",
+                   undoneCoverage, String((afterUndo.displayHash ?? "nil").prefix(16)),
+                   session.edit.showMaskID ?? "nil"))
+        check("⌘Z 回到画笔前的帧（hash \(emptyHash.prefix(8))…，覆盖回 0）",
+              undone && afterUndo.displayHash == emptyHash && undoneCoverage == 0)
+        check("⌘Z 之后显示蒙版仍在（showMaskID 是视图态，不被快照回滚）",
+              session.edit.showMaskID == mask.id)
+
+        // 7.6 — ⇧⌘Z paints it back.
+        let redid = controller.redoEdit()
+        let redoCoverage = frame(session.edit).map { coverage($0.texture, base.texture) } ?? -1
+        check(String(format: "⇧⌘Z 把这一笔加回来（覆盖 %.4f）", redoCoverage),
+              redid && redoCoverage > 0.01)
+
+        // 7.7 — a mask that changes pixels is the only thing worth persisting: +1 EV inside it.
+        session.updateMask(mask.id, label: "蒙版曝光") { $0.adjustments.exposure = 1.0 }
+        guard let saved = frame(MaskViewState.documentOnly(session.edit)),
+              let savedHash = saved.displayHash else {
+            fail("no frame for the adjusted mask")
+            loupe.autoRenderEnabled = true
+            return
+        }
+        let save = session.lastSaveResult
+        log("mask saved frame        hash \(savedHash.prefix(16))… (mask +1 EV, overlay off)")
+        log("mask persist            error=\(session.lastPersistError ?? "none") version=\(save?.developVersion ?? -1) seq=\(save?.historySeq ?? -1) rows=\(save?.historyRows ?? -1) changed=\(save?.changed ?? false) writes=\(session.persistCount)")
+        check("蒙版内的局部曝光改变了像素（这份文档值得写库）", savedHash != baseHash)
+        check("commit 之后写库成功（develop_version \(save?.developVersion ?? -1)，asset_history \(save?.historyRows ?? -1) 行，无错误）",
+              session.lastPersistError == nil && (save?.changed ?? false) && (save?.historyRows ?? 0) >= 2)
+
+        // 7.8 — close and reopen: a brand-new session reads the same library.
+        let reopened = CatalogSession()
+        var reopenError: String?
+        do {
+            try reopened.open(libraryURL)
+            reopened.selectOnly(asset.id)
+        } catch {
+            reopenError = error.localizedDescription
+        }
+        if let reopenError {
+            fail("could not reopen the library: \(reopenError)")
+        } else {
+            let storedMask = reopened.edit.masks.first
+            let reloadedHash = frame(MaskViewState.documentOnly(reopened.edit))?.displayHash
+            log("mask reopen             masks=\(reopened.edit.masks.count) strokes=\(reopened.strokeCount(ofMask: mask.id)) overlay=\(reopened.edit.showMaskID ?? "nil") hash=\((reloadedHash ?? "nil").prefix(16))…")
+            check("重开库（新 session 读同一个库）后同一张照片的像素 hash 与保存前一致",
+                  reloadedHash != nil && reloadedHash == savedHash)
+            check("重开库后蒙版结构与保存前一致（1 个蒙版、1 笔、曝光 +1 EV），且 showMask 没有落盘",
+                  reopened.edit.masks.count == 1
+                  && reopened.strokeCount(ofMask: mask.id) == 1
+                  && storedMask?.components.first?.shape.kind == MaskShape.brushKind
+                  && (storedMask?.adjustments.exposure ?? 0) == 1.0
+                  && reopened.edit.showMaskID == nil)
+        }
+
+        // 7.9 — delete: the pixels go back to the frame without the mask.
+        session.deleteMask(mask.id)
+        let afterDelete = frame(MaskViewState.documentOnly(session.edit))
+        log("mask delete             masks=\(session.edit.masks.count) hash=\((afterDelete?.displayHash ?? "nil").prefix(16))…")
+        check("删除蒙版后像素回到无蒙版帧（hash \(baseHash.prefix(8))…）",
+              session.edit.masks.isEmpty && afterDelete?.displayHash == baseHash)
+
+        session.maskTool = .off
+        loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - mask helpers
+
+    /// Post a real mouse gesture (down, N drags, up) into the canvas' own handlers.
+    ///
+    /// Synthesised events, not a call into the controller: the point is to exercise the shipped
+    /// `mouseDown/Dragged/Up` → `LoupeController` → `MaskCanvasController` chain, including the
+    /// "is a brush armed?" branch that decides paint-versus-pan.
+    @discardableResult
+    private func synthesizeStroke(in canvas: LoupeCanvasView, window: NSWindow,
+                                  from start: CGPoint, to end: CGPoint, steps: Int) -> Int {
+        func post(_ type: NSEvent.EventType, _ point: CGPoint, _ number: Int) {
+            guard let event = NSEvent.mouseEvent(with: type,
+                                                 location: canvas.convert(point, to: nil),
+                                                 modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber,
+                                                 context: nil,
+                                                 eventNumber: number,
+                                                 clickCount: 1,
+                                                 pressure: 1) else { return }
+            switch type {
+            case .leftMouseDown: canvas.mouseDown(with: event)
+            case .leftMouseDragged: canvas.mouseDragged(with: event)
+            default: canvas.mouseUp(with: event)
+            }
+        }
+        post(.leftMouseDown, start, 0)
+        for step in 1...max(1, steps) {
+            let t = CGFloat(step) / CGFloat(max(1, steps))
+            post(.leftMouseDragged,
+                 CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t),
+                 step)
+        }
+        post(.leftMouseUp, end, steps + 1)
+        return steps + 2
+    }
+
+    /// Fraction of pixels that differ between two frames — the mask's coverage, measured.
+    private func coverage(_ a: MTLTexture, _ b: MTLTexture,
+                          threshold: Float = 1.0 / 512.0) -> Double {
+        guard a.width == b.width, a.height == b.height, a.width > 0 else { return -1 }
+        let pa = rgba16(a), pb = rgba16(b)
+        let count = a.width * a.height
+        var differing = 0
+        for i in 0..<count {
+            let base = i * 4
+            for c in 0..<3 {
+                let va = Float(Float16(bitPattern: pa[base + c]))
+                let vb = Float(Float16(bitPattern: pb[base + c]))
+                if abs(va - vb) > threshold { differing += 1; break }
+            }
+        }
+        return Double(differing) / Double(count)
+    }
+
+    private func rgba16(_ texture: MTLTexture) -> [UInt16] {
+        let w = texture.width, h = texture.height
+        var raw = [UInt16](repeating: 0, count: w * h * 4)
+        raw.withUnsafeMutableBytes { buf in
+            texture.getBytes(buf.baseAddress!, bytesPerRow: w * 4 * MemoryLayout<UInt16>.size,
+                             from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return raw
     }
 
     // MARK: bench
