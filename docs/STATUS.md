@@ -2,7 +2,7 @@
 
 > Checkpoint file. A new session should be able to read this plus
 > `docs/architecture-decisions.md` and start working. Keep it under ~80 lines.
-> Updated: 2026-10-26 02:55 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
+> Updated: 2026-10-26 04:45 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
 
 ## Milestones
 
@@ -53,6 +53,16 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
   （并发 2，实测 1.7×；逐张 outcome，失败隔离；同名 `-1/-2` 不覆盖）。20×60MP → 6000×3993：总 **19.36 s**、每张 p50 **1.91 s**。
   峰值 RSS 5.0 GB；**debug 构建不能用于性能**（同批 60 s/张）。
 - **UI**：导出弹窗与开发预设面板正在做（第 8 轮）。
+
+## 第 9 轮（UI 收口 + 性能）
+
+- **decode ladder**：进 1:1 的首帧 **1231 → 52 ms**（fit 已建 0.5 graph 时 4.9 ms），全分辨率就绪 860 ms，
+  平移 3.95–5.5 ms，切回 fit **0 次解码**；fit↔1:1 的解码次数从 4 降到 2。解码本身 1032 → **762 ms**（−26%），
+  原因是把尾部 `[UInt16]` 暂存 + `map{Float16(bitPattern:)}` + 逐元素 flip（344–451 ms）换成直读 Float16 + 按字翻转（83 ms）。
+  已实测否决“只栅格化窗口”（平移每个新窗口 p50 35 ms，超预算 6–13×）。
+- **UI**：直方图卡片（四组 + 削顶，点数字切高光警告）、六种蒙版可建（线性/径向可拖拽）、loupe 倍率菜单
+  （适应/1:1/2:1/4:1/8:1 + ⌘0/⌘=/⌘−）。`ui-smoke` 87 → **108 项**。
+- 已知：0.5 阶段平移被全解码串行挡住（画面冻结 ~800 ms，不出错），真并发需第二条队列。
 
 ## 下一步（并行队列见 `docs/tasks/QUEUE.md`）
 

@@ -52,6 +52,11 @@
 | Q24 | **导出弹窗 + 预设面板** | Q18/Q19 | `Sources/PhotonsUI/**` | 导出 3 张落盘；坏张不中断；预设应用可 ⌘Z | 已派（第 8 轮） |
 | Q25 | **直方图与削顶统计** | 无 | `Sources/PhotonsCore/Histogram.swift`、`RenderGraph.swift`、`photonsctl/histogram.swift` | 四组 256 bin + 削顶比例 + ROI；开关帧耗时差 | 已派（第 8 轮） |
 
+| Q26 | **UI 收口**（直方图卡/蒙版六形状/倍率菜单） | Q23/Q25 | `Sources/PhotonsUI/**` | **完成 `0608329`**：ui-smoke 108 项；线性 0.5722 / 径向 0.1082 / 颜色 0.8746 / 亮度 0.8764 / 语义 0.1066 |
+| Q27 | **分级解码** | Q15 | `RAWDecoder.swift`、`LoupeController.swift` | **完成 `5dc6a8c`**：首帧 1231→52 ms、解码 −26%、fit↔1:1 解码 4→2 次 |
+| Q28 | **蒙版参数面板** | Q26 | `Sources/PhotonsUI/**` | 每个蒙版可调 opacity/invert/feather/refine + 局部调整滑杆；改名 | 待开工 |
+| Q29 | **解码并发** | Q27 | `Sources/PhotonsUI/LoupeController.swift`、`RAWDecoder.swift` | 全解码期间平移不被冻结（第二条队列或分段让出）；首帧不退化 | 待开工 |
+
 ## 第 6 轮候选（按依赖排序，可直接派）
 
 | # | 工作流 | 前置 | 文件所有权 | 验收 |
