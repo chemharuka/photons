@@ -58,7 +58,7 @@ RawCamera.metallib (2.6MB)
 | # | 决策 | 依据 | 代价 / 风险 |
 |---|---|---|---|
 | D1 | 解码只用 `CIRAWFilter`，**不引入 LibRaw** | `licensing.md`：LibRaw 画质倒退 + LGPL/CDDL 义务；Apple 941 机型覆盖主流 | 绑 OS 版本；冷门/后背/电影机缺失；拿不到马赛克 |
-| D2 | **交互用 v8，导出用 v9**，作为用户可见的"质量档位" | v9 慢 8–10×；Apple 自己默认 v8 | 两档画质差异要在 UI 说清 |
+| D2 | ~~交互用 v8，导出用 v9~~ **已推翻 → 见 §11.1（D2'）**：v8/v9 是两条渲染路径，v9 下 CNR/细节/摩尔纹不可用 | v9 慢 8–10×；Apple 默认 v8；v9 不支持三项控制 | 按解码器版本声明能力集，不再当作"质量档位" |
 | D3 | 解码结果落盘为**线性 16-bit 全尺寸缓冲**（每图一个 cache 条目） | 60MP 解码 0.5–5s，绝不能每帧重解 | 磁盘占用：60MP×8B ≈ 0.48GB/图 → 需 LRU 上限 |
 | D4 | 工作空间 = **无上界线性 float**（Rec2020 基底），显示变换放最后一步 | `ansel-vkdt.md`：Ansel 用无虚构色的线性 Rec2020；EDR 实测有 1.748 余量 | 全程 float16/32 带宽管理 |
 | D5 | 管线 **5 段 + 2 个缓存键**：`S0 geometry → S1 scene-linear → S2 tone map → S3 colour → S4 display` | ART 4 stage/23 step、LightCraft 5 段、Ansel 三段职责拆分，三者收敛 | 段边界要一次定死，否则缓存键失效 |
@@ -148,7 +148,7 @@ masks(photo_id, mask_id, kind, params_json)       -- 预留，v0.3 启用
 
 ## 9. 未决
 
-- `v9-vs-v8-measured.md`（白名单机身的真实 RAW 对比）仍在跑
+- ~~`v9-vs-v8-measured.md`（白名单机身的真实 RAW 对比）仍在跑~~ **已作废**：该子进程从未交付；这个问题已由 `local/research/swift-raw-ecosystem.md` §0.2 的本机实测回答（结论见 §11.1）
 - Apple 解码器的**确定性**：已在 M0 实测为确定（同进程/跨进程 digest 相同，见 `docs/STATUS.md`）
 - `linearSpaceFilter` 的语义（能否把我们的处理插进 Apple 管线内部）未实验 → 决定"捆绑深度"上限
 
@@ -167,3 +167,39 @@ masks(photo_id, mask_id, kind, params_json)       -- 预留，v0.3 启用
 | M1-9 | **bench 量上屏路径**：不读回 CPU（2560×1600 一帧 32 MB）、关缓存、3 帧预热，`gpu only` 单列 | 读回会让 16.7 ms 预算失真；开缓存则第 2 帧起测的是命中而不是渲染 |
 | M1-10 | **`detail`（锐化/降噪）不进图**：将来映射到 `CIRAWFilter`（`sharpnessAmount` / `luminanceNoiseReductionAmount`），属解码侧变更 | 存字段、不渲染，避免"两处降噪、结果不一致" |
 
+
+## 11. 实现层的实测修正（来自 Swift 生态调研，改的是决策不是细节）
+
+> 来源：`local/research/swift-raw-ecosystem.md`（本机探针实测）与 `swift-raw-editors-small.md`（16 个仓库横评）。
+> **本节推翻/收紧前文条目，读 §3 之前先读这里。** 原始报告在 `local/research/`，索引见 `local/research/INDEX.md`。
+
+### 11.1 D2 被推翻：v8 / v9 不是"质量档位"，是两条渲染路径
+
+- v9 下 `isColorNoiseReductionSupported` / `isDetailSupported` / `isMoireReductionSupported` 全为 **false**，且写这三项对像素**零影响**（差值恰为 0）；v9 的 `luminanceNoiseReductionAmount` 默认 0.010（v8 为 0）且效果强得多。
+- 后果：原 D2「交互 v8 / 导出 v9」会让用户设的色度降噪、细节、摩尔纹在导出时**静默丢失**。
+- **新决策 D2'**：**默认全 v8**；v9 只作为显式的"最高画质（实验）"导出档，启用时 ①三项控件置灰 ②导出报告写明该档不支持 CNR/细节/摩尔纹 ③golden 里 v8/v9 各存一份。
+- 实现要求：`EditModel` 不假定属性恒可用，改为按解码器版本声明 `decoderCapabilities`（M2 引入）。
+
+### 11.2 `previewImage` 不是缩略图，是内嵌的全尺寸 JPEG
+
+CR3 **8192×5464**、RAF 4416×2944、ARW 1616×1080、RW2 1920×1280；渲 4416×2944 仅 **0.192 s**，而全解码（1/4 采样）0.760 s。
+→ 网格缩略图与首帧直接走它，比走解码快约 4×；M2 导入时先落这张，再后台补真解码。
+
+### 11.3 镜头校正按**文件**而非按机型
+
+`lensCorrectionEnabled` off→on 在 RW2 改动 4.13M 子像素（meanAbs 0.0663）、RAF 6.18M（0.0189）；但 CR3（EOS R5 + Sigma 50/1.4）**不支持**。能力探测必须 per-file，不能按机型缓存。
+
+### 11.4 场景线性配方已确认，但解码侧要显式设置
+
+`boostAmount = 0` + `isGamutMappingEnabled = false` 后 `exposure +1EV` 严格 ×2（ratio p10=p50=p90=**2.0063**）；默认参数下同一测试是 2.03–2.66（色调曲线在动）。
+→ M1 的"线性缓冲"假设成立，但 **M0/M1 的解码还没有显式关掉 boost 与 gamut mapping，M2 必须补**。
+
+### 11.5 三件可以省掉的事
+
+- **HDR 导出免费**：`kCGImageDestinationEncodeGenerateGainMapWithBaseImage`（CGImageDestination.h）、`kCIImageRepresentationHDRImage`（CIContext.h）、`CIImage.contentHeadroom`（CIImage.h）→ 不必自研 gain map。
+- **ImageIO 的 XMP 足以替代 Exiv2**（JPEG/HEIC/TIFF/PNG 四容器自定义命名空间往返成功），但两个坑：`dc:subject/title/creator` 读回是**嵌套 Tag 数组**、数字读回是**字符串**。
+- `CILocalLightMapPrepare` / `CILocalLightFilter` / `CITransformMatrix` 在 macOS 27 **已不存在**（252 个 `filterNames` 里查无）；而 `CIRAWFilter` 本身也不在 `filterNames` 里却能用 `CIFilter(name:)` 构造 → **不要按 filterNames 做能力探测**。
+
+### 11.6 竞争格局的一句实话
+
+RAW Power 首页宣传的 "Unique Hooks into Apple's RAW Engine（Control Boost, Black Point, Moire）" 就是同一组免费可用的 `CIRAWFilter` 属性。**CIRAWFilter 是地板不是天花板**；差异只在镜头库、额外格式解码、目录规模与延迟。
