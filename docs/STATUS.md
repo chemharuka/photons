@@ -52,4 +52,4 @@ PHOTONS_TEST_RAW=/path/to.dng swift test       # point tests at your own sample
 
 - decisions + evidence: `docs/architecture-decisions.md`
 - workspace conventions for research/probes/fixtures: `local/README.md`
-- cross-session state: `~/.hermes/bus/photons-0985eb/` (skill `session-bus`)
+- cross-session state: `~/.hermes/bus/photons-0985eb/` (skill `photons-session-bus`)
