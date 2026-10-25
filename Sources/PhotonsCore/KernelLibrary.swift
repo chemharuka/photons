@@ -35,6 +35,7 @@ final class KernelLibrary {
     private let device: MTLDevice
     private var libraries: [String: MTLLibrary] = [:]
     private var pipelines: [String: MTLComputePipelineState] = [:]
+    private var renderPipelines: [String: MTLRenderPipelineState] = [:]
 
     init(device: MTLDevice) {
         self.device = device
@@ -50,6 +51,33 @@ final class KernelLibrary {
         do {
             let p = try device.makeComputePipelineState(function: fn)
             pipelines[cacheKey] = p
+            return p
+        } catch {
+            throw RenderError.pipelineFailed(file, error.localizedDescription)
+        }
+    }
+
+    /// Render pipelines (the on-screen present pass) are compiled the same way: source from the
+    /// resource bundle, pipeline cached per colour-attachment format.
+    func renderPipeline(file: String, vertex: String, fragment: String,
+                        pixelFormat: MTLPixelFormat) throws -> MTLRenderPipelineState {
+        let cacheKey = "\(file):\(vertex)+\(fragment):\(pixelFormat.rawValue)"
+        if let p = renderPipelines[cacheKey] { return p }
+        let library = try library(named: file)
+        guard let vfn = library.makeFunction(name: vertex) else {
+            throw RenderError.missingKernelFunction(file, vertex)
+        }
+        guard let ffn = library.makeFunction(name: fragment) else {
+            throw RenderError.missingKernelFunction(file, fragment)
+        }
+        let desc = MTLRenderPipelineDescriptor()
+        desc.label = cacheKey
+        desc.vertexFunction = vfn
+        desc.fragmentFunction = ffn
+        desc.colorAttachments[0].pixelFormat = pixelFormat
+        do {
+            let p = try device.makeRenderPipelineState(descriptor: desc)
+            renderPipelines[cacheKey] = p
             return p
         } catch {
             throw RenderError.pipelineFailed(file, error.localizedDescription)

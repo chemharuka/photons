@@ -465,7 +465,8 @@ public final class RenderGraph {
             let primaries = options.display.primaries
             let matrix = RenderGraph.primariesMatrix(from: .sRGB, to: primaries)
             var params = DisplayParams(m: matrix,
-                                       a: SIMD4(primaries == .sRGB ? 1 : 0, 0, 0, 0))
+                                       a: SIMD4(primaries == .sRGB ? 1 : 0,
+                                                Float(options.display.headroom), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)

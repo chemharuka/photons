@@ -7,6 +7,10 @@ import Metal
 public struct DecodeOptions: Sendable {
     /// Decoder version requested from the system RAW pipeline, e.g. `"8"`, `"9"`, `"9.dng"`.
     /// `nil` means "whatever Apple defaults to for this file" (measured to be v8 today).
+    ///
+    /// A request the body does not whitelist is **not** an error: the filter silently keeps its old
+    /// value, so `RAWDecoder` reads the version back and reports the effective one
+    /// (`DecoderCapabilities`, docs/architecture-decisions.md §11.1 / D2′).
     public var decoderVersion: String?
     public var exposureEV: Float
     public var scale: Float
@@ -129,18 +133,60 @@ public final class RAWDecoder {
 
     // MARK: - decode
 
+    /// A decoded buffer plus the decoder facts that shaped it.
+    ///
+    /// The pixel hash alone cannot tell you that a v9 request silently became v8; `capabilities`
+    /// can, and the UI has to say so (§11.1: 69 bodies offer v9, 941 do not).
+    public struct DecodeOutcome: Sendable {
+        public let image: LinearImage
+        public let capabilities: DecoderCapabilities
+    }
+
+    /// Test hook: `resolve` is what a read-back proves. Kept here so the decode path and the test
+    /// cannot drift apart.
+    public static func resolveVersion(_ requested: String?, offered: [String],
+                                      filterDefault: String) -> (effective: String, downgraded: Bool) {
+        DecoderCapabilities.resolve(requested: requested, offered: offered, filterDefault: filterDefault)
+    }
+
     public func decode(_ url: URL, options: DecodeOptions = DecodeOptions()) throws -> LinearImage {
+        try decodeDetailed(url, options: options).image
+    }
+
+    public func decodeDetailed(_ url: URL, options: DecodeOptions = DecodeOptions()) throws -> DecodeOutcome {
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
 
         let offered = filter.supportedDecoderVersions.map { Self.versionString($0) }
-        var usedVersion = Self.versionString(filter.decoderVersion)
+        let filterDefault = Self.versionString(filter.decoderVersion)
+
+        // ── 前置 ① D2′: v8 default + read-back assert ────────────────────────────────────────
+        // Assign, then read back. A body that does not whitelist the request keeps the old value
+        // (measurably: v9 on an SL3 stays v8), so the read-back — not the assignment — is the
+        // truth. On a mismatch we pin the D2′ default and report `effectiveVersion`.
+        var effective = filterDefault
         if let wanted = options.decoderVersion {
-            guard let match = filter.supportedDecoderVersions.first(where: { Self.versionString($0) == wanted }) else {
+            guard DecoderCapabilities.knownVersions.contains(wanted) else {
                 throw DecodeError.unsupportedVersion(requested: wanted, available: offered)
             }
-            filter.decoderVersion = match
-            usedVersion = wanted
+            filter.decoderVersion = CIRAWDecoderVersion(rawValue: wanted)
+            effective = Self.versionString(filter.decoderVersion)
+            if effective != wanted {
+                // Downgrade explicitly, then re-read: reporting the *requested* version here is
+                // exactly the bug the read-back exists to catch.
+                filter.decoderVersion = CIRAWDecoderVersion(
+                    rawValue: DecoderCapabilities.preferredDefault(offered: offered, filterDefault: filterDefault))
+                effective = Self.versionString(filter.decoderVersion)
+            }
         }
+
+        // ── 前置 ② explicit linear ──────────────────────────────────────────────────────────
+        // §11.4: with the default boost/gamut-mapping, +1 EV is *not* a factor of two (measured
+        // 2.03–2.66); with both off it is 2.0063. §11.8: the same two switches decide whether the
+        // EDR headroom survives at all (1.018 → 1.695 on the same file), so this is also the
+        // data-side precondition for EDR.
+        filter.boostAmount = 0
+        filter.isGamutMappingEnabled = false
+
         filter.isDraftModeEnabled = options.draft
         filter.scaleFactor = options.scale
         filter.exposure = options.exposureEV
@@ -173,7 +219,11 @@ public final class RAWDecoder {
                              mipmapLevel: 0)
         }
         let rgba = raw.map { Float16(bitPattern: $0) }
-        return LinearImage(width: w, height: h, rgba: rgba,
-                           colorSpace: colorSpaceID.rawValue, decoderVersion: usedVersion)
+        let image = LinearImage(width: w, height: h, rgba: rgba,
+                                colorSpace: colorSpaceID.rawValue, decoderVersion: effective)
+        let capabilities = DecoderCapabilities(requestedVersion: options.decoderVersion,
+                                               effectiveVersion: effective,
+                                               defaultVersion: filterDefault)
+        return DecodeOutcome(image: image, capabilities: capabilities)
     }
 }

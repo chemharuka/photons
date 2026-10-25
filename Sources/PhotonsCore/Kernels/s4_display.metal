@@ -4,12 +4,16 @@ using namespace metal;
 // S4 — display: primaries matrix, then the sRGB transfer function. Nothing after this.
 //
 // The matrix is linear sRGB → linear output primaries (identity for sRGB output). Encoding is the
-// sRGB piecewise OETF, which Display P3 also uses. Values are clamped to [0, 1]: M1 is SDR output —
-// EDR display is a separate, later concern that must not leak into the file.
+// sRGB piecewise OETF, which Display P3 also uses.
+//
+// The upper bound is `headroom`, not 1. With headroom = 1 this is exactly the old
+// `clamp(v, 0.0, 1.0)` (pixel-identical, golden-checked); with headroom > 1 the >1 values produced
+// by the D2′ decode recipe survive into the texture, which is what EDR consumes in M3.5
+// (docs/architecture-decisions.md §11.8). The file-export path always passes headroom = 1.
 
 struct DisplayParams {
     float4x4 m;   // linear sRGB → linear output primaries
-    float4 a;     // identityMatrix, pad, pad, pad
+    float4 a;     // identityMatrix, headroom, pad, pad
 };
 
 static inline float srgb_encode(float v) {
@@ -25,7 +29,8 @@ kernel void s4_display(texture2d<float, access::read> src [[texture(0)]],
     if (p.a.x < 0.5) {
         v = (p.m * float4(v, 0.0)).xyz;
     }
-    v = clamp(v, 0.0, 1.0);
+    float headroom = max(p.a.y, 0.0);
+    v = min(v, headroom);
     float3 enc = float3(srgb_encode(v.x), srgb_encode(v.y), srgb_encode(v.z));
     dst.write(float4(enc, 1.0), gid);
 }

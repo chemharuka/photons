@@ -84,13 +84,26 @@ public enum OutputPrimaries: String, Sendable, Codable, CaseIterable {
 public struct DisplayOptions: Sendable, Equatable {
     public var primaries: OutputPrimaries
     public var bitDepth: Int      // 8 or 16, only affects encoding, not the render
+    /// Upper bound of the display encode, in linear scene units.
+    ///
+    /// `1` is SDR and is **pixel-identical to the pre-EDR output** (`clamp(v, 0, 1)` became
+    /// `min(v, headroom)`). Values above 1 only survive if the S4 clamp stops at `headroom`, which
+    /// is why this is a contract now rather than in M3.5: opening EDR later must be one boolean and
+    /// one number, not a change to S4, S2, the key chain and every golden
+    /// (docs/architecture-decisions.md §11.8, item 3).
+    public var headroom: Double
 
-    public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8) {
+    public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8, headroom: Double = 1) {
         self.primaries = primaries
         self.bitDepth = bitDepth
+        self.headroom = headroom
     }
 
-    public var keyString: String { "\(primaries.rawValue);bits=\(bitDepth)" }
+    public var keyString: String {
+        // Headroom changes the pixels, so it must change the key; "%.3f" keeps 1.0 == "1.000"
+        // across processes and avoids 1 vs 1.0000000001 style churn.
+        String(format: "%@;bits=%d;headroom=%.3f", primaries.rawValue, bitDepth, headroom)
+    }
 }
 
 // MARK: - cache keys

@@ -14,7 +14,7 @@ BIN := .build/$(CONFIG)/photonsctl
 CACHE_DIR ?= $(HOME)/Library/Caches/Photons/linear
 VIEWPORT ?= 2560x1600
 
-.PHONY: all build test l1 l2 l3 catalog catalog-perf bench verify record clean info cache render
+.PHONY: all build test l1 l2 l3 catalog catalog-perf bench verify record clean info cache render app ui-smoke ui-bench
 
 all: build
 
@@ -90,6 +90,22 @@ verify: build test l1 l2 l3 catalog bench
 
 record: build
 	$(BIN) golden record "$(RAW)" --dir $(GOLDEN_DIR)
+	$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-neutral.json --out /tmp/photons-record.jpg --scale 0.25 --golden record
+	$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-record-2.jpg --scale 0.25 --golden record
+
+## M3 — the app bundle. `make verify` is unchanged by this: it stays one command.
+app: build
+	@scripts/bundle-app.sh $(CONFIG)
+	@plutil -lint .build/Photons.app/Contents/Info.plist >/dev/null && echo "info.plist  OK"
+	@codesign --verify --deep --strict .build/Photons.app && echo "codesign    OK"
+
+## M3 — the windowed acceptance harness (1000-row library, layout asserts, one loupe frame)
+ui-smoke: app
+	@CONFIG=$(CONFIG) RAW="$(RAW)" scripts/ui-smoke.sh
+
+## M3 — 10k-row placeholder scroll p99 + loupe frame timings (not part of `make verify`)
+ui-bench: app
+	@CONFIG=$(CONFIG) RAW="$(RAW)" scripts/ui-bench.sh
 
 info: build
 	$(BIN) info "$(RAW)"

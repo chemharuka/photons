@@ -8,7 +8,11 @@ let package = Package(
         .library(name: "PhotonsCore", targets: ["PhotonsCore"]),
         .library(name: "PhotonsExport", targets: ["PhotonsExport"]),
         .library(name: "PhotonsCatalog", targets: ["PhotonsCatalog"]),
+        // The UI shell lives in a library so its pure layout math and model are unit-testable;
+        // `PhotonsApp` is the thin `@main` + menu/bundle shim (docs/tasks/004-ui-skeleton.md §2b).
+        .library(name: "PhotonsUI", targets: ["PhotonsUI"]),
         .executable(name: "photonsctl", targets: ["photonsctl"]),
+        .executable(name: "Photons", targets: ["PhotonsApp"]),
     ],
     // The single third-party dependency: GRDB (MIT), an SQLite toolkit. Pinned on purpose —
     // see docs/tasks/003-catalog.md §1 and THIRD_PARTY_NOTICES.md.
@@ -25,8 +29,11 @@ let package = Package(
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog"]),
+        .target(name: "PhotonsUI", dependencies: ["PhotonsCore", "PhotonsCatalog"], resources: []),
+        .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsUI"]),
         .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
         .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog"]),
+        .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI"]),
     ],
     // M0 keeps Swift 5 language mode: CIRAWFilter/MTLTexture are not Sendable and
     // strict-concurrency churn would bury the acceptance harness we are building here.

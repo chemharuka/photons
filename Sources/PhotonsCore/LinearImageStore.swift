@@ -1,6 +1,17 @@
 import Foundation
 import CryptoKit
 
+/// Version of the fixed decode recipe.
+///
+/// Bumped whenever the *decode settings* change, because an already-written linear buffer must not
+/// be reused by a build that decodes differently. `v1` = the D2′ recipe of M3:
+/// `boostAmount = 0` + `isGamutMappingEnabled = false` (docs/architecture-decisions.md §11.4).
+/// Before this field existed the key had no way to say "those buffers were made with the defaults",
+/// so the first launch after the change would have hit stale pixels.
+public enum DecodeRecipe {
+    public static let current = "v1-boost0-gamutOff"
+}
+
 /// Identity of a decode result: everything that can change the pixels.
 ///
 /// Mirrors the cache discipline taken from darktable (four hashes) and LightCraft
@@ -12,20 +23,24 @@ public struct DecodeCacheKey: Sendable, Hashable {
     public let scale: Float
     public let draft: Bool
     public let colorSpace: String
+    public let decodeRecipe: String
 
     public init(fileSHA256: String, decoderVersion: String, exposureEV: Float = 0,
-                scale: Float = 1, draft: Bool = false, colorSpace: String = "extendedLinearSRGB") {
+                scale: Float = 1, draft: Bool = false, colorSpace: String = "extendedLinearSRGB",
+                decodeRecipe: String = DecodeRecipe.current) {
         self.fileSHA256 = fileSHA256
         self.decoderVersion = decoderVersion
         self.exposureEV = exposureEV
         self.scale = scale
         self.draft = draft
         self.colorSpace = colorSpace
+        self.decodeRecipe = decodeRecipe
     }
 
     public var digest: String {
         let s = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
-                 String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace].joined(separator: "|")
+                 String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
+                 decodeRecipe].joined(separator: "|")
         return SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
