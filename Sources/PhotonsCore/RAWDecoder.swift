@@ -109,6 +109,32 @@ public final class RAWDecoder {
 
     public var deviceName: String { device.name }
 
+    // MARK: - decode accounting
+
+    /// Real decodes this process has performed, by decode scale.
+    ///
+    /// The ladder's whole promise is a **count** — "one photo, one development per rung, no matter
+    /// how often the camera moves between fit and 1:1" — and a timing cannot prove a count: a second
+    /// decode of the same rung is cheap to hide inside a frame that was going to be slow anyway.
+    /// `DecodeLadderTests` asserts on this and nothing else.
+    private static let countLock = NSLock()
+    private static var counts: [Float: Int] = [:]
+
+    public static func decodeCounts() -> [Float: Int] {
+        countLock.lock(); defer { countLock.unlock() }
+        return counts
+    }
+
+    public static func resetDecodeCounts() {
+        countLock.lock(); defer { countLock.unlock() }
+        counts.removeAll()
+    }
+
+    static func recordDecode(scale: Float) {
+        countLock.lock(); defer { countLock.unlock() }
+        counts[scale, default: 0] += 1
+    }
+
     // MARK: - version helpers
 
     public static func versionString(_ v: CIRAWDecoderVersion) -> String { v.rawValue }
@@ -230,20 +256,26 @@ public final class RAWDecoder {
         guard let texture = device.makeTexture(descriptor: desc) else { throw DecodeError.renderFailed }
 
         guard let cb = queue.makeCommandBuffer() else { throw DecodeError.renderFailed }
+        Self.recordDecode(scale: options.scale)
         ciContext.render(output, to: texture, commandBuffer: cb,
                          bounds: CGRect(x: 0, y: 0, width: w, height: h),
                          colorSpace: colorSpace)
         cb.commit()
         cb.waitUntilCompleted()
 
-        var raw = [UInt16](repeating: 0, count: w * h * 4)
-        raw.withUnsafeMutableBytes { buf in
+        // ── readback ────────────────────────────────────────────────────────────────────────
+        // Straight into the `Float16` storage: an `rgba16Float` texture and `Float16` share a bit
+        // pattern, so the `[UInt16]` staging array and the 460 MB `raw.map { Float16(bitPattern:) }`
+        // pass it fed are both unnecessary. Measured on a 60 MP frame, the whole tail (readback +
+        // conversion + row flip) went from 344–451 ms to 83 ms, byte for byte (every sample equal;
+        // digests below `DecodeTests` unchanged).
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        rgba.withUnsafeMutableBytes { buf in
             texture.getBytes(buf.baseAddress!,
-                             bytesPerRow: w * 4 * MemoryLayout<UInt16>.size,
+                             bytesPerRow: w * 4 * MemoryLayout<Float16>.size,
                              from: MTLRegionMake2D(0, 0, w, h),
                              mipmapLevel: 0)
         }
-        var rgba = raw.map { Float16(bitPattern: $0) }
         // ── row order ───────────────────────────────────────────────────────────────────────
         // `CIContext.render(to: MTLTexture)` writes the picture **bottom-up** in Metal's memory
         // order: a marker in the image's top-left row lands in the *last* row of the buffer
@@ -265,14 +297,36 @@ public final class RAWDecoder {
     }
 
     /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).
+    ///
+    /// Eight bytes at a time, in place: `rowBytes` is `8 × width` for `Float16` RGBA, so a row is
+    /// always a whole number of words and no tail case exists. Measured on a 60 MP frame, three
+    /// formulations of the same permutation:
+    ///
+    ///   · elementwise `swapAt` (the original)          152–185 ms — 120 M bounds-checked swaps
+    ///   · row → scratch buffer → row, `copyMemory`      261–284 ms — moves 3× the bytes, slower
+    ///   · word-wise in place (this)                      33–65 ms  — 1× read + 1× write
+    ///
+    /// All three produce the same permutation, which is why this stays inside the `v2` decode recipe
+    /// and does not mint a `v3` (§3.2): `DecodeLadderTests.testRowFlipIsTheReferencePermutation`
+    /// pins it against the elementwise formulation, every sample.
     static func flipRows(_ rgba: inout [Float16], width: Int, height: Int) {
-        let stride = width * 4
-        var y = 0
-        while y < height / 2 {
-            let top = y * stride
-            let bottom = (height - 1 - y) * stride
-            for i in 0..<stride { rgba.swapAt(top + i, bottom + i) }
-            y += 1
+        guard width > 0, height > 1 else { return }
+        let rowBytes = width * 4 * MemoryLayout<Float16>.size
+        rgba.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var y = 0
+            while y < height / 2 {
+                let top = base + y * rowBytes
+                let bottom = base + (height - 1 - y) * rowBytes
+                let a = top.assumingMemoryBound(to: UInt64.self)
+                let b = bottom.assumingMemoryBound(to: UInt64.self)
+                for i in 0..<(rowBytes / 8) {
+                    let t = a[i]
+                    a[i] = b[i]
+                    b[i] = t
+                }
+                y += 1
+            }
         }
     }
 
@@ -368,3 +422,160 @@ public final class RAWDecoder {
         return nil
     }
 }
+
+// MARK: - the decode ladder
+
+/// One developed buffer, with the decoder facts that shaped it.
+///
+/// `capabilities` travels with the pixels because a v9 request can silently become v8
+/// (`DecoderCapabilities`); a rung that lost its capabilities in the cache would make the second
+/// frame of a photo claim a different decoder than the first.
+public struct DecodeRung: Sendable {
+    /// The `DecodeOptions.scale` this buffer was developed at (0.5 = the preview rung, 1 = full).
+    public let scale: Float
+    public let image: LinearImage
+    public let capabilities: DecoderCapabilities
+    /// Wall-clock cost of the decode that produced it. Only meaningful for a fresh decode; a rung
+    /// that came out of the ladder reports the cost it was born with, which is what makes "the
+    /// preview was 250 ms, the full was 950 ms" measurable after the fact.
+    public let milliseconds: Double
+
+    public init(scale: Float, image: LinearImage, capabilities: DecoderCapabilities,
+                milliseconds: Double) {
+        self.scale = scale
+        self.image = image
+        self.capabilities = capabilities
+        self.milliseconds = milliseconds
+    }
+}
+
+/// What a camera request has to ask the ladder for, in presentation order.
+///
+/// `preview` is the rung that can go on screen *now* — normally the 0.5 buffer the fit view already
+/// developed. `target` is the rung the request actually needs. One entry means "the target is
+/// already resident, this frame costs a render and nothing else".
+public struct DecodeLadderPlan: Equatable, Sendable {
+    public let preview: Float?
+    public let target: Float
+
+    public init(preview: Float?, target: Float) {
+        self.preview = preview
+        self.target = target
+    }
+
+    /// Rungs to fetch and present, in order. The last one is always the target.
+    public var rungs: [Float] { preview.map { [$0, target] } ?? [target] }
+
+    /// True when the frame can be produced without touching ImageIO at all.
+    public var isResident: Bool { preview == nil }
+}
+
+/// The decoded buffers of **the photo the loupe is showing**, keyed by rung.
+///
+/// Why this type exists at all (§11.10, D12): the loupe used to keep a single `(key, buffer)` slot,
+/// so entering 1:1 tiled on a full 60 MP development (941 ms on the reference file) and — worse —
+/// the two rungs evicted each other, so `fit → 1:1 → fit → 1:1` developed the same file *three*
+/// times. Keying by `(identity, scale)` and keeping one identity resident makes the second visit to
+/// either rung a render-only frame, and the counter test proves it.
+///
+/// Memory: a full 60 MP rung is ~482 MB and the preview rung ~120 MB, so the *higher* rung releases
+/// every lower rung of the same photo the moment it lands. A `RenderGraph` can render any zoom from
+/// the biggest buffer (that is what `outputWindow` is), which means the preview rung is only ever
+/// needed while the full one is still being developed — and the steady-state footprint stays what
+/// it was before this type existed (one buffer, not two).
+public final class DecodeLadder {
+    /// The rung a fit frame can afford to show first: half the linear size, ~quarter the pixels.
+    public static let previewScale: Float = 0.5
+    /// The rung 1:1 (and everything above it) is rendered from. One source pixel, one buffer pixel.
+    public static let fullScale: Float = 1
+
+    private var identity: String?
+    private var rungs: [Float: DecodeRung] = [:]
+
+    /// Rungs this ladder has developed, and how many requests it answered from the cache. Exposed
+    /// for the tests and for the bench; not part of any key.
+    public private(set) var decodes = 0
+    public private(set) var hits = 0
+    /// How many rungs the *last* `store` released because a bigger one replaced them.
+    public private(set) var released = 0
+
+    public init() {}
+
+    /// The rungs currently in memory, smallest first. Debugging/diagnostics only.
+    public var residentScales: [Float] { rungs.keys.sorted() }
+
+    public var best: DecodeRung? {
+        rungs.values.max { $0.scale < $1.scale }
+    }
+
+    /// The resident rung at exactly `scale`, or `nil`. Never returns a different rung: a 0.5 buffer
+    /// must never be mistaken for a 1.0 one (that is the bug class this type exists to close).
+    public func resident(identity: String, scale: Float) -> DecodeRung? {
+        guard identity == self.identity else { return nil }
+        return rungs[scale]
+    }
+
+    /// The largest resident rung that is not bigger than `scale` — the best thing that can be shown
+    /// while the wanted rung is being developed.
+    public func best(identity: String, atOrBelow scale: Float) -> DecodeRung? {
+        guard identity == self.identity else { return nil }
+        return rungs.values.filter { $0.scale <= scale }.max { $0.scale < $1.scale }
+    }
+
+    /// What the loupe must do for a `target` rung: show `preview` first if it can, then `target`.
+    ///
+    /// `preview` is `nil` exactly when the target is resident, which is the case that matters for
+    /// the second and every later visit to a camera position.
+    public func plan(identity: String, target: Float) -> DecodeLadderPlan {
+        if resident(identity: identity, scale: target) != nil {
+            return DecodeLadderPlan(preview: nil, target: target)
+        }
+        // Nothing smaller to show, or the only thing we have *is* the target: one rung.
+        guard target > Self.previewScale else {
+            return DecodeLadderPlan(preview: nil, target: target)
+        }
+        let preview = best(identity: identity, atOrBelow: target)?.scale ?? Self.previewScale
+        return DecodeLadderPlan(preview: preview, target: target)
+    }
+
+    /// Answer a request for one rung, developing it with `decode` on a miss.
+    ///
+    /// The decode closure is the caller's because only the caller knows the URL and the options;
+    /// the *policy* (what a hit is, when a bigger rung releases a smaller one) lives here so the
+    /// counter and the memory rule cannot drift from the code path that uses them.
+    public func rung(identity: String, scale: Float,
+                     decode: () throws -> DecodeRung) rethrows -> (rung: DecodeRung, cached: Bool) {
+        if let hit = resident(identity: identity, scale: scale) {
+            hits += 1
+            return (hit, true)
+        }
+        let fresh = try decode()
+        decodes += 1
+        store(fresh, identity: identity)
+        return (fresh, false)
+    }
+
+    /// Put a developed rung in memory, dropping every smaller rung of the same photo.
+    public func store(_ rung: DecodeRung, identity: String) {
+        if identity != self.identity {
+            // A different photo: nothing here can be reused, and holding it would be the memory
+            // leak the single-slot cache never had.
+            rungs.removeAll()
+            self.identity = identity
+        }
+        rungs[rung.scale] = rung
+        released = 0
+        for scale in rungs.keys where scale < rung.scale {
+            rungs.removeValue(forKey: scale)
+            released += 1
+        }
+    }
+
+    /// Forget everything (a new photo, or a decode recipe change).
+    public func reset() {
+        rungs.removeAll()
+        identity = nil
+        released = 0
+    }
+}
+
