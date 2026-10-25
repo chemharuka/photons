@@ -19,15 +19,15 @@
 | Q2 | **M4 蒙版规格**（005） | — | `docs/tasks/005-masks.md` | 文档自洽（无代码验收） | **完成**：`docs/tasks/005-masks.md` 242 行（S1.5 atlas + S1.6 local 两段；masks 为空时键环整段省略） |
 | Q3 | **XMP 映射规格** | — | `docs/xmp-mapping.md` | 文档自洽 | **完成**：`docs/xmp-mapping.md` 248 行（5 个不可映射；温度锚点只能平移不能换算） |
 | Q4 | **M3.5 缩略图规格**（006） | — | `docs/tasks/006-thumbnails.md` | 文档自洽 | **完成**：`docs/tasks/006-thumbnails.md` 156 行（内容寻址 JPEG 缓存；首屏热 p95 ≤80ms） |
-| Q5 | **历史与撤销（模型层）** | 无 | `Sources/PhotonsCore/History*.swift`、`Tests/PhotonsCoreTests/History*` | 单测：快照栈 + 游标 + 组级脏标记；`make verify` 绿 | 已派（第 2 轮） |
-| Q6 | **镜头校正能力探测（按文件）** | §11.3 已实测 | `Sources/PhotonsCore/RAWDecoder.swift`（只加不改变现有行为）、`Tests/PhotonsCoreTests/Lens*` | 单测：同一机身两种文件的能力集不同；`make verify` 绿 | 待开工（**与 Q1 冲突，须等 Q1 完成**） |
-| Q7 | **裁剪/拉直（模型 + 渲染参数）** | M1 geometry 段已支持 crop/rotate | `Sources/PhotonsCore/EditModel+Geometry*`、单测 | 单测：crop 参数 → S0 参数映射；golden 覆盖 crop 一例 | 待开工（文件与 Q1 不冲突，但 golden 与 Q1 冲突 → 排在 Q1 后） |
-| Q8 | **缩略图实现（previewImage 通路）** | Q4 规格 | `Sources/PhotonsCore/PreviewImage*.swift`、`Sources/PhotonsCatalog/ThumbnailCache*`、单测 | 单测 + 0.2 s/张 的实测；`make verify` 绿 | 待 Q4 |
-| Q9 | **蒙版实现（第一类值 + 线性/径向渐变）** | Q2 规格 ✅ | `Sources/PhotonsCore/Mask*.swift`、`Kernels/s15/s16*.metal`、`RenderGraph.swift`、`Stage.swift` | 单测 + 「masks 为空时 7 个旧键逐字节不变」+ 一帧 golden | 已派（第 2 轮，005a/005b） |
-| Q10 | **XMP 导出实现** | Q3 规格 ✅ | `Sources/PhotonsExport/XMP*.swift`、`Sources/photonsctl/main.swift`、`Tests/PhotonsExportTests/`、`Package.swift` | 往返测试（写→读→比对）+ 不可映射项缺席 | 已派（第 2 轮） |
-| Q11 | **文档刷新** | Q1 完成 | `docs/architecture-decisions.md`（新增 §12 UI 架构）、`docs/STATUS.md` | `make verify` 仍绿（文档不动代码） | 待 Q1 |
+| Q5 | **历史与撤销（模型层）** | 无 | `Sources/PhotonsCore/History*.swift`、`Tests/PhotonsCoreTests/History*` | 单测：快照栈 + 游标 + 组级脏标记；`make verify` 绿 | **完成 `c50d2a7`**：EditHistory 338 行 + dirtyGroups，17 项单测 |
+| Q6 | **镜头校正能力探测（按文件）** | §11.3 已实测 | `Sources/PhotonsCore/RAWDecoder.swift`（只加不改变现有行为）、`Tests/PhotonsCoreTests/Lens*` | 单测：同一机身两种文件的能力集不同；`make verify` 绿 | 已派（第 3 轮，与 Q8 同进程，同改 RAWDecoder） |
+| Q7 | **裁剪/拉直（模型 + 渲染参数）** | M1 geometry 段已支持 crop/rotate | `Sources/PhotonsCore/EditModel+Geometry*`、单测 | 单测：crop 参数 → S0 参数映射；golden 覆盖 crop 一例 | 已派（第 3 轮） |
+| Q8 | **缩略图实现（previewImage 通路）** | Q4 规格 | `Sources/PhotonsCore/PreviewImage*.swift`、`Sources/PhotonsCatalog/ThumbnailCache*`、单测 | 单测 + 0.2 s/张 的实测；`make verify` 绿 | 已派（第 3 轮） |
+| Q9 | **蒙版实现（第一类值 + 线性/径向渐变）** | Q2 规格 ✅ | `Sources/PhotonsCore/Mask*.swift`、`Kernels/s15/s16*.metal`、`RenderGraph.swift`、`Stage.swift` | 单测 + 「masks 为空时 7 个旧键逐字节不变」+ 一帧 golden | **完成 005a/005b `a270f19`**（S1.5 atlas + S1.6 local，空 masks 键不变性已钉）；005c 已派（第 3 轮） |
+| Q10 | **XMP 导出实现** | Q3 规格 ✅ | `Sources/PhotonsExport/XMP*.swift`、`Sources/photonsctl/main.swift`、`Tests/PhotonsExportTests/`、`Package.swift` | 往返测试（写→读→比对）+ 不可映射项缺席 | **完成 `5e6993b`**：XMP.swift 835 行 + 20 项往返单测 + `photonsctl xmp export` |
+| Q11 | **文档刷新** | Q1 完成 | `docs/architecture-decisions.md`（新增 §12 UI 架构）、`docs/STATUS.md` | `make verify` 仍绿（文档不动代码） | 待开工（主线写） |
 
-## 第 2 轮并发约定
+## 第 2 轮并发约定（已验证有效，第 3 轮沿用）
 
 三个代码工作流同时跑，但**各自用独立 scratch 路径**（`swift build --scratch-path /tmp/photons-<q>`），
 不跑 `make verify`（`.build` 会互相踩）；由主 session 在所有分支落盘后统一跑一次 `make verify` 定档。
