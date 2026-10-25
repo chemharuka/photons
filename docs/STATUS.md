@@ -2,7 +2,7 @@
 
 > Checkpoint file. A new session should be able to read this plus
 > `docs/architecture-decisions.md` and start working. Keep it under ~80 lines.
-> Updated: 2026-10-26 06:05 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
+> Updated: 2026-10-26 06:55 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
 
 ## Milestones
 
@@ -75,8 +75,9 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 
 ## 已知待修（下一轮）
 
-1. **直方图在窗口帧上每帧 +104 ms**（107.6 vs 4.8）——UI 每帧都开直方图卡片，所以默认配置下平移其实 ~108 ms。
-   已派代理定位并修到 ≤1.5 ms/帧。
+1. ~~直方图窗口帧 +104 ms~~ → **已修并更正**（`b55e4de`）：104 ms 只存在于 **debug** 构建（`-Onone` 下 CPU binning 94 ms），
+   release 稳态是 **+8.2 ms**。修法是“手势中不采集 + 停手 60 ms 后一次测量专用帧 + kernel 进程级共享”，
+   平移额外成本降到 **−0.5 ms**（off p50 5.69 → on 5.21），补采 11.3 ms、卡片滞后 71 ms。
 2. 蒙版面板改名会产生 1 条历史（`masks` 按值比较含名字），像素与 `selectionKey` 都不变——语义可选，待定。
 3. `LocalAdjustments` 没有 sharpen 字段，面板只露出 amount 作“强度”。
 

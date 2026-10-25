@@ -56,7 +56,7 @@
 | Q27 | **分级解码** | Q15 | `RAWDecoder.swift`、`LoupeController.swift` | **完成 `5dc6a8c`**：首帧 1231→52 ms、解码 −26%、fit↔1:1 解码 4→2 次 |
 | Q28 | **蒙版参数面板** | Q26 | `Sources/PhotonsUI/**` | **完成 `387a897`**（119 项 smoke） |
 | Q29 | **解码并发** | Q27 | `Sources/PhotonsUI/LoupeController.swift`、`RAWDecoder.swift` | **完成 `760e2ce`**（平移 5816ms → p50 4.0–4.5ms；首帧 24–26ms） |
-| Q30 | **直方图每帧 +104ms 回归** | Q25/Q29 | `Histogram.swift`、`RenderGraph.swift`、`LoupeController.swift` | 1:1 平移开直方图额外成本 ≤1.5ms/帧，数值不变 | 已派（第 11 轮） |
+| Q30 | **直方图每帧 +104ms 回归** | Q25/Q29 | `Histogram.swift`、`RenderGraph.swift`、`LoupeController.swift` | **完成 `b55e4de`**：104ms 是 debug 专属；release +8.2 → −0.5 ms/帧（手势不采集） |
 
 ## 第 6 轮候选（按依赖排序，可直接派）
 
