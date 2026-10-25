@@ -33,11 +33,13 @@ using namespace metal;
 //           alpha = smoothstep(lo − loF, lo + loF, L) · (1 − smoothstep(hi − hiF, hi + hiF, L))
 //                                                                   (§4.5)
 //
-// Not implemented in this pass, deliberately and visibly:
-//   · Mask-level `feather` (a spatial blur of the combined selection) and `refine` (guided filter)
-//     are neighbourhood operators; they need 005d's TileDependency declaration before they can be
-//     added without silently breaking tile-based recomputation. Both are already in the atlas key.
-//   · `semantic` shapes evaluate to 0 coverage (005e).
+// Since 005d the atlas is a two-part stage: this kernel writes the *pointwise* coverage
+// (`opacity · combine · invert`), then `s1_7_mask_neighbourhood.metal` applies the two
+// neighbourhood operators — mask-level `feather` (separable box blur, edge-clamped) and `refine`
+// (guided filter steered by S1's luma). Both are declared as `TileDependency.neighborhood(r + g)`
+// in `Masks.swift`, which is what makes the stage's dirty rectangle provably wide enough.
+//
+// Still not evaluated here: `semantic` shapes produce 0 coverage (005e).
 
 struct MaskAtlasParams {
     float4 a;   // canvasSize.xy, contentOrigin.xy
@@ -49,7 +51,7 @@ struct MaskAtlasParams {
 
 struct MaskDesc {
     int4   meta;   // firstComponent, componentCount, invert, pad
-    float4 misc;   // opacity, pad, pad, pad
+    float4 misc;   // opacity, featherRadiusPx (005d), refine strength, guidedRadiusPx (005d)
 };
 
 // kind: 0 linear, 1 radial, 2 brush, 3 colour range, 4 luminance range, −1 not evaluated here.

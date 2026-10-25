@@ -785,3 +785,608 @@ public enum JSONValue: Sendable, Equatable, Codable {
         }
     }
 }
+
+// MARK: - 005d: canvas-space bounds, tiles and the dependency closure
+//
+// §3.4 of docs/tasks/005-masks.md, made a value layer so it is testable without a GPU:
+//
+//     bounds(mask)  = AABB(components) ⊕ featherRadius ⊕ guidedRadius     (canvas pixels)
+//     dirtyRect(s)  = ∪ bounds(m ∈ dirty(s))
+//     tile          = 128 px (scale < 1) | 256 px (export), 8 px aligned
+//     closure(D)    = D ∪ descendants(D)      (Kahn topological order)
+//
+// The one hard criterion (§3.4, 005d): a tiled pass and a full-frame pass of the *same* document
+// must produce the same bytes — not "the same picture". `RenderGraph` therefore keeps the atlas a
+// full-frame pass (its neighbourhood operators need a complete input) and tiles only S1.6, which is
+// pointwise by construction; `TilePlan.isFullFrame` is what a test asserts against, so a bound that
+// is too small shows up as a *missing pixel*, not as a slower frame.
+
+/// A half-open integer rectangle in **canvas** pixels: `[x0, x1) × [y0, y1)`.
+///
+/// Half-open everywhere so that `union` and tile alignment are exact integer arithmetic and two
+/// rectangles that share an edge do not overlap by one row (the classic off-by-one that makes a
+/// tiled render differ from a full-frame one only at the seams).
+public struct MaskRect: Sendable, Equatable, Hashable {
+    public var x0: Int
+    public var y0: Int
+    public var x1: Int
+    public var y1: Int
+
+    public init(x0: Int, y0: Int, x1: Int, y1: Int) {
+        self.x0 = x0; self.y0 = y0; self.x1 = x1; self.y1 = y1
+    }
+
+    public static let empty = MaskRect(x0: 0, y0: 0, x1: 0, y1: 0)
+
+    public init(_ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int) { self.init(x0: x0, y0: y0, x1: x1, y1: y1) }
+
+    public var isEmpty: Bool { x1 <= x0 || y1 <= y0 }
+    public var width: Int { max(0, x1 - x0) }
+    public var height: Int { max(0, y1 - y0) }
+    public var pixelCount: Int { width * height }
+    public var keyString: String { "\(x0),\(y0),\(x1),\(y1)" }
+
+    public func union(_ other: MaskRect) -> MaskRect {
+        if isEmpty { return other }
+        if other.isEmpty { return self }
+        return MaskRect(x0: min(x0, other.x0), y0: min(y0, other.y0),
+                        x1: max(x1, other.x1), y1: max(y1, other.y1))
+    }
+
+    public func intersects(_ other: MaskRect) -> Bool {
+        !isEmpty && !other.isEmpty && x0 < other.x1 && other.x0 < x1 && y0 < other.y1 && other.y0 < y1
+    }
+
+    public func contains(_ other: MaskRect) -> Bool {
+        other.isEmpty || (!isEmpty && x0 <= other.x0 && y0 <= other.y0
+                          && x1 >= other.x1 && y1 >= other.y1)
+    }
+
+    /// Grow by `n` canvas pixels on every side — the halo a neighbourhood operator needs (§3.4).
+    public func grown(by n: Int) -> MaskRect {
+        guard n != 0 else { return self }
+        if isEmpty { return self }
+        return MaskRect(x0: x0 - n, y0: y0 - n, x1: x1 + n, y1: y1 + n)
+    }
+
+    /// Intersection with the canvas; a rectangle entirely outside it becomes `.empty`.
+    public func clamped(to size: ImageSize) -> MaskRect {
+        guard !isEmpty else { return .empty }
+        let r = MaskRect(x0: max(0, x0), y0: max(0, y0),
+                         x1: min(size.width, x1), y1: min(size.height, y1))
+        return r.isEmpty ? .empty : r
+    }
+
+    /// Outward alignment to a multiple of `a` (step 4 of §3.4: 8 px, so a tile boundary never lands
+    /// on a tensor's half-pixel), clipped to the canvas.
+    public func aligned(to a: Int, canvas: ImageSize) -> MaskRect {
+        guard a > 1, !isEmpty else { return clamped(to: canvas) }
+        let ax0 = (x0 / a) * a
+        let ay0 = (y0 / a) * a
+        let ax1 = ((x1 + a - 1) / a) * a
+        let ay1 = ((y1 + a - 1) / a) * a
+        return MaskRect(x0: ax0, y0: ay0, x1: ax1, y1: ay1).clamped(to: canvas)
+    }
+
+    /// Bounding box of a point set, rounded **outward** so a rounding mistake can only make the
+    /// rectangle bigger (the failure mode of a bound that is too large is a slower frame; the
+    /// failure mode of one that is too small is a wrong picture).
+    public static func aabb(of points: [(x: Double, y: Double)]) -> MaskRect? {
+        guard let first = points.first else { return nil }
+        var lo = (x: first.x, y: first.y), hi = lo
+        for p in points.dropFirst() {
+            if !p.x.isFinite || !p.y.isFinite { continue }
+            lo.x = min(lo.x, p.x); lo.y = min(lo.y, p.y)
+            hi.x = max(hi.x, p.x); hi.y = max(hi.y, p.y)
+        }
+        guard lo.x.isFinite, hi.x.isFinite else { return nil }
+        return MaskRect(x0: Int(lo.x.rounded(.down)), y0: Int(lo.y.rounded(.down)),
+                        x1: Int(hi.x.rounded(.up)), y1: Int(hi.y.rounded(.up)))
+    }
+}
+
+/// A set of rectangles with an **exact** union area (a y-sweep, not a sum of areas — two overlapping
+/// tiles must not be counted twice, or "the tile plan is cheaper" becomes a lie).
+public struct RectSet: Sendable, Equatable {
+    public private(set) var rects: [MaskRect]
+
+    public init(_ rects: [MaskRect] = []) {
+        self.rects = []
+        for r in rects where !r.isEmpty { insert(r) }
+    }
+
+    public static let empty = RectSet()
+
+    public var isEmpty: Bool { rects.isEmpty }
+
+    /// Union of everything inside, as one rectangle (may cover holes).
+    public var bounds: MaskRect { rects.reduce(.empty) { $0.union($1) } }
+
+    /// Exact area of the union, in pixels.
+    public var unionPixelCount: Int {
+        guard !rects.isEmpty else { return 0 }
+        var ys = Set<Int>()
+        for r in rects { ys.insert(r.y0); ys.insert(r.y1) }
+        let rows = ys.sorted()
+        var total = 0
+        for i in 0..<(rows.count - 1) {
+            let yTop = rows[i], yBottom = rows[i + 1]
+            guard yBottom > yTop else { continue }
+            var spans: [(Int, Int)] = []
+            for r in rects where r.y0 <= yTop && r.y1 >= yBottom {
+                spans.append((r.x0, r.x1))
+            }
+            guard !spans.isEmpty else { continue }
+            spans.sort { $0.0 < $1.0 }
+            var covered = 0
+            var cursor = spans[0].0
+            var end = spans[0].1
+            for (a, b) in spans.dropFirst() {
+                if a > end { covered += end - cursor; cursor = a; end = b }
+                else { end = max(end, b) }
+            }
+            covered += end - cursor
+            total += covered * (yBottom - yTop)
+        }
+        return total
+    }
+
+    public mutating func insert(_ r: MaskRect) {
+        guard !r.isEmpty else { return }
+        // Drop rectangles already covered, and grow one that covers a neighbour: the sweep stays
+        // cheap and `unionPixelCount` stays exact either way.
+        if rects.contains(where: { $0.contains(r) }) { return }
+        rects.removeAll { r.contains($0) }
+        rects.append(r)
+    }
+
+    public mutating func formUnion(_ other: RectSet) {
+        for r in other.rects { insert(r) }
+    }
+
+    public func union(_ other: RectSet) -> RectSet {
+        var s = self
+        s.formUnion(other)
+        return s
+    }
+
+    public func intersects(_ r: MaskRect) -> Bool { rects.contains { $0.intersects(r) } }
+
+    /// Key material: rectangles sorted so two processes produce the same text (D6).
+    public var keyString: String {
+        rects.map(\.keyString).sorted().joined(separator: ";")
+    }
+}
+
+/// What a stage's outputs depend on: nothing but the pixel it writes, or a neighbourhood of it.
+///
+/// §3.3 item 5: a stage that introduces a neighbourhood operator **must** declare it here, otherwise
+/// tiling silently produces a different picture. `halo` is in canvas pixels.
+public enum TileDependency: Sendable, Equatable {
+    case pointwise
+    case neighborhood(radius: Int)
+
+    public var halo: Int {
+        switch self {
+        case .pointwise: return 0
+        case .neighborhood(let r): return max(0, r)
+        }
+    }
+
+    /// Two operators **in series** on the same pixels (feather then refine ⇒ the halos add).
+    public func then(_ other: TileDependency) -> TileDependency {
+        let h = halo + other.halo
+        return h == 0 ? .pointwise : .neighborhood(radius: h)
+    }
+
+    /// Two independent masks over the same canvas: the widest halo wins. Adding them instead would
+    /// inflate the declared dependency on every extra mask and make the tile bounds lie.
+    public func widest(_ other: TileDependency) -> TileDependency {
+        let h = max(halo, other.halo)
+        return h == 0 ? .pointwise : .neighborhood(radius: h)
+    }
+
+    public var keyString: String {
+        switch self {
+        case .pointwise: return "pointwise"
+        case .neighborhood(let r): return "halo=\(r)"
+        }
+    }
+}
+
+/// The tile lattice of §3.4: 128 px below 1:1, 256 px for export, 8 px alignment.
+public struct TileGrid: Sendable, Equatable {
+    public var tile: Int
+    public var alignment: Int
+
+    public init(tile: Int = 128, alignment: Int = 8) {
+        self.tile = max(16, tile)
+        self.alignment = max(1, alignment)
+    }
+
+    public static func forScale(_ scale: Double) -> TileGrid {
+        TileGrid(tile: scale < 1 ? 128 : 256, alignment: 8)
+    }
+
+    /// Every tile of the lattice that touches the (already halo-grown) dirty set. Tiles are grown
+    /// outward to `alignment` and clipped to the canvas; a tile touched by two dirty rectangles is
+    /// dispatched **once**, so `pixelCount` is a real cost and not a doubled one.
+    public func tiles(covering dirty: RectSet, canvas: ImageSize) -> [MaskRect] {
+        var seen = Set<[Int]>()
+        var out: [MaskRect] = []
+        for r in dirty.rects {
+            let clipped = r.clamped(to: canvas)
+            guard !clipped.isEmpty else { continue }
+            let tx0 = (clipped.x0 / tile) * tile
+            let ty0 = (clipped.y0 / tile) * tile
+            var ty = ty0
+            while ty < clipped.y1 {
+                var tx = tx0
+                while tx < clipped.x1 {
+                    if seen.insert([tx, ty]).inserted {
+                        let t = MaskRect(x0: tx, y0: ty, x1: tx + tile, y1: ty + tile)
+                            .aligned(to: alignment, canvas: canvas)
+                        if !t.isEmpty { out.append(t) }
+                    }
+                    tx += tile
+                }
+                ty += tile
+            }
+        }
+        // Sorted, so the dispatch order (and any trace of it) is the same in every process.
+        return out.sorted { ($0.y0, $0.x0) < ($1.y0, $1.x0) }
+    }
+
+    public var keyString: String { "tile=\(tile);align=\(alignment)" }
+}
+
+/// The plan a stage actually dispatches: the tiles, how many pixels that is, and whether it is
+/// indistinguishable from a full-frame pass.
+public struct TilePlan: Sendable, Equatable {
+    public var tiles: [MaskRect]
+    public var pixelCount: Int
+    public var canvasPixelCount: Int
+    public var dependency: TileDependency
+    public var tiled: Bool
+
+    public init(tiles: [MaskRect] = [], pixelCount: Int = 0, canvasPixelCount: Int = 0,
+                dependency: TileDependency = .pointwise, tiled: Bool = false) {
+        self.tiles = tiles
+        self.pixelCount = pixelCount
+        self.canvasPixelCount = canvasPixelCount
+        self.dependency = dependency
+        self.tiled = tiled
+    }
+
+    public static func fullFrame(_ canvas: ImageSize, dependency: TileDependency = .pointwise) -> TilePlan {
+        TilePlan(tiles: [MaskRect(0, 0, canvas.width, canvas.height)],
+                 pixelCount: canvas.pixelCount, canvasPixelCount: canvas.pixelCount,
+                 dependency: dependency, tiled: false)
+    }
+
+    public var fraction: Double {
+        canvasPixelCount > 0 ? Double(pixelCount) / Double(canvasPixelCount) : 1
+    }
+
+    public var isFullFrame: Bool { pixelCount >= canvasPixelCount }
+}
+
+/// The forward half of S0's mapping: normalised **source** point → continuous canvas pixel.
+///
+/// The kernel walks this backwards (`source_uv` in `s1_5_mask_atlas.metal`); the bounds code needs
+/// the forward direction, and if the two disagree by a sign a mask's dirty rectangle lands on the
+/// wrong side of a rotated frame — invisible on an uncropped, unrotated test and wrong everywhere
+/// else. `testMaskBoundsInvertTheS0Mapping` pins them against each other.
+public struct MaskCanvasMapping: Sendable, Equatable {
+    public var source: ImageSize
+    public var content: ImageSize
+    public var canvas: ImageSize
+    public var originX: Double
+    public var originY: Double
+    public var crop: CropRect
+    public var cosTheta: Double
+    public var sinTheta: Double
+    public var flipH: Bool
+    public var flipV: Bool
+
+    public init(geometry: GeometryGroup, source: ImageSize, content: ImageSize,
+                canvas: ImageSize, origin: (x: Double, y: Double)) {
+        let crop = geometry.renderCrop(source: source)
+        self.source = source
+        self.content = content
+        self.canvas = canvas
+        self.originX = origin.x
+        self.originY = origin.y
+        self.crop = crop
+        let t = geometry.straightenDegrees * .pi / 180
+        self.cosTheta = cos(t)
+        self.sinTheta = sin(t)
+        self.flipH = geometry.flipHorizontal
+        self.flipV = geometry.flipVertical
+    }
+
+    /// Continuous canvas pixel centre-space position of a normalised source point. Points outside
+    /// the crop map outside the content rectangle (they are clipped later, not clamped — clamping
+    /// here would fold a mask that lives entirely outside the crop onto the visible frame).
+    public func canvasPoint(_ p: NormalizedPoint) -> (x: Double, y: Double) {
+        // source → position inside the crop (0…1), the inverse of `src = crop.xy + r·crop.zw`.
+        let rx = (p.x - crop.left) / max(crop.width, 1e-9) - 0.5
+        let ry = (p.y - crop.top) / max(crop.height, 1e-9) - 0.5
+        // Un-rotate: the kernel applies R(θ), so the forward direction applies R(−θ).
+        let ox = rx * cosTheta + ry * sinTheta
+        let oy = -rx * sinTheta + ry * cosTheta
+        var u = ox + 0.5
+        var v = oy + 0.5
+        if flipH { u = 1 - u }
+        if flipV { v = 1 - v }
+        return (u * Double(content.width) + originX - 0.5,
+                v * Double(content.height) + originY - 0.5)
+    }
+}
+
+/// §4.6 / §2 — the two radii, as one place. Host and kernel read the same numbers because the same
+/// function produced the descriptor (`MaskDescU.misc`).
+public enum MaskRadius {
+    /// A full-strength feather is **10 % of the short edge**. The document's field is documented as
+    /// 0…0.1 (a fraction of the short edge); the UI range is 0…1, so `feather = 1` is the whole
+    /// documented span and `feather = 0.1` is the usual small softening. Normalising to the *content*
+    /// short edge (canvas pixels) keeps one parameter identical at thumbnail, fit, 1:1 and export
+    /// scale — the same rule as every other distance in §4.
+    public static func featherPixels(_ feather: Double, content: ImageSize) -> Double {
+        min(max(feather, 0), 1) * 0.1 * Double(min(content.width, content.height))
+    }
+
+    /// §4.6: `kernelDiameter = odd(clamp(2·round(max(W,H)/30) + 1, 3, 65))` — radius ≈ max/30,
+    /// clamped to the 3…65 window MPS/box implementations are comfortable with.
+    public static func guidedKernelDiameter(_ content: ImageSize) -> Int {
+        let raw = 2 * Int((Double(max(content.width, content.height)) / 30).rounded()) + 1
+        let clamped = min(max(raw, 3), 65)
+        return clamped % 2 == 1 ? clamped : clamped + 1
+    }
+
+    /// Kernel **radius** in canvas pixels (0 when `refine == 0`, i.e. the pass does not exist).
+    public static func guidedRadiusPixels(_ refine: Double, content: ImageSize) -> Double {
+        guard refine > 0 else { return 0 }
+        return Double((guidedKernelDiameter(content) - 1) / 2)
+    }
+
+    /// §4.6: `epsilon = 0.01 · 10^(−refine)` — 0.01 at "barely on", 1e−3 at full strength (the
+    /// task text's 1e−3 endpoint; its `10^(−2·refine)` would give 1e−4, i.e. ten times sharper than
+    /// the number it prints next to it).
+    public static func guidedEpsilon(_ refine: Double) -> Double {
+        0.01 * pow(10, -min(max(refine, 0), 1))
+    }
+
+    /// Both halos, in canvas pixels: what `bounds` must be grown by (§3.4 step 1).
+    public static func haloPixels(of mask: Mask, content: ImageSize) -> Int {
+        let f = featherPixels(mask.feather, content: content)
+        let g = guidedRadiusPixels(mask.refine, content: content)
+        return Int((f + g).rounded(.up))
+    }
+
+    /// The dependency the atlas declares for one mask: a box blur of radius r then a guided filter of
+    /// radius g, i.e. `neighborhood(r + g)`. S1.6 reads that result at a single pixel and is
+    /// `.pointwise`.
+    public static func atlasDependency(of mask: Mask, content: ImageSize) -> TileDependency {
+        let halo = haloPixels(of: mask, content: content)
+        return halo > 0 ? .neighborhood(radius: halo) : .pointwise
+    }
+}
+
+/// Canvas-space bounds of one mask, including the halo its neighbourhood operators spread (§3.4).
+public enum MaskBounds {
+    /// The shape's own extent in **normalised source** coordinates, before crop/rotate. `nil` = the
+    /// shape cannot contribute coverage in this build (semantic matte, unknown kind, no strokes).
+    ///
+    /// Content-dependent predicates (colour range, luminance range) return the whole frame: their
+    /// extent is a property of the picture, not of the parameters, and a bound that guesses would be
+    /// a bound that is sometimes too small.
+    public static func sourceExtent(of component: MaskComponent, source: ImageSize) -> MaskRect? {
+        let w = Double(source.width), h = Double(source.height)
+        let minSide = min(w, h)
+        switch component.shape {
+        case .linearGradient(let g):
+            // `alpha > 0` above the line where `t' = lo`. `t' = t^(log ½ / log m)`, so
+            // `t_cut = lo^(log m / log ½)` — the exact inverse of the kernel's midpoint remap.
+            let f = min(max(component.feather, 0), 1)
+            let lo = 0.5 - 0.5 * f
+            let m = min(max(g.midpoint, 0.02), 0.98)
+            let exponent = log(0.5) / log(m)
+            let tCut = lo <= 0 ? 0 : pow(lo, 1 / exponent)
+            let quad = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
+            let ax = g.start.x * w, ay = g.start.y * h
+            let dx = g.end.x * w - ax, dy = g.end.y * h - ay
+            let denom = max(dx * dx + dy * dy, 1e-12)
+            // Sutherland–Hodgman against the single half-plane `t ≥ t_cut`.
+            var poly: [(x: Double, y: Double)] = []
+            for i in 0..<quad.count {
+                let a = quad[i], b = quad[(i + 1) % quad.count]
+                let ta = ((a.0 - ax) * dx + (a.1 - ay) * dy) / denom
+                let tb = ((b.0 - ax) * dx + (b.1 - ay) * dy) / denom
+                let inA = ta >= tCut, inB = tb >= tCut
+                if inA { poly.append(a) }
+                if inA != inB {
+                    let s = (tCut - ta) / (tb - ta)
+                    poly.append((a.0 + (b.0 - a.0) * s, a.1 + (b.1 - a.1) * s))
+                }
+            }
+            return MaskRect.aabb(of: poly)
+        case .radialGradient(let g):
+            // Radii are short-edge units, i.e. already pixels: `rx · minSide`.
+            let rx = max(abs(g.radius.x), 0) * minSide
+            let ry = max(abs(g.radius.y), 0) * minSide
+            let t = g.angle * .pi / 180
+            let cs = abs(cos(t)), sn = abs(sin(t))
+            // Support function of a rotated ellipse: exact half-extents, not the circle's radius.
+            let hx = (rx * cs * rx * cs + ry * sn * ry * sn).squareRoot()
+            let hy = (rx * sn * rx * sn + ry * cs * ry * cs).squareRoot()
+            // The kernel's rim sits at r = 1 and coverage is zero beyond it (feather narrows the
+            // window *inside* the rim), so the rim is the bound — no growth by the feather.
+            let cx = g.center.x * w, cy = g.center.y * h
+            return MaskRect.aabb(of: [(cx - hx, cy - hy), (cx + hx, cy + hy)])
+        case .brush(let b):
+            var box: MaskRect = .empty
+            for s in b.strokes {
+                let n = s.points.count / 2
+                guard n > 0 else { continue }
+                let r = min(max(s.resolvedRadius(fallbackSize: b.size), 0), 1) * minSide
+                var lo = (x: Double.infinity, y: Double.infinity)
+                var hi = (x: -Double.infinity, y: -Double.infinity)
+                for i in 0..<n {
+                    let x = Double(s.points[i * 2]) * w, y = Double(s.points[i * 2 + 1]) * h
+                    lo.x = min(lo.x, x); lo.y = min(lo.y, y)
+                    hi.x = max(hi.x, x); hi.y = max(hi.y, y)
+                }
+                // The radius is a short-edge length, so it is the same pixel distance on both axes.
+                box = box.union(MaskRect.aabb(of: [(lo.x - r, lo.y - r), (hi.x + r, hi.y + r)]) ?? .empty)
+            }
+            return box.isEmpty ? nil : box
+        case .colorRange, .luminanceRange:
+            // Content-dependent: the extent is a property of the picture, not of the parameters, so
+            // the honest bound is the frame. A guess here would be a bound that is sometimes small.
+            return MaskRect(0, 0, source.width, source.height)
+        case .semantic, .unsupported:
+            return nil   // no coverage in this build (§5, 005e)
+        }
+    }
+
+    /// The canvas rectangle a mask can touch, already grown by `featherRadius + guidedRadius`.
+    public static func canvasRect(for mask: Mask, mapping: MaskCanvasMapping) -> MaskRect? {
+        guard mask.isEnabled, !mask.components.isEmpty else { return nil }
+        let halo = MaskRadius.haloPixels(of: mask, content: mapping.content)
+        let w = Double(mapping.source.width), h = Double(mapping.source.height)
+
+        var dirty = RectSet()
+        for c in mask.components {
+            guard let extent = sourceExtent(of: c, source: mapping.source), !extent.isEmpty else { continue }
+            // Source-space rectangle → its four mapped corners → AABB in canvas pixels. The image of
+            // a rectangle under S0's affine map is a parallelogram, and the AABB of a parallelogram
+            // is the AABB of its vertices: conservative by construction, exact when unrotated.
+            let corners = [(extent.x0, extent.y0), (extent.x1, extent.y0),
+                           (extent.x1, extent.y1), (extent.x0, extent.y1)].map { p in
+                mapping.canvasPoint(NormalizedPoint(Double(p.0) / w, Double(p.1) / h))
+            }
+            guard var box = MaskRect.aabb(of: corners) else { continue }
+            box = box.grown(by: halo).clamped(to: mapping.canvas)
+            guard !box.isEmpty else { continue }
+            dirty.insert(box)
+        }
+        guard !dirty.isEmpty else { return nil }
+        return dirty.bounds
+    }
+
+    /// `∪ bounds(m)` for a set of masks — the dirty rectangle of a stage (§3.4 step 2).
+    public static func dirtySet(_ masks: [Mask], mapping: MaskCanvasMapping) -> RectSet {
+        var set = RectSet()
+        for m in masks {
+            if let r = canvasRect(for: m, mapping: mapping) { set.insert(r) }
+        }
+        return set
+    }
+}
+
+/// §3.4 step 4 — `producer → consumer` edges and the closure that makes a patch recomputation
+/// correct once masks can reference each other (linked masks, spots whose source lies inside another
+/// mask's target).
+///
+/// M4 ships no user-reachable edges, which is exactly why this is a value type with a synthetic test
+/// rather than a comment: the day a producer arrives, "dirty A" must mean "recompute A, then B, then
+/// C" and a cycle must be reported at **decode** time, not thrown mid-render.
+public struct MaskGraph: Sendable, Equatable {
+    public struct Edge: Sendable, Equatable {
+        public var from: String
+        public var to: String
+        public init(from: String, to: String) { self.from = from; self.to = to }
+    }
+
+    /// Ids in atlas order.
+    public var ids: [String]
+    public var edges: [Edge]
+
+    public init(ids: [String], edges: [Edge] = []) {
+        self.ids = ids
+        self.edges = edges
+    }
+
+    public func successors(of id: String) -> [String] {
+        edges.filter { $0.from == id }.map(\.to)
+    }
+
+    public func predecessors(of id: String) -> [String] {
+        edges.filter { $0.to == id }.map(\.from)
+    }
+
+    /// `D ∪ descendants(D)`, restricted to known ids.
+    public func closure(of dirty: Set<String>) -> Set<String> {
+        var seen = dirty.intersection(ids)
+        var queue = Array(seen)
+        while let id = queue.popLast() {
+            for next in successors(of: id) where !seen.contains(next) {
+                seen.insert(next)
+                queue.append(next)
+            }
+        }
+        return seen
+    }
+
+    /// Kahn's algorithm, ties broken by atlas order so the execution order is deterministic.
+    /// `nil` when the graph has a cycle (the caller reports `mask.cycle` and disables the mask).
+    public func topologicalOrder() -> [String]? {
+        var indegree = Dictionary(uniqueKeysWithValues: ids.map { ($0, 0) })
+        for e in edges where indegree[e.to] != nil && indegree[e.from] != nil {
+            indegree[e.to, default: 0] += 1
+        }
+        var ready = ids.filter { (indegree[$0] ?? 0) == 0 }
+        var order: [String] = []
+        while !ready.isEmpty {
+            let id = ready.removeFirst()
+            order.append(id)
+            for next in successors(of: id) {
+                guard var d = indegree[next] else { continue }
+                d -= 1
+                indegree[next] = d
+                if d == 0 { ready.append(next) }
+            }
+            // Atlas order, not insertion order.
+            ready.sort { (ids.firstIndex(of: $0) ?? 0) < (ids.firstIndex(of: $1) ?? 0) }
+        }
+        return order.count == ids.count ? order : nil
+    }
+
+    /// The masks a set of dirty ids actually forces to re-run, in execution order. Empty when the
+    /// graph has a cycle: a cyclic document must be refused, not half-rendered.
+    public func executionOrder(for dirty: Set<String>) -> [String] {
+        guard let order = topologicalOrder() else { return [] }
+        let set = closure(of: dirty)
+        return order.filter { set.contains($0) }
+    }
+
+    /// One cycle (as a path) when there is one, for the decode-time error message.
+    public var cycle: [String]? {
+        var colour: [String: Int] = [:]   // 1 = on stack, 2 = done
+        var stack: [String] = []
+        func dfs(_ id: String) -> [String]? {
+            colour[id] = 1
+            stack.append(id)
+            for next in successors(of: id) where ids.contains(next) {
+                if colour[next] == 1 {
+                    if let i = stack.firstIndex(of: next) { return Array(stack[i...]) + [next] }
+                    return [next, next]
+                }
+                if colour[next] == nil, let found = dfs(next) { return found }
+            }
+            colour[id] = 2
+            _ = stack.popLast()
+            return nil
+        }
+        for id in ids where colour[id] == nil {
+            if let c = dfs(id) { return c }
+        }
+        return nil
+    }
+
+    /// The graph a document implies: one node per enabled mask, no edges in M4.
+    public static func from(_ masks: [Mask]) -> MaskGraph {
+        MaskGraph(ids: masks.filter(\.isEnabled).sorted { $0.id < $1.id }.map(\.id))
+    }
+}

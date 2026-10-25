@@ -1,0 +1,53 @@
+{
+  "atlasSHA256" : "3f8cc8a1ee0ecd1f4000e68ce46d3e5161990aa5bfe18fadbe851c1f06a9e1f0",
+  "displaySHA256" : "3a7345310e17a02138c87a704b90afa82205562a90719eac44083b9dbe462eb0",
+  "maskIDs" : [
+    "m-fe",
+    "m-rf"
+  ],
+  "note" : "Recorded by MaskTests on the synthetic 96×65 ramp image; masks m-fe (radial, mask-level feather 0.5 → a 3.2 px box blur, +0.6 EV) and m-rf (brush, refine 1 → guided filter on S1's luma, amount 80, −0.7 EV). Both 005d neighbourhood operators are in the frame. 8-bit quantised digests so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended.",
+  "sampleX" : [
+    8,
+    32,
+    40,
+    64,
+    84,
+    72
+  ],
+  "sampleY" : [
+    8,
+    16,
+    32,
+    32,
+    48,
+    56
+  ],
+  "samples" : [
+    [
+      0,
+      0
+    ],
+    [
+      0.258056640625,
+      0
+    ],
+    [
+      1,
+      0.0012006759643554688
+    ],
+    [
+      0,
+      0.29833984375
+    ],
+    [
+      0,
+      0.363525390625
+    ],
+    [
+      0,
+      0.01174163818359375
+    ]
+  ],
+  "sourceHeight" : 65,
+  "sourceWidth" : 96
+}

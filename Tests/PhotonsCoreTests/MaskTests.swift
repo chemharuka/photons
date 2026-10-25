@@ -1389,6 +1389,592 @@ final class MaskTests: XCTestCase {
         XCTAssertEqual(onlyPoints.changedStages(from: edit), [.maskAtlas])
     }
 
+    // MARK: - 005d: feather and refine (radius mapping, edge clamp, unit interval)
+
+    /// One mask with the *mask-level* feather/refine set — the operators 005d adds. Kept separate from
+    /// `doc(...)` (which sets the component feather) so a test never confuses the shape's own
+    /// transition width with the atlas's spatial blur.
+    private func maskDoc(_ shape: MaskShape, componentFeather: Double = 0.5,
+                         maskFeather: Double = 0, refine: Double = 0,
+                         opacity: Double = 1, invert: Bool = false,
+                         adjustments: LocalAdjustments = .identity,
+                         id: String = "m-005d") -> EditModel {
+        var edit = EditModel.neutral
+        edit.masks = [Mask(id: id, opacity: opacity, invert: invert,
+                           feather: maskFeather, refine: refine,
+                           components: [MaskComponent(id: "c", feather: componentFeather, shape: shape)],
+                           adjustments: adjustments)]
+        return edit
+    }
+
+    /// Pixels strictly between the extremes: the width of a transition, in pixels.
+    private func partialCount(_ dump: MaskAtlasDump, slice: Int = 0,
+                              below: Double = 0.02, above: Double = 0.98) -> Int {
+        guard dump.slices.indices.contains(slice) else { return 0 }
+        let lo = Float(below), hi = Float(above)
+        return dump.slices[slice].filter { $0 > lo && $0 < hi }.count
+    }
+
+    /// §4.6/§2 — both radii are pixel lengths derived from the **short edge**, so one parameter gives
+    /// the same shape at thumbnail, fit, 1:1 and export scale.
+    func testFeatherAndGuidedRadiiFollowTheShortEdge() {
+        let content = ImageSize(width: 2400, height: 1600)
+        // feather = 1 is the whole documented span: 10 % of the short edge.
+        XCTAssertEqual(MaskRadius.featherPixels(0, content: content), 0)
+        XCTAssertEqual(MaskRadius.featherPixels(0.5, content: content), 80, accuracy: 1e-9)
+        XCTAssertEqual(MaskRadius.featherPixels(1, content: content), 160, accuracy: 1e-9)
+        XCTAssertEqual(MaskRadius.featherPixels(4, content: content), 160, accuracy: 1e-9,
+                       "the radius clamps at the documented maximum instead of growing without bound")
+        XCTAssertEqual(MaskRadius.featherPixels(-1, content: content), 0)
+
+        // Scale invariance: half the canvas, half the radius — the fault that would make a thumbnail's
+        // feather and an export's feather different shapes.
+        let half = ImageSize(width: 1200, height: 800)
+        XCTAssertEqual(MaskRadius.featherPixels(0.5, content: half) * 2,
+                       MaskRadius.featherPixels(0.5, content: content), accuracy: 1e-9)
+
+        // §4.6: kernelDiameter = odd(clamp(2·round(max(W,H)/30) + 1, 3, 65)).
+        XCTAssertEqual(MaskRadius.guidedKernelDiameter(ImageSize(width: 96, height: 64)), 7)
+        XCTAssertEqual(MaskRadius.guidedKernelDiameter(ImageSize(width: 300, height: 200)), 21)
+        XCTAssertEqual(MaskRadius.guidedKernelDiameter(ImageSize(width: 2731, height: 1500)), 65)
+        XCTAssertEqual(MaskRadius.guidedKernelDiameter(ImageSize(width: 10, height: 10)), 3,
+                       "the floor is a 3-tap kernel, never a degenerate one")
+        XCTAssertEqual(MaskRadius.guidedRadiusPixels(0, content: content), 0, "refine 0 = no radius")
+        XCTAssertEqual(MaskRadius.guidedRadiusPixels(1, content: content), 32)
+
+        // ε: 0.01 at "barely on", 1e−3 at full strength.
+        XCTAssertEqual(MaskRadius.guidedEpsilon(0), 0.01, accuracy: 1e-12)
+        XCTAssertEqual(MaskRadius.guidedEpsilon(1), 0.001, accuracy: 1e-12)
+
+        // The halo is both radii, and it is what the tile bounds are grown by.
+        let mask = Mask(id: "m", feather: 0.5, refine: 1)
+        XCTAssertEqual(MaskRadius.haloPixels(of: mask, content: content), 112)   // 80 + 32
+        XCTAssertEqual(MaskRadius.atlasDependency(of: mask, content: content), .neighborhood(radius: 112))
+        XCTAssertEqual(MaskRadius.atlasDependency(of: Mask(id: "m"), content: content), .pointwise)
+    }
+
+    /// The blur radius must actually be realised in pixels: a hard-edged disc whose mask-level feather
+    /// is r gets a transition about 2r wide, and one that is 2× the radius is about 2× as wide.
+    func testFeatherRealisesItsRadiusInPixels() throws {
+        let image = flatImage(0.4, width: 192, height: 128)   // short edge 128 ⇒ feather 0.5 = 6.4 px
+        let disc = MaskShape.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.5, 0.5), radius: NormalizedPoint(0.30, 0.30)))
+        let hard = try atlas(maskDoc(disc, componentFeather: 0, maskFeather: 0), image)
+        let soft = try atlas(maskDoc(disc, componentFeather: 0, maskFeather: 0.5), image)
+        let softer = try atlas(maskDoc(disc, componentFeather: 0, maskFeather: 1.0), image)
+
+        XCTAssertLessThan(partialCount(hard), 8, "a feather-0 disc has an aliased, one-pixel edge")
+        let content = ImageSize(width: image.width, height: image.height)
+        // A box blur of radius r turns a step into a ramp 2r wide, so this is the width the parameter
+        // promises — measured, not assumed.
+        let expected = 2 * MaskRadius.featherPixels(0.5, content: content)   // ≈ 12.8 px
+        let width = { (dump: MaskAtlasDump) -> Double in
+            var count = 0
+            for x in 0..<dump.width where (dump.value(slice: 0, x: x, y: 64) ?? 0) > 0.02
+                && (dump.value(slice: 0, x: x, y: 64) ?? 0) < 0.98 { count += 1 }
+            return Double(count) / 2   // both sides of the disc
+        }
+        XCTAssertEqual(width(soft), expected, accuracy: expected * 0.35,
+                       "the transition on one side must be about 2 × the feather radius")
+        XCTAssertGreaterThan(partialCount(soft), 500, "feather 0.5 must soften a 192×128 disc")
+        // Twice the parameter is twice the radius, i.e. about twice the transition width.
+        XCTAssertEqual(width(softer), 2 * width(soft), accuracy: width(soft) * 0.6)
+        for value in softer.slices[0] + soft.slices[0] {
+            XCTAssertTrue(value >= 0 && value <= 1, "coverage left [0, 1]: \(value)")
+        }
+    }
+
+    /// Edge clamping (§3.4): a mask that covers the whole frame must still be 1.0 at the border. Zero
+    /// padding — the obvious implementation — darkens every edge, which reads as a vignette painted
+    /// into the mask and would be blamed on the local adjustment, not on the blur.
+    func testFeatherClampsAtTheFrameBorder() throws {
+        let image = flatImage(0.4, width: 96, height: 64)
+        // Radius 1.0 short-edge units: the ellipse covers every corner (57.7 px < 64 px), so the
+        // unblurred coverage is exactly 1 everywhere.
+        let covering = MaskShape.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.5, 0.5), radius: NormalizedPoint(1.0, 1.0)))
+        let hard = try atlas(maskDoc(covering, componentFeather: 0, maskFeather: 0), image)
+        let soft = try atlas(maskDoc(covering, componentFeather: 0, maskFeather: 0.8), image)
+        let softest = try atlas(maskDoc(covering, componentFeather: 0, maskFeather: 1.0), image)
+
+        XCTAssertEqual(Double(hard.slices[0].min() ?? 0), 1, accuracy: 1.0 / 255,
+                       "the fixture must be a uniform 1.0 field, or the clamp is not what is tested")
+        let border = [(0, 0), (95, 0), (0, 63), (95, 63), (48, 0), (0, 32), (95, 32), (48, 63)]
+        for dump in [soft, softest] {
+            for (x, y) in border {
+                XCTAssertEqual(sample(dump, 0, x, y), 1, accuracy: 2.0 / 255,
+                               "border pixel (\(x), \(y)) was pulled under 1: the blur read outside the canvas")
+            }
+            XCTAssertGreaterThanOrEqual(Double(dump.slices[0].min() ?? -1), 0)
+            XCTAssertLessThanOrEqual(Double(dump.slices[0].max() ?? 2), 1)
+        }
+    }
+
+    /// `feather = 0` must not merely look like 005c: no blur pass may run, so the numbers are the ones
+    /// the recorded goldens were made from. The pinned values are 005c's own probe points.
+    func testFeatherZeroRunsNoBlurAndKeepsTheCoverage() throws {
+        let image = rampImage()
+        let graph = try makeGraph(image)
+        let result = try XCTUnwrap(try graph.maskAtlasWithReport(
+            maskDoc(.linearGradient(LinearGradientShape()), componentFeather: 1.0, maskFeather: 0),
+            options: RenderOptions(scale: 1)))
+        XCTAssertEqual(result.report.atlasPasses, ["s1_5_mask_atlas"],
+                       "a document without feather/refine must run the pointwise pass only")
+        XCTAssertEqual(result.report.featherMaskCount, 0)
+        XCTAssertEqual(result.report.refineMaskCount, 0)
+        XCTAssertEqual(result.report.atlasDependency, .pointwise)
+
+        XCTAssertEqual(sample(result.dump, 0, 48, 32), 0.5000, accuracy: 1.5 / 255)
+        XCTAssertEqual(sample(result.dump, 0, 10, 16), 0.1606, accuracy: 1.5 / 255)
+        XCTAssertEqual(sample(result.dump, 0, 80, 48), 0.8394, accuracy: 1.5 / 255)
+    }
+
+    /// The guided filter has to leave a mask in [0, 1] and actually change it: a uniform guide turns it
+    /// into the window mean, which softens the stroke's hard edge.
+    func testRefineStaysInTheUnitIntervalAndSoftens() throws {
+        let image = flatImage(0.4, width: 192, height: 128)
+        let brush = MaskShape.brush(BrushShape(size: 0.3, strokes: [
+            Stroke(points: [0.3, 0.5, 0.72, 0.5], radius: 0.12, feather: 0.0)]))
+        let raw = try atlas(maskDoc(brush, componentFeather: 0, maskFeather: 0), image)
+        let refined = try atlas(maskDoc(brush, componentFeather: 0, maskFeather: 0, refine: 1), image)
+
+        XCTAssertEqual(partialCount(raw), 0, "the fixture must start as a hard-edged stroke")
+        XCTAssertGreaterThan(partialCount(refined), 200, "refine must soften the edge")
+        var changed = 0.0
+        for i in 0..<(raw.width * raw.height) {
+            changed += abs(Double(raw.slices[0][i]) - Double(refined.slices[0][i]))
+        }
+        XCTAssertGreaterThan(changed, 10, "meanAbs must move (§005b criterion ⑥)")
+        for value in refined.slices[0] {
+            XCTAssertGreaterThanOrEqual(value, 0)
+            XCTAssertLessThanOrEqual(value, 1)
+        }
+    }
+
+    /// The refine's whole point: a mask edge that coincides with an image edge gets *sharper*, because
+    /// `a = cov/(var + ε)` is large exactly where the two agree. §005b criterion ⑥ asks for "the edge
+    /// gradient rises", so that is what is measured — a slope across the guide's edge, before and after.
+    func testRefineSteepensTheMaskEdgeOnAnImageEdge() throws {
+        let width = 240, height = 160
+        // Guide: dark left half, bright right half, so the edge sits at x = 120.
+        let image = twoToneImage((0.05, 0.05, 0.05), (0.60, 0.60, 0.60),
+                                 width: width, height: height)
+        // Mask: a soft ramp whose ½ point is exactly on that edge.
+        let ramp = MaskShape.linearGradient(LinearGradientShape(
+            start: NormalizedPoint(0.08, 0.5), end: NormalizedPoint(0.92, 0.5), midpoint: 0.5))
+        let raw = try atlas(maskDoc(ramp, componentFeather: 1.0, maskFeather: 0), image)
+        let refined = try atlas(maskDoc(ramp, componentFeather: 1.0, maskFeather: 0, refine: 1), image)
+
+        let y = height / 2
+        let edge = width / 2
+        XCTAssertEqual(sample(raw, 0, edge, y), 0.5, accuracy: 0.02, "the fixture's ½ point is the edge")
+        let slope = { (dump: MaskAtlasDump) -> Double in
+            let left = self.sample(dump, 0, edge - 4, y)
+            let right = self.sample(dump, 0, edge + 4, y)
+            return right - left
+        }
+        XCTAssertGreaterThan(slope(refined), slope(raw) * 1.2,
+                             "the mask edge must follow the guide's edge (raw \(slope(raw)), refined \(slope(refined)))")
+        XCTAssertLessThanOrEqual(Double(refined.slices[0].max() ?? 2), 1)
+        XCTAssertGreaterThanOrEqual(Double(refined.slices[0].min() ?? -1), 0)
+    }
+
+    // MARK: - 005d: tiles, bounds, dependency closure
+
+    /// **The** 005d criterion (§3.4): a tiled pass and a full-frame pass of the same document must
+    /// produce the same bytes — not "the same picture". Three shapes, two tile modes, SHA-256 over both
+    /// the display frame and every atlas slice.
+    func testTiledLocalStageIsByteIdenticalToFullFrame() throws {
+        let image = rampImage(width: 320, height: 200)
+        let docs: [(String, EditModel)] = [
+            ("brush", maskDoc(.brush(BrushShape(size: 0.14, strokes: [
+                Stroke(points: [0.12, 0.2, 0.34, 0.26], radius: 0.06, feather: 0.4)])),
+                componentFeather: 0.5, maskFeather: 0.3,
+                adjustments: LocalAdjustments(exposure: 1.2, saturation: 15))),
+            ("radial", maskDoc(.radialGradient(RadialGradientShape(
+                center: NormalizedPoint(0.3, 0.4), radius: NormalizedPoint(0.12, 0.12))),
+                componentFeather: 0.4, maskFeather: 0, refine: 1,
+                adjustments: LocalAdjustments(exposure: -1.5))),
+            ("colour", maskDoc(.colorRange(ColorRangeShape(samples: [Self.leftColourSRGB],
+                                                           tolerance: 0.2, smoothness: 0.5)),
+                componentFeather: 0.5, adjustments: LocalAdjustments(exposure: 0.8))),
+        ]
+        for (name, edit) in docs {
+            for mode in [MaskTiling.tiles, .auto] {
+                let graph = try makeGraph(image)
+                var full = RenderOptions(scale: 1, wantsPixels: true)
+                full.maskTiling = .off
+                var tiled = full
+                tiled.maskTiling = mode
+
+                let a = try graph.render(edit, options: full)
+                let b = try graph.render(edit, options: tiled)
+                let shaA = try XCTUnwrap(a.display).sha256()
+                let shaB = try XCTUnwrap(b.display).sha256()
+                XCTAssertEqual(shaA, shaB, "\(name)/\(mode): the tiled frame differs from the full frame")
+
+                // The atlas is a full-frame pass in both modes, so it must be bit-identical too.
+                let da = try XCTUnwrap(try graph.maskAtlas(edit, options: full))
+                let db = try XCTUnwrap(try graph.maskAtlas(edit, options: tiled))
+                XCTAssertEqual(da.slices, db.slices, "\(name)/\(mode): the atlas changed with the tiling")
+            }
+        }
+    }
+
+    /// The tile plan must be *smaller* — measured in pixels, not in wall-clock time, so a loaded machine
+    /// cannot turn this red — and it must **cover every pixel the atlas covers**. A plan that is too
+    /// small would still pass a pixel comparison (the missing pixels are simply never written), which is
+    /// exactly why the coverage assertion is here.
+    func testTilePlanCoversEveryCoveredPixelAndIsCheaper() throws {
+        // 1024×640: a 256-px tile lattice, and the stroke's halo stays inside two of them.
+        let image = rampImage(width: 1024, height: 640)
+        let brush = BrushShape(size: 0.12, strokes: [
+            Stroke(points: [0.10, 0.14, 0.26, 0.19], radius: 0.05, feather: 0.3)])
+        let edit = maskDoc(.brush(brush), componentFeather: 0.5, maskFeather: 0.2,
+                           adjustments: LocalAdjustments(exposure: 0.7))
+        let result = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            edit, options: RenderOptions(scale: 1, maskTiling: .tiles)))
+        let plan = result.report.localPlan
+
+        XCTAssertTrue(plan.tiled, "a small brush must not be dispatched over the whole canvas")
+        XCTAssertGreaterThan(plan.tiles.count, 1, "the plan must be several tiles, not one")
+        XCTAssertLessThan(Double(plan.pixelCount), 0.25 * Double(plan.canvasPixelCount),
+                          "the plan is \(plan.pixelCount) of \(plan.canvasPixelCount) pixels")
+        XCTAssertEqual(plan.canvasPixelCount, image.width * image.height)
+        XCTAssertEqual(plan.dependency, .pointwise, "S1.6 reads one pixel and writes it")
+        XCTAssertEqual(plan.tiles.count, Set(plan.tiles).count, "no tile may be dispatched twice")
+
+        let slice = result.dump.slices[0]
+        var covered = 0
+        var outsidePlan = 0
+        for y in 0..<result.dump.height {
+            for x in 0..<result.dump.width where slice[y * result.dump.width + x] > 0 {
+                covered += 1
+                let inside = plan.tiles.contains {
+                    $0.x0 <= x && x < $0.x1 && $0.y0 <= y && y < $0.y1
+                }
+                if !inside { outsidePlan += 1 }
+            }
+        }
+        XCTAssertGreaterThan(covered, 500, "the fixture must actually cover something")
+        XCTAssertEqual(outsidePlan, 0,
+                       "\(outsidePlan) covered pixels lie outside the dispatched tiles")
+    }
+
+    /// A mask that covers the frame has no smaller plan to offer: it must degenerate to one full pass,
+    /// otherwise "tiling" would be a per-pixel branch masquerading as an optimisation.
+    func testFullFrameMaskDegeneratesToOnePass() throws {
+        let image = rampImage(width: 256, height: 160)
+        let ramp = MaskShape.linearGradient(LinearGradientShape())
+        let edit = maskDoc(ramp, componentFeather: 1.0, maskFeather: 0,
+                           adjustments: LocalAdjustments(exposure: 0.5))
+        let result = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            edit, options: RenderOptions(scale: 1, maskTiling: .tiles)))
+        XCTAssertFalse(result.report.localPlan.tiled)
+        XCTAssertEqual(result.report.localPlan.pixelCount, image.width * image.height)
+        XCTAssertEqual(result.report.localPlan.tiles.count, 1)
+
+        // A content-dependent predicate is a full-frame mask by definition (§4.4/§4.5), so it must not
+        // pretend to be a patch either.
+        let colour = maskDoc(.colorRange(ColorRangeShape(samples: [Self.leftColourSRGB],
+                                                         tolerance: 0.15)),
+                             adjustments: LocalAdjustments(exposure: 0.5))
+        let colourResult = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            colour, options: RenderOptions(scale: 1, maskTiling: .tiles)))
+        XCTAssertFalse(colourResult.report.localPlan.tiled)
+    }
+
+    /// Bounds must contain every pixel the atlas actually covers — through a crop, a rotation and a
+    /// flip, and with the feather's halo included. The failure mode is silent (a stripe of the mask
+    /// stops being recomputed), so it is checked against the rendered coverage, not against a formula.
+    func testMaskBoundsContainEveryCoveredPixel() throws {
+        let image = rampImage(width: 200, height: 140)
+        var edit = maskDoc(.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.45, 0.55), radius: NormalizedPoint(0.14, 0.09), angle: 30)),
+            componentFeather: 0.5, maskFeather: 0.4,
+            adjustments: LocalAdjustments(exposure: 0.5), id: "m-bounds")
+        edit.geometry = GeometryGroup(crop: NormalizedRect(x: 0.12, y: 0.08, width: 0.7, height: 0.62),
+                                      rotationDegrees: 6, flipHorizontal: true, flipVertical: false)
+
+        let result = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            edit, options: RenderOptions(scale: 1, maskTiling: .tiles)))
+        let bounds = try XCTUnwrap(result.report.bounds["m-bounds"])
+        let slice = result.dump.slices[0]
+
+        var covered = 0
+        for y in 0..<result.dump.height {
+            for x in 0..<result.dump.width where slice[y * result.dump.width + x] > 0 {
+                covered += 1
+                XCTAssertTrue(bounds.x0 <= x && x < bounds.x1 && bounds.y0 <= y && y < bounds.y1,
+                              "coverage at (\(x), \(y)) lies outside \(bounds.keyString)")
+            }
+        }
+        XCTAssertGreaterThan(covered, 200)
+        XCTAssertFalse(bounds.x1 - bounds.x0 == result.dump.width
+                       && bounds.y1 - bounds.y0 == result.dump.height,
+                       "the fixture must produce a real bound, not the whole canvas")
+
+        // The halo is part of the bound: a bigger feather must widen it by the radius difference.
+        var softened = edit
+        softened.masks[0].feather = 0
+        let tightResult = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            softened, options: RenderOptions(scale: 1)))
+        let tight = try XCTUnwrap(tightResult.report.bounds["m-bounds"])
+        let halo = MaskRadius.featherPixels(0.4, content: ImageSize(width: result.dump.width,
+                                                                    height: result.dump.height))
+        XCTAssertEqual(Double((bounds.x1 - bounds.x0) - (tight.x1 - tight.x0)),
+                       halo * 2, accuracy: 4,
+                       "feather 0.4 must widen the bound by 2 × its radius")
+        XCTAssertLessThanOrEqual(bounds.x0, tight.x0)
+    }
+
+    /// §3.4 step 4: the closure is `D ∪ descendants(D)` in Kahn order, and a cycle is reported instead
+    /// of half-rendered. M4's own documents have no edges, which is why the chain is synthetic.
+    func testMaskGraphClosureOrdersProducersBeforeConsumers() {
+        typealias Edge = MaskGraph.Edge
+        let chain = MaskGraph(ids: ["A", "B", "C"],
+                              edges: [Edge(from: "A", to: "B"), Edge(from: "B", to: "C")])
+        XCTAssertEqual(chain.closure(of: ["A"]), ["A", "B", "C"])
+        XCTAssertEqual(chain.closure(of: ["B"]), ["B", "C"])
+        XCTAssertEqual(chain.closure(of: ["C"]), ["C"])
+        XCTAssertEqual(chain.closure(of: ["Z"]), [], "an unknown id must not invent a node")
+        XCTAssertEqual(chain.executionOrder(for: ["A"]), ["A", "B", "C"])
+        XCTAssertEqual(chain.executionOrder(for: ["B"]), ["B", "C"])
+        XCTAssertEqual(chain.topologicalOrder(), ["A", "B", "C"])
+        XCTAssertNil(chain.cycle)
+
+        // Diamond: C is reached twice but executed once.
+        let diamond = MaskGraph(ids: ["A", "B", "C", "D"],
+                                edges: [Edge(from: "A", to: "B"), Edge(from: "A", to: "C"),
+                                        Edge(from: "B", to: "D"), Edge(from: "C", to: "D")])
+        XCTAssertEqual(diamond.executionOrder(for: ["A"]), ["A", "B", "C", "D"])
+
+        // A cycle is refused, not silently broken: no order, a cycle to report, nothing to execute.
+        let cyclic = MaskGraph(ids: ["A", "B"],
+                               edges: [Edge(from: "A", to: "B"), Edge(from: "B", to: "A")])
+        XCTAssertNil(cyclic.topologicalOrder())
+        XCTAssertNotNil(cyclic.cycle)
+        XCTAssertEqual(cyclic.cycle?.first, cyclic.cycle?.last, "a reported cycle is a closed walk")
+        XCTAssertEqual(cyclic.executionOrder(for: ["A"]), [])
+
+        // The document graph of M4 is edgeless — that is a fact about this milestone, asserted rather
+        // than assumed, so adding a linked mask without an edge shows up here.
+        var edit = maskDoc(.linearGradient(.default))
+        edit.masks.append(Mask(id: "m-second", components: [MaskComponent(id: "c2")]))
+        let documentGraph = MaskGraph.from(edit.activeMasks)
+        XCTAssertEqual(documentGraph.ids, ["m-005d", "m-second"])
+        XCTAssertTrue(documentGraph.edges.isEmpty)
+        XCTAssertEqual(documentGraph.executionOrder(for: ["m-second"]), ["m-second"])
+    }
+
+    /// `masks == []` must still be the M1 graph, now including 005d's report: no atlas, no tiles, no
+    /// neighbourhood pass, and the seven pinned keys untouched.
+    func testEmptyMasksProduceNoMaskWork() throws {
+        let graph = try makeGraph(rampImage())
+        let result = try graph.render(EditModel.neutral, options: RenderOptions(scale: 1, wantsPixels: true))
+        XCTAssertNil(result.maskReport, "no masks: no mask work to report")
+        XCTAssertNil(result.keys.maskAtlas)
+        XCTAssertEqual(result.keys.pipeline.count, 7)
+        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.allCases))
+    }
+
+    /// The 005d golden: one mask softened by `feather`, one sharpened by `refine`, on the ramp so the
+    /// guided filter has structure to follow. A new file — 005b's gradient frame and 005c's
+    /// brush/colour frame stay exactly as recorded.
+    private func goldenFeatherRefineRecord() throws -> (record: MaskGolden, json: String) {
+        let image = rampImage()   // 96 × 65
+        let graph = try makeGraph(image, identity: "mask-feather-refine")
+        var edit = EditModel.neutral
+        let soft = Mask(id: "m-fe", name: "Feathered radial +0.6 EV",
+                        feather: 0.5, refine: 0,
+                        components: [MaskComponent(id: "fe1", feather: 0.2, shape: .radialGradient(
+                            RadialGradientShape(center: NormalizedPoint(0.42, 0.5),
+                                                radius: NormalizedPoint(0.28, 0.28), angle: 0)))],
+                        adjustments: LocalAdjustments(exposure: 0.6))
+        let guided = Mask(id: "m-rf", name: "Refined brush −0.7 EV",
+                          feather: 0, refine: 1,
+                          components: [MaskComponent(id: "rf1", feather: 0.3, shape: .brush(
+                            BrushShape(size: 0.2, strokes: [
+                                Stroke(points: [0.55, 0.3, 0.8, 0.45, 0.86, 0.7],
+                                       radius: 0.09, feather: 0.35),
+                            ])))],
+                          adjustments: LocalAdjustments(amount: 80, exposure: -0.7))
+        edit.masks = [soft, guided]
+
+        let dump = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
+        let display = try XCTUnwrap(
+            graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true)).display)
+
+        let sampleX = [8, 32, 40, 64, 84, 72]
+        let sampleY = [8, 16, 32, 32, 48, 56]
+        var samples: [[Double]] = []
+        for (x, y) in zip(sampleX, sampleY) {
+            samples.append(dump.slices.map { Double($0[y * dump.width + x]) })
+        }
+
+        let record = MaskGolden(
+            note: "Recorded by MaskTests on the synthetic 96×65 ramp image; masks m-fe (radial, "
+                + "mask-level feather 0.5 → a 3.2 px box blur, +0.6 EV) and m-rf (brush, refine 1 → "
+                + "guided filter on S1's luma, amount 80, −0.7 EV). Both 005d neighbourhood operators "
+                + "are in the frame. 8-bit quantised digests so a GPU family change does not invalidate "
+                + "the frame; re-record only when a kernel change is intended.",
+            sourceWidth: image.width,
+            sourceHeight: image.height,
+            maskIDs: dump.maskIDs,
+            atlasSHA256: quantisedDigest(dump.slices.flatMap { $0 }),
+            displaySHA256: quantisedDigest((0..<(display.width * display.height)).flatMap { i -> [Float] in
+                [Float(display.rgba[i * 4]), Float(display.rgba[i * 4 + 1]), Float(display.rgba[i * 4 + 2])]
+            }),
+            samples: samples,
+            sampleX: sampleX,
+            sampleY: sampleY)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return (record, String(decoding: try encoder.encode(record), as: UTF8.self))
+    }
+
+    /// The 005d frame: feather + refine, pinned to its own file.
+    /// Regenerate with `PHOTONS_RECORD_GOLDEN=1 swift test --filter testFeatherAndRefineFrameGolden`.
+    func testFeatherAndRefineFrameGolden() throws {
+        let (record, json) = try goldenFeatherRefineRecord()
+        try assertGolden(named: "mask-feather-refine-s1.0.json", record: record, json: json)
+    }
+
+    // MARK: - 005d: the frame budget
+
+    /// Three masks at 4.10 Mpx, full S0→S4, cache off — the budget §005c item ⑦ set at p95 ≤ 16.7 ms.
+    ///
+    /// Skipped unless `PHOTONS_BENCH=1`. The assertion is a *structural* ceiling (100 ms), because a
+    /// wall-clock assertion at the 16.7 ms scale turns a busy machine into a red test; the pixel-based
+    /// assertions above are the ones that guard correctness. What this reports is the number that goes
+    /// in the milestone note.
+    func testFrameBudgetWithThreeMasks() throws {
+        guard ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" else {
+            throw XCTSkip("set PHOTONS_BENCH=1 to measure the 4.10 Mpx frame budget")
+        }
+        let image = rampImage(width: 2731, height: 1500)   // 4.0965 Mpx ≈ 4.10 Mpx
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+
+        func document(feather: Double, refine: Double) -> EditModel {
+            var edit = EditModel.neutral
+            edit.masks = [
+                Mask(id: "m-a", feather: feather, refine: refine,
+                     components: [MaskComponent(id: "a1", feather: 0.4, shape: .radialGradient(
+                        RadialGradientShape(center: NormalizedPoint(0.3, 0.35),
+                                            radius: NormalizedPoint(0.18, 0.18)))),
+                                  MaskComponent(id: "a2", feather: 0.3, shape: .linearGradient(
+                        LinearGradientShape(start: NormalizedPoint(0.4, 0),
+                                            end: NormalizedPoint(0.5, 1))))],
+                     adjustments: LocalAdjustments(exposure: 0.8, saturation: 10)),
+                Mask(id: "m-b", feather: feather, refine: refine,
+                     components: [MaskComponent(id: "b1", feather: 0.35, shape: .brush(
+                        BrushShape(size: 0.2, strokes: [
+                            Stroke(points: [0.2, 0.6, 0.5, 0.72, 0.8, 0.62], radius: 0.08,
+                                   feather: 0.4),
+                        ])))],
+                     adjustments: LocalAdjustments(exposure: -1.1, contrast: 20)),
+                Mask(id: "m-c", feather: feather, refine: refine,
+                     components: [MaskComponent(id: "c1", feather: 0.5, shape: .colorRange(
+                        ColorRangeShape(samples: [Self.leftColourSRGB], tolerance: 0.18,
+                                        smoothness: 0.5)))],
+                     adjustments: LocalAdjustments(amount: 60, temperature: 30, saturation: -20)),
+            ]
+            return edit
+        }
+
+        for (label, doc) in [("feather 0.15", document(feather: 0.15, refine: 0)),
+                             ("feather 0.15 + refine 0.5", document(feather: 0.15, refine: 0.5))] {
+            let graph = try RenderGraph(input: RenderInput(image: image, identity: "bench-4mpx"))
+            var times: [Double] = []
+            for _ in 0..<25 {
+                let result = try graph.render(doc, options: RenderOptions(scale: 1, useCache: false,
+                                                                        wantsPixels: false))
+                if let t = result.output { graph.recycle(output: t) }
+                times.append(result.trace.gpuMilliseconds)
+            }
+            times.sort()
+            let p50 = times[times.count / 2]
+            let p95 = times[min(times.count - 1, Int(Double(times.count) * 0.95))]
+            print(String(format: "BENCH %@: p50 %.2f ms  p95 %.2f ms  min %.2f  max %.2f (3 masks, 4.10 Mpx)",
+                         label, p50, p95, times.first ?? 0, times.last ?? 0))
+            XCTAssertLessThan(p95, 100, "\(label): a structural regression, not jitter")
+        }
+
+        // A slider drag with two masks: with `.off` the whole local pass re-runs; with `.tiles` the
+        // increment lands in place inside the moved mask's tiles (§3.4 step 3).
+        var drag = document(feather: 0.15, refine: 0)
+        drag.masks = [drag.masks[1], drag.masks[2]]
+        let graph = try RenderGraph(input: RenderInput(image: image, identity: "bench-4mpx"))
+        var off: [Double] = [], on: [Double] = []
+        for mode in [MaskTiling.off, .tiles] {
+            var o = RenderOptions(scale: 1, useCache: true, wantsPixels: false)
+            o.maskTiling = mode
+            _ = try graph.render(drag, options: o)          // warm
+            var times: [Double] = []
+            for i in 0..<20 {
+                drag.masks[0].adjustments.exposure = 0.5 + Double(i) * 0.05
+                let r = try graph.render(drag, options: o)
+                if let t = r.output { graph.recycle(output: t) }
+                times.append(r.trace.gpuMilliseconds)
+            }
+            times.sort()
+            if mode == .off { off = times } else { on = times }
+        }
+        print(String(format: "BENCH slider drag, 2 masks: full pass p50 %.2f ms, tiled increment p50 %.2f ms",
+                     off[off.count / 2], on[on.count / 2]))
+    }
+
+    /// The 005d criterion in its incremental form — "the tiled increment equals one full-frame
+    /// computation, pixel for pixel". A slider move on one of two masks must rewrite only that mask's
+    /// region **in place** and still match a *cold* full-frame render of the new document.
+    func testIncrementalUpdateEqualsAColdFullFrameRender() throws {
+        let image = rampImage(width: 1024, height: 640)
+        var doc = EditModel.neutral
+        doc.masks = [
+            Mask(id: "m-a", feather: 0.2,
+                 components: [MaskComponent(id: "a1", feather: 0.4, shape: .brush(
+                    BrushShape(size: 0.14, strokes: [
+                        Stroke(points: [0.12, 0.16, 0.3, 0.2], radius: 0.06, feather: 0.35)])))],
+                 adjustments: LocalAdjustments(exposure: 0.5)),
+            Mask(id: "m-b", feather: 0,
+                 components: [MaskComponent(id: "b1", feather: 0.4, shape: .radialGradient(
+                    RadialGradientShape(center: NormalizedPoint(0.78, 0.72),
+                                        radius: NormalizedPoint(0.1, 0.1))))],
+                 adjustments: LocalAdjustments(exposure: -1)),
+        ]
+        var moved = doc
+        moved.masks[0].adjustments.exposure = 1.8          // one slider, no selection change
+        for mode in [MaskTiling.auto, .tiles] {
+        var tiled = RenderOptions(scale: 1, wantsPixels: true)
+        tiled.maskTiling = mode
+
+        let graph = try makeGraph(image)
+        _ = try graph.render(doc, options: tiled)          // the frame this update builds on
+        let incremental = try graph.render(moved, options: tiled)
+        XCTAssertTrue(incremental.trace.executed.contains(.localApply))
+        XCTAssertTrue(incremental.trace.skipped.contains(.maskAtlas),
+                      "moving a slider must not rebuild the selection")
+        let plan = try XCTUnwrap(incremental.maskReport?.localPlan)
+        XCTAssertTrue(plan.tiled, "the update must be confined to the mask's tiles")
+        XCTAssertLessThan(Double(plan.pixelCount), 0.25 * Double(plan.canvasPixelCount),
+                          "the increment covered \(plan.pixelCount) of \(plan.canvasPixelCount) pixels")
+
+        // A cold render (fresh graph, no history) of the *same* document is the reference.
+        var full = RenderOptions(scale: 1, wantsPixels: true)
+        full.maskTiling = .off
+        let cold = try makeGraph(image).render(moved, options: full)
+        XCTAssertEqual(try XCTUnwrap(incremental.display).sha256(),
+                       try XCTUnwrap(cold.display).sha256(),
+                       "the in-place increment differs from one full-frame computation")
+
+        // And a repeat is a whole-stage hit: nothing is recomputed for an unchanged document.
+        let again = try graph.render(moved, options: tiled)
+        XCTAssertTrue(again.trace.skipped.contains(.localApply))
+        XCTAssertEqual(try XCTUnwrap(again.display).sha256(), try XCTUnwrap(cold.display).sha256())
+        }
+    }
+
     // MARK: - the recorded golden frames
 
     struct MaskGolden: Codable, Equatable {

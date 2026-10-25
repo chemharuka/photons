@@ -12,12 +12,18 @@ using namespace metal;
 // Pointwise by construction: every stage in this kernel reads exactly the pixel it writes, which is
 // what keeps 005d's tile recomputation honest (no halo).
 //
+// Tiling (005d): `p.a.z/.w` carry the origin of the rectangle being dispatched, so the graph can send
+// one thread group per dirty tile instead of the whole canvas. The kernel still addresses pixels in
+// *canvas* coordinates, and outside the mask's bounds the coverage is exactly 0, so a tile pass and a
+// full-frame pass write the same half-floats — which is the 005d acceptance criterion, checked by
+// hashing both frames rather than by looking at them.
+//
 // Real identity branch (M1-6): if no mask has an active adjustment, or a given mask's adjustments
 // are neutral (or `amount == 0`, or its coverage is 0), the source pixel is written unchanged.
 // That is what makes "a mask with no adjustments" bit-exact against "no mask at all".
 
 struct LocalParams {
-    int4 a;   // anyActive, maskCount, pad, pad
+    int4 a;   // anyActive, maskCount, originX, originY (canvas pixels)
 };
 
 struct LocalAdjustDesc {
@@ -69,9 +75,13 @@ kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
                        constant LocalParams &p [[buffer(0)]],
                        constant LocalAdjustDesc *adjust [[buffer(1)]],
                        uint2 gid [[thread_position_in_grid]]) {
-    float4 c = src.read(gid);
+    // Canvas coordinates: a tiled dispatch offsets the grid instead of moving the texture.
+    uint2 px = uint2(gid.x + uint(p.a.z), gid.y + uint(p.a.w));
+    if (px.x >= src.get_width() || px.y >= src.get_height()) { return; }
+
+    float4 c = src.read(px);
     if (p.a.x == 0) {
-        dst.write(c, gid);
+        dst.write(c, px);
         return;
     }
 
@@ -79,7 +89,7 @@ kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
     for (uint i = 0; i < uint(max(p.a.y, 0)); ++i) {
         LocalAdjustDesc d = adjust[i];
         if (d.c.w < 0.5) { continue; }                  // neutral adjustments: skip entirely
-        float a = atlas.read(gid, i).r;                 // opacity · combine · invert, from S1.5
+        float a = atlas.read(px, i).r;                  // opacity · combine · invert, from S1.5
         // `acc · amount`: the atlas already carries the mask-level opacity, `d.a.w` carries the
         // adjustment's amount (0…1). Zero weight returns before `local_adjust`, so a mask with
         // amount 0 is bit-identical to no mask even if a slider would have produced a NaN (§3.3).
@@ -87,5 +97,5 @@ kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
         if (w <= 0.0) { continue; }
         v = mix(v, local_adjust(v, d), w);
     }
-    dst.write(float4(v, c.a), gid);
+    dst.write(float4(v, c.a), px);
 }
