@@ -284,3 +284,39 @@ RAW Power 首页宣传的 "Unique Hooks into Apple's RAW Engine（Control Boost,
 2. **`extendedDynamicRangeAmount` 不是可用的杠杆**：它只在 boost=默认值时抬高上限（会顺带改影调），boost=0 时完全无效。故不列入 EDR 实现手段。
 3. **EDR 显示的"数据侧"在 M3 就定了**（随前置 ②），"画面侧"才留 M3.5：S4 的 `clamp(v,0,1)` 与画布的 `CAMetalLayer`/headroom 属于 M3 的契约，
    否则 M3.5 要同时改 S4、S2 的高光段、`DisplayOptions`、缓存键与全部 golden。
+
+### 11.9 解码缓冲曾经整体上下镜像（2026-10-26 更正，影响所有 golden）
+
+M3 时记录的"`L1030433.dng` 渲染成 180°，因为文件里读不到 orientation tag"**是误判**。实测：
+
+- TIFF IFD0 `0x0112 = 1`（57 个 entry 里明确存在），5 个 SubIFD 无该 tag（默认 1）；exiftool 的
+  `[IFD0]/[XMP-tiff]/[CameraIFD] Orientation` 全为 1；文件内嵌 JPEG preview 是正立的（与 Apple 全解码 corr 0.994）；
+  `filter.orientation` 也报 `.up`。
+- **真因：`CIContext.render(to: MTLTexture)` + `getBytes` 读回是 bottom-up**。合成图案（左上角白标记）读回后
+  标记落在 buffer **最后一行**；同一 CIImage 用 `getBytes` 与 `createCGImage` 对比是 **mirrorV corr 0.9998**。
+  所以 `LinearImage` 的 row 0 一直是画面底部——**每个文件**都上下镜像，带文字的样张才看起来"转了 180°"。
+
+修法与后果：
+
+- `RAWDecoder` 读回时修正行序；`LinearImage` 新增 `ImageOrientation`（8 值 + `irot→EXIF` 映射）与 `oriented()`。
+- 方向解析走 ImageIO `kCGImagePropertyOrientation` → HEIF `irot` → `CIRAWFilter.orientation` 兜底，解码与预览
+  两条路必须给出**同一个**方向结论（单测断言相等）。
+- **方向不是用户编辑**：不进 `EditModel`，进 `StageKeys.links(…, orientation:)`，且 `== .up` 时不追加字段
+  （`.up` 的键逐字节不变）。
+- `DecodeRecipe.current` → **`v2-topdown-rows`**：v1 落盘的线性缓冲是镜像的，绝不能复用。
+- 全部 4 个像素 golden 已重录；`mask-*` 为合成源（不走解码）不受影响。
+- 客观判据（不靠肉眼）：修复后 decode 上半区 0.1548 > 下半区 0.1152（修复前 Δ = −0.040）；端到端 `photonsctl render`
+  与 `sips` 独立解码 **identity 0.9954**（修复前 mirrorV 0.9947）。
+- 残留缺口：本机 12 个 HEIC 的 `irot` 全是 0，非零旋转只用合成 box 测过；`imir`（镜像 box）未实现。
+
+### 11.10 1:1 取景要用 core 的 `outputWindow`，不能用 `cropRect` 冒充
+
+1:1 曾用"改 `geometry.cropRect` 再按 canvas 渲"实现，后果是暗角与蒙版 feather 按**可见窗口**归一化，
+且 S0 的归一化旋转使 9° 拉直下的投影差约 **0.29%**（量化过：mean 0.1926 / max 0.4978 显示单位）。
+
+正解：`RenderOptions.outputWindow: ImageRect?`（内容像素坐标，`nil` = 整帧），S0 两阶段——全帧 crop/rotate/flip，
+再取窗口；暗角与 feather 回到**整帧**归一化。结果：与"整帧渲染后裁同一区域"**逐像素一致（0.000000）**，
+`nil` 时 7 个 M1 键逐字节不变，窗口只进 geoKey；1:1 平移一帧 p50 4.0–4.6 ms。
+
+残留：`LoupeMapping`（命中测试/捏合锚点）仍是窗口形状，9° 拉直下与渲染投影差 ≤0.29%（7.5 px @2560），
+属于 hit-testing 的近似，不在渲染路径上。

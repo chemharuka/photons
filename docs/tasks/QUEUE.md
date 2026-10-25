@@ -52,10 +52,10 @@
 
 | # | 工作流 | 前置 | 文件所有权 | 验收 |
 |---|---|---|---|---|
-| Q16 | **编辑持久化进库**：`develop_json` / `edit_history` 表落盘 + 打开库时恢复 | M2 + 历史（c50d2a7） | `Sources/PhotonsCatalog/**`（迁移 v3）、`Sources/PhotonsCore/History.swift`（只读调用） | 改一个滑杆 → 重开库 → 像素 hash 一致；`edit_history` 行 1:1 映射；迁移自动快照 |
+| Q16 | **编辑持久化进库**（**完成 `9e39800`**，迁移 v3）：`develop_json` / `edit_history` 表落盘 + 打开库时恢复 | M2 + 历史（c50d2a7） | `Sources/PhotonsCatalog/**`（迁移 v3）、`Sources/PhotonsCore/History.swift`（只读调用） | 改一个滑杆 → 重开库 → 像素 hash 一致；`edit_history` 行 1:1 映射；迁移自动快照 |
 | Q17 | **方向映射**：EXIF orientation（含 `irot`）在解码与预览两条路都应用 | M3.5 | `Sources/PhotonsCore/PreviewImage.swift`、`RAWDecoder.swift` | `L1030433.dng` 180° 修正；方向矩阵 8 种组合单测；golden 更新说明 |
 | Q18 | **M5 预设 + 复制粘贴设置** | 历史 | `Sources/PhotonsCatalog/Presets*`、`Sources/PhotonsCore/EditModel.swift`（只加不改变语义） | 预设往返 Codable；复制粘贴只带非默认字段；单测 |
-| Q21 | **核心 output window rect**：`RenderOptions.windowRect` 替代“用 crop 模拟取景”，暗角/feather 按整帧归一化 | Q15 | `Sources/PhotonsCore/RenderGraph.swift`、`Stage.swift`（键）、`s0_geometry.metal` | 9° 拉直下窗口中心与整帧渲染逐像素对齐（<0.001）；1:1 平移一帧 p95 不退化 |
+| Q21 | **核心 output window rect**（**完成 `9c962d5`**）：`RenderOptions.windowRect` 替代“用 crop 模拟取景”，暗角/feather 按整帧归一化 | Q15 | `Sources/PhotonsCore/RenderGraph.swift`、`Stage.swift`（键）、`s0_geometry.metal` | 9° 拉直下窗口中心与整帧渲染逐像素对齐（<0.001）；1:1 平移一帧 p95 不退化 |
 | Q22 | **蒙版 UI**（画笔拖拽、叠加显示开关、语义蒙版菜单）+ showMask 历史修法 | Q9e | `Sources/PhotonsUI/**`（新 MaskOverlayController） | 画一笔 → 蒙版覆盖变化且可撤销；showMask 开关不进历史 |
 | Q19 | **批量导出 + 导出对话框** | M5 | `Sources/PhotonsExport/**`、`Sources/PhotonsUI/**` | 20 张批量导出、命名模板、失败逐个报告 |
 | Q20 | **文档 §12：UI 架构** | Q12/Q15 | `docs/architecture-decisions.md` | 只写文档；主线写，不派子代理 |
