@@ -27,7 +27,7 @@ let valueFlags: Set<String> = [
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
-    "--ids",
+    "--ids", "--tier", "--strategy",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -627,6 +627,7 @@ guard let cmd = argv.first else {
       photonsctl library stats   <pkg> [--json]
       photonsctl library verify  <pkg> [--rehash] [--json]
       photonsctl xmp export <pkg> --out <dir> [--ids id…|--rating N] [--embed] [--json]
+      photonsctl thumbs <pkg> --out <dir> [--tier grid|filmstrip|full] [--limit N] [--strategy auto|filter|thumbnail] [--reset] [--json]
       photonsctl fixtures <dir> [--count 100] [--dupes 10] [--size 320x240]
 
     render options:
@@ -661,6 +662,7 @@ do {
     case "bench":    try cmdBench(rest)
     case "library":  try cmdLibrary(rest)
     case "xmp":      try cmdXMP(rest)
+    case "thumbs":   try cmdThumbs(rest)
     case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")
     }

@@ -12,7 +12,8 @@
 | **P（preview 快速通路）** | 文件内嵌预览 JPEG（ImageIO `CGImageSourceCreateThumbnailAtIndex`，`CreateThumbnailIfAbsent=false`） | 目标是 ≤ 25 ms/张 | 网格/胶片条的**占位与首帧** | 相机（或 DNG Converter）自己锐化/降噪/曲线的产物，**不是编辑基线** |
 | **G（精修通路）** | `CIRAWFilter`（v8 + `boost=0` + gamut off）→ `RenderGraph(scale:tier)` | 0.3–0.5 s/张（`scale 0.125` 仍有 0.2 s 固定开销，§1 实测表） | 编辑过的、或档位超过内嵌预览尺寸的缩略图 | 与 loupe/导出**同一函数**（D12） |
 
-- 已实测：`CIRAWFilter.previewImage` 全尺寸渲出 4416×2944 只要 **0.192 s**，全解码（1/4 采样）0.760 s。P 通路直接走 ImageIO 拿同一份 JPEG（不构造 `CIRAWFilter`，省掉那 0.19 s）；**若 006a 实测 ImageIO 并不更快，就退回 `CIRAWFilter.previewImage`——数据是同一份，接口不变**。
+- 已实测（2026-10-25，19 个真实 RAW）：同一份内嵌 JPEG，**ImageIO 直取比 `CIRAWFilter.previewImage` 快 2.6×**（t256 冷 p50 62.1 ms vs 153 ms；t512 63.3 vs 162；t1024 48.6 vs 160），因为 `CIRAWFilter` 每次构造约 0.19 s。→ **P 通路定为 ImageIO 优先**，`CIRAWFilter.previewImage` 只作"ImageIO 无内嵌预览"时的回退；接口不变（`PreviewOutcome.source` 标注实际来源）。
+- 25 ms/张的目标在大容器 RAW 上**不可达**（CR3 单张扫描 ~80 ms，ARW/DNG ~17 ms，与 `maxPixelSize` 无关）：现基线 = 冷 p50 62 ms / p95 112 ms，热 p50 1.2 ms / p95 1.3 ms（t512）。
 - P 通路**只做占位**：它带着相机自己的锐化与曲线，且同一文件在默认解码设置下 EDR 余量被削 40%（§11.8）。因此：**网格不显示直方图/高光剪切警告，任何色调判断只允许在 loupe 做**。
 - 两条通路产出同一个键空间的不同 `pipeline` 值；解析顺序 = `graph` → `preview` → 现生成。G 落地后**立刻删掉同档 P 文件**，保证"占位→精修"只发生一次、不来回抖。
 
@@ -149,7 +150,7 @@ M2 实测导入 260 文件/s（1000 个 3.8 s）。即使 P 通路 25 ms/张，�
 
 | 风险 | 处理 |
 |---|---|
-| ImageIO 直取内嵌预览在大 CR3 上并不比 0.192 s 快 | 006a 先测；慢则整体退回 `CIRAWFilter.previewImage`，键与接口不变（这是本规格刻意留的唯一分支） |
+| ImageIO 直取内嵌预览在大 CR3 上并不比 0.192 s 快 | **已测：ImageIO 快 2.6×**，故 P 通路定为 ImageIO 优先；`CIRAWFilter.previewImage` 保留为回退（键与接口不变） |
 | 内嵌预览是相机 JPEG，与 G 出图观感跳变明显 | 只在 `tier ≤ 1024` 且未编辑时用 P；G 一到即删 P；占位角标可关（默认不显示角标，避免"闪烁提示"） |
 | 6 GB 缓存挤爆用户盘 | 默认 2 GB + 三种淘汰序 + `settings` 可调；清理在后台且永不删 10 分钟内写过的文件 |
 | 编辑拖动时重渲风暴 | `isInteracting` 禁投 + 300 ms 防抖 + 单飞 + 并发 3 + 同级 jobId 顺序 |

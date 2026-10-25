@@ -215,6 +215,17 @@ masks(photo_id, mask_id, kind, params_json)       -- 预留，v0.3 启用
 CR3 **8192×5464**、RAF 4416×2944、ARW 1616×1080、RW2 1920×1280；渲 4416×2944 仅 **0.192 s**，而全解码（1/4 采样）0.760 s。
 → 网格缩略图与首帧直接走它，比走解码快约 4×；M2 导入时先落这张，再后台补真解码。
 
+**但"走 previewImage"具体指 ImageIO，不是 `CIRAWFilter`**（2026-10-25 实测，19 个真实 RAW，三档尺寸）：
+
+| 通路 | t256 冷 p50 / p95 | t512 | t1024 |
+|---|---|---|---|
+| ImageIO `CGImageSourceCreateThumbnailAtIndex`（`CreateThumbnailIfAbsent=false`） | **62.1 / 111.5 ms** | 63.3 / 119.1 ms | 48.6 / 74.1 ms |
+| `CIRAWFilter.previewImage` | 153 / 236 ms | 162 / 249 ms | 160 / 249 ms |
+
+`CIRAWFilter` 每次构造约 0.19 s，把 previewImage 的收益吃掉 2.6×；同一份内嵌 JPEG 用 ImageIO 直取即可。
+→ 结论：**缩略图 P 通路 = ImageIO 内嵌预览**；`CIRAWFilter.previewImage` 只作为"ImageIO 拿不到"时的回退。
+25 ms/张 在大容器 RAW（CR3 单张 ~80 ms 扫描）上不可达，现基线 = 冷 p50 62 ms / 热 1.2 ms（见 `006-thumbnails.md`）。
+
 ### 11.3 镜头校正按**文件**而非按机型
 
 `lensCorrectionEnabled` off→on 在 RW2 改动 4.13M 子像素（meanAbs 0.0663）、RAF 6.18M（0.0189）；但 CR3（EOS R5 + Sigma 50/1.4）**不支持**。能力探测必须 per-file，不能按机型缓存。

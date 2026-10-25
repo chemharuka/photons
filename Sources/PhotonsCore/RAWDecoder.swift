@@ -75,6 +75,14 @@ public struct RAWProbe: Sendable {
     public let make: String?
     public let model: String?
     public let iso: Int?
+    /// §11.3: lens correction is a **per-file** fact, never a per-camera one — the EOS R5 + Sigma
+    /// 50/1.4 CR3 body reports the switch as unavailable while RW2/RAF from the same era honour it.
+    /// So this is `isLensCorrectionSupported` *and* a successful toggle-and-read-back on this very
+    /// file; a body that claims support but keeps the old value must read `false` here, because a
+    /// UI toggle that cannot change pixels is a lie.
+    public let lensCorrectionSupported: Bool
+    /// The value `isLensCorrectionEnabled` came back with, after the probe restored it.
+    public let lensCorrectionEnabled: Bool
 }
 
 public final class RAWDecoder {
@@ -128,7 +136,24 @@ public final class RAWDecoder {
                         nativeHeight: Int(filter.nativeSize.height),
                         make: tiff?[kCGImagePropertyTIFFMake as String] as? String,
                         model: tiff?[kCGImagePropertyTIFFModel as String] as? String,
-                        iso: iso)
+                        iso: iso,
+                        lensCorrectionSupported: Self.probeLensCorrection(filter),
+                        lensCorrectionEnabled: filter.isLensCorrectionEnabled)
+    }
+
+    /// Toggle-and-read-back, on this file only (§11.3).
+    ///
+    /// `isLensCorrectionSupported` alone is not enough: the flag is a claim, and a claim that does
+    /// not survive assignment would put a dead switch in the inspector. We flip the value, read it
+    /// back, and restore — the restore matters because the same `CIRAWFilter` is about to be used
+    /// for the capabilities of the file, and a left-on correction silently changes pixels.
+    static func probeLensCorrection(_ filter: CIRAWFilter) -> Bool {
+        guard filter.isLensCorrectionSupported else { return false }
+        let original = filter.isLensCorrectionEnabled
+        filter.isLensCorrectionEnabled = !original
+        let toggled = filter.isLensCorrectionEnabled
+        filter.isLensCorrectionEnabled = original
+        return toggled == !original && filter.isLensCorrectionEnabled == original
     }
 
     // MARK: - decode
