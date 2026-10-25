@@ -20,14 +20,18 @@
 | Q3 | **XMP 映射规格** | — | `docs/xmp-mapping.md` | 文档自洽 | **完成**：`docs/xmp-mapping.md` 248 行（5 个不可映射；温度锚点只能平移不能换算） |
 | Q4 | **M3.5 缩略图规格**（006） | — | `docs/tasks/006-thumbnails.md` | 文档自洽 | **完成**：`docs/tasks/006-thumbnails.md` 156 行（内容寻址 JPEG 缓存；首屏热 p95 ≤80ms） |
 | Q5 | **历史与撤销（模型层）** | 无 | `Sources/PhotonsCore/History*.swift`、`Tests/PhotonsCoreTests/History*` | 单测：快照栈 + 游标 + 组级脏标记；`make verify` 绿 | **完成 `c50d2a7`**：EditHistory 338 行 + dirtyGroups，17 项单测 |
-| Q6 | **镜头校正能力探测（按文件）** | §11.3 已实测 | `Sources/PhotonsCore/RAWDecoder.swift`（只加不改变现有行为）、`Tests/PhotonsCoreTests/Lens*` | 单测：同一机身两种文件的能力集不同；`make verify` 绿 | 已派（第 3 轮，与 Q8 同进程，同改 RAWDecoder） |
-| Q7 | **裁剪/拉直（模型 + 渲染参数）** | M1 geometry 段已支持 crop/rotate | `Sources/PhotonsCore/EditModel+Geometry*`、单测 | 单测：crop 参数 → S0 参数映射；golden 覆盖 crop 一例 | 已派（第 3 轮） |
-| Q8 | **缩略图实现（previewImage 通路）** | Q4 规格 | `Sources/PhotonsCore/PreviewImage*.swift`、`Sources/PhotonsCatalog/ThumbnailCache*`、单测 | 单测 + 0.2 s/张 的实测；`make verify` 绿 | 已派（第 3 轮） |
-| Q9 | **蒙版实现（第一类值 + 线性/径向渐变）** | Q2 规格 ✅ | `Sources/PhotonsCore/Mask*.swift`、`Kernels/s15/s16*.metal`、`RenderGraph.swift`、`Stage.swift` | 单测 + 「masks 为空时 7 个旧键逐字节不变」+ 一帧 golden | **完成 005a/005b `a270f19`**（S1.5 atlas + S1.6 local，空 masks 键不变性已钉）；005c 已派（第 3 轮） |
+| Q6 | **镜头校正能力探测（按文件）** | §11.3 已实测 | `Sources/PhotonsCore/RAWDecoder.swift`（只加不改变现有行为）、`Tests/PhotonsCoreTests/Lens*` | 单测：同一机身两种文件的能力集不同；`make verify` 绿 | **完成 `753d04e`**：`probeLensCorrection` 读能力 → 切一次 → 回读 → 复位；单测守住“未复位会改像素” |
+| Q7 | **裁剪/拉直（模型 + 渲染参数）** | M1 geometry 段已支持 crop/rotate | `Sources/PhotonsCore/EditModel+Geometry*`、单测 | 单测：crop 参数 → S0 参数映射；golden 覆盖 crop 一例 | **完成 `a7368ec`**：CropMath + GeometryGroup 显式字段 + 24 项单测 + crop-rot golden |
+| Q8 | **缩略图实现（previewImage 通路）** | Q4 规格 | `Sources/PhotonsCore/PreviewImage*.swift`、`Sources/PhotonsCatalog/ThumbnailCache*`、单测 | 单测 + 0.2 s/张 的实测；`make verify` 绿 | **完成 `753d04e`**：ImageIO 优先（比 CIRAWFilter.previewImage 快 2.6×）、t512 冷 63/热 1.2 ms |
+| Q9 | **蒙版实现（第一类值 + 线性/径向渐变）** | Q2 规格 ✅ | `Sources/PhotonsCore/Mask*.swift`、`Kernels/s15/s16*.metal`、`RenderGraph.swift`、`Stage.swift` | 单测 + 「masks 为空时 7 个旧键逐字节不变」+ 一帧 golden | **完成 005a/005b `a270f19`**（S1.5 atlas + S1.6 local，空 masks 键不变性已钉）；**005c 完成 `a7368ec`**（画笔/颜色/亮度 + amount=0 位等价）；005d 已派（第 4 轮） |
 | Q10 | **XMP 导出实现** | Q3 规格 ✅ | `Sources/PhotonsExport/XMP*.swift`、`Sources/photonsctl/main.swift`、`Tests/PhotonsExportTests/`、`Package.swift` | 往返测试（写→读→比对）+ 不可映射项缺席 | **完成 `5e6993b`**：XMP.swift 835 行 + 20 项往返单测 + `photonsctl xmp export` |
 | Q11 | **文档刷新** | Q1 完成 | `docs/architecture-decisions.md`（新增 §12 UI 架构）、`docs/STATUS.md` | `make verify` 仍绿（文档不动代码） | 待开工（主线写） |
 
-## 第 2 轮并发约定（已验证有效，第 3 轮沿用）
+| Q12 | **UI 接真数据** | Q1/Q8 | `Sources/PhotonsUI/**`、`Sources/PhotonsApp/**`、`Makefile` | ui-smoke 新增：缩略图命中、滑杆改帧、撤销回原 hash、无历史置灰 | 已派（第 4 轮） |
+| Q9d | **蒙版 005d** | 005c | `Masks.swift`、`Kernels/s1_5*`、`s1_6*`、`RenderGraph.swift`（蒙版段）、`MaskTests` | tile 与全幅逐像素相等；3 蒙版 @4.1Mpx p95 ≤16.7 ms | 已派（第 4 轮） |
+| Q13 | **缩略图服务层** | Q8 | `Sources/PhotonsCatalog/ThumbnailService.swift`、`photonctl/thumbs.swift`、`Tests/PhotonsCatalogTests` | 同键合并一次、取消不写盘、优先级、并发上限、G 通路键不等 | 已派（第 4 轮） |
+
+## 第 2 轮并发约定（已验证有效，第 3/4 轮沿用）
 
 三个代码工作流同时跑，但**各自用独立 scratch 路径**（`swift build --scratch-path /tmp/photons-<q>`），
 不跑 `make verify`（`.build` 会互相踩）；由主 session 在所有分支落盘后统一跑一次 `make verify` 定档。
@@ -37,7 +41,7 @@
 - 先在跑的四项各自独立；Q5 是唯一**现在就能与 Q1 并行**的纯模型工作（新文件，不碰 `PhotonsCore` 现有文件）——Q1 完成后立刻派。
 - Q6/Q7 都要改 `PhotonsCore` 现有文件或 golden，**必须串行**在 Q1 之后。
 - Q8/Q9/Q10 依赖各自的规格文档，规格一到就派，彼此文件不重叠，可三项并行。
-- 每轮最多 3 个子代理同时写代码（本机编译 8 核，再多会互相抢 CPU 且 `make verify` 变慢）。
+- 每轮 3 个子代理同时写代码（实测有效：终态可控、互相不踩）（本机编译 8 核，再多会互相抢 CPU 且 `make verify` 变慢）。
 
 ## 明确不做（除非用户改口径）
 
