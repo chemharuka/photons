@@ -41,6 +41,10 @@
 
 ## Next — M2: catalog / import
 
+**规格已写好：`docs/tasks/003-catalog.md`**（库形态、v1 DDL、导入状态机、XMP 只读内嵌、迁移快照与
+前向保护、10 条可执行验收、~2,430 行工作分解）。下面的四条是解码侧前置，影响缩略图与导出档，
+与库无关，接在 M3 之前做即可。
+
 SQLite (+GRDB, the one allowed package) with `docs/architecture-decisions.md` §6 schema, full-file
 SHA-256 de-duplication, copy/reference import, date-foldered storage, crash-safe WAL. The render
 graph from M1 is the thing the catalog points at (`develop_json` → `EditModel`), so schema work and
