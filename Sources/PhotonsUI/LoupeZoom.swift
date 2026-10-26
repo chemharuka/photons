@@ -25,10 +25,21 @@ public struct LoupeViewState: Equatable, Sendable {
         case actual
     }
 
-    /// The pinch/drag ceiling. Above 8:1 a 60 MP frame is being shown through 64 canvas pixels per
+    /// The stop ceiling. Above 4:1 a 60 MP frame is being shown through sixteen canvas pixels per
     /// source pixel — there is no information left to reveal, only interpolation to admire.
-    public static let maximumZoom: Double = 8
-    public static let minimumZoom: Double = 1
+    public static let maximumZoom: Double = 4
+    /// The stop floor. Below 1:2 the frame is smaller than the fit view, which is what `mode == .fit`
+    /// already means, so 0.5 is the last rung before the whole frame.
+    ///
+    /// Not to be confused with the *fit ratio*: `LoupeFraming.fitZoom` is a property of the window and
+    /// the crop (0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, 1.0 for a small
+    /// file) and is **not** one of the stops. The ladder is `levels(fitZoom:)`, and it inserts the live
+    /// fit ratio wherever it actually falls.
+    public static let minimumZoom: Double = 0.5
+
+    /// The discrete stops, ascending. `fit` is a mode rather than a number (`levels(fitZoom:)` puts
+    /// the live ratio in its place), so this is the numeric half of the ladder.
+    public static let zoomStops: [Double] = [0.5, 1, 2, 3, 4]
 
     public var mode: Mode
     public var zoom: Double
@@ -46,20 +57,147 @@ public struct LoupeViewState: Equatable, Sendable {
 
     public var isActualSize: Bool { mode == .actual }
 
-    /// 1…8, the interactive domain (fit is a separate mode, not a zoom value).
+    /// 0.5…4, the interactive domain (fit is a separate mode, not a zoom value).
     public static func clampZoom(_ zoom: Double) -> Double {
         guard zoom.isFinite else { return minimumZoom }
         return min(max(zoom, minimumZoom), maximumZoom)
     }
 
-    /// "fit" / "1:1" / "4.0:1" — what the status chip and `--ui-smoke` print.
+    /// `"适应"` for the whole-frame mode, otherwise the stop as a percentage: `"100%"` is 1:1.
+    ///
+    /// The fit rung's real ratio is not in here on purpose — a `LoupeViewState` does not know the
+    /// window, so it cannot know what `fitZoom` is. `LoupeController.zoomLabel` adds it
+    /// (`"适应 31%"`); the ladder's own `LoupeZoomLevel.displayLabel` does the same from a known ratio.
     public var zoomLabel: String {
         switch mode {
-        case .fit: return "fit"
-        case .actual:
-            let z = Self.clampZoom(zoom)
-            return abs(z - 1) < 0.005 ? "1:1" : String(format: "%.1f:1", z)
+        case .fit: return "适应"
+        case .actual: return Self.percentLabel(of: Self.clampZoom(zoom))
         }
+    }
+
+    /// `0.5 → "50%"`, `1 → "100%"`, `3 → "300%"`. Whole percent: the stops are all whole numbers of
+    /// percent, and a readout with decimals is a readout nobody asked for.
+    public static func percentLabel(of zoom: Double) -> String {
+        let z = zoom.isFinite ? zoom : 1
+        return "\(Int((z * 100).rounded()))%"
+    }
+}
+
+// MARK: - the ladder
+
+/// One rung of the zoom ladder: a stop, or the frame's own fit ratio.
+///
+/// `fit` is a rung whose *value* moves with the window and the crop, which is why the ladder is a
+/// function (`LoupeViewState.levels(fitZoom:)`) and not a constant. For a 60 MP frame in a 2560-px
+/// viewport it is 0.31 and the ladder is `[0.31 适应, 0.5, 1, 2, 3, 4]`; for a 24 MP frame it can be
+/// 0.72 and the ladder is `[0.5, 0.72 适应, 1, 2, 3, 4]`; for a file smaller than the viewport it is
+/// 1.0 and the 100 % stop folds into it. Nothing here may assume the fit ratio sits below 50 %.
+public struct LoupeZoomLevel: Equatable, Sendable, Comparable {
+
+    /// Canvas pixels per source pixel. For `isFit` this is the live `LoupeFraming.fitZoom`.
+    public let zoom: Double
+    /// The rung `mode == .fit` corresponds to. Exactly one ladder entry carries it.
+    public let isFit: Bool
+
+    public init(zoom: Double, isFit: Bool = false) {
+        self.zoom = zoom
+        self.isFit = isFit
+    }
+
+    /// `"适应"` / `"50%"` — what the 倍率 menu and the six-state readout use.
+    public var label: String { isFit ? "适应" : LoupeViewState.percentLabel(of: zoom) }
+
+    /// `"适应 31%"` / `"50%"` — the status strip, where the fit ratio is worth printing because the
+    /// user can see it move with the window.
+    public var displayLabel: String {
+        isFit ? "适应 \(LoupeViewState.percentLabel(of: zoom))" : label
+    }
+
+    public static func < (a: LoupeZoomLevel, b: LoupeZoomLevel) -> Bool { a.zoom < b.zoom }
+
+    /// Two rungs this close are the same rung: 0.72 and 0.5 must not both appear, and a fit ratio of
+    /// 0.998 must not sit next to 100 %.
+    public static let tolerance = 0.005
+}
+
+extension LoupeViewState {
+
+    /// The ladder for a frame whose fit ratio is `fitZoom`: the fit rung plus the five stops, sorted
+    /// by value and de-duplicated (`LoupeZoomLevel.tolerance`).
+    ///
+    /// Recomputed per call rather than cached: `fitZoom` moves with the window size, the crop and the
+    /// straighten, so a cached table would be a stale table the moment the user resizes. When the fit
+    /// ratio coincides with a stop the **fit rung wins** — `mode == .fit` is the state the camera is
+    /// actually in, and a second entry 0.002 away would be a menu item that does nothing.
+    public static func levels(fitZoom: Double) -> [LoupeZoomLevel] {
+        let fit = fitZoom.isFinite && fitZoom > 0 ? fitZoom : 1
+        let candidates = [LoupeZoomLevel(zoom: fit, isFit: true)]
+            + zoomStops.map { LoupeZoomLevel(zoom: $0) }
+        var out: [LoupeZoomLevel] = []
+        // Ties sort fit-first so the fold below always keeps the fit rung.
+        for level in candidates.sorted(by: { $0.zoom < $1.zoom || ($0.zoom == $1.zoom && $0.isFit) }) {
+            if let last = out.last, abs(last.zoom - level.zoom) < LoupeZoomLevel.tolerance { continue }
+            out.append(level)
+        }
+        return out
+    }
+
+    /// The rung a raw zoom value lands on: **the largest rung not above it**.
+    ///
+    /// This is the "自动往下走一级" rule from one place instead of four event handlers. It is a floor,
+    /// not a nearest-value round: a pinch to 0.9 on a 60 MP frame lands on 50 %, never on 100 %.
+    /// Below the lowest rung the camera shows the whole frame — there is nothing further out than
+    /// fit, and pinching out from fit must not skip the 50 % rung on its way to 100 %.
+    public static func snappedLevel(for target: Double, fitZoom: Double) -> LoupeZoomLevel {
+        let ladder = levels(fitZoom: fitZoom)
+        let t = target.isFinite ? target : 1
+        if let level = ladder.last(where: { $0.zoom <= t + 1e-9 }) { return level }
+        return ladder.first(where: { $0.isFit }) ?? LoupeZoomLevel(zoom: fitZoom, isFit: true)
+    }
+}
+
+// MARK: - fit ↔ actual bridge
+
+/// The one geometric bridge the loupe draws, and the only thing in `PhotonsUI` that animates.
+///
+/// It exists because of a decode, not because of a taste for motion: crossing `fit ↔ actual` is the
+/// one camera change whose frame may have to wait for a full-size development (52–900 ms), and the
+/// canvas meanwhile holds a picture laid out for the *old* camera — the visible jump the user
+/// reported. The picture already on screen is scaled from the rect it occupies to the rect the new
+/// camera will occupy, and the real frame replaces it the moment it presents.
+///
+/// Both content rects are centred on the canvas (`RenderGraph` letterboxes with
+/// `origin = (canvas − content) / 2`), so the map between them is a **pure scale**: no translation,
+/// no anchor-point arithmetic, no geometry-flip ambiguity to get wrong.
+public struct LoupeZoomBridge: Equatable, Sendable {
+
+    /// The picture's rect in canvas pixels, before the crossing (the old camera).
+    public let fromContent: ImageSize
+    /// The rect the new camera's frame will occupy.
+    public let toContent: ImageSize
+
+    public init(fromContent: ImageSize, toContent: ImageSize) {
+        self.fromContent = fromContent
+        self.toContent = toContent
+    }
+
+    /// A content rect thinner than this is a broken frame, not a picture to scale by 2560×.
+    private static let minimumContentSide = 8
+
+    public var scaleX: Double {
+        fromContent.width >= Self.minimumContentSide
+            ? Double(toContent.width) / Double(fromContent.width) : 1
+    }
+
+    public var scaleY: Double {
+        fromContent.height >= Self.minimumContentSide
+            ? Double(toContent.height) / Double(fromContent.height) : 1
+    }
+
+    /// A crossing between two cameras that lay the picture out identically has nothing to bridge.
+    public var isVisible: Bool {
+        scaleX.isFinite && scaleY.isFinite
+            && (abs(scaleX - 1) > 0.002 || abs(scaleY - 1) > 0.002)
     }
 }
 
@@ -130,9 +268,12 @@ public struct LoupeFraming: Equatable, Sendable {
 
     /// Canvas pixels per source pixel when the whole crop is fitted into the viewport.
     ///
-    /// `min(1, …)`: an image smaller than the viewport is shown at 1:1, never blown up — the M3 rule,
-    /// and the reason `fit ≤ 1:1 ≤ zoom` holds for every image, which is what lets pinching stay in
-    /// the single interval 1…8 instead of straddling the fit scale.
+    /// `min(1, …)`: an image smaller than the viewport is shown at 1:1, never blown up — the M3 rule.
+    /// The result is therefore always in `(0, 1]`, and it is usually **not** one of the zoom stops:
+    /// 0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, exactly 1.0 for a file that
+    /// already fits. The ladder (`LoupeViewState.levels(fitZoom:)`) inserts this value as its own rung
+    /// wherever it falls, so the stops (0.5…4) and fit are ordered by value, not by convention —
+    /// nothing may assume fit sits below 50 %, and nothing may assume the current zoom is ≥ fit.
     public var fitZoom: Double {
         let z = min(Double(viewport.width) / max(cropWidthPixels, 1e-9),
                     Double(viewport.height) / max(cropHeightPixels, 1e-9))

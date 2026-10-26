@@ -2575,11 +2575,22 @@ public final class UISmokeRunner {
 
         let items = zoomMenuItems()
         let titles = items.map(\.title).joined(separator: " / ")
-        check("显示菜单有四档倍率 + 适应窗口 + 放大/缩小（\(titles)）",
-              items.count == 4 && items.map(\.tag) == [1, 2, 4, 8]
+        check("显示菜单有四档倍率（百分比）+ 适应窗口 + 放大/缩小（\(titles)）",
+              items.count == 4 && items.map(\.tag) == [1, 2, 3, 4]
+              && items.map(\.title) == ["100%", "200%", "300%", "400%"]
               && menuItem(#selector(EditorWindowController.zoomFitAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomInAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomOutAction(_:))) != nil)
+
+        // The ladder itself, as the user sees it: the fit rung carries the frame's own ratio
+        // (a 60 MP frame in this viewport fits well under 50 %), and the stops are percentages.
+        let ladder = loupe.zoomLevels
+        let ladderLabels = ladder.map(\.displayLabel).joined(separator: " / ")
+        check("倍率档位表按 fit 真实比例重算（\(ladderLabels)）",
+              ladder.contains(where: { $0.isFit })
+              && ladder.contains(where: { !$0.isFit && abs($0.zoom - 1) < 1e-9 })
+              && ladder.map(\.zoom) == ladder.map(\.zoom).sorted()
+              && ladder.allSatisfy { $0.label.hasSuffix("%") || $0.isFit })
 
         /// What the renderer would be asked for, at the camera's current state.
         func renderShape() -> (canvas: ImageSize, zoom: Double, window: ImageSize)? {
@@ -2598,8 +2609,8 @@ public final class UISmokeRunner {
             let ticked = items.filter { controller.validateMenuItem($0) && $0.state == .on }
             let label = loupe.zoomLabel
             let expectedWindow = expectedWindowSize(loupe: loupe, zoom: Double(item.tag))
-            stopResults.append(String(format: "%d:1→canvas %@ zoom %.0f window %@ label %@ ticked %d",
-                                      item.tag,
+            stopResults.append(String(format: "%d%%→canvas %@ zoom %.0f window %@ label %@ ticked %d",
+                                      item.tag * 100,
                                       shape.map { "\($0.canvas.width)×\($0.canvas.height)" } ?? "nil",
                                       shape?.zoom ?? -1,
                                       shape.map { "\($0.window.width)×\($0.window.height)" } ?? "nil",
@@ -2614,15 +2625,14 @@ public final class UISmokeRunner {
                 stopOK = false
             }
             stopOK = stopOK && ticked.count == 1 && ticked.first?.tag == item.tag
-            stopOK = stopOK && label == (item.tag == 1 ? "1:1"
-                                            : String(format: "%.1f:1", Double(item.tag)))
+            stopOK = stopOK && label == "\(item.tag * 100)%"
             stopsOK = stopsOK && stopOK
         }
         log("zoom stops              \(stopResults.joined(separator: " · "))")
-        check("四档倍率切换后 canvas == 视口、渲染倍率 == 档位、可见窗口 == 视口/倍率，且状态条文字同步（\(stopResults.joined(separator: " · "))）",
+        check("四档倍率切换后 canvas == 视口、渲染倍率 == 档位、可见窗口 == 视口/倍率，且状态条文字为百分比（\(stopResults.joined(separator: " · "))）",
               stopsOK)
 
-        // ⌘0 → fit; ⌘= → 1:1; ⌘= → 2:1; ⌘− → 1:1; ⌘− → fit.
+        // ⌘0 → fit; ⌘= → 100 %; ⌘= → 200 %; ⌘− → 100 %; ⌘− → 50 %; ⌘− → fit.
         //
         // The key equivalent is posted through the main menu, which is the shipped path. A harness
         // launched from a shell cannot hold key-window focus, so AppKit finds the item and then has
@@ -2654,12 +2664,14 @@ public final class UISmokeRunner {
         let zoomOutKey = shortcut("-")
         let afterOut = loupe.zoomLabel
         _ = shortcut("-")
+        let afterHalf = loupe.zoomLabel
+        _ = shortcut("-")
         let backToFit = loupe.viewState.isActualSize
-        log("zoom keys               ⌘0 matched=\(fitKey.matched) via \(fitKey.via) → actual \(fitState) · ⌘= \(zoomInKey.matched)/\(zoomInKey.via) → \(afterIn) · ⌘= → \(afterSecondIn) · ⌘− \(zoomOutKey.matched)/\(zoomOutKey.via) → \(afterOut) · ⌘− → fit \(!backToFit)")
-        check("⌘0/⌘=/⌘− 命中真实菜单快捷键（matched \(fitKey.matched)/\(zoomInKey.matched)/\(zoomOutKey.matched)）并走完倍率阶梯：适应窗口 → \(afterIn) → \(afterSecondIn) → \(afterOut) → 适应窗口（\(!backToFit)）",
+        log("zoom keys               ⌘0 matched=\(fitKey.matched) via \(fitKey.via) → actual \(fitState) · ⌘= \(zoomInKey.matched)/\(zoomInKey.via) → \(afterIn) · ⌘= → \(afterSecondIn) · ⌘− \(zoomOutKey.matched)/\(zoomOutKey.via) → \(afterOut) · ⌘− → \(afterHalf) · ⌘− → fit \(!backToFit)")
+        check("⌘0/⌘=/⌘− 命中真实菜单快捷键（matched \(fitKey.matched)/\(zoomInKey.matched)/\(zoomOutKey.matched)）并走完倍率阶梯：适应窗口 → \(afterIn) → \(afterSecondIn) → \(afterOut) → \(afterHalf) → 适应窗口（\(!backToFit)）",
               fitKey.matched && zoomInKey.matched && zoomOutKey.matched
-              && !fitState && afterIn == "1:1" && afterSecondIn == "2.0:1"
-              && afterOut == "1:1" && !backToFit)
+              && !fitState && afterIn == "100%" && afterSecondIn == "200%"
+              && afterOut == "100%" && afterHalf == "50%" && !backToFit)
 
         let hashAfter = documentHash(session.edit)
         log("zoom vs document        hash \(hashBefore.prefix(8))… → \(hashAfter.prefix(8))… · history \(session.history.count) · editRevision +\(session.editRevision - revisionBefore)")

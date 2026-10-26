@@ -252,7 +252,11 @@ public final class LoupeController: NSViewController {
         /// `contentHash|assetID`.
         public let identity: String
         public let viewport: ImageSize
-        public let state: LoupeViewState
+        /// The camera this file is rendered at. `var` because the loupe's own camera commands are
+        /// what move it: `setViewState` writes the new state back here, so a harness that says "show
+        /// this file" is not frozen at the camera it was constructed with (a `zoom(to:)` would
+        /// otherwise change `viewState` and render the old one, silently).
+        public var state: LoupeViewState
         public let edit: EditModel
 
         public init(url: URL, identity: String, viewport: ImageSize,
@@ -416,6 +420,12 @@ public final class LoupeController: NSViewController {
 
     /// Where the loupe is looking, in source pixels. The only view-state this type keeps.
     public private(set) var viewState = LoupeViewState.fit
+    /// The continuous value a *pinch* has accumulated, in the same units as `viewState.zoom`.
+    ///
+    /// The camera itself is always on a rung (`LoupeViewState.snappedLevel`), which would otherwise
+    /// round every 1–5 % pinch event straight back to the rung the gesture started on. Cleared by every
+    /// command that names a rung outright — those are not a pinch continuing.
+    private var pinchZoom: Double?
     /// What the window's screen can do; `headroom` is what S4 clamps at.
     public private(set) var displayHeadroom = DisplayHeadroom.sdr
     /// Set while the canvas layer is actually carrying extended-range values.
@@ -643,8 +653,9 @@ public final class LoupeController: NSViewController {
     /// The headroom the *next* frame will be rendered with. `1` whenever EDR is unavailable.
     public var headroom: Double { displayHeadroom.headroom }
 
-    /// What the status strip shows: display class, headroom, and where the camera is.
-    public var statusText: String { "\(displayHeadroom.displayText) · \(viewState.zoomLabel)" }
+    /// What the status strip shows: display class, headroom, and where the camera is — in percent,
+    /// with the fit rung's real ratio (`适应 31%`), so the number moves with the window.
+    public var statusText: String { "\(displayHeadroom.displayText) · \(zoomLabel)" }
 
     // MARK: camera state changes
 
@@ -653,9 +664,10 @@ public final class LoupeController: NSViewController {
         if viewState.isActualSize { zoomToFit() } else { zoomToActualSize() }
     }
 
-    /// Fit → 1:1 around the middle of what is on screen. Already zoomed → back to exactly 1:1.
+    /// Fit → 100 % around the middle of what is on screen. Already zoomed → back to exactly 100 %.
     public func zoomToActualSize() {
         guard let framing = framing() else { return }
+        pinchZoom = nil
         var next = viewState
         next.mode = .actual
         next.zoom = 1
@@ -667,6 +679,7 @@ public final class LoupeController: NSViewController {
 
     /// Back to the whole frame. Keeps the last centre so Z‑Z returns to where the user was.
     public func zoomToFit() {
+        pinchZoom = nil
         var next = viewState
         next.mode = .fit
         setViewState(next)
@@ -674,17 +687,32 @@ public final class LoupeController: NSViewController {
 
     // MARK: the zoom ladder (显示 ▸ 倍率)
 
-    /// The four stops the menu offers, in order. `1` is 1:1; the ceiling is
-    /// `LoupeViewState.maximumZoom`, and above 8:1 a 60 MP frame is being shown through 64 canvas
-    /// pixels per source pixel — nothing left to reveal.
-    public static let zoomStops: [Double] = [1, 2, 4, 8]
+    /// The five numeric stops, in order. `1` is 100 % (1:1); the ceiling is `LoupeViewState.maximumZoom`.
+    /// `fit` is the sixth rung and lives in `zoomLevels`, because its value is the frame's own ratio
+    /// and moves with the window (0.31 for 60 MP, 0.72 for 24 MP, 1.0 for a small file).
+    public static let zoomStops: [Double] = LoupeViewState.zoomStops
+
+    /// What the 倍率 menu can name. `EditorWindowController.zoomStopAction` reads the stop out of the
+    /// item's `tag` as `Double(tag)`, so a menu item can carry a whole-number zoom only; the 50 % rung
+    /// is reached with ⌘− from 100 % and by pinch, and `currentZoomStop` reports it either way.
+    public static let menuZoomStops: [Double] = [1, 2, 3, 4]
+
+    /// The ladder for the current window and crop — `[fit, 50 %, 100 %, 200 %, 300 %, 400 %]` sorted by
+    /// value with the live fit ratio folded in, recomputed per call because a resize changes it
+    /// (`LoupeViewState.levels(fitZoom:)`). Nothing caches it and nothing assumes an order.
+    public var zoomLevels: [LoupeZoomLevel] {
+        LoupeViewState.levels(fitZoom: framing()?.fitZoom ?? 1)
+    }
 
     /// Canvas pixels per source pixel the frame is being drawn at — `fit`'s own ratio included, so a
-    /// readout can say "0.31:1 (fit)" without a special case.
+    /// readout can say "适应 31%" without a special case.
     public var effectiveZoom: Double { framing()?.zoom(of: viewState) ?? 1 }
 
-    /// "fit" / "1:1" / "2:1" — the number the status chip and the menu tick both use.
-    public var zoomLabel: String { viewState.zoomLabel }
+    /// `"适应 31%"` / `"50%"` / `"100%"` — the number the status chip and the menu tick both use.
+    public var zoomLabel: String {
+        guard !viewState.isActualSize, let fit = framing()?.fitZoom else { return viewState.zoomLabel }
+        return "适应 \(LoupeViewState.percentLabel(of: fit))"
+    }
 
     /// The menu stop the camera is exactly on, or nil (fit, or a pinch between stops) — what the
     /// View menu ticks.
@@ -694,12 +722,13 @@ public final class LoupeController: NSViewController {
         return LoupeController.zoomStops.first { abs($0 - zoom) < 0.005 }
     }
 
-    /// A menu stop (1 / 2 / 4 / 8): same centre, new scale, one re-render.
+    /// A menu stop (1 / 2 / 3 / 4): same centre, new scale, one re-render.
     ///
     /// Unlike a pinch this does not need a cursor anchor — the command's subject is the picture in
     /// the window, so the centre is kept and the window shrinks around it.
     public func zoom(to stop: Double) {
         guard let framing = framing() else { return }
+        pinchZoom = nil
         var next = viewState
         next.mode = .actual
         next.zoom = LoupeViewState.clampZoom(stop)
@@ -709,7 +738,7 @@ public final class LoupeController: NSViewController {
         setViewState(framing.centering(next, onSource: centre))
     }
 
-    /// ⌘+ / ⌘=: the next stop up, or 8:1 from anything between. From `fit` it lands on 1:1 — the
+    /// ⌘+ / ⌘=: the next stop up, or 4:1 from anything between. From `fit` it lands on 100 % — the
     /// same destination as Z, because "zoom in from the whole frame" means full size first.
     public func zoomIn() {
         guard viewState.isActualSize else { zoomToActualSize(); return }
@@ -718,7 +747,8 @@ public final class LoupeController: NSViewController {
         zoom(to: next)
     }
 
-    /// ⌘−: the next stop down, and below 1:1 back to the whole frame (there is no 0.5:1 mode).
+    /// ⌘−: the next stop down — 100 % → 50 % → fit. Below the lowest stop there is nothing further
+    /// out than the whole frame.
     public func zoomOut() {
         guard viewState.isActualSize else { return }
         let current = LoupeViewState.clampZoom(viewState.zoom)
@@ -733,6 +763,7 @@ public final class LoupeController: NSViewController {
     /// a double-click is the "show me this at full size" gesture, and its inverse when already there.)
     public func handleDoubleClick(at point: CGPoint) {
         guard let framing = framing() else { return }
+        pinchZoom = nil
         if viewState.isActualSize {
             zoomToFit()
             return
@@ -770,30 +801,103 @@ public final class LoupeController: NSViewController {
         setViewState(next)
     }
 
-    /// Trackpad pinch: zoom about the cursor, 1…8, re-rendered at the new scale.
+    /// Trackpad pinch: a **continuous accumulator feeding a discrete ladder**.
+    ///
+    /// A pinch event is 1–5 %; if the camera's own (already snapped) zoom were the base, every event
+    /// would floor back to the rung the gesture started on and the pinch could never leave it. So the
+    /// accumulator carries the continuous value, the camera stays on a rung, and the source pixel under
+    /// the cursor stays where it is (`LoupeFraming.zooming`). Any command that names a rung outright
+    /// (menu, ⌘=, ⌘−, Z, double-click) clears the accumulator: that is not a pinch continuing.
     public func magnify(by factor: CGFloat, at point: CGPoint) {
         guard let framing = framing(), factor.isFinite, factor > 0 else { return }
-        let target = (viewState.isActualSize ? viewState.zoom : 1) * Double(factor)
-        // Below 1:1 there is only fit, so pinching in means "show me the whole frame" — the same
-        // destination as Z and the second half of a double-click.
-        if target < LoupeViewState.minimumZoom {
+        let raw = (pinchZoom ?? framing.zoom(of: viewState)) * Double(factor)
+        let level = LoupeViewState.snappedLevel(for: raw, fitZoom: framing.fitZoom)
+        if level.isFit {
+            // Nothing further out than the whole frame. The accumulator keeps the gesture's progress,
+            // so pinching back in leaves fit at the next rung instead of after another full sweep.
             if viewState.isActualSize { zoomToFit() }
+            pinchZoom = raw
             return
         }
-        let base = viewState.isActualSize ? viewState : LoupeViewState(
-            mode: .actual, zoom: 1,
-            centerX: framing.visibleCenter(of: viewState).x,
-            centerY: framing.visibleCenter(of: viewState).y)
-        let next = framing.zooming(base, to: target, aroundView: point, backingScale: backingScale)
+        let target = LoupeViewState.clampZoom(level.zoom)
+        let next = framing.zooming(viewState, to: target, aroundView: point, backingScale: backingScale)
+        pinchZoom = raw
         setViewState(next)
     }
 
     private func setViewState(_ next: LoupeViewState) {
         guard next != viewState else { return }
+        let previous = viewState
         viewState = next
+        // One camera, one place it is stored: a `FrameSource` names a file *and* the camera to render
+        // it from, so a zoom that did not travel into it would leave `viewState` and the rendered
+        // frames disagreeing (the trap for every "zoom, then look at the frame" test).
+        if var source = frameSource {
+            source.state = next
+            frameSource = source
+        }
         updateStatusChip()
         view.window?.invalidateCursorRects(for: canvasView)
+        // The loupe's one geometric transition, and only at the `fit ↔ actual` boundary: that is the
+        // crossing whose frame may have to wait for a development. 100 ↔ 200 ↔ 300 ↔ 400 re-render in
+        // a few milliseconds from a rung that is already resident, and that hard cut is the feel worth
+        // keeping — `armZoomBridge` refuses every same-mode change.
+        if previous.mode != next.mode, let framing = framing() {
+            armZoomBridge(from: previous, to: next, framing: framing)
+        }
         requestViewportRender()
+    }
+
+    // MARK: the fit ↔ actual bridge
+
+    /// The bridge composited over the canvas right now, if any (`nil` = the canvas is the frame).
+    public private(set) var zoomBridge: LoupeZoomBridge?
+    /// Crossings that armed a bridge — one per `fit ↔ actual` change with a picture on screen.
+    public private(set) var zoomBridgeArmedCount = 0
+    /// Frames presented while a bridge was up: the "at least one bridged frame" number.
+    public private(set) var zoomBridgeCoveredPresents = 0
+
+    private static let zoomBridgeKey = "photons.zoomBridge"
+    /// How long the old picture takes to reach the new geometry: long enough to read as motion,
+    /// shorter than any development. The bridge is **cut short** by the real frame, never waited on.
+    private static let zoomBridgeDuration: CFTimeInterval = 0.18
+
+    /// Scale the picture already on screen from the rect it occupies to the rect the new camera will
+    /// occupy, and hold it there until a real frame presents.
+    ///
+    /// Why a layer transform instead of a re-render: at `fit → 100 %` the frame the new camera wants
+    /// may still be developing (52–900 ms). The canvas keeps drawing the *previous* texture, laid out
+    /// for the *old* camera, so the change reads as a cut. Those pixels are the right picture — only
+    /// their rect is wrong — so the cheapest honest fix is to move the rect: one `CATransform3D` on the
+    /// canvas layer, identity → new/old content-rect ratio, with `fillMode = .forwards` so the new
+    /// geometry is **held** when a decode outlives the 180 ms motion. The layer's model transform stays
+    /// identity and `present` removes the animation, so no real frame is ever composited through it.
+    ///
+    /// Both rects are centred on the canvas (`RenderGraph` letterboxes about the middle), which is what
+    /// makes this a pure scale about the layer's anchor point — no translation, no flip arithmetic.
+    private func armZoomBridge(from old: LoupeViewState, to new: LoupeViewState, framing: LoupeFraming) {
+        guard old.mode != new.mode else { return }       // fit ↔ actual only, never 100 ↔ 200
+        guard lastFrame != nil else { return }           // nothing on screen to bridge from
+        let bridge = LoupeZoomBridge(fromContent: framing.contentPixels(of: old),
+                                     toContent: framing.contentPixels(of: new))
+        zoomBridge = bridge
+        zoomBridgeArmedCount += 1
+        guard bridge.isVisible else { return }
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = CATransform3DIdentity
+        animation.toValue = CATransform3DMakeScale(bridge.scaleX, bridge.scaleY, 1)
+        animation.duration = Self.zoomBridgeDuration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        animation.isRemovedOnCompletion = false
+        animation.fillMode = .forwards
+        canvasView.metalLayer.add(animation, forKey: Self.zoomBridgeKey)
+    }
+
+    /// Drop the bridge: the new camera's own frame is on the canvas.
+    private func disarmZoomBridge() {
+        guard zoomBridge != nil else { return }
+        zoomBridge = nil
+        canvasView.metalLayer.removeAnimation(forKey: Self.zoomBridgeKey)
     }
 
     private var backingScale: Double {
@@ -1489,6 +1593,13 @@ public final class LoupeController: NSViewController {
             return
         }
         presentRetries = 0
+        // A real frame ends any bridge, in the same turn the frame is handed to the layer: the canvas
+        // now carries pixels laid out for the new camera, so the scaled old picture must go now (and
+        // the animation with it — a real frame is never composited through a mid-flight transform).
+        if zoomBridge != nil {
+            zoomBridgeCoveredPresents += 1
+            disarmZoomBridge()
+        }
         lastFrame = frame
         lastPresentError = nil
         recordMeasurements(frame)
