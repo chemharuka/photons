@@ -185,9 +185,15 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// what changes is the indentation, the disclosure triangles and the folder glyphs.
     private func configureOutline() {
         sourcesOutline.headerView = nil
-        sourcesOutline.rowHeight = WorkspaceLayout.browserRowHeight
         sourcesOutline.backgroundColor = .clear
+        // Order matters: `.sourceList` applies the system's compact row metrics, so the height has to
+        // be pinned *after* the style, and `rowSizeStyle = .custom` is what keeps AppKit from putting
+        // its own 24 pt back. With the height set first, the cells were laid out for 46 pt rows inside
+        // 24 pt ones — the folder name sat above the row and got clipped by it.
         sourcesOutline.style = .sourceList
+        sourcesOutline.rowSizeStyle = .custom
+        sourcesOutline.rowHeight = WorkspaceLayout.browserRowHeight
+        sourcesOutline.intercellSpacing = NSSize(width: 0, height: 0)
         sourcesOutline.selectionHighlightStyle = .regular
         sourcesOutline.dataSource = self
         sourcesOutline.delegate = self
@@ -820,13 +826,21 @@ private final class SourceRowCell: NSTableCellView {
 
     override func layout() {
         super.layout()
+        let rowHeight = bounds.height
         let side = SourceRowCell.iconSide
-        icon.frame = NSRect(x: 2, y: (bounds.height - side) / 2, width: side, height: side)
+        icon.frame = NSRect(x: 2, y: (rowHeight - side) / 2, width: side, height: side)
         let textX = SourceRowCell.iconToText
-        // The count keeps its 40 pt gutter on the right; the name truncates in the middle so
-        // "day2-very-long-name" and "...-name" stay distinguishable at 212 pt.
-        detail.frame = NSRect(x: bounds.width - 44, y: 14, width: 40, height: 16)
-        title.frame = NSRect(x: textX, y: 13, width: max(10, bounds.width - textX - 48), height: 18)
+        // Everything is centred on the row's own height, not on a hard-coded 46 pt: a row that comes
+        // out shorter (a style change, a system metric, a test frame) must not push the name out of
+        // the row it belongs to. The count keeps its 40 pt gutter on the right; the name truncates in
+        // the middle so "day2-very-long-name" and "...-name" stay distinguishable at 212 pt.
+        let textHeight: CGFloat = 18
+        let detailHeight: CGFloat = 16
+        let titleY = (rowHeight - textHeight) / 2
+        detail.frame = NSRect(x: bounds.width - 44, y: (rowHeight - detailHeight) / 2,
+                              width: 40, height: detailHeight)
+        title.frame = NSRect(x: textX, y: titleY,
+                             width: max(10, bounds.width - textX - 48), height: textHeight)
     }
 }
 

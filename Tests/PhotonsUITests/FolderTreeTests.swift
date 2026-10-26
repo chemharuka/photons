@@ -76,6 +76,51 @@ final class FolderTreeTests: XCTestCase {
 
     private var tree: [BrowserPaneController.FolderTreeRow] { controller.folderTreeRows }
 
+    // MARK: row metrics
+
+    /// The folder name sits **inside** its row and centred in it.
+    ///
+    /// `NSOutlineView.style = .sourceList` applies the system's compact row metrics; with the row
+    /// height set *before* the style it came out ~24 pt while the cell still drew its title at y 13…31
+    /// of a 46 pt row — so the name was pushed up and clipped by the row above it (owner: 「文件夹
+    /// 名称被抬高了，字体被遮挡」). The style is applied first, `rowSizeStyle = .custom` pins the
+    /// height, and the cell centres on the row's own height instead of a constant.
+    func testTheFolderNameIsInsideAndCentredInItsRow() throws {
+        controller.applyLayout(in: CGSize(width: WorkspaceLayout.browserWidthDefault, height: 744))
+        controller.view.layoutSubtreeIfNeeded()
+
+        let outline = try XCTUnwrap(Self.findOutline(controller.view))
+        XCTAssertEqual(outline.rowHeight, WorkspaceLayout.browserRowHeight, accuracy: 0.01,
+                       "a source-list style must not shrink the row")
+
+        var checked = 0
+        for row in 0..<outline.numberOfRows {
+            guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+                  let label = cell.subviews.compactMap({ $0 as? NSTextField })
+                      .first(where: { !$0.stringValue.isEmpty && $0.font?.pointSize == 12 })
+            else { continue }
+            let height = cell.bounds.height
+            XCTAssertEqual(height, WorkspaceLayout.browserRowHeight, accuracy: 0.01,
+                           "row \(row) cell height")
+            XCTAssertGreaterThanOrEqual(label.frame.minY, -0.01,
+                                        "\(label.stringValue) starts above its row (\(label.frame))")
+            XCTAssertLessThanOrEqual(label.frame.maxY, height + 0.01,
+                                     "\(label.stringValue) is clipped by its row (\(label.frame) in \(height) pt)")
+            XCTAssertEqual(label.frame.midY, height / 2, accuracy: 1.0,
+                           "\(label.stringValue) is not centred (midY \(label.frame.midY) of \(height))")
+            checked += 1
+        }
+        XCTAssertGreaterThanOrEqual(checked, 2, "the tree drew at least 全部照片 + one folder")
+    }
+
+    private static func findOutline(_ view: NSView) -> NSOutlineView? {
+        if let outline = view as? NSOutlineView { return outline }
+        for sub in view.subviews {
+            if let found = findOutline(sub) { return found }
+        }
+        return nil
+    }
+
     // MARK: shape
 
     /// Default state: 全部照片 is expanded, the root is the second level, its subfolders stay closed.
