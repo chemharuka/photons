@@ -177,6 +177,53 @@ extension HistogramCardFormat {
     }
 }
 
+// MARK: - 013: the channel row's three numbers, while the pointer is over a bin
+//
+// The row under the plot (`R 1% G 5% B 10%`) used to be one thing only: the above-white share per
+// channel. While hovering it now reads **where the pointer is on the brightness axis** instead —
+// `亮度 82%` on the code segment, `亮度 +0.8` on the tail (`+1 档 = 2×`, mirrors above white).
+//
+// Why one number and not three: the plot's x axis *is* brightness. R, G and B at the same x are by
+// construction at the same level, so `R 82% G 82% B 82%` would be the same number printed three
+// times — three times the width, no extra information. What differs per channel at that x is the
+// *count* (how many pixels), and that is already on the footnote row (`R 1284 · G 1291 · B 1206`).
+// Leaving the plot puts the above-white shares back (the owner's own preference: those three
+// numbers are useful in their own right).
+
+extension HistogramCardFormat {
+
+    /// The brightness under the pointer as a percentage of display white, 0…100 — `nil` on the tail,
+    /// where a percentage has no meaning (the tail is *above* 100 % by definition).
+    ///
+    /// It is the reading's own `code` over 255: the code segment's axis is the sRGB code,
+    /// `0 → 0 %` and `255 → 100 %`, so the number the row prints is the number the axis is drawn on
+    /// (code 128 → 50.2 %, i.e. the mid grey of a video signal, not of light).
+    public static func hoverLevelPercent(_ reading: HistogramHoverReading) -> Double? {
+        guard reading.segment == .code else { return nil }
+        let code = min(255, max(0, reading.code))
+        return Double(code) / 255 * 100
+    }
+
+    /// The row's text while hovering, in the owner's two forms:
+    ///
+    /// - code segment: `亮度 82%` — whole percent (a tenth of a code value is not a brightness a
+    ///   photographer can act on, and `82.35%` would be four more glyphs at 9.5 pt);
+    /// - tail: `亮度 +0.8` — one decimal of a stop, the same `+N 档` language the closed readout uses
+    ///   one row down (`+2.00 档 (4.0×)`); the `档` unit is spelled out there, so the short form here
+    ///   is `+0.8` and the two rows read as one statement: `亮度 +0.8` … `+0.80 档 (1.7×)`.
+    ///
+    /// `nil` only when there is no reading at all (nothing hovered) — the caller then keeps painting
+    /// the above-white shares.
+    public static func hoverLevelText(_ reading: HistogramHoverReading?) -> String? {
+        guard let reading else { return nil }
+        if let percent = hoverLevelPercent(reading) {
+            return "亮度 " + String(format: "%.0f%%", percent)
+        }
+        let stops = max(reading.stops, 0)
+        return "亮度 " + String(format: "%+.1f", stops)
+    }
+}
+
 // MARK: - the card's arithmetic (no AppKit drawing, so the smoke can check the numbers directly)
 
 extension HistogramCardFormat {
