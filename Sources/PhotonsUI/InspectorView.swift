@@ -287,115 +287,70 @@ public struct InspectorView: View {
         }
     }
 
-    /// 细节 (派单 031): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to `CIRAWFilter`.
+    /// 细节 (派单 031, 数值口径 040): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to `CIRAWFilter`.
     ///
     /// Three rules make this card different from the tone sliders, and all three come from the same
     /// fact — **a tick here is a development, not a render**:
     ///
-    ///  1. **0 is "Apple's default", not "0.0".** The decoder's own colour NR is 0.5 and its sharpness
-    ///     0.5 (measured; 1.0 on a Canon body), so a slider at 0 assigns nothing at all. That is what
-    ///     keeps an untouched document byte-identical, and why the row prints the baseline next to
-    ///     the number: ± is relative to *this file's* default, not to a nominal zero.
+    ///  1. **The number is a slider position, 0…100.** `value / 100` is what gets assigned; the
+    ///     *default* position is the body's own baseline × 100 (Leica 0/50/0/50, R5 sharpness 100,
+    ///     Sony ARW luminance NR 38), and a slider sitting there assigns **nothing**. That is what keeps
+    ///     an untouched document byte-identical, and why a resting colour-NR slider must not push a
+    ///     0.0 into Apple's 0.5.
     ///  2. **Drag = preview rung, release = full size.** The thumb writes the document on every tick
     ///     (the canvas has to follow it), and the loupe rebuilds from the 0.5 rung while the slider is
     ///     held; 200 ms after the hand stops it develops full size and replaces the frame. One drag is
     ///     still **one** `EditHistory` snapshot, taken on release.
-    ///  3. **A dead slider is said out loud.** v9 of Apple's decoder ignores chroma NR and detail
-    ///     (`DecoderCapabilities`), so the card says so instead of letting a number move nothing.
+    ///  3. **Four sliders, no prose.** 040 removed the 「解码参数 · v9 · 基线 0.50」 line under them: the
+    ///     card is four rows of the *same* control every other card uses, and the decoder's own numbers
+    ///     live in the Decode card.
     private var detailCard: some View {
-        card(Section.detail.title) {
-            detailRow("降噪", \.luminanceNR, baseline: \.luminanceNR,
-                      effective: session.capabilities?.supportsDetail ?? true)
-            detailRow("色彩降噪", \.colorNR, baseline: \.colorNR,
-                      effective: session.capabilities?.supportsChromaNoiseReduction ?? true)
-            detailRow("细节", \.detail, baseline: \.detail,
-                      effective: session.capabilities?.supportsDetail ?? true)
-            detailRow("锐化", \.sharpness, baseline: \.sharpness,
-                      effective: session.capabilities?.supportsDetail ?? true)
-            Text(detailFooter)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// One line under the sliders: what these controls cost, and what the decoder does with them.
-    ///
-    /// The version comes from the decode that is on screen (`session.capabilities`), and the
-    /// "unavailable" note is that type's measurement, not this panel's opinion.
-    private var detailFooter: String {
-        let version = session.capabilities.map { "v\($0.effectiveVersion)" } ?? "尚未解码"
-        let inert = session.capabilities.map { c -> String in
-            var dead: [String] = []
-            if !c.supportsChromaNoiseReduction { dead.append("色彩降噪") }
-            if !c.supportsDetail { dead.append("细节/锐化") }
-            return dead.isEmpty ? "" : " · 该版本解码器忽略 \(dead.joined(separator: "、"))"
-        } ?? ""
-        return "解码参数 · \(version) · 0 = 系统默认 · 改一次 = 重新 develop\(inert)"
-    }
-
-    /// A row: title (double-click resets), the baseline, an editable number, and the slider.
-    ///
-    /// `baseline` names the decoder's own value on this axis, so the row can print "基线 0.50" — the
-    /// only way a relative slider can be honest about what 0 means for this body.
-    private func detailRow(_ title: String,
-                           _ path: WritableKeyPath<DetailSettings, Double>,
-                           baseline: KeyPath<DetailBaseline, Double>,
-                           effective: Bool) -> some View {
-        let value = detailBinding(path)
-        let base = detailBaselineValue[keyPath: baseline]
-        return VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(effective ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-                    .onTapGesture(count: 2) { resetDetail(path) }
-                    .help("双击复位为 0（= 解码器默认）")
-                if base > 0.0001 {
-                    Text(String(format: "基线 %.2f", base))
-                        .font(.system(size: 8))
-                        .foregroundStyle(.tertiary)
+        let baseline = detailBaselineValue
+        return card(Section.detail.title) {
+            ForEach(Self.detailContent.rows, id: \.axis) { row in
+                sliderRow(row.title,
+                          detailBinding(row.axis, baseline: baseline),
+                          row.range,
+                          row.format,
+                          step: row.step,
+                          editable: true,
+                          accessibilityID: "inspector.detail.\(row.axis.rawValue)",
+                          onReset: { resetDetail(row.axis) },
+                          onSubmit: { commitDetail(title: row.title) }) { editing in
+                    if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
-                Spacer(minLength: 4)
-                // A number you can type, not only a slider: the task asks for both. `onSubmit` writes
-                // and commits, so a typed value is one history entry and one development.
-                TextField("", value: value, format: .number.precision(.fractionLength(0)))
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.trailing)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(effective ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                    .frame(width: 40)
-                    .onSubmit { commitDetail(title: title) }
-                    .accessibilityIdentifier("inspector.detail.\(pathKey(path))")
             }
-            Slider(value: value, in: DetailSettings.range, step: DetailSettings.step) { editing in
-                if editing { beginDetailDrag() } else { commitDetail(title: title) }
-            }
-            .controlSize(.mini)
         }
     }
+
+    /// 派单 040: the card prints **nothing** under its sliders.
+    ///
+    /// The constant is the machine-readable form of that sentence (`nil` = no footer), and the panel
+    /// test also walks the rendered card for any 基线 / 解码 / v9 label: a line that came back as view
+    /// text would be caught there, not here.
+    public static let detailFooterText: String? = nil
+
+    /// The 细节 card's four rows, as data — what the view iterates, in order, with the travel and the
+    /// number format each row draws.
+    ///
+    /// 040's「下面解码参数什么的不用展示」is the reason this is a list of rows and not a view that also
+    /// knows how to print a note: the card's entire text is these four titles plus a number per row,
+    /// so a test can hold the whole surface (`DetailSectionTests.testTheCardPrintsNoDecoderProse`).
+    public static let detailContent = DetailCardContent.standard
 
     /// The decoder's own four values, read once per development. `.measured` until the first one
-    /// lands, so the panel can show a baseline before there is a buffer to ask.
+    /// lands, so the panel can put the sliders on their defaults before there is a buffer to ask.
     private var detailBaselineValue: DetailBaseline {
         loupe?.currentDetailBaseline ?? .measured
     }
 
-    private func pathKey(_ path: WritableKeyPath<DetailSettings, Double>) -> String {
-        switch path {
-        case \.luminanceNR: return "luminanceNR"
-        case \.colorNR: return "colorNR"
-        case \.detail: return "detail"
-        default: return "sharpness"
-        }
-    }
-
     /// Live write-through: every tick moves the document (the canvas follows the thumb), but nothing
-    /// is committed until the drag ends.
-    private func detailBinding(_ path: WritableKeyPath<DetailSettings, Double>) -> Binding<Double> {
-        Binding(get: { session.edit.detailSettings[keyPath: path] },
+    /// is committed until the drag ends. A position equal to the default clears the field instead of
+    /// storing the number — see `DetailSettings.setPosition`.
+    private func detailBinding(_ axis: DetailAxis, baseline: DetailBaseline) -> Binding<Double> {
+        Binding(get: { session.edit.detailSettings.position(axis, in: baseline) },
                 set: { newValue in
-                    session.applyEdit { $0.detailSettings[keyPath: path] = newValue }
+                    session.applyEdit { $0.detailSettings.setPosition(newValue, axis, in: baseline) }
                 })
     }
 
@@ -412,10 +367,12 @@ public struct InspectorView: View {
         loupe?.endDetailAdjustment()
     }
 
-    /// Double-click: back to 0, one snapshot, one development.
-    private func resetDetail(_ path: WritableKeyPath<DetailSettings, Double>) {
-        guard session.edit.detailSettings[keyPath: path] != 0 else { return }
-        session.applyEdit { $0.detailSettings[keyPath: path] = 0 }
+    /// Double-click: back to **this body's default position** — not to 0. On a Leica that is 50 for
+    /// colour NR and sharpness, on an R5 it is 100 for sharpness; resetting to 0 would switch Apple's
+    /// default off instead of restoring it. One snapshot, one development.
+    private func resetDetail(_ axis: DetailAxis) {
+        guard session.edit.detailSettings[axis] != nil else { return }
+        session.applyEdit { $0.detailSettings[axis] = nil }
         session.commitEdit(label: "复位")
         loupe?.endDetailAdjustment()
     }
@@ -466,22 +423,80 @@ public struct InspectorView: View {
 
     private func row(_ title: String, _ keyPath: WritableKeyPath<EditModel, Double>,
                      _ range: ClosedRange<Double>, _ format: String) -> some View {
-        let value = binding(keyPath)
-        return VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
+        sliderRow(title, binding(keyPath), range, format) { editing in
+            // Drag end = one edit action = one history snapshot (never per tick).
+            if !editing { session.commitEdit() }
+        }
+    }
+
+    // MARK: the one row shape (派单 040)
+
+    /// Every row in this panel is `label + number + Slider` in this style — the tone cards, the white
+    /// balance card and the 细节 card alike.
+    ///
+    /// 040's ask was 「拖动条的样式还是和其他保持一致」, and the reason the 细节 card did not look like
+    /// the rest was that it drew its own row: a second label ("基线 0.50"), a `TextField` where the
+    /// others print a readout, its own `Slider` with a step. So the fix was not "restyle the detail
+    /// card", it was **one builder** — and this enum is its only knob. Adding a second case is how a
+    /// variant would come back, which is why the test asserts `allCases == [.standard]`.
+    enum SliderRowStyle: String, CaseIterable {
+        case standard
+
+        var labelSize: CGFloat { 10 }
+        var labelWeight: Font.Weight { .medium }
+        var readoutSize: CGFloat { 10 }
+        var rowSpacing: CGFloat { 1 }
+        var headSpacing: CGFloat { 6 }
+        /// The tone rows have always been `.mini`; the detail rows now are too.
+        var controlSize: ControlSize { .mini }
+    }
+
+    /// A row: title (double-click resets when `onReset` is given), the number, and the slider.
+    ///
+    /// `editable` is the one difference the task asks for: the 细节 card has a number you can type
+    /// (`onSubmit` writes and commits, so a typed value is one history entry and one development),
+    /// the tone cards print theirs. Everything else — fonts, spacing, `controlSize`, the `Slider`
+    /// itself — comes from `SliderRowStyle`.
+    private func sliderRow(_ title: String,
+                           _ value: Binding<Double>,
+                           _ range: ClosedRange<Double>,
+                           _ format: String,
+                           step: Double? = nil,
+                           style: SliderRowStyle = .standard,
+                           editable: Bool = false,
+                           accessibilityID: String? = nil,
+                           onReset: (() -> Void)? = nil,
+                           onSubmit: (() -> Void)? = nil,
+                           onEditingChanged: @escaping (Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: style.rowSpacing) {
+            HStack(spacing: style.headSpacing) {
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: style.labelSize, weight: style.labelWeight))
                     .foregroundStyle(.secondary)
+                    .modifier(ResetOnDoubleClick(action: onReset))
                 Spacer(minLength: 4)
-                Text(Self.sliderText(format, value.wrappedValue))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.primary)
+                if editable {
+                    TextField("", value: value, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .font(.system(size: style.readoutSize, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .frame(width: 40)
+                        .onSubmit { onSubmit?() }
+                        .accessibilityIdentifier(accessibilityID ?? "")
+                } else {
+                    Text(Self.sliderText(format, value.wrappedValue))
+                        .font(.system(size: style.readoutSize, design: .monospaced))
+                        .foregroundStyle(.primary)
+                }
             }
-            Slider(value: value, in: range) { editing in
-                // Drag end = one edit action = one history snapshot (never per tick).
-                if !editing { session.commitEdit() }
+            if let step {
+                Slider(value: value, in: range, step: step, onEditingChanged: onEditingChanged)
+                    .controlSize(style.controlSize)
+            } else {
+                Slider(value: value, in: range, onEditingChanged: onEditingChanged)
+                    .controlSize(style.controlSize)
             }
-            .controlSize(.mini)
         }
     }
 
@@ -722,6 +737,57 @@ public struct InspectorView: View {
         Rectangle()
             .fill(Color.primary.opacity(0.08))
             .frame(height: 1)
+    }
+}
+
+/// What the 细节 card draws, in order (派单 040).
+///
+/// Four rows and nothing else: the card used to end with a line of decoder prose (「解码参数 · v9 ·
+/// 0 = 系统默认」) and a second label per row (「基线 0.50」). Both are gone, and making the rows data
+/// is what lets a test hold the card's entire text surface instead of a screenshot.
+public struct DetailCardContent: Equatable, Sendable {
+
+    public struct Row: Equatable, Sendable {
+        public var axis: DetailAxis
+        /// The row's label — also the undo label for one drag.
+        public var title: String
+        /// The slider's travel (0…100 for all four).
+        public var range: ClosedRange<Double>
+        /// The number's format: integers, no percent sign.
+        public var format: String
+        /// The slider's step (1 unit = 0.01 of a `CIRAWFilter` amount).
+        public var step: Double
+    }
+
+    public var rows: [Row]
+
+    public init(rows: [Row]) { self.rows = rows }
+
+    /// The shipped card: the four axes of `DetailAxis.panelOrder`, one travel, one format.
+    public static let standard = DetailCardContent(
+        rows: DetailAxis.panelOrder.map {
+            Row(axis: $0, title: $0.title, range: DetailSettings.range,
+                format: DetailSettings.format, step: DetailSettings.step)
+        })
+}
+
+/// Double-click on a row's label = back to that slider's default (派单 040).
+///
+/// A `nil` action leaves the label a plain label, so the tone rows keep exactly the behaviour they
+/// had; the 细节 rows pass one and get 「双击复位为默认位置」, which for them is the *body's* baseline
+/// (50 on a Leica for colour NR), never a nominal 0.
+private struct ResetOnDoubleClick: ViewModifier {
+    let action: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let action {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { action() }
+                .help("双击复位为默认位置")
+        } else {
+            content
+        }
     }
 }
 

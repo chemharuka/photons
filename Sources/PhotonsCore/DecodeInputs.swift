@@ -42,8 +42,8 @@ public struct DecodeInputs: Sendable, Hashable {
     /// (`luminanceNoiseReductionAmount`, `colorNoiseReductionAmount`, `sharpnessAmount`,
     /// `detailAmount`) **before** it produces pixels. Like the white balance they are a property of
     /// the development, not of the render — a detail change is a new buffer, not a new S1 pass.
-    /// `.identity` (all four 0) appends nothing to the key, which is what keeps every document that
-    /// has never touched the panel byte-identical to the pre-031 decode.
+    /// `.identity` (all four untouched) appends nothing to the key, which is what keeps every document
+    /// that has never touched the panel byte-identical to the pre-031 decode.
     public var detail: DetailSettings
 
     /// The neutral development: the file's own balance, no version request, full scale.
@@ -67,7 +67,7 @@ public struct DecodeInputs: Sendable, Hashable {
     /// pre-006 digest and every pre-009 rung identity byte-identical.
     public var whiteBalanceComponent: String? { whiteBalance.decodeComponent }
 
-    /// The detail component — `dt=nr+30.00,c+0.00,s-20.00,d+10.00` — or `nil` for an untouched panel.
+    /// The detail component — `dt=nr·,c30,s·,d·` — or `nil` for an untouched panel.
     public var detailComponent: String? { detail.decodeComponent }
 
     /// A stable, order-independent string for this development. Only decode inputs may enter it.

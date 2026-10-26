@@ -140,8 +140,8 @@ enum EditParameters {
             && areEqual(a.lensCorrections, b.lensCorrections)
     }
 
-    /// 派单 031: the decoder-side amounts. One unit of slider travel is 0.005 of a filter value, so
-    /// the 1e-6 tolerance is far below a step and far above JSON round-trip noise.
+    /// 派单 031: the decoder-side amounts. One unit of slider travel is 0.01 of a filter value (040's
+    /// 0…100 scale), so the 1e-6 tolerance is far below a step and far above JSON round-trip noise.
     static func areEqual(_ a: DetailSettings, _ b: DetailSettings) -> Bool {
         areEqual(a.luminanceNR, b.luminanceNR)
             && areEqual(a.colorNR, b.colorNR)
