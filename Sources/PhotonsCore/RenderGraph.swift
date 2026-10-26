@@ -171,6 +171,17 @@ public struct DisplayImage: Sendable {
 public final class RenderResult {
     public let canvas: ImageSize
     public let content: ImageSize
+    /// Where the photograph itself was drawn **inside this frame's texture** — canvas pixels, origin
+    /// top-left, half-open on the far edge (048).
+    ///
+    /// This is the rect a per-frame measurement has to use. `canvas` and `content` alone cannot say
+    /// it: they describe the letterbox, and `(canvas − content) / 2` is the picture's rect only when
+    /// the window does not reach past the frame. Hand that guess a 1:1 window on a picture smaller
+    /// than the viewport — the photograph is drawn at an offset with background around it — and the
+    /// measured "picture" is the window, so bin 0 collects every background pixel (measured 37 % of
+    /// the sample on a 1600×1002 window over a 2400×800 picture). The graph knows where S0 wrote the
+    /// picture (`plan.pictureRect`), so nobody has to infer it.
+    public let pictureRect: ImageRect
     /// The part of the frame these pixels are, in content pixels of the full frame at this render's
     /// `scale`; the whole frame when no window was asked for.
     public let window: ImageRect
@@ -195,12 +206,13 @@ public final class RenderResult {
     /// "nothing was measured" and "everything was black" cannot be confused.
     public let histogram: Histogram?
 
-    init(canvas: ImageSize, content: ImageSize, window: ImageRect, keys: StageKeys,
-         trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
+    init(canvas: ImageSize, content: ImageSize, pictureRect: ImageRect, window: ImageRect,
+         keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil) {
         self.canvas = canvas
         self.content = content
+        self.pictureRect = pictureRect
         self.window = window
         self.keys = keys
         self.trace = trace
@@ -673,6 +685,12 @@ public final class RenderGraph {
         /// can lose an ulp at large sizes and would move green).
         let s0Identity: Bool
         let s0PureCA: Bool
+        /// Where the photograph ended up **inside the canvas**, in canvas pixels, origin top-left
+        /// (row 0 = texture row 0). One derivation, from the same `origin`/`frameOrigin`/`frameSize`
+        /// S0 is handed — see `plan(_:_:)`. This is the rect a measurement of the frame's picture
+        /// has to use; `origin + content` is only the same thing when the window does not reach past
+        /// the frame.
+        let pictureRect: ImageRect
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
@@ -731,6 +749,33 @@ public final class RenderGraph {
             : ImageSize(width: Int((Double(frameSize.x)).rounded()),
                         height: Int((Double(frameSize.y)).rounded()))
 
+        // Where the photograph was **drawn**, in canvas pixels — the one place this is worked out
+        // (048).
+        //
+        // S0 writes content pixel `gid` at frame pixel `gid + 0.5 − origin + frameOrigin`
+        // (`s0_geometry.metal`), so the frame (i.e. the photograph) occupies content pixels
+        // `[−frameOrigin, frameSize − frameOrigin)` and canvas pixels
+        // `origin − frameOrigin + frameSize` — origin top-left, row-major, the same space the texture
+        // is read back in and `histogram_sample.metal` indexes. With no window, `frameOrigin == 0`
+        // and this is exactly `origin + content`, which is what every pre-048 caller assumed; with a
+        // window that reaches past the frame (`backgroundOutside`) the picture sits *off-centre*
+        // inside `content` and the canvas holds background around it, so `origin + content` is the
+        // window, not the picture, and measuring over it counts that background into bin 0.
+        //
+        // Clipped, not moved (`intersected(in:)`): the part of the picture outside the canvas was not
+        // drawn, so it is not part of what a measurement can count.
+        let pictureRaw = ImageRect(x: Int((origin.x - frameOrigin.x).rounded()),
+                                   y: Int((origin.y - frameOrigin.y).rounded()),
+                                   width: Int((Double(frameSize.x)).rounded()),
+                                   height: Int((Double(frameSize.y)).rounded()))
+        let pictureRect = pictureRaw.intersected(in: canvas)
+        // The bounds assertion the派单 asks for, in the form that can fail loudly: a rect that is not
+        // inside the canvas would let a measurement read someone else's pixels.
+        assert(pictureRect.x >= 0 && pictureRect.y >= 0
+               && pictureRect.maxX <= canvas.width && pictureRect.maxY <= canvas.height,
+               "the picture's rect \(pictureRect) left the canvas \(canvas)")
+        assert(canvas.width > 0 && canvas.height > 0, "a canvas with no pixels")
+
         let keys = RenderKeyChain.keys(RenderKeyChain.links(identity: input.identity,
                                                             sourceSize: sourceSize,
                                                             canvas: canvas,
@@ -754,7 +799,7 @@ public final class RenderGraph {
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
                     frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys,
                     s0Identity: untransformed && !caOn,
-                    s0PureCA: untransformed && caOn)
+                    s0PureCA: untransformed && caOn, pictureRect: pictureRect)
     }
 
     // MARK: render
@@ -979,10 +1024,9 @@ public final class RenderGraph {
         var histogramPayload: Histogram?
         if let source = histogramSource {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
-            let picture = ImageRect(x: Int(plan.origin.x.rounded()),
-                                    y: Int(plan.origin.y.rounded()),
-                                    width: plan.content.width, height: plan.content.height)
-                .clamped(in: plan.canvas)
+            // The picture, from the layout S0 actually drew with — not the content rect, which holds
+            // background around a window that reaches past the frame (048).
+            let picture = plan.pictureRect
             let sample = readSample(source)
             histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
                                                  headroom: options.display.headroom)
@@ -998,11 +1042,13 @@ public final class RenderGraph {
             let pixels = readback(finalTexture, primaries: options.display.primaries, bitDepth: options.display.bitDepth)
             pool.recycle(finalTexture)
             return RenderResult(canvas: plan.canvas, content: plan.content,
+                                pictureRect: plan.pictureRect,
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask, histogram: histogramPayload)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
+                            pictureRect: plan.pictureRect,
                             window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask, histogram: histogramPayload)
@@ -1154,10 +1200,14 @@ public final class RenderGraph {
     ///   - texture: the frame S4 wrote — `RenderResult.output`, or the texture the loupe is showing.
     ///   - edit: the document the frame was rendered with; it is what says how big the picture is
     ///     (for the `canvas`/`roi` the numbers are labelled with) and where a letterbox band would be.
-    ///   - content: the picture's rect **inside `texture`**, in texture pixels, when the caller knows
-    ///     it (`RenderResult.content` and `.canvas` give it exactly). `nil` → the whole texture, with
-    ///     a matte band detected and excluded if one is there. Passing it skips the probe and samples
-    ///     the picture's own pixels, which is the right call for any letterboxed frame.
+    ///   - content: the picture's rect **inside `texture`**, in texture pixels — origin **top-left,
+    ///     row 0 = the texture's first row**, the same space S0 writes (`gid`) and the sample kernel
+    ///     reads (`src.read`). `RenderResult.pictureRect` is this rect exactly, and is what a caller
+    ///     that drew the frame should pass. `nil` → the whole texture, with a matte band detected and
+    ///     excluded if one is there. Passing it skips the probe and samples the picture's own pixels,
+    ///     which is the right call for any letterboxed frame. A rect that hangs off the texture is
+    ///     clipped to it (`PixelRect.intersected(in:)`), and one that misses the texture entirely
+    ///     measures nothing rather than crashing.
     ///   - sampleLongEdge: long edge of the sampled grid; the default is the 0.29 MB one.
     ///   - headroom / primaries: what the frame was rendered with (`RenderOptions.display`), so the
     ///     ceiling ratio and the colour space the codes are in are labelled truthfully.
@@ -1197,8 +1247,23 @@ public final class RenderGraph {
         // number the shipped path reports, so the two plots are labelled in one coordinate system.
         let cropPixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
                                              in: sourceSize)
+        let binCount = min(max(bins, 2), 1 << 16)
+        // The rect as a *description of where the picture was drawn*, so clipping is an intersection
+        // and not a move (048): `clamped(in:)` would slide a picture that hangs off the edge back to
+        // 0 and then measure whatever is there instead. An empty result means nothing of the picture
+        // is in this texture — early out before the grid arithmetic, which divides by these numbers.
         let rect = (content ?? ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height))
-            .clamped(in: canvas)
+            .intersected(in: canvas)
+        guard !rect.isEmpty else {
+            return FrameMeasurement(
+                histogram: Histogram.empty(bins: binCount, canvas: cropPixels,
+                                           roi: ImageRect(x: 0, y: 0, width: 0, height: 0),
+                                           primaries: primaries, headroom: headroom),
+                sample: DisplayImage(width: 1, height: 1, rgba: [0, 0, 0, 0],
+                                     primaries: primaries, bitDepth: 16),
+                rect: ImageRect(x: 0, y: 0, width: 0, height: 0),
+                cost: FrameHistogramCost())
+        }
         let grid = Histogram.frameSampleSize(for: rect, longEdge: sampleLongEdge)
 
         let sample = try pool.obtain(grid)
@@ -1246,7 +1311,6 @@ public final class RenderGraph {
             : ImageRect(x: 0, y: 0, width: grid.width, height: grid.height)
 
         let tCpu = CFAbsoluteTimeGetCurrent()
-        let binCount = min(max(bins, 2), 1 << 16)
         // `computeFrameSample`, not `computeEncoded`: the sample's fourth channel is the shipped
         // path's luma (`srgbEncode(Σw·linear)`), which is what keeps the luma series on the same axis
         // as the plot it will be swapped with.
@@ -1277,6 +1341,13 @@ public final class RenderGraph {
     /// The failure this cannot see: a picture whose own top or left edge is a hard black band is
     /// indistinguishable from a matte there. The cost of that mistake is the bin-0 counts of one
     /// band, not a wrong rect, and a caller that knows the rect should pass `content:`.
+    ///
+    /// A second failure, measured (048): a frame whose window reached **past** the picture has
+    /// background on all sides at an offset, not a letterbox computed by `fit`, so the hypothesis is
+    /// not even the right shape and the whole sample is returned — 37.0 % of it in bin 0 on a
+    /// 1600×1002 window over a 2400×800 picture. This function cannot know the window (it is not in
+    /// the texture), so the fix is not here: the renderer knows where it drew (`plan.pictureRect`)
+    /// and hands that over. `content:` is the only honest answer for a windowed frame.
     private func framePictureRect(in rgba: [Float16], sample: ImageSize, canvas: ImageSize,
                                   picture: ImageSize) -> ImageRect {
         let whole = ImageRect(x: 0, y: 0, width: sample.width, height: sample.height)

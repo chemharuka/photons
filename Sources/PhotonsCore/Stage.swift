@@ -134,6 +134,19 @@ extension PixelRect {
 
     /// Canonical text for cache keys: `wxh+x+y`.
     public var windowKeyString: String { "\(width)x\(height)+\(x)+\(y)" }
+
+    /// The part of this rect that is **inside** `frame`, with zero area when the two do not meet.
+    ///
+    /// Not `clamped(in:)`: that one moves a rect back inside, which is right for a window the renderer
+    /// must fill and wrong for a rect that *describes where something was drawn* — half a picture
+    /// hanging off the canvas is half a picture at its own offset, not a whole one at zero. Hence the
+    /// empty result: `isEmpty` is how a caller says "nothing of that is here", and `clamped(in:)`'s
+    /// forced one pixel would turn it into a claim that a pixel exists.
+    public func intersected(in frame: ImageSize) -> PixelRect {
+        let x0 = max(x, 0), y0 = max(y, 0)
+        let x1 = min(maxX, max(frame.width, 0)), y1 = min(maxY, max(frame.height, 0))
+        return PixelRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0))
+    }
 }
 
 // MARK: - output
