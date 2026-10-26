@@ -180,9 +180,13 @@ public struct InspectorView: View {
     private var infoCard: some View {
         card(Self.infoTitle) {
             VStack(alignment: .leading, spacing: 2) {
+                // 派单 049: 像素数量 / 尺寸 follow the canvas on screen — the crop tool's live draft
+                // while it is open, else the document's geometry. Computed once per refresh (a crop
+                // tick, ⌘Z, a photo switch), not per frame; `metrics` is pure arithmetic.
+                let spec = specMetrics
                 InspectorPhotoInfo.PhotoSpecRow(filename: session.anchorAsset?.filename ?? "未选择照片",
-                                                pixelCount: pixelCount,
-                                                pixelDimensions: pixelDimensions)
+                                                pixelCount: spec.pixelCount,
+                                                pixelDimensions: spec.pixelDimensions)
                 // Two rows, not one: 相机 and 镜头 are different facts, and the joined line was the
                 // longest in the card (`Leica SL3 · Vario-Elmarit-SL 1:2.8-4/24-90 ASPH.`).
                 MarqueeText(text: camera)
@@ -196,14 +200,34 @@ public struct InspectorView: View {
         }
     }
 
-    private var pixelCount: String {
-        InspectorPhotoInfo.pixelCount(width: session.anchorAsset?.width,
-                                      height: session.anchorAsset?.height)
+    /// 「像素数量 / 尺寸」 — the **canvas** on screen (派单 049): the asset's stored size run through
+    /// the crop, so the two numbers agree with the picture, the export and the histogram.
+    private var specMetrics: InspectorPhotoInfo.PhotoInfoMetrics {
+        InspectorPhotoInfo.metrics(storedWidth: session.anchorAsset?.width,
+                                   storedHeight: session.anchorAsset?.height,
+                                   geometry: canvasGeometry,
+                                   source: ingestedSource)
     }
 
-    private var pixelDimensions: String {
-        InspectorPhotoInfo.pixelDimensions(width: session.anchorAsset?.width,
-                                           height: session.anchorAsset?.height)
+    /// The geometry the canvas is showing: the crop tool's live draft while it is open (a drag writes
+    /// no document until 应用), otherwise the anchor photo's own document.
+    private var canvasGeometry: GeometryGroup? {
+        if let draft = session.cropToolDraft, draft.assetID == session.anchorAsset?.id {
+            return draft.geometry
+        }
+        // `session.edit` is only this photo's document once the session says it loaded it; before
+        // that it is the previous photo's, and its crop must not lend itself to this row.
+        guard let id = session.anchorAsset?.id, session.loadedEditAssetID == id else { return nil }
+        return session.edit.geometry
+    }
+
+    /// The **upright** frame the renderer ingested for this photo (`RenderGraph.sourceSize`), the
+    /// frame the crop is measured in. `nil` until the first frame lands — the row then falls back to
+    /// the catalog's stored dimensions, i.e. to what it printed before 049.
+    private var ingestedSource: ImageSize? {
+        guard let frame = session.ingestedSourceFrame,
+              frame.assetID == session.anchorAsset?.id else { return nil }
+        return frame.size
     }
 
     // MARK: shooting information (派单 014)
