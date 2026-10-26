@@ -7,7 +7,7 @@ import PhotonsCatalog
 /// It shares `CatalogSession.selection` with the grid — no second selection set, no second model —
 /// and it shares the *thumbnail* pipeline too: one `ThumbnailProvider` (hence one
 /// `ThumbnailService` and one memory LRU) for both views, obtained through
-/// `ThumbnailProvider.shared(for:)`. A 74 × 50 pt cell asks for the tier its DPR implies (§1), i.e.
+/// `ThumbnailProvider.shared(for:)`. A 111 × 69 pt cell asks for the tier its DPR implies (§1), i.e.
 /// `t256` at 1x and 2x, and the selected cell always goes out at `.onScreen` priority.
 public final class FilmstripCell: NSCollectionViewItem {
     public static let reuseIdentifier = NSUserInterfaceItemIdentifier("FilmstripCell")
@@ -45,7 +45,8 @@ public final class FilmstripCard: NSView {
 
     public override func draw(_ dirtyRect: NSRect) {
         guard let asset else { return }
-        let thumb = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 12)
+        let thumb = NSRect(x: 0, y: 0, width: bounds.width,
+                           height: bounds.height - WorkspaceLayout.filmstripCaptionHeight)
         let radius: CGFloat = 6
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
         NSGraphicsContext.saveGraphicsState()
@@ -118,9 +119,12 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     public override func loadView() {
         flow.scrollDirection = .horizontal
         flow.itemSize = WorkspaceLayout.filmstripCell
-        flow.minimumInteritemSpacing = 8
-        flow.minimumLineSpacing = 8
-        flow.sectionInset = NSEdgeInsets(top: 8, left: 16, bottom: 6, right: 16)
+        flow.minimumInteritemSpacing = WorkspaceLayout.filmstripSpacing
+        flow.minimumLineSpacing = WorkspaceLayout.filmstripSpacing
+        flow.sectionInset = NSEdgeInsets(top: WorkspaceLayout.filmstripInsetTop,
+                                         left: WorkspaceLayout.filmstripInsetH,
+                                         bottom: WorkspaceLayout.filmstripInsetBottom,
+                                         right: WorkspaceLayout.filmstripInsetH)
 
         collectionView.collectionViewLayout = flow
         collectionView.isSelectable = true
@@ -159,7 +163,32 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     public override func viewDidLayout() {
         super.viewDidLayout()
+        fitItemHeightToContainer()
         scheduleThumbnailReconcile()
+    }
+
+    /// `scrollDirection = .horizontal` does **not** mean "one row". A horizontal
+    /// `NSCollectionViewFlowLayout` still fills a **column** top-to-bottom before it wraps to the next
+    /// column — its "lines" run vertically — so the row count is whatever packing the available height
+    /// allows. That is exactly how the strip rendered two rows while already being `.horizontal`: the
+    /// 122 pt container gave 122 − 8 − 6 = 108 pt of column, which held 50 + 8 + 50 = two cells and one
+    /// gap.
+    ///
+    /// So the item height is derived from the live container instead of being a free-standing constant:
+    /// at the 83 pt strip this is `83 − 8 − 6 = 69` (identical to `WorkspaceLayout.filmstripCell`), and
+    /// if the strip is ever made taller the cell grows rather than the column wrapping. One item per
+    /// column, by construction — not by intent.
+    private func fitItemHeightToContainer() {
+        let container = view.bounds.height
+        let insets = WorkspaceLayout.filmstripInsetTop + WorkspaceLayout.filmstripInsetBottom
+        // Before the first real layout (`bounds == .zero`) keep the contract size.
+        guard container > insets + 1 else { return }
+        let wanted = CGSize(width: WorkspaceLayout.filmstripCell.width,
+                            height: WorkspaceLayout.filmstripItemHeight(for: container))
+        guard abs(flow.itemSize.height - wanted.height) > 0.01
+                || abs(flow.itemSize.width - wanted.width) > 0.01 else { return }
+        flow.itemSize = wanted
+        flow.invalidateLayout()
     }
 
     @objc private func clipViewBoundsChanged() {
@@ -226,7 +255,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         return made
     }
 
-    /// The tier a 74 × 50 pt cell should ask for: cell edge × DPR, clamped to what the source can
+    /// The tier a 111 × 69 pt cell should ask for: cell edge × DPR, clamped to what the source can
     /// fill (`ThumbnailProvider.tier`), then to the pipeline ceiling (`effectiveTier`, §6.1).
     private func tier(for asset: Asset) -> ThumbTier {
         let edge = max(flow.itemSize.width, flow.itemSize.height)
@@ -350,6 +379,28 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     public var visibleCellCount: Int { collectionView.indexPathsForVisibleItems().count }
+
+    // MARK: layout probes (used by `--ui-smoke`)
+
+    /// The item size the flow layout is actually applying — the smoke compares it to the contract.
+    public var appliedItemSize: CGSize { flow.itemSize }
+
+    /// Every laid-out item frame, in library order. Off-screen items resolve too (a one-row
+    /// horizontal flow is arithmetic per column), so this is the whole strip, not a screenful.
+    public var laidOutItemFrames: [NSRect] {
+        let count = collectionView.numberOfItems(inSection: 0)
+        guard count > 0 else { return [] }
+        return (0..<count).compactMap {
+            collectionView.layoutAttributesForItem(at: IndexPath(item: $0, section: 0))?.frame
+        }
+    }
+
+    /// Distinct item `minY` baselines — **1 means the strip is one row**. This is the countable
+    /// form of "single row": the old 122 pt container produced 2 (8+50+8+50+6) even though
+    /// `scrollDirection` was already `.horizontal`.
+    public var itemRowCount: Int {
+        Set(laidOutItemFrames.map { ($0.minY * 100).rounded() }).count
+    }
 
     /// Visible cells drawing a real thumbnail rather than the placeholder.
     public var visibleThumbnailCount: Int {

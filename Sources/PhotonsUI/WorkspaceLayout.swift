@@ -11,7 +11,7 @@ import AppKit
 /// |---|---|
 /// | top tool container | 36 pt, buttons 28 pt, shared centre line with the traffic lights |
 /// | browser (sources + photo rows) | 212 pt default, 196…260, row height 46 pt |
-/// | filmstrip (second browser) | 122 pt tall, 74 × 50 pt cells |
+/// | filmstrip (second browser) | 83 pt tall (one row), 111 × 69 pt cells |
 /// | inspector | 330 pt default, 300…364 |
 /// | safe editing area | at least 560 × 420 |
 ///
@@ -60,8 +60,50 @@ public enum WorkspaceLayout {
     public static let browserWidthMax: CGFloat = 260
     public static let browserRowHeight: CGFloat = 46
 
-    public static let filmstripHeight: CGFloat = 122
-    public static let filmstripCell = CGSize(width: 74, height: 50)
+    /// Height of the bottom strip: `8 + 69 + 6 = 83`, i.e. **one** row, not two.
+    ///
+    /// The old 122 was `8 + 50 + 8 + 50 + 6` — exactly two 50 pt cells plus one 8 pt gap. That is
+    /// what produced the two rows: `NSCollectionViewFlowLayout` with `scrollDirection = .horizontal`
+    /// fills a **column** top-to-bottom and only then moves right (the "lines" run vertically), so
+    /// the number of rows is the packing of the available height, not a property of the scroll
+    /// direction. `.horizontal` was set all along; the height budget was what allowed a second row.
+    /// Keep `filmstripHeight == insetTop + filmstripCell.height + insetBottom`: `FilmstripController`
+    /// derives the applied item height from the live container, so a taller strip grows the cell
+    /// instead of silently wrapping into a second column.
+    public static let filmstripHeight: CGFloat = 83
+    /// Cell: image area 57 pt (`69 − 12` caption) = the old 38 pt × 1.5, width 111 = 74 × 1.5.
+    public static let filmstripCell = CGSize(width: 111, height: 69)
+    /// Fixed filename caption inside a cell; the image area is `filmstripCell.height − this`.
+    public static let filmstripCaptionHeight: CGFloat = 12
+    public static let filmstripInsetTop: CGFloat = 8
+    public static let filmstripInsetBottom: CGFloat = 6
+    public static let filmstripInsetH: CGFloat = 16
+    /// Gap between cells in a column *and* between columns (the flow layout has one knob for each;
+    /// the strip uses the same value so the two-row budget stays arithmetic, not hope).
+    public static let filmstripSpacing: CGFloat = 8
+
+    /// Item height for a strip of `containerHeight`, so one column can only ever hold one item.
+    /// A no-op at the contract height (`83 − 8 − 6 = 69 = filmstripCell.height`); the point is that
+    /// a future `filmstripHeight` change cannot reintroduce a second row by accident.
+    public static func filmstripItemHeight(for containerHeight: CGFloat) -> CGFloat {
+        max(1, containerHeight - filmstripInsetTop - filmstripInsetBottom)
+    }
+
+    /// Cells a `.horizontal` flow column holds at `containerHeight`. `cellHeight` defaults to what
+    /// `FilmstripController` applies (derived from the container, so 1); passing the old 50 pt cell
+    /// at the old 122 pt strip returns **2** — the two rows, reproduced as arithmetic.
+    public static func filmstripItemsPerColumn(containerHeight: CGFloat, cellHeight: CGFloat? = nil) -> Int {
+        let available = containerHeight - filmstripInsetTop - filmstripInsetBottom
+        let cell = cellHeight ?? filmstripItemHeight(for: containerHeight)
+        guard cell > 0, available > 0 else { return 0 }
+        var used: CGFloat = 0
+        var count = 0
+        while used + cell <= available + 0.001 {
+            used += cell + filmstripSpacing
+            count += 1
+        }
+        return count
+    }
 
     public static let inspectorWidthDefault: CGFloat = 330
     public static let inspectorWidthMin: CGFloat = 300

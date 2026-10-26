@@ -145,8 +145,47 @@ public final class UISmokeRunner {
         let strip = stripController.collectionView
         check("filmstrip item count \(strip.numberOfItems(inSection: 0)) == library rows \(rows)",
               strip.numberOfItems(inSection: 0) == rows)
-        check(String(format: "filmstrip container %.0f pt == 122", root.geometry.filmstrip?.height ?? 0),
+        check(String(format: "filmstrip container %.0f pt == %.0f (%.0f inset + %.0f cell + %.0f inset)",
+                     root.geometry.filmstrip?.height ?? 0, WorkspaceLayout.filmstripHeight,
+                     WorkspaceLayout.filmstripInsetTop, WorkspaceLayout.filmstripCell.height,
+                     WorkspaceLayout.filmstripInsetBottom),
               abs((root.geometry.filmstrip?.height ?? 0) - WorkspaceLayout.filmstripHeight) < 0.01)
+
+        // 4a. one row. `NSCollectionViewFlowLayout` with `.horizontal` fills a *column*
+        // top-to-bottom and only then moves right, so "single row" is the packing of the available
+        // height, not the scroll direction: the old 122 pt container (8+50+8+50+6) laid out two.
+        // Countable form: the number of distinct item `minY` baselines.
+        let frames = stripController.laidOutItemFrames
+        let stripRows = stripController.itemRowCount
+        let itemSize = stripController.appliedItemSize
+        let baselines = Set(frames.map { ($0.minY * 100).rounded() }).sorted()
+        log(String(format: "filmstrip rows          %d row(s) over %d items · itemSize %.1f×%.1f · minY %@",
+                   stripRows, frames.count, itemSize.width, itemSize.height,
+                   baselines.map { String(format: "%.0f", $0 / 100) }.joined(separator: ",")))
+        check("filmstrip is one row: all \(frames.count) items share one minY (\(stripRows) row(s))",
+              frames.count > 1 && frames.count == strip.numberOfItems(inSection: 0) && stripRows == 1)
+        check(String(format: "filmstrip item %.1f×%.1f == contract %.0f×%.0f",
+                     itemSize.width, itemSize.height,
+                     WorkspaceLayout.filmstripCell.width, WorkspaceLayout.filmstripCell.height),
+              abs(itemSize.width - WorkspaceLayout.filmstripCell.width) < 0.01
+              && abs(itemSize.height - WorkspaceLayout.filmstripCell.height) < 0.01)
+        check("filmstrip packs 1 item per column at \(Int(WorkspaceLayout.filmstripHeight)) pt "
+              + "(\(WorkspaceLayout.filmstripItemsPerColumn(containerHeight: WorkspaceLayout.filmstripHeight)); was 2 at 122)",
+              WorkspaceLayout.filmstripItemsPerColumn(containerHeight: WorkspaceLayout.filmstripHeight) == 1)
+
+        // 4a-2. the row still scrolls sideways, and only sideways: content wider than the
+        // viewport, no vertical scroller (one would mean content taller than one row).
+        if let scroll = strip.enclosingScrollView {
+            let viewport = scroll.contentView.bounds.width
+            let content = strip.collectionViewLayout?.collectionViewContentSize.width ?? 0
+            check(String(format: "filmstrip scrolls horizontally (content %.0f > viewport %.0f, no vertical scroller, %d visible cells)",
+                         content, viewport, stripController.visibleCellCount),
+                  content > viewport + 1 && !scroll.hasVerticalScroller
+                  && stripController.visibleCellCount > 1)
+        } else {
+            fail("filmstrip has no enclosing scroll view")
+        }
+
         if let id = session.anchorID {
             check("filmstrip shares the grid selection",
                   (strip.selectionIndexPaths.first.map { session.assets[safe: $0.item]?.id }) == id
@@ -830,7 +869,7 @@ public final class UISmokeRunner {
     // MARK: - filmstrip thumbnails
 
     /// The strip must draw the same kind of *pixels* the grid does — not the hash swatch — and it
-    /// must ask for the tier its 74 × 50 pt cell implies at this DPR (006 §1).
+    /// must ask for the tier its 111 × 69 pt cell implies at this DPR (006 §1).
     ///
     /// "Every visible cell" is asserted twice: once for the screenful the strip opens on, and once
     /// over a sweep of pages (the union of cells that were visible while scrolling), so a cell that
