@@ -349,10 +349,15 @@ private struct S2Params {
 
 private struct CurveParams {
     var a: SIMD4<Float>   // identity, tableSize
+    // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 C). A curve
+    // with `f(0) = 0.1` lifts the matte's 0 to 0.1, i.e. 0.349 in display units, and the bars turn
+    // grey. Same convention as S2's `c` and S3c's `c`.
+    var b: SIMD4<Float>
 }
 
 private struct ColorParams {
     var a: SIMD4<Float>   // vibrance, saturation, identity
+    var b: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 }
 
 private struct VignetteParams {
@@ -1110,7 +1115,13 @@ public final class RenderGraph {
         case .curve:
             let p = try kernels.pipeline(file: "s3_curve", function: "s3_curve")
             let lut = try lutBuffer(for: edit.curve)
-            var params = CurveParams(a: SIMD4(lut.isIdentity ? 1 : 0, Float(CurveLUT.size), 0, 0))
+            var params = CurveParams(
+                a: SIMD4(lut.isIdentity ? 1 : 0, Float(CurveLUT.size), 0, 0),
+                // The content rect, so the curve never runs on the matte (派单 008 C). Whole-canvas
+                // dispatch, one guard per pixel — the same shape as S2's, so the two passes cannot
+                // drift apart again.
+                b: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<CurveParams>.stride, index: 0)
             enc.setBuffer(lut.buffer, offset: 0, index: 1)
@@ -1120,8 +1131,11 @@ public final class RenderGraph {
         case .color:
             let p = try kernels.pipeline(file: "s3_color", function: "s3_color")
             let bands = try bandBuffer(for: edit.color)
-            var params = ColorParams(a: SIMD4(Float(edit.color.vibrance), Float(edit.color.saturation),
-                                              edit.color.isIdentity ? 1 : 0, 0))
+            var params = ColorParams(
+                a: SIMD4(Float(edit.color.vibrance), Float(edit.color.saturation),
+                         edit.color.isIdentity ? 1 : 0, 0),
+                b: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
             enc.setBuffer(bands.buffer, offset: 0, index: 1)
