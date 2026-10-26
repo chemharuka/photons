@@ -10,7 +10,8 @@ import Foundation
 /// never to zero, never to a decode failure.
 public struct EditModel: Sendable, Equatable, Codable {
     /// 2 = M4: `masks` changed from the placeholder `params: [String: Double]` to the real
-    /// `Mask`/`MaskComponent`/`MaskShape` union (docs/tasks/005-masks.md §2). Not released, so
+    /// `Mask`/`MaskComponent`/`MaskShape` union — one mask is a list of components, each a shape
+    /// plus its own adjustments. Not released, so
     /// there is no migration; the placeholder is simply dropped.
     /// 3 = 派单 006: `light.temperature`/`light.tint` became `Double?` with `nil` = the file's
     /// as-shot white balance, replacing the nominal `6500`/`0` that S1 turned into a gain. Not

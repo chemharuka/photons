@@ -104,7 +104,8 @@ public struct RenderOptions: Sendable {
     }
 }
 
-/// How the local stage is dispatched (docs/tasks/005-masks.md §3.4 step 3).
+/// How the local stage is dispatched: the mask atlas is built first, then the local pass reads it
+/// per tile and the combination step folds the result back into the frame.
 ///
 /// The three cases exist because the two dispatches have different economics, and the measurement
 /// (see the cost note in `RenderGraph`) is the reason:
@@ -295,7 +296,8 @@ public struct MaskStageReport: Sendable {
 ///
 /// This exists for verification (`photonsctl maskdump`, the 005b acceptance tests) and for the
 /// `showMask` overlay, which reads the same buffer instead of re-evaluating the predicate a second
-/// way (docs/tasks/005-masks.md §3.1).
+/// way: a mask is a predicate over normalised source pixels, evaluated once into an atlas so the
+/// local pass never re-evaluates the shape per tile.
 public struct MaskAtlasDump: Sendable {
     public let width: Int
     public let height: Int
@@ -1495,7 +1497,8 @@ public final class RenderGraph {
     //   3 masks, feather 0.15, refine 0.5          p50 14.02 ms  p95 15.49 ms
     //   slider drag on one of two masks            full pass 2.46 ms → tiled increment 2.34 ms
     //
-    // The budget is p95 ≤ 16.7 ms (docs/tasks/005-masks.md §6, 005c item ⑦). The refine case is the
+    // The budget is p95 ≤ 16.7 ms at 4.1 Mpx — three masks with feather and refine have to fit in
+    // one 60 fps frame. The refine case is the
     // expensive one by a wide margin: its reconstruction is a full-resolution pass per mask, and it is
     // only worth having while the atlas is being rebuilt (a selection or S1 change), which is exactly
     // what the numbers above measure.

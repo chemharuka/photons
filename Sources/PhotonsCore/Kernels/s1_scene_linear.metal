@@ -24,7 +24,7 @@ using namespace metal;
 // "where are 0 and 1"; the curve (S3) answers "how does the range bend between them".
 //
 // Exposure is *arithmetic on the decoded buffer*, never a re-decode: v9 costs 5 s at 60 MP while a
-// slider needs ~10 ms (docs/tasks/002-editing-graph.md).
+// slider needs ~10 ms. Exposure is a gain on the buffer, never a second development.
 //
 // Highlight recovery is a soft shoulder: values above knee 0.8 are compressed towards 1.0 with a
 // shape controlled by `amount`. amount = 0 is exact identity; amount = 1 asymptotes at 1.0.
