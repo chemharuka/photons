@@ -20,7 +20,11 @@ import PhotonsUI
 final class LoupeZoomTransitionAnimationTests: XCTestCase {
 
     private static let viewport = ImageSize(width: 640, height: 400)
-    private static let deadline: TimeInterval = 6
+    /// How long a wait may take. 6 s was enough while a frame cost one render; `hashesFrames` (which
+    /// this file switches on) adds a 32 MB readback + SHA-256 per frame, and on a loaded machine that
+    /// alone has been measured at 4–14 s. The *assertions* are about geometry, not speed, so the
+    /// timeout is generous and bounded — a hang still fails, an honest frame still passes.
+    private static let deadline: TimeInterval = 30
     private var windows: [NSWindow] = []
 
     override func tearDown() {
@@ -83,28 +87,38 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
 
     /// The canvas's presentation scale, sampled at display cadence.
     ///
-    /// Frame 0 is read **before** the run loop turns, so the value the transition starts from is in the
-    /// record rather than the first value a refresh later. With `stopWhenBridgeEnds` the sampling stops
-    /// the moment the bridge hands over: after that the transform goes back to identity *together with*
-    /// a new texture, which is a no-op visually (the new frame is at the stop's own geometry) but would
-    /// read as a 2 → 1 "backtrack" to anyone measuring the scale alone.
+    /// The transition is a **sampling window** on the present pass now (025), so the frames the user
+    /// actually saw are logged by the loupe itself (`LoupeController.zoomBridgeFrames`): progress,
+    /// window, drawable. The picture's scale on screen is `1 / window.du` — a shrinking window is
+    /// larger than the texture, a growing one is a sub-rect — and that is the number this returns, one
+    /// entry per presented frame, in the order they were presented.
+    ///
+    /// With `stopWhenBridgeEnds` the sampling stops the moment the bridge hands over: after that the
+    /// real frame for the new stop is presented at the identity window, which is a no-op visually but
+    /// would read as a jump to 1 on the scale alone.
     private func sampleScale(_ controller: LoupeController, seconds: Double,
                              stopWhenBridgeEnds: Bool = false) -> [(ms: Double, scale: Double)] {
         var out: [(ms: Double, scale: Double)] = []
         let t0 = CACurrentMediaTime()
-        if let presented = controller.canvasView.metalLayer.presentation() {
-            out.append((0, Double(presented.transform.m11)))
-        }
+        // The frame the bridge drew when it armed (progress 0, the picture as it was) is already in
+        // the log by the time this is called; a bridge is told from the ones before it by its serial.
+        let serial = controller.zoomBridgeArmedCount
+        var seen = controller.zoomBridgeFrames.firstIndex { $0.serial == serial }
+            ?? controller.zoomBridgeFrames.count
         var sawBridge = false
         while CACurrentMediaTime() - t0 < seconds {
             if controller.zoomBridge != nil { sawBridge = true }
             RunLoop.current.run(until: Date().addingTimeInterval(1.0 / 120))
-            // Checked *before* the append: the turn in which the bridge hands over is the turn the
-            // transform goes back to identity with the new texture, and that value is not part of the
-            // transition's scale sequence.
+            let frames = controller.zoomBridgeFrames
+            while seen < frames.count {
+                let w = frames[seen].window
+                out.append(((CACurrentMediaTime() - t0) * 1000,
+                            w.du > 0 ? 1.0 / Double(w.du) : 1))
+                seen += 1
+            }
+            // Checked *before* the next sample: the turn in which the bridge hands over is the turn
+            // the new frame reaches the layer, and that is not part of the transition's scale sequence.
             if stopWhenBridgeEnds, sawBridge, controller.zoomBridge == nil { break }
-            guard let presented = controller.canvasView.metalLayer.presentation() else { continue }
-            out.append(((CACurrentMediaTime() - t0) * 1000, Double(presented.transform.m11)))
         }
         return out
     }
@@ -241,7 +255,14 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
             print("round \(round): final hash \((final.displayHash ?? "—").prefix(12))… == direct "
                   + "rung \(final.decodeScale) window \(final.window.width)×\(final.window.height)")
             controller.zoom(to: 1, aroundView: CGPoint(x: 160, y: 100))
-            XCTAssertTrue(waitFor { controller.zoomBridge == nil && controller.lastFrame?.zoom == 1 })
+            let tBack = CACurrentMediaTime()
+            let cameBack = waitFor { controller.zoomBridge == nil && controller.lastFrame?.zoom == 1 }
+            XCTAssertTrue(cameBack, "round \(round): the 100 % frame never arrived "
+                          + "(lastFrame \(String(describing: controller.lastFrame?.zoom)) after "
+                          + "\(String(format: "%.2f", CACurrentMediaTime() - tBack)) s, "
+                          + "bridge \(controller.zoomBridge == nil ? "gone" : "up"), "
+                          + "covered \(controller.zoomBridgeCoveredPresents), "
+                          + "error \(controller.lastPresentError ?? "—"))")
             pump(0.05)
         }
     }
@@ -286,6 +307,7 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
         var samples: [(ms: Double, scale: Double)] = []
         var presses = 0
         var sawBridge = false
+        var seen = controller.zoomBridgeFrames.count
         let t0 = CACurrentMediaTime()
         while CACurrentMediaTime() - t0 < 1.2 {
             let ms = (CACurrentMediaTime() - t0) * 1000
@@ -295,11 +317,17 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
             }
             if controller.zoomBridge != nil { sawBridge = true }
             RunLoop.current.run(until: Date().addingTimeInterval(1.0 / 120))
-            // Stop when the last bridge has handed over: after that the transform is identity again
-            // *with* the new texture, which is not a step backwards (see `sampleScale`).
+            // The log is append-only across a retarget (that is the point: the frames the eye saw are
+            // all in it), so only the entries past `seen` are new.
+            let frames = controller.zoomBridgeFrames
+            while seen < frames.count {
+                let w = frames[seen].window
+                samples.append(((CACurrentMediaTime() - t0) * 1000, w.du > 0 ? 1.0 / Double(w.du) : 1))
+                seen += 1
+            }
+            // Stop when the last bridge has handed over: after that the new frame is on the layer at
+            // the identity window, which is not a step backwards (see `sampleScale`).
             if presses == 3, sawBridge, controller.zoomBridge == nil { break }
-            guard let presented = controller.canvasView.metalLayer.presentation() else { continue }
-            samples.append(((CACurrentMediaTime() - t0) * 1000, Double(presented.transform.m11)))
         }
         let values = frames(samples).map(\.scale)
         print("100→200→300→400 (3 × ⌘=, 70 ms apart): \(values.count) frames · \(list(values))")

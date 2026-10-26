@@ -57,6 +57,11 @@ public final class LoupeCanvasView: NSView {
         metalLayer.anchorPoint = .zero
         metalLayer.frame = bounds
         metalLayer.isGeometryFlipped = isFlipped
+        // A stop change used to scale this layer (`CATransform3D`), and a scaled layer paints outside
+        // its view: the drawable covered the browser pane mid-zoom. Nothing transforms the layer now —
+        // a bridge re-presents the texture through a sampling window instead — and this makes the
+        // guarantee structural: whatever the canvas holds, it cannot draw past its own bounds.
+        metalLayer.masksToBounds = true
         let scale = window?.backingScaleFactor ?? 2
         metalLayer.contentsScale = scale
         if metalLayer.drawableSize == .zero {
@@ -793,7 +798,8 @@ public final class LoupeController: NSViewController {
         guard let framing = framing() else { return }
         pinchZoom = nil
         let anchor = point ?? canvasCentrePoint()
-        setViewState(framing.zooming(viewState, to: 1, aroundView: anchor, backingScale: backingScale))
+        setViewState(framing.zooming(viewState, to: 1, aroundView: anchor, backingScale: backingScale),
+                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
     }
 
     /// Back to the whole frame — **whole and centred**, which is the one camera change with no anchor
@@ -897,7 +903,8 @@ public final class LoupeController: NSViewController {
         let target = LoupeViewState.snappedLevel(for: LoupeViewState.clampZoom(stop)).zoom
         let anchor = point ?? canvasCentrePoint()
         setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
-                                     backingScale: backingScale))
+                                     backingScale: backingScale),
+                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
     }
 
     /// ⌘+ / ⌘=: the next stop up, or 4:1 from anything between. From `fit` it lands on 100 % — the
@@ -978,10 +985,10 @@ public final class LoupeController: NSViewController {
         let target = level.zoom
         let next = framing.zooming(viewState, to: target, aroundView: point, backingScale: backingScale)
         pinchZoom = raw
-        setViewState(next)
+        setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale))
     }
 
-    private func setViewState(_ next: LoupeViewState) {
+    private func setViewState(_ next: LoupeViewState, anchor: LoupeZoomAnchor = .center) {
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
@@ -1007,7 +1014,7 @@ public final class LoupeController: NSViewController {
         // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
         // animating a drag would leave the picture behind the hand.
         if let framing = framing(), movesScale(from: previous, to: next, framing: framing) {
-            armZoomBridge(from: previous, to: next, framing: framing)
+            armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
         }
         requestViewportRender()
     }
@@ -1037,7 +1044,30 @@ public final class LoupeController: NSViewController {
     /// Held frames thrown away because the camera moved on before they could be shown.
     public private(set) var zoomBridgePendingDrops = 0
 
-    private static let zoomBridgeKey = "photons.zoomBridge"
+    /// One presented frame of a stop change: the progress it was drawn at, the sampling window it
+    /// was drawn with, and the drawable it went into (025 — the evidence lives here).
+    public struct ZoomBridgeFrame: Equatable, Sendable {
+        /// The bridge that drew it (`zoomBridgeArmedCount` when it was armed). A retarget keeps the
+        /// log growing, so this is what tells one bridge's frames from the next one's.
+        public let serial: Int
+        public let progress: Double
+        public let window: PresentWindow
+        public let drawable: ImageSize
+        public let canvas: ImageSize
+
+        public init(serial: Int, progress: Double, window: PresentWindow,
+                    drawable: ImageSize, canvas: ImageSize) {
+            self.serial = serial
+            self.progress = progress
+            self.window = window
+            self.drawable = drawable
+            self.canvas = canvas
+        }
+    }
+    /// Every frame of every bridge, in the order it was presented — append-only, so a retarget adds
+    /// to the record instead of erasing what the eye already saw. Capped, because it is a log.
+    public private(set) var zoomBridgeFrames: [ZoomBridgeFrame] = []
+    private static let zoomBridgeFrameLimit = 512
 
     /// The projection the pixels **on the canvas** were laid out with. A bridge always starts from
     /// these pixels, whatever the camera has done since.
@@ -1053,6 +1083,30 @@ public final class LoupeController: NSViewController {
     private var zoomBridgeCanvas: ImageSize?
     private var lastLaidOutViewport: ImageSize?
 
+    // MARK: the texture the canvas is showing (025)
+    //
+    // The stop change no longer moves the layer: it re-presents **this** texture with a different
+    // sampling window on every display frame. That needs the texture to stay out of the render pool
+    // for as long as it is on the layer, so ownership moved here: the frame that lands becomes
+    // `canvasTexture`, and the one it replaced is recycled when the new drawable is committed
+    // (instead of the landing frame being recycled the moment it is presented).
+    private var canvasTexture: (texture: MTLTexture, graph: RenderGraph?)?
+
+    /// The bridge's display-cadence driver. A `Timer` on the main run loop in `.common` mode, at
+    /// 120 Hz: the window is a *parameter of the present pass*, not a layer property, so nothing in
+    /// Core Animation can interpolate it for us — and a present is a full-screen quad, i.e. the same
+    /// cost as one blit.
+    private var zoomBridgeTicker: Timer?
+    /// When the running bridge started, `CACurrentMediaTime()`.
+    private var zoomBridgeStart: CFTimeInterval = 0
+    /// Presents in flight. Two, not one: a single slot would make the transition's frame rate collapse
+    /// to the GPU's completion rate the moment anything else is busy, and one slot would also serialise
+    /// the pipeline for no reason. More than two would starve `nextDrawable()` and block the main
+    /// thread, which is worse than a dropped frame.
+    private var zoomBridgePresentsInFlight = 0
+
+    private static let zoomBridgeInterval: TimeInterval = 1.0 / 120
+
     /// System setting ▸ 辅助功能 ▸ 显示 ▸ 减弱动态效果. The geometry still has to be right, so the
     /// bridge still holds the arriving frame; it snaps to the target instead of sliding there.
     public var reducesMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1061,34 +1115,34 @@ public final class LoupeController: NSViewController {
     /// projection of the new camera in 180 ms easeOut, and hand the canvas over to the real frame when
     /// it arrives.
     ///
-    /// Why a layer transform instead of a re-render: only the *presentation* may interpolate. The
-    /// pixels the new camera wants are a render, and re-rendering at an interpolated scale for every
-    /// animation frame would be 11 extra renders per 2× step, at the exact moment the ladder is busy.
-    /// The picture on the canvas is the right picture — at the wrong scale — so the honest cheap fix
-    /// is to move it: one `CATransform3D`, `present`'s single path untouched.
+    /// **The carry is a sampling window, not a layer transform** (025). A `CATransform3D` on the
+    /// canvas's layer scales the layer itself: the drawable grows past the view's bounds and paints
+    /// over the browser pane (bug 2), and when it shrinks it leaves the canvas uncovered, so the
+    /// window behind shows through as black until the new frame lands (bug 3). The window keeps the
+    /// drawable at the canvas size and moves only *which part of the texture it reads*, so neither can
+    /// happen: a growing picture is cropped at the canvas edge by construction, and a shrinking one
+    /// samples past the texture's edge, where `clamp_to_edge` extends the picture's own border pixels.
     ///
-    /// Retargeting: the animation starts from the **presentation's** current transform, so a second
-    /// ⌘= continues from where the picture actually is instead of restarting at identity. Nothing is
-    /// ever added twice — the same key replaces the animation.
+    /// Retargeting: a second ⌘= starts from the map the eye is currently looking at (read off the
+    /// running bridge, not off a presentation tree), so nothing jumps back and nothing is added twice.
     private func armZoomBridge(from old: LoupeViewState, to new: LoupeViewState,
-                               framing: LoupeFraming) {
-        guard lastFrame != nil else { return }        // nothing on screen to carry
+                               framing: LoupeFraming, anchor: LoupeZoomAnchor) {
+        guard lastFrame != nil, let onCanvas = canvasTexture else { return }  // nothing to carry
         let canvas = viewportPixels
-        let k = backingScale
+        let texture = ImageSize(width: onCanvas.texture.width, height: onCanvas.texture.height)
         let fromMapping = canvasContent?.mapping ?? framing.mapping(of: old)
         let fromContent = canvasContent?.content ?? framing.contentPixels(of: old)
         let toMapping = framing.mapping(of: new)
-        // Where the composite already is. `identity` for a bridge armed from rest, and the running
-        // animation's own value for one that replaces it (read off the presentation tree, which is
-        // what the eye is looking at).
-        let live = presentedLayerTransform()
-        let layer = canvasView.metalLayer
-        let start = canvasContent == nil
-            ? (scale: 1.0, x: 0.0, y: 0.0)
-            : LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas, backingScale: k,
-                                     anchorPoint: layer.anchorPoint,
-                                     isFlipped: layer.isGeometryFlipped)
+        // Where the composite already is: identity for a bridge armed from rest, and the running
+        // bridge's own map for one that replaces it (read off the bridge, which is the value that was
+        // actually presented — the eye is looking at exactly this).
         let wasBridging = zoomBridge != nil
+        let start: (scale: Double, x: Double, y: Double)
+        if let running = zoomBridge {
+            start = running.map(atProgress: zoomBridgeProgress())
+        } else {
+            start = (1, 0, 0)
+        }
         let bridge = LoupeZoomBridge(
             fromContent: fromContent,
             toContent: framing.contentPixels(of: new),
@@ -1096,17 +1150,15 @@ public final class LoupeController: NSViewController {
             toMapping: toMapping,
             canvas: canvas,
             startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
-            // The real layer geometry, read off the layer rather than assumed — see
-            // `LoupeZoomBridge.layerAnchorPoint`: a backing layer is anchored at (0, 0), so "the
-            // transform is about the centre" is exactly the bug this reads the truth for.
-            layerAnchorPoint: layer.anchorPoint,
-            layerIsFlipped: layer.isGeometryFlipped)
+            layerAnchorPoint: canvasView.metalLayer.anchorPoint,
+            layerIsFlipped: canvasView.metalLayer.isGeometryFlipped,
+            anchor: anchor)
         guard bridge.isVisible else {
             // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
             // clamped to the same rect): the arriving frame *is* the whole change.
             zoomBridgeSerial += 1
             zoomBridge = nil
-            removeZoomBridgeAnimation()
+            stopZoomBridgeTicker()
             return
         }
         if wasBridging { zoomBridgeRetargets += 1 }
@@ -1121,103 +1173,169 @@ public final class LoupeController: NSViewController {
         }
         zoomBridge = bridge
         zoomBridgeArmedCount += 1
+        let serial = zoomBridgeArmedCount
         zoomBridgeCanvas = canvas
-        // The model value goes back to identity before anything else: the animation (or the hold below)
-        // owns the composite, and a leftover hold from the previous transition must not be the value
-        // this one starts from.
-        setLayerTransform(CATransform3DIdentity, animated: false)
+        zoomBridgeSerial += 1
+        zoomBridgeStart = CACurrentMediaTime()
+        // Frame 0 is the picture as it is. For a bridge armed from rest that is the identity window
+        // (the canvas was last presented with it); for a retarget it is the window the running bridge
+        // had reached, because that is what the eye is looking at.
+        recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 0,
+                                              window: bridge.window(atProgress: 0, textureSize: texture),
+                                              drawable: canvas, canvas: canvas))
         guard !reducesMotion, bridge.duration > 0 else {
-            // Reduce Motion: no slide, but the same order of operations — geometry now, frame now.
+            // Reduce Motion: no slide — one present at the stop's own geometry, then hand over.
+            presentZoomBridgeFrame(progress: 1, bridge: bridge, texture: onCanvas.texture, serial: serial)
             finishZoomBridge()
             return
         }
-        let animation = CABasicAnimation(keyPath: "transform")
-        animation.fromValue = bridge.startTransform(backingScale: k)
-        animation.toValue = bridge.targetTransform(backingScale: k)
-        animation.duration = bridge.duration
-        // easeOut, not linear: the user asked for ~180 ms easeOut, and a curve that decelerates into
-        // the stop reads as arriving *at* the stop rather than being cut off at it.
-        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        animation.isRemovedOnCompletion = false
-        animation.fillMode = .forwards
-        // The end value is held when a development outlives the motion — the picture is already where
-        // the new camera will put it, so waiting there is a still frame, not a jump.
-        canvasView.metalLayer.add(animation, forKey: Self.zoomBridgeKey)
-        zoomBridgeSerial += 1
-        let serial = zoomBridgeSerial
+        startZoomBridgeTicker()
+        let armSerial = zoomBridgeSerial
         DispatchQueue.main.asyncAfter(deadline: .now() + bridge.duration + 0.002) { [weak self] in
-            guard let self, self.zoomBridgeSerial == serial else { return }
+            guard let self, self.zoomBridgeSerial == armSerial else { return }
             self.finishZoomBridge()
         }
     }
 
-    /// The geometry has arrived: hold the transform the animation ended on, remove it, and hand the
-    /// waiting frame over. The transform goes back to identity when the new drawable is actually on
-    /// the layer (a `CAMetalLayer` commits asynchronously) — dropping it first would flash the old
-    /// picture back at 1× for a frame, which is the pop this whole path exists to avoid.
+    private func recordZoomBridgeFrame(_ frame: ZoomBridgeFrame) {
+        zoomBridgeFrames.append(frame)
+        if zoomBridgeFrames.count > Self.zoomBridgeFrameLimit {
+            zoomBridgeFrames.removeFirst(zoomBridgeFrames.count - Self.zoomBridgeFrameLimit)
+        }
+    }
+
+    /// The geometry has arrived (or the clock has run out): stop driving the window and hand the
+    /// waiting frame over.
+    ///
+    /// The stop's own window is left on the canvas when nothing is waiting, so a development that
+    /// outlives the 180 ms is a still frame at the new camera's geometry rather than a jump back.
+    /// No ordering dance is needed any more: the frame is presented with the identity window, so its
+    /// drawable is already the new camera's — there is no held transform to drop afterwards.
     private func finishZoomBridge() {
         zoomBridgeSerial += 1                 // any timer still in flight is stale now
+        stopZoomBridgeTicker()
         let wasBridging = zoomBridge != nil
-        let held = zoomBridge?.targetTransform(backingScale: backingScale)
-        zoomBridge = nil
-        if let held {
-            setLayerTransform(held, animated: false)
-            canvasView.metalLayer.removeAnimation(forKey: Self.zoomBridgeKey)
-        } else {
-            removeZoomBridgeAnimation()
+        let serial = zoomBridgeArmedCount
+        let texture = canvasTexture?.texture
+        let target = zoomBridge.flatMap { bridge -> PresentWindow? in
+            guard let texture else { return nil }
+            return bridge.window(atProgress: 1,
+                                 textureSize: ImageSize(width: texture.width, height: texture.height))
         }
+        let reached = zoomBridgeFrames.last(where: { $0.serial == serial }).map { $0.progress >= 0.999 }
+            ?? false
+        zoomBridge = nil
         guard wasBridging else { return }
         zoomBridgeCompletedCount += 1
-        guard let pending = pendingFrame else { return }
-        pendingFrame = nil
-        present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
-                graph: pending.graph, resetTransformAfterPresent: held != nil)
-    }
-
-    private func setLayerTransform(_ m: CATransform3D, animated: Bool) {
-        if !animated {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-        }
-        canvasView.metalLayer.transform = m
-        if !animated { CATransaction.commit() }
-    }
-
-    private func removeZoomBridgeAnimation() {
-        let layer = canvasView.metalLayer
-        guard layer.animation(forKey: Self.zoomBridgeKey) != nil
-                || !CATransform3DIsIdentity(layer.transform) else {
+        if let pending = pendingFrame {
+            pendingFrame = nil
+            present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
+                    graph: pending.graph)
             return
         }
-        // Implicit animations off: this is a model change, not a second transition.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.removeAnimation(forKey: Self.zoomBridgeKey)
-        layer.transform = CATransform3DIdentity
-        CATransaction.commit()
+        // Nothing waiting: sit on the stop. (The ticker normally got there already; this covers Reduce
+        // Motion and a bridge that ended between two ticks.)
+        if !reached, let target, let texture, let presenter {
+            let canvas = viewportPixels
+            presenter.present(texture, in: canvasView.metalLayer,
+                              wantsEDR: wantsExtendedDynamicRange,
+                              drawableSize: canvas, window: target)
+            recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
+                                                  drawable: canvas, canvas: canvas))
+        }
     }
 
-    /// The layer transform the eye is currently looking at: the presentation tree while an animation
-    /// is running, the model value otherwise.
-    private func presentedLayerTransform() -> CATransform3D {
-        canvasView.metalLayer.presentation()?.transform ?? canvasView.metalLayer.transform
+    // MARK: the bridge's display-cadence driver
+
+    private func startZoomBridgeTicker() {
+        stopZoomBridgeTicker()
+        let timer = Timer(timeInterval: Self.zoomBridgeInterval, repeats: true) { [weak self] _ in
+            self?.tickZoomBridge()
+        }
+        timer.tolerance = 0
+        RunLoop.main.add(timer, forMode: .common)
+        zoomBridgeTicker = timer
+        tickZoomBridge()                      // frame 0 immediately: a transition must not start late
+    }
+
+    private func stopZoomBridgeTicker() {
+        zoomBridgeTicker?.invalidate()
+        zoomBridgeTicker = nil
+        zoomBridgePresentsInFlight = 0
+    }
+
+    private func tickZoomBridge() {
+        guard let bridge = zoomBridge, let onCanvas = canvasTexture else {
+            stopZoomBridgeTicker()
+            return
+        }
+        let progress = zoomBridgeProgress()
+        presentZoomBridgeFrame(progress: progress, bridge: bridge, texture: onCanvas.texture,
+                               serial: zoomBridgeArmedCount)
+        if progress >= 1 { stopZoomBridgeTicker() }   // the stop's own geometry, held
+    }
+
+    /// The progress the picture is drawn at: `elapsed / duration` through the transition's curve.
+    private func zoomBridgeProgress() -> Double {
+        guard let bridge = zoomBridge, bridge.duration > 0 else { return 1 }
+        let raw = (CACurrentMediaTime() - zoomBridgeStart) / bridge.duration
+        return LoupeZoomCurve.easeOut(min(max(raw, 0), 1))
+    }
+
+    /// Present the frame on the canvas through `progress` of the transition.
+    ///
+    /// One present in flight at a time: `nextDrawable()` blocks once the queue is empty, and stalling
+    /// the main thread to draw a transition is worse than drawing it at the display's own rate.
+    private func presentZoomBridgeFrame(progress: Double, bridge: LoupeZoomBridge, texture: MTLTexture,
+                                        serial: Int) {
+        guard let presenter, zoomBridgePresentsInFlight < 2 else { return }
+        let canvas = viewportPixels
+        let window = bridge.window(atProgress: progress,
+                                   textureSize: ImageSize(width: texture.width, height: texture.height))
+        zoomBridgePresentsInFlight += 1
+        let ok = presenter.present(texture, in: canvasView.metalLayer,
+                                   wantsEDR: wantsExtendedDynamicRange,
+                                   drawableSize: canvas, window: window) { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)
+            }
+        }
+        if !ok {
+            zoomBridgePresentsInFlight = max(0, zoomBridgePresentsInFlight - 1)
+            return
+        }
+        recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
+                                              drawable: canvas, canvas: canvas))
     }
 
     /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
-    /// viewport, and a bridge measured against the old one is a transform about the wrong centre.
-    /// Tear it down instead of leaving the picture somewhere in between.
+    /// viewport, and a bridge measured against the old one is a window in the wrong space. Tear it
+    /// down instead of leaving the picture somewhere in between.
     public func cancelZoomBridge() {
-        guard zoomBridge != nil || pendingFrame != nil
-                || canvasView.metalLayer.animation(forKey: Self.zoomBridgeKey) != nil else { return }
+        guard zoomBridge != nil || pendingFrame != nil || zoomBridgeTicker != nil else { return }
         if let pending = pendingFrame, let graph = pending.graph {
             queue.async { graph.recycle(output: pending.frame.texture) }
             zoomBridgePendingDrops += 1
         }
         pendingFrame = nil
         zoomBridgeSerial += 1
+        stopZoomBridgeTicker()
         zoomBridge = nil
-        removeZoomBridgeAnimation()
         zoomBridgeCanvas = nil
+        // The canvas still holds the old picture seen through whatever window the bridge had reached:
+        // put it back to 1:1, or a resize would leave the picture stuck at a mid-transition scale
+        // until the next frame lands. Deferred — this is called from `viewDidLayout`, and taking a
+        // drawable mid-layout is asking for trouble. Guarded by identity, so a frame that arrived in
+        // the meantime wins.
+        guard let stuck = canvasTexture?.texture else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.zoomBridge == nil, self.canvasTexture?.texture === stuck,
+                  let presenter = self.presenter else { return }
+            presenter.present(stuck, in: self.canvasView.metalLayer,
+                              wantsEDR: self.wantsExtendedDynamicRange,
+                              drawableSize: self.viewportPixels, window: .whole)
+        }
     }
 
     /// Where the pointer is, in canvas **points** (y down — the space `NSEvent` and
@@ -1334,24 +1452,19 @@ public final class LoupeController: NSViewController {
     ///
     /// `frame.texture` is the canvas: the frame is rendered **at the viewport's device-pixel size**, so
     /// a canvas pixel *is* a texel (the `× backingScale` is the whole of the conversion), and while a
-    /// bridge is moving, the texture on screen is still the *old* frame under a layer transform — so the
-    /// point goes through the inverse of that composite first, or the row would read the pixel that is
-    /// about to arrive instead of the one the eye is on.
+    /// bridge is moving the texture on screen is still the *old* frame seen through a sampling window —
+    /// so the point goes through the inverse of that window first, or the row would read the pixel that
+    /// is about to arrive instead of the one the eye is on.
     public func textureTexel(forViewPoint point: CGPoint) -> (x: Int, y: Int)? {
         guard let frame = lastFrame else { return nil }
         let k = backingScale
         var v = (x: Double(point.x) * k, y: Double(point.y) * k)
         let canvas = frame.canvas
-        if zoomBridge != nil, zoomBridgeCanvas == canvas {
-            // The pixels on screen are the *old* frame under a running composite, so the point is
-            // pulled back through that composite before it names a texel.
-            let live = presentedLayerTransform()
-            let (scale, ox, oy) = LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas,
-                                                          backingScale: k,
-                                                          anchorPoint: canvasView.metalLayer.anchorPoint,
-                                                          isFlipped: canvasView.metalLayer.isGeometryFlipped)
-            if scale > 1e-6 {
-                v = (x: (v.x - ox) / scale, y: (v.y - oy) / scale)
+        if let bridge = zoomBridge, zoomBridgeCanvas == canvas {
+            // The pixels on screen are the *old* frame seen through the running bridge's window.
+            let live = bridge.map(atProgress: zoomBridgeProgress())
+            if live.scale > 1e-6 {
+                v = (x: (v.x - live.x) / live.scale, y: (v.y - live.y) / live.scale)
             }
         }
         let w = Double(canvas.width), h = Double(canvas.height)
@@ -2249,8 +2362,7 @@ public final class LoupeController: NSViewController {
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
-                         graph graphOverride: RenderGraph? = nil, underBridge: Bool = false,
-                         resetTransformAfterPresent: Bool = false) {
+                         graph graphOverride: RenderGraph? = nil) {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
@@ -2264,7 +2376,7 @@ public final class LoupeController: NSViewController {
         // `finishZoomBridge` hands it to this same function when the geometry arrives. Holding is not
         // discarding — the generation gate upstream has already decided this frame is the current
         // one — and nothing renders twice: `present` remains the single path to the layer.
-        if zoomBridge != nil, !underBridge {
+        if zoomBridge != nil {
             if let old = pendingFrame {
                 // Superseded either way: a frame for the same camera that arrived later is the
                 // better one, and a frame for a camera we are no longer going to is not ours.
@@ -2276,16 +2388,17 @@ public final class LoupeController: NSViewController {
             return
         }
         let graphAtFrame = graphOverride ?? graph
+        let canvas = viewportPixels
+        // The frame that is about to be replaced: it stays out of the render pool until this one's
+        // drawable is committed (the bridge may still be sampling it), and is recycled then.
+        let replaced = canvasTexture
         let t0 = CFAbsoluteTimeGetCurrent()
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
-                                   wantsEDR: wantsExtendedDynamicRange) { [weak self] in
+                                   wantsEDR: wantsExtendedDynamicRange,
+                                   drawableSize: canvas, window: .whole) { [weak self] in
             guard let self else { return }
-            // The drawable is on the layer now: only here is the bridged geometry safe to drop.
-            if resetTransformAfterPresent {
-                DispatchQueue.main.async { self.removeZoomBridgeAnimation() }
-            }
-            guard let graphAtFrame else { return }
-            self.queue.async { graphAtFrame.recycle(output: frame.texture) }
+            guard let replaced, let oldGraph = replaced.graph else { return }
+            self.queue.async { oldGraph.recycle(output: replaced.texture) }
         }
         let presentMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         // The layer refused the 16-bit drawable and fell back to 8-bit sRGB: re-render once with
@@ -2297,16 +2410,17 @@ public final class LoupeController: NSViewController {
             // before the next render instead of presenting clipped highlights.
             refreshDisplay()
             scheduleRender()
-            if resetTransformAfterPresent { removeZoomBridgeAnimation() }
             return
         }
         if !ok {
             lastPresentError = presenter.lastFailure
             if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
-            if resetTransformAfterPresent { removeZoomBridgeAnimation() }
             retryPresentLater()
             return
         }
+        // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
+        // bridge may re-sample them.
+        canvasTexture = (frame.texture, graphAtFrame)
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
         // on this serial, so the next move re-reads instead of trusting the previous picture's texel.

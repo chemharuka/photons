@@ -156,6 +156,34 @@ extension LoupeViewState {
 
 // MARK: - the scaling bridge (every stop change)
 
+/// Where a stop change is pinned: the point of the canvas that does **not** move while the picture
+/// grows or shrinks.
+///
+/// It is a parameter of the bridge, not something the two endpoint projections happen to agree on
+/// (025). `fit ↔ actual` and every pointer command pin the pixel under the pointer; the glass zoom
+/// slider pins the centre, on purpose (a slider has no pointer of its own).
+///
+/// Canvas device pixels, y down — the space `LoupeMapping` works in.
+public enum LoupeZoomAnchor: Equatable, Sendable {
+    /// The cursor's pixel, in canvas pixels.
+    case pointer(x: Double, y: Double)
+    /// The middle of the canvas: what the zoom slider means and what a command with no pointer over
+    /// the canvas falls back to.
+    case center
+
+    public func point(in canvas: ImageSize) -> (x: Double, y: Double) {
+        switch self {
+        case .pointer(let x, let y): return (x, y)
+        case .center: return (Double(canvas.width) / 2, Double(canvas.height) / 2)
+        }
+    }
+
+    /// Device-pixel anchor from a view point (the space `NSEvent` and the tests speak).
+    public static func pointer(viewPoint: CGPoint, backingScale k: Double) -> LoupeZoomAnchor {
+        .pointer(x: Double(viewPoint.x) * k, y: Double(viewPoint.y) * k)
+    }
+}
+
 /// The one geometric transition the loupe draws, and the only thing in `PhotonsUI` that animates.
 ///
 /// It exists because of a **gap**, not because of a taste for motion: the camera jumps to the new
@@ -213,11 +241,15 @@ public struct LoupeZoomBridge: Equatable, Sendable {
     /// `CALayer.isGeometryFlipped` — `true` for the canvas, whose view is flipped, so the layer's
     /// points run y **down** from the top-left, the same way every number in this type does.
     public let layerIsFlipped: Bool
+    /// Where the change is pinned. The bridge holds this point still on **every** frame of the
+    /// transition, not just at the two ends (025).
+    public let anchor: LoupeZoomAnchor
 
     public init(fromContent: ImageSize, toContent: ImageSize,
                 fromMapping: LoupeMapping, toMapping: LoupeMapping, canvas: ImageSize,
                 startScale: Double = 1, startOffsetX: Double = 0, startOffsetY: Double = 0,
                 layerAnchorPoint: CGPoint = .zero, layerIsFlipped: Bool = true,
+                anchor: LoupeZoomAnchor = .center,
                 duration: CFTimeInterval = LoupeZoomBridge.defaultDuration) {
         self.fromContent = fromContent
         self.toContent = toContent
@@ -229,6 +261,7 @@ public struct LoupeZoomBridge: Equatable, Sendable {
         self.startOffsetY = startOffsetY
         self.layerAnchorPoint = layerAnchorPoint
         self.layerIsFlipped = layerIsFlipped
+        self.anchor = anchor
         self.duration = duration
     }
 
@@ -276,6 +309,83 @@ public struct LoupeZoomBridge: Equatable, Sendable {
               canvas.height >= Self.minimumContentSide else { return false }
         let o = offset
         return abs(s - 1) > 0.002 || abs(o.x) > 0.5 || abs(o.y) > 0.5
+    }
+
+    // MARK: the map, frame by frame (025)
+
+    /// The fixed point of `v ↦ scale·v + offset` at the **end** of the bridge: the canvas pixel that
+    /// does not move. `nil` when the end map is a pure translation (`scale == 1`), which has none.
+    public var targetFixedPoint: (x: Double, y: Double)? {
+        let s = scale
+        guard abs(1 - s) > 1e-9 else { return nil }
+        let o = offset
+        return (o.x / (1 - s), o.y / (1 - s))
+    }
+
+    /// The fixed point the transition **starts** from. `nil` for a bridge armed from rest (the
+    /// picture on the canvas is at 1×, so the map is the identity and every point is fixed).
+    public var startFixedPoint: (x: Double, y: Double)? {
+        guard abs(1 - startScale) > 1e-9 else { return nil }
+        return (startOffsetX / (1 - startScale), startOffsetY / (1 - startScale))
+    }
+
+    /// The point every frame holds: the end map's fixed point, or — when the change has no scale at
+    /// its end, i.e. nothing to see — the anchor that was named.
+    public var anchorPoint: (x: Double, y: Double) {
+        targetFixedPoint ?? anchor.point(in: canvas)
+    }
+
+    /// Canvas pixels per canvas pixel at `progress` — 0 is the picture already on the canvas, 1 the
+    /// new camera. Linear in the scale, which is what `CAMediaTimingFunction(.easeOut)` distorts
+    /// (the curve picks *which* progress, it never changes what a progress means).
+    public func scale(atProgress t: Double) -> Double {
+        let p = t.isFinite ? min(max(t, 0), 1) : 0
+        return startScale + p * (scale - startScale)
+    }
+
+    /// The translation at `progress`, chosen so the anchor is **still on every frame**:
+    ///
+    ///     offset(t) = (1 − scale(t)) · F(t),   F(t) = lerp(F_start, F_end)
+    ///
+    /// This is the whole of 025's first bug. Interpolating the two endpoint *offsets* (which is what
+    /// a `CABasicAnimation` between two `CATransform3D`s does) only keeps the anchor still when both
+    /// ends happen to share it; expressing the frame as "this scale about this point" makes it true by
+    /// construction, for a fresh bridge and for a retarget of a running one alike.
+    public func offset(atProgress t: Double) -> (x: Double, y: Double) {
+        let p = t.isFinite ? min(max(t, 0), 1) : 0
+        let s = scale(atProgress: p)
+        let end = anchorPoint
+        let start = startFixedPoint ?? end
+        let fx = start.x + p * (end.x - start.x)
+        let fy = start.y + p * (end.y - start.y)
+        return ((1 - s) * fx, (1 - s) * fy)
+    }
+
+    /// `(scale, offset)` at `progress` — the same pair the layer transform used to carry, read back
+    /// for a retarget so the next bridge continues from where the eye is.
+    public func map(atProgress t: Double) -> (scale: Double, x: Double, y: Double) {
+        let o = offset(atProgress: t)
+        return (scale(atProgress: t), o.x, o.y)
+    }
+
+    /// Where a canvas point lands at `progress`: `p ↦ scale(t)·p + offset(t)`. The composite the eye
+    /// sees, for a test to project the anchored pixel through at every frame.
+    public func canvasPoint(atProgress t: Double,
+                            of p: (x: Double, y: Double)) -> (x: Double, y: Double) {
+        let s = scale(atProgress: t), o = offset(atProgress: t)
+        return (s * p.x + o.x, s * p.y + o.y)
+    }
+
+    /// The sampling window that draws frame `t` of the transition into the canvas-sized drawable.
+    ///
+    /// A window instead of a layer transform is what 025 asks for: the drawable stays the canvas size
+    /// (nothing can be drawn over the browser pane), and a shrinking window is *larger* than the
+    /// texture, so the picture's own edge pixels fill the canvas (`clamp_to_edge`) instead of an
+    /// unrendered black band.
+    public func window(atProgress t: Double, textureSize: ImageSize) -> PresentWindow {
+        let o = offset(atProgress: t)
+        return PresentWindow(scale: scale(atProgress: t), originX: o.x, originY: o.y,
+                             canvas: canvas, texture: textureSize)
     }
 
     // MARK: the layer transform
@@ -400,6 +510,42 @@ public struct LoupeZoomBridge: Equatable, Sendable {
     /// composite (or the bridge is cut short at its own target — `LoupeController.finishZoomBridge`),
     /// and the camera is already on the new stop before the first animation frame is drawn.
     public static let defaultDuration: CFTimeInterval = 0.180
+}
+
+// MARK: - the timeline
+
+/// The bridge's timing curve, as a function — the transition is drawn by the loupe now, frame by
+/// frame, so `CAMediaTimingFunction(name: .easeOut)` no longer runs it and the same curve has to be
+/// written down where both the presenter and a test can reach it.
+///
+/// It is `CAMediaTimingFunction`'s own easeOut: a cubic Bézier with control points `(0, 0)` and
+/// `(0.58, 1)`. `x(t)` is solved for the progress and `y(t)` is the answer — the curve decelerates
+/// into the stop, which is what makes a stop change read as *arriving* rather than being cut off.
+public enum LoupeZoomCurve {
+
+    private static let x1 = 0.0, y1 = 0.0
+    private static let x2 = 0.58, y2 = 1.0
+
+    /// Progress `0…1` → eased progress `0…1`. Monotone, `0 → 0`, `1 → 1`, and never outside the unit
+    /// interval (a curve that overshot would make the picture pass the stop and come back).
+    public static func easeOut(_ progress: Double) -> Double {
+        let p = progress.isFinite ? min(max(progress, 0), 1) : 0
+        if p <= 0 { return 0 }
+        if p >= 1 { return 1 }
+        // 20 halvings on [0, 1] is 1e-6 of a frame at any duration: the curve does not need Newton.
+        var low = 0.0, high = 1.0
+        for _ in 0..<20 {
+            let mid = (low + high) / 2
+            if bezier(mid, x1, x2) < p { low = mid } else { high = mid }
+        }
+        return bezier((low + high) / 2, y1, y2)
+    }
+
+    /// One coordinate of a cubic Bézier whose end points are 0 and 1.
+    private static func bezier(_ t: Double, _ c1: Double, _ c2: Double) -> Double {
+        let u = 1 - t
+        return 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t
+    }
 }
 
 // MARK: - framing (viewport + crop → all the numbers)
