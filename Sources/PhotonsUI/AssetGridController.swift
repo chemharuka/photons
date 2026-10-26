@@ -183,6 +183,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var lastWanted: Set<Int> = []
     private var lastTier: ThumbTier?
     private var lastLibraryURL: URL?
+    private var loggedMissingCache = false
 
     /// Open the anchor in the loupe (double-click / Return).
     public var onActivate: ((String) -> Void)?
@@ -377,7 +378,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     private func provider() -> ThumbnailProvider? {
-        guard let cache = session?.thumbnailCache else { return nil }
+        guard let session else { return nil }
+        guard let cache = session.thumbnailCache else {
+            // A library is open but there is no cache: the only state in which no cell can ever get
+            // pixels. Say it once — returning nil silently is how "the grid is a wall of swatches"
+            // stayed invisible for a whole milestone.
+            if session.isOpen, !loggedMissingCache {
+                loggedMissingCache = true
+                FileHandle.standardError.write(Data(
+                    "photons: thumbnail cache unavailable for \(session.libraryURL?.path ?? "?") — grid cells stay placeholders\n".utf8))
+            }
+            return nil
+        }
         if let thumbnailProvider, providerCache === cache { return thumbnailProvider }
         // A different library is a different cache directory: never keep drawing the previous
         // library's pixels (the service and its memory LRU belong to that cache).
