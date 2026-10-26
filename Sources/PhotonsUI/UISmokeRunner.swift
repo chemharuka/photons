@@ -2365,16 +2365,30 @@ public final class UISmokeRunner {
         }
 
         let depthBeforeAdjust = session.history.count
+        // 032: 控制点拖拽有自己的计数器（`shapeDragsAdjusted` 只统计“拖形状本体”的那种）。
+        let handleDragsBefore = loupe.maskHandleDrags
+        // 032 之后径向渐变有六个控制点，**中心那个是「移动」**：从中心拖是搬形状，半径当然不变。
+        // 这条断言要测的是「改半径」，所以必须从右缘的径向控制点起拖 —— 以前从中心拖能过，是因为
+        // 那时还没有控制点这层交互。找不到控制点就报错，不要悄悄退回中心拖（那样会变成测错东西）。
+        let radialGrip = loupe.maskHandlesLayout()?.grips.first {
+            $0.kind == .radialEdge(.right)
+        }?.point
+        if let grip = radialGrip {
+            log("mask radial grip       right rim at (\(String(format: "%.1f", grip.x)), \(String(format: "%.1f", grip.y))) pt")
+        } else {
+            log("mask radial grip       MISSING (no .radialEdge(.right) grip in the layout)")
+        }
+        let adjustFrom = radialGrip ?? CGPoint(x: bounds.midX, y: bounds.midY)
         _ = synthesizeStroke(in: canvas, window: window,
-                             from: CGPoint(x: bounds.midX, y: bounds.midY),
-                             to: CGPoint(x: bounds.midX + bounds.width * 0.26,
-                                         y: bounds.midY + bounds.height * 0.30),
+                             from: adjustFrom,
+                             to: CGPoint(x: adjustFrom.x + bounds.width * 0.18,
+                                         y: adjustFrom.y + bounds.height * 0.12),
                              steps: 20)
         let radialAfter = radialRadius()
         log("mask radial adjust      r \(String(format: "%.3f", radialBefore)) → \(String(format: "%.3f", radialAfter)) · history \(depthBeforeAdjust)→\(session.history.count)")
         check("径向渐变可在画布上拖动调整（半径 \(String(format: "%.3f", radialBefore)) → \(String(format: "%.3f", radialAfter))，一次拖拽一条历史 +\(session.history.count - depthBeforeAdjust)）",
               radialAfter > radialBefore + 0.02 && session.history.count == depthBeforeAdjust + 1
-              && loupe.shapeDragsAdjusted == 1)
+              && loupe.maskHandleDrags == handleDragsBefore + 1)
 
         _ = controller.undoEdit()
         pump(0.1)
