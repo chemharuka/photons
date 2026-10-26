@@ -3777,12 +3777,16 @@ public final class LoupeController: NSViewController {
             return HistogramStep(key: key, histogram: cached, latency: latency())
         }
         do {
-            // The picture's own rect inside the frame. `RenderGraph` centres the content in the
-            // canvas, so this is exact — and handing it over skips the engine's matte probe, which
-            // cannot tell a black band that belongs to the picture from a letterbox.
-            let content = ImageRect(x: (result.canvas.width - result.content.width) / 2,
-                                    y: (result.canvas.height - result.content.height) / 2,
-                                    width: result.content.width, height: result.content.height)
+            // The picture's own rect inside this frame's texture, as the **render laid it out**
+            // (`RenderResult.pictureRect` is derived from S0's own origin/frame-origin — the numbers
+            // the kernel was handed), not `(canvas − content) / 2`: that guess assumes the picture is
+            // centred in the content rect, which stops being true the moment a window reaches past
+            // the frame (a 1:1 view of a picture smaller than the viewport). There the content rect
+            // is the window and the photograph sits inside it with background around it, so the
+            // guess measures the background — bin 0 filled with canvas, which is the bug 048 reports.
+            // Handing the drawn rect over also skips the engine's matte probe, which cannot tell a
+            // black band that belongs to the picture from a letterbox.
+            let content = result.pictureRect
             let measurement = try graph.measureFrameHistogram(fromFrame: texture, edit: edit,
                                                               bins: 256, content: content,
                                                               primaries: primaries,
