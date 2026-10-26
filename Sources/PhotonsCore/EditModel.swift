@@ -452,7 +452,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
         return (Float(r), Float(g), Float(b))
     }
 
-    private static func planckianRGB(_ kelvin: Double) -> (Double, Double, Double) {
+    static func planckianRGB(_ kelvin: Double) -> (Double, Double, Double) {
         let t = min(max(kelvin, 1000), 15000) / 100
         var r: Double, g: Double, b: Double
         if t <= 66 {
