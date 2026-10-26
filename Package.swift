@@ -39,7 +39,7 @@ let package = Package(
         .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
         .testTarget(name: "PhotonsExportTests", dependencies: ["PhotonsExport", "PhotonsCore"]),
         .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog", "PhotonsCore"]),
-        .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI"]),
+        .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI", "PhotonsCatalog"]),
     ],
     // M0 keeps Swift 5 language mode: CIRAWFilter/MTLTexture are not Sendable and
     // strict-concurrency churn would bury the acceptance harness we are building here.

@@ -65,7 +65,11 @@ public struct ImportSummary: Sendable {
     public var failed = 0
     public var ignoredSidecars = 0
     public var seconds: Double = 0
+    /// The user pressed 取消 and the walk stopped between two files (`ImportState.cancelled`).
     public var interrupted = false
+    /// Ids of the rows this run created, in import order — the GUI selects the first one that is
+    /// still visible after `reload()`.
+    public var addedAssetIDs: [String] = []
 
     public init() {}
 
