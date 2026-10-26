@@ -77,13 +77,17 @@ public struct PointerPixel: Equatable, Sendable {
         }
     }
 
-    /// The level under the pointer (the luma; the footnote row paints it).
-    public let level: Level
-    /// The three channels' **own** levels, R/G/B — what the channel row paints.
+    /// The level under the pointer (the luma).
     ///
-    /// Separate from `level` because they answer different questions: the luma is one brightness for
-    /// the footnote row, the channels are the pixel's colour for the row above it, and either of them
-    /// can be above white while the other is not.
+    /// 023 deleted the row that printed it (「不需要亮度信息了」), so nothing paints `level.text` any more;
+    /// it stays because it *is* the pixel's position on the axis (the bin/counts lookup above is its), and
+    /// because the tests compare it against a second readback of the same texel.
+    public let level: Level
+    /// The three channels' **own** levels, R/G/B — what the row paints.
+    ///
+    /// Separate from `level` because they answer different questions: `level` is one brightness that
+    /// places the pixel on the axis, the channels are the pixel's colour, and either of them can be above
+    /// white while the other is not.
     public let channels: [Level]
     /// Which bin the level falls in: `bins` index (code segment) or `hdrBins` index (tail).
     public let bin: Int
@@ -161,35 +165,27 @@ public struct PointerPixel: Equatable, Sendable {
     }
 }
 
-// MARK: - the row's three states
+// MARK: - the row's states
 
-/// What the histogram card's bottom row is showing. One row, one height, three contents.
+/// What the histogram card's one row is showing, when the pointer is over the **plot**.
 ///
-/// The owner's rule (2026-10-26): 「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示该亮度像素数量，
-/// 鼠标在其他位置就都不显示但保留这行的高度不要乱动」. An enum rather than two optional strings,
-/// because the point of the type is that exactly one of the three is true and that none of them changes
-/// the row's height.
+/// The owner's rule (2026-10-26): 「鼠标在直方图上就显示该亮度像素数量，鼠标在其他位置就都不显示但保留这行的
+/// 高度不要乱动」, revised by 023 (2026-10-26): 「不需要亮度信息了，只要 RGB 值」 — the `.image` case (the
+/// pixel's brightness, one bare number) is gone, so the picture's half of the row is the pixel's three
+/// **channels**, painted by the card from `PointerPixel.channelTexts` rather than by this enum. What is
+/// left here is the plot's statement (a bin's R/G/B counts) and the absence of one.
 public enum HistogramReadoutRow: Equatable, Sendable {
     /// Nothing under the pointer: the row paints nothing and keeps its height.
     case idle
-    /// The pointer is over the picture: the brightness of the pixel under it, and nothing else.
-    case image(value: String)
-    /// The pointer is over the plot: the R/G/B sample counts of the brightness it points at.
+    /// The pointer is over the plot: the R/G/B sample counts of the bin it points at.
     case histogram(counts: HistogramBinCounts)
 
     /// What the row paints, or `nil` for `.idle` (which paints nothing and still occupies the row).
     public var text: String? {
         switch self {
         case .idle: return nil
-        case .image(let value): return value
         case .histogram(let counts): return HistogramCardFormat.readoutCounts(counts)
         }
-    }
-
-    /// The value string, or `""` — the readback the tests and the smoke compare.
-    public var valueText: String {
-        if case .image(let value) = self { return value }
-        return ""
     }
 
     /// The counts string, or `""`.
