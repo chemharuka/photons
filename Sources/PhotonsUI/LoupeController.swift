@@ -468,6 +468,11 @@ public final class LoupeController: NSViewController {
     /// no new source, so it cannot re-arm itself.
     public var frameSource: FrameSource? {
         didSet {
+            // 039: a different **photo** is a different picture, so the low-resolution backdrop is
+            // released here and rendered again by the next pointer entry. An edit keeps the identity
+            // (`contentHash|assetID`), so a slider never reaches this line — the digest half of the key
+            // moves and only marks the texture stale.
+            if frameSource?.identity != oldValue?.identity { backdrop.invalidate() }
             guard detailGesturing,
                   frameSource?.edit.detailSettings != oldValue?.edit.detailSettings else { return }
             detailPreview = true
@@ -559,6 +564,15 @@ public final class LoupeController: NSViewController {
     private var presenter: CanvasPresenter?
     private var graph: RenderGraph?
     private var graphIdentity: String?
+
+    /// 037 ② / 039 — the low-resolution **whole picture** the canvas draws outside a shrinking frame.
+    ///
+    /// Public so a test can read the state machine it is asserting (`generationCount`, `key`,
+    /// `isIdle`); the GPU work stays in `renderBackdrop` because this class owns the graph and the
+    /// queue. Nothing in the app reads it, and nothing here is a second render path: it is the same
+    /// `RenderGraph.render`, at a smaller scale, once per dirty pointer entry.
+    public let backdrop = BackdropCache()
+
     /// The decoded buffers of the photo on screen, keyed by rung (§11.10). A single `(key, buffer)`
     /// slot here is what made `fit → 1:1 → fit → 1:1` develop the same 60 MP file three times: the
     /// preview rung and the full rung evicted each other, so every visit to either paid ImageIO
@@ -1446,9 +1460,11 @@ public final class LoupeController: NSViewController {
         // Motion and a bridge that ended between two ticks.)
         if !reached, let target, let texture, let presenter {
             let canvas = viewportPixels
+            let drawn = backdropTexture(for: target)
             presenter.present(texture, in: canvasView.metalLayer,
                               wantsEDR: wantsExtendedDynamicRange,
-                              drawableSize: canvas, window: target)
+                              drawableSize: canvas, window: target, backdrop: drawn)
+            recordBackdropPresent(window: target, drawn: drawn, serial: serial)
             recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
                                                   drawable: canvas, canvas: canvas))
         }
@@ -1502,9 +1518,12 @@ public final class LoupeController: NSViewController {
         let window = bridge.window(atProgress: progress,
                                    textureSize: ImageSize(width: texture.width, height: texture.height))
         zoomBridgePresentsInFlight += 1
+        // A shrinking frame does not reach the canvas: this is the call the user's 「用低清预览做界面外
+        // 背景」 is about. A growing one covers it, and gets `nil` instead.
+        let drawn = backdropTexture(for: window)
         let ok = presenter.present(texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, window: window) { [weak self] in
+                                   drawableSize: canvas, window: window, backdrop: drawn) { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)
@@ -1514,6 +1533,7 @@ public final class LoupeController: NSViewController {
             zoomBridgePresentsInFlight = max(0, zoomBridgePresentsInFlight - 1)
             return
         }
+        recordBackdropPresent(window: window, drawn: drawn, serial: serial)
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
                                               drawable: canvas, canvas: canvas))
     }
@@ -1541,9 +1561,12 @@ public final class LoupeController: NSViewController {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.zoomBridge == nil, self.canvasTexture?.texture === stuck,
                   let presenter = self.presenter else { return }
+            let window = PresentWindow.whole
+            let drawn = self.backdropTexture(for: window)
             presenter.present(stuck, in: self.canvasView.metalLayer,
                               wantsEDR: self.wantsExtendedDynamicRange,
-                              drawableSize: self.viewportPixels, window: .whole)
+                              drawableSize: self.viewportPixels, window: window, backdrop: drawn)
+            self.recordBackdropPresent(window: window, drawn: drawn, serial: 0)
         }
     }
 
@@ -1607,7 +1630,14 @@ public final class LoupeController: NSViewController {
             pointerExited()
             return
         }
+        // 037 ②: **one** of the two conditions for a low-resolution backdrop is "the pointer came into
+        // the canvas from the inspector or from outside it". A `mouseEntered` routes here too
+        // (`LoupeCanvasView` hands both events to this one function), so a single read of "was there
+        // no pointer a moment ago" covers both spellings the task names — and a pointer that is
+        // already on the canvas never re-triggers it, however many move events arrive.
+        let entered = pointerCanvasPoint == nil
         pointerCanvasPoint = point
+        if entered { notePointerEnteredCanvas() }
         refreshPointerReadout()
         // A move is the moment before a grab: the selected mask's grips are re-projected here (and
         // only redrawn if a grip actually moved), so picking a gradient in the list shows its
@@ -2746,6 +2776,9 @@ public final class LoupeController: NSViewController {
     /// with it and cannot be aborted.
     public func cancelPendingFrames() {
         generation += 1
+        // 037 ②: the low-resolution whole picture belongs to the photo going away. Released here (and
+        // not re-rendered) — the next pointer entry on the new photo generates its own.
+        backdrop.invalidate()
         // 派单 031: a pending detail settle belongs to the photo that is going away; firing it at the
         // next one would develop a 60 MP frame nobody asked for.
         detailSettle?.cancel()
@@ -2787,6 +2820,176 @@ public final class LoupeController: NSViewController {
     @discardableResult
     public func awaitPendingDevelopments(timeout: TimeInterval = 60) -> Bool {
         decodeQueue.waitUntilIdle(timeout: timeout)
+    }
+
+    // MARK: the low-resolution whole picture (037 ② / 039)
+
+    /// The gate, and the whole of "不影响性能": a backdrop is rendered when the pointer comes into the
+    /// canvas **and** the document has moved since the last one. No other function in this file starts
+    /// it, so a stop change, a slider drag, a pan and every frame of a zoom transition cost nothing —
+    /// and an edit only moves the key (`backdropKey` carries the document digest), which marks the
+    /// texture stale without rendering anything.
+    private func notePointerEnteredCanvas() {
+        guard autoRenderEnabled, presenter != nil else { return }
+        guard let key = backdropKey else { return }
+        guard backdrop.shouldGenerate(onPointerEnter: key) else { return }
+        guard let job = makeJob(kind: .scheduled) else { return }
+        requestLowResFullFrame(key: key, edit: job.edit, template: job)
+    }
+
+    /// What the cached texture is of: the photo, plus the develop key and the edit digest.
+    ///
+    /// Three things have to move it, and each is a different kind of change: a different photo (the
+    /// picture on screen), a different `DecodeInputs.key` (white balance, detail, decoder version —
+    /// the same rules the decode ladder uses), and a different `EditModel` (everything S1–S3 does,
+    /// through `Histogram.editDigest`).
+    private var backdropKey: BackdropCache.Key? {
+        guard let edit = currentEdit else { return nil }
+        return backdropKey(edit: edit)
+    }
+
+    private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
+        guard let photo = backdropPhotoKey else { return nil }
+        return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
+                                 digest: Histogram.editDigest(edit))
+    }
+
+    /// The photo half of the key: `contentHash|assetID` in the app, a frame source's identity in the
+    /// tests and the bench — the same strings the decode ladder keys on.
+    private var backdropPhotoKey: String? {
+        if let source = frameSource { return source.identity }
+        guard let session, let asset = session.anchorAsset else { return nil }
+        return ladderIdentity(asset)
+    }
+
+    /// The document on screen as this class sees it (a frame source names its own document).
+    private var currentEdit: EditModel? {
+        if let source = frameSource { return source.edit }
+        return session?.edit
+    }
+
+    /// Start the one render. Shared by the pointer-entry gate and the explicit request below, so the
+    /// two cannot disagree about the key or about what a generation is.
+    private func requestLowResFullFrame(key: BackdropCache.Key, edit: EditModel,
+                                        template: RenderJob) {
+        let job = RenderJob(kind: template.kind, url: template.url,
+                            baseIdentity: template.baseIdentity, viewport: template.viewport,
+                            edit: edit, state: template.state, target: template.target,
+                            generation: template.generation, changedAt: template.changedAt)
+        let serial = backdrop.begin(key)
+        queue.async { [weak self] in self?.renderBackdrop(key: key, serial: serial, job: job) }
+    }
+
+    // MARK: the read-only accessor (for the histogram's whole-picture source)
+
+    /// The whole picture at low resolution, with the document it was rendered from.
+    ///
+    /// **Read-only and side-effect free**: it never starts a render. The consumer (the histogram's
+    /// whole-picture measurement, 040) may look at this once per frame, and a getter that could queue a
+    /// render is a render loop with extra steps. Call `ensureLowResFullFrame(edit:)` when a *specific*
+    /// document is needed and a pointer entry is not going to happen.
+    ///
+    /// The pixels are a frame-like `rgba16Float` texture in the same display space frames are made in
+    /// (linear P3 or sRGB, current headroom), so `RenderGraph.measureFrameHistogram(fromFrame:…)` reads
+    /// it the way it reads a frame; `content` is the picture's rect inside it (the whole texture).
+    public struct LowResFullFrame {
+        public let texture: MTLTexture
+        /// The picture's rect inside `texture` — the whole texture for this render.
+        public let content: ImageRect
+        /// `Histogram.editDigest(edit)` of the document this texture was rendered from.
+        public let digest: String
+        /// `DecodeInputs.key` of the same document (white balance / detail / decoder version).
+        public let develop: String
+        /// The photo half of the key (`contentHash|assetID` or a frame source's identity).
+        public let photo: String
+    }
+
+    /// `nil` until a backdrop has been generated for the document on screen — and immediately after a
+    /// photo switch (`cancelPendingFrames` releases it).
+    public var lowResFullFrame: LowResFullFrame? {
+        guard let texture = backdrop.texture, let key = backdrop.key,
+              let content = backdrop.content else { return nil }
+        return LowResFullFrame(texture: texture, content: content, digest: key.digest,
+                               develop: key.develop, photo: key.photo)
+    }
+
+    /// An **explicit** request for the whole picture at low resolution, for a caller that cannot wait
+    /// for a pointer entry (the histogram of a zoomed-in frame).
+    ///
+    /// It is the same gate as the pointer entry — one render, only when the requested document is not
+    /// the one already cached, and refused while another generation is in flight — and it says so. It
+    /// is **not** wired to any frame, camera or edit path: nothing in this file calls it, and calling it
+    /// from a per-frame hook would be exactly the render loop the design forbids. Returns `true` when a
+    /// render was started (the result arrives through `lowResFullFrame`).
+    @discardableResult
+    public func ensureLowResFullFrame(edit: EditModel? = nil) -> Bool {
+        guard autoRenderEnabled, presenter != nil else { return false }
+        guard let edit = edit ?? currentEdit, let key = backdropKey(edit: edit) else { return false }
+        guard backdrop.needsGeneration(for: key), backdrop.isIdle else { return false }
+        guard let job = makeJob(kind: .scheduled) else { return false }
+        requestLowResFullFrame(key: key, edit: edit, template: job)
+        return true
+    }
+
+    /// Render the whole picture at `BackdropScale` on the render queue and hand it to main.
+    ///
+    /// `useCache: false` on purpose. This is a one-off at a scale no frame uses, and the stage cache is
+    /// keyed by canvas: storing it would evict the entries the viewport's *next* frame wants (the same
+    /// reason `RenderGraph.measureHistogram` asks for a cold render). The pixels are the same either
+    /// way — the cache is a cost knob, never a quality knob.
+    private func renderBackdrop(key: BackdropCache.Key, serial: Int, job: RenderJob) {
+        guard let graph else {
+            DispatchQueue.main.async { [weak self] in
+                self?.backdrop.fail(key, error: "no frame yet (nothing decoded)")
+            }
+            return
+        }
+        let source = graph.sourceSize
+        let cropPixels = CropMath.outputSize(job.edit.geometry.renderCrop(source: source), in: source)
+        // Two pixel grids are in play, and confusing them is a half-resolution bug: the graph renders
+        // from the **decoded rung** (`graph.sourceSize` is that buffer's size), while the rule is
+        // written against the **original** (`min(imageLongEdge / 2, 4096)`). The rung's scale is what
+        // converts between them, so the ceiling is computed on the original and divided by the rung's
+        // own crop — without this, a 0.5 rung of a 9520 px file asks for 2380 px (half of the preview
+        // the user asked for) instead of 4096.
+        let rungScale = decodedScale.isFinite && decodedScale > 0 ? decodedScale : 1
+        let originalLongEdge = Int((Double(max(source.width, source.height)) / rungScale).rounded())
+        let scale = BackdropScale.renderScale(imageLongEdge: originalLongEdge,
+                                              contentLongEdge: max(cropPixels.width, cropPixels.height))
+        // The same display space the frame textures are made in (`makeFrame` reads these two the same
+        // way, on this queue): the pass samples the backdrop with the same linearise as the frame, so
+        // a mismatch here would show as a colour step at the feather band.
+        let primaries: OutputPrimaries = (presenter?.storage ?? .linear16) == .linear16 ? .displayP3 : .sRGB
+        let headroom = displayHeadroom.headroom
+        let t0 = CFAbsoluteTimeGetCurrent()
+        do {
+            let result = try graph.render(job.edit, options: RenderOptions(
+                scale: scale,
+                display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom),
+                useCache: false, wantsPixels: false))
+            let milliseconds = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+            guard let texture = result.output else {
+                throw RenderError.executeFailed("the backdrop render produced no texture")
+            }
+            // No canvas was asked for, so the picture is the whole texture — but say it with the size
+            // the render reported rather than with `texture.width`, so a letterbox can never be
+            // silently described as picture.
+            let content = ImageRect(x: 0, y: 0, width: result.content.width, height: result.content.height)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let adopted = self.backdrop.finish(texture, key: key, content: content,
+                                                   milliseconds: milliseconds, serial: serial)
+                if !adopted {
+                    // The photo moved on while this rendered: the texture is nobody's, so it goes back
+                    // to the pool it came from instead of being drawn over the new picture.
+                    self.queue.async { graph.recycle(output: texture) }
+                }
+            }
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.backdrop.fail(key, error: "\(error)")
+            }
+        }
     }
 
     // MARK: rendering
@@ -3040,6 +3243,62 @@ public final class LoupeController: NSViewController {
         }
     }
 
+    // MARK: - the backdrop on the canvas (037 ② / 039)
+
+    /// One present of the canvas as the backdrop saw it.
+    ///
+    /// The on-screen drawable cannot be read back (`framebufferOnly`), so the *parameters* of the pass
+    /// are the only observable evidence that the wiring is right — and they are recorded for every
+    /// present, not only while a bridge runs, because both rules of `039` have to be pinned:
+    /// a shrinking frame is drawn **with** the low-resolution picture and a frame that covers the
+    /// canvas is drawn **without** it (the engine feathers 2 px of low resolution into the frame's own
+    /// edge otherwise).
+    public struct BackdropPresent: Equatable, Sendable {
+        /// The bridge that drew it (`zoomBridgeArmedCount`), or 0 for a settled frame or a teardown.
+        public let serial: Int
+        public let window: PresentWindow
+        /// The backdrop's pixel size — `nil` when the pass was given none.
+        public let backdrop: ImageSize?
+        /// Whether the window already reached every canvas pixel.
+        public let coversCanvas: Bool
+    }
+
+    /// Every present, in order (capped; it is a log).
+    public private(set) var backdropPresents: [BackdropPresent] = []
+    /// Presents that carried a backdrop, and presents that did not.
+    public private(set) var backdropDrawCount = 0
+    public private(set) var backdroplessDrawCount = 0
+    private static let backdropPresentLimit = 512
+
+    /// The texture to draw behind `window`: the whole picture when the frame does **not** reach the
+    /// canvas, and `nil` whenever it does.
+    ///
+    /// Deliberately geometric — it asks nothing about bridges, gestures or zoom state. A covering frame
+    /// therefore can never pick up the low-resolution edge, and a shrinking frame drawn for any reason
+    /// (a transition, a teardown) gets the same honest background. `nil` while no backdrop has been
+    /// generated: the pass then falls back to 025's edge extrapolation, which is what keeps 「没有未渲染
+    /// 的黑」 true even before the first pointer entry.
+    private func backdropTexture(for window: PresentWindow) -> MTLTexture? {
+        guard !window.coversCanvas else { return nil }
+        // A backdrop belongs to one photo. Between a switch and the next pointer entry the cached
+        // texture is still the **previous** picture's, and drawing it behind a shrinking frame would
+        // show the old photograph's edge around the new one — a worse artefact than 025's extrapolation.
+        // The key carries the photo (`contentHash|assetID`), so the check is the same one that makes the
+        // next entry regenerate.
+        guard let key = backdrop.key, key.photo == backdropPhotoKey else { return nil }
+        return backdrop.texture
+    }
+
+    private func recordBackdropPresent(window: PresentWindow, drawn: MTLTexture?, serial: Int) {
+        let size = drawn.map { ImageSize(width: $0.width, height: $0.height) }
+        if size == nil { backdroplessDrawCount += 1 } else { backdropDrawCount += 1 }
+        backdropPresents.append(BackdropPresent(serial: serial, window: window, backdrop: size,
+                                                coversCanvas: window.coversCanvas))
+        if backdropPresents.count > Self.backdropPresentLimit {
+            backdropPresents.removeFirst(backdropPresents.count - Self.backdropPresentLimit)
+        }
+    }
+
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
                          graph graphOverride: RenderGraph? = nil) {
         guard let presenter else {
@@ -3080,9 +3339,14 @@ public final class LoupeController: NSViewController {
         // drawable is committed (the bridge may still be sampling it), and is recycled then.
         let replaced = canvasTexture
         let t0 = CFAbsoluteTimeGetCurrent()
+        // A settled frame is the whole picture at the canvas size, so `window: .whole` covers the
+        // canvas and the pass gets no backdrop — the rule is the window's, not this call site's.
+        let settledWindow = PresentWindow.whole
+        let drawn = backdropTexture(for: settledWindow)
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, window: .whole) { [weak self] in
+                                   drawableSize: canvas, window: settledWindow,
+                                   backdrop: drawn) { [weak self] in
             guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
@@ -3108,6 +3372,7 @@ public final class LoupeController: NSViewController {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)
+        recordBackdropPresent(window: settledWindow, drawn: drawn, serial: 0)
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
         // on this serial, so the next move re-reads instead of trusting the previous picture's texel.
