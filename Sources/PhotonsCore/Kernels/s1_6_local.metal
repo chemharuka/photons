@@ -46,9 +46,12 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     v = max(v, 0.0) * d.a.xyz;
 
     // 2. Tone shaping, the same parameterisation S2 uses (blacks/whites remap → contrast around the
-    //    0.18 scene pivot → shadow/highlight lifts), applied before the tone curve by design.
-    float blk = d.c.x / 100.0 * 0.15;
-    float wht = 1.0 + d.b.w / 100.0 * 0.15;             // whites
+    //    0.18 scene pivot → shadow/highlight lifts), applied before the tone curve by design — and
+    //    with the same **signs**: 派单 008 A fixed S2 to Lightroom's direction (both sliders brighten
+    //    towards +) and the panel must not be inverted for a local adjustment. `blk`/`wht` are input
+    //    points, so they move opposite to the sliders.
+    float blk = -d.c.x / 100.0 * 0.15;                  // blacks
+    float wht = 1.0 - d.b.w / 100.0 * 0.15;             // whites
     v = max((v - blk) / max(wht - blk, 1e-3), 0.0);
 
     float gamma = exp2(d.b.x / 100.0 * 2.0);            // contrast

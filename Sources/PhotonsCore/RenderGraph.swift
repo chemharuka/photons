@@ -344,6 +344,10 @@ private struct S1Params {
 private struct S2Params {
     var a: SIMD4<Float>   // blacks, whites, contrast, pivot
     var b: SIMD4<Float>   // highlights, shadows, identity
+    // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
+    // it a lifted black point remaps the matte's 0 to `−blk/(wht−blk) > 0` and the viewport's
+    // background bars light up. Same convention as S0's `a`/`b` and S3c's `c`.
+    var c: SIMD4<Float>
 }
 
 private struct CurveParams {
@@ -1112,7 +1116,12 @@ public final class RenderGraph {
             var params = S2Params(
                 a: SIMD4(Float(edit.light.blacks), Float(edit.light.whites),
                          Float(edit.light.contrast), 0.18),
-                b: SIMD4(Float(edit.light.highlights), Float(edit.light.shadows), identity ? 1 : 0, 0))
+                b: SIMD4(Float(edit.light.highlights), Float(edit.light.shadows), identity ? 1 : 0, 0),
+                // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
+                // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
+                // encoder, and the guard is what makes "blacks" leave the letterbox alone.
+                c: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S2Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
