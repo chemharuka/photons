@@ -228,27 +228,52 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(windowed.display).sha256(), try XCTUnwrap(plain.display).sha256())
     }
 
-    /// The window rect is clamped into the frame, both in the keys and in the result.
-    func testWindowIsClampedIntoTheFrame() throws {
+    /// A window may hang over the frame edge, and the part that misses the picture is **background**
+    /// — not a re-framed render.
+    ///
+    /// This test used to be `testWindowIsClampedIntoTheFrame`: the window was clipped into the frame,
+    /// which silently re-framed the picture (the render came back smaller than the canvas, the canvas
+    /// letterboxed it, and a zoom that left the picture jumped instead of showing background). The
+    /// clamp was removed when the owner asked for 「画面可以出去」; the geometry now travels verbatim and
+    /// `s0_geometry` writes zero outside the frame.
+    func testWindowMayHangOverTheFrameEdgeAndThatAreaIsBackground() throws {
         let image = texturedImage(width: 160, height: 120)
         let graph = try makeGraph(image)
         let edit = EditModel.neutral
 
-        let past = try graph.render(edit, options: RenderOptions(scale: 1,
-                                                                outputWindow: ImageRect(x: -50, y: -40,
-                                                                                        width: 9999, height: 9999),
-                                                                useCache: false, wantsPixels: false))
-        if let t = past.output { graph.recycle(output: t) }
-        XCTAssertEqual(past.window, ImageRect(x: 0, y: 0, width: 160, height: 120))
+        // ① Wholly past the frame: the request is kept verbatim.
+        let past = ImageRect(x: 200, y: 200, width: 40, height: 30)
+        let pastResult = try graph.render(edit, options: RenderOptions(scale: 1, outputWindow: past,
+                                                                      useCache: false, wantsPixels: true))
+        defer { if let t = pastResult.output { graph.recycle(output: t) } }
+        XCTAssertEqual(pastResult.window, past, "a window outside the frame is not pulled back inside it")
+        XCTAssertEqual(pastResult.content, ImageSize(width: 40, height: 30))
+        let pastPixels = try XCTUnwrap(pastResult.display, "wantsPixels asked for pixels")
+        var brightest: Float = 0
+        for i in stride(from: 0, to: pastPixels.rgba.count, by: 4) {
+            brightest = max(brightest, max(Float(pastPixels.rgba[i]),
+                                           max(Float(pastPixels.rgba[i + 1]), Float(pastPixels.rgba[i + 2]))))
+        }
+        XCTAssertEqual(brightest, 0, accuracy: 1e-4,
+                       "outside the picture must be background — the edge is never stretched into it")
 
-        let corner = try graph.render(edit, options: RenderOptions(scale: 1,
-                                                                   outputWindow: ImageRect(x: 140, y: 100,
-                                                                                           width: 80, height: 60),
-                                                                   useCache: false, wantsPixels: false))
-        if let t = corner.output { graph.recycle(output: t) }
-        XCTAssertEqual(corner.window, ImageRect(x: 80, y: 60, width: 80, height: 60),
-                       "a window that would leave the frame is moved back inside it")
-        XCTAssertEqual(corner.content, ImageSize(width: 80, height: 60))
+        // ② Half over the corner: still verbatim, so the canvas keeps the window's size.
+        let corner = ImageRect(x: 140, y: 100, width: 80, height: 60)
+        let cornerResult = try graph.render(edit, options: RenderOptions(scale: 1, outputWindow: corner,
+                                                                        useCache: false, wantsPixels: false))
+        if let t = cornerResult.output { graph.recycle(output: t) }
+        XCTAssertEqual(cornerResult.window, corner,
+                       "a window that leaves the frame stays where the camera put it")
+        XCTAssertEqual(cornerResult.content, ImageSize(width: 80, height: 60))
+
+        // ③ A window wholly inside the frame is untouched too — nothing was ever clamped *towards*
+        // the middle, which is the property the old name was really about.
+        let inside = ImageRect(x: 20, y: 15, width: 80, height: 60)
+        let insideResult = try graph.render(edit, options: RenderOptions(scale: 1, outputWindow: inside,
+                                                                        useCache: false, wantsPixels: false))
+        if let t = insideResult.output { graph.recycle(output: t) }
+        XCTAssertEqual(insideResult.window, inside)
+        XCTAssertEqual(insideResult.content, ImageSize(width: 80, height: 60))
     }
 
     // MARK: - 2. a window is literally the frame, cut
