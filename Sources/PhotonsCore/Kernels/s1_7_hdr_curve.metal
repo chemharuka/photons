@@ -6,19 +6,21 @@ using namespace metal;
 // There is exactly one curve in the pipeline and it lives here, between S1.6 (local masks) and
 // S2 (tone map). It used to sit *after* S2, on 0…1 data S2 had already compressed: the user could
 // only bend values S2 had shaped, the highlights region weighting had already had its say about
-// anything above 1, and a +6 EV highlight could not share an axis with a −12 EV shadow. Both
+// anything above 1, and a +4 EV highlight could not share an axis with a −12 EV shadow. Both
 // problems are the same problem, and the answer is the mounting point, not a better table. The old
 // stage, its file and its kernel are deleted (`Stage.curve` carries the one-line migration note).
 //
 // ## The axis: log1p of scene-linear light
 //
-//   u(x) = log1p(x / x0) / K        x0 = 2^-12 (−12 EV), K = ln(1 + 64/x0) = 12.4766531
+//   u(x) = log1p(x / x0) / K        x0 = 2^-12 (−12 EV), K = ln(1 + 16/x0) = 11.0903701
 //   x(u) = x0 · expm1(u · K)
 //
-// so `u = 0 ↔ x = 0`, `u(0.18) = 0.5293`, `u(1.0) = 0.6667` (SDR white is a third from the right
-// edge), `u = 1 ↔ +6 EV`. `K` is a **natural** log of `1 + xHI/x0`; the 18.0000055 that
-// `docs/tasks/030` quotes next to it is `K/ln 2`, i.e. the 18 stops the axis spans (+6 − (−12)),
-// and every `u` position in that document's table is the ln one. See `HDRCurveAxis.K`.
+// so `u = 0 ↔ x = 0`, `u(0.18) = 0.5955`, `u(1.0) = 0.7500` (SDR white is a quarter from the right
+// edge), `u = 1 ↔ +4 EV` — the histogram's own four-stop tail (`Histogram.swift:189`), which is
+// where 派单 044 puts the right end instead of 030's +6 EV. `K` is a **natural** log of
+// `1 + xHI/x0`; `K/ln 2 = 16.0000220` is the 16 stops the axis spans (+4 − (−12)), and is the
+// number §4.1 used to spell `log2`. Every `u` position in that document's table is the ln one.
+// See `HDRCurveAxis.K`.
 //
 // Why log1p and not a piecewise "log + linear toe" (Brightroom/OCIO): a toe needs a magic gain and
 // a break point and is only C0 there. log1p is C∞, monotone, needs no constants beyond x0/K, and
@@ -40,8 +42,10 @@ using namespace metal;
 //     branch — the matte's 0 and a true-black pixel's 0 both come out 0.
 //  4. **`u > 1` continues at the last segment's slope, never clamped.** `slope` is derived from the
 //     table's last two entries `(lut[N-1] − lut[N-2]) · (N-1)`, which is exactly 1 for the identity
-//     table, so identity is identity above +6 EV too (measured 1000 → 999.9996). A user's roll-off
-//     (slope < 1) keeps compressing; slope = 0 is a hard ceiling at 64 *the user drew*, not a
+//     table, so identity is identity above +4 EV too: the f32 round trip over 1e-6…64 (64 is
+//     u = 1.125, i.e. past the end) stays within 1.42e-6 relative, and through the fp16 display
+//     buffer 1000 comes back as 997.65 — the storage step (9.77e-4), not the slope. A user's roll-off
+//     (slope < 1) keeps compressing; slope = 0 is a hard ceiling at 16 *the user drew*, not a
 //     pipeline clamp. The slope is clamped to [0, 1] so it can neither invert nor manufacture gain.
 //
 // ## WRGB: W is a luma **gain**, R/G/B are separable per-channel tables
@@ -67,7 +71,7 @@ struct HDRCurveParams {
     // slopeW, slopeR, slopeG, slopeB — the last segment of each table (rule 4).
     float4 c;
     // luma weights (Rec709: 0.2126, 0.7152, 0.0722 — the same convention as s2_tone_map:81),
-    // then **stops per unit u** (`K/ln 2` = 18.0000055). A future colour basis change is one number
+    // then **stops per unit u** (`K/ln 2` = 16.0000220). A future colour basis change is one number
     // on the CPU side, not a kernel edit.
     float4 d;
 };
@@ -85,7 +89,7 @@ static inline float hdr_lut(device const float *lut, int offset, int n, float u)
 /// sum rounds to 1.0001 and the log quantises to ~6e-8 of `u`. The series below is used below 0.1
 /// (where `log(1+t)` would be eating the argument's low bits) and the hardware log above it. Measured
 /// against `Double`: the worst relative error of the whole forward→table→inverse round trip over
-/// 1e-6…64 is **1.48e-6**, i.e. 5e-4 of an 8-bit code — smaller than the frame's own fp16 step.
+/// 1e-6…64 is **1.42e-6**, i.e. 2e-4 of an 8-bit code — smaller than the frame's own fp16 step.
 static inline float hdr_forward(float x, float x0, float K) {
     float t = x / x0;
     float l = t < 0.1f

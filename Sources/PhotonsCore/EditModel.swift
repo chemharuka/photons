@@ -439,7 +439,9 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public static let identity = LightGroup()
 
     /// The envelope the level fields are clamped into (`§7.1`): a black sample below −3 EV is noise,
-    /// and a white above +6 EV is past the far end of the curve's axis.
+    /// and a white above +4 EV is past the far end of the curve's axis (the shaper keeps going at the
+    /// last slope, but nothing above it can be labelled — 044 moved the end from +6 to +4 EV; the
+    /// envelope itself stays where §7.1 put it, so old documents still load).
     public static let blackLevelRange: ClosedRange<Double> = -0.05...0.5
     public static let whiteLevelRange: ClosedRange<Double> = 0.05...64
 
@@ -618,7 +620,7 @@ public struct LevelPair: Sendable, Equatable {
 /// the tone map, on unbounded scene-linear light), so the two axes mean new things:
 ///
 ///   · x is the **log-light coordinate** `u = log1p(x/x0)/K` of `HDRCurveAxis` — `u = 0` is zero
-///     light, `u = 0.6667` is SDR white, `u = 1` is +6 EV;
+///     light, `u = 0.7500` is SDR white, `u = 1` is +4 EV (044: was +6);
 ///   · y is the same coordinate, i.e. the curve answers "map this u to that u".
 ///
 /// The point lists keep their shape, their 0…1 range and `CurvePoint.linear` — only the meaning of

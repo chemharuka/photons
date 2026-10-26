@@ -11,13 +11,13 @@ import PhotonsCore
 ///
 ///   1. **Identity is the identity.** The table is `i/(N−1)` to 1.2e-7 and the kernel takes a copy
 ///      branch, so a document that never touched the curve renders the bytes it always did. Forced
-///      through the arithmetic path the round trip is still ≤ 1.5e-6 relative (0.0005 of an 8-bit
+///      through the arithmetic path the round trip is still ≤ 1.5e-6 relative (0.0002 of an 8-bit
 ///      code), which is 650× below the frame's own fp16 step.
 ///   2. **Monotone, everywhere.** Fritsch–Carlson + the tabulated `min(diff) ≥ 0` check (tolerance
 ///      0), and 2048 log-spaced levels through a hard S come out non-decreasing per channel: a curve
 ///      that folds would invert tones, and that is the one thing a curve may never do.
 ///   3. **The ends behave.** `x ≤ 0` passes through with its sign (018's sub-black detail), `x = 0`
-///      therefore cannot be lifted, and above +6 EV the curve continues at its last segment's slope
+///      therefore cannot be lifted, and above +4 EV the curve continues at its last segment's slope
 ///      instead of clamping — the pipeline's upper bound is the user's, not the code's.
 ///   4. **W is a luma gain, R/G/B are separable.** Hue and saturation survive the composite curve;
 ///      a curve on R cannot move G or B.
@@ -118,6 +118,81 @@ final class HDRCurveTests: XCTestCase {
         CurveLUT.buildOne(points, size: size)
     }
 
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)      // Tests/PhotonsCoreTests/HDRCurveTests.swift
+            .deletingLastPathComponent()     // Tests/PhotonsCoreTests
+            .deletingLastPathComponent()     // Tests
+            .deletingLastPathComponent()     // repo root
+    }
+
+    /// The first capture group of `pattern` in `text`, as a `Double`; `nil` when the pattern is absent.
+    private func number(_ pattern: String, in text: String) throws -> Double? {
+        let re = try NSRegularExpression(pattern: pattern)
+        let range = NSRange(text.startIndex..., in: text)
+        guard let m = re.firstMatch(in: text, range: range), m.numberOfRanges > 1,
+              let r = Range(m.range(at: 1), in: text) else { return nil }
+        return Double(text[r])
+    }
+
+    // MARK: - ⓪ the axis itself, and the numbers the kernel documents
+
+    /// 派单 044 moved the right end of the axis from 030's +6 EV to **+4 EV** (`xHI = 16`), to land on
+    /// the histogram's own four-stop HDR tail (`Histogram.swift:189` `maxStops = 4`). Four positions
+    /// are pinned here because the docs, the kernel header and (later) the curve panel all quote them:
+    /// `u(0) = 0` exactly, `u(0.18) = 0.5955`, `u(1.0) = 0.7500`, `u(16) = 1` exactly.
+    ///
+    /// The kernel writes **no** constant of its own — it reads `x0`/`K`/stops-per-u out of
+    /// `HDRCurveParams`, so the two sides cannot disagree in the arithmetic. What *can* drift is the
+    /// header comment, which is the documentation a reader (and the next task) trusts; so it is
+    /// parsed and compared with `HDRCurveAxis` instead, the same discipline `ChromaticAberrationTests`
+    /// applies to `S0Params`.
+    func testAxisIsFourStopsAndTheKernelHeaderAgrees() throws {
+        let axis = HDRCurve.axis
+        XCTAssertEqual(axis.x0, 1.0 / 4096.0)
+        XCTAssertEqual(axis.xHI, 16, "044: the right end is +4 EV, xHI = 2^+4")
+        XCTAssertEqual(axis.K, 11.0903701476, accuracy: 1e-9, "K = ln(1 + 16/x0) = ln(65537)")
+        XCTAssertEqual(axis.stops, 16.0000220, accuracy: 1e-6, "K/ln 2 — the stops the axis spans")
+
+        // The four pinned positions.
+        XCTAssertEqual(axis.forward(0), 0, "u(0) must be exactly 0, or the black end cannot bend to 0")
+        XCTAssertEqual(axis.forward(0.18), 0.5955, accuracy: 1e-4, "u(18 % grey)")
+        XCTAssertEqual(axis.forward(1.0), 0.7500, accuracy: 1e-4,
+                       "u(SDR white) — a quarter from the right end")
+        XCTAssertEqual(axis.forward(axis.xHI), 1.0, accuracy: 1e-9, "u(+4 EV) = 1 exactly")
+        XCTAssertEqual(axis.u(stops: 4), 1.0, accuracy: 1e-9, "…the same statement in stops")
+        XCTAssertEqual(axis.u(stops: 0), 0.7500, accuracy: 1e-4, "SDR white is 0 EV")
+        XCTAssertEqual(axis.forward(1.0 / 4096.0), 0.0625, accuracy: 1e-6,
+                       "the black foot (0 … 2^-12) is 6.25 % of u")
+        XCTAssertGreaterThan(axis.u(stops: 8), 1.0, "+8 EV is past u = 1 and still answers")
+        XCTAssertEqual(axis.inverse(axis.forward(37.5)), 37.5, accuracy: 1e-9, "x → u → x")
+
+        // The `.metal` header, parsed: xHI, K, both tabulated u positions, and stops per u.
+        let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("x0 = 2^-12"), "the kernel header must state x0")
+        let docXHI = try XCTUnwrap(try number("K = ln\\(1 \\+ ([0-9.]+)/x0\\)", in: source),
+                                   "the kernel header must state K = ln(1 + <xHI>/x0)")
+        XCTAssertEqual(docXHI, axis.xHI, "the kernel header's xHI is not the axis's")
+        let docK = try XCTUnwrap(try number("K = ln\\(1 \\+ [0-9.]+/x0\\) = ([0-9.]+)", in: source))
+        XCTAssertEqual(docK, axis.K, accuracy: 1e-6, "the kernel header's K is not the axis's")
+        let docGrey = try XCTUnwrap(try number("u\\(0\\.18\\) = ([0-9.]+)", in: source))
+        XCTAssertEqual(docGrey, axis.forward(0.18), accuracy: 1e-4)
+        let docWhite = try XCTUnwrap(try number("u\\(1\\.0\\) = ([0-9.]+)", in: source))
+        XCTAssertEqual(docWhite, axis.forward(1.0), accuracy: 1e-4)
+        let docEnd = try XCTUnwrap(try number("u = 1 ↔ \\+([0-9]+) EV", in: source))
+        XCTAssertEqual(docEnd, 4, "the kernel header still claims a different right end")
+        let docStops = try XCTUnwrap(try number("K/ln 2 = ([0-9.]+)", in: source))
+        XCTAssertEqual(docStops, axis.stops, accuracy: 1e-6, "stops per unit u")
+
+        // …and no stale +6 EV number survives in the file.
+        for stale in ["0.5293", "0.6667", "12.4766531", "18.0000055", "64/x0"] {
+            XCTAssertFalse(source.contains(stale), "the kernel header still says \(stale)")
+        }
+        print(String(format: "044 axis: xHI=%.0f K=%.7f stops=%.7f, u(0.18)=%.4f u(1)=%.4f u(16)=%.9f",
+                     axis.xHI, axis.K, axis.stops, axis.forward(0.18), axis.forward(1.0),
+                     axis.forward(axis.xHI)))
+    }
+
     // MARK: - ① the identity table and the identity pixels
 
     /// The table is `i/(N−1)` to within double→single rounding, and an identity document renders the
@@ -150,7 +225,7 @@ final class HDRCurveTests: XCTestCase {
     // MARK: - ② the arithmetic is (almost) the identity too
 
     /// Forced through the shaper (`identity = 0`), the round trip `x → u → table → u → x` stays within
-    /// 1e-5 relative over four decades — the measured worst is 1.48e-6, i.e. 0.0005 of an 8-bit code,
+    /// 1e-5 relative over four decades — the measured worst is 1.42e-6, i.e. 0.0002 of an 8-bit code,
     /// two orders below the fp16 storage it lands in.
     func testIdentityArithmeticRoundTrip() throws {
         let axis = HDRCurve.axis
@@ -280,8 +355,8 @@ final class HDRCurveTests: XCTestCase {
     // MARK: - ⑤ the ends
 
     /// Endpoint behaviour, measured where it is observable: `out(0) = 0` always (rule 3), the white
-    /// end at `0.86` puts 64 at `64·2^(-0.14·18) ≈ 11.2`, and a black end pressed down still lets a
-    /// 1e-4 pixel through (smaller than its input, but > 0).
+    /// end at `0.86` puts 64 (u = 1.125, two stops past +4 EV) at `64·2^(-0.14·1.125·16) ≈ 11.2`,
+    /// and a black end pressed down still lets a 1e-4 pixel through (smaller than its input, but > 0).
     func testEndpointsBehave() throws {
         let values: [Float] = [1e-4, 0.18, 64]
         let graph = try makeGraph(bands(values))
@@ -307,7 +382,11 @@ final class HDRCurveTests: XCTestCase {
         var rolled = EditModel.neutral
         rolled.curve.white = [CurvePoint(0, 0), CurvePoint(1, 0.86)]
         let rolledOut = bandValues(try render(graph, rolled, headroom: 64), count: 3)
-        let expected = 64 * pow(2.0, -0.14 * HDRCurve.axis.stops)
+        // 64 is +6 EV — **past** the axis's right end (u(64) = 1.125), so the roll-off continues on
+        // rule 4's slope: for `(0,0)…(1,1−r)` the map above u = 1 is `v = (1−r)·u`, i.e. a shift of
+        // `−r·u`, not `−r`. Only at u = 1 (i.e. x = xHI = 16) are the two the same.
+        let u64 = HDRCurve.axis.forward(64)
+        let expected = 64 * pow(2.0, -0.14 * u64 * HDRCurve.axis.stops)
         print(String(format: "030 endpoints: roll-off (1,0.86): x=64 → %.4f (analytic %.4f)",
                      Double(rolledOut[2]), expected))
         XCTAssertEqual(Double(rolledOut[2]), encodeD(expected), accuracy: 0.01 * encodeD(expected),
@@ -362,24 +441,24 @@ final class HDRCurveTests: XCTestCase {
         }
     }
 
-    // MARK: - ⑦ beyond +6 EV
+    // MARK: - ⑦ beyond +4 EV
 
     /// Rule 4: the slope continues. Identity is identity at 1000 (through the arithmetic path), a
-    /// slope of 0 is a hard ceiling at 64, and 128 comes back as 128 at slope 1.
-    func testBeyondPlusSixEVContinues() throws {
+    /// slope of 0 is a hard ceiling at 16, and 128 comes back as 128 at slope 1.
+    func testBeyondPlusFourEVContinues() throws {
         let values: [Float] = [128, 1000]
         let graph = try makeGraph(bands(values))
         let out = bandValues(try render(graph, .neutral, headroom: 4096, forceArithmetic: true),
                              count: 2)
         let back128 = decode(out[0])
         let back1000 = decode(out[1])
-        print(String(format: "030 beyond +6 EV: 128 → %.4f, 1000 → %.4f", back128, back1000))
+        print(String(format: "030 beyond +4 EV: 128 → %.4f, 1000 → %.4f", back128, back1000))
         // Display values above 1 are the sRGB encode continued; decode through the analytic curve in
         // linear space instead, where the claim is stated.
         XCTAssertEqual(back128 / 128, 1, accuracy: 1e-2, "x = 128 at slope 1 must stay 128")
         XCTAssertEqual(back1000 / 1000, 1, accuracy: 1e-2, "x = 1000 at slope 1 must stay 1000")
 
-        // Slope 0: the user's ceiling at 64.
+        // Slope 0: the user's ceiling at xHI (+4 EV).
         XCTAssertEqual(CurveLUT.slope(of: table([CurvePoint(0, 0), CurvePoint(0.99, 1), CurvePoint(1, 1)])),
                        0, accuracy: 1e-6, "a flat last segment has slope 0")
 
@@ -388,7 +467,7 @@ final class HDRCurveTests: XCTestCase {
         let topOut = bandValues(try render(graph, hardTop, headroom: 4096), count: 2)
         let top1000 = decode(topOut[1])
         print(String(format: "030 ceiling at the white end: 1000 → %.4f", top1000))
-        XCTAssertEqual(top1000, 64, accuracy: 0.5, "slope 0 means 64 and no further")
+        XCTAssertEqual(top1000, 16, accuracy: 0.5, "slope 0 means 16 (+4 EV) and no further")
     }
 
     // MARK: - ⑧ sub-black passes through
@@ -479,36 +558,54 @@ final class HDRCurveTests: XCTestCase {
     // MARK: - ⑪ LUT precision (the gate on N = 4096)
 
     /// A 2 %-wide cliff — the narrowest gesture the editor allows — measured against the same spline
-    /// sampled 16× finer, in 8-bit sRGB codes. At N = 4096 the worst error is ≤ 0.3 codes; at
-    /// N = 1024 the same measurement is several codes, which is why the assertion has teeth.
+    /// sampled 16× finer, in 8-bit sRGB codes. Two worst cases are reported, because 044 changed what
+    /// the scan's far end means: `inside` is the error where the table interpolates (`u ≤ 1`, the
+    /// axis), and `all` includes the rule-4 extrapolation above +4 EV, where the value is not
+    /// interpolated at all but continued at each table's own estimate of the last slope.
+    ///
+    /// At N = 4096 the error **inside the axis** is 0.045 codes — it was 0.085 on the +6 EV axis (the
+    /// same scan with `xHI = 64`), because the shorter axis spends 11.09 instead of 12.48 of `K` per
+    /// unit `u`, i.e. fewer stops per table entry; the worst sample moves to x = 0.025, the cliff's own
+    /// shoulder. The `all` figure is 0.131 and its worst sample is x = 64 — two stops past the right end
+    /// since 044 — where the two tables' last-slope estimates disagree, so it measures rule 4's
+    /// continuation, not the interpolation. At N = 1024 the same measurement is 1.218 codes on the old
+    /// axis and 0.705 now, which is why the assertion still has teeth (and N = 2048, 0.179, sits
+    /// between them).
     func testTablePrecisionIsWhy4096() {
         let cliff = [CurvePoint(0, 0), CurvePoint(0.4, 0.35), CurvePoint(0.42, 0.75), CurvePoint(1, 1)]
         let reference = table(cliff, size: 65536)
         let referenceSlope = CurveLUT.slope(of: reference)
 
-        func worstCodeError(_ n: Int) -> Double {
+        /// `(all, inside u ≤ 1)` worst 8-bit code error at `n` entries, plus the `x` that produced each.
+        func worstCodeError(_ n: Int) -> (all: Double, inside: Double, allAt: Double, insideAt: Double) {
             let t = table(cliff, size: n)
             let slope = CurveLUT.slope(of: t)
-            var worst = 0.0
+            var all = 0.0, inside = 0.0, allAt = 0.0, insideAt = 0.0
             let samples = 4000
             for i in 0...samples {
                 let x = pow(10.0, -4 + Double(i) / Double(samples) * (log10(64.0) + 4))
                 let u = HDRCurve.axis.forward(x)
                 let a = HDRCurve.axis.inverse(HDRCurve.lutValue(t, slope: slope, u: u))
                 let b = HDRCurve.axis.inverse(HDRCurve.lutValue(reference, slope: referenceSlope, u: u))
-                worst = max(worst, abs(encodeD(a) - encodeD(b)) * 255)
+                let e = abs(encodeD(a) - encodeD(b)) * 255
+                if e > all { all = e; allAt = x }
+                if u <= 1, e > inside { inside = e; insideAt = x }
             }
-            return worst
+            return (all, inside, allAt, insideAt)
         }
 
         let e1024 = worstCodeError(1024)
         let e2048 = worstCodeError(2048)
         let e4096 = worstCodeError(4096)
-        print(String(format: "030 table precision (2%% cliff, 8-bit codes): N=1024 %.3f, N=2048 %.3f, N=4096 %.3f",
-                     e1024, e2048, e4096))
-        XCTAssertLessThanOrEqual(e4096, 0.3, "N = 4096 must stay under 0.3 codes")
-        XCTAssertGreaterThan(e1024, 0.3, "if this passes, the assertion above proves nothing")
-        XCTAssertGreaterThan(e2048, e4096, "the error must fall with N, or the measurement is broken")
+        print(String(format: "030 table precision (2%% cliff, 8-bit codes): N=1024 %.3f, N=2048 %.3f, "
+                     + "N=4096 %.3f (inside the axis: %.3f / %.3f / %.3f); worst sample at x = %.4g "
+                     + "(N=4096, all) and x = %.4g (N=4096, inside)",
+                     e1024.all, e2048.all, e4096.all, e1024.inside, e2048.inside, e4096.inside,
+                     e4096.allAt, e4096.insideAt))
+        XCTAssertLessThanOrEqual(e4096.all, 0.3, "N = 4096 must stay under 0.3 codes")
+        XCTAssertLessThanOrEqual(e4096.inside, 0.3, "…and inside the axis too")
+        XCTAssertGreaterThan(e1024.inside, 0.3, "if this passes, the assertion above proves nothing")
+        XCTAssertGreaterThan(e2048.inside, e4096.inside, "the error must fall with N, or the measurement is broken")
     }
 
     // MARK: - ⑫ the mount point

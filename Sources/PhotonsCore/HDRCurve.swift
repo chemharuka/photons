@@ -13,40 +13,48 @@ import Foundation
 
 /// The linear → log-light axis: `u(x) = log1p(x/x0)/K`, `x(u) = x0·expm1(u·K)`.
 ///
-/// `u = 0 ↔ x = 0` exactly, `u(0.18) = 0.5293`, `u(1) = 0.6667` (SDR white sits a third from the
-/// right edge — the axis deliberately spends its right third on HDR), `u = 1 ↔ +6 EV`, and beyond
-/// +6 EV `u` keeps growing with the same local slope (`du/dx = 1/(K·(x0+x))`), which is what lets the
+/// `u = 0 ↔ x = 0` exactly, `u(0.18) = 0.5955`, `u(1) = 0.7500` (SDR white sits a quarter from the
+/// right edge — the axis deliberately spends its last quarter on HDR), `u = 1 ↔ +4 EV`, and beyond
+/// +4 EV `u` keeps growing with the same local slope (`du/dx = 1/(K·(x0+x))`), which is what lets the
 /// kernel continue a curve past the right end instead of clamping.
+///
+/// **Why +4 EV and not the +6 that 030 first wrote (派单 044).** The only headroom the project
+/// actually states is the histogram's HDR tail: `Histogram.swift:189` `maxStops = 4` with
+/// `hdrBinsPerStop = 64`, i.e. **four** stops above SDR white (that `64` is bins per stop, never a
+/// 64× of anything). 030 §2/§4 picked `xHI = 2^+6 = 64` on its own — no rule asked for it — and 042
+/// copied the 6 EV. `xHI = 16` puts the axis exactly where the histogram already measures, spends
+/// 6.25 % of `u` on the black foot (was 5.56 %), and gives every stop above white a wider slice of
+/// the table, which is where the curve is coarsest (fp16 at +4 EV is 16 codes).
 public struct HDRCurveAxis: Sendable, Equatable {
     /// `u = 0`. −12 EV relative to SDR white. Exact in `Float` (a power of two).
     public let x0: Double
-    /// `u = 1`. +6 EV.
+    /// `u = 1`. +4 EV.
     public let xHI: Double
     /// `ln(1 + xHI/x0)` — the normalisation that makes `u(xHI) == 1`.
     ///
     /// **This is a natural log, and the distinction is load-bearing.** `docs/tasks/030` §4.1 writes
     /// `K = log2(1 + xHI/x0) = 18.0000055`, but every number that section tabulates is the ln one:
-    /// `u(2^-12) = 0.0556`, `u(0.18) = 0.5293`, `u(1.0) = 0.6667`, `u(4) = 0.7778`, `u(64) = 1.0000`,
-    /// and `dlog2(x)/du = 18.02 / 18.00 / 18.000` at 0.18 / 1.0 / 64.0. With K = log2 = 18 those six
-    /// positions come out 0.0385 / 0.3669 / 0.4621 / 0.5391 / 0.6931 — i.e. +6 EV would land at
+    /// `u(2^-12) = 0.0625`, `u(0.18) = 0.5955`, `u(1.0) = 0.7500`, `u(16) = 1.0000`, and
+    /// `dlog2(x)/du = 16.02 / 16.00 / 16.000` at 0.18 / 1.0 / 16.0. With K = log2 = 16.0000220 those
+    /// four positions come out 0.0433 / 0.4128 / 0.5199 / 0.6931 — i.e. +4 EV would land at
     /// u = 0.69 and the axis would never reach 1. The 18.0000055 is exactly `K/ln2 = log2(1+xHI/x0)`,
-    /// the **number of stops the axis spans** (18 = +6 EV − (−12 EV)), which is why it looked like K.
-    /// So: `K = ln(1 + 2^18) = ln(2^18 + 1) = 12.476653`, and 18.0000055 is `K/ln 2`.
+    /// the **number of stops the axis spans** (16.0000220 = +4 EV − (−12 EV)), which is why it
+    /// looked like K. So: `K = ln(1 + 2^16) = ln(65537) = 11.0903701`, and 16.0000220 is `K/ln 2`.
     ///
-    /// Note it is `ln(1 + x)`, not `ln(x)`: 18.0000055 instead of 18.0 exactly, because
-    /// `xHI/x0 = 2^18` and the shaper is `log1p`, whose argument is `1 + x/x0`.
+    /// Note it is `ln(1 + x)`, not `ln(x)`: 16.0000220 instead of 16.0 exactly, because
+    /// `xHI/x0 = 2^16` and the shaper is `log1p`, whose argument is `1 + x/x0`.
     public let K: Double
 
-    public init(x0: Double = 1.0 / 4096.0, xHI: Double = 64) {
+    public init(x0: Double = 1.0 / 4096.0, xHI: Double = 16) {
         self.x0 = x0
         self.xHI = xHI
         self.K = log(1 + xHI / x0)
     }
 
-    /// The shipped axis: −12…+6 EV, `K = 12.4766531`.
+    /// The shipped axis: −12…+4 EV, `K = 11.0903701`.
     public static let standard = HDRCurveAxis()
 
-    /// Stops the axis spans — `K/ln 2 = 18.0000055`, the number §4.1 quotes as `K`.
+    /// Stops the axis spans — `K/ln 2 = 16.0000220`, the number §4.1 quotes as `K`.
     public var stops: Double { K / log(2) }
 
     /// `x → u`. Defined for `x > 0`; the kernel's rule 3 passes `x ≤ 0` through untouched, so this
@@ -124,7 +132,7 @@ public enum HDRCurve {
         if y > 0 {
             let uy = axis.forward(y)
             let vy = lutValue(w, slope: s[0], u: uy)
-            // u units → stops: `axis.stops` (= K/ln 2 = 18.0000…), not `K`.
+            // u units → stops: `axis.stops` (= K/ln 2 = 16.0000…), not `K`.
             let dv = min(max((vy - uy) * axis.stops, -12), 12)
             let gain = pow(2, dv)
             rr *= gain; gg *= gain; bb *= gain
