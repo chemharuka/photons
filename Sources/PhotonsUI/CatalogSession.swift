@@ -162,6 +162,16 @@ public final class CatalogSession {
     /// switch cannot inherit the previous picture's frame before its own decode lands.
     public internal(set) var ingestedSourceFrame: (assetID: String, size: ImageSize)?
 
+    /// The crop tool's **live** draft geometry while the tool is open (派单 049).
+    ///
+    /// The draft is view state that lives in `CropToolController` and reaches the document only at
+    /// 应用, so `edit` does not move while the box is being dragged — the information row would sit
+    /// on the old numbers until the drag ended. This is the one bridge: written by the tool on every
+    /// draft change (and cleared on 应用 / 取消 / 离开), read by the inspector, never written to the
+    /// document, the history or the render key. `assetID` is carried because a published draft must
+    /// not be applied to the next photo's row.
+    public internal(set) var cropToolDraft: (assetID: String, geometry: GeometryGroup)?
+
     /// What the next drag on the canvas creates, when a shape gradient is waiting for one.
     ///
     /// View state like `maskTool`: selecting 线性/径向渐变 in the inspector's 新建 menu arms a drag,

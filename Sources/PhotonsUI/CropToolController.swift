@@ -134,9 +134,16 @@ public final class CropToolController {
 
     // MARK: state
 
-    public private(set) var isActive = false
+    public private(set) var isActive = false {
+        // 派单 049: the inspector's 「像素数量 / 尺寸」 follows the *live* draft, so every entry into
+        // and exit from 裁切 mode republishes it (leaving clears it, and the row falls back to the
+        // document — which is what a cancelled draft must print).
+        didSet { if isActive != oldValue { publishDraft() } }
+    }
     /// The draft the canvas draws. Setter-free from outside except through the commands below.
-    public private(set) var draft = Draft()
+    public private(set) var draft = Draft() {
+        didSet { if draft != oldValue { publishDraft() } }
+    }
     /// 九宫格. View state, and the only toggle that does not touch the draft.
     public var showsGrid = true
     public private(set) var isDragging = false
@@ -166,6 +173,18 @@ public final class CropToolController {
     /// property (not a stored copy) so a photo switch cannot leave the tool measuring the previous
     /// picture's aspect.
     public var sourceSize: ImageSize { session?.maskSourceSize ?? ImageSize(width: 1, height: 1) }
+
+    /// Hand the live draft to the inspector (派单 049). One property write, no render, no document:
+    /// the row recomputes two strings, and only while the tool is on. Cleared the moment the tool
+    /// closes, so 应用 / 取消 / 离开 all leave the row reading the document again.
+    private func publishDraft() {
+        guard let session else { return }
+        guard isActive, let id = session.anchorAsset?.id else {
+            session.cropToolDraft = nil
+            return
+        }
+        session.cropToolDraft = (id, draft.geometry)
+    }
 
     // MARK: the mode
 

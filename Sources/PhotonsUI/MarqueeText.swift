@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import PhotonsCatalog
+import PhotonsCore
 
 // MARK: - the numbers
 
@@ -428,6 +429,83 @@ public enum InspectorPhotoInfo {
     private static func pixelArea(width: Int?, height: Int?) -> Int? {
         guard let width, let height, width > 0, height > 0 else { return nil }
         return width * height
+    }
+
+    // MARK: 裁切后的画布尺寸 (派单 049)
+
+    /// What the first row prints, and the pixel grid it describes.
+    ///
+    /// The user, 2026-10-27:「裁剪后右上角信息栏中的像素大小也要改，这个视为画布的大小」— after a crop
+    /// the canvas on screen is the cropped picture, so `60 MP / 9520×6336` becomes whatever the crop
+    /// outputs. Two strings and the grid they came from, so a test can tell *why* a number is what it
+    /// is instead of comparing text and hoping.
+    public struct PhotoInfoMetrics: Equatable, Sendable {
+        public let pixelCount: String
+        public let pixelDimensions: String
+        /// The grid the two strings describe — the crop's output, or the asset's own stored size.
+        public let canvas: ImageSize?
+        /// `true` when `canvas` is the crop's output rather than the asset's stored dimensions.
+        public let isCroppedCanvas: Bool
+
+        public init(pixelCount: String, pixelDimensions: String,
+                    canvas: ImageSize?, isCroppedCanvas: Bool) {
+            self.pixelCount = pixelCount
+            self.pixelDimensions = pixelDimensions
+            self.canvas = canvas
+            self.isCroppedCanvas = isCroppedCanvas
+        }
+    }
+
+    /// The one entry point for 「像素数量 / 尺寸」: the asset's stored size, run through the crop.
+    ///
+    /// The numbers come from `CropMath.outputSize(geometry.renderCrop(source:), in: source)` — the
+    /// very call the export and the histogram make (`RenderGraph.measureHistogram`), so the row
+    /// cannot disagree with the file that will be written or with the plot above it.
+    ///
+    /// **"Is there a crop" is the geometry moving the output, not `crop != nil`.** A whole-frame
+    /// rectangle — `(0, 0, 1, 1)`, which is also what a document with no crop stores — leaves the
+    /// output equal to the frame, and then the row prints the asset's own numbers *character for
+    /// character*, which is what keeps 049 rule 2 (no crop ⇒ byte-identical) and rule 4 (full-canvas
+    /// crop ≡ no crop) the same statement.
+    ///
+    /// - Parameters:
+    ///   - storedWidth/storedHeight: the catalog row's dimensions, as the row has always read them.
+    ///   - geometry: the geometry on screen — the crop tool's live draft while it is open, else the
+    ///     document's. `nil` when no document is loaded for this photo.
+    ///   - source: the upright frame the renderer ingested (`RenderGraph.sourceSize`), when known.
+    ///     EXIF 5…8 transposes it, and the crop is measured on that frame, so a rotated photo's
+    ///     `W×H` comes out the right way round. Without it the stored dimensions are the frame.
+    public static func metrics(storedWidth: Int?, storedHeight: Int?,
+                               geometry: GeometryGroup?,
+                               source: ImageSize? = nil) -> PhotoInfoMetrics {
+        guard let stored = size(storedWidth, storedHeight) else {
+            return PhotoInfoMetrics(pixelCount: noValue, pixelDimensions: noValue,
+                                    canvas: nil, isCroppedCanvas: false)
+        }
+        // No document for this photo: the asset's own numbers, exactly as before 049.
+        guard let geometry else { return uncropped(stored) }
+
+        let frame = source.flatMap { size($0.width, $0.height) } ?? stored
+        let output = CropMath.outputSize(geometry.renderCrop(source: frame), in: frame)
+        // The geometry did not change the grid (no crop, a whole-frame crop, a flip, or a straighten
+        // — S0 keeps the crop as the output frame): print the asset's own size, untouched.
+        guard output != frame else { return uncropped(stored) }
+
+        return PhotoInfoMetrics(pixelCount: pixelCount(width: output.width, height: output.height),
+                                pixelDimensions: pixelDimensions(width: output.width, height: output.height),
+                                canvas: output, isCroppedCanvas: true)
+    }
+
+    private static func uncropped(_ stored: ImageSize) -> PhotoInfoMetrics {
+        PhotoInfoMetrics(pixelCount: pixelCount(width: stored.width, height: stored.height),
+                         pixelDimensions: pixelDimensions(width: stored.width, height: stored.height),
+                         canvas: stored, isCroppedCanvas: false)
+    }
+
+    /// Both sides, or nothing — the same rule `pixelArea` applies to the strings.
+    private static func size(_ width: Int?, _ height: Int?) -> ImageSize? {
+        guard let width, let height, width > 0, height > 0 else { return nil }
+        return ImageSize(width: width, height: height)
     }
 
     /// The ids the geometry test reads off the first row's two value cells. Not an enum in the
