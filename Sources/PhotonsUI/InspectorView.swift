@@ -48,6 +48,17 @@ public struct InspectorView: View {
     /// `["直方图", "白平衡", "Light", …]` — the order the cards appear in, from the one list above.
     public static var sectionTitles: [String] { Section.allCases.map(\.title) }
 
+    /// The cards that live **inside** the scroll view: everything except the pinned histogram.
+    ///
+    /// Still derived from `allCases` (one list, one order), so excluding a card here cannot silently
+    /// disagree with the enum — and `.histogram` is rendered exactly once, from `pinnedColumn`.
+    public static var scrollingSections: [Section] { Section.allCases.filter { $0 != .histogram } }
+
+    /// The pinned block's title. 「信息」, not 「调整」 — the block reports the photo (file name,
+    /// shooting parameters, equipment); it is not a control, and calling it 调整 made the panel promise
+    /// edits where it only ever printed facts.
+    public static let infoTitle = "信息"
+
     @Bindable public var session: CatalogSession
     /// The canvas, for the eyedropper and for the Auto preset's grey-world input (派单 009 C).
     /// Optional: the inspector is also built without a loupe (tests, previews, the grid side).
@@ -80,10 +91,10 @@ public struct InspectorView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            header
+            pinnedColumn
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(Section.allCases) { section in
+                    ForEach(Self.scrollingSections) { section in
                         sectionView(section)
                             .accessibilityIdentifier("inspector.card.\(section.rawValue)")
                     }
@@ -91,11 +102,32 @@ public struct InspectorView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
             }
+            .frame(maxHeight: .infinity)
         }
         .padding(.top, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .task(id: metadataKey) { reloadMetadata() }
+    }
+
+    /// The top of the panel: 信息 + 直方图, outside the `ScrollView`, so neither can be dragged away.
+    ///
+    /// The two blocks are the panel's *reference*: what this photo is, and what its tones are. The
+    /// controls below them are read against those numbers, so scrolling the reference off the top is
+    /// how a slider ends up being dragged blind. They keep their own height in a short window too —
+    /// `fixedSize(vertical:)` gives the column its ideal height and `layoutPriority` hands the
+    /// remainder to the scroll view, so a shrinking window takes space from the sliders, never from
+    /// the histogram (which would otherwise collapse to a strip).
+    private var pinnedColumn: some View {
+        VStack(spacing: 10) {
+            infoCard
+                .accessibilityIdentifier("inspector.card.info")
+            sectionView(.histogram)
+                .accessibilityIdentifier("inspector.card.histogram")
+        }
+        .padding(.horizontal, 12)
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(1)
     }
 
     @ViewBuilder
@@ -118,23 +150,20 @@ public struct InspectorView: View {
         }
     }
 
-    /// 「调整」标题 → 文件名 → 拍摄参数 → 器材（三行）。All three information rows live inside the
-    /// card's own horizontal inset, so each is exactly the card content width
-    /// (`330 − 2·12 − 2·16 = 274` at the default panel) and truncates at the tail with `…`
-    /// until the pointer is over it. The header used to sit at 16 pt while the cards sat at 28;
-    /// moving the whole block to 28 is what makes these lines end where the cards end.
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("调整")
-                .font(.system(size: 12, weight: .bold))
+    /// 「信息」 → 文件名 → 拍摄参数 → 器材（三行）, in the same card container the histogram uses.
+    ///
+    /// The card is the point: the two pinned blocks are one visual unit, and the container's own
+    /// horizontal inset is what puts the three rows at exactly the card content width
+    /// (`330 − 2·12 − 2·16 = 274` at the default panel), truncating at the tail with `…` until the
+    /// pointer is over the row.
+    private var infoCard: some View {
+        card(Self.infoTitle) {
             VStack(alignment: .leading, spacing: 2) {
                 MarqueeText(text: session.anchorAsset?.filename ?? "未选择照片")
                 InspectorPhotoInfo.InspectorParameterRow(tokens: parameterTokens)
                 MarqueeText(text: equipment)
             }
         }
-        .padding(.horizontal, WorkspaceLayout.cardInsetH)
-        .padding(.horizontal, 12)
     }
 
     // MARK: shooting information (派单 014)
