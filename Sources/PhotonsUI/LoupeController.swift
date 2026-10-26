@@ -329,6 +329,12 @@ public final class LoupeController: NSViewController {
     public let canvasView = LoupeCanvasView()
     private let container = NSView()
     private let statusChip = LoupeStatusChip()
+    /// 画布右下角的**固定档位**缩放拖动条（液态玻璃药丸）。
+    ///
+    /// It names a rung and nothing else: its only way out is `onZoom`, wired to `zoom(to:)` — the
+    /// same command the 倍率 menu and ⌘= use, bridge included. So the pill adds an input device,
+    /// not a second zoom model.
+    public let zoomSlider = ZoomGlassSlider()
     /// The two UI-only overlays. Both are transparent siblings of the `CAMetalLayer`, both refuse
     /// hit tests, and neither is part of a document or of any cache key.
     private let highlightOverlay = HighlightOverlayView()
@@ -550,6 +556,14 @@ public final class LoupeController: NSViewController {
             container.addSubview(overlay)
         }
         container.addSubview(statusChip)
+        // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
+        // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).
+        container.addSubview(zoomSlider)
+        zoomSlider.onZoom = { [weak self] stop in self?.zoomFromSlider(to: stop) }
+        zoomSlider.onFit = { [weak self] in self?.zoomToFit() }
+        // The wheel and the pinch stay the canvas' gestures even over the pill.
+        zoomSlider.wheelTarget = canvasView
+        layoutZoomSlider()
         view = container
         highlightOverlay.isArmed = session?.highlightWarning ?? false
     }
@@ -563,6 +577,7 @@ public final class LoupeController: NSViewController {
         observeModel()
         observeScreenChanges()
         refreshDisplay()
+        syncZoomSlider()
     }
 
     public override func viewDidAppear() {
@@ -573,6 +588,7 @@ public final class LoupeController: NSViewController {
     public override func viewDidLayout() {
         super.viewDidLayout()
         layoutStatusChip()
+        layoutZoomSlider()
         // A resize is a new canvas: every pixel is re-rendered into it, and a bridge measured against
         // the old one would scale the picture about the wrong centre. Tear the transition down rather
         // than leave the transform in a mid-flight state nobody will ever finish.
@@ -2342,10 +2358,43 @@ public final class LoupeController: NSViewController {
         statusChip.text = statusText
         statusChip.tooltip = displayHeadroom.detailText
         layoutStatusChip()
+        syncZoomSlider()
     }
 
     private func layoutStatusChip() {
         statusChip.layout(in: container.bounds)
+    }
+
+    // MARK: the fixed-stop zoom slider (canvas, bottom-right)
+
+    private func layoutZoomSlider() {
+        zoomSlider.layout(in: container.bounds)
+    }
+
+    /// Push the camera into the pill: the readout, the tick tints and the thumb.
+    ///
+    /// Every camera change already runs through `updateStatusChip()` (`setViewState` is the single
+    /// writer of `viewState`), so ⌘=, ⌘−, the wheel, a pinch and ⌘0 all land here — the pill can
+    /// never disagree with the canvas about where the camera is.
+    private func syncZoomSlider() {
+        // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
+        // *displayed* at its continuous position — it is never a snap target.
+        zoomSlider.update(zoomStop: currentZoomStop, fitZoom: framing()?.fitZoom)
+    }
+
+    /// Slider-originated zoom: **always around the canvas centre**.
+    ///
+    /// Deliberately *not* `zoom(to:)`: that one anchors on `cursorAnchor()`, and while the pointer
+    /// is on the slider it is not over the canvas at all, so a cursor anchor would name a stale or
+    /// nonsense pixel. "通过滑动条缩放默认从中心" — the picture grows around the middle of the
+    /// viewport.
+    ///
+    /// ⌘= / ⌘− / 显示 ▸ 倍率 / the wheel / the pinch keep their cursor anchor (the behaviour the
+    /// user has already signed off on). This is the only entry point that is centred — do not
+    /// "unify" the two.
+    public func zoomFromSlider(to stop: Double) {
+        // `nil` → `canvasCentrePoint()` inside `zoom(to:aroundView:)`.
+        zoom(to: stop, aroundView: nil)
     }
 }
 

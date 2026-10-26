@@ -2979,6 +2979,53 @@ public final class UISmokeRunner {
               && downChain == ["66.7%", "50%", "33.3%", "25%"]
               && !backToFit)
 
+        // 右下角的固定档位拖动条（液态玻璃药丸）：存在、八格刻度、从左拖到右落在 400 %，且**途经
+        // 的每个值都在档位表里**。60 个中间位置的指针事件是重点——中间值一次都不许出现；
+        // 并且从「适应」拖出去必须直接落到数值档，途中不能停在 fit（fit 只能由 ⌘0 进入）。
+        let pill = loupe.zoomSlider
+        loupe.zoomToFit()
+        pump(0.05)
+        let pillFitState = (pill.labelText, pill.thumbIndex == nil, pill.accentedTickCount)
+        var pillStops: [Double] = []
+        var pillOffLadder: [Double] = []
+        let pillStart = pill.point(forIndex: 0)
+        let pillEnd = pill.point(forIndex: 7)
+        pill.pointerDown(at: pillStart)
+        for step in 1...60 {
+            let t = CGFloat(step) / 60
+            pill.pointerDragged(at: CGPoint(x: pillStart.x + (pillEnd.x - pillStart.x) * t,
+                                            y: pillStart.y))
+            guard let stop = loupe.currentZoomStop else {
+                pillOffLadder.append(-1)      // 拖动中掉进 fit：不是数值档
+                continue
+            }
+            if pillStops.last.map({ abs($0 - stop) > 1e-9 }) ?? true { pillStops.append(stop) }
+            if !LoupeController.zoomStops.contains(where: { abs($0 - stop) < 1e-9 }) {
+                pillOffLadder.append(stop)    // 中间值
+            }
+        }
+        pill.pointerUp()
+        pump(0.1)
+        let pillFinal = loupe.currentZoomStop ?? -1
+        let pillPath = pillStops.map { LoupeViewState.percentLabel(of: $0) }.joined(separator: " → ")
+        let pillBackdrop = pill.backdropKind == .glass ? "NSGlassEffectView" : "NSVisualEffectView"
+        // 点 chip = 进 fit（唯一入口之一）；thumb 应回到 fit 比例的连续位置（不在格心上）。
+        pill.activateChip()
+        pump(0.1)
+        let chipFit = (loupe.currentZoomStop == nil, pill.labelText, pill.thumbIndex == nil,
+                       pill.thumbCenterX)
+        log("zoom slider             \(pill.geometry.edges.count) 刻度 · 背板 \(pillBackdrop) · fit 态「\(pillFitState.0)」着色 \(pillFitState.2) · 途经 \(pillPath) · 落点 \(loupe.zoomLabel) · chip→fit \(chipFit.0) 文案「\(chipFit.1)」· fit thumb x \(String(format: "%.2f", chipFit.3)) / 左端 \(String(format: "%.2f", pill.geometry.thumbLeftLimit))–右端 \(String(format: "%.2f", pill.geometry.thumbRightLimit))")
+        check("右下角液态玻璃拖动条存在、八格刻度，从「适应」拖动不会停在 fit、途经的每个值都在档位表里（\(pillPath)），从左拖到右最终落在 400%，点 chip 回到「适应」（\(chipFit.1)）",
+              pill.geometry.edges.count == 8
+              && pill.geometry.levels == LoupeController.zoomStops
+              && pillFitState.0 == "适应" && pillFitState.2 == 0
+              && pillOffLadder.isEmpty
+              && pillStops == LoupeController.zoomStops
+              && pillFinal == LoupeViewState.maximumZoom
+              && chipFit.0 && chipFit.1 == "适应" && chipFit.2
+              && chipFit.3 >= pill.geometry.thumbLeftLimit - 0.01
+              && chipFit.3 <= pill.geometry.thumbRightLimit + 0.01)
+
         let hashAfter = documentHash(session.edit)
         log("zoom vs document        hash \(hashBefore.prefix(8))… → \(hashAfter.prefix(8))… · history \(session.history.count) · editRevision +\(session.editRevision - revisionBefore)")
         check("⌘= / ⌘− / 倍率菜单不改文档：hash 不变（\(hashBefore.prefix(8))…）、history 仍 \(historyBefore) 条、editRevision +\(session.editRevision - revisionBefore)",
