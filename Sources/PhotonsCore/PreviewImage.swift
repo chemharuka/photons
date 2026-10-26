@@ -9,7 +9,8 @@ import ImageIO
 /// There is deliberately **no** case for "we decoded the RAW and downsampled it": that is the
 /// G (graph) path and it lives behind `RenderGraph`, never behind this type. A caller that sees
 /// `.embedded`/`.fallback` must therefore treat the pixels as "the camera's own look", not as our
-/// edit baseline (docs/tasks/006-thumbnails.md §0, §11.2).
+/// edit baseline (`architecture-decisions.md` §11.2: that preview is a full-size JPEG the camera
+/// already sharpened and toned, so it is never the pixel reference).
 public enum PreviewSource: String, Sendable, CaseIterable {
     /// `CIRAWFilter.previewImage` — the full-size JPEG the camera (or DNG Converter) embedded.
     /// Its `sourcePixelSize` is that preview's real size, so it answers "could this file serve

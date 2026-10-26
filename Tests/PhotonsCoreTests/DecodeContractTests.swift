@@ -2,7 +2,7 @@ import XCTest
 @testable import PhotonsCore
 
 /// M3 decode-contract tests: the two preconditions of the editing graph
-/// (docs/architecture-decisions.md §11.4 / §11.8, docs/tasks/004-ui-skeleton.md §3).
+/// (docs/architecture-decisions.md §11.4 / §11.8).
 ///
 /// ① v8 capability set + read-back assert. ② explicit linear (boost = 0, gamut mapping off).
 /// Both are pixel-level claims, so the tests that can use the real RAW do; the resolution rules are

@@ -4,7 +4,8 @@ import Foundation
 @testable import PhotonsCatalog
 
 /// 006c service contract: single flight, priority, concurrency ceiling, cancellation, stats.
-/// Every assertion here is either §5 of docs/tasks/006-thumbnails.md or an explicit acceptance rule
+/// Every assertion here is either the prefetch/cancellation contract (visible ± 1 row, stale
+/// `generation` dropped, in-flight decode runs to completion) or an explicit acceptance rule
 /// ("取消后不再写盘", "服务层不占主线程").
 final class ThumbnailServiceTests: XCTestCase {
 

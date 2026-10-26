@@ -9,13 +9,15 @@ let package = Package(
         .library(name: "PhotonsExport", targets: ["PhotonsExport"]),
         .library(name: "PhotonsCatalog", targets: ["PhotonsCatalog"]),
         // The UI shell lives in a library so its pure layout math and model are unit-testable;
-        // `PhotonsApp` is the thin `@main` + menu/bundle shim (docs/tasks/004-ui-skeleton.md §2b).
+        // `PhotonsApp` is the thin `@main` + `AppDelegate`/menu/bundle shim; a test target can depend on
+        // a library, not on an executable, which is the other reason the shell lives here.
         .library(name: "PhotonsUI", targets: ["PhotonsUI"]),
         .executable(name: "photonsctl", targets: ["photonsctl"]),
         .executable(name: "Photons", targets: ["PhotonsApp"]),
     ],
     // The single third-party dependency: GRDB (MIT), an SQLite toolkit. Pinned on purpose —
-    // see docs/tasks/003-catalog.md §1 and THIRD_PARTY_NOTICES.md.
+    // the catalog needs WAL, a migration ladder and typed row decoding, and GRDB resolves to exactly
+    // one package (it vendors its own SQLite). See THIRD_PARTY_NOTICES.md.
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", .upToNextMajor(from: "7.11.1")),
     ],
@@ -43,6 +45,7 @@ let package = Package(
     ],
     // M0 keeps Swift 5 language mode: CIRAWFilter/MTLTexture are not Sendable and
     // strict-concurrency churn would bury the acceptance harness we are building here.
-    // Migrating per-module is a tracked task (docs/tasks/002).
+    // Moving a target to Swift 6 language mode happens one module at a time, once its CIRAWFilter /
+    // MTLTexture surface is wrapped; no module has been migrated yet.
     swiftLanguageModes: [.v5]
 )

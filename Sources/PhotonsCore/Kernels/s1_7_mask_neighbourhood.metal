@@ -1,18 +1,17 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// S1.7 — the two **neighbourhood** operators of the atlas (docs/tasks/005-masks.md §3.4, §4.6).
+// S1.7 — the two **neighbourhood** operators of the atlas, applied after the pointwise combine.
 //
-// 005b/005c evaluated `opacity · combine(components) · invert` with a pointwise kernel. This file adds
+// The pointwise kernel evaluated `opacity · combine(components) · invert`. This file adds
 // the two operators that reach past the pixel, in the order the atlas applies them:
 //
 //   1. mask-level `feather`  — a separable box blur of the combined selection, radius in canvas
-//                              pixels (§2, `feather` 0…1 ⇒ 0…10 % of the short edge).
+//                              pixels (`feather` 0…1 ⇒ 0…10 % of the short edge).
 //   2. mask-level `refine`   — a guided filter (He/Sun/Tang 2010) steered by S1's linear luma:
 //                              `a = cov/(var + ε)`, `b = mean_p − a·mean_I`, `out = a·I + b`,
 //                              computed at 1/q resolution and upsampled at reconstruction, which is
-//                              the fast variant of arXiv:1505.00996 and exactly what §4.6 specifies
-//                              for the coefficient resolution.
+//                              the fast variant of arXiv:1505.00996.
 //
 // Both are affine-invariant under `opacity`/`invert` (`blur(1−a) = 1−blur(a)`, `blur(k·a) = k·blur(a)`),
 // so the atlas may keep writing the *final* coverage in S1.5 and these passes can run afterwards
@@ -20,7 +19,8 @@ using namespace metal;
 //
 // ## Why not `MPSImageGuidedFilter`
 //
-// §4.6 names the system kernel, and it was measured on this machine (macOS 27.2, M1 Pro, 1500×2731):
+// The system kernel (`MPSImageGuidedFilter`) was the plan, and it was measured on this machine
+// (macOS 27.2, M1 Pro, 1500×2731):
 //
 //   · `MPSImageGuidedFilter(device:kernelDiameter:)` with the required diameter 65 costs **145.7 ms**
 //     for the regression alone (36.2 ms at kd = 33, 3.2 ms at kd = 9; median of 12, GPU time) —

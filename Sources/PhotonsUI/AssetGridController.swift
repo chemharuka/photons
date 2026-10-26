@@ -33,7 +33,7 @@ public final class AssetCollectionView: NSCollectionView {
 ///
 /// The placeholder is never removed: a missing, failed or still-loading thumbnail draws the
 /// M3 swatch underneath, so a cell is never a white hole and a failure looks like "not yet",
-/// not like "broken" (docs/tasks/006-thumbnails.md §2).
+/// not like "broken".
 public final class AssetCardView: NSView {
     public var asset: Asset? { didSet { needsDisplay = true } }
     public var isActive: Bool = false { didSet { needsDisplay = true } }

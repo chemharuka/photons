@@ -2,7 +2,8 @@ import AppKit
 import PhotonsCatalog
 
 /// The filmstrip: a horizontal `NSCollectionView` that is the *same* browser as the photo list,
-/// just laid out along the bottom (Phos mode B, docs/tasks/004-ui-skeleton.md §2b item 3).
+/// just laid out along the bottom (Phos mode B: a 122 pt bar of 74×50 thumbs, ⌃⌘B shows/hides it,
+/// ⌃⌘A switches back to the list).
 ///
 /// It shares `CatalogSession.selection` with the grid — no second selection set, no second model —
 /// and it shares the *thumbnail* pipeline too: one `ThumbnailProvider` (hence one

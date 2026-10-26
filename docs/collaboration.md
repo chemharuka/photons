@@ -34,8 +34,8 @@
 用法（非交互，不需要 pty）：
 
 ```bash
-opencode run 'Follow the spec in docs/tasks/NNN.md exactly. Run its acceptance command before finishing.' \
-  -f docs/tasks/NNN.md
+opencode run 'Follow the spec in <spec>.md exactly. Run its acceptance command before finishing.' \
+  -f <spec>.md
 ```
 
 | 模型 | 状态 |

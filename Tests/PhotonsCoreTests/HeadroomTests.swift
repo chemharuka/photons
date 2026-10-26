@@ -2,7 +2,8 @@ import XCTest
 import PhotonsCore
 import Metal
 
-/// M3 EDR contract (docs/tasks/004-ui-skeleton.md §4, docs/architecture-decisions.md §11.8).
+/// M3 EDR contract (`DisplayOptions.headroom`, default 1, part of `keyString`;
+/// docs/architecture-decisions.md §11.8).
 ///
 /// The point of the test is that headroom is a *shape* fixed now, not a display feature: S4 must
 /// stop clamping at 1 so a later EDR switch is one boolean plus one number. A synthetic image keeps

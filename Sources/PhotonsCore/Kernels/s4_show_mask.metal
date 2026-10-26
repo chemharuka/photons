@@ -3,9 +3,9 @@ using namespace metal;
 
 // S4.5 — `showMask`: the selected mask painted over the finished frame.
 //
-// docs/tasks/005-masks.md §3.1: the atlas "is also the data source of the `showMask` overlay — one
-// implementation, two exits". So this pass reads the **same** `texture2d_array` S1.6 consumed (same
-// slice index, same coverage, feather/refine already applied) and never re-evaluates the predicate.
+// The atlas is deliberately also the data source of the `showMask` overlay — one implementation, two
+// exits. So this pass reads the **same** `texture2d_array` S1.6 consumed (same slice index, same
+// coverage, feather/refine already applied) and never re-evaluates the predicate.
 // That is the whole point: an overlay drawn from a second evaluation would one day disagree with the
 // adjustment it is previewing, and the disagreement would look like a mask bug.
 //

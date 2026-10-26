@@ -155,7 +155,8 @@ enum EditParameters {
     }
 
     /// A mask is *semantically* identified by its two key materials: exactly the resolution at which
-    /// the renderer and the cache can tell two masks apart (1e-5, docs/tasks/005-masks.md §2).
+    /// the renderer and the cache can tell two masks apart (quantised to 1e-5 — 0.6 px on a 60 MP
+    /// frame, which is the resolution the key material is written at).
     /// `name` is absent on purpose — renaming a mask dirties nothing, and adjustments live in
     /// `applyKey` while geometry lives in `selectionKey`, so the two stages stay separable (§3.2).
     ///

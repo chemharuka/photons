@@ -7,7 +7,8 @@ import PhotonsCore
 //
 //   1. `MaskTool` / `MaskViewState` — the split between "the document" and "what the canvas is
 //      doing right now". `showMask` is *view state*: the renderer reads it from the document value,
-//      but a snapshot must never carry it (`docs/tasks/QUEUE.md` 第 5 轮遗留 #1).
+//      but a snapshot must never carry it: comparing it would make every overlay toggle a history
+//      entry, and capturing it would let an undo silently switch the overlay off.
 //   2. `CatalogSession`'s mask document API — new/delete/enable/select, the overlay toggle, and the
 //      one stroke writer the canvas uses.
 //   3. `MaskCanvasController` — pointer events → sampled points → a `Stroke` in the document.

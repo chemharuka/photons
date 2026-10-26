@@ -60,7 +60,7 @@ RawCamera.metallib (2.6MB)
 - 正确的 API 是 `CGImageSourceCopyMetadataAtIndex` → `CGImageMetadataRef`：实测从中读到 `crs:Version=18.5.1`、`crs:CameraProfile=Adobe Standard`、`exifEX:LensMake=Sigma`、`xmpMM:OriginalDocumentID` 等。
 - 写回同理走 `CGImageDestinationAddImageAndMetadata`。
 
-代价评估不变（仍不需要 Exiv2），但**M2 的元数据读取必须按这条实现**，见 `docs/tasks/003-catalog.md` §4.4。
+代价评估不变（仍不需要 Exiv2），但**M2 的元数据读取必须按这条实现**：`CGImageSourceCopyMetadataAtIndex` → `CGImageMetadataRef`（`kCGImagePropertyXMPDictionary` 在 SDK 里不存在），`crs:*` 只把原文存进 `xmp_blob`，一个都不解析。
 
 **但要补一条反证（2026-10-25 晚，真机实测）**：在 Fuji **X-Trans** 的太阳能板细网格（迷宫伪色压力测试）上，v9 的解马赛克**确实更好**——线条更直更连续、伪色/摩尔纹更少、拖影更轻（`local/research/v9-vs-v8-measured.md` §6.6，1:1 目视确认）。
 所以准确说法是：**没有名为 `deBayer_v9` 的独立 kernel，但 v9 这条渲染路径在 raw 域上确实改善了 X-Trans 的解马赛克产物**；Bayer 侧则主要表现为降噪。不要再简单地说"v9 与去马赛克无关"。
@@ -120,7 +120,7 @@ RawCamera.metallib (2.6MB)
 
 ## 6. 数据模型草案（SQLite）
 
-> **已被 `docs/tasks/003-catalog.md` 定稿取代**（2026-10-25）：单库 SQLite+GRDB、宽主表 `assets`
+> **已被 M2 的定稿取代**（2026-10-25）：单库 SQLite+GRDB、宽主表 `assets`
 > + 1:1 卫星表 `asset_metadata`、相机/镜头为文本列 + `camera_key`（不建字典表）、
 > 关键词与相册多对多、`source_roots` 用卷 UUID、`import_sessions`/`import_files` 台账。
 > 本节保留为早期草案与推理依据。

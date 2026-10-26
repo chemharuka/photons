@@ -7,9 +7,11 @@ public struct ImportOptions: Sendable {
     public var rootID: String?
     /// e.g. `{YYYY}/{MM}/{name}{ext}`. `nil` keeps the original filename at the root.
     public var renameTemplate: String?
-    /// Test hook: hard-stop after N files, exactly like a kill (docs/tasks/003-catalog.md §6).
+    /// Test hook: hard-stop after N files with `_exit(137)`, exactly like a kill, so the resume path can
+    /// be exercised end to end. Acceptance scaffolding, not product semantics — said so in `--help`.
     public var interruptAfter: Int?
-    /// Extensions we never import (default: sidecars are ignored by policy, see §4.4).
+    /// Extensions we never import (default: sidecars are ignored by policy — the catalog never reads
+    /// or writes a `.xmp`; the embedded XMP is the only metadata source).
     public var skipExtensions: Set<String>
 
     /// Walk into subfolders. `false` imports only the regular files sitting directly in the folder

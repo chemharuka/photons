@@ -578,7 +578,7 @@ public final class CatalogSession {
     /// The snapshot is the *document*; the `showMask` overlay that was on screen is pasted back on
     /// top of it. Without that, undoing any edit would silently switch the mask display off (the
     /// snapshot was taken before the overlay was turned on, and `showMaskID` is not an edit), which
-    /// is the Q22/Q9e conflict in `docs/tasks/QUEUE.md`.
+    /// is exactly the failure this paste-back prevents.
     @discardableResult
     public func undo() -> Bool {
         guard let model = history.undo() else { return false }

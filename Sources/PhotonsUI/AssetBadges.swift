@@ -9,7 +9,8 @@ import PhotonsCatalog
 /// cell that actually painted.
 ///
 /// Everything is drawn *inside* the thumbnail rect, on top of the placeholder or the image: the
-/// placeholder block is never removed (docs/tasks/006-thumbnails.md §2), the badges are an overlay.
+/// placeholder block is never removed, so the badges are an overlay on top of whatever the cell
+/// already drew — a missing or failed thumbnail is "not yet", never a white hole.
 public struct AssetBadges: Equatable {
 
     public let rating: Int

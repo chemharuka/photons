@@ -7,21 +7,22 @@ import Vision
 
 // MARK: - 005e: semantic mattes
 //
-// docs/tasks/005-masks.md §5. A semantic mask is an *intent* plus a raster the OS produced; the
-// bitmap never enters the document (§2). Two routes, tried in this order, per file and per kind:
+// The fifth mask shape. A semantic mask is an *intent* plus a raster the OS produced; the
+// bitmap never enters the document — only the intent and a SHA-256 digest of the raster. Two
+// routes, tried in this order, per file and per kind:
 //
 //   1. `CIRAWFilter`'s read-only mattes (`CIRAWFilter.h:202–207`): sky, hair, skin, teeth, glasses
 //      and `portraitEffectsMatte` for a person. On this machine's Leica DNG **all of them are nil**
-//      (docs/research/apple-raw-stack.md §2), which is exactly why the probe is per file and a nil
-//      is a value, not an error.
+//      (measured; a sky matte only ships in Apple's own HEIC files), which is exactly why the probe
+//      is per file and a nil is a value, not an error.
 //   2. Vision: `VNGenerateForegroundInstanceMaskRequest` (macOS 14) for subject/foreground,
 //      `VNGeneratePersonSegmentationRequest` for a person. There is no request for sky, hair, skin,
 //      teeth or glasses, so those kinds are simply unavailable without a system matte.
 //
 // When neither route answers, the component contributes **zero coverage** and the stage report
-// carries `semanticUnavailable(kind:reason:)` — never an exception, never a guess (§5.1).
+// carries `semanticUnavailable(kind:reason:)` — never an exception, never a guess.
 //
-// Licensing (§5.3): Vision and CoreImage are OS frameworks; no model weights are redistributed, so
+// Licensing: Vision and CoreImage are OS frameworks; no model weights are redistributed, so
 // the MIT position is unchanged. Nothing here is derived from ART / RawTherapee / darktable
 // (GPL-3.0) or RapidRAW (AGPL-3.0).
 
@@ -37,7 +38,7 @@ public enum SemanticUnavailableReason: String, Sendable, Codable, CaseIterable {
     /// The system-matte route needs the file, and this graph was built without a source URL.
     case noSourceURL
     /// The route named by `SemanticShape.provider` forbids the fallback (a `systemMatte` mask never
-    /// silently becomes a Vision mask — §5.1 is a capability, not a substitution).
+    /// silently becomes a Vision mask — the provider is a capability, not a substitution).
     case routeDoesNotAllowFallback
 
     public var displayName: String {

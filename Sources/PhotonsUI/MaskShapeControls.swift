@@ -10,7 +10,7 @@ import PhotonsCore
 //   · `MaskCreationKind` is the *menu* vocabulary — one case per shape, with the label the inspector
 //     prints and the one property that changes how it is created (`isDragCreated`).
 //   · the geometry helpers turn two normalised source points into a real `LinearGradientShape` /
-//     `RadialGradientShape`, in the units §2/§4 of `docs/tasks/005-masks.md` defines: points are
+//     `RadialGradientShape`, in the units `Mask`/`MaskShape` define: points are
 //     normalised to the *uncropped source*, radii are divided by the short edge. That is why the
 //     same drag produces the same ellipse at fit, at 1:1 and in an export.
 //   · the session extension is the only writer. Creating a mask is **one** `commitEdit`, so ⌘Z takes

@@ -10,9 +10,10 @@ import CryptoKit
 ///
 /// 1. **Text**: the seven M1 cache keys are pinned verbatim, as produced by *committed* M1 code
 ///    (b1c58ec) for a fixed document. Empty masks must not move a single byte of them.
-/// 2. **Numbers**: every shape is compared against an independent scalar implementation of the
-///    formulas in docs/tasks/005-masks.md §4.1–§4.5, pixel by pixel, on a synthetic image — plus a
-///    table of pinned values so "fixed input → fixed output" is checked directly, not inferred.
+/// 2. **Numbers**: every shape is compared against an independent scalar implementation of its
+///    analytic formula (brush, linear, radial, colour range, luminance range), pixel by pixel, on a
+///    synthetic image — plus a table of pinned values so "fixed input → fixed output" is checked
+///    directly, not inferred.
 ///    No RAW fixture, no decoder, no eyeballing.
 /// 3. **Frames**: recorded goldens under `Tests/Golden/mask-*.json`, quantised to 8 bits so they
 ///    survive a GPU family change while still catching a structural regression.
@@ -106,7 +107,7 @@ final class MaskTests: XCTestCase {
         return try XCTUnwrap(dump, "a document with an enabled mask must produce an atlas")
     }
 
-    // MARK: - independent analytic reference (docs/tasks/005-masks.md §4.2 / §4.3)
+    // MARK: - independent analytic reference (linear / radial gradient)
 
     private func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
         let t = min(max((x - e0) / (e1 - e0), 0), 1)

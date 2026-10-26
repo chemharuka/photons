@@ -2,7 +2,11 @@ import Foundation
 
 // MARK: - priority
 //
-// docs/tasks/006-thumbnails.md §4 (priority list) and §5 (prefetch / cancellation).
+// Priority, high to low: the loupe's current frame, the visible grid/filmstrip, one off-screen row,
+// re-renders of edited visible items, then import backfill of `t256` / offline recovery. Prefetch is
+// the visible window ± 1 row and only resumes 150 ms after scrolling stops; cancellation bumps a
+// `generation` and drops stale jobs, but an in-flight decode cannot be interrupted — it runs to
+// completion and is written, its result is simply not delivered.
 //
 // The service is deliberately *pipeline-agnostic*: it owns the queue, the single-flight map, the
 // cancellation tokens and the counters, and it asks an injected `ThumbnailProducer` for JPEG bytes.
