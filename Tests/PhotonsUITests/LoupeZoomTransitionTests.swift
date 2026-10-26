@@ -119,7 +119,7 @@ final class LoupeZoomTransitionTests: XCTestCase {
         // The geometry it asks the layer for: the fit rect scaled to the 1:1 rect.
         XCTAssertEqual(bridge.fromContent, framing.contentPixels(of: .fit))
         XCTAssertEqual(bridge.toContent, framing.contentPixels(of: expected))
-        XCTAssertGreaterThan(bridge.scaleX, 1, "fit → 100 % grows the picture")
+        XCTAssertGreaterThan(bridge.scale, 1, "fit → 100 % grows the picture")
         XCTAssertNotNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"),
                         "the layer must be carrying the bridge")
 
@@ -146,13 +146,19 @@ final class LoupeZoomTransitionTests: XCTestCase {
                       "unexpected rung \(final.decodeScale)")
         print("fit→100%: bridges=\(controller.zoomBridgeArmedCount) "
               + "coveredPresents=\(controller.zoomBridgeCoveredPresents) "
-              + "scale=\(String(format: "%.4f×%.4f", bridge.scaleX, bridge.scaleY)) "
+              + "scale=\(String(format: "%.4f", bridge.scale)) "
+              + "duration=\(String(format: "%.0f", bridge.duration * 1000))ms "
               + "rung=\(final.decodeScale) hash=\((final.displayHash ?? "—").prefix(12))… == direct")
     }
 
-    // MARK: - ④ 100 → 200 → 300 → 400 is untouched
+    // MARK: - ④ every stop change is bridged, 100 → 200 → 300 → 400 included
 
-    func testActualToActualStopsNeverArmABridge() throws {
+    /// The five-stop ladder's whole problem: `100 → 200 %` is a 2× cut if nothing carries the picture
+    /// across, and *every* stop change is now a bridged change — not just `fit ↔ actual`.
+    ///
+    /// The bridge holds the arriving frame until the geometry gets there (see `present`), so a stop
+    /// that arms must also complete, hand the frame over, and end on the real pixels.
+    func testActualToActualStopsAreBridgedAndEndOnTheRealFrame() throws {
         let url = try rawFixture()
         let controller = makeController()
         start(controller, url: url, identity: "transition-stops")
@@ -166,20 +172,38 @@ final class LoupeZoomTransitionTests: XCTestCase {
         let coveredAfterCrossing = controller.zoomBridgeCoveredPresents
 
         var visited: [String] = []
+        var scales: [String] = []
         for stop in [2.0, 3.0, 4.0, 3.0, 2.0, 1.0] {
+            let armed = controller.zoomBridgeArmedCount
+            let completed = controller.zoomBridgeCompletedCount
             controller.zoom(to: stop)
+            let bridge = try XCTUnwrap(controller.zoomBridge,
+                                       "\(stop) is a stop change: it must arm a bridge")
+            XCTAssertEqual(controller.zoomBridgeArmedCount, armed + 1, "exactly one bridge per stop")
+            XCTAssertNotNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"),
+                            "\(stop) must carry an animation")
+            scales.append(String(format: "→%.0f%% ×%.2f", stop * 100, bridge.scale))
+            // The camera is already at the stop; the pixels are what is late.
+            XCTAssertEqual(controller.viewState.zoom, stop, accuracy: 1e-12,
+                           "the model jumps immediately")
+            XCTAssertTrue(waitFor { controller.zoomBridge == nil },
+                          "\(stop): the bridge never completed (last error: "
+                          + "\(controller.lastPresentError ?? "—"))")
+            XCTAssertEqual(controller.zoomBridgeCompletedCount, completed + 1)
+            XCTAssertNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"))
             waitForFrame(controller, zoom: stop)
             visited.append(controller.zoomLabel)
-            XCTAssertEqual(controller.zoomBridgeArmedCount, armedAfterCrossing,
-                           "\(stop) is an actual→actual stop: it must not arm a bridge")
-            XCTAssertNil(controller.zoomBridge)
-            XCTAssertNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"))
+            // The frame that ended the bridge is the stop's own frame, at the stop's own zoom.
+            XCTAssertEqual(controller.lastFrame?.zoom ?? -1, stop, accuracy: 1e-12)
         }
         XCTAssertEqual(visited, ["200%", "300%", "400%", "300%", "200%", "100%"])
-        XCTAssertEqual(controller.zoomBridgeCoveredPresents, coveredAfterCrossing,
-                       "an actual→actual stop must not present a frame under a bridge")
-        print("stops: armed=\(controller.zoomBridgeArmedCount) coveredPresents=\(controller.zoomBridgeCoveredPresents) "
-              + "labels=\(visited.joined(separator: "→"))")
+        XCTAssertGreaterThan(controller.zoomBridgeCoveredPresents, coveredAfterCrossing,
+                             "each stop presented a frame while its bridge was up (held, then handed over)")
+        XCTAssertEqual(controller.zoomBridgePendingDrops, 0, "no frame was thrown away mid-bridge")
+        print("stops: armed=\(controller.zoomBridgeArmedCount) "
+              + "completed=\(controller.zoomBridgeCompletedCount) "
+              + "coveredPresents=\(controller.zoomBridgeCoveredPresents) "
+              + "labels=\(visited.joined(separator: "→")) · \(scales.joined(separator: " "))")
     }
 
     // MARK: - ② no picture, no bridge

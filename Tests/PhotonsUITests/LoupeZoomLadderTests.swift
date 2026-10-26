@@ -142,9 +142,16 @@ final class LoupeZoomLadderTests: XCTestCase {
     // MARK: 4. the bridge geometry
 
     /// `fit → 100 %` on a 60 MP frame: the fit picture occupies 2400×1600 of a 2560×1600 canvas (its
-    /// 1.5 crop aspect fitted), the 1:1 picture occupies the whole canvas, and the bridge scale is that
-    /// ratio. Both rects are centred on the canvas, which is what makes the map a pure scale.
-    func testBridgeScaleIsTheRatioOfTheTwoContentRects() {
+    /// 1.5 crop aspect fitted), the 1:1 picture occupies the whole canvas.
+    ///
+    /// The bridge's scale is **not** the ratio of those two rects (1.0667) — that is only how much
+    /// bigger the *letterbox* gets, and scaling the fit picture by it would end the animation showing
+    /// the whole frame at 43 %, which is not the frame the 100 % camera is about to draw. The scale is
+    /// the ratio of the two cameras: `zoomN / zoomO = 1 / 0.4 = 2.5`. The old picture grows until the
+    /// pixel that was in the middle of the screen is the pixel the new camera has in the middle of the
+    /// screen, and the parts that no longer fit are clipped by the canvas — which is what "zoom in"
+    /// looks like.
+    func testBridgeScaleIsTheRatioOfTheTwoCameras() {
         let framing = LoupeFraming(viewport: ImageSize(width: 2560, height: 1600),
                                   sourceWidth: 6000, sourceHeight: 4000)
         let fitContent = framing.contentPixels(of: .fit)
@@ -154,34 +161,49 @@ final class LoupeZoomLadderTests: XCTestCase {
         XCTAssertEqual(fitContent, ImageSize(width: 2400, height: 1600))
         XCTAssertEqual(actualContent, ImageSize(width: 2560, height: 1600))
 
-        let bridge = LoupeZoomBridge(fromContent: fitContent, toContent: actualContent)
-        XCTAssertEqual(bridge.scaleX, 2560.0 / 2400.0, accuracy: 1e-12)
-        XCTAssertEqual(bridge.scaleY, 1, accuracy: 1e-12)
+        let bridge = LoupeZoomBridge(fromContent: fitContent, toContent: actualContent,
+                                     fromMapping: framing.mapping(of: .fit),
+                                     toMapping: framing.mapping(of: oneToOne),
+                                     canvas: framing.viewport)
+        XCTAssertEqual(bridge.scale, 1 / framing.fitZoom, accuracy: 1e-12)
+        XCTAssertEqual(bridge.scale, 2.5, accuracy: 1e-12)
         XCTAssertTrue(bridge.isVisible)
 
         // Back the other way it shrinks, by the reciprocal of the same number.
-        let back = LoupeZoomBridge(fromContent: actualContent, toContent: fitContent)
-        XCTAssertEqual(back.scaleX, 1 / bridge.scaleX, accuracy: 1e-12)
+        let back = LoupeZoomBridge(fromContent: actualContent, toContent: fitContent,
+                                   fromMapping: framing.mapping(of: oneToOne),
+                                   toMapping: framing.mapping(of: .fit),
+                                   canvas: framing.viewport)
+        XCTAssertEqual(back.scale, 1 / bridge.scale, accuracy: 1e-12)
 
-        // Same rect on both sides: nothing to animate, and no animation is armed.
-        XCTAssertFalse(LoupeZoomBridge(fromContent: actualContent, toContent: actualContent).isVisible)
-        // A rect of zero pixels is a broken frame, not an infinite zoom.
-        XCTAssertEqual(LoupeZoomBridge(fromContent: ImageSize(width: 0, height: 0),
-                                       toContent: actualContent).scaleX, 1)
+        // A canvas of zero pixels is a broken frame, not an infinite zoom.
+        let broken = LoupeZoomBridge(fromContent: ImageSize(width: 0, height: 0), toContent: actualContent,
+                                     fromMapping: framing.mapping(of: .fit),
+                                     toMapping: framing.mapping(of: oneToOne),
+                                     canvas: ImageSize(width: 0, height: 0))
+        XCTAssertFalse(broken.isVisible)
     }
 
-    /// 100 % → 200 % is the *same* fit to actual? No: both are `actual`, so the bridge refuses it. The
-    /// content rects do differ (the 200 % window is half the crop) but that crossing must stay a plain
-    /// re-render — this is the assertion that pins the bridge's scope.
-    func testBridgeWouldScaleBetweenStopsButTheControllerNeverAsksForIt() {
+    /// `100 % → 200 %` fills the canvas at **both** stops, so the old content-rect ratio is exactly
+    /// 1.0 and a bridge built on it would do nothing. The cameras still differ by 2×, and this is the
+    /// stop change the five-rung ladder makes a hundred times a session — it is bridged like any
+    /// other now (`LoupeZoomBridge.scale == 2`), and the translation is what keeps the anchored pixel
+    /// in place while it grows.
+    func testTwoStopsThatFillTheSameRectStillBridgeByTwo() {
         let framing = LoupeFraming(viewport: ImageSize(width: 2560, height: 1600),
                                   sourceWidth: 6000, sourceHeight: 4000)
-        let one = framing.contentPixels(of: LoupeViewState(mode: .actual, zoom: 1, centerX: 3000, centerY: 2000))
-        let two = framing.contentPixels(of: LoupeViewState(mode: .actual, zoom: 2, centerX: 3000, centerY: 2000))
-        XCTAssertEqual(one, ImageSize(width: 2560, height: 1600))
-        XCTAssertEqual(two, ImageSize(width: 2560, height: 1600))
-        // Identical rects — so even if it were armed, it would be invisible: the 200 % frame is the
-        // same canvas with a smaller window inside it, which is a re-render, not a geometry change.
-        XCTAssertFalse(LoupeZoomBridge(fromContent: one, toContent: two).isVisible)
+        let one = LoupeViewState(mode: .actual, zoom: 1, centerX: 3000, centerY: 2000)
+        let two = LoupeViewState(mode: .actual, zoom: 2, centerX: 3000, centerY: 2000)
+        XCTAssertEqual(framing.contentPixels(of: one), framing.contentPixels(of: two),
+                       "both stops letterbox to the same canvas")
+        XCTAssertEqual(framing.contentPixels(of: one), ImageSize(width: 2560, height: 1600))
+
+        let bridge = LoupeZoomBridge(fromContent: framing.contentPixels(of: one),
+                                     toContent: framing.contentPixels(of: two),
+                                     fromMapping: framing.mapping(of: one),
+                                     toMapping: framing.mapping(of: two),
+                                     canvas: framing.viewport)
+        XCTAssertEqual(bridge.scale, 2, accuracy: 1e-12)
+        XCTAssertTrue(bridge.isVisible, "identical rects, two different cameras: it must still bridge")
     }
 }

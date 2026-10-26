@@ -549,6 +549,16 @@ public final class LoupeController: NSViewController {
     public override func viewDidLayout() {
         super.viewDidLayout()
         layoutStatusChip()
+        // A resize is a new canvas: every pixel is re-rendered into it, and a bridge measured against
+        // the old one would scale the picture about the wrong centre. Tear the transition down rather
+        // than leave the transform in a mid-flight state nobody will ever finish.
+        let size = viewportPixels
+        if size != lastLaidOutViewport {
+            let canvasChanged = lastLaidOutViewport != nil && zoomBridgeCanvas != nil
+                && zoomBridgeCanvas != size
+            lastLaidOutViewport = size
+            if canvasChanged { cancelZoomBridge() }
+        }
         scheduleRender()
     }
 
@@ -664,20 +674,27 @@ public final class LoupeController: NSViewController {
         if viewState.isActualSize { zoomToFit() } else { zoomToActualSize() }
     }
 
-    /// Fit → 100 % around the middle of what is on screen. Already zoomed → back to exactly 100 %.
+    /// Fit → 100 % around **the pointer**. Already zoomed → back to exactly 100 %.
+    ///
+    /// Both directions anchor on the pointer where there is one: leaving `fit` magnifies about the
+    /// pixel under the cursor, and coming back from 300 % keeps that pixel in view instead of
+    /// re-centring the picture on the crop's middle. `zoomToFit` is the one command with no anchor to
+    /// honour — the whole frame is the whole frame.
     public func zoomToActualSize() {
-        guard let framing = framing() else { return }
-        pinchZoom = nil
-        var next = viewState
-        next.mode = .actual
-        next.zoom = 1
-        let centre = framing.visibleCenter(of: viewState)
-        next.centerX = centre.x
-        next.centerY = centre.y
-        setViewState(framing.centering(next, onSource: centre))
+        zoomToActualSize(aroundView: cursorAnchor())
     }
 
-    /// Back to the whole frame. Keeps the last centre so Z‑Z returns to where the user was.
+    /// The anchored form, for callers that know the point (the double-click, the tests).
+    public func zoomToActualSize(aroundView point: CGPoint?) {
+        guard let framing = framing() else { return }
+        pinchZoom = nil
+        let anchor = point ?? canvasCentrePoint()
+        setViewState(framing.zooming(viewState, to: 1, aroundView: anchor, backingScale: backingScale))
+    }
+
+    /// Back to the whole frame — **whole and centred**, which is the one camera change with no anchor
+    /// to honour: at `fit` the entire picture is on screen and there is nowhere else for it to be. The
+    /// last centre is kept, so Z‑Z returns to where the user was.
     public func zoomToFit() {
         pinchZoom = nil
         var next = viewState
@@ -722,20 +739,32 @@ public final class LoupeController: NSViewController {
         return LoupeController.zoomStops.first { abs($0 - zoom) < 0.005 }
     }
 
-    /// A menu stop (1 / 2 / 3 / 4): same centre, new scale, one re-render.
+    /// A menu stop (1 / 2 / 3 / 4): same **anchor**, new scale, one re-render.
     ///
-    /// Unlike a pinch this does not need a cursor anchor — the command's subject is the picture in
-    /// the window, so the centre is kept and the window shrinks around it.
+    /// The anchor is the pointer (`cursorAnchor()`), not the middle of the picture. A zoom is a
+    /// question about *this* pixel: moving it out from under the cursor is what makes a stop change
+    /// feel like a different photograph rather than a bigger one. When the pointer is not over the
+    /// canvas (a menu command, a shortcut pressed while it sits on the inspector) the picture's own
+    /// centre is the anchor, which is the behaviour this command had.
+    ///
+    /// The maths is `LoupeFraming.zooming` — the same one the pinch uses, exact because the centre
+    /// enters the mapping with slope 1 — so the anchored pixel does not move at all, not "by less than
+    /// a pixel": the two projections are one similarity and the anchor is its fixed point. The picture
+    /// is allowed to leave the frame for exactly this reason (the canvas shows background outside it,
+    /// `s0_geometry`), so the only case that can still push the pixel is the excursion limit in
+    /// `LoupeFraming.minimumPictureCoverage`, where the window would stop being half photograph.
     public func zoom(to stop: Double) {
+        zoom(to: stop, aroundView: cursorAnchor())
+    }
+
+    /// The anchored form, for callers that know the point (the tests).
+    public func zoom(to stop: Double, aroundView point: CGPoint?) {
         guard let framing = framing() else { return }
         pinchZoom = nil
-        var next = viewState
-        next.mode = .actual
-        next.zoom = LoupeViewState.clampZoom(stop)
-        let centre = framing.visibleCenter(of: viewState)
-        next.centerX = centre.x
-        next.centerY = centre.y
-        setViewState(framing.centering(next, onSource: centre))
+        let target = LoupeViewState.clampZoom(stop)
+        let anchor = point ?? canvasCentrePoint()
+        setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
+                                     backingScale: backingScale))
     }
 
     /// ⌘+ / ⌘=: the next stop up, or 4:1 from anything between. From `fit` it lands on 100 % — the
@@ -759,22 +788,20 @@ public final class LoupeController: NSViewController {
         zoom(to: next)
     }
 
-    /// Double-click: into 1:1 at the clicked pixel, or back to fit. (Both halves of the brief:
+    /// Double-click: into 1:1 **at the clicked pixel**, or back to fit. (Both halves of the brief:
     /// a double-click is the "show me this at full size" gesture, and its inverse when already there.)
+    ///
+    /// The clicked pixel is the anchor, not the destination: it stays under the pointer, and the
+    /// picture grows around it. Putting it in the middle of the viewport is the thing this used to do
+    /// and exactly what the user reported as "光标位置动了".
     public func handleDoubleClick(at point: CGPoint) {
-        guard let framing = framing() else { return }
+        guard framing() != nil else { return }
         pinchZoom = nil
         if viewState.isActualSize {
             zoomToFit()
             return
         }
-        let source = framing.mapping(of: viewState)
-            .sourcePoint(viewX: Double(point.x) * backingScale,
-                         viewY: Double(point.y) * backingScale)
-        var next = viewState
-        next.mode = .actual
-        next.zoom = 1
-        setViewState(framing.centering(next, onSource: source))
+        zoomToActualSize(aroundView: point)
     }
 
     /// Drag pan. `delta` is in view points; the *content* moves with the hand, so the camera moves
@@ -838,66 +865,236 @@ public final class LoupeController: NSViewController {
         }
         updateStatusChip()
         view.window?.invalidateCursorRects(for: canvasView)
-        // The loupe's one geometric transition, and only at the `fit ↔ actual` boundary: that is the
-        // crossing whose frame may have to wait for a development. 100 ↔ 200 ↔ 300 ↔ 400 re-render in
-        // a few milliseconds from a rung that is already resident, and that hard cut is the feel worth
-        // keeping — `armZoomBridge` refuses every same-mode change.
-        if previous.mode != next.mode, let framing = framing() {
+        // **Every** stop change is bridged, fit ↔ actual included. The camera jumps here and the
+        // pixels follow when they are rendered; between the two the canvas still holds the old
+        // picture, and with five stops that gap is a 2× cut (`fit ↔ actual` was only the loudest
+        // case because its frame can also have to wait for a development).
+        //
+        // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
+        // animating a drag would leave the picture behind the hand.
+        if let framing = framing(), movesScale(from: previous, to: next, framing: framing) {
             armZoomBridge(from: previous, to: next, framing: framing)
         }
         requestViewportRender()
     }
 
-    // MARK: the fit ↔ actual bridge
+    /// Did this change move the picture's *scale*? A pan moves it too, and must not animate.
+    private func movesScale(from old: LoupeViewState, to new: LoupeViewState,
+                            framing: LoupeFraming) -> Bool {
+        let o = framing.zoom(of: old), n = framing.zoom(of: new)
+        guard o > 0, n > 0, o.isFinite, n.isFinite else { return false }
+        return abs(n / o - 1) > 1e-6
+    }
+
+    // MARK: the stop-change bridge
 
     /// The bridge composited over the canvas right now, if any (`nil` = the canvas is the frame).
     public private(set) var zoomBridge: LoupeZoomBridge?
-    /// Crossings that armed a bridge — one per `fit ↔ actual` change with a picture on screen.
+    /// Stop changes that armed a bridge — one per change with a picture on screen.
     public private(set) var zoomBridgeArmedCount = 0
-    /// Frames presented while a bridge was up: the "at least one bridged frame" number.
+    /// Frames that arrived while a bridge was moving. They are **held**, not presented (see
+    /// `present(frame:renderMilliseconds:state:)`), and handed over when the geometry arrives.
     public private(set) var zoomBridgeCoveredPresents = 0
+    /// Bridges that replaced a running one — a held ⌘= or ⌘−. Each of those starts from the
+    /// presentation's current transform, which is what stops the picture jumping back.
+    public private(set) var zoomBridgeRetargets = 0
+    /// Bridges that reached their target geometry (and presented whatever frame was waiting).
+    public private(set) var zoomBridgeCompletedCount = 0
+    /// Held frames thrown away because the camera moved on before they could be shown.
+    public private(set) var zoomBridgePendingDrops = 0
 
     private static let zoomBridgeKey = "photons.zoomBridge"
-    /// How long the old picture takes to reach the new geometry: long enough to read as motion,
-    /// shorter than any development. The bridge is **cut short** by the real frame, never waited on.
-    private static let zoomBridgeDuration: CFTimeInterval = 0.18
 
-    /// Scale the picture already on screen from the rect it occupies to the rect the new camera will
-    /// occupy, and hold it there until a real frame presents.
+    /// The projection the pixels **on the canvas** were laid out with. A bridge always starts from
+    /// these pixels, whatever the camera has done since.
+    private var canvasContent: (mapping: LoupeMapping, content: ImageSize)?
+    /// A frame that arrived while the bridge was still moving: kept, and presented the moment the
+    /// geometry is at the target. Not a dropped frame — the generation gate upstream has already
+    /// decided it is the current one.
+    private var pendingFrame: (frame: FrameResult, graph: RenderGraph?, milliseconds: Double,
+                               state: LoupeViewState)?
+    /// Which bridge the completion timer belongs to: a superseded one must present nothing.
+    private var zoomBridgeSerial = 0
+    /// The canvas size the bridge was armed against; a resize invalidates it.
+    private var zoomBridgeCanvas: ImageSize?
+    private var lastLaidOutViewport: ImageSize?
+
+    /// System setting ▸ 辅助功能 ▸ 显示 ▸ 减弱动态效果. The geometry still has to be right, so the
+    /// bridge still holds the arriving frame; it snaps to the target instead of sliding there.
+    public var reducesMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    /// Carry the picture already on screen from the projection of the camera that produced it to the
+    /// projection of the new camera, linearly, and hand the canvas over to the real frame when it
+    /// arrives.
     ///
-    /// Why a layer transform instead of a re-render: at `fit → 100 %` the frame the new camera wants
-    /// may still be developing (52–900 ms). The canvas keeps drawing the *previous* texture, laid out
-    /// for the *old* camera, so the change reads as a cut. Those pixels are the right picture — only
-    /// their rect is wrong — so the cheapest honest fix is to move the rect: one `CATransform3D` on the
-    /// canvas layer, identity → new/old content-rect ratio, with `fillMode = .forwards` so the new
-    /// geometry is **held** when a decode outlives the 180 ms motion. The layer's model transform stays
-    /// identity and `present` removes the animation, so no real frame is ever composited through it.
+    /// Why a layer transform instead of a re-render: only the *presentation* may interpolate. The
+    /// pixels the new camera wants are a render, and re-rendering at an interpolated scale for every
+    /// animation frame would be 11 extra renders per 2× step, at the exact moment the ladder is busy.
+    /// The picture on the canvas is the right picture — at the wrong scale — so the honest cheap fix
+    /// is to move it: one `CATransform3D`, `present`'s single path untouched.
     ///
-    /// Both rects are centred on the canvas (`RenderGraph` letterboxes about the middle), which is what
-    /// makes this a pure scale about the layer's anchor point — no translation, no flip arithmetic.
-    private func armZoomBridge(from old: LoupeViewState, to new: LoupeViewState, framing: LoupeFraming) {
-        guard old.mode != new.mode else { return }       // fit ↔ actual only, never 100 ↔ 200
-        guard lastFrame != nil else { return }           // nothing on screen to bridge from
-        let bridge = LoupeZoomBridge(fromContent: framing.contentPixels(of: old),
-                                     toContent: framing.contentPixels(of: new))
+    /// Retargeting: the animation starts from the **presentation's** current transform, so a second
+    /// ⌘= continues from where the picture actually is instead of restarting at identity. Nothing is
+    /// ever added twice — the same key replaces the animation.
+    private func armZoomBridge(from old: LoupeViewState, to new: LoupeViewState,
+                               framing: LoupeFraming) {
+        guard lastFrame != nil else { return }        // nothing on screen to carry
+        let canvas = viewportPixels
+        let k = backingScale
+        let fromMapping = canvasContent?.mapping ?? framing.mapping(of: old)
+        let fromContent = canvasContent?.content ?? framing.contentPixels(of: old)
+        let toMapping = framing.mapping(of: new)
+        let targetScale = fromMapping.canvasPerSource > 1e-12
+            ? toMapping.canvasPerSource / fromMapping.canvasPerSource : 1
+        // Where the composite already is. `identity` for a bridge armed from rest, and the running
+        // animation's own value for one that replaces it (read off the presentation tree, which is
+        // what the eye is looking at).
+        let live = presentedLayerTransform()
+        let start = canvasContent == nil
+            ? (scale: 1.0, x: 0.0, y: 0.0)
+            : LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas, backingScale: k)
+        let wasBridging = zoomBridge != nil
+        let bridge = LoupeZoomBridge(
+            fromContent: fromContent,
+            toContent: framing.contentPixels(of: new),
+            fromMapping: fromMapping,
+            toMapping: toMapping,
+            canvas: canvas,
+            startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
+            duration: LoupeZoomBridge.duration(from: start.scale, to: targetScale))
+        guard bridge.isVisible else {
+            // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
+            // clamped to the same rect): the arriving frame *is* the whole change.
+            zoomBridgeSerial += 1
+            zoomBridge = nil
+            removeZoomBridgeAnimation()
+            return
+        }
+        if wasBridging { zoomBridgeRetargets += 1 }
+        // A held frame for a camera we are no longer going to belongs nowhere: recycle it and let the
+        // render that this stop change asks for take its place.
+        if let pending = pendingFrame, pending.state != new {
+            if let graph = pending.graph {
+                queue.async { graph.recycle(output: pending.frame.texture) }
+            }
+            pendingFrame = nil
+            zoomBridgePendingDrops += 1
+        }
         zoomBridge = bridge
         zoomBridgeArmedCount += 1
-        guard bridge.isVisible else { return }
+        zoomBridgeCanvas = canvas
+        // The model value goes back to identity before anything else: the animation (or the hold below)
+        // owns the composite, and a leftover hold from the previous transition must not be the value
+        // this one starts from.
+        setLayerTransform(CATransform3DIdentity, animated: false)
+        guard !reducesMotion, bridge.duration > 0 else {
+            // Reduce Motion: no slide, but the same order of operations — geometry now, frame now.
+            finishZoomBridge()
+            return
+        }
         let animation = CABasicAnimation(keyPath: "transform")
-        animation.fromValue = CATransform3DIdentity
-        animation.toValue = CATransform3DMakeScale(bridge.scaleX, bridge.scaleY, 1)
-        animation.duration = Self.zoomBridgeDuration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        animation.fromValue = bridge.startTransform(backingScale: k)
+        animation.toValue = bridge.targetTransform(backingScale: k)
+        animation.duration = bridge.duration
+        // 线性: the user asked for the picture to grow at a constant rate, and a constant rate is also
+        // the only curve that reads as "the same 10 % of the ladder" on every rung.
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
+        // The end value is held when a development outlives the motion — the picture is already where
+        // the new camera will put it, so waiting there is a still frame, not a jump.
         canvasView.metalLayer.add(animation, forKey: Self.zoomBridgeKey)
+        zoomBridgeSerial += 1
+        let serial = zoomBridgeSerial
+        DispatchQueue.main.asyncAfter(deadline: .now() + bridge.duration + 0.002) { [weak self] in
+            guard let self, self.zoomBridgeSerial == serial else { return }
+            self.finishZoomBridge()
+        }
     }
 
-    /// Drop the bridge: the new camera's own frame is on the canvas.
-    private func disarmZoomBridge() {
-        guard zoomBridge != nil else { return }
+    /// The geometry has arrived: hold the transform the animation ended on, remove it, and hand the
+    /// waiting frame over. The transform goes back to identity when the new drawable is actually on
+    /// the layer (a `CAMetalLayer` commits asynchronously) — dropping it first would flash the old
+    /// picture back at 1× for a frame, which is the pop this whole path exists to avoid.
+    private func finishZoomBridge() {
+        zoomBridgeSerial += 1                 // any timer still in flight is stale now
+        let wasBridging = zoomBridge != nil
+        let held = zoomBridge?.targetTransform(backingScale: backingScale)
         zoomBridge = nil
-        canvasView.metalLayer.removeAnimation(forKey: Self.zoomBridgeKey)
+        if let held {
+            setLayerTransform(held, animated: false)
+            canvasView.metalLayer.removeAnimation(forKey: Self.zoomBridgeKey)
+        } else {
+            removeZoomBridgeAnimation()
+        }
+        guard wasBridging else { return }
+        zoomBridgeCompletedCount += 1
+        guard let pending = pendingFrame else { return }
+        pendingFrame = nil
+        present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
+                graph: pending.graph, resetTransformAfterPresent: held != nil)
+    }
+
+    private func setLayerTransform(_ m: CATransform3D, animated: Bool) {
+        if !animated {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+        }
+        canvasView.metalLayer.transform = m
+        if !animated { CATransaction.commit() }
+    }
+
+    private func removeZoomBridgeAnimation() {
+        let layer = canvasView.metalLayer
+        guard layer.animation(forKey: Self.zoomBridgeKey) != nil
+                || !CATransform3DIsIdentity(layer.transform) else {
+            return
+        }
+        // Implicit animations off: this is a model change, not a second transition.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.removeAnimation(forKey: Self.zoomBridgeKey)
+        layer.transform = CATransform3DIdentity
+        CATransaction.commit()
+    }
+
+    /// The layer transform the eye is currently looking at: the presentation tree while an animation
+    /// is running, the model value otherwise.
+    private func presentedLayerTransform() -> CATransform3D {
+        canvasView.metalLayer.presentation()?.transform ?? canvasView.metalLayer.transform
+    }
+
+    /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
+    /// viewport, and a bridge measured against the old one is a transform about the wrong centre.
+    /// Tear it down instead of leaving the picture somewhere in between.
+    public func cancelZoomBridge() {
+        guard zoomBridge != nil || pendingFrame != nil
+                || canvasView.metalLayer.animation(forKey: Self.zoomBridgeKey) != nil else { return }
+        if let pending = pendingFrame, let graph = pending.graph {
+            queue.async { graph.recycle(output: pending.frame.texture) }
+            zoomBridgePendingDrops += 1
+        }
+        pendingFrame = nil
+        zoomBridgeSerial += 1
+        zoomBridge = nil
+        removeZoomBridgeAnimation()
+        zoomBridgeCanvas = nil
+    }
+
+    /// Where the pointer is, in canvas **points** (y down — the space `NSEvent` and
+    /// `handleDoubleClick` use), or `nil` when it is not over the canvas: a menu command chosen from
+    /// the menu bar, a shortcut pressed while the pointer sits on the inspector.
+    public func cursorAnchor() -> CGPoint? {
+        guard let window = canvasView.window else { return nil }
+        let point = canvasView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let bounds = canvasView.bounds
+        guard bounds.width > 1, bounds.height > 1, bounds.contains(point) else { return nil }
+        return point
+    }
+
+    /// The middle of the canvas: the anchor a command falls back to when the pointer is elsewhere.
+    private func canvasCentrePoint() -> CGPoint {
+        CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY)
     }
 
     private var backingScale: Double {
@@ -1217,7 +1414,7 @@ public final class LoupeController: NSViewController {
             // the one this frame was rendered for. The single-flight flag is released either way.
             if self.generation == job.generation, let frame {
                 self.lastPresentedScale = frame.decodeScale
-                self.present(frame: frame, renderMilliseconds: ms)
+                self.present(frame: frame, renderMilliseconds: ms, state: job.state)
                 switch job.kind {
                 case .edit:
                     self.editRenderCount += 1
@@ -1339,6 +1536,9 @@ public final class LoupeController: NSViewController {
     /// with it and cannot be aborted.
     public func cancelPendingFrames() {
         generation += 1
+        // Nothing that was in flight belongs to the camera that is now on screen: a bridge would
+        // carry the old picture over the new one, and a held frame is for a photo nobody is looking at.
+        cancelZoomBridge()
         viewPending = false
         editPending = false
         // A measurement belongs to the picture it was armed for.
@@ -1562,16 +1762,43 @@ public final class LoupeController: NSViewController {
         }
     }
 
-    private func present(frame: FrameResult, renderMilliseconds: Double) {
+    private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
+                         graph graphOverride: RenderGraph? = nil, underBridge: Bool = false,
+                         resetTransformAfterPresent: Bool = false) {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
         }
-        let graphAtFrame = graph
+        // A frame that lands while the bridge is still moving is the right picture at the wrong
+        // time. Presenting it now would cut the motion off at whatever scale the composite happens
+        // to be at — from a resident rung that is ~10 ms into a 180 ms slide, i.e. 1 % of the way —
+        // which is exactly the cut this whole mechanism exists to remove, only at a random scale.
+        //
+        // So it is **held**: the canvas keeps the picture the eye is following, the frame waits, and
+        // `finishZoomBridge` hands it to this same function when the geometry arrives. Holding is not
+        // discarding — the generation gate upstream has already decided this frame is the current
+        // one — and nothing renders twice: `present` remains the single path to the layer.
+        if zoomBridge != nil, !underBridge {
+            if let old = pendingFrame {
+                // Superseded either way: a frame for the same camera that arrived later is the
+                // better one, and a frame for a camera we are no longer going to is not ours.
+                if old.state != state { zoomBridgePendingDrops += 1 }
+                if let graph = old.graph { queue.async { graph.recycle(output: old.frame.texture) } }
+            }
+            pendingFrame = (frame, graphOverride ?? graph, renderMilliseconds, state)
+            zoomBridgeCoveredPresents += 1
+            return
+        }
+        let graphAtFrame = graphOverride ?? graph
         let t0 = CFAbsoluteTimeGetCurrent()
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange) { [weak self] in
-            guard let self, let graphAtFrame else { return }
+            guard let self else { return }
+            // The drawable is on the layer now: only here is the bridged geometry safe to drop.
+            if resetTransformAfterPresent {
+                DispatchQueue.main.async { self.removeZoomBridgeAnimation() }
+            }
+            guard let graphAtFrame else { return }
             self.queue.async { graphAtFrame.recycle(output: frame.texture) }
         }
         let presentMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
@@ -1584,21 +1811,21 @@ public final class LoupeController: NSViewController {
             // before the next render instead of presenting clipped highlights.
             refreshDisplay()
             scheduleRender()
+            if resetTransformAfterPresent { removeZoomBridgeAnimation() }
             return
         }
         if !ok {
             lastPresentError = presenter.lastFailure
             if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            if resetTransformAfterPresent { removeZoomBridgeAnimation() }
             retryPresentLater()
             return
         }
         presentRetries = 0
-        // A real frame ends any bridge, in the same turn the frame is handed to the layer: the canvas
-        // now carries pixels laid out for the new camera, so the scaled old picture must go now (and
-        // the animation with it — a real frame is never composited through a mid-flight transform).
-        if zoomBridge != nil {
-            zoomBridgeCoveredPresents += 1
-            disarmZoomBridge()
+        // These pixels are now what the canvas carries, and they were laid out for `state` — the
+        // projection a later bridge has to start from.
+        if let mapping = framing(viewport: frame.canvas)?.mapping(of: state) {
+            canvasContent = (mapping, frame.content)
         }
         lastFrame = frame
         lastPresentError = nil

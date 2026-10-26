@@ -18,13 +18,18 @@ using namespace metal;
 // Sampling is bilinear with clamp-to-edge. Because the crop rect stays the output frame, over-
 // rotating a crop pulls edge samples rather than growing the canvas — the honest M1 behaviour;
 // "zoom to fill after straighten" needs the crop UI that is a non-goal for this task.
-
+//
+// The one exception is a **canvas-space window** (`p.e.y`): the loupe's camera is allowed to leave the
+// photograph, and the part of the canvas that misses it must be background. There the sample is
+// rejected before it is taken — `float4(0)`, not the edge texel smeared outward, which is what
+// clamp-to-edge would give and what a photograph's edge does *not* look like. In-bounds windows never
+// reach that branch, so every pre-existing pixel is bit-identical.
 struct S0Params {
     float4 a;   // canvasSize.xy, contentOrigin.xy
     float4 b;   // contentSize.xy, srcSize.xy
     float4 c;   // crop rect (x, y, w, h) normalized
     float4 d;   // cos, sin, flipH, flipV
-    float4 e;   // identity, pad, pad, pad
+    float4 e;   // identity, backgroundOutside, pad, pad
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 };
 
@@ -70,6 +75,14 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     // Content pixel → position inside the whole frame (flips and rotation happen in *frame* space, so
     // a window at the frame's edge mirrors the same way the whole frame does).
     float2 framePx = local + p.f.zw;
+    // A canvas-space window may reach past the frame: that part is background, not the frame's edge
+    // stretched outward. Off for every window that stays inside the frame, so the in-bounds path keeps
+    // the clamp-to-edge behaviour documented at the top of this file.
+    if (p.e.y > 0.5 && (framePx.x < 0.0 || framePx.y < 0.0
+                        || framePx.x >= p.f.x || framePx.y >= p.f.y)) {
+        dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
+        return;
+    }
     float2 uv = framePx / max(p.f.xy, float2(1.0));
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
