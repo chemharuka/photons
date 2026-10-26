@@ -172,8 +172,11 @@ final class FilterChecklistRowButton: NSButton {
     static let boxSide: CGFloat = 12
     static let boxTextGap: CGFloat = 8
     static let trailingInset: CGFloat = 12
-    /// Action/note rows have no box; their text starts this far past where the box would be.
-    static let actionTextInset: CGFloat = 2
+    /// 046: the single left column. The tick box's left edge **and** the action/note rows' text both
+    /// start here, so "全部不选" is left-aligned with the boxes above it instead of sitting 2 pt
+    /// inside them (the owner's 「选择框往右一些，让『全都不选』和选择框左对齐」). One constant, because
+    /// two numbers that must agree are two numbers that will drift.
+    static let columnX: CGFloat = 2
 
     private static let textFont = NSFont.systemFont(ofSize: 11)
 
@@ -181,14 +184,14 @@ final class FilterChecklistRowButton: NSButton {
 
     /// Where the tick box is drawn — also what the layout tests read to check the 10 pt margin.
     var boxRect: NSRect {
-        NSRect(x: 0, y: (bounds.height - Self.boxSide) / 2,
+        NSRect(x: Self.columnX, y: (bounds.height - Self.boxSide) / 2,
                width: Self.boxSide, height: Self.boxSide)
     }
 
     /// Where the title starts, in row coordinates.
     var textOriginX: CGFloat {
-        row.kind == .toggle ? boxRect.maxX + Self.boxTextGap
-                            : boxRect.minX + Self.actionTextInset
+        // 046: an action row's text starts on the column itself, not 2 pt inside it.
+        row.kind == .toggle ? boxRect.maxX + Self.boxTextGap : boxRect.minX
     }
 
     override func draw(_ dirtyRect: NSRect) {

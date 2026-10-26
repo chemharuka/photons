@@ -308,11 +308,15 @@ public struct InspectorView: View {
         let baseline = detailBaselineValue
         return card(Section.detail.title) {
             ForEach(Self.detailContent.rows, id: \.axis) { row in
+                // 047: **no `step:`** — SwiftUI draws tick marks along any `Slider` that has one, and
+                // the owner wants these four to look like every other slider in the inspector. The
+                // snapping is not lost: `DetailSettings.setPosition` quantizes to `step` (1 unit) on
+                // the way in, so the document still only ever holds whole numbers.
                 sliderRow(row.title,
                           detailBinding(row.axis, baseline: baseline),
                           row.range,
                           row.format,
-                          step: row.step,
+                          step: nil,
                           editable: true,
                           accessibilityID: "inspector.detail.\(row.axis.rawValue)",
                           onReset: { resetDetail(row.axis) },

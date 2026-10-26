@@ -149,12 +149,15 @@ public final class TopBarView: NSView {
         modeControl.selectedSegment = mode == .grid ? 0 : 1
         stripButton.isActive = filmstrip
         countLabel.stringValue = assetCount == 0 ? "" : "\(assetCount) 张"
+        // 047: the corner also carries the **build** revision (`photons-demo 4a7c34b`), so a glance
+        // answers "is this the build with my merge?" without going back to a commit list.
+        let stamp = BuildStamp.revision
         if let libraryName {
             statusLabel.stringValue = selectionCount > 1
-                ? "已选 \(selectionCount) · \(libraryName)"
-                : "\(libraryName)"
+                ? "已选 \(selectionCount) · \(libraryName) \(stamp)"
+                : "\(libraryName) \(stamp)"
         } else {
-            statusLabel.stringValue = "未打开库"
+            statusLabel.stringValue = "未打开库 \(stamp)"
         }
     }
 

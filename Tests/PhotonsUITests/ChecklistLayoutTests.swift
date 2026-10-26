@@ -16,7 +16,9 @@ import PhotonsCatalog
 final class ChecklistLayoutTests: XCTestCase {
 
     // The design, as the task states it (038 §2).
-    private static let boxLeft: CGFloat = 10
+    /// The content padding (10) plus the checkbox column's own inset (2) — the left edge the tick
+    /// boxes and the 「全部不选」 label share since 046.
+    private static let boxLeft: CGFloat = 12
     private static let boxSide: CGFloat = 12
     private static let boxTextGap: CGFloat = 8
     private static let trailingInset: CGFloat = 12
@@ -146,7 +148,7 @@ final class ChecklistLayoutTests: XCTestCase {
                        accuracy: 0.01, "a row spans the content width minus two paddings")
 
         // 2. the tick box: left edge 10 pt from the content's left, 12 × 12
-        XCTAssertEqual(first.boxRect.minX, FilterChecklistRowButton.boxSide - Self.boxSide, accuracy: 0.01)
+        XCTAssertEqual(first.boxRect.minX, FilterChecklistRowButton.columnX, accuracy: 0.01)
         XCTAssertEqual(first.boxRect.width, Self.boxSide, accuracy: 0.01)
         XCTAssertEqual(first.boxRect.height, Self.boxSide, accuracy: 0.01)
         let boxInk = inkBox(of: first, fromX: 0, toX: first.textOriginX - 1)
@@ -160,7 +162,9 @@ final class ChecklistLayoutTests: XCTestCase {
         }
 
         // 3. the title starts box.maxX + 8, and never runs into the right edge
-        XCTAssertEqual(first.textOriginX, Self.boxSide + Self.boxTextGap, accuracy: 0.01)
+        XCTAssertEqual(first.textOriginX,
+                       FilterChecklistRowButton.columnX + Self.boxSide + Self.boxTextGap,
+                       accuracy: 0.01)
         let textInk = inkBox(of: first, fromX: first.textOriginX - 0.5)
         XCTAssertNotNil(textInk)
         if let textInk {
@@ -172,6 +176,19 @@ final class ChecklistLayoutTests: XCTestCase {
                                         Self.trailingInset - 1,
                                         "at least 12 pt stays clear on the right")
         }
+
+        // 046: an action row has no box, so its label must line up with the *boxes* above it —
+        // 「选择框往右一些，让『全都不选』和选择框左对齐」.
+        controller.reload([FilterChecklistRow(title: "全部不选", kind: .action, tag: "none")])
+        guard let action = controller.checklistRoot.subviews
+            .compactMap({ $0 as? FilterChecklistRowButton }).first else {
+            return XCTFail("「全部不选」 must still be a row button")
+        }
+        XCTAssertEqual(action.textOriginX, action.boxRect.minX, accuracy: 0.01,
+                       "an action row starts on the checkbox column")
+        XCTAssertEqual(action.textOriginX, first.textOriginX - Self.boxSide - Self.boxTextGap,
+                       accuracy: 0.01, "…and that column is where the tick boxes begin")
+        controller.reload([FilterChecklistRow(title: "星级", checked: true)])
 
         // A title too long for the row is truncated *inside* the trailing reserve, never under it.
         controller.reload([
