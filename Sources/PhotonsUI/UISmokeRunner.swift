@@ -315,25 +315,49 @@ public final class UISmokeRunner {
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
-        let historyBefore = session.history.count
         let decodesBefore = decodeTotal()
+        log("  document            temp=\(String(describing: session.edit.light.temperature)) tint=\(String(describing: session.edit.light.tint)) exposure=\(session.edit.light.exposure) · history \(session.history.count) cursor \(session.history.cursor) top “\(session.history.currentSnapshot?.label ?? "-")”")
+        log("  history.current     temp=\(String(describing: session.history.current?.light.temperature)) tint=\(String(describing: session.history.current?.light.tint)) exposure=\(session.history.current?.light.exposure ?? -99)")
 
         // 预设 日光: absolute numbers, one snapshot, one development.
+        //
+        // "One history entry" is counted as **one new snapshot at the tip** (`seq + 1`), not as
+        // `count + 1`: a commit that lands on top of a redo branch discards that branch first, so
+        // the depth legitimately stays the same while a new entry appears — which is what every
+        // editor does, and which used to make this check report "0 条历史" for a commit that did
+        // happen (the stack had two redo entries in front of the cursor).
+        let seqBefore = session.history.currentSnapshot?.seq ?? -1
+        let depthBefore = session.history.count
+        let cursorBefore = session.history.cursor
+        // A commit discards the redo branch ahead of the cursor before it appends, so the depth that
+        // "one more entry" predicts is `depth - redoAhead + 1`. (`seq` is *not* usable as "+1": the
+        // sequence never reuses a number, so it jumps past the discarded entries.)
+        let expectedDepth = depthBefore - max(0, depthBefore - cursorBefore - 1) + 1
         commands.commit(WhiteBalancePresets.daylight.whiteBalance!, label: "预设 日光")
+        log("  after 预设           temp=\(String(describing: session.edit.light.temperature)) · history \(session.history.count) cursor \(session.history.cursor) top “\(session.history.currentSnapshot?.label ?? "-")” seq \(session.history.currentSnapshot?.seq ?? -1)")
         check("预设 日光 写入 5500 K / 0",
               session.edit.light.temperature == 5500 && session.edit.light.tint == 0)
-        check("预设 日光 = 一条历史 (\(session.history.count - historyBefore))",
-              session.history.count == historyBefore + 1)
+        let presetSnapshot = session.history.currentSnapshot
+        check("预设 日光 = 一条历史 (depth \(depthBefore) → \(session.history.count)（预计 \(expectedDepth)，cursor \(cursorBefore) → \(session.history.cursor)，redo 支被丢弃），seq \(seqBefore) → \(presetSnapshot?.seq ?? -1)，标签“\(presetSnapshot?.label ?? "-")”)",
+              presetSnapshot?.label == "预设 日光"
+              && presetSnapshot?.seq != seqBefore
+              && session.history.count == expectedDepth && session.canUndo)
         waitForDevelopment(past: decodesBefore, timeout: 45)
-        check("预设 日光 触发重解码 (+\(decodeTotal() - decodesBefore))",
+        let presetPainted = waitForPaintedFrame(session: session, loupe: loupe, timeout: 60)
+        diagLoupe("preset", session: session, loupe: loupe)
+        check("预设 日光 触发重解码 (+" + String(decodeTotal() - decodesBefore) + ")",
               decodeTotal() > decodesBefore)
         check("选单显示 日光（不是 自定义）",
               WhiteBalancePresets.menuLabel(session.edit.light.whiteBalance) == "日光")
+        check("预设 日光 换到了画布上（逐帧 revision \(loupe.lastFrame?.editRevision ?? -1) == 文档 \(session.editRevision)，"
+              + "painted=\(presetPainted)）", presetPainted)
 
         // 吸管: a real click at the canvas centre, sampled from the resident buffer.
         let canvas = loupe.canvasView
         let centre = CGPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
-        let historyBeforeDrop = session.history.count
+        let seqBeforeDrop = session.history.currentSnapshot?.seq ?? -1
+        let depthBeforeDrop = session.history.count
+        let cursorBeforeDrop = session.history.cursor
         let decodesBeforeDrop = decodeTotal()
         guard case .sampled(let before) = loupe.samplePixel(atViewPoint: centre) else {
             fail("吸管：画布中心取不到像素（画面未就绪？）")
@@ -349,13 +373,26 @@ public final class UISmokeRunner {
         }
         let outcome = loupe.handleEyedropperClick(atViewPoint: centre)
         check("吸管点击得到取样 (\(String(describing: outcome)))", solve != nil)
-        check("吸管 = 一条历史", session.history.count == historyBeforeDrop + 1)
+        let dropperSnapshot = session.history.currentSnapshot
+        check("吸管 = 一条历史（depth \(depthBeforeDrop) → \(session.history.count)，cursor \(cursorBeforeDrop) → \(session.history.cursor)，seq \(seqBeforeDrop) → \(dropperSnapshot?.seq ?? -1)，标签“\(dropperSnapshot?.label ?? "-")”）",
+              dropperSnapshot?.label == "吸管白平衡"
+              && dropperSnapshot?.seq != seqBeforeDrop
+              && session.history.count
+                 == depthBeforeDrop - max(0, depthBeforeDrop - cursorBeforeDrop - 1) + 1)
         check("吸管后吸管自动关闭", loupe.isEyedropperArmed == false)
 
-        // Wait for the dropper's own development, then read the same point again.
+        // Wait for the dropper's own development **and for the frame that shows it**, then read the
+        // same point again. A decode that has started is not a picture: the canvas keeps the old
+        // buffer until the new rung lands and the follow-up frame presents it, and a sample taken in
+        // between reads the *previous* development (which is what "the pixels did not change" looked
+        // like in 派单 009).
         waitForDevelopment(past: decodesBeforeDrop, timeout: 45)
-        check("吸管触发重解码 (+\(decodeTotal() - decodesBeforeDrop))",
+        let painted = waitForPaintedFrame(session: session, loupe: loupe, timeout: 60)
+        diagLoupe("dropper", session: session, loupe: loupe)
+        check("吸管触发重解码 (+" + String(decodeTotal() - decodesBeforeDrop) + ")",
               decodeTotal() > decodesBeforeDrop)
+        check("吸管的新开发到达画布（逐帧 revision \(loupe.lastFrame?.editRevision ?? -1) == 文档 \(session.editRevision)，"
+              + "painted=\(painted)）", painted)
         if case .sampled(let after) = loupe.samplePixel(atViewPoint: centre), let solve {
             log(String(format: "  解出 %@ · 模型残差 %.2f%% · clamped %@",
                        solve.whiteBalance.summary, solve.residual * 100,
@@ -388,11 +425,45 @@ public final class UISmokeRunner {
     /// "one write = one development" evidence).
     private func decodeTotal() -> Int { RAWDecoder.decodeCounts().values.reduce(0, +) }
 
+    /// The loupe's own accounting, one line — enough to tell "the development happened" from "the
+    /// development painted something".
+    private func diagLoupe(_ tag: String, session: CatalogSession, loupe: LoupeController) {
+        let counts = RAWDecoder.decodeCounts().sorted { $0.key < $1.key }
+            .map { String(format: "%.3f×:%d", $0.key, $0.value) }.joined(separator: " ")
+        log("  \(tag) frameRev \(loupe.lastFrame?.editRevision ?? -1)/\(session.editRevision)"
+            + " · scale \(loupe.lastFrame?.decodeScale ?? -1) · arrivals \(loupe.rungArrivals)"
+            + " staleRung \(loupe.staleRungDrops) emptyFrame \(loupe.emptyFrameDrops)"
+            + " staleFrame \(loupe.staleFrameDrops) · viewRenders \(loupe.viewRenderCount)"
+            + " editRenders \(loupe.editRenderCount) · decodes [\(counts)]"
+            + "\n  rung                \(loupe.currentDevelopmentDescription ?? "-")")
+    }
+
     /// Pump until the process has developed more than `count` times, or the deadline passes.
+    ///
+    /// This counts *developments*, i.e. the start of the work — not the picture. A white-balance
+    /// change is a 60 MP development (0.7–0.9 s at 1:1), and the canvas keeps the previous buffer
+    /// until it lands; a check that samples right after this returns reads the **old** pixels. Pair
+    /// it with `waitForPaintedFrame`.
     private func waitForDevelopment(past count: Int, timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
         while decodeTotal() <= count && Date() < deadline { pump(0.1) }
         pump(0.2)
+    }
+
+    /// Pump until a frame **for the current document** has been presented.
+    ///
+    /// The presented frame carries the `editRevision` it was rendered for, so this is the honest
+    /// "the change reached the canvas" test: it is true only after the new rung arrived *and* the
+    /// follow-up frame presented. It is what the white-balance checks wait on before they sample.
+    @discardableResult
+    private func waitForPaintedFrame(session: CatalogSession, loupe: LoupeController,
+                                     timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if loupe.lastFrame?.editRevision == session.editRevision { return true }
+            pump(0.1)
+        }
+        return loupe.lastFrame?.editRevision == session.editRevision
     }
 
     // MARK: - export sheet + develop presets (M5)
@@ -1916,8 +1987,10 @@ public final class UISmokeRunner {
                   && card.hoverValueText == "+2.00 档 (4.0×)"
                   && card.hoverCountText == "R \(histogram.red.hdrBins[tailBin2]) · G \(histogram.green.hdrBins[tailBin2]) · B \(histogram.blue.hdrBins[tailBin2])")
 
-            // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
-            card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.5,
+            // 右端：绘图区的最后 0.47 pt 就是溢出箱（一个尾段箱是 120 pt / 256 = 0.47 pt），所以
+            // 右边缘往里四分之一点落在 **bin 255**（读 +3.98 档 = 15.8×）。再往外就是绘图区之外，
+            // 读数会被清空——那是下面「移出绘图区」那条检查，不是这一条。
+            card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.25,
                                                 y: hoverAxis.plot.midY))
             card.display()
             let lastBin = histogram.hdrBinCount - 1

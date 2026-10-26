@@ -297,7 +297,14 @@ public final class LoupeController: NSViewController {
 
         let kind: Kind
         let url: URL
-        let identity: String
+        /// The **photo** identity — `contentHash|assetID`, with no decode component.
+        ///
+        /// 派单 011 A: the decode inputs are appended by `makeFrame` (one place, `DecodeInputs
+        /// .appending(to:)`), so a job must carry the bare photo identity or the component lands
+        /// twice. It did land twice before this split (`…|wb=5500K/+0|wb=5500K/+0`): the development
+        /// was written under the queue's key while every frame looked itself up under the doubled
+        /// one, so the white balance developed and the canvas never showed it — "改白平衡画面不变".
+        let baseIdentity: String
         let viewport: ImageSize
         let edit: EditModel
         let state: LoupeViewState
@@ -306,6 +313,10 @@ public final class LoupeController: NSViewController {
         var generation: Int
         /// Only edit frames carry a slider timestamp.
         let changedAt: CFAbsoluteTime
+
+        /// The rung identity this job develops and renders from: the document's decode key on top of
+        /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
+        var identity: String { edit.decodeInputs.appending(to: baseIdentity) }
 
         /// The rung the camera needs. Everything — fit, 1:1, 4:1 — renders from the full buffer: a
         /// window is what makes 1:1 cheap to *render*, and the rung is what makes it expensive to
@@ -1329,7 +1340,7 @@ public final class LoupeController: NSViewController {
                          changedAt: CFAbsoluteTime = 0) -> RenderJob? {
         let gen = generation
         if let source = frameSource {
-            return RenderJob(kind: kind, url: source.url, identity: source.identity,
+            return RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
                              viewport: source.viewport, edit: source.edit, state: source.state,
                              generation: gen, changedAt: changedAt)
         }
@@ -1337,7 +1348,7 @@ public final class LoupeController: NSViewController {
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
         let viewport = viewportPixels
         guard viewport.width > 8, viewport.height > 8 else { return nil }
-        return RenderJob(kind: kind, url: url, identity: currentRungIdentity(asset), viewport: viewport,
+        return RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                          edit: session.edit, state: viewState, generation: gen,
                          changedAt: changedAt)
     }
@@ -1390,7 +1401,10 @@ public final class LoupeController: NSViewController {
     private func residentFrame(_ job: RenderJob, reportingFailure: Bool = true) -> FrameResult? {
         guard let rung = ladder.best(identity: job.identity, atOrBelow: job.target) else { return nil }
         do {
-            let frame = try makeFrame(url: job.url, cacheIdentity: job.identity,
+            // `baseIdentity`, not `job.identity`: `makeFrame` appends the document's decode inputs
+            // itself, and this is the same derivation the job's `identity` uses — so the rung this
+            // frame looks up is the rung the arrival was stored under.
+            let frame = try makeFrame(url: job.url, cacheIdentity: job.baseIdentity,
                                       viewport: job.viewport, decodeScale: rung.scale,
                                       edit: job.edit, state: job.state,
                                       hashPixels: hashesFrames, resolve: .residentOnly)
@@ -1412,8 +1426,9 @@ public final class LoupeController: NSViewController {
     private func requestDevelopment(_ plan: DecodeLadderPlan, job: RenderJob) {
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
             decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
-                                work: { try Self.develop(url: job.url, scale: scale,
-                                                         whiteBalance: job.edit.light.whiteBalance) },
+                                work: { try Self.develop(url: job.url,
+                                                         scale: scale,
+                                                         inputs: job.edit.decodeInputs) },
                                 completion: { [weak self] result, generation in
                 guard let self else { return }
                 DispatchQueue.main.async {
@@ -1468,8 +1483,13 @@ public final class LoupeController: NSViewController {
     }
 
     /// Is `identity` the photo this loupe is showing *now*?
+    ///
+    /// A rung identity, not a photo identity: it carries the document's decode inputs, so a rung
+    /// developed for an older white balance is not the current picture (派单 011 A).
     private func isCurrentPhoto(_ identity: String) -> Bool {
-        if let source = frameSource { return source.identity == identity }
+        if let source = frameSource {
+            return source.edit.decodeInputs.appending(to: source.identity) == identity
+        }
         guard let asset = session?.anchorAsset else { return false }
         return currentRungIdentity(asset) == identity
     }
@@ -1492,7 +1512,8 @@ public final class LoupeController: NSViewController {
         histogramCacheOrder.removeAll()
         histogramMeasuredKey = nil
         lastFrameState = nil
-        if let identity = frameSource?.identity ?? session?.anchorAsset.map({ ladderIdentity($0) }) {
+        if let identity = frameSource.map({ $0.edit.decodeInputs.appending(to: $0.identity) })
+            ?? session?.anchorAsset.map({ currentRungIdentity($0) }) {
             decodeQueue.cancel(identity: identity)
         }
     }
@@ -1547,21 +1568,38 @@ public final class LoupeController: NSViewController {
     /// never be made for one photo and applied to another.
     private func ladderIdentity(_ asset: Asset) -> String { "\(asset.contentHash)|\(asset.id)" }
 
-    /// The identity of one **rung** of one photo, including the document's white balance (派单 009).
+    /// The identity of one **rung** of one photo, including the document's decode inputs (派单 009/011).
     ///
     /// The white balance is a *decode* input since 派单 006 (`CIRAWFilter.neutralTemperature`), so two
     /// documents that differ only in Kelvin are two different buffers — the ladder must not answer
-    /// `2850 K` with the buffer it developed as shot. As shot contributes nothing, so every pre-009
-    /// identity (and every cache key built from it) is byte-for-byte the old string.
-    private static func rungIdentity(_ base: String, whiteBalance wb: WhiteBalance) -> String {
-        guard let key = wb.keyString else { return base }
-        return "\(base)|wb=\(key)"
+    /// `2850 K` with the buffer it developed as shot. `DecodeInputs.appending(to:)` is the one
+    /// spelling of that rule; as shot appends nothing, so every pre-009 identity (and every cache key
+    /// built from it) is byte-for-byte the old string.
+    private static func rungIdentity(_ base: String, inputs: DecodeInputs) -> String {
+        inputs.appending(to: base)
     }
 
     /// The identity of the rung this loupe would develop right now, for the document on screen.
     private func currentRungIdentity(_ asset: Asset) -> String {
         Self.rungIdentity(ladderIdentity(asset),
-                          whiteBalance: session?.edit.light.whiteBalance ?? .asShot)
+                          inputs: session?.edit.decodeInputs ?? .asShot)
+    }
+
+    /// The rung key, the decode inputs and the scale of the development this loupe would ask for
+    /// right now — the diagnostic line `--ui-smoke` prints to tell "the development happened" from
+    /// "the frame looked itself up under another key" (派单 011).
+    public var currentDevelopmentDescription: String? {
+        let base: String
+        if let source = frameSource {
+            base = source.identity
+        } else if let asset = session?.anchorAsset {
+            base = ladderIdentity(asset)
+        } else {
+            return nil
+        }
+        let inputs = (frameSource?.edit ?? session?.edit ?? .neutral).decodeInputs
+        return "\(inputs.appending(to: base)) · wb=\(inputs.whiteBalance.summary)"
+            + " · key=\(inputs.key)"
     }
 
     // MARK: frame
@@ -1572,14 +1610,18 @@ public final class LoupeController: NSViewController {
     /// calls it only on the synchronous path (`--ui-smoke`, tests), never from the render queue. A
     /// fresh `RAWDecoder` per development is deliberate — one `CIContext` and one Metal command queue
     /// per development, so the decode queue never shares GPU state with the render queue.
-    static func develop(url: URL, scale: Float,
-                        whiteBalance: WhiteBalance = .asShot) throws -> DecodeRung {
+    ///
+    /// 派单 011: `inputs` is **not** defaulted. It used to be `whiteBalance: WhiteBalance = .asShot`,
+    /// and a call site that forgot it developed the as-shot buffer while the document asked for
+    /// 5500 K — the failure looked exactly like "the decoder ignored the white balance". The decode
+    /// inputs now come from the job's document, and a missing argument is a compile error.
+    static func develop(url: URL, scale: Float, inputs: DecodeInputs) throws -> DecodeRung {
         let decoder = try RAWDecoder()
         let t0 = CFAbsoluteTimeGetCurrent()
-        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
+        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
                                                                               exposureEV: 0,
                                                                               scale: scale,
-                                                                              whiteBalance: whiteBalance))
+                                                                              whiteBalance: inputs.whiteBalance))
         return DecodeRung(scale: scale, image: developed.image,
                           capabilities: developed.capabilities,
                           milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
@@ -1627,10 +1669,13 @@ public final class LoupeController: NSViewController {
                            decodeScale: Float, edit model: EditModel, state: LoupeViewState,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
-        // 派单 009: the white balance is part of the *rung*, not of the render — a 2850 K document is
-        // a different development, never the as-shot buffer re-tinted in S1 (S1 is identity there).
-        let rungWB = model.light.whiteBalance
-        let cacheIdentity = Self.rungIdentity(baseIdentity, whiteBalance: rungWB)
+        // 派单 011: the white balance is a **decode** input, so it is part of the *rung*, not of the
+        // render — a 2850 K document is a different development, never the as-shot buffer re-tinted
+        // in S1 (S1 is identity there). `DecodeInputs` is the only thing allowed to name a buffer;
+        // exposure/contrast/curve/colour never enter this identity, which is why changing them can
+        // never develop.
+        let inputs = model.decodeInputs
+        let cacheIdentity = Self.rungIdentity(baseIdentity, inputs: inputs)
         // ── the decode ladder (§11.10) ───────────────────────────────────────────────────────
         // One photo, one development per rung. Keyed by (photo, scale), so the second visit to fit
         // or to 1:1 is a render and nothing else. `residentOnly` frames (every frame the loupe's
@@ -1640,7 +1685,7 @@ public final class LoupeController: NSViewController {
         switch resolve {
         case .developIfMissing:
             outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
-                try Self.develop(url: url, scale: decodeScale, whiteBalance: rungWB)
+                try Self.develop(url: url, scale: decodeScale, inputs: inputs)
             }
         case .residentOnly:
             guard let resident = ladder.resident(identity: cacheIdentity, scale: decodeScale) else {
@@ -1990,19 +2035,22 @@ public final class LoupeController: NSViewController {
     @discardableResult
     public func measureHistogramNow(asset: Asset, url: URL, edit: EditModel,
                                     bins: Int = 256) throws -> Histogram {
-        try measureHistogramNow(url: url,
-                                identity: Self.rungIdentity(ladderIdentity(asset),
-                                                            whiteBalance: edit.light.whiteBalance),
-                                edit: edit, bins: bins)
+        // 派单 011 B: the identity below appends the decode inputs **once**. The asset overload used
+        // to append them and then hand the result to the `identity:` overload, which appended them
+        // again — the card's key was `…|wb=3000K/+0|wb=3000K/+0`. It is the same picture either way,
+        // so nothing looked broken, which is exactly why a doubled key survives in a cache.
+        try measureHistogramNow(url: url, identity: ladderIdentity(asset), edit: edit, bins: bins)
     }
 
     @discardableResult
     public func measureHistogramNow(url: URL, identity: String, edit: EditModel,
                                     bins: Int = 256) throws -> Histogram {
-        let rungWB = edit.light.whiteBalance
-        let identity = Self.rungIdentity(identity, whiteBalance: rungWB)
+        // The measurement is of the *picture*, so it names the buffer the same way a frame does:
+        // `DecodeInputs` on top of the bare photo identity.
+        let inputs = edit.decodeInputs
+        let identity = Self.rungIdentity(identity, inputs: inputs)
         let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
-            try Self.develop(url: url, scale: DecodeLadder.fullScale, whiteBalance: rungWB)
+            try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)
         }
         let graphIdentityForRung = "\(identity)-s\(outcome.rung.scale)"
         let measurer: RenderGraph

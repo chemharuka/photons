@@ -368,6 +368,89 @@ final class WhiteBalanceSectionTests: XCTestCase {
                              decodeDelta: decodeTotal() - decodesBefore)
     }
 
+    // MARK: - 派单 011: the split, measured on the real decoder
+
+    /// The acceptance the whole split exists for: **a white-balance change develops, a render change
+    /// does not.** Counted with `RAWDecoder.decodeCounts`, not with a stopwatch — a second decode of
+    /// the same rung is easy to hide inside a frame that was going to be slow anyway, so the count is
+    /// the only honest evidence.
+    ///
+    /// The four claims, in order:
+    ///   1. exposure / contrast / curve / colour → `usedCachedDecode`, **0** new decodes;
+    ///   2. temperature + tint → a miss, **+1** decode, and the pixels differ from the same document
+    ///      without the white balance;
+    ///   3. the same white balance again → a hit (one rung per decode key, not per request);
+    ///   4. back to as shot → the *original* rung is still resident, so it hits — the rung key is the
+    ///      decode key, and the render half (still carrying exposure 1.2 and the curve) never entered
+    ///      it.
+    func testExposureNeverDecodesAndWhiteBalanceAlwaysDoes() throws {
+        let url = try fixtureURL()
+        let session = CatalogSession()
+        let loupe = makeLoupe(session)
+
+        // ── as shot: one development, and the pixel hash it produces
+        _ = try develop(loupe, url, session.edit)
+        let asShotPixels = try hashedFrame(loupe, url, session.edit)
+        let base = decodeTotal()
+
+        // ── render-side edits: the same buffer, **zero** developments
+        var render = session.edit
+        render.light.exposure = 1.2
+        render.light.contrast = 35
+        render.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.62), CurvePoint(1, 1)]
+        render.color.vibrance = 25
+        let rendered = try develop(loupe, url, render)
+        XCTAssertTrue(rendered.usedCachedDecode,
+                      "exposure/contrast/curve/colour developed again — render inputs leaked into the rung")
+        XCTAssertEqual(decodeTotal(), base, "改曝光/对比/曲线/色彩不重解码（解码计数不变）")
+        let renderPixels = try hashedFrame(loupe, url, render)
+        XCTAssertNotEqual(renderPixels, asShotPixels,
+                          "the render-side edits changed no pixel — the fixture edit is a no-op")
+        XCTAssertEqual(decodeTotal(), base, "a second render-side frame is still no development")
+
+        // ── white balance: a different decode key, so exactly **one** development
+        var warm = render
+        warm.light.temperature = 3500
+        warm.light.tint = 12
+        let developed = try develop(loupe, url, warm)
+        XCTAssertFalse(developed.usedCachedDecode,
+                       "3500 K/+12 was served the as-shot (or the exposure-only) buffer")
+        XCTAssertEqual(decodeTotal(), base + 1, "改色温/色调必然重解码（解码计数 +1）")
+        let warmPixels = try hashedFrame(loupe, url, warm)
+        XCTAssertNotEqual(warmPixels, renderPixels,
+                          "the white balance developed but the pixels did not move")
+
+        // ── one rung per decode key: the same document again is a hit, not a development
+        let again = try develop(loupe, url, warm)
+        XCTAssertTrue(again.usedCachedDecode, "the same 3500 K document developed twice")
+        XCTAssertEqual(decodeTotal(), base + 1)
+
+        // ── back to as shot. The ladder keeps **one decode key** resident at a time, so this is a
+        // development even though the document is the one that started the test — and its pixels
+        // must be exactly the ones `render` produced, because the render half never left the key.
+        var backToShot = warm
+        backToShot.light.temperature = nil
+        backToShot.light.tint = nil
+        let reused = try develop(loupe, url, backToShot)
+        XCTAssertFalse(reused.usedCachedDecode,
+                       "the ladder served the 3500 K buffer for an as-shot document")
+        XCTAssertEqual(decodeTotal(), base + 2, "as shot is a different decode key, so it develops once")
+        XCTAssertEqual(try hashedFrame(loupe, url, backToShot), renderPixels,
+                       "as shot with the same render inputs must be the same picture")
+        XCTAssertEqual(decodeTotal(), base + 2, "a second as-shot frame is a hit")
+
+        print("decode split: as shot \(base) decode(s) → render edits +0 → 3500 K/+12 +1 "
+              + "→ repeat +0 → back to as shot +1 (total \(decodeTotal()), one rung resident)")
+    }
+
+    /// A frame whose pixels are hashed — the "did the decode reach the picture" half of the counting.
+    private func hashedFrame(_ loupe: LoupeController, _ url: URL, _ edit: EditModel) throws -> String {
+        let frame = try loupe.makeFrame(url: url, viewport: Self.viewport,
+                                        decodeScale: Self.decodeScale, edit: edit,
+                                        hashPixels: true)
+        return try XCTUnwrap(frame.displayHash)
+    }
+
     // MARK: - helpers
 
     /// The lowest-chroma, well-exposed point of a coarse grid — "the grey area" of the fixture.
