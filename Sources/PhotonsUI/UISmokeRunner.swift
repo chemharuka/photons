@@ -2025,7 +2025,9 @@ public final class UISmokeRunner {
                   && card.hoverRowRect.maxY <= card.hoverReadoutRect.minY + 0.01)
 
             // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
-            card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.5,
+            // 0.1 pt inside the right edge: the tail is 120 pt over 256 bins, so 0.5 pt would already
+            // be a full bin in (bin 254). 0.1 pt is inside the last bin, which is what this checks.
+            card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.1,
                                                 y: hoverAxis.plot.midY))
             card.display()
             let lastBin = histogram.hdrBinCount - 1
