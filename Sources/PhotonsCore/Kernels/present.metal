@@ -14,15 +14,32 @@ using namespace metal;
 //
 // M3 keeps `wantsExtendedDynamicRangeContent = false`, so the 16-bit path is still SDR on screen;
 // opening EDR in M3.5 flips that one boolean and sets DisplayOptions.headroom.
+//
+// 037 adds the **backdrop**: a low-resolution copy of the whole picture, sampled outside the main
+// frame's window while a shrink is in flight, so the canvas around a shrinking picture shows the
+// picture's own low-res continuation instead of a band of stretched edge pixels (what 025's
+// clamp_to_edge produced, and what the user reported seeing).
+//
+// The backdrop lives in a **second fragment function**, not in a branch inside `present_fragment`.
+// A uniform branch still costs: the GPU cannot predicate a texture fetch, so it executes the fetch and
+// selects afterwards — measured at +0.03 ms on a 4.10 Mpx canvas, for a case where the caller passed
+// no backdrop at all. Two entry points, one chosen per draw by `CanvasPresenter`, keep the no-backdrop
+// path at exactly 025's instructions.
 
+// The CPU half of this struct is `CanvasPresenter.PresentParams`. The two are one contract handed
+// over as raw bytes with no compiler check between them, so every field is a `float4` at a fixed
+// offset (0, 16, 32, 48, 64; stride 80) and `BackdropPresenterTests` pins both sides against it.
 struct PresentParams {
     float4 a;   // linearize, pad, pad, pad
-    float4 b;   // the sampled window: xy = origin, zw = size, normalised texture coordinates
+    float4 b;   // the main frame's sampled window: xy = origin, zw = size, normalised texture coords
+    float4 c;   // the backdrop's sampled window, same encoding; read only by the backdrop fragment
+    float4 d;   // the main frame's rect **on the canvas**, normalised: xy = origin, zw = size
+    float4 e;   // xy = the feather width per axis (canvas-normalised), z = has backdrop, w = pad
 };
 
 struct PresentOut {
     float4 position [[position]];
-    float2 uv;
+    float2 uv;   // which texel of the main frame this fragment reads
 };
 
 vertex PresentOut present_vertex(uint vid [[vertex_id]],
@@ -45,16 +62,53 @@ static inline float srgb_encode_inverse(float v) {
     return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
 }
 
-fragment float4 present_fragment(PresentOut in [[stage_in]],
-                                 texture2d<float> src [[texture(0)]],
-                                 constant PresentParams &p [[buffer(0)]]) {
-    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
-    float4 c = src.sample(smp, in.uv);
-    float3 v = max(c.rgb, 0.0);
+// What the drawable stores for a sampled value: linear light for the 16-bit layer, clamped display
+// encoding for the bgra8 fallback. Shared by both fragments so the two paths cannot drift.
+static inline float3 present_transfer(float3 rgb, constant PresentParams &p) {
+    float3 v = max(rgb, 0.0);
     if (p.a.x > 0.5) {
         v = float3(srgb_encode_inverse(v.x), srgb_encode_inverse(v.y), srgb_encode_inverse(v.z));
     } else {
         v = min(v, 1.0);
     }
-    return float4(v, 1.0);
+    return v;
+}
+
+/// 025's presentation, unchanged: one sample, and `clamp_to_edge` extends the picture's own edge over
+/// the rest of the canvas when the window is larger than the texture.
+fragment float4 present_fragment(PresentOut in [[stage_in]],
+                                 texture2d<float> src [[texture(0)]],
+                                 constant PresentParams &p [[buffer(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    float4 c = src.sample(smp, in.uv);
+    return float4(present_transfer(c.rgb, p), 1.0);
+}
+
+// 0 at or outside the main rect's edge, 1 a feather-width inside it, a straight ramp in between —
+// measured on the nearest edge, so a corner ramps on both axes. The ramp is *inside* the picture, so
+// the picture's outer two pixels fade into the low-res whole instead of ending on a hard step.
+static inline float backdrop_weight(float2 canvasUV, constant PresentParams &p) {
+    float2 inside = min(canvasUV - p.d.xy, p.d.xy + p.d.zw - canvasUV);
+    float2 f = max(p.e.xy, float2(1e-6));
+    return saturate(min(inside.x / f.x, inside.y / f.y));
+}
+
+/// The shrink path with a backdrop: the main frame where it reaches, the low-res whole picture where
+/// it does not, cross-faded over the feather.
+fragment float4 present_fragment_backdrop(PresentOut in [[stage_in]],
+                                          texture2d<float> src [[texture(0)]],
+                                          texture2d<float> backdrop [[texture(1)]],
+                                          constant PresentParams &p [[buffer(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    // The canvas position is the inverse of the vertex stage's map, computed here rather than carried
+    // in a third varying. A zero-sized window cannot produce a meaningful rect (`makeParams` clears the
+    // has-backdrop flag for one), but this function is chosen by the *binding*, not by that flag, so the
+    // divisor is floored rather than trusted: a NaN canvas would paint the whole drawable black.
+    float2 size = select(float2(1.0), p.b.zw, abs(p.b.zw) > float2(1e-9));
+    float2 canvasUV = (in.uv - p.b.xy) / size;
+    float2 backdropUV = p.c.xy + canvasUV * p.c.zw;
+    float4 far = backdrop.sample(smp, saturate(backdropUV));
+    float4 near = src.sample(smp, in.uv);
+    float4 c = mix(far, near, backdrop_weight(canvasUV, p));
+    return float4(present_transfer(c.rgb, p), 1.0);
 }

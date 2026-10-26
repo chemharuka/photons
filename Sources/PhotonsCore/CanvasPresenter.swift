@@ -135,12 +135,18 @@ public final class CanvasPresenter {
     /// pane, the inspector and the top bar. The size is passed in by the caller that owns the layout
     /// (`LoupeController.viewportPixels`) and the part of the texture to show is named separately.
     ///
+    /// **`backdrop`** (037) is a low-resolution copy of *the whole picture*, passed while a shrink is
+    /// in flight: see `render(_:window:backdrop:backdropWindow:into:linearize:)` for what the pass
+    /// does with it. `nil` — the default, and every caller that has not been wired up yet — keeps the
+    /// 025 behaviour exactly (`clamp_to_edge` stretching the picture's own edge).
+    ///
     /// A layer that refuses a 16-bit drawable (`nextDrawable()` returning nil) falls back to the
     /// 8-bit sRGB path **once**, and keeps that choice: silently retrying every frame would halve the
     /// frame rate on exactly the machines where it failed.
     @discardableResult
     public func present(_ texture: MTLTexture, in layer: CAMetalLayer, wantsEDR: Bool = false,
                         drawableSize: ImageSize? = nil, window: PresentWindow = .whole,
+                        backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
                         onComplete: (() -> Void)? = nil) -> Bool {
         let target = drawableSize ?? ImageSize(width: texture.width, height: texture.height)
         let size = CGSize(width: max(1, target.width), height: max(1, target.height))
@@ -174,12 +180,16 @@ public final class CanvasPresenter {
 
         do {
             let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
-                                                      fragment: "present_fragment",
+                                                      fragment: Self.fragmentName(backdrop),
                                                       pixelFormat: drawable.texture.pixelFormat)
-            var params = PresentParams(a: SIMD4(storage == .linear16 ? 1 : 0, 0, 0, 0),
-                                       b: SIMD4(window.u0, window.v0, window.du, window.dv))
+            var params = Self.makeParams(linearize: storage == .linear16, window: window,
+                                         backdrop: backdrop, backdropWindow: backdropWindow,
+                                         canvas: target)
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentTexture(texture, index: 0)
+            // Bound even when there is no backdrop: the fragment's two-sample branch is uniform but
+            // the compiler still emits the fetch, and a nil texture there trips the debug layer.
+            enc.setFragmentTexture(backdrop ?? texture, index: 1)
             enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -206,8 +216,23 @@ public final class CanvasPresenter {
     /// *pixels*: what a window does to the canvas is visible here and nowhere else. It is also the
     /// shape any future offscreen consumer wants, which is why it is the same pipeline and the same
     /// params rather than a test-only copy of the shader.
+    ///
+    /// ### `backdrop` (037)
+    ///
+    /// A shrinking window is larger than the texture, so the canvas has area the main frame does not
+    /// reach; 025 filled it with the picture's own edge (`clamp_to_edge`), which the user sees as a
+    /// band of stretched colour around the picture. `backdrop` is the *whole picture* at low
+    /// resolution (`backdropWindow` = where the canvas reads it, normally `.whole`): the pass samples
+    /// it for the canvas outside the main window and cross-fades over a `backdropFeatherPixels`-wide
+    /// band so the two do not meet on a hard seam. Zoomed in the main window covers the canvas, so
+    /// the whole canvas is main-frame colour and the backdrop fetch changes nothing.
+    ///
+    /// `backdrop == nil` is the 025 path unchanged: one sample, `clamp_to_edge`, and the output is
+    /// **byte for byte** what it was before this parameter existed (pinned by
+    /// `BackdropPresenterTests.testNoBackdropOutputIsByteIdenticalTo025`).
     @discardableResult
     public func render(_ texture: MTLTexture, window: PresentWindow = .whole,
+                       backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
                        into target: MTLTexture, linearize: Bool? = nil) -> Bool {
         guard let cb = queue.makeCommandBuffer() else {
             lastFailure = "no command buffer"
@@ -224,13 +249,15 @@ public final class CanvasPresenter {
         }
         do {
             let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
-                                                      fragment: "present_fragment",
+                                                      fragment: Self.fragmentName(backdrop),
                                                       pixelFormat: target.pixelFormat)
             let linear = linearize ?? (target.pixelFormat == .rgba16Float)
-            var params = PresentParams(a: SIMD4(linear ? 1 : 0, 0, 0, 0),
-                                       b: SIMD4(window.u0, window.v0, window.du, window.dv))
+            var params = Self.makeParams(linearize: linear, window: window,
+                                         backdrop: backdrop, backdropWindow: backdropWindow,
+                                         canvas: ImageSize(width: target.width, height: target.height))
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentTexture(texture, index: 0)
+            enc.setFragmentTexture(backdrop ?? texture, index: 1)
             enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -246,9 +273,68 @@ public final class CanvasPresenter {
         return cb.error == nil
     }
 
-    private struct PresentParams {
-        var a: SIMD4<Float>   // linearize, pad, pad, pad
-        /// The sampled window: `xy` = origin, `zw` = size, both in normalised texture coordinates.
+    // MARK: - the CPU half of the kernel contract
+
+    /// The width, in canvas pixels, of the cross-fade between the main frame and the backdrop.
+    ///
+    /// Two pixels, measured **inside** the picture's own edge: wide enough that a low-resolution
+    /// backdrop does not meet the sharp frame on a visible step, narrow enough that the picture is not
+    /// visibly soft while a zoom runs. Outside the edge the backdrop is what is drawn, unchanged.
+    public static let backdropFeatherPixels: Double = 2
+
+    /// Which of `present.metal`'s two fragments to draw with.
+    ///
+    /// Two entry points rather than one shader with a branch: a uniform branch is not free on a GPU
+    /// that cannot predicate a texture fetch (measured at +0.03 ms per 4.10 Mpx frame), and the
+    /// no-backdrop path is supposed to cost what it cost before 037. `present_fragment` is 025's
+    /// fragment; `present_fragment_backdrop` is the one that reads `backdrop`.
+    static func fragmentName(_ backdrop: MTLTexture?) -> String {
+        backdrop == nil ? "present_fragment" : "present_fragment_backdrop"
+    }
+
+    /// Fills every field of `PresentParams`. One place, so `present` and `render` cannot disagree —
+    /// and so a test can pin the values without a drawable.
+    static func makeParams(linearize: Bool, window: PresentWindow,
+                           backdrop: MTLTexture?, backdropWindow: PresentWindow,
+                           canvas: ImageSize) -> PresentParams {
+        // A degenerate window has no rectangle to feather against; treat it as "no backdrop" rather
+        // than dividing by zero and blending against garbage.
+        let usable = backdrop != nil && window.du > 1e-9 && window.dv > 1e-9
+        let du = Double(usable ? window.du : 1), dv = Double(usable ? window.dv : 1)
+        let u0 = Double(usable ? window.u0 : 0), v0 = Double(usable ? window.v0 : 0)
+        // uv = u0 + p·du, so the picture occupies p ∈ [-u0/du, (1-u0)/du] — the rect in
+        // canvas-normalised coordinates that the fragment feathers against.
+        let rect = SIMD4<Float>(Float(-u0 / du), Float(-v0 / dv), Float(1 / du), Float(1 / dv))
+        let featherPixels = Self.backdropFeatherPixels
+        let feather = SIMD4<Float>(Float(featherPixels / Double(canvas.width)),
+                                   Float(featherPixels / Double(canvas.height)),
+                                   usable ? 1 : 0, 0)
+        return PresentParams(a: SIMD4(linearize ? 1 : 0, 0, 0, 0),
+                             b: SIMD4(window.u0, window.v0, window.du, window.dv),
+                             c: SIMD4(backdropWindow.u0, backdropWindow.v0,
+                                      backdropWindow.du, backdropWindow.dv),
+                             d: rect, e: feather)
+    }
+
+    /// The CPU side of the struct both sides must agree on.
+    ///
+    /// `PresentParams` is handed to the GPU as raw bytes (`setVertexBytes`/`setFragmentBytes`), so the
+    /// Swift layout and the `present.metal` declaration are one contract with no compiler check
+    /// between them — and this project has already read a stale parameter silently once. Five
+    /// `float4`s, 16 bytes each, stride 80; `BackdropPresenterTests` parses `present.metal` and pins
+    /// both sides against these numbers.
+    struct PresentParams {
+        /// linearize, pad, pad, pad
+        var a: SIMD4<Float>
+        /// The main frame's sampled window: `xy` = origin, `zw` = size, normalised texture
+        /// coordinates (values outside `[0, 1]` on a shrink are what `clamp_to_edge` fills from).
         var b: SIMD4<Float>
+        /// The backdrop's sampled window, same encoding. Only read when `e.z != 0`.
+        var c: SIMD4<Float>
+        /// The main frame's rectangle **on the canvas**, normalised: `xy` = origin, `zw` = size.
+        var d: SIMD4<Float>
+        /// `xy` = the feather width per axis (canvas-normalised, measured inside the rect),
+        /// `z` = has backdrop.
+        var e: SIMD4<Float>
     }
 }
