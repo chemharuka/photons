@@ -625,4 +625,100 @@ final class HistogramTests: XCTestCase {
         XCTAssertLessThan(second.first, first.first + 2.0,
                           "the second graph recompiled the histogram kernel")
     }
+
+    // MARK: - 6. the exponential tail (SDR + 4 stops, 2026-10-26)
+
+    /// The sRGB OETF, written out here rather than called from `Histogram`: a test that builds its
+    /// input with the very helper it is checking proves only that the helper is self-consistent.
+    private func encode(_ linear: Float) -> Float {
+        linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1.0 / 2.4) - 0.055
+    }
+
+    /// The centre of tail bin `k`, as a display code: 1/8 stop apart, and a stop is a **doubling of
+    /// light**, not of code (that is the whole reason the tail decodes before it takes a log).
+    private func codeAtBinCentre(_ k: Int) -> Float {
+        encode(Float(pow(2.0, (Double(k) + 0.5) / 8.0)))
+    }
+
+    /// One pixel per tail bin, each at its bin's centre: 32 bins, the ones chosen spread across the
+    /// four stops so a wrong scale (code-doubling, or 1/4 stop) cannot pass by luck.
+    func testTailBinsAreEighthOfAStopApart() {
+        let bins = [0, 1, 7, 8, 15, 16, 31]
+        let w = 32, h = 1
+        var rgba = [Float16](repeating: 1, count: w * h * 4)
+        for (i, k) in bins.enumerated() {
+            let v = Float16(codeAtBinCentre(k))
+            rgba[i * 4] = v
+            rgba[i * 4 + 1] = v
+            rgba[i * 4 + 2] = v
+        }
+        let hist = Histogram.compute(display(rgba, w, h))
+        XCTAssertEqual(Histogram.maxStops, 4)
+        XCTAssertEqual(Histogram.hdrBinsPerStop, 8)
+        XCTAssertEqual(hist.hdrBinCount, 32)
+        XCTAssertEqual(hist.red.hdrBins.count, hist.hdrBinCount)
+        for k in bins {
+            XCTAssertEqual(hist.red.hdrBins[k], 1,
+                           "bin \(k) must hold exactly the pixel placed at \(codeAtBinCentre(k))")
+        }
+        XCTAssertEqual(hist.red.hdrBins.reduce(0, +), bins.count)
+        XCTAssertEqual(hist.red.bins.reduce(0, +), 0, "nothing above white belongs on the code axis")
+        XCTAssertEqual(hist.red.total, hist.sampleCount, "total counts both segments")
+        XCTAssertEqual(hist.red.hdrTotal, bins.count)
+    }
+
+    /// 4.5 stops is past `maxStops`, so it piles onto the last bin (`"4 stops or more"`) instead of
+    /// running off the plot.
+    func testTailClampsAtFourStops() {
+        let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 4.5)))))
+        XCTAssertEqual(h.red.hdrBins[31], 4)
+        XCTAssertEqual(h.red.hdrBins.reduce(0, +), 4)
+        XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
+    }
+
+    /// White itself stays on the code axis (last SDR bin); a hair above it is tail bin 0. This is the
+    /// seam the card draws as the SDR/tail boundary, so it has to be exact.
+    func testWhiteIsTheLastSDRBinAndAHairAboveItIsTailBinZero() {
+        let white = Histogram.compute(solid(1, 1, rgb: 1))
+        XCTAssertEqual(white.red.bins[255], 1)
+        XCTAssertEqual(white.red.hdrTotal, 0)
+
+        let barely = Histogram.compute(solid(1, 1, rgb: encode(Float(pow(2.0, 1.0 / 64.0)))))
+        XCTAssertEqual(barely.red.hdrBins[0], 1)
+        XCTAssertEqual(barely.red.bins.reduce(0, +), 0)
+    }
+
+    /// 削顶 now means "S4 clamped here", not "above white": on an EDR frame those are different
+    /// numbers, and the difference is the entire point of the extra range.
+    func testClippingCountsTheDisplayCeilingNotJustWhite() {
+        let inside = Histogram.compute(solid(2, 2, rgb: encode(1.9)), headroom: 2)
+        XCTAssertEqual(inside.red.clippedHigh, 1.0, accuracy: 1e-12, "above white")
+        XCTAssertEqual(inside.red.clippedCeiling, 0.0, accuracy: 1e-12, "but inside the ceiling")
+
+        let atCeiling = Histogram.compute(solid(2, 2, rgb: encode(2.0)), headroom: 2)
+        XCTAssertEqual(atCeiling.red.clippedCeiling, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(atCeiling.red.clippedHigh, 1.0, accuracy: 1e-12)
+    }
+
+    /// The tail must be *additive*: the SDR bins of a frame cannot move because a display offered
+    /// more headroom, and an SDR display must still see the numbers it always saw.
+    func testHeadroomMovesOnlyTheCeilingRatio() {
+        let image = solid(8, 4, rgb: 1)
+        let sdr = Histogram.compute(image, headroom: 1)
+        let hdr = Histogram.compute(image, headroom: 4)
+        XCTAssertEqual(sdr.red.bins, hdr.red.bins)
+        XCTAssertEqual(sdr.red.clippedHigh, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(sdr.red.clippedCeiling, 1.0, accuracy: 1e-12, "headroom 1: white *is* the ceiling")
+        XCTAssertEqual(hdr.red.clippedCeiling, 0.0, accuracy: 1e-12, "headroom 4: white is not clipped")
+        XCTAssertEqual(hdr.red.hdrTotal, 0)
+    }
+
+    /// The ceiling travels with the measurement, so the card's tick can never describe a different
+    /// frame than the bins next to it.
+    func testTheCeilingTravelsWithTheMeasurement() {
+        let h = Histogram.compute(solid(2, 2, rgb: 0.5), headroom: 1.695)
+        XCTAssertEqual(h.headroom, 1.695, accuracy: 1e-12)
+        XCTAssertEqual(h.displayStops, log2(1.695), accuracy: 1e-12)
+        XCTAssertEqual(h.displayStops, 0.7614, accuracy: 1e-3)
+    }
 }

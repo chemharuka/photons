@@ -4,6 +4,7 @@ import Foundation
 import ImageIO
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsExport
 
 // MARK: - request token
 
@@ -351,12 +352,25 @@ public final class ThumbnailProvider: @unchecked Sendable {
         var sourceEdge = 0
         let embedded: CGImage?
         if kind == .raw {
-            // Embedded preview only: `preview` never falls through to a RAW decode (§0).
+            // The camera's own embedded JPEG is the default (§11.2, and the user decision: "显示导入
+            // RAW 时的内嵌 jpg"): ImageIO first because it is 2.6× faster than building a
+            // `CIRAWFilter`, then the filter for files ImageIO cannot thumbnail, and only then a
+            // **real render** at a coarse decode scale for files that carry no preview at all —
+            // such a file would otherwise sit in the grid as a coloured placeholder forever.
             guard let decoder = rawDecoder() else { throw ThumbProviderError.noRAWDecoder }
-            let outcome = decoder.preview(source, maxPixelSize: key.tier.longEdge, strategy: .thumbnail)
-            embedded = outcome?.image
-            provenance = "embedded"
-            sourceEdge = outcome?.sourceLongEdge ?? 0
+            if let outcome = decoder.preview(source, maxPixelSize: key.tier.longEdge, strategy: .thumbnail) {
+                embedded = outcome.image
+                provenance = "embedded"
+                sourceEdge = outcome.sourceLongEdge
+            } else if let outcome = decoder.preview(source, maxPixelSize: key.tier.longEdge, strategy: .filter) {
+                embedded = outcome.image
+                provenance = "filter"
+                sourceEdge = outcome.sourceLongEdge
+            } else {
+                embedded = renderedThumbnail(decoder, url: source, longEdge: key.tier.longEdge,
+                                             identity: key.digest)
+                provenance = "graph"
+            }
         } else {
             // The file already is a rendered JPEG/HEIC: ImageIO's own downscale *is* the fast path,
             // and `CreateThumbnailFromImageIfAbsent` is what lets it use the DCT-scaled decoder.
@@ -380,6 +394,28 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return ThumbPayload(data: data,
                             source: provenance,
                             sourceLongEdge: max(sourceEdge, max(normalised.width, normalised.height)))
+    }
+
+    /// Last resort for a RAW with no usable embedded preview: one coarse decode plus one frame of
+    /// the real graph (D12 — never a second renderer), sized to the tier.
+    ///
+    /// Only files that carry no camera JPEG take this path, so the ~0.3 s it costs for a 60 MP file
+    /// is paid once per such file, not per scroll.
+    private func renderedThumbnail(_ decoder: RAWDecoder, url: URL, longEdge: Int,
+                                   identity: String) -> CGImage? {
+        guard let scaled = try? decoder.decode(url, options: DecodeOptions(scale: 0.25)),
+              let graph = try? RenderGraph(input: RenderInput(image: scaled, identity: identity,
+                                                              sourceURL: url)) else { return nil }
+        let w = Double(scaled.width), h = Double(scaled.height)
+        let s = min(1, Double(longEdge) / max(w, h, 1))
+        let canvas = ImageSize(width: max(1, Int((w * s).rounded())),
+                               height: max(1, Int((h * s).rounded())))
+        let options = RenderOptions(canvas: canvas, scale: 1,
+                                    display: DisplayOptions(primaries: .sRGB, bitDepth: 8),
+                                    useCache: false, wantsPixels: true)
+        guard let display = (try? graph.render(.neutral, options: options))?.display,
+              let cg = try? Exporter.cgImage(display, bitDepth: 8) else { return nil }
+        return cg
     }
 
     private func rawDecoder() -> RAWDecoder? {

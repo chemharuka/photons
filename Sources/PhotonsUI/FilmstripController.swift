@@ -76,8 +76,13 @@ public final class FilmstripCard: NSView {
         let size = NSSize(width: iw * scale, height: ih * scale)
         let target = NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
                             width: size.width, height: size.height)
-        NSGraphicsContext.current?.cgContext.interpolationQuality = .medium
-        NSGraphicsContext.current?.cgContext.draw(image, in: target)
+        // A flipped view (`isFlipped == true`) plus a raw `CGContext.draw(CGImage)` draws the image
+        // **bottom-up**: the cell is flipped, the CGImage is not. Go through `NSImage` with
+        // `respectFlipped`, which is the only spelling that is correct in both orientations.
+        let ns = NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
+        ns.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1,
+                respectFlipped: true,
+                hints: [.interpolation: NSImageInterpolation.medium])
     }
 }
 

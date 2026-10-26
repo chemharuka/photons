@@ -287,9 +287,17 @@ public final class RAWDecoder {
         // moment a picture contains signage (L1030433), and is why it looked file-specific.
         Self.flipRows(&rgba, width: w, height: h)
 
+        // **`CIRAWFilter` already honours the container's EXIF orientation.** Measured on
+        // `L1030409.dng` (tag 8, stored 9536×6344): the filter reports `orientation == 8` *and*
+        // hands back an upright 6336×9520 image, so the buffer we just copied has row 0 at the top
+        // of the *upright* picture. Recording the tag here and letting `oriented()` rotate again
+        // double-rotates exactly the photos that are not `.up` (L1030405/409 in the demo library):
+        // they render 90° wrong and landscape-shaped. So the buffer is `.up` by construction;
+        // `sourceOrientation(of:)` stays for metadata and for the preview path, which *does* need
+        // the transform (ImageIO's thumbnail is created with `WithTransform: false`).
         let image = LinearImage(width: w, height: h, rgba: rgba,
                                 colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
-                                orientation: Self.sourceOrientation(of: url))
+                                orientation: .up)
         let capabilities = DecoderCapabilities(requestedVersion: options.decoderVersion,
                                                effectiveVersion: effective,
                                                defaultVersion: filterDefault)

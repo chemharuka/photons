@@ -894,17 +894,22 @@ public final class RenderGraph {
                 histogramPayload = Histogram.empty(bins: bins, canvas: plan.canvas, roi: requested,
                                                    primaries: options.display.primaries)
             } else {
-                // The default region: a window measures the picture inside its canvas (see note 1);
-                // a full-frame render measures the canvas it was handed, which is what
-                // `--ui-smoke`'s whole-texture recount assumes. An explicit ROI is exactly that.
+                // The default region: the **picture inside the canvas**, never the canvas itself.
+                //
+                // A canvas that is not the picture's aspect has matte bars — `fit` letterboxes into
+                // the viewport exactly as a 1:1 window does (`content < canvas`) — and a histogram of
+                // the matte is a histogram of the *output surface*: bin 0 collects every black bar, so
+                // 削底 reads 30 % on a photo with no blacks at all. The ROI is `plan.origin +
+                // plan.content` in both cases, which is the whole canvas exactly when there is no
+                // letterboxing (every pre-005f number is therefore unchanged).
+                //
+                // A windowed frame still measures the window (the pixels that exist); a photo-wide
+                // measurement at 1:1 would be a different render, not a different ROI.
                 let picture = ImageRect(x: Int(plan.origin.x.rounded()),
                                         y: Int(plan.origin.y.rounded()),
                                         width: plan.content.width, height: plan.content.height)
-                let defaultROI = plan.isFullFrame
-                    ? ImageRect(x: 0, y: 0, width: plan.canvas.width, height: plan.canvas.height)
-                    : picture
                 let roi = (options.histogramROI?.clamped(in: plan.canvas))
-                    ?? defaultROI.clamped(in: plan.canvas)
+                    ?? picture.clamped(in: plan.canvas)
                 if histogramPipeline == nil {
                     // Once per process, not once per graph: the runtime compile is ~5 ms and a graph
                     // is rebuilt for every rung and every photo (`HistogramGather.pipeline`).

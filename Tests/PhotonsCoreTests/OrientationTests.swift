@@ -185,24 +185,32 @@ final class OrientationTests: XCTestCase {
 
     /// Requirement: the preview path and the decode path must reach the **same** conclusion about a
     /// file's orientation — asserted by equality, never by looking at the pixels.
-    func testDecodeAndPreviewAgreeOnOrientation() throws {
+    func testDecodeIsUprightBecauseTheFilterAlreadyAppliesTheHeader() throws {
         let url = try fixtureURL()
         let decoder = try RAWDecoder()
         let decoded = try decoder.decode(url, options: DecodeOptions(scale: 0.125))
         let fromHeader = RAWDecoder.sourceOrientation(of: url)
 
-        XCTAssertEqual(decoded.orientation, fromHeader,
-                       "decode must carry the header orientation")
+        // `CIRAWFilter` honours the container's EXIF orientation: for `L1030409.dng` (tag 8, stored
+        // 9536×6344) its `outputImage` is 6336×9520. So the buffer we copy is already upright and
+        // must report `.up`; recording the tag and rotating again is a double rotation, which is
+        // exactly what made `L1030405/409` render landscape.
+        XCTAssertEqual(decoded.orientation, .up,
+                       "the decoded buffer is upright by construction")
+
+        // The *preview* is the opposite: ImageIO's thumbnail is created with `WithTransform: false`
+        // and `CIRAWFilter.previewImage` is likewise unrotated (measured 1024×682 for both tag 1 and
+        // tag 8), so a preview must report the header orientation for the caller to apply.
         for strategy in [PreviewStrategy.filter, .thumbnail, .auto] {
             guard let preview = decoder.preview(url, maxPixelSize: 512, strategy: strategy) else {
                 XCTFail("no preview from \(strategy)"); continue
             }
-            XCTAssertEqual(preview.orientation, decoded.orientation,
-                           "preview(\(strategy)) and decode disagree about \(url.lastPathComponent)")
+            XCTAssertEqual(preview.orientation, fromHeader,
+                           "preview(\(strategy)) must report the header orientation")
         }
-        print("orientation of \(url.lastPathComponent): decode=\(decoded.orientation.rawValue) "
-              + "preview=\((decoder.preview(url, maxPixelSize: 512)?.orientation.rawValue) ?? -1) "
-              + "header=\(fromHeader.rawValue)")
+        print("orientation of \(url.lastPathComponent): header=\(fromHeader.rawValue) "
+              + "decoded=\(decoded.width)×\(decoded.height) (upright) "
+              + "preview=\((decoder.preview(url, maxPixelSize: 512)?.orientation.rawValue) ?? -1)")
     }
 
     /// The objective "which way up?" judgement, no eyes required: **the top half must be brighter
