@@ -21,8 +21,16 @@ all: build
 build:
 	swift build -c $(CONFIG)
 
+# A failing test run must fail the gate.
+#
+# This line used to be `swift test 2>&1 | tail -40`, and a pipeline exits with the status of its
+# **last** command — so `tail` returned 0 and `make verify` printed ALL GREEN while
+# `ThumbnailServiceTests` had actually failed (measured 2026-10-26 20:46 on main). The log is kept
+# whole so a red run can be inspected without re-running 10 minutes of UI tests.
 test: build
-	PHOTONS_TEST_RAW="$(RAW)" swift test 2>&1 | tail -40
+	@set -o pipefail; PHOTONS_TEST_RAW="$(RAW)" swift test > /tmp/photons-test.log 2>&1 \
+		&& { grep -E "Executed .* tests?, with" /tmp/photons-test.log | tail -3; echo "TESTS PASS"; } \
+		|| { tail -60 /tmp/photons-test.log; echo "TESTS FAILED — 完整日志 /tmp/photons-test.log"; exit 1; }
 
 ## L1 — determinism: two independent processes must emit the same digest
 l1: build
