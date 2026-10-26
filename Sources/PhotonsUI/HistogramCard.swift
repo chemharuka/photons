@@ -36,6 +36,11 @@ import PhotonsCore
 //   · **The region is the picture, always.** There is no ROI any more: the measurement renders the
 //     whole picture at its own thumbnail scale, so a `fit` frame's matte bars cannot reach bin 0 and a
 //     1:1 window cannot measure only the window.
+//   · **The deleted footnote is now the pointer's reading** (010, 2026-10-26). The owner removed the
+//     painted 「采样 N px · 直方图 256+256 档」 line; the space it left carries a hover readout instead
+//     — the code (0–255) or the tail's stop (`+1.00 档 (2.0×)`, per "＋1 档 = 2×") on the left, and
+//     that bin's R/G/B counts on the right, in the *same* 9.5 pt semibold digits as 过白/削顶. It is
+//     driven by a tracking area over the plot only, and mouse-out clears it (nothing is painted).
 //
 // The card is AppKit rather than SwiftUI because it has to be *measurable*: the smoke reads the
 // histogram it drew, the bin count of the path it built, the axis split and ceiling tick it laid
@@ -48,6 +53,11 @@ public final class HistogramCardView: NSView {
     public var histogram: Histogram? {
         didSet {
             guard histogram != oldValue else { return }
+            // A new measurement moves the counts under the pointer, so the readout's text follows it.
+            if hoverReading != nil {
+                hoverValueText = HistogramCardFormat.hoverValue(hoverReading!)
+                hoverCountText = HistogramCardFormat.hoverCounts(histogram, hoverReading!)
+            }
             needsDisplay = true
             updateAccessibilityHelp()
         }
@@ -83,6 +93,38 @@ public final class HistogramCardView: NSView {
     /// Where 过白 was painted, in view coordinates — so a synthetic click can aim at it.
     public private(set) var clipHighHitRect: NSRect = .zero
     public private(set) var clipLowHitRect: NSRect = .zero
+
+    // MARK: the card's one number font (2026-10-26)
+    //
+    // 过白 / 削顶 / 削底 and the hover readout are the *same* size and weight by the owner's request
+    // ("lastNoteColor 的字体要更大，和过白/等保持一致"). One constant, used by both call sites, so
+    // "the same" is an identity the tests can assert (`hoverNumberFont == clipNumberFont`) rather
+    // than two literals that happen to agree today.
+    public static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold)
+    public static var hoverNumberFont: NSFont { numberFont }
+    public static var clipNumberFont: NSFont { numberFont }
+
+    // MARK: what the smoke reads back about the hover readout (010)
+
+    /// The bin the pointer is over, `nil` when the pointer is outside the plot (or has left the card).
+    public private(set) var hoverReading: HistogramHoverReading?
+    /// Exactly the strings the readout painted: the code / stop on the left, the R/G/B counts on the
+    /// right. Both empty when nothing is being hovered — that emptiness *is* "the readout cleared".
+    public private(set) var hoverValueText = ""
+    public private(set) var hoverCountText = ""
+    public private(set) var hoverValueRect: NSRect = .zero
+    public private(set) var hoverCountRect: NSRect = .zero
+    /// The union of the two rects: what the readout occupies. `.zero` when cleared.
+    public private(set) var hoverReadoutRect: NSRect = .zero
+    /// How many `draw`s painted a readout — the countable half of "moved out → nothing is painted".
+    public private(set) var hoverPaintCount = 0
+    /// The colour the last readout was painted with (contrast is recomputed from this, not stored).
+    public private(set) var lastHoverColor: NSColor = .labelColor
+
+    /// Worst-case WCAG ratio of the readout colour on the card's own backdrop band.
+    public var hoverContrast: Double {
+        HistogramCardReadability.worstContrast(of: lastHoverColor, isDark: lastAppearanceIsDark)
+    }
 
     // MARK: what the smoke reads back about the two *legibility* labels (2026-10-26)
 
@@ -124,7 +166,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。")
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。鼠标悬停读出该档的码值（尾段为 +N 档 = 2^N 倍）与该箱 R/G/B 样本数。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -149,6 +191,88 @@ public final class HistogramCardView: NSView {
     /// The pointer says "this is a control" over the number, and nothing anywhere else.
     public override func resetCursorRects() {
         if !clipHighHitRect.isEmpty { addCursorRect(clipHighHitRect, cursor: .pointingHand) }
+    }
+
+    // MARK: the pointer's reading (010)
+    //
+    // The readout is driven by a **tracking area over the plot only** (not the whole card, not the
+    // clip rows), so "inside the plot" is the definition of "there is something to read" and leaving
+    // it is what clears the line. `.inVisibleRect` is deliberately *not* used: it would make the
+    // tracked rect the whole view and hovering the 过白 row would invent a reading for a bin nobody
+    // pointed at. `updateTrackingAreas` instead rebuilds the rect from `bounds` on every call —
+    // remove first, add second, always exactly one area — because SwiftUI re-lays the card out
+    // whenever the inspector resizes, and stacking areas would deliver the same move N times.
+
+    private var hoverTrackingArea: NSTrackingArea?
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+            self.hoverTrackingArea = nil
+        }
+        let plot = NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight)
+        guard plot.width > 1, plot.height > 1 else { return }
+        let area = NSTrackingArea(rect: plot,
+                                  options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    /// A tracking area with `.mouseMoved` is only delivered while the window accepts move events;
+    /// nothing in this app depends on the flag being false, and the readout depends on it being true.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    /// The plot rect the axis is laid out in *right now* (the same arithmetic `draw` uses), or `nil`
+    /// when the card is too small to have one.
+    private var liveAxis: HistogramAxis? {
+        guard bounds.width > 80, bounds.height > 60 else { return nil }
+        return HistogramAxis(plot: NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight))
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        updateHoverReadout(at: convert(event.locationInWindow, from: nil))
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        updateHoverReadout(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Off the plot (or off the card, which `.activeInKeyWindow` reports the same way) → nothing.
+    public override func mouseExited(with event: NSEvent) {
+        clearHoverReadout()
+    }
+
+    /// Read the bin under `point` (view coordinates) and repaint. Public so the smoke can drive the
+    /// readout without a live cursor — it is the same call `mouseMoved` makes.
+    public func updateHoverReadout(at point: CGPoint) {
+        guard let axis = liveAxis, axis.plot.contains(point) else {
+            clearHoverReadout()
+            return
+        }
+        let reading = axis.hoverReading(atX: point.x, sdrBins: histogram?.binCount ?? 256)
+        guard reading != hoverReading else { return }
+        hoverReading = reading
+        hoverValueText = HistogramCardFormat.hoverValue(reading)
+        hoverCountText = HistogramCardFormat.hoverCounts(histogram, reading)
+        needsDisplay = true
+    }
+
+    /// Drop the reading: the line goes blank and the readback rects go to `.zero` (what the smoke
+    /// counts as "cleared").
+    public func clearHoverReadout() {
+        guard hoverReading != nil || !hoverValueText.isEmpty || !hoverReadoutRect.isEmpty else { return }
+        hoverReading = nil
+        hoverValueText = ""
+        hoverCountText = ""
+        hoverValueRect = .zero
+        hoverCountRect = .zero
+        hoverReadoutRect = .zero
+        needsDisplay = true
     }
 
     // MARK: drawing
@@ -220,6 +344,7 @@ public final class HistogramCardView: NSView {
         }
 
         drawClipRows(below: plot, histogram: histogram, in: bounds)
+        drawHoverReadoutRow(below: plot, histogram: histogram, in: bounds)
         _ = dirtyRect
     }
 
@@ -352,7 +477,7 @@ public final class HistogramCardView: NSView {
     private func drawClipRows(below plot: NSRect, histogram: Histogram?, in bounds: NSRect) {
         let y = plot.maxY + 5
         let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
-        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold)
+        let numberFont = Self.numberFont
 
         clipHighText = HistogramCardFormat.clipHigh(histogram, .luma)
         clipCeilingText = HistogramCardFormat.clipCeiling(histogram, .luma)
@@ -415,6 +540,57 @@ public final class HistogramCardView: NSView {
         channelRowWidth = x - 9 - bounds.minX
     }
 
+    // MARK: the hover readout line (010)
+
+    /// The line the owner deleted as a footnote, now carrying the pointer's own reading: **left** the
+    /// code (or the tail's stop), **right** that bin's R/G/B counts.
+    ///
+    /// Left/right rather than one sentence because the two halves answer different questions
+    /// ("what brightness is here?" / "how much of the picture is here?"), and because splitting them
+    /// keeps either half from being truncated at the inspector's 244 pt card: the stop
+    /// `+1.00 档 (2.0×)` is ~74 pt and `R 12841 · G 12903 · B 12688` ~120 pt, so both fit on one row
+    /// with room for the gap. The row only exists while `hoverReading` is set — otherwise nothing is
+    /// painted there at all (that is the "cleared" state, and the rects go to `.zero`).
+    ///
+    /// The font is `Self.numberFont` — the *same* 9.5 pt semibold monospaced digits as 过白/削顶/削底,
+    /// by the owner's request; the colour is an opaque `HistogramCardReadability.readoutColor`, which
+    /// is what makes ≥ 4.5 : 1 a measured fact rather than a hope.
+    private func drawHoverReadoutRow(below plot: NSRect, histogram: Histogram?, in bounds: NSRect) {
+        guard let reading = hoverReading else {
+            hoverValueText = ""
+            hoverCountText = ""
+            hoverValueRect = .zero
+            hoverCountRect = .zero
+            hoverReadoutRect = .zero
+            return
+        }
+        let font = Self.numberFont
+        let color = HistogramCardReadability.readoutColor(isDark: lastAppearanceIsDark)
+        lastHoverColor = color
+        // Re-derive from the current measurement: a redraw after a new measurement must not show the
+        // previous picture's counts next to this picture's plot.
+        hoverValueText = HistogramCardFormat.hoverValue(reading)
+        hoverCountText = HistogramCardFormat.hoverCounts(histogram, reading)
+
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let valueSize = (hoverValueText as NSString).size(withAttributes: attributes)
+        let countSize = (hoverCountText as NSString).size(withAttributes: attributes)
+        let rowTop = plot.maxY + 5 + clipRowHeight * 2
+        // Half a point of slack: the row's line box ends exactly at the card's bottom edge otherwise.
+        let y = min(rowTop, bounds.maxY - max(valueSize.height, countSize.height) - 0.5)
+
+        var countX = bounds.maxX - countSize.width
+        let valueX = bounds.minX
+        if countX < valueX + valueSize.width + 6 { countX = valueX + valueSize.width + 6 }
+
+        (hoverValueText as NSString).draw(at: CGPoint(x: valueX, y: y), withAttributes: attributes)
+        (hoverCountText as NSString).draw(at: CGPoint(x: countX, y: y), withAttributes: attributes)
+        hoverValueRect = NSRect(origin: CGPoint(x: valueX, y: y), size: valueSize)
+        hoverCountRect = NSRect(origin: CGPoint(x: countX, y: y), size: countSize)
+        hoverReadoutRect = hoverValueRect.union(hoverCountRect)
+        hoverPaintCount += 1
+    }
+
     @discardableResult
     private func drawText(_ text: String, at point: CGPoint, font: NSFont,
                           color: NSColor) -> NSRect {
@@ -469,7 +645,16 @@ public enum HistogramCardReadability {
                : NSColor(srgbRed: 0.22, green: 0.22, blue: 0.23, alpha: 1)
     }
 
-    /// The sample/bin footnote: quieter than the percentages, but still opaque and still ≥ 4.5 : 1.
+    /// The hover readout (010): a neutral that is *quieter* than the percentages but still opaque and
+    /// still ≥ 4.5 : 1 at the worst end of the band (measured: 6.1 : 1 in aqua, 6.3 : 1 in darkAqua).
+    /// `.secondaryLabelColor` would have been the obvious choice and is not: it is a 50 % tint, so
+    /// over this backdrop it lands near 4 : 1 — under the floor the card promises. Being opaque is
+    /// also what keeps a filled plot from showing through the glyphs.
+    public static func readoutColor(isDark: Bool) -> NSColor {
+        isDark ? NSColor(srgbRed: 0.72, green: 0.72, blue: 0.73, alpha: 1)
+               : NSColor(srgbRed: 0.34, green: 0.34, blue: 0.35, alpha: 1)
+    }
+
     // MARK: the fonts (unchanged sizes — nothing here may shrink)
 
     /// 8.5 pt, monospaced digits: the size the percentages already had. They are a column of numbers
