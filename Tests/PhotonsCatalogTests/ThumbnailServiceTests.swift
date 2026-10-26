@@ -37,6 +37,9 @@ final class ThumbnailServiceTests: XCTestCase {
         private(set) var mainThreadCalls = 0
         /// Blocks every call until the test signals it (priority / cancellation ordering).
         var gate: DispatchSemaphore?
+        /// When set, only this key waits on `gate` — the deadline test needs one wedged job while
+        /// the queue behind it still moves.
+        var gateKey: ThumbKey?
         /// Signalled as each call *enters*, so a test can wait for "something is in flight".
         var startedSignal: DispatchSemaphore?
         var delayMilliseconds: UInt32 = 0
@@ -57,7 +60,7 @@ final class ThumbnailServiceTests: XCTestCase {
             defer { lock.lock(); concurrent -= 1; lock.unlock() }
 
             startedSignal?.signal()
-            gate?.wait()
+            if gateKey == nil || gateKey == key { gate?.wait() }
             if delayMilliseconds > 0 { usleep(delayMilliseconds * 1000) }
             if failingTiers.contains(key.tier) { throw StubError.bounce }
             if let payload, let data = payload(key) {
@@ -93,6 +96,18 @@ final class ThumbnailServiceTests: XCTestCase {
 
     private func waitIdle(_ service: ThumbnailService) {
         XCTAssertTrue(service.waitUntilIdle(timeout: 60), "service did not drain")
+    }
+
+    /// A ticket's summary lands when the job's completion loop runs, which is *after* the job leaves
+    /// the queue — so `waitUntilIdle` alone is not enough to read it from another thread.
+    private func result(_ service: ThumbnailService, of ticket: ThumbTicket,
+                        timeout: TimeInterval = 5) -> ThumbResult? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let summary = service.result(for: ticket) { return summary }
+            usleep(2_000)
+        }
+        return nil
     }
 
     // MARK: - ① single flight
@@ -319,6 +334,93 @@ final class ThumbnailServiceTests: XCTestCase {
         XCTAssertTrue(cache.exists(one.key), "someone still wants it, so the file is written")
         XCTAssertEqual(service.stats().cancelledInFlight, 0)
         XCTAssertEqual(service.stats().missGenerated, 1)
+    }
+
+    /// 007: the grid reloads while three slow renders are in flight. They were cancelled (their
+    /// cells "scrolled away"), then immediately requested again by the new pass. The retry used to
+    /// **join** the already-condemned job, whose `finish` then suppressed delivery — so the retry
+    /// waited for a callback that had already been decided against: `pending 3 · generated 0 ·
+    /// failed 0`, forever, with an idle process. A live request must adopt the job instead.
+    func testLateRequestAdoptsACancelledInFlightJobAndAlwaysGetsACallback() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let gate = DispatchSemaphore(value: 0)
+        let started = DispatchSemaphore(value: 0)
+        producer.gate = gate
+        producer.startedSignal = started
+        let service = ThumbnailService(cache: cache, config: .init(maxConcurrency: 1), producer: producer)
+
+        let one = spec(230)
+        let first = service.request(one, priority: .onScreen)
+        XCTAssertEqual(started.wait(timeout: .now() + 5), .success, "producer entered")
+
+        // The view goes away mid-decode (§5: the decode cannot be interrupted, only its bytes can
+        // be thrown away) …
+        first.cancel()
+        XCTAssertEqual(service.stats().cancelledInFlight, 1)
+
+        // … and the next pass wants the same pixels again while the job is still running.
+        let callback = expectation(description: "the live subscriber is called back")
+        var delivered: ThumbResult?
+        _ = service.request(one, priority: .onScreen) { result in
+            delivered = result
+            callback.fulfill()
+        }
+
+        gate.signal()
+        waitIdle(service)
+        wait(for: [callback], timeout: 5)
+
+        XCTAssertNotNil(delivered, "a live subscriber is always called back — never left pending")
+        XCTAssertEqual(delivered?.origin, .generated)
+        XCTAssertNotNil(delivered?.data)
+        XCTAssertTrue(cache.exists(one.key), "the render already paid for is written, not discarded")
+        XCTAssertEqual(producer.callCount, 1, "adoption, not a second decode of the same file")
+
+        let s = service.stats()
+        XCTAssertEqual(s.missGenerated, 1)
+        XCTAssertEqual(s.missCancelled, 0, "the adoption rescinds the cancellation")
+        XCTAssertEqual(s.cancelledInFlight, 0)
+        XCTAssertEqual(s.requests, s.coalesced + s.hits + s.missGenerated + s.missCancelled + s.missFailed,
+                       "every request is still exactly one join or one outcome")
+    }
+
+    /// 007: "无论成败，一个请求都必须有终态". A producer that never returns used to hold its
+    /// concurrency slot and its cell forever; the deadline books it `failed` **with a reason** and
+    /// returns the slot so the rest of the queue moves.
+    func testAProducerThatNeverReturnsEndsFailedWithAReasonAndFreesTheSlot() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let gate = DispatchSemaphore(value: 0)
+        let started = DispatchSemaphore(value: 0)
+        producer.gate = gate
+        producer.startedSignal = started
+        let wedged = spec(240)
+        producer.gateKey = wedged.key      // only this one hangs; the queue behind it must move
+        let service = ThumbnailService(cache: cache,
+                                       config: .init(maxConcurrency: 1, queueDepthLimit: 0,
+                                                     producerDeadline: 0.25),
+                                       producer: producer)
+
+        let stuck = service.request(wedged, priority: .onScreen)
+        XCTAssertEqual(started.wait(timeout: .now() + 5), .success)
+        let behind = service.request(spec(241), priority: .onScreen)
+
+        XCTAssertTrue(service.waitUntilIdle(timeout: 10), "the wedged job must not keep the queue")
+
+        let s = service.stats()
+        XCTAssertEqual(s.missFailed, 1, "the deadline is a booked failure, not a silent hole")
+        let stuckResult = result(service, of: stuck)
+        XCTAssertNotNil(stuckResult?.error, "a failure always carries its reason")
+        XCTAssertEqual(stuckResult?.origin, .failed)
+        XCTAssertEqual(result(service, of: behind)?.origin, .generated,
+                       "the next job ran once the slot came back")
+        XCTAssertFalse(cache.exists(wedged.key), "bytes from an expired job are never written")
+
+        gate.signal()   // let the stuck worker unwind; its late `finish` is a no-op
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(service.stats().missFailed, 1, "a late producer return does not book twice")
+        XCTAssertEqual(producer.callCount, 2)
     }
 
     /// "The view left": one call cancels a whole visible set.

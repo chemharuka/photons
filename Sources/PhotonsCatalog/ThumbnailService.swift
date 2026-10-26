@@ -171,6 +171,12 @@ public func cancel(_ tickets: [ThumbTicket]) {
 /// * **Cancel means no write.** A cancelled job never produces bytes that reach the disk. An
 ///   in-flight decode still runs to completion (CIRAWFilter cannot be interrupted) but its bytes are
 ///   dropped — the stricter of §5's "写盘不浪费" and the acceptance rule "取消后不再写盘".
+/// * **Every live subscriber reaches a terminal state.** A job is booked exactly once (`hit`,
+///   `generated`, `cancelled`, `failed`); a subscriber that did not cancel itself always gets its
+///   callback; and a producer that never returns is booked `failed` with a reason when
+///   `Config.producerDeadline` expires. A request that arrives while a *condemned* job (every
+///   earlier subscriber left) is still running **adopts** that job rather than joining one that has
+///   already decided to call nobody back — that join was 007's "pending forever".
 public final class ThumbnailService: @unchecked Sendable {
 
     public struct Config: Sendable {
@@ -179,10 +185,18 @@ public final class ThumbnailService: @unchecked Sendable {
         /// Optional admission cap. 0 = unlimited: the queue is bounded by the visible window, and
         /// silently dropping work because a prefetch ran long would make hit rates unexplainable.
         public var queueDepthLimit: Int
+        /// Nothing may sit in a producer forever: one wedged decode would hold a concurrency slot
+        /// (and with it `maxConcurrency` cells) until the app quit. A job that exceeds this is
+        /// booked `failed` with a reason and its bytes are dropped if they ever arrive. 0 disables.
+        /// A normal render here is ~0.3 s; the deadline exists for "the filter never returns", not
+        /// for slow machines.
+        public var producerDeadline: TimeInterval
 
-        public init(maxConcurrency: Int = 3, queueDepthLimit: Int = 0) {
+        public init(maxConcurrency: Int = 3, queueDepthLimit: Int = 0,
+                    producerDeadline: TimeInterval = 30) {
             self.maxConcurrency = max(1, maxConcurrency)
             self.queueDepthLimit = max(0, queueDepthLimit)
+            self.producerDeadline = max(0, producerDeadline)
         }
     }
 
@@ -244,6 +258,10 @@ public final class ThumbnailService: @unchecked Sendable {
     private final class Subscription {
         let id: Int64
         var cancelled = false
+        /// The view this subscriber belonged to no longer exists (§5 generation bump). It asked to be
+        /// called back, but its pixels are worthless now — so it gets no callback, while any later
+        /// subscriber of the same still-running job does.
+        var stale = false
         let completion: ((ThumbResult) -> Void)?
         init(id: Int64, completion: ((ThumbResult) -> Void)?) {
             self.id = id
@@ -259,8 +277,11 @@ public final class ThumbnailService: @unchecked Sendable {
         var priority: ThumbPriority
         var subscribers: [Subscription] = []
         var started = false
-        var suppressWrite = false    // hard cancel: drop the bytes the producer is making
-        var suppressDelivery = false // generation bump: keep the useful cache entry, skip the UI hop
+        /// Hard cancel: drop the bytes the producer is making. Cleared again when a later request
+        /// adopts the job (`requestBatch`), because then somebody *does* want those bytes.
+        var suppressWrite = false
+        /// Set by `finish` (and by the producer deadline): exactly one terminal state per job.
+        var finished = false
         var enqueuedAt = DispatchTime.now()
         var producerMilliseconds = 0.0
 
@@ -322,6 +343,9 @@ public final class ThumbnailService: @unchecked Sendable {
     /// §5 "让它跑完并写盘"), but their results are not delivered to a view that no longer exists.
     /// Keys in `keeping` (the new visible set) survive the sweep — that is the "same cells, new
     /// generation" case a scroll that lands on the same row produces.
+    ///
+    /// "Not delivered" is per **subscriber** (`Subscription.stale`), not per job: a later request for
+    /// the same still-running key is a different view, and it does want its callback.
     @discardableResult
     public func beginGeneration(keeping keys: Set<ThumbKey> = []) -> Int {
         lock.lock()
@@ -336,7 +360,7 @@ public final class ThumbnailService: @unchecked Sendable {
             return true
         }
         for job in jobs.values where job.started && job.generation < gen && !keys.contains(job.key) {
-            job.suppressDelivery = true
+            job.subscribers.forEach { $0.stale = true }
         }
         counters.queued = pending.count
         counters.missCancelled += dropped
@@ -395,6 +419,18 @@ public final class ThumbnailService: @unchecked Sendable {
 
             if let existing = jobs[spec.key] {
                 // Single flight: same key, same bytes, one producer call.
+                //
+                // Adoption: if every earlier subscriber left while this decode was already running,
+                // the job is *condemned* — it would finish, throw its bytes away and call nobody
+                // back. Joining it as-is is how a request turns into "pending forever": the caller
+                // waits for a callback that this job has already decided not to make (007 §root
+                // cause). A request that wants the bytes now un-condemns the job instead, so the
+                // render already paid for is written and delivered (§5 "让它跑完并写盘").
+                if existing.suppressWrite {
+                    existing.suppressWrite = false
+                    counters.missCancelled = max(0, counters.missCancelled - 1)
+                    counters.cancelledInFlight = max(0, counters.cancelledInFlight - 1)
+                }
                 existing.subscribers.append(Subscription(id: id, completion: completion))
                 if priority > existing.priority { existing.priority = priority }
                 counters.coalesced += 1
@@ -437,8 +473,8 @@ public final class ThumbnailService: @unchecked Sendable {
             guard !job.suppressWrite else { continue } // already dead: count the job once
             if job.started {
                 // Uninterruptible decode: let it finish, throw the bytes away (§5 + "取消后不写盘").
+                // A later request for the same key adopts the job and rescinds both flags.
                 job.suppressWrite = true
-                job.suppressDelivery = true
                 counters.cancelledInFlight += 1
                 counters.missCancelled += 1
             } else {
@@ -458,7 +494,6 @@ public final class ThumbnailService: @unchecked Sendable {
         lock.lock()
         for job in jobs.values where job.started {
             job.suppressWrite = true
-            job.suppressDelivery = true
             job.subscribers.forEach { $0.cancelled = true }
             counters.cancelledInFlight += 1
             counters.missCancelled += 1
@@ -528,6 +563,14 @@ public final class ThumbnailService: @unchecked Sendable {
 
         let t0 = DispatchTime.now()
         let payload: ThumbPayload
+        if config.producerDeadline > 0 {
+            // Safety net for a producer that never returns: without it, one wedged decode holds a
+            // concurrency slot forever and the queue behind it never moves.
+            let deadline = config.producerDeadline
+            workers.asyncAfter(deadline: .now() + deadline) { [weak self] in
+                self?.expire(job, after: deadline)
+            }
+        }
         do {
             payload = try producer.produce(job.key, source: job.source)
             guard !payload.data.isEmpty else { throw ThumbServiceError.producerReturnedEmpty(job.key) }
@@ -543,7 +586,8 @@ public final class ThumbnailService: @unchecked Sendable {
         lock.unlock()
 
         if dropBytes {
-            // Cancelled while the producer ran: bytes are discarded, never written.
+            // Cancelled while the producer ran: bytes are discarded, never written. (Unless a later
+            // request adopted the job before this line — then `dropBytes` is false and we store.)
             finish(job, origin: .cancelled, data: nil, payload: nil, error: nil)
             return
         }
@@ -559,15 +603,35 @@ public final class ThumbnailService: @unchecked Sendable {
         finish(job, origin: .generated, data: payload.data, payload: payload, error: nil)
     }
 
+    /// The producer deadline fired. Book the job `failed` (with the reason) so its subscribers get a
+    /// terminal state and its slot is returned; if the decode ever returns, `finish` is a no-op and
+    /// its bytes are dropped (`suppressWrite`).
+    private func expire(_ job: Job, after deadline: TimeInterval) {
+        lock.lock()
+        if job.finished {
+            lock.unlock()
+            return
+        }
+        job.suppressWrite = true
+        lock.unlock()
+        finish(job, origin: .failed, data: nil, payload: nil,
+               error: "producer exceeded \(String(format: "%.0f", deadline)) s without returning")
+    }
+
     /// Bookkeeping + delivery. Completions run outside the lock, on the worker thread.
+    ///
+    /// Exactly one terminal state per job: a second call (the producer finally returning after the
+    /// deadline, say) returns immediately without touching the counters or the cache.
     private func finish(_ job: Job, origin: ThumbOrigin, data: Data?, payload: ThumbPayload?,
                         error: String?) {
         let waited = Double(DispatchTime.now().uptimeNanoseconds - job.enqueuedAt.uptimeNanoseconds) / 1e6
 
         lock.lock()
+        guard !job.finished else { lock.unlock(); return }
+        job.finished = true
         activeCount = max(0, activeCount - 1)
         counters.active = activeCount
-        jobs.removeValue(forKey: job.key)
+        if jobs[job.key] === job { jobs.removeValue(forKey: job.key) }
         counters.queued = pending.count
 
         switch origin {
@@ -577,37 +641,43 @@ public final class ThumbnailService: @unchecked Sendable {
         case .failed: counters.missFailed += 1
         }
 
-        let deliver = !job.suppressDelivery
+        // A subscriber that asked to be called back gets called back — always. `cancelled` means its
+        // owner left (it already dropped the token); `stale` means its generation is gone (§5).
         let subscribers = job.subscribers
         lock.broadcast() // waitUntilIdle sees this job leave the queue
         lock.unlock()
 
-        if deliver {
-            for sub in subscribers where !sub.cancelled {
-                let result = ThumbResult(key: job.key, origin: origin, data: data,
-                                         source: payload?.source,
-                                         sourceLongEdge: payload?.sourceLongEdge ?? 0,
-                                         waitedMilliseconds: waited,
-                                         producedMilliseconds: job.producerMilliseconds,
-                                         error: error)
-                lock.lock()
-                counters.delivered += 1
-                counters.waitSamples += 1
-                counters.totalWaitMilliseconds += waited
-                counters.maxWaitMilliseconds = max(counters.maxWaitMilliseconds, waited)
-                if sub.completion == nil {
-                    // Summary only: the bytes are on disk, and pinning 1000 payloads in a
-                    // dictionary would cost more than the batch it describes.
-                    summaries[sub.id] = ThumbResult(key: result.key, origin: result.origin, data: nil,
-                                                    source: result.source,
-                                                    sourceLongEdge: result.sourceLongEdge,
-                                                    waitedMilliseconds: result.waitedMilliseconds,
-                                                    producedMilliseconds: result.producedMilliseconds,
-                                                    error: result.error)
-                }
-                lock.unlock()
-                sub.completion?(result)
+        if let error, origin == .failed {
+            // "失败必须有原因": the counter alone cannot tell a report *why* a cell stayed empty.
+            let line = "photons: thumbnail \(job.key.tier.rawValue) \(job.key.digest.prefix(8)) "
+                + "failed — \(error)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+
+        for sub in subscribers where !sub.cancelled && !sub.stale {
+            let result = ThumbResult(key: job.key, origin: origin, data: data,
+                                     source: payload?.source,
+                                     sourceLongEdge: payload?.sourceLongEdge ?? 0,
+                                     waitedMilliseconds: waited,
+                                     producedMilliseconds: job.producerMilliseconds,
+                                     error: error)
+            lock.lock()
+            counters.delivered += 1
+            counters.waitSamples += 1
+            counters.totalWaitMilliseconds += waited
+            counters.maxWaitMilliseconds = max(counters.maxWaitMilliseconds, waited)
+            if sub.completion == nil {
+                // Summary only: the bytes are on disk, and pinning 1000 payloads in a
+                // dictionary would cost more than the batch it describes.
+                summaries[sub.id] = ThumbResult(key: result.key, origin: result.origin, data: nil,
+                                                source: result.source,
+                                                sourceLongEdge: result.sourceLongEdge,
+                                                waitedMilliseconds: result.waitedMilliseconds,
+                                                producedMilliseconds: result.producedMilliseconds,
+                                                error: result.error)
             }
+            lock.unlock()
+            sub.completion?(result)
         }
         lock.broadcast() // waitUntilIdle
         pump()
