@@ -21,8 +21,8 @@ private let cardHeight: CGFloat = 104
 ///   ② the hierarchy survives — the footnote stays quieter than the percentages;
 ///   ③ nothing shrank: 8.5 pt monospaced digits for the percentage, 8 pt for the footnote;
 ///   ④ at the card's minimum width (the inspector's 300 pt floor minus the inspector's 24 pt of
-///      padding and the card's 32 pt of inset = **244 pt**) both rows fit: the channel row inside
-///      the card, and the footnote on its own line, right-aligned, unabbreviated;
+///      padding and the card's 32 pt of inset = **244 pt**) both rows fit: the channel row (the cursor
+///      pixel's R/G/B — the percentages it replaced are gone) and the footnote row, unabbreviated;
 ///   ⑤ the sentence says what it means (「采样 … px · 直方图 256+256 档」) and VoiceOver spells the
 ///      binning out (「256 档 SDR 码值 + 256 档高光尾」).
 @MainActor
@@ -162,22 +162,37 @@ final class HistogramLegibilityTests: XCTestCase {
 
     // MARK: - ④ layout at the card's minimum width
 
+    /// The channel row is the cursor pixel now, and the widest honest row still fits 244 pt:
+    /// three codes plus a `+x.x` channel, with nothing truncated and the letters at their thirds.
     func testTheChannelRowFitsTheMinimumCardWidth() {
-        let card = drawnCard(width: minimumCardWidth)
+        let card = drawnCard(width: minimumCardWidth, histogram: fixture(high: 1))
+        XCTAssertEqual(card.channelRowText, "", "没有指针 → 空行（比例不再画在这里）")
+        XCTAssertFalse(card.channelRowRect.isEmpty, "空行仍占位")
+
+        card.showPointerReadout(PointerPixel(level: .code(255), bin: 255, isTail: false, luma: 1,
+                                            channels: [.code(255), .code(255), .stops(3)]))
+        render(card)
         XCTAssertGreaterThan(card.channelRowWidth, 0)
         XCTAssertLessThanOrEqual(card.channelRowWidth, minimumCardWidth,
                                  "通道行宽 \(card.channelRowWidth) pt 必须 ≤ 卡宽 \(minimumCardWidth) pt")
-
-        // Worst case is a wide percentage: 100.0 % is 6 glyphs at 8.5 pt monospaced digits.
-        let worst = drawnCard(width: minimumCardWidth, histogram: fixture(high: 1))
-        XCTAssertLessThanOrEqual(worst.channelRowWidth, minimumCardWidth,
-                                 "100.0% 三通道行宽 \(worst.channelRowWidth) pt 必须 ≤ \(minimumCardWidth) pt")
+        XCTAssertEqual(card.channelRowText, "R 255 G 255 B +3.0")
+        XCTAssertLessThanOrEqual(card.channelValueRects.map(\.maxX).max() ?? 0,
+                                 minimumCardWidth + 0.01,
+                                 "最宽的一行也在卡片内")
     }
 
-    func testAHistogramLessCardStillDrawsReadablePercentages() {
+    /// A card with **no measurement** still paints the channel row (a pixel is not a histogram), in the
+    /// readable colour — and the row says nothing about 过白, which has nothing to measure.
+    func testAHistogramLessCardStillPaintsTheChannelRowReadably() {
         let card = drawnCard(width: minimumCardWidth, measured: false)
-        // The percentages still exist (they read "—"), and they are still readable.
+        card.showPointerReadout(PointerPixel(level: .code(64), bin: 64, isTail: false, luma: 0.05,
+                                            channels: [.code(32), .code(64), .code(96)]))
+        render(card)
+        XCTAssertEqual(card.channelRowText, "R 32 G 64 B 96")
         XCTAssertGreaterThanOrEqual(card.percentContrast, HistogramCardReadability.minimumRatio)
         XCTAssertGreaterThan(card.channelRowWidth, 0)
+        XCTAssertTrue(card.clipHighTextByChannel.allSatisfy { $0 == "—" },
+                      "没有测量就没有过白比例——而且它本来也不画")
+        XCTAssertFalse(card.channelRowText.contains("%"))
     }
 }

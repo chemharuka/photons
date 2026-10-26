@@ -4,8 +4,16 @@ import PhotonsCore
 
 // MARK: - the histogram card
 //
-// Four series (R, G, B, luma) drawn from the bins `RenderGraph.measureHistogram` measured, the
-// clipping ratios under them, and one click target: 过白 toggles the highlight warning on the canvas.
+// Four series (R, G, B, luma) drawn from the bins `RenderGraph.measureHistogram` measured, the three
+// clipping numbers under them (过白 / 削顶 / 削底), two readout rows, and one click target: 过白 toggles
+// the highlight warning on the canvas.
+//
+// **The per-channel percentages row is gone** (2026-10-26): 「不再展示过白的 RGB 比例，把这个位置换成鼠标
+// 指针位置处像素的 RGB 值」. The row under 过白/削顶/削底 is now `R 245 G 128 B 64` — the pixel under the
+// pointer, each channel a code or, above display white, `+x.x` stops. It is blank when no pointer is on
+// the picture, at a fixed height; the footnote row below it still answers `.image` / `.histogram` /
+// `.idle`. The percentages are still *measured* (`clipHighTextByChannel`) and still printed by the CLI
+// and `--ui-smoke`'s identity check — they are simply not painted and not spoken.
 //
 // **The plot has two segments** (2026-10-26): 0…1 on a linear code axis, then a fixed **30 pt per
 // stop** exponential tail of 4 stops (`HistogramAxis`, `Histogram.maxStops`) — 120 pt at the default
@@ -44,7 +52,7 @@ import PhotonsCore
 //
 // The card is AppKit rather than SwiftUI because it has to be *measurable*: the smoke reads the
 // histogram it drew, the bin count of the path it built, the axis split and ceiling tick it laid
-// out, and the exact text of the clipping percentages, then clicks 过白 through `mouseDown` — none
+// out, the exact strings and rects of both readout rows, then clicks 过白 through `mouseDown` — none
 // of which a SwiftUI `Canvas` exposes.
 
 public final class HistogramCardView: NSView {
@@ -102,50 +110,79 @@ public final class HistogramCardView: NSView {
     public static var hoverNumberFont: NSFont { numberFont }
     public static var clipNumberFont: NSFont { numberFont }
 
-    // MARK: the row at the bottom of the card (018: one row, three states, one height)
+    // MARK: the two rows at the bottom of the card (018, revised 2026-10-26)
     //
-    // The owner's rule (2026-10-26): 「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示该亮度像素数量，
-    // 鼠标在其他位置就都不显示但保留这行的高度不要乱动」. So this row is a *slot* with a fixed height and
-    // a state, not a label that appears and disappears:
+    // Two rows, two questions, and the owner's rule for each:
     //
-    //   · `.image(value:)`      the pointer is on the picture → only the brightness of that pixel;
-    //   · `.histogram(counts:)` the pointer is on the plot    → only that bin's R/G/B counts;
-    //   · `.idle`               anywhere else                → nothing painted, same height.
+    //   ① **the channel row** — `R 245 G 128 B 64`, the pixel under the pointer's three channels
+    //      (SDR code 0–255, or `+x.x` stops for a channel above display white). Blank when there is no
+    //      pixel under the pointer, at the same height.
+    //   ② **the footnote row** — `.image` (that pixel's brightness) / `.histogram` (that bin's R/G/B
+    //      counts) / `.idle` (nothing), one height in all three states.
     //
-    // Three states in one enum rather than two optional strings, because "exactly one of these" is the
-    // requirement and the height is what must not move. The percentages row above is *never* replaced
-    // any more (that was 015/017's mistake: two questions fought over one line).
+    // The *percentages* row the card used to paint here is gone: 「不再展示过白的 RGB 比例，把这个位置换成
+    // 鼠标指针位置处像素的 RGB 值」. `clipHighTextByChannel` is still measured (it is what the CLI and the
+    // 过白 identity check read) but it is no longer painted and no longer speaks in accessibility.
 
     /// The bin the pointer is over the plot at, `nil` when it is not over the plot.
     public private(set) var hoverReading: HistogramHoverReading?
     /// The pixel the pointer is over the picture at, as published by the loupe (`PointerReadoutTarget`).
     public private(set) var pointerPixel: PointerPixel?
-    /// What the row is showing now. Derived: the plot wins when both could apply (they cannot — one
-    /// pointer — and a hover is the more specific statement).
+    /// What the footnote row is showing now. Derived: the plot wins when both could apply (they cannot
+    /// — one pointer — and a hover is the more specific statement).
     public private(set) var readoutState: HistogramReadoutRow = .idle
-    /// The slot the row occupies — **the same rect in all three states**, which is the owner's
+
+    /// The channel row's slot — **the same rect whether it paints the cursor's RGB or nothing at all**.
+    public private(set) var channelRowRect: NSRect = .zero
+    /// The three values the channel row painted (`["245", "128", "+0.6"]`), `[]` when it is blank.
+    public private(set) var channelRowValues: [String] = []
+    /// The channel row as one string — `R 245 G 128 B 64`, or `""` when nothing is painted. No `%`
+    /// can appear in it: that is the owner's 「不再展示过白的 RGB 比例」 as a string the tests read.
+    public private(set) var channelRowText = ""
+    /// How wide the channel row's paint really is (`0` when blank) — the layout fit is asserted from
+    /// this rather than from a stored string width.
+    public private(set) var channelRowWidth: CGFloat = 0
+
+    /// The slot the footnote row occupies — **the same rect in all three states**, which is the owner's
     /// 「保留这行的高度不要乱动」 as a number the tests can compare with `accuracy: 0`.
     public private(set) var readoutRowRect: NSRect = .zero
-    /// What was actually painted inside the slot (`.zero` for `.idle`).
+    /// What was actually painted inside the footnote slot (`.zero` for `.idle`).
     public private(set) var readoutContentRect: NSRect = .zero
-    /// The three channel letters' rects as painted (`R`, `G`, `B`), `.zero` when the row is not counts.
-    /// Their `minX` is what "the letters do not float" means, so they are the readback that proves it.
+
+    // The three groups, as painted, for both rows: the letters' rects (their `minX` is what 「三个字母
+    // 位置恒定」 means), the values' rects (left-aligned one space after the letter), and the **colours
+    // the letters were painted with** — a readback of the paint, not of the constant.
+    public private(set) var channelLetterRects: [NSRect] = []
+    public private(set) var channelValueRects: [NSRect] = []
+    public private(set) var channelLetterColors: [NSColor] = []
     public private(set) var readoutLetterRects: [NSRect] = []
-    /// The three count fields' rects as painted — right-aligned inside their slots.
-    public private(set) var readoutFieldRects: [NSRect] = []
-    /// How many `draw`s painted anything in the row (`.idle` paints nothing: this does not move).
+    public private(set) var readoutValueRects: [NSRect] = []
+    public private(set) var readoutLetterColors: [NSColor] = []
+    /// The values the footnote row painted, per group (`["1284", "1291", "1206"]` for `.histogram`,
+    /// `[]` for `.image`, which paints one bare number).
+    public private(set) var readoutValueTexts: [String] = []
+    /// How many `draw`s painted anything in the footnote row (`.idle` paints nothing: this does not
+    /// move).
     public private(set) var readoutPaintCount = 0
 
-    /// The row's fixed height, from the face it is painted in — a font constant, never a function of
-    /// the text, which is what makes `.idle` occupy the same height as a reading.
+    /// The footnote row's fixed height, from the face it is painted in — a font constant, never a
+    /// function of the text, which is what makes `.idle` occupy the same height as a reading.
     public static let readoutRowHeight: CGFloat = {
         let font = HistogramCardView.numberFont
         let size = ("0" as NSString).size(withAttributes: [.font: font])
         return (size.height).rounded(.up)
     }()
 
-    /// Exactly the strings the row painted: the level on the left (`.image`), the counts on the right
-    /// (`.histogram`). Both empty when nothing is painted — that emptiness *is* "the row is idle".
+    /// The channel row's fixed height. Same number as the footnote row's, so the two rows can be laid
+    /// out one after the other without either ever moving; the value face is one point smaller, and a
+    /// 9.5 pt line box still holds it.
+    public static let channelRowHeight: CGFloat = readoutRowHeight
+
+    /// The channel letters' face: 8 pt bold, as the legend and the percentages row used.
+    public static let channelLetterFont = NSFont.systemFont(ofSize: 8, weight: .bold)
+
+    /// Exactly the strings the footnote row painted: the level (`.image`), the counts (`.histogram`).
+    /// Both empty when nothing is painted — that emptiness *is* "the row is idle".
     public private(set) var hoverValueText = ""
     public private(set) var hoverCountText = ""
     public private(set) var hoverValueRect: NSRect = .zero
@@ -157,14 +194,11 @@ public final class HistogramCardView: NSView {
     /// The colour the reading was last painted with (contrast is recomputed from this, not stored).
     public private(set) var lastHoverColor: NSColor = .labelColor
 
-    /// The row as one string; `nil` while idle. `.image` → `"128"`, `.histogram` → `"R  1284 G  1291 B  1206"`.
+    /// The footnote row as one string; `nil` while idle. `.image` → `"128"`,
+    /// `.histogram` → `"R 1284 G 1291 B 1206"`.
     public var hoverRowText: String? { readoutState.text }
     /// Where that line was painted — `.zero` while idle.
     public var hoverRowRect: NSRect { readoutContentRect }
-    /// `nil`-able alias kept for the smoke's readback of "which state is on screen".
-    public private(set) var channelRowTexts: [String] = ["—", "—", "—"]
-    /// The percentages row as one string (`R 1.0% G 1.0% B 1.0%`, always).
-    public private(set) var channelRowText = ""
 
     /// Worst-case WCAG ratio of the readout colour on the card's own backdrop band.
     public var hoverContrast: Double {
@@ -173,15 +207,13 @@ public final class HistogramCardView: NSView {
 
     // MARK: what the smoke reads back about the two *legibility* labels (2026-10-26)
 
-    /// Right edge of the last channel percentage (R/G/B), i.e. how wide the channel row really is.
-    public private(set) var channelRowWidth: CGFloat = 0
-    /// The percentage colour of the last `draw`. The smoke recomputes its contrast from this rather
-    /// than trusting a stored ratio.
+    /// The value colour of the last `draw` (the channel row's numbers). The smoke recomputes its
+    /// contrast from this rather than trusting a stored ratio.
     public private(set) var lastPercentColor: NSColor = .labelColor
     /// Which appearance those colours were resolved for (`effectiveAppearance` in `draw`).
     public private(set) var lastAppearanceIsDark = false
 
-    /// Worst-case WCAG ratio of the percentage colour on the card's own backdrop.
+    /// Worst-case WCAG ratio of the channel values on the card's own backdrop.
     public var percentContrast: Double {
         HistogramCardReadability.worstContrast(of: lastPercentColor, isDark: lastAppearanceIsDark)
     }
@@ -208,10 +240,14 @@ public final class HistogramCardView: NSView {
     /// VoiceOver still hears how the x axis is binned. The painted footnote that used to carry this
     /// sentence was removed at the owner's request (2026-10-26) — it was "采样 N px · 直方图 256+N 档",
     /// and the owner does not want that line on screen — so the binning is now spoken, not painted.
+    ///
+    /// The two readout rows are described; the per-channel **percentages** are deliberately not, because
+    /// they are no longer on screen (「不再展示过白的 RGB 比例」) and a screen reader that announced them
+    /// would be reading a line the eye cannot see.
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。最下面一行随鼠标变化：鼠标在画面上时读出该像素的亮度（SDR 区为 0–255 码值，超白为 +x.x 档），鼠标在直方图上时读出该亮度那一箱的 R/G/B 样本数，其他位置为空。")
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面两行随鼠标变化：上面一行是鼠标处像素的 R/G/B 三通道值（SDR 区为 0–255 码值，超白通道为 +x.x 档，一次一个空格紧跟字母），下面一行是鼠标在画面上时该像素的亮度（同样 0–255 或 +x.x）、鼠标在直方图上时该亮度那一箱的 R/G/B 样本数，其他位置两行都为空但行高不变。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -357,6 +393,12 @@ public final class HistogramCardView: NSView {
         let bounds = self.bounds
         guard bounds.width > 80, bounds.height > 60 else { return }
 
+        // The appearance resolves once, here: both readout rows paint with colours derived from it, and
+        // neither may read a stale value from the other's last draw.
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        lastAppearanceIsDark = dark
+        lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
+
         let plot = NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight)
         let axis = HistogramAxis(plot: plot)
         lastAxis = axis
@@ -420,6 +462,7 @@ public final class HistogramCardView: NSView {
         }
 
         drawClipRows(below: plot, histogram: histogram, in: bounds)
+        drawChannelRow(below: plot, in: bounds)
         drawReadoutRow(below: plot, in: bounds)
         _ = dirtyRect
     }
@@ -589,56 +632,106 @@ public final class HistogramCardView: NSView {
         clipLowHitRect = NSRect(x: lowLabel.minX, y: y - 2,
                                 width: lowNumber.maxX - lowLabel.minX, height: 14)
 
-        // Per-channel line: R/G/B above-white shares, the numbers a white-balance tweak moves.
-        //
-        // **This row is always the percentages** (018). 015/017 briefly turned it into the pointer's
-        // readout, which put two different questions on one line and made the percentages vanish
-        // exactly when the reader was comparing them; the readout now lives in its own row below
-        // (`drawReadoutRow`), whcich is where the footnote used to be.
-        //
-        // The face is the card's own `numberFont` (9.5 pt semibold) for the numbers and an 8 pt bold
-        // face for the channel letters, which keeps the letter/percentage pairing the owner asked for
-        // ("字号要更大，和其他 UI 匹配").
-        //
-        // The percentages used to be `.tertiaryLabelColor`: resolved over this card's own backdrop
-        // that is 1.86 : 1 in aqua and 2.26 : 1 in darkAqua — invisible next to the bold channel
-        // letter it belongs to. `HistogramCardReadability` picks an *opaque* colour per appearance
-        // that clears 4.5 : 1 at the worst end of the material's own grey band (see that type).
-        let channelY = y + clipRowHeight
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        lastAppearanceIsDark = dark
-        lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
-        var x = bounds.minX
-        for (index, value) in clipHighTextByChannel.prefix(3).enumerated() {
-            let nameRect = drawText(Self.channelLetters[index],
-                                    at: CGPoint(x: x, y: channelY),
-                                    font: .systemFont(ofSize: 8, weight: .bold),
-                                    color: Self.channelNameColors[index])
-            let valueRect = drawText(value, at: CGPoint(x: nameRect.maxX + 2, y: channelY),
-                                     font: HistogramCardReadability.percentFont,
-                                     color: lastPercentColor)
-            x = valueRect.maxX + 9
-        }
-        channelRowWidth = x - 9 - bounds.minX
-        channelRowTexts = Array(clipHighTextByChannel.prefix(3))
-        channelRowText = zip(Self.channelLetters, channelRowTexts)
-            .map { "\($0) \($1)" }.joined(separator: " ")
+        // **The percentages are not painted.** The per-channel 过白 shares used to live on the row
+        // below this one; the owner replaced that row with the pixel under the pointer
+        // (「不再展示过白的 RGB 比例，把这个位置换成鼠标指针位置处像素的 RGB 值」), so
+        // `clipHighTextByChannel` stops here: it is still measured (the CLI and the 过白 identity check
+        // read it) and is deliberately *not* drawn and *not* spoken.
     }
 
-    /// The channel letters' colours: the same three the idle percentage row paints (a red R next to
-    /// a red curve, and so on), so the row reads the same in both states.
-    /// The three channel letters, in row order — the idle percentages row and the hover row share them.
-    static let channelLetters = ["R", "G", "B"]
+    // MARK: the channel row — the pixel under the pointer (2026-10-26)
 
-    private static let channelNameColors: [NSColor] = [
+    /// `R 245 G 128 B 64` — the three channels of the pixel the pointer is on.
+    ///
+    /// Three rules, all of them the owner's:
+    ///
+    ///   · **the row is blank when there is no pixel** under the pointer (no `—`, no percentages): the
+    ///     slot keeps its height and paints nothing, exactly like the footnote row's `.idle`;
+    ///   · **blank while the pointer is on the plot**, because a hover points at a *bin*, not at a
+    ///     pixel — the footnote row is the one that answers there (the counts);
+    ///   · each channel is a code (`0…255`) or, above display white, `+x.x` stops — so one row can mix
+    ///     (`R 255 G +0.8 B 120`), which is what a channel-clipped highlight actually looks like.
+    private func drawChannelRow(below plot: NSRect, in bounds: NSRect) {
+        let y = plot.maxY + 5 + clipRowHeight
+        // The slot, in every state: a function of `bounds` and the font heights only, so the row cannot
+        // move when the pixel comes and goes.
+        channelRowRect = NSRect(x: bounds.minX, y: y, width: bounds.width,
+                                height: Self.channelRowHeight)
+        channelRowText = ""
+        channelRowValues = []
+        channelRowWidth = 0
+        channelLetterRects = []
+        channelValueRects = []
+        channelLetterColors = []
+
+        guard let pixel = pointerPixel, hoverReading == nil else { return }
+
+        let values = pixel.channelTexts
+        let painted = paintGroups(values, atY: y,
+                                  letterFont: Self.channelLetterFont,
+                                  letterColors: Self.channelNameColors,
+                                  valueFont: HistogramCardReadability.percentFont,
+                                  valueColor: lastPercentColor)
+        channelRowValues = values
+        channelRowText = HistogramCardFormat.grouped(values)
+        channelLetterRects = painted.letters
+        channelValueRects = painted.values
+        channelLetterColors = painted.colors
+        if let last = painted.values.last { channelRowWidth = last.maxX - bounds.minX }
+    }
+
+    /// The channel letters, in row order. One constant, shared with the counts row and the plot's own
+    /// legend: `R` is red in both rows because it is red in the curves.
+    static let channelLetters = HistogramCardFormat.channelLetters
+
+    /// The three letters' colours: the same three the R/G/B curves are tinted with (`series` in `draw`),
+    /// so a red `R` next to a red curve. Public because the tests compare the colour that was *painted*
+    /// against this constant rather than re-typing the literals.
+    public static let channelNameColors: [NSColor] = [
         NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1),
         NSColor(srgbRed: 0.22, green: 0.72, blue: 0.34, alpha: 1),
         NSColor(srgbRed: 0.30, green: 0.48, blue: 0.98, alpha: 1),
     ]
 
-    /// Vertical distance from the percentages row's top to the readout row's top. **Constant** (018):
-    /// the readout row no longer changes the percentages row's face, so the row below never moves.
-    private var channelRowStride: CGFloat { clipRowHeight }
+    /// What one row of three groups painted.
+    private struct PaintedGroups {
+        var letters: [NSRect] = []
+        var values: [NSRect] = []
+        var colors: [NSColor] = []
+    }
+
+    /// One row of `letter value` groups, laid out the owner's way (2026-10-26, second pass):
+    /// 「RGB 三个字母要带颜色，数字要靠近字母，例如 `R 2      G 40      B 1023`」.
+    ///
+    ///   · **the letters are coloured** (`letterColors`: `R` red, `G` green, `B` blue), in both rows;
+    ///   · the row is split into three **equal** groups, and group `i`'s letter starts exactly at
+    ///     `i · rowWidth / 3` — so `R`, `G` and `B` sit at the same three x positions whatever the
+    ///     numbers are (the group *starts* are what 「三个字母位置恒定」 means);
+    ///   · the value is **one space** after its letter and left-aligned there — the number hugs the
+    ///     letter instead of floating at a field's right edge (「数字要靠近字母」);
+    ///   · a value wider than its group **runs past the group's edge**: nothing is truncated and the
+    ///     font never shrinks. A count or a code that outgrows its third is allowed to overlap the next
+    ///     group (this is what replaced the five-character right-aligned field).
+    private func paintGroups(_ values: [String], atY y: CGFloat,
+                             letterFont: NSFont, letterColors: [NSColor],
+                             valueFont: NSFont, valueColor: NSColor) -> PaintedGroups {
+        guard !values.isEmpty else { return PaintedGroups() }
+        let groupWidth = bounds.width / CGFloat(values.count)
+        let spaceWidth = (" " as NSString).size(withAttributes: [.font: valueFont]).width
+        var painted = PaintedGroups()
+        for (index, text) in values.enumerated() {
+            let color = letterColors[index % letterColors.count]
+            let letterRect = drawText(Self.channelLetters[index % Self.channelLetters.count],
+                                      at: CGPoint(x: bounds.minX + CGFloat(index) * groupWidth, y: y),
+                                      font: letterFont, color: color)
+            let valueRect = drawText(text, at: CGPoint(x: letterRect.maxX + spaceWidth, y: y),
+                                     font: valueFont, color: valueColor)
+            painted.letters.append(letterRect)
+            painted.values.append(valueRect)
+            painted.colors.append(color)
+        }
+        return painted
+    }
 
     // MARK: the readout row (018: one slot, three states, one height)
     //
@@ -650,23 +743,17 @@ public final class HistogramCardView: NSView {
     //     .histogram((r, g, b))   the pointer is on the plot    → that bin's counts, nothing else
     //     .idle                   anywhere else                 → nothing painted, same height
     //
-    // Two layout rules the tests pin, because "the letters do not float" is a property of the paint and
-    // not of the string:
-    //
-    //   · a count is **right-aligned in a five-character field** (`readoutCountFieldWidth`), and the
-    //     three fields start at fixed x — so `R`, `G` and `B` sit at the same three positions whether
-    //     the count is `0`, `1284` or `12`. A count that needs more than five digits widens its own
-    //     field (nothing is truncated, no smaller font) and pushes the later letters right, which is the
-    //     one case the owner allowed ("超过 5 位时该列自然加宽");
-    //   · the level and the counts never share the row: each state is one half of the old row, and the
-    //     half that is not applicable is not painted at all.
+    // The counts are the same three groups as the channel row above it (`paintGroups`): coloured
+    // letters at fixed thirds of the row, one space between a letter and its count, no truncation. Only
+    // the content differs — a bin's sample counts here, a pixel's channels above.
     //
     // The face is `Self.numberFont` — the same 9.5 pt semibold monospaced digits as 过白/削顶/削底, by
     // the owner's request; the colour is an opaque `HistogramCardReadability.readoutColor`, which is
-    // what makes ≥ 4.5 : 1 a measured fact rather than a hope.
+    // what makes ≥ 4.5 : 1 a measured fact rather than a hope. The level (`.image`) is one bare number
+    // at the row's left edge: it belongs to no channel, so it gets no letter.
 
     private func drawReadoutRow(below plot: NSRect, in bounds: NSRect) {
-        let rowTop = plot.maxY + 5 + clipRowHeight + channelRowStride
+        let rowTop = plot.maxY + 5 + clipRowHeight + Self.channelRowHeight
         let height = Self.readoutRowHeight
         // The slot, in every state. Half a point of slack keeps the line box off the card's bottom edge
         // at the inspector's 104 pt height; the number is a function of `bounds` only, so no state can
@@ -681,7 +768,9 @@ public final class HistogramCardView: NSView {
         hoverReadoutRect = .zero
         readoutContentRect = .zero
         readoutLetterRects = []
-        readoutFieldRects = []
+        readoutValueRects = []
+        readoutLetterColors = []
+        readoutValueTexts = []
         // Re-derived from the live state every draw: a new measurement, a new bin or a new pixel can
         // never leave the previous one's numbers on screen.
         refreshReadoutRow()
@@ -701,50 +790,27 @@ public final class HistogramCardView: NSView {
             hoverPaintCount += 1
             readoutPaintCount += 1
         case .histogram(let counts):
-            paintCountBlock(counts, atY: y, color: color)
+            paintCounts(counts, atY: y, color: color)
         }
     }
 
-    /// The `R  1284 G  1291 B  1206` half of the row, laid out slot by slot.
-    ///
-    /// Measured, not space-padded: `%5d` pads with *spaces* and a proportional face makes a space
-    /// narrower than a digit, so the fields would not be the same width as the numbers in them. Here
-    /// each field's rect is `five digits wide` (or as wide as the number needs), the number is drawn
-    /// right-aligned inside it, and the next group starts after the field — so the letter positions are
-    /// a fact about the layout, not about the string.
-    private func paintCountBlock(_ counts: HistogramBinCounts, atY y: CGFloat, color: NSColor) {
-        let font = Self.numberFont
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-        let digitWidth = ("0" as NSString).size(withAttributes: attributes).width
-        let reserved = CGFloat(HistogramCardFormat.readoutCountFieldWidth) * digitWidth
-        let spaceWidth = (" " as NSString).size(withAttributes: attributes).width
-        let values = [counts.red, counts.green, counts.blue]
-
-        var x = bounds.minX
-        var letters: [NSRect] = []
-        var fields: [NSRect] = []
-        for (index, value) in values.enumerated() {
-            let text = "\(max(value, 0))"
-            let numberWidth = (text as NSString).size(withAttributes: attributes).width
-            // Right-aligned in the reserved field; a longer number widens the field instead of
-            // shrinking the font or being cut.
-            let fieldWidth = max(reserved, numberWidth)
-            let letterRect = drawText(Self.channelLetters[index],
-                                      at: CGPoint(x: x, y: y), font: font, color: color)
-            let field = NSRect(x: letterRect.maxX + spaceWidth, y: y,
-                               width: fieldWidth, height: Self.readoutRowHeight)
-            (text as NSString).draw(at: CGPoint(x: field.maxX - numberWidth, y: y),
-                                    withAttributes: attributes)
-            letters.append(letterRect)
-            fields.append(field)
-            x = field.maxX + spaceWidth
-        }
-        readoutLetterRects = letters
-        readoutFieldRects = fields
+    /// The `R 1284 G 1291 B 1206` half of the row — three groups, `paintGroups`' layout.
+    private func paintCounts(_ counts: HistogramBinCounts, atY y: CGFloat, color: NSColor) {
+        let values = ["\(max(counts.red, 0))", "\(max(counts.green, 0))", "\(max(counts.blue, 0))"]
+        let painted = paintGroups(values, atY: y,
+                                  letterFont: Self.channelLetterFont,
+                                  letterColors: Self.channelNameColors,
+                                  valueFont: Self.numberFont, valueColor: color)
+        readoutLetterRects = painted.letters
+        readoutValueRects = painted.values
+        readoutLetterColors = painted.colors
+        readoutValueTexts = values
         hoverCountText = HistogramCardFormat.readoutCounts(counts)
-        guard let firstField = fields.first, let lastField = fields.last,
-              let firstLetter = letters.first, let lastLetter = letters.last else { return }
-        hoverCountRect = firstField.union(lastField)
+        guard let firstValue = painted.values.first, let lastValue = painted.values.last,
+              let firstLetter = painted.letters.first, let lastLetter = painted.letters.last else {
+            return
+        }
+        hoverCountRect = firstValue.union(lastValue)
         hoverReadoutRect = hoverCountRect.union(firstLetter).union(lastLetter)
         readoutContentRect = hoverReadoutRect
         hoverPaintCount += 1
