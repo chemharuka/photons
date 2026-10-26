@@ -21,6 +21,11 @@ public struct InspectorView: View {
     @State private var draftTemperature: Double?
     @State private var draftTint: Double?
 
+    /// The exposure row of the anchor photo (派单 014). Read handle + last read, both view state:
+    /// the catalog stays the source of truth and nothing here is ever written back.
+    @State private var metadataReader = InspectorMetadataReader()
+    @State private var photoMetadata: AssetMetadata?
+
     public init(session: CatalogSession) {
         self.session = session
     }
@@ -46,19 +51,53 @@ public struct InspectorView: View {
         .padding(.top, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
+        .task(id: metadataKey) { reloadMetadata() }
     }
 
+    /// 「调整」标题 → 文件名 → 拍摄参数 → 器材（三行）。All three information rows live inside the
+    /// card's own horizontal inset, so each is exactly the card content width
+    /// (`330 − 2·12 − 2·16 = 274` at the default panel) and truncates at the tail with `…`
+    /// until the pointer is over it. The header used to sit at 16 pt while the cards sat at 28;
+    /// moving the whole block to 28 is what makes these lines end where the cards end.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text("调整")
                 .font(.system(size: 12, weight: .bold))
-            Text(session.anchorAsset?.filename ?? "未选择照片")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            VStack(alignment: .leading, spacing: 2) {
+                MarqueeText(text: session.anchorAsset?.filename ?? "未选择照片")
+                MarqueeText(text: shootingParameters, monospacedDigits: true)
+                MarqueeText(text: equipment)
+            }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, WorkspaceLayout.cardInsetH)
+        .padding(.horizontal, 12)
+    }
+
+    // MARK: shooting information (派单 014)
+
+    private var shootingParameters: String {
+        InspectorPhotoInfo.parameters(iso: photoMetadata?.iso,
+                                      focalLength: photoMetadata?.focalLength,
+                                      aperture: photoMetadata?.aperture,
+                                      shutter: photoMetadata?.shutter)
+    }
+
+    private var equipment: String {
+        InspectorPhotoInfo.equipment(make: session.anchorAsset?.cameraMake,
+                                     model: session.anchorAsset?.cameraModel,
+                                     lens: session.anchorAsset?.lens)
+    }
+
+    private var metadataKey: String {
+        "\(session.libraryURL?.path ?? "-")|\(session.anchorAsset?.id ?? "-")"
+    }
+
+    /// One row read per anchor change. `CatalogSession` exposes no metadata accessor on purpose, so
+    /// the reader keeps a single extra read-only handle for the library instead of reopening it.
+    private func reloadMetadata() {
+        let assetID = session.anchorAsset?.id
+        guard assetID != nil else { photoMetadata = nil; return }
+        photoMetadata = metadataReader.metadata(library: session.libraryURL, assetID: assetID)
     }
 
     // The undo/redo strip that used to sit under the title is gone: an editor's history belongs in
