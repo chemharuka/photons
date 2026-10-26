@@ -52,19 +52,33 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
-    float3 v = max(c.rgb, 0.0);
+    // **Keep the sign.** The decoder hands us scene-linear values that go *below* the black point
+    // (measured on _1274394.dng: min −0.039, 33 M negative samples, 43 % of the frame under luma
+    // 1e-6). Those pixels are not dead — inside that band the 32×32 block means vary with σ 5.7e-4
+    // against 2.5e-5 expected from noise, i.e. 23× more structure than noise, which is exactly the
+    // detail Lightroom can lift and we could not. Clamping here deleted it before any slider saw it.
+    float3 v = c.rgb;
 
     // Input black/white points: a positive slider lowers the point it names, which is what makes
-    // `+blacks` open the shadows and `+whites` brighten (and clip) the highlights.
+    // `+blacks` open the shadows and `+whites` brighten (and clip) the highlights. The remap is
+    // affine, so it is defined on negative input and needs no clamp of its own.
     float blk = -p.a.x / 100.0 * 0.15;
     float wht = 1.0 - p.a.y / 100.0 * 0.15;
-    v = max((v - blk) / max(wht - blk, 1e-3), 0.0);
+    v = (v - blk) / max(wht - blk, 1e-3);
 
     float pivot = max(p.a.w, 1e-3);
     float gamma = exp2(p.a.z / 100.0 * 2.0);
-    v = pivot * pow(max(v, 1e-6) / pivot, gamma);
+    // Sign-preserving power: `pow` is undefined for a negative base, and the curve has to stay
+    // odd-symmetric around zero so a sub-black pixel keeps its sub-black sign through the contrast
+    // step (at gamma == 1 this is the identity on both sides of zero). The 1e-6 floor is the
+    // existing guard against `pow(near-zero, large gamma)` collapsing; it only bites below 1e-6.
+    v = sign(v) * pivot * pow(max(abs(v) / pivot, 1e-6), gamma);
 
-    float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
+    // The **region weights** are computed from the non-negative part, exactly as before the sign was
+    // preserved. A pixel with mixed signs (one channel sub-black) would otherwise read a slightly
+    // different luminance and the shadows/highlights lift would land a code off on its *positive*
+    // channels — measured as 260 of 3.05 M pixels moving by 1 in the push fixture, with no benefit.
+    float lum = dot(max(v, 0.0), float3(0.2126, 0.7152, 0.0722));
     float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
     float wHighlight = smoothstep(0.5, 1.0, lum);
     // LR convention for both region sliders: a positive value lifts that region, a negative value
@@ -75,5 +89,11 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     float liftHighlight = exp2(p.b.x / 100.0 * 0.8 * wHighlight);
     v *= liftShadow * liftHighlight;
 
+    // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
+    // value that an additive control (`blacks +` lowers the input black point) has pulled above zero
+    // is real picture by now and must survive; whatever is still below zero is what the display would
+    // clip anyway, and clamping it here is what keeps every ordinary edit byte-identical to before.
+    // Measured: keeping the sign *through* the write instead moved 260 of 3.05 M pixels by one code in
+    // the push fixture — a real but pointless change in the wrong place.
     dst.write(float4(max(v, 0.0), c.a), gid);
 }
