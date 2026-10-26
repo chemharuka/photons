@@ -242,6 +242,26 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func redoAction(_ sender: Any?) { redoEdit() }
 
+    // MARK: 旋转/裁切 (task 035)
+    //
+    // The menu never touches the document: it asks the loupe's tool to enter, apply or cancel, and
+    // the tool owns the draft, the one commit and the camera.
+
+    /// 显影 ▸ 裁切与旋转 (⌘R): enter the tool, or apply and leave if it is already on.
+    @objc public func toggleCropAction(_ sender: Any?) {
+        rootView.loupeController.toggleCropTool()
+    }
+
+    /// 显影 ▸ 应用裁切 (⌘⏎): one snapshot, one ⌘Z.
+    @objc public func applyCropAction(_ sender: Any?) {
+        rootView.loupeController.applyCropTool()
+    }
+
+    /// 显影 ▸ 取消裁切 (⌘.): nothing is written.
+    @objc public func cancelCropAction(_ sender: Any?) {
+        rootView.loupeController.cancelCropTool()
+    }
+
     /// All six rating items share this action; the stars come from the item's tag.
     @objc public func ratingAction(_ sender: Any?) {
         guard let item = sender as? NSMenuItem else { return }
@@ -269,6 +289,14 @@ public final class EditorWindowController: NSWindowController {
             // when there is nothing behind the cursor — a menu that lies about undo is a bug.
             item.title = session.undoLabel.map { "撤销 \($0)" } ?? "撤销"
             return session.canUndo
+        case #selector(toggleCropAction(_:)):
+            // Ticked while the frame is up, and enabled only where there is a photo to crop.
+            item.state = rootView.loupeController.isCropToolActive ? .on : .off
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(applyCropAction(_:)):
+            return rootView.loupeController.isCropToolActive
+        case #selector(cancelCropAction(_:)):
+            return rootView.loupeController.isCropToolActive
         case #selector(redoAction(_:)):
             item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
             return session.canRedo

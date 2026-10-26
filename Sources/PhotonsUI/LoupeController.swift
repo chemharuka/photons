@@ -33,6 +33,9 @@ public final class LoupeCanvasView: NSView {
     /// A gradient drag: creating a linear/radial mask, or reshaping the selected one.
     private var isShaping = false
     private var isDraggingHandle = false
+    /// A 裁切 drag (task 035): the frame's grip, its inside, or a new frame. The draft it moves lives
+    /// in `CropToolController`; this is only "the hand is down".
+    private var isCropDragging = false
 
     public init() {
         super.init(frame: .zero)
@@ -131,6 +134,21 @@ public final class LoupeCanvasView: NSView {
     /// Z or space: fit ↔ 1:1. Escape: back to fit.
     public override func keyDown(with event: NSEvent) {
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // 裁切模式 (task 035) owns the keyboard while it is on: ↵ applies (one commit), Escape drops
+        // the draft (nothing written). Everything else keeps falling through, so ⌘Z, ⌘0 and the
+        // rating keys still work with the frame on screen.
+        if controller?.isCropToolActive == true {
+            switch key {
+            case "\u{1b}":
+                controller?.cancelCropTool()
+                return
+            case "\r", "\u{3}":
+                controller?.applyCropTool()
+                return
+            default:
+                break
+            }
+        }
         switch key {
         case "z", " ":
             controller?.toggleActualSize()
@@ -150,51 +168,63 @@ public final class LoupeCanvasView: NSView {
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        // 派单 009 C: the eyedropper is a modal one-shot, so it is the innermost gesture of all —
-        // it consumes the click before a paint drag or a pan can start.
-        if controller?.isEyedropperArmed == true {
+        switch controller?.gestureOwner(atViewPoint: point, clickCount: event.clickCount) {
+        case .cropTool:
+            isCropDragging = controller?.beginCropDrag(
+                atViewPoint: point,
+                rotate: event.modifierFlags.contains(.command)) ?? false
+            return
+        case .cropToolApply:
+            controller?.applyCropTool()
+            return
+        case .eyedropper:
+            // 派单 009 C: the eyedropper is a modal one-shot, so it is the innermost gesture of all —
+            // it consumes the click before a paint drag or a pan can start.
             controller?.handleEyedropperClick(atViewPoint: point)
             return
-        }
-        // A gradient drag is the innermost gesture: it exists only while a shape is armed, and it is
-        // what turns two clicks into a linear ramp / an ellipse (or reshapes the selected one).
-        if controller?.isShapeCreateArmed == true {
+        case .maskCreate:
+            // A gradient drag is the innermost mask gesture: it exists only while a shape is armed,
+            // and it is what turns two clicks into a linear ramp / an ellipse.
             isShaping = true
             controller?.beginShapeDrag(at: point)
             return
-        }
-        // Control points (task 032) come next, and **before** the blanket "drag adjusts the selected
-        // gradient" gesture: a hand that lands on a grip means "move this grip", so the click must be
-        // taken here. A miss returns false and falls through to the adjust drag below, and then to the
-        // pan — a grip never turns into a pan, and the empty canvas still pans.
-        if controller?.beginMaskHandleDrag(atViewPoint: point) == true {
-            isDraggingHandle = true
+        case .maskHandle:
+            // Control points (task 032) come **before** the blanket "drag adjusts the selected
+            // gradient" gesture: a hand that lands on a grip means "move this grip", so the click
+            // must be taken here. A miss falls through to the adjust drag, and then to the pan — a
+            // grip never turns into a pan, and the empty canvas still pans.
+            // (`gestureOwner` is the pure hit test; this is the side effect that takes the grip.)
+            isDraggingHandle = controller?.beginMaskHandleDrag(atViewPoint: point) ?? false
             return
-        }
-        if controller?.isShapeDragArmed == true {
+        case .maskShape:
             isShaping = true
             controller?.beginShapeDrag(at: point)
             return
-        }
-        // A paint drag is a paint drag: it never pans, and a double-click while a brush is armed is
-        // two dabs rather than a zoom. Turning the tool off is what gives the camera back.
-        if maskPainter?.isArmed == true {
+        case .paint:
+            // A paint drag is a paint drag: it never pans, and a double-click while a brush is armed
+            // is two dabs rather than a zoom.
             isPainting = true
             controller?.beginPaint(at: point, pressure: Self.pressure(of: event))
             return
-        }
-        if event.clickCount == 2 {
+        case .doubleClick:
             controller?.handleDoubleClick(at: point)
             return
+        case .pan, .none:
+            isDragging = true
+            lastDragPoint = event.locationInWindow
         }
-        isDragging = true
-        lastDragPoint = event.locationInWindow
     }
 
     public override func mouseDragged(with event: NSEvent) {
         // A drag moves the pointer too: the histogram row follows the pixel under it, and the anchor a
         // ⌘= would use after a pan is where the hand left the cursor.
         controller?.pointerMoved(to: convert(event.locationInWindow, from: nil))
+        if isCropDragging {
+            // 裁切 (task 035): the frame follows the hand and **nothing is written** — the draft
+            // lives in the tool until ↵.
+            controller?.continueCropDrag(atViewPoint: convert(event.locationInWindow, from: nil))
+            return
+        }
         if isShaping {
             controller?.continueShapeDrag(at: convert(event.locationInWindow, from: nil))
             return
@@ -218,6 +248,11 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        if isCropDragging {
+            isCropDragging = false
+            controller?.endCropDrag()
+            return
+        }
         if isDraggingHandle {
             isDraggingHandle = false
             controller?.endMaskHandleDrag()
@@ -244,13 +279,18 @@ public final class LoupeCanvasView: NSView {
 
     /// Trackpads send two axes; a wheel sends mostly y. Both mean "move the camera", never "scale a
     /// layer" — the controller re-renders the window at the same zoom.
+    ///
+    /// While 裁切 mode is on the wheel is **dead**: the picture has to stay where the frame is, or the
+    /// number on screen would disagree with the number that gets committed (task 035, 手势优先级).
     public override func scrollWheel(with event: NSEvent) {
+        guard controller?.isCropToolActive != true else { return }
         controller?.scrollPan(deltaX: event.scrollingDeltaX,
                              deltaY: event.scrollingDeltaY,
                              precise: event.hasPreciseScrollingDeltas)
     }
 
     public override func magnify(with event: NSEvent) {
+        guard controller?.isCropToolActive != true else { return }
         controller?.magnify(by: 1 + event.magnification,
                             at: convert(event.locationInWindow, from: nil))
     }
@@ -261,6 +301,12 @@ public final class LoupeCanvasView: NSView {
     /// What the cursor should say: a crosshair for a brush, a pointing hand only when there is
     /// something to drag.
     public override func resetCursorRects() {
+        if controller?.isCropToolActive == true {
+            // Every point of the canvas is the frame's: corners and edges resize, inside moves the
+            // picture, outside starts a new frame. A crosshair says "this is a tool surface".
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if controller?.isEyedropperArmed == true {
             // A dropper is armed: every point of the canvas is a sample, so the pointer says so.
             addCursorRect(bounds, cursor: .crosshair)
@@ -277,6 +323,40 @@ public final class LoupeCanvasView: NSView {
         }
         let zoomed = controller?.viewState.isActualSize ?? false
         addCursorRect(bounds, cursor: zoomed ? .openHand : .arrow)
+    }
+}
+
+// MARK: - gesture ownership
+
+/// Who owns a press on the canvas — the answer `LoupeCanvasView.mouseDown` switches on.
+///
+/// One enum instead of a chain of `if`s in the view, so the priority is a single readable list and a
+/// test can ask the question without an `NSEvent` (task 035's 手势优先级 criterion, and the reason
+/// task 032's grip test could be written at all).
+public enum LoupeCanvasGesture: Equatable, Sendable {
+    /// The crop frame (task 035). Everything else is unreachable while the tool is on.
+    case cropTool
+    /// A double-click inside the crop frame: 应用.
+    case cropToolApply
+    case eyedropper
+    /// Two clicks will become a gradient.
+    case maskCreate
+    /// A knob on the selected mask.
+    case maskHandle
+    /// Dragging adjusts the selected mask's geometry.
+    case maskShape
+    case paint
+    case doubleClick
+    case pan
+
+    /// The crop tool's own split (task 035 §2): a double-click **inside** the frame applies it;
+    /// everything else — a corner, an edge, the inside of a single click, the outside — is a drag.
+    ///
+    /// Pure and static so the rule can be asserted without a canvas, a click or a photo: the router
+    /// (`LoupeController.gestureOwner`) is the only caller, so what a test reads is what ships.
+    public static func crop(clickCount: Int, hit: CropToolHandle?) -> LoupeCanvasGesture {
+        if clickCount >= 2, hit == .inside { return .cropToolApply }
+        return .cropTool
     }
 }
 
@@ -452,11 +532,22 @@ public final class LoupeController: NSViewController {
     /// The selected mask's control points (task 032) — grips and guides, drawn over the canvas and
     /// hit-tested by the controller (never by this view: `hitTest` is nil).
     private let maskHandlesOverlay = MaskHandlesOverlayView()
+    /// 裁切框 (task 035) — the dimmed outside, the frame, its eight grips and the thirds grid. Same
+    /// contract as the two above: `hitTest → nil`, and the positions come from `CropTool.layout`,
+    /// i.e. from the one projection.
+    private let cropOverlay = CropToolOverlayView()
+    /// 裁切工具条: 比例 / 拉直 / 翻转 / 九宫格 / 应用 / 取消. The only chrome on the canvas that takes
+    /// clicks, and it exists only while the tool is on.
+    let cropBar = CropToolBar()
 
     /// The mask painter: pointer → sampled points → `Stroke` (Q22). Owned here because the paint
     /// gesture is a canvas gesture, and handed to the view so `mouseDown` knows which of the two
     /// gestures a drag is.
     public let maskCanvas: MaskCanvasController
+
+    /// 旋转/裁切 (task 035). Owned here because the frame is a canvas gesture; the draft it edits is
+    /// view state and never enters `EditModel` until 应用.
+    public let cropTool: CropToolController
 
     // MARK: render plumbing
 
@@ -595,6 +686,9 @@ public final class LoupeController: NSViewController {
 
     /// Where the loupe is looking, in source pixels. The only view-state this type keeps.
     public private(set) var viewState = LoupeViewState.fit
+    /// The camera the 裁切 tool borrowed: restored on 应用/取消, so a precision tool never leaves the
+    /// user at a zoom they did not choose (`WINDOW_INTEGRATION.md:14` — 临时fit，退出恢复会话视口).
+    private var cropEntryState: LoupeViewState?
     /// The continuous value a *pinch* has accumulated, in the same units as `viewState.zoom`.
     ///
     /// The camera itself is always on a rung (`LoupeViewState.snappedLevel`), which would otherwise
@@ -617,6 +711,9 @@ public final class LoupeController: NSViewController {
     private var editInFlight = false
     private var editPending = false
     private var lastHandledRevision = 0
+    /// The photo the 裁切 frame was opened on — a change drops the tool rather than crop one picture
+    /// with another's framing.
+    private var lastHandledAnchorID: String?
     public private(set) var editRenderCount = 0
     /// How many edit renders the debounce actually **started**.
     ///
@@ -684,6 +781,7 @@ public final class LoupeController: NSViewController {
     public init(session: CatalogSession) {
         self.session = session
         self.maskCanvas = MaskCanvasController(session: session)
+        self.cropTool = CropToolController(session: session)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -707,10 +805,22 @@ public final class LoupeController: NSViewController {
         // selected mask's control points. All three are `hitTest → nil`, so every click still belongs
         // to the canvas.
         for overlay in [highlightOverlay as NSView, draftOverlay as NSView,
-                        maskHandlesOverlay as NSView] {
+                        maskHandlesOverlay as NSView, cropOverlay as NSView] {
             overlay.frame = container.bounds
             overlay.autoresizingMask = [.width, .height]
             container.addSubview(overlay)
+        }
+        cropOverlay.isHidden = true
+        // The tool strip. Above the overlays (it takes clicks), below the zoom pill (which stays the
+        // topmost chrome), and hidden until 裁切 mode is on.
+        container.addSubview(cropBar)
+        cropBar.isHidden = true
+        cropBar.controller = cropTool
+        cropBar.onApply = { [weak self] in self?.applyCropTool() }
+        cropBar.onCancel = { [weak self] in self?.cancelCropTool() }
+        cropBar.onChange = { [weak self] in
+            self?.refreshCropTool()
+            self?.requestEditRender()
         }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
@@ -749,6 +859,9 @@ public final class LoupeController: NSViewController {
         // The control points live in view points, so a resize moves them: rebuild rather than let the
         // overlay keep the old canvas' coordinates.
         refreshMaskHandles()
+        // Same for the crop frame: a resize is a new projection, and both the frame and the tool strip
+        // are laid out in view points.
+        refreshCropTool()
         // A resize is a new canvas: every pixel is re-rendered into it, and a bridge measured against
         // the old one would scale the picture about the wrong centre. Tear the transition down rather
         // than leave the transform in a mid-flight state nobody will ever finish.
@@ -764,6 +877,7 @@ public final class LoupeController: NSViewController {
 
     private func observeModel() {
         lastHandledRevision = session?.editRevision ?? 0
+        lastHandledAnchorID = session?.anchorID
         bridge.observe({ [weak self] in
             guard let self else { return }
             _ = self.session?.anchorID
@@ -774,6 +888,10 @@ public final class LoupeController: NSViewController {
             // One observer, two jobs: a document change re-renders the current decode (cheap,
             // ~ms); a photo change needs a new decode (expensive, the 0.5 → 1.0 ladder).
             let revision = self.session?.editRevision ?? 0
+            // 裁切 mode belongs to the photo it was opened on, and to the loupe: a different picture
+            // (or another module) drops the frame rather than cropping one photo with another's
+            // framing (task 035).
+            self.dropCropToolIfStale()
             if revision != self.lastHandledRevision {
                 self.lastHandledRevision = revision
                 self.requestEditRender()
@@ -1607,9 +1725,15 @@ public final class LoupeController: NSViewController {
 
     /// The projection for the *current* decode buffer (or the asset's own size before the first
     /// decode lands). Hit-testing must work before the first frame: a double-click queues one.
+    ///
+    /// While 裁切 mode is on, the projection is built from the tool's **preview** document — the whole
+    /// frame with the draft's straighten and flips — so the frame on screen, the crop box drawn on it
+    /// and every hit test are one geometry (task 035). Nothing is written: `previewEdit` is a value
+    /// derived from the draft for as long as the tool is on.
     public func framing(viewport: ImageSize? = nil) -> LoupeFraming? {
         let size = viewport ?? viewportPixels
-        let edit = session?.edit ?? .neutral
+        var edit = session?.edit ?? .neutral
+        if cropTool.isActive { edit = cropTool.previewEdit(from: edit) }
         if let image = decoded {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
@@ -1985,6 +2109,13 @@ public final class LoupeController: NSViewController {
         return MaskHandles.hit(point, in: layout)
     }
 
+    /// Pure version of "is a grip under this point" — what `gestureOwner` asks before
+    /// `beginMaskHandleDrag` takes it (task 035 folded the canvas' priority chain into one function,
+    /// and a router that began a drag as a side effect of being asked would fire twice).
+    public func isMaskHandleArmed(atViewPoint point: CGPoint) -> Bool {
+        hitMaskHandle(atViewPoint: point) != nil
+    }
+
     /// Take the grip under the click. `true` means the click belongs to a control point and **must
     /// not** also start a pan or a shape-adjust drag — the caller returns on `true`.
     @discardableResult
@@ -2047,6 +2178,223 @@ public final class LoupeController: NSViewController {
     /// The grip the last drag took, for the status/QA line.
     public var lastMaskHandleLabel: String? { maskCanvas.lastHandleLabel }
     public var isMaskHandleDragging: Bool { maskCanvas.isDraggingHandle }
+
+    // MARK: 旋转 / 裁切 (task 035)
+    //
+    // The canvas half of 「添加旋转/裁切工具」. Four small pieces, and none of them renders anything:
+    //
+    //   · the **frame** comes from `CropTool.layout` (the draft rect through the one projection), so a
+    //     portrait file, a straightened frame and a flipped one are the same code path;
+    //   · the **hit test** is `CropTool.hit`, in view points (the same size on screen at every zoom);
+    //   · the **draft** lives in `CropToolController` — view state, never written to the document
+    //     until 应用 (one `applyEdit`, one `commitEdit`, so one ⌘Z);
+    //   · the **preview** is `CropToolController.previewEdit`, which `framing()` and `makeJob` already
+    //     read: while the tool is on, the canvas shows the whole frame with the draft's straighten and
+    //     flips, which is what makes 「进入时显示完整图像」 true without touching the document.
+    //
+    // The frame is `session.maskSourceSize` — the upright frame the renderer ingested (task 028) —
+    // and never `asset.width/height`, which are the *stored* dimensions and are transposed for
+    // EXIF 5…8.
+
+    public var isCropToolActive: Bool { cropTool.isActive }
+
+    /// What a press at `point` belongs to — **one** decision, in one place.
+    ///
+    /// The order is the gesture's depth: the crop tool first, because while it is on the canvas is a
+    /// crop frame and nothing else (Phos gates every other canvas gesture on `cropMode` for the same
+    /// reason, `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/WorkspaceCanvasInput.swift:32`); then
+    /// the eyedropper's one-shot; then a mask's creation, its grips and its adjust drag; then the
+    /// paint drag; then double-click; and last the pan. `LoupeCanvasView.mouseDown` switches on
+    /// exactly this value, so a test can ask "who owns this click?" without synthesising an `NSEvent`
+    /// — and the answer cannot drift from the shipped path.
+    public func gestureOwner(atViewPoint point: CGPoint, clickCount: Int = 1) -> LoupeCanvasGesture {
+        if isCropToolActive {
+            return LoupeCanvasGesture.crop(clickCount: clickCount, hit: cropHit(atViewPoint: point))
+        }
+        if isEyedropperArmed { return .eyedropper }
+        if isShapeCreateArmed { return .maskCreate }
+        if isMaskHandleArmed(atViewPoint: point) { return .maskHandle }
+        if isShapeDragArmed { return .maskShape }
+        if maskCanvas.isArmed { return .paint }
+        if clickCount >= 2 { return .doubleClick }
+        return .pan
+    }
+
+    /// The one frame the crop tool measures with. Same authority as the mask drag maths, so a portrait
+    /// file's frame lands on its picture (task 028) and a review of this file can grep one call site.
+    public var cropSourceSize: ImageSize { session?.maskSourceSize ?? ImageSize(width: 1, height: 1) }
+
+    /// 显影 ▸ 裁切与旋转 (⌘R): enter, or — if it is already on — 应用 and leave.
+    ///
+    /// Entering does three things beyond the mode switch, and each is load-bearing: the mask tools are
+    /// disarmed (they are canvas gestures too, and the frame owns every drag now), the camera goes to
+    /// **fit** (the whole picture has to be visible to be cropped), and one render is requested for
+    /// the preview document.
+    @discardableResult
+    public func toggleCropTool() -> Bool {
+        if cropTool.isActive { return applyCropTool() }
+        return beginCropTool()
+    }
+
+    @discardableResult
+    public func beginCropTool() -> Bool {
+        guard let session, session.mode == .loupe, session.anchorAsset != nil else { return false }
+        guard cropTool.begin() else { return false }
+        // The camera is remembered and restored on exit: a precision tool is a temporary fit over the
+        // session viewport (`local/src/swift-raw/Zenodeng_Phos/WINDOW_INTEGRATION.md:14`).
+        cropEntryState = viewState
+        // One gesture owner while the frame is up: no eyedropper, no shape drag, no brush.
+        cancelEyedropper()
+        if isShapeDragArmed { cancelShapeDrag() }
+        session.pendingMaskShape = nil
+        session.maskTool = .off
+        zoomToFit()
+        refreshCropTool()
+        requestEditRender()
+        return true
+    }
+
+    /// ↵ (and 双击框内): the draft becomes the document, once.
+    @discardableResult
+    public func applyCropTool() -> Bool {
+        guard cropTool.isActive else { return false }
+        let applied = cropTool.apply()
+        leaveCropTool()
+        return applied
+    }
+
+    /// Esc: the frame goes away and **nothing** is written — the document, its revision and its
+    /// history are exactly what they were before ⌘R.
+    public func cancelCropTool() {
+        guard cropTool.isActive else { return }
+        cropTool.cancel()
+        leaveCropTool()
+    }
+
+    private func leaveCropTool() {
+        if let previous = cropEntryState { setViewState(previous) }
+        cropEntryState = nil
+        refreshCropTool()
+        requestEditRender()
+    }
+
+    /// The photo changed, or the loupe is not the module on screen: the frame goes away without
+    /// writing and without counting as a 取消 (the user did not press Esc).
+    private func dropCropToolIfStale() {
+        guard cropTool.isActive else { return }
+        let anchor = session?.anchorID
+        let stale = anchor != lastHandledAnchorID || session?.mode != .loupe
+        guard stale else { return }
+        cropTool.detach()
+        cropEntryState = nil
+        lastHandledAnchorID = anchor
+        refreshCropTool()
+    }
+
+    /// The crop frame's layout in view points, for the overlay and for the tests.
+    ///
+    /// `viewport`/`backingScale` exist for the headless tests, exactly as they do for
+    /// `maskHandlesLayout`: without a window the canvas has no size, and a hit test must still be
+    /// able to say "this point, in this frame".
+    public func cropToolLayout(viewport: ImageSize? = nil,
+                               backingScale scaleOverride: Double? = nil) -> CropToolLayout? {
+        guard cropTool.isActive else { return nil }
+        let scale = scaleOverride ?? backingScale
+        let mapping: LoupeMapping
+        if let framing = framing(viewport: viewport) {
+            mapping = framing.mapping(of: viewState)
+        } else {
+            // No projection yet (no photo at all): draw the frame against the session's own upright
+            // frame same as everything else, rather than return nothing. Same authority, same maths.
+            let size = viewport ?? viewportPixels
+            let frame = cropSourceSize
+            mapping = LoupeFraming(viewport: size,
+                                   sourceWidth: Double(frame.width),
+                                   sourceHeight: Double(frame.height),
+                                   crop: .full,
+                                   straightenDegrees: cropTool.draft.straighten,
+                                   flipH: cropTool.draft.flipHorizontal,
+                                   flipV: cropTool.draft.flipVertical).mapping(of: viewState)
+        }
+        return cropTool.layout(mapping: mapping, source: cropSourceSize, pointScale: scale)
+    }
+
+    /// The grip under `point` (view points): corner, edge, `.inside` or `.outside`. `nil` only when
+    /// the tool is off.
+    public func cropHit(atViewPoint point: CGPoint) -> CropToolHandle? {
+        guard let layout = cropToolLayout() else { return nil }
+        return CropTool.hit(point, in: layout)
+    }
+
+    /// Take the press. `true` means the canvas is dragging the frame and must not pan.
+    @discardableResult
+    public func beginCropDrag(atViewPoint point: CGPoint, rotate: Bool = false,
+                              viewport: ImageSize? = nil,
+                              backingScale scaleOverride: Double? = nil) -> Bool {
+        guard cropTool.isActive, let framing = framing(viewport: viewport) else { return false }
+        let scale = scaleOverride ?? backingScale
+        let started = cropTool.beginDrag(atViewPoint: point,
+                                         mapping: framing.mapping(of: viewState),
+                                         source: cropSourceSize, pointScale: scale,
+                                         rotate: rotate)
+        refreshCropTool()
+        return started
+    }
+
+    /// One tick of a frame drag (or of a ⌘-rotation). No render is requested per tick: a crop drag
+    /// only moves the overlay, which is AppKit, not the graph. The exception is the rotation, which
+    /// moves the *picture* — the bar's `onChange` asks for that frame.
+    public func continueCropDrag(atViewPoint point: CGPoint,
+                                 viewport: ImageSize? = nil,
+                                 backingScale scaleOverride: Double? = nil) {
+        guard cropTool.isActive, cropTool.isDragging, let framing = framing(viewport: viewport) else {
+            return
+        }
+        let scale = scaleOverride ?? backingScale
+        let before = cropTool.draft.straighten
+        cropTool.continueDrag(atViewPoint: point, mapping: framing.mapping(of: viewState),
+                              source: cropSourceSize, pointScale: scale)
+        refreshCropTool()
+        if cropTool.draft.straighten != before { requestEditRender() }
+    }
+
+    /// Mouse-up: the draft stays, the document is still untouched.
+    public func endCropDrag() {
+        cropTool.endDrag()
+        refreshCropTool()
+    }
+
+    /// Escape mid-drag.
+    public func cancelCropDrag() {
+        let before = cropTool.draft.straighten
+        cropTool.cancelDrag()
+        refreshCropTool()
+        if cropTool.draft.straighten != before { requestEditRender() }
+    }
+
+    /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.
+    public func refreshCropTool() {
+        let active = cropTool.isActive
+        cropOverlay.isHidden = !active
+        cropBar.isHidden = !active
+        // 手势优先级: the zoom pill is canvas chrome, and in 裁切 mode the canvas belongs to the
+        // frame — a pinch or a stop change would move the picture out from under the box.
+        zoomSlider.isHidden = active
+        guard active else {
+            cropOverlay.layout = nil
+            cropOverlay.active = nil
+            return
+        }
+        cropOverlay.layout = cropToolLayout()
+        cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
+        cropBar.sync()
+        layoutCropBar()
+    }
+
+    private func layoutCropBar() {
+        guard !cropBar.isHidden else { return }
+        cropBar.layout(in: container.bounds)
+    }
 
     // MARK: edit re-render (50 ms debounce, single-flight)
 
@@ -2228,8 +2576,12 @@ public final class LoupeController: NSViewController {
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
         let viewport = viewportPixels
         guard viewport.width > 8, viewport.height > 8 else { return nil }
+        // 裁切 mode renders the tool's preview document (whole frame + draft straighten/flips), so
+        // the picture under the frame is the picture the frame is measured against. Geometry is not
+        // a decode input, so this costs a render and never a development (task 035).
+        let edit = cropTool.isActive ? cropTool.previewEdit(from: session.edit) : session.edit
         return RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
-                         edit: session.edit, state: viewState, target: target, generation: gen,
+                         edit: edit, state: viewState, target: target, generation: gen,
                          changedAt: changedAt)
     }
 
