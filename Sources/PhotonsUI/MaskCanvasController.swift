@@ -238,6 +238,10 @@ public final class MaskCanvasController {
     public private(set) var lastStrokePointCount = 0
     /// Strokes finished through this controller — one `commitEdit` each.
     public private(set) var finishedStrokes = 0
+    /// Control-point drags that ended in a committed document (task 032). One drag, one ⌘Z.
+    public private(set) var maskHandleDrags = 0
+    /// The grip the last drag took, in words — what the status/QA line prints.
+    public private(set) var lastHandleLabel: String?
 
     private weak var session: CatalogSession?
     private var points: [Float] = []
@@ -246,6 +250,11 @@ public final class MaskCanvasController {
     private var targetMaskID: String?
     private var placement: (component: Int, stroke: Int)?
     private var usingPressure = false
+
+    /// The grip being dragged, with the shape it started from (see `MaskHandleDrag`: every update is
+    /// computed from the mouse-down state, so nothing accumulates and a clamp cannot ratchet).
+    private var handleDrag: MaskHandleDrag?
+    private var handleTarget: (maskID: String, component: Int, frame: ImageSize)?
 
     public init(session: CatalogSession) {
         self.session = session
@@ -319,6 +328,81 @@ public final class MaskCanvasController {
         pressures = []
         lastKept = nil
         usingPressure = false
+    }
+
+    // MARK: control points (task 032)
+    //
+    // The same shape of gesture as a brush stroke, and the same history rule: every tick writes the
+    // document with `commit: false` (the pixels follow the hand, the inspector shows the new numbers),
+    // and mouse-up commits **once**. So one drag is one ⌘Z — not one per tick, which is what would
+    // happen if each `extend` committed, and not zero, which is what would happen if only the ticks
+    // wrote.
+    //
+    // The frame is `session.maskSourceSize` (the upright frame the renderer ingested). The drag maths
+    // never sees `asset.width/height`: those are the *stored* dimensions and are transposed for
+    // EXIF 5…8, so a rim dragged 60 px sideways on a portrait photo would render 90 px wide
+    // (task 028, `MaskPortraitProjectionTests`).
+
+    public var isDraggingHandle: Bool { handleDrag != nil }
+
+    /// Take the grip `kind` at `point` (normalised upright source coordinates).
+    ///
+    /// Returns false when there is nothing to drag, so the caller can fall through to the next
+    /// gesture in the stack — a miss must never be swallowed by this controller.
+    @discardableResult
+    public func beginHandleDrag(_ kind: MaskHandleKind, at point: NormalizedPoint,
+                                source frame: ImageSize? = nil) -> Bool {
+        guard let session, handleDrag == nil,
+              let target = session.selectedAdjustableShape() else { return false }
+        let source = frame ?? session.maskSourceSize
+        guard let handle = MaskHandles.handle(kind, in: target.shape, source: source) else {
+            return false
+        }
+        handleDrag = MaskHandleDrag(handle: handle, shape: target.shape, grab: point)
+        handleTarget = (target.maskID, target.component, source)
+        lastHandleLabel = kind.label
+        return true
+    }
+
+    /// One tick. `uniform` is ⇧ (an ellipse keeps its aspect).
+    @discardableResult
+    public func extendHandleDrag(to point: NormalizedPoint, uniform: Bool) -> Bool {
+        guard let session, let drag = handleDrag, let target = handleTarget,
+              let shape = drag.shape(at: point, source: target.frame, uniform: uniform) else {
+            return false
+        }
+        session.setMaskComponentShape(target.maskID, component: target.component,
+                                      shape: shape, commit: false, label: "")
+        return true
+    }
+
+    /// Mouse-up: the geometry becomes the document — one commit, one snapshot.
+    ///
+    /// A drag that ended exactly where it started changes nothing, and `EditHistory.commit` is a
+    /// no-op for it: the stack does not grow, and `maskHandleDrags` does not count it.
+    @discardableResult
+    public func endHandleDrag() -> Bool {
+        guard let session, let drag = handleDrag else { return false }
+        defer { clearHandleDrag() }
+        let committed = session.commitEdit(label: "调整\(drag.handle.kind.label)蒙版")
+        if committed { maskHandleDrags += 1 }
+        return committed
+    }
+
+    /// Escape, or the canvas going away: put the shape back and commit nothing.
+    public func cancelHandleDrag() {
+        guard let session, let target = handleTarget, let drag = handleDrag else {
+            clearHandleDrag()
+            return
+        }
+        session.setMaskComponentShape(target.maskID, component: target.component,
+                                      shape: drag.shape, commit: false, label: "")
+        clearHandleDrag()
+    }
+
+    private func clearHandleDrag() {
+        handleDrag = nil
+        handleTarget = nil
     }
 
     // MARK: stroke construction

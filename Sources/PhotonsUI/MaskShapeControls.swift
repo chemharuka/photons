@@ -147,6 +147,105 @@ final class MaskDraftOverlayView: NSView {
     }
 }
 
+// MARK: - the control points, drawn
+//
+// The other half of the rubber band: once a mask exists its geometry is on the canvas as grips the
+// hand can take (task 032), instead of only as numbers in the inspector. The *positions* are not
+// computed here — `MaskHandles.layout` does that, from the shape and the one projection
+// (`LoupeFraming`/`LoupeMapping`), so what is drawn and what is grabbable cannot drift apart.
+//
+// The view itself is `hitTest → nil`, exactly like the draft overlay and like Brightroom's crop
+// guide container (`CropView._InteractiveCropGuideView.swift:326-334`): a click that misses a grip
+// belongs to the canvas underneath (a pan, or the gradient adjust drag), never to a transparent
+// view that happens to be in front of it.
+
+final class MaskHandlesOverlayView: NSView {
+
+    /// Grips and guides in view points, from `MaskHandles.layout`.
+    var layout: MaskHandlesLayout? {
+        didSet { if oldValue != layout { needsDisplay = true } }
+    }
+
+    /// The grip under the hand, drawn filled with the accent colour.
+    var active: MaskHandleKind? {
+        didSet { if oldValue != active { needsDisplay = true } }
+    }
+
+    override var isOpaque: Bool { false }
+    override var isFlipped: Bool { true }
+
+    /// Never a hit target — the canvas owns every click, and the grips are hit-tested there.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private static let dotRadius: CGFloat = 5.5
+    private static let centerRadius: CGFloat = 7
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let layout, bounds.width > 1, bounds.height > 1 else { return }
+        _ = dirtyRect
+
+        for guide in layout.guides {
+            guard guide.points.count > 1 else { continue }
+            let path = NSBezierPath()
+            path.lineWidth = guide.style == .rim ? 1.5 : 1
+            switch guide.style {
+            case .isoLine:
+                NSColor.white.withAlphaComponent(0.55).setStroke()
+                path.setLineDash([5, 3], count: 2, phase: 0)
+            case .axis:
+                NSColor.white.withAlphaComponent(0.30).setStroke()
+                path.setLineDash([2, 4], count: 2, phase: 0)
+            case .rim:
+                NSColor.white.withAlphaComponent(0.75).setStroke()
+            case .featherRing:
+                NSColor.white.withAlphaComponent(0.45).setStroke()
+                path.setLineDash([3, 3], count: 2, phase: 0)
+            case .brushBounds:
+                NSColor.white.withAlphaComponent(0.50).setStroke()
+                path.setLineDash([4, 4], count: 2, phase: 0)
+            }
+            path.move(to: guide.points[0])
+            for p in guide.points.dropFirst() { path.line(to: p) }
+            if guide.isClosed { path.close() }
+            path.stroke()
+        }
+
+        // The grabbable extent of an iso-line, faintly: the whole line takes the drag, so it should
+        // look like it does.
+        for grip in layout.grips {
+            guard let line = grip.line else { continue }
+            let path = NSBezierPath()
+            path.lineWidth = 3
+            path.setLineDash([2, 2], count: 2, phase: 0)
+            NSColor.white.withAlphaComponent(0.20).setStroke()
+            path.move(to: line.a)
+            path.line(to: line.b)
+            path.stroke()
+        }
+
+        for grip in layout.grips {
+            let radius = grip.isCenter ? Self.centerRadius : Self.dotRadius
+            let rect = NSRect(x: grip.point.x - radius, y: grip.point.y - radius,
+                              width: radius * 2, height: radius * 2)
+            let dot = NSBezierPath(ovalIn: rect)
+            let isActive = grip.kind == active
+            (isActive ? NSColor.controlAccentColor : NSColor.white).setFill()
+            dot.fill()
+            let ring = NSBezierPath(ovalIn: rect.insetBy(dx: -0.75, dy: -0.75))
+            ring.lineWidth = 1.5
+            (isActive ? NSColor.white : NSColor.black.withAlphaComponent(0.55)).setStroke()
+            ring.stroke()
+        }
+    }
+}
+
+private extension MaskHandlesLayout.Grip {
+    var isCenter: Bool {
+        if case .radialCenter = kind { return true }
+        return false
+    }
+}
+
 extension SemanticKind {
     /// What the inspector prints for this kind (the menu's submenu and the mask list row).
     public var displayName: String {
