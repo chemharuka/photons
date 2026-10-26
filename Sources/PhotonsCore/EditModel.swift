@@ -17,10 +17,20 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// as-shot white balance, replacing the nominal `6500`/`0` that S1 turned into a gain. Not
     /// released either; schema-2 documents are read back as as-shot when they carry the old
     /// sentinel (`EditModel.init(from:)` → `LightGroup.migratePreSchema3WhiteBalance()`).
-    public static let currentSchemaVersion = 3
+    /// 4 = 派单 030: `curve.rgb` became `curve.white` (the luminance curve, under a name that says
+    /// so) and `light` gained the absolute `blackLevel`/`whiteLevel`. A schema-3 document's `rgb`
+    /// key is read into `white` (`CurveGroup.init(from:)`), so the **shape** survives; only the name
+    /// is new. Not released.
+    public static let currentSchemaVersion = 4
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
-    public static let currentProcessVersion = 1
+    ///
+    /// 2 = 派单 030: the curve moved from S3 (display-referred, after the tone map) to S1.7
+    /// (scene-referred, log-light axis). The same control points now render differently — that is a
+    /// change of meaning, exactly what this field is for. `pv=` is in the geometry key material, so
+    /// a version bump also moves every key: pixels of an **identity** curve are unchanged, pixels of
+    /// a shaped one are not, and the version number is the document's declaration of which it got.
+    public static let currentProcessVersion = 2
 
     public var schemaVersion: Int
     public var processVersion: Int
@@ -136,10 +146,17 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 0 and 1 points of the scene-linear buffer — so they dirty `.sceneLinear` like exposure
             // does: the linear buffer itself is what changed (派单 019). White balance (派单 006)
             // straddles neither: it was already answered above, by `decodeInputs`.
+            //
+            // 030: the absolute `blackLevel`/`whiteLevel` are the same level under a second name
+            // (one control, two handles — the sliders and the curve panel's reference lines), so
+            // they dirty exactly the stage the sliders do. Nothing else: the mask atlas is
+            // downstream of `.sceneLinear`'s key, which the chain handles.
             if light.exposure != old.light.exposure
                 || light.highlightRecovery != old.light.highlightRecovery
                 || light.whites != old.light.whites
-                || light.blacks != old.light.blacks {
+                || light.blacks != old.light.blacks
+                || light.blackLevel != old.light.blackLevel
+                || light.whiteLevel != old.light.whiteLevel {
                 s.insert(.sceneLinear)
             }
             if light.contrast != old.light.contrast
@@ -212,10 +229,17 @@ public struct EditModel: Sendable, Equatable, Codable {
             // scene-linear buffer itself (`(v − blk)/max(wht − blk, 1e−3)` before the gain), so the S1
             // output changes and everything below it must miss. The tokens are the same ones S2 used
             // to carry, in the same order, so a document's numbers read the same in a log line.
-            return "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
+            //
+            // 030 appends the absolute levels **only when they are set** (§3.2 discipline): a
+            // document that never used a level dropper keeps its S1 material byte for byte, and a
+            // document that did can never serve a cached S1 buffer levelled somewhere else.
+            var m = "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
                 + ";tint=\(light.tint.map { k($0) } ?? "shot")"
                 + ";hlr=\(k(light.highlightRecovery))"
                 + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
+            if let bl = light.blackLevel { m += ";blL=\(k(bl))" }
+            if let wh = light.whiteLevel { m += ";whL=\(k(wh))" }
+            return m
 
         // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
         // rebuild the atlas (§3.3 item 4), and `name` is in neither.
@@ -397,11 +421,32 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// Soft shoulder for values above ~0.8; 0 = untouched, 1 = asymptote at 1.0.
     public var highlightRecovery: Double // 0…1, default 0
 
+    /// Absolute black level in **scene-linear** light (`0.18` means "the 18 % grey patch reads
+    /// here"), or `nil` = use the `blacks` slider's mapping (派单 030).
+    ///
+    /// Why an absolute value exists at all: a slider's travel cannot express an HDR white point. The
+    /// sliders reach `blk ∈ [−0.15, +0.15]` (plenty — a black sample is always below −3 EV) and
+    /// `wht ∈ [0.85, 1.15]` (**not** plenty — a +1 EV highlight needs `wht = 2.0`).
+    ///
+    /// **Exactly one of the two spellings is in force**: this field when non-nil, the slider
+    /// otherwise. The slider clears this to `nil` when it is dragged, so two black points cannot
+    /// exist (`temperature`'s `nil` discipline, 派单 006).
+    public var blackLevel: Double?
+    /// Absolute white level in scene-linear light; `nil` = the `whites` slider's mapping. Same rules
+    /// as `blackLevel`, with `white ≥ black + 1e-3` enforced on the pair.
+    public var whiteLevel: Double?
+
     public static let identity = LightGroup()
+
+    /// The envelope the level fields are clamped into (`§7.1`): a black sample below −3 EV is noise,
+    /// and a white above +6 EV is past the far end of the curve's axis.
+    public static let blackLevelRange: ClosedRange<Double> = -0.05...0.5
+    public static let whiteLevelRange: ClosedRange<Double> = 0.05...64
 
     public init(exposure: Double = 0, contrast: Double = 0, highlights: Double = 0,
                 shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
-                temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0) {
+                temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0,
+                blackLevel: Double? = nil, whiteLevel: Double? = nil) {
         self.exposure = exposure
         self.contrast = contrast
         self.highlights = highlights
@@ -411,6 +456,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
         self.temperature = temperature
         self.tint = tint
         self.highlightRecovery = highlightRecovery
+        self.blackLevel = blackLevel
+        self.whiteLevel = whiteLevel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -425,6 +472,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
         v.temperature = c.val("temperature", v.temperature)
         v.tint = c.val("tint", v.tint)
         v.highlightRecovery = c.val("highlightRecovery", v.highlightRecovery)
+        v.blackLevel = c.val("blackLevel", v.blackLevel)
+        v.whiteLevel = c.val("whiteLevel", v.whiteLevel)
         self = v
     }
 
@@ -456,9 +505,33 @@ public struct LightGroup: Sendable, Equatable, Codable {
         try c.encodeIfPresent(temperature, forKey: AnyCodingKey("temperature"))
         try c.encodeIfPresent(tint, forKey: AnyCodingKey("tint"))
         try c.encode(highlightRecovery, forKey: AnyCodingKey("highlightRecovery"))
+        // 030: absent, not `null` — a document that never set a level encodes byte-identically to
+        // the pre-030 JSON (the `temperature`/`tint` rule again).
+        try c.encodeIfPresent(blackLevel, forKey: AnyCodingKey("blackLevel"))
+        try c.encodeIfPresent(whiteLevel, forKey: AnyCodingKey("whiteLevel"))
     }
 
     public var isIdentity: Bool { self == LightGroup.identity }
+
+    /// The black level the `blacks` slider asks for, `blk = −blacks/100·0.15` (派单 019, unchanged).
+    public var sliderBlackLevel: Double { -blacks / 100 * 0.15 }
+
+    /// The white level the `whites` slider asks for, `wht = 1 − whites/100·0.15`.
+    public var sliderWhiteLevel: Double { 1 - whites / 100 * 0.15 }
+
+    /// Where 0 and 1 are, after the absolute fields and the sliders are reconciled.
+    ///
+    /// One answer, one place: S1, the level droppers and the curve panel's reference lines all read
+    /// this, so "which black point is in force" cannot be answered two ways.
+    public var levels: LevelPair {
+        let blk = min(max(blackLevel ?? sliderBlackLevel,
+                          LightGroup.blackLevelRange.lowerBound), LightGroup.blackLevelRange.upperBound)
+        let whtRaw = min(max(whiteLevel ?? sliderWhiteLevel,
+                             LightGroup.whiteLevelRange.lowerBound), LightGroup.whiteLevelRange.upperBound)
+        // `max(…, 1e-3)` on the span, exactly as S1's remap does: a pair that crossed over would
+        // divide by ≤ 0 and invert the picture.
+        return LevelPair(black: blk, white: max(whtRaw, blk + 1e-3))
+    }
 
     /// S1 exposure gain. 1.0 at 0 EV.
     public var exposureGain: Float { Float(pow(2.0, exposure)) }
@@ -509,43 +582,120 @@ public struct LightGroup: Sendable, Equatable, Codable {
     }
 }
 
-/// Lightroom's tone curve. Four monotone-cubic LUTs: composite RGB plus per-channel.
+/// The pair of linear levels S1 applies — "where 0 is" and "where white is".
+///
+/// One value type rather than two loose numbers, because three things must agree about it: the S1
+/// remap `(v − black)/span`, the droppers' cross-constraint (a black sample may not be pushed onto
+/// the white level) and `keyMaterial`'s envelope. §13.1 asks for exactly this: the mapping lives in
+/// one place so a later change to the level form (stops instead of linear, say) is one edit.
+public struct LevelPair: Sendable, Equatable {
+    /// Input value that maps to 0.
+    public var black: Double
+    /// Input value that maps to 1.
+    public var white: Double
+
+    public init(black: Double, white: Double) {
+        self.black = black
+        self.white = white
+    }
+
+    public static let identity = LevelPair(black: 0, white: 1)
+
+    /// The divisor, floored exactly as `s1_scene_linear.metal` floors it: a pair that crossed over
+    /// must not invert the picture.
+    public var span: Double { max(white - black, 1e-3) }
+
+    /// The affine remap S1 performs, in `Double` — for solvers and tests, not for the GPU.
+    public func normalised(_ v: Double) -> Double { (v - black) / span }
+
+    /// True when this pair maps `0 → 0` and `1 → 1` exactly: no levelling at all.
+    public var isIdentity: Bool { black == 0 && white == 1 }
+}
+
+/// Lightroom's tone curve. Four monotone-cubic LUTs: **W** (luminance) plus per-channel R/G/B.
+///
+/// 派单 030 moved this curve from S3 (after the tone map, on 0…1 display data) to **S1.7** (before
+/// the tone map, on unbounded scene-linear light), so the two axes mean new things:
+///
+///   · x is the **log-light coordinate** `u = log1p(x/x0)/K` of `HDRCurveAxis` — `u = 0` is zero
+///     light, `u = 0.6667` is SDR white, `u = 1` is +6 EV;
+///   · y is the same coordinate, i.e. the curve answers "map this u to that u".
+///
+/// The point lists keep their shape, their 0…1 range and `CurvePoint.linear` — only the meaning of
+/// the y axis changed, which is exactly what `processVersion` 2 records (§10.1). Old documents keep
+/// their control points and get a different rendering; that is the declared migration, not a bug.
 public struct CurveGroup: Sendable, Equatable, Codable {
-    public var rgb: [CurvePoint]
+    /// The luminance curve. Was called `rgb` — and was *not* the composite-per-channel curve that
+    /// name suggests: it is a gain on the pixel's luma, which keeps hue and saturation. The old name
+    /// is kept as a deprecated alias so the ~12 call sites in tests and export keep compiling, but
+    /// nothing should be written against it: on a saturated HDR pixel the two operators differ by
+    /// 137 8-bit codes (§5.2).
+    public var white: [CurvePoint]
     public var red: [CurvePoint]
     public var green: [CurvePoint]
     public var blue: [CurvePoint]
 
     public static let identity = CurveGroup()
 
-    public init(rgb: [CurvePoint] = CurvePoint.linear,
+    public init(white: [CurvePoint] = CurvePoint.linear,
                 red: [CurvePoint] = CurvePoint.linear,
                 green: [CurvePoint] = CurvePoint.linear,
                 blue: [CurvePoint] = CurvePoint.linear) {
-        self.rgb = rgb
+        self.white = white
         self.red = red
         self.green = green
         self.blue = blue
     }
 
+    /// The pre-030 spelling. `white`, under its old name — not a fifth curve, and not a composite.
+    @available(*, deprecated, message: "`rgb` is the luminance curve `white` under its old name")
+    public init(rgb: [CurvePoint],
+                red: [CurvePoint] = CurvePoint.linear,
+                green: [CurvePoint] = CurvePoint.linear,
+                blue: [CurvePoint] = CurvePoint.linear) {
+        self.init(white: rgb, red: red, green: green, blue: blue)
+    }
+
+    @available(*, deprecated, message: "`rgb` is the luminance curve `white` under its old name")
+    public var rgb: [CurvePoint] {
+        get { white }
+        set { white = newValue }
+    }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = CurveGroup.identity
-        v.rgb = c.val("rgb", v.rgb)
+        // 派单 030 / schema 4: `white` is the stored name; a schema-3 document says `rgb`. One line,
+        // and the shape of the point list survives the rename untouched.
+        v.white = c.val("white", c.val("rgb", v.white))
         v.red = c.val("red", v.red)
         v.green = c.val("green", v.green)
         v.blue = c.val("blue", v.blue)
         self = v
     }
 
+    /// Only `white` is written: a document must not be able to carry both names.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(white, forKey: AnyCodingKey("white"))
+        try c.encode(red, forKey: AnyCodingKey("red"))
+        try c.encode(green, forKey: AnyCodingKey("green"))
+        try c.encode(blue, forKey: AnyCodingKey("blue"))
+    }
+
+    /// The four point lists in table order — W, R, G, B — which is the order the GPU buffer has.
+    public var tables: [[CurvePoint]] { [white, red, green, blue] }
+
     public var isIdentity: Bool {
-        self.rgb == CurvePoint.linear && self.red == CurvePoint.linear
-            && self.green == CurvePoint.linear && self.blue == CurvePoint.linear
+        white == CurvePoint.linear && red == CurvePoint.linear
+            && green == CurvePoint.linear && blue == CurvePoint.linear
     }
 
     public var keyString: String {
         func one(_ p: [CurvePoint]) -> String { p.map(\.keyString).joined(separator: ";") }
-        return "rgb=\(one(rgb))|r=\(one(red))|g=\(one(green))|b=\(one(blue))"
+        // `w=` since 030: the field is the luminance curve, and a key that still said `rgb=` would
+        // invite exactly the confusion §5.2 warns about.
+        return "w=\(one(white))|r=\(one(red))|g=\(one(green))|b=\(one(blue))"
     }
 }
 

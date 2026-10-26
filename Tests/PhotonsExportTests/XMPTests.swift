@@ -125,7 +125,7 @@ final class XMPTests: XCTestCase {
         explicit.light.exposure = 0.0
         explicit.effects.vignetteAmount = 0.0
         explicit.detail.sharpening = 0
-        explicit.curve.rgb = [CurvePoint(0, 0), CurvePoint(1, 1)]
+        explicit.curve.white = [CurvePoint(0, 0), CurvePoint(1, 1)]
 
         let neutralPacket = try XMPWriter.packet(for: .neutral).data
         let explicitPacket = try XMPWriter.packet(for: explicit).data
@@ -214,7 +214,7 @@ final class XMPTests: XCTestCase {
             let x = Double(i) / 15.0
             points.append(CurvePoint(x, pow(x, 1.25)))
         }
-        edit.curve.rgb = points
+        edit.curve.white = points
 
         let (m, _) = try reparse(edit)
         let items = try XCTUnwrap(XMPReadback.strings(m, "crs:ToneCurvePV2012"))
@@ -430,7 +430,7 @@ final class XMPTests: XCTestCase {
         edit.light.contrast = 30
         edit.effects.vignetteAmount = 40
         edit.detail.sharpening = 80
-        edit.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        edit.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
 
         let (first, _) = try XMPWriter.makeMetadata(for: edit)
         let mutable = try XMPWriter.mutableCopy(of: first)
@@ -485,7 +485,7 @@ final class XMPTests: XCTestCase {
     func testX15LargeSettingsBlobRoundTripsAndWarnsAboutEmbedding() throws {
         var edit = EditModel.neutral
         // Thousands of control points survive in photons:settings even though crs: keeps only 16.
-        edit.curve.rgb = (0..<3000).map { CurvePoint(Double($0) / 2999.0, pow(Double($0) / 2999.0, 1.3)) }
+        edit.curve.white = (0..<3000).map { CurvePoint(Double($0) / 2999.0, pow(Double($0) / 2999.0, 1.3)) }
         edit.curve.red = (0..<3000).map { CurvePoint(Double($0) / 2999.0, Double($0) / 2999.0 * 0.9) }
 
         let blob = try XMPWriter.settingsBlob(edit)

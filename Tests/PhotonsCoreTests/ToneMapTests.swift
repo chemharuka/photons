@@ -246,9 +246,11 @@ final class ToneMapTests: XCTestCase {
     /// encode maps 0 to 0 — this pins that they still do, at the extremes, with the sliders that used
     /// to lift the bars.
     ///
-    /// The **curve** used to be the hole in this chain: a LUT with a point at `(0, 0.1)` lifted the
-    /// matte to 0.349 display units. That is fixed in `s3_curve` (派单 008 C) and pinned by
-    /// `CurveMatteTests`; the case is not re-run here because it is no longer a ToneMapTests concern.
+    /// The **curve** used to be the hole in this chain: a LUT with a lifted black end lightened the
+    /// matte. That is fixed by the content guard in the curve's kernel (派单 008 C) — which since
+    /// 派单 030 lives in `s1_7_hdr_curve.metal`, before this stage rather than after it — and pinned
+    /// by `CurveMatteTests`; the case is not re-run here because it is no longer a ToneMapTests
+    /// concern.
     func testMatteSurvivesTheRestOfTheChain() throws {
         let image = rampImage()
         let graph = try makeGraph(image)

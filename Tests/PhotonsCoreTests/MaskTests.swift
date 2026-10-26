@@ -47,7 +47,7 @@ final class MaskTests: XCTestCase {
         edit.light = LightGroup(exposure: 0.75, contrast: 20, highlights: -30, shadows: 15,
                                 whites: 10, blacks: -5, temperature: 5200, tint: 12,
                                 highlightRecovery: 0.4)
-        edit.curve = CurveGroup(rgb: [CurvePoint(0, 0), CurvePoint(0.3, 0.25), CurvePoint(1, 1)])
+        edit.curve = CurveGroup(white: [CurvePoint(0, 0), CurvePoint(0.3, 0.25), CurvePoint(1, 1)])
         edit.color = ColorGroup(vibrance: 15, saturation: -10, bands: ColorGroup.identityBands)
         edit.color.bands[3].hue = 20
         edit.effects = EffectsGroup(vignetteAmount: -40, vignetteMidpoint: 45,
@@ -472,13 +472,23 @@ final class MaskTests: XCTestCase {
 
     /// Byte-for-byte the canonical text and digest that **b1c58ec** produced for this document
     /// (captured by running that commit's `RenderStage`/`EditModel` through its own `plan()`), with the
-    /// one migration 派单 019 was allowed to make:
+    /// migrations later tasks were allowed to make:
     ///
-    ///   · `wh=…;bl=…` moved from the `.toneMap` material into `.sceneLinear`, because blacks/whites are
-    ///     a linear *level* now and the maths moved with them. So the `sceneLinear` text gained two
-    ///     tokens, the `toneMap` text lost them, and every digest from `sceneLinear` down follows its
-    ///     parent. The `geometry` link is untouched, and the `curve`/`color`/`vignette`/`display`
-    ///     *materials* are untouched — only their chain digests moved.
+    ///   · 019 — `wh=…;bl=…` moved from the `.toneMap` material into `.sceneLinear`, because
+    ///     blacks/whites are a linear *level* now and the maths moved with them. So the `sceneLinear`
+    ///     text gained two tokens, the `toneMap` text lost them, and every digest from `sceneLinear`
+    ///     down follows its parent. The `geometry` link is untouched, and the `curve`/`color`/
+    ///     `vignette`/`display` *materials* are untouched — only their chain digests moved.
+    ///   · 030 — **曲线换阶段** (the curve changed stage). Three string facts, no pixel fact:
+    ///       1. `pv=1` → `pv=2`: the process version, because the curve's axis changed meaning;
+    ///       2. `curve` and `toneMap` swapped places in the chain: the curve now runs before S2, so
+    ///          `curve` is seeded by `sceneLinear` and `toneMap` by `curve`;
+    ///       3. the W table's key prefix is `w=` where it was `rgb=`, since the field is now
+    ///          `curve.white` (the luminance curve) and no longer claims to be a composite.
+    ///     The **pixels** of this document are unchanged only where the curve is the identity; its
+    ///     curve is not, and that is what `processVersion` 2 declares (`docs/tasks/030` §10.1).
+    ///     Nothing about the invariance criteria was relaxed: same seven links, same counts, same
+    ///     `masks == []` → no mask stages.
     ///
     /// Nothing about the *structure* changed, and the mask-side invariance criteria below are not
     /// touched. If this test fails again, the empty-mask path changed and every golden, every disk
@@ -492,20 +502,20 @@ final class MaskTests: XCTestCase {
         XCTAssertNil(l.localApply, "no masks: the local stage must not exist")
 
         let expected: [(String, String, String)] = [
-            ("geometry", "248063fdc8786acc7fdac7362853bc7f46cd050927d3ed66fabe0e81991f33bb",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=1;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10"),
-            ("sceneLinear", "73e60976d04959058b4140c775fa22a939c0a8984f85b5ae98e98fa6de801b9c",
-             "248063fdc8786acc7fdac7362853bc7f46cd050927d3ed66fabe0e81991f33bb|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"),
-            ("toneMap", "dd9f8784dad818b66088304759db553781e1aba21782f469e6b1510e6a545b3b",
-             "73e60976d04959058b4140c775fa22a939c0a8984f85b5ae98e98fa6de801b9c|con=20.00000;hi=-30.00000;sh=15.00000"),
-            ("curve", "42300e68900b29a25c10e82327db976b1eae9b0554450920a5b967daf725a354",
-             "dd9f8784dad818b66088304759db553781e1aba21782f469e6b1510e6a545b3b|rgb=0.0000,0.0000;0.3000,0.2500;1.0000,1.0000|r=0.0000,0.0000;1.0000,1.0000|g=0.0000,0.0000;1.0000,1.0000|b=0.0000,0.0000;1.0000,1.0000"),
-            ("color", "3ef25fb1bd5b26b177a747fde89d50b630d0b04cb494cc52e0b1e116af3cfc6c",
-             "42300e68900b29a25c10e82327db976b1eae9b0554450920a5b967daf725a354|vib=15.00000;sat=-10.00000;bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
-            ("vignette", "cc158f4559ccf62a04d3fa6a3f9f7fc8350cbf12dea44cce993220b07892d6db",
-             "3ef25fb1bd5b26b177a747fde89d50b630d0b04cb494cc52e0b1e116af3cfc6c|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
-            ("display", "cf23380ef82dca5de67f2344ea8b566d8b544bd71c33605c7b4f701ca7153fb9",
-             "cc158f4559ccf62a04d3fa6a3f9f7fc8350cbf12dea44cce993220b07892d6db|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("geometry", "1ba3968fd210c7dca1650a3a7aed55b73e4e958240b52b42850642edd7b3c578",
+             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10"),
+            ("sceneLinear", "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f",
+             "1ba3968fd210c7dca1650a3a7aed55b73e4e958240b52b42850642edd7b3c578|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"),
+            ("curve", "de27c78cac82467aa9cb1cc0b44b55819f607766707368a2a81d1dc5b961023c",
+             "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f|w=0.0000,0.0000;0.3000,0.2500;1.0000,1.0000|r=0.0000,0.0000;1.0000,1.0000|g=0.0000,0.0000;1.0000,1.0000|b=0.0000,0.0000;1.0000,1.0000"),
+            ("toneMap", "7481b2f8470a346fb83f5e926abe32676fc8d1f86859bd06b6e013b028cabdd1",
+             "de27c78cac82467aa9cb1cc0b44b55819f607766707368a2a81d1dc5b961023c|con=20.00000;hi=-30.00000;sh=15.00000"),
+            ("color", "f16e16346deb972a94cfb1ab288d8e746cd5470f8221527998e72fa700a016e9",
+             "7481b2f8470a346fb83f5e926abe32676fc8d1f86859bd06b6e013b028cabdd1|vib=15.00000;sat=-10.00000;bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
+            ("vignette", "aeb4ea9e65653681f95ef6b84b07f9812e849ad4638ff7ad3e2a00438960238c",
+             "f16e16346deb972a94cfb1ab288d8e746cd5470f8221527998e72fa700a016e9|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
+            ("display", "df5fd57369a835ae8e6df28b610a599ac8a59bef0576dbeea9b6c55148465577",
+             "aeb4ea9e65653681f95ef6b84b07f9812e849ad4638ff7ad3e2a00438960238c|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

@@ -83,6 +83,17 @@ public struct RenderOptions: Sendable {
     /// Bins per channel for `collectHistogram`; 256 is an 8-bit output's own resolution.
     public var histogramBins: Int
 
+    /// **Tests only.** Render S1.7 with the arithmetic path even when the tables are the identity.
+    ///
+    /// The identity branch is a byte copy (`s1_7_hdr_curve.metal` rule 1), which is the right thing
+    /// for the product and a blind spot for measurement: it is the one way to check that the
+    /// identity curve is *arithmetically* the identity too (shaper round trip, table interpolation,
+    /// rule 4's slope of exactly 1 above +6 EV). Never part of a key and never set by the app — the
+    /// pixels it produces differ from the shipped path by ≤ 2.4e-6 relative, which is the point of
+    /// measuring them. **Pair it with `useCache: false`**: a cached texture keyed by the same
+    /// document would otherwise be reused across the two paths, which compare equal in every key.
+    public var forceCurveArithmetic: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -91,7 +102,8 @@ public struct RenderOptions: Sendable {
                 wantsPixels: Bool = true,
                 maskTiling: MaskTiling = .auto,
                 collectHistogram: Bool = false,
-                histogramBins: Int = 256) {
+                histogramBins: Int = 256,
+                forceCurveArithmetic: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -101,6 +113,7 @@ public struct RenderOptions: Sendable {
         self.maskTiling = maskTiling
         self.collectHistogram = collectHistogram
         self.histogramBins = histogramBins
+        self.forceCurveArithmetic = forceCurveArithmetic
     }
 }
 
@@ -346,6 +359,9 @@ private struct S1Params {
     // as well as S2: the black point is a level and levels live here, so a lifted `blacks` maps the
     // matte's 0 to `−blk/(wht−blk) > 0` in *this* pass. Same convention as S0's `a`/`b` and S3c's `c`.
     var c: SIMD4<Float>
+    // 030: blackLevel, whiteLevel, hasBlack, hasWhite. The absolute spelling of the same two levels;
+    // the flags are 0 unless a level dropper (or a document) set one, and then the slider is ignored.
+    var d: SIMD4<Float>
 }
 
 private struct S2Params {
@@ -357,12 +373,19 @@ private struct S2Params {
     var c: SIMD4<Float>
 }
 
-private struct CurveParams {
-    var a: SIMD4<Float>   // identity, tableSize
+/// Mirror of `HDRCurveParams` in `s1_7_hdr_curve.metal`, byte for byte (派单 030).
+///
+/// `x0` and `K` come from `HDRCurveAxis` — the kernel has no constants of its own, so the CPU
+/// reference and the GPU shaper cannot drift apart. The slopes are rule 4's continuation: the last
+/// segment of each table, so a curve keeps going above +6 EV instead of being clamped.
+private struct HDRCurveParams {
+    var a: SIMD4<Float>   // identity, tableSize, x0, K
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 C). A curve
-    // with `f(0) = 0.1` lifts the matte's 0 to 0.1, i.e. 0.349 in display units, and the bars turn
-    // grey. Same convention as S2's `c` and S3c's `c`.
+    // with its black end lifted lifts the matte's 0 too, and the bars turn grey. Same convention as
+    // S2's `c` and S3c's `c`.
     var b: SIMD4<Float>
+    var c: SIMD4<Float>   // slopeW, slopeR, slopeG, slopeB
+    var d: SIMD4<Float>   // lumaR, lumaG, lumaB, pad
 }
 
 private struct ColorParams {
@@ -516,7 +539,13 @@ public final class RenderGraph {
     private var cacheOrder: [RenderStage] = []
     private var cacheBytes = 0
 
-    private var lutBuffers: [String: (buffer: MTLBuffer, isIdentity: Bool)] = [:]
+    /// 030: **one** 64 KB buffer, rewritten in place per changed table (§6.4).
+    ///
+    /// The old `lutBuffers: [String: …]` dictionary grew without bound — 16 KB per distinct curve
+    /// key, and the curve panel would drag a new key onto it sixty times a second. One buffer plus
+    /// four keys answers the same question with a bounded cost: compare four point lists, rebuild
+    /// only the slices whose key moved, `copyMemory` 16 KB each.
+    private var curveTablesCache: HDRCurveTableCache?
     private var bandBuffers: [String: MTLBuffer] = [:]
 
     /// 005e: the semantic routes (system matte, then Vision) and the in-memory raster cache of §5.2.
@@ -1406,6 +1435,8 @@ public final class RenderGraph {
             // not the same picture; see `WhiteBalanceTests`).
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
                 && edit.light.blacks == 0 && edit.light.whites == 0
+                && edit.light.blackLevel == nil && edit.light.whiteLevel == nil
+            let levels = edit.light.levels
             var params = S1Params(
                 a: SIMD4(edit.light.exposureGain, 1, 1, 1),
                 b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0,
@@ -1414,7 +1445,14 @@ public final class RenderGraph {
                 // matte's 0 to a positive value in *this* pass (派单 019 §3 item ①). Dispatch stays
                 // the whole canvas — one guard per pixel is cheaper than a second encoder.
                 c: SIMD4(plan.origin.x, plan.origin.y,
-                         Float(plan.content.width), Float(plan.content.height)))
+                         Float(plan.content.width), Float(plan.content.height)),
+                // 030: the absolute levels, resolved through `LevelPair` so the envelope and the
+                // `white ≥ black + 1e-3` constraint are applied in **one** place. The flags are what
+                // tell the kernel to ignore the sliders; a document without them sends 0/0 and gets
+                // 019's arithmetic bit for bit.
+                d: SIMD4(Float(levels.black), Float(levels.white),
+                         edit.light.blackLevel == nil ? 0 : 1,
+                         edit.light.whiteLevel == nil ? 0 : 1))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -1449,18 +1487,29 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .curve:
-            let p = try kernels.pipeline(file: "s3_curve", function: "s3_curve")
-            let lut = try lutBuffer(for: edit.curve)
-            var params = CurveParams(
-                a: SIMD4(lut.isIdentity ? 1 : 0, Float(CurveLUT.size), 0, 0),
+            // S1.7 — the one curve, in the log-light domain (派单 030). It reads the scene-linear
+            // buffer S1.6 (or S1) produced, unbounded and still signed, and hands S2 a value that is
+            // still scene-referred: that is what lets a −12 EV shadow and a +6 EV highlight be bent
+            // on one axis, which no curve after the tone map can do.
+            let p = try kernels.pipeline(file: "s1_7_hdr_curve", function: "s1_7_hdr_curve")
+            let tables = try hdrCurveTables(for: edit.curve)
+            let axis = HDRCurve.axis
+            var params = HDRCurveParams(
+                a: SIMD4(tables.isIdentity && !options.forceCurveArithmetic ? 1 : 0,
+                         Float(CurveLUT.size), Float(axis.x0), Float(axis.K)),
                 // The content rect, so the curve never runs on the matte (派单 008 C). Whole-canvas
                 // dispatch, one guard per pixel — the same shape as S2's, so the two passes cannot
-                // drift apart again.
+                // drift apart.
                 b: SIMD4(plan.origin.x, plan.origin.y,
-                         Float(plan.content.width), Float(plan.content.height)))
+                         Float(plan.content.width), Float(plan.content.height)),
+                c: SIMD4(tables.slopes[0], tables.slopes[1], tables.slopes[2], tables.slopes[3]),
+                // The luma weights are a parameter, not a constant: changing the working space (a
+                // future Rec2020 move) is one number here and one in `HDRCurve.lumaWeights`.
+                d: SIMD4(Float(HDRCurve.lumaWeights.r), Float(HDRCurve.lumaWeights.g),
+                         Float(HDRCurve.lumaWeights.b), Float(axis.stops)))
             let enc = try encoder(cb, p, in: src, out: out)
-            enc.setBytes(&params, length: MemoryLayout<CurveParams>.stride, index: 0)
-            enc.setBuffer(lut.buffer, offset: 0, index: 1)
+            enc.setBytes(&params, length: MemoryLayout<HDRCurveParams>.stride, index: 0)
+            enc.setBuffer(tables.buffer, offset: 0, index: 1)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 
@@ -2312,20 +2361,59 @@ public final class RenderGraph {
         let isIdentity: Bool
     }
 
-    private func lutBuffer(for curve: CurveGroup) throws -> LUTResource {
-        let key = curve.keyString
-        if let hit = lutBuffers[key] {
-            return LUTResource(buffer: hit.buffer, isIdentity: hit.isIdentity)
+    /// The four S1.7 tables, in one buffer, plus what says whether they still match the document.
+    private struct HDRCurveTableCache {
+        let buffer: MTLBuffer
+        /// One key per table (W, R, G, B): the canonical text of that point list. Comparing four
+        /// short strings is what keeps a drag to one rebuild instead of four.
+        var keys: [String]
+        var slopes: [Float]
+        var identity: [Bool]
+        var allIdentity: Bool { identity.allSatisfy { $0 } }
+    }
+
+    /// The S1.7 tables for `curve`, rebuilding only what moved.
+    ///
+    /// Measured on this machine (`swiftc -O`, the same code path, `HDRCurveTests` prints it in
+    /// Debug): **one table 0.023 ms** (p95 0.024), **all four 0.099 ms** (p95 0.35) — a drag is one
+    /// table, a document switch is four, and both are two orders below a frame. §6.4's budgets
+    /// (0.5 ms / 2 ms) hold with ~20× margin. Under `-Onone` (how `swift test` runs) the same work
+    /// is 2.4 ms / 8.9 ms, which is why the test's assertions are structural.
+    ///
+    /// The render path itself stays quiet: a per-frame `print` on a drag is one log line per frame.
+    private func hdrCurveTables(for curve: CurveGroup) throws -> (buffer: MTLBuffer, slopes: [Float],
+                                                                  isIdentity: Bool) {
+        let n = CurveLUT.size
+        let sliceBytes = n * MemoryLayout<Float>.size
+        let points = curve.tables
+        let keys = points.map { $0.map(\.keyString).joined(separator: ";") }
+
+        if var cache = curveTablesCache, cache.buffer.length == CurveLUT.tableCount * sliceBytes {
+            for t in 0..<CurveLUT.tableCount where cache.keys[t] != keys[t] {
+                let table = CurveLUT.buildOne(points[t])
+                cache.buffer.contents().advanced(by: t * sliceBytes).copyMemory(
+                    from: table, byteCount: sliceBytes)
+                cache.keys[t] = keys[t]
+                cache.identity[t] = CurveLUT.isIdentityTable(table)
+                cache.slopes[t] = CurveLUT.slope(of: table)
+            }
+            curveTablesCache = cache
+            return (cache.buffer, cache.slopes, cache.allIdentity)
         }
+
         let tables = CurveLUT.build(curve)
         guard let b = device.makeBuffer(bytes: tables,
                                         length: tables.count * MemoryLayout<Float>.size,
                                         options: .storageModeShared) else {
-            throw RenderError.allocationFailed("curve LUT")
+            throw RenderError.allocationFailed("S1.7 curve tables")
         }
-        let identity = CurveLUT.tablesAreIdentity(tables)
-        lutBuffers[key] = (b, identity)
-        return LUTResource(buffer: b, isIdentity: identity)
+        let identity = (0..<CurveLUT.tableCount).map {
+            CurveLUT.isIdentityTable(tables[$0 * n..<($0 + 1) * n])
+        }
+        let cache = HDRCurveTableCache(buffer: b, keys: keys, slopes: CurveLUT.slopes(tables),
+                                       identity: identity)
+        curveTablesCache = cache
+        return (b, cache.slopes, cache.allIdentity)
     }
 
     private func bandBuffer(for color: ColorGroup) throws -> LUTResource {

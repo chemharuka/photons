@@ -228,7 +228,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         s.light = light.isEmpty ? nil : light
 
         var curve = CurvePatch()
-        if !same(edit.curve.rgb, CurvePoint.linear) { curve.rgb = edit.curve.rgb }
+        // `CurvePatch.rgb` keeps its (pre-030) name because it is the shape of the preset/snapshot
+        // JSON, not of the document: the field still carries the luminance curve, now `white`.
+        if !same(edit.curve.white, CurvePoint.linear) { curve.rgb = edit.curve.white }
         if !same(edit.curve.red, CurvePoint.linear) { curve.red = edit.curve.red }
         if !same(edit.curve.green, CurvePoint.linear) { curve.green = edit.curve.green }
         if !same(edit.curve.blue, CurvePoint.linear) { curve.blue = edit.curve.blue }
@@ -335,7 +337,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
 
         if let p = curve {
-            if let v = p.rgb { out.curve.rgb = v }
+            if let v = p.rgb { out.curve.white = v }
             if let v = p.red { out.curve.red = v }
             if let v = p.green { out.curve.green = v }
             if let v = p.blue { out.curve.blue = v }

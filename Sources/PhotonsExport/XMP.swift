@@ -384,11 +384,11 @@ public enum XMPWriter {
 
         // MARK: 1.4 curve
 
-        try writeCurve(metadata, points: edit.curve.rgb, path: "crs:ToneCurvePV2012", &report)
+        try writeCurve(metadata, points: edit.curve.white, path: "crs:ToneCurvePV2012", &report)
         try writeCurve(metadata, points: edit.curve.red, path: "crs:ToneCurvePV2012Red", &report)
         try writeCurve(metadata, points: edit.curve.green, path: "crs:ToneCurvePV2012Green", &report)
         try writeCurve(metadata, points: edit.curve.blue, path: "crs:ToneCurvePV2012Blue", &report)
-        let anyCurve = [edit.curve.rgb, edit.curve.red, edit.curve.green, edit.curve.blue]
+        let anyCurve = [edit.curve.white, edit.curve.red, edit.curve.green, edit.curve.blue]
             .contains { $0 != CurvePoint.linear }
         try write(metadata, "crs:ToneCurveName2012", anyCurve ? str("Custom") : nil, &report)
 

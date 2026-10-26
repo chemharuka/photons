@@ -144,9 +144,15 @@ final class CurveMatteTests: XCTestCase {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    /// `CurvePoint(0, 0.1) → (1, 1)`: the drag that lights the bars up. 0 in, 0.1 out.
+    /// `CurvePoint(0, 0.3) → (1, 1)`: the drag that would light the bars up, if nothing guarded them.
+    ///
+    /// 030 turned the y axis into the log-light coordinate `u` (`HDRCurveAxis`), so the lift has to be
+    /// expressed in `u`, not in linear light: **0.3 u at the bottom of the axis is +5.4 stops**
+    /// (`x0·expm1(0.3·K)` = 0.0538 linear, 0.257 in display units). A lifted black end is therefore
+    /// even more visible on the letterbox than the old `f(0) = 0.1` was, which is why the two guards
+    /// are still the point of this file.
     private var liftedBlackCurve: CurveGroup {
-        CurveGroup(rgb: [CurvePoint(0, 0.1), CurvePoint(1, 1)])
+        CurveGroup(white: [CurvePoint(0, 0.3), CurvePoint(1, 1)])
     }
 
     // MARK: - the matte
@@ -196,9 +202,14 @@ final class CurveMatteTests: XCTestCase {
 
     // MARK: - the picture
 
-    /// Acceptance ②: the guard must not eat the picture. Inside the content rect the LUT still runs —
-    /// the mean rises because the ramp's toe moved, and the true-black block lands on the LUT's 0.1
-    /// (0.349 in display units), which is the number the pre-guard render showed on the bars too.
+    /// Acceptance ②: the guard must not eat the picture. Inside the content rect the table still
+    /// runs — the mean rises because the ramp's toe moved.
+    ///
+    /// 030 note on the true-black block: it stays **exactly 0**, and that is now the *kernel's* rule
+    /// 3 (`x ≤ 0` passes through, 派单 018), not the guard. A curve cannot lift an exact zero,
+    /// because the log-light shaper has no defined value there and sub-black detail must survive the
+    /// curve untouched. So this test pins both halves: the picture moves, the exact-black pixel does
+    /// not — the second fact is why the matte needs a guard even though `0 → 0` here.
     func testCurveStillMovesTheContent() throws {
         let graph = try makeGraph(rampImage())
         var edit = EditModel.neutral
@@ -217,13 +228,20 @@ final class CurveMatteTests: XCTestCase {
             // The source's exact-black block sits at the content rect's top-left corner (no rescale).
             let blackIndex = ((rect.y + 8) * img.width + (rect.x + 8)) * 4
             let liftedBlack = Float(img.rgba[blackIndex])
+            // A *near*-black pixel of the picture: the ramp's first column past the block, 0.0751
+            // linear. This is the pixel the lift must move.
+            let toeIndex = ((rect.y + 8) * img.width + (rect.x + 40)) * 4
+            let toeBase = Float(base.rgba[((rect.y + 8) * base.width + (rect.x + 40)) * 4])
+            let toeLifted = Float(img.rgba[toeIndex])
 
             print("派单 008C content [\(box.name)]: mean \(baseMean) → \(curveMean) (Δ \(delta)), "
-                  + "source-black pixel → \(liftedBlack)")
+                  + "exact-black \(liftedBlack), toe \(toeBase) → \(toeLifted)")
 
             XCTAssertGreaterThan(delta, 0.02, "\(box.name): the curve must still move the picture")
-            XCTAssertEqual(liftedBlack, 0.349, accuracy: 0.005,
-                           "\(box.name): the LUT's 0 → 0.1 must survive inside the content rect")
+            XCTAssertEqual(liftedBlack, 0,
+                           "\(box.name): an exact 0 must pass through the curve (rule 3, 018)")
+            XCTAssertGreaterThan(toeLifted, toeBase + 0.1,
+                                 "\(box.name): a near-black pixel must be lifted by the table")
         }
     }
 
@@ -293,13 +311,19 @@ final class CurveMatteTests: XCTestCase {
 
     // MARK: - measured-once constants
     //
-    // Recorded from the render **before** `s3_curve`'s content guard (the matte was 0.349 there, the
-    // content rect is the same picture either way). Re-measure only if the curve pipeline itself
-    // changes; these are not goldens on disk, so nothing needs re-recording.
+    // The three identity hashes were recorded **before** any content guard existed and have not moved
+    // since: the identity branch writes the pixel through, so the reorder of 派单 030 (curve from S3
+    // to S1.7) is invisible to them — that is the strongest pixel claim in this file, and it holds.
+    //
+    // The two curve hashes were re-recorded for 030 because the fixture curve is now expressed in the
+    // log-light axis (`CurvePoint(0, 0.3)`, see `liftedBlackCurve`): the *same* control points no
+    // longer mean the same lift, which is exactly what `processVersion` 2 declares. The structure
+    // being pinned did not change — content moved, matte did not. Not goldens on disk; nothing needs
+    // re-recording elsewhere.
 
     private static let neutralCanvasHash = "0487f109112b48233dce485d843610dd1dfae7884e307533bb7baa0bf18437bb"
     private static let neutralPillarboxHash = "eab59159b31e72b4fc223fce364c44e67c025db96e09015c739780371d52795a"
     private static let neutralLetterboxHash = "d39f90c648b367c2042b882e84733a56a3db65d7f364e1e04d92b668efc1e3a5"
-    private static let curveContentPillarboxHash = "4347144dcb07f7faeec3fd3b476213f357c1e3797e2fb1aba7a23cc2a2f9bdfa"
-    private static let curveContentLetterboxHash = "4347144dcb07f7faeec3fd3b476213f357c1e3797e2fb1aba7a23cc2a2f9bdfa"
+    private static let curveContentPillarboxHash = "768c9b3deb63363e62abfd870d51d5c9f0b3f67f2b099e81d6955fb2f45c871f"
+    private static let curveContentLetterboxHash = "768c9b3deb63363e62abfd870d51d5c9f0b3f67f2b099e81d6955fb2f45c871f"
 }
