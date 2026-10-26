@@ -30,6 +30,11 @@ extension EditHistory {
         if !EditParameters.areEqual(before.curve, after.curve) { dirty.insert(.curve) }
         if !EditParameters.areEqual(before.color, after.color) { dirty.insert(.color) }
         if !EditParameters.areEqual(before.detail, after.detail) { dirty.insert(.detail) }
+        // 派单 031: the decoder-side detail amounts share the panel with `detail`, so they share the
+        // group. They dirty no *stage* (`.detail.stages` is empty and stays empty: a new
+        // development is not a stage), but a document whose sliders moved is a document that
+        // changed, and `commit` has to see it to keep an undo step.
+        if !EditParameters.areEqual(before.detailSettings, after.detailSettings) { dirty.insert(.detail) }
         if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
         if !EditParameters.areEqual(before.geometry, after.geometry) { dirty.insert(.geometry) }
         if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }
@@ -133,6 +138,15 @@ enum EditParameters {
             && areEqual(a.noiseLuminance, b.noiseLuminance)
             && areEqual(a.noiseColor, b.noiseColor)
             && areEqual(a.lensCorrections, b.lensCorrections)
+    }
+
+    /// 派单 031: the decoder-side amounts. One unit of slider travel is 0.005 of a filter value, so
+    /// the 1e-6 tolerance is far below a step and far above JSON round-trip noise.
+    static func areEqual(_ a: DetailSettings, _ b: DetailSettings) -> Bool {
+        areEqual(a.luminanceNR, b.luminanceNR)
+            && areEqual(a.colorNR, b.colorNR)
+            && areEqual(a.sharpness, b.sharpness)
+            && areEqual(a.detail, b.detail)
     }
 
     static func areEqual(_ a: EffectsGroup, _ b: EffectsGroup) -> Bool {

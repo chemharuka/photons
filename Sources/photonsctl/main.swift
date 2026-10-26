@@ -669,6 +669,7 @@ guard let cmd = argv.first else {
       photonsctl render <raw> --edit <json> [--edit <json> …] --out <file> [options]
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
       photonsctl histogram <raw> [--edit <json>] [--roi x,y,w,h] [--bins 256] [--json|--csv]
+      photonsctl detail <raw> [--version V] [--scale F]   # 派单 031 降噪/细节解码参数实测
 
       photonsctl library create  <pkg.photonslibrary>
       photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
@@ -720,6 +721,7 @@ do {
     case "render":   try cmdRender(rest)
     case "bench":    try cmdBench(rest)
     case "histogram": try cmdHistogram(rest)
+    case "detail":    try cmdDetail(rest)
     case "library":  try cmdLibrary(rest)
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)

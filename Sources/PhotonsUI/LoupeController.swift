@@ -380,7 +380,19 @@ public final class LoupeController: NSViewController {
 
     /// When set, frames are made for this URL instead of the session's anchor photo (tests, the
     /// bench, an import preview). `nil` in the app.
-    public var frameSource: FrameSource?
+    ///
+    /// 派单 031: writing a frame source whose **detail amounts moved** is the harness spelling of "the
+    /// user moved a 细节 slider" — it puts the frames on the preview rung and arms the "hand stopped"
+    /// upgrade, exactly as `requestEditRender` does for a real drag. The settle's own re-render writes
+    /// no new source, so it cannot re-arm itself.
+    public var frameSource: FrameSource? {
+        didSet {
+            guard detailGesturing,
+                  frameSource?.edit.detailSettings != oldValue?.edit.detailSettings else { return }
+            detailPreview = true
+            scheduleDetailSettle()
+        }
+    }
 
     /// Everything one frame needs, snapshotted on the main thread: the render queue must never read
     /// `session` itself (a slider would race it) and the decode queue must never read a view state.
@@ -404,6 +416,12 @@ public final class LoupeController: NSViewController {
         let viewport: ImageSize
         let edit: EditModel
         let state: LoupeViewState
+        /// The rung this frame wants. `DecodeLadder.fullScale` for everything except a frame drawn
+        /// while a 细节/降噪 slider is moving (派单 031): a detail change is a **new development**, so
+        /// following the thumb at full size would put a 1–5 s 60 MP decode behind every tick. While
+        /// the drag lasts the ladder is asked for the 0.5 rung only; 200 ms after the hand stops, a
+        /// full-size frame is requested and replaces it.
+        let target: Float
         /// The caller's frame generation. `var` because `scheduleRender` bumps the counter *after* it
         /// has decided there is something to draw, and the job it just built has to carry the new one.
         var generation: Int
@@ -413,11 +431,6 @@ public final class LoupeController: NSViewController {
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
         var identity: String { edit.decodeInputs.appending(to: baseIdentity) }
-
-        /// The rung the camera needs. Everything — fit, 1:1, 4:1 — renders from the full buffer: a
-        /// window is what makes 1:1 cheap to *render*, and the rung is what makes it expensive to
-        /// *develop*. Asking for the biggest rung once is what keeps `fit ↔ 1:1` at one development.
-        var target: Float { DecodeLadder.fullScale }
     }
 
     // MARK: views
@@ -2012,11 +2025,80 @@ public final class LoupeController: NSViewController {
 
     // MARK: edit re-render (50 ms debounce, single-flight)
 
+    /// 派单 031: how long after the hand stops a detail change is re-developed at **full** size.
+    ///
+    /// The window the task asks for is 150–250 ms; 200 ms sits in the middle. Shorter and a drag
+    /// with a stutter starts a 60 MP development it will have to throw away; longer and the picture
+    /// stays soft after the user has visibly stopped.
+    public static let detailSettleInterval: TimeInterval = 0.2
+
+    /// True while a 细节/降噪 slider is held. It decides **the rung**, never the document:
+    /// `makeJob` asks the ladder for the preview rung while `detailPreview` is on, and for the full
+    /// one otherwise.
+    private var detailGesturing = false
+    /// True while the frames being produced are preview-rung frames. Cleared by the "hand stopped"
+    /// timer, so a drag that pauses for 200 ms gets its full-size development — and the next tick
+    /// (if the drag resumes) puts the preview back on.
+    private var detailPreview = false
+    /// The pending "the hand stopped" re-development.
+    private var detailSettle: DispatchWorkItem?
+    /// The identity of the last preview rung this loupe asked for during a detail drag, so the next
+    /// tick can drop the one it superseded instead of queueing a decode for every thumb position.
+    private var pendingDetailPreviewIdentity: String?
+
+    /// A 细节/降噪 slider was grabbed: the frames that follow rebuild from the preview rung.
+    public func beginDetailAdjustment() {
+        detailGesturing = true
+        detailPreview = true
+        detailSettle?.cancel()
+        detailSettle = nil
+    }
+
+    /// The slider was released: commit-time work is the caller's; this only schedules the full-size
+    /// re-development for `detailSettleInterval` later (the same "hand stopped" timer a paused drag
+    /// gets, so holding still and letting go behave identically).
+    public func endDetailAdjustment() {
+        detailGesturing = false
+        scheduleDetailSettle()
+    }
+
+    /// Arm (or re-arm) the "the hand stopped" timer. Every detail tick re-arms it, so a drag produces
+    /// exactly one full-size development — after the last movement, not during it.
+    private func scheduleDetailSettle() {
+        detailSettle?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.detailSettle = nil
+            // The hand stopped: whatever produced the last frame was a preview, so this one is the
+            // full-size development the spec asks for 150–250 ms after the movement ended.
+            self.detailPreview = false
+            self.requestSettleFrame()
+        }
+        detailSettle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.detailSettleInterval, execute: work)
+    }
+
+    /// Ask for one frame at the current camera, on whichever path this loupe is running.
+    ///
+    /// In the app that is an **edit** frame (`requestEditRender`, with the slider timestamp that feeds
+    /// the latency counters). A loupe with a `frameSource` — `--ui-smoke`, the tests, an import
+    /// preview — has no catalog session to be "in the loupe of", so it asks for a viewport frame
+    /// instead; both end in `renderFrame`, which is where the rung decision actually lives.
+    private func requestSettleFrame() {
+        if frameSource != nil { requestViewportRender() } else { requestEditRender() }
+    }
+
     /// A slider tick landed. Coalesce for `debounceInterval`; if the loupe is not on screen this
     /// costs nothing at all (no decode, no render, no queue entry).
     public func requestEditRender() {
         guard autoRenderEnabled, let session, session.mode == .loupe else { return }
         guard session.anchorAsset != nil else { return }
+        // 派单 031: a detail tick is a *development*, so it stays on the preview rung and re-arms the
+        // "hand stopped" upgrade. Both only while the slider is actually held.
+        if detailGesturing {
+            detailPreview = true
+            scheduleDetailSettle()
+        }
         editDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.startEditRender() }
         editDebounce = work
@@ -2110,17 +2192,19 @@ public final class LoupeController: NSViewController {
     private func makeJob(kind: RenderJob.Kind,
                          changedAt: CFAbsoluteTime = 0) -> RenderJob? {
         let gen = generation
+        // 派单 031: while a detail slider moves, ask the ladder for the preview rung only.
+        let target = detailPreview ? DecodeLadder.previewScale : DecodeLadder.fullScale
         if let source = frameSource {
             return RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
                              viewport: source.viewport, edit: source.edit, state: source.state,
-                             generation: gen, changedAt: changedAt)
+                             target: target, generation: gen, changedAt: changedAt)
         }
         guard let session, session.mode == .loupe,
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
         let viewport = viewportPixels
         guard viewport.width > 8, viewport.height > 8 else { return nil }
         return RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
-                         edit: session.edit, state: viewState, generation: gen,
+                         edit: session.edit, state: viewState, target: target, generation: gen,
                          changedAt: changedAt)
     }
 
@@ -2195,6 +2279,18 @@ public final class LoupeController: NSViewController {
     /// The queue dedupes by `(photo, rung)`, so twenty pans during one development cost **one** decode
     /// and twenty deliveries; `rungArrived` then ignores the duplicates because the rung is resident.
     private func requestDevelopment(_ plan: DecodeLadderPlan, job: RenderJob) {
+        // 派单 031: a detail drag produces one identity per thumb position, and every one of them is
+        // a new `(identity, scale)` key — so without this the queue would develop every position the
+        // thumb passed through. The previous preview rung can never be shown again (its document is
+        // gone), so drop it first: at most one preview decode runs, and at most one waits.
+        if detailPreview {
+            if let previous = pendingDetailPreviewIdentity, previous != job.identity {
+                decodeQueue.cancel(identity: previous)
+            }
+            pendingDetailPreviewIdentity = job.identity
+        } else if !plan.isResident {
+            pendingDetailPreviewIdentity = nil
+        }
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
             decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
                                 work: { try Self.develop(url: job.url,
@@ -2273,6 +2369,13 @@ public final class LoupeController: NSViewController {
     /// with it and cannot be aborted.
     public func cancelPendingFrames() {
         generation += 1
+        // 派单 031: a pending detail settle belongs to the photo that is going away; firing it at the
+        // next one would develop a 60 MP frame nobody asked for.
+        detailSettle?.cancel()
+        detailSettle = nil
+        detailGesturing = false
+        detailPreview = false
+        pendingDetailPreviewIdentity = nil
         // Nothing that was in flight belongs to the camera that is now on screen: a bridge would
         // carry the old picture over the new one, and a held frame is for a photo nobody is looking at.
         cancelZoomBridge()
@@ -2362,6 +2465,10 @@ public final class LoupeController: NSViewController {
                           inputs: session?.edit.decodeInputs ?? .asShot)
     }
 
+    /// 派单 031: the four decoder-side detail values of the buffer on screen, so the 细节 card can print
+    /// what its 0 position means for this body. `nil` before the first development lands.
+    public var currentDetailBaseline: DetailBaseline? { ladder.best?.detailBaseline }
+
     /// The rung key, the decode inputs and the scale of the development this loupe would ask for
     /// right now — the diagnostic line `--ui-smoke` prints to tell "the development happened" from
     /// "the frame looked itself up under another key" (派单 011).
@@ -2398,10 +2505,12 @@ public final class LoupeController: NSViewController {
         let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
                                                                               exposureEV: 0,
                                                                               scale: scale,
-                                                                              whiteBalance: inputs.whiteBalance))
+                                                                              whiteBalance: inputs.whiteBalance,
+                                                                              detail: inputs.detail))
         return DecodeRung(scale: scale, image: developed.image,
                           capabilities: developed.capabilities,
-                          milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                          milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000,
+                          detailBaseline: developed.detailBaseline)
     }
 
     /// The whole GPU path for one frame, callable synchronously (ui-smoke uses this).

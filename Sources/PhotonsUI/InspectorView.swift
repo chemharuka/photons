@@ -26,6 +26,10 @@ public struct InspectorView: View {
         case whiteBalance
         case light
         case color
+        /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
+        /// are the same panel in Lightroom, and below the tone controls because they act on the
+        /// decoded pixels rather than on the render.
+        case detail
         case presets
         case masks
         case decode
@@ -38,6 +42,7 @@ public struct InspectorView: View {
             case .whiteBalance: return "白平衡"
             case .light: return "Light"
             case .color: return "Color"
+            case .detail: return "细节"
             case .presets: return "预设"
             case .masks: return "蒙版"
             case .decode: return "Decode"
@@ -143,6 +148,8 @@ public struct InspectorView: View {
             lightCard
         case .color:
             colorCard
+        case .detail:
+            detailCard
         case .presets:
             PresetPanel(session: session)
         case .masks:
@@ -278,6 +285,139 @@ public struct InspectorView: View {
             row("自然饱和", \.color.vibrance, -100 ... 100, "%.0f")
             row("饱和", \.color.saturation, -100 ... 100, "%.0f")
         }
+    }
+
+    /// 细节 (派单 031): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to `CIRAWFilter`.
+    ///
+    /// Three rules make this card different from the tone sliders, and all three come from the same
+    /// fact — **a tick here is a development, not a render**:
+    ///
+    ///  1. **0 is "Apple's default", not "0.0".** The decoder's own colour NR is 0.5 and its sharpness
+    ///     0.5 (measured; 1.0 on a Canon body), so a slider at 0 assigns nothing at all. That is what
+    ///     keeps an untouched document byte-identical, and why the row prints the baseline next to
+    ///     the number: ± is relative to *this file's* default, not to a nominal zero.
+    ///  2. **Drag = preview rung, release = full size.** The thumb writes the document on every tick
+    ///     (the canvas has to follow it), and the loupe rebuilds from the 0.5 rung while the slider is
+    ///     held; 200 ms after the hand stops it develops full size and replaces the frame. One drag is
+    ///     still **one** `EditHistory` snapshot, taken on release.
+    ///  3. **A dead slider is said out loud.** v9 of Apple's decoder ignores chroma NR and detail
+    ///     (`DecoderCapabilities`), so the card says so instead of letting a number move nothing.
+    private var detailCard: some View {
+        card(Section.detail.title) {
+            detailRow("降噪", \.luminanceNR, baseline: \.luminanceNR,
+                      effective: session.capabilities?.supportsDetail ?? true)
+            detailRow("色彩降噪", \.colorNR, baseline: \.colorNR,
+                      effective: session.capabilities?.supportsChromaNoiseReduction ?? true)
+            detailRow("细节", \.detail, baseline: \.detail,
+                      effective: session.capabilities?.supportsDetail ?? true)
+            detailRow("锐化", \.sharpness, baseline: \.sharpness,
+                      effective: session.capabilities?.supportsDetail ?? true)
+            Text(detailFooter)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One line under the sliders: what these controls cost, and what the decoder does with them.
+    ///
+    /// The version comes from the decode that is on screen (`session.capabilities`), and the
+    /// "unavailable" note is that type's measurement, not this panel's opinion.
+    private var detailFooter: String {
+        let version = session.capabilities.map { "v\($0.effectiveVersion)" } ?? "尚未解码"
+        let inert = session.capabilities.map { c -> String in
+            var dead: [String] = []
+            if !c.supportsChromaNoiseReduction { dead.append("色彩降噪") }
+            if !c.supportsDetail { dead.append("细节/锐化") }
+            return dead.isEmpty ? "" : " · 该版本解码器忽略 \(dead.joined(separator: "、"))"
+        } ?? ""
+        return "解码参数 · \(version) · 0 = 系统默认 · 改一次 = 重新 develop\(inert)"
+    }
+
+    /// A row: title (double-click resets), the baseline, an editable number, and the slider.
+    ///
+    /// `baseline` names the decoder's own value on this axis, so the row can print "基线 0.50" — the
+    /// only way a relative slider can be honest about what 0 means for this body.
+    private func detailRow(_ title: String,
+                           _ path: WritableKeyPath<DetailSettings, Double>,
+                           baseline: KeyPath<DetailBaseline, Double>,
+                           effective: Bool) -> some View {
+        let value = detailBinding(path)
+        let base = detailBaselineValue[keyPath: baseline]
+        return VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(effective ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                    .onTapGesture(count: 2) { resetDetail(path) }
+                    .help("双击复位为 0（= 解码器默认）")
+                if base > 0.0001 {
+                    Text(String(format: "基线 %.2f", base))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 4)
+                // A number you can type, not only a slider: the task asks for both. `onSubmit` writes
+                // and commits, so a typed value is one history entry and one development.
+                TextField("", value: value, format: .number.precision(.fractionLength(0)))
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(effective ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                    .frame(width: 40)
+                    .onSubmit { commitDetail(title: title) }
+                    .accessibilityIdentifier("inspector.detail.\(pathKey(path))")
+            }
+            Slider(value: value, in: DetailSettings.range, step: DetailSettings.step) { editing in
+                if editing { beginDetailDrag() } else { commitDetail(title: title) }
+            }
+            .controlSize(.mini)
+        }
+    }
+
+    /// The decoder's own four values, read once per development. `.measured` until the first one
+    /// lands, so the panel can show a baseline before there is a buffer to ask.
+    private var detailBaselineValue: DetailBaseline {
+        loupe?.currentDetailBaseline ?? .measured
+    }
+
+    private func pathKey(_ path: WritableKeyPath<DetailSettings, Double>) -> String {
+        switch path {
+        case \.luminanceNR: return "luminanceNR"
+        case \.colorNR: return "colorNR"
+        case \.detail: return "detail"
+        default: return "sharpness"
+        }
+    }
+
+    /// Live write-through: every tick moves the document (the canvas follows the thumb), but nothing
+    /// is committed until the drag ends.
+    private func detailBinding(_ path: WritableKeyPath<DetailSettings, Double>) -> Binding<Double> {
+        Binding(get: { session.edit.detailSettings[keyPath: path] },
+                set: { newValue in
+                    session.applyEdit { $0.detailSettings[keyPath: path] = newValue }
+                })
+    }
+
+    /// Drag start: the loupe rebuilds from the preview rung only (派单 031).
+    private func beginDetailDrag() {
+        loupe?.beginDetailAdjustment()
+    }
+
+    /// One drag (or one typed value) = one quantized write = one history snapshot = one full-size
+    /// development. The loupe's settle timer does the last part 200 ms after the hand stops.
+    private func commitDetail(title: String) {
+        session.applyEdit { $0.detailSettings = $0.detailSettings.quantized() }
+        session.commitEdit(label: title)
+        loupe?.endDetailAdjustment()
+    }
+
+    /// Double-click: back to 0, one snapshot, one development.
+    private func resetDetail(_ path: WritableKeyPath<DetailSettings, Double>) {
+        guard session.edit.detailSettings[keyPath: path] != 0 else { return }
+        session.applyEdit { $0.detailSettings[keyPath: path] = 0 }
+        session.commitEdit(label: "复位")
+        loupe?.endDetailAdjustment()
     }
 
     private var decodeCard: some View {

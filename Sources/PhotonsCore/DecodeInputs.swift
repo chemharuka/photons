@@ -38,6 +38,13 @@ public struct DecodeInputs: Sendable, Hashable {
     public var scale: Double
     /// The fixed decode recipe (`DecodeRecipe.current`). Bumped when the settings change.
     public var recipe: String
+    /// 派单 031: the four noise-reduction / detail amounts, assigned to `CIRAWFilter`
+    /// (`luminanceNoiseReductionAmount`, `colorNoiseReductionAmount`, `sharpnessAmount`,
+    /// `detailAmount`) **before** it produces pixels. Like the white balance they are a property of
+    /// the development, not of the render — a detail change is a new buffer, not a new S1 pass.
+    /// `.identity` (all four 0) appends nothing to the key, which is what keeps every document that
+    /// has never touched the panel byte-identical to the pre-031 decode.
+    public var detail: DetailSettings
 
     /// The neutral development: the file's own balance, no version request, full scale.
     public static let asShot = DecodeInputs()
@@ -45,11 +52,13 @@ public struct DecodeInputs: Sendable, Hashable {
     public init(whiteBalance: WhiteBalance = .asShot,
                 decoderVersion: String? = nil,
                 scale: Double = 1,
-                recipe: String = DecodeRecipe.current) {
+                recipe: String = DecodeRecipe.current,
+                detail: DetailSettings = .identity) {
         self.whiteBalance = whiteBalance
         self.decoderVersion = decoderVersion
         self.scale = scale
         self.recipe = recipe
+        self.detail = detail
     }
 
     /// The white-balance component of a decode key — `wb=5500K/+0` — or `nil` for as shot.
@@ -58,22 +67,29 @@ public struct DecodeInputs: Sendable, Hashable {
     /// pre-006 digest and every pre-009 rung identity byte-identical.
     public var whiteBalanceComponent: String? { whiteBalance.decodeComponent }
 
+    /// The detail component — `dt=nr+30.00,c+0.00,s-20.00,d+10.00` — or `nil` for an untouched panel.
+    public var detailComponent: String? { detail.decodeComponent }
+
     /// A stable, order-independent string for this development. Only decode inputs may enter it.
     public var key: String {
         var parts = ["recipe=\(recipe)",
                      "ver=\(decoderVersion ?? "auto")",
                      String(format: "scale=%.4f", scale)]
         if let wb = whiteBalanceComponent { parts.append(wb) }
+        if let dt = detailComponent { parts.append(dt) }
         return parts.joined(separator: ";")
     }
 
-    /// `base` for as shot, `base|wb=…` otherwise — the one spelling of a rung identity.
+    /// `base` for as shot and an untouched detail panel, `base|wb=…|dt=…` otherwise — the one
+    /// spelling of a rung identity.
     ///
     /// Used by the loupe's `ladderIdentity` and by the histogram's cache key, so a buffer cannot be
     /// named one way on the way in and another on the way out.
     public func appending(to base: String) -> String {
-        guard let wb = whiteBalanceComponent else { return base }
-        return "\(base)|\(wb)"
+        var out = base
+        if let wb = whiteBalanceComponent { out += "|\(wb)" }
+        if let dt = detailComponent { out += "|\(dt)" }
+        return out
     }
 }
 
@@ -92,6 +108,10 @@ public struct RenderInputs: Sendable, Equatable {
         var e = edit
         e.light.temperature = nil
         e.light.tint = nil
+        // 派单 031: the noise-reduction/detail amounts are assigned inside `CIRAWFilter`, so the
+        // buffer already carries them. Leaving them here would make "did this change the render?"
+        // answer yes for a change the render cannot see.
+        e.detailSettings = .identity
         self.edit = e
     }
 
@@ -126,7 +146,8 @@ public extension EditModel {
         DecodeInputs(whiteBalance: light.whiteBalance,
                      decoderVersion: nil,
                      scale: 1,
-                     recipe: DecodeRecipe.current)
+                     recipe: DecodeRecipe.current,
+                     detail: detailSettings)
     }
 
     /// The stable decode key: changes **iff** the decoded pixels would change.

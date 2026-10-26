@@ -30,11 +30,16 @@ public struct DecodeCacheKey: Sendable, Hashable {
     /// hitting. An explicit `3500 K / +30` is a **different buffer**, not a different render: without
     /// this component a stale as-shot buffer would be served for a document that asked for 3500 K.
     public let whiteBalance: WhiteBalance
+    /// 派单 031: the four noise-reduction/detail amounts, which are `CIRAWFilter` inputs and therefore
+    /// change the pixels. `.identity` appends nothing, so every buffer written before this field
+    /// existed keeps hitting byte for byte.
+    public let detail: DetailSettings
     public let decodeRecipe: String
 
     public init(fileSHA256: String, decoderVersion: String, exposureEV: Float = 0,
                 scale: Float = 1, draft: Bool = false, colorSpace: String = "extendedLinearSRGB",
                 whiteBalance: WhiteBalance = .asShot,
+                detail: DetailSettings = .identity,
                 decodeRecipe: String = DecodeRecipe.current) {
         self.fileSHA256 = fileSHA256
         self.decoderVersion = decoderVersion
@@ -43,13 +48,15 @@ public struct DecodeCacheKey: Sendable, Hashable {
         self.draft = draft
         self.colorSpace = colorSpace
         self.whiteBalance = whiteBalance
+        self.detail = detail
         self.decodeRecipe = decodeRecipe
     }
 
-    /// The exact text the digest is taken over: `file|version|ev|scale|draft|colour|recipe[|wb=…]`.
+    /// The exact text the digest is taken over: `file|version|ev|scale|draft|colour|recipe[|wb=…][|dt=…]`.
     ///
     /// Exposed because "the white balance appears in the decode key and **only** there" is an
-    /// architecture claim, and a claim needs a string a test can read (派单 011 A).
+    /// architecture claim, and a claim needs a string a test can read (派单 011 A). 派单 031 added the
+    /// detail component on the same rule: it is a decode input, so it is here and nowhere else.
     public var keyText: String {
         var parts = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
                      String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
@@ -60,9 +67,13 @@ public struct DecodeCacheKey: Sendable, Hashable {
         if let wb = DecodeInputs(whiteBalance: whiteBalance,
                                  decoderVersion: decoderVersion,
                                  scale: Double(scale),
-                                 recipe: decodeRecipe).whiteBalanceComponent {
+                                 recipe: decodeRecipe,
+                                 detail: detail).whiteBalanceComponent {
             parts.append(wb)
         }
+        // 派单 031: same discipline for the detail amounts — one spelling (`DecodeInputs`), appended
+        // only when the panel was touched.
+        if let dt = detail.decodeComponent { parts.append(dt) }
         return parts.joined(separator: "|")
     }
 
