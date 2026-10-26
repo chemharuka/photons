@@ -1936,18 +1936,21 @@ public final class UISmokeRunner {
                                              channels: [.code(245), .code(128), .code(64)]))
         card.needsDisplay = true
         card.display()
-        let percentContrast = card.percentContrast
+        let valueContrast = HistogramCardReadability.worstContrast(of: card.channelValueColor,
+                                                                   isDark: card.lastAppearanceIsDark)
         let sampleChannel = card.channelRowText
         let channelSlotWithPixel = card.channelRowRect
         let sampleGaps = zip(card.channelLetterRects, card.channelValueRects)
             .map { $0.1.minX - $0.0.maxX }
-        log("histogram labels        通道行 “\(sampleChannel)” · \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · WCAG 通道值 \(String(format: "%.2f", percentContrast)):1（\(appearanceName)）· 字母 minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) }) · 间距 \(sampleGaps.map { String(format: "%.2f", $0) })")
-        check("通道行是光标像素的 RGB 而不是过白比例：“\(sampleChannel)” == “R 245 G 128 B 64”，不含 “%”，字母带色 \(card.channelLetterColors.count) 个、minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) })；通道值对比度 \(String(format: "%.2f", percentContrast)):1 ≥ \(HistogramCardReadability.minimumRatio):1（WCAG，卡片背景带最差端，\(appearanceName)），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+        log("histogram labels        通道行 “\(sampleChannel)” · \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · 数值 \(card.channelValueFont.fontName) \(String(format: "%.1f", card.channelValueFont.pointSize))pt · WCAG 数值 \(String(format: "%.2f", valueContrast)):1（\(appearanceName)）· 字母 minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) }) · 间距 \(sampleGaps.map { String(format: "%.2f", $0) })")
+        check("通道行是光标像素的 RGB 而不是过白比例：“\(sampleChannel)” == “R 245 G 128 B 64”，不含 “%”，字母带色 \(card.channelLetterColors.count) 个、minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) })；数值是直方图悬停个数指示那一套（\(card.channelValueFont.fontName) \(String(format: "%.1f", card.channelValueFont.pointSize)) pt，颜色 == readoutColor），对比度 \(String(format: "%.2f", valueContrast)):1 ≥ \(HistogramCardReadability.minimumRatio):1（WCAG，卡片背景带最差端，\(appearanceName)），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
               sampleChannel == "R 245 G 128 B 64"
               && !sampleChannel.contains("%")
               && card.channelLetterRects.count == 3
               && card.channelLetterColors.count == 3
-              && percentContrast >= HistogramCardReadability.minimumRatio
+              && card.channelValueFont == HistogramCardView.numberFont
+              && card.channelValueColor == HistogramCardReadability.readoutColor(isDark: card.lastAppearanceIsDark)
+              && valueContrast >= HistogramCardReadability.minimumRatio
               && card.channelRowWidth > 0
               && card.channelRowWidth <= cardBounds.width)
         card.clearPointerReadout()
@@ -1983,23 +1986,23 @@ public final class UISmokeRunner {
                                    green: histogram.green.bins[codeBin],
                                    blue: histogram.blue.bins[codeBin]))
             log("hover readout          码值 bin \(codeBin) → “\(card.hoverCountText)” · 事件=\(movedByEvent) · row \(card.readoutRowRect)")
-            check("悬停读数（码值区）：真实 mouseMoved 事件 → 行 “\(card.hoverCountText)” == \(codeCounts)（Core 的该箱计数，五位定宽右对齐）；亮度值不显示（那是画布上那一半），“\(card.hoverValueText)” 应为空",
+            check("悬停读数（码值区）：真实 mouseMoved 事件 → 行 “\(card.hoverCountText)” == \(codeCounts)（Core 的该箱计数）；023 之后只有这一行的一种内容，没有亮度数字，“\(card.readoutValueTexts)” 是三组计数",
                   movedByEvent
                   && card.readoutState == .histogram(counts: HistogramBinCounts(red: histogram.red.bins[codeBin],
                                                                                green: histogram.green.bins[codeBin],
                                                                                blue: histogram.blue.bins[codeBin]))
                   && card.hoverCountText == codeCounts
-                  && card.hoverValueText.isEmpty)
+                  && card.readoutValueTexts.count == 3)
 
-            // 指针在直方图上 → **通道行空白**（它读的是像素，不是箱），脚注行是计数；两行槽位不交。
+            // 指针在直方图上 → **同一行**画计数，像素那半空着；两半共用一个槽（一行）。
             if let reading = card.hoverReading {
                 let expectedRow = HistogramCardFormat.readoutCounts(
                     HistogramBinCounts(red: histogram.red.bins[reading.bin],
                                        green: histogram.green.bins[reading.bin],
                                        blue: histogram.blue.bins[reading.bin]))
                 let slot = card.readoutRowRect
-                log("hover row              code bin \(reading.bin) → “\(card.hoverRowText ?? "nil")” · 通道行 “\(card.channelRowText)”（应为空）· 通道槽 \(card.channelRowRect) · 读数槽 \(slot)")
-                check("悬停时通道行为空（“\(card.channelRowText)”，指针在直方图上不读像素），脚注行是计数：“\(card.hoverRowText ?? "nil")” == “\(expectedRow)”，槽 \(slot) 高 \(String(format: "%.1f", slot.height)) == readoutRowHeight \(String(format: "%.1f", HistogramCardView.readoutRowHeight))，R/G/B 字母 minX \(card.readoutLetterRects.map { String(format: "%.1f", $0.minX) })，两行不重叠（通道行 maxY \(String(format: "%.1f", card.channelRowRect.maxY)) ≤ 读数行 minY \(String(format: "%.1f", slot.minY))）",
+                log("hover row              code bin \(reading.bin) → “\(card.hoverRowText ?? "nil")” · 像素行 “\(card.channelRowText)”（应为空）· 通道槽 \(card.channelRowRect) · 读数槽 \(slot)")
+                check("悬停时像素行为空（“\(card.channelRowText)”，指针在直方图上不读像素），同一行是计数：“\(card.hoverRowText ?? "nil")” == “\(expectedRow)”，槽 \(slot) 高 \(String(format: "%.1f", slot.height)) == readoutRowHeight \(String(format: "%.1f", HistogramCardView.readoutRowHeight))，R/G/B 字母 minX \(card.readoutLetterRects.map { String(format: "%.1f", $0.minX) })，与像素行是同一个槽（通道槽 == 读数槽：\(card.channelRowRect == slot)）",
                       card.hoverRowText == expectedRow
                       && reading.code == codeBin
                       && card.channelRowText.isEmpty
@@ -2007,7 +2010,7 @@ public final class UISmokeRunner {
                       && !card.readoutRowRect.isEmpty
                       && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
                       && card.readoutLetterRects.count == 3
-                      && card.channelRowRect.maxY <= card.readoutRowRect.minY)
+                      && card.channelRowRect == card.readoutRowRect)
             } else {
                 fail("码值区悬停没有 reading，悬停行无从断言")
             }
@@ -2024,7 +2027,7 @@ public final class UISmokeRunner {
                                    blue: histogram.blue.hdrBins[tailBin1]))
             check("悬停读数（尾段 +1 档 = 2×）：“\(tail1Counts)” == \(tail1Expected)（bin \(tailBin1)）",
                   card.hoverReading?.segment == .tail && card.hoverReading?.bin == tailBin1
-                  && tail1Counts == tail1Expected && card.hoverValueText.isEmpty)
+                  && tail1Counts == tail1Expected && card.readoutValueTexts.count == 3)
 
             let tailBin2 = min(2 * Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 2),
@@ -2079,13 +2082,13 @@ public final class UISmokeRunner {
             check("移出绘图区 → 读数清空（画了 \(paintsBefore) 次，现在 \(card.readoutPaintCount) 次不增）：行空 \(card.hoverReadoutRect.isEmpty)，状态 \(card.readoutState)，槽仍是 \(card.readoutRowRect)（高 \(String(format: "%.1f", card.readoutRowRect.height))）",
                   paintsBefore >= 3
                   && card.hoverReading == nil
-                  && card.hoverValueText.isEmpty && card.hoverCountText.isEmpty
+                  && card.hoverCountText.isEmpty
                   && card.hoverReadoutRect.isEmpty
                   && card.readoutState == .idle
                   && card.readoutRowRect == slotBefore
                   && card.readoutRowRect.height == HistogramCardView.readoutRowHeight)
 
-            // 018 新增：光标在**画布**上 → 同一行显示该像素的亮度（不显示计数）；离开则回到 idle。
+            // 023: 光标在**画布**上 → 这一行是该像素的 R/G/B（样式与直方图悬停的个数指示相同）；亮度不再显示。
             // This is driven through the loupe's own entry point (`pointerMoved`), which is the call the
             // canvas's tracking area makes — the same one the zoom commands anchor on.
             loupe.autoRenderEnabled = false
@@ -2095,43 +2098,41 @@ public final class UISmokeRunner {
             loupe.pointerMoved(to: canvasCentre)
             card.needsDisplay = true
             card.display()
-            let pointerText = card.hoverValueText
             let pixel = loupe.pointerReadout
-            let parses = pointerText.hasPrefix("+")
-                ? Double(pointerText.dropFirst()).map { $0 > 0 } ?? false
-                : Int(pointerText).map { $0 >= 0 && $0 <= 255 } ?? false
-            log("pointer readout        canvas \(canvasCentre) → row “\(pointerText)” · counts “\(card.hoverCountText)” · state \(card.readoutState) · readbacks \(loupe.pointerReadbackCount) · 槽 \(card.readoutRowRect)")
-            check("光标在画布上 → 直方图最下面一行是该像素亮度 “\(pointerText)”（可解析、非空：码值 0–255 或 +x.x），不显示计数（“\(card.hoverCountText)” 为空），槽与原脚注行同高 \(String(format: "%.1f", card.readoutRowRect.height))；节流后读回 \(loupe.pointerReadbackCount) 次",
-                  !pointerText.isEmpty && parses
+            log("pointer readout        canvas \(canvasCentre) → 通道行 “\(card.channelRowText)” · counts “\(card.hoverCountText)” · state \(card.readoutState) · 数值 \(card.channelValueFont.fontName) \(String(format: "%.1f", card.channelValueFont.pointSize))pt · readbacks \(loupe.pointerReadbackCount) · 槽 \(card.readoutRowRect)")
+            check("光标在画布上 → 直方图最下面那一行（唯一一行）是该像素的 R/G/B “\(card.channelRowText)”；不再有亮度数字（state \(card.readoutState)，计数 “\(card.hoverCountText)” 为空），槽高 \(String(format: "%.1f", card.readoutRowRect.height)) == readoutRowHeight；节流后读回 \(loupe.pointerReadbackCount) 次",
+                  !card.channelRowText.isEmpty
+                  && card.readoutState == .idle
                   && card.hoverCountText.isEmpty
-                  && card.readoutState == .image(value: pointerText)
+                  && card.readoutValueTexts.isEmpty
                   && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
                   && loupe.pointerReadbackCount >= 1
-
                   && pixel != nil)
 
-            // 通道行现在是光标像素的 RGB，脚注行仍是亮度：两行、两个问题、两块不重叠的槽。
+            // 同一行、两种内容：像素 RGB 与个数指示用同一套数值字体/颜色，共用一个槽。
             let channelText = card.channelRowText
             let channelGaps = zip(card.channelLetterRects, card.channelValueRects)
                 .map { $0.1.minX - $0.0.maxX }
             let spaceWidth = (" " as NSString)
-                .size(withAttributes: [.font: HistogramCardReadability.percentFont]).width
-            log("pointer channel row    canvas \(canvasCentre) → “\(channelText)” · 字母 minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) }) · 字母-数值间距 \(channelGaps.map { String(format: "%.2f", $0) })（一个空格 \(String(format: "%.2f", spaceWidth))）· 通道槽 \(card.channelRowRect) · 读数槽 \(card.readoutRowRect)")
-            check("光标在画布上 → 通道行是该像素的 RGB “\(channelText)” == loupe 的 “\(pixel?.channelRowText ?? "")”（三组值逐字相同），字母着色 \(card.channelLetterColors == HistogramCardView.channelNameColors)，数值紧跟字母（间距 \(channelGaps.map { String(format: "%.2f", $0) }) ≈ 一个空格 \(String(format: "%.2f", spaceWidth))），不含 “%”，两行槽位不重叠（通道行 maxY \(String(format: "%.1f", card.channelRowRect.maxY)) ≤ 读数行 minY \(String(format: "%.1f", card.readoutRowRect.minY))）",
+                .size(withAttributes: [.font: HistogramCardView.numberFont]).width
+            log("pointer channel row    canvas \(canvasCentre) → “\(channelText)” · 字母 minX \(card.channelLetterRects.map { String(format: "%.1f", $0.minX) }) · 字母-数值间距 \(channelGaps.map { String(format: "%.2f", $0) })（一个空格 \(String(format: "%.2f", spaceWidth))）· 槽 \(card.channelRowRect)（== 读数槽 \(card.readoutRowRect)）· 数值字体 \(card.channelValueFont.fontName)")
+            check("光标在画布上 → 通道行是该像素的 RGB “\(channelText)” == loupe 的 “\(pixel?.channelRowText ?? "")”（三组值逐字相同），字母着色 \(card.channelLetterColors == HistogramCardView.channelNameColors)，数值紧跟字母（间距 \(channelGaps.map { String(format: "%.2f", $0) }) ≈ 一个空格 \(String(format: "%.2f", spaceWidth))），不含 “%”，数值字体 == numberFont（\(card.channelValueFont.fontName)）、颜色 == readoutColor，与读数行共用一个槽（\(card.channelRowRect == card.readoutRowRect)）",
                   !channelText.isEmpty
                   && channelText == (pixel?.channelRowText ?? "")
                   && !channelText.contains("%")
                   && card.channelLetterColors == HistogramCardView.channelNameColors
                   && channelGaps.count == 3
                   && channelGaps.allSatisfy { abs($0 - spaceWidth) <= 0.5 }
-                  && card.channelRowRect.maxY <= card.readoutRowRect.minY
+                  && card.channelValueFont == HistogramCardView.numberFont
+                  && card.channelValueColor == HistogramCardReadability.readoutColor(isDark: card.lastAppearanceIsDark)
+                  && card.channelRowRect == card.readoutRowRect
                   && card.channelRowRect.height == HistogramCardView.channelRowHeight)
 
             let beforeExit = loupe.pointerReadbackCount
             loupe.pointerExited()
             card.needsDisplay = true
             card.display()
-            check("光标离开画布 → 两行都回到空（通道行 “\(card.channelRowText)”，读数行不显示任何文字），两行高度不变 \(String(format: "%.1f", card.readoutRowRect.height))，读回次数 \(beforeExit) → \(loupe.pointerReadbackCount)（不增）",
+            check("光标离开画布 → 这一行回到空（通道行 “\(card.channelRowText)”，计数 “\(card.hoverCountText)”），行高不变 \(String(format: "%.1f", card.readoutRowRect.height))，读回次数 \(beforeExit) → \(loupe.pointerReadbackCount)（不增）",
                   card.readoutState == .idle
                   && card.hoverReadoutRect.isEmpty
                   && card.readoutRowRect.height == HistogramCardView.readoutRowHeight

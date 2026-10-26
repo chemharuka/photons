@@ -4,20 +4,22 @@ import Metal
 import PhotonsCore
 import PhotonsUI
 
-/// The bottom row of the histogram card — the owner's 「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示
-/// 该亮度像素数量，鼠标在其他位置就都不显示但保留这行的高度不要乱动」.
+/// The one row under the histogram card — the owner's 「鼠标在画面上就显示…R/G/B，鼠标在直方图上就显示该箱的
+/// R/G/B 像素数量，鼠标在其他位置就都不显示但保留这行的高度不要乱动」 (023 deleted the brightness the original
+/// wording asked for: 「不需要亮度信息了，只要 RGB 值」).
 ///
 /// Three things have to be true at once, and they are tested separately because they fail differently:
 ///
-///   ① **the number is the pixel's.** The loupe tracks the pointer, reads a 1×1 texel of the presented
-///      frame, and the card prints the brightness of *that* texel — so the test reads the same texel a
-///      second way and compares the two numbers (≤ 1 code / 0.02 stop), rather than comparing the
-///      formatter to itself.
+///   ① **the numbers are the pixel's.** The loupe tracks the pointer, reads a 1×1 texel of the presented
+///      frame, and the card prints the three channels of *that* texel — so the test reads the same texel a
+///      second way and compares the numbers (≤ 1 code / 0.02 stop), rather than comparing the formatter to
+///      itself. The texel's luma is still computed and still checked (it is what puts the pixel on the
+///      axis); it is simply no longer painted.
 ///   ② **it costs nothing when nothing changes.** A 1×1 `getBytes` synchronises with the GPU, so 100
 ///      `mouseMoved` events in the same pixel must cost at most one readback.
-///   ③ **the row is a slot, not a label.** The three states paint different things; the row's height and
-///      position are the same number in all of them, and the R/G/B letters sit at fixed x whatever the
-///      counts are.
+///   ③ **the row is a slot, not a label.** The two contents paint different things; the row's height and
+///      position are the same number in both — and in idle — and the R/G/B letters sit at fixed x whatever
+///      the counts are.
 @MainActor
 final class HistogramPointerReadoutTests: XCTestCase {
 
@@ -169,10 +171,16 @@ final class HistogramPointerReadoutTests: XCTestCase {
 
             let pixel = try XCTUnwrap(controller.pointerReadout)
             render(card)
-            XCTAssertEqual(card.readoutState, .image(value: pixel.level.text),
-                           "the row is the pixel's brightness and nothing else")
-            XCTAssertEqual(card.hoverValueText, expected, "texel (\(texel.x), \(texel.y)) at \(point)")
-            XCTAssertEqual(card.hoverCountText, "", ".image shows no counts")
+            // 023 deleted the brightness row (「不需要亮度信息了，只要 RGB 值」), so the row paints the
+            // pixel's **channels** and nothing else. The brightness is still computed — and this asserts it
+            // is still *this* texel's — but it is no longer painted: the readout state is idle and nothing
+            // bare-numbered reaches the row. The "the number is the pixel's" claim is carried by the three
+            // channels below (also computed from the texture, not from the card).
+            XCTAssertEqual(pixel.level.text, expected,
+                           "texel (\(texel.x), \(texel.y)) at \(point)：亮度仍是这颗 texel 的（只是不再显示）")
+            XCTAssertEqual(card.readoutState, .idle, ".image 已删除：指针在画面上时读数态是 idle")
+            XCTAssertEqual(card.hoverCountText, "", "指针在画面上不显示计数")
+            XCTAssertTrue(card.readoutValueTexts.isEmpty, "没有任何裸数字被画到这一行上")
             // The channel row: the same texel, each channel on its own axis (a code, or +x.x above
             // display white) — computed here from the texture, not from the card's own arithmetic.
             let expectedChannels = [channel(0), channel(1), channel(2)].map { c -> String in
@@ -199,59 +207,62 @@ final class HistogramPointerReadoutTests: XCTestCase {
             XCTAssertEqual(counts.green, (reference.isTail ? hist.green.hdrBins : hist.green.bins)[reference.bin])
             XCTAssertEqual(counts.blue, (reference.isTail ? hist.blue.hdrBins : hist.blue.bins)[reference.bin])
             XCTAssertEqual(k, 2, accuracy: 1e-9)
-            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) · linear \(String(format: "%.4f", linear)) · 亮度 “\(card.hoverValueText)” (expected “\(expected)”) · 通道 “\(card.channelRowText)” (expected “R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])”) · bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
+            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) · linear \(String(format: "%.4f", linear)) · 亮度 “\(pixel.level.text)”（不再显示，expected “\(expected)”） · 通道 “\(card.channelRowText)” (expected “R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])”) · bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
         }
         print("pointer row vs an independent readback of the same texel:")
         print(lines.map { "        " + $0 }.joined(separator: "\n"))
     }
 
-    /// The pointer *on the plot* shows counts in the footnote row and leaves the **channel row blank** —
-    /// the channel row reads a *pixel*, and a hover points at a bin. (This is the slot the old
-    /// per-channel percentages row used to occupy; the percentages are no longer painted at all.)
-    func testThePlotShowsCountsAndTheChannelRowStaysBlank() throws {
+    /// The pointer *on the plot* shows counts in the row and leaves the **pixel half blank** — that half
+    /// reads a *pixel*, and a hover points at a bin. (This is the slot the old per-channel percentages row
+    /// used to occupy, and — since 023 — the same slot the pixel's channels use.)
+    func testThePlotShowsCountsAndThePixelHalfStaysBlank() throws {
         let card = drawnCard(histogram: knownCounts())
         XCTAssertEqual(card.readoutState, .idle)
-        XCTAssertEqual(card.channelRowText, "", "no pointer on the picture → the channel row is blank")
+        XCTAssertEqual(card.channelRowText, "", "no pointer on the picture → the pixel half is blank")
         let idleChannelSlot = card.channelRowRect
-        XCTAssertFalse(idleChannelSlot.isEmpty, "the channel slot exists even when it is empty")
+        XCTAssertFalse(idleChannelSlot.isEmpty, "the slot exists even when it is empty")
 
-        // A pixel reading is available: the channel row prints it, the footnote row prints its luma.
+        // A pixel reading is available: the row prints its three channels, and nothing else — 023 deleted
+        // the brightness line, so the readout state stays idle.
         card.showPointerReadout(PointerPixel(level: .code(200), bin: 200, isTail: false, luma: 0.6,
                                              channels: [.code(245), .code(128), .code(64)]))
         render(card)
-        XCTAssertEqual(card.readoutState, .image(value: "200"))
+        XCTAssertEqual(card.readoutState, .idle, "亮度行已删除，读数态不再有 .image")
         XCTAssertEqual(card.hoverCountText, "")
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
         XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64", "on the picture: the pixel's channels")
         XCTAssertFalse(card.channelRowText.contains("%"), "过白比例不再出现在这一行")
 
-        // The pointer on the plot: the plot wins for the footnote row, and the channel row goes blank
-        // (the pixel is not what a hover is pointing at), at the same slot.
+        // The pointer on the plot: the counts half paints, the pixel half goes blank (the pixel is not what
+        // a hover is pointing at) — in the *same* slot, because it is the same row.
         let axis = try XCTUnwrap(card.lastAxis)
         card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
         render(card)
         XCTAssertEqual(card.readoutState, .histogram(counts: HistogramBinCounts(red: 1284, green: 1291,
                                                                                 blue: 1206)))
         XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
-        XCTAssertEqual(card.hoverValueText, "", ".histogram shows no level")
-        XCTAssertEqual(card.channelRowText, "", "a hover is not a pixel: the channel row is blank")
+        XCTAssertEqual(card.channelRowText, "", "a hover is not a pixel: the pixel half is blank")
         XCTAssertTrue(card.channelLetterRects.isEmpty)
         XCTAssertEqual(card.channelRowRect, idleChannelSlot, "…and keeps its slot")
-        XCTAssertLessThanOrEqual(card.channelRowRect.maxY, card.readoutRowRect.minY,
-                                 "the two rows' slots do not overlap")
+        XCTAssertEqual(card.channelRowRect, card.readoutRowRect,
+                       "像素那半与计数那半是同一个槽（023：卡片只有一行）")
 
-        // Off the plot, with the pixel still known: back to the pixel's brightness *and* its channels.
+        // Off the plot, with the pixel still known: back to the pixel's channels (and still no brightness).
         card.clearHoverReadout()
         render(card)
-        XCTAssertEqual(card.readoutState, .image(value: "200"))
+        XCTAssertEqual(card.readoutState, .idle)
         XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64")
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
 
-        // And with the pointer gone from the picture too: idle, nothing painted, both rows the same.
+        // And with the pointer gone from the picture too: idle, nothing painted, the same row.
         card.clearPointerReadout()
         render(card)
         XCTAssertEqual(card.readoutState, .idle)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertEqual(card.channelRowText, "")
-        XCTAssertEqual(card.channelRowRect, idleChannelSlot, "the channel row keeps its slot")
+        XCTAssertEqual(card.channelRowRect, idleChannelSlot, "the row keeps its slot")
+        XCTAssertEqual(card.readoutRowRect, idleChannelSlot)
     }
 
     // MARK: - ② the readback is throttled
@@ -280,26 +291,33 @@ final class HistogramPointerReadoutTests: XCTestCase {
         XCTAssertEqual(controller.pointerReadbackCount, afterFirst + 1)
     }
 
-    // MARK: - ③ the row is a slot with one height
+    // MARK: - ③ the row is one slot with one height
 
-    /// The owner's 「保留这行的高度不要乱动」: the slot's rect is the **same** in all three states,
-    /// compared with `accuracy: 0`, and the idle state paints nothing at all.
-    func testTheRowKeepsItsHeightInAllThreeStates() {
+    /// The owner's 「保留这行的高度不要乱动」: the slot's rect is the **same** in every state — the pixel's
+    /// channels, the bin's counts, and idle — compared with `accuracy: 0`, and idle paints nothing at all.
+    ///
+    /// 023 left three states but **one row**: `.image` is gone, so the middle state is now the pixel's
+    /// channels painted by the channel half of the same slot. The paint counters follow that split — the
+    /// pixel state moves `channelValueRects`, the counts state moves `readoutPaintCount`.
+    func testTheRowKeepsItsHeightInEveryState() {
         let card = drawnCard(histogram: knownCounts())
         render(card)
         let idleSlot = card.readoutRowRect
-        let idlePaint = card.hoverPaintCount
+        let idlePaint = card.readoutPaintCount
         XCTAssertFalse(idleSlot.isEmpty, "the slot exists even when it is empty")
         XCTAssertEqual(card.readoutState, .idle)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
-        XCTAssertEqual(card.hoverPaintCount, idlePaint, "idle paints nothing")
+        XCTAssertEqual(card.readoutPaintCount, idlePaint, "idle paints nothing")
+        XCTAssertTrue(card.channelValueRects.isEmpty, "…neither half paints")
 
-        card.showPointerReadout(PointerPixel(level: .code(128), bin: 128, isTail: false, luma: 0.2))
+        card.showPointerReadout(PointerPixel(level: .code(128), bin: 128, isTail: false, luma: 0.2,
+                                             channels: [.code(245), .code(128), .code(64)]))
         render(card)
-        let imageSlot = card.readoutRowRect
-        let imagePaint = card.hoverPaintCount
+        let pixelSlot = card.readoutRowRect
+        XCTAssertEqual(card.channelValueRects.count, 3, "像素那半画了三组值（读数态仍是 idle）")
+        XCTAssertEqual(card.readoutPaintCount, idlePaint, "计数那半一个字都没画")
+        XCTAssertEqual(card.readoutState, .idle)
 
-        card.showPointerReadout(PointerPixel(level: .code(128), bin: 128, isTail: false, luma: 0.2))
         card.clearPointerReadout()
         let axis = try? XCTUnwrap(card.lastAxis)
         if let axis {
@@ -307,21 +325,20 @@ final class HistogramPointerReadoutTests: XCTestCase {
         }
         render(card)
         let countsSlot = card.readoutRowRect
-        let countsPaint = card.hoverPaintCount
+        let countsPaint = card.readoutPaintCount
 
-        print("readout row slot: idle \(idleSlot) · image \(imageSlot) · counts \(countsSlot) · height \(HistogramCardView.readoutRowHeight)")
-        XCTAssertEqual(imageSlot, idleSlot, "the row does not move for .image")
+        print("readout row slot: idle \(idleSlot) · pixel \(pixelSlot) · counts \(countsSlot) · height \(HistogramCardView.readoutRowHeight)")
+        XCTAssertEqual(pixelSlot, idleSlot, "the row does not move for the pixel's channels")
         XCTAssertEqual(countsSlot, idleSlot, "the row does not move for .histogram")
-        XCTAssertEqual(imageSlot.height, countsSlot.height, accuracy: 0, "one height, three states")
+        XCTAssertEqual(pixelSlot.height, countsSlot.height, accuracy: 0, "one height, every state")
         XCTAssertEqual(idleSlot.height, HistogramCardView.readoutRowHeight, accuracy: 0)
-        XCTAssertGreaterThan(imagePaint, idlePaint, ".image paints")
-        XCTAssertGreaterThan(countsPaint, imagePaint, ".histogram paints")
+        XCTAssertGreaterThan(countsPaint, idlePaint, ".histogram paints the counts half")
         XCTAssertLessThanOrEqual(countsSlot.maxY, cardHeight + 0.01)
-        // The channel row above it is a slot too: the same rect whether it paints or not, and the two
-        // rows never overlap (they answer two different questions).
+        // The two halves are the same row: one slot, one height, and the pixel half's rect is the counts
+        // half's rect (this replaces 「两行的槽位相接、不重叠」 — 023 left one row, not two).
         XCTAssertEqual(card.channelRowRect.height, HistogramCardView.channelRowHeight, accuracy: 0)
-        XCTAssertEqual(card.channelRowRect.maxY, card.readoutRowRect.minY, accuracy: 0.01,
-                       "通道行与脚注行的槽位相接、不重叠")
+        XCTAssertEqual(card.channelRowRect, card.readoutRowRect,
+                       "像素那半与计数那半共用一个槽")
     }
 
     /// 「三个字母位置恒定，数字紧跟字母」 — the group starts are a property of the layout, so they are
@@ -396,8 +413,9 @@ final class HistogramPointerReadoutTests: XCTestCase {
         controller.pointerMoved(to: CGPoint(x: 100, y: 80))
         XCTAssertNotNil(controller.pointerReadout)
         render(card)
-        XCTAssertEqual(card.readoutState, .image(value: try XCTUnwrap(controller.pointerReadout).level.text))
-        XCTAssertFalse(card.readoutState.valueText.isEmpty)
+        // 023: the row shows the pixel's channels; there is no brightness state to read back any more.
+        XCTAssertEqual(card.readoutState, .idle, "亮度行已删除：指针在画面上时读数态是 idle")
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
         XCTAssertEqual(card.channelRowText, try XCTUnwrap(controller.pointerReadout).channelRowText,
                        "通道行是同一个像素的三通道值")
         XCTAssertFalse(card.channelRowText.isEmpty)

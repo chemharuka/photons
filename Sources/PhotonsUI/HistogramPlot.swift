@@ -183,40 +183,28 @@ extension HistogramCardFormat {
 
 }
 
-// MARK: - 018: the row under the plot — three states, one height
+// MARK: - 018/023: the row under the plot — one row, two contents
 //
 // 017 made the row one line (`L 245 · R 1284 · G 1291 · B 1206`) and painted it *instead of* the
-// channel percentages. The owner's next word split it: 「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示
-// 该亮度像素数量，鼠标在其他位置就都不显示但保留这行的高度不要乱动」. So:
+// channel percentages. 018 split it into a channel row and a brightness row
+// (「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示该亮度像素数量，鼠标在其他位置就都不显示但保留这行的高度
+// 不要乱动」). 023 merged them back into **one** row and deleted the brightness (「不需要亮度信息了，只要 RGB
+// 值，而且样式和鼠标悬停在直方图上的 RGB 像素个数指示保持一致」):
 //
-//     .image(value:)          pointer on the picture → the brightness alone (`128`, `+2.0`)
-//     .histogram(counts:)     pointer on the plot    → that bin's counts alone (`R  1284 G  1291 B  1206`)
-//     .idle                   anywhere else          → nothing, at the same height
+//     pointer on the picture → `R 245 G 128 B 64`       (the pixel's channels — `PointerPixel.channelTexts`)
+//     pointer on the plot    → `R 1284 G 1291 B 1206`   (that bin's counts — `hoverCounts` below)
+//     anywhere else          → nothing, and the row keeps its height
 //
-// The two halves are formatted here (`HistogramReadoutRow`, `PointerPixel.Level`) and laid out by the
-// card (`HistogramCardView.paintCountBlock`), so "what the numbers are" and "where they sit" are two
-// separate, separately testable claims.
+// So the only state this file formats is the counts; the pixel's three strings are `PointerPixel`'s and
+// the card lays both out with the same `paintGroups`. `PointerPixel.Level`'s bare-number text
+// (`128` / `+2.0`) is no longer painted anywhere — the brightness row was the only reader and it is gone.
 
 extension HistogramCardFormat {
 
-    /// The brightness as the row prints it: an sRGB code `0…255`, or `+x.x` stops above white.
-    ///
-    /// One decimal on the tail, none on the code, and no `档` / `×` / `L` — the owner's wording for this
-    /// row is a bare number (「左侧：亮度 0-255 或者 +1.0，不要写档和 x2.0」).
-    public static func hoverRowValue(_ reading: HistogramHoverReading?) -> String? {
-        guard let reading else { return nil }
-        switch reading.segment {
-        case .code:
-            return "\(min(255, max(0, reading.code)))"
-        case .tail:
-            return String(format: "%+.1f", max(reading.stops, 0))
-        }
-    }
-
     /// The row's text for a plot hover; `nil` when nothing is hovered or nothing was measured.
     ///
-    /// Counts and nothing else: the level belongs to the *pixel* under the pointer, and the plot does
-    /// not know which pixel that is — it knows which bin. Painting a level here was 017's conflation.
+    /// Counts and nothing else: the pixel's channels belong to the *picture* under the pointer, and the
+    /// plot does not know which pixel that is — it knows which bin.
     public static func hoverRowText(_ histogram: Histogram?, _ reading: HistogramHoverReading?) -> String? {
         guard let reading, let histogram else { return nil }
         return hoverCounts(histogram, reading)

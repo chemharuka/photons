@@ -148,9 +148,16 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(card.channelRowValues.first, "+1.0")
         XCTAssertFalse(card.channelRowValues[1].hasPrefix("+"), "只有超白的那一通道写 +x.x")
         XCTAssertFalse(card.channelRowValues[2].hasPrefix("+"))
-        XCTAssertEqual(card.readoutState, .image(value: reading.level.text),
-                       "脚注行仍是该像素的亮度，与通道行是两个问题")
-        print("mixed row: “\(card.channelRowText)” · 亮度行 “\(card.hoverValueText)” · luma "
+        // 023 deleted the brightness row (「不需要亮度信息了，只要 RGB 值」), so the row has **one** content
+        // here: the pixel's three channels. The readout state is idle and nothing bare-numbered is painted
+        // — that is the assertion that replaces the old `.image(value: reading.level.text)`.
+        XCTAssertEqual(card.readoutState, .idle, "亮度行已删除：指针在画面上时读数态是 idle")
+        XCTAssertTrue(card.readoutValueTexts.isEmpty, "没有任何「只有数字没有字母」的裸数字")
+        XCTAssertTrue(card.readoutValueRects.isEmpty)
+        XCTAssertTrue(card.readoutLetterRects.isEmpty)
+        XCTAssertTrue(card.readoutContentRect.isEmpty, "读数那一半在指针位于画面上时一个字都不画")
+        XCTAssertEqual(card.channelRowValues.count, 3, "画面上只画了这一组 R/G/B")
+        print("mixed row: “\(card.channelRowText)” · 读数态 \(card.readoutState) · luma "
               + "\(String(format: "%.3f", reading.luma))")
     }
 
@@ -181,18 +188,19 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(card.channelRowRect, blankSlot, "…还是同一个槽")
         XCTAssertEqual(card.channelRowRect.height, blankHeight, accuracy: 0)
 
-        // The pointer on the histogram: not a pixel → the channel row stays blank, the footnote row
-        // answers with the bin's counts.
+        // The pointer on the histogram: not a pixel → the pixel half stays blank, and the *same row*
+        // answers with the bin's counts (023: one row, two contents).
         card.showPointerReadout(pixel(0.96, 0.50, 0.25))
         if let axis = card.lastAxis {
             card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
         }
         render(card)
-        XCTAssertEqual(card.channelRowText, "", "鼠标在直方图上 → 通道行空白")
+        XCTAssertEqual(card.channelRowText, "", "鼠标在直方图上 → 像素那半空白")
         XCTAssertTrue(card.channelLetterRects.isEmpty)
         XCTAssertEqual(card.channelRowRect, blankSlot)
-        XCTAssertFalse(card.hoverCountText.isEmpty, "计数由脚注行回答")
+        XCTAssertFalse(card.hoverCountText.isEmpty, "计数由同一行的另一半回答")
         XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
+        XCTAssertEqual(card.readoutRowRect, blankSlot, "两半共用一个槽：槽从不因为内容而变")
     }
 
     /// The percentages are gone from the paint *and* from accessibility, even though the measurement
@@ -232,8 +240,11 @@ final class HistogramChannelRowTests: XCTestCase {
             ("+3.0  ", pixel(Histogram.srgbEncode(8), Histogram.srgbEncode(8), Histogram.srgbEncode(8),
                             headroom: 8)),
         ]
+        // One space **in the face the values are painted in**. 023 moved that face from
+        // `percentFont` (8.5 pt regular) to `numberFont` (9.5 pt semibold) to match the counts
+        // indicator, so the expected gap is measured in `numberFont` — the assertion itself is unchanged.
         let spaceWidth = (" " as NSString)
-            .size(withAttributes: [.font: HistogramCardReadability.percentFont]).width
+            .size(withAttributes: [.font: HistogramCardView.numberFont]).width
         var starts: [[CGFloat]] = []
         for (label, reading) in samples {
             card.showPointerReadout(reading)
@@ -270,6 +281,94 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertLessThanOrEqual(card.channelValueRects.last?.maxX ?? .infinity, cardWidth + 0.01)
     }
 
+    /// 023's whole point: 「样式和鼠标悬停在直方图上的 RGB 像素个数指示保持一致」.
+    ///
+    /// The fixture makes the two states print the **same three strings** (a pixel of 245 / 128 / 64 and a
+    /// bin whose counts are 245 / 128 / 64), so "the same style" is not a claim about text but about the
+    /// paint: the face, the colour, the rects and the pixels are compared between the two states, and to
+    /// `numberFont` / `readoutColor(isDark:)` — never to a copy of the literals.
+    func testThePixelRowPaintsInTheCountsIndicatorsFaceColourAndGeometry() {
+        func measured(counts: (Int, Int, Int)) -> Histogram {
+            func channel(_ value: Int) -> HistogramChannel {
+                HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
+                                 hdrBins: (0..<Histogram.hdrBinCount).map { _ in 0 },
+                                 clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+            }
+            return Histogram(binCount: 256, sampleCount: 861,
+                             canvas: ImageSize(width: 720, height: 420),
+                             roi: ImageRect(x: 0, y: 0, width: 720, height: 420),
+                             sampleSize: ImageSize(width: 720, height: 420),
+                             primaries: .sRGB, headroom: 1,
+                             red: channel(counts.0), green: channel(counts.1), blue: channel(counts.2),
+                             luma: channel(counts.0))
+        }
+        let card = drawnCard(histogram: measured(counts: (245, 128, 64)))
+        card.appearance = NSAppearance(named: .aqua)
+
+        /// Mean colour of the opaque (non-backdrop) pixels inside `rect`, off a rendered bitmap.
+        func glyphColour(_ rep: NSBitmapImageRep, _ rect: NSRect) -> (r: Double, g: Double, b: Double, n: Int) {
+            let scale: CGFloat = 2
+            let x0 = max(0, Int((rect.minX * scale).rounded(.down)))
+            let x1 = min(rep.pixelsWide - 1, Int((rect.maxX * scale).rounded(.up)))
+            let y0 = max(0, Int(((cardHeight - rect.maxY) * scale).rounded(.down)))
+            let y1 = min(rep.pixelsHigh - 1, Int(((cardHeight - rect.minY) * scale).rounded(.up)))
+            var sr = 0.0, sg = 0.0, sb = 0.0, n = 0
+            guard x1 > x0, y1 > y0 else { return (0, 0, 0, 0) }
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    // The card's backdrop is a light neutral; the digits are the dark readout grey.
+                    guard Double(c.redComponent) < 0.6 else { continue }
+                    sr += Double(c.redComponent); sg += Double(c.greenComponent)
+                    sb += Double(c.blueComponent); n += 1
+                }
+            }
+            return (sr / Double(max(n, 1)), sg / Double(max(n, 1)), sb / Double(max(n, 1)), n)
+        }
+
+        // ① pointer on the picture → the pixel's channels.
+        card.showPointerReadout(pixel(0.96, 0.502, 0.25))
+        let pictureRep = render(card)
+        XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64", "像素行是这颗像素的三通道值")
+        XCTAssertEqual(card.channelRowValues, ["245", "128", "64"])
+        let pictureRects = card.channelValueRects
+        let pictureFont = card.channelValueFont
+        let pictureColour = card.channelValueColor
+        guard pictureRects.count == 3 else { return XCTFail("像素行应画三组值，实际 \(pictureRects.count)") }
+        let pictureGlyph = glyphColour(pictureRep, pictureRects[0])
+
+        // ② pointer on the plot, same three strings as counts.
+        guard let axis = card.lastAxis else { return XCTFail("卡片没画出坐标轴") }
+        card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
+        let countsRep = render(card)
+        XCTAssertEqual(card.hoverCountText, "R 245 G 128 B 64", "同一串数字，来自这一箱的计数")
+        XCTAssertEqual(card.readoutValueTexts, ["245", "128", "64"])
+        let countsRects = card.readoutValueRects
+        let countsFont = card.readoutValueFont
+        let countsColour = card.readoutValueColor
+        guard countsRects.count == 3 else { return XCTFail("计数行应画三组值，实际 \(countsRects.count)") }
+        let countsGlyph = glyphColour(countsRep, countsRects[0])
+
+        // ③ the equality — font, colour, and the painted rects (which also pins the face: a wider face
+        // would move the value's maxX, and a different face would change the glyph widths).
+        XCTAssertEqual(pictureFont, countsFont, "两态的数值字体相同（同一个 NSFont）")
+        XCTAssertEqual(pictureFont, HistogramCardView.numberFont,
+                       "就是 readoutColor 那一套：numberFont 9.5 semibold")
+        XCTAssertEqual(pictureColour, countsColour, "两态的数值颜色相同")
+        XCTAssertEqual(pictureColour, HistogramCardReadability.readoutColor(isDark: false))
+        XCTAssertEqual(pictureRects, countsRects, "同样的字符串、同一个槽 → 逐点相同的矩形")
+        XCTAssertEqual(card.channelRowRect, card.readoutRowRect, "…因为它们就是同一行")
+        XCTAssertEqual(pictureGlyph.n, countsGlyph.n, "同一串数字 → 同样多的字形像素")
+        XCTAssertEqual(pictureGlyph.r, countsGlyph.r, accuracy: 0.02, "字形像素颜色相同（R）")
+        XCTAssertEqual(pictureGlyph.g, countsGlyph.g, accuracy: 0.02, "字形像素颜色相同（G）")
+        XCTAssertEqual(pictureGlyph.b, countsGlyph.b, accuracy: 0.02, "字形像素颜色相同（B）")
+        XCTAssertGreaterThan(pictureGlyph.n, 0, "位图里真的画了字")
+        print("023 style identity: 字体 \(pictureFont.fontName) \(String(format: "%.1f", pictureFont.pointSize))pt · "
+              + "颜色 \(pictureColour) == \(countsColour) · rects 相同 \(pictureRects == countsRects) · "
+              + "字形像素 \(pictureGlyph.n)/\(countsGlyph.n) 均值 "
+              + "\(String(format: "%.3f/%.3f/%.3f", pictureGlyph.r, pictureGlyph.g, pictureGlyph.b))")
+    }
+
     /// The letters are painted in the channel colours — read back from the paint, and compared to the
     /// constant the legend/curves use, in **both** rows (they share the colour table).
     func testTheLettersArePaintedInTheChannelColours() {
@@ -292,25 +391,38 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(Set(HistogramCardView.channelNameColors.map { $0.description }).count, 3)
     }
 
-    /// The two rows are two slots: neither moves, and they never overlap (the channel row is *above*
-    /// the footnote row, which is the row the owner deleted as a footnote).
-    func testTheTwoRowsDoNotOverlap() {
+    /// **One row, one slot** (023). The pixel's channels and the bin's counts are the same row, so they
+    /// share one rect — `accuracy: 0`, in both states and when idle — and the card never has a second.
+    /// (That is what replaced 「通道行与脚注行相接不重叠」: there is nothing left to overlap.)
+    func testTheRowIsOneSlotForBothContents() {
         let card = drawnCard(histogram: measuredHistogram())
         let blankChannel = card.channelRowRect
         let blankReadout = card.readoutRowRect
+        XCTAssertEqual(blankChannel, blankReadout, "一个槽：像素行与计数行是同一行")
+        XCTAssertEqual(blankChannel.height, HistogramCardView.readoutRowHeight, accuracy: 0)
 
+        // Pointer on the picture: the pixel half paints, the counts half is empty, the slot is unchanged.
         card.showPointerReadout(pixel(0.96, 0.50, 0.25))
         render(card)
         XCTAssertEqual(card.channelRowRect, blankChannel)
         XCTAssertEqual(card.readoutRowRect, blankReadout)
-        XCTAssertEqual(card.channelRowRect.maxY, card.readoutRowRect.minY, accuracy: 0.01,
-                       "通道行下沿 = 脚注行上沿（相接但不重叠）")
-        XCTAssertLessThanOrEqual(card.channelRowRect.maxY, card.readoutRowRect.minY)
+        XCTAssertEqual(card.channelValueRects.count, 3, "像素那半画了三组值")
+        XCTAssertTrue(card.readoutValueTexts.isEmpty, "计数那半没画")
         XCTAssertGreaterThan(card.channelLetterRects.first?.minY ?? -CGFloat.infinity,
                              card.lastAxis?.plot.maxY ?? CGFloat.infinity,
-                             "通道行在绘图区下方")
-        XCTAssertLessThanOrEqual(card.readoutRowRect.maxY, cardHeight + 0.01, "两行都在卡片内")
-        print("rows: 通道 \(card.channelRowRect) · 脚注 \(card.readoutRowRect) · 通道高 \(String(format: "%.1f", HistogramCardView.channelRowHeight)) · 脚注高 \(String(format: "%.1f", HistogramCardView.readoutRowHeight))")
+                             "这一行在绘图区下方")
+
+        // Pointer on the plot: the counts half paints, the pixel half is empty, the same slot.
+        if let axis = card.lastAxis {
+            card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
+        }
+        render(card)
+        XCTAssertEqual(card.channelRowRect, blankChannel, "换内容不移动这一行")
+        XCTAssertEqual(card.readoutRowRect, blankReadout)
+        XCTAssertEqual(card.readoutValueTexts.count, 3, "计数那半画了三组值")
+        XCTAssertTrue(card.channelRowValues.isEmpty, "像素那半没画")
+        XCTAssertLessThanOrEqual(card.readoutRowRect.maxY, cardHeight + 0.01, "都在卡片内")
+        print("row: 槽 \(card.channelRowRect)（== \(card.readoutRowRect)）· 行高 \(String(format: "%.1f", HistogramCardView.readoutRowHeight)) · 卡片 \(cardHeight)")
     }
 
     /// The strongest form of 「字母带颜色」: the pixels inside each letter are read back off the rendered

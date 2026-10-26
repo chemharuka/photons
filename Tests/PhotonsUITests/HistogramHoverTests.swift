@@ -273,21 +273,28 @@ final class HistogramHoverTests: XCTestCase {
 
     func testTheDrawnCardPaintsTheReadoutAtCode128AndClearsItOnLeave() {
         let card = drawnCard(histogram: knownCounts)
-        XCTAssertTrue(card.hoverValueText.isEmpty, "没悬停时那一行是空的")
+        XCTAssertEqual(card.readoutState, .idle, "没悬停时那一行什么都没有")
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertEqual(card.hoverPaintCount, 0)
 
         // bin 128 of the 244 pt card: sdrWidth 124 pt, so the bin's centre is at x = 62.25.
         card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
         render(card)
-        XCTAssertEqual(card.hoverValueText, "", "直方图上只显示数量")
+        XCTAssertEqual(card.readoutValueTexts.count, 3,
+                       "直方图上只有三组计数，没有第二个「裸数字」亮度值（023 已删除亮度行）")
         XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
         XCTAssertEqual(card.hoverPaintCount, 1)
         XCTAssertFalse(card.hoverReadoutRect.isEmpty)
         XCTAssertEqual(card.hoverReadoutRect.minX, 0, accuracy: 0.5, "三组从卡片内容左端开始")
         XCTAssertLessThanOrEqual(card.hoverReadoutRect.maxX, minimumCardWidth + 0.01, "不出卡片右边界")
         XCTAssertLessThanOrEqual(card.hoverReadoutRect.maxY, cardHeight + 0.01, "读数不能画到卡片外面")
-        XCTAssertGreaterThanOrEqual(card.hoverReadoutRect.minY, 89, "读数在通道行（8.5 pt）下方，不重叠")
+        // 023 collapsed the two bottom rows into one: the counts are painted in the **same slot** the
+        // pixel's channels use, which is what replaced 「读数在通道行下方（minY ≥ 89）」 — there is no row
+        // above this one any more, and the slot must be below the plot and inside the card.
+        XCTAssertEqual(card.readoutRowRect, card.channelRowRect,
+                       "计数与像素值是同一行、同一个槽")
+        XCTAssertGreaterThanOrEqual(card.readoutRowRect.minY, card.lastAxis?.plot.maxY ?? .infinity,
+                                    "这一行在绘图区下方")
         XCTAssertEqual(card.lastHoverColor, HistogramCardReadability.readoutColor(isDark: false))
         XCTAssertGreaterThanOrEqual(card.hoverContrast, HistogramCardReadability.minimumRatio)
         print("hover readout drawn: \"\(card.hoverCountText)\" · rect \(card.hoverReadoutRect) · card \(card.bounds) · font \(HistogramCardView.hoverNumberFont.fontName) \(HistogramCardView.hoverNumberFont.pointSize) · contrast \(String(format: "%.2f", card.hoverContrast)):1")
@@ -296,7 +303,7 @@ final class HistogramHoverTests: XCTestCase {
         card.clearHoverReadout()
         render(card)
         XCTAssertNil(card.hoverReading)
-        XCTAssertEqual(card.hoverValueText.count, 0)
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
         XCTAssertEqual(card.hoverCountText.count, 0)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertEqual(card.hoverPaintCount, 1, "清空后不再画读数")
@@ -321,7 +328,8 @@ final class HistogramHoverTests: XCTestCase {
             card.updateHoverReadout(at: CGPoint(x: sample.x, y: 20))
             render(card)
             XCTAssertEqual(card.hoverCountText, sample.counts)
-            XCTAssertEqual(card.hoverValueText, "", "鼠标在直方图上只显示数量，不显示亮度")
+            XCTAssertEqual(card.readoutValueTexts.count, 3,
+                           "直方图上只有三组计数：没有裸数字（023 删掉了亮度那一行）")
             XCTAssertLessThanOrEqual(card.hoverReadoutRect.maxY, cardHeight + 0.01)
             XCTAssertLessThanOrEqual(card.hoverReadoutRect.maxX, minimumCardWidth + 0.01)
             print("drawn readout: \(card.hoverCountText) · rect \(card.hoverReadoutRect)")
@@ -336,7 +344,7 @@ final class HistogramHoverTests: XCTestCase {
         card.updateHoverReadout(at: CGPoint(x: 62.25, y: 70))   // 过白 那一行
         render(card)
         XCTAssertNil(card.hoverReading)
-        XCTAssertTrue(card.hoverValueText.isEmpty)
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
     }
 
@@ -356,7 +364,7 @@ final class HistogramHoverTests: XCTestCase {
         card.clearHoverReadout()   // exactly what mouseExited(with:) calls
         render(card)
         XCTAssertNil(card.hoverReading)
-        XCTAssertEqual(card.hoverValueText.count, 0)
+        XCTAssertTrue(card.readoutValueTexts.isEmpty)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
     }
 
@@ -390,42 +398,25 @@ final class HistogramHoverTests: XCTestCase {
         XCTAssertFalse(card.hoverReadoutRect.isEmpty)
         XCTAssertLessThanOrEqual(card.hoverReadoutRect.maxY, cardHeight + 0.01)
         XCTAssertLessThanOrEqual(card.hoverCountRect.maxX, 200 + 0.01)
-        XCTAssertTrue(card.hoverValueRect.isEmpty, "数量态不画亮度值")
+        XCTAssertEqual(card.readoutValueTexts.count, 3,
+                       "数量态画的是三组「字母 + 数字」，不是一颗裸数字（023 删掉了亮度那一行）")
+        XCTAssertEqual(card.readoutLetterRects.count, 3)
     }
 
-    // MARK: - 015: the percentages row becomes three *fixed* R/G/B slots
+    // MARK: - 015: the row's values are three *fixed* R/G/B groups
     //
-    // The row reads the level under the pointer three times — once per channel — and the owner's
-    // requirement is layout, not content: `R`, `G` and `B` must sit at the same three x positions
-    // whatever number is in the slot ("不要出现 G B 的位置随着内容变化乱动"). So the row is three
-    // equal-width slots: the letter pinned to the slot's left edge, the number right-aligned to the
-    // slot's right edge. The tests below assert that as *exact* equality (`accuracy: 0`) at three
-    // different string lengths — `0`, `128`, `+3.0` — because "within a tolerance" is what a layout
+    // The owner's requirement is layout, not content: `R`, `G` and `B` must sit at the same three x
+    // positions whatever number follows them (「不要出现 G B 的位置随着内容变化乱动」). The rows below assert
+    // that as *exact* equality across different lengths, because "within a tolerance" is what a layout
     // that twitches also passes.
-
-    /// SDR: the number is the sRGB **code**, an integer 0…255 — bin 0 / 128 / 255 → `0` / `128` / `255`.
-    func testTheRowValueIsTheCodeOnTheCodeSegment() {
-        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: 244, height: 58))
-        let cases: [(Int, String)] = [(0, "0"), (128, "128"), (255, "255")]
-        for c in cases {
-            let reading = axis.hoverReading(atX: axis.x(sdrBin: c.0, of: 256))
-            XCTAssertEqual(HistogramCardFormat.hoverRowValue(reading), c.1, "码值，不是百分比")
-        }
-    }
-
-    func testTheRowValueIsTheStopOnTheTail() {
-        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: 244, height: 58))
-        let cases: [(Double, String)] = [(1.0, "+1.0"), (2.0, "+2.0"), (3.0, "+3.0")]
-        for c in cases {
-            let reading = axis.hoverReading(atX: axis.x(stopsAboveWhite: c.0))
-            XCTAssertEqual(HistogramCardFormat.hoverRowValue(reading), c.1, "一位小数的 +x.x 档")
-        }
-        let overflow = axis.hoverReading(atX: axis.plot.maxX - 0.5)
-        XCTAssertEqual(HistogramCardFormat.hoverRowValue(overflow), "+4.0")
-    }
+    //
+    // 023 deleted the two tests that used to live here (`hoverRowValue` on the code segment, and on the
+    // tail): they formatted the **pixel's brightness** — `128` / `+1.0` — as one bare number at the row's
+    // left edge, and 「不需要亮度信息了，只要 RGB 值」 removed both the state and its formatter. The
+    // equivalent claim for what is left (the counts, and the pixel's three channels) lives in
+    // `testTheRowTextIsTheCountsInThreeGroups` and in `HistogramChannelRowTests`' rect assertions.
 
     func testNoReadingIsNoRow() {
-        XCTAssertNil(HistogramCardFormat.hoverRowValue(nil), "没悬停就没有这行")
         XCTAssertNil(HistogramCardFormat.hoverRowText(knownCounts, nil))
         XCTAssertNil(HistogramReadoutRow.idle.text, "idle 时这一行什么都不画")
     }
@@ -446,19 +437,20 @@ final class HistogramHoverTests: XCTestCase {
         XCTAssertNil(HistogramCardFormat.hoverRowText(nil, code))
     }
 
-    /// One footnote row, three states, one height — and the **channel row above it is blank** while the
-    /// pointer is on the plot, because a hover points at a bin, not at a pixel.
+    /// One row, two contents, one height — and the **pixel half is blank** while the pointer is on the
+    /// plot, because a hover points at a bin, not at a pixel.
     ///
     /// This is the semantics the percentages row used to carry (it never changed, whatever the pointer
     /// did); the owner replaced that row with the cursor pixel, so the assertions below are the ones that
-    /// replaced "通道行永远是过白比例".
-    func testTheDrawnCardPaintsTheCountsAndLeavesTheChannelRowBlank() {
+    /// replaced "通道行永远是过白比例". 023 then deleted the second row, so the two contents share the
+    /// slot instead of sitting one above the other.
+    func testTheDrawnCardPaintsTheCountsAndLeavesThePixelHalfBlank() {
         let card = drawnCard(histogram: knownCounts)
         let idleSlot = card.readoutRowRect
         let channelSlot = card.channelRowRect
         XCTAssertNil(card.hoverRowText, "没悬停 → 这一行是空的")
         XCTAssertTrue(card.hoverRowRect.isEmpty)
-        XCTAssertEqual(card.channelRowText, "", "没有指针在画面上 → 通道行也是空的")
+        XCTAssertEqual(card.channelRowText, "", "没有指针在画面上 → 像素那半也是空的")
         XCTAssertFalse(channelSlot.isEmpty, "…但它在")
 
         let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: minimumCardWidth, height: 58))
@@ -466,20 +458,21 @@ final class HistogramHoverTests: XCTestCase {
         render(card)
 
         XCTAssertEqual(card.hoverRowText, "R 1284 G 1291 B 1206")
-        XCTAssertEqual(card.channelRowText, "", "指针在直方图上 → 通道行空白（不显示像素，也不显示比例）")
+        XCTAssertEqual(card.channelRowText, "", "指针在直方图上 → 像素那半空白（不显示像素，也不显示比例）")
         XCTAssertTrue(card.channelLetterRects.isEmpty)
         XCTAssertFalse(card.hoverRowRect.isEmpty)
         XCTAssertEqual(card.hoverRowRect.minX, 0, accuracy: 0.01, "左对齐到卡片内容左端")
         XCTAssertEqual(card.hoverRowRect.minY, idleSlot.minY, accuracy: 0, "行位置不随状态变")
-        XCTAssertEqual(card.readoutRowRect, idleSlot, "这一行的高度和位置三种状态都一样")
+        XCTAssertEqual(card.readoutRowRect, idleSlot, "这一行的高度和位置不随状态变")
         XCTAssertEqual(card.hoverRowRect.height, HistogramCardView.readoutRowHeight, accuracy: 0.01,
                        "行高是 numberFont 的固定值，不是 string 的 sizeToFit")
-        XCTAssertEqual(card.channelRowRect, channelSlot, "通道行的槽也没动")
-        XCTAssertLessThanOrEqual(card.channelRowRect.maxY, card.readoutRowRect.minY,
-                                 "读数行在通道行下方，不重叠")
+        XCTAssertEqual(card.channelRowRect, channelSlot, "像素那半的槽也没动")
+        // 023: the two contents are the *same* row — so 「两行不重叠」 became 「同一个槽」.
+        XCTAssertEqual(card.channelRowRect, card.readoutRowRect,
+                       "像素值与计数共用一个槽（023 之后卡片只有一行）")
         XCTAssertEqual(card.readoutLetterColors, HistogramCardView.channelNameColors,
                        "计数的三个字母也带通道颜色")
-        print("018 drawn rows: \"\(card.hoverRowText ?? "nil")\" · 通道槽 \(card.channelRowRect) · 读数槽 \(card.readoutRowRect)")
+        print("drawn row: \"\(card.hoverRowText ?? "nil")\" · 槽 \(card.channelRowRect)（== \(card.readoutRowRect)）")
 
         card.clearHoverReadout()
         render(card)
