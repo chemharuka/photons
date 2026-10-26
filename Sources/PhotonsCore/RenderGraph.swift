@@ -371,6 +371,13 @@ private struct DisplayParams {
     var a: SIMD4<Float>   // identityMatrix
 }
 
+/// Mirror of `Kernels/histogram_sample.metal`, byte for byte: the picture's rect inside the frame
+/// (in texels) and the stride each output texel jumps.
+private struct HistSampleParams {
+    var a: SIMD4<Float>   // origin.xy, size.xy
+    var b: SIMD4<Float>   // step.xy, dstSize.xy
+}
+
 // MARK: - mask uniforms (mirror of s1_5_mask_atlas.metal / s1_6_local.metal, byte for byte)
 
 private struct MaskAtlasParams {
@@ -979,6 +986,264 @@ public final class RenderGraph {
         // The sample *is* the picture, so the reported region is the picture's own pixel grid: that is
         // the denominator 「采样 N px」 stands against, and it is the same number at every zoom.
         return measured.relabelled(canvas: cropPixels, roi: picture)
+    }
+
+    // MARK: - 027: the histogram of the frame that was just drawn
+    //
+    // The measurement above renders the picture a second time, at thumbnail scale, because a
+    // histogram of *the picture* has to be independent of the camera. That costs ~11 ms, so the card
+    // could only afford it once an edit had settled (a 120 ms debounce), and a slider drag therefore
+    // moved the picture while the plot stood still.
+    //
+    // This one reads the frame S4 has **already written** — the texture the caller is about to put on
+    // screen — so the only work it adds to a frame is a stride read of a few thousand texels, one
+    // small readback and the CPU binning. That is affordable *every* frame, which is what makes the
+    // plot track a drag.
+    //
+    // ## What it measures, and how it differs from the shipped path
+    //
+    // The frame is **display-referred**: S4 applied the primaries matrix, the sRGB OETF and the
+    // `min(v, headroom)` clamp, and the only thing a caller can hand back is that result. The shipped
+    // path samples the texture *before* S4 instead (scene-linear, see `Histogram`), so the two are
+    // not the same domain, and that difference is worth stating exactly:
+    //
+    //   · **Below white they agree.** S4's code is `srgbEncode(v)`, which is the axis `Histogram`
+    //     derives per sample (`combinedIndex`): the SDR bins are the same statistic of the same
+    //     pixels, not an approximation of it. `computeEncoded` is used on purpose — decoding the code
+    //     and re-encoding it would move a value that sits exactly on a bin edge (0.5 of code comes
+    //     back 0.4999997 and lands a bin low), which is a bug this file has already had once.
+    //   · **Above white they agree only if the frame had headroom.** With `headroom = 1` S4 clamps
+    //     everything above white to code 1.0, so the tail is *gone*: those samples are counted in the
+    //     last SDR bin (as the shipped path also counts a clipped sample there) but they cannot be
+    //     placed on the 1/64-stop axis, and `hdrBins` is empty. With `headroom > 1` the codes above
+    //     1.0 survive, and `computeEncoded` decodes them back to the same tail bins the shipped path
+    //     reports. So a picture with highlights above white measures the same in an EDR frame and
+    //     reads "clipped" in an SDR one — which is the honest answer to "what does this screen have".
+    //   · **Half float rounds the code.** The frame stores codes as `Float16`; the shipped path bins
+    //     the `Float` the OETF produced. A value within half an ULP of a bin edge (≈0.00012 of code
+    //     near 0.5, i.e. ~3 % of a bin's width) can land one bin over. `HistogramSampleTests` prints
+    //     the actual per-bin difference rather than claiming zero.
+    //
+    // Luma is the one series a display-referred sample cannot derive from its three codes and still
+    // match: the shipped path weights **linear** light and encodes the sum, while `Σw·code` is a
+    // different number (the OETF is concave, so the code-space mean sits below it — up to ~0.02 of code
+    // near white, which is five bins). So the sample kernel computes the shipped definition itself and
+    // carries it in the texture's unused alpha channel; `Histogram.computeFrameSample` reads it. Four
+    // `pow`s per sample texel on the GPU (36 k threads) instead of on the CPU inside a frame budget.
+    // With that, all four series are the *same statistic* as the shipped measurement on the same
+    // pixels, and the tail is the only thing the frame cannot carry.
+    //
+    // ## The sample
+    //
+    // `histogram_sample` reads one texel per output texel on a deterministic stride
+    // (`(i + 0.5) · step`), from the **picture's rect inside the frame** — never from a centred patch,
+    // which would be a systematic bias rather than a cheaper measurement. `ImageSize`-fitted to a
+    // 256-texel long edge, so a 4.10 Mpx frame becomes 141×256 = 36 k samples and the readback is
+    // 0.29 MB instead of the frame's 33 MB. Stride sampling is not a box filter, and that is the
+    // point: the sample is an unbiased estimate of the distribution instead of 36 k local means
+    // (which would pull every sample toward its neighbourhood and flatten the ends of the plot).
+    //
+    // The matte is excluded without being told where it is: the plan letterboxes a picture into a
+    // canvas of a different aspect, and `framePictureRect` accepts the `fit` hypothesis only when the
+    // band outside it is measurably matte (exactly 0 in all three channels). Bin 0 collecting every
+    // matte pixel would report 30 % blacks on a photo with none.
+    //
+    // ## Determinism
+    //
+    // Same frame + same edit + same bins → the same texels, the same bytes, the same bins, in this
+    // process and the next: the step is an integer ratio computed in `double` and narrowed once, and
+    // the index is a `floor`. Nothing here depends on a seed, a clock or the order of dispatch.
+    //
+    // Call it from the thread that renders — the graph owns one command queue and one texture pool,
+    // so it is not safe to measure from two threads at once (no renderer in this app does).
+
+    /// What one `measureFrameHistogram` cost, in the units the acceptance numbers are quoted in.
+    public struct FrameHistogramCost: Sendable {
+        /// The grid the frame was reduced to (`≤ 256` on the long edge by default).
+        public var sampleSize = ImageSize(width: 0, height: 0)
+        /// Bytes read back: `sampleSize.pixelCount × 8` (rgba16Float).
+        public var readbackBytes = 0
+        /// The downsample pass alone, from the command buffer's own GPU timestamps.
+        public var gpuMilliseconds: Double = 0
+        /// The CPU binning of the readback.
+        public var cpuMilliseconds: Double = 0
+        /// Dispatch → wait → binning, as the caller experiences it.
+        public var wallMilliseconds: Double = 0
+    }
+
+    /// One frame measurement: the plot, the samples it came from, and what it cost.
+    ///
+    /// `sample` is the downsampled, display-encoded grid itself — the exact bytes the CPU counted, so
+    /// "two calls are byte-identical" is checkable with `sample.sha256()`, and so a test can re-count
+    /// them to separate a binning bug from a sampling one. **Its alpha is not alpha**: the kernel
+    /// spends that channel on the luma (`Histogram.computeFrameSample`), so a recount must use
+    /// `Histogram.computeFrameSample(sample, rect: rect)`, not `computeEncoded`.
+    public struct FrameMeasurement: Sendable {
+        public let histogram: Histogram
+        public let sample: DisplayImage
+        /// The region of `sample` the bins were counted over — the picture, i.e. `sample` minus any
+        /// letterbox band.
+        public let rect: ImageRect
+        public let cost: FrameHistogramCost
+    }
+
+    /// Measure the histogram of a frame that has **already been rendered** (see the note above).
+    ///
+    /// - Parameters:
+    ///   - texture: the frame S4 wrote — `RenderResult.output`, or the texture the loupe is showing.
+    ///   - edit: the document the frame was rendered with; it is what says how big the picture is
+    ///     (for the `canvas`/`roi` the numbers are labelled with) and where a letterbox band would be.
+    ///   - content: the picture's rect **inside `texture`**, in texture pixels, when the caller knows
+    ///     it (`RenderResult.content` and `.canvas` give it exactly). `nil` → the whole texture, with
+    ///     a matte band detected and excluded if one is there. Passing it skips the probe and samples
+    ///     the picture's own pixels, which is the right call for any letterboxed frame.
+    ///   - sampleLongEdge: long edge of the sampled grid; the default is the 0.29 MB one.
+    ///   - headroom / primaries: what the frame was rendered with (`RenderOptions.display`), so the
+    ///     ceiling ratio and the colour space the codes are in are labelled truthfully.
+    ///
+    /// **A frame is a window, so this measures what the window shows.** At fit the canvas holds the
+    /// whole picture and the plot is the picture's; at 1:1 or 400 % the frame holds a crop and so does
+    /// the plot — the pixels outside it are not in the texture and nothing can recover them
+    /// (`Histogram.sampleFraction` then reads far below the grid's own share of the picture, which is
+    /// the tell). A caller that must plot the picture should measure only frames that contain it, and
+    /// use the shipped `measureHistogram(_:bins:headroom:)` for the settled reading.
+    public func measureHistogram(fromFrame texture: MTLTexture, edit: EditModel,
+                                 bins: Int = 256,
+                                 content: ImageRect? = nil,
+                                 sampleLongEdge: Int = Histogram.frameSampleLongEdge,
+                                 primaries: OutputPrimaries = .sRGB,
+                                 headroom: Double = 1) throws -> Histogram {
+        try measureFrameHistogram(fromFrame: texture, edit: edit, bins: bins, content: content,
+                                 sampleLongEdge: sampleLongEdge, primaries: primaries,
+                                 headroom: headroom).histogram
+    }
+
+    /// The same measurement, with the receipts (`cost`, and the bytes that were counted).
+    public func measureFrameHistogram(fromFrame texture: MTLTexture, edit: EditModel,
+                                      bins: Int = 256,
+                                      content: ImageRect? = nil,
+                                      sampleLongEdge: Int = Histogram.frameSampleLongEdge,
+                                      primaries: OutputPrimaries = .sRGB,
+                                      headroom: Double = 1) throws -> FrameMeasurement {
+        let tStart = CFAbsoluteTimeGetCurrent()
+        let canvas = ImageSize(width: texture.width, height: texture.height)
+        guard texture.pixelFormat == .rgba16Float else {
+            throw RenderError.executeFailed(
+                "the frame histogram reads a display-encoded rgba16Float frame, got pixelFormat "
+                + "\(texture.pixelFormat.rawValue)")
+        }
+        // The picture's own pixel grid: the denominator 「采样 N px」 stands against, and the same
+        // number the shipped path reports, so the two plots are labelled in one coordinate system.
+        let cropPixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
+                                             in: sourceSize)
+        let rect = (content ?? ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height))
+            .clamped(in: canvas)
+        let grid = Histogram.frameSampleSize(for: rect, longEdge: sampleLongEdge)
+
+        let sample = try pool.obtain(grid)
+        defer { pool.recycle(sample) }
+
+        let pipeline = try kernels.pipeline(file: "histogram_sample", function: "histogram_sample")
+        guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
+        guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(texture, index: 0)
+        enc.setTexture(sample, index: 1)
+        // The step is a ratio of integers taken through `double` and narrowed once: the same frame
+        // and grid choose the same source texels in every process (see the note above).
+        var params = HistSampleParams(
+            a: SIMD4(Float(rect.x), Float(rect.y), Float(rect.width), Float(rect.height)),
+            b: SIMD4(Float(Double(rect.width) / Double(grid.width)),
+                     Float(Double(rect.height) / Double(grid.height)),
+                     Float(grid.width), Float(grid.height)))
+        enc.setBytes(&params, length: MemoryLayout<HistSampleParams>.stride, index: 0)
+        dispatch(enc, pipeline, grid)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error {
+            throw RenderError.executeFailed(err.localizedDescription)
+        }
+        let gpu = (cb.gpuEndTime > 0 && cb.gpuEndTime > cb.gpuStartTime)
+            ? (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            : 0
+
+        // Half float out of a half-float texture is a copy, not a conversion — the same one `getBytes`
+        // the shipped path does, over ~36 k pixels instead of 0.58 M.
+        var rgba = [Float16](repeating: 0, count: grid.pixelCount * 4)
+        rgba.withUnsafeMutableBytes { buf in
+            sample.getBytes(buf.baseAddress!,
+                            bytesPerRow: grid.width * 4 * MemoryLayout<Float16>.size,
+                            from: MTLRegionMake2D(0, 0, grid.width, grid.height),
+                            mipmapLevel: 0)
+        }
+        let display = DisplayImage(width: grid.width, height: grid.height, rgba: rgba,
+                                   primaries: primaries, bitDepth: 16)
+        // The matte probe reads the bytes that are already here, so it costs nothing on the GPU.
+        let counted = content == nil
+            ? framePictureRect(in: rgba, sample: grid, canvas: canvas, picture: cropPixels)
+            : ImageRect(x: 0, y: 0, width: grid.width, height: grid.height)
+
+        let tCpu = CFAbsoluteTimeGetCurrent()
+        let binCount = min(max(bins, 2), 1 << 16)
+        // `computeFrameSample`, not `computeEncoded`: the sample's fourth channel is the shipped
+        // path's luma (`srgbEncode(Σw·linear)`), which is what keeps the luma series on the same axis
+        // as the plot it will be swapped with.
+        let histogram = Histogram.computeFrameSample(display, bins: binCount, rect: counted,
+                                                     headroom: headroom)
+            .relabelled(canvas: cropPixels,
+                        roi: ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height))
+        let cpu = (CFAbsoluteTimeGetCurrent() - tCpu) * 1000
+
+        var cost = FrameHistogramCost()
+        cost.sampleSize = grid
+        cost.readbackBytes = grid.pixelCount * 8
+        cost.gpuMilliseconds = gpu
+        cost.cpuMilliseconds = cpu
+        cost.wallMilliseconds = (CFAbsoluteTimeGetCurrent() - tStart) * 1000
+        return FrameMeasurement(histogram: histogram, sample: display, rect: counted, cost: cost)
+    }
+
+    /// The picture's rect inside a frame, when the caller did not say where it is.
+    ///
+    /// A frame is a *canvas* — the viewport's device-pixel size, of which the picture occupies the
+    /// centred `ImageSize.fit` rect (S0 letterboxes the rest, S2/S3 guard it, S4 encodes 0 as 0). So
+    /// the hypothesis is checkable rather than assumed: `fit(crop, canvas)` is accepted only when the
+    /// band outside it really is matte, i.e. every sample in it is exactly 0 in all three channels. A
+    /// 1:1 window fills its canvas with picture, fails the probe (there is no band to check) and gets
+    /// the whole sample — which is correct, because that window *is* all picture.
+    ///
+    /// The failure this cannot see: a picture whose own top or left edge is a hard black band is
+    /// indistinguishable from a matte there. The cost of that mistake is the bin-0 counts of one
+    /// band, not a wrong rect, and a caller that knows the rect should pass `content:`.
+    private func framePictureRect(in rgba: [Float16], sample: ImageSize, canvas: ImageSize,
+                                  picture: ImageSize) -> ImageRect {
+        let whole = ImageRect(x: 0, y: 0, width: sample.width, height: sample.height)
+        let fitted = ImageSize.fit(picture, in: canvas)
+        guard fitted != canvas else { return whole }
+        let sx = Double(sample.width) / Double(canvas.width)
+        let sy = Double(sample.height) / Double(canvas.height)
+        let x = Int((Double((canvas.width - fitted.width) / 2) * sx).rounded())
+        let y = Int((Double((canvas.height - fitted.height) / 2) * sy).rounded())
+        let w = Int((Double(fitted.width) * sx).rounded())
+        let h = Int((Double(fitted.height) * sy).rounded())
+        // A band has to exist *in the sample* for the probe to mean anything.
+        guard x >= 0, y >= 0, w > 0, h > 0, x + w <= sample.width, y + h <= sample.height,
+              w < sample.width || h < sample.height else { return whole }
+
+        @inline(__always) func isMatte(_ px: Int, _ py: Int) -> Bool {
+            let o = (py * sample.width + px) * 4
+            return rgba[o] == 0 && rgba[o + 1] == 0 && rgba[o + 2] == 0
+        }
+        var bandIsMatte = true
+        for py in 0..<sample.height {
+            let rowOutside = py < y || py >= y + h
+            for px in 0..<sample.width where rowOutside || px < x || px >= x + w {
+                if !isMatte(px, py) { bandIsMatte = false; break }
+            }
+            if !bandIsMatte { break }
+        }
+        return bandIsMatte ? ImageRect(x: x, y: y, width: w, height: h) : whole
     }
 
     public func invalidateCache() {
