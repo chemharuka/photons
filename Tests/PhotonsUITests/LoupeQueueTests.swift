@@ -123,24 +123,31 @@ final class LoupeQueueTests: XCTestCase {
         return condition()
     }
 
-    /// Pump until nothing is moving: the decode queue idle **and** the frame count unchanged for four
-    /// consecutive checks.
+    /// Pump until nothing is moving: the decode queue idle, no frame mid-render, **and** the frame
+    /// count unchanged for four consecutive checks.
     ///
-    /// Both halves are needed. A frame's render is not on the decode queue, so "the decode queue is
-    /// empty" alone returns while a 60 MP render is still in flight; and a rung's arrival starts the
-    /// *next* development, so one idle check can be the gap between two of them.
+    /// All three are needed. A frame's render is not on the decode queue, so "the decode queue is
+    /// empty" alone returns while a 60 MP render is still in flight — and that render moves no
+    /// counter until it presents, so the stability window alone would call a 700 ms replacement
+    /// render "quiet" (this is how the stale-arrival test went red on a loaded box). A rung's arrival
+    /// starts the *next* development, so one idle check can be the gap between two of them.
+    ///
+    /// Each drain is capped by what is left of this call's own deadline (≤ 2 s), so the loop can no
+    /// longer outlive its timeout the way chained 30 s waits could: the total is `timeout`.
     private func settle(_ controller: LoupeController, timeout: TimeInterval = 180) {
         let deadline = Date().addingTimeInterval(timeout)
-        var stable = 0
+        var quiescent = 0
         var lastFrames = -1
-        while Date() < deadline && stable < 4 {
+        while Date() < deadline && quiescent < 4 {
+            let budget = max(0.05, min(2, deadline.timeIntervalSinceNow))
+            let idle = controller.awaitPendingDevelopments(timeout: budget)
             pump(0.05)
             let frames = controller.viewRenderCount + controller.editRenderCount
-            let idle = controller.awaitPendingDevelopments(timeout: 30)
-            if idle, frames == lastFrames { stable += 1 } else { stable = 0 }
+            let rendering = controller.isRenderingViewportFrame
+            if idle, !rendering, frames == lastFrames { quiescent += 1 } else { quiescent = 0 }
             lastFrames = frames
         }
-        XCTAssertEqual(stable, 4, "the loupe never went quiet")
+        XCTAssertEqual(quiescent, 4, "the loupe never went quiet")
     }
 
     private func percentile(_ xs: [Double], _ q: Double) -> Double {
@@ -200,13 +207,18 @@ final class LoupeQueueTests: XCTestCase {
             XCTAssertLessThanOrEqual(latency.max() ?? 0, 16.7,
                                      "…and the whole request→canvas hop must fit a 60 Hz frame")
         }
-        // Unconditional, and load-proof by an order of magnitude: a pan that was queued behind the
-        // development costs 800–6000 ms (measured), a free one costs 4–12 ms even on a busy machine.
-        XCTAssertLessThan(latency.max() ?? .infinity, 50,
-                          "a pan was serialised behind the development")
+        // Unconditional: no pan was serialised behind the development. Asserted structurally — all
+        // twenty frames landed while only the preview rung existed, so none of them could have waited
+        // for the full development to finish (a serialised pan would have to land after it).
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.previewScale,
                        "the pans ride the preview rung: the full one is still being developed")
         XCTAssertEqual(loupe.rungArrivals, 1, "only the preview rung has landed so far")
+        // The millisecond budget is a machine measurement (a 60 MP development holds the GPU), so it
+        // is asserted only under PHOTONS_BENCH=1; the numbers are printed on every run.
+        if benchmarks {
+            XCTAssertLessThan(latency.max() ?? 0, 50,
+                              "a pan was serialised behind the development")
+        }
 
         settle(loupe)
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
@@ -296,16 +308,28 @@ final class LoupeQueueTests: XCTestCase {
             XCTAssertTrue(waitFor { b.lastPresentedScale == DecodeLadder.fullScale },
                           "the full rung never reached the canvas")
             split.append((CFAbsoluteTimeGetCurrent() - tB) * 1000)
-            print(String(format: "Q29 ③ round %d: inline %.0f ms → two queues %.0f ms (%.1f%%)",
+            // Structural, load-proof, and the part ③ would otherwise only be able to infer from a
+            // clock: the split path develops each rung once and paints one frame per rung.
+            XCTAssertEqual(b.rungArrivals, 2, "two rungs, two arrivals")
+            XCTAssertEqual(b.developmentStats.decodes, 2,
+                           "the queue split must not develop a rung twice")
+            print(String(format: "Q29 ③ round %d: inline %.0f ms → two queues %.0f ms (%.1f%%), "
+                         + "decodes %d, arrivals %d",
                          round, inline[round], split[round],
-                         (split[round] / inline[round] - 1) * 100))
+                         (split[round] / inline[round] - 1) * 100,
+                         b.developmentStats.decodes, b.rungArrivals))
         }
 
         let inlineP50 = percentile(inline, 0.5), splitP50 = percentile(split, 0.5)
         print(String(format: "Q29 ③ full-resolution ready: inline %.0f ms → split %.0f ms "
                         + "(budget: within 5%% of baseline 860 ms)", inlineP50, splitP50))
-        XCTAssertLessThanOrEqual(splitP50, inlineP50 * 1.05 + 5,
-                                 "the queue split must not cost 5% of the ready time")
+        // Both numbers are wall clocks measured against each other in the same process, so the ratio
+        // is only asserted under PHOTONS_BENCH=1: on a box that is building something else the two
+        // rounds can drift ±20 % independently and the ratio says nothing about the product.
+        if benchmarks {
+            XCTAssertLessThanOrEqual(splitP50, inlineP50 * 1.05 + 5,
+                                     "the queue split must not cost 5% of the ready time")
+        }
     }
 
     // MARK: - ④ the decode count
@@ -417,6 +441,12 @@ final class LoupeQueueTests: XCTestCase {
         // A resize (or any new intent) while the full development is still running: same photo, new
         // generation. The full rung's arrival now belongs to a frame that no longer exists.
         loupe.scheduleRender()
+        // The second `scheduleRender` paints a frame of its own; *then* the stale arrival has to
+        // repaint at the camera on screen now. Wait for that property — the full rung on the canvas —
+        // instead of for a quiet process: a `.scheduled` frame is not covered by the in-flight flag,
+        // and "nothing changed for a while" is a race with a 700 ms render on a loaded box.
+        XCTAssertTrue(waitFor { loupe.lastPresentedScale == DecodeLadder.fullScale },
+                      "the full rung never replaced the preview on its own")
         settle(loupe)
         print("Q29 stale: frames \(framesBefore) → \(loupe.viewRenderCount), "
               + "stale drops \(loupe.staleRungDrops), arrivals \(loupe.rungArrivals), "
@@ -443,8 +473,8 @@ final class LoupeQueueTests: XCTestCase {
 
     // MARK: - the two queues really are two
 
-    /// Decode and render **overlap in time** — asserted as interval overlap, so a loaded machine can
-    /// be slow without failing the test, and a single-queue implementation cannot pass it.
+    /// Decode and render **overlap in time** — asserted as a count taken at delivery, so a loaded
+    /// machine can be slow without failing the test, and a single-queue implementation cannot pass it.
     func testDevelopmentAndFramesOverlapInTime() throws {
         let url = try rawFixture()
         let loupe = makeController(source: source(url, identity: "overlap"))
@@ -454,12 +484,17 @@ final class LoupeQueueTests: XCTestCase {
         XCTAssertTrue(waitFor { loupe.developmentStats.decodes >= 1 }, "no development started")
 
         var frameTimes: [Double] = []
+        var framesWhileFullRungPending = 0
         for step in 0..<6 {
             loupe.frameSource = source(url, identity: "overlap", state: pannedState(step))
             let before = loupe.viewRenderCount
             loupe.requestViewportRender()
             if waitFor(10, { loupe.viewRenderCount > before }) {
                 frameTimes.append(CFAbsoluteTimeGetCurrent())
+                // The structural form of "the two queues overlapped": read on the spot whether the
+                // full development had already arrived. A single queue would deliver this frame only
+                // after the development finished, so every frame would see both rungs resident.
+                if loupe.rungArrivals < 2 { framesWhileFullRungPending += 1 }
             }
         }
         XCTAssertEqual(frameTimes.count, 6, "not every pan produced a frame")
@@ -469,14 +504,14 @@ final class LoupeQueueTests: XCTestCase {
         settle(loupe)
 
         let frames = (start: try XCTUnwrap(frameTimes.first), end: try XCTUnwrap(frameTimes.last))
-        print(String(format: "Q29 overlap: development finished at %.0f ms; frames at %.0f … %.0f ms",
+        print(String(format: "Q29 overlap: development finished at %.0f ms; frames at %.0f … %.0f ms; "
+                        + "frames delivered while the full rung was still pending: %d/6",
                      (developmentDone - t0) * 1000,
-                     (frames.start - t0) * 1000, (frames.end - t0) * 1000))
+                     (frames.start - t0) * 1000, (frames.end - t0) * 1000,
+                     framesWhileFullRungPending))
+        XCTAssertEqual(framesWhileFullRungPending, 6,
+                       "a frame landed only after the development had finished — the decode and the "
+                       + "render were not overlapping, they were serialised")
         XCTAssertGreaterThan(frames.start, t0)
-        XCTAssertLessThan(frames.end, developmentDone,
-                          "every frame must land **while** the development is still running: a single "
-                          + "queue would put them all after it")
-        XCTAssertGreaterThan(developmentDone - frames.end, 0.05,
-                             "and the development must still be running when the last frame lands")
     }
 }
