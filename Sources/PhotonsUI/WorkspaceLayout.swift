@@ -10,7 +10,7 @@ import AppKit
 /// | element | value |
 /// |---|---|
 /// | top tool container | 36 pt, buttons 28 pt, shared centre line with the traffic lights |
-/// | browser (sources + photo rows) | 212 pt default, 196…260, row height 46 pt |
+/// | browser (sources + photo rows) | 212 pt default, 196…260, folder rows 28 pt, photo rows 46 pt |
 /// | filmstrip (second browser) | 83 pt tall (one row), 111 × 69 pt cells |
 /// | inspector | 330 pt default, 300…364 |
 /// | safe editing area | at least 560 × 420 |
@@ -58,7 +58,15 @@ public enum WorkspaceLayout {
     public static let browserWidthDefault: CGFloat = 212
     public static let browserWidthMin: CGFloat = 196
     public static let browserWidthMax: CGFloat = 260
+    /// A **photo** row: thumbnail 34 pt + filename + meta line. Unchanged by 021 — the rows below
+    /// the tree carry two lines of text and a picture, so 28 pt would clip them.
     public static let browserRowHeight: CGFloat = 46
+    /// A **folder tree** row (021 A). The user's 「文件夹高度太高了，不需要那么多 px」 is about this
+    /// column: a source list is a navigation surface, one line of 12 pt text and a 13 pt glyph, and
+    /// 46 pt of height per folder pushed most of a library's tree out of a 180 pt pane. 28 pt still
+    /// leaves the name 18 pt of centred text with 5 pt of air above and below (the tree and the photo
+    /// rows are separate constants so neither can drag the other).
+    public static let browserTreeRowHeight: CGFloat = 28
 
     // The left browser's own vertical contract: a folder **tree** on top, the photo rows below.
     //
@@ -78,12 +86,18 @@ public enum WorkspaceLayout {
 
     /// Height the folder tree gets in a browser pane `panelHeight` tall, for `rowCount` visible rows.
     ///
-    /// Three bounds, in this order: the content (`rows × 46 + 6`), the 45 % ceiling, and what is left
+    /// Three bounds, in this order: the content (`rows × 28 + 6`), the 45 % ceiling, and what is left
     /// once the header, the footer and the photo list's 120 pt floor are paid for. The 180 pt floor
-    /// wins over all of them — a tree shorter than three rows cannot show "全部照片 → root → 一个子文件夹",
-    /// which is the whole point of the control.
+    /// wins over all of them.
+    ///
+    /// **The floor stays 180 after 021 A**, and that is deliberate: it was never "3 × rowHeight"
+    /// arithmetic (at 46 pt three rows were 144) but the promise that the tree is a navigation pane
+    /// rather than a strip. With 28 pt rows the same 180 pt now shows six folders instead of three —
+    /// the height the user complained about is per row, and shrinking the pane too would have handed
+    /// the freed pixels to the photo list while leaving a one-root library with the same 52 pt of
+    /// blank space that started this. The photo list's share of the panel is therefore unchanged.
     public static func browserTreeHeight(rowCount: Int, panelHeight: CGFloat) -> CGFloat {
-        let content = CGFloat(max(1, rowCount)) * browserRowHeight + browserTreeInset
+        let content = CGFloat(max(1, rowCount)) * browserTreeRowHeight + browserTreeInset
         // `max(minHeight, …)` keeps the *floor* true for a panel too short to honour 45 %; a real
         // panel (window minimum 780 pt) is never that short.
         let fractionCap = max(browserTreeMinHeight, panelHeight * browserTreeMaxFraction)

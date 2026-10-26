@@ -212,13 +212,23 @@ public final class CatalogSession {
             // then guaranteed to describe the same library state, and a selected folder that lost
             // its last photo (a delete, a relink) stops filtering instead of filtering to nothing.
             folderNodes = (try? c.folderIndex()) ?? [:]
-            if let id = selectedRootID, !roots.contains(where: { $0.id == id }) {
-                selectedRootID = nil
-                selectedFolderPath = ""
-            }
-            if !selectedFolderPath.isEmpty,
-               !(folderNodes[selectedRootID ?? ""] ?? []).contains(where: { $0.path == selectedFolderPath }) {
-                selectedFolderPath = ""
+            // Drop selections that no longer exist — a delete, a relink or a removed root. A dead
+            // *root* drops its row outright; a dead *subfolder* falls back to its root, which is
+            // what the single-selection model did ("the folder I was in lost its last photo" must
+            // narrow to the root, not to nothing). Multi-selection keeps the other rows.
+            if !selectedFolders.isEmpty {
+                var kept: [FolderSelection] = []
+                for sel in selectedFolders {
+                    guard let id = sel.rootId, roots.contains(where: { $0.id == id }) else { continue }
+                    guard let path = sel.normalizedPath else { kept.append(sel); continue }
+                    if (folderNodes[id] ?? []).contains(where: { $0.path == path }) {
+                        kept.append(sel)
+                    } else {
+                        kept.append(FolderSelection(rootId: id, path: nil))
+                    }
+                }
+                let normalized = Self.normalizedFolders(kept)
+                if normalized != selectedFolders { selectedFolders = normalized }
             }
             // The grid is the library view: everything the catalog has, newest first (the query
             // already orders by capture_time DESC). M3 has no paging; 10k rows is the design point.
@@ -227,11 +237,10 @@ public final class CatalogSession {
             let f = filter
             assets = try c.assets(AssetFilter(ratingAtLeast: f.ratingAtLeast,
                                               cameraKey: f.cameraKey,
-                                              sourceRootId: selectedRootID,
                                               limit: 200_000,
                                               flagEquals: f.flag,
                                               colorLabelEquals: f.colorLabel,
-                                              folderPath: selectedFolderPath))
+                                              folders: selectedFolders))
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -280,13 +289,33 @@ public final class CatalogSession {
 
     // MARK: selection
 
-    /// `nil` = all photos. The browser's source list writes this; the grid/list/loupe all follow.
-    public private(set) var selectedRootID: String?
+    /// The folder rows the source tree has highlighted (021 B), in the order the user added them.
+    ///
+    /// Empty means no folder constraint — the whole library — and that is also how 「全部照片」 is
+    /// stored: it is the *absence* of a constraint, not a clause. The old model was one
+    /// `selectedRootID` + one `selectedFolderPath`, which could only ever name a single root's single
+    /// subtree; ⌘-multi-select needs a set, and a set that spans roots.
+    ///
+    /// Normalised on the way in (`normalizedFolders`): 「全部照片」 collapses the whole set, duplicate
+    /// rows collapse to one, and paths are canonicalised — so `reload()` compares like with like and
+    /// a ⌘-click that changes nothing does not re-run the query.
+    public private(set) var selectedFolders: [FolderSelection] = []
+
+    /// `nil` = all photos. Read-only convenience for the single-selection case (the tree's own
+    /// probes and the 020-era tests read it); with a multi-selection it is `nil`, because there is
+    /// no single root to name — `selectedFolders` is the truth.
+    public var selectedRootID: String? {
+        guard selectedFolders.count == 1 else { return nil }
+        return selectedFolders[0].rootId
+    }
 
     /// A folder inside `selectedRootID`, relative to it and `/`-separated; `""` = the whole root.
-    /// Written together with the root by `selectFolder`, so the tree can never describe a folder
-    /// that belongs to another root.
-    public private(set) var selectedFolderPath: String = ""
+    /// Same single-selection caveat as `selectedRootID`, and `""` whenever the set is empty (the
+    /// whole library) so the old "全部照片 sets the path to empty" assertion still means what it says.
+    public var selectedFolderPath: String {
+        guard selectedFolders.count == 1 else { return "" }
+        return selectedFolders[0].normalizedPath ?? ""
+    }
 
     /// Per-root folder trees, filled by `reload()` from one `folderIndex()` scan. The browser draws
     /// its rows and reads its counts from here — never from `stats.byRoot`, which keys on the
@@ -299,11 +328,36 @@ public final class CatalogSession {
 
     /// One click in the folder tree: root + subtree prefix, one reload.
     public func selectFolder(rootID: String?, path: String) {
-        let normalized = AssetFilter.normalizedFolderPath(path) ?? ""
-        guard rootID != selectedRootID || normalized != selectedFolderPath else { return }
-        selectedRootID = rootID
-        selectedFolderPath = normalized
+        selectFolders([FolderSelection(rootId: rootID, path: path)])
+    }
+
+    /// The whole selection at once — what a ⌘-click, a ⇧-range or a "clicked the empty area" hands
+    /// over. One reload per gesture, never one per row.
+    public func selectFolders(_ folders: [FolderSelection]) {
+        let normalized = Self.normalizedFolders(folders)
+        guard normalized != selectedFolders else { return }
+        selectedFolders = normalized
         reload()
+    }
+
+    /// Canonical form of a selection, so the tree, the query and the highlight all agree.
+    ///
+    /// * 「全部照片」 (`rootId == nil`) means the whole library → the selection collapses to empty; the
+    ///   other rows are ignored rather than ORed with everything (021 §B, last row of the table).
+    /// * duplicates collapse (`Hashable` on `(rootId, path)`, paths canonicalised) — two highlights on
+    ///   one row are not two clauses.
+    /// * `day2` + `day2/sub` is left **as is**: the union is `day2`'s subtree by arithmetic, the SQL
+    ///   OR returns each row once, and both rows stay highlighted because the user selected both.
+    public static func normalizedFolders(_ folders: [FolderSelection]) -> [FolderSelection] {
+        if folders.contains(where: { $0.isAllPhotos }) { return [] }
+        var seen = Set<FolderSelection>()
+        var out: [FolderSelection] = []
+        for folder in folders {
+            guard let root = folder.rootId else { continue }
+            let canonical = FolderSelection(rootId: root, path: folder.normalizedPath)
+            if seen.insert(canonical).inserted { out.append(canonical) }
+        }
+        return out
     }
 
     /// The folders of one root. Always contains the `""` node (the root itself) when it holds a photo,
