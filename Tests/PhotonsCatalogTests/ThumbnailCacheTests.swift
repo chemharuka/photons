@@ -3,7 +3,8 @@ import CoreGraphics
 @testable import PhotonsCatalog
 
 /// M3.5 cache contract: content-addressed keys, atomic writes, LRU, tier policy.
-/// Every assertion here is one of the executable checks of docs/tasks/006-thumbnails.md §7.
+/// Every assertion here is one of the executable acceptance checks written for M3.5: content
+/// addressing, atomic `rename`, LRU budget, tier policy, and no upscaling past the embedded preview.
 final class ThumbnailCacheTests: XCTestCase {
 
     private var root: URL!

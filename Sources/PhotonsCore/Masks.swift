@@ -5,8 +5,7 @@ import Foundation
 // Masks are **first-class values** (docs/architecture-decisions.md D11): everything the renderer
 // needs is a parameter, nothing is a bitmap. Coordinates are normalised to the **uncropped source
 // image** and distances are divided by `min(W, H)`, so one document produces the same shape at
-// thumbnail, fit, 1:1 and export scale — that is the precondition for "store parameters, not pixels"
-// (docs/tasks/005-masks.md §2/§4).
+// thumbnail, fit, 1:1 and export scale — which is the whole reason a mask never stores a bitmap.
 //
 // Field defaults are explicit and every decoder falls back to them (D9): a missing key never becomes
 // zero and never fails the document.
@@ -16,9 +15,10 @@ import Foundation
 /// How a component joins the running selection. The first component's `op` is ignored.
 public enum CombineOp: String, Codable, Sendable, CaseIterable {
     /// Union: `max(acc, a)`. The same "max is a union, joints do not double-expose" rule as the
-    /// brush accumulation blend (docs/tasks/005-masks.md §4.1).
+    /// brush accumulation blend, where a stroke is one render pass of per-segment quads blended with
+    /// `MTLBlendOperation.max` (max is a union, so joints never double-expose).
     case add
-    /// `acc · (1 − a)` — the erase blend of §4.1 applied to a whole component.
+    /// `acc · (1 − a)` — the erase blend (`a_d · (1 − a_s)`) applied to a whole component.
     case subtract
     /// `acc · a` — the product rule ART uses for stacked masks (§4.6).
     case intersect
@@ -424,8 +424,8 @@ public enum OKLabMetric {
 /// existing document round-trips byte for byte — it resolves through the same Vision request.
 public enum SemanticKind: String, Codable, Sendable, CaseIterable {
     case sky, subject, person, hair, skin, teeth, glasses
-    /// Legacy spelling of `subject` (docs/tasks/005-masks.md §2 used it before 005e named the seven
-    /// kinds). Same route, same raster: it is an alias, not a second model.
+    /// Legacy spelling of `subject`, kept so a document written before the seven kinds were named
+    /// round-trips byte for byte. Same route, same raster: it is an alias, not a second model.
     case foreground
 }
 
@@ -798,7 +798,7 @@ public enum JSONValue: Sendable, Equatable, Codable {
 
 // MARK: - 005d: canvas-space bounds, tiles and the dependency closure
 //
-// §3.4 of docs/tasks/005-masks.md, made a value layer so it is testable without a GPU:
+// The patch-recompute geometry, made a value layer so it is testable without a GPU:
 //
 //     bounds(mask)  = AABB(components) ⊕ featherRadius ⊕ guidedRadius     (canvas pixels)
 //     dirtyRect(s)  = ∪ bounds(m ∈ dirty(s))

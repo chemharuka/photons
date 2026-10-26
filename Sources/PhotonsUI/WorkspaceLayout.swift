@@ -5,7 +5,8 @@ import AppKit
 /// Every frame in the workspace comes from one resolver — the discipline `local/research/ui-stack.md`
 /// credits for the shell that survived four rounds of redesign (Phos `WorkspaceLayout.resolve`).
 ///
-/// The numbers are the layout contract of docs/tasks/004-ui-skeleton.md §2b:
+/// The numbers are the layout contract of the M3 shell (Phos-style: no `NSToolbar`, a 36 pt drawn top
+/// bar that shares the traffic lights' midline):
 ///
 /// | element | value |
 /// |---|---|

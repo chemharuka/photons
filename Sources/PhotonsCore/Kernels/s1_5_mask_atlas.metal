@@ -3,9 +3,9 @@ using namespace metal;
 
 // S1.5 — mask atlas: one slice per enabled mask, R16F, at canvas resolution.
 //
-// This is the single predicate domain of the graph (docs/tasks/005-masks.md §3.1): a mask is
-// evaluated once, in the frame the *editing* stage sees (after S1's global exposure and white
-// balance), and every consumer — S1.6 here, `showMask` in 005e — reads the same numbers.
+// This is the single predicate domain of the graph: a mask is evaluated once, in the frame the
+// *editing* stage sees (after S1's global exposure and white balance), and every consumer — S1.6
+// here, the `showMask` overlay — reads the same numbers.
 // Evaluating the predicate inside S1/S2/S3 instead would mean three copies of it and three
 // different selections.
 //

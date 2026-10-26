@@ -11,8 +11,9 @@ import CryptoKit
 /// M4 adds two **conditional** stages between S1 and S2 (`s1.5-mask-atlas`, `s1.6-local`). They are
 /// cases of this enum — so the trace, the dirty set and the key chain all speak the same language —
 /// but they are deliberately *not* in `allCases`, because `allCases` means "the passes every
-/// document renders". A document with no masks must produce exactly the M1 trace and the M1 keys
-/// (docs/tasks/005-masks.md §3.2); see `pipeline`.
+/// document renders". A document with no masks must produce exactly the M1 trace and the M1 keys:
+/// with `masks` empty the two mask-keyed links are dropped whole rather than made neutral, so the
+/// key bytes stay the M1 ones; see `pipeline`.
 public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case geometry = "s0-geometry"
     case sceneLinear = "s1-scene-linear"

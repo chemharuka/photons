@@ -1,5 +1,6 @@
 #!/bin/bash
-# M2 acceptance — the checks in docs/tasks/003-catalog.md §7.
+# M2 acceptance — dedup, re-import, interrupt/resume, move, offline root, migration guard, migration
+# correctness, query timing, metadata, full chain.
 #
 #   BIN=.build/release/photonsctl RAW=~/Desktop/test/L1030433.dng Tests/catalog-acceptance.sh
 #   ... --perf     also run the 10k-row query timing (~90 s)

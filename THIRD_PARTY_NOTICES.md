@@ -9,7 +9,8 @@ Photons is MIT-licensed (see `LICENSE`). It links exactly **one** third-party pa
 - License: **MIT**
 - Used by: `PhotonsCatalog` (the SQLite layer: connections, migrations, record mapping)
 - Why: the catalog needs WAL, a migration ladder, and typed row decoding. Hand-rolling that is
-  ~700–900 lines of the most error-prone code in the project (see `docs/tasks/003-catalog.md` §1).
+  ~700–900 lines of the most error-prone code in the project (WAL, a migration ladder, typed row
+  decoding, and soft-delete / offline bookkeeping that has to survive a `kill -9`).
 
 Copyright notice as required by the MIT license:
 

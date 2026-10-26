@@ -19,7 +19,7 @@ import PhotonsCore
 ///      descriptors' feather normalize to the frame's size, so a window at the frame's corner sees
 ///      the corner's darkening and the frame's feather width — not the window's.
 ///   4. **It costs what it cost.** A 1:1 pan frame is a full stage-cache miss; `testPanFrame...`
-///      measures p50/p95 against the 5.8 ms figure in docs/tasks/QUEUE.md Q15.
+///      measures p50/p95 against the 5.8 ms pan-frame figure measured when 1:1 + EDR landed.
 ///
 /// Everything here uses a synthetic textured image, so the numbers are reproducible and no test in
 /// this file skips for want of a RAW fixture.

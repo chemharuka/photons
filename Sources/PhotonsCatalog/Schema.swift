@@ -1,8 +1,8 @@
 import Foundation
 import GRDB
 
-/// Schema — one migration per version, each doing one thing (darktable's 57-step discipline;
-/// `docs/tasks/003-catalog.md` §3 has the annotated DDL).
+/// Schema — one migration per version, each doing one thing (darktable's 57-step discipline); the DDL
+/// lives in the `v1`…`v5` closures below, one `CREATE TABLE` per concern.
 ///
 /// | version | what it adds |
 /// |---|---|
@@ -14,9 +14,10 @@ import GRDB
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
-/// table under the name `asset_history` (`docs/tasks/003-catalog.md` §3, `architecture-decisions.md`
-/// §6). v3 therefore does **not** create a second table: the existing name and columns win, and the
-/// only things missing were a write timestamp and a place to park blobs that will not decode.
+/// table under the name `asset_history` (the v1 migration in this file;
+/// `architecture-decisions.md` §6 has the table's original reasoning). v3 therefore does **not**
+/// create a second table: the existing name and columns win, and the only things missing were a
+/// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
     public static let version = 5

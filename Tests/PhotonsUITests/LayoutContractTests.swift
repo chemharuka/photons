@@ -2,7 +2,8 @@ import XCTest
 import AppKit
 import PhotonsUI
 
-/// The layout contract of docs/tasks/004-ui-skeleton.md §2b, as a test.
+/// The layout contract of the M3 shell (36 pt top bar, 212 pt sidebar, 122 pt filmstrip, 330 pt
+/// inspector), as a test.
 ///
 /// "The grid has 5 columns here" is only a claim unless both sides come from a function: the views
 /// call `GridLayout.metrics` / `WorkspaceLayout.resolve`, and `--ui-smoke` compares what the flow

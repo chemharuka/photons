@@ -11,7 +11,8 @@ import PhotonsExport
 /// One cell's outstanding thumbnail load.
 ///
 /// Queueing, single-flight, priority and cancellation are *not* here any more: they belong to
-/// `ThumbnailService` (docs/tasks/006-thumbnails.md §4–§5) and there is exactly one of those per
+/// `ThumbnailService` (single-flight per `(contentHash, tier)`, priority order, concurrency ceiling 3,
+/// `generation`-based cancellation) and there is exactly one of those per
 /// library. This token is the UI-facing half of a request — the item index a scroll handler can
 /// match against the visible window, the cache key that was actually asked for (after the tier
 /// policy), and the cancellation counter `--ui-smoke` reads.
@@ -79,7 +80,8 @@ final class RequestState: @unchecked Sendable {
 /// `ThumbnailService`, which owns the queue, the single-flight map, cancellation and the
 /// concurrency ceiling.
 ///
-/// Layers, in the order a cell asks for them (docs/tasks/006-thumbnails.md §1, §3):
+/// Layers, in the order a cell asks for them — memory, then the content-addressed file on disk, then a
+/// freshly generated one:
 ///
 /// 1. **memory** — `NSCache` keyed by `ThumbKey.digest`, 512 images / 96 MB, cost = w·h·4. A cell
 ///    that scrolls back into view is answered synchronously, with no file I/O and no queue hop.

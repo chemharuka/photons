@@ -6,8 +6,7 @@ import ImageIO
 // MARK: - tiers
 
 /// The only sizes that may exist on disk. A tier is part of the cache key, so adding an
-/// interpolated one (1.5×, 2.5×) buys one more file per recipe and one more way to go stale —
-/// docs/tasks/006-thumbnails.md §1.
+/// interpolated one (1.5×, 2.5×) buys one more file per recipe that can go stale.
 public enum ThumbTier: String, Sendable, CaseIterable, Codable {
     case t256, t512, t1024, t2048, t4096
 

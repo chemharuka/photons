@@ -4,7 +4,8 @@ import AppKit
 
 /// The M3 stand-in for a thumbnail: a colour block derived from the asset's content hash.
 ///
-/// Deliberately **not** a thumbnail (docs/tasks/004-ui-skeleton.md §1: `previewImage` is M3.5).
+/// Deliberately **not** a thumbnail: M3 ships the grid before any thumbnail exists, so what a cell
+/// draws is a stand-in by definition.
 /// The point is that a 10k-row grid measures the grid — layout, reuse, selection — and not ImageIO.
 /// Deriving the colour from `contentHash` keeps it stable across launches and unique per photo, so
 /// mistakes in reuse show up as a caption that does not match its block.

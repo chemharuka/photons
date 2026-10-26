@@ -81,8 +81,8 @@ public enum MaskLevelParameter: String, CaseIterable, Sendable {
 
 // MARK: local adjustments
 
-/// The eleven local sliders plus `amount`, in the order the panel draws them and the order
-/// `docs/tasks/005-masks.md` §2 lists them.
+/// The eleven local sliders plus `amount`, in the order the panel draws them — which is the order
+/// `LocalAdjustments` declares them in.
 ///
 /// Every range is the one the *document* is defined in:
 ///   · `amount` — "0…100，默认 100（整体 lerp）";

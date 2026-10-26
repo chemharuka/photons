@@ -2,7 +2,7 @@
 
 > Checkpoint file. A new session should be able to read this plus
 > `docs/architecture-decisions.md` and start working. Keep it under ~80 lines.
-> Updated: 2026-10-26 06:55 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（见 `docs/tasks/QUEUE.md`）
+> Updated: 2026-10-26 06:55 · M3/M3.5 done，M4 核心 done（无 UI），M2 迁到 v3 · 离线连续作业中（多路并行，按依赖排序派发）
 
 ## Milestones
 
@@ -82,7 +82,7 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 2. 蒙版面板改名会产生 1 条历史（`masks` 按值比较含名字），像素与 `selectionKey` 都不变——语义可选，待定。
 3. `LocalAdjustments` 没有 sharpen 字段，面板只露出 amount 作“强度”。
 
-## 下一步（并行队列见 `docs/tasks/QUEUE.md`）
+## 下一步（按依赖排序，可并行派发）
 
 1. UI 接真数据：网格出真缩略图、检查器滑杆驱动重渲（防抖+单飞）、⌘Z/⇧⌘Z 接 `EditHistory`（在跑）。
 2. 蒙版 005d（feather/refine/tile）→ 005e（语义蒙版 + showMask）。
@@ -109,6 +109,6 @@ PHOTONS_TEST_RAW=/path/to.dng swift test
 ## Pointers
 
 - decisions + evidence: `docs/architecture-decisions.md`（§11 = 解码/EDR/镜头/XMP 的实测结论）
-- specs: `docs/tasks/004-ui-skeleton.md`（M3）、`005-masks.md`（M4）、`006-thumbnails.md`（M3.5）、`xmp-mapping.md`
-- 连续作业队列与文件所有权：`docs/tasks/QUEUE.md`
+- specs: `docs/xmp-mapping.md`（XMP 映射，入库）；M3/M4/M3.5 的规格只留在本机、不入库，结论已写进本文件与 `architecture-decisions.md`
+- 连续作业的文件所有权规则：一个工作流一组文件所有者，同一时刻同一文件只有一个所有者；队列不入库
 - research corpus (gitignored): `local/research/INDEX.md` · cross-session state: `~/.hermes/bus/photons-0985eb/`
