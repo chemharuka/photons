@@ -1793,6 +1793,24 @@ public final class UISmokeRunner {
                   && card.hoverValueText == "\(codeBin)"
                   && card.hoverCountText == codeCounts)
 
+            // 013 — the percentages row (`R x% G y% B z%`) becomes the *brightness* under the pointer:
+            // `亮度 50%` on the code segment, `亮度 +N.N` on the tail. It replaces that row only; the
+            // footnote above is still painted on the same draw, so both readings exist at once.
+            if let reading = card.hoverReading {
+                let expectedLevel = String(format: "亮度 %.0f%%", Double(reading.code) / 255 * 100)
+                log("hover level row        code bin \(reading.bin) → “\(card.hoverLevelText ?? "nil")” · 通道行 “\(card.channelRowText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · 亮度行 \(card.hoverLevelRect)")
+                check("悬停时通道行读亮度（SDR 区）：\(card.hoverLevelText ?? "nil") == \(expectedLevel)，与脚注 “\(card.hoverValueText)” + “\(card.hoverCountText)” 同时存在，两行不重叠（\(String(format: "%.1f", card.hoverLevelRect.maxY)) ≤ \(String(format: "%.1f", card.hoverReadoutRect.minY))），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+                      card.hoverLevelText == expectedLevel
+                      && reading.code == codeBin
+                      && !card.hoverValueText.isEmpty && !card.hoverCountText.isEmpty
+                      && !card.hoverReadoutRect.isEmpty && !card.hoverLevelRect.isEmpty
+                      && card.hoverLevelRect.maxY <= card.hoverReadoutRect.minY
+                      && card.channelRowWidth <= cardBounds.width
+                      && card.channelRowTexts == [expectedLevel, "", ""])
+            } else {
+                fail("码值区悬停没有 reading，亮度行无从断言")
+            }
+
             // 尾段 +1 / +2 档：64 箱/stop，所以 +1 档是 bin 64、+2 档是 bin 128。
             let tailBin1 = min(Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 1),
@@ -1813,6 +1831,22 @@ public final class UISmokeRunner {
                   card.hoverReading?.bin == tailBin2
                   && card.hoverValueText == "+2.00 档 (4.0×)"
                   && card.hoverCountText == "R \(histogram.red.hdrBins[tailBin2]) · G \(histogram.green.hdrBins[tailBin2]) · B \(histogram.blue.hdrBins[tailBin2])")
+
+            // 尾段的亮度行：+1 档 → “亮度 +1.0”，+2 档 → “亮度 +2.0”（一位小数，口径 +1 档 = 2×）。
+            var tailLevels: [String] = []
+            for stop in [1.0, 2.0] {
+                card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: stop),
+                                                    y: hoverAxis.plot.midY))
+                card.display()
+                tailLevels.append(card.hoverLevelText ?? "nil")
+            }
+            log("hover level row        tail +1/+2 → \(tailLevels) · 脚注 “\(card.hoverValueText)” | “\(card.hoverCountText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt")
+            check("悬停时通道行读亮度（尾段）：+1 档 → “\(tailLevels[0])” == “亮度 +1.0”，+2 档 → “\(tailLevels[1])” == “亮度 +2.0”，脚注同时仍有值 “\(card.hoverValueText)” | “\(card.hoverCountText)”，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+                  tailLevels == ["亮度 +1.0", "亮度 +2.0"]
+                  && card.hoverReading?.segment == .tail
+                  && !card.hoverValueText.isEmpty && !card.hoverCountText.isEmpty
+                  && card.channelRowWidth <= cardBounds.width
+                  && card.hoverLevelRect.maxY <= card.hoverReadoutRect.minY)
 
             // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.5,
@@ -1836,6 +1870,14 @@ public final class UISmokeRunner {
                   && card.hoverValueText.isEmpty && card.hoverCountText.isEmpty
                   && card.hoverReadoutRect.isEmpty
                   && card.hoverPaintCount == paintsBefore)
+
+            // 013 — 离开后通道行回到过白比例（上一处 check 已证明 clipHighTextByChannel == Core 的值）。
+            check("移出绘图区 → 通道行恢复过白比例：画的是 “\(card.channelRowText)” == clipHighTextByChannel 前三项 \(card.channelRowTexts)，亮度行已空（\(card.hoverLevelText ?? "nil")，rect \(card.hoverLevelRect.isEmpty ? "empty" : "非空")），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+                  card.hoverLevelText == nil
+                  && card.hoverLevelRect.isEmpty
+                  && card.channelRowTexts == Array(card.clipHighTextByChannel.prefix(3))
+                  && card.channelRowText.hasPrefix("R ")
+                  && card.channelRowWidth <= cardBounds.width)
 
             // 字号是同一把尺子，颜色可测。
             let readoutFont = HistogramCardView.hoverNumberFont

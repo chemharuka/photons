@@ -121,6 +121,28 @@ public final class HistogramCardView: NSView {
     /// The colour the last readout was painted with (contrast is recomputed from this, not stored).
     public private(set) var lastHoverColor: NSColor = .labelColor
 
+    // MARK: what the channel row is showing while hovering (013)
+
+    /// The **brightness** row, as painted while a bin is under the pointer: `亮度 82%` on the code
+    /// segment, `亮度 +0.8` on the tail. `nil` means the row is showing the above-white shares
+    /// (`clipHighTextByChannel`) — the state when nothing is hovered, and the state it returns to on
+    /// `clearHoverReadout()`.
+    ///
+    /// This is a *position* readout, not a per-channel one: the plot's x axis is brightness, so R, G
+    /// and B sit at the same level at the same x — three identical numbers would be noise. It does
+    /// not replace the footnote either: `hoverValueText` / `hoverCountText` keep painting on the row
+    /// below (010), so the code/stop and the bin's per-channel counts stay on screen alongside it.
+    public private(set) var hoverLevelText: String?
+    /// The three strings the channel row painted last `draw` — the above-white shares normally, and
+    /// while hovering the level readout in `[0]` with the other two slots blank (it is one label, not
+    /// three). The readback the smoke asserts against, so "the row shows X" is a fact about the paint.
+    public private(set) var channelRowTexts: [String] = ["—", "—", "—"]
+    /// How wide the channel row's content really is in *this* state (level readout or percentages).
+    public private(set) var channelRowText = ""
+    /// Where the brightness readout was painted while hovering (`.zero` when the row is the
+    /// percentages) — the smoke compares it with the channel row's own band.
+    public private(set) var hoverLevelRect: NSRect = .zero
+
     /// Worst-case WCAG ratio of the readout colour on the card's own backdrop band.
     public var hoverContrast: Double {
         HistogramCardReadability.worstContrast(of: lastHoverColor, isDark: lastAppearanceIsDark)
@@ -166,7 +188,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。鼠标悬停读出该档的码值（尾段为 +N 档 = 2^N 倍）与该箱 R/G/B 样本数。")
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。鼠标悬停读出该档的码值（尾段为 +N 档 = 2^N 倍）与该箱 R/G/B 样本数，同时把通道行换成该处的亮度（SDR 区为百分比，尾段为 +N 档）。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -259,16 +281,22 @@ public final class HistogramCardView: NSView {
         hoverReading = reading
         hoverValueText = HistogramCardFormat.hoverValue(reading)
         hoverCountText = HistogramCardFormat.hoverCounts(histogram, reading)
+        // 013: the percentages row becomes the brightness readout for the same bin. Kept beside the
+        // footnote above rather than instead of it: the two rows answer different questions.
+        hoverLevelText = HistogramCardFormat.hoverLevelText(reading)
         needsDisplay = true
     }
 
-    /// Drop the reading: the line goes blank and the readback rects go to `.zero` (what the smoke
-    /// counts as "cleared").
+    /// Drop the reading: the line goes blank, the percentages row comes back, and the readback rects
+    /// go to `.zero` (what the smoke counts as "cleared").
     public func clearHoverReadout() {
-        guard hoverReading != nil || !hoverValueText.isEmpty || !hoverReadoutRect.isEmpty else { return }
+        guard hoverReading != nil || !hoverValueText.isEmpty || !hoverReadoutRect.isEmpty
+                || hoverLevelText != nil else { return }
         hoverReading = nil
         hoverValueText = ""
         hoverCountText = ""
+        hoverLevelText = nil
+        hoverLevelRect = .zero
         hoverValueRect = .zero
         hoverCountRect = .zero
         hoverReadoutRect = .zero
@@ -515,6 +543,15 @@ public final class HistogramCardView: NSView {
 
         // Per-channel line: R/G/B above-white shares, the numbers a white-balance tweak moves.
         //
+        // While a bin is under the pointer this row carries the **brightness readout** instead (013) —
+        // `亮度 82%` on the code segment, `亮度 +0.8` on the tail — in the card's own number font, so
+        // it is the same size as 过白/削顶 above it (the owner: "字号要更大，和其他 UI 匹配"). It is
+        // one label, not three: the x axis *is* brightness, so R/G/B would print the same number three
+        // times (see `HistogramCardFormat.hoverLevelText`). On leave the row goes back to the three
+        // above-white percentages in their 8.5 pt face, which is why the row's own width is measured
+        // per state (`channelRowWidth`) and the footnote row below steps down a little further while
+        // the taller face is in use (`channelRowStride`).
+        //
         // The percentages used to be `.tertiaryLabelColor`: resolved over this card's own backdrop
         // that is 1.86 : 1 in aqua and 2.26 : 1 in darkAqua — invisible next to the bold channel
         // letter it belongs to. `HistogramCardReadability` picks an *opaque* colour per appearance
@@ -523,21 +560,47 @@ public final class HistogramCardView: NSView {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         lastAppearanceIsDark = dark
         lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
-        var x = bounds.minX
-        let channels: [(String, String, NSColor)] = [
-            ("R", clipHighTextByChannel[0], NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1)),
-            ("G", clipHighTextByChannel[1], NSColor(srgbRed: 0.22, green: 0.72, blue: 0.34, alpha: 1)),
-            ("B", clipHighTextByChannel[2], NSColor(srgbRed: 0.30, green: 0.48, blue: 0.98, alpha: 1)),
-        ]
-        for (name, value, color) in channels {
-            let nameRect = drawText(name, at: CGPoint(x: x, y: channelY),
-                                    font: .systemFont(ofSize: 8, weight: .bold), color: color)
-            let valueRect = drawText(value, at: CGPoint(x: nameRect.maxX + 2, y: channelY),
-                                     font: HistogramCardReadability.percentFont,
-                                     color: lastPercentColor)
-            x = valueRect.maxX + 9
+        // Re-derived from the live reading every draw: a new measurement or a new bin can never leave
+        // the previous one's label on screen.
+        hoverLevelText = HistogramCardFormat.hoverLevelText(hoverReading)
+        hoverLevelRect = .zero
+        if let level = hoverLevelText {
+            let rect = drawText(level, at: CGPoint(x: bounds.minX, y: channelY),
+                                font: Self.numberFont, color: lastPercentColor)
+            hoverLevelRect = rect
+            channelRowWidth = rect.width
+            channelRowTexts = [level, "", ""]
+            channelRowText = level
+        } else {
+            var x = bounds.minX
+            let channels: [(String, String, NSColor)] = [
+                ("R", clipHighTextByChannel[0], NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1)),
+                ("G", clipHighTextByChannel[1], NSColor(srgbRed: 0.22, green: 0.72, blue: 0.34, alpha: 1)),
+                ("B", clipHighTextByChannel[2], NSColor(srgbRed: 0.30, green: 0.48, blue: 0.98, alpha: 1)),
+            ]
+            for (name, value, color) in channels {
+                let nameRect = drawText(name, at: CGPoint(x: x, y: channelY),
+                                        font: .systemFont(ofSize: 8, weight: .bold), color: color)
+                let valueRect = drawText(value, at: CGPoint(x: nameRect.maxX + 2, y: channelY),
+                                         font: HistogramCardReadability.percentFont,
+                                         color: lastPercentColor)
+                x = valueRect.maxX + 9
+            }
+            channelRowWidth = x - 9 - bounds.minX
+            channelRowTexts = Array(clipHighTextByChannel.prefix(3))
+            channelRowText = zip(["R", "G", "B"], channelRowTexts)
+                .map { "\($0) \($1)" }.joined(separator: " ")
         }
-        channelRowWidth = x - 9 - bounds.minX
+    }
+
+    /// Vertical distance from the percentages row's top to the footnote row's top.
+    ///
+    /// The percentage row's own slot is `clipRowHeight` (15 pt, an 8.5 pt face). While it carries the
+    /// 9.5 pt brightness readout the next row steps down 2 pt, so the two labels keep a real gap
+    /// instead of sharing a line box (at 244 × 104 the card has the room: the footnote still ends
+    /// above `bounds.maxY`).
+    private var channelRowStride: CGFloat {
+        hoverLevelText == nil ? clipRowHeight : clipRowHeight + 2
     }
 
     // MARK: the hover readout line (010)
@@ -575,7 +638,7 @@ public final class HistogramCardView: NSView {
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
         let valueSize = (hoverValueText as NSString).size(withAttributes: attributes)
         let countSize = (hoverCountText as NSString).size(withAttributes: attributes)
-        let rowTop = plot.maxY + 5 + clipRowHeight * 2
+        let rowTop = plot.maxY + 5 + clipRowHeight + channelRowStride
         // Half a point of slack: the row's line box ends exactly at the card's bottom edge otherwise.
         let y = min(rowTop, bounds.maxY - max(valueSize.height, countSize.height) - 0.5)
 
