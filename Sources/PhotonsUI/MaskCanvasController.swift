@@ -348,10 +348,15 @@ public final class MaskCanvasController {
     }
 
     /// Distance in **short-edge units**, i.e. the metric `Stroke.radius` is expressed in.
+    ///
+    /// The frame comes from `maskSourceSize` — the upright one the renderer ingested — not from the
+    /// catalog row's stored dimensions, which are transposed for EXIF 5…8 (task 028: the spacing would
+    /// then be measured in a frame the hand is not drawing in).
     private func shortEdgeDistance(_ a: (x: Double, y: Double), _ b: (x: Double, y: Double),
                                   session: CatalogSession) -> Double {
-        let width = Double(session.anchorAsset?.width ?? 1)
-        let height = Double(session.anchorAsset?.height ?? 1)
+        let source = session.maskSourceSize
+        let width = Double(source.width)
+        let height = Double(source.height)
         let minSide = max(1, min(width, height))
         let dx = (b.x - a.x) * width / minSide
         let dy = (b.y - a.y) * height / minSide

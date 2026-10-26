@@ -147,6 +147,17 @@ public final class CatalogSession {
     /// 0…1 per-stroke alpha multiplier.
     public var brushFlow: Double = 1.0
 
+    /// The **upright** pixel size of the photo on screen, as the renderer actually ingested it
+    /// (`RenderGraph.sourceSize`, i.e. after EXIF orientation was applied — task 028).
+    ///
+    /// Mask parameters are normalised to this frame, and every short-edge distance (`brushSize`, a
+    /// stroke's radius, a radial mask's rim) is a fraction of it. The catalog row's `width/height` are
+    /// the *stored* dimensions, which are transposed for EXIF 5…8: a portrait frame then converts
+    /// `left/right` rim offsets with the landscape ratio and the ellipse renders half again as wide as
+    /// the hand drew it. Written once per presented photo by the loupe, keyed by asset id so a photo
+    /// switch cannot inherit the previous picture's frame before its own decode lands.
+    public internal(set) var ingestedSourceFrame: (assetID: String, size: ImageSize)?
+
     /// What the next drag on the canvas creates, when a shape gradient is waiting for one.
     ///
     /// View state like `maskTool`: selecting 线性/径向渐变 in the inspector's 新建 menu arms a drag,

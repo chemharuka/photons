@@ -205,9 +205,18 @@ public enum MaskDragGeometry {
 
 extension CatalogSession {
 
-    /// The source size the normalised geometry is expressed against.
+    /// The source size the normalised geometry is expressed against — **one** answer for the drag
+    /// maths, the brush's spacing metric and the loupe's pre-decode framing.
+    ///
+    /// It is the *upright* frame (`MaskSourceFrame`): the catalog row's dimensions are the stored ones
+    /// and are transposed for EXIF 5…8, which is what made a portrait drag render as a landscape-shaped
+    /// ellipse (task 028).
     var maskSourceSize: ImageSize {
-        ImageSize(width: max(1, anchorAsset?.width ?? 1), height: max(1, anchorAsset?.height ?? 1))
+        let asset = anchorAsset
+        let ingested = ingestedSourceFrame.flatMap { $0.assetID == asset?.id ? $0.size : nil }
+        return MaskSourceFrame.size(ingested: ingested,
+                                    storedWidth: asset?.width,
+                                    storedHeight: asset?.height)
     }
 
     /// Arm the next drag (linear/radial) or create the mask outright (everything else).
