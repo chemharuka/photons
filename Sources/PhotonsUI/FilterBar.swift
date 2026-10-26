@@ -5,7 +5,7 @@ import PhotonsCatalog
 ///
 /// The catalog speaks canonical strings (`"03"`, `"leica|sl3"`, `"1/800"`, `"1.2"`, `"1"`); the bar is
 /// the only layer that knows how to say them out loud. Kept apart from `FilterBarView` so the same
-/// words can be used by the chips, the popup titles and the tests without a second copy.
+/// words can be used by the chips, the checklist rows and the tests without a second copy.
 enum FilterDisplay {
 
     /// Short enough to sit in a 34 pt popup: 星级 / 旗标 / 相机 / 镜头 / 后缀 / 月 / 日 …
@@ -29,7 +29,7 @@ enum FilterDisplay {
         }
     }
 
-    /// The menu entry in the dimension picker — what the 15-item list prints.
+    /// The checklist entry in the dimension picker — what the 15-row list prints.
     static func longTitle(_ dimension: FilterDimension) -> String {
         switch dimension {
         case .ext: return "文件后缀"
@@ -77,7 +77,7 @@ enum FilterDisplay {
         }
     }
 
-    /// The popup's own title: 「全部星级」 when nothing is ticked, else 「星级 1★、2★」.
+    /// The slot control's own title: 「全部星级」 when nothing is ticked, else 「星级 1★、2★」.
     static func slotTitle(_ slot: FilterSlot, cameraLabels: [String: String] = [:]) -> String {
         guard !slot.values.isEmpty else { return "全部\(title(slot.dimension))" }
         let joined = slot.values
@@ -87,31 +87,241 @@ enum FilterDisplay {
     }
 }
 
-/// The grid's filter strip (026 v2): **one** small button that picks dimensions, then up to five slots.
+// MARK: - checklist popover (036)
+
+/// One row of a checklist popover.
+///
+/// `toggle` is a tick box (dimension or value), `action` a plain accent row that runs something
+/// without a state (「全部不选」 / 「全部星级」), `note` a disabled explanation (「本库无此数据」).
+struct FilterChecklistRow {
+    enum Kind { case toggle, action, note }
+
+    let title: String
+    let checked: Bool
+    let enabled: Bool
+    let kind: Kind
+    /// What the bar reads back when the row is clicked: a `FilterDimension` raw value, a canonical
+    /// value string, or "" for the action/note rows.
+    let tag: String
+
+    init(title: String, checked: Bool = false, enabled: Bool = true,
+         kind: Kind = .toggle, tag: String = "") {
+        self.title = title
+        self.checked = checked
+        self.enabled = enabled
+        self.kind = kind
+        self.tag = tag
+    }
+}
+
+/// The popover's root: flipped, focusable, and the place `Esc` is caught.
+final class FilterChecklistRootView: NSView {
+    var onCancel: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {                 // Esc
+            onCancel?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+/// One row of the checklist, drawn by hand so 「置灰」 is a decision rather than an AppKit mood.
+///
+/// A stock checkbox renders a *disabled but ticked* row as an empty white square (no checkmark, no
+/// dimming in this appearance), which would make a full bar look as if nothing were ticked. Drawing
+/// the box, the tick and the title here keeps three states legible at once: ticked, ticked-but-greyed
+/// (five slots already), and not-available (greyed, click inert). It is still an `NSButton`, so the
+/// action, `Tab` and space all behave normally.
+final class FilterChecklistRowButton: NSButton {
+
+    var row = FilterChecklistRow(title: "") {
+        didSet {
+            title = row.title
+            isEnabled = row.enabled
+            toolTip = row.title
+            needsDisplay = true
+        }
+    }
+
+    private static let boxSide: CGFloat = 12
+    private static let textFont = NSFont.systemFont(ofSize: 11)
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let dim: CGFloat = row.enabled ? 1 : 0.4
+        let box = NSRect(x: 2, y: (bounds.height - Self.boxSide) / 2,
+                         width: Self.boxSide, height: Self.boxSide)
+
+        if row.kind == .toggle {
+            let path = NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3)
+            if row.checked {
+                NSColor.controlAccentColor.withAlphaComponent(0.95 * dim).setFill()
+                path.fill()
+                let tick = NSBezierPath()
+                tick.move(to: NSPoint(x: box.minX + 2.8, y: box.midY))
+                tick.line(to: NSPoint(x: box.midX - 0.4, y: box.maxY - 3.2))
+                tick.line(to: NSPoint(x: box.maxX - 2.2, y: box.minY + 3.2))
+                tick.lineWidth = 1.6
+                tick.lineCapStyle = .round
+                tick.lineJoinStyle = .round
+                NSColor.white.withAlphaComponent(dim).setStroke()
+                tick.stroke()
+            } else {
+                NSColor.secondaryLabelColor.withAlphaComponent(0.75 * dim).setStroke()
+                path.lineWidth = 1
+                path.stroke()
+            }
+        }
+
+        let color: NSColor
+        switch row.kind {
+        case .action: color = row.enabled ? .controlAccentColor : .disabledControlTextColor
+        case .note: color = .disabledControlTextColor
+        case .toggle: color = row.enabled ? .labelColor : .disabledControlTextColor
+        }
+        let textX = row.kind == .toggle ? box.maxX + 6 : box.minX + 2
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.textFont, .foregroundColor: color]
+        let size = (row.title as NSString).size(withAttributes: attrs)
+        let rect = NSRect(x: textX, y: (bounds.height - size.height) / 2,
+                          width: max(0, bounds.maxX - textX - 4), height: size.height)
+        (row.title as NSString).draw(in: rect, withAttributes: attrs)
+    }
+}
+
+/// A vertical checklist with real `NSButton` rows — 15 dimensions, or one slot's values.
+///
+/// This exists because `NSMenu` closes as soon as an item is chosen and that cannot be configured
+/// away. `NSPopover(behavior: .transient)` is AppKit's own answer to “点选项不关、点外面才关”: the
+/// window server dismisses it on the next click outside, and nothing here closes it on a selection.
+/// Rows are buttons, so `Tab`/space work; `Esc` arrives at the root view's `cancelOperation`.
+final class FilterChecklistController: NSViewController {
+
+    static let width: CGFloat = 236
+    static let rowHeight: CGFloat = 22
+    static let padding: CGFloat = 8
+
+    private(set) var rows: [FilterChecklistRow] = []
+    var onSelect: ((FilterChecklistRow) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private var buttons: [FilterChecklistRowButton] = []
+    private var buttonKinds: [FilterChecklistRow.Kind] = []
+    private let root = FilterChecklistRootView()
+
+    init() { super.init(nibName: nil, bundle: nil) }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override func loadView() {
+        root.onCancel = { [weak self] in self?.onCancel?() }
+        view = root
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // Rows stay Tab-reachable; taking first responder here is what lets Esc be seen before the
+        // popover has focus somewhere of its own.
+        view.window?.makeFirstResponder(view)
+    }
+
+    var requiredSize: NSSize {
+        NSSize(width: Self.width,
+               height: Self.padding * 2 + CGFloat(max(1, rows.count)) * Self.rowHeight)
+    }
+
+    /// Re-render from a snapshot. When the shape is unchanged the existing buttons are updated **in
+    /// place**, so the click that caused the update never destroys the button it came from.
+    func reload(_ next: [FilterChecklistRow]) {
+        let sameShape = next.count == buttons.count && next.map(\.kind) == buttonKinds
+        rows = next
+        guard sameShape else {
+            rebuild()
+            return
+        }
+        for (index, row) in next.enumerated() where buttons.indices.contains(index) {
+            buttons[index].row = row
+        }
+        layoutRows()
+    }
+
+    private func rebuild() {
+        for button in buttons { button.removeFromSuperview() }
+        buttons = rows.enumerated().map { makeButton(for: $0.element, tag: $0.offset) }
+        buttonKinds = rows.map(\.kind)
+        for button in buttons { root.addSubview(button) }
+        layoutRows()
+    }
+
+    private func makeButton(for row: FilterChecklistRow, tag: Int) -> FilterChecklistRowButton {
+        let button = FilterChecklistRowButton(title: row.title, target: self,
+                                             action: #selector(rowClicked(_:)))
+        button.isBordered = false
+        button.alignment = .left
+        button.focusRingType = .none
+        button.tag = tag
+        button.row = row
+        return button
+    }
+
+    private func layoutRows() {
+        root.frame = NSRect(origin: .zero, size: requiredSize)
+        for (index, button) in buttons.enumerated() {
+            button.frame = NSRect(x: Self.padding + 2,
+                                  y: Self.padding + CGFloat(index) * Self.rowHeight,
+                                  width: Self.width - Self.padding * 2 - 4,
+                                  height: Self.rowHeight)
+        }
+    }
+
+    @objc private func rowClicked(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag) else { return }
+        onSelect?(rows[sender.tag])
+    }
+}
+
+/// The grid's filter strip (026 v2, reshaped by 036): **one** small icon button that picks dimensions,
+/// then up to five slots.
 ///
 /// ```
-/// [ ⋯ ]  [全部星级]  [全部旗标]  [相机 LEICA SL3]  …
+/// [ ⧩ ]  [全部星级]  [全部旗标]  [相机 LEICA SL3]  …
 /// ```
 ///
-/// * the button opens a 15-item check menu; ticking a dimension appends a slot **in click order**,
-///   at most five. Unticking removes it and the later slots close the gap. 「全部不选」 empties them
-///   all, so the next five clicks number 1…5 again. When five are ticked, the remaining ten are
-///   **disabled** (greyed) — the contract allows "disable or ignore", and a grey row explains why
-///   nothing happens where a silently dead click would not.
-/// * each slot's right-hand control is a pull-down `NSPopUpButton` whose menu items carry checkmarks;
-///   the button shows 「全部星级」 or 「星级 1★、2★」. Values inside one slot OR, slots AND.
+/// * the button is a fixed 24 × 24 SF Symbol (`line.horizontal.3.decrease.circle`, the owner's pick
+///   from the contact sheet; `line.horizontal.3.decrease` then `⋯` are the fallbacks) and never
+///   widens with text, so nothing can be truncated. `toolTip` and the accessibility label say
+///   「选择筛选维度」 either way.
+/// * clicking it opens an `NSPopover` (`behavior = .transient`) holding a 15-row tick list, slot
+///   numbers as prefixes, 「全部不选」 last. **Choosing a row keeps the popover open** — a dimension
+///   is ticked (appended in click order, at most five) or unticked (later slots close the gap), and
+///   only a click outside dismisses it. `NSMenu` cannot be made to behave this way; that is why this
+///   is a popover and not a menu.
+/// * 「全部不选」 empties every slot and **stays open**, so the next five clicks number 1…5 again.
+///   When five are ticked the remaining ten rows are **disabled** (greyed), while a ticked row can
+///   still be unticked.
+/// * each slot's right-hand control is a button opening the same kind of checklist for that slot's
+///   values (also multi-select, also stays open). Values inside one slot OR, slots AND.
 /// * the chips below are the same conditions made removable; clicking one drops *one value* and the
 ///   slot stays (a slot is the dimension you are looking at, not a condition).
 ///
-/// The bar owns **no** state: every control reads `filter` and writes back through `onChange`. That is
-/// what keeps "切换照片时筛选不变" true without bookkeeping — the filter lives in the session.
-public final class FilterBarView: NSView, NSMenuDelegate {
+/// The bar owns **no** filter state: every control reads `filter` and writes back through `onChange`.
+/// That is what keeps "切换照片时筛选不变" true without bookkeeping — the filter lives in the session.
+public final class FilterBarView: NSView, NSPopoverDelegate {
 
     public static let height: CGFloat = 28
 
     // Geometry, also read by the layout tests.
     static let leading: CGFloat = 10
-    static let dimensionButtonWidth: CGFloat = 22
+    /// 036: a fixed square — the button is an icon, its width no longer depends on a word.
+    static let dimensionButtonWidth: CGFloat = 24
+    static let dimensionButtonHeight: CGFloat = 24
     static let slotGap: CGFloat = 4
     static let popupMinWidth: CGFloat = 34
     static let popupMaxWidth: CGFloat = 120
@@ -119,19 +329,49 @@ public final class FilterBarView: NSView, NSMenuDelegate {
     /// values it holds, so when the bar is tight the **entry** wins over the duplicate feedback.
     static let chipBudgetFraction: CGFloat = 0.35
 
+    /// SF Symbols tried in order, as the owner chose from the contact sheet: the funnel-and-circle
+    /// filter glyph first, then its ring-less sibling, then `⋯`. `NSImage(systemSymbolName:)` returns
+    /// `nil` on a system that does not ship one, which is exactly how the fallback is selected.
+    static let dimensionSymbolCandidates = [
+        "line.horizontal.3.decrease.circle",   // 15 × 15 native, 16 × 16 @13 pt on macOS 27.2
+        "line.horizontal.3.decrease",          // 16 × 10 — no circle
+    ]
+
+    /// The first symbol this machine actually has, tinted for `contentTintColor`. 13 pt renders the
+    /// chosen glyph at 16 × 16, inside the 24 × 24 box.
+    static func dimensionSymbolImage(pointSize: CGFloat = 13) -> NSImage? {
+        for name in dimensionSymbolCandidates {
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "选择筛选维度")
+            else { continue }
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+            let image = symbol.withSymbolConfiguration(config) ?? symbol
+            image.isTemplate = true
+            return image
+        }
+        return nil
+    }
+
     public var onChange: ((CatalogFilter) -> Void)?
     public var onClearFacet: ((CatalogFilter.Facet) -> Void)?
     public var onRemoveSlotValue: ((Int, String) -> Void)?
     public var onClearAll: (() -> Void)?
 
-    /// Where the slot menus get their values: the catalog, through the session. Asked once per
+    /// Where the slot checklists get their values: the catalog, through the session. Asked once per
     /// dimension per `update`, and answered with 「本库无此数据」 (an empty list) when the dimension
     /// has nothing — never with an invented vocabulary.
     public var facetProvider: ((FilterDimension) -> [String])?
     public var cameraLabels: [String: String] = [:]
 
-    private let dimensionButton = NSButton(title: "⋯", target: nil, action: nil)
-    private var slotPopups: [NSPopUpButton] = []
+    private let dimensionButton = NSButton(title: "", target: nil, action: nil)
+    private let dimensionPopover = NSPopover()
+    private let dimensionChecklist = FilterChecklistController()
+    private var dimensionPopoverOpen = false
+
+    private var slotButtons: [NSButton] = []
+    private let slotPopover = NSPopover()
+    private let slotChecklist = FilterChecklistController()
+    private var openSlotIndex: Int?
+
     private let clearButton = NSButton(title: "清除全部", target: nil, action: nil)
 
     /// Chips in draw order. The models are known as soon as `update` runs (a chip exists the moment a
@@ -142,11 +382,6 @@ public final class FilterBarView: NSView, NSMenuDelegate {
     private var facetCache: [FilterDimension: [String]] = [:]
     /// True while the controls are being synced from the model, so a control's action cannot loop.
     private var isSyncing = false
-    /// Menus are rebuilt from the model, and rebuilding a menu while AppKit is tracking it is a crash
-    /// waiting to happen — a click that changes the filter re-enters `update` from inside the open
-    /// menu. So the rebuild is deferred to `menuDidClose`.
-    private var openMenuCount = 0
-    private var needsRebuildAfterMenu = false
 
     public override var isFlipped: Bool { true }
 
@@ -156,24 +391,38 @@ public final class FilterBarView: NSView, NSMenuDelegate {
 
         dimensionButton.bezelStyle = .rounded
         dimensionButton.controlSize = .small
-        dimensionButton.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        dimensionButton.isBordered = true
+        // `.scaleNone`: the symbol is already sized for the box (16 pt in 24 pt). Letting AppKit scale it
+        // to the rounded bezel's content rect shrinks it to ~11 pt, which reads as a smudge.
+        dimensionButton.imageScaling = .scaleNone
+        dimensionButton.contentTintColor = .secondaryLabelColor
         dimensionButton.target = self
         dimensionButton.action = #selector(dimensionButtonTapped)
-        dimensionButton.toolTip = "选择筛选维度（最多 5 个）"
+        dimensionButton.toolTip = "选择筛选维度"
+        dimensionButton.setAccessibilityLabel("选择筛选维度")
+        if let symbol = Self.dimensionSymbolImage() {
+            dimensionButton.image = symbol
+            dimensionButton.imagePosition = .imageOnly
+            dimensionButton.title = ""
+        } else {
+            // No symbol on this system: the same 24 × 24 box with a ⋯ — never a clipped word.
+            dimensionButton.image = nil
+            dimensionButton.imagePosition = .noImage
+            dimensionButton.title = "⋯"
+            dimensionButton.font = .systemFont(ofSize: 11, weight: .semibold)
+        }
         addSubview(dimensionButton)
 
-        for _ in 0..<CatalogFilter.slotCapacity {
-            let popup = NSPopUpButton(frame: .zero, pullsDown: true)
-            popup.controlSize = .small
-            popup.font = .systemFont(ofSize: 10.5)
-            popup.bezelStyle = .rounded
-            popup.autoenablesItems = false
-            popup.isHidden = true
-            popup.target = self
-            popup.action = #selector(slotPopupChanged(_:))
-            popup.menu?.delegate = self
-            slotPopups.append(popup)
-            addSubview(popup)
+        for index in 0..<CatalogFilter.slotCapacity {
+            let button = NSButton(title: "", target: self, action: #selector(slotButtonTapped(_:)))
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 10.5)
+            button.bezelStyle = .rounded
+            button.cell?.lineBreakMode = .byTruncatingTail
+            button.tag = index
+            button.isHidden = true
+            slotButtons.append(button)
+            addSubview(button)
         }
 
         clearButton.controlSize = .small
@@ -184,9 +433,29 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         clearButton.action = #selector(clearAllTapped)
         clearButton.isHidden = true
         addSubview(clearButton)
+
+        configurePopovers()
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    /// Both popovers share the same recipe: transient (a click outside closes it, a click inside does
+    /// not), one checklist controller, and this view as the delegate so `popoverDidClose` can sync the
+    /// flags when the system dismisses them.
+    private func configurePopovers() {
+        for popover in [dimensionPopover, slotPopover] {
+            popover.behavior = .transient
+            popover.animates = true
+            popover.delegate = self
+        }
+        dimensionPopover.contentViewController = dimensionChecklist
+        dimensionChecklist.onSelect = { [weak self] row in self?.handleDimensionRow(row) }
+        dimensionChecklist.onCancel = { [weak self] in self?.dismissDimensionPopover() }
+
+        slotPopover.contentViewController = slotChecklist
+        slotChecklist.onSelect = { [weak self] row in self?.handleSlotRow(row) }
+        slotChecklist.onCancel = { [weak self] in self?.dismissSlotPopover() }
+    }
 
     // MARK: model → bar
 
@@ -194,9 +463,9 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         update(filter: filter, cameraKeys: cameraKeys, cameraLabels: [:])
     }
 
-    /// `cameraKeys` is kept for the pre-026 call sites (`AssetGridController` passed it); the slot menu
-    /// reads its own list through `facetProvider`, so the parameter now only documents the library's
-    /// cameras for callers that do not supply labels.
+    /// `cameraKeys` is kept for the pre-026 call sites (`AssetGridController` passed it); the slot
+    /// checklist reads its own list through `facetProvider`, so the parameter now only documents the
+    /// library's cameras for callers that do not supply labels.
     public func update(filter: CatalogFilter, cameraKeys: [String], cameraLabels: [String: String]) {
         isSyncing = true
         self.filter = filter
@@ -204,53 +473,43 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         facetCache = [:]
         chipModels = filter.chips(cameraLabels: self.cameraLabels)
         chipRects = []
-        rebuildSlotPopups()
+        rebuildSlotButtons()
         isSyncing = false
+        refreshOpenChecklists()
         clearButton.isHidden = !filter.isActive
         needsLayout = true
         needsDisplay = true
     }
 
-    private func rebuildSlotPopups() {
-        guard openMenuCount == 0 else {
-            needsRebuildAfterMenu = true
-            return
-        }
-        for (index, popup) in slotPopups.enumerated() {
+    private func rebuildSlotButtons() {
+        for (index, button) in slotButtons.enumerated() {
             guard filter.slots.indices.contains(index) else {
-                popup.isHidden = true
-                popup.menu?.removeAllItems()
+                button.isHidden = true
+                button.title = ""
                 continue
             }
             let slot = filter.slots[index]
-            popup.isHidden = false
-            popup.menu?.removeAllItems()
+            button.isHidden = false
+            button.title = FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels)
+            button.toolTip = "选择\(FilterDisplay.title(slot.dimension))的值（可多选）"
+            button.setAccessibilityLabel(button.toolTip ?? "")
+        }
+    }
 
-            // Pull-down: item 0 is the button's title **and** the "clear this slot" row.
-            let summary = NSMenuItem(title: FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels),
-                                     action: #selector(slotClearTapped(_:)), keyEquivalent: "")
-            summary.target = self
-            summary.tag = index
-            summary.toolTip = "清空本槽（全部\(FilterDisplay.title(slot.dimension))）"
-            popup.menu?.addItem(summary)
-            popup.menu?.addItem(.separator())
-
-            let values = facetValues(slot.dimension)
-            if values.isEmpty {
-                let empty = NSMenuItem(title: "本库无此数据", action: nil, keyEquivalent: "")
-                empty.isEnabled = false
-                popup.menu?.addItem(empty)
+    /// An open checklist is a live view of the model: a tick updates the slots *and* the row states
+    /// (numbers, ticks, the ten greyed rows) without the popover going away.
+    private func refreshOpenChecklists() {
+        if dimensionPopoverOpen {
+            dimensionChecklist.reload(dimensionChecklistRows())
+            dimensionPopover.contentSize = dimensionChecklist.requiredSize
+        }
+        if let index = openSlotIndex {
+            guard filter.slots.indices.contains(index) else {
+                dismissSlotPopover()
+                return
             }
-            for value in values {
-                let item = NSMenuItem(title: FilterDisplay.value(slot.dimension, value,
-                                                                 cameraLabels: cameraLabels),
-                                      action: #selector(slotValueToggled(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = index
-                item.representedObject = value
-                item.state = slot.values.contains(value) ? .on : .off
-                popup.menu?.addItem(item)
-            }
+            slotChecklist.reload(slotChecklistRows(at: index))
+            slotPopover.contentSize = slotChecklist.requiredSize
         }
     }
 
@@ -261,80 +520,156 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         return values
     }
 
+    // MARK: the two checklists, as snapshots
+
+    /// The 15 dimensions (slot number as prefix, tick when active) + 「全部不选」.
+    func dimensionChecklistRows() -> [FilterChecklistRow] {
+        let full = filter.slots.count >= CatalogFilter.slotCapacity
+        var rows = FilterDimension.allCases.map { dimension -> FilterChecklistRow in
+            let slotIndex = filter.slots.firstIndex { $0.dimension == dimension }
+            let prefix = slotIndex.map { "\($0 + 1)  " } ?? "    "
+            return FilterChecklistRow(title: prefix + FilterDisplay.longTitle(dimension),
+                                      checked: slotIndex != nil,
+                                      enabled: slotIndex != nil || !full,
+                                      kind: .toggle,
+                                      tag: dimension.rawValue)
+        }
+        rows.append(FilterChecklistRow(title: "全部不选",
+                                       enabled: !filter.slots.isEmpty,
+                                       kind: .action))
+        return rows
+    }
+
+    /// One slot's values: 「全部xxx」 (clears this slot) first, then the catalog's own ladder — or a
+    /// single disabled 「本库无此数据」 when the library has nothing for that dimension.
+    func slotChecklistRows(at index: Int) -> [FilterChecklistRow] {
+        guard filter.slots.indices.contains(index) else { return [] }
+        let slot = filter.slots[index]
+        var rows = [FilterChecklistRow(title: FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels),
+                                       enabled: !slot.values.isEmpty,
+                                       kind: .action)]
+        let values = facetValues(slot.dimension)
+        if values.isEmpty {
+            rows.append(FilterChecklistRow(title: "本库无此数据", enabled: false, kind: .note))
+        } else {
+            rows += values.map { value in
+                FilterChecklistRow(title: FilterDisplay.value(slot.dimension, value,
+                                                              cameraLabels: cameraLabels),
+                                   checked: slot.values.contains(value),
+                                   kind: .toggle,
+                                   tag: value)
+            }
+        }
+        return rows
+    }
+
     // MARK: controls → model
 
     @objc private func dimensionButtonTapped() {
         guard !isSyncing else { return }
-        let menu = buildDimensionMenu()
-        menu.popUp(positioning: nil,
-                   at: NSPoint(x: 0, y: dimensionButton.bounds.height + 2),
-                   in: dimensionButton)
-    }
-
-    /// The 15-item check menu: slot numbers as prefixes, a tick per active slot, 「全部不选」 last.
-    func buildDimensionMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        menu.delegate = self
-        let full = filter.slots.count >= CatalogFilter.slotCapacity
-        for dimension in FilterDimension.allCases {
-            let slotIndex = filter.slots.firstIndex { $0.dimension == dimension }
-            let prefix = slotIndex.map { "\($0 + 1)  " } ?? "    "
-            let item = NSMenuItem(title: prefix + FilterDisplay.longTitle(dimension),
-                                  action: #selector(dimensionItemTapped(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = dimension.rawValue
-            item.state = slotIndex == nil ? .off : .on
-            item.isEnabled = slotIndex != nil || !full
-            menu.addItem(item)
+        if dimensionPopoverOpen {
+            dismissDimensionPopover()
+        } else {
+            showDimensionPopover()
         }
-        menu.addItem(.separator())
-        let none = NSMenuItem(title: "全部不选", action: #selector(dimensionNoneTapped), keyEquivalent: "")
-        none.target = self
-        none.isEnabled = !filter.slots.isEmpty
-        menu.addItem(none)
-        return menu
     }
 
-    @objc private func dimensionItemTapped(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let dimension = FilterDimension(rawValue: raw) else { return }
-        chooseDimension(dimension)
+    func showDimensionPopover() {
+        dimensionChecklist.reload(dimensionChecklistRows())
+        dimensionPopover.contentSize = dimensionChecklist.requiredSize
+        dimensionPopoverOpen = true
+        // Without a window (unit tests, a detached view) there is nothing to anchor to; the model
+        // state above is still the truth the bar reports, and `performDimensionRow` still drives it.
+        guard dimensionButton.window != nil else { return }
+        dimensionPopover.show(relativeTo: dimensionButton.bounds,
+                              of: dimensionButton,
+                              preferredEdge: .maxY)
     }
 
-    @objc private func dimensionNoneTapped() {
-        guard !filter.slots.isEmpty else { return }
-        onChange?(filter.clearingSlots())
+    func dismissDimensionPopover() {
+        dimensionPopoverOpen = false
+        if dimensionPopover.isShown { dimensionPopover.performClose(nil) }
     }
 
-    /// One dimension click — the menu item's action, and the seam the UI tests drive.
+    /// A dimension row: tick/untick a slot, or 「全部不选」. **Never closes the popover** — that is the
+    /// whole point of 036, and it is what `.transient` + a live reload buys us.
+    private func handleDimensionRow(_ row: FilterChecklistRow) {
+        guard !isSyncing, row.enabled else { return }
+        switch row.kind {
+        case .action:
+            clearSlotDimensions()
+        case .toggle:
+            guard let dimension = FilterDimension(rawValue: row.tag) else { return }
+            chooseDimension(dimension)
+        case .note:
+            return
+        }
+    }
+
+    /// One dimension click — the checklist row's action, and the seam the UI tests drive.
     public func chooseDimension(_ dimension: FilterDimension) {
         let next = filter.togglingDimension(dimension)
         guard next != filter else { return }
         onChange?(next)
     }
 
-    @objc private func slotValueToggled(_ sender: NSMenuItem) {
-        guard !isSyncing, let value = sender.representedObject as? String else { return }
-        let next = filter.togglingValue(value, atSlot: sender.tag)
-        guard next != filter else { return }
-        onChange?(next)
-    }
-
-    @objc private func slotClearTapped(_ sender: NSMenuItem) {
+    @objc private func slotButtonTapped(_ sender: NSButton) {
         guard !isSyncing else { return }
-        let next = filter.settingValues([], atSlot: sender.tag)
-        guard next != filter else { return }
-        onChange?(next)
+        let index = sender.tag
+        if openSlotIndex == index {
+            dismissSlotPopover()
+        } else {
+            showSlotPopover(at: index)
+        }
     }
 
-    /// A pull-down popup's own action: the menu items do the work, this only keeps AppKit from
-    /// treating the click as a selection (the title must stay the summary).
-    @objc private func slotPopupChanged(_ sender: NSPopUpButton) {
-        sender.selectItem(at: 0)
+    func showSlotPopover(at index: Int) {
+        guard filter.slots.indices.contains(index),
+              slotButtons.indices.contains(index), !slotButtons[index].isHidden else { return }
+        dismissSlotPopover()
+        slotChecklist.reload(slotChecklistRows(at: index))
+        slotPopover.contentSize = slotChecklist.requiredSize
+        openSlotIndex = index
+        guard slotButtons[index].window != nil else { return }
+        slotPopover.show(relativeTo: slotButtons[index].bounds,
+                         of: slotButtons[index],
+                         preferredEdge: .maxY)
+    }
+
+    func dismissSlotPopover() {
+        openSlotIndex = nil
+        if slotPopover.isShown { slotPopover.performClose(nil) }
+    }
+
+    /// A value row: tick/untick inside the open slot, or 「全部xxx」 to empty it. Stays open.
+    private func handleSlotRow(_ row: FilterChecklistRow) {
+        guard !isSyncing, let index = openSlotIndex,
+              filter.slots.indices.contains(index), row.enabled else { return }
+        switch row.kind {
+        case .action:
+            let next = filter.settingValues([], atSlot: index)
+            guard next != filter else { return }
+            onChange?(next)
+        case .toggle:
+            let next = filter.togglingValue(row.tag, atSlot: index)
+            guard next != filter else { return }
+            onChange?(next)
+        case .note:
+            return
+        }
     }
 
     @objc private func clearAllTapped() { onClearAll?() }
+
+    // MARK: popover dismissal
+
+    /// The system's transient dismissal (a click outside, Esc in the popover window) lands here, so
+    /// the flags cannot drift out of step with what is on screen.
+    public func popoverDidClose(_ notification: Notification) {
+        guard let popover = notification.object as? NSPopover else { return }
+        if popover === dimensionPopover { dimensionPopoverOpen = false }
+        if popover === slotPopover { openSlotIndex = nil }
+    }
 
     // MARK: chips
 
@@ -403,7 +738,10 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         let mid = max(0, (h - 22) / 2)
 
         var x = Self.leading
-        dimensionButton.frame = NSRect(x: x, y: mid, width: Self.dimensionButtonWidth, height: 22)
+        // 036: a 24 × 24 icon, centred in the 28 pt strip; its width never depends on its label.
+        dimensionButton.frame = NSRect(x: x, y: max(0, (h - Self.dimensionButtonHeight) / 2),
+                                      width: Self.dimensionButtonWidth,
+                                      height: Self.dimensionButtonHeight)
         x += Self.dimensionButtonWidth + 6
 
         let clearWidth: CGFloat = filter.isActive ? 54 : 0
@@ -424,7 +762,7 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         if slotCount > 0 {
             popupWidth = min(Self.popupMaxWidth,
                              max(Self.popupMinWidth, usable / CGFloat(slotCount) - Self.slotGap))
-            // Only when even a 34 pt popup does not fit is a whole slot dropped — 22 + 34 + gap is
+            // Only when even a 34 pt popup does not fit is a whole slot dropped — 24 + 34 + gap is
             // the narrowest a slot can be and still be a button you can hit.
             while visible > 0 && CGFloat(visible) * (popupWidth + Self.slotGap) > usable + 0.5 {
                 visible -= 1
@@ -433,14 +771,14 @@ public final class FilterBarView: NSView, NSMenuDelegate {
             }
         }
 
-        for (index, popup) in slotPopups.enumerated() {
+        for (index, button) in slotButtons.enumerated() {
             guard index < visible, filter.slots.indices.contains(index) else {
-                popup.isHidden = true
-                popup.frame = .zero
+                button.isHidden = true
+                button.frame = .zero
                 continue
             }
-            popup.isHidden = false
-            popup.frame = NSRect(x: x, y: mid, width: popupWidth, height: 22)
+            button.isHidden = false
+            button.frame = NSRect(x: x, y: mid, width: popupWidth, height: 22)
             x += popupWidth + Self.slotGap
         }
         if visible > 0 { x += 2 }
@@ -505,22 +843,6 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         super.mouseDown(with: event)
     }
 
-    // MARK: menu tracking
-
-    public func menuWillOpen(_ menu: NSMenu) {
-        openMenuCount += 1
-    }
-
-    public func menuDidClose(_ menu: NSMenu) {
-        openMenuCount = max(0, openMenuCount - 1)
-        guard openMenuCount == 0, needsRebuildAfterMenu else { return }
-        needsRebuildAfterMenu = false
-        rebuildSlotPopups()
-        clearButton.isHidden = !filter.isActive
-        needsLayout = true
-        needsDisplay = true
-    }
-
     // MARK: test seams (the UI tests drive the same actions a click does)
 
     /// The slots' dimensions, left to right.
@@ -530,45 +852,94 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         filter.slots.indices.contains(index) ? filter.slots[index].values : []
     }
 
-    /// The popup's title text — what the user reads in the bar.
+    /// The slot control's title — what the user reads in the bar.
     public func slotTitle(at index: Int) -> String? {
         guard filter.slots.indices.contains(index) else { return nil }
         return FilterDisplay.slotTitle(filter.slots[index], cameraLabels: cameraLabels)
     }
 
     public func slotPopupFrame(at index: Int) -> NSRect? {
-        guard slotPopups.indices.contains(index), !slotPopups[index].isHidden else { return nil }
-        return slotPopups[index].frame
+        guard slotButtons.indices.contains(index), !slotButtons[index].isHidden else { return nil }
+        return slotButtons[index].frame
     }
 
     public var slotVisibleCount: Int {
-        slotPopups.filter { !$0.isHidden }.count
+        slotButtons.filter { !$0.isHidden }.count
     }
 
     public var dimensionButtonFrame: NSRect { dimensionButton.frame }
 
-    /// 「全部不选」 — the menu's last row, and the seam the UI tests use for it.
+    /// The icon actually installed — non-`nil` means this machine ships the SF Symbol.
+    public var dimensionButtonImage: NSImage? { dimensionButton.image }
+
+    /// Empty when the icon path was used; `⋯` only when no symbol existed.
+    public var dimensionButtonTitle: String { dimensionButton.title }
+
+    public var dimensionButtonToolTip: String? { dimensionButton.toolTip }
+
+    public var dimensionButtonAccessibilityLabel: String? { dimensionButton.accessibilityLabel() }
+
+    // MARK: dimension checklist seams
+
+    /// The dimension checklist as it would draw: `(title, checked, enabled)`, 15 dimensions then
+    /// 「全部不选」. (Named `…MenuRows` because 026's tests read it; there is no `NSMenu` any more.)
+    public var dimensionMenuRows: [(title: String, checked: Bool, enabled: Bool)] {
+        dimensionChecklistRows().map { ($0.title, $0.checked, $0.enabled) }
+    }
+
+    public var isDimensionPopoverOpen: Bool { dimensionPopoverOpen }
+
+    /// Open it the way the button does. Without a window the logical state is still tracked, which is
+    /// what the tests assert on; in the app this is the same `.transient` popover the user sees.
+    public func openDimensionPopover() { showDimensionPopover() }
+
+    public func closeDimensionPopover() { dismissDimensionPopover() }
+
+    /// Click a dimension-checklist row by index — the same handler the row's `NSButton` runs, so
+    /// "does the popover stay open" is answered by the production path, not by a test-only shortcut.
+    public func performDimensionRow(at index: Int) {
+        let rows = dimensionChecklistRows()
+        guard rows.indices.contains(index) else { return }
+        handleDimensionRow(rows[index])
+    }
+
+    /// 「全部不选」 — the checklist's last row, and the seam the UI tests use for it.
     public func clearSlotDimensions() {
         guard !filter.slots.isEmpty else { return }
         onChange?(filter.clearingSlots())
     }
 
-    /// The rows a slot's menu currently holds (summary, separator, values) — so a test can see
-    /// 「本库无此数据」 instead of just an empty array.
+    // MARK: slot checklist seams
+
+    /// The rows a slot's checklist currently holds (「全部xxx」, then values or 「本库无此数据」) — so a
+    /// test can see the empty-state row instead of just an empty array.
     public func slotMenuTitles(at index: Int) -> [String] {
-        guard slotPopups.indices.contains(index), let menu = slotPopups[index].menu else { return [] }
-        return menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+        slotChecklistRows(at: index).map(\.title)
     }
 
-    /// Menu rows as the picker would draw them: `(title, checked, enabled)`.
-    public var dimensionMenuRows: [(title: String, checked: Bool, enabled: Bool)] {
-        buildDimensionMenu().items
-            .filter { !$0.isSeparatorItem }
-            .map { ($0.title, $0.state == .on, $0.isEnabled) }
+    /// A slot's checklist rows as it would draw them: `(title, checked, enabled)`.
+    public func slotChecklistRowModels(at index: Int) -> [(title: String, checked: Bool, enabled: Bool)] {
+        slotChecklistRows(at: index).map { ($0.title, $0.checked, $0.enabled) }
     }
 
-    /// Choose values for a slot without going through the menu (a menu's checkbox is one value at a
-    /// time; a test usually wants the end state).
+    public var openSlotPopoverIndex: Int? { openSlotIndex }
+
+    public func isSlotPopoverOpen(at index: Int) -> Bool { openSlotIndex == index }
+
+    public func openSlotPopover(at index: Int) { showSlotPopover(at: index) }
+
+    public func closeSlotPopover() { dismissSlotPopover() }
+
+    /// Click a row of the open slot checklist by index (summary row 0, values after it).
+    public func performSlotRow(at index: Int) {
+        guard let slot = openSlotIndex else { return }
+        let rows = slotChecklistRows(at: slot)
+        guard rows.indices.contains(index) else { return }
+        handleSlotRow(rows[index])
+    }
+
+    /// Choose values for a slot without going through the checklist (a checklist tick is one value at
+    /// a time; a test usually wants the end state).
     public func setSlotValues(_ values: [String], at index: Int) {
         let next = filter.settingValues(values, atSlot: index)
         guard next != filter else { return }
@@ -579,7 +950,7 @@ public final class FilterBarView: NSView, NSMenuDelegate {
         setSlotValues([], at: index)
     }
 
-    /// The catalog values a slot's menu is offering right now (empty = 「本库无此数据」).
+    /// The catalog values a slot's checklist is offering right now (empty = 「本库无此数据」).
     public func facetValuesForMenu(at index: Int) -> [String] {
         guard filter.slots.indices.contains(index) else { return [] }
         return facetValues(filter.slots[index].dimension)

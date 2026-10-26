@@ -4,12 +4,15 @@ import GRDB
 import PhotonsCatalog
 @testable import PhotonsUI
 
-/// 026 v2 — the grid's filter strip as the owner described it:
+/// 026 v2 — the grid's filter strip as the owner described it (036 reshaped the picker):
 ///
-/// * **one** small button opens a 15-item check menu; ticking a dimension appends a slot in click
-///   order, at most five; unticking removes it and the rest close the gap; 「全部不选」 empties them so
-///   the next clicks number 1…5 again; a 6th dimension while full does nothing **and is greyed**;
-/// * each slot's value control multi-selects (`1★、2★、5★`), values inside a slot OR, slots AND;
+/// * **one** small icon button (24 × 24 SF Symbol) opens a transient-popover checklist of 15
+///   dimensions; ticking one appends a slot in click order, at most five, and **the popover stays
+///   open** for the next tick (036: an `NSMenu` closed on every selection). Unticking removes a slot
+///   and the rest close the gap; 「全部不选」 empties them so the next clicks number 1…5, without
+///   closing; a 6th dimension while full does nothing **and is greyed**;
+/// * each slot's value control multi-selects (`1★、2★、5★`) in the same kind of checklist, also
+///   staying open; values inside a slot OR, slots AND;
 /// * chips stay, and a chip's × drops one value while the slot stays with 「全部」;
 /// * the bar never draws outside its own bounds, at a 330 pt **or** a 212 pt panel.
 @MainActor
@@ -337,6 +340,154 @@ final class GridFilterSlotsTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(bar.slotPopupFrame(at: index)!.width,
                                         FilterBarView.popupMinWidth - 0.5)
         }
+    }
+
+    // MARK: 036 — an icon button and a checklist popover that stays open
+
+    /// Requirement 3: a fixed 24 × 24 box holding a real SF Symbol — the old button's 22 pt width for a
+    /// word like 「筛选」 is what clipped it.
+    func testTheDimensionButtonIsATwentyFourPointSymbol() {
+        XCTAssertEqual(FilterBarView.dimensionButtonWidth, 24)
+        XCTAssertEqual(bar.dimensionButtonFrame.width, 24, accuracy: 0.5)
+        XCTAssertEqual(bar.dimensionButtonFrame.height, 24, accuracy: 0.5)
+        let icon = try! XCTUnwrap(bar.dimensionButtonImage,
+                                  "本机必须有 SF Symbol；没有时退化成同尺寸 ⋯，不许再裁字")
+        // The owner's pick from the contact sheet, and the size it must render at.
+        XCTAssertEqual(FilterBarView.dimensionSymbolCandidates.first, "line.horizontal.3.decrease.circle")
+        XCTAssertNotNil(NSImage(systemSymbolName: "line.horizontal.3.decrease.circle",
+                                accessibilityDescription: nil),
+                        "首选符号必须在本机存在")
+        XCTAssertEqual(icon.size.width, 16, accuracy: 1, "图标按 15–16 pt 显示")
+        XCTAssertEqual(icon.size.height, 16, accuracy: 1)
+        XCTAssertLessThanOrEqual(icon.size.width, 24, "图标不得超出 24 × 24 的框")
+        XCTAssertTrue(icon.isTemplate, "模板图跟随 contentTintColor")
+        XCTAssertEqual(bar.dimensionButtonTitle, "", "用图标时不再画文字（文字被裁的根因）")
+        XCTAssertEqual(bar.dimensionButtonToolTip, "选择筛选维度")
+        XCTAssertEqual(bar.dimensionButtonAccessibilityLabel, "选择筛选维度")
+    }
+
+    /// The fallback chain is a real chain: the ring-less glyph exists too, so only a system missing
+    /// both would ever see `⋯`.
+    func testTheSymbolFallbackChainResolves() {
+        XCTAssertNotNil(NSImage(systemSymbolName: "line.horizontal.3.decrease.circle",
+                                accessibilityDescription: nil))
+        XCTAssertNotNil(NSImage(systemSymbolName: "line.horizontal.3.decrease",
+                                accessibilityDescription: nil))
+        XCTAssertNotNil(FilterBarView.dimensionSymbolImage())
+    }
+
+    /// Requirement 1: three ticks in a row → the popover is still open and the slots are 0 → 3 in click
+    /// order. Every tick goes through the row button's production handler.
+    func testTickingThreeDimensionsKeepsThePopoverOpenInClickOrder() throws {
+        clearDimensions()
+        XCTAssertEqual(bar.slotDimensions, [])
+
+        bar.openDimensionPopover()
+        XCTAssertTrue(bar.isDimensionPopoverOpen)
+
+        for (expected, name) in [(1, "ISO"), (2, "焦距"), (3, "序列号")] {
+            let rows = bar.dimensionMenuRows
+            let index = try XCTUnwrap(rows.firstIndex { $0.title.contains(name) }, name)
+            bar.performDimensionRow(at: index)
+            settle()
+            XCTAssertTrue(bar.isDimensionPopoverOpen, "点「\(name)」后 popover 不许关")
+            XCTAssertEqual(bar.slotDimensions.count, expected, "槽位 \(expected) 个")
+        }
+
+        XCTAssertEqual(bar.slotDimensions, [.iso, .focal, .serial], "顺序 = 点击先后")
+        XCTAssertEqual(bar.slotVisibleCount, 3)
+        // The numbers the open checklist shows are the click order too.
+        let titles = bar.dimensionMenuRows.map(\.title)
+        XCTAssertTrue(titles.contains { $0.hasPrefix("1  ISO") })
+        XCTAssertTrue(titles.contains { $0.hasPrefix("2  焦距") })
+        XCTAssertTrue(titles.contains { $0.hasPrefix("3  序列号") })
+    }
+
+    /// Requirement 2: a click outside (the transient dismissal) closes the popover and keeps the slots.
+    func testClickingOutsideClosesThePopoverAndKeepsTheSlots() throws {
+        clearDimensions()
+        bar.openDimensionPopover()
+        let rows = bar.dimensionMenuRows
+        bar.performDimensionRow(at: try XCTUnwrap(rows.firstIndex { $0.title.contains("焦距") }))
+        settle()
+        XCTAssertEqual(bar.slotDimensions, [.focal])
+
+        bar.closeDimensionPopover()                       // what a click outside ends in
+        XCTAssertFalse(bar.isDimensionPopoverOpen)
+        XCTAssertEqual(bar.slotDimensions, [.focal], "槽位保留")
+        XCTAssertEqual(bar.slotVisibleCount, 1)
+
+        // Re-opening shows the current state, not a blank list.
+        bar.openDimensionPopover()
+        XCTAssertTrue(bar.isDimensionPopoverOpen)
+        XCTAssertEqual(bar.dimensionMenuRows.filter { $0.checked }.count, 1)
+    }
+
+    /// Requirement 4: with five slots ticked the sixth dimension is greyed **and** inert, while a
+    /// ticked row can still be unticked — all without the popover closing.
+    func testAFullBarGreysTheSixthDimensionAndItsClickDoesNothing() throws {
+        XCTAssertEqual(bar.slotDimensions, CatalogFilter.defaultDimensions)   // already full
+        bar.openDimensionPopover()
+
+        let rows = bar.dimensionMenuRows
+        let iso = try XCTUnwrap(rows.firstIndex { $0.title.contains("ISO") })
+        XCTAssertFalse(rows[iso].enabled, "满 5 时未选项置灰")
+        XCTAssertFalse(rows[iso].checked)
+        bar.performDimensionRow(at: iso)
+        settle()
+        XCTAssertEqual(bar.slotDimensions, CatalogFilter.defaultDimensions, "置灰行点击无效")
+        XCTAssertEqual(bar.slotDimensions.count, 5)
+        XCTAssertTrue(bar.isDimensionPopoverOpen)
+
+        let rating = try XCTUnwrap(bar.dimensionMenuRows.firstIndex { $0.title.contains("星级") })
+        XCTAssertTrue(bar.dimensionMenuRows[rating].enabled, "已选项仍可取消")
+        bar.performDimensionRow(at: rating)
+        settle()
+        XCTAssertEqual(bar.slotDimensions, [.flag, .camera, .lens, .ext], "取消后其余左移")
+        XCTAssertTrue(bar.isDimensionPopoverOpen)
+    }
+
+    /// Requirement 5: 「全部不选」 empties the slots and leaves the popover open for the next five ticks.
+    func testClearAllEmptiesTheSlotsWithoutClosingThePopover() throws {
+        bar.openDimensionPopover()
+        let rows = bar.dimensionMenuRows
+        XCTAssertEqual(rows.last?.title, "全部不选")
+        XCTAssertTrue(try XCTUnwrap(rows.last).enabled)
+
+        bar.performDimensionRow(at: rows.count - 1)
+        settle()
+        XCTAssertEqual(bar.slotDimensions, [])
+        XCTAssertEqual(bar.slotVisibleCount, 0)
+        XCTAssertTrue(bar.isDimensionPopoverOpen, "「全部不选」后 popover 仍开")
+        XCTAssertFalse(try XCTUnwrap(bar.dimensionMenuRows.last).enabled, "没有可清的了")
+        XCTAssertEqual(bar.dimensionMenuRows.filter { !$0.checked && $0.enabled }.count, 15,
+                       "清空后 15 个维度全部可选")
+    }
+
+    /// C: the per-slot value list is the same checklist — multi-select, and it stays open too.
+    func testTheSlotValueChecklistStaysOpenWhileValuesAreTicked() throws {
+        layout(width: 900)
+        bar.openSlotPopover(at: 0)
+        XCTAssertTrue(bar.isSlotPopoverOpen(at: 0))
+
+        let five = try XCTUnwrap(bar.slotChecklistRowModels(at: 0).firstIndex { $0.title == "5★" })
+        bar.performSlotRow(at: five)
+        settle()
+        XCTAssertEqual(bar.slotValues(at: 0), ["5"])
+        XCTAssertTrue(bar.isSlotPopoverOpen(at: 0), "点值不关")
+
+        let rows = bar.slotChecklistRowModels(at: 0)
+        let one = try XCTUnwrap(rows.firstIndex { $0.title == "1★" })
+        XCTAssertTrue(rows[five].checked, "已选项打勾")
+        bar.performSlotRow(at: one)
+        settle()
+        XCTAssertEqual(bar.slotValues(at: 0), ["5", "1"])
+        XCTAssertEqual(bar.slotTitle(at: 0), "星级 5★、1★")
+        XCTAssertTrue(bar.isSlotPopoverOpen(at: 0))
+
+        bar.closeSlotPopover()
+        XCTAssertNil(bar.openSlotPopoverIndex)
+        XCTAssertEqual(bar.slotValues(at: 0), ["5", "1"], "关掉 popover 不动筛选")
     }
 
     // MARK: helpers
