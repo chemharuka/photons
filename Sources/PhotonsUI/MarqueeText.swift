@@ -399,17 +399,145 @@ public enum InspectorPhotoInfo {
         }
     }
 
+    // MARK: 像素数 / 尺寸 (派单 022)
+
+    /// The one character a row prints when the library does not know the number.
+    public static let noValue = "—"
+
+    /// `9000×6000` → `54 MP`; `1000×900` → `0.9 MP`; a missing side → `—`.
+    ///
+    /// The user asked for the first row to be **values only** — no `像素`, no `尺寸`, no label
+    /// beyond the unit the number itself needs (「不要写中文 就 L100000.dng   60 MP   9000×6000」).
+    /// So: the space before `MP` stays (it is what keeps `60 MP` from reading as a product code),
+    /// the megapixel figure is an integer from one megapixel up, and below that it keeps one
+    /// decimal (`0.9`), because `0 MP` would be a lie about a photo that exists.
+    public static func pixelCount(width: Int?, height: Int?) -> String {
+        guard let pixels = pixelArea(width: width, height: height) else { return noValue }
+        let megapixels = Double(pixels) / 1_000_000
+        if megapixels >= 1 { return "\(Int(megapixels.rounded())) MP" }
+        return String(format: "%.1f MP", megapixels)
+    }
+
+    /// `9000×6000` — U+00D7, no spaces around it, no unit, nothing else on the line.
+    public static func pixelDimensions(width: Int?, height: Int?) -> String {
+        guard let width, let height, width > 0, height > 0 else { return noValue }
+        return "\(width)×\(height)"
+    }
+
+    /// Both sides, or nothing: half a size is not a size, and `9000×—` would read as a broken row.
+    private static func pixelArea(width: Int?, height: Int?) -> Int? {
+        guard let width, let height, width > 0, height > 0 else { return nil }
+        return width * height
+    }
+
+    /// The ids the geometry test reads off the first row's two value cells. Not an enum in the
+    /// view: the probe publishes the string, and the test looks the string up by these keys.
+    public enum SpecColumn: String, Sendable {
+        case pixelCount = "center"
+        case pixelDimensions = "trailing"
+    }
+
+    /// Four rows, first one is one line with three columns: `L100000.dng   60 MP   9000×6000` —
+    /// file name flush left, megapixels centred on the card's own centre, dimensions flush right.
+    ///
+    /// The three columns are placed by `SpecRowLayout` rather than by `Spacer()`s, because the
+    /// leading cell is a marquee: `MarqueeText` asks for `maxWidth: .infinity`, so in a plain
+    /// `HStack` it would take the whole row and push the other two cells to the end. Here the
+    /// middle and trailing cells are placed at their measured size first, and the marquee gets
+    /// exactly the room left before them — so the name stays left-aligned *and* truncates only
+    /// when it really would collide with `60 MP`.
+    ///
+    /// The two values carry an invisible AppKit probe in their background: SwiftUI draws text
+    /// into layers, so a `Text` has no `NSView` to measure, and the alignment has to be proven on
+    /// the frame SwiftUI actually handed the text (`MaskPanelProbe` is the same seam).
+    public struct PhotoSpecRow: View {
+        /// The marquee's own size, so the three columns sit on one baseline grid.
+        public static let fontSize: CGFloat = 10
+        /// Fixed, whatever the values are: a missing `—` must not make the row shorter.
+        public static let height: CGFloat = fontSize + 4
+        /// One gap between the name and the centred cell — the only air the row can spare.
+        public static let columnGap: CGFloat = 8
+
+        public let filename: String
+        public let pixelCount: String
+        public let pixelDimensions: String
+
+        public init(filename: String, pixelCount: String, pixelDimensions: String) {
+            self.filename = filename
+            self.pixelCount = pixelCount
+            self.pixelDimensions = pixelDimensions
+        }
+
+        public var body: some View {
+            SpecRowLayout(gap: Self.columnGap) {
+                // The marquee is kept: a long name still truncates with `…` and scrolls on hover.
+                MarqueeText(text: filename)
+                valueText(pixelCount, column: .pixelCount)
+                valueText(pixelDimensions, column: .pixelDimensions)
+            }
+            .frame(height: Self.height)
+        }
+
+        private func valueText(_ text: String, column: SpecColumn) -> some View {
+            Text(text)
+                .font(.system(size: Self.fontSize))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .lineLimit(1)
+                .fixedSize()
+                .background(SpecRowProbeRepresentable(id: column.rawValue, text: text))
+        }
+    }
+
+    /// Three columns: `[0]` takes the room left over on the left, `[1]` is centred on `bounds.midX`,
+    /// `[2]` ends on `bounds.maxX`. Centring on the bounds (not on the space between the other two
+    /// cells) is what keeps `60 MP` from moving when the file name gets longer.
+    struct SpecRowLayout: Layout {
+        let gap: CGFloat
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            CGSize(width: proposal.width ?? 0, height: PhotoSpecRow.height)
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                           cache: inout ()) {
+            guard subviews.count == 3 else { return }
+            let middle = subviews[1].sizeThatFits(.unspecified)
+            let trailing = subviews[2].sizeThatFits(.unspecified)
+            let middleMinX = bounds.midX - middle.width / 2
+
+            subviews[2].place(at: CGPoint(x: bounds.maxX - trailing.width,
+                                          y: bounds.midY - trailing.height / 2),
+                              proposal: ProposedViewSize(trailing))
+            subviews[1].place(at: CGPoint(x: middleMinX, y: bounds.midY - middle.height / 2),
+                              proposal: ProposedViewSize(middle))
+            let leadingWidth = max(0, middleMinX - gap - bounds.minX)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY),
+                              proposal: ProposedViewSize(width: leadingWidth, height: bounds.height))
+        }
+    }
+
     /// `Leica SL3 · Sigma 20-60 DG`; a missing half keeps its slot with `未知相机` / `未知镜头`,
     /// and only both-missing collapses to the bare `未知相机` (no separator, no second word).
-    public static func equipment(make: String?, model: String?, lens: String?) -> String {
-        let camera = cameraName(make: make, model: model)
-        let lensName = lens.flatMap(nonEmpty)
-        switch (camera, lensName) {
-        case let (camera?, lens?): return "\(camera) · \(lens)"
-        case let (camera?, nil): return "\(camera) · \(unknownLens)"
-        case let (nil, lens?): return "\(unknownCamera) · \(lens)"
-        case (nil, nil): return unknownCamera
+    ///
+    /// 派单 022 shows the two halves on their own rows instead (`camera` / `lens`); this string is
+    /// kept as the join of those two so the words cannot drift apart, and still carries the
+    /// both-missing collapse the single row needed.
+    public static func equipment(make: String?, model: String?, lens rawLens: String?) -> String {
+        guard cameraName(make: make, model: model) != nil || rawLens.flatMap(nonEmpty) != nil else {
+            return unknownCamera
         }
+        return "\(camera(make: make, model: model)) · \(lens(rawLens))"
+    }
+
+    /// Row 2 of 派单 022: the camera half of `equipment`, character for character — model first,
+    /// make as the fallback, `未知相机` when the file names neither.
+    public static func camera(make: String?, model: String?) -> String {
+        cameraName(make: make, model: model) ?? unknownCamera
+    }
+
+    /// Row 3: the lens half of `equipment` — `未知镜头` when the file is silent about it.
+    public static func lens(_ raw: String?) -> String {
+        raw.flatMap(nonEmpty) ?? unknownLens
     }
 
     /// Model preferred, make as the fallback. See the note above for why the make is not prefixed.
@@ -445,6 +573,57 @@ public enum InspectorPhotoInfo {
     private static func nonEmpty(_ s: String) -> String? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
+    }
+}
+
+// MARK: - the spec rows' AppKit seam
+
+/// What a spec row published: which slot it is, and the exact string on it.
+///
+/// Invisible and click-through — it exists so a test can read (a) the frame SwiftUI gave the value
+/// and (b) the value itself, without a screenshot and without a second copy of the formatter in the
+/// test. `MaskPanelProbe` publishes the same way for the mask panel.
+public final class InspectorSpecRowProbe: NSView {
+    public private(set) var id: String
+    public private(set) var text: String
+
+    public init(id: String, text: String) {
+        self.id = id
+        self.text = text
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("InspectorSpecRowProbe is created in code") }
+
+    func update(id: String, text: String) {
+        if self.id != id { self.id = id }
+        if self.text != text { self.text = text }
+    }
+
+    /// A measuring leaf, never a target: hover belongs to the marquee row above it.
+    public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    public override var isOpaque: Bool { false }
+    public override func draw(_ dirtyRect: NSRect) {}
+}
+
+private struct SpecRowProbeRepresentable: NSViewRepresentable {
+    let id: String
+    let text: String
+
+    func makeNSView(context: Context) -> InspectorSpecRowProbe {
+        InspectorSpecRowProbe(id: id, text: text)
+    }
+
+    func updateNSView(_ view: InspectorSpecRowProbe, context: Context) {
+        view.update(id: id, text: text)
+    }
+
+    /// The background is proposed the primary view's frame; accepting it is what makes the probe's
+    /// frame equal the text's frame instead of the row's.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: InspectorSpecRowProbe,
+                      context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 }
 
