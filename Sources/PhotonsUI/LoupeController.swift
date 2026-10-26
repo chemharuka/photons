@@ -1408,9 +1408,15 @@ public final class LoupeController: NSViewController {
                                 decodeScale: decodedScale,
                                 edit: edit)
         }
-        if let asset = session?.anchorAsset, let w = asset.width, let h = asset.height, w > 0, h > 0 {
+        if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
+            // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
+            // uses (`maskSourceSize`, task 028). It stops disagreeing with the decoded framing the
+            // moment this photo's first frame is ingested, and it never mixes the stored dimensions
+            // into a projection that is otherwise display-oriented.
+            let source = session?.maskSourceSize
+                ?? ImageSize(width: max(1, asset.width ?? 1), height: max(1, asset.height ?? 1))
             return LoupeFraming(viewport: size,
-                                decoded: ImageSize(width: w, height: h),
+                                decoded: source,
                                 decodeScale: 1,
                                 edit: edit)
         }
@@ -2276,6 +2282,14 @@ public final class LoupeController: NSViewController {
             return
         }
         let graphAtFrame = graphOverride ?? graph
+        // Task 028: the mask UI measures its normalised geometry against the frame the renderer
+        // actually ingested (upright, EXIF orientation already applied). Published here — on the main
+        // thread, next to the pixels it belongs to — because the catalog row's `PixelWidth/PixelHeight`
+        // are the *stored* dimensions, which are transposed for EXIF 5…8 and made a portrait drag
+        // render as a landscape-shaped ellipse.
+        if let graphAtFrame, let assetID = session?.anchorAsset?.id {
+            session?.ingestedSourceFrame = (assetID, graphAtFrame.sourceSize)
+        }
         let t0 = CFAbsoluteTimeGetCurrent()
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange) { [weak self] in

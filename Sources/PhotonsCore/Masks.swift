@@ -1081,6 +1081,39 @@ public struct TilePlan: Sendable, Equatable {
     public var isFullFrame: Bool { pixelCount >= canvasPixelCount }
 }
 
+/// The pixel frame a document's normalised parameters are expressed in: the **upright**
+/// (display-oriented) source, i.e. the frame `RenderGraph.sourceSize` reports after ingestion applied
+/// the EXIF orientation (Q17, docs/architecture-decisions.md §11.2).
+///
+/// One function, because this number is where task 028's portrait bug came from. A mask is stored in
+/// normalised *source* coordinates and every distance is divided by `min(W, H)`, so the number has to
+/// be the size of the picture on screen. The mask UI used to build it from the catalog row's
+/// `kCGImagePropertyPixelWidth/PixelHeight`, which are the **stored** dimensions: for EXIF 5…8 those
+/// are transposed relative to what the user sees (a 3:2 portrait frame reads 9536×6344 while the
+/// picture is 6336×9520). A radial drag then converted its rim with `W / minSide = 1.503` instead of
+/// the honest `6336 / 6336 = 1`, and the rendered ellipse came out half again as wide as the one the
+/// hand drew — the eye reads that as "the mask is in the wrong place".
+///
+/// The decoded buffer always wins, because it is the frame the GPU evaluates the mask in and no
+/// metadata row may disagree with the pixels. The stored dimensions are the fallback for the window
+/// before the photo's first frame has landed, and they are documented as *stored* — a caller that
+/// wants them to be upright has to apply `ImageOrientation.uprightSize` itself, which only a decode
+/// (or a header read) can licence.
+public enum MaskSourceFrame {
+
+    /// The upright source size a document's normalised geometry is measured against.
+    ///
+    /// - Parameters:
+    ///   - ingested: the size the renderer ingested (`RenderGraph.sourceSize`, `LinearImage.uprightSize`).
+    ///   - storedWidth/storedHeight: the catalog row's pixel dimensions, *before* orientation. Used
+    ///     only when no frame has been ingested yet, or when the row has no dimensions at all.
+    public static func size(ingested: ImageSize?, storedWidth: Int?, storedHeight: Int?) -> ImageSize {
+        // `ImageSize` floors both edges at 1, so an "ingested" 0×0 cannot exist and needs no guard.
+        if let ingested { return ingested }
+        return ImageSize(width: storedWidth ?? 1, height: storedHeight ?? 1)
+    }
+}
+
 /// The forward half of S0's mapping: normalised **source** point → continuous canvas pixel.
 ///
 /// The kernel walks this backwards (`source_uv` in `s1_5_mask_atlas.metal`); the bounds code needs
