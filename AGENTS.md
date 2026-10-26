@@ -48,6 +48,8 @@ macOS 原生 RAW 摄影工作流（目录库 + 非破坏性编辑 + 导出），
 - 一个工作单元一个提交；首行 `feat(ui): …` / `fix(render): …`，正文列证据（测试数、p50/p95、hash 前缀）。
 - 提交前 `git status` 确认 `local/` 只出现 `local/README.md`。
 - 只提交自己分支的改动；不要 merge 别人分支，不要 `push`（无远端凭据）。
+- `git add -A` 只许在自己的 feature worktree 里用；在主 checkout 一律 `git add <明确路径>`
+  （发生过：主 checkout 的 `git add -A` 把别的 session 刚写、还没提交的 `AGENTS.md` 扫进了某个 UI 修复提交）。
 
 ## 文档面
 
