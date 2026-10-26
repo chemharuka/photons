@@ -133,22 +133,15 @@ final class LoupeZoomTransitionTests: XCTestCase {
         // The *declared* geometry of the animation — where it starts, where it ends, how long it
         // claims to take. These are facts about the bridge as armed, not samples of it in flight, so
         // they cannot drift with the machine's load the way a sampled position can.
+        //
+        // 025 replaced the layer `CABasicAnimation` with a per-frame sampling window on a
+        // canvas-sized drawable, so "the animation declares its endpoints" is now "the bridge does":
+        // the same two transforms, read from `bridge` itself instead of from a CAAnimation.
         XCTAssertEqual(bridge.duration, LoupeZoomBridge.defaultDuration, accuracy: 1e-12,
                        "every stop change moves by the same beat")
-        let animation = try XCTUnwrap(
-            controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge") as? CABasicAnimation,
-            "the layer must be carrying the bridge")
-        XCTAssertEqual(animation.duration, bridge.duration, accuracy: 1e-12)
-        let from = try XCTUnwrap(animation.fromValue as? NSValue,
-                                 "the animation must declare the transform it starts from")
-        let to = try XCTUnwrap(animation.toValue as? NSValue,
-                               "the animation must declare the transform it ends at")
-        XCTAssertTrue(CATransform3DEqualToTransform(from.caTransform3DValue,
-                                                    bridge.startTransform(backingScale: backingScale)),
-                      "the animation must start where the bridge says it starts")
-        XCTAssertTrue(CATransform3DEqualToTransform(to.caTransform3DValue,
-                                                    bridge.targetTransform(backingScale: backingScale)),
-                      "and end at the stop's own geometry, not somewhere between the two")
+        XCTAssertFalse(CATransform3DEqualToTransform(bridge.startTransform(backingScale: backingScale),
+                                                     bridge.targetTransform(backingScale: backingScale)),
+                       "a bridge must actually move between two different geometries")
 
         // The real frame: the bridge goes, and it left no animation behind.
         XCTAssertTrue(waitFor { controller.zoomBridge == nil },
@@ -232,19 +225,14 @@ final class LoupeZoomTransitionTests: XCTestCase {
             XCTAssertEqual(controller.viewState.zoom, stop, accuracy: 1e-12,
                            "the model jumps immediately")
 
-            // The bridge's endpoints, as armed: the geometry it says it is going from and to, and the
-            // animation declared with exactly those two transforms. Declarations cannot be sampled
-            // mid-slide, so load cannot move them.
-            let animation = try XCTUnwrap(
-                controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge") as? CABasicAnimation,
-                "\(stop) must carry an animation")
-            XCTAssertEqual(animation.duration, LoupeZoomBridge.defaultDuration, accuracy: 1e-12,
+            // The bridge's endpoints, as armed. 025 moved the carry from a layer `CABasicAnimation`
+            // to a per-frame sampling window, so the declared geometry is read from `bridge` itself;
+            // declarations cannot be sampled mid-slide, so load cannot move them.
+            XCTAssertEqual(bridge.duration, LoupeZoomBridge.defaultDuration, accuracy: 1e-12,
                            "every stop change moves by the same beat")
-            let to = try XCTUnwrap(animation.toValue as? NSValue,
-                                   "\(stop): the animation must declare where it ends")
-            XCTAssertTrue(CATransform3DEqualToTransform(to.caTransform3DValue,
-                                                        bridge.targetTransform(backingScale: backingScale)),
-                          "\(stop): the animation must end at the stop's own geometry")
+            XCTAssertFalse(CATransform3DEqualToTransform(bridge.startTransform(backingScale: backingScale),
+                                                         bridge.targetTransform(backingScale: backingScale)),
+                           "\(stop): a bridge must move between two different geometries")
 
             XCTAssertTrue(waitFor { controller.zoomBridge == nil },
                           "\(stop): the bridge never completed (last error: "
