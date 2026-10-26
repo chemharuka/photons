@@ -279,7 +279,10 @@ public final class EditorWindowController: NSWindowController {
             // Exactly on this stop, not "at least": 2:1 and 4:1 cannot both be ticked, and a pinch
             // between stops ticks none of them (the readout still says 1.7:1).
             let current = rootView.loupeController.currentZoomStop
-            item.state = (current.map { abs($0 - Double(item.tag)) < 0.005 } ?? false) ? .on : .off
+            // The tag carries a **percentage** (`50`), the camera carries a zoom (`0.5`) — comparing
+            // them raw is why no item was ever ticked after the tag moved to percent.
+            let tagZoom = Double(item.tag) / 100
+            item.state = (current.map { abs($0 - tagZoom) < 0.005 } ?? false) ? .on : .off
             return session.mode == .loupe && session.anchorID != nil
         case #selector(zoomInAction(_:)):
             return session.mode == .loupe && session.anchorID != nil

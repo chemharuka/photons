@@ -1693,7 +1693,7 @@ public final class UISmokeRunner {
         let sdrWidth = axis?.sdrWidth ?? -1
         let hdrWidth = axis?.hdrWidth ?? -1
         check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
-              axis != nil && axis?.stopWidth == 30 && axis?.stops == 6
+              axis != nil && axis?.stopWidth == 30 && axis?.stops == 4
               && hdrWidth == 120
               && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
 
