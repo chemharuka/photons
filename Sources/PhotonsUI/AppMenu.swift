@@ -104,6 +104,25 @@ public enum MainMenu {
         main.addItem(developItem)
         let develop = NSMenu(title: "显影")
         developItem.submenu = develop
+        // 裁切与旋转 (⌘R — the R every photo app puts on its crop tool, and the key Phos uses,
+        // `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`).
+        //
+        // The three items are one tool in three verbs: enter/apply, apply, cancel. ↵ and Esc do the
+        // same thing from the canvas without touching the menu, which is why the menu items carry
+        // ⌘-modified keys: a bare Return or Escape in a menu item steals the key from every text
+        // field in the window.
+        develop.addItem(withTitle: "裁切与旋转",
+                        action: #selector(EditorWindowController.toggleCropAction(_:)),
+                        keyEquivalent: "r")
+        let applyCrop = develop.addItem(withTitle: "应用裁切",
+                                        action: #selector(EditorWindowController.applyCropAction(_:)),
+                                        keyEquivalent: "\r")
+        applyCrop.keyEquivalentModifierMask = [.command]
+        let cancelCrop = develop.addItem(withTitle: "取消裁切",
+                                         action: #selector(EditorWindowController.cancelCropAction(_:)),
+                                         keyEquivalent: ".")
+        cancelCrop.keyEquivalentModifierMask = [.command]
+        develop.addItem(.separator())
         let presetItem = NSMenuItem(title: "预设", action: nil, keyEquivalent: "")
         presetItem.submenu = PresetMenu(kind: .apply)
         develop.addItem(presetItem)
