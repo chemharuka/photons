@@ -13,7 +13,11 @@ import PhotonsCatalog
 ///   closing; a 6th dimension while full does nothing **and is greyed**;
 /// * each slot's value control multi-selects (`1★、2★、5★`) in the same kind of checklist, also
 ///   staying open; values inside a slot OR, slots AND;
-/// * chips stay, and a chip's × drops one value while the slot stays with 「全部」;
+/// * 050: the removable-condition pills that used to sit at the bar's right end are **gone** — the
+///   only control right of the slots is 「清除全部」. A single value is now dropped inside its slot's
+///   own checklist, which is why these tests drive `performSlotRow` / `setSlotValues` instead of
+///   clicking a pill. `CatalogFilter.chips()` still exists (query vocabulary + the summary) and
+///   `FilterChipModelTests` keeps pinning it.
 /// * the bar never draws outside its own bounds, at a 330 pt **or** a 212 pt panel.
 @MainActor
 final class GridFilterSlotsTests: XCTestCase {
@@ -122,7 +126,11 @@ final class GridFilterSlotsTests: XCTestCase {
         XCTAssertEqual(bar.slotTitle(at: 0), "全部星级")
         XCTAssertEqual(bar.slotTitle(at: 1), "全部旗标")
         XCTAssertEqual(bar.slotTitle(at: 2), "全部相机")
-        XCTAssertEqual(bar.chipCount, 0)
+        // 050: no pill row any more — the bar holds exactly the icon, five slot buttons and
+        // 「清除全部」, and every one of them is a button (a drawn pill would be a bare NSView or, with
+        // the old code, purely painted — which is precisely what must not come back).
+        XCTAssertEqual(bar.subviews.count, 1 + CatalogFilter.slotCapacity + 1)
+        XCTAssertTrue(bar.subviews.allSatisfy { $0 is NSButton })
         // The one small button — not one per slot.
         XCTAssertEqual(bar.dimensionButtonFrame.width, FilterBarView.dimensionButtonWidth, accuracy: 0.5)
     }
@@ -180,7 +188,6 @@ final class GridFilterSlotsTests: XCTestCase {
         tick(["1", "5"], at: 0)
         XCTAssertEqual(bar.slotTitle(at: 0), "星级 1★、5★")
         XCTAssertEqual(bar.slotValues(at: 0), ["1", "5"])
-        XCTAssertEqual(bar.chipCount, 2)
 
         // 1★ OR 5★ → the 5★ and the 1★ photos (not the 3★, the 2★ or the unrated one).
         XCTAssertEqual(Set(session.assets.map(\.filename)), ["a.dng", "d.dng"])
@@ -207,14 +214,14 @@ final class GridFilterSlotsTests: XCTestCase {
         XCTAssertEqual(session.assets.count, 0, "an empty grid, not a crash")
     }
 
-    // MARK: switching dimensions, clearing, chips
+    // MARK: switching dimensions, clearing
 
     func testRemovingADimensionDiscardsItsValues() {
         tick(["1", "5"], at: 0)
-        XCTAssertEqual(bar.chipCount, 2)
+        XCTAssertEqual(bar.slotValues(at: 0), ["1", "5"])
         choose(.rating)                       // untick 星级 → its slot (and values) go
         XCTAssertFalse(bar.slotDimensions.contains(.rating))
-        XCTAssertEqual(bar.chipCount, 0)
+        XCTAssertTrue(session.filter.criteria.isEmpty, "旧值不许留在查询里")
 
         choose(.rating)                       // tick it again → a **fresh**, empty slot
         XCTAssertEqual(bar.slotValues(at: bar.slotDimensions.count - 1), [],
@@ -224,24 +231,35 @@ final class GridFilterSlotsTests: XCTestCase {
         XCTAssertTrue(session.filter.criteria.isEmpty)
     }
 
-    func testChipClickDropsOneValueAndKeepsTheSlot() throws {
+    /// 050 — this was `testChipClickDropsOneValueAndKeepsTheSlot`. The pill's × no longer exists, so:
+    /// a click in the band right of the last slot (where the 5★ pill used to be painted) must be
+    /// **inert**, and dropping one value must go through the slot's own checklist.
+    func testOnlyTheSlotChecklistDropsOneValue() throws {
         tick(["1", "5"], at: 0)
-        let five = try XCTUnwrap((0..<bar.chipCount).first { bar.chipText($0)?.contains("5★") == true })
-        let fiveRect = try XCTUnwrap(bar.chipRect(five))
-        bar.mouseDown(with: Self.click(bar, at: NSPoint(x: fiveRect.midX, y: fiveRect.midY)))
-        settle()
+        layout(width: 900)
+        let lastSlot = try XCTUnwrap(bar.slotPopupFrame(at: bar.slotVisibleCount - 1))
 
-        XCTAssertEqual(bar.slotValues(at: 0), ["1"], "only the clicked value is gone")
+        let before = bar.slotValues(at: 0)
+        // Where the pill row used to start — immediately right of the last slot.
+        bar.mouseDown(with: Self.click(bar, at: NSPoint(x: lastSlot.maxX + 30, y: bar.bounds.midY)))
+        settle()
+        XCTAssertEqual(bar.slotValues(at: 0), before, "槽位右侧已经没有任何可点的条件了")
+        XCTAssertEqual(bar.slotDimensions.first, .rating)
+
+        bar.openSlotPopover(at: 0)
+        let rows = bar.slotMenuTitles(at: 0)          // 「全部星级」, then the ladder
+        let five = try XCTUnwrap(rows.firstIndex(of: "5★"), "\(rows)")
+        bar.performSlotRow(at: five)
+        settle()
+        XCTAssertEqual(bar.slotValues(at: 0), ["1"], "only that value is gone")
         XCTAssertEqual(bar.slotDimensions.first, .rating, "the slot stays")
         XCTAssertEqual(bar.slotTitle(at: 0), "星级 1★")
-        XCTAssertEqual(bar.chipCount, 1)
 
-        let onlyRect = try XCTUnwrap(bar.chipRect(0))
-        bar.mouseDown(with: Self.click(bar, at: NSPoint(x: onlyRect.midX, y: onlyRect.midY)))
+        let one = try XCTUnwrap(bar.slotMenuTitles(at: 0).firstIndex(of: "1★"))
+        bar.performSlotRow(at: one)
         settle()
         XCTAssertEqual(bar.slotValues(at: 0), [])
         XCTAssertEqual(bar.slotTitle(at: 0), "全部星级", "取完则该槽回到「全部」")
-        XCTAssertEqual(bar.chipCount, 0)
         XCTAssertEqual(session.assets.count, 5)
     }
 
@@ -292,16 +310,17 @@ final class GridFilterSlotsTests: XCTestCase {
         session.clearFilter()
         settle()
         XCTAssertFalse(session.filter.isActive)
-        XCTAssertEqual(bar.chipCount, 0)
         XCTAssertEqual(bar.slotDimensions, CatalogFilter.defaultDimensions)
+        XCTAssertEqual(bar.slotValues(at: 0), [], "清空后没有残留值")
+        XCTAssertTrue(session.filter.criteria.isEmpty)
         XCTAssertEqual(session.assets.count, 5)
     }
 
     // MARK: geometry — 330 pt and 212 pt panels
 
     func testTheBarNeverDrawsOutsideItself() {
-        tick(["1", "5"], at: 0)                     // two chips
-        tick(["pick"], at: 1)                       // a third
+        tick(["1", "5"], at: 0)                     // two values in 星级 …
+        tick(["pick"], at: 1)                       // … and one in 旗标 (three conditions, no pills)
         for width in [330.0, 212.0, 900.0] as [CGFloat] {
             layout(width: width)
             let bounds = bar.bounds
@@ -314,10 +333,15 @@ final class GridFilterSlotsTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(frame.width, FilterBarView.popupMinWidth - 0.5,
                                             "a popup narrower than 34 pt is not a control")
             }
-            for chip in 0..<bar.chipCount {
-                guard let rect = bar.chipRect(chip) else { continue }
-                XCTAssertLessThanOrEqual(rect.maxX, bounds.width + 0.5,
-                                         "chip \(chip) pushed out at \(width)")
+            // 050: 「清除全部」 is the only thing right of the slots, and it is inside the bar too.
+            XCTAssertLessThanOrEqual(bar.clearButtonFrame.maxX, bounds.width - 12 + 0.5,
+                                     "「清除全部」 超出右边缘 at \(width)")
+            XCTAssertGreaterThanOrEqual(bar.clearButtonFrame.minX, 0)
+            // Nothing in the bar is a pill: every subview is one of the seven buttons.
+            XCTAssertEqual(bar.subviews.count, 1 + CatalogFilter.slotCapacity + 1, "no pill views at \(width)")
+            for subview in bar.subviews {
+                XCTAssertLessThanOrEqual(subview.frame.maxX, bounds.width + 0.5,
+                                         "\(subview) pushed out at \(width)")
             }
         }
     }
@@ -334,7 +358,7 @@ final class GridFilterSlotsTests: XCTestCase {
 
         layout(width: 212)
         XCTAssertLessThan(bar.slotVisibleCount, 5,
-                          "212 pt cannot hold five usable slots with chips reserved — whole slots drop")
+                          "212 pt cannot hold five usable 34 pt popups — whole slots drop")
         XCTAssertGreaterThanOrEqual(bar.slotVisibleCount, 1)
         for index in 0..<bar.slotVisibleCount {
             XCTAssertGreaterThanOrEqual(bar.slotPopupFrame(at: index)!.width,

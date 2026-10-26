@@ -5,7 +5,7 @@ import PhotonsCatalog
 ///
 /// The catalog speaks canonical strings (`"03"`, `"leica|sl3"`, `"1/800"`, `"1.2"`, `"1"`); the bar is
 /// the only layer that knows how to say them out loud. Kept apart from `FilterBarView` so the same
-/// words can be used by the chips, the checklist rows and the tests without a second copy.
+/// words can be used by the slot titles, the checklist rows and the tests without a second copy.
 enum FilterDisplay {
 
     /// Short enough to sit in a 34 pt popup: 星级 / 旗标 / 相机 / 镜头 / 后缀 / 月 / 日 …
@@ -401,8 +401,11 @@ final class FilterChecklistController: NSViewController {
 ///   still be unticked.
 /// * each slot's right-hand control is a button opening the same kind of checklist for that slot's
 ///   values (also multi-select, also stays open). Values inside one slot OR, slots AND.
-/// * the chips below are the same conditions made removable; clicking one drops *one value* and the
-///   slot stays (a slot is the dimension you are looking at, not a condition).
+/// * the only control to the right of the slots is 「清除全部」 — plain grey text, no border, no icon
+///   (050). The removable-condition pills that used to sit there are gone with the owner's words
+///   「右侧就不要出现蓝色的单独关闭筛选条件的选项了，只保留清除全部四个字」; dropping one condition
+///   now happens in the slot's own checklist. `CatalogFilter.chips()` still exists — it is query
+///   vocabulary and the log's summary — the bar simply no longer draws it.
 ///
 /// The bar owns **no** filter state: every control reads `filter` and writes back through `onChange`.
 /// That is what keeps "切换照片时筛选不变" true without bookkeeping — the filter lives in the session.
@@ -418,9 +421,17 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     static let slotGap: CGFloat = 4
     static let popupMinWidth: CGFloat = 34
     static let popupMaxWidth: CGFloat = 120
-    /// Chips may claim at most this share of the bar. A slot's own title already spells out the
-    /// values it holds, so when the bar is tight the **entry** wins over the duplicate feedback.
-    static let chipBudgetFraction: CGFloat = 0.35
+
+    /// 050: 「清除全部」 — the only control right of the slots. Width = measured ink + 8 pt, so a
+    /// system font that measures wider than expected can never clip the word.
+    static let clearTitle = "清除全部"
+    static let clearFont = NSFont.systemFont(ofSize: 10.5)
+    /// How far the button's right edge sits from the bar's right edge.
+    static let clearTrailingInset: CGFloat = 12
+
+    static func clearWidth(_ title: String = clearTitle) -> CGFloat {
+        ceil((title as NSString).size(withAttributes: [.font: clearFont]).width) + 8
+    }
 
     /// SF Symbols tried in order, as the owner chose from the contact sheet: the funnel-and-circle
     /// filter glyph first, then its ring-less sibling, then `⋯`. `NSImage(systemSymbolName:)` returns
@@ -445,8 +456,6 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     }
 
     public var onChange: ((CatalogFilter) -> Void)?
-    public var onClearFacet: ((CatalogFilter.Facet) -> Void)?
-    public var onRemoveSlotValue: ((Int, String) -> Void)?
     public var onClearAll: (() -> Void)?
 
     /// Where the slot checklists get their values: the catalog, through the session. Asked once per
@@ -465,12 +474,8 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     private let slotChecklist = FilterChecklistController()
     private var openSlotIndex: Int?
 
-    private let clearButton = NSButton(title: "清除全部", target: nil, action: nil)
+    private let clearButton = NSButton(title: "", target: nil, action: nil)
 
-    /// Chips in draw order. The models are known as soon as `update` runs (a chip exists the moment a
-    /// value is ticked); the rects need a layout pass, which is what `chipRect` reports.
-    private var chipModels: [CatalogFilter.Chip] = []
-    private var chipRects: [NSRect] = []
     private var filter = CatalogFilter.none
     private var facetCache: [FilterDimension: [String]] = [:]
     /// True while the controls are being synced from the model, so a control's action cannot loop.
@@ -520,11 +525,20 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
 
         clearButton.controlSize = .small
         clearButton.bezelStyle = .inline
-        clearButton.font = .systemFont(ofSize: 10.5)
         clearButton.isBordered = false
+        clearButton.font = Self.clearFont
+        clearButton.isHidden = true
         clearButton.target = self
         clearButton.action = #selector(clearAllTapped)
-        clearButton.isHidden = true
+        // 050: grey text, no border, no icon, **no accent**. The tint *and* the attributed title are
+        // set, because AppKit's default for a plain button's label is the accent colour: one of those
+        // two would be enough for us and both are needed to be sure nothing paints it blue.
+        clearButton.contentTintColor = .secondaryLabelColor
+        clearButton.attributedTitle = NSAttributedString(string: Self.clearTitle, attributes: [
+            .font: Self.clearFont,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        clearButton.setAccessibilityLabel(Self.clearTitle)
         addSubview(clearButton)
 
         configurePopovers()
@@ -564,8 +578,6 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         self.filter = filter
         self.cameraLabels = cameraLabels.isEmpty ? self.cameraLabels : cameraLabels
         facetCache = [:]
-        chipModels = filter.chips(cameraLabels: self.cameraLabels)
-        chipRects = []
         rebuildSlotButtons()
         isSyncing = false
         refreshOpenChecklists()
@@ -764,65 +776,6 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         if popover === slotPopover { openSlotIndex = nil }
     }
 
-    // MARK: chips
-
-    public var chipCount: Int { chipModels.count }
-
-    public func chipText(_ index: Int) -> String? {
-        chipModels.indices.contains(index) ? chipModels[index].text : nil
-    }
-
-    /// The legacy facet a chip belongs to — `.rating` for both a pre-026 `ratingAtLeast` chip and a
-    /// 星级 slot chip, so an old assertion still reads the thing it meant.
-    public func chipFacet(_ index: Int) -> CatalogFilter.Facet? {
-        guard chipModels.indices.contains(index) else { return nil }
-        switch chipModels[index].origin {
-        case .facet(let facet): return facet
-        case .slot: return CatalogFilter.Facet(rawValue: chipModels[index].dimension.rawValue)
-        }
-    }
-
-    /// Chip frame in this view's coordinates, so a test can click it like a user would. `nil` until a
-    /// layout pass has placed it (the bar is laid out by its container, never by itself).
-    public func chipRect(_ index: Int) -> NSRect? {
-        chipRects.indices.contains(index) ? chipRects[index] : nil
-    }
-
-    /// Clicking a chip: a legacy facet clears its field, a slot chip drops that one value.
-    func clickChip(_ index: Int) {
-        guard chipModels.indices.contains(index) else { return }
-        switch chipModels[index].origin {
-        case .facet(let facet):
-            onClearFacet?(facet)
-        case .slot(let slot):
-            if let value = chipModels[index].value { onRemoveSlotValue?(slot, value) }
-        }
-    }
-
-    private static let chipFont = NSFont.systemFont(ofSize: 10, weight: .medium)
-
-    private static func chipWidth(_ text: String) -> CGFloat {
-        let size = (text as NSString).size(withAttributes: [.font: chipFont])
-        return ceil(size.width) + 26      // text + "×" + padding
-    }
-
-    private func rebuildChips(originX: CGFloat, budget: CGFloat) {
-        let h: CGFloat = 18
-        let y = (bounds.height - h) / 2
-        var x = originX
-        var rects: [NSRect] = []
-        for chip in chipModels {
-            let w = Self.chipWidth(chip.text)
-            // A chip that would leave the bar is not drawn: the visible ones stay clickable and the
-            // condition is still removable from its slot menu. (The alternative — pushing them off
-            // the right edge — is exactly what this task forbids.)
-            guard x + w <= originX + budget + 0.5 else { break }
-            rects.append(NSRect(x: x, y: y, width: w, height: h))
-            x += w + 6
-        }
-        chipRects = rects
-    }
-
     // MARK: geometry
 
     public override func layout() {
@@ -837,30 +790,28 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
                                       height: Self.dimensionButtonHeight)
         x += Self.dimensionButtonWidth + 6
 
-        let clearWidth: CGFloat = filter.isActive ? 54 : 0
-        let available = max(0, bounds.width - x - 8 - clearWidth)
-        let chipTotal = chipModels.reduce(CGFloat(0)) { $0 + Self.chipWidth($1.text) + 6 }
-        // Chips are paid for first (they are the result and must stay on screen); the slots get the
-        // rest and the popup is what shrinks. A chip row may claim 35 % of the bar at most, and never
-        // so much that fewer than two slots are left — a bar with no way to change the dimension is a
-        // dead end, while a missing chip is only a missing shortcut.
-        let slotFloor = 2 * (Self.dimensionButtonWidth + Self.slotGap + Self.popupMinWidth)
-        let chipReserve = min(chipTotal, bounds.width * Self.chipBudgetFraction,
-                              max(0, available - slotFloor))
-        let usable = max(0, available - chipReserve)
+        // 050: nothing is reserved for removable pills any more — there are none. The only slice taken
+        // out of the slots' share is 「清除全部」's own width at the far right (+4 pt of breathing room,
+        // the same allowance the old hard-coded 54 pt budget made), and every point after that goes to
+        // the slot popups. That is the whole trade the owner asked for: the slot's title already spells
+        // out the values it holds, so the second row of feedback buys nothing and its width is better
+        // spent on the entry.
+        let clearWidth = filter.isActive ? Self.clearWidth() : 0
+        let clearReserve = clearWidth > 0 ? clearWidth + 4 : 0
+        let available = max(0, bounds.width - x - 8 - clearReserve)
 
         let slotCount = min(filter.slots.count, CatalogFilter.slotCapacity)
         var popupWidth = Self.popupMaxWidth
         var visible = slotCount
         if slotCount > 0 {
             popupWidth = min(Self.popupMaxWidth,
-                             max(Self.popupMinWidth, usable / CGFloat(slotCount) - Self.slotGap))
+                             max(Self.popupMinWidth, available / CGFloat(slotCount) - Self.slotGap))
             // Only when even a 34 pt popup does not fit is a whole slot dropped — 24 + 34 + gap is
             // the narrowest a slot can be and still be a button you can hit.
-            while visible > 0 && CGFloat(visible) * (popupWidth + Self.slotGap) > usable + 0.5 {
+            while visible > 0 && CGFloat(visible) * (popupWidth + Self.slotGap) > available + 0.5 {
                 visible -= 1
                 popupWidth = min(Self.popupMaxWidth,
-                                 max(Self.popupMinWidth, usable / CGFloat(max(1, visible)) - Self.slotGap))
+                                 max(Self.popupMinWidth, available / CGFloat(max(1, visible)) - Self.slotGap))
             }
         }
 
@@ -874,20 +825,14 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
             button.frame = NSRect(x: x, y: mid, width: popupWidth, height: 22)
             x += popupWidth + Self.slotGap
         }
-        if visible > 0 { x += 2 }
 
-        let chipRoom = max(0, bounds.width - x - 8 - clearWidth - 6)
-        rebuildChips(originX: x, budget: min(chipTotal, chipRoom))
-
+        // 「清除全部」 is pinned to the right edge: `maxX == bounds.width - clearTrailingInset` at every
+        // bar width, however many slots are drawn and however wide they ended up.
         clearButton.isHidden = !filter.isActive
-        if filter.isActive {
-            let w = (clearButton.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10.5)]).width + 8
-            let afterChips = chipRects.last.map { $0.maxX + 10 } ?? (x + 4)
-            clearButton.frame = NSRect(x: min(bounds.width - w - 12, afterChips),
-                                       y: mid + 3, width: w, height: 16)
-        } else {
-            clearButton.frame = .zero
-        }
+        clearButton.frame = filter.isActive
+            ? NSRect(x: bounds.width - clearWidth - Self.clearTrailingInset,
+                     y: mid + 3, width: clearWidth, height: 16)
+            : .zero
     }
 
     public override func draw(_ dirtyRect: NSRect) {
@@ -895,48 +840,44 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         bounds.fill()
         NSColor.labelColor.withAlphaComponent(0.10).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
-
-        for (index, chip) in chipModels.enumerated() {
-            guard chipRects.indices.contains(index) else { break }
-            let rect = chipRects[index]
-            let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
-            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
-            path.fill()
-            NSColor.controlAccentColor.withAlphaComponent(0.45).setStroke()
-            path.lineWidth = 1
-            path.stroke()
-
-            let text = chip.text as NSString
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: Self.chipFont, .foregroundColor: NSColor.labelColor,
-            ]
-            let size = text.size(withAttributes: attrs)
-            text.draw(at: NSPoint(x: rect.minX + 9, y: rect.midY - size.height / 2),
-                      withAttributes: attrs)
-            let cross = "×" as NSString
-            let crossAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]
-            let crossSize = cross.size(withAttributes: crossAttrs)
-            cross.draw(at: NSPoint(x: rect.maxX - crossSize.width - 7,
-                                   y: rect.midY - crossSize.height / 2),
-                       withAttributes: crossAttrs)
-        }
-    }
-
-    // MARK: chip clicking
-
-    public override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        if let hit = chipRects.firstIndex(where: { $0.contains(point) }) {
-            clickChip(hit)
-            return
-        }
-        super.mouseDown(with: event)
+        // 050: nothing else is painted. The accent-tinted pill row lived here; the bar is now the
+        // strip, its buttons, and the grey 「清除全部」 word.
     }
 
     // MARK: test seams (the UI tests drive the same actions a click does)
+
+    // MARK: 「清除全部」 seams (050)
+
+    public var clearButtonFrame: NSRect { clearButton.frame }
+
+    /// What the button says — the owner's four words, nothing appended.
+    public var clearButtonTitle: String { clearButton.title }
+
+    public var isClearButtonHidden: Bool { clearButton.isHidden }
+
+    public var clearButtonIsBordered: Bool { clearButton.isBordered }
+
+    public var clearButtonTintColor: NSColor? { clearButton.contentTintColor }
+
+    /// The colour the title is actually drawn in. `nil` when the button carries no attributed title
+    /// (i.e. AppKit would pick its own — and its own default for a plain button is the accent).
+    public var clearButtonTextColor: NSColor? {
+        let attributed = clearButton.attributedTitle
+        guard attributed.length > 0 else { return nil }
+        return attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
+
+    public var clearButtonFont: NSFont? {
+        let attributed = clearButton.attributedTitle
+        guard attributed.length > 0 else { return clearButton.font }
+        return attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont ?? clearButton.font
+    }
+
+    public var clearButtonAccessibilityLabel: String? { clearButton.accessibilityLabel() }
+
+    /// Press 「清除全部」 through the button's own target/action — the same call AppKit makes when the
+    /// user clicks it, so a test exercises the production path rather than a private shortcut.
+    public func performClearAllClick() { clearButton.performClick(nil) }
 
     /// The slots' dimensions, left to right.
     public var slotDimensions: [FilterDimension] { filter.slots.map(\.dimension) }

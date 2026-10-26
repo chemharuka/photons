@@ -262,10 +262,6 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // Filter strip on top, grid below: the bar is a view of `CatalogSession.filter`, so the
         // grid area and the row order come from one query, never from a post-hoc UI filter.
         filterBar.onChange = { [weak self] next in self?.session?.applyFilter(next) }
-        filterBar.onClearFacet = { [weak self] facet in self?.session?.clearFilter(facet) }
-        filterBar.onRemoveSlotValue = { [weak self] slot, value in
-            self?.session?.removeSlotValue(at: slot, value: value)
-        }
         filterBar.onClearAll = { [weak self] in self?.session?.clearFilter() }
         // The slot menus must offer **this library's** values (026's hard constraint), so the bar
         // asks the session, which asks the catalog with the current filter folded in.
