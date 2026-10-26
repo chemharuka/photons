@@ -397,6 +397,10 @@ public struct RenderTrace: Sendable {
     public var skipped: [RenderStage] = []
     public var gpuMilliseconds: Double = 0
     public var cacheHits: Int = 0
+    /// 029: S0 took the pure-CA fast path — the frame is the source pixel grid, so green was a texel
+    /// copy and only red/blue were resampled. False for every document with α = 0 (that is the
+    /// identity copy) and for a CA document that also crops/rotates/scales (the general path).
+    public var s0PureCA = false
 
     public init() {}
 

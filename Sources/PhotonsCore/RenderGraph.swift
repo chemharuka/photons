@@ -326,13 +326,17 @@ public struct MaskAtlasDump: Sendable {
 
 // MARK: - uniform blocks (must mirror the .metal structs byte for byte)
 
-private struct S0Params {
+/// Mirror of `Kernels/s0_geometry.metal`, byte for byte: **7 float4 = 112 bytes** (a mismatch reads
+/// the wrong uniform and does not fail, so `ChromaticAberrationTests` asserts the number on both
+/// sides).
+struct S0Params {
     var a: SIMD4<Float>   // canvasSize.xy, contentOrigin.xy
     var b: SIMD4<Float>   // contentSize.xy, srcSize.xy
     var c: SIMD4<Float>   // crop rect
     var d: SIMD4<Float>   // cos, sin, flipH, flipV
-    var e: SIMD4<Float>   // identity
+    var e: SIMD4<Float>   // identity, backgroundOutside, pureCA, pad
     var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
+    var g: SIMD4<Float>   // caRed, caBlue, pad, pad (029)
 }
 
 private struct S1Params {
@@ -631,6 +635,15 @@ public final class RenderGraph {
         /// golden and edge-sample behaviour is untouched.
         let backgroundOutside: Bool
         let keys: StageKeys
+        /// S0's two fast paths (029). Decided once, here, so the kernel's branch and the trace cannot
+        /// disagree about which one a frame took.
+        ///
+        /// `s0Identity`: nothing to transform and no CA — copy texels, bit-exact.
+        /// `s0PureCA`: nothing to transform **but** α ≠ 0 — the frame *is* the source pixel grid, so
+        /// S0 hands `framePx` to the sampler directly instead of round-tripping through uv (which
+        /// can lose an ulp at large sizes and would move green).
+        let s0Identity: Bool
+        let s0PureCA: Bool
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
@@ -698,9 +711,21 @@ public final class RenderGraph {
                                                             outputWindow: window,
                                                             orientation: orientation),
                                        identity: input.identity)
+        // 029: S0's fast paths. "Nothing to transform" is the pre-029 identity condition; on top of
+        // it, CA either keeps the frame the identity copy (α = 0) or needs the three-sample branch
+        // with `framePx` taken directly (α ≠ 0). A CA document with a crop, a rotation or a scale
+        // falls through to the general path — same `px` as before, only R/B from a scaled radius.
+        let untransformed = crop == .full
+            && edit.geometry.rotationDegrees == 0
+            && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
+            && content == sourceSize && canvas == sourceSize
+            && window == nil
+        let caOn = !edit.optics.isIdentity
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
-                    frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys)
+                    frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys,
+                    s0Identity: untransformed && !caOn,
+                    s0PureCA: untransformed && caOn)
     }
 
     // MARK: render
@@ -708,6 +733,7 @@ public final class RenderGraph {
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
         let plan = plan(edit, options)
         var trace = RenderTrace()
+        trace.s0PureCA = plan.s0PureCA
         // 005e: the semantic mattes are resolved before the table is built, because a semantic
         // component's descriptor carries the slice index of its raster. The resolution is cached
         // (contentHash + kind + modelVersion), so this is free on every frame but the first.
@@ -1337,11 +1363,9 @@ public final class RenderGraph {
         switch stage {
         case .geometry:
             let p = try kernels.pipeline(file: "s0_geometry", function: "s0_geometry")
-            let identity = plan.crop == .full
-                && edit.geometry.rotationDegrees == 0
-                && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
-                && plan.content == sourceSize && plan.canvas == sourceSize
-                && plan.isFullFrame
+            // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
+            // place, so the kernel's branch and the trace cannot disagree (029).
+            let identity = plan.s0Identity
             var params = S0Params(
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
@@ -1352,8 +1376,14 @@ public final class RenderGraph {
                          edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
                 // e.y: the window reaches past the frame, so the miss renders as background. Zero on
                 // every in-frame render, which is why this changes no existing pixel.
-                e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0, 0, 0),
-                f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))
+                // e.z: pure-CA fast path (029) — the frame is the source pixel grid, so `px` is taken
+                // directly and green stays a texel copy.
+                e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0,
+                         plan.s0PureCA ? 1 : 0, 0),
+                f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
+                // g: the two dimensionless radial ratios; 0/0 for every document that has not
+                // touched the sliders, which is what keeps the CA-off path byte-identical.
+                g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)

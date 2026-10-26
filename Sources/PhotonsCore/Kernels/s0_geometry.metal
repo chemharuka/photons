@@ -24,14 +24,23 @@ using namespace metal;
 // rejected before it is taken — `float4(0)`, not the edge texel smeared outward, which is what
 // clamp-to-edge would give and what a photograph's edge does *not* look like. In-bounds windows never
 // reach that branch, so every pre-existing pixel is bit-identical.
+//
+// Lateral CA (029) rides in the same pass: green is the reference and is sampled exactly as before,
+// red and blue are sampled at a radius scaled by `1 + α` about the source centre (`p.g`, `p.e.z`).
+// No second stage, no second texture — the three samples are of the same pixel, which is the whole
+// reason this belongs here rather than after S1.
 struct S0Params {
     float4 a;   // canvasSize.xy, contentOrigin.xy
     float4 b;   // contentSize.xy, srcSize.xy
     float4 c;   // crop rect (x, y, w, h) normalized
     float4 d;   // cos, sin, flipH, flipV
-    float4 e;   // identity, backgroundOutside, pad, pad
+    float4 e;   // identity, backgroundOutside, pureCA, pad
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
+    float4 g;   // caRed, caBlue, pad, pad  (029; dimensionless radial ratios, 0 = off)
 };
+// 7 × float4 = 112 bytes. `RenderGraph.swift`'s mirror must stay the same size — a mismatch reads
+// the wrong uniform and **does not fail**, which is why `ChromaticAberrationTests` asserts 112 on
+// both sides.
 
 static inline float4 sample_bilinear(texture2d<float, access::read> src,
                                      float2 px,
@@ -83,6 +92,23 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
         dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
         return;
     }
+    // ── lateral CA (029), pure-CA fast path ─────────────────────────────────────────────────────
+    // Crop full, nothing rotated or flipped, no window, canvas == content == frame == source, and
+    // α ≠ 0 — the common case ("just fix the corners"). Then `framePx` *is* the source pixel centre,
+    // so hand it to the sampler directly instead of going through the uv round trip below, whose
+    // `(i + 0.5)/n·n` can lose an ulp at 9504 px and would move green by ~1e-4 relative. Green is
+    // read as a texel (**not** resampled), so this frame's green channel is byte-identical to the
+    // identity copy above; only red and blue are resampled.
+    if (p.e.z > 0.5) {
+        float2 axis = float2(srcSize) * 0.5;
+        float2 d = framePx - axis;
+        float4 green = src.read(uint2(gid));
+        float4 red = sample_bilinear(src, axis + d * (1.0 + p.g.x), srcSize);
+        float4 blue = sample_bilinear(src, axis + d * (1.0 + p.g.y), srcSize);
+        dst.write(float4(red.r, green.g, blue.b, green.a), gid);
+        return;
+    }
+
     float2 uv = framePx / max(p.f.xy, float2(1.0));
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
@@ -93,5 +119,26 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     float2 r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
 
     float2 px = (p.c.xy + r * p.c.zw) * float2(srcSize);
-    dst.write(sample_bilinear(src, px, srcSize), gid);
+
+    // ── lateral CA (029): one pass, three samples ───────────────────────────────────────────────
+    // Green is the reference and never moves. Red and blue are taken at
+    // `axis + (px − axis)·(1 + α)`, where `axis` is the **source** centre: lateral CA is a property
+    // of the lens's optical axis, so a crop or a rotation must not move the point that is aberration-
+    // free. `α` itself is dimensionless (a fraction of the radius), which is what lets a 400 px
+    // preview and a 9504 px export correct the same picture.
+    //
+    // This is path C — CA on top of a crop/rotation/flip/scale. It samples the *same* `px` the
+    // pre-029 kernel sampled, so green is bit-identical to the CA-off frame and only red and blue
+    // come from a scaled radius. With both α at zero it is exactly the old single sample: that branch
+    // is cold for every document that has never touched the sliders.
+    if (p.g.x == 0.0 && p.g.y == 0.0) {
+        dst.write(sample_bilinear(src, px, srcSize), gid);
+        return;
+    }
+    float4 green = sample_bilinear(src, px, srcSize);
+    float2 axis = float2(srcSize) * 0.5;
+    float2 d = px - axis;
+    float4 red = sample_bilinear(src, axis + d * (1.0 + p.g.x), srcSize);
+    float4 blue = sample_bilinear(src, axis + d * (1.0 + p.g.y), srcSize);
+    dst.write(float4(red.r, green.g, blue.b, green.a), gid);
 }

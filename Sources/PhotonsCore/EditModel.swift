@@ -30,6 +30,10 @@ public struct EditModel: Sendable, Equatable, Codable {
     public var color: ColorGroup
     public var detail: DetailGroup
     public var effects: EffectsGroup
+    /// Optics: lateral chromatic aberration (029). Its own group, **not** a field in `DetailGroup`:
+    /// `keyMaterial` has no `.detail` branch, so a slider parked there would change no key and would
+    /// silently render nothing.
+    public var optics: OpticsGroup
     /// Local masks (M4). Empty = the graph has no mask stages at all (§3.2): the key chain stays the
     /// M1 seven-link chain and the pixels are byte-identical to M1.
     public var masks: [Mask]
@@ -47,6 +51,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 color: ColorGroup = .identity,
                 detail: DetailGroup = .identity,
                 effects: EffectsGroup = .identity,
+                optics: OpticsGroup = .identity,
                 masks: [Mask] = [],
                 showMaskID: String? = nil) {
         self.schemaVersion = schemaVersion
@@ -57,6 +62,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.color = color
         self.detail = detail
         self.effects = effects
+        self.optics = optics
         self.masks = masks
         self.showMaskID = showMaskID
     }
@@ -75,6 +81,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.color = c.val("color", v.color)
         v.detail = c.val("detail", v.detail)
         v.effects = c.val("effects", v.effects)
+        v.optics = c.val("optics", v.optics)
         v.masks = c.val("masks", v.masks)
         v.showMaskID = c.val("showMaskID", v.showMaskID)
         // 派单 006: pre-schema-3 documents used `light.temperature = 6500` / `tint = 0` as "the
@@ -136,6 +143,9 @@ public struct EditModel: Sendable, Equatable, Codable {
         if curve != old.curve { s.insert(.curve) }
         if color != old.color { s.insert(.color) }
         if effects != old.effects { s.insert(.vignette) }
+        // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
+        // so it dirties S0 and, through the key chain, everything below it.
+        if optics != old.optics { s.insert(.geometry) }
         // Masks split across the two new stages: geometry/combination invalidates the atlas,
         // adjustments invalidate only S1.6, and a rename invalidates nothing (§3.2). Both stages go
         // dirty when a mask appears or disappears, because the keys stop existing.
@@ -178,6 +188,11 @@ public struct EditModel: Sendable, Equatable, Codable {
             if geometry.aspectLock.ratio != nil {
                 s += ";asp=\(geometry.aspectLock.code)"
             }
+            // 029: lateral CA. Appended **only when non-zero**, exactly like `asp`, so every document
+            // that has never touched the CA sliders keeps the pre-029 geometry material byte for
+            // byte — the seven pinned keys and every recorded golden depend on that.
+            if optics.caRed != 0 { s += ";car=\(k(optics.caRed))" }
+            if optics.caBlue != 0 { s += ";cab=\(k(optics.caBlue))" }
             return s
 
         case .sceneLinear:
@@ -664,6 +679,54 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     public var keyString: String {
         "vig=\(k(vignetteAmount));mid=\(k(vignetteMidpoint));fea=\(k(vignetteFeather))"
             + ";rou=\(k(vignetteRoundness))"
+    }
+}
+
+/// Optics: lateral (transverse) chromatic aberration — 029.
+///
+/// The stored values are **dimensionless radial ratios**, not pixel shifts: α > 0 means that
+/// channel's image is larger than green's (a longer effective focal length), and the correction
+/// samples that channel at `r · (1 + α)` so the three channels line up again. A preview at 400 px
+/// and an export at 9504 px therefore correct the same fraction of the radius — a pixel-valued
+/// parameter could not do that (029 §4.1).
+///
+/// Full scale is ±0.005: LightCraft's `CA_SCALE` is 0.003, RawTherapee's post-demosaic CA slider is
+/// ±0.005 in steps of 1e-4, and PixelLoupe searches ±0.5 % in steps of 0.01 % — three independent
+/// implementations inside 3–5 × 10⁻³, so 5 × 10⁻³ is neither cramped nor a dead zone.
+///
+/// Sign convention, the one the UI copy repeats: `caRed > 0` = "the red image is bigger, pull it
+/// in", i.e. a larger α samples red further out.
+public struct OpticsGroup: Sendable, Equatable, Codable {
+    /// |α| at full deflection of either slider.
+    public static let fullScale = 0.005
+
+    /// α_R: red relative to green, −0.005…+0.005, default 0 (+ = red image is larger).
+    public var caRed: Double
+    /// α_B: blue relative to green, same range and convention.
+    public var caBlue: Double
+
+    public static let identity = OpticsGroup()
+
+    public init(caRed: Double = 0, caBlue: Double = 0) {
+        self.caRed = caRed
+        self.caBlue = caBlue
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = OpticsGroup.identity
+        v.caRed = c.val("caRed", v.caRed)
+        v.caBlue = c.val("caBlue", v.caBlue)
+        self = v
+    }
+
+    /// Both sliders at zero. The graph's S0 fast path keys off exactly this.
+    public var isIdentity: Bool { caRed == 0 && caBlue == 0 }
+
+    /// Corner displacement in pixels of the render at `halfDiagonal` — a **read-out**, not a
+    /// parameter: it belongs to the viewport's size, so it never enters a key.
+    public func cornerPixels(halfDiagonal: Double) -> Double {
+        max(abs(caRed), abs(caBlue)) * halfDiagonal
     }
 }
 
