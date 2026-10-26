@@ -327,6 +327,83 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
               + "drops \(controller.zoomBridgePendingDrops)")
     }
 
+    // MARK: - ⑥ the invariant behind all of the above: every zoom ends **on a stop**
+
+    /// The user's acceptance line: "每次缩放都动起来，动完必须正好停在 25/33.3/50/66.7/100/200/300/400
+    /// 或 fit 上，不许停在中间." A transition is allowed to *show* intermediate scales (that is what an
+    /// animation is) but the camera must not come to rest on one, so `viewState.zoom` is asserted to be
+    /// exactly a table value after every single command — including while a bridge is still running,
+    /// i.e. before any of them has settled.
+    func testEveryZoomLeavesTheCameraOnAStopNeverInBetween() throws {
+        let url = try rawFixture()
+        let controller = makeController()
+        start(controller, url: url, identity: "anim-invariant")
+        controller.reducesMotion = true        // no waiting: the camera value is set synchronously
+
+        func assertOnAStop(_ what: String, file: StaticString = #filePath, line: UInt = #line) {
+            if controller.viewState.isActualSize {
+                let zoom = controller.viewState.zoom
+                XCTAssertNotNil(LoupeViewState.stopIndex(of: zoom),
+                                "\(what) left the camera on \(zoom) — between stops",
+                                file: file, line: line)
+            }
+        }
+
+        XCTAssertEqual(controller.viewState.mode, .fit)
+        controller.zoomToActualSize(aroundView: CGPoint(x: 160, y: 100))
+        assertOnAStop("fit → 100 %")
+
+        // Every menu stop, up the ladder.
+        for stop in LoupeController.menuZoomStops {
+            controller.zoom(to: stop, aroundView: CGPoint(x: 160, y: 100))
+            XCTAssertEqual(controller.viewState.zoom, stop, accuracy: 1e-12,
+                           "\(LoupeViewState.percentLabel(of: stop)) must be reached exactly")
+            assertOnAStop("menu \(LoupeViewState.percentLabel(of: stop))")
+        }
+
+        // ⌘− all the way down: 8 stops → fit, every step parked on a stop on the way.
+        var seen: [String] = []
+        for _ in 0..<9 {
+            controller.zoomOut()
+            if controller.viewState.isActualSize {
+                seen.append(LoupeViewState.percentLabel(of: controller.viewState.zoom))
+            } else {
+                seen.append("fit")
+            }
+            assertOnAStop("⌘−")
+        }
+        XCTAssertEqual(seen, ["300%", "200%", "100%", "66.7%", "50%", "33.3%", "25%", "fit", "fit"],
+                       "⌘− walks the eight stops in order and then reaches fit")
+
+        // ⌘= back up: fit → 100 % (full size first), then 200 → 300 → 400.
+        var up: [String] = []
+        for _ in 0..<4 {
+            controller.zoomIn()
+            up.append(controller.viewState.isActualSize
+                      ? LoupeViewState.percentLabel(of: controller.viewState.zoom) : "fit")
+            assertOnAStop("⌘=")
+        }
+        XCTAssertEqual(up, ["100%", "200%", "300%", "400%"])
+        XCTAssertEqual(controller.viewState.zoom, 4, accuracy: 1e-12, "the ladder tops out on 400 %")
+
+        // A pinch sweep: the accumulator carries the continuous value, the camera may not.
+        var factor = 0.55
+        for _ in 0..<80 {
+            controller.magnify(by: CGFloat(factor), at: CGPoint(x: 120, y: 80))
+            assertOnAStop("pinch ×\(String(format: "%.2f", factor))")
+            factor = factor < 1 ? factor * 1.08 : factor * 0.92
+            if factor > 2.4 { factor = 0.9 }
+        }
+
+        // A pinch that passes through a third lands on **the third**, not on 33 %.
+        controller.zoom(to: 0.5, aroundView: CGPoint(x: 160, y: 100))
+        controller.magnify(by: 0.68, at: CGPoint(x: 160, y: 100))     // 0.5 × 0.68 = 0.34
+        XCTAssertEqual(controller.viewState.zoom, 1.0 / 3.0, accuracy: 1e-12)
+        print("invariant: 9 × ⌘− = \(seen.joined(separator: " → ")) · 4 × ⌘= = "
+              + "\(up.joined(separator: " → ")) · pinch 0.34 → "
+              + LoupeViewState.percentLabel(of: controller.viewState.zoom))
+    }
+
     // MARK: - ⑤ cleanup: a resize mid-transition leaves no transform behind
 
     func testResizingDuringATransitionTearsItDown() throws {

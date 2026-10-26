@@ -33,10 +33,7 @@ final class LoupeZoomBridgeGeometryTests: XCTestCase {
                                fromMapping: f.mapping(of: old),
                                toMapping: f.mapping(of: new),
                                canvas: viewport,
-                               startScale: startScale,
-                               duration: LoupeZoomBridge.duration(from: startScale,
-                                                                  to: f.mapping(of: new).canvasPerSource
-                                                                      / f.mapping(of: old).canvasPerSource))
+                               startScale: startScale)
     }
 
     /// One source pixel through both cameras, and through the layer transform, in layer points.
@@ -138,21 +135,26 @@ final class LoupeZoomBridgeGeometryTests: XCTestCase {
         XCTAssertFalse(abs(f.zoom(of: new) / f.zoom(of: old) - 1) > 1e-6)
     }
 
-    func testDurationScalesWithTheSpanInOctaves() {
-        let cases: [(Double, Double, Double)] = [
-            (1, 2, 0.180),        // one octave — 100 → 200 %, the tuned fit ↔ 100 % duration
-            (2, 1, 0.180),        // and back
-            (0.5, 1, 0.180),      // 50 → 100 %, the same octave
-            (2, 3, 0.155),        // half an octave
-            (3, 4, 0.145),
-            (0.5, 4, 0.260),      // three octaves: at the ceiling
-            (4, 3, 0.145),
+    /// One duration for every stop change — 180 ms, easeOut — because the user asked for one beat,
+    /// not a duration that scales with the span: `25 → 400 %` and `300 → 400 %` must feel like the
+    /// same mechanism. The easeOut curve is asserted where it is applied (`LoupeController`), the
+    /// number here.
+    func testEveryStopChangeUsesTheSameOneHundredEightyMillisecondBeat() {
+        let f = framing()
+        let pairs: [(LoupeViewState, LoupeViewState)] = [
+            (.fit, LoupeViewState(mode: .actual, zoom: 1, centerX: 3000, centerY: 2000)),
+            (LoupeViewState(mode: .actual, zoom: 1, centerX: 3000, centerY: 2000),
+             LoupeViewState(mode: .actual, zoom: 2, centerX: 3000, centerY: 2000)),
+            (LoupeViewState(mode: .actual, zoom: 0.25, centerX: 3000, centerY: 2000),
+             LoupeViewState(mode: .actual, zoom: 4, centerX: 3000, centerY: 2000)),
+            (LoupeViewState(mode: .actual, zoom: 3, centerX: 3000, centerY: 2000),
+             LoupeViewState(mode: .actual, zoom: 2.0 / 3.0, centerX: 3000, centerY: 2000)),
         ]
-        for (from, to, expected) in cases {
-            XCTAssertEqual(LoupeZoomBridge.duration(from: from, to: to), expected, accuracy: 0.001,
-                           "\(from) → \(to)")
+        for (old, new) in pairs {
+            let b = bridge(from: old, to: new)
+            XCTAssertEqual(b.duration, 0.180, accuracy: 1e-9,
+                           "\(f.zoom(of: old)) → \(f.zoom(of: new)) must take the same 180 ms")
         }
-        XCTAssertEqual(LoupeZoomBridge.duration(from: 1, to: 1), 0.120, accuracy: 1e-9,
-                       "a no-op span bottoms out at the 120 ms floor")
+        XCTAssertEqual(LoupeZoomBridge.defaultDuration, 0.180, accuracy: 1e-9)
     }
 }

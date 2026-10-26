@@ -113,17 +113,17 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(f.renderScale(of: .fit, decodeScale: 0.5), 0.8, accuracy: 1e-12)
     }
 
-    // MARK: 3. zoom clamp 1…8
+    // MARK: 3. zoom clamp 25 % … 400 %
 
-    func testZoomIsClampedToHalfThroughFour() {
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.25).zoom, 0.5, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.5, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.5, accuracy: 1e-12)
+    func testZoomIsClampedToAQuarterThroughFour() {
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.1).zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.25, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 4).zoom, 4, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 64).zoom, 4, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.25, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState.clampZoom(12), 4, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState.clampZoom(0.5), 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState.clampZoom(1.0 / 3.0), 1.0 / 3.0, accuracy: 1e-12)
 
         // A pinch past the ceiling stops at 4 and keeps rendering 4.
         let f = framing()
@@ -131,14 +131,18 @@ final class LoupeZoomTests: XCTestCase {
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 2, aroundView: CGPoint(x: 100, y: 100)) }
         XCTAssertEqual(state.zoom, 4, accuracy: 1e-12)
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 0.5, aroundView: CGPoint(x: 100, y: 100)) }
-        XCTAssertEqual(state.zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 0.25, accuracy: 1e-12)
     }
 
-    /// The six rungs, as percentages. 1:1 is 100 %; the fit rung only says "适应" here because a
-    /// `LoupeViewState` has no window to measure (the controller prints "适应 31%").
+    /// The eight stops, as percentages. 1:1 is 100 %; the thirds print one decimal and stay exact, and
+    /// the fit mode only says "适应" here because a `LoupeViewState` has no window to measure (the
+    /// controller prints "适应 31%").
     func testZoomLabels() {
         XCTAssertEqual(LoupeViewState.fit.zoomLabel, "适应")
+        XCTAssertEqual(actual(zoom: 0.25).zoomLabel, "25%")
+        XCTAssertEqual(actual(zoom: 1.0 / 3.0).zoomLabel, "33.3%")
         XCTAssertEqual(actual(zoom: 0.5).zoomLabel, "50%")
+        XCTAssertEqual(actual(zoom: 2.0 / 3.0).zoomLabel, "66.7%")
         XCTAssertEqual(actual(zoom: 1).zoomLabel, "100%")
         XCTAssertEqual(actual(zoom: 2).zoomLabel, "200%")
         XCTAssertEqual(actual(zoom: 3).zoomLabel, "300%")
@@ -434,11 +438,11 @@ final class LoupeZoomTests: XCTestCase {
                     let window = f.outputWindow(of: state)
                     XCTAssertNotNil(window)
                     guard let window else { continue }
-                    // The visible window is the canvas at this stop — never a second, hidden zoom.
-                    XCTAssertEqual(Double(window.width), Double(viewport.width) / zoom * zoom,
-                                   accuracy: 1.0)
-                    XCTAssertEqual(Double(window.height), Double(viewport.height) / zoom * zoom,
-                                   accuracy: 1.0)
+                    // `outputWindow` is in **content (device) pixels**, not source pixels: the window
+                    // is `viewport / zoom` source pixels drawn at `zoom`, which is the viewport — the
+                    // canvas is filled at every stop, and there is no second, hidden zoom.
+                    XCTAssertEqual(Double(window.width), Double(viewport.width), accuracy: 1.0)
+                    XCTAssertEqual(Double(window.height), Double(viewport.height), accuracy: 1.0)
                     let inside = window.x >= 0 && window.y >= 0
                         && window.x + window.width <= frame.width
                         && window.y + window.height <= frame.height

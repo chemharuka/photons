@@ -3,12 +3,13 @@ import AppKit
 import PhotonsCore
 import PhotonsUI
 
-/// The `fit ↔ actual` bridge: the loupe's **only** transition, and the numbers that keep it honest.
+/// The stop-change bridge: the loupe's only transition, and the numbers that keep it honest.
 ///
-/// The defect it fixes is a decode, not a preference: crossing `fit → 100 %` can need a full-size
-/// development (52–900 ms) while the canvas still lays the old picture out for the old camera, so the
-/// change reads as a cut. The bridge scales the picture that is already on screen from the rect it
-/// occupies to the rect the new camera will occupy, and the first real frame replaces it.
+/// It exists because of a gap, not a preference: the camera jumps to the new stop the moment the user
+/// asks for it (`fit ↔ 25…400 %`, and stop ↔ stop), but the pixels for that stop are not on the canvas
+/// yet — 5 ms from a resident rung, 52–900 ms if a development is in the way. The bridge carries the
+/// picture that is already on screen from the projection that produced it to the new camera's
+/// projection in 180 ms easeOut, and the real frame replaces it when it lands (held until then).
 ///
 /// Every wait in this file has an explicit deadline and asserts on it: a bridge that never ends must
 /// fail in seconds, not hold an `xctest` window open. Nothing here waits for the **full** rung of a

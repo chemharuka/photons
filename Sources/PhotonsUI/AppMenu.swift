@@ -119,21 +119,27 @@ public enum MainMenu {
                                 keyEquivalent: "a")
         list.keyEquivalentModifierMask = [.control, .command]
         view.addItem(.separator())
-        // 倍率. The stops are the ladder's whole-number rungs — `LoupeController.menuZoomStops`,
-        // because `zoomStopAction` reads the zoom out of the item's `tag` as `Double(tag)` — ticked by
-        // `validateMenuItem` when the camera is exactly on one; 适应窗口 and 放大/缩小 are the keyboard
-        // path (⌘0, ⌘=, ⌘−) every photo app has. The titles are percentages: 100 % is 1:1.
-        view.addItem(withTitle: "适应窗口",
-                     action: #selector(EditorWindowController.zoomFitAction(_:)),
-                     keyEquivalent: "0")
+        // 倍率. The stops are the eight numeric rungs (`LoupeController.menuZoomStops`) and the item's
+        // **tag is the index** into that array: `1/3` and `2/3` have no hundredths form, so a percent
+        // tag would have to round the third to 33 % — a different stop than the one the item names.
+        // Ticked by `validateMenuItem` when the camera is exactly on one.
+        //
+        // 适应窗口 is **not** a rung of this ladder — it is a mode whose ratio depends on the window —
+        // so it is its own row here (⌘0), and `LoupeController.zoomFitEntryPoint` is the one switch
+        // that decides whether that row exists at all. TODO(用户待定): fit 的位置尚未决定。
+        if LoupeController.zoomFitEntryPoint == .menuItem {
+            view.addItem(withTitle: "适应窗口",
+                         action: #selector(EditorWindowController.zoomFitAction(_:)),
+                         keyEquivalent: "0")
+        }
         for (index, stop) in LoupeController.menuZoomStops.enumerated() {
             let item = view.addItem(withTitle: LoupeViewState.percentLabel(of: stop),
                                     action: #selector(EditorWindowController.zoomStopAction(_:)),
                                     keyEquivalent: "\(index + 1)")
             item.keyEquivalentModifierMask = [.command, .option]
-            // Percent, because an `NSMenuItem` tag is an `Int` and 50 % is 0.5: the action divides
-            // by 100 again. Whole-number tags could not express the 50 % rung at all.
-            item.tag = Int((stop * 100).rounded())
+            // Index, not percent: the action looks the value up in `menuZoomStops`, so 33.3 % stays
+            // `1.0/3.0` instead of collapsing to 0.333.
+            item.tag = index
         }
         view.addItem(.separator())
         view.addItem(withTitle: "放大",

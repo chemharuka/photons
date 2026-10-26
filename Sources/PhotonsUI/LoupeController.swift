@@ -704,39 +704,64 @@ public final class LoupeController: NSViewController {
 
     // MARK: the zoom ladder (显示 ▸ 倍率)
 
-    /// The five numeric stops, in order. `1` is 100 % (1:1); the ceiling is `LoupeViewState.maximumZoom`.
-    /// `fit` is the sixth rung and lives in `zoomLevels`, because its value is the frame's own ratio
-    /// and moves with the window (0.31 for 60 MP, 0.72 for 24 MP, 1.0 for a small file).
+    /// The eight numeric stops, in order — `LoupeViewState.zoomStops`, `0.25 … 4` with the thirds
+    /// exact (`1.0/3.0`, `2.0/3.0`). `fit` is **not** one of them; it is a mode with its own entry
+    /// point (`zoomFitEntryPoint`).
     public static let zoomStops: [Double] = LoupeViewState.zoomStops
 
-    /// What the 倍率 menu can name — every numeric rung, including the 50 % one.
-    /// `EditorWindowController.zoomStopAction` reads the stop out of the item's `tag` as **percent**
-    /// (`Double(tag) / 100`), because a menu tag is an `Int` and 0.5 has no integer form.
-    public static let menuZoomStops: [Double] = [0.5, 1, 2, 3, 4]
+    /// What the 倍率 menu can name: the same eight stops, at the same indices.
+    ///
+    /// The menu item's **tag is the index into this array**, not a percentage. That is the only
+    /// identity that survives `1/3 → "33.3%" → 0.333` intact: a hundredths tag would round the third
+    /// to 33 % and land the action on a stop the item never named. `EditorWindowController.zoomStopAction`
+    /// reads `menuZoomStops[item.tag]`, so the value is exact and the label is only a label.
+    public static let menuZoomStops: [Double] = LoupeViewState.zoomStops
 
-    /// The ladder for the current window and crop — `[fit, 50 %, 100 %, 200 %, 300 %, 400 %]` sorted by
-    /// value with the live fit ratio folded in, recomputed per call because a resize changes it
-    /// (`LoupeViewState.levels(fitZoom:)`). Nothing caches it and nothing assumes an order.
-    public var zoomLevels: [LoupeZoomLevel] {
-        LoupeViewState.levels(fitZoom: framing()?.fitZoom ?? 1)
+    /// The ladder the menu and the readout print: eight numeric stops, ascending, no fit rung.
+    public var zoomLevels: [LoupeZoomLevel] { LoupeViewState.levels }
+
+    /// Where 适应窗口 is reachable from — **the single switch point** for `fit`.
+    ///
+    /// `fit` is not a rung: its ratio is a property of the window (0.31 on a 60 MP frame in a 2560-px
+    /// viewport, 0.72 on a 24 MP one, above 1 on a small file), so it cannot sit in a table of fixed
+    /// percentages, and the user has not said yet whether it wants its own menu row, a bare shortcut
+    /// or a toolbar button. Everything that offers `fit` asks this one constant, so moving it is a
+    /// one-line change here and no other code learns about the decision.
+    ///
+    /// TODO: fit 的位置待定，用户会指定（菜单单独一行 / 快捷键 / 工具栏）。在此之前它只是
+    /// `zoomToFit()` 这个**独立动作**：不进档位表、不参与 ⌘=/⌘− 的档位循环、不参与捏合取档。
+    public static let zoomFitEntryPoint: ZoomFitEntryPoint = .menuItem
+
+    public enum ZoomFitEntryPoint: Sendable {
+        /// Its own row in 显示 (what ships now): 显示 ▸ 适应窗口, ⌘0.
+        case menuItem
+        /// A shortcut with no menu row.
+        case shortcutOnly
+        /// A toolbar button.
+        case toolbar
     }
 
     /// Canvas pixels per source pixel the frame is being drawn at — `fit`'s own ratio included, so a
     /// readout can say "适应 31%" without a special case.
     public var effectiveZoom: Double { framing()?.zoom(of: viewState) ?? 1 }
 
-    /// `"适应 31%"` / `"50%"` / `"100%"` — the number the status chip and the menu tick both use.
+    /// `"适应 31%"` / `"50%"` / `"33.3%"` — the number the status chip and the menu tick both use.
+    ///
+    /// The fit ratio is printed to whole percent (it moves with the window; a tenth of a percent of a
+    /// 0.31 viewport is noise), while the stops use `percentLabel`'s one-decimal rule for the thirds.
     public var zoomLabel: String {
         guard !viewState.isActualSize, let fit = framing()?.fitZoom else { return viewState.zoomLabel }
-        return "适应 \(LoupeViewState.percentLabel(of: fit))"
+        return "适应 \(Int((fit * 100).rounded()))%"
     }
 
-    /// The menu stop the camera is exactly on, or nil (fit, or a pinch between stops) — what the
-    /// View menu ticks.
+    /// The menu stop the camera is exactly on, or nil (fit) — what the View menu ticks.
+    ///
+    /// `1e-9`, not a fudge factor: the camera is only ever parked on a table value, so "on a stop" is
+    /// an equality question about the table's own doubles.
     public var currentZoomStop: Double? {
         guard viewState.isActualSize else { return nil }
         let zoom = LoupeViewState.clampZoom(viewState.zoom)
-        return LoupeController.zoomStops.first { abs($0 - zoom) < 0.005 }
+        return LoupeController.zoomStops.first { abs($0 - zoom) < 1e-9 }
     }
 
     /// A menu stop (1 / 2 / 3 / 4): same **anchor**, new scale, one re-render.
@@ -758,10 +783,14 @@ public final class LoupeController: NSViewController {
     }
 
     /// The anchored form, for callers that know the point (the tests).
+    ///
+    /// The target is snapped **to a rung** (`LoupeViewState.snappedLevel`): the camera must never come
+    /// to rest between stops, so a value that is not in the table is floored onto the one below it
+    /// before anything is set. For a caller that names a table value this is the identity.
     public func zoom(to stop: Double, aroundView point: CGPoint?) {
         guard let framing = framing() else { return }
         pinchZoom = nil
-        let target = LoupeViewState.clampZoom(stop)
+        let target = LoupeViewState.snappedLevel(for: LoupeViewState.clampZoom(stop)).zoom
         let anchor = point ?? canvasCentrePoint()
         setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
                                      backingScale: backingScale))
@@ -772,16 +801,17 @@ public final class LoupeController: NSViewController {
     public func zoomIn() {
         guard viewState.isActualSize else { zoomToActualSize(); return }
         let current = LoupeViewState.clampZoom(viewState.zoom)
-        let next = LoupeController.zoomStops.first { $0 > current + 0.005 } ?? LoupeViewState.maximumZoom
+        let next = LoupeController.zoomStops.first { $0 > current + 1e-9 } ?? LoupeViewState.maximumZoom
         zoom(to: next)
     }
 
-    /// ⌘−: the next stop down — 100 % → 50 % → fit. Below the lowest stop there is nothing further
-    /// out than the whole frame.
+    /// ⌘−: the next stop down — 100 % → 66.7 % → 50 % → 33.3 % → 25 %. Below the lowest **numeric**
+    /// stop the whole frame is the next step out; `fit` is outside the ladder and is reached here
+    /// rather than by a snap, so one more ⌘− from 25 % always gives the same picture.
     public func zoomOut() {
         guard viewState.isActualSize else { return }
         let current = LoupeViewState.clampZoom(viewState.zoom)
-        guard let next = LoupeController.zoomStops.last(where: { $0 < current - 0.005 }) else {
+        guard let next = LoupeController.zoomStops.last(where: { $0 < current - 1e-9 }) else {
             zoomToFit()
             return
         }
@@ -838,15 +868,10 @@ public final class LoupeController: NSViewController {
     public func magnify(by factor: CGFloat, at point: CGPoint) {
         guard let framing = framing(), factor.isFinite, factor > 0 else { return }
         let raw = (pinchZoom ?? framing.zoom(of: viewState)) * Double(factor)
-        let level = LoupeViewState.snappedLevel(for: raw, fitZoom: framing.fitZoom)
-        if level.isFit {
-            // Nothing further out than the whole frame. The accumulator keeps the gesture's progress,
-            // so pinching back in leaves fit at the next rung instead of after another full sweep.
-            if viewState.isActualSize { zoomToFit() }
-            pinchZoom = raw
-            return
-        }
-        let target = LoupeViewState.clampZoom(level.zoom)
+        // The floor of the ladder is 25 %, and 25 % is where a pinch out stops: `fit` is a different
+        // mode, entered by its own action, so a gesture cannot slide the camera into it by accident.
+        let level = LoupeViewState.snappedLevel(for: raw)
+        let target = level.zoom
         let next = framing.zooming(viewState, to: target, aroundView: point, backingScale: backingScale)
         pinchZoom = raw
         setViewState(next)
@@ -865,10 +890,15 @@ public final class LoupeController: NSViewController {
         }
         updateStatusChip()
         view.window?.invalidateCursorRects(for: canvasView)
-        // **Every** stop change is bridged, fit ↔ actual included. The camera jumps here and the
-        // pixels follow when they are rendered; between the two the canvas still holds the old
-        // picture, and with five stops that gap is a 2× cut (`fit ↔ actual` was only the loudest
-        // case because its frame can also have to wait for a development).
+        // **Every** stop change is bridged — fit ↔ a numeric stop, and numeric stop ↔ numeric stop
+        // (`25 ↔ 33.3 ↔ 50 ↔ 66.7 ↔ 100 ↔ 200 ↔ 300 ↔ 400`). The camera jumps here and the pixels
+        // follow when they are rendered; between the two the canvas still holds the old picture, so
+        // without the bridge the change is a cut at whatever ratio the two stops differ by.
+        //
+        // The user's constraint is not "never animate" but "**never come to rest between stops**":
+        // `viewState.zoom` is already the target stop on this line (snapped by `zoom(to:)`,
+        // `magnify(by:)` and the `⌘=`/`⌘−` walk), so the model is never 137 %, and the bridge only
+        // ever interpolates the *presentation* of the old picture on its way to that stop.
         //
         // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
         // animating a drag would leave the picture behind the hand.
@@ -924,8 +954,8 @@ public final class LoupeController: NSViewController {
     public var reducesMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     /// Carry the picture already on screen from the projection of the camera that produced it to the
-    /// projection of the new camera, linearly, and hand the canvas over to the real frame when it
-    /// arrives.
+    /// projection of the new camera in 180 ms easeOut, and hand the canvas over to the real frame when
+    /// it arrives.
     ///
     /// Why a layer transform instead of a re-render: only the *presentation* may interpolate. The
     /// pixels the new camera wants are a render, and re-rendering at an interpolated scale for every
@@ -944,8 +974,6 @@ public final class LoupeController: NSViewController {
         let fromMapping = canvasContent?.mapping ?? framing.mapping(of: old)
         let fromContent = canvasContent?.content ?? framing.contentPixels(of: old)
         let toMapping = framing.mapping(of: new)
-        let targetScale = fromMapping.canvasPerSource > 1e-12
-            ? toMapping.canvasPerSource / fromMapping.canvasPerSource : 1
         // Where the composite already is. `identity` for a bridge armed from rest, and the running
         // animation's own value for one that replaces it (read off the presentation tree, which is
         // what the eye is looking at).
@@ -960,8 +988,7 @@ public final class LoupeController: NSViewController {
             fromMapping: fromMapping,
             toMapping: toMapping,
             canvas: canvas,
-            startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
-            duration: LoupeZoomBridge.duration(from: start.scale, to: targetScale))
+            startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y)
         guard bridge.isVisible else {
             // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
             // clamped to the same rect): the arriving frame *is* the whole change.
@@ -996,9 +1023,9 @@ public final class LoupeController: NSViewController {
         animation.fromValue = bridge.startTransform(backingScale: k)
         animation.toValue = bridge.targetTransform(backingScale: k)
         animation.duration = bridge.duration
-        // 线性: the user asked for the picture to grow at a constant rate, and a constant rate is also
-        // the only curve that reads as "the same 10 % of the ladder" on every rung.
-        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        // easeOut, not linear: the user asked for ~180 ms easeOut, and a curve that decelerates into
+        // the stop reads as arriving *at* the stop rather than being cut off at it.
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
         // The end value is held when a development outlives the motion — the picture is already where
