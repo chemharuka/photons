@@ -107,9 +107,12 @@ public struct EditModel: Sendable, Equatable, Codable {
         var s: Set<RenderStage> = []
         if geometry != old.geometry { s.insert(.geometry) }
         if light != old.light {
-            // Lightroom's Light panel straddles S1 (exposure, highlight recovery) and S2 (contrast,
-            // highlights, shadows, whites, blacks). White balance (派单 006) straddles neither: a
-            // change there means a **new development**, so every stage's source pixels are new.
+            // Lightroom's Light panel straddles S1 (blacks/whites levels, exposure, highlight
+            // recovery) and S2 (contrast, highlights, shadows). Blacks/whites are a **level** — the
+            // 0 and 1 points of the scene-linear buffer — so they dirty `.sceneLinear` like exposure
+            // does: the linear buffer itself is what changed (派单 019). White balance (派单 006)
+            // straddles neither: a change there means a **new development**, so every stage's source
+            // pixels are new.
             //
             // 派单 011: the question "is this a new development?" is `decodeInputs`, not a hand-rolled
             // comparison of two fields — `EditModel.splitFrom(_:)` is the one place that decides, and
@@ -118,14 +121,14 @@ public struct EditModel: Sendable, Equatable, Codable {
                 return Set(RenderStage.allCases)
             }
             if light.exposure != old.light.exposure
-                || light.highlightRecovery != old.light.highlightRecovery {
+                || light.highlightRecovery != old.light.highlightRecovery
+                || light.whites != old.light.whites
+                || light.blacks != old.light.blacks {
                 s.insert(.sceneLinear)
             }
             if light.contrast != old.light.contrast
                 || light.highlights != old.light.highlights
-                || light.shadows != old.light.shadows
-                || light.whites != old.light.whites
-                || light.blacks != old.light.blacks {
+                || light.shadows != old.light.shadows {
                 s.insert(.toneMap)
             }
         }
@@ -179,9 +182,15 @@ public struct EditModel: Sendable, Equatable, Codable {
         case .sceneLinear:
             // `temp=shot` when the document follows the file (派单 006): the key has to change when
             // the *decode* changes, and it must not claim "6500" for a file shot at 4803 K.
+            //
+            // `wh`/`bl` are here, not in `.toneMap`, since 派单 019: a black/white level normalises the
+            // scene-linear buffer itself (`(v − blk)/max(wht − blk, 1e−3)` before the gain), so the S1
+            // output changes and everything below it must miss. The tokens are the same ones S2 used
+            // to carry, in the same order, so a document's numbers read the same in a log line.
             return "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
                 + ";tint=\(light.tint.map { k($0) } ?? "shot")"
                 + ";hlr=\(k(light.highlightRecovery))"
+                + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
 
         // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
         // rebuild the atlas (§3.3 item 4), and `name` is in neither.
@@ -192,8 +201,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             return "local=\(maskApplyMaterial)"
 
         case .toneMap:
+            // Contrast and the two region lifts only — the whites/blacks levels moved into the
+            // `.sceneLinear` material with the maths (派单 019), so a level change must not be able to
+            // miss a cached S1 output by landing in this key instead.
             return "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
-                + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
 
         case .curve:
             return curve.keyString
