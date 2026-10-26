@@ -18,6 +18,10 @@ final class DecodeLadderTests: XCTestCase {
 
     private static let viewport = ImageSize(width: 2560, height: 1600)
 
+    /// Wall-clock ceilings are asserted only under `PHOTONS_BENCH=1` (project rule): `swift test`
+    /// builds Debug, where the same render pass measures several times the Release number.
+    private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
+
     // MARK: - fixtures
 
     private func fixtureURL() throws -> URL {
@@ -231,7 +235,14 @@ final class DecodeLadderTests: XCTestCase {
         let previewP50 = percentile(previewRuns, 0.5)
         print(String(format: "LADDER 1:1 first frame (0.5 rung magnified): %@ ms → p50 %.1f ms (budget 60)",
                      previewRuns.map { String(format: "%.1f", $0) }.joined(separator: "/"), previewP50))
-        XCTAssertLessThan(previewP50, 60, "the preview frame must fit the 60 ms budget")
+        // Millisecond budget: asserted **only** under `PHOTONS_BENCH=1`, the project's rule for every
+        // wall-clock ceiling. `swift test` builds Debug, where a render pass is several times slower
+        // than the Release build these numbers were measured in (measured: 8.7 ms in Debug against
+        // 2–3 ms in Release on the same machine), so an ungated ceiling here fails on load or on the
+        // build configuration rather than on a regression. The number is printed on every run.
+        if benchmarks {
+            XCTAssertLessThan(previewP50, 60, "the preview frame must fit the 60 ms budget")
+        }
 
         // ② The full-resolution arrival: what Q15 measured at 941 ms, plus the preview frame that
         // was already on screen. Reported, not asserted against a machine-specific number.
@@ -265,7 +276,9 @@ final class DecodeLadderTests: XCTestCase {
         print(String(format: "LADDER 1:1 full-resolution ready: %.0f ms total (decode %.0f + graph/render %.0f) vs Q15 941 ms",
                      previewP50 + arrival, readyMs, arrival - readyMs))
         print(String(format: "LADDER 1:1 pan: p50 %.2f ms over 20 windows (budget 6, Q15 5.8)", panP50))
-        XCTAssertLessThan(panP50, 6.0, "panning a resident full rung must stay inside the 6 ms budget")
+        if benchmarks {
+            XCTAssertLessThan(panP50, 6.0, "panning a resident full rung must stay inside the 6 ms budget")
+        }
         // "One development, not a decode storm" is a **count**, not a clock. It used to be asserted as
         // "ready in under 4000 ms", which is a wall clock: a machine that is running two other builds
         // stretches the same two developments to 4.3 s and the test goes red for a reason that has

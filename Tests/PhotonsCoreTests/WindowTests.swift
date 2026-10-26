@@ -25,6 +25,10 @@ import PhotonsCore
 /// this file skips for want of a RAW fixture.
 final class WindowTests: XCTestCase {
 
+    /// Millisecond ceilings are asserted only under `PHOTONS_BENCH=1` (project rule): `swift test`
+    /// builds Debug, where a render/DB pass measures several times its Release number.
+    private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
+
     // MARK: - fixtures
 
     private func makeGraph(_ image: LinearImage, identity: String = "window-test") throws -> RenderGraph {
@@ -618,7 +622,9 @@ final class WindowTests: XCTestCase {
         print(String(format: "BENCH 1:1 pan frame  crop route:   p50 %.2f ms  p95 %.2f ms", cp50, cp95))
         print(String(format: "BENCH baseline Q15: 5.80 ms (p50, 2560×1600 canvas) → budget %.2f ms", 5.8 * 1.3))
 
-        XCTAssertLessThan(wp50, 5.8 * 1.3, "1:1 pan frame regressed past the 5.8 ms baseline by >30%")
+        if benchmarks {
+            XCTAssertLessThan(wp50, 5.8 * 1.3, "1:1 pan frame regressed past the 5.8 ms baseline by >30%")
+        }
         XCTAssertLessThan(wp50, cp50 * 1.3,
                           "the window route must stay within 30 % of the crop route it replaces")
     }

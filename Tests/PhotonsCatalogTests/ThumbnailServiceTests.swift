@@ -772,7 +772,9 @@ final class ThumbnailServiceTests: XCTestCase {
         // The gap is a wall clock and cannot tell "the service blocked main" from "something else on
         // this box was compiling": gate it, print it on every run.
         if benchmarks {
-            XCTAssertLessThan(maxGap * 1000, 50, "service work ran on the main thread (gap \(maxGap * 1000) ms)")
+            if benchmarks {
+                XCTAssertLessThan(maxGap * 1000, 50, "service work ran on the main thread (gap \(maxGap * 1000) ms)")
+            }
         }
     }
 

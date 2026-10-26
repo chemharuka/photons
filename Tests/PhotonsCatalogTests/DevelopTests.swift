@@ -13,6 +13,10 @@ import PhotonsCore
 /// Filter with `--filter Develop`.
 final class DevelopTests: XCTestCase {
 
+    /// Millisecond ceilings are asserted only under `PHOTONS_BENCH=1` (project rule): `swift test`
+    /// builds Debug, where a render/DB pass measures several times its Release number.
+    private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
+
     private var workDir: URL!
 
     override func setUpWithError() throws {
@@ -596,6 +600,6 @@ final class DevelopTests: XCTestCase {
                      count, p50, p95, samples.last ?? 0))
 
         XCTAssertEqual(catalog.developDecodeFailures, 0)
-        XCTAssertLessThan(p95, 5.0, "a per-asset document read must stay far below a frame")
+        if benchmarks { XCTAssertLessThan(p95, 5.0, "a per-asset document read must stay far below a frame") }
     }
 }

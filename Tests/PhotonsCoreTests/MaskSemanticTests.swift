@@ -20,6 +20,10 @@ import CryptoKit
 ///    which is a new file so 005b/005c/005d's frames stay exactly as recorded.
 final class MaskSemanticTests: XCTestCase {
 
+    /// Millisecond ceilings are asserted only under `PHOTONS_BENCH=1` (project rule): `swift test`
+    /// builds Debug, where a render/DB pass measures several times its Release number.
+    private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
+
     // MARK: - fixtures
 
     private func rampImage(width: Int = 96, height: Int = 65) -> LinearImage {
@@ -260,7 +264,9 @@ final class MaskSemanticTests: XCTestCase {
                                    source: source, provider: provider)
         let secondMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
         XCTAssertEqual(second.raster?.digest, first.raster?.digest)
-        XCTAssertLessThan(secondMs, 5, "second call took \(secondMs) ms (budget 5 ms)")
+        if ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" {
+            XCTAssertLessThan(secondMs, 5, "second call took \(secondMs) ms (budget 5 ms)")
+        }
         XCTAssertEqual(provider.calls.count, 1, "the cache must not re-ask the model")
         XCTAssertEqual(store.providerCalls, 1)
 
