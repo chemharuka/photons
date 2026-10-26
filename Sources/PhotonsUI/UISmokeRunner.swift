@@ -1959,27 +1959,34 @@ public final class UISmokeRunner {
             }
             card.needsDisplay = true
             card.display()
-            let codeCounts = "R \(histogram.red.bins[codeBin]) · G \(histogram.green.bins[codeBin]) · B \(histogram.blue.bins[codeBin])"
-            log("hover readout          码值 bin \(codeBin) → “\(card.hoverValueText)” | “\(card.hoverCountText)” · 事件=\(movedByEvent) · rect \(card.hoverReadoutRect)")
-            check("悬停读数（码值区）：真实 mouseMoved 事件 → 左 “\(card.hoverValueText)” == \(codeBin)，右 “\(card.hoverCountText)” == \(codeCounts)（Core 的该箱计数）",
+            let codeCounts = HistogramCardFormat.readoutCounts(
+                HistogramBinCounts(red: histogram.red.bins[codeBin],
+                                   green: histogram.green.bins[codeBin],
+                                   blue: histogram.blue.bins[codeBin]))
+            log("hover readout          码值 bin \(codeBin) → “\(card.hoverCountText)” · 事件=\(movedByEvent) · row \(card.readoutRowRect)")
+            check("悬停读数（码值区）：真实 mouseMoved 事件 → 行 “\(card.hoverCountText)” == \(codeCounts)（Core 的该箱计数，五位定宽右对齐）；亮度值不显示（那是画布上那一半），“\(card.hoverValueText)” 应为空",
                   movedByEvent
-                  && card.hoverValueText == "\(codeBin)"
-                  && card.hoverCountText == codeCounts)
+                  && card.readoutState == .histogram(counts: HistogramBinCounts(red: histogram.red.bins[codeBin],
+                                                                               green: histogram.green.bins[codeBin],
+                                                                               blue: histogram.blue.bins[codeBin]))
+                  && card.hoverCountText == codeCounts
+                  && card.hoverValueText.isEmpty)
 
-            // 017 — the percentages row (`R x% G y% z%`) becomes **one line** holding the level under
-            // the pointer and that bin's R/G/B counts: `L 128 · R 1284 · G 1291 · B 1206`. `L` is
-            // luminance; the level is the sRGB code on the code segment and `+x.x` stops on the tail.
+            // 018 — 通道行永远是过白比例；指针读数在同一张卡最下面那一行（原脚注位），三种状态同一个槽。
             if let reading = card.hoverReading {
-                let expectedRow = "L \(reading.code) · R \(histogram.red.bins[reading.bin]) · G \(histogram.green.bins[reading.bin]) · B \(histogram.blue.bins[reading.bin])"
-                log("hover row              code bin \(reading.bin) → “\(card.hoverRowText ?? "nil")” · 通道行 “\(card.channelRowText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt")
-                check("悬停时通道行是单行（SDR 区）：“\(card.hoverRowText ?? "nil")” == “\(expectedRow)” —— L 前缀 + 码值 + 该箱 R/G/B 计数，一行内左对齐，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt，且与脚注行不重叠（\(String(format: "%.1f", card.hoverRowRect.maxY)) ≤ \(String(format: "%.1f", card.hoverReadoutRect.minY))）",
+                let expectedRow = HistogramCardFormat.readoutCounts(
+                    HistogramBinCounts(red: histogram.red.bins[reading.bin],
+                                       green: histogram.green.bins[reading.bin],
+                                       blue: histogram.blue.bins[reading.bin]))
+                let slot = card.readoutRowRect
+                log("hover row              code bin \(reading.bin) → “\(card.hoverRowText ?? "nil")” · 通道行 “\(card.channelRowText)” · slot \(slot)")
+                check("悬停时通道行仍是过白比例（“\(card.channelRowText)” == clipHighTextByChannel 前三项），读数在下面那一行：“\(card.hoverRowText ?? "nil")” == “\(expectedRow)”，槽 \(slot) 高 \(String(format: "%.1f", slot.height)) == readoutRowHeight \(String(format: "%.1f", HistogramCardView.readoutRowHeight))，R/G/B 字母 minX \(card.readoutLetterRects.map { String(format: "%.1f", $0.minX) })",
                       card.hoverRowText == expectedRow
                       && reading.code == codeBin
-                      && card.channelRowTexts == [expectedRow]
-                      && card.channelRowText == expectedRow
-                      && !card.hoverRowRect.isEmpty
-                      && card.hoverRowRect.maxY <= card.hoverReadoutRect.minY + 0.01
-                      && card.channelRowWidth <= cardBounds.width)
+                      && card.channelRowTexts == Array(card.clipHighTextByChannel.prefix(3))
+                      && !card.readoutRowRect.isEmpty
+                      && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
+                      && card.readoutLetterRects.count == 3)
             } else {
                 fail("码值区悬停没有 reading，悬停行无从断言")
             }
@@ -1989,23 +1996,27 @@ public final class UISmokeRunner {
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 1),
                                                 y: hoverAxis.plot.midY))
             card.display()
-            let tail1Text = card.hoverValueText
             let tail1Counts = card.hoverCountText
-            let tail1Expected = "R \(histogram.red.hdrBins[tailBin1]) · G \(histogram.green.hdrBins[tailBin1]) · B \(histogram.blue.hdrBins[tailBin1])"
-            check("悬停读数（尾段 +1 档 = 2×）：“\(tail1Text)” == “+1.00 档 (2.0×)”，右 “\(tail1Counts)” == \(tail1Expected)（bin \(tailBin1)）",
+            let tail1Expected = HistogramCardFormat.readoutCounts(
+                HistogramBinCounts(red: histogram.red.hdrBins[tailBin1],
+                                   green: histogram.green.hdrBins[tailBin1],
+                                   blue: histogram.blue.hdrBins[tailBin1]))
+            check("悬停读数（尾段 +1 档 = 2×）：“\(tail1Counts)” == \(tail1Expected)（bin \(tailBin1)）",
                   card.hoverReading?.segment == .tail && card.hoverReading?.bin == tailBin1
-                  && tail1Text == "+1.00 档 (2.0×)" && tail1Counts == tail1Expected)
+                  && tail1Counts == tail1Expected && card.hoverValueText.isEmpty)
 
             let tailBin2 = min(2 * Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 2),
                                                 y: hoverAxis.plot.midY))
             card.display()
-            check("悬停读数（尾段 +2 档 = 4×）：“\(card.hoverValueText)” == “+2.00 档 (4.0×)”，右 “\(card.hoverCountText)”（bin \(tailBin2)）",
+            check("悬停读数（尾段 +2 档 = 4×）：“\(card.hoverCountText)”（bin \(tailBin2)）",
                   card.hoverReading?.bin == tailBin2
-                  && card.hoverValueText == "+2.00 档 (4.0×)"
-                  && card.hoverCountText == "R \(histogram.red.hdrBins[tailBin2]) · G \(histogram.green.hdrBins[tailBin2]) · B \(histogram.blue.hdrBins[tailBin2])")
+                  && card.hoverCountText == HistogramCardFormat.readoutCounts(
+                      HistogramBinCounts(red: histogram.red.hdrBins[tailBin2],
+                                         green: histogram.green.hdrBins[tailBin2],
+                                         blue: histogram.blue.hdrBins[tailBin2])))
 
-            // 尾段同样是一行：+1 档 → “L +1.0 · R n · G n · B n”，+2 档 → “L +2.0 · …”（一位小数）。
+            // 尾段同样是一行：+1 档 → “R … G … B …”，+2 档 → 同形，只有数字变。
             var tailRows: [String] = []
             for stop in [1.0, 2.0] {
                 card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: stop),
@@ -2013,56 +2024,88 @@ public final class UISmokeRunner {
                 card.display()
                 tailRows.append(card.hoverRowText ?? "nil")
             }
-            let expectedTail = ["1.0", "2.0"].map { value in
-                let bin = Int((value as NSString).doubleValue * Double(Histogram.hdrBinsPerStop))
-                return "L +\(value) · R \(histogram.red.hdrBins[bin]) · G \(histogram.green.hdrBins[bin]) · B \(histogram.blue.hdrBins[bin])"
+            let expectedTail = [1, 2].map { stop in
+                let bin = min(stop * Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
+                return HistogramCardFormat.readoutCounts(
+                    HistogramBinCounts(red: histogram.red.hdrBins[bin],
+                                       green: histogram.green.hdrBins[bin],
+                                       blue: histogram.blue.hdrBins[bin]))
             }
-            log("hover row              tail +1/+2 → \(tailRows) · 脚注 “\(card.hoverValueText)” | “\(card.hoverCountText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt")
-            check("悬停时通道行是单行（尾段）：+1 档 → “\(tailRows[0])”、+2 档 → “\(tailRows[1])”，与期望 \(expectedTail) 一致，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+            log("hover row              tail +1/+2 → \(tailRows) · slot \(card.readoutRowRect)")
+            check("悬停行（尾段）：+1 档 → “\(tailRows[0])”、+2 档 → “\(tailRows[1])”，与期望 \(expectedTail) 一致",
                   tailRows == expectedTail
-                  && card.hoverReading?.segment == .tail
-                  && card.channelRowWidth <= cardBounds.width
-                  && card.hoverRowRect.maxY <= card.hoverReadoutRect.minY + 0.01)
+                  && card.hoverReading?.segment == .tail)
 
-            // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
-            // 0.1 pt inside the right edge: the tail is 120 pt over 256 bins, so 0.5 pt would already
-            // be a full bin in (bin 254). 0.1 pt is inside the last bin, which is what this checks.
+            // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255）。
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.1,
                                                 y: hoverAxis.plot.midY))
             card.display()
             let lastBin = histogram.hdrBinCount - 1
-            let lastCounts = "R \(histogram.red.hdrBins[lastBin]) · G \(histogram.green.hdrBins[lastBin]) · B \(histogram.blue.hdrBins[lastBin])"
-            check("悬停读数（越过尾段右端）：clamp 到最后一箱 bin \(lastBin) 而不是留空，“\(card.hoverValueText)” | “\(card.hoverCountText)” == \(lastCounts)",
+            let lastCounts = HistogramCardFormat.readoutCounts(
+                HistogramBinCounts(red: histogram.red.hdrBins[lastBin],
+                                   green: histogram.green.hdrBins[lastBin],
+                                   blue: histogram.blue.hdrBins[lastBin]))
+            check("悬停读数（越过尾段右端）：clamp 到最后一箱 bin \(lastBin) 而不是留空，“\(card.hoverCountText)” == \(lastCounts)",
                   card.hoverReading?.bin == lastBin
-                  && card.hoverValueText == "+3.98 档 (15.8×)"
                   && card.hoverCountText == lastCounts)
 
-            // 鼠标离开 → 清空，且不再绘制任何读数。
-            let paintsBefore = card.hoverPaintCount
+            // 鼠标离开 → 清空，且不再绘制任何读数，**行高不变**（owner: 「保留这行的高度不要乱动」）。
+            let paintsBefore = card.readoutPaintCount
+            let slotBefore = card.readoutRowRect
             card.clearHoverReadout()
             card.needsDisplay = true
             card.display()
-            check("移出绘图区 → 读数清空：左 \(card.hoverValueText.count) 字、右 \(card.hoverCountText.count) 字、rect 空 \(card.hoverReadoutRect.isEmpty)，读数绘制次数 \(paintsBefore) → \(card.hoverPaintCount)（不增）",
+            check("移出绘图区 → 读数清空（画了 \(paintsBefore) 次，现在 \(card.readoutPaintCount) 次不增）：行空 \(card.hoverReadoutRect.isEmpty)，状态 \(card.readoutState)，槽仍是 \(card.readoutRowRect)（高 \(String(format: "%.1f", card.readoutRowRect.height))）",
                   paintsBefore >= 3
                   && card.hoverReading == nil
                   && card.hoverValueText.isEmpty && card.hoverCountText.isEmpty
                   && card.hoverReadoutRect.isEmpty
-                  && card.hoverPaintCount == paintsBefore)
+                  && card.readoutState == .idle
+                  && card.readoutRowRect == slotBefore
+                  && card.readoutRowRect.height == HistogramCardView.readoutRowHeight)
 
-            // 013 — 离开后通道行回到过白比例（上一处 check 已证明 clipHighTextByChannel == Core 的值）。
-            check("移出绘图区 → 通道行恢复过白比例：画的是 “\(card.channelRowText)” == clipHighTextByChannel 前三项 \(card.channelRowTexts)，悬停行已空（\(card.hoverRowText ?? "nil")，rect \(card.hoverRowRect.isEmpty ? "empty" : "非空")），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
-                  card.hoverRowText == nil
-                  && card.hoverRowRect.isEmpty
-                  && card.channelRowTexts == Array(card.clipHighTextByChannel.prefix(3))
-                  && card.channelRowText.hasPrefix("R ")
-                  && card.channelRowWidth <= cardBounds.width)
+            // 018 新增：光标在**画布**上 → 同一行显示该像素的亮度（不显示计数）；离开则回到 idle。
+            // This is driven through the loupe's own entry point (`pointerMoved`), which is the call the
+            // canvas's tracking area makes — the same one the zoom commands anchor on.
+            loupe.autoRenderEnabled = false
+            let canvasCentre = NSPoint(x: loupe.canvasView.bounds.midX,
+                                       y: loupe.canvasView.bounds.midY)
+            loupe.pointerReadoutTarget = card
+            loupe.pointerMoved(to: canvasCentre)
+            card.needsDisplay = true
+            card.display()
+            let pointerText = card.hoverValueText
+            let pixel = loupe.pointerReadout
+            let parses = pointerText.hasPrefix("+")
+                ? Double(pointerText.dropFirst()).map { $0 > 0 } ?? false
+                : Int(pointerText).map { $0 >= 0 && $0 <= 255 } ?? false
+            log("pointer readout        canvas \(canvasCentre) → row “\(pointerText)” · counts “\(card.hoverCountText)” · state \(card.readoutState) · readbacks \(loupe.pointerReadbackCount) · 槽 \(card.readoutRowRect)")
+            check("光标在画布上 → 直方图最下面一行是该像素亮度 “\(pointerText)”（可解析、非空：码值 0–255 或 +x.x），不显示计数（“\(card.hoverCountText)” 为空），槽与原脚注行同高 \(String(format: "%.1f", card.readoutRowRect.height))；节流后读回 \(loupe.pointerReadbackCount) 次",
+                  !pointerText.isEmpty && parses
+                  && card.hoverCountText.isEmpty
+                  && card.readoutState == .image(value: pointerText)
+                  && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
+                  && loupe.pointerReadbackCount >= 1
+                  && pixel != nil)
+
+            let beforeExit = loupe.pointerReadbackCount
+            loupe.pointerExited()
+            card.needsDisplay = true
+            card.display()
+            check("光标离开画布 → 这一行回到空（不显示任何文字），高度不变 \(String(format: "%.1f", card.readoutRowRect.height))，读回次数 \(beforeExit) → \(loupe.pointerReadbackCount)（不增）",
+                  card.readoutState == .idle
+                  && card.hoverReadoutRect.isEmpty
+                  && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
+                  && loupe.pointerReadbackCount == beforeExit)
+            loupe.pointerReadoutTarget = nil
+            loupe.autoRenderEnabled = true
 
             // 字号是同一把尺子，颜色可测。
             let readoutFont = HistogramCardView.hoverNumberFont
             let clipFont = HistogramCardView.clipNumberFont
             for _ in 0..<3 { card.updateTrackingAreas() }
             let hoverContrast = card.hoverContrast
-            log("hover readout style     font \(readoutFont.fontName) \(String(format: "%.1f", readoutFont.pointSize))pt · 削顶数字 \(clipFont.fontName) \(String(format: "%.1f", clipFont.pointSize))pt · WCAG \(String(format: "%.2f", hoverContrast)):1（\(appearanceName)）· tracking areas \(card.trackingAreas.count)")
+            log("hover readout style    font \(readoutFont.fontName) \(String(format: "%.1f", readoutFont.pointSize))pt · 削顶数字 \(clipFont.fontName) \(String(format: "%.1f", clipFont.pointSize))pt · WCAG \(String(format: "%.2f", hoverContrast)):1（\(appearanceName)）· tracking areas \(card.trackingAreas.count)")
             check("读数与过白/削顶同字号：\(readoutFont.fontName) \(String(format: "%.1f", readoutFont.pointSize)) pt == 削顶数字（同一 NSFont 常量，9.5 semibold，不是脚注的 8 pt）；对比度 \(String(format: "%.2f", hoverContrast)):1 ≥ \(HistogramCardReadability.minimumRatio):1；updateTrackingAreas 调 4 次仍只有 \(card.trackingAreas.count) 个 tracking area，且只盖绘图区 \(String(format: "%.0f", card.trackingAreas.first?.rect.height ?? -1)) pt 高",
                   readoutFont == clipFont
                   && readoutFont.pointSize == 9.5

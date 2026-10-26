@@ -200,10 +200,24 @@ public struct LoupeZoomBridge: Equatable, Sendable {
     public let startOffsetY: Double
     /// How long this bridge takes, in seconds (already scaled to the span it covers).
     public let duration: CFTimeInterval
+    /// The `CALayer.anchorPoint` of the layer this transform is applied to.
+    ///
+    /// **Not `(0.5, 0.5)`.** A view's backing layer in AppKit has `anchorPoint == (0, 0)` — `frame`
+    /// and `position` are kept equal to the view's frame so that the two agree — and the canvas's layer
+    /// is a backing layer, so a `CATransform3D` on it is applied about the **bottom-left corner**.
+    /// Assuming the centre is a scale about the corner: the picture grows into the top-right and
+    /// shrinks into the bottom-left, which is exactly the reported bug (「缩小是左下的位置 放大是右上
+    /// 位置」). The bridge therefore takes the anchor from the layer instead of assuming one, and the
+    /// canvas pins it in `LoupeCanvasView.layout()` so the two can never drift apart.
+    public let layerAnchorPoint: CGPoint
+    /// `CALayer.isGeometryFlipped` — `true` for the canvas, whose view is flipped, so the layer's
+    /// points run y **down** from the top-left, the same way every number in this type does.
+    public let layerIsFlipped: Bool
 
     public init(fromContent: ImageSize, toContent: ImageSize,
                 fromMapping: LoupeMapping, toMapping: LoupeMapping, canvas: ImageSize,
                 startScale: Double = 1, startOffsetX: Double = 0, startOffsetY: Double = 0,
+                layerAnchorPoint: CGPoint = .zero, layerIsFlipped: Bool = true,
                 duration: CFTimeInterval = LoupeZoomBridge.defaultDuration) {
         self.fromContent = fromContent
         self.toContent = toContent
@@ -213,6 +227,8 @@ public struct LoupeZoomBridge: Equatable, Sendable {
         self.startScale = startScale
         self.startOffsetX = startOffsetX
         self.startOffsetY = startOffsetY
+        self.layerAnchorPoint = layerAnchorPoint
+        self.layerIsFlipped = layerIsFlipped
         self.duration = duration
     }
 
@@ -266,26 +282,43 @@ public struct LoupeZoomBridge: Equatable, Sendable {
 
     /// `CATransform3D` for `aN(p) = s · aO(p) + o`, expressed in the layer's own coordinates.
     ///
-    /// `CALayer.transform` is applied about the **anchor point** (the canvas centre here), and its
-    /// coordinates are points with y **up** from the layer's bottom-left, while every number above is
-    /// device pixels with y **down** from the top-left. The two conversions cancel in a way worth
-    /// writing down, since a sign error here slides the picture by half a viewport:
+    /// Three facts have to be right at once, and any of them wrong slides the picture by part of a
+    /// viewport — which is why they are written as one derivation instead of three sign fixes:
     ///
-    ///     v_yup = (canvas.height / backingScale) − v_ydown / backingScale
-    ///     t_up  = (o.x / k, (1 − s) · H − o.y / k)         with H = canvas.height / k
-    ///     τ     = t_up − (1 − s) · (W/2, H/2)              (what the anchor-point conjugation leaves)
+    ///   1. `CALayer.transform` is applied about the **anchor point**, and it is a *point* of the
+    ///      layer's bounds, not the centre: `anchor = anchorPoint · (W, H)` in points. On a view's
+    ///      backing layer `anchorPoint` is `(0, 0)`, so "about the anchor" means "about the bottom-left
+    ///      corner" — the bug this type shipped with, because it conjugated by `(W/2, H/2)`.
+    ///   2. Layer points are points, not device pixels: `÷ backingScale`.
+    ///   3. The layer's y axis is flipped when `isGeometryFlipped` is set (a flipped `NSView`), and then
+    ///      layer points already run y **down** from the top-left, exactly like `canvas`:
     ///
-    /// so `m41 = o.x/k − (1 − s)·W/2` and `m42 = (1 − s)·H/2 − o.y/k`, with `m11 = m22 = s`.
+    ///            v_layer = (v.x / k,            v.y / k)        flipped
+    ///            v_layer = (v.x / k,  H − v.y / k)              not flipped
+    ///
+    /// A similarity `v ↦ s·v + o` in device pixels is the same similarity in layer points, with a
+    /// translation that is just `o/k` when the axes agree and `((1 − s)·H − o.y/k)` on the y axis when
+    /// they do not. The conjugation by the anchor turns that translation into
+    ///
+    ///     m41 = t.x − (1 − s)·anchor.x        m42 = t.y − (1 − s)·anchor.y
+    ///
+    /// (because `anchor + s·(v − anchor) + t = s·v + t − (1 − s)·anchor`). With the canvas's real
+    /// geometry — anchor `(0, 0)`, flipped — this collapses to `m41 = o.x/k`, `m42 = o.y/k`: the layer
+    /// *is* the device-pixel grid, which is the whole reason `layerPoint` below is a division.
     public func transform(scale s: Double, offset o: (x: Double, y: Double),
                           backingScale: Double) -> CATransform3D {
         let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
         let w = Double(canvas.width) / k
         let h = Double(canvas.height) / k
+        let anchor = CGPoint(x: layerAnchorPoint.x * w, y: layerAnchorPoint.y * h)
+        // The device-pixel translation, said in layer points.
+        let tx = o.x / k
+        let ty = layerIsFlipped ? o.y / k : (1 - s) * h - o.y / k
         var m = CATransform3DIdentity
         m.m11 = CGFloat(s)
         m.m22 = CGFloat(s)
-        m.m41 = CGFloat(o.x / k - (1 - s) * w / 2)
-        m.m42 = CGFloat((1 - s) * h / 2 - o.y / k)
+        m.m41 = CGFloat(tx - (1 - s) * Double(anchor.x))
+        m.m42 = CGFloat(ty - (1 - s) * Double(anchor.y))
         return m
     }
 
@@ -300,18 +333,22 @@ public struct LoupeZoomBridge: Equatable, Sendable {
         transform(scale: startScale, offset: (startOffsetX, startOffsetY), backingScale: backingScale)
     }
 
-    /// Canvas pixel (device pixels, y down) → layer point (points, y up). The test-side half of the
-    /// conversion above, so the map can be asserted in the space it was derived in.
+    /// Canvas pixel (device pixels, y down) → layer point (points, in the layer's own y direction).
+    /// The test-side half of the conversion above, so the map can be asserted in the space it was
+    /// derived in.
     public func layerPoint(canvasX: Double, canvasY: Double, backingScale: Double) -> CGPoint {
         let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
-        return CGPoint(x: canvasX / k, y: (Double(canvas.height) - canvasY) / k)
+        let y = canvasY / k
+        return CGPoint(x: canvasX / k,
+                       y: layerIsFlipped ? y : Double(canvas.height) / k - y)
     }
 
-    /// The layer's anchor point in its own points — the canvas centre, which is where `CALayer`
-    /// applies the transform about (the default `anchorPoint` is `(0.5, 0.5)`).
+    /// The layer's anchor in its own points — `anchorPoint · (W, H)`, which is where `CALayer`
+    /// applies the transform about.
     public func layerAnchor(backingScale: Double) -> CGPoint {
         let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
-        return CGPoint(x: Double(canvas.width) / k / 2, y: Double(canvas.height) / k / 2)
+        return CGPoint(x: layerAnchorPoint.x * Double(canvas.width) / k,
+                       y: layerAnchorPoint.y * Double(canvas.height) / k)
     }
 
     /// Apply a layer transform the way `CALayer` does: about the anchor point, not the origin.
@@ -327,14 +364,26 @@ public struct LoupeZoomBridge: Equatable, Sendable {
 
     /// Read `(scale, offset)` back out of a layer transform — the inverse of `transform(scale:offset:)`,
     /// used to continue a running animation from the value the eye is looking at.
+    ///
+    /// `anchorPoint` / `isFlipped` are the layer's **real** geometry (the same pair
+    /// `transform(scale:offset:)` was given); the defaults are the canvas's own. An inverse that
+    /// assumed a different anchor than the forward map is a jump of `(1 − s) · anchor` on the second
+    /// ⌘= of a held key, which is why the pair is a parameter and not a constant.
     public static func offset(ofLayerTransform m: CATransform3D, canvas: ImageSize,
-                              backingScale: Double) -> (scale: Double, x: Double, y: Double) {
+                              backingScale: Double,
+                              anchorPoint: CGPoint = .zero,
+                              isFlipped: Bool = true) -> (scale: Double, x: Double, y: Double) {
         let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
         let w = Double(canvas.width) / k
         let h = Double(canvas.height) / k
         let s = Double(m.m11)
         guard s.isFinite, s > 0 else { return (1, 0, 0) }
-        return (s, k * (Double(m.m41) + (1 - s) * w / 2), k * ((1 - s) * h / 2 - Double(m.m42)))
+        // Undo the anchor conjugation first, then the y direction.
+        let tx = Double(m.m41) + (1 - s) * Double(anchorPoint.x) * w
+        let ty = Double(m.m42) + (1 - s) * Double(anchorPoint.y) * h
+        return (s,
+                k * tx,
+                isFlipped ? k * ty : k * ((1 - s) * h - ty))
     }
 
     // MARK: how long

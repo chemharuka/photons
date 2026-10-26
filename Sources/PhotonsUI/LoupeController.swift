@@ -48,7 +48,15 @@ public final class LoupeCanvasView: NSView {
 
     public override func layout() {
         super.layout()
+        // **The layer's geometry is pinned here, not assumed.** `LoupeZoomBridge.transform` conjugates
+        // its translation by `anchorPoint · (W, H)`, and a view's backing layer has
+        // `anchorPoint == (0, 0)` (not the `CALayer` default `(0.5, 0.5)`), so the composite scales
+        // about the bottom-left corner unless the two agree. Saying it once, where the frame is set,
+        // means the animation and the `layout` cannot disagree; `isGeometryFlipped` follows the view,
+        // so a 180° picture cannot appear if AppKit ever stops setting it for a flipped view.
+        metalLayer.anchorPoint = .zero
         metalLayer.frame = bounds
+        metalLayer.isGeometryFlipped = isFlipped
         let scale = window?.backingScaleFactor ?? 2
         metalLayer.contentsScale = scale
         if metalLayer.drawableSize == .zero {
@@ -58,6 +66,59 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override var acceptsFirstResponder: Bool { true }
+
+    // MARK: the pointer (one source for the zoom anchor *and* the histogram readout)
+    //
+    // Two features ask "where is the pointer, and what is under it": the zoom commands anchor on that
+    // pixel, and the histogram card reports it. They must not track separately — a second source would
+    // be a second coordinate conversion, and the whole class of bug in this file is a coordinate
+    // conversion that is right in one place and wrong in the other. So the view owns **one** tracking
+    // area, and every event it delivers goes to `controller.pointerMoved(to:)`; `cursorAnchor()` and the
+    // histogram row both read the value that call stores.
+    //
+    // `.inVisibleRect` (the rect is maintained by AppKit on resize, so no `updateTrackingAreas`
+    // bookkeeping), `.activeInKeyWindow` (a loupe in a background window is not being pointed at), and
+    // `.mouseEnteredAndExited` for the two edges. A tracking area is per-view and per-window, so this
+    // is rebuilt by `updateTrackingAreas`, which AppKit calls on every layout.
+
+    private var pointerTrackingArea: NSTrackingArea?
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTrackingArea {
+            removeTrackingArea(pointerTrackingArea)
+            self.pointerTrackingArea = nil
+        }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseMoved, .mouseEnteredAndExited,
+                                            .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        pointerTrackingArea = area
+    }
+
+    /// A tracking area only gets `.mouseMoved` while the window accepts move events; nothing here
+    /// depends on the flag being false, and both consumers of the pointer depend on it being true.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+        // Off screen (a new photo, the loupe going away): there is no pointer to report, and a stale
+        // one would leave the histogram row reading a pixel of a picture that is no longer there.
+        if window == nil { controller?.pointerExited() }
+        updateTrackingAreas()
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        controller?.pointerMoved(to: convert(event.locationInWindow, from: nil))
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        controller?.pointerMoved(to: convert(event.locationInWindow, from: nil))
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        controller?.pointerExited()
+    }
 
     // MARK: 1:1 / pan / pinch
 
@@ -110,6 +171,9 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        // A drag moves the pointer too: the histogram row follows the pixel under it, and the anchor a
+        // ⌘= would use after a pan is where the hand left the cursor.
+        controller?.pointerMoved(to: convert(event.locationInWindow, from: nil))
         if isShaping {
             controller?.continueShapeDrag(at: convert(event.locationInWindow, from: nil))
             return
@@ -1002,9 +1066,12 @@ public final class LoupeController: NSViewController {
         // animation's own value for one that replaces it (read off the presentation tree, which is
         // what the eye is looking at).
         let live = presentedLayerTransform()
+        let layer = canvasView.metalLayer
         let start = canvasContent == nil
             ? (scale: 1.0, x: 0.0, y: 0.0)
-            : LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas, backingScale: k)
+            : LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas, backingScale: k,
+                                     anchorPoint: layer.anchorPoint,
+                                     isFlipped: layer.isGeometryFlipped)
         let wasBridging = zoomBridge != nil
         let bridge = LoupeZoomBridge(
             fromContent: fromContent,
@@ -1012,7 +1079,12 @@ public final class LoupeController: NSViewController {
             fromMapping: fromMapping,
             toMapping: toMapping,
             canvas: canvas,
-            startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y)
+            startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
+            // The real layer geometry, read off the layer rather than assumed — see
+            // `LoupeZoomBridge.layerAnchorPoint`: a backing layer is anchored at (0, 0), so "the
+            // transform is about the centre" is exactly the bug this reads the truth for.
+            layerAnchorPoint: layer.anchorPoint,
+            layerIsFlipped: layer.isGeometryFlipped)
         guard bridge.isVisible else {
             // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
             // clamped to the same rect): the arriving frame *is* the whole change.
@@ -1135,12 +1207,169 @@ public final class LoupeController: NSViewController {
     /// Where the pointer is, in canvas **points** (y down — the space `NSEvent` and
     /// `handleDoubleClick` use), or `nil` when it is not over the canvas: a menu command chosen from
     /// the menu bar, a shortcut pressed while the pointer sits on the inspector.
+    ///
+    /// Two answers, one pointer. The **tracking area** (`LoupeCanvasView.updateTrackingAreas`) is the
+    /// primary source: it is the same value the histogram's pixel readout uses, so the pixel the zoom
+    /// anchors on and the brightness the card reports are the same pixel by construction. The live
+    /// `mouseLocationOutsideOfEventStream` query is the fallback for the one case tracking cannot
+    /// cover — a pointer that was already over the canvas before any move event was delivered (the
+    /// first ⌘= after launch, a loupe that just appeared under a resting cursor).
+    ///
+    /// The conversion is `NSView.convert(_:from: nil)`, i.e. "from window base coordinates" (y **up**),
+    /// into this view's flipped space (y **down**). Doing it by hand — subtracting `frame.origin` —
+    /// is the y-flip bug this method is one `convert` call away from; `PointerAnchorTests` asserts the
+    /// flipped answer against a hand conversion of a known window point.
     public func cursorAnchor() -> CGPoint? {
+        if let tracked = pointerCanvasPoint { return tracked }
         guard let window = canvasView.window else { return nil }
         let point = canvasView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
         let bounds = canvasView.bounds
         guard bounds.width > 1, bounds.height > 1, bounds.contains(point) else { return nil }
         return point
+    }
+
+    // MARK: the pointer (the one source both features read)
+    //
+    // `LoupeCanvasView` owns a single tracking area and calls these. Everything downstream — the zoom
+    // anchor above and the histogram card's bottom row — reads what they store, so there is exactly one
+    // "current mouse position" in the app.
+
+    /// The last pointer position the tracking area reported, in canvas points (y down), or `nil` when
+    /// the pointer is not over the canvas. **The** current mouse position, as far as the loupe goes.
+    public private(set) var pointerCanvasPoint: CGPoint?
+    /// The pixel the row is currently reporting, `nil` when nothing is painted.
+    public private(set) var pointerReadout: PointerPixel?
+    /// How many 1×1 texture readbacks the pointer has cost. The throttle is asserted from this number:
+    /// a still pointer must not read, and 100 moves must not read 100 times.
+    public private(set) var pointerReadbackCount = 0
+    /// Where the reading is published (the histogram card). `weak`: a rebuilt inspector releases the
+    /// old card, and the loupe must not write into it.
+    public weak var pointerReadoutTarget: (any PointerReadoutTarget)? {
+        didSet { publishPointerReadout() }
+    }
+
+    /// Which frame the last readback was taken from, and from which texel — together they are the
+    /// throttle: the same texel of the same frame is never read twice.
+    private var pointerSampleFrame = -1
+    private var pointerSampleTexel: (x: Int, y: Int)?
+    /// Bumped on every `present`. A readback belongs to a frame, not to a mouse event.
+    private var frameSerial = 0
+    /// Readbacks the throttle refused — the other half of "it did not read".
+    public private(set) var pointerReadbacksSkipped = 0
+
+    /// The pointer moved to `point` (canvas points, y down) — the tracking area's `mouseMoved`.
+    public func pointerMoved(to point: CGPoint) {
+        let bounds = canvasView.bounds
+        guard bounds.width > 1, bounds.height > 1, bounds.contains(point) else {
+            pointerExited()
+            return
+        }
+        pointerCanvasPoint = point
+        refreshPointerReadout()
+    }
+
+    /// The pointer left the canvas (a tracking-area exit, the view leaving its window, a photo switch):
+    /// the row goes back to idle and the anchor falls back to the centre.
+    public func pointerExited() {
+        let had = pointerCanvasPoint != nil || pointerReadout != nil
+        pointerCanvasPoint = nil
+        pointerSampleTexel = nil
+        pointerSampleFrame = -1
+        if pointerReadout != nil { pointerReadout = nil }
+        if had { pointerReadoutTarget?.clearPointerReadout() }
+    }
+
+    /// Read the pixel under the pointer, once per (frame, texel).
+    ///
+    /// The cost model is the point: a 1×1 `getBytes` is a synchronisation with the GPU, so it happens
+    /// **only when the answer can have changed** — a different texel, or a different frame. A resting
+    /// pointer and a stream of move events in the same pixel both cost nothing, which is what keeps the
+    /// readout off the frame-time budget.
+    private func refreshPointerReadout() {
+        guard let point = pointerCanvasPoint, let frame = lastFrame else {
+            pointerReadoutTarget?.clearPointerReadout()
+            pointerReadout = nil
+            return
+        }
+        guard let texel = textureTexel(forViewPoint: point) else {
+            pointerReadoutTarget?.clearPointerReadout()
+            pointerReadout = nil
+            return
+        }
+        if pointerSampleFrame == frameSerial, let last = pointerSampleTexel,
+           last.x == texel.x, last.y == texel.y {
+            pointerReadbacksSkipped += 1
+            return
+        }
+        pointerSampleFrame = frameSerial
+        pointerSampleTexel = texel
+        pointerReadbackCount += 1
+        guard let pixel = Self.sample(frame.texture, x: texel.x, y: texel.y,
+                                      histogram: lastHistogram) else {
+            pointerReadout = nil
+            pointerReadoutTarget?.clearPointerReadout()
+            return
+        }
+        pointerReadout = pixel
+        pointerReadoutTarget?.showPointerReadout(pixel)
+    }
+
+    /// Canvas point (points, y down) → the texel of the presented frame that is under it.
+    ///
+    /// `frame.texture` is the canvas: the frame is rendered **at the viewport's device-pixel size**, so
+    /// a canvas pixel *is* a texel (the `× backingScale` is the whole of the conversion), and while a
+    /// bridge is moving, the texture on screen is still the *old* frame under a layer transform — so the
+    /// point goes through the inverse of that composite first, or the row would read the pixel that is
+    /// about to arrive instead of the one the eye is on.
+    public func textureTexel(forViewPoint point: CGPoint) -> (x: Int, y: Int)? {
+        guard let frame = lastFrame else { return nil }
+        let k = backingScale
+        var v = (x: Double(point.x) * k, y: Double(point.y) * k)
+        let canvas = frame.canvas
+        if zoomBridge != nil, zoomBridgeCanvas == canvas {
+            // The pixels on screen are the *old* frame under a running composite, so the point is
+            // pulled back through that composite before it names a texel.
+            let live = presentedLayerTransform()
+            let (scale, ox, oy) = LoupeZoomBridge.offset(ofLayerTransform: live, canvas: canvas,
+                                                          backingScale: k,
+                                                          anchorPoint: canvasView.metalLayer.anchorPoint,
+                                                          isFlipped: canvasView.metalLayer.isGeometryFlipped)
+            if scale > 1e-6 {
+                v = (x: (v.x - ox) / scale, y: (v.y - oy) / scale)
+            }
+        }
+        let w = Double(canvas.width), h = Double(canvas.height)
+        guard v.x >= 0, v.y >= 0, v.x < w, v.y < h else { return nil }
+        let tx = v.x * Double(frame.texture.width) / w
+        let ty = v.y * Double(frame.texture.height) / h
+        return (x: min(frame.texture.width - 1, max(0, Int(tx))),
+                y: min(frame.texture.height - 1, max(0, Int(ty))))
+    }
+
+    /// One texel of an rgba16f frame, as a `PointerPixel`.
+    ///
+    /// Static and public so the tests can call it on a texture they built themselves — the acceptance
+    /// test reads the same texel a second way and compares, which is only meaningful if both sides are
+    /// the same code path.
+    public static func sample(_ texture: MTLTexture, x: Int, y: Int,
+                              histogram: Histogram?) -> PointerPixel? {
+        guard texture.pixelFormat == .rgba16Float,
+              x >= 0, y >= 0, x < texture.width, y < texture.height else { return nil }
+        var raw = [UInt16](repeating: 0, count: 4)
+        raw.withUnsafeMutableBytes { buffer in
+            texture.getBytes(buffer.baseAddress!,
+                             bytesPerRow: 4 * MemoryLayout<UInt16>.size,
+                             from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
+        }
+        func channel(_ i: Int) -> Float { Float(Float16(bitPattern: raw[i])) }
+        return PointerPixel(encodedRed: channel(0), green: channel(1), blue: channel(2),
+                           histogram: histogram)
+    }
+
+    private func publishPointerReadout() {
+        guard let target = pointerReadoutTarget else { return }
+        if let pixel = pointerReadout { target.showPointerReadout(pixel) }
+        else { target.clearPointerReadout() }
     }
 
     /// The middle of the canvas: the anchor a command falls back to when the pointer is elsewhere.
@@ -1729,6 +1958,9 @@ public final class LoupeController: NSViewController {
         // Nothing that was in flight belongs to the camera that is now on screen: a bridge would
         // carry the old picture over the new one, and a held frame is for a photo nobody is looking at.
         cancelZoomBridge()
+        // The pointer's reading is a pixel of the picture that is going away: clear the row rather
+        // than let it keep reporting a brightness nobody is looking at.
+        pointerExited()
         viewPending = false
         editPending = false
         // A measurement belongs to the picture it was armed for.
@@ -2060,6 +2292,9 @@ public final class LoupeController: NSViewController {
             return
         }
         presentRetries = 0
+        // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
+        // on this serial, so the next move re-reads instead of trusting the previous picture's texel.
+        frameSerial += 1
         // These pixels are now what the canvas carries, and they were laid out for `state` — the
         // projection a later bridge has to start from.
         if let mapping = framing(viewport: frame.canvas)?.mapping(of: state) {
