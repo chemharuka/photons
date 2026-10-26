@@ -352,6 +352,40 @@ public final class ThumbnailCache {
         try? fm.removeItem(at: url(for: shadow))
     }
 
+    // MARK: removal
+
+    /// Drop every file this content hash owns, at every tier and pipeline. Returns how many files
+    /// were actually removed.
+    ///
+    /// Deleting a library entry must not leave its pixels behind: the key is content-addressed, so
+    /// nothing else will ever look at them again, and a re-import of the same bytes would then hit a
+    /// thumbnail produced by an *edit* the user just deleted. `developJSONs` is the set of documents
+    /// whose `graph` recipes may exist on disk (the row's own `develop_json`, plus `{}` for the
+    /// neutral baseline); a recipe we are not told about can only be found by a full `trim()` pass.
+    ///
+    /// Not `fsync`ed and not journalled, like every other write here: the cache is derived data, so
+    /// the worst case of a crash mid-removal is one stale file that `trim()` will evict.
+    @discardableResult
+    public func removeAll(contentHash: String, developJSONs: [String] = ["{}"]) -> Int {
+        var removed = 0
+        let recipes = developJSONs.isEmpty ? ["{}"] : Array(Set(developJSONs))
+        for tier in ThumbTier.allCases {
+            var keys = [ThumbKey.preview(contentHash: contentHash, tier: tier)]
+            for json in recipes {
+                keys.append(.graph(contentHash: contentHash, tier: tier, developJSON: json))
+            }
+            for key in keys {
+                let path = url(for: key)
+                guard fm.fileExists(atPath: path.path) else { continue }
+                if (try? fm.removeItem(at: path)) != nil { removed += 1 }
+            }
+        }
+        lock.lock()
+        touched = touched.filter { !$0.contains(contentHash) }
+        lock.unlock()
+        return removed
+    }
+
     // MARK: LRU
 
     /// Mark a hit as recently used. Once per key per process: hits are read-only in the common

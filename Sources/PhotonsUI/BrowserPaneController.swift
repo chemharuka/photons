@@ -26,6 +26,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private let footer = NSTextField(labelWithString: "")
     private let sourcesTable = NSTableView()
     private let photosTable = NSTableView()
+    /// 右键：从库中删除… / 查找丢失的文件… — one menu object, the same verbs as the grid.
+    public let contextMenu = AssetContextMenu()
     private let sourcesScroll = NSScrollView()
     private let photosScroll = NSScrollView()
     private let matte = NSVisualEffectView()
@@ -89,6 +91,13 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         configure(table: sourcesTable, rowHeight: WorkspaceLayout.browserRowHeight, identifier: "SourceRowCell")
         configure(table: photosTable, rowHeight: WorkspaceLayout.browserRowHeight, identifier: "PhotoRowCell")
         photosTable.allowsMultipleSelection = true
+
+        // 右键：the same two verbs the grid and the filmstrip offer, on the same menu object. The
+        // list resolves the click through `clickedRow`, which AppKit keeps current for us.
+        contextMenu.willOpen = { [weak self] in self?.prepareContextMenu() }
+        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        photosTable.menu = contextMenu.menu
 
         sourcesScroll.documentView = sourcesTable
         sourcesScroll.hasVerticalScroller = false
@@ -238,6 +247,33 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         view.window?.backingScaleFactor ?? 2
     }
 
+    // MARK: right-click (same verbs as the grid and the strip)
+
+    /// Refresh the shared menu's state from the row the click landed on (`clickedRow`, which AppKit
+    /// sets immediately before it asks for the menu).
+    public func prepareContextMenu() {
+        guard let session else { return }
+        let row = photosTable.clickedRow
+        if row >= 0, let asset = session.assets[safe: row], !session.selection.contains(asset.id) {
+            session.selectOnly(asset.id)
+            isApplyingModel = true
+            photosTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            isApplyingModel = false
+        }
+        contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
+                           missingIDs: session.missingAssets.map(\.id))
+    }
+
+    public func deleteMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.delete(ids, session: session, window: view.window)
+    }
+
+    public func findAndRelinkMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.findLost(ids, session: session, window: view.window)
+    }
+
     private func provider() -> ThumbnailProvider? {
         guard let session else { return nil }
         guard let cache = session.thumbnailCache else {
@@ -277,7 +313,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// Show the image we already hold; queue a load when we hold none.
     ///
     /// The memory layer is synchronous on purpose: a row that scrolls back into view must draw in
-    /// the same frame, and a flash of solid colour is exactly the symptom this fixes.
+    /// the same frame, and a flash of solid colour is exactly the symptom this fixes. A **missing**
+    /// original has nothing to decode, so only a cached thumbnail may stand in (same rule as the
+    /// grid and the strip).
     private func applyThumbnail(to cell: PhotoRowCell, row: Int, asset: Asset) {
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
@@ -285,6 +323,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
             cell.setThumbnail(cached)
             return
+        }
+        if asset.isMissing {
+            let key = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
+            guard provider.cache.exists(key) else { return }
         }
         requestThumbnail(row: row, asset: asset, tier: tier, priority: .onScreen)
     }
@@ -510,6 +552,8 @@ final class PhotoRowCell: NSTableCellView {
     private let name = NSTextField(labelWithString: "")
     private let meta = NSTextField(labelWithString: "")
     private let stars = NSTextField(labelWithString: "")
+    /// 「原文件已移动」, over the thumbnail square. Hidden unless the row's original moved.
+    private let pill = MissingFilePillView()
 
     /// Which asset this row is currently showing. A recycled row must never accept an image that was
     /// requested for the photo it used to hold.
@@ -518,6 +562,9 @@ final class PhotoRowCell: NSTableCellView {
     private(set) var thumbnail: CGImage?
     /// Which tier the current image came from — the probe asserts the DPR choice against it.
     var thumbnailTier: ThumbTier?
+    /// 「原文件已移动」 for this row, or nil. A string, not just a colour, so the row can be asserted
+    /// on (the grid card and the strip cell expose the same one, from the same constant).
+    private(set) var missingLabel: String?
 
     static func reuse(in table: NSTableView, owner: Any) -> PhotoRowCell {
         let id = NSUserInterfaceItemIdentifier("PhotoRowCell")
@@ -544,6 +591,7 @@ final class PhotoRowCell: NSTableCellView {
         stars.font = .systemFont(ofSize: 8)
         stars.textColor = .systemYellow
         for v in [swatch, name, meta, stars] { addSubview(v) }
+        addSubview(pill)   // last: the badge sits on top of the thumbnail square
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
@@ -564,6 +612,19 @@ final class PhotoRowCell: NSTableCellView {
         meta.stringValue = bits.joined(separator: " · ")
         stars.stringValue = asset.rating > 0 ? PlaceholderSwatch.stars(asset.rating) : ""
         name.textColor = isActive ? .labelColor : .secondaryLabelColor
+
+        // 「原文件已移动」 takes the meta line: on a 46 pt row the fact that the file is gone outranks
+        // the camera model, and the badge is drawn on the thumbnail as well so a glance finds it.
+        let moved = asset.isMissing ? MissingFileText.moved : nil
+        missingLabel = moved
+        pill.text = moved
+        if let moved {
+            meta.stringValue = moved
+            meta.textColor = .systemOrange
+        } else {
+            meta.stringValue = bits.joined(separator: " · ")
+            meta.textColor = .secondaryLabelColor
+        }
     }
 
     /// Paint the image (or drop back to the placeholder when `image` is nil).
@@ -589,5 +650,8 @@ final class PhotoRowCell: NSTableCellView {
         name.frame = NSRect(x: textX, y: bounds.height - 31, width: width, height: 15)
         meta.frame = NSRect(x: textX, y: bounds.height - 45, width: width, height: 12)
         stars.frame = NSRect(x: textX, y: bounds.height - 17, width: width, height: 10)
+        // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
+        pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
+                            width: swatch.frame.width, height: 12)
     }
 }

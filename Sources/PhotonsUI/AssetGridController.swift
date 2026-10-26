@@ -11,12 +11,20 @@ import PhotonsCore
 /// whether M3.5 needs the other path.
 public final class AssetCollectionView: NSCollectionView {
     public var onKeyDown: ((NSEvent) -> Bool)?
+    /// Right-click plumbing. AppKit asks the *view* for its menu, and only the view knows where the
+    /// click landed — a right-click on an unselected cell means that cell, so the resolution has to
+    /// happen here (where the event is) and not in `validateMenuItem`.
+    public var contextMenuProvider: ((NSEvent?) -> NSMenu?)?
 
     public override var acceptsFirstResponder: Bool { true }
 
     public override func keyDown(with event: NSEvent) {
         if onKeyDown?(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuProvider?(event) ?? super.menu(for: event)
     }
 }
 
@@ -35,6 +43,16 @@ public final class AssetCardView: NSView {
     /// reads this back off the cell that actually painted, so "the badge is drawn" is an observation
     /// and not an inference from `asset.rating`.
     public private(set) var lastDrawnBadges: [String] = []
+
+    /// The 「原文件已移动」 line this card would draw, or nil for a healthy file.
+    ///
+    /// Exposed as a *string* (not only as pixels) on purpose: the badge has to be assertable from a
+    /// test and readable from a log, and "there is a pill somewhere in this rect" is not a fact a
+    /// test can state.
+    public var missingLabel: String? { asset?.isMissing == true ? MissingFileText.moved : nil }
+
+    /// What the last `draw` actually painted — set inside `draw`, so it is evidence and not intent.
+    public private(set) var lastDrawnMissingLabel: String?
 
     /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
     public var badgeSignature: String { asset.map { AssetBadges(asset: $0).signature } ?? "—" }
@@ -100,7 +118,15 @@ public final class AssetCardView: NSView {
         // still shows its rating.
         let badges = AssetBadges(asset: asset)
         badges.draw(in: swatchRect)
-        lastDrawnBadges = badges.drawn
+
+        // 「原文件已移动」 is an overlay of its own, drawn last: it is the one thing on this card the
+        // user has to act on, and it must never be covered by a star.
+        lastDrawnMissingLabel = nil
+        if let missingLabel {
+            MissingFileBadge.draw(in: swatchRect)
+            lastDrawnMissingLabel = missingLabel
+        }
+        lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
     }
 
     /// Aspect-fill, centre-anchored. `NSGraphicsContext` is already clipped to the rounded swatch.
@@ -160,6 +186,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     public let scrollView = NSScrollView()
     /// The filter strip: 星级 ≥ N / 旗标 / 色标 / 相机 + one chip per active facet.
     public let filterBar = FilterBarView()
+    /// 右键：从库中删除… / 查找丢失的文件… — shared code, one instance per browser.
+    public let contextMenu = AssetContextMenu()
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
@@ -205,6 +233,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         collectionView.delegate = self
         collectionView.register(AssetGridItem.self, forItemWithIdentifier: AssetGridItem.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
+
+        // Context menu: attach the shared menu, resolve the clicked cell here (only this view knows
+        // where the event landed), and let the two verbs run through the session.
+        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        collectionView.contextMenuProvider = { [weak self] event in self?.menuForRightClick(event) }
 
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick(_:)))
         doubleClick.numberOfClicksRequired = 2
@@ -347,6 +381,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     ///
     /// The memory layer is synchronous on purpose: a cell that scrolls back into view must draw in
     /// the same frame (a spinner or a flash of placeholder would be a visible regression).
+    ///
+    /// A **missing** file is a third case: there are no bytes to decode, so a request could only
+    /// ever fail. The cell draws a thumbnail only if one is already on disk (the key is
+    /// content-addressed, so the pixels of a moved file are still valid); otherwise it keeps the
+    /// placeholder and the 「原文件已移动」 badge and asks for nothing. That is what keeps a missing
+    /// entry from sitting in `pendingThumbnailRequests` forever, and it is the same terminal state
+    /// the request path reaches on a failure — without the failed decode.
     private func applyThumbnail(to cell: AssetGridItem, index: Int, asset: Asset) {
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
@@ -356,6 +397,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
             cell.cardView.thumbnail = cached
             return
+        }
+        if asset.isMissing {
+            let key = ThumbKey.preview(contentHash: asset.contentHash,
+                                       tier: ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext).tier)
+            guard provider.cache.exists(key) else { return }
         }
         requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
     }
@@ -526,6 +572,45 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         lastTier = nil
         thumbnailProvider = nil
         providerCache = nil
+    }
+
+    // MARK: right-click (「原文件已移动」 → 删除 or 重新链接)
+
+    /// The menu for a right-click at `event` (nil = "the current selection, no click"), or nil when
+    /// there is nothing to show.
+    ///
+    /// A right-click on a cell that is **not** selected means that cell (Finder/Photos behaviour), so
+    /// the selection is moved first — otherwise the user right-clicks a red-badged photo that is not
+    /// in the selection and the menu talks about a different photo.
+    public func menuForRightClick(_ event: NSEvent?) -> NSMenu? {
+        guard let session else { return nil }
+        if let event, let point = collectionViewPoint(for: event),
+           let indexPath = collectionView.indexPathForItem(at: point),
+           let asset = session.assets[safe: indexPath.item],
+           !session.selection.contains(asset.id) {
+            session.selectOnly(asset.id)
+        }
+        contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
+                           missingIDs: session.missingAssets.map(\.id))
+        return contextMenu.menu
+    }
+
+    /// Where the click landed, in the collection view's own coordinates.
+    private func collectionViewPoint(for event: NSEvent) -> NSPoint? {
+        guard event.window != nil else { return nil }
+        return collectionView.convert(event.locationInWindow, from: nil)
+    }
+
+    /// 「从库中删除…」: confirm, then one transaction (rows + history + thumbnails) and a `reload()`.
+    public func deleteMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.delete(ids, session: session, window: view.window)
+    }
+
+    /// 「查找丢失的文件…」: one folder panel, one recursive search, one relink per hash-verified hit.
+    public func findAndRelinkMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.findLost(ids, session: session, window: view.window)
     }
 
     // MARK: selection

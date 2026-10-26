@@ -10,6 +10,7 @@ import GRDB
 /// | v2 | `assets.history_end` — the persisted snapshot cursor (D10's `history_end`) |
 /// | v3 | `assets.edit_time` + `develop_quarantine` — the develop document actually lands |
 /// | v4 | `presets` — named partial documents for M5's preset panel |
+/// | v5 | `assets.missing` — the row whose original file moved away (reference roots only) |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -18,24 +19,38 @@ import GRDB
 /// only things missing were a write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 4
+    public static let version = 5
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
+    /// One migration step: a name GRDB records in `grdb_migrations` and the work it does.
+    ///
+    /// The work is a closure rather than a bare SQL string because a step may have to *look* before
+    /// it alters (`v5` adds a column, and `ALTER TABLE … ADD COLUMN` throws if the column is already
+    /// there). Every step is written to be replayable: re-running it on a database that already has
+    /// its effect is a no-op, never an error (the `user_version` stamp can be lost — a restored
+    /// backup, a hand-edited file — and a migration that explodes on a healthy library is worse than
+    /// one that does nothing).
+    struct Step: Sendable {
+        let name: String
+        let apply: @Sendable (Database) throws -> Void
+    }
+
     /// The ordered steps. GRDB records the applied names in `grdb_migrations`; `user_version` is
     /// ours to stamp (Database.swift), so both readers and `sqlite3` see the same number.
-    static let steps: [(name: String, sql: String)] = [
-        ("v1", v1),
-        ("v2", v2),
-        ("v3", v3),
-        ("v4", v4),
+    static let steps: [Step] = [
+        Step(name: "v1") { db in try db.execute(sql: v1) },
+        Step(name: "v2") { db in try db.execute(sql: v2) },
+        Step(name: "v3") { db in try db.execute(sql: v3) },
+        Step(name: "v4") { db in try db.execute(sql: v4) },
+        Step(name: "v5") { db in try addMissingColumnIfAbsent(db) },
     ]
 
     static var migrator: DatabaseMigrator {
         var m = DatabaseMigrator()
         for step in steps {
             m.registerMigration(step.name) { db in
-                try db.execute(sql: step.sql)
+                try step.apply(db)
             }
         }
         return m
@@ -54,6 +69,30 @@ public enum Schema {
         let target = steps.prefix(max(0, min(version, steps.count)))
         guard let last = target.last else { return }
         try migrator.migrate(queue, upTo: last.name)
+    }
+
+    // MARK: - v5
+
+    /// `assets.missing` — "the original file is not where this row says it is".
+    ///
+    /// The library stores *references* (`ManagementMode.reference`), so moving or renaming a file
+    /// outside Photons leaves the row pointing at a path that no longer exists. That used to be
+    /// invisible: `verify()` counted it, nothing marked the row. The flag is what the grid can draw
+    /// a badge from, what the inspector can print, and what the right-click menu can act on.
+    ///
+    /// Two decisions worth the ink:
+    ///
+    /// - **It is a cache of a filesystem fact, never a state machine.** `refreshAvailability()`
+    ///   recomputes it from `stat` on every open and every rescan; nothing else writes it. An
+    ///   offline root is skipped rather than marked, because "the drive is unplugged" and "the file
+    ///   moved" are different sentences and only the second one is actionable.
+    /// - **`DEFAULT 0` is the whole back-compat story.** An existing library reads every row as
+    ///   present until the first `refreshAvailability()`, which is exactly the pre-v5 behaviour.
+    ///   Nothing is deleted, so a wrong guess costs one rescan.
+    private static func addMissingColumnIfAbsent(_ db: Database) throws {
+        let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(assets)").map { $0["name"] as String }
+        guard !columns.contains("missing") else { return }   // replayable: already applied
+        try db.execute(sql: "ALTER TABLE assets ADD COLUMN missing INTEGER NOT NULL DEFAULT 0")
     }
 
     private static let v1 = """

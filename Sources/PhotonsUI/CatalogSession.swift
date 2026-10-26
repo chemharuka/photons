@@ -194,6 +194,10 @@ public final class CatalogSession {
         // grid falls back to placeholders, which must not stop the library from opening.
         thumbnailCache = try? ThumbnailCache(layout: c.layout)
         loadedEditAssetID = nil
+        // Before the first query, so the grid's very first paint already carries 「原文件已移动」:
+        // the flag is a filesystem fact and this is the only moment it can be fresh. A failure here
+        // only means the flags keep yesterday's values, which is why it does not throw.
+        lastAvailability = try? c.refreshAvailability()
         reload()
         // The preset card and the Develop menu read this cache; fill it as soon as the library is
         // open instead of waiting for the panel's first `onAppear`.
@@ -741,6 +745,87 @@ public final class CatalogSession {
             lastPresetError = error.localizedDescription
             return false
         }
+    }
+
+    // MARK: missing originals (a reference root's file moved on disk)
+
+    // The library stores references, so the Finder can move a photo out from under a row. Nothing
+    // here deletes anything without the user saying so: `refreshAvailability()` re-derives the flag,
+    // `relinkMissing` puts a row back on its file, and `deleteAssets` is the other answer.
+    //
+    // All three are *library* facts, not document edits: `editRevision`, `editHistory` and
+    // `develop_json` are untouched by a relink (the document belongs to the photo, and the photo is
+    // the same photo — that is what the content hash check proves).
+
+    /// What the last availability pass found (`nil` before the library was opened).
+    public private(set) var lastAvailability: AvailabilityReport?
+
+    /// Why the last relink/delete failed, or nil. Reported, never swallowed.
+    public private(set) var lastAvailabilityError: String?
+
+    /// Rows whose original file is not where the library says — what the badge and the menu read.
+    public var missingAssets: [Asset] { assets.filter(\.isMissing) }
+
+    /// The missing subset of the current selection, in library order. Both context-menu verbs act on
+    /// exactly this list, so the count in the confirmation sheet is the count that gets deleted.
+    public var missingSelectionIDs: [String] { selectedAssets.filter(\.isMissing).map(\.id) }
+
+    /// Re-stat every row under an online root. Called on open and by the manual rescan action.
+    @discardableResult
+    public func refreshAvailability() -> AvailabilityReport? {
+        guard let catalog else { return nil }
+        let report = try? catalog.refreshAvailability()
+        lastAvailability = report
+        reload()
+        return report
+    }
+
+    /// Remove entries **and their modification records**. The originals on disk are never touched.
+    @discardableResult
+    public func deleteAssets(_ ids: [String]) -> DeleteReport? {
+        guard let catalog, !ids.isEmpty else { return nil }
+        do {
+            let report = try catalog.deleteAssets(ids: ids, thumbnails: thumbnailCache)
+            lastAvailabilityError = nil
+            // `reload()` and not a local splice: membership, the selection, the anchor and the stats
+            // all change at once, and the query is the only thing that knows the new truth.
+            reload()
+            return report
+        } catch {
+            lastAvailabilityError = "\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// One 「查找丢失的文件…」 run: search `folder` by file name, then relink every hit whose content
+    /// hash matches. Entries that are not found keep their flag — nothing is guessed.
+    ///
+    /// One search for the whole batch (`LostFileFinder.find` takes every target at once), because a
+    /// recursive walk per photo would make a 40-photo relink 40 walks of the same folder.
+    public func relinkMissing(_ ids: [String], in folder: URL) -> RelinkOutcome {
+        guard let catalog else { return RelinkOutcome() }
+        let chosen = assets.filter { ids.contains($0.id) && $0.isMissing }
+        let targets = chosen.map {
+            LostFileFinder.Target(assetID: $0.id, filename: $0.filename, contentHash: $0.contentHash)
+        }
+        var outcome = RelinkOutcome()
+        guard !targets.isEmpty else { return outcome }
+
+        let found = LostFileFinder.find(folder: folder, targets: targets)
+        outcome.unmatched = found.unmatched
+        outcome.rejected = found.rejected
+        for match in found.matches {
+            do {
+                _ = try catalog.relink(assetID: match.assetID, to: match.url)
+                outcome.relinked.append(match.assetID)
+            } catch {
+                outcome.failed.append(match.assetID)
+                outcome.failures.append("\(match.filename)：\(error.localizedDescription)")
+            }
+        }
+        lastAvailabilityError = outcome.failures.isEmpty ? nil : outcome.failures.joined(separator: "；")
+        if !outcome.relinked.isEmpty { reload() }
+        return outcome
     }
 
     // MARK: export items

@@ -129,6 +129,13 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
     public var renderVersion: Int
     public var importedAt: String
     public var checkedAt: String?
+    /// The original file is **not** at `relPath` under its root (v5).
+    ///
+    /// A cached filesystem fact, recomputed by `Catalog.refreshAvailability()` on open and rescan —
+    /// never a state the app sets by hand. `true` means: the root is online, we stat'ed the path,
+    /// and nothing was there. The row, its rating and its whole edit history are untouched; the
+    /// user decides whether to relink it or remove it.
+    public var missing: Bool
     public var deleted: Bool
 
     public init(id: String = UUID().uuidString,
@@ -160,6 +167,7 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
                 renderVersion: Int = 1,
                 importedAt: String = ISO8601.now(),
                 checkedAt: String? = nil,
+                missing: Bool = false,
                 deleted: Bool = false) {
         self.id = id
         self.sourceRootId = sourceRootId
@@ -190,8 +198,13 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
         self.renderVersion = renderVersion
         self.importedAt = importedAt
         self.checkedAt = checkedAt
+        self.missing = missing
         self.deleted = deleted
     }
+
+    /// Readable form of `missing` for call sites that talk about the user's situation rather than
+    /// the column: "the original file moved away".
+    public var isMissing: Bool { missing }
 
     /// `lower(make|model)` — the filter key. Normalised once at import so queries stay dumb.
     public static func cameraKey(make: String?, model: String?) -> String? {

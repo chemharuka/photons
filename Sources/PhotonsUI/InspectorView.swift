@@ -160,6 +160,12 @@ public struct InspectorView: View {
         card(Self.infoTitle) {
             VStack(alignment: .leading, spacing: 2) {
                 MarqueeText(text: session.anchorAsset?.filename ?? "未选择照片")
+                // Only for a moved original: a row that is always there would spend every healthy
+                // photo's second line saying "fine".
+                if let notice = InspectorPhotoInfo.missingNotice(isMissing: session.anchorAsset?.isMissing ?? false) {
+                    MissingFileNotice(text: notice)
+                        .accessibilityIdentifier("inspector.info.missing")
+                }
                 InspectorPhotoInfo.InspectorParameterRow(tokens: parameterTokens)
                 MarqueeText(text: equipment)
             }

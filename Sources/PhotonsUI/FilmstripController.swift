@@ -41,6 +41,11 @@ public final class FilmstripCard: NSView {
     /// Which tier the current image came from — `--ui-smoke` asserts the DPR choice against it.
     public var thumbnailTier: ThumbTier?
 
+    /// 「原文件已移动」 for this cell, or nil — the same string the grid card and the inspector use.
+    public var missingLabel: String? { asset?.isMissing == true ? MissingFileText.moved : nil }
+    /// Set inside `draw` when the badge was actually painted.
+    public private(set) var lastDrawnMissingLabel: String?
+
     public override var isFlipped: Bool { true }
 
     public override func draw(_ dirtyRect: NSRect) {
@@ -65,6 +70,14 @@ public final class FilmstripCard: NSView {
             ring.stroke()
         }
         NSGraphicsContext.restoreGraphicsState()
+
+        // The badge is drawn *outside* the clip so its pill is never cut by the rounded corner, and
+        // last, so no selection ring sits on top of the words the user has to read.
+        lastDrawnMissingLabel = nil
+        if let missingLabel {
+            MissingFileBadge.draw(in: thumb, compact: true)
+            lastDrawnMissingLabel = missingLabel
+        }
         let name = NSRect(x: 0, y: thumb.maxY + 1, width: bounds.width, height: 11)
         (asset.filename as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
     }
@@ -90,6 +103,8 @@ public final class FilmstripCard: NSView {
 public final class FilmstripController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate {
 
     public let collectionView = AssetCollectionView()
+    /// 右键：从库中删除… / 查找丢失的文件… — the same menu object the grid uses.
+    public let contextMenu = AssetContextMenu()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
     private weak var session: CatalogSession?
@@ -134,6 +149,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.delegate = self
         collectionView.register(FilmstripCell.self, forItemWithIdentifier: FilmstripCell.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
+
+        // Same two verbs as the grid, on the same kind of menu.
+        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        collectionView.contextMenuProvider = { [weak self] event in self?.menuForRightClick(event) }
 
         let scroll = NSScrollView()
         scroll.documentView = collectionView
@@ -241,6 +261,32 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         view.window?.backingScaleFactor ?? 2
     }
 
+    // MARK: right-click (same verbs as the grid)
+
+    public func menuForRightClick(_ event: NSEvent?) -> NSMenu? {
+        guard let session else { return nil }
+        if let event, event.window != nil {
+            let point = collectionView.convert(event.locationInWindow, from: nil)
+            if let indexPath = collectionView.indexPathForItem(at: point),
+               let asset = session.assets[safe: indexPath.item], !session.selection.contains(asset.id) {
+                session.selectOnly(asset.id)
+            }
+        }
+        contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
+                           missingIDs: session.missingAssets.map(\.id))
+        return contextMenu.menu
+    }
+
+    public func deleteMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.delete(ids, session: session, window: view.window)
+    }
+
+    public func findAndRelinkMissingAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.findLost(ids, session: session, window: view.window)
+    }
+
     private func provider() -> ThumbnailProvider? {
         guard let cache = session?.thumbnailCache else { return nil }
         if let thumbnailProvider, providerCache === cache { return thumbnailProvider }
@@ -272,6 +318,13 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
             cell.cardView.thumbnail = cached
             return
+        }
+        // A missing original has nothing to decode: only an already-cached thumbnail may stand in,
+        // otherwise the cell keeps its placeholder and its badge (identical rule to the grid).
+        if asset.isMissing {
+            let key = ThumbKey.preview(contentHash: asset.contentHash,
+                                       tier: ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext).tier)
+            guard provider.cache.exists(key) else { return }
         }
         requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
     }
