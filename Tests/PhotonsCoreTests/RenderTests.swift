@@ -220,7 +220,11 @@ final class RenderTests: XCTestCase {
         let model = try JSONDecoder().decode(EditModel.self, from: json)
         XCTAssertEqual(model.light.exposure, 0.5)
         XCTAssertEqual(model.light.contrast, 0, "missing field must not become something else")
-        XCTAssertEqual(model.light.temperature, 6500)
+        // 派单 006: the missing white balance means "the file's own" — `nil`, not the old nominal
+        // 6500 K, which is now a real (and different) decode.
+        XCTAssertNil(model.light.temperature)
+        XCTAssertNil(model.light.tint)
+        XCTAssertTrue(model.light.whiteBalance.isAsShot)
         XCTAssertEqual(model.geometry.crop, .full)
         XCTAssertEqual(model.color.bands.count, ColorGroup.bandCount)
         XCTAssertEqual(model.effects.vignetteMidpoint, 50)
@@ -336,9 +340,14 @@ final class RenderTests: XCTestCase {
                 continue
             }
             let decodeScale = Float(max(rec.scale, 0.125))
-            let img = try RAWDecoder().decode(url, options: DecodeOptions(decoderVersion: nil, scale: decodeScale))
-            let graph = try RenderGraph(input: RenderInput(image: img, identity: "golden"))
             let model = try edit(rec.edit)
+            // 派单 006: a document's white balance is a decode setting, so the golden's pixels come
+            // from a development made *with* that white balance — an as-shot decode would silently
+            // drop a 7150 K/+7 push.
+            let img = try RAWDecoder().decode(url, options: DecodeOptions(decoderVersion: nil,
+                                                                         scale: decodeScale,
+                                                                         whiteBalance: model.light.whiteBalance))
+            let graph = try RenderGraph(input: RenderInput(image: img, identity: "golden"))
             let result = try graph.render(model, options: RenderOptions(scale: rec.scale / Double(decodeScale), wantsPixels: true))
             let pixels = try XCTUnwrap(result.display)
             XCTAssertEqual(pixels.width, rec.width, "\(file.lastPathComponent): width")

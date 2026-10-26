@@ -192,12 +192,21 @@ final class PresetSnapshotTests: XCTestCase {
         // `EditHistory.dirtyTolerance` must not become a "copied field".
         var document = EditModel.neutral
         document.light.exposure = 5e-7          // just under 1e-6
-        document.light.temperature = 6500 + 5e-7
+        document.light.contrast = -5e-7
         XCTAssertTrue(EditSnapshot.capture(document).isEmpty,
                       "sub-tolerance differences are not edits")
 
         document.light.exposure = 2e-6          // just over
         XCTAssertEqual(EditSnapshot.capture(document).fieldCount, 1,
                        "a difference above the tolerance is a real field")
+
+        // 派单 006: white balance is a *state* (`nil` = follow the file) plus an absolute value, so
+        // there is no neutral number to be within tolerance of — any pinned value travels.
+        document.light.temperature = 6500
+        XCTAssertNotNil(EditSnapshot.capture(document).light?.temperature,
+                        "a pinned 6500 K must survive \"copy settings\"")
+        document.light.temperature = nil
+        XCTAssertNil(EditSnapshot.capture(document).light?.temperature,
+                     "as shot has nothing to copy")
     }
 }

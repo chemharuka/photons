@@ -107,6 +107,16 @@ enum EditParameters {
             && areEqual(a.highlightRecovery, b.highlightRecovery)
     }
 
+    /// As shot (`nil`) is a *state*, not a number: a document that follows the file and one that
+    /// pins 6500 K are different documents, so the comparison has to be three-valued (派单 006).
+    static func areEqual(_ a: Double?, _ b: Double?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return areEqual(x, y)
+        default: return false
+        }
+    }
+
     static func areEqual(_ a: CurveGroup, _ b: CurveGroup) -> Bool {
         areEqual(a.rgb, b.rgb) && areEqual(a.red, b.red)
             && areEqual(a.green, b.green) && areEqual(a.blue, b.blue)

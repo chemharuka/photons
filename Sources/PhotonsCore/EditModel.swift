@@ -12,7 +12,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// 2 = M4: `masks` changed from the placeholder `params: [String: Double]` to the real
     /// `Mask`/`MaskComponent`/`MaskShape` union (docs/tasks/005-masks.md §2). Not released, so
     /// there is no migration; the placeholder is simply dropped.
-    public static let currentSchemaVersion = 2
+    /// 3 = 派单 006: `light.temperature`/`light.tint` became `Double?` with `nil` = the file's
+    /// as-shot white balance, replacing the nominal `6500`/`0` that S1 turned into a gain. Not
+    /// released either; schema-2 documents are read back as as-shot when they carry the old
+    /// sentinel (`EditModel.init(from:)` → `LightGroup.migratePreSchema3WhiteBalance()`).
+    public static let currentSchemaVersion = 3
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     public static let currentProcessVersion = 1
@@ -72,6 +76,10 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.effects = c.val("effects", v.effects)
         v.masks = c.val("masks", v.masks)
         v.showMaskID = c.val("showMaskID", v.showMaskID)
+        // 派单 006: pre-schema-3 documents used `light.temperature = 6500` / `tint = 0` as "the
+        // decoder's own balance". The version is the document's, so this is the only place the
+        // migration can be decided.
+        if v.schemaVersion < 3 { v.light.migratePreSchema3WhiteBalance() }
         self = v
     }
 
@@ -99,11 +107,13 @@ public struct EditModel: Sendable, Equatable, Codable {
         var s: Set<RenderStage> = []
         if geometry != old.geometry { s.insert(.geometry) }
         if light != old.light {
-            // Lightroom's Light panel straddles S1 (exposure, WB, highlight recovery) and
-            // S2 (contrast, highlights, shadows, whites, blacks).
+            // Lightroom's Light panel straddles S1 (exposure, highlight recovery) and S2 (contrast,
+            // highlights, shadows, whites, blacks). White balance (派单 006) straddles neither: a
+            // change there means a **new development**, so every stage's source pixels are new.
+            if light.temperature != old.light.temperature || light.tint != old.light.tint {
+                return Set(RenderStage.allCases)
+            }
             if light.exposure != old.light.exposure
-                || light.temperature != old.light.temperature
-                || light.tint != old.light.tint
                 || light.highlightRecovery != old.light.highlightRecovery {
                 s.insert(.sceneLinear)
             }
@@ -163,7 +173,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             return s
 
         case .sceneLinear:
-            return "ev=\(k(light.exposure));temp=\(k(light.temperature));tint=\(k(light.tint))"
+            // `temp=shot` when the document follows the file (派单 006): the key has to change when
+            // the *decode* changes, and it must not claim "6500" for a file shot at 4803 K.
+            return "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
+                + ";tint=\(light.tint.map { k($0) } ?? "shot")"
                 + ";hlr=\(k(light.highlightRecovery))"
 
         // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
@@ -331,9 +344,16 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public var shadows: Double           // -100…100, default 0
     public var whites: Double            // -100…100, default 0
     public var blacks: Double            // -100…100, default 0
-    /// Relative white balance in kelvin. 6500 = the decode's own neutral, i.e. no change.
-    public var temperature: Double       // 2000…12000, default 6500
-    public var tint: Double              // -150…150, default 0 (positive = magenta)
+    /// Absolute white balance in Kelvin, fed to `CIRAWFilter.neutralTemperature` — **not** a gain on
+    /// S1 (派单 006 B). `nil` = as shot: the decoder is left alone and the inspector shows the number
+    /// the file reports (`DecoderCapabilities.asShotTemperature`).
+    ///
+    /// It used to be a nominal 6500 with a Planckian S1 gain. That was a lie in two ways: the number
+    /// in the panel was not the file's, and the pixels moved through a fit rather than through the
+    /// decoder. The literal `6500` is **not** a sentinel any more, and `nil` is distinct from it.
+    public var temperature: Double?      // 2000…12000, default nil (as shot)
+    /// Absolute tint (−150…150, positive = magenta), same rules as `temperature`.
+    public var tint: Double?             // default nil (as shot)
     /// Soft shoulder for values above ~0.8; 0 = untouched, 1 = asymptote at 1.0.
     public var highlightRecovery: Double // 0…1, default 0
 
@@ -341,7 +361,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     public init(exposure: Double = 0, contrast: Double = 0, highlights: Double = 0,
                 shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
-                temperature: Double = 6500, tint: Double = 0, highlightRecovery: Double = 0) {
+                temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0) {
         self.exposure = exposure
         self.contrast = contrast
         self.highlights = highlights
@@ -368,27 +388,64 @@ public struct LightGroup: Sendable, Equatable, Codable {
         self = v
     }
 
+    /// Read a pre-006 document's `6500 K / tint 0` back into the as-shot state it meant.
+    ///
+    /// Called by `EditModel.init(from:)`, which is the only place that knows the **document's**
+    /// `schemaVersion` — a `LightGroup` container has no version of its own, so the migration cannot
+    /// live in `init(from:)` above (a first attempt did, and silently never fired).
+    ///
+    /// Why it matters: `6500` used to mean "no change", where the pixels came from Apple's as-shot
+    /// decode. Reading it as an *explicit* 6500 K would re-decode the file at 6500 K and change every
+    /// pixel of every pre-006 document — measured: assigning any value, including the one the filter
+    /// reports, is not a no-op.
+    mutating func migratePreSchema3WhiteBalance() {
+        if temperature == 6500 { temperature = nil }
+        if tint == 0 { tint = nil }
+    }
+
+    /// Written without the as-shot fields: `nil` is the default, and a document that says
+    /// `"temperature": null` would be indistinguishable from a missing key anyway (D9's rule).
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(exposure, forKey: AnyCodingKey("exposure"))
+        try c.encode(contrast, forKey: AnyCodingKey("contrast"))
+        try c.encode(highlights, forKey: AnyCodingKey("highlights"))
+        try c.encode(shadows, forKey: AnyCodingKey("shadows"))
+        try c.encode(whites, forKey: AnyCodingKey("whites"))
+        try c.encode(blacks, forKey: AnyCodingKey("blacks"))
+        try c.encodeIfPresent(temperature, forKey: AnyCodingKey("temperature"))
+        try c.encodeIfPresent(tint, forKey: AnyCodingKey("tint"))
+        try c.encode(highlightRecovery, forKey: AnyCodingKey("highlightRecovery"))
+    }
+
     public var isIdentity: Bool { self == LightGroup.identity }
 
     /// S1 exposure gain. 1.0 at 0 EV.
     public var exposureGain: Float { Float(pow(2.0, exposure)) }
 
+    /// The decoder-side white balance this document asks for. `.asShot` when both are `nil`.
+    public var whiteBalance: WhiteBalance {
+        WhiteBalance(temperature: temperature, tint: tint)
+    }
+
     /// S1 white-balance gains, normalized so that 6500 K / tint 0 is exactly (1, 1, 1).
     ///
-    /// M1 uses a Planckian-locus approximation (Tanner Helland's fit, 1000–15000 K) divided by the
-    /// same fit evaluated at 6500 K. It is monotone, deterministic and good enough to prove the
-    /// gain path end-to-end; a Bradford chromatic adaptation from the file's as-shot WB replaces it
-    /// when the decoder path grows real WB metadata (M2).
+    /// **The global white balance no longer uses this.** Since 派单 006 the document's Kelvin/tint go
+    /// to `CIRAWFilter` and `RenderGraph`'s S1 pass runs with (1, 1, 1), because the decode has
+    /// already balanced the pixels; multiplying again would apply the correction twice. What is left
+    /// is the local-adjustment approximation (`MaskAdjustment.gain`), where a ±100 WB slider is a
+    /// cheap scene-linear nudge on a masked region rather than a second development. As shot
+    /// (`nil`) is the neutral of *that* fit, i.e. (1, 1, 1).
     public var whiteBalanceGains: (r: Float, g: Float, b: Float) {
         let reference = Self.planckianRGB(6500)
-        let current = Self.planckianRGB(min(max(temperature, 2000), 12000))
+        let current = Self.planckianRGB(min(max(temperature ?? 6500, 2000), 12000))
         var r = reference.0 / max(current.0, 1e-4)
         var g = reference.1 / max(current.1, 1e-4)
         var b = reference.2 / max(current.2, 1e-4)
         let norm = max(g, 1e-4)
         r /= norm; g /= norm; b /= norm
         // Tint: positive = magenta, i.e. pull green down and hand the difference to R and B.
-        let tintScale = 1 + min(max(tint, -150), 150) / 150 * 0.5
+        let tintScale = 1 + min(max(tint ?? 0, -150), 150) / 150 * 0.5
         g /= tintScale
         let comp = tintScale.squareRoot()
         r *= comp; b *= comp

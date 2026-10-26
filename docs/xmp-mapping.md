@@ -66,8 +66,8 @@ LR 的坐标定义（参考自 redlamp 的 crop 说明，仅取语义）：`Crop
 | `shadows` | `crs:Shadows2012` | −100…100 | 1:1 | ≈ |
 | `whites` | `crs:Whites2012` | −100…100 | 1:1 | ≈ |
 | `blacks` | `crs:Blacks2012` | −100…100 | 1:1 | ≈ |
-| `temperature` | `crs:Temperature` | raw 2000…50000 K（滑块非线性）；默认 = as-shot | **坐标系不同**：我们是*相对*开尔文，**6500 = 解码自中性 = 不变**；LR 是*绝对*开尔文，锚在 as-shot 中性并经由相机 profile 矩阵解释。已知 as-shot `N`（M2 起）时 `crs:Temperature = N + (temperature − 6500)`（**锚点平移，不是比例缩放**：两套曲线的零点不同、斜率也不同，比值换算没有物理依据）。M1 无 `N` → 不写 `crs:Temperature`，只写 `photons:temperature`，并在导出报告里标注"WB 在 LR 端保持 as-shot" | ⚠ |
-| `tint` | `crs:Tint` | −150…150，默认 0（**正 = 洋红**，与我们一致） | 同温度：绝对/相对锚点差异。已知 as-shot 时 `= tint_asShot + tint`；否则不写 | ⚠ |
+| `temperature` | `crs:Temperature` | raw 2000…50000 K（滑块非线性）；默认 = as-shot | **坐标系相同**（派单 006 起）：我们是*绝对*开尔文，`nil` = as shot，显式值直接喂 `CIRAWFilter.neutralTemperature`；LR 也是绝对开尔文、锚在同一个 as-shot 中性（差别只在相机 profile 矩阵）。所以映射就是 `crs:Temperature = temperature ?? N`——旧规则 `N + (temperature − 6500)` 的 `− 6500` 只是用来抵消我们从前那个名义值，现已随模型一起消失。无 `N` 且 as shot → 不写 `crs:Temperature`；显式值则照写 `= temperature` | ≈ |
+| `tint` | `crs:Tint` | −150…150，默认 as-shot（**正 = 洋红**，与我们一致） | 同温度：`crs:Tint = tint ?? tint_asShot`（解码器 tint 坐标里 as-shot 本身约 +20，不是 0）。无 `N` 且 as shot 时不写 | ≈ |
 | `highlightRecovery` | — | 无对应键 | 我们是 0.8 以上的软肩（S1、线性域）；LR 的 `Highlights2012` 是 tone 段的局部压缩，语义不同。只写 `photons:highlightRecovery` | ✕ |
 
 ### 1.4 curve

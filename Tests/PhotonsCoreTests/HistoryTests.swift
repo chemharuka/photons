@@ -281,8 +281,16 @@ final class HistoryTests: XCTestCase {
 
         // 1e-9 is double noise from a JSON round-trip, not an edit
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.exposure = 1e-9 }), [])
-        XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.temperature = 6500 + 1e-9 }), [])
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.color.vibrance = -1e-9 }), [])
+        // White balance is measured between two *pinned* values, because as shot (`nil`) is a state
+        // rather than a number (派单 006): an explicit value must never be "the same as" `nil`, or a
+        // document that stops following the file would produce no history entry at all.
+        let wbBase = edit { $0.light.temperature = 5200; $0.light.tint = 8 }
+        XCTAssertEqual(EditHistory.dirtyGroups(from: wbBase,
+                                               to: edit { $0.light.temperature = 5200 + 1e-9; $0.light.tint = 8 }), [])
+        XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: wbBase), [.light],
+                       "as shot → explicit is a different document, however small the numbers are")
+        XCTAssertEqual(EditHistory.dirtyGroups(from: wbBase, to: base), [.light])
         let curveBase = edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)] }
         XCTAssertEqual(EditHistory.dirtyGroups(
             from: curveBase,
@@ -291,7 +299,8 @@ final class HistoryTests: XCTestCase {
 
         // 1e-3 is a real change (one slider quantum at a hundredth of a stop)
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.exposure = 1e-3 }), [.light])
-        XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.temperature = 6500 + 1e-3 }), [.light])
+        XCTAssertEqual(EditHistory.dirtyGroups(from: wbBase,
+                                               to: edit { $0.light.temperature = 5200 + 1e-3; $0.light.tint = 8 }), [.light])
         XCTAssertEqual(EditHistory.dirtyGroups(
             from: curveBase,
             to: edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.5 + 1e-3), CurvePoint(1, 1)] }

@@ -27,7 +27,17 @@ public struct DecoderCapabilities: Sendable, Equatable {
     public let supportsDetail: Bool
     public let supportsMoireReduction: Bool
 
-    public init(requestedVersion: String?, effectiveVersion: String, defaultVersion: String) {
+    /// The **as-shot white balance** the decoder used for these pixels (`nil` = the filter reported
+    /// nothing usable). It lives here because this is the value that travels from a development to
+    /// the inspector (`DecodeRung.capabilities`): the default a document's `nil` temperature means is
+    /// a fact about the decode, not a model constant (派单 006 A). It does not belong to the version
+    /// facts above, but a second struct that has to be plumbed through the ladder for one pair of
+    /// numbers would be worse.
+    public let asShotTemperature: Double?
+    public let asShotTint: Double?
+
+    public init(requestedVersion: String?, effectiveVersion: String, defaultVersion: String,
+                asShotTemperature: Double? = nil, asShotTint: Double? = nil) {
         self.requestedVersion = requestedVersion
         self.effectiveVersion = effectiveVersion
         self.defaultVersion = defaultVersion
@@ -35,6 +45,13 @@ public struct DecoderCapabilities: Sendable, Equatable {
         self.supportsChromaNoiseReduction = sliders.chromaNR
         self.supportsDetail = sliders.detail
         self.supportsMoireReduction = sliders.moire
+        self.asShotTemperature = asShotTemperature
+        self.asShotTint = asShotTint
+    }
+
+    /// The as-shot pair as a `WhiteBalance`, for callers that only want the number.
+    public var asShotWhiteBalance: WhiteBalance {
+        WhiteBalance(temperature: asShotTemperature, tint: asShotTint)
     }
 
     /// Per-version slider availability. Only v9 is known to drop controls; everything below keeps

@@ -27,7 +27,7 @@ let valueFlags: Set<String> = [
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
-    "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom",
+    "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -49,12 +49,31 @@ func parseArgs(_ argv: [String]) -> Args {
     return a
 }
 
+/// `--wb 3500/+30`, `--wb 3500`, `--wb as-shot` (派单 006). Unparseable input is a hard error: a
+/// silently ignored white balance would make `hash`/`decode` report the as-shot pixels under a
+/// "3500 K" label, which is the exact class of lie this change removes.
+func whiteBalanceOption(_ a: Args) -> WhiteBalance {
+    guard let raw = a.value("--wb") else { return .asShot }
+    let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+    if s == "as-shot" || s == "asshot" || s == "as shot" || s == "shot" { return .asShot }
+    let parts = s.split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count <= 2 else { die("bad --wb '\(raw)' (want K/tint, K, or as-shot)") }
+    guard let k = Double(parts[0]) else { die("bad --wb temperature '\(parts[0])'") }
+    var tint: Double?
+    if parts.count == 2 {
+        guard let t = Double(parts[1]) else { die("bad --wb tint '\(parts[1])'") }
+        tint = t
+    }
+    return WhiteBalance(temperature: k, tint: tint).quantized()
+}
+
 func decodeOptions(_ a: Args) -> DecodeOptions {
     var o = DecodeOptions()
     o.decoderVersion = a.value("--version")
     if let v = a.value("--ev") { o.exposureEV = Float(v) ?? 0 }
     if let v = a.value("--scale") { o.scale = Float(v) ?? 1 }
     o.draft = a.has("--draft")
+    o.whiteBalance = whiteBalanceOption(a)
     return o
 }
 
@@ -77,14 +96,18 @@ func cmdInfo(_ a: Args) {
     note("nativeSize      \(probe.nativeWidth) x \(probe.nativeHeight)")
     note("defaultVersion  \(probe.defaultVersion)")
     note("versions        \(probe.supportedVersions.joined(separator: ", "))")
+    // 派单 006 A: the file's own white balance — what the inspector shows while the document is
+    // as shot, instead of the nominal 6500 K the panel used to print.
+    note("asShotWB        \(WhiteBalance(temperature: probe.asShotTemperature, tint: probe.asShotTint).summary)")
     note("fileSHA256      \(try! FileDigest.sha256(of: url))")
 }
 
 func cmdHash(_ a: Args) throws {
     let url = requireRaw(a)
-    let img = try makeDecoder().decode(url, options: decodeOptions(a))
+    let opts = decodeOptions(a)
+    let img = try makeDecoder().decode(url, options: opts)
     // Machine-readable single line: scripts diff this.
-    print("\(img.sha256())  \(img.width)x\(img.height) v\(img.decoderVersion) ev\(a.value("--ev") ?? "0") scale\(a.value("--scale") ?? "1")\(a.has("--draft") ? " draft" : "")")
+    print("\(img.sha256())  \(img.width)x\(img.height) v\(img.decoderVersion) ev\(a.value("--ev") ?? "0") scale\(a.value("--scale") ?? "1")\(a.has("--draft") ? " draft" : "") wb(\(opts.whiteBalance.summary))")
     let st = img.statistics()
     err(String(format: "  max=%.4f mean=%.5f over1.0=%.4f%% bytes=%d",
                st.maxChannel, st.meanLuma, st.overUnityRatio * 100, img.byteCount))
@@ -103,7 +126,8 @@ func cmdDecode(_ a: Args) throws {
     let version = opts.decoderVersion ?? probe.defaultVersion
     let key = DecodeCacheKey(fileSHA256: fileHash, decoderVersion: version,
                              exposureEV: opts.exposureEV, scale: opts.scale, draft: opts.draft,
-                             colorSpace: opts.colorSpace.rawValue)
+                             colorSpace: opts.colorSpace.rawValue,
+                             whiteBalance: opts.whiteBalance)
     if let hit = try store.load(key) {
         note("cache hit  \(store.binURL(for: key).lastPathComponent)")
         note("sha256     \(hit.sha256())")
@@ -290,10 +314,14 @@ func percentile(_ xs: [Double], _ p: Double) -> Double {
 }
 
 func decodeForRender(_ a: Args, url: URL, decodeScale: Float, fileHash: String,
-                     version: String, quiet: Bool = false) throws -> (LinearImage, String) {
+                     version: String, whiteBalance: WhiteBalance = .asShot,
+                     quiet: Bool = false) throws -> (LinearImage, String) {
     let key = DecodeCacheKey(fileSHA256: fileHash, decoderVersion: version, exposureEV: 0,
-                             scale: decodeScale, draft: false, colorSpace: "extendedLinearSRGB")
+                             scale: decodeScale, draft: false, colorSpace: "extendedLinearSRGB",
+                             whiteBalance: whiteBalance)
     let decoder = makeDecoder()
+    let opts = DecodeOptions(decoderVersion: a.value("--version"), scale: decodeScale,
+                             whiteBalance: whiteBalance)
 
     if let dirPath = a.value("--cache-dir") {
         let store = try LinearImageStore(directory: URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath))
@@ -302,7 +330,7 @@ func decodeForRender(_ a: Args, url: URL, decodeScale: Float, fileHash: String,
             return (hit, key.digest)
         }
         let t0 = CFAbsoluteTimeGetCurrent()
-        let img = try decoder.decode(url, options: DecodeOptions(decoderVersion: a.value("--version"), scale: decodeScale))
+        let img = try decoder.decode(url, options: opts)
         try store.save(img, key: key)
         if !quiet {
             note(String(format: "decode     %.2f s (scale %.3f, %d×%d, stored)", CFAbsoluteTimeGetCurrent() - t0,
@@ -312,12 +340,19 @@ func decodeForRender(_ a: Args, url: URL, decodeScale: Float, fileHash: String,
     }
 
     let t0 = CFAbsoluteTimeGetCurrent()
-    let img = try decoder.decode(url, options: DecodeOptions(decoderVersion: a.value("--version"), scale: decodeScale))
+    let img = try decoder.decode(url, options: opts)
     if !quiet {
         note(String(format: "decode     %.2f s (scale %.3f, %d×%d)", CFAbsoluteTimeGetCurrent() - t0,
                     decodeScale, img.width, img.height))
     }
     return (img, key.digest)
+}
+
+/// The white balance a render develops with: `--wb` when given, else the first document's
+/// (`nil` = as shot), so `--edit edit-3500.json` really is a 3500 K development (派单 006).
+func renderWhiteBalance(_ a: Args, edits: [EditModel]) -> WhiteBalance {
+    if a.value("--wb") != nil { return whiteBalanceOption(a) }
+    return edits.first?.light.whiteBalance ?? .asShot
 }
 
 func cmdRender(_ a: Args) throws {
@@ -333,9 +368,18 @@ func cmdRender(_ a: Args) throws {
     let version = a.value("--version") ?? probe.defaultVersion
     let fileHash = try FileDigest.sha256(of: url)
     let decodeScale = a.value("--decode-scale").flatMap(Float.init) ?? decodeScaleLadder(scale)
+    // 派单 006: the document's white balance *is* the decode, so the render develops the RAW with
+    // it. `--wb` overrides for a one-off measurement; without an edit the file's as-shot applies.
+    let wb = renderWhiteBalance(a, edits: edits)
+    if a.value("--wb") == nil, edits.count > 1,
+       edits.contains(where: { $0.light.whiteBalance != wb }) {
+        err("warning: one decode serves every --edit; white balance taken from '\(names[0])' (\(wb.summary))")
+    }
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
-                                                  fileHash: fileHash, version: version)
+                                                  fileHash: fileHash, version: version,
+                                                  whiteBalance: wb)
     note("source     \(url.lastPathComponent) v\(decoded.decoderVersion) → render v\(version)")
+    note("wb         \(wb.summary)\(a.value("--wb") == nil ? " (from the document)" : " (--wb)")")
 
     // `--scale` is relative to the *full-resolution* crop; the render works on the decoded buffer,
     // which is already at `decodeScale`, so the pass scale is the remainder.
@@ -443,7 +487,8 @@ func cmdBench(_ a: Args) throws {
                        Double(viewport.height) / Double(probe.nativeHeight)) * scale
     let decodeScale = a.value("--decode-scale").flatMap(Float.init) ?? decodeScaleLadder(fitScale)
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
-                                                  fileHash: fileHash, version: version)
+                                                  fileHash: fileHash, version: version,
+                                                  whiteBalance: renderWhiteBalance(a, edits: edits))
 
     let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
     let opts = RenderOptions(canvas: viewport, scale: 1, display: display,
