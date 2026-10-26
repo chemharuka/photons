@@ -1637,9 +1637,9 @@ public final class UISmokeRunner {
     ///
     ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series over **both**
     ///      segments — 256 code bins plus the 256-bin exponential tail (`Histogram.maxStops` ×
-    ///      `hdrBinsPerStop` = 6 × 16);
+    ///      `hdrBinsPerStop` = 4 × 64);
     ///   2. every channel's bins sum to the sample count (the measurement's own invariant), and the
-    ///      axis is the laid-out one: 30 pt per stop, 6 stops, SDR + tail = the card's width;
+    ///      axis is the laid-out one: 30 pt per stop, 4 stops, SDR + tail = the card's width;
     ///   3. the display-ceiling tick sits at `log2(headroom)` stops into the tail — the measurement's
     ///      own headroom, so the plot and its ceiling describe the same screen;
     ///   4. the sample is the **picture**, not the frame: `sampleCount` is the whole-picture thumbnail
@@ -1693,7 +1693,7 @@ public final class UISmokeRunner {
         let sdrWidth = axis?.sdrWidth ?? -1
         let hdrWidth = axis?.hdrWidth ?? -1
         check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
-              axis != nil && axis?.stopWidth == 30 && axis?.stops == 6
+              axis != nil && axis?.stopWidth == 30 && axis?.stops == Histogram.maxStops
               && hdrWidth == 120
               && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
 
@@ -1766,6 +1766,93 @@ public final class UISmokeRunner {
               percentContrast >= HistogramCardReadability.minimumRatio
               && card.channelRowWidth > 0
               && card.channelRowWidth <= cardBounds.width)
+
+        // 010 — the deleted footnote's line is the pointer's reading now. Four samples, each against
+        // the *measurement's* own bins (not against the formatter it is testing), plus the two facts
+        // the owner asked for by name: the font is the clipping numbers' font, and leaving clears it.
+        if let hoverAxis = axis ?? card.lastAxis {
+            let codeBin = min(128, histogram.binCount - 1)
+            let codePoint = NSPoint(x: hoverAxis.x(sdrBin: codeBin, of: histogram.binCount),
+                                    y: hoverAxis.plot.midY)
+            var movedByEvent = false
+            if let move = NSEvent.mouseEvent(with: .mouseMoved,
+                                             location: card.convert(codePoint, to: nil),
+                                             modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 0, pressure: 0) {
+                card.mouseMoved(with: move)
+                movedByEvent = true
+            }
+            card.needsDisplay = true
+            card.display()
+            let codeCounts = "R \(histogram.red.bins[codeBin]) · G \(histogram.green.bins[codeBin]) · B \(histogram.blue.bins[codeBin])"
+            log("hover readout          码值 bin \(codeBin) → “\(card.hoverValueText)” | “\(card.hoverCountText)” · 事件=\(movedByEvent) · rect \(card.hoverReadoutRect)")
+            check("悬停读数（码值区）：真实 mouseMoved 事件 → 左 “\(card.hoverValueText)” == \(codeBin)，右 “\(card.hoverCountText)” == \(codeCounts)（Core 的该箱计数）",
+                  movedByEvent
+                  && card.hoverValueText == "\(codeBin)"
+                  && card.hoverCountText == codeCounts)
+
+            // 尾段 +1 / +2 档：64 箱/stop，所以 +1 档是 bin 64、+2 档是 bin 128。
+            let tailBin1 = min(Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
+            card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 1),
+                                                y: hoverAxis.plot.midY))
+            card.display()
+            let tail1Text = card.hoverValueText
+            let tail1Counts = card.hoverCountText
+            let tail1Expected = "R \(histogram.red.hdrBins[tailBin1]) · G \(histogram.green.hdrBins[tailBin1]) · B \(histogram.blue.hdrBins[tailBin1])"
+            check("悬停读数（尾段 +1 档 = 2×）：“\(tail1Text)” == “+1.00 档 (2.0×)”，右 “\(tail1Counts)” == \(tail1Expected)（bin \(tailBin1)）",
+                  card.hoverReading?.segment == .tail && card.hoverReading?.bin == tailBin1
+                  && tail1Text == "+1.00 档 (2.0×)" && tail1Counts == tail1Expected)
+
+            let tailBin2 = min(2 * Histogram.hdrBinsPerStop, histogram.hdrBinCount - 1)
+            card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: 2),
+                                                y: hoverAxis.plot.midY))
+            card.display()
+            check("悬停读数（尾段 +2 档 = 4×）：“\(card.hoverValueText)” == “+2.00 档 (4.0×)”，右 “\(card.hoverCountText)”（bin \(tailBin2)）",
+                  card.hoverReading?.bin == tailBin2
+                  && card.hoverValueText == "+2.00 档 (4.0×)"
+                  && card.hoverCountText == "R \(histogram.red.hdrBins[tailBin2]) · G \(histogram.green.hdrBins[tailBin2]) · B \(histogram.blue.hdrBins[tailBin2])")
+
+            // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
+            card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.5,
+                                                y: hoverAxis.plot.midY))
+            card.display()
+            let lastBin = histogram.hdrBinCount - 1
+            let lastCounts = "R \(histogram.red.hdrBins[lastBin]) · G \(histogram.green.hdrBins[lastBin]) · B \(histogram.blue.hdrBins[lastBin])"
+            check("悬停读数（越过尾段右端）：clamp 到最后一箱 bin \(lastBin) 而不是留空，“\(card.hoverValueText)” | “\(card.hoverCountText)” == \(lastCounts)",
+                  card.hoverReading?.bin == lastBin
+                  && card.hoverValueText == "+3.98 档 (15.8×)"
+                  && card.hoverCountText == lastCounts)
+
+            // 鼠标离开 → 清空，且不再绘制任何读数。
+            let paintsBefore = card.hoverPaintCount
+            card.clearHoverReadout()
+            card.needsDisplay = true
+            card.display()
+            check("移出绘图区 → 读数清空：左 \(card.hoverValueText.count) 字、右 \(card.hoverCountText.count) 字、rect 空 \(card.hoverReadoutRect.isEmpty)，读数绘制次数 \(paintsBefore) → \(card.hoverPaintCount)（不增）",
+                  paintsBefore >= 3
+                  && card.hoverReading == nil
+                  && card.hoverValueText.isEmpty && card.hoverCountText.isEmpty
+                  && card.hoverReadoutRect.isEmpty
+                  && card.hoverPaintCount == paintsBefore)
+
+            // 字号是同一把尺子，颜色可测。
+            let readoutFont = HistogramCardView.hoverNumberFont
+            let clipFont = HistogramCardView.clipNumberFont
+            for _ in 0..<3 { card.updateTrackingAreas() }
+            let hoverContrast = card.hoverContrast
+            log("hover readout style     font \(readoutFont.fontName) \(String(format: "%.1f", readoutFont.pointSize))pt · 削顶数字 \(clipFont.fontName) \(String(format: "%.1f", clipFont.pointSize))pt · WCAG \(String(format: "%.2f", hoverContrast)):1（\(appearanceName)）· tracking areas \(card.trackingAreas.count)")
+            check("读数与过白/削顶同字号：\(readoutFont.fontName) \(String(format: "%.1f", readoutFont.pointSize)) pt == 削顶数字（同一 NSFont 常量，9.5 semibold，不是脚注的 8 pt）；对比度 \(String(format: "%.2f", hoverContrast)):1 ≥ \(HistogramCardReadability.minimumRatio):1；updateTrackingAreas 调 4 次仍只有 \(card.trackingAreas.count) 个 tracking area，且只盖绘图区 \(String(format: "%.0f", card.trackingAreas.first?.rect.height ?? -1)) pt 高",
+                  readoutFont == clipFont
+                  && readoutFont.pointSize == 9.5
+                  && readoutFont.pointSize > HistogramCardReadability.percentFont.pointSize
+                  && hoverContrast >= HistogramCardReadability.minimumRatio
+                  && card.trackingAreas.count == 1
+                  && (card.trackingAreas.first?.rect.height ?? -1) == 58)
+        } else {
+            fail("直方图卡片没有布局出轴（lastAxis 为 nil），悬停读数无从断言")
+        }
 
         // The warning: a real click on the number, then a frame that carries the clipped grid.
         let documentBefore = documentHash(session.edit)
