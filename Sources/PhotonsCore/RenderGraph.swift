@@ -66,23 +66,22 @@ public struct RenderOptions: Sendable {
     /// both — so this is a cost knob, never a quality knob.
     public var maskTiling: MaskTiling
 
-    /// Measure a histogram of the display-encoded output (see `Histogram`).
+    /// Measure a histogram of the picture, before the display transform (see `Histogram`).
     ///
-    /// Off by default and free when off: no texture, no dispatch, no extra key, and the pixels are
-    /// bit-identical either way (`HistogramTests.testPixelsAreIdenticalWithAndWithout`). When on, the
-    /// frame's own command buffer gains one dispatch that reduces the result to a grid of at most
-    /// 1024 pixels on the long edge, and the one readback the render already does for `wantsPixels`
-    /// is joined by one readback of that grid — 4.6 MB at 4.10 Mpx instead of 32 MB
-    /// (`Histogram.maxLongEdge` carries the argument and the error bound).
+    /// Off by default and free when off: no readback, no extra texture, no extra key, and the pixels
+    /// are bit-identical either way. When on, the frame's own command buffer gains nothing — the
+    /// measurement reads the texture S3 wrote *before* S4 encodes it, so a frame render's measurement
+    /// describes the frame it drew and costs one readback of that frame
+    /// (`testPixelsAndKeysAreIdenticalWithAndWithout`).
+    ///
+    /// **The card does not set this.** `measureHistogram(_:bins:headroom:)` is the shipped entry: it
+    /// renders the whole picture at thumbnail scale and measures that, which is what makes the numbers
+    /// independent of the camera and the panel. This flag stays because the measurement has to happen
+    /// inside a render (the pre-S4 texture is never handed out), and the CLI and the tests want the
+    /// measurement of a render they choose.
     public var collectHistogram: Bool
     /// Bins per channel for `collectHistogram`; 256 is an 8-bit output's own resolution.
     public var histogramBins: Int
-    /// Measure only this part of the frame, in **canvas pixels** (`nil` = all of it).
-    ///
-    /// Canvas pixels, not content pixels: the histogram's job is to answer "what does the file/panel
-    /// get", and the file/panel is the canvas. A ROI that leaves the canvas is clamped into it; a ROI
-    /// with no area produces an empty measurement rather than a guess.
-    public var histogramROI: ImageRect?
 
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
@@ -92,8 +91,7 @@ public struct RenderOptions: Sendable {
                 wantsPixels: Bool = true,
                 maskTiling: MaskTiling = .auto,
                 collectHistogram: Bool = false,
-                histogramBins: Int = 256,
-                histogramROI: ImageRect? = nil) {
+                histogramBins: Int = 256) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -103,7 +101,6 @@ public struct RenderOptions: Sendable {
         self.maskTiling = maskTiling
         self.collectHistogram = collectHistogram
         self.histogramBins = histogramBins
-        self.histogramROI = histogramROI
     }
 }
 
@@ -538,11 +535,6 @@ public final class RenderGraph {
     private var atlasPool: (key: String, texture: MTLTexture)?
     private var maskTables: [String: MaskTable] = [:]
 
-    /// 005f: the histogram's downsample pipeline, compiled on the first frame that asks for a
-    /// histogram (`makeLibrary(source:)` compiles once per process, so it cannot be a per-frame cost,
-    /// and a session that never draws a histogram never pays for it).
-    private var histogramPipeline: MTLComputePipelineState?
-
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
                 semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider()) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
@@ -703,6 +695,8 @@ public final class RenderGraph {
         var current = sourceTexture
         var transient: [MTLTexture] = []
         var finish: MTLTexture?
+        /// Set when `collectHistogram` asks: the texture S4 read, i.e. the scene-linear picture.
+        var histogramSource: MTLTexture?
 
         for stage in plan.stages {
             // The environment suffix has to reach **every** stage the atlas feeds, not just the two
@@ -806,6 +800,11 @@ public final class RenderGraph {
                 continue
             }
 
+            // The histogram reads what S4 is about to read: scene-linear RGB after S2/S3, before the
+            // primaries matrix, the transfer function and the headroom clamp. Captured here rather
+            // than looked up afterwards because S4's output is the only texture a caller ever sees.
+            if stage == .display, options.collectHistogram { histogramSource = current }
+
             let out = try pool.obtain(plan.canvas)
             try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
                        options: options, table: table, report: &report)
@@ -847,83 +846,24 @@ public final class RenderGraph {
             report?.showMaskSlice = slice
         }
 
-        // MARK: the histogram's downsample (005f)
+        // MARK: the histogram's sample (005, 2026-10-26: the picture, before the display transform)
         //
-        // One dispatch appended to the frame's *own* command buffer, so the sample costs no second
-        // submission and no second wait, and the readback below is the only CPU/GPU transfer this
-        // measurement adds. It reads `finish` — the same display-encoded texture the caller gets — so
-        // the numbers describe exactly the pixels the export or the screen would carry, `showMask`
-        // overlay included.
+        // The measurement reads the texture S3 wrote -- `current` on the way into S4 -- and never the
+        // frame S4 produced. That one choice is what makes the plot screen-independent: S4 applies the
+        // primaries matrix, the transfer function and the headroom clamp in a single pass, and all
+        // three are properties of a *panel*. Measuring its input means an SDR screen can still see that
+        // a picture has three stops of highlight above white, and that two panels with different
+        // headroom get the same bins.
         //
-        // Nothing here runs when `collectHistogram` is false: no texture, no pipeline, no dispatch,
-        // so the frame is byte-for-byte and cycle-for-cycle the pre-005f frame.
-        // Arithmetic, not a knob: a window cannot be more than its frame, and it may now be the
-        // *floor* as well. Three ideas, in order:
+        // Nothing here runs when `collectHistogram` is false: no readback, no texture, so the frame is
+        // byte-for-byte and cycle-for-cycle the pre-005f frame. When it does run it costs one readback
+        // of the frame's own pre-S4 texture; the *size* of that texture is the caller's business, and
+        // `measureHistogram` makes it a thumbnail.
         //
-        //   1. **A window's default ROI is the picture, not the letterbox.** `plan.canvas` is the
-        //      output surface (the viewport, when the loupe renders) and a canvas whose aspect differs
-        //      from the picture's has matte bars: measuring "the whole canvas" counted those bars as a
-        //      spike in bin 0 — a distribution of the *surface*, not of the photograph. For a **windowed**
-        //      render the picture's rect in canvas pixels is `plan.origin` + `plan.content`, and that is
-        //      what a 1:1 frame measures.
-        //      A *full-frame* render keeps the whole canvas: there the caller asked for a canvas and
-        //      sized it (`photonsctl`, export, and `fit`, where canvas == content — the letterbox is
-        //      only possible when the caller padded a canvas, and that padding is the caller's
-        //      measurement). It is also the contract `--ui-smoke` asserts by recounting clipping over
-        //      the whole presented texture: "at 720 × 420 the sample grid *is* the frame".
-        //   2. **The sample is the canvas, never the frame.** The downsample reads `finish`, which is
-        //      at most one canvas: a 1:1 window is measured at the window's own pixels from the
-        //      window's own texture, so a pan's measurement is a function of what is on screen.
-        //   3. **A window's histogram is the window's** — the ROI is in canvas coordinates, and the
-        //      canvas *is* the window when the loupe asked for one, so the same picture measured at
-        //      fit and at 1:1 gives the same numbers over the same region (HistogramTests asserts
-        //      this bin for bin).
-        //
-        // What is *not* here is a per-frame budget trick: the CPU binning of the reduced grid is the
-        // expensive part (~3.4 ms release, ~94 ms in a debug build for a 0.65 Mpx grid), and no
-        // choice of ROI makes it free. `LoupeController` owns the cadence — it skips the measurement
-        // while the camera is moving and measures once the hand stops — which is where a frame
-        // budget belongs; this stage simply does what it is asked, once per frame that asks.
-        var histogramTarget: MTLTexture?
-        var histogramRequest: (roi: ImageRect, bins: Int)?
-        var histogramPayload: Histogram?
-        if options.collectHistogram, let shown = finish {
-            let bins = min(max(options.histogramBins, 2), 1 << 16)
-            if let requested = options.histogramROI, requested.isEmpty {
-                // An empty selection is a measurement of nothing, not a measurement of pixel (0,0).
-                histogramPayload = Histogram.empty(bins: bins, canvas: plan.canvas, roi: requested,
-                                                   primaries: options.display.primaries,
-                                                   headroom: options.display.headroom)
-            } else {
-                // The default region: the **picture inside the canvas**, never the canvas itself.
-                //
-                // A canvas that is not the picture's aspect has matte bars — `fit` letterboxes into
-                // the viewport exactly as a 1:1 window does (`content < canvas`) — and a histogram of
-                // the matte is a histogram of the *output surface*: bin 0 collects every black bar, so
-                // 削底 reads 30 % on a photo with no blacks at all. The ROI is `plan.origin +
-                // plan.content` in both cases, which is the whole canvas exactly when there is no
-                // letterboxing (every pre-005f number is therefore unchanged).
-                //
-                // A windowed frame still measures the window (the pixels that exist); a photo-wide
-                // measurement at 1:1 would be a different render, not a different ROI.
-                let picture = ImageRect(x: Int(plan.origin.x.rounded()),
-                                        y: Int(plan.origin.y.rounded()),
-                                        width: plan.content.width, height: plan.content.height)
-                let roi = (options.histogramROI?.clamped(in: plan.canvas))
-                    ?? picture.clamped(in: plan.canvas)
-                if histogramPipeline == nil {
-                    // Once per process, not once per graph: the runtime compile is ~5 ms and a graph
-                    // is rebuilt for every rung and every photo (`HistogramGather.pipeline`).
-                    histogramPipeline = try HistogramGather.pipeline(device)
-                }
-                guard let pipeline = histogramPipeline else { throw RenderError.commandBufferFailed }
-                let sample = try pool.obtain(Histogram.sampleSize(for: roi))
-                try HistogramGather.encode(cb, source: shown, roi: roi, target: sample,
-                                           pipeline: pipeline)
-                histogramTarget = sample
-                histogramRequest = (roi, bins)
-            }
-        }
+        // The region is the picture inside the canvas, never the canvas: a canvas whose aspect differs
+        // from the picture's has matte bars, and a histogram of the matte is a histogram of the output
+        // *surface* -- bin 0 collects every black bar, so 削底 reads 30 % on a photo with no blacks at
+        // all. `plan.origin + plan.content` is the whole canvas exactly when there is no letterboxing.
 
         let t0 = CFAbsoluteTimeGetCurrent()
         cb.commit()
@@ -937,18 +877,25 @@ public final class RenderGraph {
             : wall
         trace.gpuMilliseconds = gpu
 
+        // The measurement's one readback, of the pre-S4 texture — read *before* the transients go back
+        // to the pool, so what is counted is the texture this frame wrote and not whatever the pool
+        // hands out next. The CPU then counts its pixels: at the thumbnail scale `measureHistogram`
+        // asks for, that is ~0.58 Mpx, not 4.10 M — let alone the 60 M of a full export.
+        var histogramPayload: Histogram?
+        if let source = histogramSource {
+            let bins = min(max(options.histogramBins, 2), 1 << 16)
+            let picture = ImageRect(x: Int(plan.origin.x.rounded()),
+                                    y: Int(plan.origin.y.rounded()),
+                                    width: plan.content.width, height: plan.content.height)
+                .clamped(in: plan.canvas)
+            let sample = readSample(source)
+            histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
+                                                 headroom: options.display.headroom)
+                .relabelled(canvas: plan.canvas, roi: picture)
+        }
+
         for t in transient { pool.recycle(t) }
 
-        // The measurement's single readback: the reduced grid, never the frame. 1024 × 1024 half
-        // float is 8 MB worst case against 32 MB for a 4.10 Mpx rgba16Float frame, and the CPU then
-        // bins ~0.3–1 Mpx instead of 4.10 M (let alone a 60 MP export).
-        if let target = histogramTarget, let request = histogramRequest {
-            let sample = readSample(target, primaries: options.display.primaries)
-            histogramPayload = Histogram.compute(sample, bins: request.bins,
-                                                 headroom: options.display.headroom)
-                .relabelled(canvas: plan.canvas, roi: request.roi)
-            pool.recycle(target)
-        }
 
         guard let finalTexture = finish else { throw RenderError.executeFailed("no display output") }
 
@@ -969,6 +916,42 @@ public final class RenderGraph {
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
     public func recycle(output: MTLTexture) {
         pool.recycle(output)
+    }
+
+    /// The histogram of the **whole picture**, independent of the camera and of the panel.
+    ///
+    /// One thumbnail render (long edge ≤ `Histogram.maxLongEdge`) plus one readback of the texture S3
+    /// produced, then the CPU counts ~0.58 Mpx. Nothing about it depends on a viewport, a window, a
+    /// zoom or a display: the same photo and the same edit give the same bins at fit, at 1:1 and at
+    /// 400 %, and a `headroom` change moves `clippedCeiling` alone.
+    ///
+    /// Deliberately its own render rather than a dispatch inside a frame's command buffer: a frame is
+    /// the *window* the camera is showing, and one measurement per picture has to be of the picture.
+    /// The cost is the whole pipeline at 1/7 of the pixels of a 4.10 Mpx frame (0.58 M), once per edit;
+    /// `HistogramTests` prints the milliseconds.
+    ///
+    /// `useCache: false` on purpose — the stage cache is keyed by canvas, so a thumbnail render's
+    /// entries could only evict the frame's own; the pool still recycles every texture.
+    public func measureHistogram(_ edit: EditModel, bins: Int = 256,
+                                 headroom: Double = 1) throws -> Histogram {
+        let cropPixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
+                                             in: sourceSize)
+        let picture = ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height)
+        let options = RenderOptions(
+            scale: Histogram.sampleScale(for: cropPixels),
+            // `headroom` reaches the counters, not the pixels: S4's ceiling cannot move a bin any
+            // more, it only decides what `clippedCeiling` reports for this screen.
+            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: headroom),
+            useCache: false, wantsPixels: false,
+            collectHistogram: true, histogramBins: bins)
+        let result = try render(edit, options: options)
+        if let texture = result.output { recycle(output: texture) }
+        guard let measured = result.histogram else {
+            return Histogram.empty(bins: bins, canvas: cropPixels, roi: picture, headroom: headroom)
+        }
+        // The sample *is* the picture, so the reported region is the picture's own pixel grid: that is
+        // the denominator 「采样 N px」 stands against, and it is the same number at every zoom.
+        return measured.relabelled(canvas: cropPixels, roi: picture)
     }
 
     public func invalidateCache() {
@@ -1014,12 +997,9 @@ public final class RenderGraph {
     /// conversion, so it is one `getBytes` straight into `[Float16]`.
     ///
     /// `readback(_:primaries:bitDepth:)` is the general path and maps 4·w·h `UInt16`s through
-    /// `Float16(bitPattern:)`; the bits are identical either way, but that map is O(pixels) of closure
-    /// work on a buffer that is already in the right format (measured on a 4.10 Mpx frame in a debug
-    /// build: the histogram's frame went from 324 ms to 90 ms, of which the rest is the CPU binning).
-    /// This does not replace the general path, it just refuses to pay for the conversion twice per
-    /// frame.
-    private func readSample(_ texture: MTLTexture, primaries: OutputPrimaries) -> DisplayImage {
+    /// `Float16(bitPattern:)`; the bits are identical either way, but that map is O(n) of closure
+    /// work on a buffer that is already in the right format.
+    private func readSample(_ texture: MTLTexture) -> LinearSample {
         let w = texture.width, h = texture.height
         var rgba = [Float16](repeating: 0, count: w * h * 4)
         rgba.withUnsafeMutableBytes { buf in
@@ -1028,7 +1008,7 @@ public final class RenderGraph {
                              from: MTLRegionMake2D(0, 0, w, h),
                              mipmapLevel: 0)
         }
-        return DisplayImage(width: w, height: h, rgba: rgba, primaries: primaries, bitDepth: 16)
+        return LinearSample(width: w, height: h, rgba: rgba)
     }
 
     // MARK: encoding

@@ -1,10 +1,10 @@
 import AppKit
 import PhotonsCore
 
-// MARK: - the card's x axis: SDR + a 4-stop exponential tail
+// MARK: - the card's x axis: SDR + a 6-stop exponential tail
 //
 // The measurement (`Histogram`) already knows *what* it counted: 256 uniform code bins up to display
-// white, then 32 bins that are 1/8 stop apart in linear light. This file is the other half of that
+// white, then 96 bins that are 1/16 stop apart in linear light. This file is the other half of that
 // contract — where each of them goes on screen — plus the peak normalisation the two segments must
 // share, because a histogram whose two halves are scaled differently is two histograms glued
 // together.
@@ -17,8 +17,11 @@ import PhotonsCore
 //     when the window moves. Only when the card is too narrow to keep 60 pt of SDR does the stop
 //     scale shrink (the alternative — letting SDR collapse to nothing — is worse: the SDR segment is
 //     where 95 % of a photograph lives).
-//   · **4 stops**, i.e. a fixed 120 pt tail, from `Histogram.maxStops` (16× = the largest headroom
-//     the app will ever hand S4, so the tail always covers the screen).
+//   · **6 stops**, i.e. a fixed 180 pt tail, from `Histogram.maxStops`. It used to be 4 stops because
+//     the axis was bounded by the largest headroom the app could hand S4 (16×); the measurement is
+//     pre-clamp now, so the tail is bounded by the picture instead — 64× white — and the card has to
+//     fit 180 pt of it: at the inspector's 244 pt minimum that leaves 64 pt of SDR, 4 pt above the
+//     60 pt floor, so the default scale still holds at the narrowest card the app ships.
 //   · **one peak for both segments.** End spikes are excluded together (the drawn path's first and
 //     last bin), which is what keeps a clipped highlight from flattening the whole plot.
 
@@ -43,7 +46,7 @@ public struct HistogramAxis: Equatable {
 
     public var stops: Int { Histogram.maxStops }
     public var hdrBinCount: Int { Histogram.hdrBinCount }
-    /// Width of the exponential tail (4 × `stopWidth`, 120 pt at the default scale).
+    /// Width of the exponential tail (6 × `stopWidth`, 180 pt at the default scale).
     public var hdrWidth: CGFloat { stopWidth * CGFloat(stops) }
     /// Width of the code segment (everything left of the tail).
     public var sdrWidth: CGFloat { max(plot.width - hdrWidth, 0) }
@@ -57,7 +60,7 @@ public struct HistogramAxis: Equatable {
         return plot.minX + (CGFloat(i) + 0.5) / CGFloat(n) * sdrWidth
     }
 
-    /// Centre of a tail bin (each 1/8 stop, so uniform in x **inside the tail**).
+    /// Centre of a tail bin (each 1/16 stop, so uniform in x **inside the tail**).
     public func x(hdrBin index: Int) -> CGFloat {
         let n = max(hdrBinCount, 1)
         let i = min(max(index, 0), n - 1)

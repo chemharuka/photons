@@ -1,37 +1,39 @@
 import Foundation
-import Metal
+import CryptoKit
 
 // MARK: - what a histogram is here
 //
-// A histogram is a *display-encoded* measurement: the numbers below are the values S4 wrote — the
-// sRGB/P3 transfer already applied, 0…1 for an SDR output (and up to `srgb_encode(headroom)` for an
-// EDR one). It is deliberately **not** scene-linear luma: the question a histogram answers is
-// "how many pixels did the file/panel get at code value k", and the answer must be the codes.
+// A histogram is a measurement of **the picture**, not of the screen and not of the frame the camera
+// happens to be showing. Three consequences, each a deliberate break from 005f:
 //
-// **The x axis is SDR + a 4-stop exponential tail** (2026-10-26). Two segments, one measurement:
+// **1. It is measured before S4.** The samples are the scene-linear RGB S3 hands to S4: no primaries
+// matrix, no transfer function, and — the point — no `min(v, headroom)` clamp. The measurement
+// therefore describes the *photograph* (what an export at any headroom would carry), and an SDR panel
+// can still show that a picture has 3 stops of highlight above white. `DisplayOptions.headroom` no
+// longer enters the geometry of the measurement at all; it only derives `clippedCeiling` (how much
+// *this* screen would throw away) and the card's 「本机能显示到哪」 tick.
 //
-//   · `0 … 1` (display white) on `binCount` **uniform code** bins — unchanged from 005f, so an SDR
-//     screen sees exactly the histogram it always saw.
-//   · above white on `maxStops × hdrBinsPerStop` bins that are uniform in **stops of linear
-//     light**: bin k covers scene-linear `[2^(k/8), 2^((k+1)/8))`, i.e. 1/8 stop per bin, 4 stops
-//     total (`hdrBins`).
+// **2. The x axis is an sRGB code axis, derived here.** Below white the bins are uniform in the code
+// value this process computes by applying the sRGB OETF to the linear sample (`srgbEncode`), so the
+// axis still means "how many pixels at code k" — the same reading as before, and the same 256 bins an
+// 8-bit output has. Above white the axis is exponential in **stops of linear light**, because a stop
+// is a doubling of light and the headroom S4 is handed is a linear multiple of white; one stop of
+// *code* is 2.4 stops of light (sRGB is ~γ2.4 above the knee), so a code-doubling axis would lie by
+// that factor and the display-ceiling marker could not be placed on it.
 //
-// Why stops of *linear* light and not "the code value doubles": S4 clamps in linear
-// (`min(v, headroom)`, §11.8), the headroom it is handed is a linear multiple of SDR white, and a
-// photographer's stop is a doubling of light. One stop of *code* is 2.4 stops of light (the sRGB
-// OETF is ~γ2.4 above white), so a code-doubling axis would lie by that factor and the display
-// ceiling marker could not be placed without a second, contradicting scale.
+// **3. There is one measurement per picture, not one per frame.** `RenderGraph.measureHistogram`
+// renders the whole picture once, at a thumbnail scale (long edge ≤ `maxLongEdge`), and counts the
+// pixels of *that* render. So `sampleCount` is a property of the photo's aspect and nothing else: it
+// does not move when the camera zooms or pans or when the window resizes, and the card's 「采样 N px」
+// is the same number at fit, at 1:1 and at 400 %.
 //
-// Why 4 stops: `DisplayHeadroom.maximumHeadroom` is 16 = 2^4, so no screen this app can drive puts
-// a value past the last bin — the tail is a fixed 4 stops for every display, and `hdrBins.last`
-// means "4 stops or more".
+// The tail: `maxStops × hdrBinsPerStop` = 6 × 16 = **96 bins of 1/16 stop** above white (005 was
+// 4 × 8 = 32 bins of 1/8 stop). Why 6 stops: the samples are pre-clamp, so the axis is no longer
+// bounded by the largest headroom the app can hand S4 (16 = 2^4) but by where a photograph stops
+// carrying highlight information — 6 stops above white is 64×, past every consumer camera's
+// highlight headroom. Samples past the last bin are counted in the last bin (`hdrBinIndex`).
 //
-// **The measured region is the picture, not the canvas** (2026-10-26): `RenderGraph`'s default ROI is
-// `plan.origin + plan.content`, so a `fit` frame's matte bars are not counted as black pixels. At 1:1
-// the picture that exists *is* the window, so the numbers are of the window — a photo-wide reading at
-// every zoom would be a second render, not a different ROI.
-//
-// Two consequences worth writing down rather than discovering later:
+// Two smaller decisions worth writing down rather than discovering later:
 //
 //   · `binCount` is the *measurement's* resolution, not the file's. The default 256 matches an
 //     8-bit output; a 16-bit export that wants per-code counts would ask for 65536 bins (4 × 256 KB
@@ -40,24 +42,52 @@ import Metal
 //     (0.2126, 0.7152, 0.0722). That is the same number a compositor would call luma; scene
 //     luminance is a different quantity and `LinearImage.statistics()` is where it lives.
 
+/// Scene-linear RGB, as S3 hands it to S4 — **no** transfer function, **no** headroom clamp.
+///
+/// The measurement's input. Deliberately not `DisplayImage` (which is display-encoded by contract): a
+/// type that says "linear" is what keeps a future caller from feeding the counters coded values and
+/// getting a plausible, wrong plot.
+public struct LinearSample: Sendable {
+    public let width: Int
+    public let height: Int
+    /// Row-major rgba, 4 components per pixel. Values above 1 are legal and expected.
+    public let rgba: [Float16]
+
+    public init(width: Int, height: Int, rgba: [Float16]) {
+        self.width = width
+        self.height = height
+        self.rgba = rgba
+    }
+
+    public var size: ImageSize { ImageSize(width: width, height: height) }
+}
+
 /// One channel's distribution plus the three ratios that make it actionable.
 public struct HistogramChannel: Sendable, Equatable {
-    /// `bins[k]` = number of sampled pixels whose code fell in `[k/binCount, (k+1)/binCount)`.
+    /// `bins[k]` = number of sampled pixels whose **code** (`srgbEncode(linear)`) fell in
+    /// `[k/binCount, (k+1)/binCount)`. Linear values above white are not here: they are the tail.
     public let bins: [Int]
-    /// `hdrBins[k]` = samples 1/8 stop apart above display white — see the file header. Empty when a
-    /// caller built the value by hand; the measurement always fills it.
+    /// `hdrBins[k]` = samples 1/16 stop apart above white — see the file header. Empty when a caller
+    /// built the value by hand; the measurement always fills it.
     public let hdrBins: [Int]
-    /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999), i.e. above SDR
-    /// white. On an EDR screen this is *not* lost detail any more — it is what the panel's extra
-    /// range is for — which is why `clippedCeiling` exists next to it.
+    /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999 of code), i.e. above
+    /// SDR white. On an SDR screen this is *not* lost detail any more — it is light the picture has
+    /// and the panel does not — which is why `clippedCeiling` sits next to it.
     ///
-    /// A clipped sample is still counted in `bins` — its last bin — because "the distribution ends
-    /// at white" and "white was hit" are different facts and a caller needs both.
+    /// A clipped sample is still counted in `bins` — its last bin — because "the distribution ends at
+    /// white" and "white was hit" are different facts and a caller needs both.
     public let clippedHigh: Double
-    /// Fraction of sampled pixels **at the display ceiling** — S4's own clamp, so this is detail that
-    /// was actually lost. With `headroom = 1` it coincides with `clippedHigh`.
+    /// Fraction of sampled pixels **at or above the ceiling this measurement was taken for**
+    /// (`Histogram.headroom`, in linear units where 1 is SDR white).
+    ///
+    /// This is the derived quantity screen-independence bought: the bins cannot depend on a panel, so
+    /// "how much would it lose *here*" is reported separately, as the fraction a screen with that
+    /// headroom would clamp. With `headroom = 1` it is the fraction above white that an SDR panel
+    /// cannot show — the number the old `clippedCeiling` reported, now for a stated screen instead of
+    /// for whichever panel happened to render the frame.
     public let clippedCeiling: Double
-    /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001).
+    /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001). Linear values are
+    /// negative sometimes (a curve can undershoot); those count as below black.
     public let clippedLow: Double
 
     public init(bins: [Int], hdrBins: [Int] = [], clippedHigh: Double, clippedCeiling: Double = 0,
@@ -75,17 +105,30 @@ public struct HistogramChannel: Sendable, Equatable {
     /// Samples that landed above white (the tail's own subtotal).
     public var hdrTotal: Int { hdrBins.reduce(0, +) }
 
-    /// The bin with the most samples (`nil` for an empty channel — an empty ROI has no peak).
+    /// The bin with the most samples (`nil` for an empty channel — an empty sample has no peak).
     public var peakBin: Int? {
         guard total > 0 else { return nil }
         return bins.indices.max { bins[$0] < bins[$1] }
     }
+
+    /// A stable digest of the counts, so "the same edit gives the same plot" can be asserted as an
+    /// equality of numbers rather than of shapes. Both segments are in it, in a fixed order.
+    public func sha256() -> String {
+        var hasher = SHA256()
+        let sdr = bins.map { UInt32(max(0, $0)) }
+        let tail = hdrBins.map { UInt32(max(0, $0)) }
+        sdr.withUnsafeBytes { hasher.update(bufferPointer: UnsafeRawBufferPointer($0)) }
+        tail.withUnsafeBytes { hasher.update(bufferPointer: UnsafeRawBufferPointer($0)) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
-/// Four channels, the region they were measured over, and the grid they were measured on.
+/// Four channels, the picture they were measured over, and the grid they were measured on.
 public struct Histogram: Sendable, Equatable {
     /// What counts as clipped. Display-encoded white is exactly 1.0, so 0.999 admits one 8-bit code
-    /// below it; the low side is symmetric (0.001 is the second code above black at 8 bits).
+    /// below it; the low side is symmetric (0.001 is the second code above black at 8 bits). Both are
+    /// compared in *code* space, which is why `compute` encodes before it tests them — the same
+    /// threshold every 8-bit tool uses, on a measurement that no longer arrives encoded.
     public static let clipHighThreshold: Double = 0.999
     public static let clipLowThreshold: Double = 0.001
     /// Rec.709 weights, applied to encoded values — see the note at the top of this file.
@@ -93,22 +136,23 @@ public struct Histogram: Sendable, Equatable {
 
     /// Bins per channel on the SDR segment.
     public let binCount: Int
-    /// Bins per channel on the exponential tail: `maxStops × hdrBinsPerStop` (32 today).
+    /// Bins per channel on the exponential tail: `maxStops × hdrBinsPerStop` (96 today).
     public var hdrBinCount: Int { Histogram.hdrBinCount }
-    /// Pixels counted: the sample grid's pixel count (the ROI clipped to the frame, downsampled).
+    /// Pixels counted: the sample grid's pixel count, i.e. the whole-picture thumbnail's own pixels.
+    /// Constant for a given photo — this is the number the card prints as 「采样 N px」.
     public let sampleCount: Int
-    /// The render's output size the ROI is expressed in.
+    /// The picture's own pixel grid at scale 1 (the crop's output size), which the sample stands for.
     public let canvas: ImageSize
-    /// The region measured, in canvas pixels: the picture, not the letterbox around it.
+    /// The region of `canvas` the measurement covers — the whole picture.
     public let roi: ImageRect
     /// The grid the samples came from (long edge ≤ `maxLongEdge`).
     public let sampleSize: ImageSize
-    /// Output primaries the samples are in — the same codes the export would carry.
+    /// Output primaries the samples are in. Always `.sRGB`: the measurement is taken before S4's
+    /// primaries matrix, so the codes on the axis are sRGB codes regardless of the panel.
     public let primaries: OutputPrimaries
-    /// The S4 clamp (`DisplayOptions.headroom`) this frame was measured with, in **linear** scene
-    /// units where 1 is SDR white. Travels with the measurement on purpose: the card's ceiling tick
-    /// then describes the frame it drew, not whatever screen the window is on by the time it
-    /// redraws.
+    /// The display ceiling this measurement's `clippedCeiling` was derived for, in **linear** units
+    /// where 1 is SDR white. It cannot move a bin any more; it travels with the measurement so the
+    /// card's ceiling tick and the 削顶 number describe the same screen.
     public let headroom: Double
 
     public let red: HistogramChannel
@@ -133,24 +177,20 @@ public struct Histogram: Sendable, Equatable {
         self.luma = luma
     }
 
-    /// Stops above white this measurement can hold. Fixed at 4 for every display: see the file
-    /// header (16 = 2^4 is the largest headroom the app will ever hand S4).
-    public static let maxStops = 4
-    /// Tail resolution. 8 bins per stop is 1/8 stop ≈ 9 % of light per bin — fine enough to see a
-    /// highlight roll-off, coarse enough that a 30 pt-per-stop card draws it without resampling.
-    public static let hdrBinsPerStop = 8
+    /// Stops above white this measurement can hold.
+    ///
+    /// 6, not 4: the samples are pre-clamp, so the axis is bounded by where a photograph stops
+    /// carrying highlight information (2^6 = 64× white), not by the largest headroom a display can be
+    /// handed (`DisplayHeadroom.maximumHeadroom` = 16 = 2^4). Anything past the last bin lands there.
+    public static let maxStops = 6
+    /// Tail resolution: 16 bins per stop = 1/16 stop ≈ 4.4 % of light per bin, 3× finer than 005's
+    /// 1/8 stop. Coarse enough that the card's 30 pt-per-stop tail (180 pt over 6 stops) draws it
+    /// without resampling — 11.25 pt per bin.
+    public static let hdrBinsPerStop = 16
     public static var hdrBinCount: Int { maxStops * hdrBinsPerStop }
 
     /// Where the display ceiling sits on the tail, in stops above white (`0` for an SDR screen).
     public var displayStops: Double { log2(max(headroom, 1)) }
-
-    /// How many times this process compiled the histogram's downsample kernel. One, ever.
-    ///
-    /// It exists so the acceptance test can assert "once per process" as a **fact** instead of
-    /// inferring it from a frame time: a ±2 ms budget on a ~130 ms debug-build measurement is noise
-    /// (measured 151 vs 154 ms between two graphs doing identical work), while a counter cannot be
-    /// talked out of the answer.
-    public internal(set) nonisolated(unsafe) static var kernelCompileCount = 0
 
     /// Where SDR white sits on the combined axis, as a fraction of it: the split a card draws.
     public var sdrFraction: Double {
@@ -173,48 +213,81 @@ public struct Histogram: Sendable, Equatable {
         case red, green, blue, luma
     }
 
-    /// The sample grid as a fraction of the ROI it stands for — the honest denominator for "how
+    /// The sample grid as a fraction of the picture it stands for — the honest denominator for "how
     /// much of the picture did this measurement actually see".
     public var sampleFraction: Double {
         let roiPixels = roi.area
         guard roiPixels > 0 else { return 0 }
         return Double(sampleCount) / Double(roiPixels)
     }
+
+    /// A digest of every bin of every channel (both segments), so "the same edit gives the same plot"
+    /// is one string.
+    public func binsDigest() -> String {
+        var hasher = SHA256()
+        for channel in channels { hasher.update(data: Data(channel.sha256().utf8)) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The key one measurement is cached under:
+    /// `hist|v1|<rungIdentity>|<editDigest>|<bins>`.
+    ///
+    /// `rungIdentity` names the decoded buffer (photo content hash + decode recipe + the rung the
+    /// histogram is always measured from); `editDigest` the document. Nothing about the camera, the
+    /// viewport or the display is in here — that is claim A expressed as key material instead of as a
+    /// comment.
+    public static func cacheKey(rungIdentity: String, editDigest: String, bins: Int) -> String {
+        "hist|v1|\(rungIdentity)|\(editDigest)|\(bins)"
+    }
+
+    /// A stable digest of a document's develop settings (JSON with sorted keys, SHA-256, 8 bytes of
+    /// hex).
+    ///
+    /// Stable across processes on purpose: a key built from Swift's `Hasher` is seeded per launch, so
+    /// the same photo would measure twice in two sessions and the claim "one measurement per picture"
+    /// would be a per-process claim.
+    public static func editDigest(_ edit: EditModel) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(edit) else { return "undigestable" }
+        return SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
-// MARK: - downsampling rule
+// MARK: - the sampling rule
 
 extension Histogram {
     /// Longest edge of the grid a histogram is measured on.
     ///
-    /// Why 1024 rather than the frame: at 4.10 Mpx (1500×2731) the grid is 562×1024 = 0.58 Mpx, so
-    /// the single readback is 4.6 MB of half float instead of 32 MB, and the CPU walks 14 % of the
-    /// pixels instead of all of them. The error this buys is quantified in `sampleSize(for:)`'s
-    /// sibling note below and measured in `HistogramTests`.
+    /// 1024, and now it is the **render's own** resolution rather than a reduction applied to a frame:
+    /// `measureHistogram` renders the whole picture at the scale that puts its long edge here and
+    /// counts every pixel of that render. At 4.10 Mpx (1500×2731) the grid is 562×1024 = 0.58 Mpx, so
+    /// the one readback is 4.6 MB of half float and the CPU walks 14 % of the pixels instead of all of
+    /// them. The error this buys is quantified in `sampleSize(for:)`'s note and measured against a
+    /// full-resolution recount in `HistogramTests`.
     public static let maxLongEdge = 1024
 
     /// The grid a `roi` is reduced to: the same aspect, long edge ≤ 1024, never upsampled.
     ///
-    /// **The error this introduces, in full.** A destination texel is the *mean* of the source
-    /// rectangle it covers (`r_x × r_y` pixels, `r ≈ longEdge/1024`, i.e. 2.7 × 2.7 at 4.10 Mpx).
-    /// Two things follow:
+    /// **The error this introduces, in full.** The render samples the source at this scale, so a
+    /// destination texel is the *mean* of the source rectangle it covers (`r_x × r_y` pixels,
+    /// `r ≈ longEdge/1024`, i.e. 2.7 × 2.7 at 4.10 Mpx). Two things follow:
     ///
     ///   1. **Bin counts.** The sample is a 0.58 Mpx estimate of a 4.10 Mpx distribution. If the
     ///      pixels were independent, the per-bin fractional error would be bounded by
-    ///      `0.5/√N ≈ 0.07 pp` at N = 0.58 M (a binomial two-sigma figure); in practice pictures
-    ///      are spatially correlated, so the *structural* term dominates: a feature smaller than
-    ///      one source rectangle (≈ 2.7 × 2.7 px) is averaged into its neighbours, which moves at
-    ///      most the mass of those features. For smooth and mid-frequency content this is far below
-    ///      the 1 % bound `HistogramTests.testDownsamplingKeepsBinCountsWithinOnePercent` asserts;
-    ///      for 1-px-wide detail (a resolution chart, dithered noise) the histogram of a downsample
-    ///      is genuinely the histogram of an *average*, and no bound smaller than the local contrast
-    ///      exists.
-    ///   2. **Clipping ratios.** Averaging is what clipping measurement cannot survive at the
-    ///      extreme: a specular highlight or a 1-px rim that is (1,1,1) inside a footprint whose
-    ///      mean is 0.99 stops counting as clipped. So the ratio is exact for regions larger than
-    ///      ~3 × 3 source pixels and *under*-reports the finest clipped detail. That under-report is
-    ///      the price of a single 4.6 MB readback instead of a 32 MB one, and it is the reason the
-    ///      ratio is documented as "fraction of the sample", not "fraction of the picture".
+    ///      `0.5/√N ≈ 0.07 pp` at N = 0.58 M (a binomial two-sigma figure); in practice pictures are
+    ///      spatially correlated, so the *structural* term dominates: a feature smaller than one
+    ///      source rectangle (≈ 2.7 × 2.7 px) is averaged into its neighbours, which moves at most the
+    ///      mass of those features. For smooth and mid-frequency content this is far below the 1 %
+    ///      bound `HistogramTests` asserts against a full-resolution recount; for 1-px-wide detail (a
+    ///      resolution chart, dithered noise) the histogram of a downsample is genuinely the histogram
+    ///      of an *average*, and no bound smaller than the local contrast exists.
+    ///   2. **Clipping ratios.** Averaging is what clipping measurement cannot survive at the extreme:
+    ///      a specular highlight or a 1-px rim that is 8 stops up inside a footprint whose mean is 5
+    ///      stops up stops counting as beyond the last bin. So the ratio is exact for regions larger
+    ///      than ~3 × 3 source pixels and *under*-reports the finest clipped detail. That under-report
+    ///      is the price of a 0.58 Mpx sample instead of a 60 Mpx one, and it is the reason the ratio
+    ///      is documented as "fraction of the sample", not "fraction of the picture".
     public static func sampleSize(for roi: ImageRect) -> ImageSize {
         let long = max(roi.width, roi.height)
         guard long > maxLongEdge else {
@@ -224,57 +297,98 @@ extension Histogram {
         return ImageSize(width: max(1, Int((Double(roi.width) * s).rounded())),
                          height: max(1, Int((Double(roi.height) * s).rounded())))
     }
+
+    /// The render scale that puts a `size`-pixel picture on that grid (`1` when it already fits).
+    ///
+    /// The same arithmetic as `sampleSize(for:)` in the other direction, on purpose: the render's
+    /// `frame` is `round(crop × scale)`, so the two agree to the pixel and a caller can predict the
+    /// sample's size without rendering it.
+    public static func sampleScale(for size: ImageSize) -> Double {
+        let long = Double(max(size.width, size.height))
+        guard long > Double(maxLongEdge) else { return 1 }
+        return Double(maxLongEdge) / long
+    }
 }
 
 // MARK: - the measurement itself
 
 extension Histogram {
-    /// Measure display-encoded pixels. Pure CPU: no Metal, no I/O, so the arithmetic is testable
-    /// against a hand-built `DisplayImage` and the GPU side (`HistogramGather`) only has to be
-    /// trusted as far as "it averaged a rectangle".
+    /// Measure scene-linear pixels. Pure CPU: no Metal, no I/O, so the arithmetic is testable against a
+    /// hand-built `LinearSample` and the render path only has to be trusted as far as "it produced the
+    /// picture at thumbnail scale".
     ///
-    /// `rect` is in image pixels and defaults to the whole image; the returned histogram's `canvas`
-    /// is the image's own size, i.e. the frame the rect was expressed in. A caller measuring a
-    /// *reduced* sample (the render path) re-labels the result with `relabelled(canvas:roi:)` so the
-    /// numbers are the sample's and the region they stand for is the caller's.
-    public static func compute(_ image: DisplayImage, bins: Int = 256,
+    /// `rect` is in sample pixels and defaults to the whole sample; the returned histogram's `canvas`
+    /// is the sample's own size, i.e. the frame the rect was expressed in. The render path re-labels it
+    /// with `relabelled(canvas:roi:)` so the numbers stay the sample's and the region they stand for is
+    /// the caller's.
+    public static func compute(_ sample: LinearSample, bins: Int = 256,
                                rect: ImageRect? = nil, headroom: Double = 1) -> Histogram {
+        measure(width: sample.width, height: sample.height, rgba: sample.rgba,
+                bins: bins, rect: rect, headroom: headroom, encoded: false)
+    }
+
+    /// Measure an **already display-encoded** image: its codes are the axis, so nothing is encoded.
+    ///
+    /// Not the same as `compute(LinearSample)` with a decode in front of it: a decode→encode round trip
+    /// through `Float16` moves a value that sits exactly on a bin edge into the bin below (0.5 of code
+    /// came back as 0.4995 and landed in bin 127 on the first attempt at this), and a fixture that says
+    /// "one pixel per bin" deserves the bins it asked for. The render path never uses this — the graph
+    /// has the linear values before S4 and measures those.
+    public static func computeEncoded(_ image: DisplayImage, bins: Int = 256,
+                                      rect: ImageRect? = nil, headroom: Double = 1) -> Histogram {
+        let measured = measure(width: image.width, height: image.height, rgba: image.rgba,
+                               bins: bins, rect: rect, headroom: headroom, encoded: true)
+        return Histogram(binCount: measured.binCount, sampleCount: measured.sampleCount,
+                         canvas: measured.canvas, roi: measured.roi,
+                         sampleSize: measured.sampleSize, primaries: image.primaries,
+                         headroom: measured.headroom,
+                         red: measured.red, green: measured.green,
+                         blue: measured.blue, luma: measured.luma)
+    }
+
+    /// The one counting loop. `encoded` says whether the samples are codes (the axis itself) or scene
+    /// linear light (encoded here) — the only difference between the two entry points.
+    private static func measure(width: Int, height: Int, rgba: [Float16],
+                                bins: Int, rect: ImageRect?, headroom: Double,
+                                encoded: Bool) -> Histogram {
         let binCount = min(max(bins, 2), 1 << 16)
         let hdrCount = hdrBinCount
         let stride = binCount + hdrCount
-        let frame = ImageSize(width: image.width, height: image.height)
+        let frame = ImageSize(width: width, height: height)
         if let rect, rect.isEmpty {
-            return Histogram.empty(bins: binCount, canvas: frame, roi: rect,
-                                   primaries: image.primaries, headroom: headroom)
+            return Histogram.empty(bins: binCount, canvas: frame, roi: rect, headroom: headroom)
         }
         let rect = (rect ?? ImageRect(x: 0, y: 0, width: frame.width, height: frame.height))
             .clamped(in: frame)
 
-        let high = Float(clipHighThreshold)
-        let low = Float(clipLowThreshold)
+        // The two thresholds live in code space (`0.999`, `0.001`); a linear sample has them
+        // translated once, so the per-pixel test stays one comparison (0.999 of code is
+        // `srgbDecode(0.999)` of light). The same numbers an 8-bit tool would use.
+        let high = encoded ? Float(clipHighThreshold) : srgbDecode(Float(clipHighThreshold))
+        let low = encoded ? Float(clipLowThreshold) : srgbDecode(Float(clipLowThreshold))
         let (wr, wg, wb) = (Float(lumaWeights.r), Float(lumaWeights.g), Float(lumaWeights.b))
-        // The ceiling is S4's own clamp, read back in code: a pixel S4 clamped carries exactly
-        // `srgbEncode(headroom)`. The comparison is slack by half a float16 step (2^-11 relative) —
-        // that is the quantisation of the texture the samples came from, and without the slack a
-        // pixel clamped *at* the ceiling could land one ULP below it and never be counted.
-        let ceilingFloor = srgbEncode(Float(max(headroom, 1))) * (1 - 1.0 / 2048)
+        // The ceiling is a *value* now, not a clamp whose output we read back: a sample at or above it
+        // is light this screen would throw away. Slack by half a float16 step (2^-11 relative) — that
+        // is the quantisation of the texture the samples came from, and without it a value that is
+        // exactly the ceiling could land one ULP below and never be counted.
+        let ceilingFloor = (encoded ? srgbEncode(Float(max(headroom, 1))) : Float(max(headroom, 1)))
+            * (1 - 1.0 / 2048)
 
         // One flat counter block indexed through a raw pointer: per channel
         // `SDR bins | HDR bins`, then 12 scalars `hiR hiG hiB hiL · ceilR ceilG ceilB ceilL ·
         // loR loG loB loL`. The pointer matters because an `Array` subscript per increment pays an
         // exclusivity check on every one of a million pixels — 306 ms for 0.79 Mpx in a debug build,
-        // against 83 ms for 0.58 Mpx with this block. In a **release** build the same loop is 4.7 ms
-        // for 0.58 Mpx, and the split is worth knowing: 3.2 ms is the four scatter increments and
-        // 1.5 ms the eight clipping predicates (measured by removing each in turn). The exponential
-        // tail adds work **only for pixels above white** (one `pow` + one `log2` each), so an SDR
-        // frame pays the four extra ceiling comparisons and nothing else. That is what counting on
-        // the CPU costs; `Histogram.maxLongEdge` is what keeps the number of pixels this block ever
-        // sees at ~0.5 M rather than 60 M.
+        // against 83 ms for 0.58 Mpx with this block. In a **release** build the loop was 4.7 ms for
+        // 0.58 Mpx when the samples arrived already encoded; deriving the code axis costs one `pow`
+        // per channel per pixel and `HistogramTests` prints the measured total so the number travels
+        // with the claim. The tail adds work only for samples above white (one `log2` each, and no
+        // `pow` at all now that the input is linear). `Histogram.maxLongEdge` is what keeps the number
+        // of pixels this block ever sees at ~0.5 M rather than 60 M.
         let statsBase = 4 * stride
         var counts = [Int](repeating: 0, count: 4 * stride + 12)
         let scale = Float(binCount)
 
-        image.rgba.withUnsafeBufferPointer { px in
+        rgba.withUnsafeBufferPointer { px in
             counts.withUnsafeMutableBufferPointer { c in
                 let base = c.baseAddress!
                 let g0 = stride, b0 = 2 * stride, l0 = 3 * stride
@@ -292,10 +406,14 @@ extension Histogram {
                         let bv = unbounded(px[o + 2])
                         let lv = wr * rv + wg * gv + wb * bv
 
-                        base[combinedIndex(rv, sdrBins: binCount, scale: scale)] += 1
-                        base[g0 + combinedIndex(gv, sdrBins: binCount, scale: scale)] += 1
-                        base[b0 + combinedIndex(bv, sdrBins: binCount, scale: scale)] += 1
-                        base[l0 + combinedIndex(lv, sdrBins: binCount, scale: scale)] += 1
+                        base[combinedIndex(rv, sdrBins: binCount, scale: scale,
+                                           encoded: encoded)] += 1
+                        base[g0 + combinedIndex(gv, sdrBins: binCount, scale: scale,
+                                                encoded: encoded)] += 1
+                        base[b0 + combinedIndex(bv, sdrBins: binCount, scale: scale,
+                                                encoded: encoded)] += 1
+                        base[l0 + combinedIndex(lv, sdrBins: binCount, scale: scale,
+                                                encoded: encoded)] += 1
 
                         // Clipping is counted in the same pass, from the same values, so the ratios
                         // and the bins can never describe two different samples.
@@ -341,7 +459,7 @@ extension Histogram {
                              clippedLow: Double(counts[loIndex]) / n)
         }
         return Histogram(binCount: binCount, sampleCount: counted, canvas: frame,
-                         roi: rect, sampleSize: frame, primaries: image.primaries,
+                         roi: rect, sampleSize: frame, primaries: .sRGB,
                          headroom: headroom,
                          red: channel(0, statsBase, statsBase + 4, statsBase + 8),
                          green: channel(stride, statsBase + 1, statsBase + 5, statsBase + 9),
@@ -349,20 +467,29 @@ extension Histogram {
                          luma: channel(3 * stride, statsBase + 3, statsBase + 7, statsBase + 11))
     }
 
-    /// The same counts, described by the frame they were taken from.
+    /// The historical name for `computeEncoded`: a hand-built, display-encoded fixture measured on the
+    /// code axis. Kept because that is what every arithmetic test in `HistogramTests` is written in —
+    /// a ramp of codes, a solid patch of 0.5 — and renaming the fixtures would only have moved the
+    /// risk, not reduced it.
+    public static func compute(_ image: DisplayImage, bins: Int = 256,
+                               rect: ImageRect? = nil, headroom: Double = 1) -> Histogram {
+        computeEncoded(image, bins: bins, rect: rect, headroom: headroom)
+    }
+
+    /// The same counts, described by the picture they were taken from.
     ///
     /// The render path measures a *reduced* sample (≤ 1024 long edge), so `compute` reports the
     /// sample's own size as both canvas and ROI — true, and useless: what a caller asked about is the
-    /// ROI in canvas pixels. Re-labelling keeps the arithmetic untouched and makes `roi.area` the
-    /// denominator `sampleFraction` divides by, so "we counted 14 % of the pixels you asked about" is
-    /// a number the caller can check.
+    /// picture in its own pixels. Re-labelling keeps the arithmetic untouched and makes `roi.area` the
+    /// denominator `sampleFraction` divides by, so "we counted 14 % of the pixels you asked about" is a
+    /// number the caller can check.
     public func relabelled(canvas: ImageSize, roi: ImageRect) -> Histogram {
         Histogram(binCount: binCount, sampleCount: sampleCount, canvas: canvas, roi: roi,
                   sampleSize: sampleSize, primaries: primaries, headroom: headroom,
                   red: red, green: green, blue: blue, luma: luma)
     }
 
-    /// Nothing measured: an empty ROI, or a render that could not produce a sample. Ratios are 0,
+    /// Nothing measured: an empty region, or a render that could not produce a sample. Ratios are 0,
     /// not NaN, so a UI can print it without a special case.
     public static func empty(bins: Int = 256, canvas: ImageSize, roi: ImageRect,
                              primaries: OutputPrimaries = .sRGB,
@@ -397,43 +524,49 @@ extension Histogram {
         return Int(scaled)
     }
 
-    /// The index in the combined `SDR bins | HDR bins` block: white and below on the code axis, above
-    /// it on the exponential tail.
+    /// The index in the combined `SDR bins | HDR bins` block: white and below on the **code** axis
+    /// (`srgbEncode` of the linear sample), above it on the exponential tail.
+    ///
+    /// The encode is the one cost the pre-S4 measurement adds to the SDR segment: it used to be a
+    /// multiply, because the samples already carried the transfer function. It is what makes the axis
+    /// stay comparable with every 8-bit number a user has ever seen.
     @inline(__always)
-    private static func combinedIndex(_ v: Float, sdrBins: Int, scale: Float) -> Int {
-        if v > 1 { return sdrBins + hdrBinIndex(v) }
-        return binIndex(v, scale, sdrBins)
+    private static func combinedIndex(_ v: Float, sdrBins: Int, scale: Float,
+                                      encoded: Bool) -> Int {
+        if v > 1 {
+            // The tail is in stops of *light*, so a coded sample has to be decoded first; a linear one
+            // is already there.
+            return sdrBins + hdrBinIndex(encoded ? srgbDecode(v) : v)
+        }
+        return binIndex(encoded ? v : srgbEncode(v), scale, sdrBins)
     }
 
-    /// Which 1/8-stop bin a code above white belongs to.
+    /// Which 1/16-stop bin a **linear** value above white belongs to.
     ///
-    /// The decode is only ever reached for `v > 1`, so it is the linear branch of the sRGB inverse —
-    /// `pow` once per above-white sample, which for a normal photograph is a fraction of a percent of
-    /// the samples and for a clipped frame is a few hundred thousand of them (0.58 Mpx worst case,
-    /// still well inside the 16.7 ms budget).
+    /// The sample is linear, so this is one `log2` and a multiply — no decode. (005 had to invert the
+    /// transfer function per above-white sample, because what it was handed was code.)
     ///
-    /// Degradation rules, same discipline as `binIndex`: `+∞` and anything past 4 stops land on the
-    /// last bin (`"4 stops or more"`), and NaN — which cannot be above white and therefore cannot get
-    /// here — would too, rather than trapping in `Int(_:)`.
+    /// Degradation rules, same discipline as `binIndex`: `+∞` and anything at or past 6 stops land on
+    /// the last bin (`"6 stops or more"`), and NaN — which cannot be above white and therefore cannot
+    /// get here — would too, rather than trapping in `Int(_:)`.
     @inline(__always)
     private static func hdrBinIndex(_ v: Float) -> Int {
         let limit = Float(hdrBinCount)
-        let linear = srgbDecode(v)
-        let scaled = log2(linear) * Float(hdrBinsPerStop)
+        let scaled = log2(v) * Float(hdrBinsPerStop)
         if !(scaled < limit) { return hdrBinCount - 1 }
         if !(scaled > 0) { return 0 }
         return Int(scaled)
     }
 
-    /// `1.055·v^(1/2.4) − 0.055` above the knee — the same function `s4_display` writes, so the
-    /// ceiling comparison is in the same code space as the samples.
+    /// `1.055·v^(1/2.4) − 0.055` above the knee — the same function `s4_display` writes, so the code
+    /// axis this file derives is the code axis the panel and the export carry.
     @inline(__always)
     static func srgbEncode(_ v: Float) -> Float {
         v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055
     }
 
     /// Its inverse. Total (no trap) for every finite input; negatives mirror, which the counters
-    /// ignore anyway.
+    /// handle (they land below black).
     @inline(__always)
     static func srgbDecode(_ v: Float) -> Float {
         let a = abs(v)
@@ -442,126 +575,13 @@ extension Histogram {
     }
 }
 
-// MARK: - the GPU side: one downsample dispatch
-
-/// The only GPU code a histogram needs: reduce the display-encoded frame (or the ROI inside it) to a
-/// grid of at most 1024 × 1024 box averages.
-///
-/// Why a shader and not a mip chain: `generateMipmaps` halves the size, so a 1500×2731 frame would
-/// land on 682 (level 2) — a third less data than asked for and a different grid for every size,
-/// which is exactly the kind of "it depends on the frame" number a histogram must not have. A box
-/// average to a fixed long edge keeps the sample grid a function of the ROI alone.
-///
-/// Why not a full-resolution readback and a CPU reduce: 60 MP is 480 MB of half float and a per-pixel
-/// loop in Swift; the point of this file is that the CPU sees 0.3–1 Mpx.
-///
-/// The source is compiled at runtime from the string below, the same way `KernelLibrary` compiles the
-/// shipped `.metal` files (no Metal toolchain, no build step, one `makeLibrary` per process).
-enum HistogramGather {
-    /// Mirror of `struct HistogramDownsampleParams` in `HISTOGRAM_METAL` — three `uint2`s, stride 24.
-    struct Params {
-        var origin: SIMD2<UInt32>
-        var size: SIMD2<UInt32>
-        var target: SIMD2<UInt32>
-    }
-
-    static let source = """
-    #include <metal_stdlib>
-    using namespace metal;
-
-    struct HistogramDownsampleParams {
-        uint2 origin;   // ROI origin in source pixels
-        uint2 size;     // ROI size in source pixels
-        uint2 target;   // destination grid
-    };
-
-    // One thread per destination texel; the source rectangle it owns is the half-open interval
-    // [gid * size / target, (gid+1) * size / target), so the whole ROI is covered exactly once and
-    // the partition does not depend on the thread count.
-    kernel void photons_histogram_downsample(texture2d<float, access::read> src [[texture(0)]],
-                                             texture2d<float, access::write> dst [[texture(1)]],
-                                             constant HistogramDownsampleParams &p [[buffer(0)]],
-                                             uint2 gid [[thread_position_in_grid]]) {
-        if (gid.x >= p.target.x || gid.y >= p.target.y) return;
-
-        uint x0 = p.origin.x + uint((uint64_t(gid.x)     * uint64_t(p.size.x)) / uint64_t(p.target.x));
-        uint x1 = p.origin.x + uint((uint64_t(gid.x + 1) * uint64_t(p.size.x)) / uint64_t(p.target.x));
-        uint y0 = p.origin.y + uint((uint64_t(gid.y)     * uint64_t(p.size.y)) / uint64_t(p.target.y));
-        uint y1 = p.origin.y + uint((uint64_t(gid.y + 1) * uint64_t(p.size.y)) / uint64_t(p.target.y));
-        if (x1 <= x0) x1 = x0 + 1;   // an upsample of one axis would otherwise read nothing
-        if (y1 <= y0) y1 = y0 + 1;
-
-        float4 acc = float4(0.0);
-        uint n = 0;
-        for (uint y = y0; y < y1; ++y) {
-            for (uint x = x0; x < x1; ++x) {
-                acc += src.read(uint2(x, y));
-                n += 1;
-            }
-        }
-        dst.write(acc / float(n), gid);
-    }
-    """
-
-    /// The one pipeline this process owns.
-    ///
-    /// `makeLibrary(source:)` is a **runtime compile**: measured on an M1 Pro at ~5 ms of extra frame
-    /// time on the first measurement (34.5 ms for that frame, of which 20.6 ms is the graph's own pool
-    /// warm-up and 9.1 ms the steady-state measurement; `HistogramTests.testTheRuntimeCompileIsOnce-
-    /// PerProcess`). The graph used to hold the pipeline, so every graph paid that compile again — and
-    /// a graph is rebuilt for each decode rung and each photo, so it could land on a frame in the
-    /// middle of a pan. One process-wide slot makes it what this file always claimed: a *session*
-    /// cost, never a per-frame one.
-    private static let pipelineLock = NSLock()
-    nonisolated(unsafe) private static var sharedPipeline: MTLComputePipelineState?
-
-
-    /// The shared downsample pipeline, compiled on first use.
-    static func pipeline(_ device: MTLDevice) throws -> MTLComputePipelineState {
-        pipelineLock.lock()
-        defer { pipelineLock.unlock() }
-        if let sharedPipeline { return sharedPipeline }
-        let made = try makePipeline(device)
-        sharedPipeline = made
-        return made
-    }
-
-    static func makePipeline(_ device: MTLDevice) throws -> MTLComputePipelineState {
-        Histogram.kernelCompileCount += 1
-        let library: MTLLibrary
-        do {
-            library = try device.makeLibrary(source: source, options: nil)
-        } catch {
-            throw RenderError.kernelCompileFailed("histogram-downsample", error.localizedDescription)
-        }
-        guard let fn = library.makeFunction(name: "photons_histogram_downsample") else {
-            throw RenderError.missingKernelFunction("histogram-downsample", "photons_histogram_downsample")
-        }
-        do {
-            return try device.makeComputePipelineState(function: fn)
-        } catch {
-            throw RenderError.pipelineFailed("histogram-downsample", error.localizedDescription)
-        }
-    }
-
-    /// Encode the reduction into a command buffer the frame already owns — the sample therefore costs
-    /// one dispatch inside the frame's own submission, not a second command buffer and a second wait.
-    /// `target` must be `Histogram.sampleSize(for: roi)` in size and a writable rgba16Float texture.
-    static func encode(_ cb: MTLCommandBuffer, source: MTLTexture, roi: ImageRect,
-                       target: MTLTexture, pipeline: MTLComputePipelineState) throws {
-        guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        enc.setComputePipelineState(pipeline)
-        enc.setTexture(source, index: 0)
-        enc.setTexture(target, index: 1)
-        var params = Params(origin: SIMD2(UInt32(max(roi.x, 0)), UInt32(max(roi.y, 0))),
-                            size: SIMD2(UInt32(max(roi.width, 0)), UInt32(max(roi.height, 0))),
-                            target: SIMD2(UInt32(target.width), UInt32(target.height)))
-        enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
-        let tw = pipeline.threadExecutionWidth
-        let th = max(1, pipeline.maxTotalThreadsPerThreadgroup / tw)
-        enc.dispatchThreadgroups(
-            MTLSize(width: (target.width + tw - 1) / tw, height: (target.height + th - 1) / th, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
-        enc.endEncoding()
-    }
-}
+// MARK: - what is deliberately *not* here any more
+//
+// 005f's `HistogramGather` — a runtime-compiled downsample kernel that reduced the displayed frame (or
+// a ROI inside it) to a ≤ 1024-long-edge grid — is gone (2026-10-26). It existed to sample the frame
+// the camera had drawn; the whole point of measuring the picture instead is that there is exactly one
+// sample per picture, and the cheapest way to get it is to *render* the picture at the sample's own
+// size: S0 already samples with a filtered footprint, so the graph's own output at thumbnail scale is
+// the downsample, produced by the same kernels as the picture on screen. That removes a runtime
+// `makeLibrary` (5–8 ms on the first measurement of a process), one dispatch per measured frame, and
+// the whole "the grid depends on the frame" failure mode.

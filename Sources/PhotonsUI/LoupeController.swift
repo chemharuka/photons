@@ -215,10 +215,11 @@ public final class LoupeController: NSViewController {
         /// The visible window in source pixels.
         public let window: ImageSize
 
-        /// The frame's own histogram (005f), when `collectsHistogram` asked for it. Measured on the
-        /// *same* command buffer and the same pixels the layer is about to show, so the inspector
-        /// card updates with the re-render instead of paying for a second one.
-        public let histogram: Histogram?
+        // There is deliberately no `histogram` field (005, 2026-10-26). A frame is the window the
+        // camera is showing and the card's numbers are of the *picture*: carrying one here would make
+        // it possible to publish a per-frame plot again, which is exactly the coupling that made the
+        // numbers move when the user zoomed. `LoupeController.lastHistogram` is the card's input and
+        // `RenderGraph.measureHistogram` is where the numbers come from.
         /// Clipped-pixel grid (the highlight warning's input), when the warning was armed. `nil`
         /// otherwise — the readback only happens when someone is looking at it.
         public let clipped: ClippedGrid?
@@ -344,45 +345,66 @@ public final class LoupeController: NSViewController {
     /// Ask for a histogram at all — the inspector card's switch.
     ///
     /// On by default because the card is always on screen in this build. What it does *not* mean is
-    /// "measure every frame": a frame that moves the camera skips the measurement and a deferred one
-    /// runs once the hand stops (see `histogramWanted(for:)`). A bench that wants the pre-005f frame
-    /// turns this off.
+    /// "measure every frame" or even "measure when the camera settles": since 005 the histogram is a
+    /// measurement of the **picture**, so it is re-measured only when the picture's *key* changes — a
+    /// new photo, a new decode rung, or an edit — and never because the viewport moved. Panning and
+    /// zooming measure nothing at all (`noteHistogramKey(for:)`).
     public var collectsHistogram = true
 
-    /// How long the camera must be still before the deferred measurement runs.
+    /// How long the picture must be unchanged before it is re-measured.
     ///
-    /// 60 ms is two frames at 30 fps: long enough that a hand still dragging always pushes the
-    /// deadline out, short enough that the card follows the picture without the user noticing a wait.
-    public var histogramSettleInterval: TimeInterval = 0.06
+    /// 120 ms: long enough that a slider drag costs one measurement instead of one per tick, short
+    /// enough that the card has followed the picture before a person's eye gets there. It is a
+    /// debounce on the *edit*, not on the hand: a camera gesture cannot re-arm it, which is the
+    /// difference between this and Q30's 60 ms settle.
+    public var histogramDebounceInterval: TimeInterval = 0.12
 
-    /// Frames that skipped the measurement because the camera was moving.
+    /// Frames that carried no measurement of their own — every frame, since 005.
+    ///
+    /// Kept as a counter (and asserted by the cadence tests) because "the pan frames measured
+    /// nothing" is the claim this whole change rests on, and a counter cannot be talked out of the
+    /// answer the way a frame time can.
     public private(set) var histogramSkippedFrames = 0
-    /// Measurements that reached the card (the frame's own, and the deferred ones).
+    /// Measurements that reached the card.
     public private(set) var histogramCollectedFrames = 0
-    /// Deferred measurements started after the camera settled — what the card refreshes on.
+    /// Measurements actually run (a cache hit for an unchanged picture is not one).
     public private(set) var histogramRefreshCount = 0
-    /// The last deferred measurement's own cost (render + readback + binning), in milliseconds.
+    /// The last measurement's own cost (thumbnail render + readback + binning), in milliseconds.
     public private(set) var lastHistogramMilliseconds: Double = 0
-    /// The last deferred measurement's latency: "the hand stopped" → "the card has new numbers".
+    /// The last measurement's latency: "the picture changed" → "the card has new numbers".
     public private(set) var lastHistogramLatency: Double = 0
+    /// Why the last measurement did not run (`nil` when it did). A development that had not landed, or
+    /// an edit that superseded the measurement before it started.
+    public private(set) var lastHistogramError: String?
 
     private var histogramSettle: DispatchWorkItem?
-    /// When the card's numbers went stale — the last frame whose camera moved. The deferred
-    /// measurement's latency is published against this, so it is "the hand stopped → the card has
-    /// new numbers" and not just the measurement's own cost.
+    /// When the card's numbers went stale — the moment the picture's key changed. The measurement's
+    /// latency is published against this, so it is "the picture changed → the card has new numbers".
     private var histogramStaleAt: CFAbsoluteTime = 0
-    /// The card's numbers are older than the camera.
-    private var histogramPending = false
+    /// The key the armed debounce is waiting for (nil when nothing is pending).
+    private var histogramPendingKey: String?
+    /// The key `lastHistogram` belongs to.
+    private var histogramMeasuredKey: String?
     private var histogramRefreshing = false
+    /// `Histogram.cacheKey` → the numbers. A handful of entries: the current picture's edit chain, so
+    /// sliding back is instant and a re-measurement of the same document cannot produce different
+    /// numbers (it cannot produce anything — the key is the identity).
+    private var histogramCache: [String: Histogram] = [:]
+    private var histogramCacheOrder: [String] = []
+    private var histogramCacheLimit = 8
+    /// The last document digested, and its digest. `noteHistogramKey` runs on every frame, and a JSON
+    /// encode plus a SHA-256 per frame would be a real cost on a 4 ms pan; an `EditModel` comparison is
+    /// a field-by-field compare of a small struct. Render-queue only.
+    private var lastEditDigest: (edit: EditModel, digest: String)?
     /// The camera the *previous* frame was rendered at. `nil` after a new photo, so its first frame
     /// measures instead of being mistaken for a gesture.
     private var lastFrameState: LoupeViewState?
 
     /// The numbers the card is showing: the last measurement that reached the session.
     ///
-    /// Kept here as well as on the session because a frame that *skipped* the measurement (Q30 — the
-    /// camera was moving) must leave it alone instead of blanking the plot, and "what did the card
-    /// last get" is the fact that tells the two cases apart.
+    /// Kept here as well as on the session because a measurement that *failed* (a rung that had not
+    /// landed) must leave it alone instead of blanking the plot, and "what did the card last get" is
+    /// the fact that tells the two cases apart.
     public private(set) var lastHistogram: Histogram?
 
     /// The last clipping grid the warning produced (nil while the warning is off or before a frame).
@@ -1215,10 +1237,13 @@ public final class LoupeController: NSViewController {
         generation += 1
         viewPending = false
         editPending = false
-        // A deferred measurement belongs to the photo it was armed for.
+        // A measurement belongs to the picture it was armed for.
         histogramSettle?.cancel()
         histogramSettle = nil
-        histogramPending = false
+        histogramPendingKey = nil
+        histogramCache.removeAll()
+        histogramCacheOrder.removeAll()
+        histogramMeasuredKey = nil
         lastFrameState = nil
         if let identity = frameSource?.identity ?? session?.anchorAsset.map({ ladderIdentity($0) }) {
             decodeQueue.cancel(identity: identity)
@@ -1369,10 +1394,9 @@ public final class LoupeController: NSViewController {
         if graph == nil || graphIdentity != identity {
             graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url))
             graphIdentity = identity
-            // A new photo (or a new rung of it): its first frame is the first look, not a gesture, so
-            // it measures — the card must not keep the previous picture's distribution.
+            // A new photo (or a new rung of it): its key is a different picture, so the measurement
+            // armed below is a fresh one — the card must not keep the previous picture's numbers.
             lastFrameState = nil
-            histogramPending = true
         }
         guard let graph else { throw RenderError.allocationFailed("loupe graph") }
 
@@ -1390,24 +1414,21 @@ public final class LoupeController: NSViewController {
         let primaries: OutputPrimaries = (presenter?.storage ?? .linear16) == .linear16 ? .displayP3 : .sRGB
         let ceiling = displayHeadroom.headroom
         let t1 = CFAbsoluteTimeGetCurrent()
-        // The histogram's cadence (Q30). A frame whose camera moved skips the measurement and arms
-        // the deferred one; the frame that confirms the camera measures. Without this the card cost a
-        // pan 8 ms (release) / 104 ms (debug) *per frame* of numbers no one can read while the picture
-        // is sliding under the plot.
-        let measureHistogram = histogramWanted(for: state)
+        // The histogram's trigger (005, 2026-10-26). A frame measures **nothing**: the numbers are of
+        // the picture, so this frame only reports whether the picture's key moved away from what the
+        // card is showing — a new photo, a new rung, an edit — and the debounced measurement is armed
+        // for that key. A pan or a zoom changes the camera and not the key, which is the whole reason
+        // a gesture no longer costs a histogram.
+        noteHistogramKey(identity: cacheIdentity, edit: model, fallbackScale: decodeScale)
         let result = try graph.render(model, options: RenderOptions(
             canvas: viewport,
             scale: scale,
             outputWindow: outputWindow,
             display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
             useCache: true,
-            wantsPixels: false,
-            // The histogram is measured by the *same* frame — one extra dispatch in the frame's own
-            // command buffer plus the reduced readback, never a second render (`RenderGraph`'s
-            // `collectHistogram`), so a frame that does measure pays nothing beyond the measurement.
-            collectHistogram: measureHistogram,
-            histogramBins: 256))
+            wantsPixels: false))
         let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
+        histogramSkippedFrames += 1
         guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
         let hash = hashPixels ? LoupeController.hash(texture) : nil
         // The clipping warning's input. Only read while the warning is on: it is a UI aid, and a
@@ -1420,7 +1441,7 @@ public final class LoupeController: NSViewController {
                            capabilities: decodedCaps, primaries: primaries,
                            editRevision: session?.editRevision ?? 0, displayHash: hash,
                            zoom: projected.zoom(of: state), headroom: ceiling, window: window,
-                           histogram: result.histogram, clipped: clipped)
+                           clipped: clipped)
     }
 
     /// SHA-256 of an rgba16f texture's bytes, taken while it is still out of the pool.
@@ -1517,18 +1538,17 @@ public final class LoupeController: NSViewController {
 
     // MARK: measurements (histogram + clipping warning)
     //
-    // This is the "re-render finished" callback the inspector's histogram card hangs off: the frame
-    // already measured itself (`collectHistogram` in its own command buffer, and the clipping grid
-    // when the warning is on), so publishing costs a main-thread hand-off and nothing else. Called
-    // from `present`; `--ui-smoke` calls the same function for a frame it rendered synchronously, so
-    // the card is asserted through the shipped path rather than a test-only one.
+    // Two different cadences live here now, and keeping them apart is the point of 005:
+    //
+    //   · the **clipping grid** is a property of the frame on screen — it marks *these* pixels — so it
+    //     rides with the frame, and `recordMeasurements` publishes it from the presenting frame;
+    //   · the **histogram** is a property of the picture, so it has its own render, its own key and its
+    //     own debounce. No frame carries one (`noteHistogramKey(identity:edit:fallbackScale:)`).
+    //
+    // Called from `present`; `--ui-smoke` calls the same function for a frame it rendered
+    // synchronously, so the card is asserted through the shipped path rather than a test-only one.
 
     public func recordMeasurements(_ frame: FrameResult) {
-        // A frame that measured publishes — and a frame that **skipped** (the camera was moving, Q30)
-        // publishes nothing: `recordHistogram(nil)` would blank the plot for the length of every pan,
-        // and the last numbers are still the last numbers anyone could read. The deferred measurement
-        // replaces them once the hand stops.
-        if let histogram = frame.histogram { publish(histogram: histogram) }
         if let clipped = frame.clipped {
             lastClipped = clipped
             highlightOverlay.grid = clipped
@@ -1541,100 +1561,195 @@ public final class LoupeController: NSViewController {
 
     /// Hand a measurement to the card. One function, so "the session has new numbers", "the card has
     /// them" and the publish count cannot disagree.
-    private func publish(histogram: Histogram) {
+    private func publish(histogram: Histogram, key: String) {
         session?.recordHistogram(histogram)
         lastHistogram = histogram
+        histogramMeasuredKey = key
         histogramPublishCount += 1
         histogramCollectedFrames += 1
     }
 
-    // MARK: the histogram's cadence (Q30)
+    // MARK: the histogram's key, cache and debounce (005, 2026-10-26)
     //
-    // Before this, every frame measured: +8 ms per frame in a release build and **+104 ms** in a
-    // debug one (0.65 Mpx of CPU binning), which is 20× a whole 1:1 pan frame. The measurement is a
-    // *reading*, not a feature of the picture — while the camera is moving nobody can read the plot,
-    // and the plot's job is to describe where the picture has settled. So the cadence is two rules
-    // and no timestamps in the frame path:
+    // Q30 measured a *frame* and had to answer "is the camera still?" with 60 ms of quiet. The
+    // measurement is of the picture now, so the question changed: "is the picture still?" — and a
+    // picture is named by a key, not by a camera. Three rules, and no timestamps in the frame path:
     //
-    //   · a frame whose camera differs from the previous frame's is a gesture frame → it skips and
-    //     pushes the deferred deadline out;
-    //   · a frame that confirms the camera (the first frame after the hand stops, the deferred
-    //     measurement itself, an edit frame, a resize) measures.
+    //   · a frame computes the key of the picture it drew (`Histogram.cacheKey`: rung identity + edit
+    //     digest + bins) and compares it with what the card is showing;
+    //   · a *different* key arms the debounce (`histogramDebounceInterval`, 120 ms), which is where a
+    //     slider drag collapses into one measurement;
+    //   · the same key measures nothing — which is why panning and zooming, which cannot change the
+    //     key, cost no measurement at all (they used to cost 8 ms per frame in release, 104 ms in a
+    //     debug build).
     //
-    // The deferred measurement runs once `histogramSettleInterval` after the last moving frame, at the
-    // camera that is on screen, and presents nothing: the pixels are the ones already there.
+    // The measurement runs on the render queue (it uses that graph's pool and the ladder), presents
+    // nothing, publishes on main, and is cached by key so sliding a slider back is instant.
 
-    /// Does *this* frame measure a histogram?
-    private func histogramWanted(for state: LoupeViewState) -> Bool {
-        guard collectsHistogram else {
-            lastFrameState = state
-            return false
-        }
-        let moved = lastFrameState.map { $0 != state } ?? false
-        lastFrameState = state
-        guard moved else {
-            // This frame measures, so the card is about to be current. Cleared here — on the frame's
-            // own queue, in the same place that decides to measure — rather than on the publish, which
-            // happens later on the main thread and could otherwise clear a *newer* frame's staleness.
-            histogramPending = false
-            return true
-        }
-        histogramPending = true
-        histogramSkippedFrames += 1
-        scheduleHistogramRefresh()
-        return false
+    /// The key the picture would be measured under right now.
+    ///
+    /// The rung is the **biggest one the ladder has**, not the one this frame renders from: a frame at
+    /// fit may render from the preview rung while 1:1 renders from the full one, and if the key carried
+    /// the frame's rung the card would re-measure — with slightly different numbers — every time the
+    /// zoom changed. The ladder keeps one rung in practice (`RenderJob.target` is always full scale),
+    /// so this is the same buffer at every zoom; `fallbackScale` is only used before the first rung
+    /// lands, and the key changes (and re-measures once) when the real one does.
+    private func histogramKey(identity: String, digest: String, fallbackScale: Float) -> String {
+        let rung = ladder.best(identity: identity, atOrBelow: DecodeLadder.fullScale)?.scale
+            ?? fallbackScale
+        return Histogram.cacheKey(rungIdentity: "\(identity)-s\(rung)",
+                                  editDigest: digest, bins: 256)
     }
 
-    /// Arm (or re-arm) the deferred measurement. Every moving frame pushes the deadline out, which is
-    /// what makes "60 ms of quiet" the definition of "the hand has stopped".
+    /// The document's digest, memoised against the document itself (render queue only).
+    private func cachedEditDigest(_ edit: EditModel) -> String {
+        if let cached = lastEditDigest, cached.edit == edit { return cached.digest }
+        let digest = Histogram.editDigest(edit)
+        lastEditDigest = (edit, digest)
+        return digest
+    }
+
+    /// Called by every frame: arm the measurement only if the picture's key moved.
+    ///
+    /// This is the whole decoupling: a pan changes `state`, `scale`, `outputWindow` and the canvas, and
+    /// none of them is in the key, so a gesture reaches this function and does nothing.
+    private func noteHistogramKey(identity: String, edit: EditModel, fallbackScale: Float) {
+        guard collectsHistogram else { return }
+        let key = histogramKey(identity: identity, digest: cachedEditDigest(edit),
+                               fallbackScale: fallbackScale)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.collectsHistogram else { return }
+            guard key != self.histogramMeasuredKey, key != self.histogramPendingKey else { return }
+            self.histogramPendingKey = key
+            self.histogramStaleAt = CFAbsoluteTimeGetCurrent()
+            self.scheduleHistogramRefresh()
+        }
+    }
+
+    /// Arm (or re-arm) the debounce. Every key change pushes the deadline out.
     private func scheduleHistogramRefresh() {
         guard collectsHistogram, autoRenderEnabled else { return }
         histogramSettle?.cancel()
-        histogramStaleAt = CFAbsoluteTimeGetCurrent()
         let work = DispatchWorkItem { [weak self] in self?.startHistogramRefresh() }
         histogramSettle = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + histogramSettleInterval, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + histogramDebounceInterval, execute: work)
     }
 
     private func startHistogramRefresh() {
         histogramSettle = nil
-        guard collectsHistogram, histogramPending else { return }
+        guard collectsHistogram, let key = histogramPendingKey else { return }
         guard autoRenderEnabled, let job = makeJob(kind: .scheduled) else { return }
-        // Something is already on its way: it measures at its own camera, and if that camera moved it
-        // re-arms this. Starting a second frame here would be a frame nobody asked for.
-        guard !viewInFlight, !editInFlight, !histogramRefreshing else {
-            scheduleHistogramRefresh()
-            return
-        }
-        guard isCurrentPhoto(job.identity) else { return }
+        // A measurement is of the picture, so it does not need the frame queues to be idle — only the
+        // same picture to still be the one on screen.
+        guard !histogramRefreshing, isCurrentPhoto(job.identity) else { return }
         histogramRefreshing = true
-        histogramRefreshCount += 1
-        queue.async { [weak self] in self?.renderHistogramRefresh(job) }
+        queue.async { [weak self] in self?.renderHistogramRefresh(job, key: key) }
     }
 
-    /// The deferred measurement. It renders the frame the canvas is already showing and keeps only the
-    /// histogram: nothing is presented (the pixels on screen are the same ones — a moving camera would
-    /// have pushed the deadline out), and it is deliberately not counted as a view frame, because it
-    /// is not one: no picture appears, no generation moves, no development is requested.
-    private func renderHistogramRefresh(_ job: RenderJob) {
+    /// The measurement itself: a whole-picture thumbnail render, on the render queue.
+    ///
+    /// It does not go through `makeFrame`: that path is the *camera* — a window into the frame, a rung
+    /// chosen for the zoom, a presented texture. This one wants the whole picture at a fixed scale, and
+    /// `RenderGraph.measureHistogram` is exactly that.
+    private func renderHistogramRefresh(_ job: RenderJob, key: String) {
         let t0 = CFAbsoluteTimeGetCurrent()
-        let frame = residentFrame(job, reportingFailure: false)
+        var histogram: Histogram?
+        var failure: String?
+        if let cached = histogramCache[key] {
+            histogram = cached
+        } else if let rung = ladder.best(identity: job.identity, atOrBelow: DecodeLadder.fullScale) {
+            do {
+                let identity = "\(job.identity)-s\(rung.scale)"
+                // Reuse the frame's graph when it is the same source (the common case: the ladder holds
+                // one rung), so the measurement costs one thumbnail render and no texture upload. A
+                // different rung builds a throwaway graph, whose source texture and pool go away with it.
+                let measurer: RenderGraph
+                if graphIdentity == identity, let existing = graph {
+                    measurer = existing
+                } else {
+                    measurer = try RenderGraph(input: RenderInput(image: rung.image,
+                                                                  identity: identity,
+                                                                  sourceURL: job.url))
+                }
+                histogram = try measurer.measureHistogram(job.edit, bins: 256,
+                                                          headroom: displayHeadroom.headroom)
+            } catch {
+                failure = "\(error)"
+            }
+        } else {
+            // Nothing developed at or below the full rung yet: the picture that would be measured is
+            // not the picture on screen. Keep the numbers and retry when the rung lands (the next frame
+            // re-arms, because the key still differs from `histogramMeasuredKey`).
+            failure = "no decoded rung at or below 1.0× yet"
+        }
         let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-        // The graph that owns the pool for this frame: `residentFrame` may have just built one.
-        if let texture = frame?.texture { graph?.recycle(output: texture) }
+        if let histogram { store(histogram: histogram, for: key) }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.histogramRefreshing = false
             self.lastHistogramMilliseconds = ms
-            guard let histogram = frame?.histogram else {
-                // Nothing resident yet (a development is landing) or the frame failed: the card keeps
-                // its numbers and the next frame tries again.
-                self.histogramPending = true
+            self.lastHistogramError = failure
+            guard let histogram else {
+                // Keep the card's numbers and stay pending: the next frame's key check re-arms this.
                 return
             }
-            self.publish(histogram: histogram)
+            guard self.histogramPendingKey == key else { return }   // superseded while measuring
+            self.histogramRefreshCount += 1
+            self.publish(histogram: histogram, key: key)
+            self.histogramPendingKey = nil
             self.lastHistogramLatency = (CFAbsoluteTimeGetCurrent() - self.histogramStaleAt) * 1000
         }
+    }
+
+    /// The measurement, synchronously, on the caller's thread — the smoke's and the tests' path into
+    /// the same numbers the card gets.
+    ///
+    /// It resolves the rung itself (developing the preview if nothing is resident) and publishes, so a
+    /// caller only has to say *what* it wants measured. It is deliberately not the debounced path: a
+    /// test wants the measurement now, and calling twice must produce the same bins — which it does,
+    /// because the picture is the only input (`Histogram.cacheKey` is what the debounced path keys on).
+    ///
+    /// Main thread only: it publishes to the session and to `lastHistogram`.
+    @discardableResult
+    public func measureHistogramNow(asset: Asset, url: URL, edit: EditModel,
+                                    bins: Int = 256) throws -> Histogram {
+        try measureHistogramNow(url: url, identity: ladderIdentity(asset), edit: edit, bins: bins)
+    }
+
+    @discardableResult
+    public func measureHistogramNow(url: URL, identity: String, edit: EditModel,
+                                    bins: Int = 256) throws -> Histogram {
+        let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
+            try Self.develop(url: url, scale: DecodeLadder.fullScale)
+        }
+        let graphIdentityForRung = "\(identity)-s\(outcome.rung.scale)"
+        let measurer: RenderGraph
+        if graphIdentity == graphIdentityForRung, let existing = graph {
+            measurer = existing
+        } else {
+            measurer = try RenderGraph(input: RenderInput(image: outcome.rung.image,
+                                                          identity: graphIdentityForRung,
+                                                          sourceURL: url))
+        }
+        let histogram = try measurer.measureHistogram(edit, bins: bins,
+                                                     headroom: displayHeadroom.headroom)
+        let key = histogramKey(identity: identity, digest: Histogram.editDigest(edit),
+                               fallbackScale: outcome.rung.scale)
+        store(histogram: histogram, for: key)
+        publish(histogram: histogram, key: key)
+        return histogram
+    }
+
+    /// Cache one measurement under its key, newest last, at most `histogramCacheLimit` of them.
+    private func store(histogram: Histogram, for key: String) {
+        histogramCache[key] = histogram
+        histogramCacheOrder.removeAll { $0 == key }
+        histogramCacheOrder.append(key)
+        while histogramCacheOrder.count > histogramCacheLimit {
+            let victim = histogramCacheOrder.removeFirst()
+            histogramCache.removeValue(forKey: victim)
+        }
+        _ = histogramCacheLimit
     }
 
     // MARK: status strip
