@@ -103,23 +103,25 @@ func cmdLibrary(_ a: Args) throws {
             summary.moved += s.moved
             summary.failed += s.failed
         }
-        if a.has("--json") {
-            note(jsonLine(["total": summary.total, "added": summary.added, "moved": summary.moved,
-                           "duplicate": summary.duplicate, "unchanged": summary.unchanged,
-                           "failed": summary.failed]))
-        } else {
-            note("rescan     \(summary.text)")
-        }
         // The import walk says "what is new"; it says nothing about rows whose file the Finder took
         // away. Re-derive `assets.missing` here too, so a rescan is a full answer to "what changed
         // on disk?" and not half of one.
         let availability = try catalog.refreshAvailability()
         if a.has("--json") {
-            note(jsonLine(["availability": ["checked": availability.checked,
+            // **One object, not two.** This used to `note()` the import summary and then a second
+            // `{"availability": …}` line, which broke every consumer that parses the output as a
+            // single JSON document (`M2 acceptance §4` died with `Extra data: line 2 column 1`).
+            // The availability block is a nested key, so an old reader that only looks at the top
+            // level keeps working unchanged.
+            note(jsonLine(["total": summary.total, "added": summary.added, "moved": summary.moved,
+                           "duplicate": summary.duplicate, "unchanged": summary.unchanged,
+                           "failed": summary.failed,
+                           "availability": ["checked": availability.checked,
                                             "missing": availability.missing,
                                             "relinked": availability.relinked,
                                             "offlineRoots": availability.offlineRoots]]))
         } else {
+            note("rescan     \(summary.text)")
             note("available  \(availability.summary)")
         }
 
