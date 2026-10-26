@@ -73,6 +73,16 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
+    // **The matte is not a shadow.** S0 marks background (anything outside the picture, in a canvas-space
+    // window) with alpha 0, and the guard below is a *canvas* guard: when the window is the canvas, the
+    // content rect covers every pixel, so background pixels used to fall through and get lifted with the
+    // shadows — a blacks/curve lift turned the letterbox grey. Alpha 0 is the only thing that says
+    // "there is no photograph here", so it is checked before any pixel maths.
+    if (c.a == 0.0) {
+        dst.write(c, gid);
+        return;
+    }
+
     // Outside the content rect: the matte, written back unchanged.
     float2 g = float2(gid);
     if (g.x < p.b.x || g.y < p.b.y || g.x >= p.b.x + p.b.z || g.y >= p.b.y + p.b.w) {
