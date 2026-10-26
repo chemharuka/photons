@@ -221,6 +221,87 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(try catalog.stats().total, 5)
     }
 
+    // MARK: - recursive switch (文件 ▸ 导入照片… 的「包含子文件夹」)
+
+    /// One folder holding one file plus a subfolder holding another. Recursion decides 2 vs 1 — the
+    /// number the panel's box is the difference between.
+    private func makeNestedSource() throws -> URL {
+        let dir = try sourceDir()
+        _ = try makeJPEG(at: dir.appendingPathComponent("top.jpg"), rating: 0, label: "None",
+                         keywords: [], seed: 71)
+        let sub = dir.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        _ = try makeJPEG(at: sub.appendingPathComponent("deep.jpg"), rating: 0, label: "None",
+                         keywords: [], seed: 72)
+        return dir
+    }
+
+    func testRecursiveImportWalksSubfolders() throws {
+        let catalog = try newLibrary()
+        let dir = try makeNestedSource()
+        let summary = try ImportService(catalog: catalog).run(
+            sources: [dir], options: ImportOptions(recursive: true))
+        XCTAssertEqual(summary.added, 2, "recursive: true must import top.jpg and sub/deep.jpg")
+    }
+
+    func testNonRecursiveImportKeepsOnlyTopLevelFiles() throws {
+        let catalog = try newLibrary()
+        let dir = try makeNestedSource()
+        let summary = try ImportService(catalog: catalog).run(
+            sources: [dir], options: ImportOptions(recursive: false))
+        XCTAssertEqual(summary.added, 1, "recursive: false must leave sub/deep.jpg alone")
+        let asset = try XCTUnwrap(try catalog.assets(AssetFilter()).first)
+        XCTAssertEqual(asset.relPath, "top.jpg")
+    }
+
+    /// 混选 (the panel allows it): a folder **and** an explicitly named file. `recursive: false`
+    /// governs the folder only — the file was named by the user and is imported either way.
+    func testNonRecursiveStillImportsExplicitlyNamedFilesBesideAFolder() throws {
+        let catalog = try newLibrary()
+        let dir = try makeNestedSource()
+        let outside = try sourceDir().appendingPathComponent("named.jpg")
+        _ = try makeJPEG(at: outside, rating: 0, label: "None", keywords: [], seed: 73)
+
+        let summary = try ImportService(catalog: catalog).run(
+            sources: [dir, outside], options: ImportOptions(recursive: false))
+        XCTAssertEqual(summary.added, 2, "dir/top.jpg + named.jpg; sub/deep.jpg stays out")
+        let names = Set(try catalog.assets(AssetFilter()).map(\.relPath))
+        XCTAssertEqual(names, Set(["top.jpg", "named.jpg"]))
+    }
+
+    func testRecursiveMixedSelectionImportsAllThree() throws {
+        let catalog = try newLibrary()
+        let dir = try makeNestedSource()
+        let outside = try sourceDir().appendingPathComponent("named.jpg")
+        _ = try makeJPEG(at: outside, rating: 0, label: "None", keywords: [], seed: 74)
+
+        let summary = try ImportService(catalog: catalog).run(
+            sources: [dir, outside], options: ImportOptions(recursive: true))
+        XCTAssertEqual(summary.added, 3)
+    }
+
+    /// 取消 stops between files: what landed stays landed, and the session says `cancelled`
+    /// rather than `finished` — that row is what the next run adopts by content hash.
+    func testCancelStopsBetweenFilesAndBooksTheSession() throws {
+        let catalog = try newLibrary()
+        let dir = try sourceDir()
+        for i in 0..<4 {
+            _ = try makeJPEG(at: dir.appendingPathComponent("c\\(i).jpg"), rating: 0, label: "None",
+                             keywords: [], seed: 80 + i)
+        }
+        let service = ImportService(catalog: catalog)
+        service.shouldCancel = { true }        // cancel before the first file
+        let summary = try service.run(sources: [dir], options: ImportOptions())
+        XCTAssertTrue(summary.interrupted)
+        XCTAssertEqual(summary.added, 0)
+
+        let state = try catalog.dbQueue.read { db in
+            try String.fetchOne(db, sql: "SELECT state FROM import_sessions ORDER BY started_at DESC LIMIT 1")
+        }
+        XCTAssertEqual(state, ImportState.cancelled.rawValue)
+        XCTAssertEqual(try catalog.stats().total, 0)
+    }
+
     func testMovedFileKeepsItsRowAndHistory() throws {
         let catalog = try newLibrary()
         let dir = try sourceDir()

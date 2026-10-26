@@ -47,6 +47,10 @@ public enum ImportOutcome: String, Codable, Sendable {
 public enum ImportState: String, Codable, Sendable {
     case running
     case finished
+    /// Stopped by the user between two files (the GUI's 取消). Everything already imported stays
+    /// imported — the next run adopts it through content-hash dedupe, exactly like a re-run after
+    /// `finished`.
+    case cancelled
     case failed
 }
 

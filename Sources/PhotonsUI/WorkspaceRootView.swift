@@ -240,6 +240,8 @@ public final class WorkspaceRootView: NSView {
     public let loupeController: LoupeController
     public let filmstripController: FilmstripController
     public let inspectorHost: NSHostingView<InspectorView>
+    /// The one line of import feedback (进度 + 取消), floating at the bottom of the canvas.
+    public let importProgressBar = ImportProgressBar()
 
     private let canvasHost = NSView()
     private let browserDivider = WorkspaceDivider()
@@ -251,6 +253,12 @@ public final class WorkspaceRootView: NSView {
     private var inspectorWidth: CGFloat
     public private(set) var browserMode: BrowserMode = .list
     public private(set) var geometry: WorkspaceGeometry
+
+    /// 导入照片… — created on first use, because a session with no library has nothing to import
+    /// into and the coordinator is only reachable through `beginImport()`.
+    public private(set) lazy var importCoordinator = ImportCoordinator(session: session)
+
+    public var isImporting: Bool { importCoordinator.isImporting }
 
     private let defaults = UserDefaults.standard
 
@@ -287,7 +295,7 @@ public final class WorkspaceRootView: NSView {
 
         for v: NSView in [topBar, browserPane.view, browserDivider, canvasHost,
                           inspectorDivider, inspectorBackdrop, inspectorHost,
-                          filmstripController.view] {
+                          filmstripController.view, importProgressBar] {
             addSubview(v)
         }
 
@@ -409,6 +417,14 @@ public final class WorkspaceRootView: NSView {
         } else {
             filmstripController.view.isHidden = true
         }
+        // The import line floats over the canvas' bottom edge — above the filmstrip, inside the
+        // canvas, so it cannot cover a thumbnail it is counting. Fixed height, width capped so a
+        // wide display does not turn one sentence into a banner.
+        let barHeight: CGFloat = 22
+        let barWidth = min(260, max(140, g.canvas.width - 24))
+        importProgressBar.frame = NSRect(x: g.canvas.minX + 12,
+                                         y: g.canvas.maxY - barHeight - 12,
+                                         width: barWidth, height: barHeight)
         topBar.needsLayout = true
         topBar.needsDisplay = true
     }
@@ -437,6 +453,38 @@ public final class WorkspaceRootView: NSView {
     public var currentInspectorWidth: CGFloat { inspectorWidth }
 
     // MARK: commands
+
+    /// 文件 ▸ 导入照片… — panel, background import, then reload + select the first new photo.
+    ///
+    /// Everything the window shows about an import is wired here and nowhere else: one progress
+    /// line (which doubles as the cancel affordance), and — on a run that had failures — that same
+    /// line saying 「N 个失败」 for a few seconds. No sheet, no summary alert (用户: 摘要文案暂时不需要).
+    public func beginImport() {
+        guard session.isOpen else { return }
+        let coordinator = importCoordinator
+
+        coordinator.onProgress = { [weak self] progress in
+            self?.importProgressBar.show(progress.text)
+        }
+        coordinator.onFinish = { [weak self] summary in
+            guard let self else { return }
+            if summary.failed > 0 {
+                self.importProgressBar.showFailure(summary.failed)
+            } else {
+                self.importProgressBar.hide()
+            }
+        }
+        coordinator.onError = { [weak self] _ in
+            // The only throw here is "the folder is gone"; a whole-import failure is one word, not
+            // a paragraph.
+            self?.importProgressBar.show("导入失败")
+        }
+        importProgressBar.onCancel = { [weak coordinator] in coordinator?.cancel() }
+
+        // A previous run's failure line must not sit under a new run.
+        importProgressBar.hide()
+        coordinator.presentAndStart()
+    }
 
     public func openLibraryPanel() {
         let panel = NSOpenPanel()

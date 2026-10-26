@@ -238,6 +238,29 @@ public final class CatalogSession {
         if let a = anchorAsset, loadedEditAssetID != a.id { loadEditForAnchor() }
     }
 
+    // MARK: import (文件 ▸ 导入照片…)
+
+    /// An `ImportService` for this library, for a caller that runs it **off the main actor**
+    /// (`ImportCoordinator`). Nil when no library is open — which is exactly the condition the menu
+    /// item is validated against.
+    ///
+    /// The engine is handed out instead of being driven by the session: `ImportService.run` is
+    /// synchronous and does its own writing through `catalog.dbQueue`, so the caller owns the
+    /// background queue and only the *result* comes back to the main actor.
+    public func makeImportService() -> ImportService? {
+        guard let catalog else { return nil }
+        return ImportService(catalog: catalog)
+    }
+
+    /// After an import: reload, then select the first of `ids` that survived the current filter.
+    /// A photo the filter hides must not become the anchor — that would leave the grid showing no
+    /// selection at all. With nothing added the current selection is kept as it is.
+    public func selectImported(_ ids: [String]) {
+        reload()
+        guard let hit = ids.first(where: { id in assets.contains { $0.id == id } }) else { return }
+        selectOnly(hit)
+    }
+
     // MARK: selection
 
     /// `nil` = all photos. The browser's source list writes this; the grid/list/loupe all follow.

@@ -98,6 +98,17 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func exportAction(_ sender: Any?) { showExportSheet() }
 
+    // MARK: import (M6)
+
+    /// 文件 ▸ 导入照片… (⇧⌘I). The work lives in `WorkspaceRootView`'s `ImportCoordinator`, which
+    /// owns the progress line it drives; the window only forwards the command, so the menu and
+    /// `--ui-smoke` take the same path.
+    public func beginImport() { rootView.beginImport() }
+
+    public var isImporting: Bool { rootView.isImporting }
+
+    @objc public func importAction(_ sender: Any?) { beginImport() }
+
     // MARK: develop presets (M5)
 
     /// Develop ▸ 预设 ▸ <name>. The name travels in `representedObject` (a menu is rebuilt from the
@@ -296,6 +307,11 @@ public final class EditorWindowController: NSWindowController {
                 && rootView.loupeController.viewState.isActualSize
         case #selector(openLibraryAction(_:)):
             return true
+        case #selector(importAction(_:)):
+            // Nowhere to write without a library, and a second import while one runs would put two
+            // walks on the same root at once. Grey in both cases instead of starting a panel whose
+            // OK does nothing.
+            return session.isOpen && !rootView.isImporting
         case #selector(ratingAction(_:)):
             // Ticked when the whole selection already holds that rating — a menu that shows 3 stars
             // while the selection is mixed would be lying about what the next click does.

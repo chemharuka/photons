@@ -12,16 +12,26 @@ public struct ImportOptions: Sendable {
     /// Extensions we never import (default: sidecars are ignored by policy, see §4.4).
     public var skipExtensions: Set<String>
 
+    /// Walk into subfolders. `false` imports only the regular files sitting directly in the folder
+    /// the user picked (one level, not "the folder itself as a single item"), which is what
+    /// 文件 ▸ 导入照片… offers as an unticked 包含子文件夹 box.
+    ///
+    /// Default `true`: the CLI's documented behaviour — and every photo app's — is a recursive
+    /// import, so the switch has to be opted **out** of, not into.
+    public var recursive: Bool
+
     public init(mode: ManagementMode = .reference,
                 rootID: String? = nil,
                 renameTemplate: String? = nil,
                 interruptAfter: Int? = nil,
-                skipExtensions: Set<String> = ["xmp", "aae", "thm", "lrv"]) {
+                skipExtensions: Set<String> = ["xmp", "aae", "thm", "lrv"],
+                recursive: Bool = true) {
         self.mode = mode
         self.rootID = rootID
         self.renameTemplate = renameTemplate
         self.interruptAfter = interruptAfter
         self.skipExtensions = skipExtensions
+        self.recursive = recursive
     }
 }
 
@@ -30,9 +40,20 @@ public struct ImportOptions: Sendable {
 /// Order matters: the file is materialised *before* the row is written. The other way round a crash
 /// leaves a row pointing at nothing (an "offline" asset the user has to reason about); this way the
 /// worst case is an orphan file that `library verify` reports and a re-import adopts.
-public final class ImportService {
+///
+/// `@unchecked Sendable`: the instance is a handle (catalog + `FileManager`) plus the `shouldCancel`
+/// hook, which is written before the run starts and read only by that run. `ImportCoordinator` runs
+/// one instance on one serial queue, which is what makes the unchecked claim true.
+public final class ImportService: @unchecked Sendable {
     private let catalog: Catalog
     private let fm = FileManager.default
+
+    /// Cooperative cancel hook, polled **between files** (one file is atomic: it is materialised and
+    /// then committed in one transaction, so stopping mid-file would be the thing the ordering above
+    /// exists to prevent). Returns true ⇒ the run stops, the session is booked as `cancelled`, and
+    /// everything already imported stays imported. Set from the background queue's caller, so the
+    /// closure must be thread-safe (`ImportCoordinator` uses a lock, not a `Bool`).
+    public var shouldCancel: (() -> Bool)?
 
     public init(catalog: Catalog) {
         self.catalog = catalog
@@ -40,8 +61,11 @@ public final class ImportService {
 
     // MARK: main
 
+    /// `onFile` is called after *every* file (`processed, total`) — the GUI progress line needs
+    /// per-file ticks; `progress` keeps its historical "every 100 files" line for the CLI.
     public func run(sources: [URL],
                     options: ImportOptions,
+                    onFile: ((Int, Int) -> Void)? = nil,
                     progress: ((String) -> Void)? = nil) throws -> ImportSummary {
         let started = CFAbsoluteTimeGetCurrent()
         guard !sources.isEmpty else { throw CatalogError.importSourceMissing(URL(fileURLWithPath: ".")) }
@@ -74,6 +98,12 @@ public final class ImportService {
 
         var processed = 0
         for file in files {
+            if shouldCancel?() == true {
+                // Between two files, never inside one: what landed stays landed and the session says
+                // so, which is what makes a second import an idempotent re-run (hash dedupe).
+                summary.interrupted = true
+                break
+            }
             if let limit = options.interruptAfter, processed >= limit {
                 // Deliberately no cleanup: this must look exactly like SIGKILL to the next process.
                 fputs("interrupted by --test-interrupt-after after \(processed) files\n", stderr)
@@ -82,7 +112,8 @@ public final class ImportService {
             processed += 1
             summary.total += 1
             do {
-                let outcome = try importOne(file, root: root, options: options, sessionId: session.id)
+                let outcome = try importOne(file, root: root, options: options, sessionId: session.id,
+                                            summary: &summary)
                 switch outcome {
                 case .added: summary.added += 1
                 case .duplicate: summary.duplicate += 1
@@ -96,6 +127,7 @@ public final class ImportService {
                 try? record(file: file, outcome: .failed, reason: "\(error)", assetId: nil, sessionId: session.id)
                 try? bumpFailure(sessionId: session.id)
             }
+            onFile?(processed, files.count)
             if let progress, processed % 100 == 0 {
                 progress("… \(processed)/\(files.count)")
             }
@@ -104,10 +136,12 @@ public final class ImportService {
         let finished = ISO8601.now()
         try catalog.dbQueue.write { db in
             try db.execute(sql: """
-                UPDATE import_sessions SET state = 'finished', finished_at = ?,
+                UPDATE import_sessions SET state = ?, finished_at = ?,
                   total_count = ?, imported_count = ?, skipped_count = ?, failed_count = ?
                 WHERE id = ?
-                """, arguments: [finished, summary.total, summary.added,
+                """, arguments: [summary.interrupted ? ImportState.cancelled.rawValue
+                                                     : ImportState.finished.rawValue,
+                                 finished, summary.total, summary.added,
                                  summary.duplicate + summary.unchanged, summary.failed, session.id])
         }
         summary.seconds = CFAbsoluteTimeGetCurrent() - started
@@ -118,6 +152,11 @@ public final class ImportService {
 
     private func enumerate(sources: [URL], options: ImportOptions, summary: inout ImportSummary) throws -> [URL] {
         var out: [URL] = []
+        // Recursion is the switch the panel's 包含子文件夹 box sets. `skipsSubdirectoryDescendants`
+        // keeps the *files of the chosen folder* and drops the folders below it, which is what "仅此
+        // 文件夹" means — NOT "import the folder itself" (a directory is never an asset).
+        var walkOptions: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+        if !options.recursive { walkOptions.insert(.skipsSubdirectoryDescendants) }
         for source in sources {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: source.path, isDirectory: &isDir) else {
@@ -129,7 +168,7 @@ public final class ImportService {
             }
             guard let walker = fm.enumerator(at: source,
                                              includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey],
-                                             options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+                                             options: walkOptions) else { continue }
             for case let url as URL in walker {
                 guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
                 if accepts(url, options: options, summary: &summary) { out.append(url) }
@@ -151,7 +190,7 @@ public final class ImportService {
     // MARK: one file
 
     private func importOne(_ url: URL, root: SourceRoot, options: ImportOptions,
-                           sessionId: String) throws -> ImportOutcome {
+                           sessionId: String, summary: inout ImportSummary) throws -> ImportOutcome {
         let attrs = try fm.attributesOfItem(atPath: url.path)
         let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
         let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -251,6 +290,7 @@ public final class ImportService {
             try db.execute(sql: "UPDATE import_sessions SET imported_count = imported_count + 1 WHERE id = ?",
                            arguments: [sessionId])
         }
+        summary.addedAssetIDs.append(asset.id)
         return .added
     }
 

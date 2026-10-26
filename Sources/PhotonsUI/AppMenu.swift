@@ -33,6 +33,12 @@ public enum MainMenu {
         let file = NSMenu(title: "文件")
         fileItem.submenu = file
         file.addItem(withTitle: "打开库…", action: #selector(EditorWindowController.openLibraryAction(_:)), keyEquivalent: "o")
+        // ⇧⌘I — the shortcut every photo app puts on "import". Grey until a library is open
+        // (`validateMenuItem`): the panel would otherwise accept folders and have nowhere to write.
+        let importItem = file.addItem(withTitle: "导入照片…",
+                                      action: #selector(EditorWindowController.importAction(_:)),
+                                      keyEquivalent: "i")
+        importItem.keyEquivalentModifierMask = [.command, .shift]
         file.addItem(.separator())
         // ⌘⇧E, the shortcut every photo app puts on "export the selection". Grey with an empty
         // selection (`validateMenuItem`), so the menu cannot promise a batch that has no items.
