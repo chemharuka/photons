@@ -28,7 +28,6 @@ public struct InspectorView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            historyStrip
             ScrollView {
                 VStack(spacing: 10) {
                     card("直方图") {
@@ -62,21 +61,9 @@ public struct InspectorView: View {
         .padding(.horizontal, 16)
     }
 
-    /// The undo stack, visible: label of the step ⌘Z would take back, and whether ⇧⌘Z has a future.
-    private var historyStrip: some View {
-        HStack(spacing: 8) {
-            Text(session.undoLabel.map { "⌘Z \($0)" } ?? "⌘Z —")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(session.canUndo ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Text(session.redoLabel.map { "⇧⌘Z \($0)" } ?? "⇧⌘Z —")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(session.canRedo ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 16)
-    }
+    // The undo/redo strip that used to sit under the title is gone: an editor's history belongs in
+    // the dedicated 历史 area (still to come), not as two lines of grey text above the sliders.
+    // ⌘Z / ⇧⌘Z themselves are untouched — the menu items still carry the labels.
 
     // MARK: cards
 
