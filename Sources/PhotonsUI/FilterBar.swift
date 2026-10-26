@@ -132,6 +132,17 @@ final class FilterChecklistRootView: NSView {
     }
 }
 
+/// What the popover actually hosts — a plain, **non-flipped** view that owns nothing but its child.
+///
+/// `NSPopover` frames its `contentViewController`'s view itself: it places that view inside the
+/// popover frame at the frame's own border inset (13 pt as of macOS 27.2). Writing a frame on that
+/// view therefore fights AppKit — `layoutRows` used to set `origin = .zero`, which moved the whole
+/// checklist 13 pt left and 13 pt down *the moment a row was clicked* (the first show was fine
+/// because AppKit had already placed it). Keeping the popover's view a dumb container and pinning
+/// the flipped checklist inside it means no sheet of ours can ever own the popover's geometry:
+/// whatever `contentSize` says, the container is that size and the checklist fills it edge to edge.
+final class FilterChecklistContainerView: NSView {}
+
 /// One row of the checklist, drawn by hand so 「置灰」 is a decision rather than an AppKit mood.
 ///
 /// A stock checkbox renders a *disabled but ticked* row as an empty white square (no checkmark, no
@@ -139,6 +150,11 @@ final class FilterChecklistRootView: NSView {
 /// the box, the tick and the title here keeps three states legible at once: ticked, ticked-but-greyed
 /// (five slots already), and not-available (greyed, click inert). It is still an `NSButton`, so the
 /// action, `Tab` and space all behave normally.
+///
+/// The title is placed from the **ink** box CoreText reports (038): `NSString.draw(in:)` centres the
+/// *line fragment*, which leaves CJK ink a hair above the row's centre and made the text read as
+/// sitting high. `CTLineGetBoundsWithOptions(.useGlyphPathBounds)` says where the glyphs really are,
+/// so the baseline can be put under the ink's own middle.
 final class FilterChecklistRowButton: NSButton {
 
     var row = FilterChecklistRow(title: "") {
@@ -150,15 +166,34 @@ final class FilterChecklistRowButton: NSButton {
         }
     }
 
-    private static let boxSide: CGFloat = 12
+    /// 038 geometry, in the row's own coordinates: the tick box hugs the row's left edge (the row
+    /// itself starts at `padding`), the title follows after `boxTextGap`, and at least
+    /// `trailingInset` stays clear on the right.
+    static let boxSide: CGFloat = 12
+    static let boxTextGap: CGFloat = 8
+    static let trailingInset: CGFloat = 12
+    /// Action/note rows have no box; their text starts this far past where the box would be.
+    static let actionTextInset: CGFloat = 2
+
     private static let textFont = NSFont.systemFont(ofSize: 11)
 
     override var isFlipped: Bool { true }
 
+    /// Where the tick box is drawn — also what the layout tests read to check the 10 pt margin.
+    var boxRect: NSRect {
+        NSRect(x: 0, y: (bounds.height - Self.boxSide) / 2,
+               width: Self.boxSide, height: Self.boxSide)
+    }
+
+    /// Where the title starts, in row coordinates.
+    var textOriginX: CGFloat {
+        row.kind == .toggle ? boxRect.maxX + Self.boxTextGap
+                            : boxRect.minX + Self.actionTextInset
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let dim: CGFloat = row.enabled ? 1 : 0.4
-        let box = NSRect(x: 2, y: (bounds.height - Self.boxSide) / 2,
-                         width: Self.boxSide, height: Self.boxSide)
+        let box = boxRect
 
         if row.kind == .toggle {
             let path = NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3)
@@ -187,12 +222,37 @@ final class FilterChecklistRowButton: NSButton {
         case .note: color = .disabledControlTextColor
         case .toggle: color = row.enabled ? .labelColor : .disabledControlTextColor
         }
-        let textX = row.kind == .toggle ? box.maxX + 6 : box.minX + 2
-        let attrs: [NSAttributedString.Key: Any] = [.font: Self.textFont, .foregroundColor: color]
-        let size = (row.title as NSString).size(withAttributes: attrs)
-        let rect = NSRect(x: textX, y: (bounds.height - size.height) / 2,
-                          width: max(0, bounds.maxX - textX - 4), height: size.height)
-        (row.title as NSString).draw(in: rect, withAttributes: attrs)
+        let textX = textOriginX
+        let width = max(0, bounds.maxX - textX - Self.trailingInset)
+        guard width > 1, !row.title.isEmpty else { return }
+        let attributed = NSAttributedString(string: row.title, attributes: [
+            .font: Self.textFont, .foregroundColor: color,
+        ])
+        Self.drawInkCentred(attributed, x: textX, width: width, height: bounds.height)
+    }
+
+    /// Draw `string` with its **ink** centred on `height / 2`, left edge on `x`, truncated to `width`.
+    ///
+    /// The context is flipped here (row views are), so the baseline is derived in that space: the ink
+    /// CoreText reports is y-up around the baseline, and `baselineY = height/2 + ink.midY` is exactly
+    /// the place that puts the ink's middle on the row's middle.
+    private static func drawInkCentred(_ string: NSAttributedString, x: CGFloat,
+                                       width: CGFloat, height: CGFloat) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let line = CTLineCreateWithAttributedString(string)
+        let ellipsis = CTLineCreateWithAttributedString(
+            NSAttributedString(string: "…", attributes: string.attributes(at: 0, effectiveRange: nil)))
+        let drawn = CTLineCreateTruncatedLine(line, Double(width), .end, ellipsis) ?? line
+        let ink = CTLineGetBoundsWithOptions(drawn, .useGlyphPathBounds)
+        guard ink.height > 0 else { return }
+
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        // Flip back to y-up around the baseline so `CTLineDraw` puts glyphs above it.
+        ctx.translateBy(x: x, y: height / 2 + ink.midY)
+        ctx.scaleBy(x: 1, y: -1)
+        CTLineDraw(drawn, ctx)
+        ctx.restoreGState()
     }
 }
 
@@ -206,7 +266,9 @@ final class FilterChecklistController: NSViewController {
 
     static let width: CGFloat = 236
     static let rowHeight: CGFloat = 22
-    static let padding: CGFloat = 8
+    /// 038: the content padding. The tick box's left edge lands on this too, so the box and the
+    /// first/last row agree on one margin instead of two (8 + 2 before this task).
+    static let padding: CGFloat = 10
 
     private(set) var rows: [FilterChecklistRow] = []
     var onSelect: ((FilterChecklistRow) -> Void)?
@@ -214,6 +276,9 @@ final class FilterChecklistController: NSViewController {
 
     private var buttons: [FilterChecklistRowButton] = []
     private var buttonKinds: [FilterChecklistRow.Kind] = []
+    /// The popover's own view — plain, non-flipped, and never given a frame by us while hosted.
+    private let container = FilterChecklistContainerView()
+    /// The flipped checklist, pinned to all four edges of `container`.
     private let root = FilterChecklistRootView()
 
     init() { super.init(nibName: nil, bundle: nil) }
@@ -222,20 +287,27 @@ final class FilterChecklistController: NSViewController {
 
     override func loadView() {
         root.onCancel = { [weak self] in self?.onCancel?() }
-        view = root
+        root.autoresizingMask = [.width, .height]
+        container.addSubview(root)
+        root.frame = container.bounds
+        view = container
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
         // Rows stay Tab-reachable; taking first responder here is what lets Esc be seen before the
-        // popover has focus somewhere of its own.
-        view.window?.makeFirstResponder(view)
+        // popover has focus somewhere of its own. The checklist — not the container — is what
+        // `cancelOperation` lives on.
+        view.window?.makeFirstResponder(root)
     }
 
     var requiredSize: NSSize {
         NSSize(width: Self.width,
                height: Self.padding * 2 + CGFloat(max(1, rows.count)) * Self.rowHeight)
     }
+
+    /// The flipped checklist, as the layout tests measure it.
+    var checklistRoot: NSView { root }
 
     /// Re-render from a snapshot. When the shape is unchanged the existing buttons are updated **in
     /// place**, so the click that caused the update never destroys the button it came from.
@@ -271,14 +343,32 @@ final class FilterChecklistController: NSViewController {
         return button
     }
 
+    /// Size and place the rows — and nothing else.
+    ///
+    /// This function used to write `root.frame` (which is the *popover's* content view) to
+    /// `(origin: .zero, size: requiredSize)`. When the popover was already on screen, that dropped
+    /// the content out of the frame's 13 pt inset and everything read as shoved to the lower left.
+    /// Now: `preferredContentSize` states the size we want, the container is whatever the popover
+    /// makes it, and the checklist is pinned edge to edge inside — so a reload can only re-place
+    /// rows, never the popover's geometry.
     private func layoutRows() {
-        root.frame = NSRect(origin: .zero, size: requiredSize)
+        let target = requiredSize
+        preferredContentSize = target
+        // Unhosted (a unit test, or a reload before the popover shows): give the container the size
+        // it will have. While hosted, AppKit owns this frame and any write would be undone — worse,
+        // it would be undone *after* our rows were laid out for the wrong width.
+        if container.window == nil && container.superview == nil {
+            container.frame = NSRect(origin: .zero, size: target)
+        }
+        root.frame = container.bounds
+        let rowWidth = max(0, root.bounds.width - Self.padding * 2)
         for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(x: Self.padding + 2,
+            button.frame = NSRect(x: Self.padding,
                                   y: Self.padding + CGFloat(index) * Self.rowHeight,
-                                  width: Self.width - Self.padding * 2 - 4,
+                                  width: rowWidth,
                                   height: Self.rowHeight)
         }
+        root.needsDisplay = true
     }
 
     @objc private func rowClicked(_ sender: NSButton) {
@@ -888,6 +978,14 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     }
 
     public var isDimensionPopoverOpen: Bool { dimensionPopoverOpen }
+
+    /// The live popover and the checklist's own root — what the layout tests measure, so a size that
+    /// drifts apart between `contentSize`, `preferredContentSize` and the root's frame is visible
+    /// from a test rather than only from the screen.
+    var dimensionPopoverForLayoutTests: NSPopover { dimensionPopover }
+    var dimensionChecklistForLayoutTests: FilterChecklistController { dimensionChecklist }
+    var slotPopoverForLayoutTests: NSPopover { slotPopover }
+    var slotChecklistForLayoutTests: FilterChecklistController { slotChecklist }
 
     /// Open it the way the button does. Without a window the logical state is still tracked, which is
     /// what the tests assert on; in the app this is the same `.transient` popover the user sees.
