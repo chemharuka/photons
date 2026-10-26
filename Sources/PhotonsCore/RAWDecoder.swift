@@ -340,8 +340,9 @@ public final class RAWDecoder {
     ///     `luminanceNoiseReductionAmount` reads 0.000 and `detailAmount` 0.000, but
     ///     `colorNoiseReductionAmount` and `sharpnessAmount` read **0.500**, and on a Canon body
     ///     `sharpnessAmount` reads 1.000. That is why the baseline is read here, from the live filter,
-    ///     and why a slider at 0 must assign *nothing*: assigning 0 to the colour NR would switch off
-    ///     half of Apple's default (measured: 1656830 samples move on `L1030433.dng`).
+    ///     and why a slider parked at its default position must assign *nothing*: assigning 0 to the
+    ///     colour NR would switch off half of Apple's default (measured: 1656830 samples move on
+    ///     `L1030433.dng`).
     ///
     /// Read-back tolerance is 1e-4 because the properties are `Float`: `Float(0.3)` reads back as
     /// 0.30000001192, which is the assignment landing, not a rejection.
@@ -353,7 +354,7 @@ public final class RAWDecoder {
 
         func assign(_ name: String, _ wanted: Double?,
                     _ get: () -> Float, _ set: (Float) -> Void) throws {
-            guard let wanted else { return }          // 0 on the slider: leave Apple's value alone
+            guard let wanted else { return }          // default position: leave Apple's value alone
             set(Float(wanted))
             let back = Double(get())
             guard abs(back - wanted) <= 1e-4 else {
