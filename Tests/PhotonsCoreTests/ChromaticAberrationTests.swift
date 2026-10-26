@@ -148,9 +148,13 @@ final class ChromaticAberrationTests: XCTestCase {
         }
 
         // The key: the pre-029 material, comma for comma, then the two conditional tokens.
+        //
+        // `pv=2` since 派单 030 (the curve moved to S1.7 and changed the meaning of a document's
+        // pixels, so the process version bumped). Nothing about this material's *shape* changed —
+        // the version is the only token that moved.
         let neutral = EditModel.neutral
         let material = neutral.keyMaterial(.geometry)
-        XCTAssertEqual(material, "pv=1;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
+        XCTAssertEqual(material, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
         XCTAssertFalse(material.contains("car="))
         XCTAssertFalse(material.contains("cab="))
 

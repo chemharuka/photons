@@ -41,6 +41,14 @@ struct S1Params {
     float4 a;   // gain, wbR, wbG, wbB
     float4 b;   // recovery, identity, blacks, whites
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    // 派单 030 — the absolute levels: blackLevel, whiteLevel, hasBlack, hasWhite.
+    //
+    // `blackLevel`/`whiteLevel` are the same two numbers the `blacks`/`whites` sliders produce, said
+    // in scene-linear units instead of slider travel. That matters for white: the slider can reach
+    // `wht = 1.15`, and a +1 EV highlight needs `wht = 2.0`. Only one spelling is ever in force —
+    // the flags say which, and both are 0 for every document that never used a dropper, so the
+    // slider arithmetic below runs unchanged (and bit-identically) for those.
+    float4 d;
 };
 
 kernel void s1_scene_linear(texture2d<float, access::read> src [[texture(0)]],
@@ -70,8 +78,13 @@ kernel void s1_scene_linear(texture2d<float, access::read> src [[texture(0)]],
     // ① Linear black/white levels. A positive `blacks` lowers the input black point (lifting the
     //    shadows), a positive `whites` pulls the white point in (brightening, clipping sooner) — the
     //    Lightroom direction, unchanged from 派单 008 A.
-    float blk = -p.b.z / 100.0 * 0.15;
-    float wht = 1.0 - p.b.w / 100.0 * 0.15;
+    //
+    //    030: an absolute level, when the document has one, is the same number in scene-linear units
+    //    and wins over its slider. The slider arithmetic stays *inside* this branch rather than being
+    //    pre-computed on the CPU, so a document with no absolute levels computes `blk`/`wht` with the
+    //    exact float32 operations it always did — that is what keeps 019's pixels identical.
+    float blk = p.d.z > 0.5 ? p.d.x : (-p.b.z / 100.0 * 0.15);
+    float wht = p.d.w > 0.5 ? p.d.y : (1.0 - p.b.w / 100.0 * 0.15);
     float3 v = (c.rgb - blk) / max(wht - blk, 1e-3);
 
     // ② The gain acts on the levelled value: (v − blk)·gain, sign preserved by construction. The WB

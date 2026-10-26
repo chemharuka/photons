@@ -310,7 +310,7 @@ final class PresetCatalogTests: XCTestCase {
         var document = edit(exposure: -0.5, contrast: 8, saturation: 30)
         document.light.temperature = 7200
         document.detail.sharpening = 55
-        document.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        document.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
         _ = try catalog.appendDevelop(document, label: "Develop", forAsset: source)
 
         let snapshot = try catalog.copySettings(fromAsset: source)

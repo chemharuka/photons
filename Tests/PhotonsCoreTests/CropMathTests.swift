@@ -183,11 +183,11 @@ final class CropMathTests: XCTestCase {
         edit.geometry.aspectLock = .original
         XCTAssertEqual(edit.geometry.renderCrop(source: source), before)
         XCTAssertEqual(edit.keyMaterial(.geometry),
-                       "pv=1;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
+                       "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
                        "the unconstrained lock must not add a key segment")
         edit.geometry.aspectLock = .square
         XCTAssertNotEqual(edit.keyMaterial(.geometry),
-                          "pv=1;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
+                          "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
                           "a constraining lock must invalidate S0")
         XCTAssertTrue(edit.keyMaterial(.geometry).contains(";asp=square"))
     }

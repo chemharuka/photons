@@ -19,21 +19,33 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case sceneLinear = "s1-scene-linear"
     case maskAtlas = "s1.5-mask-atlas"
     case localApply = "s1.6-local"
+    /// 派单 030: **the** tone curve, in the HDR (scene-linear, log1p-shaped) domain.
+    ///
+    /// It used to be `s3-curve`, after the tone map, on 0…1 data S2 had already compressed — so the
+    /// user could only bend what S2 had shaped, and a +6 EV highlight had already been treated as a
+    /// "highlights region" before the curve saw it. `s3_curve` (the file, the kernel and the stage)
+    /// is **deleted**; this is the one curve. `grep -rn "s3_curve" Sources` must find nothing but
+    /// this sentence.
+    case curve = "s1.7-hdr-curve"
     case toneMap = "s2-tone-map"
-    case curve = "s3-curve"
     case color = "s3-color"
     case vignette = "s3-vignette"
     case display = "s4-display"
 
     /// The seven passes every document runs. Mask stages are excluded on purpose: `masks == []`
     /// must be byte-for-byte the M1 graph, including the set of stages a cold render reports.
+    ///
+    /// The curve is third among the unconditional passes (030): S1 → **curve** → S2. S2 must see
+    /// what the curve produced, not the other way round, and `s2_tone_map`'s region weights are
+    /// defined on display-referred values — which is what the curve hands it.
     public static var allCases: [RenderStage] {
-        [.geometry, .sceneLinear, .toneMap, .curve, .color, .vignette, .display]
+        [.geometry, .sceneLinear, .curve, .toneMap, .color, .vignette, .display]
     }
 
     /// Execution order including the conditional stages.
     public static var order: [RenderStage] {
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .toneMap, .curve, .color, .vignette, .display]
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .vignette,
+         .display]
     }
 
     /// The stages one render actually visits.
@@ -53,8 +65,8 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .sceneLinear: return "s1"
         case .maskAtlas: return "s1.5"
         case .localApply: return "s1.6"
+        case .curve: return "s1.7"
         case .toneMap: return "s2"
-        case .curve: return "s3-curve"
         case .color: return "s3-color"
         case .vignette: return "s3-vignette"
         case .display: return "s4"
@@ -275,6 +287,7 @@ public enum RenderKeyChain {
         var maskAtlas: String?
         var localApply: String?
         var toneMap: String
+        var curve: String
         if edit.hasActiveMasks {
             // The explicit exception of §3.2: with masks the chain is nine links, and every link
             // below the atlas moves. Without masks the two lines below simply do not run and
@@ -290,15 +303,21 @@ public enum RenderKeyChain {
                 .canonical
             maskAtlas = atlas
             localApply = local
-            toneMap = KeyBuilder(KeyBuilder.digest(of: local)).add(edit.keyMaterial(.toneMap)).canonical
+            // 030: the curve reads whatever the mask stages produced, and S2 reads the curve. A
+            // curve drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6,
+            // which is the whole reason the curve has its own stage instead of riding on S1's key
+            // (§3.2 of 030).
+            curve = KeyBuilder(KeyBuilder.digest(of: local)).add(edit.keyMaterial(.curve)).canonical
+            toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(edit.keyMaterial(.toneMap)).canonical
         } else {
-            toneMap = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
+            curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
+                .add(edit.keyMaterial(.curve)).canonical
+            toneMap = KeyBuilder(KeyBuilder.digest(of: curve))
                 .add(edit.keyMaterial(.toneMap))
                 .canonical
         }
 
-        let curve = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(edit.keyMaterial(.curve)).canonical
-        let color = KeyBuilder(KeyBuilder.digest(of: curve)).add(edit.keyMaterial(.color)).canonical
+        let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(edit.keyMaterial(.color)).canonical
         let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(edit.keyMaterial(.vignette)).canonical
         var displayKey = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(display.keyString)
@@ -331,9 +350,13 @@ public enum RenderKeyChain {
 /// The key chain for one render: each stage's output key, computed before anything runs.
 ///
 /// Seven links for a document without masks (exactly M1), nine when masks are active:
-/// `geo → lin → maskAtlas → localApply → preNR → curve → color → vignette → display`. The two mask
-/// keys are `nil` for the M1 chain — that is the explicit exception of §3.2, and `pipeline` is what
-/// makes the stages disappear instead of merely being skipped.
+/// `geo → lin → [maskAtlas → localApply →] curve → toneMap → color → vignette → display`. The two
+/// mask keys are `nil` for the M1 chain — that is the explicit exception of §3.2, and `pipeline` is
+/// what makes the stages disappear instead of merely being skipped.
+///
+/// 派单 030 swapped `curve` and `toneMap`: the curve runs *before* the tone map now, so S2's key is
+/// seeded by the curve's and the curve's by S1.6 (or S1). The **order of the fields in this struct**
+/// is declaration order, not execution order — `RenderStage.order` is the authority.
 public struct StageKeys: Sendable, Equatable {
     public var inputIdentity: String
     public var geometry: String

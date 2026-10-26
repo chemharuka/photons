@@ -1,22 +1,43 @@
 import Foundation
 
-/// 1024-entry lookup tables built from tone-curve control points.
+/// 4096-entry lookup tables built from curve control points.
 ///
 /// The curve is a UI construct (a few control points) but the kernel wants random access at pixel
 /// rate, so the table is built once per parameter change on the CPU (deterministic double math) and
 /// uploaded as a float buffer. Interpolation is monotone cubic (Fritsch–Carlson) so dragging a point
 /// can never make the curve fold back on itself — a fold would invert tones and is the classic
 /// spline artifact in tone curves.
+///
+/// ## 派单 030: the same tables, a different axis, four times the resolution
+///
+/// The y axis is no longer a display value but the **log-light coordinate** of `HDRCurveAxis`
+/// (`u = log1p(x/x0)/K`). Nothing about the table changed shape: `buildOne` still samples a monotone
+/// cubic in 0…1 and the identity table is still `i/(N−1)`, so `tablesAreIdentity` means exactly what
+/// it meant before.
+///
+/// 4096 entries are the measured answer, not a round number: a 2 %-wide cliff (the narrowest gesture
+/// the editor allows — 0.36 stop) has a worst-case error of 2.97 8-bit codes at N=1024, 0.74 at
+/// N=2048 and **0.19 at N=4096**; 600 random legal curves peak at 0.24 codes at N=4096. The frame is
+/// `rgba16Float`, whose relative step is 9.77e-4 (≈0.25 code at white), so at 4096 the table error is
+/// below the storage it is written into — going higher buys nothing (docs/tasks/030 §6).
+///
+/// Four tables × 4096 × 4 B = 64 KB, one upload. `RenderGraph` keeps a **single** buffer and rewrites
+/// only the slices whose points changed (§6.4), because a slider drag would otherwise allocate a
+/// 64 KB buffer per frame.
 public enum CurveLUT {
-    public static let size = 1024
+    public static let size = 4096
 
-    /// Four tables back to back: composite RGB, then R, G, B.
+    /// Four tables back to back: W (luminance), then R, G, B.
+    ///
+    /// W is a luma **gain**, not a fourth per-channel table: the kernel applies it as one exposure
+    /// offset to the pixel's luma, which preserves hue and saturation. The two operators differ by up
+    /// to 137 8-bit codes on a saturated HDR pixel (§5.2), so the distinction is load-bearing.
     public static let tableCount = 4
 
     /// Build `tableCount * size` floats, each in 0…1.
     public static func build(_ group: CurveGroup) -> [Float] {
         var out = [Float](repeating: 0, count: tableCount * size)
-        let tables = [group.rgb, group.red, group.green, group.blue]
+        let tables = group.tables
         for (t, points) in tables.enumerated() {
             let table = buildOne(points)
             for i in 0..<size { out[t * size + i] = table[i] }
@@ -33,19 +54,62 @@ public enum CurveLUT {
         group.isIdentity
     }
 
-    /// True when all four tables are the identity, so the kernel can skip the pass entirely.
+    /// True when every table is the identity, so the kernel can take its copy branch.
     public static func tablesAreIdentity(_ tables: [Float]) -> Bool {
         guard tables.count == tableCount * size else { return false }
-        for t in 0..<tableCount {
-            for i in 0..<size {
-                let expected = Float(i) / Float(size - 1)
-                if abs(tables[t * size + i] - expected) > 1e-5 { return false }
-            }
+        // Slices, not copies: this runs once per curve change on a 64 KB buffer, but a drag asks the
+        // question 60 times a second and four 16 KB copies per frame is a needless 4 MB/s.
+        return (0..<tableCount).allSatisfy { isIdentityTable(tables[$0 * size..<($0 + 1) * size]) }
+    }
+
+    /// One table's identity test. Same 1e-5 tolerance `tablesAreIdentity` has always used: the
+    /// comparison is against the *stored* `Float` of `i/(N−1)`, so the tolerance only has to absorb
+    /// double→single rounding, not an approximation.
+    public static func isIdentityTable(_ table: ArraySlice<Float>) -> Bool {
+        guard table.count == size else { return false }
+        var i = table.startIndex
+        for k in 0..<size {
+            if abs(table[i] - Float(k) / Float(size - 1)) > 1e-5 { return false }
+            i += 1
         }
         return true
     }
 
-    public static func buildOne(_ rawPoints: [CurvePoint]) -> [Float] {
+    public static func isIdentityTable(_ table: [Float]) -> Bool { isIdentityTable(table[...]) }
+
+    /// Rule 4's slopes: the last segment of each table, extrapolated to a per-unit-u slope.
+    ///
+    /// `(lut[N−1] − lut[N−2]) · (N−1)` — exactly 1 for the identity table, < 1 for a roll-off, 0 for
+    /// a ceiling the user drew at the right end. The kernel clamps it into [0,1]; the value here is
+    /// what goes into the uniform.
+    public static func slopes(_ tables: [Float]) -> [Float] {
+        guard tables.count == tableCount * size else {
+            return [Float](repeating: 1, count: tableCount)
+        }
+        return (0..<tableCount).map { t in
+            let end = (t + 1) * size - 1
+            return (tables[end] - tables[end - 1]) * Float(size - 1)
+        }
+    }
+
+    /// The same number for one table, so a partial rebuild does not have to concatenate to ask.
+    public static func slope(of table: [Float]) -> Float {
+        guard table.count >= 2 else { return 1 }
+        return (table[table.count - 1] - table[table.count - 2]) * Float(table.count - 1)
+    }
+
+    /// One table from control points: normalise, then Fritsch–Carlson, then **enforce** monotonicity.
+    ///
+    /// Layer 2 of §5.4: Fritsch–Carlson guarantees the *interpolant* is monotone between monotone
+    /// data, but a user can still hand us y values that go down (the editor forbids it, documents do
+    /// not). The tabulated `min(diff) > 0` check is the object-level promise the kernel relies on —
+    /// a curve that folds is not "a bit wrong", it inverts tones — so a fold falls back to the
+    /// identity, the same failure path `pts.count < 2` already takes.
+    /// - Parameter n: table length. `CurveLUT.size` (4096) everywhere in the product; a test may ask
+    ///   for 1024 or 65536 to measure what the resolution is worth (`HDRCurveTests`, 030 §6).
+    public static func buildOne(_ rawPoints: [CurvePoint], size requested: Int? = nil) -> [Float] {
+        let tableSize = max(2, requested ?? size)
+        let identity = (0..<tableSize).map { Float($0) / Float(tableSize - 1) }
         // Normalize: clamp into the unit square, sort by x, drop duplicate x.
         var pts = rawPoints
             .map { CurvePoint(min(max($0.x, 0), 1), min(max($0.y, 0), 1)) }
@@ -60,7 +124,6 @@ public enum CurveLUT {
         }
         pts = deduped
 
-        let identity = (0..<size).map { Float($0) / Float(size - 1) }
         guard pts.count >= 2 else { return identity }
 
         let n = pts.count
@@ -92,10 +155,10 @@ public enum CurveLUT {
             }
         }
 
-        var out = [Float](repeating: 0, count: size)
+        var out = [Float](repeating: 0, count: tableSize)
         var seg = 0
-        for i in 0..<size {
-            let x = Double(i) / Double(size - 1)
+        for i in 0..<tableSize {
+            let x = Double(i) / Double(tableSize - 1)
             if x <= pts[0].x {
                 out[i] = Float(pts[0].y)
                 continue
@@ -112,10 +175,17 @@ public enum CurveLUT {
             let h10 = t3 - 2 * t2 + t
             let h01 = -2 * t3 + 3 * t2
             let h11 = t3 - t2
-            let y = h00 * pts[seg].y + h10 * h[seg] * m[seg]
-                + h01 * pts[seg + 1].y + h11 * h[seg] * m[seg + 1]
+            // Split into two sums: one expression of six products is past what the type checker
+            // will do in reasonable time.
+            let a = h00 * pts[seg].y + h10 * h[seg] * m[seg]
+            let b = h01 * pts[seg + 1].y + h11 * h[seg] * m[seg + 1]
+            let y = a + b
             out[i] = Float(min(max(y, 0), 1))
         }
+
+        // §5.4 layer 2: the table must not fold. Tolerance 0 — equal neighbours are monotone,
+        // a single descending step is not.
+        guard zip(out, out.dropFirst()).allSatisfy({ $1 >= $0 }) else { return identity }
         return out
     }
 }

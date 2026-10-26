@@ -226,7 +226,7 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(dirty { $0.light.exposure = 0.5 }, [.light])
         XCTAssertEqual(dirty { $0.light.temperature = 5200 }, [.light])
         XCTAssertEqual(dirty { $0.light.highlightRecovery = 0.4 }, [.light])
-        XCTAssertEqual(dirty { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)] },
+        XCTAssertEqual(dirty { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)] },
                        [.curve])
         XCTAssertEqual(dirty { $0.curve.blue = [CurvePoint(0, 0.1), CurvePoint(1, 1)] }, [.curve])
         XCTAssertEqual(dirty { $0.color.saturation = 30 }, [.color])
@@ -291,10 +291,10 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: wbBase), [.light],
                        "as shot → explicit is a different document, however small the numbers are")
         XCTAssertEqual(EditHistory.dirtyGroups(from: wbBase, to: base), [.light])
-        let curveBase = edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)] }
+        let curveBase = edit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)] }
         XCTAssertEqual(EditHistory.dirtyGroups(
             from: curveBase,
-            to: edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.5 + 1e-9), CurvePoint(1, 1)] }
+            to: edit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5 + 1e-9), CurvePoint(1, 1)] }
         ), [])
 
         // 1e-3 is a real change (one slider quantum at a hundredth of a stop)
@@ -303,7 +303,7 @@ final class HistoryTests: XCTestCase {
                                                to: edit { $0.light.temperature = 5200 + 1e-3; $0.light.tint = 8 }), [.light])
         XCTAssertEqual(EditHistory.dirtyGroups(
             from: curveBase,
-            to: edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.5 + 1e-3), CurvePoint(1, 1)] }
+            to: edit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5 + 1e-3), CurvePoint(1, 1)] }
         ), [.curve])
 
         // exactly at the tolerance is still "the same"; just past it is not
@@ -323,12 +323,17 @@ final class HistoryTests: XCTestCase {
 
     func testEmptyAndMissingMasksDoNotDirtyTheMaskGroup() throws {
         let v = EditModel.currentSchemaVersion      // interpolated: the test tracks the schema
+        // …and the process version, for the same reason: it is interpolated too, because a fixture
+        // pinned at an older one is a version bump, and a version bump is *every* group dirty by
+        // design (`dirtyGroups` compares documents, not parsers). The claim being made here is about
+        // absent-vs-empty mask lists, which has nothing to do with either version.
+        let p = EditModel.currentProcessVersion
         let minimal = try JSONDecoder().decode(
-            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":1}"#.utf8))
+            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":\#(p)}"#.utf8))
         let explicitNull = try JSONDecoder().decode(
-            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":1,"masks":null}"#.utf8))
+            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":\#(p),"masks":null}"#.utf8))
         let explicitEmpty = try JSONDecoder().decode(
-            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":1,"masks":[]}"#.utf8))
+            EditModel.self, from: Data(#"{"schemaVersion":\#(v),"processVersion":\#(p),"masks":[]}"#.utf8))
 
         XCTAssertEqual(minimal.masks, [])
         XCTAssertEqual(explicitNull.masks, [])
@@ -421,7 +426,7 @@ final class HistoryTests: XCTestCase {
     func testCodableRoundTripPreservesStackAndCursor() throws {
         var h = history()
         h.commit(edit { $0.light.exposure = 1 }, label: "Exposure", now: t0)
-        h.commit(edit { $0.curve.rgb = [CurvePoint(0, 0), CurvePoint(0.5, 0.7), CurvePoint(1, 1)] },
+        h.commit(edit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.7), CurvePoint(1, 1)] },
                  label: "Curve", now: t0)
         h.commit(edit { $0.color.saturation = 30 }, label: "Saturation", now: t0)
         h.undo()                                       // a mid-stack cursor must survive too
