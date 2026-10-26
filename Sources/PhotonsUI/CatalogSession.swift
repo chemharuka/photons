@@ -195,7 +195,18 @@ public final class CatalogSession {
 
     private var catalog: Catalog?
 
-    public init() {}
+    /// Where the filter bar's state is remembered (043). Injectable so a test runs against its own
+    /// domain and can count writes; production gets `UserDefaults.standard`.
+    public let filterPersistence: FilterPersistence.Writer
+
+    /// The library the filter is remembered *for* — the key of the archive the next write goes to.
+    /// Set by `open`; nil until a library is open, which is why a filter applied with no library
+    /// open is not written anywhere (there is no library to attach it to).
+    private var filterPersistencePath: String?
+
+    public init(filterStore: FilterPersistence.Store = UserDefaults.standard) {
+        filterPersistence = FilterPersistence.Writer(store: filterStore)
+    }
 
     // MARK: lifecycle
 
@@ -209,14 +220,37 @@ public final class CatalogSession {
         // grid falls back to placeholders, which must not stop the library from opening.
         thumbnailCache = try? ThumbnailCache(layout: c.layout)
         loadedEditAssetID = nil
+        // Anything still pending belongs to the library we are leaving (043): write it before the
+        // path changes, so a fast 打开另一个库 → 回来 does not lose the last click.
+        filterPersistence.flush()
+        let path = Self.filterPersistencePath(for: url)
+        filterPersistencePath = path
+        // The previous library's filter must not be inherited: this is the *reset* half of "remember
+        // per library". Assigned directly rather than through `applyFilter` because the restore right
+        // below (or the `reload()` further down) is what runs the query — one query, not three.
+        filter = .none
         // Before the first query, so the grid's very first paint already carries 「原文件已移动」:
         // the flag is a filesystem fact and this is the only moment it can be fresh. A failure here
         // only means the flags keep yesterday's values, which is why it does not throw.
         lastAvailability = try? c.refreshAvailability()
-        reload()
+        // 043 — the bar's slots are view state remembered per library, restored **before the first
+        // query** so the grid's very first paint is already narrowed. It goes through `applyFilter`,
+        // the door a click uses: a restored filter must be indistinguishable from a clicked one —
+        // which also means its `reload()` is the only query this open runs when an archive exists.
+        if let restored = filterPersistence.recall(libraryPath: path), restored != filter {
+            applyFilter(restored)
+        } else {
+            reload()
+        }
         // The preset card and the Develop menu read this cache; fill it as soon as the library is
         // open instead of waiting for the panel's first `onAppear`.
         reloadPresets()
+    }
+
+    /// Where this library's filter archive lives. The path is the library *directory*; the hash of it
+    /// inside `FilterPersistence` is what makes a path with a user name or CJK safe as a defaults key.
+    private static func filterPersistencePath(for url: URL) -> String {
+        url.standardizedFileURL.path
     }
 
     public func reload() {
@@ -525,14 +559,42 @@ public final class CatalogSession {
 
     /// Narrow (or widen) the grid. Re-runs the catalog query; the selection is intersected with
     /// what is left, exactly like a source change. Never touches the document or history.
+    ///
+    /// This is also the **only** place the filter is remembered (043): the bar, a chip's ×, a
+    /// shortcut and the restore in `open` all arrive here, so what is stored is always what the user
+    /// sees — there is no restore-only path that could drift from the click path.
     public func applyFilter(_ next: CatalogFilter) {
         guard next != filter else { return }
         filter = next
         reload()
+        rememberFilter()
     }
 
     public func clearFilter() {
         applyFilter(.none)
+        // 「清除全部」 means "start from the defaults next time too": that library's archive goes,
+        // and every other library keeps its own (043 §4). `.none` is deliberately *not* written as an
+        // archive — the default bar is the absence of one.
+        if let path = filterPersistencePath { filterPersistence.forget(libraryPath: path) }
+    }
+
+    /// Write a pending filter archive right now. The app calls this on termination; a test calls it
+    /// instead of waiting out the 0.5 s throttle.
+    public func flushPendingFilterSave() {
+        filterPersistence.flush()
+    }
+
+    private func rememberFilter() {
+        guard let path = filterPersistencePath else { return }
+        // A bar with nothing ticked constrains nothing: its archive is *absence*, not a blob of empty
+        // slots. Dropping it is what makes "I un-ticked everything" survive a restart — writing
+        // nothing here would leave yesterday's narrower archive to be restored over the user's own
+        // clearing, which is the one way this feature could contradict the screen.
+        guard filter.slots.contains(where: { !$0.isEmpty }) else {
+            filterPersistence.forget(libraryPath: path)
+            return
+        }
+        filterPersistence.remember(filter, libraryPath: path)
     }
 
     /// Drop one facet — what clicking a chip does.
