@@ -110,7 +110,11 @@ public struct EditModel: Sendable, Equatable, Codable {
             // Lightroom's Light panel straddles S1 (exposure, highlight recovery) and S2 (contrast,
             // highlights, shadows, whites, blacks). White balance (派单 006) straddles neither: a
             // change there means a **new development**, so every stage's source pixels are new.
-            if light.temperature != old.light.temperature || light.tint != old.light.tint {
+            //
+            // 派单 011: the question "is this a new development?" is `decodeInputs`, not a hand-rolled
+            // comparison of two fields — `EditModel.splitFrom(_:)` is the one place that decides, and
+            // the loupe keys its rungs by the same `DecodeInputs`.
+            if decodesDifferently(from: old) {
                 return Set(RenderStage.allCases)
             }
             if light.exposure != old.light.exposure
@@ -452,7 +456,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
         return (Float(r), Float(g), Float(b))
     }
 
-    private static func planckianRGB(_ kelvin: Double) -> (Double, Double, Double) {
+    static func planckianRGB(_ kelvin: Double) -> (Double, Double, Double) {
         let t = min(max(kelvin, 1000), 15000) / 100
         var r: Double, g: Double, b: Double
         if t <= 66 {

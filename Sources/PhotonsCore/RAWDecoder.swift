@@ -68,6 +68,14 @@ public struct WhiteBalance: Sendable, Hashable, Codable {
         return "\(t)/\(i)"
     }
 
+    /// This value's contribution to a **decode key**: `wb=5500K/+0`, or `nil` for as shot.
+    ///
+    /// The one spelling every decode-side key uses (`DecodeInputs`, `DecodeCacheKey`), so the rung
+    /// identity and the on-disk buffer name cannot disagree about what "5500 K" looks like.
+    public var decodeComponent: String? {
+        keyString.map { "wb=\($0)" }
+    }
+
     /// `5320 K / +7` for the inspector, the probe line and the report.
     public var summary: String {
         if isAsShot { return "as shot" }

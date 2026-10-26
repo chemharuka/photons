@@ -46,12 +46,28 @@ public struct DecodeCacheKey: Sendable, Hashable {
         self.decodeRecipe = decodeRecipe
     }
 
-    public var digest: String {
+    /// The exact text the digest is taken over: `file|version|ev|scale|draft|colour|recipe[|wb=…]`.
+    ///
+    /// Exposed because "the white balance appears in the decode key and **only** there" is an
+    /// architecture claim, and a claim needs a string a test can read (派单 011 A).
+    public var keyText: String {
         var parts = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
                      String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
                      decodeRecipe]
-        if let wb = whiteBalance.keyString { parts.append("wb=\(wb)") }
-        return SHA256.hash(data: Data(parts.joined(separator: "|").utf8))
+        // 派单 011: the white-balance component comes from `DecodeInputs`' spelling, so the on-disk
+        // buffer name and the loupe's rung identity are the same text — and as shot appends nothing
+        // at all, which is what keeps every pre-006 buffer on disk hitting.
+        if let wb = DecodeInputs(whiteBalance: whiteBalance,
+                                 decoderVersion: decoderVersion,
+                                 scale: Double(scale),
+                                 recipe: decodeRecipe).whiteBalanceComponent {
+            parts.append(wb)
+        }
+        return parts.joined(separator: "|")
+    }
+
+    public var digest: String {
+        SHA256.hash(data: Data(keyText.utf8))
             .map { String(format: "%02x", $0) }.joined()
     }
 }

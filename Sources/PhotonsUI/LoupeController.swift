@@ -68,8 +68,10 @@ public final class LoupeCanvasView: NSView {
         case "z", " ":
             controller?.toggleActualSize()
         case "\u{1b}":
-            // Escape abandons a gradient drag before it becomes a mask, and otherwise means "fit".
-            if isShaping { isShaping = false; controller?.cancelShapeDrag() }
+            // Escape abandons a gradient drag before it becomes a mask, disarms the eyedropper, and
+            // otherwise means "fit".
+            if controller?.isEyedropperArmed == true { controller?.cancelEyedropper() }
+            else if isShaping { isShaping = false; controller?.cancelShapeDrag() }
             else { controller?.zoomToFit() }
         default:
             super.keyDown(with: event)
@@ -79,6 +81,12 @@ public final class LoupeCanvasView: NSView {
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        // 派单 009 C: the eyedropper is a modal one-shot, so it is the innermost gesture of all —
+        // it consumes the click before a paint drag or a pan can start.
+        if controller?.isEyedropperArmed == true {
+            controller?.handleEyedropperClick(atViewPoint: point)
+            return
+        }
         // A gradient drag is the innermost gesture: it exists only while a shape is armed, and it is
         // what turns two clicks into a linear ramp / an ellipse (or reshapes the selected one).
         if controller?.isShapeDragArmed == true {
@@ -157,6 +165,11 @@ public final class LoupeCanvasView: NSView {
     /// What the cursor should say: a crosshair for a brush, a pointing hand only when there is
     /// something to drag.
     public override func resetCursorRects() {
+        if controller?.isEyedropperArmed == true {
+            // A dropper is armed: every point of the canvas is a sample, so the pointer says so.
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if controller?.isShapeDragArmed == true {
             // Two clicks will become a gradient: the pointer has to say "draw here".
             addCursorRect(bounds, cursor: .crosshair)
@@ -284,7 +297,14 @@ public final class LoupeController: NSViewController {
 
         let kind: Kind
         let url: URL
-        let identity: String
+        /// The **photo** identity — `contentHash|assetID`, with no decode component.
+        ///
+        /// 派单 011 A: the decode inputs are appended by `makeFrame` (one place, `DecodeInputs
+        /// .appending(to:)`), so a job must carry the bare photo identity or the component lands
+        /// twice. It did land twice before this split (`…|wb=5500K/+0|wb=5500K/+0`): the development
+        /// was written under the queue's key while every frame looked itself up under the doubled
+        /// one, so the white balance developed and the canvas never showed it — "改白平衡画面不变".
+        let baseIdentity: String
         let viewport: ImageSize
         let edit: EditModel
         let state: LoupeViewState
@@ -293,6 +313,10 @@ public final class LoupeController: NSViewController {
         var generation: Int
         /// Only edit frames carry a slider timestamp.
         let changedAt: CFAbsoluteTime
+
+        /// The rung identity this job develops and renders from: the document's decode key on top of
+        /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
+        var identity: String { edit.decodeInputs.appending(to: baseIdentity) }
 
         /// The rung the camera needs. Everything — fit, 1:1, 4:1 — renders from the full buffer: a
         /// window is what makes 1:1 cheap to *render*, and the rung is what makes it expensive to
@@ -940,6 +964,135 @@ public final class LoupeController: NSViewController {
         return CGPoint(x: p.x / backingScale, y: p.y / backingScale)
     }
 
+    // MARK: white-balance eyedropper (派单 009 C)
+
+    /// One pixel of the **resident decode buffer**, resolved from a click.
+    ///
+    /// Everything the inspector needs to explain itself: the source pixel (so the report can say
+    /// where the sample came from), the buffer pixel it was read at (the rung is usually not 1:1),
+    /// and the colour. Read from the buffer — never from the presented texture: the canvas has been
+    /// through S0–S4 (crop, tone map, output primaries), and a white balance solved on display
+    /// pixels would bake the tone curve into the Kelvin.
+    public struct DropperSample: Equatable, Sendable {
+        public let sourceX: Double
+        public let sourceY: Double
+        public let bufferX: Int
+        public let bufferY: Int
+        public let decodeScale: Double
+        public let rgb: RGBSample
+
+        public var text: String {
+            String(format: "src %.0f,%.0f → buf %d,%d @%.2f× · RGB %@",
+                   sourceX, sourceY, bufferX, bufferY, decodeScale, rgb.text)
+        }
+    }
+
+    /// What a click on the canvas produced. Three cases, because the caller must be able to say
+    /// *why* nothing happened without writing anything.
+    public enum DropperOutcome: Equatable, Sendable {
+        /// A sample, and the (approximate) balance that makes it neutral.
+        case sampled(DropperSample)
+        /// The click landed on the letterbox — outside the picture. No document write.
+        case outsideImage
+        /// There is no decode buffer yet (the first development has not landed). No document write.
+        case notReady
+
+        public var hint: String {
+            switch self {
+            case .sampled: return "取色完成"
+            case .outsideImage: return "点在照片外（letterbox），未取样"
+            case .notReady: return "画面尚未就绪，未取样"
+            }
+        }
+    }
+
+    /// True between arming the tool and the first successful sample (or Esc).
+    public private(set) var isEyedropperArmed = false
+    private var eyedropperHandler: ((DropperOutcome) -> Void)?
+
+    /// Arm the one-shot picker. The next click on the canvas samples and disarms; a click that lands
+    /// outside the picture reports `.outsideImage` and **stays armed**, so a user who missed does not
+    /// have to re-arm (Lightroom behaves the same way).
+    public func armEyedropper(_ handler: @escaping (DropperOutcome) -> Void) {
+        isEyedropperArmed = true
+        eyedropperHandler = handler
+        refreshEyedropperCursor()
+    }
+
+    /// Esc, or the inspector's toggle going off.
+    public func cancelEyedropper() {
+        guard isEyedropperArmed else { return }
+        isEyedropperArmed = false
+        eyedropperHandler = nil
+        refreshEyedropperCursor()
+    }
+
+    private func refreshEyedropperCursor() {
+        canvasView.window?.invalidateCursorRects(for: canvasView)
+    }
+
+    /// The click route. `LoupeCanvasView` calls it on mouse-down while the tool is armed; the tests
+    /// call it directly (there is no window in `swift test`).
+    ///
+    /// Returns `nil` when the tool is not armed — a plain click on the canvas is a pan, not a probe.
+    @discardableResult
+    public func handleEyedropperClick(atViewPoint point: CGPoint) -> DropperOutcome? {
+        guard isEyedropperArmed, let handler = eyedropperHandler else { return nil }
+        let outcome = samplePixel(atViewPoint: point)
+        if case .sampled = outcome {
+            isEyedropperArmed = false      // one-shot: Lightroom's dropper is a click, not a mode
+            eyedropperHandler = nil
+            refreshEyedropperCursor()
+        }
+        handler(outcome)
+        return outcome
+    }
+
+    /// Read the buffer pixel under a view point (points, y down).
+    ///
+    /// `viewport`/`backingScale` exist for the tests: without a window the canvas has no backing
+    /// scale, and a probe must still be able to say "this point, in this frame".
+    public func samplePixel(atViewPoint point: CGPoint,
+                            viewport: ImageSize? = nil,
+                            backingScale scaleOverride: Double? = nil) -> DropperOutcome {
+        guard let image = decoded else { return .notReady }
+        guard let framing = framing(viewport: viewport) else { return .notReady }
+        let scale = scaleOverride ?? backingScale
+        let mapping = framing.mapping(of: viewState)
+        let viewX = Double(point.x) * scale
+        let viewY = Double(point.y) * scale
+        // The letterbox is `content` inside `viewport`: outside it there is no pixel to read, and
+        // clamping would silently sample the nearest edge of the picture instead.
+        let eps = 0.5
+        let inside = viewX >= mapping.originX - eps
+            && viewX <= mapping.originX + mapping.contentWidth + eps
+            && viewY >= mapping.originY - eps
+            && viewY <= mapping.originY + mapping.contentHeight + eps
+        guard inside else { return .outsideImage }
+
+        let source = mapping.sourcePoint(viewX: viewX, viewY: viewY)
+        guard source.x.isFinite, source.y.isFinite else { return .outsideImage }
+        let ds = decodedScale > 0 ? decodedScale : 1
+        let bx = Int((source.x * ds).rounded(.down))
+        let by = Int((source.y * ds).rounded(.down))
+        let (w, h) = image.uprightSize
+        guard bx >= 0, by >= 0, bx < w, by < h else { return .outsideImage }
+        return .sampled(DropperSample(sourceX: source.x, sourceY: source.y,
+                                      bufferX: bx, bufferY: by, decodeScale: ds,
+                                      rgb: image.averageRGB(x: bx, y: by)))
+    }
+
+    /// The picture's mean colour, for the 自动 preset. The same grey-world input Lightroom's Auto WB
+    /// uses, measured on the resident buffer so it costs a strided scan and no development.
+    public func averageSceneRGB(stride: Int = 8) -> RGBSample? {
+        decoded?.meanRGB(stride: stride)
+    }
+
+    /// The as-shot pair the **resident buffer** was developed with. The white-balance solve is relative
+    /// to it, and it has to come from the decode rather than from the asset row: it is a fact about the
+    /// file that only `CIRAWFilter` knows.
+    public var asShotWhiteBalance: WhiteBalance? { decodedCaps?.asShotWhiteBalance }
+
     // MARK: painting (Q22)
 
     /// View point → normalised **uncropped source** coordinates, which is the space every mask
@@ -1187,7 +1340,7 @@ public final class LoupeController: NSViewController {
                          changedAt: CFAbsoluteTime = 0) -> RenderJob? {
         let gen = generation
         if let source = frameSource {
-            return RenderJob(kind: kind, url: source.url, identity: source.identity,
+            return RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
                              viewport: source.viewport, edit: source.edit, state: source.state,
                              generation: gen, changedAt: changedAt)
         }
@@ -1195,7 +1348,7 @@ public final class LoupeController: NSViewController {
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
         let viewport = viewportPixels
         guard viewport.width > 8, viewport.height > 8 else { return nil }
-        return RenderJob(kind: kind, url: url, identity: ladderIdentity(asset), viewport: viewport,
+        return RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                          edit: session.edit, state: viewState, generation: gen,
                          changedAt: changedAt)
     }
@@ -1248,7 +1401,10 @@ public final class LoupeController: NSViewController {
     private func residentFrame(_ job: RenderJob, reportingFailure: Bool = true) -> FrameResult? {
         guard let rung = ladder.best(identity: job.identity, atOrBelow: job.target) else { return nil }
         do {
-            let frame = try makeFrame(url: job.url, cacheIdentity: job.identity,
+            // `baseIdentity`, not `job.identity`: `makeFrame` appends the document's decode inputs
+            // itself, and this is the same derivation the job's `identity` uses — so the rung this
+            // frame looks up is the rung the arrival was stored under.
+            let frame = try makeFrame(url: job.url, cacheIdentity: job.baseIdentity,
                                       viewport: job.viewport, decodeScale: rung.scale,
                                       edit: job.edit, state: job.state,
                                       hashPixels: hashesFrames, resolve: .residentOnly)
@@ -1270,7 +1426,9 @@ public final class LoupeController: NSViewController {
     private func requestDevelopment(_ plan: DecodeLadderPlan, job: RenderJob) {
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
             decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
-                                work: { try Self.develop(url: job.url, scale: scale) },
+                                work: { try Self.develop(url: job.url,
+                                                         scale: scale,
+                                                         inputs: job.edit.decodeInputs) },
                                 completion: { [weak self] result, generation in
                 guard let self else { return }
                 DispatchQueue.main.async {
@@ -1325,10 +1483,15 @@ public final class LoupeController: NSViewController {
     }
 
     /// Is `identity` the photo this loupe is showing *now*?
+    ///
+    /// A rung identity, not a photo identity: it carries the document's decode inputs, so a rung
+    /// developed for an older white balance is not the current picture (派单 011 A).
     private func isCurrentPhoto(_ identity: String) -> Bool {
-        if let source = frameSource { return source.identity == identity }
+        if let source = frameSource {
+            return source.edit.decodeInputs.appending(to: source.identity) == identity
+        }
         guard let asset = session?.anchorAsset else { return false }
-        return ladderIdentity(asset) == identity
+        return currentRungIdentity(asset) == identity
     }
 
     /// Stop paying for a picture nobody is looking at: leaving the loupe, or switching to another
@@ -1349,7 +1512,8 @@ public final class LoupeController: NSViewController {
         histogramCacheOrder.removeAll()
         histogramMeasuredKey = nil
         lastFrameState = nil
-        if let identity = frameSource?.identity ?? session?.anchorAsset.map({ ladderIdentity($0) }) {
+        if let identity = frameSource.map({ $0.edit.decodeInputs.appending(to: $0.identity) })
+            ?? session?.anchorAsset.map({ currentRungIdentity($0) }) {
             decodeQueue.cancel(identity: identity)
         }
     }
@@ -1404,6 +1568,40 @@ public final class LoupeController: NSViewController {
     /// never be made for one photo and applied to another.
     private func ladderIdentity(_ asset: Asset) -> String { "\(asset.contentHash)|\(asset.id)" }
 
+    /// The identity of one **rung** of one photo, including the document's decode inputs (派单 009/011).
+    ///
+    /// The white balance is a *decode* input since 派单 006 (`CIRAWFilter.neutralTemperature`), so two
+    /// documents that differ only in Kelvin are two different buffers — the ladder must not answer
+    /// `2850 K` with the buffer it developed as shot. `DecodeInputs.appending(to:)` is the one
+    /// spelling of that rule; as shot appends nothing, so every pre-009 identity (and every cache key
+    /// built from it) is byte-for-byte the old string.
+    private static func rungIdentity(_ base: String, inputs: DecodeInputs) -> String {
+        inputs.appending(to: base)
+    }
+
+    /// The identity of the rung this loupe would develop right now, for the document on screen.
+    private func currentRungIdentity(_ asset: Asset) -> String {
+        Self.rungIdentity(ladderIdentity(asset),
+                          inputs: session?.edit.decodeInputs ?? .asShot)
+    }
+
+    /// The rung key, the decode inputs and the scale of the development this loupe would ask for
+    /// right now — the diagnostic line `--ui-smoke` prints to tell "the development happened" from
+    /// "the frame looked itself up under another key" (派单 011).
+    public var currentDevelopmentDescription: String? {
+        let base: String
+        if let source = frameSource {
+            base = source.identity
+        } else if let asset = session?.anchorAsset {
+            base = ladderIdentity(asset)
+        } else {
+            return nil
+        }
+        let inputs = (frameSource?.edit ?? session?.edit ?? .neutral).decodeInputs
+        return "\(inputs.appending(to: base)) · wb=\(inputs.whiteBalance.summary)"
+            + " · key=\(inputs.key)"
+    }
+
     // MARK: frame
 
     /// One development, wrapped as a rung.
@@ -1412,12 +1610,18 @@ public final class LoupeController: NSViewController {
     /// calls it only on the synchronous path (`--ui-smoke`, tests), never from the render queue. A
     /// fresh `RAWDecoder` per development is deliberate — one `CIContext` and one Metal command queue
     /// per development, so the decode queue never shares GPU state with the render queue.
-    static func develop(url: URL, scale: Float) throws -> DecodeRung {
+    ///
+    /// 派单 011: `inputs` is **not** defaulted. It used to be `whiteBalance: WhiteBalance = .asShot`,
+    /// and a call site that forgot it developed the as-shot buffer while the document asked for
+    /// 5500 K — the failure looked exactly like "the decoder ignored the white balance". The decode
+    /// inputs now come from the job's document, and a missing argument is a compile error.
+    static func develop(url: URL, scale: Float, inputs: DecodeInputs) throws -> DecodeRung {
         let decoder = try RAWDecoder()
         let t0 = CFAbsoluteTimeGetCurrent()
-        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
+        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
                                                                               exposureEV: 0,
-                                                                              scale: scale))
+                                                                              scale: scale,
+                                                                              whiteBalance: inputs.whiteBalance))
         return DecodeRung(scale: scale, image: developed.image,
                           capabilities: developed.capabilities,
                           milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000)
@@ -1461,10 +1665,17 @@ public final class LoupeController: NSViewController {
         case residentOnly
     }
 
-    private func makeFrame(url: URL, cacheIdentity: String, viewport: ImageSize, decodeScale: Float,
-                           edit model: EditModel, state: LoupeViewState,
+    private func makeFrame(url: URL, cacheIdentity baseIdentity: String, viewport: ImageSize,
+                           decodeScale: Float, edit model: EditModel, state: LoupeViewState,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
+        // 派单 011: the white balance is a **decode** input, so it is part of the *rung*, not of the
+        // render — a 2850 K document is a different development, never the as-shot buffer re-tinted
+        // in S1 (S1 is identity there). `DecodeInputs` is the only thing allowed to name a buffer;
+        // exposure/contrast/curve/colour never enter this identity, which is why changing them can
+        // never develop.
+        let inputs = model.decodeInputs
+        let cacheIdentity = Self.rungIdentity(baseIdentity, inputs: inputs)
         // ── the decode ladder (§11.10) ───────────────────────────────────────────────────────
         // One photo, one development per rung. Keyed by (photo, scale), so the second visit to fit
         // or to 1:1 is a render and nothing else. `residentOnly` frames (every frame the loupe's
@@ -1474,7 +1685,7 @@ public final class LoupeController: NSViewController {
         switch resolve {
         case .developIfMissing:
             outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
-                try Self.develop(url: url, scale: decodeScale)
+                try Self.develop(url: url, scale: decodeScale, inputs: inputs)
             }
         case .residentOnly:
             guard let resident = ladder.resident(identity: cacheIdentity, scale: decodeScale) else {
@@ -1824,14 +2035,22 @@ public final class LoupeController: NSViewController {
     @discardableResult
     public func measureHistogramNow(asset: Asset, url: URL, edit: EditModel,
                                     bins: Int = 256) throws -> Histogram {
+        // 派单 011 B: the identity below appends the decode inputs **once**. The asset overload used
+        // to append them and then hand the result to the `identity:` overload, which appended them
+        // again — the card's key was `…|wb=3000K/+0|wb=3000K/+0`. It is the same picture either way,
+        // so nothing looked broken, which is exactly why a doubled key survives in a cache.
         try measureHistogramNow(url: url, identity: ladderIdentity(asset), edit: edit, bins: bins)
     }
 
     @discardableResult
     public func measureHistogramNow(url: URL, identity: String, edit: EditModel,
                                     bins: Int = 256) throws -> Histogram {
+        // The measurement is of the *picture*, so it names the buffer the same way a frame does:
+        // `DecodeInputs` on top of the bare photo identity.
+        let inputs = edit.decodeInputs
+        let identity = Self.rungIdentity(identity, inputs: inputs)
         let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
-            try Self.develop(url: url, scale: DecodeLadder.fullScale)
+            try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)
         }
         let graphIdentityForRung = "\(identity)-s\(outcome.rung.scale)"
         let measurer: RenderGraph
