@@ -31,3 +31,6 @@ out/
 # scratch by-products
 *.bak
 *.tmp
+
+# 派单/规格文档只留在本机，不同步到远端（用户 2026-10-26）
+docs/tasks/
