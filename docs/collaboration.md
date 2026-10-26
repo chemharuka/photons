@@ -83,6 +83,15 @@ $S claim --task NNN && … && $S post --kind done --summary '…' --ref docs/…
 | 4 审阅 | 另一个 session | `photons-code-review`：基线对齐 → 自己重跑 verify（不采信摘录）→ 项目检查表 → 结论写 `docs/reviews/NNN-<主题>-review.md` |
 | 5 合入 | 审阅 session | `git merge --no-ff` → 主线再跑一次 `make verify` → 删两个 worktree → bus `post --kind done` |
 
+派单一条命令（主线跑，做完就能把打印出的那段粘进新 session）：
+
+```bash
+scripts/dispatch.sh <NNN> <主题slug> "<一句目标>" --accept "<验收命令>"   # 备 worktree+播种+编译+规格骨架+prompt
+scripts/dispatch.sh review <NNN> <主题slug>                              # 生成审阅 session 的开场 prompt
+```
+
+它只碰 `/tmp/photons-wt-<slug>`，不写主 checkout、不提交任何东西；规格骨架写在分支里，随实现 session 的提交一起进仓库。
+
 三条容易漏的：
 
 - **worktree 里的 bus 命令必须带 `--path ~/Documents/GitHub/photons`**。slug 由 git root 绝对路径算出
