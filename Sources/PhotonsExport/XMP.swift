@@ -38,9 +38,14 @@ public enum XMPNamespace {
 
 // MARK: - context
 
-/// As-shot white balance, when the catalog knows it (M2 and later). `crs:Temperature/Tint` are
-/// absolute and camera-profile relative; ours are relative to 6500 K. With an anchor the mapping is
-/// a **shift of the neutral point**, not a ratio: `crs = asShot + (ours − 6500)`.
+/// As-shot white balance, when the catalog knows it (M2 and later).
+///
+/// `crs:Temperature/Tint` are absolute and camera-profile relative; our `light.temperature`/`tint`
+/// are **absolute Kelvin/tint in the decoder's own coordinates** since 派单 006 (`nil` = as shot), and
+/// they are anchored at the same place Lightroom anchors: the file's as-shot neutral. So the mapping
+/// is the identity on the anchor — `crs = ours ?? asShot` — and the old "shift of the neutral point,
+/// not a ratio" rule (`crs = asShot + (ours − 6500)`) collapses to it, because the `− 6500` term
+/// existed only to undo the nominal value our model used to carry.
 public struct WhiteBalanceAnchor: Sendable, Equatable {
     public var temperature: Double
     public var tint: Double
@@ -321,10 +326,12 @@ public enum XMPWriter {
         try write(metadata, "crs:ProcessVersion", str(XMPNamespace.processVersion), &report)
 
         let anchored = context.asShot.map { (anchor: WhiteBalanceAnchor) in
-            (temperature: anchor.temperature + (l.temperature - 6500),
-             tint: anchor.tint + l.tint)
+            (temperature: l.temperature ?? anchor.temperature,
+             tint: l.tint ?? anchor.tint)
         }
-        try write(metadata, "crs:WhiteBalance", str(anchored == nil ? "As Shot" : "Custom"), &report)
+        // "As Shot" is the document saying "whatever the file says" — not "6500 K".
+        let followsAsShot = l.temperature == nil && l.tint == nil
+        try write(metadata, "crs:WhiteBalance", str(followsAsShot ? "As Shot" : "Custom"), &report)
 
         // MARK: 1.2 geometry
 
@@ -361,11 +368,13 @@ public enum XMPWriter {
         if let anchor = anchored {
             try write(metadata, "crs:Temperature", number(anchor.temperature), &report)
             try write(metadata, "crs:Tint", number(anchor.tint), &report)
-            report.notes.append("WB anchored on as-shot set point (shift, not ratio)")
+            report.notes.append(followsAsShot
+                                ? "WB = the file's as-shot set point"
+                                : "WB is absolute Kelvin/tint, anchored on the as-shot set point")
         } else {
             try write(metadata, "crs:Temperature", nil, &report)
             try write(metadata, "crs:Tint", nil, &report)
-            if l.temperature != 6500 {
+            if !followsAsShot {
                 report.notes.append("no as-shot WB known: crs:Temperature/Tint omitted, "
                                     + "Lightroom keeps as-shot")
             }
@@ -431,7 +440,18 @@ public enum XMPWriter {
         try write(metadata, "photons:schemaVersion", number(Double(edit.schemaVersion)), &report)
         try write(metadata, "photons:processVersion", number(Double(edit.processVersion)), &report)
         report.skip("schemaVersion")            // int lives in photons:, crs: has no such concept
-        try write(metadata, "photons:temperature", number(l.temperature), &report)
+        // As shot has no number to write: `crs:WhiteBalance = "As Shot"` records the state, and a
+        // nominal 6500 here would be the lie 派单 006 removed.
+        if let t = l.temperature {
+            try write(metadata, "photons:temperature", number(t), &report)
+        } else {
+            report.skip("light.temperature (as shot)")
+        }
+        if let i = l.tint {
+            try write(metadata, "photons:tint", number(i), &report)
+        } else {
+            report.skip("light.tint (as shot)")
+        }
         try write(metadata, "photons:highlightRecovery", number(l.highlightRecovery), &report)
         if context.includeSettingsBlob {
             let blob = try settingsBlob(edit)

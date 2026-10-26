@@ -4,6 +4,79 @@ import CoreGraphics
 import ImageIO
 import Metal
 
+/// The decoder-side white balance of one development: absolute Kelvin + tint, in exactly the two
+/// coordinates `CIRAWFilter` exposes for the job (`neutralTemperature` / `neutralTint`, header range
+/// 2000…50000 K and −150…150).
+///
+/// **`nil` is the as-shot state, and it means "do not touch the filter".** That is not a
+/// convenience: assigning the *reported* as-shot value back to the filter is **not** a no-op —
+/// measured on this machine, `L1030433.dng` (5871.643 K / +20.35) and `_1274394.dng`
+/// (4803.594 K / +19.97) each move 0.15 % / 0.40 % of the samples when their own reported value is
+/// written back, because the reported `Float` is a rounded view of the filter's internal state.
+/// Leaving the filter alone is therefore the only way the default document keeps the pixels it has
+/// always had (派单 006 invariant 1).
+public struct WhiteBalance: Sendable, Hashable, Codable {
+    /// Kelvin, or `nil` for "as shot" on this axis.
+    public var temperature: Double?
+    /// Tint (−150…150, positive = magenta), or `nil` for "as shot" on this axis.
+    public var tint: Double?
+
+    public static let asShot = WhiteBalance()
+
+    /// `CIRAWFilter`'s documented range is 2000…50000 K; the UI and the validator use 2000…12000 K
+    /// (`LightGroup`'s old slider), and the same −150…150 for tint.
+    public static let temperatureRange: ClosedRange<Double> = 2000...12000
+    public static let tintRange: ClosedRange<Double> = -150...150
+    /// Slider quanta. A full-size development is ~762 ms, so the value the document stores only
+    /// changes when the *decoded pixels* would change in a way a person can see: one 25 K step is
+    /// well below anything visible, and quantizing removes the "12 drags in one bucket, 12 decodes"
+    /// class of waste (派单 006 B③).
+    public static let temperatureStep: Double = 25
+    public static let tintStep: Double = 1
+
+    public init(temperature: Double? = nil, tint: Double? = nil) {
+        self.temperature = temperature
+        self.tint = tint
+    }
+
+    /// Nothing to assign: the filter keeps Apple's as-shot white balance.
+    public var isAsShot: Bool { temperature == nil && tint == nil }
+
+    /// Clamped into the range we offer, axis by axis (a partial setting is legal: "explicit Kelvin,
+    /// as-shot tint" is what a document holds while only one slider has been touched).
+    public func clamped() -> WhiteBalance {
+        WhiteBalance(temperature: temperature.map {
+                         min(max($0, Self.temperatureRange.lowerBound), Self.temperatureRange.upperBound)
+                     },
+                     tint: tint.map { min(max($0, Self.tintRange.lowerBound), Self.tintRange.upperBound) })
+    }
+
+    /// Rounded to the slider quanta, then clamped — the only form that is ever committed.
+    public func quantized() -> WhiteBalance {
+        func step(_ v: Double, _ q: Double) -> Double { (v / q).rounded() * q }
+        return WhiteBalance(temperature: temperature.map { step($0, Self.temperatureStep) },
+                            tint: tint.map { step($0, Self.tintStep) }).clamped()
+    }
+
+    /// The component this value contributes to a decode cache key, a rung identity or a log line.
+    /// `nil` for as shot — deliberately, so the as-shot digest stays exactly the pre-006 one and
+    /// every linear buffer already on disk keeps hitting.
+    public var keyString: String? {
+        guard !isAsShot else { return nil }
+        let t = temperature.map { String(format: "%.0fK", $0) } ?? "shot"
+        let i = tint.map { String(format: "%+.0f", $0) } ?? "shot"
+        return "\(t)/\(i)"
+    }
+
+    /// `5320 K / +7` for the inspector, the probe line and the report.
+    public var summary: String {
+        if isAsShot { return "as shot" }
+        let t = temperature.map { String(format: "%.0f K", $0) } ?? "as shot"
+        let i = tint.map { String(format: "%+.0f", $0) } ?? "as shot"
+        return "\(t) / \(i)"
+    }
+}
+
 public struct DecodeOptions: Sendable {
     /// Decoder version requested from the system RAW pipeline, e.g. `"8"`, `"9"`, `"9.dng"`.
     /// `nil` means "whatever Apple defaults to for this file" (measured to be v8 today).
@@ -16,17 +89,22 @@ public struct DecodeOptions: Sendable {
     public var scale: Float
     public var draft: Bool
     public var colorSpace: LinearColorSpace
+    /// White balance applied **inside** the decoder (`neutralTemperature`/`neutralTint`). `.asShot`
+    /// leaves Apple's as-shot balance alone, which is the default and the pre-006 behaviour.
+    public var whiteBalance: WhiteBalance
 
     public init(decoderVersion: String? = nil,
                 exposureEV: Float = 0,
                 scale: Float = 1,
                 draft: Bool = false,
-                colorSpace: LinearColorSpace = .extendedLinearSRGB) {
+                colorSpace: LinearColorSpace = .extendedLinearSRGB,
+                whiteBalance: WhiteBalance = .asShot) {
         self.decoderVersion = decoderVersion
         self.exposureEV = exposureEV
         self.scale = scale
         self.draft = draft
         self.colorSpace = colorSpace
+        self.whiteBalance = whiteBalance
     }
 }
 
@@ -53,6 +131,9 @@ public enum DecodeError: LocalizedError {
     case unsupportedVersion(requested: String, available: [String])
     case renderFailed
     case badDimensions(CGSize)
+    /// The decoder did not keep the white balance we assigned (`§8c`'s read-back rule, applied to
+    /// `neutralTemperature`/`neutralTint` instead of the version string).
+    case whiteBalanceRejected(assigned: String, readBack: String)
 
     public var errorDescription: String? {
         switch self {
@@ -62,6 +143,7 @@ public enum DecodeError: LocalizedError {
         case .unsupportedVersion(let r, let a): return "decoder version '\(r)' not offered by this file; available: \(a.joined(separator: ", "))"
         case .renderFailed: return "CIRAWFilter produced no image (or the version was rejected)"
         case .badDimensions(let s): return "unusable dimensions \(s)"
+        case .whiteBalanceRejected(let a, let b): return "white balance \(a) was not accepted by the decoder (it reads back \(b))"
         }
     }
 }
@@ -83,6 +165,14 @@ public struct RAWProbe: Sendable {
     public let lensCorrectionSupported: Bool
     /// The value `isLensCorrectionEnabled` came back with, after the probe restored it.
     public let lensCorrectionEnabled: Bool
+    /// The as-shot white balance Apple's decoder would use for this file: `neutralTemperature` /
+    /// `neutralTint` with nothing assigned. This is what the inspector shows as the default — it is
+    /// a fact about the file, not a 6500 K placeholder (派单 006 A).
+    ///
+    /// `nil` when the gesture reports nothing usable (a JPEG through this path, a body that does not
+    /// write a neutral), in which case the UI says "as shot" instead of inventing a number.
+    public let asShotTemperature: Double?
+    public let asShotTint: Double?
 }
 
 public final class RAWDecoder {
@@ -164,7 +254,60 @@ public final class RAWDecoder {
                         model: tiff?[kCGImagePropertyTIFFModel as String] as? String,
                         iso: iso,
                         lensCorrectionSupported: Self.probeLensCorrection(filter),
-                        lensCorrectionEnabled: filter.isLensCorrectionEnabled)
+                        lensCorrectionEnabled: filter.isLensCorrectionEnabled,
+                        asShotTemperature: Self.saneTemperature(filter.neutralTemperature),
+                        asShotTint: Self.saneTint(filter.neutralTint))
+    }
+
+    /// A neutral outside the filter's own documented range is a "no answer", not a value to show.
+    ///
+    /// Measured on this machine with nothing assigned: `L1030433.dng` reports 5871.6 K / +20.35 and
+    /// `_1274394.dng` 4803.6 K / +19.97 — both inside 2000…12000. A body that reports 0 (or NaN)
+    /// must not become a slider position.
+    static func saneTemperature(_ v: Float) -> Double? {
+        let d = Double(v)
+        guard d.isFinite, d >= 1500, d <= 50000 else { return nil }
+        return d
+    }
+
+    static func saneTint(_ v: Float) -> Double? {
+        let d = Double(v)
+        guard d.isFinite, d >= -150, d <= 150 else { return nil }
+        return d
+    }
+
+    /// Read the filter's white balance with nothing assigned — the as-shot pair both `probe` and
+    /// `decodeDetailed` report.
+    static func asShotWhiteBalance(_ filter: CIRAWFilter) -> WhiteBalance {
+        WhiteBalance(temperature: saneTemperature(filter.neutralTemperature),
+                     tint: saneTint(filter.neutralTint))
+    }
+
+    /// Assign, then **read back** (§8c's rule, the same discipline the decoder version gets).
+    ///
+    /// `CIRAWFilter` accepts out-of-range neutrals without complaint (measured: 99999 K and 100 K
+    /// are kept verbatim), so the clamp is ours and the read-back is the only thing that proves the
+    /// value that shaped these pixels is the value the document asked for. A mismatch is an error,
+    /// never a silent fallback: a white balance the filter ignored would render as "as shot" while
+    /// the slider claims 3500 K.
+    static func applyWhiteBalance(_ wb: WhiteBalance, to filter: CIRAWFilter) throws {
+        let wanted = wb.clamped()
+        if let t = wanted.temperature {
+            filter.neutralTemperature = Float(t)
+            let back = Double(filter.neutralTemperature)
+            guard abs(back - t) <= 0.51 else {
+                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%.1f K", t),
+                                                       readBack: String(format: "%.1f K", back))
+            }
+        }
+        if let i = wanted.tint {
+            filter.neutralTint = Float(i)
+            let back = Double(filter.neutralTint)
+            guard abs(back - i) <= 0.51 else {
+                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%+.1f", i),
+                                                       readBack: String(format: "%+.1f", back))
+            }
+        }
     }
 
     /// Toggle-and-read-back, on this file only (§11.3).
@@ -191,6 +334,16 @@ public final class RAWDecoder {
     public struct DecodeOutcome: Sendable {
         public let image: LinearImage
         public let capabilities: DecoderCapabilities
+        /// The file's own white balance, read before anything was assigned. `nil` fields mean the
+        /// filter reported nothing usable; a document's `nil` temperature means exactly this.
+        public let asShotWhiteBalance: WhiteBalance
+
+        public init(image: LinearImage, capabilities: DecoderCapabilities,
+                    asShotWhiteBalance: WhiteBalance = .asShot) {
+            self.image = image
+            self.capabilities = capabilities
+            self.asShotWhiteBalance = asShotWhiteBalance
+        }
     }
 
     /// Test hook: `resolve` is what a read-back proves. Kept here so the decode path and the test
@@ -241,6 +394,16 @@ public final class RAWDecoder {
         filter.isDraftModeEnabled = options.draft
         filter.scaleFactor = options.scale
         filter.exposure = options.exposureEV
+
+        // ── 前置 ③ white balance, or nothing at all ──────────────────────────────────────────
+        // The as-shot pair is read before anything is assigned — it is what the inspector shows and
+        // what the document's `nil` means. Only an explicit document touches the filter: assigning
+        // the reported as-shot value back is *not* a no-op (0.15–0.40 % of the samples move), so
+        // "leave it alone" is the only way the default document stays byte-identical to pre-006.
+        let asShot = Self.asShotWhiteBalance(filter)
+        if !options.whiteBalance.isAsShot {
+            try Self.applyWhiteBalance(options.whiteBalance, to: filter)
+        }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
         let extent = output.extent.integral
@@ -300,8 +463,10 @@ public final class RAWDecoder {
                                 orientation: .up)
         let capabilities = DecoderCapabilities(requestedVersion: options.decoderVersion,
                                                effectiveVersion: effective,
-                                               defaultVersion: filterDefault)
-        return DecodeOutcome(image: image, capabilities: capabilities)
+                                               defaultVersion: filterDefault,
+                                               asShotTemperature: asShot.temperature,
+                                               asShotTint: asShot.tint)
+        return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot)
     }
 
     /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).

@@ -25,10 +25,16 @@ public struct DecodeCacheKey: Sendable, Hashable {
     public let scale: Float
     public let draft: Bool
     public let colorSpace: String
+    /// Decoder-side white balance (派单 006 B). As shot is the pre-006 decode, so its key string is
+    /// `nil` and the digest is byte-for-byte the old one — every linear buffer already on disk keeps
+    /// hitting. An explicit `3500 K / +30` is a **different buffer**, not a different render: without
+    /// this component a stale as-shot buffer would be served for a document that asked for 3500 K.
+    public let whiteBalance: WhiteBalance
     public let decodeRecipe: String
 
     public init(fileSHA256: String, decoderVersion: String, exposureEV: Float = 0,
                 scale: Float = 1, draft: Bool = false, colorSpace: String = "extendedLinearSRGB",
+                whiteBalance: WhiteBalance = .asShot,
                 decodeRecipe: String = DecodeRecipe.current) {
         self.fileSHA256 = fileSHA256
         self.decoderVersion = decoderVersion
@@ -36,14 +42,17 @@ public struct DecodeCacheKey: Sendable, Hashable {
         self.scale = scale
         self.draft = draft
         self.colorSpace = colorSpace
+        self.whiteBalance = whiteBalance
         self.decodeRecipe = decodeRecipe
     }
 
     public var digest: String {
-        let s = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
-                 String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
-                 decodeRecipe].joined(separator: "|")
-        return SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+        var parts = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
+                     String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
+                     decodeRecipe]
+        if let wb = whiteBalance.keyString { parts.append("wb=\(wb)") }
+        return SHA256.hash(data: Data(parts.joined(separator: "|").utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 }
 

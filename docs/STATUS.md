@@ -37,6 +37,7 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 - 非白名单机身设 v9 会**静默退回 v8** → 赋值后必须回读；`DecodeCacheKey.decodeRecipe = v1-boost0-gamutOff`。
 - 缩略图"走 previewImage"要落到 **ImageIO**（`CGImageSourceCreateThumbnailAtIndex`），`CIRAWFilter` 每次构造 ~0.19 s。
 - macOS 27 的 ImageIO **已内置 `crs` 前缀映射**（未注册也能写）；HEIC 的 `tiff:Orientation` 读回恒为 1（用 `irot` 承载）。
+- **色温/色调 = 解码参数，不是 S1 增益**（派单 006）：`light.temperature/tint` 为 `Double?`，`nil` = as shot；非 nil 时喂 `CIRAWFilter.neutralTemperature/neutralTint` 并**回读断言**，S1 增益退化为 (1,1,1)。as-shot 实测：SL3 `5871.64 K / +20.35`、DC-S5 `4803.59 K / +19.97`；**把读到的 as-shot 值再赋回去不是恒等**（0.15 %/0.40 % 样本移动），所以默认路径必须完全不碰 filter —— 这也是默认像素逐字节不变的原因。量化 25 K / 1 tint，松手才提交。
 
 ## 已落地（本轮）
 

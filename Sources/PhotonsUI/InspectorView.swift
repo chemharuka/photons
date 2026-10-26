@@ -13,6 +13,13 @@ import PhotonsCore
 /// exactly one `EditHistory` snapshot. Committing per tick would make ⌘Z undo 1/100 EV at a time.
 public struct InspectorView: View {
     @Bindable public var session: CatalogSession
+    /// The value under the thumb while a white-balance drag is in progress (派单 006).
+    ///
+    /// Not a document write: a Kelvin change means a **re-decode** (~762 ms full size), so a tick
+    /// must never reach the model. The draft dies on release, where the value is quantized and
+    /// committed once — one decode, one history snapshot.
+    @State private var draftTemperature: Double?
+    @State private var draftTint: Double?
 
     public init(session: CatalogSession) {
         self.session = session
@@ -82,8 +89,8 @@ public struct InspectorView: View {
             row("白色", \.light.whites, -100 ... 100, "%.0f")
             row("黑色", \.light.blacks, -100 ... 100, "%.0f")
             divider
-            row("色温", \.light.temperature, 2000 ... 12000, "%.0f K")
-            row("色调", \.light.tint, -150 ... 150, "%.0f")
+            whiteBalanceRow("色温", isTemperature: true)
+            whiteBalanceRow("色调", isTemperature: false)
         }
     }
 
@@ -165,6 +172,90 @@ public struct InspectorView: View {
                 set: { newValue in
                     session.applyEdit { $0[keyPath: keyPath] = newValue }
                 })
+    }
+
+    // MARK: white balance (派单 006)
+
+    /// The file's own white balance, as the decode reported it. `nil` until the first development
+    /// lands (`session.capabilities`), which is why the row can say "as shot" without a number.
+    private var asShotWhiteBalance: WhiteBalance {
+        session.capabilities?.asShotWhiteBalance ?? .asShot
+    }
+
+    /// 色温 / 色调: absolute Kelvin and tint, in the decoder's coordinates (派单 006).
+    ///
+    /// Two rules the other rows do not have, both because this is a *decode* control:
+    ///
+    ///  · **The number shown is the file's** while the document is as shot (`nil`), read from the
+    ///    decode, not the nominal 6500 the panel used to print for every photo. An explicit value
+    ///    wins as soon as one exists; "as shot" next to the title is the state, not a hint.
+    ///  · **Drag ≠ decode.** A tick only moves `@State`; release quantizes (25 K / 1 tint) and
+    ///    writes the document once. Committing per tick would queue a ~762 ms development per pixel
+    ///    of slider travel, and the pixels could never keep up with the thumb anyway.
+    private func whiteBalanceRow(_ title: String, isTemperature: Bool) -> some View {
+        let stored = isTemperature ? session.edit.light.temperature : session.edit.light.tint
+        let draft = isTemperature ? draftTemperature : draftTint
+        let shot = isTemperature ? asShotWhiteBalance.temperature : asShotWhiteBalance.tint
+        // Only a fallback for "no decode yet": the file's value, never a claim about the photo.
+        let shown = draft ?? stored ?? shot ?? (isTemperature ? 6500 : 0)
+        let range = isTemperature ? WhiteBalance.temperatureRange : WhiteBalance.tintRange
+        let format = isTemperature ? "%.0f K" : "%+.0f"
+
+        return VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if stored == nil {
+                    Text("as shot")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 4)
+                Text(String(format: format, shown))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.primary)
+            }
+            Slider(value: Binding(get: { shown },
+                                  set: { newValue in
+                                      if isTemperature { draftTemperature = newValue }
+                                      else { draftTint = newValue }
+                                  }),
+                   in: range) { editing in
+                // Release = quantize + one document write = one development (`commitWhiteBalance`).
+                if !editing { commitWhiteBalance(isTemperature: isTemperature) }
+            }
+            .controlSize(.mini)
+        }
+    }
+
+    /// The one place a white-balance drag becomes a document change.
+    ///
+    /// Quantization is the contract (`WhiteBalance.quantized()`: 25 K, 1 tint), and so is the
+    /// round-trip home: a value within half a step of the file's as-shot becomes `nil` again, because
+    /// pinning `5875` for a 5871.6 K shot would re-decode to *slightly different* pixels — the
+    /// decoder's as-shot state is not reproducible by assigning the number it reports.
+    private func commitWhiteBalance(isTemperature: Bool) {
+        defer {
+            if isTemperature { draftTemperature = nil } else { draftTint = nil }
+        }
+        guard let draft = isTemperature ? draftTemperature : draftTint else { return }
+        let shot = asShotWhiteBalance
+        var wb = WhiteBalance(temperature: isTemperature ? draft : session.edit.light.temperature,
+                              tint: isTemperature ? session.edit.light.tint : draft).quantized()
+        if isTemperature, let v = wb.temperature, let s = shot.temperature,
+           abs(v - s) <= WhiteBalance.temperatureStep / 2 {
+            wb.temperature = nil
+        }
+        if !isTemperature, let v = wb.tint, let s = shot.tint, abs(v - s) <= WhiteBalance.tintStep / 2 {
+            wb.tint = nil
+        }
+        let next = wb
+        session.applyEdit { model in
+            model.light.temperature = next.temperature
+            model.light.tint = next.tint
+        }
+        session.commitEdit()
     }
 
     private var divider: some View {

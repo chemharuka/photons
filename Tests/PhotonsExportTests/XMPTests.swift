@@ -108,18 +108,21 @@ final class XMPTests: XCTestCase {
         XCTAssertFalse(paths.contains { $0.hasPrefix("crs:HueAdjustment") })
 
         // The lossless half still has to be there.
-        for path in ["photons:schemaVersion", "photons:processVersion", "photons:temperature",
+        for path in ["photons:schemaVersion", "photons:processVersion",
                      "photons:highlightRecovery", "photons:settings"] {
             XCTAssertNotNil(XMPReadback.tag(m, path), "\(path) is the backup of record")
         }
-        assertClose(XMPReadback.double(m, "photons:temperature"), 6500, "photons:temperature")
+        // 派单 006: an as-shot document has **no** temperature to write — `crs:WhiteBalance` carries
+        // the state, and a nominal 6500 K here would be the lie this change removed.
+        XCTAssertNil(XMPReadback.tag(m, "photons:temperature"), "as shot must not be written as 6500")
+        XCTAssertNil(XMPReadback.tag(m, "photons:tint"))
+        XCTAssertEqual(XMPReadback.string(m, "crs:WhiteBalance"), "As Shot")
         XCTAssertEqual(report.written.filter { $0.hasPrefix("crs:") }.count, 3)
     }
 
     func testX02ExplicitZerosAreIdenticalToNeutral() throws {
         var explicit = EditModel.neutral
         explicit.light.exposure = 0.0
-        explicit.light.tint = 0.0
         explicit.effects.vignetteAmount = 0.0
         explicit.detail.sharpening = 0
         explicit.curve.rgb = [CurvePoint(0, 0), CurvePoint(1, 1)]
@@ -128,6 +131,14 @@ final class XMPTests: XCTestCase {
         let explicitPacket = try XMPWriter.packet(for: explicit).data
         XCTAssertEqual(neutralPacket, explicitPacket,
                        "0 and a missing value must be indistinguishable (R1)")
+
+        // …except for white balance, where the *default* is a state, not a number (派单 006): a
+        // pinned tint of 0 is a real setting and must reach the packet.
+        var pinned = explicit
+        pinned.light.tint = 0
+        let (m, _) = try reparse(pinned)
+        assertClose(XMPReadback.double(m, "photons:tint"), 0, "photons:tint pinned at 0")
+        XCTAssertEqual(XMPReadback.string(m, "crs:WhiteBalance"), "Custom")
     }
 
     // MARK: - X-03 / X-04: signs and extremes
@@ -175,12 +186,23 @@ final class XMPTests: XCTestCase {
         let (m3, _) = try reparse(edit)
         assertClose(XMPReadback.double(m3, "crs:SharpenRadius"), 3, "SharpenRadius 3")
 
-        // Anchored WB: shift, not ratio. 5200 as-shot + (12000 − 6500) = 10700.
+        // Anchored WB is **absolute** now (派单 006): the anchor is where the file's as-shot sits, and
+        // an explicit 12000 K / +150 tint is written as exactly that. The old `anchor + (ours − 6500)`
+        // shift existed only to undo the nominal 6500 K our model used to carry.
         let anchor = WhiteBalanceAnchor(temperature: 5200, tint: 10)
         let (ma, _) = try reparse(edit, XMPWriteContext(asShot: anchor))
-        assertClose(XMPReadback.double(ma, "crs:Temperature"), 10700, "anchored temperature")
-        assertClose(XMPReadback.double(ma, "crs:Tint"), 160, "anchored tint")
+        assertClose(XMPReadback.double(ma, "crs:Temperature"), 12000, "anchored temperature")
+        assertClose(XMPReadback.double(ma, "crs:Tint"), 150, "anchored tint")
         XCTAssertEqual(XMPReadback.string(ma, "crs:WhiteBalance"), "Custom")
+
+        // As shot writes the anchor itself, and says so.
+        var follows = edit
+        follows.light.temperature = nil
+        follows.light.tint = nil
+        let (ms, _) = try reparse(follows, XMPWriteContext(asShot: anchor))
+        assertClose(XMPReadback.double(ms, "crs:Temperature"), 5200, "as-shot temperature")
+        assertClose(XMPReadback.double(ms, "crs:Tint"), 10, "as-shot tint")
+        XCTAssertEqual(XMPReadback.string(ms, "crs:WhiteBalance"), "As Shot")
     }
 
     // MARK: - X-05 / X-06: curves
@@ -441,7 +463,11 @@ final class XMPTests: XCTestCase {
         XCTAssertEqual(report.unmapped["masks[i].kind"], 2)
         XCTAssertEqual(report.unmapped["masks[i].params"], 2)
         XCTAssertEqual(report.unmapped["schemaVersion"], 1)
-        XCTAssertEqual(report.unmappedCount, 8)
+        // 派单 006: as shot has no XMP number, so the two WB fields are reported as skipped — nothing
+        // to translate, nothing to lose (the state lives in `crs:WhiteBalance = "As Shot"`).
+        XCTAssertEqual(report.unmapped["light.temperature (as shot)"], 1)
+        XCTAssertEqual(report.unmapped["light.tint (as shot)"], 1)
+        XCTAssertEqual(report.unmappedCount, 10)
 
         // Unmappable means "no crs: key", and the private namespace carries the value instead.
         XCTAssertNil(XMPReadback.tag(metadata, "crs:HighlightRecovery"))
@@ -503,7 +529,8 @@ final class XMPTests: XCTestCase {
             assertClose(XMPReadback.double(back, "crs:CropRight"), 0.4, "\(ext) CropRight")
             assertClose(XMPReadback.double(back, "crs:Exposure2012"), -1.25, "\(ext) Exposure2012")
             assertClose(XMPReadback.double(back, "crs:PostCropVignetteMidpoint"), 62, "\(ext) vignette")
-            assertClose(XMPReadback.double(back, "photons:temperature"), 6500, "\(ext) temperature")
+            // 派单 006: an as-shot document carries no temperature tag; the state is `As Shot`.
+            XCTAssertNil(XMPReadback.tag(back, "photons:temperature"), "\(ext) wrote a nominal 6500")
 
             // HEIC normalises orientation to its own irot box and reports 1 back; JPEG/TIFF/PNG keep
             // the composed tag. Everything else must round-trip in all four containers.
@@ -588,7 +615,11 @@ final class XMPTests: XCTestCase {
         let merged = try XCTUnwrap(XMPReadback.metadata(fromXMP: seededURL))
         assertClose(XMPReadback.double(merged, "crs:Texture"), 12, "others' crs: keys survive")
         XCTAssertEqual(XMPReadback.string(merged, "photons:futureKey"), "keep me")
-        assertClose(XMPReadback.double(merged, "photons:temperature"), 6500, "our key landed")
+        // 派单 006: `photons:temperature` is absent for as shot, so "our key landed" is asked of a
+        // key that always exists.
+        XCTAssertNotNil(XMPReadback.tag(merged, "photons:processVersion"), "our key landed")
+        XCTAssertNil(XMPReadback.tag(merged, "photons:temperature"), "as shot must not be a number")
+        XCTAssertEqual(XMPReadback.string(merged, "crs:WhiteBalance"), "As Shot")
 
         // An unreadable packet is backed up before being replaced.
         let junkURL = scratch.appendingPathComponent("nested/dir/junk.xmp")

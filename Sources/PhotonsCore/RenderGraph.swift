@@ -1081,10 +1081,16 @@ public final class RenderGraph {
 
         case .sceneLinear:
             let p = try kernels.pipeline(file: "s1_scene_linear", function: "s1_scene_linear")
-            let wb = edit.light.whiteBalanceGains
-            let identity = edit.light.isIdentity
+            // ── S1 is exposure + highlight recovery only (派单 006 B) ────────────────────────────
+            // White balance is a **decode** setting now: `light.temperature`/`tint` go to
+            // `CIRAWFilter.neutralTemperature`/`neutralTint` and the RAW is developed again, so the
+            // pixels arriving here are already balanced. The gains below are literally (1, 1, 1) —
+            // the old Planckian fit here would be a *second* correction on top of the decoder's, and
+            // the two would disagree (measured: at 3500 K / +30 the gain path and the decode path are
+            // not the same picture; see `WhiteBalanceTests`).
+            let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
             var params = S1Params(
-                a: SIMD4(edit.light.exposureGain, wb.r, wb.g, wb.b),
+                a: SIMD4(edit.light.exposureGain, 1, 1, 1),
                 b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0, 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)

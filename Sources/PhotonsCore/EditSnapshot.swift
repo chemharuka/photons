@@ -219,8 +219,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.light.shadows, 0) { light.shadows = edit.light.shadows }
         if differs(edit.light.whites, 0) { light.whites = edit.light.whites }
         if differs(edit.light.blacks, 0) { light.blacks = edit.light.blacks }
-        if differs(edit.light.temperature, 6500) { light.temperature = edit.light.temperature }
-        if differs(edit.light.tint, 0) { light.tint = edit.light.tint }
+        // 派单 006: white balance has no neutral *number* to compare against any more — either the
+        // document follows the file (`nil`, nothing to copy) or it pins a value (always copied, even
+        // 6500 K, because pinning 6500 K on a 4803 K shot is a real setting).
+        if let t = edit.light.temperature { light.temperature = t }
+        if let i = edit.light.tint { light.tint = i }
         if differs(edit.light.highlightRecovery, 0) { light.highlightRecovery = edit.light.highlightRecovery }
         s.light = light.isEmpty ? nil : light
 
