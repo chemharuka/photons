@@ -121,27 +121,37 @@ public final class HistogramCardView: NSView {
     /// The colour the last readout was painted with (contrast is recomputed from this, not stored).
     public private(set) var lastHoverColor: NSColor = .labelColor
 
-    // MARK: what the channel row is showing while hovering (013)
+    // MARK: what the channel row is showing while hovering (015: three fixed R/G/B slots)
 
-    /// The **brightness** row, as painted while a bin is under the pointer: `亮度 82%` on the code
-    /// segment, `亮度 +0.8` on the tail. `nil` means the row is showing the above-white shares
-    /// (`clipHighTextByChannel`) — the state when nothing is hovered, and the state it returns to on
-    /// `clearHoverReadout()`.
+    /// The row as painted while a bin is under the pointer, all three slots joined:
+    /// `R 128 G 128 B 128` on the code segment, `R +0.8 G +0.8 B +0.8` on the tail. `nil` means the
+    /// row is showing the above-white shares (`clipHighTextByChannel`) — the state when nothing is
+    /// hovered, and the state it returns to on `clearHoverReadout()`.
     ///
-    /// This is a *position* readout, not a per-channel one: the plot's x axis is brightness, so R, G
-    /// and B sit at the same level at the same x — three identical numbers would be noise. It does
-    /// not replace the footnote either: `hoverValueText` / `hoverCountText` keep painting on the row
-    /// below (010), so the code/stop and the bin's per-channel counts stay on screen alongside it.
+    /// Three identical numbers is deliberate (the owner asked for it): the plot's x axis is
+    /// brightness, so R, G and B *are* at the same level at the same x. What the three slots buy is
+    /// a **fixed layout** — `R`, `G` and `B` sit at the same three x positions no matter whether
+    /// the number is `0`, `128` or `+3.0`, so the row stops twitching as the pointer moves.
     public private(set) var hoverLevelText: String?
+    /// The number all three slots show: `128` (SDR code) or `+0.8` (HDR stop). `nil` while idle.
+    public private(set) var hoverLevelValueText: String?
     /// The three strings the channel row painted last `draw` — the above-white shares normally, and
-    /// while hovering the level readout in `[0]` with the other two slots blank (it is one label, not
-    /// three). The readback the smoke asserts against, so "the row shows X" is a fact about the paint.
+    /// while hovering the three slots (`R 128`, `G 128`, `B 128`). The readback the smoke asserts
+    /// against, so "the row shows X" is a fact about the paint.
     public private(set) var channelRowTexts: [String] = ["—", "—", "—"]
-    /// How wide the channel row's content really is in *this* state (level readout or percentages).
+    /// The row's text as one string (idle: `R 1.0% G 1.0% B 1.0%`; hovering: the three slots).
     public private(set) var channelRowText = ""
-    /// Where the brightness readout was painted while hovering (`.zero` when the row is the
-    /// percentages) — the smoke compares it with the channel row's own band.
+    /// Where the hover row was painted while hovering (`.zero` when the row is the percentages) —
+    /// the union of the three slots, i.e. the whole band.
     public private(set) var hoverLevelRect: NSRect = .zero
+    /// The three slots' boxes, left to right (`.zero`-empty while idle). Slot `i` starts at
+    /// `hoverLevelSlotRects[i].minX` and ends at its `maxX`; that is where slot `i`'s letter and
+    /// number are pinned, whatever they say.
+    public private(set) var hoverLevelSlotRects: [NSRect] = []
+    /// The three letters' boxes (`R`, `G`, `B`), pinned to their slots' left edges.
+    public private(set) var hoverLevelLetterRects: [NSRect] = []
+    /// The three numbers' boxes, right-aligned to their slots' right edges.
+    public private(set) var hoverLevelValueRects: [NSRect] = []
 
     /// Worst-case WCAG ratio of the readout colour on the card's own backdrop band.
     public var hoverContrast: Double {
@@ -188,7 +198,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。鼠标悬停读出该档的码值（尾段为 +N 档 = 2^N 倍）与该箱 R/G/B 样本数，同时把通道行换成该处的亮度（SDR 区为百分比，尾段为 +N 档）。")
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。鼠标悬停读出该档的码值（尾段为 +N 档 = 2^N 倍）与该箱 R/G/B 样本数，同时把通道行换成 R/G/B 三份该处亮度（SDR 区为 0–255 码值，尾段为 +x.x 档）。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -281,9 +291,10 @@ public final class HistogramCardView: NSView {
         hoverReading = reading
         hoverValueText = HistogramCardFormat.hoverValue(reading)
         hoverCountText = HistogramCardFormat.hoverCounts(histogram, reading)
-        // 013: the percentages row becomes the brightness readout for the same bin. Kept beside the
-        // footnote above rather than instead of it: the two rows answer different questions.
+        // 015: the percentages row becomes the three fixed R/G/B slots for the same bin. Kept beside
+        // the footnote above rather than instead of it: the two rows answer different questions.
         hoverLevelText = HistogramCardFormat.hoverLevelText(reading)
+        hoverLevelValueText = HistogramCardFormat.hoverSlotValue(reading)
         needsDisplay = true
     }
 
@@ -296,7 +307,11 @@ public final class HistogramCardView: NSView {
         hoverValueText = ""
         hoverCountText = ""
         hoverLevelText = nil
+        hoverLevelValueText = nil
         hoverLevelRect = .zero
+        hoverLevelSlotRects = []
+        hoverLevelLetterRects = []
+        hoverLevelValueRects = []
         hoverValueRect = .zero
         hoverCountRect = .zero
         hoverReadoutRect = .zero
@@ -543,11 +558,14 @@ public final class HistogramCardView: NSView {
 
         // Per-channel line: R/G/B above-white shares, the numbers a white-balance tweak moves.
         //
-        // While a bin is under the pointer this row carries the **brightness readout** instead (013) —
-        // `亮度 82%` on the code segment, `亮度 +0.8` on the tail — in the card's own number font, so
-        // it is the same size as 过白/削顶 above it (the owner: "字号要更大，和其他 UI 匹配"). It is
-        // one label, not three: the x axis *is* brightness, so R/G/B would print the same number three
-        // times (see `HistogramCardFormat.hoverLevelText`). On leave the row goes back to the three
+        // While a bin is under the pointer this row becomes three **fixed slots** (015):
+        // `R 128 G 128 B 128` on the code segment, `R +0.8 G +0.8 B +0.8` on the tail. The letters
+        // are pinned to their slots' left edges and the numbers right-aligned to their slots' right
+        // edges, so neither position is a function of the text — that fixed layout is the whole
+        // point (the owner: "不要出现 G B 的位置随着内容变化乱动").
+        //
+        // The face is the card's own `numberFont` (9.5 pt semibold), the same size as 过白/削顶 above
+        // it (the owner: "字号要更大，和其他 UI 匹配"). On leave the row goes back to the three
         // above-white percentages in their 8.5 pt face, which is why the row's own width is measured
         // per state (`channelRowWidth`) and the footnote row below steps down a little further while
         // the taller face is in use (`channelRowStride`).
@@ -561,26 +579,22 @@ public final class HistogramCardView: NSView {
         lastAppearanceIsDark = dark
         lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
         // Re-derived from the live reading every draw: a new measurement or a new bin can never leave
-        // the previous one's label on screen.
+        // the previous one's numbers on screen.
+        hoverLevelValueText = HistogramCardFormat.hoverSlotValue(hoverReading)
         hoverLevelText = HistogramCardFormat.hoverLevelText(hoverReading)
         hoverLevelRect = .zero
-        if let level = hoverLevelText {
-            let rect = drawText(level, at: CGPoint(x: bounds.minX, y: channelY),
-                                font: Self.numberFont, color: lastPercentColor)
-            hoverLevelRect = rect
-            channelRowWidth = rect.width
-            channelRowTexts = [level, "", ""]
-            channelRowText = level
+        hoverLevelSlotRects = []
+        hoverLevelLetterRects = []
+        hoverLevelValueRects = []
+        if hoverLevelValueText != nil {
+            paintHoverSlots(in: bounds, atY: channelY)
         } else {
             var x = bounds.minX
-            let channels: [(String, String, NSColor)] = [
-                ("R", clipHighTextByChannel[0], NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1)),
-                ("G", clipHighTextByChannel[1], NSColor(srgbRed: 0.22, green: 0.72, blue: 0.34, alpha: 1)),
-                ("B", clipHighTextByChannel[2], NSColor(srgbRed: 0.30, green: 0.48, blue: 0.98, alpha: 1)),
-            ]
-            for (name, value, color) in channels {
-                let nameRect = drawText(name, at: CGPoint(x: x, y: channelY),
-                                        font: .systemFont(ofSize: 8, weight: .bold), color: color)
+            for (index, value) in clipHighTextByChannel.prefix(3).enumerated() {
+                let nameRect = drawText(HistogramCardFormat.hoverLevelSlotNames[index],
+                                        at: CGPoint(x: x, y: channelY),
+                                        font: .systemFont(ofSize: 8, weight: .bold),
+                                        color: Self.channelNameColors[index])
                 let valueRect = drawText(value, at: CGPoint(x: nameRect.maxX + 2, y: channelY),
                                          font: HistogramCardReadability.percentFont,
                                          color: lastPercentColor)
@@ -588,9 +602,60 @@ public final class HistogramCardView: NSView {
             }
             channelRowWidth = x - 9 - bounds.minX
             channelRowTexts = Array(clipHighTextByChannel.prefix(3))
-            channelRowText = zip(["R", "G", "B"], channelRowTexts)
+            channelRowText = zip(HistogramCardFormat.hoverLevelSlotNames, channelRowTexts)
                 .map { "\($0) \($1)" }.joined(separator: " ")
         }
+    }
+
+    /// The channel letters' colours: the same three the idle percentage row paints (a red R next to
+    /// a red curve, and so on), so the row reads the same in both states.
+    private static let channelNameColors: [NSColor] = [
+        NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1),
+        NSColor(srgbRed: 0.22, green: 0.72, blue: 0.34, alpha: 1),
+        NSColor(srgbRed: 0.30, green: 0.48, blue: 0.98, alpha: 1),
+    ]
+
+    /// 015: paint the three fixed slots of the hover row and publish their boxes.
+    ///
+    /// Slot `i` is `[edges[i], edges[i + 1])`; the letter is drawn at the slot's left edge, the number
+    /// right-aligned to its right edge. Both come from `HistogramCardFormat.hoverSlotLayout` and from
+    /// the font's measured widths only — never from the other slot's text — so `0`, `128` and `+3.0`
+    /// produce the *same* three letter positions and the *same* three right ends.
+    private func paintHoverSlots(in bounds: NSRect, atY y: CGFloat) {
+        guard let value = hoverLevelValueText else { return }
+        let font = Self.numberFont
+        let layout = HistogramCardFormat.hoverSlotLayout(forRowWidth: bounds.width)
+        let names = HistogramCardFormat.hoverLevelSlotNames
+        let valueAttributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: lastPercentColor]
+        let valueSize = (value as NSString).size(withAttributes: valueAttributes)
+
+        var slotRects: [NSRect] = []
+        var letterRects: [NSRect] = []
+        var valueRects: [NSRect] = []
+        var texts: [String] = []
+        for slot in 0..<HistogramHoverSlotLayout.slotCount {
+            let name = names[slot]
+            let letterAttributes: [NSAttributedString.Key: Any] = [.font: font,
+                                                                   .foregroundColor: Self.channelNameColors[slot]]
+            let letterSize = (name as NSString).size(withAttributes: letterAttributes)
+            let letterRect = layout.letterRect(slot, size: letterSize, y: y, offsetX: bounds.minX)
+            let valueRect = layout.valueRect(slot, size: valueSize, y: y, offsetX: bounds.minX)
+            (name as NSString).draw(at: letterRect.origin, withAttributes: letterAttributes)
+            (value as NSString).draw(at: valueRect.origin, withAttributes: valueAttributes)
+            slotRects.append(layout.slotRect(slot, height: max(letterSize.height, valueSize.height), y: y)
+                .offsetBy(dx: bounds.minX, dy: 0))
+            letterRects.append(letterRect)
+            valueRects.append(valueRect)
+            texts.append("\(name) \(value)")
+        }
+
+        hoverLevelSlotRects = slotRects
+        hoverLevelLetterRects = letterRects
+        hoverLevelValueRects = valueRects
+        channelRowTexts = texts
+        channelRowText = texts.joined(separator: " ")
+        channelRowWidth = layout.rowWidth
+        hoverLevelRect = slotRects.reduce(letterRects[0].union(valueRects[0])) { $0.union($1) }
     }
 
     /// Vertical distance from the percentages row's top to the footnote row's top.
