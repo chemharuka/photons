@@ -11,8 +11,9 @@ import PhotonsCore
 ///      last bin and counts as clipped-high; a ramp that is one pixel per bin lands exactly there. This
 ///      is the part that can be checked without a GPU, so it is the part that is checked hardest.
 ///   2. **The three channels plus luma are *separate* series**, not one series printed three times.
-///   3. **The tail is 6 stops of 1/16 stop** and its seam at white is exact: white is the last code
-///      bin, a hair above it is tail bin 0, and anything past 6 stops piles onto the last bin.
+///   3. **The tail is 4 stops of 1/64 stop** (256 bins, the same count as the SDR segment) and its seam
+///      at white is exact: white is the last code bin, a hair above it is tail bin 0, and anything past
+///      4 stops piles onto the last bin.
 ///   4. **The measurement is of the picture, not of the frame.** `measureHistogram` renders the whole
 ///      picture at thumbnail scale; the same photo and edit give the same bins and the same
 ///      `sampleCount` no matter what window, canvas or scale the camera happened to be showing, and a
@@ -505,7 +506,7 @@ final class HistogramTests: XCTestCase {
         XCTAssertLessThan(p50, 500, "a thumbnail render plus 0.58 Mpx of counting is not a second export")
     }
 
-    // MARK: - 10. the exponential tail (6 stops × 1/16 stop)
+    // MARK: - 10. the exponential tail (4 stops × 1/64 stop = 256 bins)
 
     /// The sRGB OETF, written out here rather than called from `Histogram`: a test that builds its
     /// input with the very helper it is checking proves only that the helper is self-consistent.
@@ -513,16 +514,16 @@ final class HistogramTests: XCTestCase {
         linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1.0 / 2.4) - 0.055
     }
 
-    /// The centre of tail bin `k` as a display code: 1/16 stop apart, and a stop is a **doubling of
+    /// The centre of tail bin `k` as a display code: 1/64 stop apart, and a stop is a **doubling of
     /// light**, not of code.
     private func codeAtBinCentre(_ k: Int) -> Float {
-        encode(Float(pow(2.0, (Double(k) + 0.5) / 16.0)))
+        encode(Float(pow(2.0, (Double(k) + 0.5) / 64.0)))
     }
 
-    /// One pixel per tail bin, each at its bin's centre: the bins are 1/16 stop apart, there are 96 of
-    /// them, and the ones chosen are spread over all 6 stops so a wrong scale cannot pass by luck.
-    func testTailBinsAreSixteenthOfAStopApart() {
-        let bins = [0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 95]
+    /// One pixel per tail bin, each at its bin's centre: the bins are 1/64 stop apart, there are 256 of
+    /// them, and the ones chosen are spread over all 4 stops so a wrong scale cannot pass by luck.
+    func testTailBinsAreSixtyFourthsOfAStopApart() {
+        let bins = [0, 1, 31, 32, 63, 64, 127, 128, 191, 192, 255]
         let w = bins.count, h = 1
         var rgba = [Float16](repeating: 1, count: w * h * 4)
         for (i, k) in bins.enumerated() {
@@ -532,9 +533,10 @@ final class HistogramTests: XCTestCase {
             rgba[i * 4 + 2] = v
         }
         let hist = Histogram.compute(display(rgba, w, h))
-        XCTAssertEqual(Histogram.maxStops, 6)
-        XCTAssertEqual(Histogram.hdrBinsPerStop, 16)
-        XCTAssertEqual(hist.hdrBinCount, 96)
+        XCTAssertEqual(Histogram.maxStops, 4)
+        XCTAssertEqual(Histogram.hdrBinsPerStop, 64)
+        XCTAssertEqual(hist.hdrBinCount, 256)
+        XCTAssertEqual(hist.hdrBinCount, hist.binCount, "the tail matches the SDR segment's count")
         XCTAssertEqual(hist.red.hdrBins.count, hist.hdrBinCount)
         for k in bins {
             XCTAssertEqual(hist.red.hdrBins[k], 1,
@@ -546,11 +548,11 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(hist.red.hdrTotal, bins.count)
     }
 
-    /// 6.5 stops is past `maxStops`, so it piles onto the last bin (`"6 stops or more"`) instead of
+    /// 4.5 stops is past `maxStops`, so it piles onto the last bin (`"4 stops or more"`) instead of
     /// running off the plot.
-    func testTailClampsAtSixStops() {
-        let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 6.5)))))
-        XCTAssertEqual(h.red.hdrBins[95], 4)
+    func testTailClampsAtFourStops() {
+        let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 4.5)))))
+        XCTAssertEqual(h.red.hdrBins[255], 4)
         XCTAssertEqual(h.red.hdrBins.reduce(0, +), 4)
         XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
     }
@@ -562,7 +564,10 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(white.red.bins[255], 1)
         XCTAssertEqual(white.red.hdrTotal, 0)
 
-        let barely = Histogram.compute(solid(1, 1, rgb: encode(Float(pow(2.0, 1.0 / 64.0)))))
+        // A quarter of one tail bin above white — "a hair" has to be *inside* bin 0, and one whole
+        // bin (2^(1/64)) is exactly the bin-0/bin-1 boundary, so using a bin width here would test
+        // the rounding of `encode`/`decode`, not the seam.
+        let barely = Histogram.compute(solid(1, 1, rgb: encode(Float(pow(2.0, 0.25 / 64.0)))))
         XCTAssertEqual(barely.red.hdrBins[0], 1)
         XCTAssertEqual(barely.red.bins.reduce(0, +), 0)
     }
@@ -590,8 +595,8 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(sdr.red.hdrBins, edr.red.hdrBins)
         XCTAssertGreaterThan(sdr.red.hdrTotal, 0, "an SDR screen must still see light above white")
         XCTAssertEqual(sdr.red.hdrTotal, 32)
-        // 2 stops = bin 32 of 1/16 stop.
-        XCTAssertEqual(sdr.red.hdrBins[32], 32)
+        // 2 stops = bin 128 of 1/64 stop.
+        XCTAssertEqual(sdr.red.hdrBins[128], 32)
         XCTAssertEqual(sdr.red.clippedHigh, 1.0, accuracy: 1e-12)
         XCTAssertEqual(sdr.red.clippedCeiling, 1.0, accuracy: 1e-12, "headroom 1: white is the ceiling")
         XCTAssertEqual(edr.red.clippedCeiling, 1.0, accuracy: 1e-12, "4.0 > 1.2 too")
@@ -606,14 +611,14 @@ final class HistogramTests: XCTestCase {
 
         XCTAssertGreaterThan(sdr.luma.hdrTotal, 0, "headroom = 1 must still count the tail")
         XCTAssertEqual(sdr.red.bins, edr.red.bins, "the 256 SDR bins are screen-independent")
-        XCTAssertEqual(sdr.red.hdrBins, edr.red.hdrBins, "and so is the 96-bin tail")
+        XCTAssertEqual(sdr.red.hdrBins, edr.red.hdrBins, "and so is the 256-bin tail")
         XCTAssertEqual(sdr.binsDigest(), edr.binsDigest())
         XCTAssertEqual(sdr.headroom, 1, accuracy: 1e-12)
         XCTAssertEqual(edr.headroom, 1.2, accuracy: 1e-12)
 
         // The tail's first 8 bins, printed: the acceptance number for C.
         let head = (0..<8).map { "\(sdr.luma.hdrBins[$0])" }.joined(separator: " / ")
-        print("histogram tail, luma, bins 0…7 of 96: \(head) · hdrTotal \(sdr.luma.hdrTotal) of "
+        print("histogram tail, luma, bins 0…7 of 256: \(head) · hdrTotal \(sdr.luma.hdrTotal) of "
               + "\(sdr.luma.total) samples · clippedHigh(R) \(String(format: "%.4f", sdr.red.clippedHigh))")
         print("histogram ceiling, same picture: SDR clippedCeiling(R) "
               + "\(String(format: "%.4f", sdr.red.clippedCeiling)) vs 1.2× "

@@ -8,7 +8,7 @@ import PhotonsCore
 // clipping ratios under them, and one click target: 过白 toggles the highlight warning on the canvas.
 //
 // **The plot has two segments** (2026-10-26): 0…1 on a linear code axis, then a fixed **30 pt per
-// stop** exponential tail of 6 stops (`HistogramAxis`, `Histogram.maxStops`) — 180 pt at the default
+// stop** exponential tail of 4 stops (`HistogramAxis`, `Histogram.maxStops`) — 120 pt at the default
 // scale, which a 364 pt card and even the inspector's 244 pt minimum can hold (244 − 60 pt of SDR =
 // 184 pt of tail, so 30 pt/stop still fits; below that the stop scale shrinks, never the code axis).
 // Everything right of the dashed orange tick is light this panel cannot show: the tick is the display
@@ -65,7 +65,7 @@ public final class HistogramCardView: NSView {
 
     /// Channels whose path was actually built in the last `draw` (4 when there is a histogram).
     public private(set) var lastDrawnSeries = 0
-    /// Bins the last path was built from, **both segments** (256 + 96 = 352 today).
+    /// Bins the last path was built from, **both segments** (256 + 256 = 512 today).
     public private(set) var lastDrawnBins = 0
     /// How many of those were tail bins (0 without a histogram).
     public private(set) var lastDrawnHDRBins = 0
@@ -86,27 +86,17 @@ public final class HistogramCardView: NSView {
 
     // MARK: what the smoke reads back about the two *legibility* labels (2026-10-26)
 
-    /// The sample/bin footnote as painted, e.g. `采样 898k px · 直方图 256+32 档`. Empty without a
-    /// histogram. Kept as a string so the smoke compares the sentence, not the pixels.
-    public private(set) var sampleNoteText = ""
-    /// Where that footnote landed. Empty rect when there is nothing to paint.
-    public private(set) var sampleNoteRect: NSRect = .zero
     /// Right edge of the last channel percentage (R/G/B), i.e. how wide the channel row really is.
     public private(set) var channelRowWidth: CGFloat = 0
-    /// The two colours of the last `draw`. The smoke recomputes their contrast from these rather
+    /// The percentage colour of the last `draw`. The smoke recomputes its contrast from this rather
     /// than trusting a stored ratio.
     public private(set) var lastPercentColor: NSColor = .labelColor
-    public private(set) var lastNoteColor: NSColor = .labelColor
     /// Which appearance those colours were resolved for (`effectiveAppearance` in `draw`).
     public private(set) var lastAppearanceIsDark = false
 
     /// Worst-case WCAG ratio of the percentage colour on the card's own backdrop.
     public var percentContrast: Double {
         HistogramCardReadability.worstContrast(of: lastPercentColor, isDark: lastAppearanceIsDark)
-    }
-    /// Worst-case WCAG ratio of the footnote colour on the card's own backdrop.
-    public var noteContrast: Double {
-        HistogramCardReadability.worstContrast(of: lastNoteColor, isDark: lastAppearanceIsDark)
     }
 
     /// The card's own title is the inspector's (`card("直方图")`), so nothing is drawn twice: the
@@ -128,14 +118,13 @@ public final class HistogramCardView: NSView {
         updateAccessibilityHelp()
     }
 
-    /// VoiceOver (and the smoke) reads the footnote's two numbers spelled out — `256 档 SDR 码值`
-    /// and `32 档高光尾` are not things a listener should have to decode from "256+32".
+    /// VoiceOver still hears how the x axis is binned. The painted footnote that used to carry this
+    /// sentence was removed at the owner's request (2026-10-26) — it was "采样 N px · 直方图 256+N 档",
+    /// and the owner does not want that line on screen — so the binning is now spoken, not painted.
     private func updateAccessibilityHelp() {
-        let text = HistogramCardReadability.accessibilityHelp(
-            sampleCount: histogram?.sampleCount,
-            binCount: histogram?.binCount ?? 256,
-            hdrBinCount: histogram?.hdrBinCount ?? Histogram.hdrBinCount)
-        setAccessibilityHelp(text)
+        let bins = histogram?.binCount ?? 256
+        let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -409,7 +398,6 @@ public final class HistogramCardView: NSView {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         lastAppearanceIsDark = dark
         lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
-        lastNoteColor = HistogramCardReadability.noteColor(isDark: dark)
         var x = bounds.minX
         let channels: [(String, String, NSColor)] = [
             ("R", clipHighTextByChannel[0], NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1)),
@@ -425,28 +413,6 @@ public final class HistogramCardView: NSView {
             x = valueRect.maxX + 9
         }
         channelRowWidth = x - 9 - bounds.minX
-
-        // The sample/bin footnote — what was measured, and how the x axis is binned — is its own
-        // line, hard against the right edge. It cannot share the channel row: at the inspector's
-        // minimum width the card is 244 pt wide, the three R/G/B pairs alone can take ~140 pt and
-        // the sentence needs 126 pt, so the old same-line version ran off the card exactly when the
-        // card was narrow. `.quaternaryLabelColor` made it 1.24 : 1 at the same time, i.e. both
-        // unreadable and (at the margin) clipped.
-        sampleNoteText = ""
-        sampleNoteRect = .zero
-        if let histogram {
-            sampleNoteText = HistogramCardReadability.sampleNote(sampleCount: histogram.sampleCount,
-                                                                 binCount: histogram.binCount,
-                                                                 hdrBinCount: histogram.hdrBinCount)
-            let font = HistogramCardReadability.noteFont
-            let size = (sampleNoteText as NSString).size(withAttributes: [.font: font])
-            let noteY = channelY + 13
-            if size.width <= bounds.width, noteY + size.height <= bounds.maxY {
-                sampleNoteRect = NSRect(x: bounds.maxX - size.width, y: noteY,
-                                        width: size.width, height: size.height)
-                drawText(sampleNoteText, at: sampleNoteRect.origin, font: font, color: lastNoteColor)
-            }
-        }
     }
 
     @discardableResult
@@ -504,47 +470,12 @@ public enum HistogramCardReadability {
     }
 
     /// The sample/bin footnote: quieter than the percentages, but still opaque and still ≥ 4.5 : 1.
-    public static func noteColor(isDark: Bool) -> NSColor {
-        isDark ? NSColor(srgbRed: 0.68, green: 0.68, blue: 0.69, alpha: 1)
-               : NSColor(srgbRed: 0.34, green: 0.34, blue: 0.35, alpha: 1)
-    }
-
     // MARK: the fonts (unchanged sizes — nothing here may shrink)
 
     /// 8.5 pt, monospaced digits: the size the percentages already had. They are a column of numbers
     /// under each other's channel letters, so the digits must not jitter as the value changes.
     public static var percentFont: NSFont {
         .monospacedDigitSystemFont(ofSize: 8.5, weight: .regular)
-    }
-
-    /// 8 pt, monospaced digits: one step quieter than the percentages, same as before.
-    public static var noteFont: NSFont {
-        .monospacedDigitSystemFont(ofSize: 8, weight: .regular)
-    }
-
-    // MARK: the sentence
-
-    /// 「采样 575k px · 直方图 256+96 档」 — what the footnote says, in words:
-    ///
-    ///   · **采样 575k px** — the pixels this measurement counted (`Histogram.sampleCount`). That is
-    ///     the whole picture rendered at thumbnail scale (long edge 1024), not the whole frame at its
-    ///     own size, which is why it is not 60 M — and it is the same number at every zoom, because
-    ///     the sample is the picture's and not the window's.
-    ///   · **直方图 256+96 档** — the x axis' binning: 256 bins of SDR code value (black to white)
-    ///     plus 96 bins of highlight tail (`binCount` + `hdrBinCount`), i.e. 6 stops at 1/16 stop —
-    ///     the part above white that 过白 counts.
-    public static func sampleNote(sampleCount: Int, binCount: Int, hdrBinCount: Int) -> String {
-        let sampled = sampleCount >= 1_000 ? "\(sampleCount / 1_000)k px" : "\(sampleCount) px"
-        return "采样 \(sampled) · 直方图 \(binCount)+\(hdrBinCount) 档"
-    }
-
-    /// The same sentence for VoiceOver and the tooltip: "档" is explained instead of assumed.
-    public static func accessibilityHelp(sampleCount: Int?, binCount: Int, hdrBinCount: Int) -> String {
-        let sample = sampleCount.map { "采样 \($0) px（整幅图缩到长边 1024 后逐像素统计，与缩放无关）。" } ?? ""
-        return sample
-            + "横轴 \(binCount) 档 SDR 码值 + \(hdrBinCount) 档高光尾："
-            + "前 \(binCount) 档是从黑到白的码值，后 \(hdrBinCount) 档把超过白点的 6 档高光按每档 1/16 stop 单独展开，"
-            + "过白就是落在最后那一段的像素。"
     }
 
     // MARK: the arithmetic (WCAG 2.1, sRGB-linearised)

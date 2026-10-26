@@ -27,11 +27,13 @@ import CryptoKit
 // does not move when the camera zooms or pans or when the window resizes, and the card's 「采样 N px」
 // is the same number at fit, at 1:1 and at 400 %.
 //
-// The tail: `maxStops × hdrBinsPerStop` = 6 × 16 = **96 bins of 1/16 stop** above white (005 was
-// 4 × 8 = 32 bins of 1/8 stop). Why 6 stops: the samples are pre-clamp, so the axis is no longer
-// bounded by the largest headroom the app can hand S4 (16 = 2^4) but by where a photograph stops
-// carrying highlight information — 6 stops above white is 64×, past every consumer camera's
-// highlight headroom. Samples past the last bin are counted in the last bin (`hdrBinIndex`).
+// The tail: `maxStops × hdrBinsPerStop` = 4 × 64 = **256 bins of 1/64 stop** above white (005 was
+// 4 × 8 = 32 bins of 1/8 stop — one bin per 12 % of light, which made the tail's spikes tower over
+// the SDR segment because a tail bin covered a far wider slice of the picture than a code bin did).
+// The **range** stays at the owner's 4 stops (2^4 = 16× white, the largest headroom the app can hand
+// S4); the *resolution* is what changed, to 256 bins — the same count as the SDR segment, so the two
+// halves of the axis are comparable at a glance instead of one being 32× coarser than the other.
+// Samples past the last bin are counted in the last bin (`hdrBinIndex`).
 //
 // Two smaller decisions worth writing down rather than discovering later:
 //
@@ -67,7 +69,7 @@ public struct HistogramChannel: Sendable, Equatable {
     /// `bins[k]` = number of sampled pixels whose **code** (`srgbEncode(linear)`) fell in
     /// `[k/binCount, (k+1)/binCount)`. Linear values above white are not here: they are the tail.
     public let bins: [Int]
-    /// `hdrBins[k]` = samples 1/16 stop apart above white — see the file header. Empty when a caller
+    /// `hdrBins[k]` = samples 1/64 stop apart above white — see the file header. Empty when a caller
     /// built the value by hand; the measurement always fills it.
     public let hdrBins: [Int]
     /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999 of code), i.e. above
@@ -136,7 +138,8 @@ public struct Histogram: Sendable, Equatable {
 
     /// Bins per channel on the SDR segment.
     public let binCount: Int
-    /// Bins per channel on the exponential tail: `maxStops × hdrBinsPerStop` (96 today).
+    /// Bins per channel on the exponential tail: `maxStops × hdrBinsPerStop` (256 today — the same
+    /// count as the SDR segment, so one bin means a comparable slice of the picture on both halves).
     public var hdrBinCount: Int { Histogram.hdrBinCount }
     /// Pixels counted: the sample grid's pixel count, i.e. the whole-picture thumbnail's own pixels.
     /// Constant for a given photo — this is the number the card prints as 「采样 N px」.
@@ -177,16 +180,20 @@ public struct Histogram: Sendable, Equatable {
         self.luma = luma
     }
 
-    /// Stops above white this measurement can hold.
+    /// Stops above white this measurement can hold — **4**, the same range 005 had.
     ///
-    /// 6, not 4: the samples are pre-clamp, so the axis is bounded by where a photograph stops
-    /// carrying highlight information (2^6 = 64× white), not by the largest headroom a display can be
-    /// handed (`DisplayHeadroom.maximumHeadroom` = 16 = 2^4). Anything past the last bin lands there.
-    public static let maxStops = 6
-    /// Tail resolution: 16 bins per stop = 1/16 stop ≈ 4.4 % of light per bin, 3× finer than 005's
-    /// 1/8 stop. Coarse enough that the card's 30 pt-per-stop tail (180 pt over 6 stops) draws it
-    /// without resampling — 11.25 pt per bin.
-    public static let hdrBinsPerStop = 16
+    /// The owner's rule is "at most 4 stops" (2^4 = 16× white, which is also
+    /// `DisplayHeadroom.maximumHeadroom`). What 派单 005 asked to improve was the *resolution*, not the
+    /// range: a 6-stop tail was my own over-reach and has been reverted. Anything past the last bin
+    /// lands there.
+    public static let maxStops = 4
+    /// Tail resolution: **64 bins per stop** = 1/64 stop ≈ 1.1 % of light per bin (005 was 1/8 stop,
+    /// i.e. 12 %). 4 stops × 64 = 256 bins, matching `binCount` — that equality is the point: with 32
+    /// tail bins against 256 code bins, one tail bin stood for 8× more picture than a code bin and the
+    /// tail drew as spikes several times taller than anything in the SDR segment. The card gives the
+    /// tail 120 pt (4 × 30), so a tail bin is under half a point wide; the plot draws the outline, not
+    /// bars, so that is a shape, not a rasterisation problem.
+    public static let hdrBinsPerStop = 64
     public static var hdrBinCount: Int { maxStops * hdrBinsPerStop }
 
     /// Where the display ceiling sits on the tail, in stops above white (`0` for an SDR screen).
@@ -541,14 +548,14 @@ extension Histogram {
         return binIndex(encoded ? v : srgbEncode(v), scale, sdrBins)
     }
 
-    /// Which 1/16-stop bin a **linear** value above white belongs to.
+    /// Which 1/64-stop bin a **linear** value above white belongs to.
     ///
     /// The sample is linear, so this is one `log2` and a multiply — no decode. (005 had to invert the
     /// transfer function per above-white sample, because what it was handed was code.)
     ///
-    /// Degradation rules, same discipline as `binIndex`: `+∞` and anything at or past 6 stops land on
-    /// the last bin (`"6 stops or more"`), and NaN — which cannot be above white and therefore cannot
-    /// get here — would too, rather than trapping in `Int(_:)`.
+    /// Degradation rules, same discipline as `binIndex`: `+∞` and anything at or past 4 stops land on
+    /// the last bin (`"4 stops or more"`), and NaN — which cannot be above white and therefore cannot
+    /// get here — would too, rather than trapping in `Int(_:)`. The scale is 1/64 stop, so `log2(v) * 64`.
     @inline(__always)
     private static func hdrBinIndex(_ v: Float) -> Int {
         let limit = Float(hdrBinCount)
