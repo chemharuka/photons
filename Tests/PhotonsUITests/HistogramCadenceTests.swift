@@ -4,22 +4,22 @@ import Metal
 import PhotonsCore
 import PhotonsUI
 
-/// Q30 — the histogram's **cadence**: a measurement is a reading of a picture, and a picture sliding
-/// under the plot cannot be read. Before this the card cost a 1:1 pan **8 ms per frame in release and
-/// 104 ms in a debug build** (0.65 Mpx of CPU binning plus a 5.1 MB readback), i.e. 20× the frame it
-/// was measuring; the pan budget the repo quotes (4–5 ms) was only true with the histogram switched
-/// off, which is not the configuration the app ships.
+/// The histogram's **cadence**, after 005 (2026-10-26): the numbers are of the picture, so a frame
+/// measures nothing and a gesture cannot cost one.
+///
+/// Q30 measured a frame and paid 8 ms per 1:1 pan frame (release; 104 ms in a debug build) for a plot
+/// nobody can read while the picture slides. 005 removed the coupling at the root instead of scheduling
+/// around it: the measurement is its own whole-picture render, keyed by
+/// `hist(rung, editDigest, bins)`, debounced 120 ms behind the key and *never* behind the camera.
 ///
 /// The rules this file defends:
 ///
-///   ① a frame whose camera moved **does not measure** (20 pans → at most two measurements, and the
-///      frame that confirms the camera is the one that does);
-///   ② the card is refreshed **once**, ~60 ms after the hand stops, on a frame that is measured but
-///      not presented — so the numbers are of the picture on screen, and no second picture appears;
-///   ③ the card keeps the last numbers while a pan is in flight (it must not blank out);
+///   ① no frame carries a histogram at all, whatever the camera does —
+///      `histogramSkippedFrames` counts the frames, `histogramRefreshCount` the measurements;
+///   ② the card follows the **edit**, once, and a pan between edits publishes nothing;
+///   ③ the card keeps the last numbers while the picture moves (it must not blank out);
 ///   ④ the pan frames themselves cost the same with the card on as with it off;
-///   ⑤ the numbers still line up with an independent measurement of the same pixels (asserted in
-///      `HistogramTests.testWindowFrameAndFullFrameAgreeOnTheSameROI`, where the pixels are known).
+///   ⑤ the measurement is of the picture, not of the viewport the camera happens to be showing.
 @MainActor
 final class HistogramCadenceTests: XCTestCase {
 
@@ -91,49 +91,83 @@ final class HistogramCadenceTests: XCTestCase {
         return sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * q).rounded()))]
     }
 
-    private func frame(_ loupe: LoupeController, url: URL, state: LoupeViewState) throws -> LoupeController.FrameResult {
+    private func frame(_ loupe: LoupeController, url: URL, state: LoupeViewState,
+                       edit: EditModel = .neutral) throws -> LoupeController.FrameResult {
         try loupe.makeFrame(url: url, viewport: Self.viewport, decodeScale: 0.5,
-                            edit: .neutral, state: state)
+                            edit: edit, state: state)
     }
 
-    // MARK: - ① the rule itself: a pan does not measure
+    /// A document that differs from neutral by one develop setting.
+    private func brighter(_ stops: Double) -> EditModel {
+        var edit = EditModel.neutral
+        var light = edit.light
+        light.exposure += stops
+        edit.light = light
+        return edit
+    }
 
-    func testAPanDoesNotMeasureAndTheSettledCameraDoes() throws {
+    // MARK: - ① no frame measures, whatever the camera does
+
+    func testNoFrameCarriesAHistogramAtAnyCamera() throws {
         let url = try rawFixture()
         let loupe = makeController()
 
-        // The first frame of a photo is a first look, not a gesture.
-        let first = try frame(loupe, url: url, state: .fit)
-        XCTAssertNotNil(first.histogram, "the first frame of a photo must measure")
-        XCTAssertEqual(loupe.histogramSkippedFrames, 0)
-
-        var measuredDuringPan = 0
+        _ = try frame(loupe, url: url, state: .fit)
         for step in 1...20 {
-            let pan = try frame(loupe, url: url, state: pannedState(step))
-            if pan.histogram != nil { measuredDuringPan += 1 }
+            _ = try frame(loupe, url: url, state: pannedState(step))
         }
-        XCTAssertEqual(measuredDuringPan, 0, "no pan frame may carry a histogram")
-        XCTAssertEqual(loupe.histogramSkippedFrames, 20)
-
-        // The hand stops: the next frame at the same camera is the measurement.
-        let settled = try frame(loupe, url: url, state: pannedState(20))
-        XCTAssertNotNil(settled.histogram, "the frame that confirms the camera must measure")
-        XCTAssertEqual(loupe.histogramSkippedFrames, 20, "a confirming frame is not a skip")
+        // 21 frames, 21 non-measurements. With `autoRenderEnabled` off nothing arms the debounce, so
+        // this is also the proof that a frame is not what triggers a measurement.
+        XCTAssertEqual(loupe.histogramSkippedFrames, 21)
+        XCTAssertEqual(loupe.histogramRefreshCount, 0, "no measurement may run off a frame")
+        XCTAssertNil(loupe.lastHistogram)
+        print("frames without a histogram: \(loupe.histogramSkippedFrames) (fit + 20 pans), "
+              + "measurements \(loupe.histogramRefreshCount)")
     }
 
-    // MARK: - ②③ the deferred measurement, through the shipped queue path
+    /// The measurement itself is of the picture: the viewport the camera is showing is not in it.
+    func testTheMeasurementIsOfThePictureNotTheViewport() throws {
+        let url = try rawFixture()
+        let loupe = makeController()
 
-    func testTheHandStopsAndTheCardIsRefreshedOnce() throws {
+        let atFit = try frame(loupe, url: url, state: .fit)
+        let histogram = try loupe.measureHistogramNow(url: url, identity: "cadence", edit: .neutral)
+
+        XCTAssertEqual(loupe.histogramPublishCount, 1)
+        XCTAssertEqual(loupe.lastHistogram, histogram)
+        // 2560 × 1600 is the viewport; the picture is neither that size nor its aspect.
+        XCTAssertNotEqual(histogram.canvas, Self.viewport)
+        XCTAssertTrue(histogram.sampleCount > 0)
+        XCTAssertEqual(histogram.sampleCount, histogram.sampleSize.pixelCount)
+        XCTAssertEqual(histogram.sampleSize, Histogram.sampleSize(for: histogram.roi))
+        XCTAssertEqual(histogram.roi, ImageRect(x: 0, y: 0, width: histogram.canvas.width,
+                                                height: histogram.canvas.height),
+                       "the measurement covers the whole picture")
+        XCTAssertGreaterThan(histogram.canvas.width, 0)
+
+        // A second call — same document — is the same numbers, at any camera.
+        _ = try frame(loupe, url: url, state: pannedState(7))
+        let again = try loupe.measureHistogramNow(url: url, identity: "cadence", edit: .neutral)
+        XCTAssertEqual(again.binsDigest(), histogram.binsDigest())
+        XCTAssertEqual(again.sampleCount, histogram.sampleCount)
+        print("histogram of the picture: \(histogram.canvas.width)×\(histogram.canvas.height) picture → "
+              + "\(histogram.sampleCount) px on \(histogram.sampleSize.width)×\(histogram.sampleSize.height), "
+              + "digest \(histogram.binsDigest().prefix(16))…")
+    }
+
+    // MARK: - ②③ the debounced measurement, through the shipped queue path
+
+    func testTheCardFollowsTheEditAndNotTheCamera() throws {
         let url = try rawFixture()
         let loupe = makeController(autoRender: true)
         loupe.frameSource = LoupeController.FrameSource(url: url, identity: "cadence",
-                                                       viewport: Self.viewport, state: .fit)
+                                                        viewport: Self.viewport, state: .fit)
         loupe.scheduleRender()
-        XCTAssertTrue(waitFor(120) { loupe.lastFrame?.histogram != nil },
-                      "the first frame of a photo must measure")
+        XCTAssertTrue(waitFor(120) { loupe.lastHistogram != nil },
+                      "opening a photo must produce a measurement")
         let publishedOnOpen = loupe.histogramPublishCount
-        let firstHistogram = loupe.lastHistogram
-        XCTAssertNotNil(firstHistogram)
+        let measurementsOnOpen = loupe.histogramRefreshCount
+        let firstHistogram = try XCTUnwrap(loupe.lastHistogram)
 
         // Twenty pans, driven the way the canvas drives them: a new camera, one request each.
         for step in 1...20 {
@@ -145,68 +179,69 @@ final class HistogramCadenceTests: XCTestCase {
         }
         XCTAssertEqual(loupe.lastHistogram, firstHistogram,
                        "the card keeps the numbers it has while the picture moves")
-        XCTAssertGreaterThanOrEqual(loupe.histogramSkippedFrames, 18,
-                                    "the pan frames must have skipped the measurement")
+        XCTAssertEqual(loupe.histogramPublishCount, publishedOnOpen,
+                       "a pan may not publish a measurement")
+        XCTAssertEqual(loupe.histogramRefreshCount, measurementsOnOpen,
+                       "and may not run one")
+        pump(0.3)
+        XCTAssertEqual(loupe.histogramPublishCount, publishedOnOpen,
+                       "not even after the hand stops: the picture did not change")
 
-        // The hand stops. One deferred measurement, at the camera on screen, and the card follows.
-        XCTAssertTrue(waitFor(10) { loupe.histogramRefreshCount >= 1 },
-                      "the settled camera was never measured")
-        XCTAssertTrue(waitFor(10) { loupe.histogramPublishCount > publishedOnOpen },
-                      "the card never received the settled measurement")
-        XCTAssertLessThanOrEqual(loupe.histogramRefreshCount, 2,
-                                 "a gesture may cost one deferred measurement, not one per gap")
-        XCTAssertLessThanOrEqual(loupe.histogramPublishCount - publishedOnOpen, 2,
-                                 "twenty pan frames may cost at most two measurements")
-        let refreshed = try XCTUnwrap(loupe.lastHistogram)
-        XCTAssertEqual(refreshed.canvas, Self.viewport,
-                       "the measurement is of the canvas on screen")
-        XCTAssertNotEqual(refreshed, firstHistogram, "the settled camera is a different picture")
+        // The edit: one debounced measurement, and the card follows.
+        loupe.frameSource = LoupeController.FrameSource(url: url, identity: "cadence",
+                                                        viewport: Self.viewport,
+                                                        state: pannedState(20),
+                                                        edit: brighter(1))
+        loupe.requestViewportRender()
+        XCTAssertTrue(waitFor(30) { loupe.histogramPublishCount > publishedOnOpen },
+                      "the edit was never measured")
+        XCTAssertEqual(loupe.histogramPublishCount - publishedOnOpen, 1,
+                       "one edit is one measurement, however many ticks it took")
+        let edited = try XCTUnwrap(loupe.lastHistogram)
+        XCTAssertNotEqual(edited.binsDigest(), firstHistogram.binsDigest(),
+                          "a brighter document is a different distribution")
 
-        print(String(format: "Q30 settle: %d skipped frames → %d deferred measurement(s) · "
-                        + "measurement %.1f ms · hand-stop→card %.1f ms (%d publishes)",
+        print(String(format: "005 cadence: %d frames, %d measurements · edit→card %.1f ms "
+                     + "· measurement %.1f ms · %d publishes",
                      loupe.histogramSkippedFrames, loupe.histogramRefreshCount,
-                     loupe.lastHistogramMilliseconds, loupe.lastHistogramLatency,
+                     loupe.lastHistogramLatency, loupe.lastHistogramMilliseconds,
                      loupe.histogramPublishCount))
 
-        // ③ the card's latency. The budget is a claim about the shipped (optimized) app: this build's
-        // binning loop is ~20× slower in `-Onone` (94 ms vs 3.4 ms for the same grid, measured), so on
-        // a debug build the wall-clock budget would measure the compiler, not the design. Measured and
-        // printed either way; asserted where it means something.
-        if benchmarks, optimizedBuild() {
-            XCTAssertLessThanOrEqual(loupe.lastHistogramLatency, 150,
-                                     "the card must catch up within 150 ms of the hand stopping")
+        // A slider drag is a burst of edits 8 ms apart: one measurement, for the last one.
+        let beforeDrag = loupe.histogramPublishCount
+        for tick in 1...10 {
+            loupe.frameSource = LoupeController.FrameSource(url: url, identity: "cadence",
+                                                            viewport: Self.viewport,
+                                                            state: pannedState(20),
+                                                            edit: brighter(1 + Double(tick) * 0.1))
+            loupe.requestViewportRender()
+            pump(0.008)
         }
-    }
+        XCTAssertTrue(waitFor(30) { loupe.histogramPublishCount > beforeDrag })
+        pump(0.3)
+        XCTAssertEqual(loupe.histogramPublishCount - beforeDrag, 1,
+                       "a ten-tick drag must collapse into one measurement")
 
-    /// A debug build's `-Onone` binning is ~20× the optimized one; the arithmetic below is the same
-    /// work the deferred measurement does (a 1024-long-edge grid of a viewport-sized region).
-    private func optimizedBuild() -> Bool {
-        guard let device = MTLCreateSystemDefaultDevice() else { return false }
-        let w = 1024, h = 640
-        let rgba = [Float16](repeating: Float16(0.4), count: w * h * 4)
-        let image = DisplayImage(width: w, height: h, rgba: rgba, primaries: .sRGB, bitDepth: 16)
-        let t0 = CFAbsoluteTimeGetCurrent()
-        _ = Histogram.compute(image)
-        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-        _ = device
-        return ms < 30
+        if benchmarks {
+            XCTAssertLessThanOrEqual(loupe.lastHistogramLatency, 400,
+                                     "the card must catch up shortly after the edit stops")
+        }
     }
 
     // MARK: - ④ the pan frames pay nothing for the card
 
-    /// Twenty 1:1 pans, the card on and off, interleaved so drift cannot favour either side. This is
-    /// the acceptance number: **Δp50 and Δp95 ≤ 1.5 ms** — i.e. the card is free on a pan frame.
+    /// Twenty 1:1 pans, the card on and off, interleaved so drift cannot favour either side. With the
+    /// measurement decoupled there is nothing left for the card to cost a frame, and this is the number
+    /// that says so: **Δp50 and Δp95 ≤ 1.5 ms** in a bench build.
     func testPanFramesCostNothingForTheCard() throws {
         let url = try rawFixture()
         let loupe = makeController()
-        // Warm: the graph, the ladder, the pool, the pipeline (the first frame measures).
+        // Warm: the graph, the ladder, the pool (and one measurement, so nothing is armed).
         _ = try frame(loupe, url: url, state: pannedState(0))
-        _ = try frame(loupe, url: url, state: pannedState(1))
+        _ = try loupe.measureHistogramNow(url: url, identity: "cadence", edit: .neutral)
 
         var offTimes: [Double] = [], onTimes: [Double] = []
         for step in 0..<20 {
-            // Two consecutive pan steps, one with the card on and one with it off: both are a camera
-            // that moved, which is the frame shape that must not measure.
             loupe.collectsHistogram = false
             var t0 = CFAbsoluteTimeGetCurrent()
             _ = try frame(loupe, url: url, state: pannedState(100 + step * 2))
@@ -220,13 +255,12 @@ final class HistogramCadenceTests: XCTestCase {
 
         let offP50 = percentile(offTimes, 0.5), offP95 = percentile(offTimes, 0.95)
         let onP50 = percentile(onTimes, 0.5), onP95 = percentile(onTimes, 0.95)
-        print(String(format: "Q30 1:1 pan, 20 frames, card on vs off: off p50 %.2f / p95 %.2f ms · "
+        print(String(format: "005 1:1 pan, 20 frames, card on vs off: off p50 %.2f / p95 %.2f ms · "
                         + "on p50 %.2f / p95 %.2f ms · Δp50 %+.2f / Δp95 %+.2f ms",
                      offP50, offP95, onP50, onP95, onP50 - offP50, onP95 - offP95))
 
         XCTAssertGreaterThanOrEqual(loupe.histogramSkippedFrames, 20,
-                                    "every measured pan frame must have skipped the histogram")
-        // Load-proof: 104 ms of measurement would blow through this even on a busy machine.
+                                    "every frame must have carried no histogram")
         XCTAssertLessThan(onP50 - offP50, 5.0, "the card must not cost a pan frame its budget")
         if benchmarks {
             XCTAssertLessThanOrEqual(onP50 - offP50, 1.5, "Δp50 must fit in 1.5 ms")

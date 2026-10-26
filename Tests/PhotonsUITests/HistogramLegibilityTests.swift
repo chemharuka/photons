@@ -11,7 +11,7 @@ private let cardHeight: CGFloat = 104
 /// 004 — the histogram card's two secondary labels were **unreadable**, and this file is the proof
 /// that they are not any more.
 ///
-/// The complaint was concrete: "RGB 百分数现在颜色是灰色,不明显 … 旁边还有个 898px 256+32 bin 是什么?
+/// The complaint was concrete: "RGB 百分数现在颜色是灰色,不明显 … 旁边还有个 898px 256+96 bin 是什么?
 /// 这个颜色是黑色更加看不清". The cause was that both were *semantic* label colours — alpha tints of
 /// black/white — so on the card's own backdrop they landed at 1.2–2.3 : 1, i.e. texture rather than
 /// text. WCAG 2.1 SC 1.4.3 asks 4.5 : 1 for text this size, so the fix is measured, not eyeballed:
@@ -23,8 +23,8 @@ private let cardHeight: CGFloat = 104
 ///   ④ at the card's minimum width (the inspector's 300 pt floor minus the inspector's 24 pt of
 ///      padding and the card's 32 pt of inset = **244 pt**) both rows fit: the channel row inside
 ///      the card, and the footnote on its own line, right-aligned, unabbreviated;
-///   ⑤ the sentence says what it means (「采样 … px · 直方图 256+32 档」) and VoiceOver spells the
-///      binning out (「256 档 SDR 码值 + 32 档高光尾」).
+///   ⑤ the sentence says what it means (「采样 … px · 直方图 256+96 档」) and VoiceOver spells the
+///      binning out (「256 档 SDR 码值 + 96 档高光尾」).
 @MainActor
 final class HistogramLegibilityTests: XCTestCase {
 
@@ -33,7 +33,7 @@ final class HistogramLegibilityTests: XCTestCase {
     private func fixture(sampleCount: Int = 898_432, high: Double? = nil) -> Histogram {
         func channel(_ h: Double) -> HistogramChannel {
             HistogramChannel(bins: [Int](repeating: 1, count: 256),
-                             hdrBins: [Int](repeating: 0, count: 32),
+                             hdrBins: [Int](repeating: 0, count: 96),
                              clippedHigh: h, clippedCeiling: h, clippedLow: 0)
         }
         return Histogram(binCount: 256, sampleCount: sampleCount,
@@ -207,7 +207,7 @@ final class HistogramLegibilityTests: XCTestCase {
         let rect = card.sampleNoteRect
         XCTAssertEqual(card.sampleNoteText,
                        HistogramCardReadability.sampleNote(sampleCount: 898_432, binCount: 256,
-                                                           hdrBinCount: 32))
+                                                           hdrBinCount: 96))
         XCTAssertFalse(rect.isEmpty, "脚注必须画出来")
         XCTAssertGreaterThanOrEqual(rect.minX, card.bounds.minX, "脚注左边界不得越界")
         XCTAssertLessThanOrEqual(rect.maxX, card.bounds.maxX + 0.5, "脚注右边界不得越界")
@@ -232,28 +232,28 @@ final class HistogramLegibilityTests: XCTestCase {
 
     func testTheFootnoteSaysWhatTheUserAskedAbout() {
         XCTAssertEqual(HistogramCardReadability.sampleNote(sampleCount: 898_432, binCount: 256,
-                                                           hdrBinCount: 32),
-                       "采样 898k px · 直方图 256+32 档")
+                                                           hdrBinCount: 96),
+                       "采样 898k px · 直方图 256+96 档")
         // Sub-thousand samples are not rounded to "0k px".
         XCTAssertEqual(HistogramCardReadability.sampleNote(sampleCount: 512, binCount: 256,
-                                                           hdrBinCount: 32),
-                       "采样 512 px · 直方图 256+32 档")
+                                                           hdrBinCount: 96),
+                       "采样 512 px · 直方图 256+96 档")
         let card = drawnCard(width: minimumCardWidth)
         XCTAssertTrue(card.sampleNoteText.contains("采样"))
-        XCTAssertTrue(card.sampleNoteText.contains("256+32 档"))
+        XCTAssertTrue(card.sampleNoteText.contains("256+96 档"))
         XCTAssertFalse(card.sampleNoteText.contains("bin"), "别再写 bin 了：用户不知道那是什么")
     }
 
     func testAccessibilityHelpSpellsOutTheBinning() {
         let help = HistogramCardReadability.accessibilityHelp(sampleCount: 898_432, binCount: 256,
-                                                              hdrBinCount: 32)
+                                                              hdrBinCount: 96)
         XCTAssertTrue(help.contains("256 档 SDR 码值"))
-        XCTAssertTrue(help.contains("32 档高光尾"))
+        XCTAssertTrue(help.contains("96 档高光尾"))
         XCTAssertTrue(help.contains("898432"), "把采样像素数说出来：\(help)")
         // The card carries it, so VoiceOver reads it without a separate label.
         let card = drawnCard(width: minimumCardWidth)
         let spoken = card.accessibilityHelp() ?? ""
         XCTAssertTrue(spoken.contains("256 档 SDR 码值"), spoken)
-        XCTAssertTrue(spoken.contains("32 档高光尾"), spoken)
+        XCTAssertTrue(spoken.contains("96 档高光尾"), spoken)
     }
 }

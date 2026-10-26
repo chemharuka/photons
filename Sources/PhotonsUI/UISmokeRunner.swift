@@ -1632,23 +1632,25 @@ public final class UISmokeRunner {
 
     // MARK: - 直方图卡片 + 高光警告（005f 的 UI）
 
-    /// The histogram card, asserted on the **frame's own measurement** rather than on a re-count of
-    /// its own numbers:
+    /// The histogram card, asserted on the **shipped measurement** — the picture, measured before S4
+    /// (005, 2026-10-26), not the frame on screen:
     ///
     ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series over **both**
-    ///      segments — 256 code bins plus the 32-bin exponential tail (`Histogram.maxStops` ×
-    ///      `hdrBinsPerStop`);
+    ///      segments — 256 code bins plus the 96-bin exponential tail (`Histogram.maxStops` ×
+    ///      `hdrBinsPerStop` = 6 × 16);
     ///   2. every channel's bins sum to the sample count (the measurement's own invariant), and the
-    ///      axis is the laid-out one: 30 pt per stop, 4 stops, SDR + tail = the card's width;
-    ///   3. the display-ceiling tick sits at `log2(headroom)` stops into the tail — the frame's own
-    ///      headroom, so the plot and its ceiling always describe the same pixels;
-    ///   4. the ROI is the **picture**, not the canvas: this frame is letterboxed, and no matte row
-    ///      may reach the black bin (the bug that made 削底 read tens of percent on a clean photo);
-    ///   5. the 削顶 percentage is **Core's** `clippedCeiling` and 过白 its `clippedHigh`, each checked
-    ///      twice: the card's text against `HistogramCardFormat`, and Core's ratio against an
-    ///      independent full-resolution recount of the very pixels inside the ROI (at 720 × 420 the
-    ///      sample grid *is* the frame, so the two agree exactly, not by a downsample estimate);
-    ///   6. clicking 过白 toggles the canvas warning, and doing so moves **no** document: same
+    ///      axis is the laid-out one: 30 pt per stop, 6 stops, SDR + tail = the card's width;
+    ///   3. the display-ceiling tick sits at `log2(headroom)` stops into the tail — the measurement's
+    ///      own headroom, so the plot and its ceiling describe the same screen;
+    ///   4. the sample is the **picture**, not the frame: `sampleCount` is the whole-picture thumbnail
+    ///      and `roi` is the picture's own pixel grid, so no viewport enters the numbers at all (the
+    ///      acceptance "fit/100%/400% give the same numbers" is checked as "the measurement takes no
+    ///      camera" — `measureHistogramNow` has no viewport parameter to get wrong);
+    ///   5. the 削顶 percentage is **Core's** `clippedCeiling` and 过白 its `clippedHigh`, checked
+    ///      against `HistogramCardFormat`; the pixels themselves are cross-checked against a
+    ///      full-resolution recount in `HistogramTests`, where the source is known;
+    ///   6. measuring the same document twice returns the same bins — the key, not the camera, decides;
+    ///   7. clicking 过白 toggles the canvas warning, and doing so moves **no** document: same
     ///      document hash, same history depth, same `editRevision`, same persistence count.
     private func checkHistogramCard(session: CatalogSession, loupe: LoupeController,
                                     controller: EditorWindowController, window: NSWindow,
@@ -1664,26 +1666,21 @@ public final class UISmokeRunner {
             return
         }
 
-        // A canvas whose long edge is under `Histogram.maxLongEdge`, i.e. the measurement's sample
-        // grid is the frame itself. That is what makes check 3 an equality rather than a bound.
-        let viewport = ImageSize(width: 720, height: 420)
-        guard let frame = try? loupe.makeFrame(asset: asset, url: url, viewport: viewport,
-                                               decodeScale: 0.5,
-                                               edit: MaskViewState.documentOnly(session.edit),
-                                               state: .fit, hashPixels: false),
-              let histogram = frame.histogram else {
-            fail("直方图：这一帧没有 measurement（collectHistogram 没生效）")
+        // The measurement, through the same call the card's numbers come from. No frame is rendered
+        // and no viewport is passed: that is the change 005 made, so it is what the smoke asserts.
+        let documentEdit = MaskViewState.documentOnly(session.edit)
+        guard let histogram = try? loupe.measureHistogramNow(asset: asset, url: url,
+                                                              edit: documentEdit) else {
+            fail("直方图：整幅图测量失败（measureHistogramNow 返回 nil）")
             loupe.autoRenderEnabled = true
             return
         }
-        // The same hand-off `present` performs: the card's input is the frame's own measurement.
-        loupe.recordMeasurements(frame)
         let cardDeadline = Date().addingTimeInterval(6)
         while card.histogram != histogram && Date() < cardDeadline { pump(0.1) }
         card.needsDisplay = true
         card.display()
 
-        log("histogram frame         \(histogram.sampleCount) px sampled on \(histogram.sampleSize.width)×\(histogram.sampleSize.height) · canvas \(histogram.canvas.width)×\(histogram.canvas.height) · roi \(histogram.roi.width)×\(histogram.roi.height) · \(histogram.binCount)+\(histogram.hdrBinCount) bins · headroom \(String(format: "%.3f", histogram.headroom))× · publishes \(loupe.histogramPublishCount)")
+        log("histogram picture       \(histogram.sampleCount) px sampled on \(histogram.sampleSize.width)×\(histogram.sampleSize.height) · canvas \(histogram.canvas.width)×\(histogram.canvas.height) · \(histogram.binCount)+\(histogram.hdrBinCount) bins · headroom \(String(format: "%.3f", histogram.headroom))× · publishes \(loupe.histogramPublishCount) · \(String(format: "%.1f", loupe.lastHistogramMilliseconds)) ms")
         let axis = card.lastAxis
         check("直方图卡片在检查器里，并画出 4 组 × \(histogram.binCount)+\(histogram.hdrBinCount) bin（实测 series \(card.lastDrawnSeries) / bins \(card.lastDrawnBins) / 尾段 \(card.lastDrawnHDRBins)）",
               card.lastDrawnSeries == 4
@@ -1696,8 +1693,8 @@ public final class UISmokeRunner {
         let sdrWidth = axis?.sdrWidth ?? -1
         let hdrWidth = axis?.hdrWidth ?? -1
         check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
-              axis != nil && axis?.stopWidth == 30 && axis?.stops == 4
-              && hdrWidth == 120
+              axis != nil && axis?.stopWidth == 30 && axis?.stops == 6
+              && hdrWidth == 180
               && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
 
         // The display ceiling: log2(headroom) stops into the tail, from the frame's own headroom.
@@ -1711,16 +1708,22 @@ public final class UISmokeRunner {
                   ? abs(card.lastCeilingMarkerX - splitX) < 1e-6
                   : card.lastCeilingMarkerX >= splitX))
 
-        // The region is the picture, not the canvas: this frame is letterboxed (a 720 × 420 canvas
-        // around a 631 × 420 picture), so the ROI must equal the frame's *content* and the matte must
-        // lie outside it. A photo may legitimately contain true blacks, so "bin 0 is empty" is not
-        // the evidence — `HistogramTests.testAFitFrameMeasuresThePictureNotTheMatte` is, on a source
-        // whose every picture pixel is above black and whose matte is exactly the difference.
-        let matteColumns = frame.canvas.width - frame.content.width
-        check("ROI 是画面不是画布：canvas \(frame.canvas.width)×\(frame.canvas.height)，content \(frame.content.width)×\(frame.content.height)（左右各 \(matteColumns / 2) px 黑边在外），roi \(histogram.roi.width)×\(histogram.roi.height) == content",
-              matteColumns > 0
-              && histogram.roi.width == frame.content.width
-              && histogram.roi.height == frame.content.height)
+        // The sample is the **picture**: `sampleCount` is the thumbnail's own pixel count, `roi` is the
+        // picture's pixel grid, and `sampleSize` is what `Histogram.sampleSize` says that grid is. No
+        // viewport appears anywhere — that is the whole claim, and it is checkable as an identity.
+        let expectedSample = Histogram.sampleSize(for: histogram.roi)
+        check("测的是整幅图：采样 \(histogram.sampleCount) px 于 \(histogram.sampleSize.width)×\(histogram.sampleSize.height)（= Histogram.sampleSize 算出的 \(expectedSample.width)×\(expectedSample.height)），画面 \(histogram.canvas.width)×\(histogram.canvas.height)，roi 覆盖整幅",
+              histogram.sampleCount == histogram.sampleSize.pixelCount
+              && histogram.sampleSize == expectedSample
+              && histogram.roi == ImageRect(x: 0, y: 0, width: histogram.canvas.width,
+                                            height: histogram.canvas.height))
+
+        // Same document, second measurement: same bins. The key decides, not the camera — so this is
+        // also the check that a re-measure cannot drift.
+        let again = try? loupe.measureHistogramNow(asset: asset, url: url, edit: documentEdit)
+        check("同一份文档测两次，逐 bin 相同：digest \(histogram.binsDigest().prefix(16))… vs \(again?.binsDigest().prefix(16) ?? "—")…，采样数 \(histogram.sampleCount) vs \(again?.sampleCount ?? -1)",
+              again?.binsDigest() == histogram.binsDigest()
+              && again?.sampleCount == histogram.sampleCount)
 
         let totals = [histogram.red.total, histogram.green.total,
                       histogram.blue.total, histogram.luma.total]
@@ -1728,15 +1731,15 @@ public final class UISmokeRunner {
               histogram.sampleCount > 0 && totals.allSatisfy { $0 == histogram.sampleCount }
               && card.histogram == histogram)
 
-        // Independent recount: the ratio Core reports, recomputed from the presented pixels with the
-        // same 0.999 threshold, and the luma with the same Rec.709 weights.
-        let recounted = clipFractions(of: frame.texture, in: histogram.roi)
+        // The ratio Core reports is the one the card prints, in all four channels. (The pixels are
+        // cross-checked against a full-resolution recount in `HistogramTests`, where the source and the
+        // expected distribution are known; here the claim is the card/Core identity.)
         let coreValues = [histogram.red, histogram.green, histogram.blue, histogram.luma]
             .map(\.clippedHigh)
-        let deltas = zip(recounted, coreValues).map { abs($0 - $1) }
-        log("clipped recount         card “\(card.clipHighText)” · Core luma \(String(format: "%.5f", histogram.luma.clippedHigh)) · 逐通道 Core \(coreValues.map { String(format: "%.5f", $0) }) · 独立重数 \(recounted.map { String(format: "%.5f", $0) }) · 最大差 \(deltas.max() ?? -1)")
-        check("削顶百分比与 Core 一致：Core 的 4 个 clippedHigh 与对同一帧像素独立重数的最大差 \(String(format: "%.2e", deltas.max() ?? -1))（< 1e-5，即 0.001 个百分点以内）",
-              deltas.allSatisfy { $0 < 1e-5 })
+        log("clipped ratios          card “\(card.clipHighText)” · Core luma \(String(format: "%.5f", histogram.luma.clippedHigh)) · 逐通道 \(coreValues.map { String(format: "%.5f", $0) }) · 过白合计 \(histogram.luma.hdrTotal) px")
+        check("削顶百分比与 Core 一致：R/G/B/L 的 clippedHigh 全部落在 [0,1] 且卡片 luma 与 Core 相同（\(String(format: "%.5f", coreValues[3]))）",
+              coreValues.allSatisfy { $0 >= 0 && $0 <= 1 }
+              && card.clipHighText == HistogramCardFormat.clipHigh(histogram, .luma))
         let expectedText = [Histogram.Channel.red, .green, .blue, .luma]
             .map { HistogramCardFormat.clipHigh(histogram, $0) }
         check("卡片上的削顶数字就是 Core 的值（\(card.clipHighTextByChannel.joined(separator: " / ")) == \(expectedText.joined(separator: " / "))，削底 \(card.clipLowText)）",
@@ -1795,7 +1798,10 @@ public final class UISmokeRunner {
         }
         pump(0.2)
         let toggled = session.highlightWarning != warningBefore
-        if let warnedFrame = try? loupe.makeFrame(asset: asset, url: url, viewport: viewport,
+        // The clipping grid is still a property of a *frame* (it marks the pixels on screen), so it
+        // takes one — the measurement above did not.
+        if let warnedFrame = try? loupe.makeFrame(asset: asset, url: url,
+                                                  viewport: ImageSize(width: 720, height: 420),
                                                   decodeScale: 0.5,
                                                   edit: MaskViewState.documentOnly(session.edit),
                                                   state: .fit) {
@@ -1831,14 +1837,16 @@ public final class UISmokeRunner {
         let white = LinearImage(width: whiteWidth, height: whiteHeight, rgba: whitePixels,
                                 colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
         let whiteCanvas = ImageSize(width: whiteWidth, height: whiteHeight)
-        if let graph = try? RenderGraph(input: RenderInput(image: white, identity: "ui-smoke-white")),
-           let rendered = try? graph.render(EditModel(), options: RenderOptions(
-                canvas: whiteCanvas, wantsPixels: false,
-                collectHistogram: true, histogramBins: 256)),
-           let texture = rendered.output {
-            whiteGrid = HighlightWarning.grid(of: texture)
-            whiteHistogram = rendered.histogram
-            graph.recycle(output: texture)
+        if let graph = try? RenderGraph(input: RenderInput(image: white, identity: "ui-smoke-white")) {
+            // Two passes on purpose now: the grid is of the *presented* pixels (that is what it marks)
+            // and the histogram is a measurement of the picture, taken by its own render.
+            if let rendered = try? graph.render(EditModel(), options: RenderOptions(
+                canvas: whiteCanvas, wantsPixels: false)),
+               let texture = rendered.output {
+                whiteGrid = HighlightWarning.grid(of: texture)
+                graph.recycle(output: texture)
+            }
+            whiteHistogram = try? graph.measureHistogram(EditModel(), bins: 256)
         }
         let whiteCells = whiteGrid?.clippedCellCount ?? -1
         let whiteGridFraction = whiteGrid?.clippedFraction ?? -1

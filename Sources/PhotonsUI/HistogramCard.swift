@@ -4,37 +4,38 @@ import PhotonsCore
 
 // MARK: - the histogram card
 //
-// Four series (R, G, B, luma) drawn from the bins `RenderGraph` measured, the clipping ratios under
-// them, and one click target: 过白 toggles the highlight warning on the canvas.
+// Four series (R, G, B, luma) drawn from the bins `RenderGraph.measureHistogram` measured, the
+// clipping ratios under them, and one click target: 过白 toggles the highlight warning on the canvas.
 //
 // **The plot has two segments** (2026-10-26): 0…1 on a linear code axis, then a fixed **30 pt per
-// stop** exponential tail of 4 stops (`HistogramAxis`, `Histogram.maxStops`). Everything right of
-// the dashed orange tick is light this panel cannot show: the tick is the display ceiling
-// (`log2(headroom)` stops above white) and it comes from the *frame's* measurement, not from the
-// screen the window happens to be on when the card redraws — so the plot and its ceiling always
-// describe the same pixels. On an SDR screen the tick sits exactly on the SDR/tail boundary, which
-// is the honest picture: no headroom at all.
+// stop** exponential tail of 6 stops (`HistogramAxis`, `Histogram.maxStops`) — 180 pt at the default
+// scale, which a 364 pt card and even the inspector's 244 pt minimum can hold (244 − 60 pt of SDR =
+// 184 pt of tail, so 30 pt/stop still fits; below that the stop scale shrinks, never the code axis).
+// Everything right of the dashed orange tick is light this panel cannot show: the tick is the display
+// ceiling (`log2(headroom)` stops above white) and it comes from the *measurement's* own headroom, not
+// from whatever screen the window is on by the time the card redraws — so the plot and its ceiling
+// always describe the same screen. On an SDR screen the tick sits exactly on the SDR/tail boundary,
+// which is the honest picture: no headroom at all.
 //
 // Decisions worth writing down:
 //
 //   · **The numbers come from `Histogram`, never from a second measurement.** The card formats
 //     `HistogramChannel.clippedHigh` / `clippedCeiling` / `clippedLow` — the same values the CLI
 //     prints and the tests assert — so "what the card says" and "what Core measured" cannot drift,
-//     and `--ui-smoke` checks the identity by reformatting the frame's own histogram.
-//   · **The histogram arrives with the frame, not from a render of its own.** `LoupeController`
-//     asks for `RenderOptions.collectHistogram` on the same render that produces the picture
-//     (one dispatch inside the frame's own command buffer) and hands the payload to the session
-//     when the frame is presented. A card that rendered separately would double the cost of every
-//     slider tick and could describe a different document than the photo next to it.
-//   · **The numbers are of a *settled* camera (Q30).** While the loupe is panning or zooming the
-//     controller skips the measurement and keeps the last one on screen — a plot that changes 10
-//     times a second is unreadable anyway — then measures once, ~60 ms after the hand stops, on a
-//     frame it does not present. So a stale plot here is the design, not a bug: `histogram` is
-//     always "the last measurement of the picture that was on screen", and it never goes nil
-//     mid-gesture (which is why `LoupeController.recordMeasurements` publishes only non-nil).
-//   · **The region is the picture, not the canvas.** `RenderGraph`'s default ROI is the content
-//     rect, so a `fit` frame's matte bars are not counted as black pixels (they used to be, and
-//     削底 read tens of percent on a photo with no blacks at all).
+//     and `--ui-smoke` checks the identity by reformatting the measurement.
+//   · **The histogram is of the picture, not of the frame** (005, 2026-10-26). `LoupeController`
+//     measures the whole photo once per edit (`RenderGraph.measureHistogram`: a whole-picture render
+//     at thumbnail scale, counted before S4) and hands the payload to the session; a frame render no
+//     longer measures anything, so panning and zooming cannot move a bin. That is why 「采样 N px」 is
+//     the same number at fit, at 1:1 and at 400 %, and why the plot can show light above 1.0 on an
+//     SDR panel.
+//   · **A stale plot is the design.** The measurement is debounced ~120 ms behind an edit and no
+//     gesture triggers one, so `histogram` is always "the last measurement of the document that is on
+//     screen", and it never goes nil mid-gesture (which is why `LoupeController.recordMeasurements`
+//     publishes only non-nil).
+//   · **The region is the picture, always.** There is no ROI any more: the measurement renders the
+//     whole picture at its own thumbnail scale, so a `fit` frame's matte bars cannot reach bin 0 and a
+//     1:1 window cannot measure only the window.
 //
 // The card is AppKit rather than SwiftUI because it has to be *measurable*: the smoke reads the
 // histogram it drew, the bin count of the path it built, the axis split and ceiling tick it laid
@@ -64,7 +65,7 @@ public final class HistogramCardView: NSView {
 
     /// Channels whose path was actually built in the last `draw` (4 when there is a histogram).
     public private(set) var lastDrawnSeries = 0
-    /// Bins the last path was built from, **both segments** (256 + 32 = 288 today).
+    /// Bins the last path was built from, **both segments** (256 + 96 = 352 today).
     public private(set) var lastDrawnBins = 0
     /// How many of those were tail bins (0 without a histogram).
     public private(set) var lastDrawnHDRBins = 0
@@ -355,8 +356,10 @@ public final class HistogramCardView: NSView {
     ///
     /// 过白 (>SDR white) doubles as the highlight-warning switch, and it says so (an orange dot when
     /// the overlay is on). 削顶 is the *other* number now that the plot has a tail: it counts pixels
-    /// at the display's own ceiling, i.e. the detail that was really lost (with `headroom = 1` the
-    /// two coincide, which is why an SDR screen sees the familiar pair of numbers).
+    /// at or above the ceiling the measurement was taken for, i.e. the detail *this* screen would
+    /// throw away (with `headroom = 1` that is light above white, so an SDR screen sees the familiar
+    /// pair of numbers). The bins themselves do not depend on the panel — that is the whole point of
+    /// measuring before S4 — so 削顶 is the one number that moves when the display does.
     private func drawClipRows(below plot: NSRect, histogram: Histogram?, in bounds: NSRect) {
         let y = plot.maxY + 5
         let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
@@ -521,13 +524,15 @@ public enum HistogramCardReadability {
 
     // MARK: the sentence
 
-    /// 「采样 898k px · 直方图 256+32 档」 — what the footnote says, in words:
+    /// 「采样 575k px · 直方图 256+96 档」 — what the footnote says, in words:
     ///
-    ///   · **采样 898k px** — the pixels this measurement counted (`Histogram.sampleCount`). That is
-    ///     the sample grid the render used, not the whole frame, which is why it is not 60 M.
-    ///   · **直方图 256+32 档** — the x axis' binning: 256 bins of SDR code value (black to white)
-    ///     plus 32 bins of highlight tail (`binCount` + `hdrBinCount`), the part above white that
-    ///     过白 counts.
+    ///   · **采样 575k px** — the pixels this measurement counted (`Histogram.sampleCount`). That is
+    ///     the whole picture rendered at thumbnail scale (long edge 1024), not the whole frame at its
+    ///     own size, which is why it is not 60 M — and it is the same number at every zoom, because
+    ///     the sample is the picture's and not the window's.
+    ///   · **直方图 256+96 档** — the x axis' binning: 256 bins of SDR code value (black to white)
+    ///     plus 96 bins of highlight tail (`binCount` + `hdrBinCount`), i.e. 6 stops at 1/16 stop —
+    ///     the part above white that 过白 counts.
     public static func sampleNote(sampleCount: Int, binCount: Int, hdrBinCount: Int) -> String {
         let sampled = sampleCount >= 1_000 ? "\(sampleCount / 1_000)k px" : "\(sampleCount) px"
         return "采样 \(sampled) · 直方图 \(binCount)+\(hdrBinCount) 档"
@@ -535,10 +540,10 @@ public enum HistogramCardReadability {
 
     /// The same sentence for VoiceOver and the tooltip: "档" is explained instead of assumed.
     public static func accessibilityHelp(sampleCount: Int?, binCount: Int, hdrBinCount: Int) -> String {
-        let sample = sampleCount.map { "采样 \($0) px（渲染色阶上抽的样，不是整幅）。" } ?? ""
+        let sample = sampleCount.map { "采样 \($0) px（整幅图缩到长边 1024 后逐像素统计，与缩放无关）。" } ?? ""
         return sample
             + "横轴 \(binCount) 档 SDR 码值 + \(hdrBinCount) 档高光尾："
-            + "前 \(binCount) 档是从黑到白的码值，后 \(hdrBinCount) 档把超过白点的 4 档高光单独展开，"
+            + "前 \(binCount) 档是从黑到白的码值，后 \(hdrBinCount) 档把超过白点的 6 档高光按每档 1/16 stop 单独展开，"
             + "过白就是落在最后那一段的像素。"
     }
 

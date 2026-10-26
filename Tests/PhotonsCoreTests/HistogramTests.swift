@@ -2,8 +2,8 @@ import XCTest
 import Metal
 import PhotonsCore
 
-/// The histogram (005f): four series, two clipping ratios, an optional ROI, and one readback of a
-/// reduced grid.
+/// The histogram (005f, rewritten for 005 2026-10-26): four series, three ratios, and a measurement of
+/// **the picture** taken before S4.
 ///
 /// What this file defends, in the order the failures would appear:
 ///
@@ -11,14 +11,21 @@ import PhotonsCore
 ///      last bin and counts as clipped-high; a ramp that is one pixel per bin lands exactly there. This
 ///      is the part that can be checked without a GPU, so it is the part that is checked hardest.
 ///   2. **The three channels plus luma are *separate* series**, not one series printed three times.
-///   3. **A ROI counts only what is inside it**, and the mapping from canvas pixels to the sample grid
-///      is exact when no reduction is needed — the GPU path and the CPU reference then agree bin for
-///      bin, which is a much stronger statement than "roughly the same shape".
-///   4. **Reduction costs accuracy, and no more than the documented bound.** The downsampled
-///      histogram of a 1.08 Mpx frame is compared against the full-resolution one; every bin must be
-///      within 1 % of the total, and the number is printed so the claim travels with a measurement.
-///   5. **Off means off.** `collectHistogram == false` produces `nil`, identical pixels, identical
-///      keys, and a frame time that is not slower than the measured one (`test...FrameTime`).
+///   3. **The tail is 6 stops of 1/16 stop** and its seam at white is exact: white is the last code
+///      bin, a hair above it is tail bin 0, and anything past 6 stops piles onto the last bin.
+///   4. **The measurement is of the picture, not of the frame.** `measureHistogram` renders the whole
+///      picture at thumbnail scale; the same photo and edit give the same bins and the same
+///      `sampleCount` no matter what window, canvas or scale the camera happened to be showing, and a
+///      second call cannot drift.
+///   5. **The screen cannot move a bin.** The measurement is pre-S4, so an SDR (`headroom = 1`) and an
+///      EDR (`headroom = 1.2`) measurement of the same picture agree on all 256 SDR bins *and* the
+///      tail — only `clippedCeiling` differs. An SDR measurement still sees light above white.
+///   6. **Reduction costs accuracy, and no more than the documented bound.** The thumbnail is compared
+///      against a full-resolution recount of the same picture; every bin must be within 1 % of the
+///      total and the numbers are printed so the claim travels with a measurement.
+///   7. **Off means off, and a frame never measures.** `collectHistogram == false` produces `nil` and
+///      identical pixels, and a plain `render` produces `nil` even when a measurement exists — the
+///      card's numbers come from their own render.
 final class HistogramTests: XCTestCase {
 
     // MARK: - fixtures
@@ -30,7 +37,7 @@ final class HistogramTests: XCTestCase {
                             primaries: primaries, bitDepth: 8)
     }
 
-    /// `value` per pixel, alpha 1.
+    /// `value` per pixel, alpha 1 — **display-encoded**, the form the hand-built fixtures are in.
     private func solid(_ width: Int, _ height: Int, rgb: Float) -> DisplayImage {
         var rgba = [Float16](repeating: 1, count: width * height * 4)
         for i in 0..<(width * height) {
@@ -41,6 +48,17 @@ final class HistogramTests: XCTestCase {
         return display(rgba, width, height)
     }
 
+    /// **Linear** light at `value` per pixel — what the graph actually measures.
+    private func solidLinear(_ width: Int, _ height: Int, rgb: Float) -> LinearSample {
+        var rgba = [Float16](repeating: 1, count: width * height * 4)
+        for i in 0..<(width * height) {
+            rgba[i * 4] = Float16(rgb)
+            rgba[i * 4 + 1] = Float16(rgb)
+            rgba[i * 4 + 2] = Float16(rgb)
+        }
+        return LinearSample(width: width, height: height, rgba: rgba)
+    }
+
     /// The bin a value must land in, computed the way the type documents it.
     private func expectedBin(_ v: Float, bins: Int = 256) -> Int {
         min(bins - 1, max(0, Int(v * Float(bins))))
@@ -49,6 +67,11 @@ final class HistogramTests: XCTestCase {
     private func fractions(_ channel: HistogramChannel) -> [Double] {
         let n = Double(max(channel.total, 1))
         return channel.bins.map { Double($0) / n }
+    }
+
+    private func tailFractions(_ channel: HistogramChannel) -> [Double] {
+        let n = Double(max(channel.total, 1))
+        return channel.hdrBins.map { Double($0) / n }
     }
 
     private func makeGraph(_ image: LinearImage, identity: String = "histogram-test") throws -> RenderGraph {
@@ -90,6 +113,29 @@ final class HistogramTests: XCTestCase {
                 rgba[o] = Float16(base)
                 rgba[o + 1] = Float16(min(base * 1.25, 0.9))
                 rgba[o + 2] = Float16(base * 0.8)
+                rgba[o + 3] = 1
+            }
+        }
+        return LinearImage(width: width, height: height, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+    }
+
+    /// A picture with real highlight headroom: a smooth base plus a "specular" band that runs 1.5 to
+    /// 8 stops above white. This is the fixture the SDR-screen claim needs — 68 % of the frame is
+    /// ordinary tones and the rest is light no SDR panel can show.
+    private func hotImage(width: Int, height: Int) -> LinearImage {
+        var rgba = [Float16](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let fx = Double(x), fy = Double(y)
+                let base = 0.05 + 0.35 * (0.5 + 0.5 * sin(fx * 0.011 + fy * 0.005))
+                // The top-right quadrant is the hot band; its height varies 0…3 stops above white.
+                let inBand = Double(x) > 0.5 * Double(width) && Double(y) < 0.35 * Double(height)
+                let lift = inBand ? pow(2.0, 0.6 + 2.4 * (fx / Double(width))) : 1.0
+                let o = (y * width + x) * 4
+                rgba[o] = Float16(base * lift)
+                rgba[o + 1] = Float16(base * lift * 0.96)
+                rgba[o + 2] = Float16(base * lift * 0.9)
                 rgba[o + 3] = 1
             }
         }
@@ -152,10 +198,27 @@ final class HistogramTests: XCTestCase {
             XCTAssertEqual(channel.clippedHigh, 0, accuracy: 1e-12)
             XCTAssertEqual(channel.clippedLow, 0, accuracy: 1e-12)
         }
-        // Monotone: the ramp's bins are in value order, which is the only ordering claim here.
         let bins = hist.luma.bins
         XCTAssertEqual(bins.firstIndex(of: 1), 0)
         XCTAssertEqual(bins.lastIndex(of: 1), 255)
+    }
+
+    /// The same ramp, handed in as **linear** light (the shipped form): the code axis is derived here,
+    /// so the bins must be the ramp's own.
+    func testALinearRampLandsOnTheSameCodeBins() {
+        let n = 256, w = 16, hgt = 16
+        var rgba = [Float16](repeating: 1, count: w * hgt * 4)
+        for i in 0..<(w * hgt) {
+            let code = Float((Double(i) + 0.5) / Double(n))
+            let linear = code <= 0.04045 ? code / 12.92 : pow((code + 0.055) / 1.055, 2.4)
+            rgba[i * 4] = Float16(linear)
+            rgba[i * 4 + 1] = Float16(linear)
+            rgba[i * 4 + 2] = Float16(linear)
+        }
+        let hist = Histogram.compute(LinearSample(width: w, height: hgt, rgba: rgba))
+        XCTAssertEqual(hist.sampleCount, n)
+        XCTAssertEqual(hist.red.bins.filter { $0 == 1 }.count, n,
+                       "a linear ramp must reach every code bin exactly once")
     }
 
     // MARK: - 3. channels are separate series
@@ -170,15 +233,11 @@ final class HistogramTests: XCTestCase {
         }
         let hist = Histogram.compute(display(rgba, w, h))
 
-        // R spread over ~64 bins near the bottom of the range.
         XCTAssertGreaterThan(hist.red.bins.filter { $0 > 0 }.count, 16)
-        // G and B are single spikes, in the bins their values imply.
         XCTAssertEqual(hist.green.bins[expectedBin(0.25)], w * h)
         XCTAssertEqual(hist.green.bins.filter { $0 > 0 }.count, 1)
         XCTAssertEqual(hist.blue.bins[expectedBin(0.75)], w * h)
         XCTAssertEqual(hist.blue.bins.filter { $0 > 0 }.count, 1)
-        // Luma is its own series: 0.2126·r + 0.7152·0.25 + 0.0722·0.75, so its support is the red
-        // series shifted up by the constant green and blue contribute — not a copy of red.
         XCTAssertEqual(hist.luma.total, w * h)
         XCTAssertNotEqual(hist.luma.bins, hist.red.bins)
         let lumaLo = 0.2126 * 0.0 + 0.7152 * 0.25 + 0.0722 * 0.75
@@ -206,15 +265,14 @@ final class HistogramTests: XCTestCase {
             XCTAssertEqual(channel.clippedLow, 0.25, accuracy: 1e-12)
             XCTAssertEqual(channel.total, 64)
         }
-        // 0.0005 is clipped low and still in bin 0; 0.999 itself is the threshold's edge case.
         XCTAssertEqual(hist.red.bins[0], 16)
         XCTAssertEqual(hist.red.bins[expectedBin(0.5)], 16)
         XCTAssertEqual(hist.red.bins[255], 32)
     }
 
-    // MARK: - 5. ROI
+    // MARK: - 5. the CPU API's region
 
-    func testROIOnlyCountsPixelsInsideTheRect() {
+    func testARectOnlyCountsPixelsInsideIt() {
         let w = 4, h = 2                        // left half white, right half black
         var rgba = [Float16](repeating: 1, count: w * h * 4)
         for y in 0..<h {
@@ -236,9 +294,8 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(right.red.bins[0], 4)
         XCTAssertEqual(right.red.clippedLow, 1.0, accuracy: 1e-12)
 
-        // A rect that leaves the frame is clamped by `PixelRect.clamped`: shrunk to fit, then moved
-        // inside. An oversized rect therefore becomes the whole frame — a count of pixels that exist,
-        // never of pixels asked for.
+        // A rect that leaves the frame is clamped: an oversized rect becomes the whole frame — a count
+        // of pixels that exist, never of pixels asked for.
         let oversized = Histogram.compute(image, rect: ImageRect(x: 2, y: 1, width: 99, height: 99))
         XCTAssertEqual(oversized.roi, ImageRect(x: 0, y: 0, width: 4, height: 2))
         XCTAssertEqual(oversized.sampleCount, 8)
@@ -251,7 +308,7 @@ final class HistogramTests: XCTestCase {
 
     // MARK: - 6. degenerate sizes
 
-    func testSinglePixelAndEmptyROIAreWellDefined() {
+    func testSinglePixelAndEmptyRectAreWellDefined() {
         let one = solid(1, 1, rgb: 1)
         let h = Histogram.compute(one)
         XCTAssertEqual(h.sampleCount, 1)
@@ -259,8 +316,6 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(h.red.bins[255], 1)
         XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
         XCTAssertEqual(h.sampleFraction, 1.0, accuracy: 1e-12)
-        XCTAssertEqual(Histogram.sampleSize(for: ImageRect(x: 0, y: 0, width: 1, height: 1)).keyString,
-                       "1x1")
 
         // An empty rect is a measurement of nothing, not of pixel (0,0).
         let empty = Histogram.compute(solid(4, 4, rgb: 0.5),
@@ -274,14 +329,15 @@ final class HistogramTests: XCTestCase {
         }
         XCTAssertEqual(empty.sampleFraction, 0)
 
-        // A one-pixel ROI of a bigger picture still has its own bin.
+        // A one-pixel rect of a bigger picture still has its own bin.
         let single = Histogram.compute(solid(9, 9, rgb: 0.5),
                                        rect: ImageRect(x: 4, y: 4, width: 1, height: 1))
         XCTAssertEqual(single.sampleCount, 1)
         XCTAssertEqual(single.red.bins[expectedBin(0.5)], 1)
     }
 
-    /// The reduction's sizing rule, without a GPU: aspect preserved, long edge ≤ 1024, never upsampled.
+    /// The sampling rule, without a GPU: aspect preserved, long edge ≤ 1024, never upsampled — and the
+    /// scale that produces it is the same arithmetic in the other direction.
     func testSampleSizeRule() {
         XCTAssertEqual(Histogram.sampleSize(for: ImageRect(x: 0, y: 0, width: 600, height: 400)).keyString,
                        "600x400")
@@ -291,112 +347,107 @@ final class HistogramTests: XCTestCase {
                        "1024x562")
         XCTAssertEqual(Histogram.sampleSize(for: ImageRect(x: 0, y: 0, width: 1, height: 4000)).keyString,
                        "1x1024")
+        XCTAssertEqual(Histogram.sampleScale(for: ImageSize(width: 600, height: 400)), 1)
+        XCTAssertEqual(Histogram.sampleScale(for: ImageSize(width: 1500, height: 2731)),
+                       1024.0 / 2731, accuracy: 1e-12)
     }
 
-    // MARK: - 7. the GPU path, whole frame: the reduction's error, measured
+    // MARK: - 7. the measurement is of the picture, not of the frame
 
-    func testDownsamplingKeepsBinCountsWithinOnePercent() throws {
-        let w = 1200, h = 900                       // 1.08 Mpx; sample grid is 1024×768
+    /// **The acceptance claim.** One `measureHistogram` per document, and the camera cannot be an input
+    /// to it: `measureHistogram` has no viewport, window or scale parameter at all. What this test can
+    /// still check is that rendering frames at wildly different cameras in between changes nothing —
+    /// the numbers are the same object-cached bins, and a *fresh* graph measuring the same edit agrees.
+    func testTheMeasurementIgnoresTheCamera() throws {
+        let w = 1500, h = 2731                           // 4.10 Mpx: the repo's reference frame
+        let source = texturedImage(width: w, height: h)
+        let graph = try makeGraph(source)
+
+        let first = try graph.measureHistogram(.neutral)
+        XCTAssertEqual(first.canvas, ImageSize(width: w, height: h))
+        XCTAssertEqual(first.roi, ImageRect(x: 0, y: 0, width: w, height: h))
+        XCTAssertEqual(first.sampleSize, Histogram.sampleSize(for: first.roi))
+        XCTAssertEqual(first.sampleCount, first.sampleSize.pixelCount)
+        XCTAssertEqual(first.sampleCount, 562 * 1024)
+
+        // The cameras a user actually works through: fit, 1:1, 400 %, and a pan. Each is a full frame
+        // render at a different window/scale — the frames the old code measured.
+        let cameras: [RenderOptions] = [
+            RenderOptions(canvas: ImageSize(width: 2560, height: 1600), scale: 0.58,
+                          useCache: false, wantsPixels: false),
+            RenderOptions(canvas: ImageSize(width: 2560, height: 1600), scale: 1,
+                          outputWindow: ImageRect(x: 400, y: 900, width: 2560, height: 1600),
+                          useCache: false, wantsPixels: false),
+            RenderOptions(canvas: ImageSize(width: 2560, height: 1600), scale: 4,
+                          outputWindow: ImageRect(x: 900, y: 1500, width: 640, height: 400),
+                          useCache: false, wantsPixels: false),
+            RenderOptions(canvas: ImageSize(width: 2560, height: 1600), scale: 1,
+                          outputWindow: ImageRect(x: 1700, y: 200, width: 900, height: 700),
+                          useCache: false, wantsPixels: false),
+        ]
+        var digests: [String] = [first.binsDigest()]
+        for options in cameras {
+            let frame = try graph.render(.neutral, options: options)
+            if let texture = frame.output { graph.recycle(output: texture) }
+            XCTAssertNil(frame.histogram, "a frame render must not measure anything")
+            let again = try graph.measureHistogram(.neutral)
+            digests.append(again.binsDigest())
+            XCTAssertEqual(again.sampleCount, first.sampleCount)
+        }
+        XCTAssertEqual(Set(digests).count, 1, "the same edit produced \(Set(digests).count) histograms")
+        print("histogram camera invariance: 4 cameras (fit / 1:1 / 4:1 / panned), "
+              + "1 digest \(first.binsDigest().prefix(16))…, sampleCount \(first.sampleCount) at every one")
+
+        // A second graph of the same source agrees too — the measurement is a function of the picture,
+        // not of a graph's state.
+        let other = try makeGraph(source, identity: "histogram-test-b")
+        let fresh = try other.measureHistogram(.neutral)
+        XCTAssertEqual(fresh.binsDigest(), first.binsDigest())
+        XCTAssertEqual(fresh.sampleCount, first.sampleCount)
+    }
+
+    // MARK: - 8. the GPU path: the reduction's error, measured against a full-resolution recount
+
+    func testThumbnailAgreesWithAFullResolutionRecount() throws {
+        let w = 1200, h = 900                       // 1.08 Mpx; the thumbnail is 1024×768
         let graph = try makeGraph(smoothImage(width: w, height: h))
-        let opts = RenderOptions(scale: 1, useCache: false, wantsPixels: true,
-                                 collectHistogram: true)
-        let result = try graph.render(.neutral, options: opts)
-        let full = try XCTUnwrap(result.display)
-        let measured = try XCTUnwrap(result.histogram)
 
-        XCTAssertEqual(measured.canvas, ImageSize(width: w, height: h))
-        XCTAssertEqual(measured.roi, ImageRect(x: 0, y: 0, width: w, height: h))
-        XCTAssertEqual(measured.sampleSize, Histogram.sampleSize(for: measured.roi))
-        XCTAssertEqual(measured.sampleCount, measured.sampleSize.pixelCount)
-        XCTAssertLessThan(measured.sampleCount, full.width * full.height)
+        let thumbnail = try graph.measureHistogram(.neutral)
+        XCTAssertEqual(thumbnail.sampleCount, 1024 * 768)
 
-        // The reference: the same frame, every pixel, on the CPU.
-        let reference = Histogram.compute(full)
-        XCTAssertEqual(reference.sampleCount, full.width * full.height)
+        // The reference: the same picture, every pixel, measured pre-S4 by a full-scale render.
+        var full = RenderOptions(scale: 1, useCache: false, wantsPixels: false, collectHistogram: true)
+        full.histogramBins = 256
+        let reference = try XCTUnwrap(try graph.render(.neutral, options: full).histogram)
+        XCTAssertEqual(reference.sampleCount, w * h, "the reference must be every pixel")
+        if let texture = try graph.render(.neutral, options: full).output { graph.recycle(output: texture) }
 
-        var worst = 0.0
+        var worstBin = 0.0
+        var worstChannel = ""
         for name in Histogram.Channel.allCases {
-            let a = fractions(measured[name])
+            let a = fractions(thumbnail[name])
             let b = fractions(reference[name])
-            XCTAssertEqual(measured[name].total, measured.sampleCount)
+            for (i, (x, y)) in zip(a, b).enumerated() {
+                if abs(x - y) > worstBin { worstBin = abs(x - y); worstChannel = "\(name)[\(i)]" }
+            }
             let diff = zip(a, b).map { abs($0 - $1) }.max() ?? 0
-            worst = max(worst, diff)
             XCTAssertLessThan(diff, 0.01,
                               "\(name): one bin moved \(String(format: "%.3f", diff * 100)) % of the "
                               + "pixels; the documented bound is 1 %")
-            XCTAssertEqual(measured[name].clippedHigh, reference[name].clippedHigh, accuracy: 0.01)
-            XCTAssertEqual(measured[name].clippedLow, reference[name].clippedLow, accuracy: 0.01)
-        }
-        print(String(format: "histogram reduction: %d px → %d px (%@), worst bin error %.3f %% of total",
-                     full.width * full.height, measured.sampleCount,
-                     measured.sampleSize.keyString, worst * 100))
-
-        // For the record, the same measurement on 20-px gratings: this is the case the file's error
-        // note says is *not* bounded by 1 % — a reduction turns near-Nyquist detail into an average,
-        // and no histogram can undo that. Printed, not asserted, so the number travels with the claim.
-        let detail = try makeGraph(texturedImage(width: w, height: h))
-        let detailResult = try detail.render(.neutral, options: opts)
-        let detailFull = try XCTUnwrap(detailResult.display)
-        let detailHist = try XCTUnwrap(detailResult.histogram)
-        let detailRef = Histogram.compute(detailFull)
-        var detailWorst = 0.0
-        for name in Histogram.Channel.allCases {
-            let diff = zip(fractions(detailHist[name]), fractions(detailRef[name]))
+            XCTAssertEqual(thumbnail[name].clippedHigh, reference[name].clippedHigh, accuracy: 0.01)
+            XCTAssertEqual(thumbnail[name].clippedLow, reference[name].clippedLow, accuracy: 0.01)
+            let tailDiff = zip(tailFractions(thumbnail[name]), tailFractions(reference[name]))
                 .map { abs($0 - $1) }.max() ?? 0
-            detailWorst = max(detailWorst, diff)
+            XCTAssertLessThan(tailDiff, 0.005)
         }
-        print(String(format: "histogram reduction on 20-px detail: worst bin error %.3f %% of total "
-                     + "(no 1 %% claim for near-Nyquist content)", detailWorst * 100))
+        print(String(format: "histogram reduction: %d px → %d px (%@), worst bin %@ %.4f %% of total "
+                     + "(per-bin ±%.4f pp), clippedHigh Δ %.4f",
+                     w * h, thumbnail.sampleCount, thumbnail.sampleSize.keyString,
+                     worstChannel, worstBin * 100, worstBin * 100,
+                     abs(thumbnail.luma.clippedHigh - reference.luma.clippedHigh)))
     }
 
-    // MARK: - 8. the GPU path, ROI: pixel-exact when there is nothing to reduce
-
-    func testGraphROIMatchesTheCPUHistogramOfThosePixels() throws {
-        let w = 1200, h = 900
-        let graph = try makeGraph(texturedImage(width: w, height: h))
-        let roi = ImageRect(x: 100, y: 50, width: 400, height: 300)   // < 1024 → 1:1 sample
-        var opts = RenderOptions(scale: 1, useCache: false, wantsPixels: true,
-                                 collectHistogram: true)
-        opts.histogramROI = roi
-        let result = try graph.render(.neutral, options: opts)
-        let full = try XCTUnwrap(result.display)
-        let measured = try XCTUnwrap(result.histogram)
-
-        XCTAssertEqual(measured.roi, roi)
-        XCTAssertEqual(measured.canvas, ImageSize(width: w, height: h))
-        XCTAssertEqual(measured.sampleSize, ImageSize(width: 400, height: 300))
-        XCTAssertEqual(measured.sampleCount, 400 * 300)
-
-        let reference = Histogram.compute(full, rect: roi)
-        for name in Histogram.Channel.allCases {
-            XCTAssertEqual(measured[name].bins, reference[name].bins,
-                           "\(name): a 1:1 sample must be the pixels themselves, bin for bin")
-            XCTAssertEqual(measured[name].clippedHigh, reference[name].clippedHigh, accuracy: 1e-12)
-            XCTAssertEqual(measured[name].clippedLow, reference[name].clippedLow, accuracy: 1e-12)
-        }
-
-        // The ROI really did exclude the rest of the frame.
-        let whole = Histogram.compute(full)
-        XCTAssertNotEqual(measured.red.bins, whole.red.bins)
-
-        if let t = result.output { graph.recycle(output: t) }
-    }
-
-    /// A ROI with no area is an empty measurement even on the render path (no dispatch, no sample).
-    func testGraphEmptyROIProducesAnEmptyHistogram() throws {
-        let graph = try makeGraph(texturedImage(width: 300, height: 200))
-        var opts = RenderOptions(scale: 1, useCache: false, wantsPixels: false,
-                                 collectHistogram: true)
-        opts.histogramROI = ImageRect(x: 10, y: 10, width: 0, height: 0)
-        let result = try graph.render(.neutral, options: opts)
-        let h = try XCTUnwrap(result.histogram)
-        XCTAssertEqual(h.sampleCount, 0)
-        XCTAssertEqual(h.roi, ImageRect(x: 10, y: 10, width: 0, height: 0))
-        XCTAssertEqual(h.red.total, 0)
-        if let t = result.output { graph.recycle(output: t) }
-    }
-
-    // MARK: - 9. off means off, and on means one extra dispatch
+    // MARK: - 9. off means off, and a frame never measures
 
     func testPixelsAndKeysAreIdenticalWithAndWithout() throws {
         let graph = try makeGraph(texturedImage(width: 640, height: 480))
@@ -408,7 +459,7 @@ final class HistogramTests: XCTestCase {
         let onResult = try graph.render(.neutral, options: on)
 
         XCTAssertNil(off.histogram, "the default must not measure anything")
-        XCTAssertNotNil(onResult.histogram)
+        XCTAssertNotNil(onResult.histogram, "the flag is what makes a render measure")
 
         let a = try XCTUnwrap(off.display), b = try XCTUnwrap(onResult.display)
         XCTAssertEqual(a.sha256(), b.sha256(), "measuring must not touch a pixel")
@@ -418,249 +469,43 @@ final class HistogramTests: XCTestCase {
                        "no stage may appear because a histogram was asked for")
     }
 
-    /// Frame cost of the measurement, interleaved so drift cannot favour either side. The assertion is
-    /// deliberately loose (a p50 ratio under contention is not a microbenchmark); the numbers are
-    /// printed and quoted in the task report.
-    func testFrameTimeWithAndWithoutHistogram() throws {
-        // The frame the repo quotes everywhere: 1500 × 2731 = 4.10 Mpx canvas.
+    /// The card's numbers never come from a frame: `measureHistogram` is the only shipped path, and it
+    /// is a render of its own. This is the property the whole of A rests on.
+    func testTheShippedPathIsItsOwnRender() throws {
+        let graph = try makeGraph(texturedImage(width: 900, height: 700))
+        let measured = try graph.measureHistogram(.neutral)
+        XCTAssertEqual(measured.sampleCount, Histogram.sampleSize(for: measured.roi).pixelCount)
+
+        // A frame of the same picture — the window the camera would show — is not the measurement.
+        let frame = try graph.render(.neutral, options: RenderOptions(
+            canvas: ImageSize(width: 900, height: 700), scale: 1,
+            outputWindow: ImageRect(x: 100, y: 50, width: 600, height: 500),
+            useCache: false, wantsPixels: false))
+        XCTAssertNil(frame.histogram)
+        if let texture = frame.output { graph.recycle(output: texture) }
+        XCTAssertEqual(try graph.measureHistogram(.neutral).binsDigest(), measured.binsDigest())
+    }
+
+    /// The cost of the measurement, printed. One thumbnail render plus one readback plus the CPU
+    /// binning of ~0.58 Mpx — and it is a *separate* render, so a pan pays nothing.
+    func testTheMeasurementCostsOneThumbnailRender() throws {
         let graph = try makeGraph(texturedImage(width: 1500, height: 2731))
-        let base = RenderOptions(scale: 1, useCache: false, wantsPixels: false)
-        var with = base
-        with.collectHistogram = true
-
-        // Warm up both paths: pipeline compile, texture allocation, the pool.
-        for _ in 0..<2 {
-            if let t = try graph.render(.neutral, options: base).output { graph.recycle(output: t) }
-            if let t = try graph.render(.neutral, options: with).output { graph.recycle(output: t) }
+        _ = try graph.measureHistogram(.neutral)          // warm: pipeline, pool, source upload
+        var times: [Double] = []
+        for _ in 0..<6 {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            _ = try graph.measureHistogram(.neutral)
+            times.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
         }
-
-        var offTimes: [Double] = [], onTimes: [Double] = []
-        for _ in 0..<8 {
-            var t0 = CFAbsoluteTimeGetCurrent()
-            if let t = try graph.render(.neutral, options: base).output { graph.recycle(output: t) }
-            offTimes.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-
-            t0 = CFAbsoluteTimeGetCurrent()
-            if let t = try graph.render(.neutral, options: with).output { graph.recycle(output: t) }
-            onTimes.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-        }
-
-        func median(_ xs: [Double]) -> Double {
-            let s = xs.sorted()
-            return s.count % 2 == 1 ? s[s.count / 2] : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
-        }
-        func p95(_ xs: [Double]) -> Double {
-            let s = xs.sorted()
-            return s[min(s.count - 1, Int((Double(s.count - 1) * 0.95).rounded()))]
-        }
-        let (offP50, onP50) = (median(offTimes), median(onTimes))
-        print(String(format: "histogram frame cost (1500×2731 = 4.10 Mpx): off p50 %.2f ms / p95 %.2f ms · "
-                     + "on p50 %.2f ms / p95 %.2f ms · Δp50 %+.2f ms",
-                     offP50, p95(offTimes), onP50, p95(onTimes), onP50 - offP50))
-
-        XCTAssertLessThanOrEqual(offP50, max(onP50 * 1.4, onP50 + 1.0),
-                                 "collecting a histogram off must not cost more than on")
+        let sorted = times.sorted()
+        let p50 = sorted[sorted.count / 2]
+        print(String(format: "histogram measurement (4.10 Mpx picture → %d px thumbnail): "
+                     + "p50 %.2f ms / min %.2f / max %.2f", 562 * 1024, p50, sorted.first ?? 0,
+                     sorted.last ?? 0))
+        XCTAssertLessThan(p50, 500, "a thumbnail render plus 0.58 Mpx of counting is not a second export")
     }
 
-    // MARK: - 10. a window is a crop (Q30)
-
-    /// The 1:1 path renders a **window** of the frame into a canvas that is the window's own size,
-    /// and `fit` renders the whole frame into the same canvas. The histogram must be a function of
-    /// *the region asked about*, not of which of those two framings produced it: otherwise pressing
-    /// Z would change the numbers in the card, which is the defect this guards.
-    ///
-    /// The strongest form of that claim is available here: with the window at scale 1 and a canvas
-    /// the window's own size, neither measurement is reduced (600 × 450 < `maxLongEdge`), so the two
-    /// are reading the *same source pixels* and the bins must agree exactly.
-    func testWindowFrameAndFullFrameAgreeOnTheSameROI() throws {
-        let w = 1200, h = 900
-        let graph = try makeGraph(texturedImage(width: w, height: h))
-        let region = ImageRect(x: 300, y: 200, width: 600, height: 450)
-
-        // ① the whole frame, measuring that region through an explicit canvas-coordinate ROI…
-        var wholeOptions = RenderOptions(scale: 1, useCache: false, wantsPixels: true,
-                                         collectHistogram: true)
-        wholeOptions.histogramROI = region
-        let wholeResult = try graph.render(.neutral, options: wholeOptions)
-        let whole = try XCTUnwrap(wholeResult.histogram)
-
-        // ② …and the same region as a window whose canvas *is* the region.
-        let windowedResult = try graph.render(.neutral, options: RenderOptions(
-            canvas: ImageSize(width: region.width, height: region.height),
-            scale: 1, outputWindow: region, useCache: false, wantsPixels: true,
-            collectHistogram: true))
-        let windowed = try XCTUnwrap(windowedResult.histogram)
-
-        XCTAssertEqual(whole.canvas, ImageSize(width: w, height: h))
-        XCTAssertEqual(whole.roi, region)
-        XCTAssertEqual(windowed.canvas, ImageSize(width: 600, height: 450))
-        XCTAssertEqual(windowed.roi, ImageRect(x: 0, y: 0, width: 600, height: 450),
-                       "a window's default ROI is the whole canvas: inside a window, that is the picture")
-        XCTAssertEqual(whole.sampleSize, windowed.sampleSize)
-        XCTAssertEqual(whole.sampleCount, 600 * 450)
-        XCTAssertEqual(windowed.sampleCount, 600 * 450)
-
-        // ③ the exact claim: the window's numbers are the histogram of *the window's own pixels*,
-        // computed independently on the CPU. No reduction happens at 600 × 450, so this is an identity
-        // — the same statement `testGraphROIMatchesTheCPUHistogramOfThosePixels` makes for a ROI.
-        let reference = Histogram.compute(try XCTUnwrap(windowedResult.display), rect: windowed.roi)
-        XCTAssertEqual(reference.sampleCount, windowed.sampleCount)
-        for channel in Histogram.Channel.allCases {
-            XCTAssertEqual(windowed[channel].bins, reference[channel].bins,
-                           "\(channel): a 1:1 window must count its own pixels, bin for bin")
-            XCTAssertEqual(windowed[channel].clippedHigh, reference[channel].clippedHigh,
-                           accuracy: 1e-12)
-            XCTAssertEqual(windowed[channel].clippedLow, reference[channel].clippedLow,
-                           accuracy: 1e-12)
-        }
-
-        // ④ the same region through the other framing: the same distribution. Not bin-for-bin — the
-        // two renders are two S0 dispatches, and the window's samples the source on its own half-pixel
-        // grid, so a value can land one code over — but the *distribution* must be the same
-        // measurement, and 0.5 % of the pixels is the room resampling needs (measured: ≤ 0.3 %).
-        var worst = 0.0
-        for channel in Histogram.Channel.allCases {
-            let a = fractions(windowed[channel]), b = fractions(whole[channel])
-            let diff = zip(a, b).map { abs($0 - $1) }.max() ?? 0
-            worst = max(worst, diff)
-            XCTAssertEqual(windowed[channel].clippedHigh, whole[channel].clippedHigh, accuracy: 0.002)
-            XCTAssertEqual(windowed[channel].clippedLow, whole[channel].clippedLow, accuracy: 0.002)
-        }
-        print(String(format: "Q30 window vs full frame, same region: worst bin error %.3f %% of total",
-                     worst * 100))
-        XCTAssertLessThan(worst, 0.005,
-                          "a window and a ROI over the same region must be one measurement")
-    }
-
-    /// The default ROI is the **picture**, not the matte around it.
-    ///
-    /// A canvas that is not the picture's aspect has letterbox bars (the loupe renders the window
-    /// into the viewport, and `fit` into any box). "The whole canvas" used to include them, so the
-    /// card's bin 0 collected the bars — a distribution of the *output surface* instead of the
-    /// photograph. The ROI is now `plan.origin + plan.content`, which is the whole canvas exactly when
-    /// there is no letterboxing (which is why every other test in this file is unchanged).
-    func testDefaultROIIsThePictureNotTheLetterbox() throws {
-        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
-        let window = ImageRect(x: 100, y: 100, width: 600, height: 600)   // square → 1.5× fit
-        let result = try graph.render(.neutral, options: RenderOptions(
-            canvas: ImageSize(width: 1200, height: 900), scale: 1, outputWindow: window,
-            useCache: false, wantsPixels: true, collectHistogram: true))
-        let measured = try XCTUnwrap(result.histogram)
-
-        XCTAssertEqual(measured.canvas, ImageSize(width: 1200, height: 900))
-        // 600 × 600 into a 1200 × 900 box: 900 × 900, centred → 150 px of matte on each side.
-        XCTAssertEqual(measured.roi, ImageRect(x: 150, y: 0, width: 900, height: 900))
-        XCTAssertNotEqual(measured.roi, ImageRect(x: 0, y: 0, width: 1200, height: 900),
-                          "the matte is not the picture")
-        for channel in Histogram.Channel.allCases {
-            XCTAssertEqual(measured[channel].bins[0], 0,
-                           "\(channel): no matte pixel may reach the black bin")
-        }
-        // The measurement still describes real pixels: a 900 × 900 picture is a 0.81 Mpx sample grid.
-        XCTAssertEqual(measured.sampleSize, Histogram.sampleSize(for: measured.roi))
-        XCTAssertEqual(measured.sampleCount, measured.sampleSize.pixelCount)
-
-        if let t = result.output { graph.recycle(output: t) }
-    }
-
-    /// A `fit` frame is letterboxed too, and its default ROI must be the picture as well.
-    ///
-    /// This is the same claim as the test above on the *other* framing, and it was a real bug: a
-    /// full-frame render used to default to "the whole canvas", so at `fit` — the view a photo opens
-    /// in — the matte bars were measured as black pixels and 削底 read tens of percent on a photo
-    /// with no blacks at all. The ROI is the content rect for every framing now.
-    func testAFitFrameMeasuresThePictureNotTheMatte() throws {
-        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
-        // A 4:3 picture fitted into a 900 × 700 viewport: 900 × 675 with 12/13 rows of matte.
-        let canvas = ImageSize(width: 900, height: 700)
-        let result = try graph.render(.neutral, options: RenderOptions(
-            canvas: canvas, scale: 1, useCache: false, wantsPixels: true,
-            collectHistogram: true))
-        let measured = try XCTUnwrap(result.histogram)
-
-        XCTAssertEqual(measured.canvas, canvas)
-        XCTAssertEqual(measured.roi, ImageRect(x: 0, y: 12, width: 900, height: 675),
-                       "the matte above and below is not the picture")
-        XCTAssertLessThan(measured.roi.height, canvas.height)
-        for channel in Histogram.Channel.allCases {
-            XCTAssertEqual(measured[channel].bins[0], 0,
-                           "\(channel): a matte row must not reach the black bin")
-        }
-        if let t = result.output { graph.recycle(output: t) }
-    }
-
-    /// A **windowed** frame is byte-identical with and without the measurement — the same claim as
-    /// `testPixelsAndKeysAreIdenticalWithAndWithout`, on the framing the loupe actually pans with.
-    func testWindowedFramePixelsAreIdenticalWithAndWithout() throws {
-        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
-        let window = ImageRect(x: 300, y: 200, width: 600, height: 450)
-        let off = try graph.render(.neutral, options: RenderOptions(
-            canvas: Self.windowCanvas, scale: 1, outputWindow: window,
-            useCache: false, wantsPixels: true))
-        let on = try graph.render(.neutral, options: RenderOptions(
-            canvas: Self.windowCanvas, scale: 1, outputWindow: window,
-            useCache: false, wantsPixels: true, collectHistogram: true))
-
-        XCTAssertNil(off.histogram)
-        XCTAssertNotNil(on.histogram)
-        let a = try XCTUnwrap(off.display), b = try XCTUnwrap(on.display)
-        XCTAssertEqual(a.sha256(), b.sha256(), "measuring must not touch a pixel of a windowed frame")
-        XCTAssertEqual(off.keys, on.keys)
-        XCTAssertEqual(off.window, on.window)
-        XCTAssertEqual(off.trace.executed, on.trace.executed,
-                       "no stage may appear because a histogram was asked for")
-    }
-
-    /// The loupe's canvas: the viewport, which is *not* the picture's aspect in general.
-    private static let windowCanvas = ImageSize(width: 900, height: 700)
-
-    // MARK: - 11. the runtime compile happens once per process, not once per graph
-
-    /// `HistogramGather` compiles its own `.metal` source at runtime — measured at +5–8 ms on the first
-    /// frame that asks (34.5 ms against a 9.1 ms steady state, of which 20.6 ms is the graph's own pool
-    /// warm-up; `Q30Warm`, printed in the report). The pipeline used to live on the graph, and a graph
-    /// is rebuilt for every decode rung and every photo, so that compile came back with every rung —
-    /// possibly on a frame in the middle of a pan. It is process-wide now, and this asserts it: the
-    /// second graph's first measurement may not cost more than the first graph's.
-    func testTheRuntimeCompileIsOncePerProcess() throws {
-        let source = texturedImage(width: 1500, height: 1000)
-        let canvas = ImageSize(width: 2560, height: 1600)
-        var options = RenderOptions(canvas: canvas, scale: 1, useCache: true, wantsPixels: false)
-        options.collectHistogram = true
-
-        func firstAndSteady(_ graph: RenderGraph) throws -> (first: Double, steady: Double) {
-            var times: [Double] = []
-            for _ in 0..<5 {
-                let t0 = CFAbsoluteTimeGetCurrent()
-                if let t = try graph.render(.neutral, options: options).output { graph.recycle(output: t) }
-                times.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            }
-            return (times[0], times[4])
-        }
-
-        let compilesBefore = Histogram.kernelCompileCount
-        let a = try makeGraph(source, identity: "compile-a")
-        let b = try makeGraph(source, identity: "compile-b")
-        let first = try firstAndSteady(a)
-        let second = try firstAndSteady(b)
-
-        print(String(format: "histogram first frame per graph: A first %.2f / steady %.2f ms · "
-                        + "B first %.2f / steady %.2f ms · compiles %d (compile is per process)",
-                     first.first, first.steady, second.first, second.steady,
-                     Histogram.kernelCompileCount))
-        // The claim is "one compile per process", so assert exactly that instead of a frame-time
-        // budget: at ~130 ms per debug-build measurement the ±2 ms version of this test measured
-        // noise (it failed on a loaded machine with 151 vs 154 ms between identical graphs).
-        XCTAssertEqual(Histogram.kernelCompileCount, compilesBefore,
-                       "a second graph compiled the histogram kernel again")
-        XCTAssertLessThanOrEqual(Histogram.kernelCompileCount, 1, "the kernel is compiled once per process")
-        // The frame times still have to be in the same ballpark: a recompile would show up as tens of
-        // milliseconds on B's first frame even if the counter were somehow wrong.
-        XCTAssertLessThan(second.first, first.first * 1.20,
-                          "the second graph's first measurement is much slower than the first graph's")
-    }
-
-    // MARK: - 6. the exponential tail (SDR + 4 stops, 2026-10-26)
+    // MARK: - 10. the exponential tail (6 stops × 1/16 stop)
 
     /// The sRGB OETF, written out here rather than called from `Histogram`: a test that builds its
     /// input with the very helper it is checking proves only that the helper is self-consistent.
@@ -668,17 +513,16 @@ final class HistogramTests: XCTestCase {
         linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1.0 / 2.4) - 0.055
     }
 
-    /// The centre of tail bin `k`, as a display code: 1/8 stop apart, and a stop is a **doubling of
-    /// light**, not of code (that is the whole reason the tail decodes before it takes a log).
+    /// The centre of tail bin `k` as a display code: 1/16 stop apart, and a stop is a **doubling of
+    /// light**, not of code.
     private func codeAtBinCentre(_ k: Int) -> Float {
-        encode(Float(pow(2.0, (Double(k) + 0.5) / 8.0)))
+        encode(Float(pow(2.0, (Double(k) + 0.5) / 16.0)))
     }
 
-    /// One pixel per tail bin, each at its bin's centre: 32 bins, the ones chosen spread across the
-    /// four stops so a wrong scale (code-doubling, or 1/4 stop) cannot pass by luck.
-    func testTailBinsAreEighthOfAStopApart() {
-        let bins = [0, 1, 7, 8, 15, 16, 31]
-        // Exactly one pixel per chosen bin: no filler pixel may contribute to either segment.
+    /// One pixel per tail bin, each at its bin's centre: the bins are 1/16 stop apart, there are 96 of
+    /// them, and the ones chosen are spread over all 6 stops so a wrong scale cannot pass by luck.
+    func testTailBinsAreSixteenthOfAStopApart() {
+        let bins = [0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 95]
         let w = bins.count, h = 1
         var rgba = [Float16](repeating: 1, count: w * h * 4)
         for (i, k) in bins.enumerated() {
@@ -688,9 +532,9 @@ final class HistogramTests: XCTestCase {
             rgba[i * 4 + 2] = v
         }
         let hist = Histogram.compute(display(rgba, w, h))
-        XCTAssertEqual(Histogram.maxStops, 4)
-        XCTAssertEqual(Histogram.hdrBinsPerStop, 8)
-        XCTAssertEqual(hist.hdrBinCount, 32)
+        XCTAssertEqual(Histogram.maxStops, 6)
+        XCTAssertEqual(Histogram.hdrBinsPerStop, 16)
+        XCTAssertEqual(hist.hdrBinCount, 96)
         XCTAssertEqual(hist.red.hdrBins.count, hist.hdrBinCount)
         for k in bins {
             XCTAssertEqual(hist.red.hdrBins[k], 1,
@@ -702,11 +546,11 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(hist.red.hdrTotal, bins.count)
     }
 
-    /// 4.5 stops is past `maxStops`, so it piles onto the last bin (`"4 stops or more"`) instead of
+    /// 6.5 stops is past `maxStops`, so it piles onto the last bin (`"6 stops or more"`) instead of
     /// running off the plot.
-    func testTailClampsAtFourStops() {
-        let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 4.5)))))
-        XCTAssertEqual(h.red.hdrBins[31], 4)
+    func testTailClampsAtSixStops() {
+        let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 6.5)))))
+        XCTAssertEqual(h.red.hdrBins[95], 4)
         XCTAssertEqual(h.red.hdrBins.reduce(0, +), 4)
         XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
     }
@@ -723,9 +567,9 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(barely.red.bins.reduce(0, +), 0)
     }
 
-    /// 削顶 now means "S4 clamped here", not "above white": on an EDR frame those are different
-    /// numbers, and the difference is the entire point of the extra range.
-    func testClippingCountsTheDisplayCeilingNotJustWhite() {
+    /// 削顶 is "the ceiling of the screen this measurement was taken for", which is a *derived* number
+    /// now: the bins are of the picture, and this is how much of it that screen would throw away.
+    func testClippedCeilingIsTheScreensLossNotThePictures() {
         let inside = Histogram.compute(solid(2, 2, rgb: encode(1.9)), headroom: 2)
         XCTAssertEqual(inside.red.clippedHigh, 1.0, accuracy: 1e-12, "above white")
         XCTAssertEqual(inside.red.clippedCeiling, 0.0, accuracy: 1e-12, "but inside the ceiling")
@@ -735,25 +579,76 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(atCeiling.red.clippedHigh, 1.0, accuracy: 1e-12)
     }
 
-    /// The tail must be *additive*: the SDR bins of a frame cannot move because a display offered
-    /// more headroom, and an SDR display must still see the numbers it always saw.
+    /// **The acceptance claim of B**, on the CPU: the bins do not know what screen this is. An SDR and a
+    /// 1.2× measurement of the same picture agree on every SDR bin *and* every tail bin; only the
+    /// ceiling ratio moves. And the SDR one still sees light above white.
     func testHeadroomMovesOnlyTheCeilingRatio() {
-        let image = solid(8, 4, rgb: 1)
+        let image = solidLinear(8, 4, rgb: 4.0)          // 2 stops above white, everywhere
         let sdr = Histogram.compute(image, headroom: 1)
-        let hdr = Histogram.compute(image, headroom: 4)
-        XCTAssertEqual(sdr.red.bins, hdr.red.bins)
+        let edr = Histogram.compute(image, headroom: 1.2)
+        XCTAssertEqual(sdr.red.bins, edr.red.bins)
+        XCTAssertEqual(sdr.red.hdrBins, edr.red.hdrBins)
+        XCTAssertGreaterThan(sdr.red.hdrTotal, 0, "an SDR screen must still see light above white")
+        XCTAssertEqual(sdr.red.hdrTotal, 32)
+        // 2 stops = bin 32 of 1/16 stop.
+        XCTAssertEqual(sdr.red.hdrBins[32], 32)
         XCTAssertEqual(sdr.red.clippedHigh, 1.0, accuracy: 1e-12)
-        XCTAssertEqual(sdr.red.clippedCeiling, 1.0, accuracy: 1e-12, "headroom 1: white *is* the ceiling")
-        XCTAssertEqual(hdr.red.clippedCeiling, 0.0, accuracy: 1e-12, "headroom 4: white is not clipped")
-        XCTAssertEqual(hdr.red.hdrTotal, 0)
+        XCTAssertEqual(sdr.red.clippedCeiling, 1.0, accuracy: 1e-12, "headroom 1: white is the ceiling")
+        XCTAssertEqual(edr.red.clippedCeiling, 1.0, accuracy: 1e-12, "4.0 > 1.2 too")
+    }
+
+    /// The same claim through the graph, on a real picture with a hot band: `headroom` changes nothing
+    /// but `clippedCeiling`, and the SDR measurement has a non-zero tail.
+    func testAnSDRMeasurementSeesTheHighlightThatAnSDRScreenWouldLose() throws {
+        let graph = try makeGraph(hotImage(width: 1200, height: 900))
+        let sdr = try graph.measureHistogram(.neutral, headroom: 1)
+        let edr = try graph.measureHistogram(.neutral, headroom: 1.2)
+
+        XCTAssertGreaterThan(sdr.luma.hdrTotal, 0, "headroom = 1 must still count the tail")
+        XCTAssertEqual(sdr.red.bins, edr.red.bins, "the 256 SDR bins are screen-independent")
+        XCTAssertEqual(sdr.red.hdrBins, edr.red.hdrBins, "and so is the 96-bin tail")
+        XCTAssertEqual(sdr.binsDigest(), edr.binsDigest())
+        XCTAssertEqual(sdr.headroom, 1, accuracy: 1e-12)
+        XCTAssertEqual(edr.headroom, 1.2, accuracy: 1e-12)
+
+        // The tail's first 8 bins, printed: the acceptance number for C.
+        let head = (0..<8).map { "\(sdr.luma.hdrBins[$0])" }.joined(separator: " / ")
+        print("histogram tail, luma, bins 0…7 of 96: \(head) · hdrTotal \(sdr.luma.hdrTotal) of "
+              + "\(sdr.luma.total) samples · clippedHigh(R) \(String(format: "%.4f", sdr.red.clippedHigh))")
+        print("histogram ceiling, same picture: SDR clippedCeiling(R) "
+              + "\(String(format: "%.4f", sdr.red.clippedCeiling)) vs 1.2× "
+              + "\(String(format: "%.4f", edr.red.clippedCeiling)); bins identical")
+        XCTAssertGreaterThan(sdr.red.hdrTotal, 0)
+        XCTAssertNotEqual(sdr.red.clippedCeiling, edr.red.clippedCeiling, accuracy: 0.0,
+                          "1.2× keeps some of the light an SDR panel loses")
     }
 
     /// The ceiling travels with the measurement, so the card's tick can never describe a different
-    /// frame than the bins next to it.
+    /// screen than the numbers next to it.
     func testTheCeilingTravelsWithTheMeasurement() {
         let h = Histogram.compute(solid(2, 2, rgb: 0.5), headroom: 1.695)
         XCTAssertEqual(h.headroom, 1.695, accuracy: 1e-12)
         XCTAssertEqual(h.displayStops, log2(1.695), accuracy: 1e-12)
         XCTAssertEqual(h.displayStops, 0.7614, accuracy: 1e-3)
+    }
+
+    /// The cache key is the claim, written down: nothing about a camera, a viewport or a display.
+    func testTheCacheKeyNamesThePictureAndTheDocument() {
+        let a = Histogram.cacheKey(rungIdentity: "photo-s1.0", editDigest: "deadbeefcafe0001", bins: 256)
+        XCTAssertEqual(a, "hist|v1|photo-s1.0|deadbeefcafe0001|256")
+        let b = Histogram.cacheKey(rungIdentity: "photo-s1.0", editDigest: "deadbeefcafe0002", bins: 256)
+        XCTAssertNotEqual(a, b, "an edit must mint a new key")
+        XCTAssertFalse(a.contains("2560"), "no viewport in the key")
+        XCTAssertFalse(a.contains("headroom"), "no panel in the key")
+
+        // The digest is stable across processes (SHA-256 of sorted-key JSON), not a seeded hash.
+        let edit = EditModel.neutral
+        XCTAssertEqual(Histogram.editDigest(edit), Histogram.editDigest(edit))
+        XCTAssertEqual(Histogram.editDigest(edit).count, 16)
+        var brighter = edit.light
+        brighter.exposure = edit.light.exposure + 0.25
+        var edited = edit
+        edited.light = brighter
+        XCTAssertNotEqual(Histogram.editDigest(edit), Histogram.editDigest(edited))
     }
 }

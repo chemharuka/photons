@@ -86,6 +86,10 @@ final class LoupeFirstFrameTests: XCTestCase {
         XCTAssertTrue(appeared,
                       "the photo never appeared on its own (last error: \(controller.lastPresentError ?? "—"))")
         XCTAssertNil(controller.lastPresentError)
-        XCTAssertNotNil(controller.lastHistogram, "the first presented frame measures a histogram")
+        // Since 005 the first frame *arms* the measurement instead of carrying one: the histogram is
+        // a picture-level render, debounced behind the picture's key, so it lands a moment later.
+        let measured = waitFor(120) { controller.lastHistogram != nil }
+        XCTAssertTrue(measured, "the first look at a photo must produce a histogram")
+        XCTAssertGreaterThan(controller.histogramRefreshCount, 0, "and it must be a real measurement")
     }
 }
