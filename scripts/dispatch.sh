@@ -54,8 +54,10 @@ done
 WT=${WTBASE}/photons-wt-${SLUG}
 SPEC_REL=docs/tasks/${NNN}-${SLUG}.md
 
-[ -d "$WT" ] && die "$WT 已存在（先处理旧的：git -C $ROOT worktree remove $WT）"
-git -C "$ROOT" rev-parse --verify --quiet "feat/${SLUG}" >/dev/null && die "分支 feat/${SLUG} 已存在"
+if [ "$DRYRUN" = 0 ]; then
+  [ -d "$WT" ] && die "$WT 已存在（先处理旧的：git -C $ROOT worktree remove $WT）"
+  git -C "$ROOT" rev-parse --verify --quiet "feat/${SLUG}" >/dev/null && die "分支 feat/${SLUG} 已存在"
+fi
 
 BASE=$(git -C "$ROOT" rev-parse --short main)
 
@@ -132,7 +134,7 @@ cat <<EOF
 4. 读规格 ${WT}/${SPEC_REL}，先把「文件所有权 / 不变量 / 不做」三节补全再动手
 
 环境已经备好，**不要重建、不要在 ${ROOT} 里改文件**：
-- worktree：${WT}（分支 feat/${SLUG}，基线 main@${BASE}$([ "$BUILD" = 1 ] && echo "，已编译通过）" || echo "，未编译，先 swift build -c release --disable-automatic-resolution）"
+- worktree：${WT}（分支 feat/${SLUG}，基线 main@${BASE}$([ "$BUILD" = 1 ] && echo "，已编译通过）" || echo "，未编译，先 swift build -c release --disable-automatic-resolution）")
 - 验收命令：${ACCEPT}
 
 纪律：
