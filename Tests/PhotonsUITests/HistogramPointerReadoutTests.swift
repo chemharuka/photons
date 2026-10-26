@@ -173,6 +173,19 @@ final class HistogramPointerReadoutTests: XCTestCase {
                            "the row is the pixel's brightness and nothing else")
             XCTAssertEqual(card.hoverValueText, expected, "texel (\(texel.x), \(texel.y)) at \(point)")
             XCTAssertEqual(card.hoverCountText, "", ".image shows no counts")
+            // The channel row: the same texel, each channel on its own axis (a code, or +x.x above
+            // display white) — computed here from the texture, not from the card's own arithmetic.
+            let expectedChannels = [channel(0), channel(1), channel(2)].map { c -> String in
+                let linear = Histogram.srgbDecode(c)
+                if linear > 1 { return String(format: "%+.1f", log2(Double(linear))) }
+                let code = (Double(Histogram.srgbEncode(Float(max(linear, 0)))) * 255).rounded()
+                return "\(min(255, max(0, Int(code))))"
+            }
+            XCTAssertEqual(card.channelRowText,
+                           "R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])",
+                           "texel (\(texel.x), \(texel.y)): 通道行就是这颗像素的三通道值")
+            XCTAssertEqual(card.channelRowValues, expectedChannels)
+            XCTAssertEqual(card.channelRowValues.count, 3)
             // The same texel, put on the axis by the *same* rule but with the test's own histogram:
             // the bin index and the counts have to be that histogram's, or the row's numbers would
             // describe a bin the card never drew.
@@ -186,45 +199,59 @@ final class HistogramPointerReadoutTests: XCTestCase {
             XCTAssertEqual(counts.green, (reference.isTail ? hist.green.hdrBins : hist.green.bins)[reference.bin])
             XCTAssertEqual(counts.blue, (reference.isTail ? hist.blue.hdrBins : hist.blue.bins)[reference.bin])
             XCTAssertEqual(k, 2, accuracy: 1e-9)
-            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) · linear \(String(format: "%.4f", linear)) · row “\(card.hoverValueText)” (expected “\(expected)”) · bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
+            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) · linear \(String(format: "%.4f", linear)) · 亮度 “\(card.hoverValueText)” (expected “\(expected)”) · 通道 “\(card.channelRowText)” (expected “R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])”) · bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
         }
         print("pointer row vs an independent readback of the same texel:")
         print(lines.map { "        " + $0 }.joined(separator: "\n"))
     }
 
-    /// The pointer *on the plot* shows counts, not the level; and the row is the same row (the
-    /// percentages row above is untouched in both cases — that was 015/017's mistake).
-    func testThePlotShowsCountsAndThePercentagesRowNeverChanges() throws {
+    /// The pointer *on the plot* shows counts in the footnote row and leaves the **channel row blank** —
+    /// the channel row reads a *pixel*, and a hover points at a bin. (This is the slot the old
+    /// per-channel percentages row used to occupy; the percentages are no longer painted at all.)
+    func testThePlotShowsCountsAndTheChannelRowStaysBlank() throws {
         let card = drawnCard(histogram: knownCounts())
-        let percentages = card.clipHighTextByChannel
         XCTAssertEqual(card.readoutState, .idle)
-        XCTAssertEqual(card.channelRowTexts, Array(percentages.prefix(3)))
+        XCTAssertEqual(card.channelRowText, "", "no pointer on the picture → the channel row is blank")
+        let idleChannelSlot = card.channelRowRect
+        XCTAssertFalse(idleChannelSlot.isEmpty, "the channel slot exists even when it is empty")
 
-        // A pixel reading is available, but the pointer is on the plot: the plot wins.
-        card.showPointerReadout(PointerPixel(level: .code(200), bin: 200, isTail: false, luma: 0.6))
+        // A pixel reading is available: the channel row prints it, the footnote row prints its luma.
+        card.showPointerReadout(PointerPixel(level: .code(200), bin: 200, isTail: false, luma: 0.6,
+                                             channels: [.code(245), .code(128), .code(64)]))
         render(card)
         XCTAssertEqual(card.readoutState, .image(value: "200"))
         XCTAssertEqual(card.hoverCountText, "")
+        XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64", "on the picture: the pixel's channels")
+        XCTAssertFalse(card.channelRowText.contains("%"), "过白比例不再出现在这一行")
 
+        // The pointer on the plot: the plot wins for the footnote row, and the channel row goes blank
+        // (the pixel is not what a hover is pointing at), at the same slot.
         let axis = try XCTUnwrap(card.lastAxis)
         card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
         render(card)
         XCTAssertEqual(card.readoutState, .histogram(counts: HistogramBinCounts(red: 1284, green: 1291,
                                                                                 blue: 1206)))
-        XCTAssertEqual(card.hoverCountText, "R  1284 G  1291 B  1206")
+        XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
         XCTAssertEqual(card.hoverValueText, "", ".histogram shows no level")
-        XCTAssertEqual(card.channelRowTexts, Array(percentages.prefix(3)),
-                       "the percentages row is never replaced")
+        XCTAssertEqual(card.channelRowText, "", "a hover is not a pixel: the channel row is blank")
+        XCTAssertTrue(card.channelLetterRects.isEmpty)
+        XCTAssertEqual(card.channelRowRect, idleChannelSlot, "…and keeps its slot")
+        XCTAssertLessThanOrEqual(card.channelRowRect.maxY, card.readoutRowRect.minY,
+                                 "the two rows' slots do not overlap")
 
-        // Off the plot, with the pixel still known: back to the pixel's brightness, not to idle.
+        // Off the plot, with the pixel still known: back to the pixel's brightness *and* its channels.
         card.clearHoverReadout()
         render(card)
         XCTAssertEqual(card.readoutState, .image(value: "200"))
-        // And with the pointer gone from the picture too: idle, nothing painted.
+        XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64")
+
+        // And with the pointer gone from the picture too: idle, nothing painted, both rows the same.
         card.clearPointerReadout()
         render(card)
         XCTAssertEqual(card.readoutState, .idle)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
+        XCTAssertEqual(card.channelRowText, "")
+        XCTAssertEqual(card.channelRowRect, idleChannelSlot, "the channel row keeps its slot")
     }
 
     // MARK: - ② the readback is throttled
@@ -290,53 +317,71 @@ final class HistogramPointerReadoutTests: XCTestCase {
         XCTAssertGreaterThan(imagePaint, idlePaint, ".image paints")
         XCTAssertGreaterThan(countsPaint, imagePaint, ".histogram paints")
         XCTAssertLessThanOrEqual(countsSlot.maxY, cardHeight + 0.01)
+        // The channel row above it is a slot too: the same rect whether it paints or not, and the two
+        // rows never overlap (they answer two different questions).
+        XCTAssertEqual(card.channelRowRect.height, HistogramCardView.channelRowHeight, accuracy: 0)
+        XCTAssertEqual(card.channelRowRect.maxY, card.readoutRowRect.minY, accuracy: 0.01,
+                       "通道行与脚注行的槽位相接、不重叠")
     }
 
-    /// 「固定 R xxx G xxx B xxx 的宽度」 — the letters' x positions are a property of the layout, so they
-    /// are compared **exactly** (`accuracy: 0`) across counts of every length the card can show, and a
-    /// number that outgrows the five-character field widens its field instead of being cut.
-    func testTheCountFieldsHoldTheirPositions() {
+    /// 「三个字母位置恒定，数字紧跟字母」 — the group starts are a property of the layout, so they are
+    /// compared **exactly** (`accuracy: 0`) across counts of every length: `i · rowWidth / 3`, whatever
+    /// the numbers are. A count that outgrows its third is neither truncated nor shrunk — the *starts*
+    /// are what must not float, and the value stays one space behind its letter (replaces the old
+    /// five-character right-aligned field, which put the number at the far edge of its slot).
+    func testTheGroupsHoldTheirStartsAndTheNumbersHugTheLetters() throws {
         let cases: [(String, Int, Int, Int)] = [
-            ("zeros ", 0, 0, 0),
-            ("mixed ", 1284, 12, 9),
-            ("wide  ", 198_765, 90_000, 1_234),
+            ("zeros", 0, 0, 0),
+            ("mixed", 1284, 12, 9),
+            ("wide ", 198_765, 90_000, 1_234),
         ]
+        let spaceWidth = (" " as NSString)
+            .size(withAttributes: [.font: HistogramCardView.numberFont]).width
         var letters: [[CGFloat]] = []
-        var fieldEdges: [[CGFloat]] = []
+        var gaps: [[CGFloat]] = []
+        var texts: [[String]] = []
+        var colors: [[NSColor]] = []
         for (label, red, green, blue) in cases {
             let card = drawnCard(histogram: knownCounts(red: red, green: green, blue: blue))
-            let axis = card.lastAxis
-            if let axis {
-                card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256),
-                                                    y: axis.plot.midY))
-            }
+            let axis = try XCTUnwrap(card.lastAxis)
+            card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
             render(card)
-            XCTAssertEqual(card.readoutState, .histogram(counts: HistogramBinCounts(red: red, green: green,
-                                                                                    blue: blue)))
+            XCTAssertEqual(card.readoutState,
+                           .histogram(counts: HistogramBinCounts(red: red, green: green, blue: blue)))
             XCTAssertEqual(card.readoutLetterRects.count, 3)
-            XCTAssertEqual(card.readoutFieldRects.count, 3)
+            XCTAssertEqual(card.readoutValueRects.count, 3)
             letters.append(card.readoutLetterRects.map(\.minX))
-            fieldEdges.append(card.readoutFieldRects.map(\.maxX))
-            print("counts \(label) “\(card.hoverCountText)” · letters \(card.readoutLetterRects.map { String(format: "%.2f", $0.minX) }) · field right edges \(card.readoutFieldRects.map { String(format: "%.2f", $0.maxX) })")
+            gaps.append(zip(card.readoutLetterRects, card.readoutValueRects).map { $0.1.minX - $0.0.maxX })
+            texts.append(card.readoutValueTexts)
+            colors.append(card.readoutLetterColors)
+            print("counts \(label) “\(card.hoverCountText)” · letters \(card.readoutLetterRects.map { String(format: "%.2f", $0.minX) }) · gaps \(zip(card.readoutLetterRects, card.readoutValueRects).map { String(format: "%.2f", $0.1.minX - $0.0.maxX) })")
         }
-        // `R` is the first group, so it is fixed for every length; with all counts inside the five-digit
-        // field (the first two cases) the other two are fixed as well.
-        XCTAssertEqual(letters[0][0], letters[1][0], accuracy: 0)
-        XCTAssertEqual(letters[0][1], letters[1][1], accuracy: 0)
-        XCTAssertEqual(letters[0][2], letters[1][2], accuracy: 0)
-        XCTAssertEqual(letters[2][0], letters[0][0], accuracy: 0,
-                       "a six-digit count widens its own field; R does not move")
-        XCTAssertGreaterThan(letters[2][1], letters[1][1],
-                             "…and the later groups shift right, which is the growth the owner allowed")
-        // Right-aligned: a short number ends where a long one does, inside the same field.
-        XCTAssertEqual(fieldEdges[0][0], fieldEdges[1][0], accuracy: 0,
-                       "reserved field width is the same, so the digits' right edge is the same")
-        // The canonical string reserves five characters per field.
+        // The three group starts are identical for every length — including the six-digit count.
+        for group in 0..<3 {
+            XCTAssertEqual(letters[1][group], letters[0][group], accuracy: 0,
+                           "第 \(group) 组字母起点与数字长度无关")
+            XCTAssertEqual(letters[2][group], letters[0][group], accuracy: 0,
+                           "长数字也不移动第 \(group) 组的字母")
+        }
+        // …and they are the thirds of the row.
+        XCTAssertEqual(letters[0][0], 0, accuracy: 0.01)
+        XCTAssertEqual(letters[0][1], 244.0 / 3, accuracy: 0.01, "中间组的起点是 1/3 卡宽")
+        XCTAssertEqual(letters[0][2], 2 * 244.0 / 3, accuracy: 0.01, "最后一组的起点是 2/3 卡宽")
+        // The number hugs its letter: one space, not a right-aligned field edge.
+        for gap in gaps.flatMap({ $0 }) {
+            XCTAssertEqual(gap, spaceWidth, accuracy: 0.5, "数值与字母之间是一个空格 (\(spaceWidth) pt)")
+        }
+        // Nothing is truncated: the six-digit count is painted whole.
+        XCTAssertEqual(texts[2], ["198765", "90000", "1234"])
+        // The letters are painted with the channel colours — read back from the paint, not re-typed.
+        for painted in colors {
+            XCTAssertEqual(painted, HistogramCardView.channelNameColors)
+        }
+        // The canonical strings of the new layout.
         XCTAssertEqual(HistogramCardFormat.readoutCounts(HistogramBinCounts(red: 1284, green: 12,
                                                                            blue: 198_765)),
-                       "R  1284 G    12 B 198765")
-        XCTAssertEqual(HistogramCardFormat.readoutCounts(HistogramBinCounts(red: 0, green: 0, blue: 0)),
-                       "R     0 G     0 B     0")
+                       "R 1284 G 12 B 198765")
+        XCTAssertEqual(HistogramCardFormat.readoutCounts(.zero), "R 0 G 0 B 0")
     }
 
     // MARK: - the pointer leaving, and the loupe clearing it
@@ -350,8 +395,12 @@ final class HistogramPointerReadoutTests: XCTestCase {
         controller.pointerReadoutTarget = card
         controller.pointerMoved(to: CGPoint(x: 100, y: 80))
         XCTAssertNotNil(controller.pointerReadout)
+        render(card)
         XCTAssertEqual(card.readoutState, .image(value: try XCTUnwrap(controller.pointerReadout).level.text))
         XCTAssertFalse(card.readoutState.valueText.isEmpty)
+        XCTAssertEqual(card.channelRowText, try XCTUnwrap(controller.pointerReadout).channelRowText,
+                       "通道行是同一个像素的三通道值")
+        XCTAssertFalse(card.channelRowText.isEmpty)
 
         controller.pointerExited()
         XCTAssertNil(controller.pointerCanvasPoint)
@@ -360,10 +409,16 @@ final class HistogramPointerReadoutTests: XCTestCase {
         render(card)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertFalse(card.readoutRowRect.isEmpty, "…and keeps its height")
+        XCTAssertEqual(card.channelRowText, "", "通道行同样清空")
+        XCTAssertTrue(card.channelLetterRects.isEmpty)
+        XCTAssertEqual(card.channelRowRect.height, HistogramCardView.channelRowHeight, accuracy: 0,
+                       "…通道行的高度也不变")
 
         // A photo switch clears it too: the reading belonged to the picture that is going away.
         controller.pointerMoved(to: CGPoint(x: 100, y: 80))
         XCTAssertNotNil(controller.pointerReadout)
+        render(card)
+        XCTAssertFalse(card.channelRowText.isEmpty, "通道行又回来了")
         controller.cancelPendingFrames()
         XCTAssertEqual(card.readoutState, .idle)
     }

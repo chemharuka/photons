@@ -50,7 +50,7 @@ public struct PointerPixel: Equatable, Sendable {
         /// Stops above display white (`1.0` = 2×, one decimal in the readout).
         case stops(Double)
 
-        /// `"128"` / `"+1.0"` — the string the card paints on the left of the row.
+        /// `"128"` / `"+1.0"` — the string the card paints behind the channel letter.
         ///
         /// No `档`, no `×`, no `L` prefix: the owner's wording for this row is a *number* (「左侧：亮度
         /// 0-255 或者 +1.0，不要写档和 x2.0」), and the two forms are distinguishable on sight.
@@ -60,10 +60,31 @@ public struct PointerPixel: Equatable, Sendable {
             case .stops(let stops): return String(format: "%+.1f", max(stops, 0))
             }
         }
+
+        /// One channel of a presented frame → the level that channel paints.
+        ///
+        /// Same two cases as the luma, per channel: a channel at or below display white is its sRGB
+        /// **code** (0–255); a channel above it is that channel's own `log2` — one stop is 2×, the
+        /// owner's 「+1 档 = 2×」 — printed as `+x.x`. Mixed rows are the point (`R 255 G +0.8 B 120`):
+        /// a picture can hold a channel over white while the others are still inside the plot.
+        public static func channel(encoded: Float) -> Level {
+            let linear = Histogram.srgbDecode(encoded)
+            if linear > 1 {
+                return .stops(log2(Double(linear)))
+            }
+            let code = Double(Histogram.srgbEncode(Float(max(linear, 0)))) * 255
+            return .code(min(255, max(0, Int(code.rounded()))))
+        }
     }
 
-    /// The level under the pointer.
+    /// The level under the pointer (the luma; the footnote row paints it).
     public let level: Level
+    /// The three channels' **own** levels, R/G/B — what the channel row paints.
+    ///
+    /// Separate from `level` because they answer different questions: the luma is one brightness for
+    /// the footnote row, the channels are the pixel's colour for the row above it, and either of them
+    /// can be above white while the other is not.
+    public let channels: [Level]
     /// Which bin the level falls in: `bins` index (code segment) or `hdrBins` index (tail).
     public let bin: Int
     /// `true` when `bin` indexes `hdrBins`.
@@ -75,13 +96,20 @@ public struct PointerPixel: Equatable, Sendable {
     public let counts: HistogramBinCounts?
 
     public init(level: Level, bin: Int, isTail: Bool, luma: Double,
-                counts: HistogramBinCounts? = nil) {
+                counts: HistogramBinCounts? = nil, channels: [Level]? = nil) {
         self.level = level
+        self.channels = (channels?.count == 3) ? channels! : [level, level, level]
         self.bin = bin
         self.isTail = isTail
         self.luma = luma
         self.counts = counts
     }
+
+    /// The three channel strings, in R/G/B order — `["245", "128", "64"]`.
+    public var channelTexts: [String] { channels.map(\.text) }
+
+    /// The channel row as one string, exactly as the card paints it: `R 245 G 128 B 64`.
+    public var channelRowText: String { HistogramCardFormat.grouped(channelTexts) }
 
     /// The pixel of a presented (S4-encoded, RGBA16F) frame, put on `histogram`'s axis.
     ///
@@ -97,6 +125,9 @@ public struct PointerPixel: Equatable, Sendable {
         let b = Histogram.srgbDecode(blue)
         let linear = Double(wr * r + wg * g + wb * b)
         let sdrBins = max(histogram?.binCount ?? 256, 2)
+        // The three channels' own levels travel with the pixel: the channel row is their printout.
+        let channels = [Level.channel(encoded: encodedRed), .channel(encoded: green),
+                        .channel(encoded: blue)]
 
         if linear > 1 {
             // The tail: 1/64 stop per bin, the last bin is the overflow ("4 stops or more").
@@ -105,14 +136,14 @@ public struct PointerPixel: Equatable, Sendable {
             let bin = scaled >= Double(Histogram.hdrBinCount) ? Histogram.hdrBinCount - 1
                 : max(0, Int(scaled))
             self.init(level: .stops(stops), bin: bin, isTail: true, luma: linear,
-                      counts: Self.counts(histogram, bin: bin, isTail: true))
+                      counts: Self.counts(histogram, bin: bin, isTail: true), channels: channels)
         } else {
             let code01 = Double(Histogram.srgbEncode(Float(max(linear, 0))))
             // `binIndex` in the measure loop: `floor(v · bins)` clamped into `[0, bins-1]`.
             let bin = min(sdrBins - 1, max(0, Int(code01 * Double(sdrBins))))
             let code = min(255, max(0, Int((code01 * 255).rounded())))
             self.init(level: .code(code), bin: bin, isTail: false, luma: linear,
-                      counts: Self.counts(histogram, bin: bin, isTail: false))
+                      counts: Self.counts(histogram, bin: bin, isTail: false), channels: channels)
         }
     }
 
@@ -170,27 +201,29 @@ public enum HistogramReadoutRow: Equatable, Sendable {
 
 extension HistogramCardFormat {
 
-    /// The counts block, exactly as the card paints it: `R  1284 G  1291 B  1206`.
+    /// Three `letter value` groups, exactly as the card paints them: `R 245 G 128 B 64`.
     ///
-    /// Every count is **right-aligned in a five-character field** (`%5d`), so `R`/`G`/`B` sit at fixed x
-    /// positions whatever the numbers are — the owner: 「需要固定 R xxx G xxx B xxx 的宽度，暂时给 xxx 留
-    /// 五位的空白避免 RGB 三个字母位置会浮动」. A count that needs more than five digits grows its own
-    /// field (nothing is truncated) and pushes the later letters right, which is the one case where the
-    /// letters move and the only one the owner allowed ("超过 5 位时该列自然加宽").
+    /// The owner's layout (2026-10-26, second pass): 「RGB 三个字母要带颜色，数字要靠近字母，例如
+    /// `R 2      G 40      B 1023`」. So the string is *one space* between a letter and its value and
+    /// one space between groups; the wide gaps in the sketch are the **fixed group starts** the paint
+    /// uses (`groupWidth = rowWidth / 3`, letter `i` at `i · groupWidth`), not characters. Numbers are
+    /// left-aligned right after their letter and may run past their group's edge — the group *starts*
+    /// are what must not float, and the readback that proves it is `letterRects`, not this string.
+    ///
+    /// Nothing is padded and nothing is right-aligned any more: the previous five-character
+    /// right-aligned field is gone, so a long number cannot push its own value away from its letter.
+    public static func grouped(_ values: [String]) -> String {
+        zip(channelLetters, values).map { "\($0) \($1)" }.joined(separator: " ")
+    }
+
+    /// The counts block, exactly as the card paints it: `R 1284 G 1291 B 1206`.
     public static func readoutCounts(_ counts: HistogramBinCounts) -> String {
-        "R " + field(counts.red) + " G " + field(counts.green) + " B " + field(counts.blue)
+        grouped(["\(max(counts.red, 0))", "\(max(counts.green, 0))", "\(max(counts.blue, 0))"])
     }
 
-    /// One fixed-width, right-aligned count field.
-    public static func field(_ count: Int) -> String {
-        let digits = max(count, 0)
-        let text = "\(digits)"
-        let width = max(readoutCountFieldWidth, text.count)
-        return String(repeating: " ", count: width - text.count) + text
-    }
-
-    /// The number of characters a count field reserves — five, by the owner's request.
-    public static let readoutCountFieldWidth = 5
+    /// The three letters, in row order. One constant, shared by the plot legend, the channel row and
+    /// the counts row, so "R is red" is the same fact everywhere.
+    public static let channelLetters = ["R", "G", "B"]
 }
 
 // MARK: - who receives the pointer's reading
