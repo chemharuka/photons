@@ -134,7 +134,9 @@ public struct InspectorView: View {
     private func sectionView(_ section: Section) -> some View {
         switch section {
         case .histogram:
-            card(Section.histogram.title) { HistogramCard(session: session) }
+            // The loupe is handed in so the card can read the pointer's pixel: the canvas owns the one
+            // mouse position, and the row under the plot is one of its two consumers.
+            card(Section.histogram.title) { HistogramCard(session: session, loupe: loupe) }
         case .whiteBalance:
             whiteBalanceCard
         case .light:

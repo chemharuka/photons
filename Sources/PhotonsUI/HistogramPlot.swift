@@ -164,37 +164,45 @@ extension HistogramCardFormat {
         }
     }
 
-    /// The right-hand string: that bin's R/G/B sample counts, exactly as counted (`R 1284 · G 1291 · B 1206`).
-    /// Percentages are deliberately left out: at 9.5 pt the three counts plus the stop already fill
-    /// the 244 pt card, and a number that has to be truncated is worse than one that is not shown.
+    /// That bin's R/G/B sample counts, as the card paints them: `R  1284 G  1291 B  1206`.
+    ///
+    /// Five-character fields, right-aligned, because the owner wants the three letters to stay put
+    /// (「需要固定 R xxx G xxx B xxx 的宽度」) and a number that grows must not move them. `—` when there
+    /// is no measurement at all: "nothing to say" is not the same as "a bin with no samples", and the
+    /// row is only ever the counts when the card *has* a measurement.
     public static func hoverCounts(_ histogram: Histogram?, _ reading: HistogramHoverReading) -> String {
         guard let histogram else { return "—" }
         func count(_ channel: HistogramChannel) -> Int {
             let bins = reading.isTail ? channel.hdrBins : channel.bins
             return reading.bin >= 0 && reading.bin < bins.count ? bins[reading.bin] : 0
         }
-        return "R \(count(histogram.red)) · G \(count(histogram.green)) · B \(count(histogram.blue))"
+        return readoutCounts(HistogramBinCounts(red: count(histogram.red),
+                                                green: count(histogram.green),
+                                                blue: count(histogram.blue)))
     }
+
 }
 
-// MARK: - 017: the hover row is one line — `L 245 · R 1284 · G 1291 · B 1206`
+// MARK: - 018: the row under the plot — three states, one height
 //
-// 015 painted the same brightness three times (`R 128 G 128 B 128`) in three fixed slots. That was
-// broke-on-arrival for a simple reason: the row's x axis *is* brightness, so one number says it, and
-// the width it wasted belongs to the counts, which really do differ per channel.
+// 017 made the row one line (`L 245 · R 1284 · G 1291 · B 1206`) and painted it *instead of* the
+// channel percentages. The owner's next word split it: 「鼠标在画面上就显示该像素亮度，鼠标在直方图上就显示
+// 该亮度像素数量，鼠标在其他位置就都不显示但保留这行的高度不要乱动」. So:
 //
-//     L 245 · R 1284 · G 1291 · B 1206
+//     .image(value:)          pointer on the picture → the brightness alone (`128`, `+2.0`)
+//     .histogram(counts:)     pointer on the plot    → that bin's counts alone (`R  1284 G  1291 B  1206`)
+//     .idle                   anywhere else          → nothing, at the same height
 //
-// `L` is luminance (owner: 「W 改成 L 吧 表示亮度」). The value follows the segment — the sRGB code
-// `0…255` on the code segment, `+x.x` stops on the tail — and the three counts are that bin's own
-// samples, printed exactly as counted.
+// The two halves are formatted here (`HistogramReadoutRow`, `PointerPixel.Level`) and laid out by the
+// card (`HistogramCardView.paintCountBlock`), so "what the numbers are" and "where they sit" are two
+// separate, separately testable claims.
 
 extension HistogramCardFormat {
 
-    /// The row's leading letter: luminance, not white.
-    public static let hoverRowPrefix = "L"
-
-    /// The brightness under the pointer: `128` (sRGB code) or `+3.0` (stops, one decimal).
+    /// The brightness as the row prints it: an sRGB code `0…255`, or `+x.x` stops above white.
+    ///
+    /// One decimal on the tail, none on the code, and no `档` / `×` / `L` — the owner's wording for this
+    /// row is a bare number (「左侧：亮度 0-255 或者 +1.0，不要写档和 x2.0」).
     public static func hoverRowValue(_ reading: HistogramHoverReading?) -> String? {
         guard let reading else { return nil }
         switch reading.segment {
@@ -205,16 +213,13 @@ extension HistogramCardFormat {
         }
     }
 
-    /// The whole row as one string; `nil` when nothing is hovered, which is what brings the
-    /// percentages back.
+    /// The row's text for a plot hover; `nil` when nothing is hovered or nothing was measured.
+    ///
+    /// Counts and nothing else: the level belongs to the *pixel* under the pointer, and the plot does
+    /// not know which pixel that is — it knows which bin. Painting a level here was 017's conflation.
     public static func hoverRowText(_ histogram: Histogram?, _ reading: HistogramHoverReading?) -> String? {
-        guard let reading, let value = hoverRowValue(reading) else { return nil }
-        func count(_ channel: HistogramChannel) -> Int {
-            let bins = reading.isTail ? channel.hdrBins : channel.bins
-            return reading.bin >= 0 && reading.bin < bins.count ? bins[reading.bin] : 0
-        }
-        guard let histogram else { return "\(hoverRowPrefix) \(value)" }
-        return "\(hoverRowPrefix) \(value) · R \(count(histogram.red)) · G \(count(histogram.green)) · B \(count(histogram.blue))"
+        guard let reading, let histogram else { return nil }
+        return hoverCounts(histogram, reading)
     }
 }
 

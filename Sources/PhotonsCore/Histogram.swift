@@ -567,15 +567,19 @@ extension Histogram {
 
     /// `1.055·v^(1/2.4) − 0.055` above the knee — the same function `s4_display` writes, so the code
     /// axis this file derives is the code axis the panel and the export carry.
+    ///
+    /// Public because the code axis is a *shared* definition, not a private detail: the histogram card's
+    /// pointer readout has to turn a presented (S4-encoded) pixel back into the same linear light and the
+    /// same code this axis counts, and two copies of the OETF would be two axes waiting to disagree.
     @inline(__always)
-    static func srgbEncode(_ v: Float) -> Float {
+    public static func srgbEncode(_ v: Float) -> Float {
         v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055
     }
 
     /// Its inverse. Total (no trap) for every finite input; negatives mirror, which the counters
     /// handle (they land below black).
     @inline(__always)
-    static func srgbDecode(_ v: Float) -> Float {
+    public static func srgbDecode(_ v: Float) -> Float {
         let a = abs(v)
         let d = a <= 0.04045 ? a / 12.92 : pow((a + 0.055) / 1.055, 2.4)
         return v < 0 ? -d : d
