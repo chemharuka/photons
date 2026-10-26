@@ -154,7 +154,7 @@ public struct InspectorView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                Text(String(format: format, value.wrappedValue))
+                Text(Self.sliderText(format, value.wrappedValue))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.primary)
             }
@@ -164,6 +164,20 @@ public struct InspectorView: View {
             }
             .controlSize(.mini)
         }
+    }
+
+    /// One slider's readout, with the negative zero taken out.
+    ///
+    /// `String(format: "%.0f", -0.4)` is `"-0"`, so a control parked a hair below zero read `-0`
+    /// while it was, for every practical purpose, at zero (the same for `"%.2f"` → `"-0.00"`).
+    /// Anything whose formatted form is zero must come out unsigned: the panel says `0`, never `-0`.
+    static func sliderText(_ format: String, _ value: Double) -> String {
+        let text = String(format: format, value)
+        let digits = text.drop { $0 == "-" }
+        if !digits.isEmpty, digits.allSatisfy({ $0 == "0" || $0 == "." }) {
+            return String(digits)
+        }
+        return text
     }
 
     /// A slider binding that writes through the session, so every tick is observed by the loupe.
@@ -212,7 +226,7 @@ public struct InspectorView: View {
                         .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 4)
-                Text(String(format: format, shown))
+                Text(Self.sliderText(format, shown))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.primary)
             }
