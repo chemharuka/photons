@@ -88,7 +88,7 @@ public struct RenderOptions: Sendable {
     /// The identity branch is a byte copy (`s1_7_hdr_curve.metal` rule 1), which is the right thing
     /// for the product and a blind spot for measurement: it is the one way to check that the
     /// identity curve is *arithmetically* the identity too (shaper round trip, table interpolation,
-    /// rule 4's slope of exactly 1 above +6 EV). Never part of a key and never set by the app — the
+    /// rule 4's slope of exactly 1 above +4 EV). Never part of a key and never set by the app — the
     /// pixels it produces differ from the shipped path by ≤ 2.4e-6 relative, which is the point of
     /// measuring them. **Pair it with `useCache: false`**: a cached texture keyed by the same
     /// document would otherwise be reused across the two paths, which compare equal in every key.
@@ -377,7 +377,7 @@ private struct S2Params {
 ///
 /// `x0` and `K` come from `HDRCurveAxis` — the kernel has no constants of its own, so the CPU
 /// reference and the GPU shaper cannot drift apart. The slopes are rule 4's continuation: the last
-/// segment of each table, so a curve keeps going above +6 EV instead of being clamped.
+/// segment of each table, so a curve keeps going above +4 EV instead of being clamped.
 private struct HDRCurveParams {
     var a: SIMD4<Float>   // identity, tableSize, x0, K
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 C). A curve
@@ -1489,7 +1489,7 @@ public final class RenderGraph {
         case .curve:
             // S1.7 — the one curve, in the log-light domain (派单 030). It reads the scene-linear
             // buffer S1.6 (or S1) produced, unbounded and still signed, and hands S2 a value that is
-            // still scene-referred: that is what lets a −12 EV shadow and a +6 EV highlight be bent
+            // still scene-referred: that is what lets a −12 EV shadow and a +4 EV highlight be bent
             // on one axis, which no curve after the tone map can do.
             let p = try kernels.pipeline(file: "s1_7_hdr_curve", function: "s1_7_hdr_curve")
             let tables = try hdrCurveTables(for: edit.curve)

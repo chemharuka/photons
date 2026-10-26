@@ -317,13 +317,16 @@ final class CurveMatteTests: XCTestCase {
     //
     // The two curve hashes were re-recorded for 030 because the fixture curve is now expressed in the
     // log-light axis (`CurvePoint(0, 0.3)`, see `liftedBlackCurve`): the *same* control points no
-    // longer mean the same lift, which is exactly what `processVersion` 2 declares. The structure
-    // being pinned did not change — content moved, matte did not. Not goldens on disk; nothing needs
-    // re-recording elsewhere.
+    // longer mean the same lift, which is exactly what `processVersion` 2 declares. They moved again
+    // for 044 (the axis's right end went +6 → +4 EV, so every u position — and therefore the lift of
+    // a fixed control point — is a different amount of light), which is the same change of meaning
+    // and not a regression: the *identity* hashes above still have not moved by one bit. The
+    // structure being pinned did not change — content moved, matte did not. Not goldens on disk;
+    // nothing needs re-recording elsewhere.
 
     private static let neutralCanvasHash = "0487f109112b48233dce485d843610dd1dfae7884e307533bb7baa0bf18437bb"
     private static let neutralPillarboxHash = "eab59159b31e72b4fc223fce364c44e67c025db96e09015c739780371d52795a"
     private static let neutralLetterboxHash = "d39f90c648b367c2042b882e84733a56a3db65d7f364e1e04d92b668efc1e3a5"
-    private static let curveContentPillarboxHash = "768c9b3deb63363e62abfd870d51d5c9f0b3f67f2b099e81d6955fb2f45c871f"
-    private static let curveContentLetterboxHash = "768c9b3deb63363e62abfd870d51d5c9f0b3f67f2b099e81d6955fb2f45c871f"
+    private static let curveContentPillarboxHash = "b82e9168ac9026b8cc9147012cd3942155dca47d8a350bc8515d209a8298550c"
+    private static let curveContentLetterboxHash = "b82e9168ac9026b8cc9147012cd3942155dca47d8a350bc8515d209a8298550c"
 }

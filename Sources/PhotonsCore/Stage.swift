@@ -22,7 +22,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// 派单 030: **the** tone curve, in the HDR (scene-linear, log1p-shaped) domain.
     ///
     /// It used to be `s3-curve`, after the tone map, on 0…1 data S2 had already compressed — so the
-    /// user could only bend what S2 had shaped, and a +6 EV highlight had already been treated as a
+    /// user could only bend what S2 had shaped, and a +4 EV highlight had already been treated as a
     /// "highlights region" before the curve saw it. `s3_curve` (the file, the kernel and the stage)
     /// is **deleted**; this is the one curve. `grep -rn "s3_curve" Sources` must find nothing but
     /// this sentence.
