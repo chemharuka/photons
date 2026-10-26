@@ -1,0 +1,259 @@
+import XCTest
+import AppKit
+import PhotonsCore
+import PhotonsUI
+
+/// The card's minimum content width: inspector 300 pt (`WorkspaceLayout.inspectorWidthMin`)
+/// − 2 × 12 pt scroll padding − 2 × 16 pt card inset.
+private let minimumCardWidth: CGFloat = 244
+private let cardHeight: CGFloat = 104
+
+/// 004 — the histogram card's two secondary labels were **unreadable**, and this file is the proof
+/// that they are not any more.
+///
+/// The complaint was concrete: "RGB 百分数现在颜色是灰色,不明显 … 旁边还有个 898px 256+32 bin 是什么?
+/// 这个颜色是黑色更加看不清". The cause was that both were *semantic* label colours — alpha tints of
+/// black/white — so on the card's own backdrop they landed at 1.2–2.3 : 1, i.e. texture rather than
+/// text. WCAG 2.1 SC 1.4.3 asks 4.5 : 1 for text this size, so the fix is measured, not eyeballed:
+///
+///   ① both colours clear 4.5 : 1 at the **worst** end of the card's backdrop band, in aqua *and*
+///      in darkAqua (the old ones are asserted to fail, so the table is not decoration);
+///   ② the hierarchy survives — the footnote stays quieter than the percentages;
+///   ③ nothing shrank: 8.5 pt monospaced digits for the percentage, 8 pt for the footnote;
+///   ④ at the card's minimum width (the inspector's 300 pt floor minus the inspector's 24 pt of
+///      padding and the card's 32 pt of inset = **244 pt**) both rows fit: the channel row inside
+///      the card, and the footnote on its own line, right-aligned, unabbreviated;
+///   ⑤ the sentence says what it means (「采样 … px · 直方图 256+32 档」) and VoiceOver spells the
+///      binning out (「256 档 SDR 码值 + 32 档高光尾」).
+@MainActor
+final class HistogramLegibilityTests: XCTestCase {
+
+    // MARK: - fixtures
+
+    private func fixture(sampleCount: Int = 898_432, high: Double? = nil) -> Histogram {
+        func channel(_ h: Double) -> HistogramChannel {
+            HistogramChannel(bins: [Int](repeating: 1, count: 256),
+                             hdrBins: [Int](repeating: 0, count: 32),
+                             clippedHigh: h, clippedCeiling: h, clippedLow: 0)
+        }
+        return Histogram(binCount: 256, sampleCount: sampleCount,
+                         canvas: ImageSize(width: 720, height: 420),
+                         roi: ImageRect(x: 0, y: 0, width: 720, height: 420),
+                         sampleSize: ImageSize(width: 720, height: 420),
+                         primaries: .sRGB, headroom: 1,
+                         red: channel(high ?? 0.012), green: channel(high ?? 0.003),
+                         blue: channel(high ?? 0.0), luma: channel(high ?? 0.005))
+    }
+
+    /// Draws a real card into a bitmap: the readbacks (`channelRowWidth`, `sampleNoteRect`) are what
+    /// `draw` laid out, so this measures the card, not a copy of its arithmetic.
+    private func drawnCard(width: CGFloat = minimumCardWidth,
+                           appearance: NSAppearance.Name = .aqua,
+                           histogram: Histogram? = nil,
+                           measured: Bool = true) -> HistogramCardView {
+        let card = HistogramCardView()
+        card.frame = NSRect(x: 0, y: 0, width: width, height: cardHeight)
+        card.appearance = NSAppearance(named: appearance)
+        card.histogram = measured ? (histogram ?? fixture()) : nil
+        render(card)
+        return card
+    }
+
+    /// One real `draw` into an offscreen bitmap at 2× — no window, but real text metrics.
+    private func render(_ card: HistogramCardView) {
+        let width = card.bounds.width
+        let scale: CGFloat = 2
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                   pixelsWide: Int(width * scale), pixelsHigh: Int(cardHeight * scale),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = NSSize(width: width, height: cardHeight)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        card.draw(card.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// A semantic label colour resolved and composited over a neutral backdrop — how the *old*
+    /// colours actually appeared, alpha and all.
+    private func composited(_ color: NSColor, over grey: Double,
+                            appearance: NSAppearance.Name) -> NSColor {
+        let resolution = NSAppearance(named: appearance)!
+        var r = 0.0, g = 0.0, b = 0.0, a = 0.0
+        resolution.performAsCurrentDrawingAppearance {
+            let s = color.usingColorSpace(.sRGB)!
+            r = Double(s.redComponent); g = Double(s.greenComponent)
+            b = Double(s.blueComponent); a = Double(s.alphaComponent)
+        }
+        return NSColor(srgbRed: CGFloat(r * a + grey * (1 - a)),
+                       green: CGFloat(g * a + grey * (1 - a)),
+                       blue: CGFloat(b * a + grey * (1 - a)), alpha: 1)
+    }
+
+    private func ratio(_ color: NSColor, overGrey grey: Double) -> Double {
+        HistogramCardReadability.contrast(of: color, overGrey: grey)
+    }
+
+    // MARK: - ① contrast, both appearances, worst end of the band
+
+    func testBothLabelsClearTheWCAGFloorInAquaAndDarkAqua() {
+        for isDark in [false, true] {
+            let name = isDark ? "darkAqua" : "aqua"
+            let percent = HistogramCardReadability.percentColor(isDark: isDark)
+            let note = HistogramCardReadability.noteColor(isDark: isDark)
+            for grey in [HistogramCardReadability.backdropGreys(isDark: isDark).low,
+                         HistogramCardReadability.backdropGreys(isDark: isDark).high] {
+                XCTAssertGreaterThanOrEqual(
+                    ratio(percent, overGrey: grey), HistogramCardReadability.minimumRatio,
+                    "\(name) 通道百分数在背景灰阶 \(grey) 上的对比度 \(ratio(percent, overGrey: grey))")
+                XCTAssertGreaterThanOrEqual(
+                    ratio(note, overGrey: grey), HistogramCardReadability.minimumRatio,
+                    "\(name) 脚注在背景灰阶 \(grey) 上的对比度 \(ratio(note, overGrey: grey))")
+            }
+            XCTAssertGreaterThanOrEqual(
+                HistogramCardReadability.worstContrast(of: percent, isDark: isDark), 7,
+                "\(name) 百分数留足余量（实际 ≥ 7:1）")
+            XCTAssertGreaterThanOrEqual(
+                HistogramCardReadability.worstContrast(of: note, isDark: isDark), 5,
+                "\(name) 脚注留足余量（实际 ≥ 5:1）")
+        }
+    }
+
+    /// The colours this file replaces, measured the way the user saw them: `.tertiaryLabelColor`
+    /// is a 26 % tint and `.quaternaryLabelColor` a 10 % one, so both were far below the floor.
+    func testTheSemanticLabelColoursTheyReplacedDidNotClearTheFloor() {
+        let aqua = HistogramCardReadability.backdropGreys(isDark: false).low
+        let dark = HistogramCardReadability.backdropGreys(isDark: true).low
+        let cases: [(name: String, old: NSColor, new: NSColor, grey: Double, was: Double)] = [
+            ("aqua 百分数", composited(.tertiaryLabelColor, over: aqua, appearance: .aqua),
+             HistogramCardReadability.percentColor(isDark: false), aqua, 2.5),
+            ("aqua 脚注", composited(.quaternaryLabelColor, over: aqua, appearance: .aqua),
+             HistogramCardReadability.noteColor(isDark: false), aqua, 2.0),
+            ("darkAqua 百分数", composited(.tertiaryLabelColor, over: dark, appearance: .darkAqua),
+             HistogramCardReadability.percentColor(isDark: true), dark, 2.5),
+            ("darkAqua 脚注", composited(.quaternaryLabelColor, over: dark, appearance: .darkAqua),
+             HistogramCardReadability.noteColor(isDark: true), dark, 2.0),
+        ]
+        for c in cases {
+            let before = ratio(c.old, overGrey: c.grey)
+            let after = ratio(c.new, overGrey: c.grey)
+            XCTAssertLessThan(before, c.was, "\(c.name)：改之前 \(before):1 本来就该是坏的")
+            XCTAssertGreaterThanOrEqual(after, HistogramCardReadability.minimumRatio)
+            XCTAssertGreaterThan(after, 2 * before, "\(c.name)：\(before):1 → \(after):1 应至少翻倍")
+        }
+    }
+
+    /// The footnote has to stay a footnote: readable, but visibly quieter than the numbers above it.
+    func testTheFootnoteStaysQuieterThanThePercentage() {
+        for isDark in [false, true] {
+            let percent = HistogramCardReadability.worstContrast(
+                of: HistogramCardReadability.percentColor(isDark: isDark), isDark: isDark)
+            let note = HistogramCardReadability.worstContrast(
+                of: HistogramCardReadability.noteColor(isDark: isDark), isDark: isDark)
+            XCTAssertGreaterThan(percent, note,
+                                 "\(isDark ? "darkAqua" : "aqua")：百分数该比脚注更重")
+        }
+    }
+
+    // MARK: - ③ nothing shrank, digits do not jitter
+
+    func testTheLabelsKeptTheirSizesAndTheDigitsAreMonospaced() {
+        let percent = HistogramCardReadability.percentFont
+        XCTAssertGreaterThanOrEqual(percent.pointSize, 8.5, "百分数不得小于 8.5 pt")
+        XCTAssertGreaterThanOrEqual(HistogramCardReadability.noteFont.pointSize, 8, "脚注不得小于 8 pt")
+        for font in [percent, HistogramCardReadability.noteFont] {
+            let one = ("1" as NSString).size(withAttributes: [.font: font]).width
+            let zero = ("0" as NSString).size(withAttributes: [.font: font]).width
+            let eight = ("8" as NSString).size(withAttributes: [.font: font]).width
+            XCTAssertEqual(one, zero, accuracy: 0.01, "等宽数字：1 和 0 同宽")
+            XCTAssertEqual(eight, zero, accuracy: 0.01, "等宽数字：8 和 0 同宽")
+        }
+    }
+
+    // MARK: - ② the colours the card actually drew with
+
+    func testTheDrawnCardUsesTheReadableColoursInBothAppearances() {
+        for (name, isDark) in [(NSAppearance.Name.aqua, false), (.darkAqua, true)] {
+            let card = drawnCard(appearance: name)
+            XCTAssertEqual(card.lastAppearanceIsDark, isDark)
+            XCTAssertEqual(card.lastPercentColor, HistogramCardReadability.percentColor(isDark: isDark))
+            XCTAssertEqual(card.lastNoteColor, HistogramCardReadability.noteColor(isDark: isDark))
+            XCTAssertGreaterThanOrEqual(card.percentContrast, HistogramCardReadability.minimumRatio)
+            XCTAssertGreaterThanOrEqual(card.noteContrast, HistogramCardReadability.minimumRatio)
+            // 100 % opaque: a tint would let the backdrop back in through the glyphs.
+            XCTAssertEqual(card.lastPercentColor.alphaComponent, 1)
+            XCTAssertEqual(card.lastNoteColor.alphaComponent, 1)
+        }
+    }
+
+    // MARK: - ④ layout at the card's minimum width
+
+    func testTheChannelRowFitsTheMinimumCardWidth() {
+        let card = drawnCard(width: minimumCardWidth)
+        XCTAssertGreaterThan(card.channelRowWidth, 0)
+        XCTAssertLessThanOrEqual(card.channelRowWidth, minimumCardWidth,
+                                 "通道行宽 \(card.channelRowWidth) pt 必须 ≤ 卡宽 \(minimumCardWidth) pt")
+
+        // Worst case is a wide percentage: 100.0 % is 6 glyphs at 8.5 pt monospaced digits.
+        let worst = drawnCard(width: minimumCardWidth, histogram: fixture(high: 1))
+        XCTAssertLessThanOrEqual(worst.channelRowWidth, minimumCardWidth,
+                                 "100.0% 三通道行宽 \(worst.channelRowWidth) pt 必须 ≤ \(minimumCardWidth) pt")
+        XCTAssertFalse(worst.sampleNoteRect.isEmpty, "最宽的数字下脚注也得画出来")
+    }
+
+    func testTheFootnoteIsOnItsOwnLineRightAlignedAndNotTruncated() {
+        let card = drawnCard(width: minimumCardWidth)
+        let rect = card.sampleNoteRect
+        XCTAssertEqual(card.sampleNoteText,
+                       HistogramCardReadability.sampleNote(sampleCount: 898_432, binCount: 256,
+                                                           hdrBinCount: 32))
+        XCTAssertFalse(rect.isEmpty, "脚注必须画出来")
+        XCTAssertGreaterThanOrEqual(rect.minX, card.bounds.minX, "脚注左边界不得越界")
+        XCTAssertLessThanOrEqual(rect.maxX, card.bounds.maxX + 0.5, "脚注右边界不得越界")
+        XCTAssertLessThanOrEqual(rect.maxY, card.bounds.maxY, "脚注不得溢出卡片底部")
+        XCTAssertEqual(rect.maxX, card.bounds.maxX, accuracy: 0.5, "脚注右对齐")
+        // Its own line: below the channel row (which starts at 58 + 5 + 15 = 78 with 10 pt of text).
+        XCTAssertGreaterThan(rect.minY, 88, "脚注在通道行下方，不与 R/G/B 挤一行")
+        // And wide enough that the sentence was not shortened to make it fit.
+        XCTAssertGreaterThan(rect.width, 100, "整句要画得下，不得为凑宽度缩写")
+    }
+
+    func testAHistogramLessCardLeavesTheFootnoteEmpty() {
+        let card = drawnCard(width: minimumCardWidth, measured: false)
+        XCTAssertEqual(card.sampleNoteText, "")
+        XCTAssertTrue(card.sampleNoteRect.isEmpty)
+        // The percentages still exist (they read "—"), and they are still readable.
+        XCTAssertGreaterThanOrEqual(card.percentContrast, HistogramCardReadability.minimumRatio)
+        XCTAssertGreaterThan(card.channelRowWidth, 0)
+    }
+
+    // MARK: - ⑤ the sentence, and what VoiceOver says
+
+    func testTheFootnoteSaysWhatTheUserAskedAbout() {
+        XCTAssertEqual(HistogramCardReadability.sampleNote(sampleCount: 898_432, binCount: 256,
+                                                           hdrBinCount: 32),
+                       "采样 898k px · 直方图 256+32 档")
+        // Sub-thousand samples are not rounded to "0k px".
+        XCTAssertEqual(HistogramCardReadability.sampleNote(sampleCount: 512, binCount: 256,
+                                                           hdrBinCount: 32),
+                       "采样 512 px · 直方图 256+32 档")
+        let card = drawnCard(width: minimumCardWidth)
+        XCTAssertTrue(card.sampleNoteText.contains("采样"))
+        XCTAssertTrue(card.sampleNoteText.contains("256+32 档"))
+        XCTAssertFalse(card.sampleNoteText.contains("bin"), "别再写 bin 了：用户不知道那是什么")
+    }
+
+    func testAccessibilityHelpSpellsOutTheBinning() {
+        let help = HistogramCardReadability.accessibilityHelp(sampleCount: 898_432, binCount: 256,
+                                                              hdrBinCount: 32)
+        XCTAssertTrue(help.contains("256 档 SDR 码值"))
+        XCTAssertTrue(help.contains("32 档高光尾"))
+        XCTAssertTrue(help.contains("898432"), "把采样像素数说出来：\(help)")
+        // The card carries it, so VoiceOver reads it without a separate label.
+        let card = drawnCard(width: minimumCardWidth)
+        let spoken = card.accessibilityHelp() ?? ""
+        XCTAssertTrue(spoken.contains("256 档 SDR 码值"), spoken)
+        XCTAssertTrue(spoken.contains("32 档高光尾"), spoken)
+    }
+}

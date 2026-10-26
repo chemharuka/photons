@@ -48,6 +48,7 @@ public final class HistogramCardView: NSView {
         didSet {
             guard histogram != oldValue else { return }
             needsDisplay = true
+            updateAccessibilityHelp()
         }
     }
 
@@ -82,6 +83,31 @@ public final class HistogramCardView: NSView {
     public private(set) var clipHighHitRect: NSRect = .zero
     public private(set) var clipLowHitRect: NSRect = .zero
 
+    // MARK: what the smoke reads back about the two *legibility* labels (2026-10-26)
+
+    /// The sample/bin footnote as painted, e.g. `采样 898k px · 直方图 256+32 档`. Empty without a
+    /// histogram. Kept as a string so the smoke compares the sentence, not the pixels.
+    public private(set) var sampleNoteText = ""
+    /// Where that footnote landed. Empty rect when there is nothing to paint.
+    public private(set) var sampleNoteRect: NSRect = .zero
+    /// Right edge of the last channel percentage (R/G/B), i.e. how wide the channel row really is.
+    public private(set) var channelRowWidth: CGFloat = 0
+    /// The two colours of the last `draw`. The smoke recomputes their contrast from these rather
+    /// than trusting a stored ratio.
+    public private(set) var lastPercentColor: NSColor = .labelColor
+    public private(set) var lastNoteColor: NSColor = .labelColor
+    /// Which appearance those colours were resolved for (`effectiveAppearance` in `draw`).
+    public private(set) var lastAppearanceIsDark = false
+
+    /// Worst-case WCAG ratio of the percentage colour on the card's own backdrop.
+    public var percentContrast: Double {
+        HistogramCardReadability.worstContrast(of: lastPercentColor, isDark: lastAppearanceIsDark)
+    }
+    /// Worst-case WCAG ratio of the footnote colour on the card's own backdrop.
+    public var noteContrast: Double {
+        HistogramCardReadability.worstContrast(of: lastNoteColor, isDark: lastAppearanceIsDark)
+    }
+
     /// The card's own title is the inspector's (`card("直方图")`), so nothing is drawn twice: the
     /// plot starts at the top edge of this view.
     private let plotInsetTop: CGFloat = 0
@@ -98,6 +124,17 @@ public final class HistogramCardView: NSView {
         setAccessibilityIdentifier("histogram-card")
         setAccessibilityLabel("直方图")
         setAccessibilityRole(.group)
+        updateAccessibilityHelp()
+    }
+
+    /// VoiceOver (and the smoke) reads the footnote's two numbers spelled out — `256 档 SDR 码值`
+    /// and `32 档高光尾` are not things a listener should have to decode from "256+32".
+    private func updateAccessibilityHelp() {
+        let text = HistogramCardReadability.accessibilityHelp(
+            sampleCount: histogram?.sampleCount,
+            binCount: histogram?.binCount ?? 256,
+            hdrBinCount: histogram?.hdrBinCount ?? Histogram.hdrBinCount)
+        setAccessibilityHelp(text)
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -360,7 +397,16 @@ public final class HistogramCardView: NSView {
                                 width: lowNumber.maxX - lowLabel.minX, height: 14)
 
         // Per-channel line: R/G/B above-white shares, the numbers a white-balance tweak moves.
+        //
+        // The percentages used to be `.tertiaryLabelColor`: resolved over this card's own backdrop
+        // that is 1.86 : 1 in aqua and 2.26 : 1 in darkAqua — invisible next to the bold channel
+        // letter it belongs to. `HistogramCardReadability` picks an *opaque* colour per appearance
+        // that clears 4.5 : 1 at the worst end of the material's own grey band (see that type).
         let channelY = y + clipRowHeight
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        lastAppearanceIsDark = dark
+        lastPercentColor = HistogramCardReadability.percentColor(isDark: dark)
+        lastNoteColor = HistogramCardReadability.noteColor(isDark: dark)
         var x = bounds.minX
         let channels: [(String, String, NSColor)] = [
             ("R", clipHighTextByChannel[0], NSColor(srgbRed: 0.95, green: 0.25, blue: 0.28, alpha: 1)),
@@ -371,19 +417,32 @@ public final class HistogramCardView: NSView {
             let nameRect = drawText(name, at: CGPoint(x: x, y: channelY),
                                     font: .systemFont(ofSize: 8, weight: .bold), color: color)
             let valueRect = drawText(value, at: CGPoint(x: nameRect.maxX + 2, y: channelY),
-                                     font: .monospacedDigitSystemFont(ofSize: 8.5, weight: .regular),
-                                     color: .tertiaryLabelColor)
+                                     font: HistogramCardReadability.percentFont,
+                                     color: lastPercentColor)
             x = valueRect.maxX + 9
         }
-        var total = ""
+        channelRowWidth = x - 9 - bounds.minX
+
+        // The sample/bin footnote — what was measured, and how the x axis is binned — is its own
+        // line, hard against the right edge. It cannot share the channel row: at the inspector's
+        // minimum width the card is 244 pt wide, the three R/G/B pairs alone can take ~140 pt and
+        // the sentence needs 126 pt, so the old same-line version ran off the card exactly when the
+        // card was narrow. `.quaternaryLabelColor` made it 1.24 : 1 at the same time, i.e. both
+        // unreadable and (at the margin) clipped.
+        sampleNoteText = ""
+        sampleNoteRect = .zero
         if let histogram {
-            total = "\(histogram.sampleCount / 1000)k px · "
-                + "\(histogram.binCount)+\(histogram.hdrBinCount) bin"
-        }
-        if !total.isEmpty {
-            drawText(total, at: CGPoint(x: x, y: channelY),
-                     font: .monospacedDigitSystemFont(ofSize: 8, weight: .regular),
-                     color: .quaternaryLabelColor)
+            sampleNoteText = HistogramCardReadability.sampleNote(sampleCount: histogram.sampleCount,
+                                                                 binCount: histogram.binCount,
+                                                                 hdrBinCount: histogram.hdrBinCount)
+            let font = HistogramCardReadability.noteFont
+            let size = (sampleNoteText as NSString).size(withAttributes: [.font: font])
+            let noteY = channelY + 13
+            if size.width <= bounds.width, noteY + size.height <= bounds.maxY {
+                sampleNoteRect = NSRect(x: bounds.maxX - size.width, y: noteY,
+                                        width: size.width, height: size.height)
+                drawText(sampleNoteText, at: sampleNoteRect.origin, font: font, color: lastNoteColor)
+            }
         }
     }
 
@@ -394,6 +453,123 @@ public final class HistogramCardView: NSView {
         let size = (text as NSString).size(withAttributes: attributes)
         (text as NSString).draw(at: point, withAttributes: attributes)
         return NSRect(origin: point, size: size)
+    }
+}
+
+// MARK: - the two labels that had to become readable
+//
+// The complaint (2026-10-26): the per-channel percentages were "grey, not obvious" and the
+// sample/bin footnote "even blacker, invisible". Both were *semantic* label colours, and those are
+// alpha tints of black/white — 26 % and 10 % — so they read as texture, not as text:
+//
+// | | aqua (over #ECECEC) | darkAqua (over #1E1E1E) |
+// |---|---|---|
+// | `.tertiaryLabelColor` (percentages) | **1.86 : 1** | **2.26 : 1** |
+// | `.quaternaryLabelColor` (footnote)  | **1.24 : 1** | **1.34 : 1** |
+//
+// WCAG 2.1 SC 1.4.3 wants 4.5 : 1 for text this size, so neither was near it. The fix is a pair of
+// **opaque** colours resolved per appearance, and the arithmetic that proves them is here rather
+// than in a comment: the unit test and `--ui-smoke` both recompute the ratio from the colours the
+// card actually drew with.
+//
+// The card paints nothing of its own behind these labels. It is an `NSView` inside the inspector's
+// `card(_:)`, whose fill is `.regularMaterial` over `NSColor.windowBackgroundColor` (set on the
+// window by `EditorWindowController`). A material can only lift a backdrop toward white, so the
+// backdrop's grey level is *bounded* by the window background on one side and white on the other.
+// The colours below therefore have to clear 4.5 : 1 at the **worst** end of that band — the darker
+// one in aqua, the lighter one in darkAqua — not at the middle of it, which is why the numbers here
+// (9.9 and 6.1 in aqua) look stronger than the 4.5 they promise.
+public enum HistogramCardReadability {
+
+    /// WCAG 2.1 SC 1.4.3, normal-size text. The card's labels are 8–8.5 pt, so this is the floor.
+    public static let minimumRatio: Double = 4.5
+
+    /// The sRGB grey levels the card's backdrop can resolve to, per appearance.
+    ///
+    /// aqua: `windowBackgroundColor` `#ECECEC` (0.925) up to the material's white.
+    /// darkAqua: `#1E1E1E` (0.117) up to the material's own grey, `#333333` (0.200).
+    public static func backdropGreys(isDark: Bool) -> (low: Double, high: Double) {
+        isDark ? (0.117, 0.200) : (0.925, 1.000)
+    }
+
+    // MARK: the colours
+
+    /// The R/G/B percentages: a strong neutral, one step below the card's primary numbers.
+    public static func percentColor(isDark: Bool) -> NSColor {
+        isDark ? NSColor(srgbRed: 0.82, green: 0.82, blue: 0.83, alpha: 1)
+               : NSColor(srgbRed: 0.22, green: 0.22, blue: 0.23, alpha: 1)
+    }
+
+    /// The sample/bin footnote: quieter than the percentages, but still opaque and still ≥ 4.5 : 1.
+    public static func noteColor(isDark: Bool) -> NSColor {
+        isDark ? NSColor(srgbRed: 0.68, green: 0.68, blue: 0.69, alpha: 1)
+               : NSColor(srgbRed: 0.34, green: 0.34, blue: 0.35, alpha: 1)
+    }
+
+    // MARK: the fonts (unchanged sizes — nothing here may shrink)
+
+    /// 8.5 pt, monospaced digits: the size the percentages already had. They are a column of numbers
+    /// under each other's channel letters, so the digits must not jitter as the value changes.
+    public static var percentFont: NSFont {
+        .monospacedDigitSystemFont(ofSize: 8.5, weight: .regular)
+    }
+
+    /// 8 pt, monospaced digits: one step quieter than the percentages, same as before.
+    public static var noteFont: NSFont {
+        .monospacedDigitSystemFont(ofSize: 8, weight: .regular)
+    }
+
+    // MARK: the sentence
+
+    /// 「采样 898k px · 直方图 256+32 档」 — what the footnote says, in words:
+    ///
+    ///   · **采样 898k px** — the pixels this measurement counted (`Histogram.sampleCount`). That is
+    ///     the sample grid the render used, not the whole frame, which is why it is not 60 M.
+    ///   · **直方图 256+32 档** — the x axis' binning: 256 bins of SDR code value (black to white)
+    ///     plus 32 bins of highlight tail (`binCount` + `hdrBinCount`), the part above white that
+    ///     过白 counts.
+    public static func sampleNote(sampleCount: Int, binCount: Int, hdrBinCount: Int) -> String {
+        let sampled = sampleCount >= 1_000 ? "\(sampleCount / 1_000)k px" : "\(sampleCount) px"
+        return "采样 \(sampled) · 直方图 \(binCount)+\(hdrBinCount) 档"
+    }
+
+    /// The same sentence for VoiceOver and the tooltip: "档" is explained instead of assumed.
+    public static func accessibilityHelp(sampleCount: Int?, binCount: Int, hdrBinCount: Int) -> String {
+        let sample = sampleCount.map { "采样 \($0) px（渲染色阶上抽的样，不是整幅）。" } ?? ""
+        return sample
+            + "横轴 \(binCount) 档 SDR 码值 + \(hdrBinCount) 档高光尾："
+            + "前 \(binCount) 档是从黑到白的码值，后 \(hdrBinCount) 档把超过白点的 4 档高光单独展开，"
+            + "过白就是落在最后那一段的像素。"
+    }
+
+    // MARK: the arithmetic (WCAG 2.1, sRGB-linearised)
+
+    /// One sRGB channel, linearised.
+    public static func linear(_ component: CGFloat) -> Double {
+        let v = Double(component)
+        return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+    }
+
+    /// WCAG relative luminance of an sRGB colour (alpha is the caller's problem: these colours are
+    /// opaque by construction, and the *old* ones are composited by the test before measuring).
+    public static func relativeLuminance(of color: NSColor) -> Double {
+        guard let srgb = color.usingColorSpace(.sRGB) else { return .nan }
+        return 0.2126 * linear(srgb.redComponent)
+            + 0.7152 * linear(srgb.greenComponent)
+            + 0.0722 * linear(srgb.blueComponent)
+    }
+
+    /// Contrast ratio of `color` against a neutral backdrop of the given sRGB grey level.
+    public static func contrast(of color: NSColor, overGrey grey: Double) -> Double {
+        let a = relativeLuminance(of: color) + 0.05
+        let b = linear(CGFloat(grey)) + 0.05
+        return max(a, b) / min(a, b)
+    }
+
+    /// The ratio that has to hold: the worst end of the backdrop band for this appearance.
+    public static func worstContrast(of color: NSColor, isDark: Bool) -> Double {
+        let band = backdropGreys(isDark: isDark)
+        return [band.low, band.high].map { contrast(of: color, overGrey: $0) }.min() ?? 0
     }
 }
 

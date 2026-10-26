@@ -1751,6 +1751,35 @@ public final class UISmokeRunner {
               && (histogram.headroom > 1.0005
                   || card.clipCeilingText == card.clipHighText))
 
+        // The two labels the user reported as unreadable (004): the per-channel percentages and the
+        // sample/bin footnote. Asserted as text *and* as WCAG contrast recomputed from the colours
+        // the card actually drew with, against the card's own backdrop band.
+        let note = card.sampleNoteText
+        let expectedNote = HistogramCardReadability.sampleNote(sampleCount: histogram.sampleCount,
+                                                              binCount: histogram.binCount,
+                                                              hdrBinCount: histogram.hdrBinCount)
+        let cardBounds = card.bounds
+        let percentContrast = card.percentContrast
+        let noteContrast = card.noteContrast
+        let appearanceName = card.lastAppearanceIsDark ? "darkAqua" : "aqua"
+        log("histogram labels        “\(note)” @ (\(String(format: "%.1f", card.sampleNoteRect.minX)),\(String(format: "%.1f", card.sampleNoteRect.minY))) \(String(format: "%.1f", card.sampleNoteRect.width))×\(String(format: "%.1f", card.sampleNoteRect.height)) · 通道行 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · WCAG 百分数 \(String(format: "%.2f", percentContrast)):1 脚注 \(String(format: "%.2f", noteContrast)):1（\(appearanceName)）")
+        check("直方图脚注在卡片内、不截断：“\(note)” == “\(expectedNote)”，右对齐 \(String(format: "%.1f", card.sampleNoteRect.maxX)) / 卡宽 \(String(format: "%.1f", cardBounds.width))，通道行 \(String(format: "%.1f", card.channelRowWidth)) pt",
+              note == expectedNote
+              && note.contains("采样")
+              && note.contains("\(histogram.binCount)+\(histogram.hdrBinCount) 档")
+              && !card.sampleNoteRect.isEmpty
+              && card.sampleNoteRect.minX >= cardBounds.minX
+              && card.sampleNoteRect.maxX <= cardBounds.maxX + 0.5
+              && card.sampleNoteRect.maxY <= cardBounds.maxY
+              && card.channelRowWidth <= cardBounds.width)
+        check("通道百分数与脚注的对比度 ≥ \(HistogramCardReadability.minimumRatio):1（WCAG，卡片背景带最差端，\(appearanceName)）：百分数 \(String(format: "%.2f", percentContrast)):1 · 脚注 \(String(format: "%.2f", noteContrast)):1",
+              percentContrast >= HistogramCardReadability.minimumRatio
+              && noteContrast >= HistogramCardReadability.minimumRatio)
+        let spokenHelp = card.accessibilityHelp() ?? ""
+        check("直方图卡片的 VoiceOver 说明解释了分箱：“\(spokenHelp)”",
+              spokenHelp.contains("\(histogram.binCount) 档 SDR 码值")
+              && spokenHelp.contains("\(histogram.hdrBinCount) 档高光尾"))
+
         // The warning: a real click on the number, then a frame that carries the clipped grid.
         let documentBefore = documentHash(session.edit)
         let historyBefore = session.history.count
