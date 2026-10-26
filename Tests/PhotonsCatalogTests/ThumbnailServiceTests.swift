@@ -723,13 +723,25 @@ final class ThumbnailServiceTests: XCTestCase {
         XCTAssertEqual(producer.mainThreadCalls, 0)
     }
 
-    /// 1000 keys, the first 20 of them `onScreen`: the visible cells must finish first, and the
-    /// per-request cost on the caller's thread must stay negligible (§5 "队列峰值不随行数增长").
+    /// 1000 keys, the first 20 of them `onScreen`: the visible cells must reach a worker before any
+    /// prefetch does, and the per-request cost on the caller's thread must stay negligible
+    /// (§5 "队列峰值不随行数增长").
+    ///
+    /// 可见优先 is asserted **at the scheduler**, which is the only place it is a property rather than
+    /// a race. The old form compared the first 20 *completion callbacks* with the visible set; that
+    /// only holds if no prefetch finishes before the 20th visible cell, and with 3 workers behind 980
+    /// queued prefetches the last visible job can be overtaken the moment a slot frees: the 20th
+    /// visible job gets a slot, a prefetch gets the next one a decay later, and which of the two
+    /// finishes first is up to the thread scheduler (~1 run in 3 here even on an idle machine, more
+    /// under a parallel build). `pending` is priority-then-FIFO and all 20 visible jobs are enqueued
+    /// before the batch, so "no prefetch is picked while a visible job is still pending" is decided
+    /// inside the lock and cannot flip. Completion order is printed as a diagnostic, not asserted.
     func testThousandKeyBatchFinishesVisibleFirst() throws {
         let cache = try makeCache()
         let producer = StubProducer()
         producer.delayMilliseconds = 1
         let service = ThumbnailService(cache: cache, config: .init(maxConcurrency: 3), producer: producer)
+        service.recordsAdmissionOrder = true
 
         let visibleCount = 20
         let total = 1000
@@ -766,20 +778,33 @@ final class ThumbnailServiceTests: XCTestCase {
         waitIdle(service)
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
 
+        // The scheduler's own decisions, taken under its lock: this is the assertion surface.
+        let admitted = service.admissionWitness()
+
         finishLock.lock()
-        let firstTwenty = Array(order.prefix(visibleCount))
         let visibleSet = Set(visible.map { $0.key })
         let visibleFinish = visible.compactMap { finishedAt[$0.key] }.max() ?? .infinity
+        let earlyPrefetch = order.filter { !visibleSet.contains($0) && (finishedAt[$0] ?? .infinity) < visibleFinish }
         finishLock.unlock()
 
+        let firstPrefetchAdmission = admitted.firstIndex { !visibleSet.contains($0) } ?? admitted.count
         let s = service.stats()
         print(String(format: "batch1000: total %.1f ms, all onScreen done at %.1f ms, "
-                     + "enqueue p50 %.3f ms max %.3f ms, peakActive %d, generated %d",
+                     + "enqueue p50 %.3f ms max %.3f ms, peakActive %d, generated %d, "
+                     + "first prefetch admission #%d of %d, prefetch finishes before the grid: %d",
                      elapsed, visibleFinish, median(enqueueMs), enqueueMs.max() ?? 0,
-                     s.activePeak, s.missGenerated))
+                     s.activePeak, s.missGenerated, firstPrefetchAdmission, admitted.count,
+                     earlyPrefetch.count))
 
-        XCTAssertEqual(firstTwenty.count, visibleCount)
-        XCTAssertEqual(Set(firstTwenty), visibleSet, "the 20 visible cells finish before any prefetch")
+        XCTAssertEqual(admitted.count, total, "every job was admitted exactly once")
+        XCTAssertEqual(firstPrefetchAdmission, visibleCount,
+                       "a prefetch was admitted while visible cells were still queued: the first "
+                       + "prefetch is admission #\(firstPrefetchAdmission) of \(admitted.count), "
+                       + "expected #\(visibleCount) — priority is priority-then-FIFO (§4)")
+        XCTAssertTrue(visibleSet.isSubset(of: Set(admitted)),
+                      "visible cells that never reached a worker: "
+                      + visibleSet.subtracting(admitted).map { $0.contentHash.suffix(4) }
+                        .sorted().joined(separator: ","))
         XCTAssertLessThan(visibleFinish, elapsed, "prefetch continued after the grid was served")
         XCTAssertEqual(s.missGenerated, total)
         XCTAssertLessThanOrEqual(s.activePeak, 3)
