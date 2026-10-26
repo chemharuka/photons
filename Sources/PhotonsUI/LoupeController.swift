@@ -32,6 +32,7 @@ public final class LoupeCanvasView: NSView {
     private var isPainting = false
     /// A gradient drag: creating a linear/radial mask, or reshaping the selected one.
     private var isShaping = false
+    private var isDraggingHandle = false
 
     public init() {
         super.init(frame: .zero)
@@ -134,9 +135,11 @@ public final class LoupeCanvasView: NSView {
         case "z", " ":
             controller?.toggleActualSize()
         case "\u{1b}":
-            // Escape abandons a gradient drag before it becomes a mask, disarms the eyedropper, and
+            // Escape abandons a gradient drag before it becomes a mask, drops a control-point drag
+            // (task 032: nothing is written, nothing is committed), disarms the eyedropper, and
             // otherwise means "fit".
             if controller?.isEyedropperArmed == true { controller?.cancelEyedropper() }
+            else if isDraggingHandle { isDraggingHandle = false; controller?.cancelMaskHandleDrag() }
             else if isShaping { isShaping = false; controller?.cancelShapeDrag() }
             else { controller?.zoomToFit() }
         default:
@@ -155,6 +158,19 @@ public final class LoupeCanvasView: NSView {
         }
         // A gradient drag is the innermost gesture: it exists only while a shape is armed, and it is
         // what turns two clicks into a linear ramp / an ellipse (or reshapes the selected one).
+        if controller?.isShapeCreateArmed == true {
+            isShaping = true
+            controller?.beginShapeDrag(at: point)
+            return
+        }
+        // Control points (task 032) come next, and **before** the blanket "drag adjusts the selected
+        // gradient" gesture: a hand that lands on a grip means "move this grip", so the click must be
+        // taken here. A miss returns false and falls through to the adjust drag below, and then to the
+        // pan — a grip never turns into a pan, and the empty canvas still pans.
+        if controller?.beginMaskHandleDrag(atViewPoint: point) == true {
+            isDraggingHandle = true
+            return
+        }
         if controller?.isShapeDragArmed == true {
             isShaping = true
             controller?.beginShapeDrag(at: point)
@@ -183,6 +199,12 @@ public final class LoupeCanvasView: NSView {
             controller?.continueShapeDrag(at: convert(event.locationInWindow, from: nil))
             return
         }
+        if isDraggingHandle {
+            // ⇧ keeps an ellipse's aspect while a rim is dragged (`MaskHandleDrag.shape(uniform:)`).
+            controller?.continueMaskHandleDrag(atViewPoint: convert(event.locationInWindow, from: nil),
+                                               uniform: event.modifierFlags.contains(.shift))
+            return
+        }
         if isPainting {
             controller?.continuePaint(at: convert(event.locationInWindow, from: nil),
                                       pressure: Self.pressure(of: event))
@@ -196,6 +218,11 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        if isDraggingHandle {
+            isDraggingHandle = false
+            controller?.endMaskHandleDrag()
+            return
+        }
         if isShaping {
             isShaping = false
             controller?.endShapeDrag(at: convert(event.locationInWindow, from: nil))
@@ -408,6 +435,9 @@ public final class LoupeController: NSViewController {
     /// hit tests, and neither is part of a document or of any cache key.
     private let highlightOverlay = HighlightOverlayView()
     private let draftOverlay = MaskDraftOverlayView()
+    /// The selected mask's control points (task 032) — grips and guides, drawn over the canvas and
+    /// hit-tested by the controller (never by this view: `hitTest` is nil).
+    private let maskHandlesOverlay = MaskHandlesOverlayView()
 
     /// The mask painter: pointer → sampled points → `Stroke` (Q22). Owned here because the paint
     /// gesture is a canvas gesture, and handed to the view so `mouseDown` knows which of the two
@@ -635,9 +665,11 @@ public final class LoupeController: NSViewController {
         canvasView.controller = self
         canvasView.maskPainter = maskCanvas
         container.addSubview(canvasView)
-        // Over the canvas, under the readout: the clipping wash and the shape-drag rubber band. Both
-        // are `hitTest → nil`, so every click still belongs to the canvas.
-        for overlay in [highlightOverlay as NSView, draftOverlay as NSView] {
+        // Over the canvas, under the readout: the clipping wash, the shape-drag rubber band, and the
+        // selected mask's control points. All three are `hitTest → nil`, so every click still belongs
+        // to the canvas.
+        for overlay in [highlightOverlay as NSView, draftOverlay as NSView,
+                        maskHandlesOverlay as NSView] {
             overlay.frame = container.bounds
             overlay.autoresizingMask = [.width, .height]
             container.addSubview(overlay)
@@ -676,6 +708,9 @@ public final class LoupeController: NSViewController {
         super.viewDidLayout()
         layoutStatusChip()
         layoutZoomSlider()
+        // The control points live in view points, so a resize moves them: rebuild rather than let the
+        // overlay keep the old canvas' coordinates.
+        refreshMaskHandles()
         // A resize is a new canvas: every pixel is re-rendered into it, and a bridge measured against
         // the old one would scale the picture about the wrong centre. Tear the transition down rather
         // than leave the transform in a mid-flight state nobody will ever finish.
@@ -1418,6 +1453,10 @@ public final class LoupeController: NSViewController {
         }
         pointerCanvasPoint = point
         refreshPointerReadout()
+        // A move is the moment before a grab: the selected mask's grips are re-projected here (and
+        // only redrawn if a grip actually moved), so picking a gradient in the list shows its
+        // control points without waiting for an edit.
+        refreshMaskHandles()
     }
 
     /// The pointer left the canvas (a tracking-area exit, the view leaving its window, a photo switch):
@@ -1844,6 +1883,132 @@ public final class LoupeController: NSViewController {
             return nil
         }
     }
+
+    /// True when the armed drag is a **creation** (the inspector's 新建 menu is waiting for a
+    /// gesture). Kept apart from `isShapeDragArmed` because the two now sit at different depths of
+    /// the gesture stack: a creation outranks the control points (there is no mask yet), while the
+    /// blanket adjust-drag ranks **behind** them (task 032).
+    public var isShapeCreateArmed: Bool {
+        if case .create = shapeDragMode { return true }
+        return false
+    }
+
+    // MARK: mask control points (task 032)
+    //
+    // The canvas half of 「蒙版创建后应该产生多个控制点」. Three small pieces:
+    //
+    //   · the **grips** come from `MaskHandles.handles` (normalised, upright source frame) and are
+    //     projected here — the only place that knows the crop, the straighten angle, the flips, the
+    //     backing scale and the zoom, i.e. `LoupeFraming`/`LoupeMapping`. No second projection.
+    //   · the **hit test** is `MaskHandles.hit`, in view **points**: the radius is the same on screen
+    //     at 25 % and at 400 %.
+    //   · the **drag** is `MaskCanvasController`'s (the same object that turns a drag into a stroke,
+    //     so the "one gesture, one commit" rule is in one place), with
+    //     `session.maskSourceSize` as its frame.
+
+    /// The selected mask's adjustable component, with everything a grip needs.
+    public struct MaskHandleTarget: Equatable {
+        public var maskID: String
+        public var component: Int
+        public var shape: MaskShape
+        public var feather: Double
+    }
+
+    /// The selected mask's drawn geometry, or nil when it has none (brush, colour, luminance,
+    /// semantic — and no selection at all).
+    public func maskHandleTarget() -> MaskHandleTarget? {
+        guard let session, let target = session.selectedAdjustableShape(),
+              let mask = session.edit.masks.first(where: { $0.id == target.maskID }),
+              mask.components.indices.contains(target.component) else { return nil }
+        return MaskHandleTarget(maskID: target.maskID, component: target.component,
+                                shape: target.shape,
+                                feather: mask.components[target.component].feather)
+    }
+
+    /// Grips and guides in view points for the overlay (and for the tests: this is what a click is
+    /// hit-tested against).
+    ///
+    /// `viewport`/`backingScale` exist for the headless tests — without a window the canvas has no
+    /// size and no scale, and a hit test must still be able to say "this point, in this frame".
+    public func maskHandlesLayout(viewport: ImageSize? = nil,
+                                  backingScale scaleOverride: Double? = nil) -> MaskHandlesLayout? {
+        guard let target = maskHandleTarget(), let framing = framing(viewport: viewport) else {
+            return nil
+        }
+        let scale = scaleOverride ?? backingScale
+        return MaskHandles.layout(shape: target.shape, feather: target.feather,
+                                  source: session?.maskSourceSize ?? ImageSize(width: 1, height: 1),
+                                  mapping: framing.mapping(of: viewState), pointScale: scale)
+    }
+
+    /// The grip under `point` (view points), or nil.
+    public func hitMaskHandle(atViewPoint point: CGPoint) -> MaskHandleKind? {
+        guard let layout = maskHandlesLayout() else { return nil }
+        return MaskHandles.hit(point, in: layout)
+    }
+
+    /// Take the grip under the click. `true` means the click belongs to a control point and **must
+    /// not** also start a pan or a shape-adjust drag — the caller returns on `true`.
+    @discardableResult
+    public func beginMaskHandleDrag(atViewPoint point: CGPoint,
+                                    viewport: ImageSize? = nil,
+                                    backingScale scaleOverride: Double? = nil) -> Bool {
+        guard let framing = framing(viewport: viewport) else { return false }
+        let scale = scaleOverride ?? backingScale
+        let mapping = framing.mapping(of: viewState)
+        guard let layout = maskHandlesLayout(viewport: viewport, backingScale: scale),
+              let kind = MaskHandles.hit(point, in: layout) else { return false }
+        let source = mapping.sourcePoint(viewX: Double(point.x) * scale,
+                                         viewY: Double(point.y) * scale)
+        guard source.x.isFinite, source.y.isFinite else { return false }
+        let normalized = NormalizedPoint(source.x / max(framing.sourceWidth, 1),
+                                        source.y / max(framing.sourceHeight, 1))
+        guard maskCanvas.beginHandleDrag(kind, at: normalized) else { return false }
+        maskHandlesOverlay.active = kind
+        refreshMaskHandles()
+        return true
+    }
+
+    /// One tick of a control-point drag. ⇧ = uniform (an ellipse keeps its aspect).
+    public func continueMaskHandleDrag(atViewPoint point: CGPoint, uniform: Bool = false,
+                                       viewport: ImageSize? = nil,
+                                       backingScale scaleOverride: Double? = nil) {
+        guard maskCanvas.isDraggingHandle, let framing = framing(viewport: viewport) else { return }
+        let scale = scaleOverride ?? backingScale
+        let source = framing.mapping(of: viewState)
+            .sourcePoint(viewX: Double(point.x) * scale, viewY: Double(point.y) * scale)
+        guard source.x.isFinite, source.y.isFinite else { return }
+        maskCanvas.extendHandleDrag(to: NormalizedPoint(source.x / max(framing.sourceWidth, 1),
+                                                       source.y / max(framing.sourceHeight, 1)),
+                                    uniform: uniform)
+        refreshMaskHandles()
+    }
+
+    /// Mouse-up: one commit, one ⌘Z.
+    public func endMaskHandleDrag() {
+        maskCanvas.endHandleDrag()
+        maskHandlesOverlay.active = nil
+        refreshMaskHandles()
+    }
+
+    /// Escape: the shape goes back, the history does not grow.
+    public func cancelMaskHandleDrag() {
+        maskCanvas.cancelHandleDrag()
+        maskHandlesOverlay.active = nil
+        refreshMaskHandles()
+    }
+
+    /// Rebuild the overlay from the live document. Cheap (a dozen points) and idempotent: the
+    /// overlay's setter compares before it redraws, so calling it on every mouse move is free.
+    public func refreshMaskHandles() {
+        maskHandlesOverlay.layout = maskHandlesLayout()
+    }
+
+    /// Control-point drags committed through the canvas (one per ⌘Z).
+    public var maskHandleDrags: Int { maskCanvas.maskHandleDrags }
+    /// The grip the last drag took, for the status/QA line.
+    public var lastMaskHandleLabel: String? { maskCanvas.lastHandleLabel }
+    public var isMaskHandleDragging: Bool { maskCanvas.isDraggingHandle }
 
     // MARK: edit re-render (50 ms debounce, single-flight)
 
