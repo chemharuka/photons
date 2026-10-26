@@ -95,6 +95,17 @@ extension Catalog {
 
     /// Find the root that contains `path`, or create one. Volume identity is the UUID, never the
     /// mount point: a card re-inserted at a different mount path is the same root.
+    /// The root a given path belongs to, creating one when nothing contains it.
+    ///
+    /// **Reference roots are folders, not volumes.** Matching only on the volume UUID folded every
+    /// folder of one disk into the first root that happened to exist, so importing `~/Desktop/US`
+    /// into a library that already had `~/Desktop/test` produced rows whose `rel_path` was a bare
+    /// filename — the paths resolved to files that were never there (no thumbnail, no decode, no
+    /// error). A root therefore has to *contain* the file: the deepest containing `pathHint` wins,
+    /// and a folder nothing contains becomes a root of its own.
+    ///
+    /// Copy roots are different by design: the originals live inside the package, so one root per
+    /// volume is enough and the bookkeeping stays simple.
     public func ensureRoot(for path: URL, mode: ManagementMode) throws -> SourceRoot {
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -104,29 +115,52 @@ extension Catalog {
         // Ascend to a directory: a file argument belongs to its parent folder.
         var rootURL = isDir.boolValue ? path : path.deletingLastPathComponent()
         rootURL = rootURL.standardizedFileURL
+        let rootPath = rootURL.path
+
+        let existing = try roots().filter { $0.managementMode == mode }
+        if mode == .reference {
+            // Deepest container wins; a folder that contains itself matches exactly.
+            if var hit = existing
+                .filter({ Self.path($0.pathHint, contains: rootPath) })
+                .max(by: { $0.pathHint.count < $1.pathHint.count }) {
+                if hit.status != .online {
+                    hit.status = .online
+                    try dbQueue.write { db in try hit.update(db) }
+                }
+                return hit
+            }
+        } else {
+            let volumeUUID = (try? rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) ?? nil
+            if var hit = existing.first(where: { root in
+                if root.pathHint == rootPath { return true }
+                if let v = volumeUUID, let rv = root.volumeUuid { return v == rv }
+                return false
+            }) {
+                if hit.status != .online {
+                    hit.status = .online
+                    try dbQueue.write { db in try hit.update(db) }
+                }
+                return hit
+            }
+        }
 
         let volumeUUID = (try? rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) ?? nil
-        let existing = try roots().first { root in
-            if let v = volumeUUID, let rv = root.volumeUuid, v == rv { return true }
-            return root.pathHint == rootURL.path
-        }
-        if var hit = existing {
-            if hit.status != .online {
-                hit.status = .online
-                try dbQueue.write { db in try hit.update(db) }
-            }
-            return hit
-        }
-
         let bookmark = try? rootURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
         let root = SourceRoot(volumeUuid: volumeUUID,
                               bookmark: bookmark,
                               displayName: rootURL.lastPathComponent,
-                              pathHint: rootURL.path,
+                              pathHint: rootPath,
                               managementMode: mode,
                               status: .online)
         try dbQueue.write { db in try root.insert(db) }
         return root
+    }
+
+    /// Is `descendant` the same path as `ancestor`, or inside it? Component-aware, so
+    /// `/a/bc` is *not* inside `/a/b`.
+    static func path(_ ancestor: String, contains descendant: String) -> Bool {
+        let a = ancestor.hasSuffix("/") ? String(ancestor.dropLast()) : ancestor
+        return descendant == a || descendant.hasPrefix(a + "/")
     }
 
     /// Re-check every root for reachability. Offline roots keep all their rows (never delete).

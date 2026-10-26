@@ -70,13 +70,30 @@ public final class ImportService: @unchecked Sendable {
         let started = CFAbsoluteTimeGetCurrent()
         guard !sources.isEmpty else { throw CatalogError.importSourceMissing(URL(fileURLWithPath: ".")) }
 
-        let root: SourceRoot
+        let explicitRoot: SourceRoot?
         if let id = options.rootID {
             guard let r = try catalog.root(id: id) else { throw CatalogError.noSuchSourceRoot(id) }
-            root = r
+            explicitRoot = r
         } else {
-            root = try catalog.ensureRoot(for: sources[0], mode: options.mode)
+            explicitRoot = nil
         }
+        /// The root that contains this file.
+        ///
+        /// Resolved **per file**, not once for the whole run: two folders on the same disk are two
+        /// reference roots, and a file must land in the root whose `pathHint` contains it — otherwise
+        /// its `rel_path` is a bare filename that resolves to a file which was never there.
+        var resolvedRoots: [String: SourceRoot] = [:]
+        func rootContaining(_ file: URL) throws -> SourceRoot {
+            if let explicitRoot { return explicitRoot }
+            let dir = file.deletingLastPathComponent().standardizedFileURL.path
+            if let hit = resolvedRoots[dir] { return hit }
+            let r = try catalog.ensureRoot(for: file, mode: options.mode)
+            resolvedRoots[dir] = r
+            return r
+        }
+        // The session names one root; it is the one the first source resolves to (a run that spans
+        // several roots keeps every row's own `source_root_id`, which is what files are read from).
+        let root = try rootContaining(sources[0])
 
         // Any session left 'running' belongs to a process that died. Book-keep it, then start clean:
         // idempotency across runs comes from content_hash, not from resuming a stale session.
@@ -112,8 +129,8 @@ public final class ImportService: @unchecked Sendable {
             processed += 1
             summary.total += 1
             do {
-                let outcome = try importOne(file, root: root, options: options, sessionId: session.id,
-                                            summary: &summary)
+                let outcome = try importOne(file, root: try rootContaining(file), options: options,
+                                            sessionId: session.id, summary: &summary)
                 switch outcome {
                 case .added: summary.added += 1
                 case .duplicate: summary.duplicate += 1
@@ -213,7 +230,7 @@ public final class ImportService: @unchecked Sendable {
             // Same bytes. If the row's file is gone and the bytes turned up elsewhere, it moved —
             // keep the row (its rating, its develop_json, its history) and just re-point it.
             let newRelPath = root.managementMode == .reference
-                ? relativePath(of: url, under: root.pathHint)
+                ? try relativePath(of: url, under: root.pathHint)
                 : existing.relPath
             let oldURL = try? catalog.fileURL(for: existing)
             let oldExists = oldURL.map { fm.fileExists(atPath: $0.path) } ?? false
@@ -240,7 +257,7 @@ public final class ImportService: @unchecked Sendable {
         if root.managementMode == .copy {
             relPath = try materialise(url, meta: meta, options: options)
         } else {
-            relPath = relativePath(of: url, under: root.pathHint)
+            relPath = try relativePath(of: url, under: root.pathHint)
         }
 
         let asset = Asset(sourceRootId: root.id,
@@ -323,11 +340,16 @@ public final class ImportService: @unchecked Sendable {
 
     // MARK: paths
 
-    private func relativePath(of url: URL, under rootPath: String) -> String {
+    /// `sub/dir/file.dng` for a file under `rootPath`; throws when it is not.
+    ///
+    /// It used to return the bare filename in that case, which wrote a row pointing at
+    /// `<root>/file.dng` — a path that never existed, so the asset had no thumbnail and no decode and
+    /// nothing reported an error. A file outside its root is a bug in root selection, not a filename.
+    private func relativePath(of url: URL, under rootPath: String) throws -> String {
         let base = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL.path
         let full = url.standardizedFileURL.path
         if full.hasPrefix(base + "/") { return String(full.dropFirst(base.count + 1)) }
-        return url.lastPathComponent
+        throw CatalogError.fileOperationFailed("\\(full) is not inside its source root \\(base)")
     }
 
     /// Copy into `originals/` (write to `.tmp`, then rename — never a half file under the real name)
@@ -345,7 +367,7 @@ public final class ImportService: @unchecked Sendable {
             }
             let unique = Self.uniqueVariant(for: destURL)
             try copy(url, to: unique)
-            return relativePath(of: unique, under: catalog.layout.originalsURL.path)
+            return try relativePath(of: unique, under: catalog.layout.originalsURL.path)
         }
         try copy(url, to: destURL)
         return dest
