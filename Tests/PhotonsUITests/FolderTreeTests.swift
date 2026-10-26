@@ -6,15 +6,19 @@ import PhotonsCatalog
 
 /// The left browser's source list is a **folder tree**, not a flat list of roots.
 ///
-/// Three things have to hold at once, and each of them was wrong before:
+/// Four things have to hold at once, and each of them was wrong before:
 ///
 /// * the shape — 全部照片 → the source root → the folders `rel_path` implies, indented, collapsible,
 ///   with counts (`day2` holds 2, its child `sub` holds 1);
-/// * the filter — clicking `day2` must show exactly that subtree in the photo list, and clicking
-///   全部照片 must bring everything back;
+/// * the filter — clicking `day2` must show exactly that subtree in the photo list, clicking
+///   全部照片 must bring everything back, and (021 B) a ⌘-multi-selection must be the **union** of
+///   the highlighted subtrees, across roots, without `day2` swallowing `day2x`;
 /// * the height — the tree was `rows × 46`, capped at 200, so a one-root library got a ~52 pt strip
-///   ("这个区域的窗口太窄，大概只有几十 px"). It is now at least 180 pt, at most 45 % of the panel,
-///   and leaves the photo list its own 120 pt floor.
+///   ("这个区域的窗口太窄，大概只有几十 px"); it is now at least 180 pt, at most 45 % of the panel,
+///   and leaves the photo list its own 120 pt floor. Since 021 A its **rows** are 28 pt (the photo
+///   rows below keep 46), which is what "文件夹高度太高了" was about;
+/// * the state — a reload must keep the highlighted folders (by `(rootId, path)`, never by row
+///   index) and must not reset the filter to 全部照片.
 @MainActor
 final class FolderTreeTests: XCTestCase {
 
@@ -78,7 +82,7 @@ final class FolderTreeTests: XCTestCase {
 
     // MARK: row metrics
 
-    /// The folder name sits **inside** its row and centred in it.
+    /// The folder name sits **inside** its row and centred in it, in a 28 pt row (021 A).
     ///
     /// `NSOutlineView.style = .sourceList` applies the system's compact row metrics; with the row
     /// height set *before* the style it came out ~24 pt while the cell still drew its title at y 13…31
@@ -90,8 +94,18 @@ final class FolderTreeTests: XCTestCase {
         controller.view.layoutSubtreeIfNeeded()
 
         let outline = try XCTUnwrap(Self.findOutline(controller.view))
-        XCTAssertEqual(outline.rowHeight, WorkspaceLayout.browserRowHeight, accuracy: 0.01,
+        XCTAssertEqual(outline.rowHeight, WorkspaceLayout.browserTreeRowHeight, accuracy: 0.01,
                        "a source-list style must not shrink the row")
+        XCTAssertEqual(outline.rowHeight, 28, accuracy: 0.01, "021 A: 28 pt, measured")
+        XCTAssertLessThan(outline.rowHeight, WorkspaceLayout.browserRowHeight,
+                          "the folder tree is the column the owner asked to shrink")
+
+        // The photo rows below are *not* part of that change: they carry a 34 pt thumbnail and two
+        // lines of text, and they still measure 46 pt.
+        let tables = Self.findTables(controller.view).filter { $0 !== outline }
+        let photos = try XCTUnwrap(tables.first, "the photo list is a table next to the outline")
+        XCTAssertEqual(photos.rowHeight, WorkspaceLayout.browserRowHeight, accuracy: 0.01)
+        XCTAssertEqual(photos.rowHeight, 46, accuracy: 0.01, "the photo row keeps its 46 pt")
 
         var checked = 0
         for row in 0..<outline.numberOfRows {
@@ -100,7 +114,7 @@ final class FolderTreeTests: XCTestCase {
                       .first(where: { !$0.stringValue.isEmpty && $0.font?.pointSize == 12 })
             else { continue }
             let height = cell.bounds.height
-            XCTAssertEqual(height, WorkspaceLayout.browserRowHeight, accuracy: 0.01,
+            XCTAssertEqual(height, WorkspaceLayout.browserTreeRowHeight, accuracy: 0.01,
                            "row \(row) cell height")
             XCTAssertGreaterThanOrEqual(label.frame.minY, -0.01,
                                         "\(label.stringValue) starts above its row (\(label.frame))")
@@ -119,6 +133,12 @@ final class FolderTreeTests: XCTestCase {
             if let found = findOutline(sub) { return found }
         }
         return nil
+    }
+
+    private static func findTables(_ view: NSView) -> [NSTableView] {
+        var out = view is NSTableView ? [view as! NSTableView] : []
+        for sub in view.subviews { out += findTables(sub) }
+        return out
     }
 
     // MARK: shape
@@ -206,6 +226,164 @@ final class FolderTreeTests: XCTestCase {
                        "the tree keeps the folders the user had open")
     }
 
+    // MARK: multi-select = filter (021 B)
+
+    private func outlineView() throws -> NSOutlineView {
+        try XCTUnwrap(Self.findOutline(controller.view))
+    }
+
+    private func rowIndex(_ title: String) throws -> Int {
+        try XCTUnwrap(controller.folderTreeRows.firstIndex { $0.title == title },
+                      "no row titled \(title) in \(controller.folderTreeRows.map(\.title))")
+    }
+
+    /// Let the observation bridge land: `session.selectFolders` re-runs the query synchronously, but
+    /// the tree and the photo table are rebuilt on the next main-queue turn.
+    private func settle(_ turns: Int = 3) {
+        for _ in 0..<turns {
+            let turned = expectation(description: "main-queue turn")
+            DispatchQueue.main.async { turned.fulfill() }
+            wait(for: [turned], timeout: 5)
+        }
+    }
+
+    /// ⌘-clicking two folders filters to their **union**. This drives AppKit's own multi-selection
+    /// (`selectRowIndexes` posts `outlineViewSelectionDidChange`, exactly what a ⌘-click does) — there
+    /// is no key handling in the controller to test separately.
+    func testCommandClickingTwoFoldersFiltersToTheirUnion() throws {
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        let outline = try outlineView()
+        outline.selectRowIndexes(IndexSet([try rowIndex("day2"), try rowIndex("day2x")]),
+                                 byExtendingSelection: false)
+
+        XCTAssertEqual(Set(session.assets.map(\.filename)), ["b.dng", "c.dng", "d.dng"],
+                       "day2 ∪ day2x — d.dng is not swallowed by the day2 prefix")
+        XCTAssertEqual(session.selectedFolders.count, 2)
+        XCTAssertEqual(controller.selectedFolderKeys.count, 2, "both rows stay highlighted")
+
+        settle()
+        XCTAssertEqual(controller.photoRowCount, 3, "the photo list drew the union")
+    }
+
+    /// `day2` + `day2/sub`: the child is inside the parent, so the list is `day2` once — and both
+    /// rows the user selected stay highlighted.
+    func testAParentAndItsChildUnionWithoutDuplicateRows() throws {
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.setFolderExpanded(rootID: root.id, path: "day2", true)
+        controller.selectFolderRows([FolderSelection(rootId: root.id, path: "day2"),
+                                     FolderSelection(rootId: root.id, path: "day2/sub")])
+
+        XCTAssertEqual(Set(session.assets.map(\.filename)), ["b.dng", "c.dng"])
+        XCTAssertEqual(controller.photoRowCount, 2, "c.dng is not listed twice")
+        XCTAssertEqual(controller.selectedFolderKeys.count, 2)
+    }
+
+    /// A selection that spans two roots is the union across them (the old single `folderPath` could
+    /// not even name two roots).
+    func testTheUnionSpansRoots() throws {
+        let other = try addSecondRoot(["day2/z.dng", "day3/y.dng"])
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.setFolderExpanded(rootID: other.id, path: "", true)
+        controller.setFolderExpanded(rootID: other.id, path: "day2", true)
+
+        controller.selectFolderRows([FolderSelection(rootId: root.id, path: "day2"),
+                                     FolderSelection(rootId: other.id, path: "day2")])
+
+        XCTAssertEqual(Set(session.assets.map(\.filename)), ["b.dng", "c.dng", "z.dng"])
+        XCTAssertEqual(controller.photoRowCount, 3)
+        XCTAssertEqual(Set(controller.selectedFolderKeys), ["\(root.id)|day2", "\(other.id)|day2"],
+                       "one highlighted row per root — same path, different roots")
+    }
+
+    /// ⌘-clicking the last highlight off means 「全部照片」: the whole library, and the highlight moves
+    /// back to that row (it is the model that says so, not AppKit's empty selection).
+    func testClearingTheSelectionGoesBackToTheWholeLibrary() throws {
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.selectFolderRows([FolderSelection(rootId: root.id, path: "day2")])
+        XCTAssertEqual(session.assets.count, 2)
+
+        controller.selectFolderRows([])
+        XCTAssertEqual(session.assets.count, 4)
+        XCTAssertTrue(session.selectedFolders.isEmpty)
+        XCTAssertEqual(controller.selectedFolderKeys, ["*|"], "the highlight is back on 全部照片")
+    }
+
+    /// 「全部照片」 is the library, not a folder: it can only be a selection of one, and the model
+    /// collapses a mixed set to "no constraint" (021 §B — the catalog's documented choice).
+    func testAllPhotosCollapsesTheSelection() {
+        XCTAssertEqual(CatalogSession.normalizedFolders([FolderSelection(rootId: nil)]), [])
+        XCTAssertEqual(CatalogSession.normalizedFolders([FolderSelection(rootId: nil),
+                                                         FolderSelection(rootId: "r", path: "day2")]), [])
+        XCTAssertEqual(CatalogSession.normalizedFolders([FolderSelection(rootId: "r", path: "/day2/"),
+                                                         FolderSelection(rootId: "r", path: "day2")]),
+                       [FolderSelection(rootId: "r", path: "day2")],
+                       "the same row selected twice is one clause, not two")
+    }
+
+    // MARK: a reload keeps the selection (by rootId + path, never by row index)
+
+    /// A rating, an import, a metadata write — anything that calls `reload()` — must not move a
+    /// multi-selection, and `reloadData()` must not auto-select row 0 and wipe the filter.
+    func testTheMultiSelectionSurvivesAReload() throws {
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.selectFolderRows([FolderSelection(rootId: root.id, path: "day2"),
+                                     FolderSelection(rootId: root.id, path: "day2x")])
+        let keysBefore = Set(controller.selectedFolderKeys)
+        XCTAssertEqual(session.assets.count, 3)
+
+        session.reload()
+        controller.refresh()
+
+        XCTAssertEqual(session.selectedFolders,
+                       [FolderSelection(rootId: root.id, path: "day2"),
+                        FolderSelection(rootId: root.id, path: "day2x")])
+        XCTAssertEqual(session.assets.count, 3, "the filter survived, it was not reset to 全部照片")
+        XCTAssertEqual(controller.photoRowCount, 3)
+        XCTAssertEqual(Set(controller.selectedFolderKeys), keysBefore,
+                       "the same two rows are still highlighted after the rebuild")
+    }
+
+    /// A selected folder that lost its last photo falls back to its root — the multi-selection case
+    /// of the 020 rule "narrow to what still exists, never filter to nothing".
+    func testASelectedFolderThatDisappearsFallsBackToItsRoot() throws {
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.selectFolderRows([FolderSelection(rootId: root.id, path: "day2"),
+                                     FolderSelection(rootId: root.id, path: "day2x")])
+
+        let catalog = try Catalog.open(at: library)
+        let ids = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT id FROM assets WHERE rel_path LIKE 'day2x/%'")
+        }
+        for id in ids { try catalog.setDeleted(true, forAsset: id) }
+
+        session.reload()
+        controller.refresh()
+
+        XCTAssertEqual(session.selectedFolders, [FolderSelection(rootId: root.id, path: "day2"),
+                                                 FolderSelection(rootId: root.id, path: nil)],
+                       "day2x is gone, its root takes its place")
+        XCTAssertEqual(Set(session.assets.map(\.filename)), ["a.dng", "b.dng", "c.dng"])
+    }
+
+    /// Register a second source root with the given photos and reload, the way an import would.
+    @discardableResult
+    private func addSecondRoot(_ relPaths: [String]) throws -> SourceRoot {
+        let catalog = try Catalog.open(at: library)
+        let dir = tmp.appendingPathComponent("other", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let other = try catalog.ensureRoot(for: dir, mode: .reference)
+        for relPath in relPaths {
+            let asset = Asset(sourceRootId: other.id, relPath: relPath,
+                              filename: (relPath as NSString).lastPathComponent,
+                              ext: (relPath as NSString).pathExtension, kind: .raw,
+                              size: 1, mtime: 0, contentHash: UUID().uuidString)
+            try catalog.dbQueue.write { db in try asset.insert(db) }
+        }
+        session.reload()
+        controller.refresh()
+        return other
+    }
+
     // MARK: height
 
     /// The tree is a navigation surface with a floor, not `rows × 46`: at the contract window size a
@@ -261,6 +439,8 @@ final class FolderTreeTests: XCTestCase {
     func testTheTreeHeightContract() {
         XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 2, panelHeight: 744), 180,
                        accuracy: 0.001, "two rows still get the 180 pt floor")
+        XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 7, panelHeight: 744), 7 * 28 + 6,
+                       accuracy: 0.001, "021 A: the content term is rows × 28 + 6, not rows × 46 + 6")
         XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 100, panelHeight: 900), 405,
                        accuracy: 0.001, "45 % of 900")
         XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 100, panelHeight: 1200), 540,

@@ -4,7 +4,8 @@ import PhotonsCatalog
 /// Left browser (Phos "素材浏览"): the source roots on top, the photo list below.
 ///
 /// Matte, not glass — §2b item 5: big panels stay matte (`.sidebar`), only small widget containers
-/// use glass. Rows are 46 pt and recycled, so 10k photos cost the same as 10.
+/// use glass. Photo rows are 46 pt and recycled, so 10k photos cost the same as 10; the folder tree
+/// above them is 28 pt per row (021 A).
 ///
 /// The 34 pt square in a row is a **thumbnail**, not a colour chip. It used to be painted as
 /// `PlaceholderSwatch.color(for:)` and nothing ever replaced it, which is why the default browser
@@ -181,8 +182,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         table.addTableColumn(col)
     }
 
-    /// The folder tree. Same row height, font and `.sourceList` style as the flat list it replaces —
-    /// what changes is the indentation, the disclosure triangles and the folder glyphs.
+    /// The folder tree. 28 pt rows and `.sourceList` — a navigation row is one 12 pt line and a
+    /// folder glyph, not a 46 pt photo row (021 A); `configure(table:)` keeps the photo rows at 46.
     private func configureOutline() {
         sourcesOutline.headerView = nil
         sourcesOutline.backgroundColor = .clear
@@ -192,7 +193,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // 24 pt ones — the folder name sat above the row and got clipped by it.
         sourcesOutline.style = .sourceList
         sourcesOutline.rowSizeStyle = .custom
-        sourcesOutline.rowHeight = WorkspaceLayout.browserRowHeight
+        sourcesOutline.rowHeight = WorkspaceLayout.browserTreeRowHeight
         sourcesOutline.intercellSpacing = NSSize(width: 0, height: 0)
         sourcesOutline.selectionHighlightStyle = .regular
         sourcesOutline.dataSource = self
@@ -203,7 +204,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // change through the delegate, silently resetting the user's folder filter on every refresh
         // (a rating, an import, `reload()`). The highlight is installed from the model instead
         // (`selectSourceItem`), and a click in the empty area below the tree simply keeps the filter.
-        sourcesOutline.allowsMultipleSelection = false
+        // 021 B: still `true` — ⌘-clicking the last row off is a legitimate gesture ("back to
+        // everything") and it is handled in `outlineViewSelectionDidChange`, not by AppKit.
+        sourcesOutline.allowsMultipleSelection = true
         sourcesOutline.floatsGroupRows = false
         // 14 pt per level: a `day2/sub` row still leaves ~150 pt for its name at the 212 pt default
         // width, and the indent reads as a hierarchy rather than as a stray gap.
@@ -407,16 +410,35 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     /// Put the outline's highlight on the model's selection. The model is the truth: a refresh that
-    /// cannot find the selected folder falls back to 全部照片, which is also what the session does.
+    /// cannot find a selected folder drops that row from the highlight (the session drops it too),
+    /// and an empty model selection — 「全部照片」 — highlights the 全部照片 row.
+    ///
+    /// 021 B: restored **by `(rootId, path)`**, never by index. `reloadData()` keeps the table's
+    /// selected *indexes* but the rows behind them are new objects, so an index-based restore would
+    /// quietly move a ⌘-selection from `day2` to whatever row now sits there. Installed with
+    /// `isApplyingModel` on, so the delegate cannot write AppKit's own idea of the selection back
+    /// into the session (which is what wiped the filter in the 020 handoff).
     private func selectSourceItem() {
         guard let session else { return }
-        let target = item(rootID: session.selectedRootID, path: session.selectedFolderPath)
-            ?? allPhotosItem
-        guard let target else { return }
-        expandAncestors(of: target)
-        let row = sourcesOutline.row(forItem: target)
+        var rows = IndexSet()
+        if session.selectedFolders.isEmpty {
+            if let all = allPhotosItem, sourcesOutline.row(forItem: all) >= 0 {
+                rows.insert(sourcesOutline.row(forItem: all))
+            }
+        } else {
+            for selection in session.selectedFolders {
+                // A model row the tree cannot draw (it should not happen — `reload()` prunes those)
+                // contributes nothing, so the highlight never points at a row that is not selected.
+                guard let target = item(rootID: selection.rootId, path: selection.path ?? "") else {
+                    continue
+                }
+                expandAncestors(of: target)
+                let row = sourcesOutline.row(forItem: target)
+                if row >= 0 { rows.insert(row) }
+            }
+        }
         isApplyingModel = true
-        if row >= 0 { sourcesOutline.selectRowIndexes([row], byExtendingSelection: false) }
+        sourcesOutline.selectRowIndexes(rows, byExtendingSelection: false)
         isApplyingModel = false
     }
 
@@ -706,11 +728,52 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     /// A folder row is a filter, not a selection: the same `reload()` the flat list drove.
+    ///
+    /// 021 B: the whole outline selection is a filter, ORed. AppKit does the ⌘-click (free
+    /// multi-select) and the ⇧-range itself — there is no key handling here on purpose.
+    ///
+    /// An **empty** selection is only acted on when it came from a real click on a row (⌘-clicking
+    /// the last highlight off → back to 全部照片 / the whole library). Clicking the blank area under
+    /// the last row also empties it, and that must leave the filter exactly as it was — the model is
+    /// reinstalled a line later by `refresh()`.
     public func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isApplyingModel, let session else { return }
-        let row = sourcesOutline.selectedRow
-        guard row >= 0, let item = sourcesOutline.item(atRow: row) as? FolderTreeItem else { return }
-        session.selectFolder(rootID: item.rootID, path: item.path)
+        let items = sourcesOutline.selectedRowIndexes
+            .compactMap { sourcesOutline.item(atRow: $0) as? FolderTreeItem }
+        if items.isEmpty {
+            guard sourcesOutline.clickedRow >= 0 else { return }
+            session.selectFolders([])
+            selectSourceItem()
+            return
+        }
+        let clicked = sourcesOutline.clickedRow >= 0
+            ? sourcesOutline.item(atRow: sourcesOutline.clickedRow) as? FolderTreeItem
+            : nil
+        let chosen = Self.folderSelection(from: items, clicked: clicked)
+        session.selectFolders(chosen)
+        // Repaired **synchronously and without a data reload**: `reloadData()` inside a selection
+        // notification is AppKit reentrancy for nothing (`session.selectFolders` already re-ran the
+        // query and the bridge rebuilds the tree on the next turn). This only re-points the highlight
+        // at what the model accepted, which is what keeps 「全部照片」 exclusive on screen.
+        selectSourceItem()
+    }
+
+    /// Turn highlighted rows into the session's selection.
+    ///
+    /// 「全部照片」 is the library, not a folder, so it can only ever be a selection of exactly one.
+    /// When it is highlighted together with folders — only reachable with ⌘ — the **row the user just
+    /// clicked decides**: ⌘-clicking 全部照片 means "back to everything", ⌘-clicking a folder on top
+    /// of it means "narrow to this". The catalog takes the same decision defensively (an all-photos
+    /// entry collapses the whole filter), so the two can never disagree about what is on screen.
+    static func folderSelection(from items: [FolderTreeItem],
+                               clicked: FolderTreeItem?) -> [FolderSelection] {
+        let allPhotos = items.filter(\.isAllPhotos)
+        let folders = items.filter { !$0.isAllPhotos }
+        if !allPhotos.isEmpty, !folders.isEmpty {
+            if let clicked, clicked.isAllPhotos { return [FolderSelection(rootId: nil)] }
+            return folders.map { FolderSelection(rootId: $0.rootID, path: $0.path) }
+        }
+        return items.map { FolderSelection(rootId: $0.rootID, path: $0.path) }
     }
 
     public func outlineViewItemDidExpand(_ notification: Notification) {
@@ -762,14 +825,31 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// synchronous (and what a test can assert on without spinning the run loop). The bridge's later
     /// pass finds nothing changed and is a no-op.
     public func selectFolderRow(rootID: String?, path: String) {
-        guard let item = item(rootID: rootID, path: path) else { return }
-        expandAncestors(of: item)
-        let row = sourcesOutline.row(forItem: item)
-        isApplyingModel = true
-        if row >= 0 { sourcesOutline.selectRowIndexes([row], byExtendingSelection: false) }
-        isApplyingModel = false
-        session?.selectFolder(rootID: rootID, path: path)
+        selectFolderRows([FolderSelection(rootId: rootID, path: path)])
+    }
+
+    /// The same one step for a **set** of rows — what a ⌘-multi-selection ends up as (021 B).
+    ///
+    /// Used by the tests and by `--ui-smoke` to reach the state AppKit produces with ⌘-clicks without
+    /// synthesising mouse events. The highlight is not set here: it is installed from the model by
+    /// `refresh()` → `selectSourceItem()`, i.e. by the same path a real click takes, so a test that
+    /// asserts two highlighted rows is asserting the restore-by-`(rootId, path)` logic.
+    public func selectFolderRows(_ folders: [FolderSelection]) {
+        guard let session else { return }
+        for folder in session.selectedFolders + folders {
+            if let target = item(rootID: folder.rootId, path: folder.path ?? "") {
+                expandAncestors(of: target)
+            }
+        }
+        session.selectFolders(folders)
         refresh()
+    }
+
+    /// The highlighted tree rows as `(rootId, path)` keys — the probe the multi-select tests read.
+    public var selectedFolderKeys: [String] {
+        sourcesOutline.selectedRowIndexes.compactMap { row in
+            (sourcesOutline.item(atRow: row) as? FolderTreeItem)?.key
+        }
     }
 
     public var photoRowCount: Int { photosTable.numberOfRows }

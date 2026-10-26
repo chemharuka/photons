@@ -3,36 +3,74 @@ import GRDB
 
 // MARK: - request / report types
 
+/// One folder row in the source tree that is part of the filter (021 B).
+///
+/// `rootId == nil` is 「全部照片」 — the whole library, not a root — and the catalog treats it as
+/// "no constraint at all": the row is what a user clicks to get *back* to everything, so it can
+/// never be one clause of a union. `path` is relative to the root and `/`-separated; `nil` (or
+/// `""`, or stray slashes, which `normalizedFolderPath` eats) is the root itself.
+///
+/// `Hashable` so the browser can build the selection as a set and hand the tree back exactly what
+/// the user left highlighted: identity is `(rootId, path)`, never a row index — a `reloadData()`
+/// moves rows, and restoring by index is what silently retargeted the filter in the 020 handoff.
+public struct FolderSelection: Sendable, Hashable {
+    public var rootId: String?
+    public var path: String?
+
+    public init(rootId: String?, path: String? = nil) {
+        self.rootId = rootId
+        self.path = path
+    }
+
+    /// 「全部照片」: the whole library.
+    public var isAllPhotos: Bool { rootId == nil }
+    /// The path with stray slashes removed; `nil` is the root itself.
+    public var normalizedPath: String? { AssetFilter.normalizedFolderPath(path) }
+    /// Stable identity for restoring the outline's highlight after `reloadData()`.
+    public var key: String { "\(rootId ?? "*")|\(normalizedPath ?? "")" }
+
+    /// Identity is the **canonical** `(rootId, path)`, not the raw one: `day2/`, `/day2` and `day2`
+    /// are the same folder row, so a set of selections cannot hold the same row twice — and a
+    /// comparison against what the session stored cannot fail because of a stray slash.
+    public static func == (lhs: FolderSelection, rhs: FolderSelection) -> Bool { lhs.key == rhs.key }
+    public func hash(into hasher: inout Hasher) { hasher.combine(key) }
+}
+
 public struct AssetFilter: Sendable {
     public var ratingAtLeast: Int?
     public var cameraKey: String?
     public var sinceLocalDate: String?
-    public var sourceRootId: String?
     public var includeDeleted: Bool
     public var limit: Int
     /// Catalog metadata facets (M5). `flag` is `"pick"` / `"reject"`, `colorLabel` is one of
     /// `red…purple`. Equality against the `assets` columns, so `nil` means "any".
     public var flagEquals: String?
     public var colorLabelEquals: String?
-    /// A **folder subtree** inside `sourceRootId`: `"day2"` matches `day2/b.dng` and
-    /// `day2/sub/c.dng` but never `day2x/d.dng`. `nil` or `""` means the whole root, which is what
-    /// a click on the root itself asks for. Component-aware by construction: the compared prefix
-    /// always ends in `/`, so a sibling that merely starts with the same letters is not swallowed.
-    public var folderPath: String?
+    /// The folder rows the source tree has selected (021 B), ORed together.
+    ///
+    /// Empty = no folder constraint, i.e. the whole library — which is also what 「全部照片」 means,
+    /// so `[FolderSelection(rootId: nil)]` normalises to empty rather than to a clause. A selection
+    /// is *not* restricted to one root: `rootA|day2` + `rootB|night` is a cross-root union, which is
+    /// the whole point of ⌘-multi-select (the old single `folderPath` + `sourceRootId` pair could
+    /// only ever name one root's one subtree).
+    ///
+    /// Overlapping selections are fine and are **not** deduplicated in the result: the clauses are a
+    /// `WHERE … OR …`, so a row that matches both `day2` and `day2/sub` is still returned once, and
+    /// no `DISTINCT` (or second pass) is needed to keep `day2 + day2/sub` equal to `day2`.
+    public var folders: [FolderSelection]
 
     public init(ratingAtLeast: Int? = nil, cameraKey: String? = nil, sinceLocalDate: String? = nil,
-                sourceRootId: String? = nil, includeDeleted: Bool = false, limit: Int = 200,
+                includeDeleted: Bool = false, limit: Int = 200,
                 flagEquals: String? = nil, colorLabelEquals: String? = nil,
-                folderPath: String? = nil) {
+                folders: [FolderSelection] = []) {
         self.ratingAtLeast = ratingAtLeast
         self.cameraKey = cameraKey
         self.sinceLocalDate = sinceLocalDate
-        self.sourceRootId = sourceRootId
         self.includeDeleted = includeDeleted
         self.limit = limit
         self.flagEquals = flagEquals
         self.colorLabelEquals = colorLabelEquals
-        self.folderPath = folderPath
+        self.folders = folders
     }
 
     /// `"day2/"` → `"day2"`, `"/day2//sub/"` → `"day2/sub"`, `""`/`nil` → `nil` (= the whole root).
@@ -258,14 +296,35 @@ extension Catalog {
         if let f = filter.flagEquals { sql += " AND flag = ?"; args.append(f) }
         if let l = filter.colorLabelEquals { sql += " AND color_label = ?"; args.append(l) }
         if let d = filter.sinceLocalDate { sql += " AND capture_local_date >= ?"; args.append(d) }
-        if let s = filter.sourceRootId { sql += " AND source_root_id = ?"; args.append(s) }
-        // Folder subtree, segment-safe and literal. `instr(rel_path, 'day2/') = 1` asks "does the
-        // path *start* with this exact text": unlike `LIKE 'day2%'` it cannot be fooled by a `_` or
-        // `%` in a real folder name, and unlike `LIKE` on a wildcard-free string it cannot swallow
-        // `day2x/` either, because the tested prefix ends in `/`.
-        if let folder = AssetFilter.normalizedFolderPath(filter.folderPath) {
-            sql += " AND instr(rel_path, ?) = 1"
-            args.append(folder + "/")
+        // Folder selection: an **OR group** of `(root match AND path prefix)` clauses, every value
+        // bound (`?`), never interpolated — a folder is data (`100%_raw` is a real folder name in the
+        // tests), so it must never reach the SQL text.
+        //
+        // Segment-safe by construction: `instr(rel_path, 'day2/') = 1` asks "does the path *start*
+        // with this exact text", which cannot swallow `day2x/` (the prefix ends in `/`) and cannot be
+        // fooled by a `_` or `%` in the name. An empty path is the root itself, so it contributes a
+        // bare `source_root_id = ?` — the old `sourceRootId` field, now per selection instead of
+        // once for the whole filter.
+        //
+        // 「全部照片」 in the set wins: the whole library, the other rows ignored (021 §B, last row of
+        // the table). The browser also normalises the combination away before it gets here, so this
+        // branch is the contract, not a path a click can reach.
+        if !filter.folders.contains(where: { $0.isAllPhotos }) {
+            var clauses: [String] = []
+            for folder in filter.folders {
+                guard let root = folder.rootId else { continue }
+                if let path = folder.normalizedPath {
+                    clauses.append("(source_root_id = ? AND instr(rel_path, ?) = 1)")
+                    args.append(root)
+                    args.append(path + "/")
+                } else {
+                    clauses.append("(source_root_id = ?)")
+                    args.append(root)
+                }
+            }
+            if !clauses.isEmpty {
+                sql += " AND (" + clauses.joined(separator: " OR ") + ")"
+            }
         }
         sql += " ORDER BY capture_time DESC, id LIMIT ?"
         args.append(filter.limit)
