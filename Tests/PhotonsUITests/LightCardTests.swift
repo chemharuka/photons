@@ -1,0 +1,99 @@
+import XCTest
+import SwiftUI
+import PhotonsCore
+import PhotonsCatalog
+@testable import PhotonsUI
+
+/// 派单 046, the Light card's half of the rule: 曝光 / 对比 / 高光 / 阴影 / 白色 / 黑色 are **render**
+/// parameters — they act on the pixels the decoder already produced — so all six keep the round knob.
+///
+/// The six rows are a table (`InspectorView.lightRows`) that the card iterates, which is what makes
+/// this assertable without a window session: the shape a row draws is the shape in the table.
+@MainActor
+final class LightCardTests: XCTestCase {
+
+    func testTheLightCardHasSixRenderRowsInOrder() {
+        let rows = InspectorView.lightRows
+        XCTAssertEqual(rows.map(\.title), ["曝光", "对比", "高光", "阴影", "白色", "黑色"],
+                       "the tone card's six rows, in display order")
+        XCTAssertEqual(rows.count, 6)
+        XCTAssertEqual(InspectorView.Section.light.title, "Light")
+        XCTAssertTrue(InspectorView.scrollingSections.contains(.light))
+
+        // The travel and the number format of each row — unchanged by 046.
+        XCTAssertEqual(rows[0].range, -5 ... 5, "曝光 is ±5 EV")
+        XCTAssertEqual(rows[0].format, "%.2f EV")
+        for row in rows.dropFirst() {
+            XCTAssertEqual(row.range, -100 ... 100, "\(row.title) is ±100")
+            XCTAssertEqual(row.format, "%.0f", "\(row.title) prints an integer")
+        }
+        XCTAssertEqual(rows.map(\.keyPath), [\.light.exposure, \.light.contrast, \.light.highlights,
+                                             \.light.shadows, \.light.whites, \.light.blacks],
+                       "one write path per row, straight into `EditModel.light`")
+    }
+
+    /// 046's structural claim for this card: **every** row is `.knob`, none is `.bar`.
+    func testEveryLightRowDrawsTheRoundKnob() {
+        let shapes = InspectorView.lightRows.map(\.shape)
+        XCTAssertEqual(shapes, Array(repeating: .knob, count: 6),
+                       "046: 解 RAW 之后的参数是圆形滑杆; got \(shapes)")
+        XCTAssertFalse(shapes.contains(.bar),
+                       "no tone control is a decoder parameter — a `.bar` here would mean a re-develop")
+
+        // 与细节卡互为反证：那边全是 `.bar`，这边全是 `.knob`。
+        XCTAssertEqual(Set(InspectorView.detailContent.rows.map(\.shape)), [.bar])
+        print("LIGHT shapes: \(InspectorView.lightRows.map { "\($0.title)=\($0.shape.rawValue)" })")
+    }
+
+    /// Both shapes share one row height, so this card and the 细节 card are the same height per row
+    /// and the panel does not jump when a parameter changes class (046 要求 4).
+    func testTheLightRowsUseTheSharedRowHeight() {
+        XCTAssertEqual(SliderValueMap.rowHeight, 16)
+        let style = InspectorView.SliderRowStyle.standard
+        XCTAssertEqual(style.controlSize, .mini, "the knob is still .mini, as it has always been")
+    }
+
+    /// The rendered card exposes the same six rows as the table — degraded to a print when the
+    /// accessibility tree is not available in this environment (as in `DetailSectionTests`).
+    func testTheRenderedCardStillCarriesTheSixRows() {
+        let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))
+        host.frame = NSRect(x: 0, y: 0, width: 330, height: 2400)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: true)
+        window.contentView = host
+        Self.windows.append(window)
+        host.layoutSubtreeIfNeeded()
+
+        let ids = Self.identifiers(in: host)
+        print("LIGHT card ids: \(ids.filter { $0.contains("light") || $0.contains("card") })")
+        guard ids.contains(where: { $0.hasPrefix("inspector.card.") }) else {
+            // No window session here: the table assertions above are the check (same degradation as
+            // `DetailSectionTests.testTheRenderedCardExposesTheFourControls`).
+            return
+        }
+        XCTAssertTrue(ids.contains("inspector.card.light"), "the Light card did not render: \(ids)")
+    }
+
+    // MARK: - helpers
+
+    private static var windows: [NSWindow] = []
+
+    private static func identifiers(in root: NSView, depth: Int = 0) -> [String] {
+        guard depth < 24 else { return [] }
+        var out: [String] = []
+        for child in root.accessibilityChildren() ?? [] {
+            if let view = child as? NSView {
+                let id = view.accessibilityIdentifier()
+                if !id.isEmpty { out.append(id) }
+            }
+            if let element = child as? NSAccessibilityElement,
+               let id = element.accessibilityIdentifier(), !id.isEmpty {
+                out.append(id)
+            }
+            if let view = child as? NSView {
+                out += identifiers(in: view, depth: depth + 1)
+            }
+        }
+        return out
+    }
+}

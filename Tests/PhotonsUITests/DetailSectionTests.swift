@@ -75,6 +75,34 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertEqual(style.headSpacing, 6)
     }
 
+    /// 派单 046: the four rows are **decoder** parameters (a tick here is a development), so each one
+    /// draws the long bar — and no slider in the card is given a `step:`, because SwiftUI draws tick
+    /// marks the moment it gets one.
+    ///
+    /// The shape is asserted on `InspectorView.detailContent`, the object the card iterates; the tick
+    /// claim is asserted on the row builder's source, because "the argument that draws ticks is not
+    /// passed" is not visible in a value.
+    func testTheFourDetailRowsDrawTheBarShapeWithoutTicks() throws {
+        let rows = InspectorView.detailContent.rows
+        XCTAssertEqual(rows.map(\.shape), [.bar, .bar, .bar, .bar],
+                       "046: 细节的四根（会重新 develop）必须是长条形滑杆")
+
+        // The bar is 16 pt tall, like every other row in the panel: no layout jump between shapes.
+        XCTAssertEqual(SliderValueMap.rowHeight, 16)
+        XCTAssertLessThan(SliderValueMap.handleHeight, SliderValueMap.rowHeight,
+                          "the 14 pt handle fits inside the 16 pt row")
+
+        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        let tickedSlider = try NSRegularExpression(pattern: "Slider\\([^)]*step:")
+        let range = NSRange(source.startIndex..., in: source)
+        XCTAssertEqual(tickedSlider.numberOfMatches(in: source, range: range), 0,
+                       "a `Slider(... step:)` would draw tick marks under the 细节 sliders")
+        XCTAssertFalse(source.contains("step: Double? = nil"),
+                       "sliderRow must not take a step: it is how the ticks came back before")
+
+        print("DETAIL shapes: \(rows.map { "\($0.title)=\($0.shape.rawValue)" })")
+    }
+
     /// 040 requirement 4: **no** decoder prose under the sliders — no 「基线 0.50」, no 「解码参数」,
     /// no 「v9」.
     ///
@@ -151,6 +179,16 @@ final class DetailSectionTests: XCTestCase {
     /// than to pass silently, and the assertions that always run are the ones on
     /// `InspectorView.detailContent` (the object the card iterates).
     private static var windows: [NSWindow] = []
+
+    /// The one file that renders the panel — read for the claims a value cannot carry (046: no
+    /// `Slider(... step:)` anywhere).
+    private static var inspectorSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
 
     private static func host() -> NSHostingView<InspectorView> {
         let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))

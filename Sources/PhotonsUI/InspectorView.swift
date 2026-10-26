@@ -249,12 +249,13 @@ public struct InspectorView: View {
     /// second entry here would be two controls for one fact.
     private var lightCard: some View {
         card(Section.light.title) {
-            row("曝光", \.light.exposure, -5 ... 5, "%.2f EV")
-            row("对比", \.light.contrast, -100 ... 100, "%.0f")
-            row("高光", \.light.highlights, -100 ... 100, "%.0f")
-            row("阴影", \.light.shadows, -100 ... 100, "%.0f")
-            row("白色", \.light.whites, -100 ... 100, "%.0f")
-            row("黑色", \.light.blacks, -100 ... 100, "%.0f")
+            ForEach(Self.lightRows, id: \.title) { row in
+                sliderRow(row.title, binding(row.keyPath), row.range, row.format, shape: row.shape) {
+                    editing in
+                    // Drag end = one edit action = one history snapshot (never per tick).
+                    if !editing { session.commitEdit() }
+                }
+            }
         }
     }
 
@@ -312,7 +313,7 @@ public struct InspectorView: View {
                           detailBinding(row.axis, baseline: baseline),
                           row.range,
                           row.format,
-                          step: row.step,
+                          shape: row.shape,
                           editable: true,
                           accessibilityID: "inspector.detail.\(row.axis.rawValue)",
                           onReset: { resetDetail(row.axis) },
@@ -421,13 +422,44 @@ public struct InspectorView: View {
         )
     }
 
+    /// A **render** row (曝光 / 对比 / 自然饱和 …): the knob shape is the default, because a tone or
+    /// color control does not re-develop the RAW (046's table).
     private func row(_ title: String, _ keyPath: WritableKeyPath<EditModel, Double>,
                      _ range: ClosedRange<Double>, _ format: String) -> some View {
-        sliderRow(title, binding(keyPath), range, format) { editing in
+        sliderRow(title, binding(keyPath), range, format, shape: .knob) { editing in
             // Drag end = one edit action = one history snapshot (never per tick).
             if !editing { session.commitEdit() }
         }
     }
+
+    // MARK: the Light card's rows (046: all six are render parameters → .knob)
+
+    /// One tone row: what the row draws, and which shape it draws.
+    ///
+    /// A table rather than six inline calls because the **shape rule is per parameter class**, and a
+    /// test has to be able to hold the six rows' shapes without an accessibility tree
+    /// (`LightCardTests`). `keyPath` keeps the write path single-sourced — the card iterates this.
+    public struct ToneRow: Equatable {
+        public var title: String
+        public var range: ClosedRange<Double>
+        public var format: String
+        public var shape: SliderShape
+        public var keyPath: WritableKeyPath<EditModel, Double>
+    }
+
+    /// 曝光 / 对比 / 高光 / 阴影 / 白色 / 黑色 — the six tone controls, in display order.
+    ///
+    /// All six are **render** parameters: they act on the decoded pixels and never re-develop the
+    /// RAW, so per 046 they keep the round knob. The day one of them moves into `DecodeInputs`, its
+    /// `shape` here turns `.bar` and nothing else about the row changes.
+    public static let lightRows: [ToneRow] = [
+        ToneRow(title: "曝光", range: -5 ... 5, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure),
+        ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast),
+        ToneRow(title: "高光", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.highlights),
+        ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows),
+        ToneRow(title: "白色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.whites),
+        ToneRow(title: "黑色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.blacks),
+    ]
 
     // MARK: the one row shape (派单 040)
 
@@ -455,13 +487,24 @@ public struct InspectorView: View {
     ///
     /// `editable` is the one difference the task asks for: the 细节 card has a number you can type
     /// (`onSubmit` writes and commits, so a typed value is one history entry and one development),
-    /// the tone cards print theirs. Everything else — fonts, spacing, `controlSize`, the `Slider`
-    /// itself — comes from `SliderRowStyle`.
+    /// the tone cards print theirs. Everything else — fonts, spacing, `controlSize`, the row's height —
+    /// comes from `SliderRowStyle`.
+    ///
+    /// `shape` is 派单 046's only visual switch: `.bar` for the decoder parameters (降噪 / 色彩降噪 /
+    /// 细节 / 锐化), `.knob` for everything that acts on the already-decoded render (Light, Color,
+    /// 白平衡). Both draw the **same row**: label, number, double-click reset and the
+    /// `onEditingChanged` contract are this function's, not the control's, so a shape can never grow
+    /// a different behaviour.
+    ///
+    /// There is deliberately **no `step:` parameter**. SwiftUI's `Slider` draws tick marks the moment
+    /// it is handed one, and 046 forbids ticks on every slider; any quantization belongs to the model
+    /// (`DetailSettings.setPosition` rounds to 1 unit), which is why the knob is built from the
+    /// `step`-free initializer and the bar steps by `SliderValueMap.keyboardStep(in:)`.
     private func sliderRow(_ title: String,
                            _ value: Binding<Double>,
                            _ range: ClosedRange<Double>,
                            _ format: String,
-                           step: Double? = nil,
+                           shape: SliderShape = .knob,
                            style: SliderRowStyle = .standard,
                            editable: Bool = false,
                            accessibilityID: String? = nil,
@@ -490,12 +533,16 @@ public struct InspectorView: View {
                         .foregroundStyle(.primary)
                 }
             }
-            if let step {
-                Slider(value: value, in: range, step: step, onEditingChanged: onEditingChanged)
-                    .controlSize(style.controlSize)
-            } else {
+            switch shape {
+            case .bar:
+                // Decoder parameter: the drawn bar. No step, no ticks (046).
+                BarSlider(value: value, range: range, onEditingChanged: onEditingChanged)
+                    .frame(height: SliderValueMap.rowHeight)
+            case .knob:
+                // Render parameter: the system slider, **without** `step:` — a step draws ticks.
                 Slider(value: value, in: range, onEditingChanged: onEditingChanged)
                     .controlSize(style.controlSize)
+                    .frame(height: SliderValueMap.rowHeight)
             }
         }
     }
@@ -755,19 +802,24 @@ public struct DetailCardContent: Equatable, Sendable {
         public var range: ClosedRange<Double>
         /// The number's format: integers, no percent sign.
         public var format: String
-        /// The slider's step (1 unit = 0.01 of a `CIRAWFilter` amount).
+        /// The quantization the **model** applies (1 unit = 0.01 of a `CIRAWFilter` amount).
+        ///
+        /// 046: this is never handed to a `Slider` — a `step:` makes SwiftUI draw tick marks, and no
+        /// slider in this panel has them. `DetailSettings.setPosition` is what rounds.
         public var step: Double
+        /// 046: a decoder parameter, so the row draws the **bar** — not the round knob.
+        public var shape: SliderShape
     }
 
     public var rows: [Row]
 
     public init(rows: [Row]) { self.rows = rows }
 
-    /// The shipped card: the four axes of `DetailAxis.panelOrder`, one travel, one format.
+    /// The shipped card: the four axes of `DetailAxis.panelOrder`, one travel, one format, one shape.
     public static let standard = DetailCardContent(
         rows: DetailAxis.panelOrder.map {
             Row(axis: $0, title: $0.title, range: DetailSettings.range,
-                format: DetailSettings.format, step: DetailSettings.step)
+                format: DetailSettings.format, step: DetailSettings.step, shape: .bar)
         })
 }
 
