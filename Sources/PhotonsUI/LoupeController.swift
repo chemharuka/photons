@@ -430,6 +430,15 @@ public final class LoupeController: NSViewController {
     /// How many pan/pinch requests were folded into a later frame (the never-a-backlog counter).
     public private(set) var viewRenderCoalesced = 0
     public private(set) var viewRenderCount = 0
+    /// Requests that reached `requestViewportRender` past its guards, and how many of them started a
+    /// frame (diagnostics: a request that starts nothing is the interesting case).
+    public private(set) var viewRenderRequests = 0
+    public private(set) var viewRenderStarts = 0
+    /// Frames that were rendered but thrown away because the generation moved on (a newer request
+    /// superseded them) — a normal outcome during a gesture, a *bug signal* when nothing moved.
+    public private(set) var staleFrameDrops = 0
+    /// Frames that had nothing to draw: no decoded rung was resident when they ran.
+    public private(set) var emptyFrameDrops = 0
 
     /// Last measured frames — printed by `--ui-smoke` and the 10k bench.
     public private(set) var firstFrameMilliseconds: Double = 0
@@ -1021,6 +1030,7 @@ public final class LoupeController: NSViewController {
         if frameSource == nil {
             guard let session, session.mode == .loupe, session.anchorAsset != nil else { return }
         }
+        viewRenderRequests += 1
         if viewInFlight {
             viewPending = true
             viewRenderCoalesced += 1
@@ -1031,6 +1041,7 @@ public final class LoupeController: NSViewController {
 
     private func startViewportRender() {
         guard let job = makeJob(kind: .view) else { return }
+        viewRenderStarts += 1
         viewInFlight = true
         queue.async { [weak self] in self?.renderFrame(job) }
     }
@@ -1090,6 +1101,10 @@ public final class LoupeController: NSViewController {
                 case .view, .scheduled:
                     self.viewRenderCount += 1
                 }
+            } else if frame != nil {
+                self.staleFrameDrops += 1
+            } else {
+                self.emptyFrameDrops += 1
             }
             switch job.kind {
             case .edit: self.finishEditRender()
@@ -1148,9 +1163,12 @@ public final class LoupeController: NSViewController {
     ///     eviction bug, one queue later.
     ///  2. **A rung that is already resident is not news.** Two pans can join one development; only
     ///     the first arrival may repaint.
-    ///  3. **A stale generation still caches, but never paints.** The buffer is this photo's and was
-    ///     paid for, so it lands in the ladder for the next frame; the *frame* it was meant for is
-    ///     gone, so the canvas is left alone.
+    ///  3. **A stale generation caches the buffer and asks for one frame at the current camera.**
+    ///     The buffer is this photo's and was paid for, so it lands in the ladder; the *frame* it was
+    ///     meant for is gone, so its pixels are never painted — but a request is made, because
+    ///     otherwise nothing would ever paint it (2026-10-26: a photo opened while the display was
+    ///     settling stayed black until the user touched the camera, and a full rung could land behind
+    ///     a preview that stayed on screen).
     private func rungArrived(_ result: Result<DecodeRung, Error>, identity: String, generation gen: Int) {
         let isCurrentFrame = gen == generation
         switch result {
@@ -1166,6 +1184,13 @@ public final class LoupeController: NSViewController {
             rungArrivals += 1
             guard isCurrentFrame else {
                 staleRungDrops += 1
+                // The *frame* this development was started for is gone, so its pixels are not painted
+                // (rule 3). But the **buffer** is this photo's and the current camera needs it: ask
+                // for a frame at the camera that is on screen now, which will find the rung resident
+                // and paint it. Without this, a photo opened while the display was still settling (the
+                // headroom re-read bumps the generation twice on the way into the loupe) left the
+                // canvas black until the user touched the camera — the reported "得缩放一下才出来".
+                requestViewportRender()
                 return
             }
             // Exactly one replacement: this render finds the rung resident and asks for nothing.
@@ -1242,6 +1267,9 @@ public final class LoupeController: NSViewController {
         awaitingFirstFrame = true
         queue.async { [weak self] in self?.renderFrame(job) }
     }
+
+    /// Which rungs are in memory right now (diagnostics and the first-frame test).
+    public var residentRungScales: [Float] { ladder.residentScales }
 
     /// The ladder identity of an asset: the same string `makeFrame` keys its graph on, so a plan can
     /// never be made for one photo and applied to another.
@@ -1436,8 +1464,10 @@ public final class LoupeController: NSViewController {
         if !ok {
             lastPresentError = presenter.lastFailure
             if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            retryPresentLater()
             return
         }
+        presentRetries = 0
         lastFrame = frame
         lastPresentError = nil
         recordMeasurements(frame)
@@ -1459,6 +1489,31 @@ public final class LoupeController: NSViewController {
     }
 
     public var decodeSeconds: Double { decodeMilliseconds / 1000 }
+
+    /// Retries already spent on a frame the canvas refused to take.
+    private var presentRetries = 0
+    /// Hard cap: a canvas that never becomes drawable (a headless test surface, a window that is
+    /// never ordered in) must not keep a render loop alive.
+    private static let maxPresentRetries = 4
+
+    /// The canvas had no drawable yet — which is what the **first** frame after entering the loupe
+    /// meets, because a `CAMetalLayer` hands out drawables only once it is in a visible window with a
+    /// size. Without this the photo stayed black until any camera change re-rendered it (the reported
+    /// bug: "点进编辑界面不会自动加载照片，得缩放一下"), since a settled layout schedules no further
+    /// frame.
+    ///
+    /// Four attempts, 120 ms apart, the same frame each time: long enough for a window being ordered
+    /// in or a resize to settle, short enough that it never competes with a real gesture (any new
+    /// request goes through the normal single-flight path and the counter resets on success).
+    private func retryPresentLater() {
+        guard presentRetries < Self.maxPresentRetries, autoRenderEnabled else { return }
+        presentRetries += 1
+        let attempt = presentRetries
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12 * Double(attempt)) { [weak self] in
+            guard let self, self.lastFrame == nil || self.lastPresentError != nil else { return }
+            self.scheduleRender()
+        }
+    }
 
     // MARK: measurements (histogram + clipping warning)
     //

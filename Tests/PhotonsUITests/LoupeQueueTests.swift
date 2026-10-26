@@ -396,9 +396,16 @@ final class LoupeQueueTests: XCTestCase {
     }
 
     /// The generation rule, isolated: a development that lands after the camera moved on is **cached
-    /// but not painted**, and the next frame renders from it instead of paying for it again. That is
-    /// the difference between "keeping the buffer" and "painting a frame nobody asked for".
-    func testAStaleArrivalIsCachedButNotPainted() throws {
+    /// and the current camera is asked for one frame** — the stale *pixels* are never painted, but the
+    /// buffer must not sit invisible either.
+    ///
+    /// That second half is the 2026-10-26 correction of the original rule ("cache but never paint").
+    /// The original version left a photo opened while the display was settling permanently black (the
+    /// headroom re-read bumps the generation twice on the way into the loupe), and it also left a 0.5
+    /// preview on screen after the full rung had landed; the user's only cure was to touch the camera.
+    /// Repainting here is a frame at the camera that is on screen **now** — not the superseded one — so
+    /// it cannot show stale pixels, and the single-flight path coalesces it during a real gesture.
+    func testAStaleArrivalIsCachedAndRepaintedAtTheCurrentCamera() throws {
         let url = try rawFixture()
         let loupe = makeController(source: source(url, identity: "stale"))
         loupe.autoRenderEnabled = true
@@ -416,12 +423,15 @@ final class LoupeQueueTests: XCTestCase {
               + "queue \(loupe.developmentStats)")
 
         XCTAssertGreaterThanOrEqual(loupe.staleRungDrops, 1,
-                                    "a delivery for a superseded frame must not paint")
-        XCTAssertEqual(loupe.rungArrivals, 2, "…but the buffer is kept: both rungs are resident")
-        // The second `scheduleRender` paints one frame of its own; the full rung's arrival (which
-        // carried two waiters, one per generation) must not add a second.
-        XCTAssertEqual(loupe.viewRenderCount, framesBefore + 1,
-                       "a stale arrival must not repaint — not even once per waiter")
+                                    "a delivery for a superseded frame still counts as stale")
+        XCTAssertEqual(loupe.rungArrivals, 2, "…and the buffer is kept: both rungs are resident")
+        // The second `scheduleRender` paints one frame of its own from the preview rung; the full
+        // rung's arrival adds exactly **one** more, at the current camera, so the full rung reaches
+        // the screen without the user touching anything.
+        XCTAssertEqual(loupe.viewRenderCount, framesBefore + 2,
+                       "a stale arrival repaints once, at the camera on screen now")
+        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
+                       "the full rung replaces the preview on its own")
 
         // The buffer is not thrown away: the explicit next frame uses it, with no new development.
         let decodes = loupe.developmentStats.decodes

@@ -247,10 +247,10 @@ public final class HistogramCardView: NSView {
     /// `+1 … +4` along the top of the tail: what the 30 pt steps mean. Skipped when the card is too
     /// narrow for the numbers to be legible (they would collide with each other).
     private func drawStopLabels(_ axis: HistogramAxis) {
-        guard axis.stopWidth >= 18 else { return }
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .semibold)
+        guard axis.stopWidth >= 16 else { return }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [.font: font,
-                                                         .foregroundColor: NSColor.tertiaryLabelColor]
+                                                         .foregroundColor: NSColor.secondaryLabelColor]
         for stop in 1...axis.stops {
             let text = "+\(stop)"
             let size = (text as NSString).size(withAttributes: attributes)
@@ -281,15 +281,21 @@ public final class HistogramCardView: NSView {
         path.stroke()
 
         let text = String(format: "屏 %.2f×", headroom)
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 7.5, weight: .semibold)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [.font: font,
                                                          .foregroundColor: NSColor.systemOrange]
         let size = (text as NSString).size(withAttributes: attributes)
         var labelX = x + 3
         if labelX + size.width > axis.plot.maxX - 1 { labelX = axis.plot.maxX - size.width - 1 }
         if labelX < axis.plot.minX + 1 { labelX = axis.plot.minX + 1 }
-        (text as NSString).draw(at: CGPoint(x: labelX, y: axis.plot.maxY - size.height - 1),
-                                withAttributes: attributes)
+        let labelY = axis.plot.maxY - size.height - 1
+        // A chip behind the number: the tick is drawn over the distribution, and an orange 8 pt label
+        // on top of a filled curve is unreadable exactly where it matters (a spiky highlight).
+        NSColor.labelColor.withAlphaComponent(0.14).setFill()
+        NSBezierPath(roundedRect: NSRect(x: labelX - 1.5, y: labelY - 0.5,
+                                        width: size.width + 3, height: size.height + 1),
+                     xRadius: 2, yRadius: 2).fill()
+        (text as NSString).draw(at: CGPoint(x: labelX, y: labelY), withAttributes: attributes)
     }
 
     /// Marks the two clipping thresholds on the x axis: `0.999` is one 8-bit code below white, so
