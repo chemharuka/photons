@@ -943,6 +943,60 @@ final class PhotoRowCell: NSTableCellView {
     /// on (the grid card and the strip cell expose the same one, from the same constant).
     private(set) var missingLabel: String?
 
+    // MARK: text block metrics
+
+    /// Line heights of the row's three text lines, in the order they stack bottom → top:
+    /// `meta` (机身 · 日期) sits at the bottom, `name` in the middle, `stars` on top.
+    /// These are line *frames*, not font sizes (11 / 9 / 8 pt): a label needs a little more height
+    /// than its cap height, and keeping the numbers here is what lets `layout()` treat the three
+    /// lines as one block instead of three absolute offsets from `bounds.height`.
+    static let nameLineHeight: CGFloat = 15
+    static let metaLineHeight: CGFloat = 12
+    static let starsLineHeight: CGFloat = 10
+    /// Height of the three lines edge to edge — the block `layout()` centres on the row.
+    static var textBlockHeight: CGFloat { nameLineHeight + metaLineHeight + starsLineHeight }
+
+    /// The three line heights for a row `rowHeight` tall.
+    ///
+    /// At 46 pt (and anything taller) this is exactly 15 / 12 / 10. A row shorter than the block
+    /// (a style change, a degenerate test frame) shrinks all three **in proportion**, because the
+    /// alternatives are worse: keeping them would hang a line outside the row it belongs to, and
+    /// top-aligning the block would break the one thing this cell is for — lining the text up with
+    /// the thumbnail. The square does not fit such a row either (`thumbnailSide` is 34 pt).
+    static func textLineHeights(fitting rowHeight: CGFloat) -> (name: CGFloat, meta: CGFloat, stars: CGFloat) {
+        let natural = (name: nameLineHeight, meta: metaLineHeight, stars: starsLineHeight)
+        let block = textBlockHeight
+        guard rowHeight > 0, rowHeight < block else { return natural }
+        let k = rowHeight / block
+        return (nameLineHeight * k, metaLineHeight * k, starsLineHeight * k)
+    }
+
+    /// Where `layout()` actually put the row's parts, as frames in the cell's own coordinates.
+    ///
+    /// The geometry has to be assertable offscreen — "the text block is 3 pt low" is a number, not
+    /// an opinion — and the views themselves are private, so this is the probe the layout tests
+    /// read. Nothing in the UI depends on it.
+    struct LayoutProbe {
+        var swatch: NSRect
+        var name: NSRect
+        var meta: NSRect
+        var stars: NSRect
+        var pill: NSRect
+        var nameBreakMode: NSLineBreakMode
+        /// Width the name would need at its own font, unclipped. `> name.width` means it truncates.
+        var nameUnclippedWidth: CGFloat
+        var nameText: String
+    }
+
+    var layoutProbe: LayoutProbe {
+        let needed = (name.stringValue as NSString)
+            .size(withAttributes: [.font: name.font ?? NSFont.systemFont(ofSize: 11)]).width
+        return LayoutProbe(swatch: swatch.frame, name: name.frame, meta: meta.frame,
+                           stars: stars.frame, pill: pill.frame,
+                           nameBreakMode: name.lineBreakMode,
+                           nameUnclippedWidth: ceil(needed), nameText: name.stringValue)
+    }
+
     static func reuse(in table: NSTableView, owner: Any) -> PhotoRowCell {
         let id = NSUserInterfaceItemIdentifier("PhotoRowCell")
         if let v = table.makeView(withIdentifier: id, owner: owner) as? PhotoRowCell { return v }
@@ -1019,14 +1073,31 @@ final class PhotoRowCell: NSTableCellView {
 
     override func layout() {
         super.layout()
-        swatch.frame = NSRect(x: 2, y: (bounds.height - BrowserPaneController.thumbnailSide) / 2,
-                              width: BrowserPaneController.thumbnailSide,
-                              height: BrowserPaneController.thumbnailSide)
+        let side = BrowserPaneController.thumbnailSide
+        swatch.frame = NSRect(x: 2, y: (bounds.height - side) / 2, width: side, height: side)
+
         let textX: CGFloat = 44
         let width = max(10, bounds.width - textX - 2)
-        name.frame = NSRect(x: textX, y: bounds.height - 31, width: width, height: 15)
-        meta.frame = NSRect(x: textX, y: bounds.height - 45, width: width, height: 12)
-        stars.frame = NSRect(x: textX, y: bounds.height - 17, width: width, height: 10)
+        // The three lines are one block, and the **block** is what gets centred: it shares the
+        // thumbnail square's vertical centre. The row used to place each line at an absolute
+        // offset from `bounds.height` (46 − 31 / − 45 / − 17), which put the block's centre at 20
+        // against a 23 pt square centre — 3 pt low, with 7 pt of slack above and 1 pt below.
+        // Deriving the block from its own line heights means a different `browserRowHeight` (or a
+        // test frame) stays centred instead of drifting; there is no 46 anywhere in here.
+        let heights = PhotoRowCell.textLineHeights(fitting: bounds.height)
+        let block = heights.name + heights.meta + heights.stars
+        // Top edge of the block, then stack down: stars, name, meta — edge to edge, so the lines
+        // can neither overlap nor open a gap the eye reads as a misalignment.
+        let top = (bounds.height + block) / 2
+        let starsY = top - heights.stars
+        let nameY = starsY - heights.name
+        // `max(0,…)`: on a row exactly as tall as the block this lands on 0, and the subtraction
+        // can leave −1.8e−15 there. A row may not contain a line at a negative y, not even one
+        // that only exists because of binary floating point.
+        let metaY = max(0, nameY - heights.meta)
+        stars.frame = NSRect(x: textX, y: starsY, width: width, height: heights.stars)
+        name.frame = NSRect(x: textX, y: nameY, width: width, height: heights.name)
+        meta.frame = NSRect(x: textX, y: metaY, width: width, height: heights.meta)
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)
