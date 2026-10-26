@@ -155,3 +155,38 @@ M2 实测导入 260 文件/s（1000 个 3.8 s）。即使 P 通路 25 ms/张，�
 | 6 GB 缓存挤爆用户盘 | 默认 2 GB + 三种淘汰序 + `settings` 可调；清理在后台且永不删 10 分钟内写过的文件 |
 | 编辑拖动时重渲风暴 | `isInteracting` 禁投 + 300 ms 防抖 + 单飞 + 并发 3 + 同级 jobId 顺序 |
 | ARW/RW2 内嵌预览太小（1616/1920）导致 6K 全屏必须渲染 | 预期行为；loupe fit 先上 P 占位再 G 精修，用户看到的是"由虚到实"，不是空白 |
+
+## 10. 素材浏览（左侧列表）的方形预览：一次被漏掉的接线（2026-10-26）
+
+**症状**：用户打开 `photons-demo.photonslibrary` 后说「左侧素材浏览窗口，正方形的图片预览目前是默认的纯色图像」。缓存里 12 资产 × 2 档（`t256`/`t512`）全在，`photonsctl thumbs --tier t512` 12/12 `source=cache`。
+
+**根因**：`BrowserPaneController.PhotoRowCell`（`Sources/PhotonsUI/BrowserPaneController.swift`）的 34 pt 方块只有一行
+`swatch.layer.backgroundColor = PlaceholderSwatch.color(for: asset.contentHash)` —— 这个文件里 `thumbnail`/`ThumbKey`/provider 一个都不存在，
+列表**从未请求过**缩略图。`photons.browserMode` 默认 `.list`（用户机器上实测 `defaults read com.nousresearch.photons` 就是 `list`），
+所以用户看到的是列表而不是"网格章节"里那个已经接好线的 `AssetGridController`。`--ui-smoke` 只查网格与胶片条，看不出这个洞。
+
+**修法**：列表行接同一条管线 —— `ThumbnailProvider.shared(for:)`（与网格、胶片条同一个 service / 同一个 LRU / 同一个单飞表），
+档位由 34 pt × DPR 经 `ThumbnailProvider.tier` + `effectiveTier` 得出（1×/2×/3× 都是 `t256`，因为 34→102 px 都在 256 以内），
+`NSCache` 命中同步返回，否则 `.onScreen` 排队；滚动时"可见 + 上下 5 行"保留、其余取消；回收的行先清图再按 `assetID` 守门，
+占位色始终留在图层下面（006 §2：永远不是白洞）。`provider()` 在"库已打开但没有缓存"时向 stderr 说一次话，不再静默返回 nil。
+
+**证据**（`/tmp/probe-lib2.photonslibrary` 是用户库的副本，独立实例，冷/热各跑一次）：
+
+| 场景 | 落盘 jpg | `t256` 键 | `t512` 键 | 列表真图行 | 网格真图格 | 命中率 |
+|---|---|---|---|---|---|---|
+| 修复前，冷缓存 12 s | 9 | **0/12** | 9/12 | **0/12**（无请求路径） | 9/12 | — |
+| 修复后，冷缓存 12 s | 21 | 12/12 | 9/12 | **12/12** | 9/12 | 0.000（全生成） |
+| 修复后，热缓存 8 s | 24 | 12/12 | 12/12 | **12/12** | **12/12** | **1.000** |
+
+"修复前 0 个 `t256`"是这次根因最硬的一条：一个 34 pt 的方块只能问 `t256`，而那个档位在整个进程里从来没被请求过一次。
+
+**复现命令**（不需要截图，全部是计数/哈希）：
+
+```bash
+.build/Photons.app/Contents/MacOS/Photons --library /tmp/probe-lib2.photonslibrary --thumb-probe --seconds 8
+# 打印 library / cache root / 每档 key 是否在盘上 / 网格与列表各自的真图计数 / provider 是否同一个实例
+```
+
+**已知遗留**（不属本次修复）：`L1030414/13/12.dng` 没有可用内嵌预览，走 `produced` 的 `fallback`（`renderedThumbnail`）分支，
+`photonsctl` 里每张 ~203 ms 能出图，但 GUI 进程里这 3 个 `t512` 请求在 20 s 内既没完成也没失败（`pending 3`，`generated 0`）。
+冷缓存下网格会是 9/12。用 CLI 预生成这 3 张后网格即 12/12，所以与列表这条链无关，另开单子。
