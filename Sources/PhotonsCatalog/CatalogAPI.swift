@@ -36,6 +36,35 @@ public struct FolderSelection: Sendable, Hashable {
     public func hash(into hasher: inout Hasher) { hasher.combine(key) }
 }
 
+/// The 15 things a grid slot can filter by (026).
+///
+/// The raw values are the wire form: they go into a `FilterCriterion`, into a `facetValues` call and
+/// into a preset file, so renaming a case is a data migration, not a refactor.
+public enum FilterDimension: String, Sendable, CaseIterable, Hashable {
+    case month, day, ext, rating, flag, color, camera, serial, lens
+    case focal, shutter, aperture, iso, flash, gps
+
+    /// The 7 dimensions the owner insists must be offered **from the numbers that exist**
+    /// (「相机 序列号 镜头 焦距 快门速度 光圈 ISO … 如果所有照片都没焦距，就只能选『全部』」).
+    /// 月/日/文件后缀 behave the same way by nature; 星级/旗标/色标 are a closed vocabulary.
+    public var isDataDriven: Bool { !hasFixedVocabulary }
+}
+
+/// One picked value of one dimension — the data layer's unit, deliberately single-valued.
+///
+/// A slot in the bar may hold several values (星级 1★、2★、5★). That becomes **several criteria of
+/// the same dimension**, which the query ORs together; criteria of *different* dimensions are
+/// ANDed. Keeping the struct single-valued means CLI/preset JSON stays the obvious thing it was.
+public struct FilterCriterion: Sendable, Hashable {
+    public var dimension: FilterDimension
+    public var value: String
+
+    public init(dimension: FilterDimension, value: String) {
+        self.dimension = dimension
+        self.value = value
+    }
+}
+
 public struct AssetFilter: Sendable {
     public var ratingAtLeast: Int?
     public var cameraKey: String?
@@ -59,10 +88,19 @@ public struct AssetFilter: Sendable {
     /// no `DISTINCT` (or second pass) is needed to keep `day2 + day2/sub` equal to `day2`.
     public var folders: [FolderSelection]
 
+    /// The grid bar's slots (026), flattened: one criterion per picked value.
+    ///
+    /// **Values of the same dimension OR together, dimensions AND together** — 星级 1★·2★·5★ AND
+    /// 留用 AND LEICA SL3. They are ANDed with every field above as well, so the CLI's
+    /// `ratingAtLeast` / `cameraKey` / `flagEquals` / `colorLabelEquals` keep their meaning unchanged
+    /// (nothing that already worked had to be rewritten to gain slots).
+    public var criteria: [FilterCriterion]
+
     public init(ratingAtLeast: Int? = nil, cameraKey: String? = nil, sinceLocalDate: String? = nil,
                 includeDeleted: Bool = false, limit: Int = 200,
                 flagEquals: String? = nil, colorLabelEquals: String? = nil,
-                folders: [FolderSelection] = []) {
+                folders: [FolderSelection] = [],
+                criteria: [FilterCriterion] = []) {
         self.ratingAtLeast = ratingAtLeast
         self.cameraKey = cameraKey
         self.sinceLocalDate = sinceLocalDate
@@ -71,6 +109,7 @@ public struct AssetFilter: Sendable {
         self.flagEquals = flagEquals
         self.colorLabelEquals = colorLabelEquals
         self.folders = folders
+        self.criteria = criteria
     }
 
     /// `"day2/"` → `"day2"`, `"/day2//sub/"` → `"day2/sub"`, `""`/`nil` → `nil` (= the whole root).
@@ -288,48 +327,9 @@ extension Catalog {
     }
 
     public func assets(_ filter: AssetFilter = AssetFilter()) throws -> [Asset] {
-        var sql = "SELECT * FROM assets WHERE 1 = 1"
-        var args: [any DatabaseValueConvertible] = []
-        if !filter.includeDeleted { sql += " AND deleted = 0" }
-        if let r = filter.ratingAtLeast { sql += " AND rating >= ?"; args.append(r) }
-        if let c = filter.cameraKey { sql += " AND camera_key = ?"; args.append(c.lowercased()) }
-        if let f = filter.flagEquals { sql += " AND flag = ?"; args.append(f) }
-        if let l = filter.colorLabelEquals { sql += " AND color_label = ?"; args.append(l) }
-        if let d = filter.sinceLocalDate { sql += " AND capture_local_date >= ?"; args.append(d) }
-        // Folder selection: an **OR group** of `(root match AND path prefix)` clauses, every value
-        // bound (`?`), never interpolated — a folder is data (`100%_raw` is a real folder name in the
-        // tests), so it must never reach the SQL text.
-        //
-        // Segment-safe by construction: `instr(rel_path, 'day2/') = 1` asks "does the path *start*
-        // with this exact text", which cannot swallow `day2x/` (the prefix ends in `/`) and cannot be
-        // fooled by a `_` or `%` in the name. An empty path is the root itself, so it contributes a
-        // bare `source_root_id = ?` — the old `sourceRootId` field, now per selection instead of
-        // once for the whole filter.
-        //
-        // 「全部照片」 in the set wins: the whole library, the other rows ignored (021 §B, last row of
-        // the table). The browser also normalises the combination away before it gets here, so this
-        // branch is the contract, not a path a click can reach.
-        if !filter.folders.contains(where: { $0.isAllPhotos }) {
-            var clauses: [String] = []
-            for folder in filter.folders {
-                guard let root = folder.rootId else { continue }
-                if let path = folder.normalizedPath {
-                    clauses.append("(source_root_id = ? AND instr(rel_path, ?) = 1)")
-                    args.append(root)
-                    args.append(path + "/")
-                } else {
-                    clauses.append("(source_root_id = ?)")
-                    args.append(root)
-                }
-            }
-            if !clauses.isEmpty {
-                sql += " AND (" + clauses.joined(separator: " OR ") + ")"
-            }
-        }
-        sql += " ORDER BY capture_time DESC, id LIMIT ?"
-        args.append(filter.limit)
-        return try dbQueue.read { db in
-            try Asset.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+        try dbQueue.read { db in
+            let (sql, args) = try Self.assetsQuery(filter, in: db)
+            return try Asset.fetchAll(db, sql: sql, arguments: StatementArguments(args))
         }
     }
 
