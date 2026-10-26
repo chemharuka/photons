@@ -607,7 +607,12 @@ public final class CatalogSession {
         filterPersistence.remember(filter, libraryPath: path)
     }
 
-    /// Drop one facet — what clicking a chip does.
+    /// Drop one facet from the active filter.
+    ///
+    /// 050: the bar no longer draws removable chips, so nothing in the UI calls this — the same removal
+    /// now happens by unticking the value in the slot's own checklist. Kept because the filter value is
+    /// still a value: a facet can be dropped from a preset, a CLI or a test without going through a
+    /// button that no longer exists.
     public func clearFilter(_ facet: CatalogFilter.Facet) {
         applyFilter(filter.without(facet))
     }

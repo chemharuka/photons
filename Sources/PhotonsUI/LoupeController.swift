@@ -472,7 +472,10 @@ public final class LoupeController: NSViewController {
             // released here and rendered again by the next pointer entry. An edit keeps the identity
             // (`contentHash|assetID`), so a slider never reaches this line — the digest half of the key
             // moves and only marks the texture stale.
-            if frameSource?.identity != oldValue?.identity { backdrop.invalidate() }
+            if frameSource?.identity != oldValue?.identity {
+                backdrop.invalidate()
+                fullPictureBox.store(nil)
+            }
             guard detailGesturing,
                   frameSource?.edit.detailSettings != oldValue?.edit.detailSettings else { return }
             detailPreview = true
@@ -940,6 +943,14 @@ public final class LoupeController: NSViewController {
         self.maskCanvas = MaskCanvasController(session: session)
         self.cropTool = CropToolController(session: session)
         super.init(nibName: nil, bundle: nil)
+
+        // 045 × 039: the histogram's whole-picture source **is** the backdrop cache — same render,
+        // two purposes. `nil` when no backdrop for the current document exists, and always digest
+        // gated: measuring a frame rendered from another edit is worse than not updating at all.
+        fullPictureSource = { [box = fullPictureBox] edit in
+            guard let frame = box.current(), frame.digest == Histogram.editDigest(edit) else { return nil }
+            return (frame.texture, frame.content, frame.digest)
+        }
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -2920,8 +2931,10 @@ public final class LoupeController: NSViewController {
     public func cancelPendingFrames() {
         generation += 1
         // 037 ②: the low-resolution whole picture belongs to the photo going away. Released here (and
-        // not re-rendered) — the next pointer entry on the new photo generates its own.
+        // not re-rendered) — the next pointer entry on the new photo generates its own. The histogram's
+        // snapshot goes with it, so a background measurement can never read the old photo's picture.
         backdrop.invalidate()
+        fullPictureBox.store(nil)
         // 派单 031: a pending detail settle belongs to the photo that is going away; firing it at the
         // next one would develop a 60 MP frame nobody asked for.
         detailSettle?.cancel()
@@ -3043,6 +3056,22 @@ public final class LoupeController: NSViewController {
     /// The pixels are a frame-like `rgba16Float` texture in the same display space frames are made in
     /// (linear P3 or sRGB, current headroom), so `RenderGraph.measureFrameHistogram(fromFrame:…)` reads
     /// it the way it reads a frame; `content` is the picture's rect inside it (the whole texture).
+    /// The histogram's background measurement runs on `pictureQueue`, **not** on the main actor
+    /// (`main.sync` there would deadlock a slider drag), so it cannot read `lowResFullFrame` — that is
+    /// main-actor state. This box is the snapshot it reads instead: one texture reference, replaced
+    /// whenever the backdrop is published or released, guarded by a lock.
+    ///
+    /// 039 × 045: **one** low-res whole picture serves two purposes — the letterbox backdrop while
+    /// shrinking, and the whole-picture source for the histogram of a zoomed-in frame. Without this the
+    /// histogram would render the picture a second time (11–24 ms) on every edit.
+    private final class FullPictureBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var frame: LowResFullFrame?
+        func store(_ new: LowResFullFrame?) { lock.lock(); frame = new; lock.unlock() }
+        func current() -> LowResFullFrame? { lock.lock(); defer { lock.unlock() }; return frame }
+    }
+    private let fullPictureBox = FullPictureBox()
+
     public struct LowResFullFrame {
         public let texture: MTLTexture
         /// The picture's rect inside `texture` — the whole texture for this render.
@@ -3135,6 +3164,8 @@ public final class LoupeController: NSViewController {
                     // to the pool it came from instead of being drawn over the new picture.
                     self.queue.async { graph.recycle(output: texture) }
                 }
+                // Hand the histogram thread the picture it may measure (nil when this render lost).
+                self.fullPictureBox.store(adopted ? self.lowResFullFrame : nil)
             }
         } catch {
             DispatchQueue.main.async { [weak self] in

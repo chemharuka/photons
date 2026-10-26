@@ -407,6 +407,44 @@ final class BackdropWiringTests: XCTestCase {
         XCTAssertTrue(controller.backdrop.isIdle)
     }
 
+    // MARK: - ⑦b the backdrop *is* the histogram's whole picture (039 × 045)
+
+    /// 「低清全图一次渲染、两个用途」：缩小时的底图，和放大态测直方图要的整幅图，是**同一张**。
+    ///
+    /// 注入点必须只交出 digest 与所问文档一致的那张：交错的会得到一个“看起来更新了、数值却是上一版”的
+    /// 直方图，那比不更新更糟。交不出就返回 nil，让 045 退回自己渲染（11–24 ms），绝不猜。
+    func testTheHistogramSourceIsTheBackdropAndNothingElse() throws {
+        let url = try rawFixture()
+        let controller = makeController(url: url, identity: "backdrop-histogram-source")
+        let source = try XCTUnwrap(controller.fullPictureSource,
+                                   "the histogram's injection point must be wired, not left nil")
+
+        let current = try XCTUnwrap(controller.frameSource).edit
+        XCTAssertNil(source(current), "no backdrop yet → nil, so 045 renders it itself")
+        XCTAssertEqual(controller.backdrop.generationCount, 0,
+                       "asking the source must not generate anything")
+
+        enter(controller)
+        XCTAssertTrue(settleBackdrop(controller))
+        let handed = try XCTUnwrap(source(current), "the backdrop for this very document is handed over")
+        XCTAssertTrue(handed.texture === controller.backdrop.texture,
+                      "same texture, not a copy: one render serves both purposes")
+        XCTAssertEqual(handed.digest, Histogram.editDigest(current))
+        XCTAssertEqual(handed.content.width, handed.texture.width,
+                       "a backdrop render has no canvas, so the picture is the whole texture")
+
+        // Another edit: the texture on hand is the *previous* document's, so it must not be offered.
+        var edited = current
+        edited.light.exposure = 1.25
+        XCTAssertNotEqual(Histogram.editDigest(edited), handed.digest)
+        XCTAssertNil(source(edited), "a stale digest is never handed to the histogram")
+
+        // The photo going away takes its picture (and the snapshot) with it.
+        controller.cancelPendingFrames()
+        pump(0.05)
+        XCTAssertNil(source(current), "a cancelled photo's picture is not measurable any more")
+    }
+
     // MARK: - ⑧ a different photo is a different picture
 
     /// 换图释放 (039 ④): the backdrop belongs to the photo it was rendered from. Switching photos must
