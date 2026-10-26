@@ -117,12 +117,17 @@ final class LoupeZoomTransitionTests: XCTestCase {
         XCTAssertEqual(controller.viewState.zoom, 1, accuracy: 1e-12)
         XCTAssertEqual(controller.viewState.centerX, expected.centerX, accuracy: 1e-9)
         XCTAssertEqual(controller.viewState.centerY, expected.centerY, accuracy: 1e-9)
-        // The geometry it asks the layer for: the fit rect scaled to the 1:1 rect.
+        // The geometry it asks the canvas for: the fit rect scaled to the 1:1 rect.
         XCTAssertEqual(bridge.fromContent, framing.contentPixels(of: .fit))
         XCTAssertEqual(bridge.toContent, framing.contentPixels(of: expected))
         XCTAssertGreaterThan(bridge.scale, 1, "fit → 100 % grows the picture")
-        XCTAssertNotNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"),
-                        "the layer must be carrying the bridge")
+        // The carry is a **sampling window on a canvas-sized drawable** now (025), not a transform on
+        // the layer: the layer keeps its geometry, and what moves is which part of the texture the
+        // present pass reads.
+        XCTAssertEqual(controller.zoomBridgeFrames.last?.drawable, controller.viewportPixels,
+                       "the transition must draw into the canvas, not into a bigger drawable")
+        XCTAssertTrue(CATransform3DIsIdentity(controller.canvasView.metalLayer.transform),
+                      "the canvas layer must never be scaled — that is what covered the sidebar")
 
         // The real frame: the bridge goes, and it covered at least one present on the way.
         XCTAssertTrue(waitFor { controller.zoomBridge == nil },
@@ -181,8 +186,10 @@ final class LoupeZoomTransitionTests: XCTestCase {
             let bridge = try XCTUnwrap(controller.zoomBridge,
                                        "\(stop) is a stop change: it must arm a bridge")
             XCTAssertEqual(controller.zoomBridgeArmedCount, armed + 1, "exactly one bridge per stop")
-            XCTAssertNotNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"),
-                            "\(stop) must carry an animation")
+            XCTAssertEqual(controller.zoomBridgeFrames.last?.drawable, controller.viewportPixels,
+                           "\\(stop): the transition must draw into the canvas-sized drawable")
+            XCTAssertTrue(CATransform3DIsIdentity(controller.canvasView.metalLayer.transform),
+                          "\\(stop): the canvas layer is never scaled")
             scales.append(String(format: "→%.0f%% ×%.2f", stop * 100, bridge.scale))
             // The camera is already at the stop; the pixels are what is late.
             XCTAssertEqual(controller.viewState.zoom, stop, accuracy: 1e-12,

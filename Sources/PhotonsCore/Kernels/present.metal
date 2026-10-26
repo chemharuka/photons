@@ -17,6 +17,7 @@ using namespace metal;
 
 struct PresentParams {
     float4 a;   // linearize, pad, pad, pad
+    float4 b;   // the sampled window: xy = origin, zw = size, normalised texture coordinates
 };
 
 struct PresentOut {
@@ -24,13 +25,19 @@ struct PresentOut {
     float2 uv;
 };
 
-vertex PresentOut present_vertex(uint vid [[vertex_id]]) {
+vertex PresentOut present_vertex(uint vid [[vertex_id]],
+                                constant PresentParams &p [[buffer(0)]]) {
     // Full-screen triangle strip in clip space; y+ is up, texture v=0 is the top row.
     const float2 corners[4] = { float2(-1.0, 1.0), float2(1.0, 1.0), float2(-1.0, -1.0), float2(1.0, -1.0) };
     const float2 coords[4]  = { float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0) };
     PresentOut o;
     o.position = float4(corners[vid], 0.0, 1.0);
-    o.uv = coords[vid];
+    // The quad **always** covers the whole drawable; `b` decides which part of the texture it reads.
+    // With no window `b` is (0, 0, 1, 1) and this is the identity the pre-window pass had. `b` is
+    // deliberately *not* clamped to [0, 1]: on a shrink the window is larger than the texture, and the
+    // sampler's clamp_to_edge is what fills the canvas with the picture's own edge pixels instead of
+    // an unrendered band.
+    o.uv = p.b.xy + coords[vid] * p.b.zw;
     return o;
 }
 
