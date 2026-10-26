@@ -87,8 +87,13 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
     // here, so touching vibrance or saturation flattened every highlight above white to 1.0 — the
     // picture lost its EDR range the moment a colour slider moved.
     // For an SDR pixel (max ≤ 1) the factor is exactly 1 and the maths below is bit-identical.
-    float headroomScale = max(1.0, max(c.r, max(c.g, c.b)));
-    float3 hsl = rgb_to_hsl(c.rgb / headroomScale);
+    // The scale targets a normalized peak of 0.9 rather than 1.0 on purpose: `rgb_to_hsl` on a value
+    // whose max is exactly 1 always yields saturation **1** (s = (1−mn)/(1−mn)), which would make a
+    // saturation boost a no-op on every HDR pixel. Normalizing to 0.9 keeps the chroma ratio intact,
+    // so `saturation +` still has room to move.
+    float peak = max(c.r, max(c.g, c.b));
+    float headroomScale = peak > 1.0 ? peak / 0.9 : 1.0;
+    float3 hsl = rgb_to_hsl(max(c.rgb, 0.0) / headroomScale);
     float hueDeg = hsl.x * 360.0;
 
     float3 shift = float3(0.0);
