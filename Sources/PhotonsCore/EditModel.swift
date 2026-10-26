@@ -342,8 +342,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public var contrast: Double          // -100…100, default 0
     public var highlights: Double        // -100…100, default 0
     public var shadows: Double           // -100…100, default 0
-    public var whites: Double            // -100…100, default 0
-    public var blacks: Double            // -100…100, default 0
+    public var whites: Double            // -100…100, default 0; + expands the white point (brighter)
+    public var blacks: Double            // -100…100, default 0; + lifts the black point (brighter)
     /// Absolute white balance in Kelvin, fed to `CIRAWFilter.neutralTemperature` — **not** a gain on
     /// S1 (派单 006 B). `nil` = as shot: the decoder is left alone and the inspector shows the number
     /// the file reports (`DecoderCapabilities.asShotTemperature`).
