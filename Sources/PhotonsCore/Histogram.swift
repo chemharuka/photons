@@ -315,6 +315,35 @@ extension Histogram {
         guard long > Double(maxLongEdge) else { return 1 }
         return Double(maxLongEdge) / long
     }
+
+    /// Longest edge of the grid a **frame** is reduced to for a per-frame measurement.
+    ///
+    /// 256, not 1024 — and for the opposite reason to `maxLongEdge`. That grid is the measurement
+    /// itself, paid once per edit; this one is paid *per rendered frame* (`RenderGraph
+    /// .measureHistogram(fromFrame:)`, 027), inside a slider drag, where the whole budget for
+    /// measuring is 2 ms. 256 on the long edge of a 4.10 Mpx frame is 141×256 = 36 k samples: 0.29 MB
+    /// read back instead of 4.6 MB, and a CPU binning pass that is a tenth of the 0.58 Mpx one.
+    ///
+    /// The size of the grid is a noise/price knob, not a coverage one: both grids spread their
+    /// samples over the whole picture, so neither is brighter or darker than the other on average.
+    /// What shrinks with the grid is the *resolution of the estimate* — a bin's count carries a
+    /// relative error of order `1/√(bin count)`, which `HistogramSampleTests` prints.
+    public static let frameSampleLongEdge = 256
+
+    /// The grid a frame's picture `rect` is reduced to: same aspect, long edge ≤ `longEdge`, never
+    /// upsampled (a picture smaller than the grid is sampled one texel per texel, so that case is
+    /// exact and not merely close).
+    public static func frameSampleSize(for rect: ImageRect, longEdge: Int = frameSampleLongEdge)
+        -> ImageSize {
+        let long = max(max(rect.width, rect.height), 1)
+        let cap = max(2, longEdge)
+        guard long > cap else {
+            return ImageSize(width: max(1, rect.width), height: max(1, rect.height))
+        }
+        let s = Double(cap) / Double(long)
+        return ImageSize(width: max(1, Int((Double(rect.width) * s).rounded())),
+                         height: max(1, Int((Double(rect.height) * s).rounded())))
+    }
 }
 
 // MARK: - the measurement itself
@@ -343,8 +372,33 @@ extension Histogram {
     /// has the linear values before S4 and measures those.
     public static func computeEncoded(_ image: DisplayImage, bins: Int = 256,
                                       rect: ImageRect? = nil, headroom: Double = 1) -> Histogram {
+        measure(image, bins: bins, rect: rect, headroom: headroom, lumaInAlpha: false)
+    }
+
+    /// Measure a **frame sample**: `histogram_sample`'s downsampled, display-encoded grid, whose
+    /// fourth channel carries the luma (`RenderGraph.measureHistogram(fromFrame:)`, 027).
+    ///
+    /// Three codes and a luma is one channel more than an `rgba16Float` texture has, and S4 leaves
+    /// alpha at 1.0, so the sample kernel spends that channel on the one number the CPU cannot derive
+    /// without four `pow`s per pixel: `srgbEncode(0.2126·R + 0.7152·G + 0.0722·B)` of the **linear**
+    /// light, which is the definition the shipped pre-S4 measurement uses. Deriving it on the CPU from
+    /// the three codes instead is a different quantity (the OETF is concave: `Σw·code` sits below
+    /// `encode(Σw·linear)`, by up to ~0.02 of code near white), and it showed up as the only series
+    /// whose bins disagreed between the two paths.
+    ///
+    /// `image.alpha` is therefore *not* alpha. A caller recounting a sample must use this entry point,
+    /// not `computeEncoded` — the luma series would then be the code-space mean instead.
+    public static func computeFrameSample(_ image: DisplayImage, bins: Int = 256,
+                                          rect: ImageRect? = nil,
+                                          headroom: Double = 1) -> Histogram {
+        measure(image, bins: bins, rect: rect, headroom: headroom, lumaInAlpha: true)
+    }
+
+    private static func measure(_ image: DisplayImage, bins: Int, rect: ImageRect?,
+                                headroom: Double, lumaInAlpha: Bool) -> Histogram {
         let measured = measure(width: image.width, height: image.height, rgba: image.rgba,
-                               bins: bins, rect: rect, headroom: headroom, encoded: true)
+                               bins: bins, rect: rect, headroom: headroom, encoded: true,
+                               lumaInAlpha: lumaInAlpha)
         return Histogram(binCount: measured.binCount, sampleCount: measured.sampleCount,
                          canvas: measured.canvas, roi: measured.roi,
                          sampleSize: measured.sampleSize, primaries: image.primaries,
@@ -357,7 +411,7 @@ extension Histogram {
     /// linear light (encoded here) — the only difference between the two entry points.
     private static func measure(width: Int, height: Int, rgba: [Float16],
                                 bins: Int, rect: ImageRect?, headroom: Double,
-                                encoded: Bool) -> Histogram {
+                                encoded: Bool, lumaInAlpha: Bool = false) -> Histogram {
         let binCount = min(max(bins, 2), 1 << 16)
         let hdrCount = hdrBinCount
         let stride = binCount + hdrCount
@@ -394,6 +448,13 @@ extension Histogram {
         let statsBase = 4 * stride
         var counts = [Int](repeating: 0, count: 4 * stride + 12)
         let scale = Float(binCount)
+        // Where the luma series comes from, as arithmetic rather than a branch: a *frame* sample
+        // carries its luma in the (otherwise unused) alpha channel — `srgbEncode(Σw·linear)`, the
+        // definition the pre-S4 measurement uses — while a linear or hand-built sample derives it from
+        // the three channels weighted here. Mixing instead of testing keeps this loop branch-free:
+        // the ternary this replaced cost 4.6× in a debug build (690 ms against 148 ms for the shipped
+        // 0.58 Mpx measurement), which is a real regression in the test suite's own budget.
+        let lumaMix: Float = lumaInAlpha ? 1 : 0
 
         rgba.withUnsafeBufferPointer { px in
             counts.withUnsafeMutableBufferPointer { c in
@@ -411,7 +472,11 @@ extension Histogram {
                         let rv = unbounded(px[o])
                         let gv = unbounded(px[o + 1])
                         let bv = unbounded(px[o + 2])
-                        let lv = wr * rv + wg * gv + wb * bv
+                        // A frame sample carries the shipped luma in alpha (it is the only channel
+                        // left, and deriving it from three codes would be a different quantity —
+                        // see `computeFrameSample`).
+                        let lv = lumaMix * unbounded(px[o + 3])
+                            + (1 - lumaMix) * (wr * rv + wg * gv + wb * bv)
 
                         base[combinedIndex(rv, sdrBins: binCount, scale: scale,
                                            encoded: encoded)] += 1

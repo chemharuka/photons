@@ -28,6 +28,7 @@ let valueFlags: Set<String> = [
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
+    "--repeat",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
