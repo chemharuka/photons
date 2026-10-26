@@ -104,6 +104,10 @@ public final class CatalogSession {
     /// unfiltered load runs, so narrowing the grid does not shrink the list of cameras to choose.
     public private(set) var allCameraKeys: [String] = []
 
+    /// `camera_key` → `camera_model`, for the slot popup's labels (a key is `make|model`, lowercased;
+    /// the model is what the user recognises). Refreshed with `allCameraKeys`.
+    public private(set) var allCameraLabels: [String: String] = [:]
+
     /// The assets a metadata command applies to: the whole selection, or the anchor when the
     /// selection is empty (a filter can leave nothing selected while the anchor is still visible).
     public var metadataTargetIDs: [String] {
@@ -246,18 +250,19 @@ public final class CatalogSession {
             // The filter bar's value is folded into the *same* query the source list uses, so the
             // visible rows, their order and the count in the top bar can never disagree.
             let f = filter
-            assets = try c.assets(AssetFilter(ratingAtLeast: f.ratingAtLeast,
-                                              cameraKey: f.cameraKey,
-                                              limit: 200_000,
-                                              flagEquals: f.flag,
-                                              colorLabelEquals: f.colorLabel,
-                                              folders: selectedFolders))
+            assets = try c.assets(f.assetFilter(limit: 200_000, folders: selectedFolders))
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
             // only from an unfiltered load so narrowing never removes a choice from its own popup.
             if !f.isActive {
                 allCameraKeys = Array(Set(assets.compactMap(\.cameraKey))).sorted()
+                var labels: [String: String] = [:]
+                for asset in assets {
+                    guard let key = asset.cameraKey, let model = asset.cameraModel, !model.isEmpty else { continue }
+                    if labels[key] == nil { labels[key] = model }
+                }
+                allCameraLabels = labels
             }
         } catch {
             loadError = error.localizedDescription
@@ -533,6 +538,23 @@ public final class CatalogSession {
     /// Drop one facet — what clicking a chip does.
     public func clearFilter(_ facet: CatalogFilter.Facet) {
         applyFilter(filter.without(facet))
+    }
+
+    /// Drop **one value** from one slot — what a chip's × does (026 v2). The slot stays, because a
+    /// slot is the dimension the user is looking at, not a condition.
+    public func removeSlotValue(at slot: Int, value: String) {
+        applyFilter(filter.removingValue(value, atSlot: slot))
+    }
+
+    /// The values a slot's popup offers for `dimension`, scoped to the rest of the filter.
+    ///
+    /// Asked per dimension while the bar rebuilds; the catalog answers from this library only, so a
+    /// dimension with nothing in it yields `[]` and the popup says 「本库无此数据」 instead of inventing
+    /// a ladder of ISO values.
+    public func facetValues(_ dimension: FilterDimension) -> [String] {
+        guard let c = catalog else { return [] }
+        return c.facetValues(dimension, filter: filter.assetFilter(limit: 200_000,
+                                                                  folders: selectedFolders))
     }
 
     // MARK: documents
