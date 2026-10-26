@@ -110,6 +110,18 @@ func cmdLibrary(_ a: Args) throws {
         } else {
             note("rescan     \(summary.text)")
         }
+        // The import walk says "what is new"; it says nothing about rows whose file the Finder took
+        // away. Re-derive `assets.missing` here too, so a rescan is a full answer to "what changed
+        // on disk?" and not half of one.
+        let availability = try catalog.refreshAvailability()
+        if a.has("--json") {
+            note(jsonLine(["availability": ["checked": availability.checked,
+                                            "missing": availability.missing,
+                                            "relinked": availability.relinked,
+                                            "offlineRoots": availability.offlineRoots]]))
+        } else {
+            note("available  \(availability.summary)")
+        }
 
     case "assets":
         guard a.positional.count >= 2 else { die("library assets <pkg> [filters]") }

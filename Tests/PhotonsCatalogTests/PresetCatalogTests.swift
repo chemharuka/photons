@@ -405,7 +405,7 @@ final class PresetCatalogTests: XCTestCase {
 
         // Product path: snapshot first, then migrate.
         let migrated = try Catalog.open(at: pkg)
-        XCTAssertEqual(migrated.schemaVersionApplied, 4)
+        XCTAssertEqual(migrated.schemaVersionApplied, Schema.version, "v3 → every later step, including v5")
         XCTAssertEqual(try migrated.integrityCheck(), "ok")
 
         // 1. The pre-migration copy exists, named for the version it came from, with the old rows.
