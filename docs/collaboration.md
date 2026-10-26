@@ -70,38 +70,6 @@ $S claim --task NNN && … && $S post --kind done --summary '…' --ref docs/…
 
 **共用终端时务必带不同的 `--purpose` 或 `--id`**：会话 id 走 env 变量，同终端的另一个 agent 会继承它，事件就记到别人名下（已踩过）。看到 `sync` 里的 `you` 不对，就重新 `register --id <名字>`。
 
-## 一个功能一个 session：派单 → 实现 → 审阅 → 合入
-
-> 2026-10-26 定稿。**铁律在仓库根 `AGENTS.md`**（每个 session 自动注入，含 opencode/codex）；
-> 角色流程在 skill `photons-feature-dev`（实现）/ `photons-code-review`（审阅）/ `photons-session-bus`（总线）。
-
-| 步 | 谁做 | 命令 / 产物 |
-|---|---|---|
-| 1 派单 | 用户或主线 | session 开场写明「用 skill `photons-feature-dev`，任务 NNN」；规格落 `docs/tasks/NNN-*.md`，**必须含可执行验收** |
-| 2 实现 | 新 session（自己的 worktree） | `git worktree add --detach /tmp/photons-wt-<主题> main` + 播种 `.build` → 实现 → `make verify` 绿 → 本地 commit |
-| 3 交接 | 实现 session | `bus.py --path … post --kind handoff`：**分支名 + 基线 commit + 规格路径 + 验收摘要** |
-| 4 审阅 | 另一个 session | `photons-code-review`：基线对齐 → 自己重跑 verify（不采信摘录）→ 项目检查表 → 结论写 `docs/reviews/NNN-<主题>-review.md` |
-| 5 合入 | 审阅 session | `git merge --no-ff` → 主线再跑一次 `make verify` → 删两个 worktree → bus `post --kind done` |
-
-派单一条命令（主线跑，做完就能把打印出的那段粘进新 session）：
-
-```bash
-scripts/dispatch.sh <NNN> <主题slug> "<一句目标>" --accept "<验收命令>"   # 备 worktree+播种+编译+规格骨架+prompt
-scripts/dispatch.sh review <NNN> <主题slug>                              # 生成审阅 session 的开场 prompt
-```
-
-它只碰 `/tmp/photons-wt-<slug>`，不写主 checkout、不提交任何东西；规格骨架写在分支里，随实现 session 的提交一起进仓库。
-
-三条容易漏的：
-
-- **worktree 里的 bus 命令必须带 `--path ~/Documents/GitHub/photons`**。slug 由 git root 绝对路径算出
-  （`bus.py:59-63`），`/tmp/photons-wt-x` 会得到另一条**空总线**，`sync` 全空却不报错。
-- 本机到 github 不通（`SSL_ERROR_SYSCALL`，2026-10-26 实测）：所谓"push 到本地"实际就是**本地 commit + 分支**；
-  同机审阅不需要远端，直接 `git diff main...feat/x`。要留档再建本地裸仓库当第二 remote
-  （`git init --bare ~/git/photons.git` + `git remote add local`），**不要动 origin**。
-- **不要"复制一份项目代码"**：复制出来的目录是一条新总线，还丢 `.build/checkouts`（GRDB 的 `SQLiteCustom/src`
-  子模块要重下）。要用 worktree。审阅完立刻 `git worktree remove --force`（每个 ~1.2 GB）。
-
 ## 已知的环境坑
 
 | 坑 | 结论 |
