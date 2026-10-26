@@ -1966,29 +1966,22 @@ public final class UISmokeRunner {
                   && card.hoverValueText == "\(codeBin)"
                   && card.hoverCountText == codeCounts)
 
-            // 015 — the percentages row (`R x% G y% B z%`) becomes three **fixed** R/G/B slots holding
-            // the level under the pointer: `R 128 G 128 B 128` on the code segment (the sRGB code,
-            // 0–255), `R +0.8 G +0.8 B +0.8` on the tail. The letters sit at the slots' left edges and
-            // the numbers at their right edges, so the three positions never move with the text.
+            // 017 — the percentages row (`R x% G y% z%`) becomes **one line** holding the level under
+            // the pointer and that bin's R/G/B counts: `L 128 · R 1284 · G 1291 · B 1206`. `L` is
+            // luminance; the level is the sRGB code on the code segment and `+x.x` stops on the tail.
             if let reading = card.hoverReading {
-                let expectedValue = "\(reading.code)"
-                let expectedLevel = "R \(expectedValue) G \(expectedValue) B \(expectedValue)"
-                let expectedSlots = ["R \(expectedValue)", "G \(expectedValue)", "B \(expectedValue)"]
-                log("hover level row        code bin \(reading.bin) → “\(card.hoverLevelText ?? "nil")” · 通道行 “\(card.channelRowText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · 三槽 \(card.hoverLevelSlotRects.map { String(format: "%.3f…%.3f", $0.minX, $0.maxX) })")
-                check("悬停时通道行是 R/G/B 三槽（SDR 区）：\(card.hoverLevelText ?? "nil") == \(expectedLevel)（码值 0–255），字母 minX \(card.hoverLevelLetterRects.map { String(format: "%.3f", $0.minX) }) 都钉在槽左端、数值 maxX \(card.hoverLevelValueRects.map { String(format: "%.3f", $0.maxX) }) 都在槽右端，与脚注 “\(card.hoverValueText)” + “\(card.hoverCountText)” 同时存在，两行不重叠（\(String(format: "%.1f", card.hoverLevelRect.maxY)) ≤ \(String(format: "%.1f", card.hoverReadoutRect.minY))），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
-                      card.hoverLevelText == expectedLevel
-                      && card.hoverLevelValueText == expectedValue
+                let expectedRow = "L \(reading.code) · R \(histogram.red.bins[reading.bin]) · G \(histogram.green.bins[reading.bin]) · B \(histogram.blue.bins[reading.bin])"
+                log("hover row              code bin \(reading.bin) → “\(card.hoverRowText ?? "nil")” · 通道行 “\(card.channelRowText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt")
+                check("悬停时通道行是单行（SDR 区）：“\(card.hoverRowText ?? "nil")” == “\(expectedRow)” —— L 前缀 + 码值 + 该箱 R/G/B 计数，一行内左对齐，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt，且与脚注行不重叠（\(String(format: "%.1f", card.hoverRowRect.maxY)) ≤ \(String(format: "%.1f", card.hoverReadoutRect.minY))）",
+                      card.hoverRowText == expectedRow
                       && reading.code == codeBin
-                      && !card.hoverValueText.isEmpty && !card.hoverCountText.isEmpty
-                      && !card.hoverReadoutRect.isEmpty && !card.hoverLevelRect.isEmpty
-                      && card.hoverLevelRect.maxY <= card.hoverReadoutRect.minY
-                      && card.channelRowWidth <= cardBounds.width
-                      && card.hoverLevelSlotRects.count == 3
-                      && card.hoverLevelLetterRects.map(\.minX) == card.hoverLevelSlotRects.map(\.minX)
-                      && card.hoverLevelValueRects.map(\.maxX) == card.hoverLevelSlotRects.map(\.maxX)
-                      && card.channelRowTexts == expectedSlots)
+                      && card.channelRowTexts == [expectedRow]
+                      && card.channelRowText == expectedRow
+                      && !card.hoverRowRect.isEmpty
+                      && card.hoverRowRect.maxY <= card.hoverReadoutRect.minY + 0.01
+                      && card.channelRowWidth <= cardBounds.width)
             } else {
-                fail("码值区悬停没有 reading，三槽行无从断言")
+                fail("码值区悬停没有 reading，悬停行无从断言")
             }
 
             // 尾段 +1 / +2 档：64 箱/stop，所以 +1 档是 bin 64、+2 档是 bin 128。
@@ -2012,22 +2005,24 @@ public final class UISmokeRunner {
                   && card.hoverValueText == "+2.00 档 (4.0×)"
                   && card.hoverCountText == "R \(histogram.red.hdrBins[tailBin2]) · G \(histogram.green.hdrBins[tailBin2]) · B \(histogram.blue.hdrBins[tailBin2])")
 
-            // 尾段的三槽行：+1 档 → “R +1.0 G +1.0 B +1.0”，+2 档 → “R +2.0 G +2.0 B +2.0”
-            // （一位小数，口径 +1 档 = 2×）。
-            var tailLevels: [String] = []
+            // 尾段同样是一行：+1 档 → “L +1.0 · R n · G n · B n”，+2 档 → “L +2.0 · …”（一位小数）。
+            var tailRows: [String] = []
             for stop in [1.0, 2.0] {
                 card.updateHoverReadout(at: NSPoint(x: hoverAxis.x(stopsAboveWhite: stop),
                                                     y: hoverAxis.plot.midY))
                 card.display()
-                tailLevels.append(card.hoverLevelText ?? "nil")
+                tailRows.append(card.hoverRowText ?? "nil")
             }
-            log("hover level row        tail +1/+2 → \(tailLevels) · 脚注 “\(card.hoverValueText)” | “\(card.hoverCountText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt")
-            check("悬停时通道行是三槽（尾段）：+1 档 → “\(tailLevels[0])” == “R +1.0 G +1.0 B +1.0”，+2 档 → “\(tailLevels[1])” == “R +2.0 G +2.0 B +2.0”，脚注同时仍有值 “\(card.hoverValueText)” | “\(card.hoverCountText)”，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
-                  tailLevels == ["R +1.0 G +1.0 B +1.0", "R +2.0 G +2.0 B +2.0"]
+            let expectedTail = ["1.0", "2.0"].map { value in
+                let bin = Int((value as NSString).doubleValue * Double(Histogram.hdrBinsPerStop))
+                return "L +\(value) · R \(histogram.red.hdrBins[bin]) · G \(histogram.green.hdrBins[bin]) · B \(histogram.blue.hdrBins[bin])"
+            }
+            log("hover row              tail +1/+2 → \(tailRows) · 脚注 “\(card.hoverValueText)” | “\(card.hoverCountText)” · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt")
+            check("悬停时通道行是单行（尾段）：+1 档 → “\(tailRows[0])”、+2 档 → “\(tailRows[1])”，与期望 \(expectedTail) 一致，行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+                  tailRows == expectedTail
                   && card.hoverReading?.segment == .tail
-                  && !card.hoverValueText.isEmpty && !card.hoverCountText.isEmpty
                   && card.channelRowWidth <= cardBounds.width
-                  && card.hoverLevelRect.maxY <= card.hoverReadoutRect.minY)
+                  && card.hoverRowRect.maxY <= card.hoverReadoutRect.minY + 0.01)
 
             // 越过右端：绘图区右边缘就是 4 档，clamp 到溢出箱（bin 255，读 +3.98 档）。
             card.updateHoverReadout(at: NSPoint(x: hoverAxis.plot.maxX - 0.5,
@@ -2053,9 +2048,9 @@ public final class UISmokeRunner {
                   && card.hoverPaintCount == paintsBefore)
 
             // 013 — 离开后通道行回到过白比例（上一处 check 已证明 clipHighTextByChannel == Core 的值）。
-            check("移出绘图区 → 通道行恢复过白比例：画的是 “\(card.channelRowText)” == clipHighTextByChannel 前三项 \(card.channelRowTexts)，亮度行已空（\(card.hoverLevelText ?? "nil")，rect \(card.hoverLevelRect.isEmpty ? "empty" : "非空")），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
-                  card.hoverLevelText == nil
-                  && card.hoverLevelRect.isEmpty
+            check("移出绘图区 → 通道行恢复过白比例：画的是 “\(card.channelRowText)” == clipHighTextByChannel 前三项 \(card.channelRowTexts)，悬停行已空（\(card.hoverRowText ?? "nil")，rect \(card.hoverRowRect.isEmpty ? "empty" : "非空")），行宽 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
+                  card.hoverRowText == nil
+                  && card.hoverRowRect.isEmpty
                   && card.channelRowTexts == Array(card.clipHighTextByChannel.prefix(3))
                   && card.channelRowText.hasPrefix("R ")
                   && card.channelRowWidth <= cardBounds.width)

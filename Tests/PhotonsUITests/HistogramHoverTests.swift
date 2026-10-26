@@ -399,212 +399,111 @@ final class HistogramHoverTests: XCTestCase {
     // that twitches also passes.
 
     /// SDR: the number is the sRGB **code**, an integer 0…255 — bin 0 / 128 / 255 → `0` / `128` / `255`.
-    func testTheSlotNumberIsTheCodeOnTheCodeSegment() {
-        let axis = HistogramAxis(plot: plot)
-        let cases: [(bin: Int, text: String)] = [(0, "0"), (64, "64"), (128, "128"), (255, "255")]
+    func testTheRowValueIsTheCodeOnTheCodeSegment() {
+        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: 244, height: 58))
+        let cases: [(Int, String)] = [(0, "0"), (128, "128"), (255, "255")]
         for c in cases {
-            let reading = axis.hoverReading(atX: axis.x(sdrBin: c.bin, of: 256))
-            XCTAssertEqual(reading.segment, .code)
-            XCTAssertEqual(reading.bin, c.bin)
-            XCTAssertEqual(HistogramCardFormat.hoverSlotValue(reading), c.text, "码值，不是百分比")
-            XCTAssertEqual(HistogramCardFormat.hoverLevelText(reading),
-                           "R \(c.text) G \(c.text) B \(c.text)", "R/G/B 三份同值")
+            let reading = axis.hoverReading(atX: axis.x(sdrBin: c.0, of: 256))
+            XCTAssertEqual(HistogramCardFormat.hoverRowValue(reading), c.1, "码值，不是百分比")
         }
-        print("015 SDR row: bin 0 → \"R 0 G 0 B 0\" · bin 128 → \"R 128 G 128 B 128\" · bin 255 → \"R 255 G 255 B 255\"")
     }
 
-    /// The tail has no code: it reads the stop, one decimal — `+0.8`, `+2.0`, `+3.0` — and the
-    /// 3.984-stop overflow bin rounds to `+4.0`.
-    func testTheSlotNumberIsTheStopOnTheTail() {
-        let axis = HistogramAxis(plot: plot)
-        let cases: [(stops: Double, text: String)] = [
-            (0.8, "+0.8"), (1.0, "+1.0"), (2.0, "+2.0"), (3.0, "+3.0"),
-        ]
+    func testTheRowValueIsTheStopOnTheTail() {
+        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: 244, height: 58))
+        let cases: [(Double, String)] = [(1.0, "+1.0"), (2.0, "+2.0"), (3.0, "+3.0")]
         for c in cases {
-            let reading = axis.hoverReading(atX: axis.x(stopsAboveWhite: c.stops))
-            XCTAssertEqual(reading.segment, .tail)
-            XCTAssertEqual(HistogramCardFormat.hoverSlotValue(reading), c.text, "一位小数的 +x.x 档")
-            XCTAssertEqual(HistogramCardFormat.hoverLevelText(reading),
-                           "R \(c.text) G \(c.text) B \(c.text)")
+            let reading = axis.hoverReading(atX: axis.x(stopsAboveWhite: c.0))
+            XCTAssertEqual(HistogramCardFormat.hoverRowValue(reading), c.1, "一位小数的 +x.x 档")
         }
-        let overflow = axis.hoverReading(atX: plot.maxX)
-        XCTAssertEqual(overflow.stops, 3.984375, accuracy: 1e-9)
-        XCTAssertEqual(HistogramCardFormat.hoverSlotValue(overflow), "+4.0")
-        print("015 tail row: 0.8 → \"+0.8\" · 1.0 → \"+1.0\" · 3.0 → \"+3.0\" · overflow 3.984 → \"+4.0\"")
+        let overflow = axis.hoverReading(atX: axis.plot.maxX - 0.5)
+        XCTAssertEqual(HistogramCardFormat.hoverRowValue(overflow), "+4.0")
     }
 
-    func testNoReadingIsNoSlotText() {
-        XCTAssertNil(HistogramCardFormat.hoverSlotValue(nil), "没悬停就没有这行数字")
-        XCTAssertNil(HistogramCardFormat.hoverLevelText(nil))
+    func testNoReadingIsNoRow() {
+        XCTAssertNil(HistogramCardFormat.hoverRowValue(nil), "没悬停就没有这行")
+        XCTAssertNil(HistogramCardFormat.hoverRowText(knownCounts, nil))
     }
 
-    /// The layout arithmetic, with no drawing: three equal slots on a 1/1000 pt grid, and the 72 pt
-    /// floor that a card narrower than 216 pt falls back to.
-    func testTheSlotGeometryIsThreeEqualSlots() {
-        let layout = HistogramCardFormat.hoverSlotLayout(forRowWidth: minimumCardWidth)
-        XCTAssertEqual(layout.edges, [0, 81.333, 162.667, 244])
-        XCTAssertEqual(layout.slotOrigin(0), 0)
-        XCTAssertEqual(layout.slotEnd(2), minimumCardWidth)
-        XCTAssertEqual(layout.slotWidth(0), 81.333, accuracy: 1e-9)
-        XCTAssertEqual(layout.slotWidth(1), 81.334, accuracy: 1e-9)
-        XCTAssertEqual(HistogramCardFormat.hoverSlotLayout(forRowWidth: 180).edges, [0, 72, 144, 216],
-                       "窄卡不再缩槽：72 pt × 3")
-        XCTAssertEqual(HistogramCardFormat.hoverSlotLayout(forRowWidth: 216).edges, [0, 72, 144, 216])
-        print("015 slots: 244 → \(layout.edges) · 180 → \(HistogramCardFormat.hoverSlotLayout(forRowWidth: 180).edges)")
+    /// The owner's line, in full: `L <level> · R <n> · G <n> · B <n>`.
+    func testTheRowTextIsOneLineWithTheCounts() {
+        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: 244, height: 58))
+        let code = axis.hoverReading(atX: axis.x(sdrBin: 128, of: 256))
+        XCTAssertEqual(HistogramCardFormat.hoverRowText(knownCounts, code),
+                       "L 128 · R 1284 · G 1291 · B 1206")
+        let tail = axis.hoverReading(atX: axis.x(hdrBin: 128))
+        XCTAssertEqual(HistogramCardFormat.hoverRowText(knownCounts, tail),
+                       "L +2.0 · R 903 · G 910 · B 825")
+        // An unmeasured card still knows the level; it just has no counts to print.
+        XCTAssertEqual(HistogramCardFormat.hoverRowText(nil, code), "L 128")
     }
 
-    /// 位置固定（纯函数）：`0` / `128` / `+3.0` 三种长度下，R/G/B 字母的 `minX` 精确相等，数值的
-    /// `maxX` 也精确相等——相等的是位模式，不是"在容差内"。
-    func testTheThreeSlotsDoNotMoveWhenTheNumberChanges() {
-        let font = HistogramCardView.numberFont
-        let layout = HistogramCardFormat.hoverSlotLayout(forRowWidth: minimumCardWidth)
-        let names = HistogramCardFormat.hoverLevelSlotNames
-        var letterMinX: [[CGFloat]] = []
-        var valueMaxX: [[CGFloat]] = []
-        var numberWidths: [[CGFloat]] = []
-        for value in ["0", "128", "+3.0"] {
-            var mins: [CGFloat] = []
-            var maxs: [CGFloat] = []
-            var widths: [CGFloat] = []
-            for slot in 0..<3 {
-                let letterSize = (names[slot] as NSString).size(withAttributes: [.font: font])
-                let valueSize = (value as NSString).size(withAttributes: [.font: font])
-                mins.append(layout.letterRect(slot, size: letterSize, y: 0).minX)
-                maxs.append(layout.valueRect(slot, size: valueSize, y: 0).maxX)
-                widths.append(valueSize.width)
-            }
-            letterMinX.append(mins)
-            valueMaxX.append(maxs)
-            numberWidths.append(widths)
-        }
-        for slot in 0..<3 {
-            for caseIndex in 0..<3 {
-                XCTAssertEqual(letterMinX[caseIndex][slot], layout.edges[slot], accuracy: 0,
-                               "槽 \(slot) 的字母钉在槽左端（\(["0", "128", "+3.0"][caseIndex])）")
-                XCTAssertEqual(valueMaxX[caseIndex][slot], layout.edges[slot + 1], accuracy: 0,
-                               "槽 \(slot) 的数值右对齐到槽右端（\(["0", "128", "+3.0"][caseIndex])）")
-            }
-            XCTAssertEqual(letterMinX[1][slot], letterMinX[0][slot], accuracy: 0, "换数字，字母不动")
-            XCTAssertEqual(letterMinX[2][slot], letterMinX[0][slot], accuracy: 0, "换数字，字母不动")
-            XCTAssertEqual(valueMaxX[1][slot], valueMaxX[0][slot], accuracy: 0, "换数字，右端不动")
-            XCTAssertEqual(valueMaxX[2][slot], valueMaxX[0][slot], accuracy: 0, "换数字，右端不动")
-        }
-        print("015 fixed slots: 字母 minX \(letterMinX[0].map { String(format: "%.3f", $0) }) · 数值 maxX \(valueMaxX[0].map { String(format: "%.3f", $0) }) · 数字宽度 0:\(String(format: "%.2f", numberWidths[0][0])) 128:\(String(format: "%.2f", numberWidths[1][0])) +3.0:\(String(format: "%.2f", numberWidths[2][0])) pt")
-        print("015 三种长度同一组槽: \"0\" \(letterMinX[0]) | \"128\" \(letterMinX[1]) | \"+3.0\" \(letterMinX[2])")
-    }
-
-    // MARK: - 015: the drawn card — three slots painted, and back to the percentages on leave
-
-    func testTheDrawnCardPaintsThreeFixedSlotsAndRestoresThePercentages() {
+    /// One shot, one line: the percentages row becomes the hover row and comes back on leave.
+    func testTheDrawnCardPaintsOneLineAndRestoresThePercentages() {
         let card = drawnCard(histogram: knownCounts)
         let clips = card.clipHighTextByChannel
-        XCTAssertNil(card.hoverLevelText, "没悬停 → 这一行是过白比例")
-        XCTAssertNil(card.hoverLevelValueText)
-        XCTAssertTrue(card.hoverLevelSlotRects.isEmpty)
-        XCTAssertEqual(card.channelRowTexts, Array(clips.prefix(3)))
         let idleWidth = card.channelRowWidth
+        XCTAssertNil(card.hoverRowText, "没悬停 → 这一行是过白比例")
+        XCTAssertTrue(card.hoverRowRect.isEmpty)
+        XCTAssertEqual(card.channelRowTexts, Array(clips.prefix(3)))
 
-        // bin 128 of the 244 pt card: sdrWidth 124 pt (the 120 pt tail takes the rest), so the bin's
-        // centre is at x = 62.23.
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
+        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: minimumCardWidth, height: 58))
+        card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: 20))
         render(card)
-        XCTAssertEqual(card.hoverLevelValueText, "128")
-        XCTAssertEqual(card.hoverLevelText, "R 128 G 128 B 128")
-        XCTAssertEqual(card.channelRowTexts, ["R 128", "G 128", "B 128"], "三个槽各画一次")
-        XCTAssertEqual(card.channelRowText, "R 128 G 128 B 128")
-        XCTAssertEqual(card.hoverLevelSlotRects.map(\.minX), [0, 81.333, 162.667], "三槽起点")
-        XCTAssertEqual(card.hoverLevelLetterRects.map(\.minX), [0, 81.333, 162.667], "字母在槽左端")
-        XCTAssertEqual(card.hoverLevelValueRects.map(\.maxX), [81.333, 162.667, 244], "数值在槽右端")
-        XCTAssertEqual(card.channelRowWidth, 244, accuracy: 1e-9, "三槽铺满整行")
-        XCTAssertEqual(card.hoverLevelSlotRects.count, 3)
 
-        // The face is still `numberFont` (9.5 pt semibold), the same one 过白/削顶 use.
-        let face = ("128" as NSString).size(withAttributes: [.font: HistogramCardView.numberFont])
-        XCTAssertEqual(card.hoverLevelValueRects[0].height, face.height, accuracy: 0.01)
-        XCTAssertGreaterThan(HistogramCardView.numberFont.pointSize,
-                             HistogramCardReadability.percentFont.pointSize)
-        XCTAssertEqual(card.hoverLevelRect.minY, 78, accuracy: 0.5, "行位置没变（plot 58 + 5 + 15）")
+        XCTAssertEqual(card.hoverRowText, "L 128 · R 1284 · G 1291 · B 1206")
+        XCTAssertEqual(card.channelRowTexts, ["L 128 · R 1284 · G 1291 · B 1206"], "一行，不是三槽")
+        XCTAssertEqual(card.channelRowText, "L 128 · R 1284 · G 1291 · B 1206")
+        XCTAssertFalse(card.hoverRowRect.isEmpty)
+        XCTAssertEqual(card.hoverRowRect.minX, 0, accuracy: 0.01, "左对齐到卡片内容左端")
+        XCTAssertEqual(card.hoverRowRect.minY, 78, accuracy: 0.5, "行位置没变（plot 58 + 5 + 15）")
+        XCTAssertEqual(card.hoverRowRect.height,
+                       ("L 128" as NSString).size(withAttributes: [.font: HistogramCardView.numberFont]).height,
+                       accuracy: 0.01, "字号是卡片自己的 numberFont（9.5 semibold）")
+        XCTAssertTrue(card.hoverRowRect.intersection(card.hoverReadoutRect).isEmpty,
+                      "两行不重叠：悬停行 \(card.hoverRowRect) vs 脚注 \(card.hoverReadoutRect)")
+        print("017 drawn row: \"\(card.channelRowText)\" · rect \(card.hoverRowRect) · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(minimumCardWidth) pt")
 
-        // The footnote (010) is still painted on the same draw, and the two rows do not overlap.
-        XCTAssertEqual(card.hoverValueText, "128")
-        XCTAssertEqual(card.hoverCountText, "R 1284 · G 1291 · B 1206")
-        XCTAssertTrue(card.hoverLevelRect.intersection(card.hoverReadoutRect).isEmpty,
-                      "两行不重叠：三槽 \(card.hoverLevelRect) vs 脚注 \(card.hoverReadoutRect)")
-        XCTAssertLessThan(card.hoverLevelRect.maxY, card.hoverReadoutRect.minY)
-        XCTAssertLessThanOrEqual(card.hoverLevelRect.maxY, cardHeight + 0.01)
-        print("015 drawn slots: \"\(card.channelRowText)\" · 槽 \(card.hoverLevelSlotRects.map { String(format: "%.3f…%.3f", $0.minX, $0.maxX) }) · 行宽 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(minimumCardWidth) pt")
-        print("015 drawn rows: 三槽 y \(String(format: "%.1f", card.hoverLevelRect.minY))…\(String(format: "%.1f", card.hoverLevelRect.maxY)) · 脚注 y \(String(format: "%.1f", card.hoverReadoutRect.minY))…\(String(format: "%.1f", card.hoverReadoutRect.maxY))")
-
-        // Mouse out: the three above-white percentages come back in the row's own 8.5 pt face.
         card.clearHoverReadout()
         render(card)
-        XCTAssertNil(card.hoverLevelText)
-        XCTAssertNil(card.hoverLevelValueText)
-        XCTAssertTrue(card.hoverLevelRect.isEmpty)
-        XCTAssertTrue(card.hoverLevelSlotRects.isEmpty)
-        XCTAssertTrue(card.hoverLevelLetterRects.isEmpty)
+        XCTAssertNil(card.hoverRowText)
+        XCTAssertTrue(card.hoverRowRect.isEmpty)
         XCTAssertEqual(card.channelRowTexts, Array(clips.prefix(3)))
         XCTAssertEqual(card.channelRowText, "R \(clips[0]) G \(clips[1]) B \(clips[2])")
         XCTAssertEqual(card.channelRowWidth, idleWidth, accuracy: 0.01, "回到过白比例，行宽回原值")
         XCTAssertEqual(card.clipHighTextByChannel, clips, "过白比例本身没被改掉")
-        print("015 restored row: \"\(card.channelRowText)\" · 行宽 \(String(format: "%.2f", card.channelRowWidth)) pt（悬停时 244.0 pt）· 字号 \(HistogramCardReadability.percentFont.pointSize) pt（悬停时 \(HistogramCardView.numberFont.pointSize) pt）")
     }
 
-    /// The claim that matters most, on the drawn card: `0`, `128` and `+3.0` all land in the same
-    /// three slots, letter `minX` and number `maxX` exactly equal.
-    func testTheDrawnSlotsLineUpForZero128AndAStop() {
+    /// The row starts at the same x for `0`, `128` and `+3.0` — that is what "one line, flush left"
+    /// means, and it is a fact about the paint, not about the string.
+    func testTheDrawnRowKeepsItsLeftEdgeForEveryValue() {
         let card = drawnCard(histogram: knownCounts)
         let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: minimumCardWidth, height: 58))
         let samples: [(x: CGFloat, value: String)] = [
-            (axis.x(sdrBin: 0, of: 256), "0"),
-            (axis.x(sdrBin: 128, of: 256), "128"),
-            (axis.x(stopsAboveWhite: 3.0), "+3.0"),
+            (axis.x(sdrBin: 0, of: 256), "L 0"),
+            (axis.x(sdrBin: 128, of: 256), "L 128"),
+            (axis.x(stopsAboveWhite: 3.0), "L +3.0"),
         ]
-        var letters: [[CGFloat]] = []
-        var values: [[CGFloat]] = []
+        var minXs: [CGFloat] = []
+        var minYs: [CGFloat] = []
         for sample in samples {
             card.updateHoverReadout(at: CGPoint(x: sample.x, y: 20))
             render(card)
-            XCTAssertEqual(card.hoverLevelValueText, sample.value)
-            letters.append(card.hoverLevelLetterRects.map(\.minX))
-            values.append(card.hoverLevelValueRects.map(\.maxX))
-            print("015 drawn “\(sample.value)” → 字母 minX \(letters[letters.count - 1].map { String(format: "%.3f", $0) }) · 数值 maxX \(values[values.count - 1].map { String(format: "%.3f", $0) })")
+            XCTAssertTrue(card.hoverRowText?.hasPrefix(sample.value + " · ") ?? false,
+                          "\(card.hoverRowText ?? "nil") 应以 \(sample.value) 开头")
+            minXs.append(card.hoverRowRect.minX)
+            minYs.append(card.hoverRowRect.minY)
         }
-        XCTAssertEqual(letters[0], letters[1], "0 与 128 的字母位置完全相同")
-        XCTAssertEqual(letters[1], letters[2], "128 与 +3.0 的字母位置完全相同")
-        XCTAssertEqual(values[0], values[1], "0 与 128 的数值右端完全相同")
-        XCTAssertEqual(values[1], values[2], "128 与 +3.0 的数值右端完全相同")
+        XCTAssertEqual(Set(minXs).count, 1, "不同码值下起点相同：\(minXs)")
+        XCTAssertEqual(Set(minYs).count, 1, "不同码值下行位置相同：\(minYs)")
     }
 
-    /// The tail on the drawn card: `R +0.8 G +0.8 B +0.8`, footnote still reading the stop and counts.
-    func testTheDrawnCardShowsTheSameStopThreeTimesOnTheTail() {
-        let card = drawnCard(histogram: knownCounts)
-        let axis = HistogramAxis(plot: NSRect(x: 0, y: 0, width: minimumCardWidth, height: 58))
-        card.updateHoverReadout(at: CGPoint(x: axis.x(stopsAboveWhite: 0.8), y: 20))
-        render(card)
-        XCTAssertEqual(card.hoverLevelText, "R +0.8 G +0.8 B +0.8")
-        XCTAssertEqual(card.hoverValueText, "+0.80 档 (1.7×)")
-        XCTAssertEqual(card.hoverCountText, "R 0 · G 0 · B 0", "该档没有样品，脚注如实说 0")
-        XCTAssertTrue(card.hoverLevelRect.intersection(card.hoverReadoutRect).isEmpty)
-        XCTAssertEqual(card.hoverLevelSlotRects.map(\.minX), [0, 81.333, 162.667], "尾段也是同一组槽")
-
-        // +2 档 is tail bin 128 — the fixture has 903/910/825 samples there.
-        card.updateHoverReadout(at: CGPoint(x: axis.x(hdrBin: 128), y: 20))
-        render(card)
-        XCTAssertEqual(card.hoverLevelText, "R +2.0 G +2.0 B +2.0")
-        XCTAssertEqual(card.hoverCountText, "R 903 · G 910 · B 825")
-        XCTAssertEqual(card.hoverLevelSlotRects.map(\.minX), [0, 81.333, 162.667])
-        print("015 tail drawn: \"\(card.hoverLevelText ?? "-")\" · 脚注 \"\(card.hoverValueText)\" | \"\(card.hoverCountText)\"")
-    }
-
-    /// A card with no measurement keeps the `—` percentages: the level is a property of the *axis*,
-    /// not of the histogram, so the three slots still read the code under the pointer.
-    func testAnUnmeasuredCardKeepsThePercentageRowWhileHovering() {
+    /// A card with no measurement still reads the level (the level is a property of the *axis*).
+    func testAnUnmeasuredCardStillReadsTheLevel() {
         let card = drawnCard(histogram: nil)
         card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
         render(card)
-        XCTAssertEqual(card.hoverLevelText, "R 128 G 128 B 128", "位置读数不需要测量")
+        XCTAssertEqual(card.hoverRowText, "L 128", "位置读数不需要测量，只是没有计数")
         XCTAssertTrue(card.clipHighTextByChannel.allSatisfy { $0 == "—" })
-        XCTAssertEqual(card.channelRowTexts, ["R 128", "G 128", "B 128"])
+        XCTAssertEqual(card.channelRowTexts, ["L 128"])
     }
 }
