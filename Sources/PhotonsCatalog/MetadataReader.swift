@@ -134,13 +134,15 @@ public enum MetadataReader {
         xmpValue(md, path).flatMap { Double($0) }
     }
 
+    /// XMP hands us a *rational string* (`55924/44739201` on a Leica DNG), EXIF hands us a double.
+    /// Both go through `ShutterFormat` so the stored value is the standard shutter a photographer
+    /// reads (`1/800`), never an improper fraction or a `1/8006` artefact of flooring.
     private static func shutterString(md: CGImageMetadata?, exif: [String: Any]) -> String? {
-        if let s = xmpValue(md, "exif:ExposureTime") { return s }
+        if let s = xmpValue(md, "exif:ExposureTime"), let standard = ShutterFormat.standard(from: s) {
+            return standard
+        }
         if let n = exif[kCGImagePropertyExifExposureTime as String] as? NSNumber {
-            let t = n.doubleValue
-            if t <= 0 { return nil }
-            if t < 0.5 { return "1/\(Int((1.0 / t).rounded()))" }
-            return String(format: "%.1fs", t)
+            return ShutterFormat.standard(seconds: n.doubleValue)
         }
         return nil
     }

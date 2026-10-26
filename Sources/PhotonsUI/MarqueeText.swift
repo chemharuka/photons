@@ -366,10 +366,15 @@ public enum InspectorPhotoInfo {
     }
 
     /// `1/250` → `1/250s`; `1/250s` stays `1/250s`; empty → nil (the caller prints `—`).
+    ///
+    /// Legacy rows also come through here: a library imported before `ShutterFormat` existed has
+    /// `55924/44739201` in `asset_metadata.shutter`, so the value is re-normalised at display time
+    /// (the row is read-only here — no migration, no re-import).
     public static func shutter(_ raw: String?) -> String? {
-        guard var s = raw.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }), !s.isEmpty else {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
+        guard var s = ShutterFormat.standard(from: raw), !s.isEmpty else { return nil }
         if s.hasSuffix("s") || s.hasSuffix("S") { return s }
         s.append("s")
         return s

@@ -197,4 +197,15 @@ final class InspectorMetadataTests: XCTestCase {
         for sub in view.subviews { found += marqueeRows(in: sub) }
         return found
     }
+
+    /// The panel adds the unit exactly once, and it normalises legacy rows on the way (a library
+    /// imported before `ShutterFormat` has `55924/44739201` in the shutter column).
+    func testShutterRowNormalisesLegacyRatiosAndAddsOneUnit() {
+        XCTAssertEqual(InspectorPhotoInfo.shutter("55924/44739201"), "1/800s")
+        XCTAssertEqual(InspectorPhotoInfo.shutter("31667/39583751"), "1/1250s")
+        XCTAssertEqual(InspectorPhotoInfo.shutter("1/250"), "1/250s")
+        XCTAssertEqual(InspectorPhotoInfo.shutter("2"), "2s")
+        XCTAssertNil(InspectorPhotoInfo.shutter(""))
+        XCTAssertNil(InspectorPhotoInfo.shutter(nil))
+    }
 }
