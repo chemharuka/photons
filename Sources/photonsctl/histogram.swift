@@ -73,10 +73,13 @@ func cmdHistogram(_ a: Args) throws {
     if a.has("--json") {
         var clipping: [String: Any] = [:]
         var bins64: [String: Any] = [:]
+        var hdr64: [String: Any] = [:]
         for channel in Histogram.Channel.allCases {
             let c = histogram[channel]
-            clipping[channel.rawValue] = ["high": c.clippedHigh, "low": c.clippedLow]
+            clipping[channel.rawValue] = ["high": c.clippedHigh, "ceiling": c.clippedCeiling,
+                                          "low": c.clippedLow]
             bins64[channel.rawValue] = base64HistogramBins(c.bins)
+            hdr64[channel.rawValue] = base64HistogramBins(c.hdrBins)
         }
         note(jsonLine([
             "raw": url.lastPathComponent,
@@ -84,6 +87,9 @@ func cmdHistogram(_ a: Args) throws {
             "scale": scale,
             "primaries": display.primaries.rawValue,
             "bitDepth": display.bitDepth,
+            // The frame's own S4 ceiling: the tail is measured against it, and the card's display
+            // tick sits at log2(headroom) stops above white.
+            "headroom": histogram.headroom,
             "canvas": ["width": histogram.canvas.width, "height": histogram.canvas.height],
             "roi": ["x": histogram.roi.x, "y": histogram.roi.y,
                     "width": histogram.roi.width, "height": histogram.roi.height],
@@ -92,8 +98,13 @@ func cmdHistogram(_ a: Args) throws {
             "sampleCount": histogram.sampleCount,
             "sampleFraction": histogram.sampleFraction,
             "binCount": histogram.binCount,
+            "axis": ["sdrBins": histogram.binCount,
+                     "maxStops": Histogram.maxStops,
+                     "hdrBinsPerStop": Histogram.hdrBinsPerStop,
+                     "hdrBinCount": histogram.hdrBinCount],
             "clipping": clipping,
             "base64": bins64,
+            "hdrBase64": hdr64,
             "gpuMilliseconds": result.trace.gpuMilliseconds,
         ]))
         return
@@ -102,15 +113,18 @@ func cmdHistogram(_ a: Args) throws {
     if a.has("--csv") {
         for channel in Histogram.Channel.allCases {
             note("\(channel.rawValue),\(csvHistogramBins(histogram[channel].bins))")
+            note("\(channel.rawValue)-hdr,\(csvHistogramBins(histogram[channel].hdrBins))")
         }
-        err(String(format: "canvas %d×%d  roi %@  samples %d (%.1f%%)  bins %d  gpu %.2f ms",
+        err(String(format: "canvas %d×%d  roi %@  samples %d (%.1f%%)  bins %d+%d  headroom %.3f  gpu %.2f ms",
                    histogram.canvas.width, histogram.canvas.height, roiLabel,
-                   histogram.sampleCount, histogram.sampleFraction * 100, histogram.binCount,
+                   histogram.sampleCount, histogram.sampleFraction * 100,
+                   histogram.binCount, histogram.hdrBinCount, histogram.headroom,
                    result.trace.gpuMilliseconds))
         for channel in Histogram.Channel.allCases {
             let c = histogram[channel]
             err("       \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
-                + "high \(percent(c.clippedHigh))  low \(percent(c.clippedLow))")
+                + "high \(percent(c.clippedHigh))  ceil \(percent(c.clippedCeiling))"
+                + "  low \(percent(c.clippedLow))")
         }
         return
     }
@@ -119,17 +133,27 @@ func cmdHistogram(_ a: Args) throws {
     note("canvas     \(histogram.canvas.width)×\(histogram.canvas.height)"
          + "  \(display.primaries.displayName) \(display.bitDepth)-bit")
     note("roi        \(roiLabel)")
-    note(String(format: "sample     %d of %d pixels (%.1f%%) on a %d×%d grid, %d bins",
+    note(String(format: "sample     %d of %d pixels (%.1f%%) on a %d×%d grid, %d+%d bins",
                 histogram.sampleCount, histogram.roi.area, histogram.sampleFraction * 100,
-                histogram.sampleSize.width, histogram.sampleSize.height, histogram.binCount))
+                histogram.sampleSize.width, histogram.sampleSize.height,
+                histogram.binCount, histogram.hdrBinCount))
+    note(String(format: "axis       SDR 0…1 on %d code bins, then %.0f stops above white "
+                + "on %d bins of 1/%.0f stop (display ceiling %.3f× = %+.2f EV)",
+                histogram.binCount, Double(Histogram.maxStops), histogram.hdrBinCount,
+                Double(Histogram.hdrBinsPerStop), histogram.headroom, histogram.displayStops))
     for channel in Histogram.Channel.allCases {
         let c = histogram[channel]
         note("clip \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
-             + "high \(percent(c.clippedHigh))  low \(percent(c.clippedLow))")
+             + "high \(percent(c.clippedHigh))  ceil \(percent(c.clippedCeiling))"
+             + "  low \(percent(c.clippedLow))")
     }
     for channel in Histogram.Channel.allCases {
         note("\(channel.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
              + base64HistogramBins(histogram[channel].bins))
+    }
+    for channel in Histogram.Channel.allCases {
+        let label = (channel.rawValue + "-hdr").padding(toLength: 10, withPad: " ", startingAt: 0)
+        note(label + base64HistogramBins(histogram[channel].hdrBins))
     }
     note(String(format: "gpu        %.2f ms", result.trace.gpuMilliseconds))
 }

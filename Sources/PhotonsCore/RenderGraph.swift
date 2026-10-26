@@ -892,7 +892,8 @@ public final class RenderGraph {
             if let requested = options.histogramROI, requested.isEmpty {
                 // An empty selection is a measurement of nothing, not a measurement of pixel (0,0).
                 histogramPayload = Histogram.empty(bins: bins, canvas: plan.canvas, roi: requested,
-                                                   primaries: options.display.primaries)
+                                                   primaries: options.display.primaries,
+                                                   headroom: options.display.headroom)
             } else {
                 // The default region: the **picture inside the canvas**, never the canvas itself.
                 //
@@ -943,7 +944,8 @@ public final class RenderGraph {
         // bins ~0.3–1 Mpx instead of 4.10 M (let alone a 60 MP export).
         if let target = histogramTarget, let request = histogramRequest {
             let sample = readSample(target, primaries: options.display.primaries)
-            histogramPayload = Histogram.compute(sample, bins: request.bins)
+            histogramPayload = Histogram.compute(sample, bins: request.bins,
+                                                 headroom: options.display.headroom)
                 .relabelled(canvas: plan.canvas, roi: request.roi)
             pool.recycle(target)
         }

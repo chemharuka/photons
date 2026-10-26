@@ -27,7 +27,7 @@ let valueFlags: Set<String> = [
     "--viewport", "--iterations", "--decode-scale", "--golden", "--cache-dir",
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
-    "--ids", "--tier", "--strategy", "--roi", "--bins",
+    "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -230,6 +230,9 @@ func displayOptions(_ a: Args) -> DisplayOptions {
         d.primaries = .displayP3
     }
     if let b = a.value("--bits").flatMap(Int.init) { d.bitDepth = b }
+    // The S4 ceiling by hand: the way to see the exponential tail and the display tick populated
+    // without an EDR screen (the card itself always uses the screen's own headroom).
+    if let h = a.value("--headroom").flatMap(Double.init) { d.headroom = min(max(h, 1), 16) }
     return d
 }
 

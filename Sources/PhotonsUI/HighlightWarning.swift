@@ -221,38 +221,4 @@ public enum HistogramCardFormat {
         return percent(histogram[channel].clippedLow)
     }
 
-    /// Points for one channel, in `rect`'s coordinates (y down, like the card).
-    ///
-    /// The vertical scale ignores the two end bins *when* they dominate: a photo with a clipped
-    /// highlight has thousands of pixels in bin 255 and a normal distribution everywhere else, and
-    /// scaling by that spike would draw a flat line along the bottom — a histogram that hides the
-    /// picture. When the ends are not the peak they are included as normal.
-    public static func points(_ channel: HistogramChannel, binCount: Int, in rect: NSRect,
-                              bins: Int? = nil) -> [CGPoint] {
-        let count = max(2, binCount)
-        guard channel.bins.count >= count, rect.width > 1, rect.height > 1 else { return [] }
-        let drawBins = max(2, min(bins ?? count, count))
-        var peak = 0
-        for i in 0..<count { peak = max(peak, channel.bins[i]) }
-        let interiorPeak = (1..<(count - 1)).reduce(0) { max($0, channel.bins[$1]) }
-        let scalePeak = interiorPeak > 0 ? interiorPeak : peak
-        guard scalePeak > 0 else { return [] }
-
-        var points: [CGPoint] = []
-        points.reserveCapacity(drawBins + 2)
-        points.append(CGPoint(x: rect.minX, y: rect.maxY))
-        for i in 0..<drawBins {
-            let lo = (i * count) / drawBins
-            let hi = max(lo + 1, ((i + 1) * count) / drawBins)
-            var sum = 0
-            for b in lo..<min(hi, count) { sum += channel.bins[b] }
-            let value = Double(sum) / Double(hi - lo)
-            let x = rect.minX + (CGFloat(i) + 0.5) / CGFloat(drawBins) * rect.width
-            let normalised = min(1.0, value / Double(scalePeak))
-            let y = rect.maxY - CGFloat(normalised) * rect.height
-            points.append(CGPoint(x: x, y: y))
-        }
-        points.append(CGPoint(x: rect.maxX, y: rect.maxY))
-        return points
-    }
 }

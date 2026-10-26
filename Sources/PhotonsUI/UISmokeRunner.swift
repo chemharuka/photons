@@ -1596,13 +1596,20 @@ public final class UISmokeRunner {
     /// The histogram card, asserted on the **frame's own measurement** rather than on a re-count of
     /// its own numbers:
     ///
-    ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series of 256 bins;
-    ///   2. every channel's bins sum to the sample count (the measurement's own invariant);
-    ///   3. the 削顶 percentage is **Core's** number — checked twice: the card's text against
-    ///      `HistogramCardFormat`, and Core's ratio against an independent full-resolution recount of
-    ///      the very pixels that frame presented (at 720 × 420 the sample grid *is* the frame, so the
-    ///      two agree exactly and the check is not a downsample estimate);
-    ///   4. clicking 削顶 toggles the canvas warning, and doing so moves **no** document: same
+    ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series over **both**
+    ///      segments — 256 code bins plus the 32-bin exponential tail (`Histogram.maxStops` ×
+    ///      `hdrBinsPerStop`);
+    ///   2. every channel's bins sum to the sample count (the measurement's own invariant), and the
+    ///      axis is the laid-out one: 30 pt per stop, 4 stops, SDR + tail = the card's width;
+    ///   3. the display-ceiling tick sits at `log2(headroom)` stops into the tail — the frame's own
+    ///      headroom, so the plot and its ceiling always describe the same pixels;
+    ///   4. the ROI is the **picture**, not the canvas: this frame is letterboxed, and no matte row
+    ///      may reach the black bin (the bug that made 削底 read tens of percent on a clean photo);
+    ///   5. the 削顶 percentage is **Core's** `clippedCeiling` and 过白 its `clippedHigh`, each checked
+    ///      twice: the card's text against `HistogramCardFormat`, and Core's ratio against an
+    ///      independent full-resolution recount of the very pixels inside the ROI (at 720 × 420 the
+    ///      sample grid *is* the frame, so the two agree exactly, not by a downsample estimate);
+    ///   6. clicking 过白 toggles the canvas warning, and doing so moves **no** document: same
     ///      document hash, same history depth, same `editRevision`, same persistence count.
     private func checkHistogramCard(session: CatalogSession, loupe: LoupeController,
                                     controller: EditorWindowController, window: NSWindow,
@@ -1637,10 +1644,44 @@ public final class UISmokeRunner {
         card.needsDisplay = true
         card.display()
 
-        log("histogram frame         \(histogram.sampleCount) px sampled on \(histogram.sampleSize.width)×\(histogram.sampleSize.height) · canvas \(histogram.canvas.width)×\(histogram.canvas.height) · \(histogram.binCount) bins · publishes \(loupe.histogramPublishCount)")
-        check("直方图卡片在检查器里，并画出 4 组 × \(histogram.binCount) bin（实测 series \(card.lastDrawnSeries) / bins \(card.lastDrawnBins)）",
-              card.lastDrawnSeries == 4 && card.lastDrawnBins == histogram.binCount
+        log("histogram frame         \(histogram.sampleCount) px sampled on \(histogram.sampleSize.width)×\(histogram.sampleSize.height) · canvas \(histogram.canvas.width)×\(histogram.canvas.height) · roi \(histogram.roi.width)×\(histogram.roi.height) · \(histogram.binCount)+\(histogram.hdrBinCount) bins · headroom \(String(format: "%.3f", histogram.headroom))× · publishes \(loupe.histogramPublishCount)")
+        let axis = card.lastAxis
+        check("直方图卡片在检查器里，并画出 4 组 × \(histogram.binCount)+\(histogram.hdrBinCount) bin（实测 series \(card.lastDrawnSeries) / bins \(card.lastDrawnBins) / 尾段 \(card.lastDrawnHDRBins)）",
+              card.lastDrawnSeries == 4
+              && card.lastDrawnBins == histogram.binCount + histogram.hdrBinCount
+              && card.lastDrawnHDRBins == histogram.hdrBinCount
               && card.histogram != nil)
+
+        // The axis itself: 30 pt per stop is a fixed reading scale, the tail is 4 stops wide, and the
+        // two segments add up to the card's width.
+        let sdrWidth = axis?.sdrWidth ?? -1
+        let hdrWidth = axis?.hdrWidth ?? -1
+        check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
+              axis != nil && axis?.stopWidth == 30 && axis?.stops == 4
+              && hdrWidth == 120
+              && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
+
+        // The display ceiling: log2(headroom) stops into the tail, from the frame's own headroom.
+        let ceilingX = axis?.x(ceiling: histogram.headroom) ?? .nan
+        let ceilingStops = log2(max(histogram.headroom, 1))
+        let splitX = axis?.sdrMaxX ?? .nan
+        check("显示上限刻度：headroom \(String(format: "%.3f", histogram.headroom))× = \(String(format: "%+.2f", ceilingStops)) stop，画在 \(String(format: "%.1f", card.lastCeilingMarkerX))（轴算 \(String(format: "%.1f", ceilingX))，SDR/尾段分界 \(String(format: "%.1f", splitX))）",
+              abs(card.lastCeilingMarkerX - ceilingX) < 0.5
+              && abs(card.lastCeilingStops - ceilingStops) < 1e-9
+              && (histogram.headroom <= 1.0005
+                  ? abs(card.lastCeilingMarkerX - splitX) < 1e-6
+                  : card.lastCeilingMarkerX >= splitX))
+
+        // The region is the picture, not the canvas: this frame is letterboxed (a 720 × 420 canvas
+        // around a 631 × 420 picture), so the ROI must equal the frame's *content* and the matte must
+        // lie outside it. A photo may legitimately contain true blacks, so "bin 0 is empty" is not
+        // the evidence — `HistogramTests.testAFitFrameMeasuresThePictureNotTheMatte` is, on a source
+        // whose every picture pixel is above black and whose matte is exactly the difference.
+        let matteColumns = frame.canvas.width - frame.content.width
+        check("ROI 是画面不是画布：canvas \(frame.canvas.width)×\(frame.canvas.height)，content \(frame.content.width)×\(frame.content.height)（左右各 \(matteColumns / 2) px 黑边在外），roi \(histogram.roi.width)×\(histogram.roi.height) == content",
+              matteColumns > 0
+              && histogram.roi.width == frame.content.width
+              && histogram.roi.height == frame.content.height)
 
         let totals = [histogram.red.total, histogram.green.total,
                       histogram.blue.total, histogram.luma.total]
@@ -1650,7 +1691,7 @@ public final class UISmokeRunner {
 
         // Independent recount: the ratio Core reports, recomputed from the presented pixels with the
         // same 0.999 threshold, and the luma with the same Rec.709 weights.
-        let recounted = clipFractions(of: frame.texture)
+        let recounted = clipFractions(of: frame.texture, in: histogram.roi)
         let coreValues = [histogram.red, histogram.green, histogram.blue, histogram.luma]
             .map(\.clippedHigh)
         let deltas = zip(recounted, coreValues).map { abs($0 - $1) }
@@ -1663,6 +1704,13 @@ public final class UISmokeRunner {
               card.clipHighTextByChannel == expectedText
               && card.clipHighText == HistogramCardFormat.clipHigh(histogram, .luma)
               && card.clipLowText == HistogramCardFormat.clipLow(histogram, .luma))
+
+        // 削顶 is now the *ceiling* ratio (S4's own clamp); 过白 is still the 0.999 one the warning uses.
+        let ceilingExpected = HistogramCardFormat.clipCeiling(histogram, .luma)
+        check("卡片上的削顶是 Core 的 clippedCeiling（\(card.clipCeilingText) == \(ceilingExpected)，headroom \(String(format: "%.3f", histogram.headroom))×；过白 \(card.clipHighText) 仍是 0.999 阈值）",
+              card.clipCeilingText == ceilingExpected
+              && (histogram.headroom > 1.0005
+                  || card.clipCeilingText == card.clipHighText))
 
         // The warning: a real click on the number, then a frame that carries the clipped grid.
         let documentBefore = documentHash(session.edit)
@@ -2624,24 +2672,37 @@ public final class UISmokeRunner {
     /// The independent half of "the card's percentage is Core's": Core measures a *downsampled*
     /// grid, this walks the frame itself, and at the smoke's canvas size the two describe the same
     /// pixels — which is what makes the assertion an equality.
-    private func clipFractions(of texture: MTLTexture) -> [Double] {
+    /// The 0.999 clip fractions recomputed from the presented pixels — over **the histogram's own
+    /// region**.
+    ///
+    /// Walking the whole texture was right while the ROI was the whole canvas. Now that the ROI is
+    /// the picture, a `fit` frame's letterbox would be counted here as black (and its share of the
+    /// denominator would deflate every ratio), so the recount takes the same rect the measurement
+    /// used — which is also what makes this an equality test rather than an estimate.
+    private func clipFractions(of texture: MTLTexture, in rect: ImageRect? = nil) -> [Double] {
         let width = texture.width, height = texture.height
         let raw = rgba16(texture)
         let threshold = Float(Histogram.clipHighThreshold)
         let weights = (Float(Histogram.lumaWeights.r), Float(Histogram.lumaWeights.g),
                        Float(Histogram.lumaWeights.b))
+        let region = (rect ?? ImageRect(x: 0, y: 0, width: width, height: height))
+            .clamped(in: ImageSize(width: width, height: height))
         var hits = [0, 0, 0, 0]
-        for i in stride(from: 0, to: raw.count, by: 4) {
-            let r = Float(Float16(bitPattern: raw[i]))
-            let g = Float(Float16(bitPattern: raw[i + 1]))
-            let b = Float(Float16(bitPattern: raw[i + 2]))
-            let luma = weights.0 * r + weights.1 * g + weights.2 * b
-            if r > threshold { hits[0] += 1 }
-            if g > threshold { hits[1] += 1 }
-            if b > threshold { hits[2] += 1 }
-            if luma > threshold { hits[3] += 1 }
+        for y in region.y..<(region.y + region.height) {
+            let row = y * width
+            for x in region.x..<(region.x + region.width) {
+                let i = (row + x) * 4
+                let r = Float(Float16(bitPattern: raw[i]))
+                let g = Float(Float16(bitPattern: raw[i + 1]))
+                let b = Float(Float16(bitPattern: raw[i + 2]))
+                let luma = weights.0 * r + weights.1 * g + weights.2 * b
+                if r > threshold { hits[0] += 1 }
+                if g > threshold { hits[1] += 1 }
+                if b > threshold { hits[2] += 1 }
+                if luma > threshold { hits[3] += 1 }
+            }
         }
-        let total = Double(max(1, width * height))
+        let total = Double(max(1, region.width * region.height))
         return hits.map { Double($0) / total }
     }
 

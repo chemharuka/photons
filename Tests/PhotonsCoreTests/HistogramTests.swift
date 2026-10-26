@@ -563,6 +563,32 @@ final class HistogramTests: XCTestCase {
         if let t = result.output { graph.recycle(output: t) }
     }
 
+    /// A `fit` frame is letterboxed too, and its default ROI must be the picture as well.
+    ///
+    /// This is the same claim as the test above on the *other* framing, and it was a real bug: a
+    /// full-frame render used to default to "the whole canvas", so at `fit` — the view a photo opens
+    /// in — the matte bars were measured as black pixels and 削底 read tens of percent on a photo
+    /// with no blacks at all. The ROI is the content rect for every framing now.
+    func testAFitFrameMeasuresThePictureNotTheMatte() throws {
+        let graph = try makeGraph(texturedImage(width: 1200, height: 900))
+        // A 4:3 picture fitted into a 900 × 700 viewport: 900 × 675 with 12/13 rows of matte.
+        let canvas = ImageSize(width: 900, height: 700)
+        let result = try graph.render(.neutral, options: RenderOptions(
+            canvas: canvas, scale: 1, useCache: false, wantsPixels: true,
+            collectHistogram: true))
+        let measured = try XCTUnwrap(result.histogram)
+
+        XCTAssertEqual(measured.canvas, canvas)
+        XCTAssertEqual(measured.roi, ImageRect(x: 0, y: 12, width: 900, height: 675),
+                       "the matte above and below is not the picture")
+        XCTAssertLessThan(measured.roi.height, canvas.height)
+        for channel in Histogram.Channel.allCases {
+            XCTAssertEqual(measured[channel].bins[0], 0,
+                           "\(channel): a matte row must not reach the black bin")
+        }
+        if let t = result.output { graph.recycle(output: t) }
+    }
+
     /// A **windowed** frame is byte-identical with and without the measurement — the same claim as
     /// `testPixelsAndKeysAreIdenticalWithAndWithout`, on the framing the loupe actually pans with.
     func testWindowedFramePixelsAreIdenticalWithAndWithout() throws {
@@ -612,18 +638,26 @@ final class HistogramTests: XCTestCase {
             return (times[0], times[4])
         }
 
+        let compilesBefore = Histogram.kernelCompileCount
         let a = try makeGraph(source, identity: "compile-a")
         let b = try makeGraph(source, identity: "compile-b")
         let first = try firstAndSteady(a)
         let second = try firstAndSteady(b)
 
         print(String(format: "histogram first frame per graph: A first %.2f / steady %.2f ms · "
-                        + "B first %.2f / steady %.2f ms (compile is per process)",
-                     first.first, first.steady, second.first, second.steady))
-        // Both graphs pay their own pool warm-up; only the *compile* is the difference, and it must not
-        // be paid twice. 2 ms of slack for a machine that is doing something else.
-        XCTAssertLessThan(second.first, first.first + 2.0,
-                          "the second graph recompiled the histogram kernel")
+                        + "B first %.2f / steady %.2f ms · compiles %d (compile is per process)",
+                     first.first, first.steady, second.first, second.steady,
+                     Histogram.kernelCompileCount))
+        // The claim is "one compile per process", so assert exactly that instead of a frame-time
+        // budget: at ~130 ms per debug-build measurement the ±2 ms version of this test measured
+        // noise (it failed on a loaded machine with 151 vs 154 ms between identical graphs).
+        XCTAssertEqual(Histogram.kernelCompileCount, compilesBefore,
+                       "a second graph compiled the histogram kernel again")
+        XCTAssertLessThanOrEqual(Histogram.kernelCompileCount, 1, "the kernel is compiled once per process")
+        // The frame times still have to be in the same ballpark: a recompile would show up as tens of
+        // milliseconds on B's first frame even if the counter were somehow wrong.
+        XCTAssertLessThan(second.first, first.first * 1.20,
+                          "the second graph's first measurement is much slower than the first graph's")
     }
 
     // MARK: - 6. the exponential tail (SDR + 4 stops, 2026-10-26)
@@ -644,7 +678,8 @@ final class HistogramTests: XCTestCase {
     /// four stops so a wrong scale (code-doubling, or 1/4 stop) cannot pass by luck.
     func testTailBinsAreEighthOfAStopApart() {
         let bins = [0, 1, 7, 8, 15, 16, 31]
-        let w = 32, h = 1
+        // Exactly one pixel per chosen bin: no filler pixel may contribute to either segment.
+        let w = bins.count, h = 1
         var rgba = [Float16](repeating: 1, count: w * h * 4)
         for (i, k) in bins.enumerated() {
             let v = Float16(codeAtBinCentre(k))

@@ -356,3 +356,46 @@ M3 时记录的"`L1030433.dng` 渲染成 180°，因为文件里读不到 orient
 
 **已知近似**：`LoupeMapping`（命中测试/捏合锚点）仍是窗口形状，9° 拉直下与渲染投影差 ≤0.29%（7.5 px @2560）；
 蒙版 feather/refine 在 `outputWindow` 边缘按 halo 截断（内部精确到 5.7e-5）。
+
+## 13. 直方图的轴：SDR + 4 stop 指数尾段 + 显示上限（2026-10-26 定案，代码即如此）
+
+**问题**：005f 的直方图只有 `0…1` 的 256 个码值 bin。EDR 一开，S4 允许 `min(v, headroom)`，编码后可超过 1.0
+（headroom 1.695 → 码值 1.259，headroom 16 → 3.14），这些像素**全部挤进 bin 255**：既看不出高光余量，也没法
+回答"画面有没有用完这块屏"。同时 `fit` 帧的 ROI 取的是整个 canvas，黑边被当成黑色像素统计——一张没有死黑的
+照片能读出几十个百分点的削底。
+
+**轴 = 两段，一次测量**（`Histogram`）：
+
+| 段 | 码值/单位 | bin | 画法 |
+|---|---|---|---|
+| SDR | `0…1` 均匀码值 | `binCount`（256） | 左侧线性，占剩下的宽度 |
+| 尾段 | SDR 白之上，**线性光**每 1/8 stop | `maxStops × hdrBinsPerStop`（4×8=32） | **30 pt / stop，固定 4 stop = 120 pt** |
+
+- **单位是线性光的 stop，不是码值翻倍**：S4 在**线性域**钳位（§11.8），交给它的 headroom 也是"SDR 白的线性倍数"，
+  而摄影的 1 stop = 光翻倍。sRGB OETF 在白之上近似 γ2.4，码值翻倍 ≈ 2.4 stop 的光——用码值做指数轴会**
+  谎报 2.4 倍**，而且显示上限的刻度就得用另一套坐标，两张轴互相矛盾。尾段 bin k 覆盖线性 `[2^(k/8), 2^((k+1)/8))`。
+- **4 stop 不是任意数**：`DisplayHeadroom.maximumHeadroom` = 16 = 2⁴，所以任何屏都不可能把值推出最后一格；
+  `hdrBins.last` 的含义是"4 stop 或更多"。
+- **30 pt/stop 是读数标尺**：窗口 300–364 pt 变宽变窄时"+1 stop"不许跟着变，否则同一张图的高光会随窗口移动。
+  只有卡片窄到 SDR 段不足 60 pt 时才压缩 stop 宽度（`HistogramAxis.minimumSDRWidth`），因为照片 95 % 的信息在 SDR 段。
+- **两段共用一个峰值**（`HistogramCardFormat.scalePeak`）：排除绘制路径的首末 bin 后取最大值，所以削顶尖峰不会把整张图压平。
+
+**显示上限刻度**：`Histogram.headroom` 随测量一起走（不是读当前屏幕），卡片画在 `log2(headroom)` stop 处
+（1.695× → +0.76 stop；SDR → 正好落在 SDR/尾段分界线上）。落在刻度左边的像素这块屏全能显示，右边的是屏丢掉的部分。
+
+**三个比例**（`HistogramChannel`）：`clippedHigh`（>0.999，超过 SDR 白，**不再等于"丢细节"**）、
+`clippedCeiling`（S4 钳位处，真正丢掉的细节；headroom=1 时与前者相等）、`clippedLow`。卡片上行依次是
+过白 / 削顶 / 削底，过白那个数字仍是高光警告的开关（警告阈值没变，仍按 >0.999 涂色）。
+
+**ROI 一律是画面**：`RenderGraph` 的默认区域 = `plan.origin + plan.content`，**不是** canvas。`fit` 与 1:1
+窗口都会 letterbox（`content < canvas`），而 canvas 的 ROI 会把黑边算进 bin 0。窗口帧仍然只测窗口——1:1 下
+"存在的画面"就是窗口，整幅图的读数需要另一次渲染，不是换一个 ROI。
+
+**验收**：`HistogramTests`（尾段 1/8 stop、4 stop 钳位、白/白上分界、ceiling 只在钳位处计数、headroom 只动
+ceiling 比例、fit 黑边不进 bin 0）+ `HistogramAxisTests`（30 pt/stop、120 pt、窄卡压 stop、单路径跨两段、
+削顶尖峰不压平）+ `--ui-smoke`（卡片实际画出的 288 bin、轴宽、上限刻度位置、ROI 不含黑边、削顶文本 = Core 值）。
+`photonsctl histogram` 的 JSON 多了 `headroom` / `axis` / `hdrBase64` / `clipping.ceiling`，并新增 `--headroom`
+（无 EDR 屏也能验尾段）。
+
+**已知近似**：尾段的 1/8 stop 分辨率靠 `pow` + `log2` 逐像素算，只对白之上的像素付费；SDR 帧只多四次 ceiling 比较。
+`Histogram.kernelCompileCount` 是"编译一次/进程"的可断言事实（原先靠 ±2 ms 帧时差判断，在 debug 构建下是噪声）。
