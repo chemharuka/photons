@@ -119,14 +119,15 @@ public enum MainMenu {
                                 keyEquivalent: "a")
         list.keyEquivalentModifierMask = [.control, .command]
         view.addItem(.separator())
-        // 倍率. The four stops are the ladder `LoupeController.zoomStops` defines, ticked by
-        // `validateMenuItem` when the camera is exactly on one; 适应窗口 and 放大/缩小 are the
-        // keyboard path (⌘0, ⌘=, ⌘−) every photo app has.
+        // 倍率. The stops are the ladder's whole-number rungs — `LoupeController.menuZoomStops`,
+        // because `zoomStopAction` reads the zoom out of the item's `tag` as `Double(tag)` — ticked by
+        // `validateMenuItem` when the camera is exactly on one; 适应窗口 and 放大/缩小 are the keyboard
+        // path (⌘0, ⌘=, ⌘−) every photo app has. The titles are percentages: 100 % is 1:1.
         view.addItem(withTitle: "适应窗口",
                      action: #selector(EditorWindowController.zoomFitAction(_:)),
                      keyEquivalent: "0")
-        for (index, stop) in LoupeController.zoomStops.enumerated() {
-            let item = view.addItem(withTitle: stop == 1 ? "1:1" : "\(Int(stop)):1",
+        for (index, stop) in LoupeController.menuZoomStops.enumerated() {
+            let item = view.addItem(withTitle: LoupeViewState.percentLabel(of: stop),
                                     action: #selector(EditorWindowController.zoomStopAction(_:)),
                                     keyEquivalent: "\(index + 1)")
             item.keyEquivalentModifierMask = [.command, .option]

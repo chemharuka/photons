@@ -37,7 +37,7 @@ final class LoupeZoomTests: XCTestCase {
         let points = [(0.0, 0.0), (1.0, 1.0), (1280.0, 800.0), (2559.0, 3.0), (17.5, 1599.25)]
         for degrees in [0.0, 7.0, -12.5] {
             for (flipH, flipV) in [(false, false), (true, false), (false, true), (true, true)] {
-                for zoom in [1.0, 2.5, 8.0] {
+                for zoom in [1.0, 2.5, 3.0] {
                     let f = framing(degrees: degrees, flipH: flipH, flipV: flipV)
                     let state = actual(zoom: zoom)
                     let map = f.mapping(of: state)
@@ -73,7 +73,7 @@ final class LoupeZoomTests: XCTestCase {
     /// twice (once by S0, once by the presenter's fullscreen quad).
     func testWindowSizeIsTheViewportDividedByZoom() throws {
         let f = framing()
-        for zoom in [1.0, 2.0, 4.0, 8.0] {
+        for zoom in [1.0, 2.0, 3.0, 4.0] {
             let state = actual(zoom: zoom)
             let window = f.windowSize(of: state)
             let content = f.contentSize(of: state)
@@ -115,29 +115,34 @@ final class LoupeZoomTests: XCTestCase {
 
     // MARK: 3. zoom clamp 1…8
 
-    func testZoomIsClampedToOneThroughEight() {
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.25).zoom, 1, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 1, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 1, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 8).zoom, 8, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 64).zoom, 8, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 1, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState.clampZoom(12), 8, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState.clampZoom(0.5), 1, accuracy: 1e-12)
+    func testZoomIsClampedToHalfThroughFour() {
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.25).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 4).zoom, 4, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 64).zoom, 4, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState.clampZoom(12), 4, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState.clampZoom(0.5), 0.5, accuracy: 1e-12)
 
-        // A pinch past the ceiling stops at 8 and keeps rendering 8.
+        // A pinch past the ceiling stops at 4 and keeps rendering 4.
         let f = framing()
         var state = actual(zoom: 1)
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 2, aroundView: CGPoint(x: 100, y: 100)) }
-        XCTAssertEqual(state.zoom, 8, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 4, accuracy: 1e-12)
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 0.5, aroundView: CGPoint(x: 100, y: 100)) }
-        XCTAssertEqual(state.zoom, 1, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 0.5, accuracy: 1e-12)
     }
 
+    /// The six rungs, as percentages. 1:1 is 100 %; the fit rung only says "适应" here because a
+    /// `LoupeViewState` has no window to measure (the controller prints "适应 31%").
     func testZoomLabels() {
-        XCTAssertEqual(LoupeViewState.fit.zoomLabel, "fit")
-        XCTAssertEqual(actual(zoom: 1).zoomLabel, "1:1")
-        XCTAssertEqual(actual(zoom: 4).zoomLabel, "4.0:1")
+        XCTAssertEqual(LoupeViewState.fit.zoomLabel, "适应")
+        XCTAssertEqual(actual(zoom: 0.5).zoomLabel, "50%")
+        XCTAssertEqual(actual(zoom: 1).zoomLabel, "100%")
+        XCTAssertEqual(actual(zoom: 2).zoomLabel, "200%")
+        XCTAssertEqual(actual(zoom: 3).zoomLabel, "300%")
+        XCTAssertEqual(actual(zoom: 4).zoomLabel, "400%")
     }
 
     // MARK: 4. fit is the old frame
@@ -331,7 +336,7 @@ final class LoupeZoomTests: XCTestCase {
 
     func testPinchKeepsThePointUnderTheCursorFixed() {
         let f = framing()
-        for (from, to) in [(1.0, 4.0), (4.0, 8.0), (8.0, 2.0)] {
+        for (from, to) in [(1.0, 4.0), (2.0, 4.0), (4.0, 2.0)] {
             let cursor = CGPoint(x: 300, y: 250)
             let before = actual(zoom: from)
             let after = f.zooming(before, to: to, aroundView: cursor)
@@ -402,7 +407,7 @@ final class LoupeZoomTests: XCTestCase {
         for degrees in [0.0, 7.0] {
             let f = framing(degrees: degrees, crop: crop)
             XCTAssertNil(f.outputWindow(of: .fit), "fit is the whole frame, so it names no window")
-            for zoom in [1.0, 2.5, 8.0] {
+            for zoom in [1.0, 2.5, 4.0] {
                 for centre in [(3000.0, 2000.0), (1200.0, 700.0), (5200.0, 3500.0)] {
                     let state = actual(zoom: zoom, x: centre.0, y: centre.1)
                     let rect = f.cropRect(of: state)
@@ -495,7 +500,7 @@ final class LoupeZoomTests: XCTestCase {
                                             maximumEDRComponent: 1.2, source: .extendedRange))
         XCTAssertTrue(controller.statusText.contains("HDR 显示器"), controller.statusText)
         XCTAssertTrue(controller.statusText.contains("1.20"), controller.statusText)
-        XCTAssertTrue(controller.statusText.contains("fit"), controller.statusText)
+        XCTAssertTrue(controller.statusText.contains("适应"), controller.statusText)
 
         controller.setDisplayHeadroom(.init(headroom: 1, screenName: "27G7K-Ultra",
                                             maximumEDRComponent: 1, source: .sdr))
