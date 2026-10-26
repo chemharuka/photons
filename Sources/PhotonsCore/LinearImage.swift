@@ -218,6 +218,62 @@ public struct LinearImage: Sendable {
                           overUnityRatio: Double(over) / Double(Swift.max(n, 1)))
     }
 
+    /// One upright pixel's colour, box-averaged over a `radius`-pixel square (派单 009 C).
+    ///
+    /// Upright, not stored: the eyedropper works in the coordinates the user sees, and the
+    /// orientation is undone here through the one table that defines it (`sourceCoordinate`), so a
+    /// rotated file cannot sample a transposed point. The box average is what every raw converter's
+    /// dropper does — a single pixel of a 60 MP frame is noise, and a 3×3 mean is still "that spot".
+    public func averageRGB(x: Int, y: Int, radius: Int = 1) -> RGBSample {
+        let (w, h) = uprightSize
+        let cx = Swift.min(Swift.max(x, 0), w - 1)
+        let cy = Swift.min(Swift.max(y, 0), h - 1)
+        let r = Swift.max(0, radius)
+        var acc = (0.0, 0.0, 0.0)
+        var n = 0.0
+        for dy in -r...r {
+            let yy = Swift.min(Swift.max(cy + dy, 0), h - 1)
+            for dx in -r...r {
+                let xx = Swift.min(Swift.max(cx + dx, 0), w - 1)
+                let s = orientation.sourceCoordinate(x: xx, y: yy, width: width, height: height)
+                let o = (s.y * width + s.x) * 4
+                acc.0 += Double(rgba[o])
+                acc.1 += Double(rgba[o + 1])
+                acc.2 += Double(rgba[o + 2])
+                n += 1
+            }
+        }
+        guard n > 0 else { return .black }
+        return RGBSample(r: acc.0 / n, g: acc.1 / n, b: acc.2 / n)
+    }
+
+    /// Mean colour of the whole picture, sampled on a stride — the grey-world input for Auto WB.
+    ///
+    /// A stride rather than every pixel: the mean of 60 M samples and of every 8th one agree to
+    /// well under a percent, and this runs on the main thread when the user picks 自动.
+    public func meanRGB(stride: Int = 8) -> RGBSample {
+        let step = Swift.max(1, stride)
+        let (w, h) = uprightSize
+        var acc = (0.0, 0.0, 0.0)
+        var n = 0.0
+        var y = 0
+        while y < h {
+            var x = 0
+            while x < w {
+                let s = orientation.sourceCoordinate(x: x, y: y, width: width, height: height)
+                let o = (s.y * width + s.x) * 4
+                acc.0 += Double(rgba[o])
+                acc.1 += Double(rgba[o + 1])
+                acc.2 += Double(rgba[o + 2])
+                n += 1
+                x += step
+            }
+            y += step
+        }
+        guard n > 0 else { return .black }
+        return RGBSample(r: acc.0 / n, g: acc.1 / n, b: acc.2 / n)
+    }
+
     /// Mean luma of the top and bottom halves, in **row** terms (row 0 = top).
     ///
     /// This is the objective "which way up is this?" measurement used by the orientation tests: a
