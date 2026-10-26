@@ -5,14 +5,54 @@ import PhotonsCore
 /// The inspector: SwiftUI inside `NSHostingView`, bound to the one `CatalogSession`.
 ///
 /// §2b item 5 keeps the big surfaces matte and uses glass only for small widget containers. The
-/// panel is a *leaf*: it holds no state of its own, and every slider writes through
+/// panel is a *leaf*: it holds no document state of its own, and every slider writes through
 /// `CatalogSession.applyEdit` — the only mutation point, which is what bumps `editRevision` and
 /// wakes the loupe's debounced renderer (50 ms, single-flight).
 ///
 /// The drag/release split matters: `onEditingChanged` fires once when the drag ends, and that is
 /// exactly one `EditHistory` snapshot. Committing per tick would make ⌘Z undo 1/100 EV at a time.
 public struct InspectorView: View {
+
+    /// The cards, in display order (派单 009 A).
+    ///
+    /// `body` builds the stack from `allCases`, so this list **is** the view hierarchy — there is no
+    /// second, hand-maintained ordering to drift out of step with what is on screen. The tests assert
+    /// it (`InspectorView.sectionTitles`) and the rendered order of the card identifiers.
+    public enum Section: String, CaseIterable, Identifiable, Hashable {
+        /// Histogram first: it is the read-out of the picture the rest of the panel edits.
+        case histogram
+        /// 白平衡 is its own section, between the histogram and Light (派单 009 A): it is a *decode*
+        /// setting (006), not a tone control, and burying it under six sliders misrepresented that.
+        case whiteBalance
+        case light
+        case color
+        case presets
+        case masks
+        case decode
+
+        public var id: String { rawValue }
+
+        public var title: String {
+            switch self {
+            case .histogram: return "直方图"
+            case .whiteBalance: return "白平衡"
+            case .light: return "Light"
+            case .color: return "Color"
+            case .presets: return "预设"
+            case .masks: return "蒙版"
+            case .decode: return "Decode"
+            }
+        }
+    }
+
+    /// `["直方图", "白平衡", "Light", …]` — the order the cards appear in, from the one list above.
+    public static var sectionTitles: [String] { Section.allCases.map(\.title) }
+
     @Bindable public var session: CatalogSession
+    /// The canvas, for the eyedropper and for the Auto preset's grey-world input (派单 009 C).
+    /// Optional: the inspector is also built without a loupe (tests, previews, the grid side).
+    public let loupe: LoupeController?
+
     /// The value under the thumb while a white-balance drag is in progress (派单 006).
     ///
     /// Not a document write: a Kelvin change means a **re-decode** (~762 ms full size), so a tick
@@ -21,8 +61,16 @@ public struct InspectorView: View {
     @State private var draftTemperature: Double?
     @State private var draftTint: Double?
 
-    public init(session: CatalogSession) {
+    /// The preset the user picked last. View state on purpose: it only breaks ties between presets
+    /// with identical numbers (`闪光灯 == 日光`), and a tie is not a fact about the document.
+    @State private var lastPresetID: String?
+    /// One line under the sliders: what the dropper did, or why it did nothing.
+    @State private var hint: String?
+    @State private var eyedropperArmed = false
+
+    public init(session: CatalogSession, loupe: LoupeController? = nil) {
         self.session = session
+        self.loupe = loupe
     }
 
     public var body: some View {
@@ -31,14 +79,10 @@ public struct InspectorView: View {
             historyStrip
             ScrollView {
                 VStack(spacing: 10) {
-                    card("直方图") {
-                        HistogramCard(session: session)
+                    ForEach(Section.allCases) { section in
+                        sectionView(section)
+                            .accessibilityIdentifier("inspector.card.\(section.rawValue)")
                     }
-                    lightCard
-                    colorCard
-                    PresetPanel(session: session)
-                    MaskListPanel(session: session)
-                    decodeCard
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
@@ -47,6 +91,26 @@ public struct InspectorView: View {
         .padding(.top, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: Section) -> some View {
+        switch section {
+        case .histogram:
+            card(Section.histogram.title) { HistogramCard(session: session) }
+        case .whiteBalance:
+            whiteBalanceCard
+        case .light:
+            lightCard
+        case .color:
+            colorCard
+        case .presets:
+            PresetPanel(session: session)
+        case .masks:
+            MaskListPanel(session: session)
+        case .decode:
+            decodeCard
+        }
     }
 
     private var header: some View {
@@ -80,29 +144,50 @@ public struct InspectorView: View {
 
     // MARK: cards
 
+    /// Light: tone only. 色温/色调 moved out (派单 009 A) — they are a decode setting, and keeping a
+    /// second entry here would be two controls for one fact.
     private var lightCard: some View {
-        card("Light") {
+        card(Section.light.title) {
             row("曝光", \.light.exposure, -5 ... 5, "%.2f EV")
             row("对比", \.light.contrast, -100 ... 100, "%.0f")
             row("高光", \.light.highlights, -100 ... 100, "%.0f")
             row("阴影", \.light.shadows, -100 ... 100, "%.0f")
             row("白色", \.light.whites, -100 ... 100, "%.0f")
             row("黑色", \.light.blacks, -100 ... 100, "%.0f")
+        }
+    }
+
+    /// 白平衡 (派单 009): preset menu, the two absolute sliders, and the dropper.
+    ///
+    /// The whole section is one idea — *what is neutral?* — and its three controls are three answers:
+    /// a known illuminant (menu), a number (sliders), or a sample (dropper). All three end in the same
+    /// place: one `commitWhiteBalance` → one history snapshot → one development.
+    private var whiteBalanceCard: some View {
+        card(Section.whiteBalance.title) {
+            presetRow
             divider
             whiteBalanceRow("色温", isTemperature: true)
             whiteBalanceRow("色调", isTemperature: false)
+            dropperRow
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
+            }
         }
     }
 
     private var colorCard: some View {
-        card("Color") {
+        card(Section.color.title) {
             row("自然饱和", \.color.vibrance, -100 ... 100, "%.0f")
             row("饱和", \.color.saturation, -100 ... 100, "%.0f")
         }
     }
 
     private var decodeCard: some View {
-        card("Decode") {
+        card(Section.decode.title) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.capabilities?.summary ?? "尚未解码")
                     .font(.system(size: 10, weight: .medium))
@@ -188,12 +273,56 @@ public struct InspectorView: View {
                 })
     }
 
-    // MARK: white balance (派单 006)
+    // MARK: white balance (派单 006 / 009)
 
     /// The file's own white balance, as the decode reported it. `nil` until the first development
     /// lands (`session.capabilities`), which is why the row can say "as shot" without a number.
     private var asShotWhiteBalance: WhiteBalance {
         session.capabilities?.asShotWhiteBalance ?? .asShot
+    }
+
+    /// The document's pair, which is what the menu and the dropper reason about.
+    private var documentWhiteBalance: WhiteBalance { session.edit.light.whiteBalance }
+
+    private var commands: WhiteBalanceCommands {
+        WhiteBalanceCommands(session: session,
+                             asShot: loupe?.asShotWhiteBalance
+                                 ?? session.capabilities?.asShotWhiteBalance)
+    }
+
+    /// The menu (派单 009 B).
+    ///
+    /// Selection is *derived* from the document, never stored: a dragged pair matches no preset and
+    /// the picker therefore lands on `自定义`, which is exactly the honesty the task asks for. The
+    /// `lastPresetID` tie-break only decides between two presets that carry the same numbers.
+    private var presetRow: some View {
+        HStack(spacing: 6) {
+            Text("预设")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Picker("预设", selection: Binding(
+                get: { WhiteBalancePresets.match(documentWhiteBalance,
+                                                 preferred: lastPresetID)?.id ?? WhiteBalanceCommands.customID },
+                set: { id in applyPreset(id) })) {
+                ForEach(WhiteBalancePresets.all) { preset in
+                    Text(menuTitle(for: preset)).tag(preset.id)
+                }
+                Text("自定义").tag(WhiteBalanceCommands.customID)
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.mini)
+            .frame(maxWidth: 150)
+        }
+    }
+
+    /// `原照设置 · 5872 K` for as shot (the number is the file's, the state is the word), plain names
+    /// for everything else.
+    private func menuTitle(for preset: WhiteBalancePreset) -> String {
+        guard preset.kind == .asShot else { return preset.name }
+        guard let t = asShotWhiteBalance.temperature else { return preset.name }
+        return String(format: "%@ · %.0f K", preset.name, t)
     }
 
     /// 色温 / 色调: absolute Kelvin and tint, in the decoder's coordinates (派单 006).
@@ -243,6 +372,92 @@ public struct InspectorView: View {
         }
     }
 
+    /// The dropper (派单 009 C): arm, then the next canvas click samples the **decode buffer**.
+    private var dropperRow: some View {
+        HStack(spacing: 6) {
+            Button {
+                toggleEyedropper()
+            } label: {
+                Image(systemName: "eyedropper")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .disabled(loupe == nil)
+            .help("吸管：点击画布上的中性灰取样（Esc 取消）")
+            .accessibilityIdentifier("inspector.whiteBalance.eyedropper")
+            .foregroundStyle(eyedropperArmed ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+
+            Text(eyedropperArmed ? "点击画布取样 · Esc 取消" : "吸管")
+                .font(.system(size: 10))
+                .foregroundStyle(eyedropperArmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            Spacer(minLength: 4)
+        }
+    }
+
+    // MARK: actions
+
+    private func toggleEyedropper() {
+        guard let loupe else { return }
+        if eyedropperArmed {
+            loupe.cancelEyedropper()
+            eyedropperArmed = false
+            hint = nil
+            return
+        }
+        eyedropperArmed = true
+        hint = "点击画布上的中性灰取样…"
+        loupe.armEyedropper { outcome in applyDropper(outcome) }
+    }
+
+    /// The dropper's answer: solve, write once, report the numbers it acted on.
+    private func applyDropper(_ outcome: LoupeController.DropperOutcome) {
+        switch outcome {
+        case .sampled(let sample):
+            eyedropperArmed = false
+            guard let solve = commands.applyDropper(sample.rgb) else {
+                hint = "吸管：取样点几乎无颜色信息，未写入"
+                return
+            }
+            lastPresetID = nil
+            hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
+                          sample.text, solve.whiteBalance.summary, sample.rgb.text,
+                          solve.clamped ? " · 已到量程边界（近似）" : "")
+        case .outsideImage, .notReady:
+            // No document write, and the tool stays armed on a miss (the loupe keeps it armed too).
+            eyedropperArmed = loupe?.isEyedropperArmed ?? false
+            hint = outcome.hint
+        }
+    }
+
+    private func applyPreset(_ id: String) {
+        guard id != WhiteBalanceCommands.customID else { return }
+        guard let preset = WhiteBalancePresets.preset(id: id) else { return }
+        switch preset.kind {
+        case .asShot:
+            commands.resetToAsShot()
+            lastPresetID = preset.id
+            hint = "原照设置 · 交给解码器（不写温度/色调）"
+        case .fixed:
+            guard let wb = preset.whiteBalance else { return }
+            commands.commit(wb, label: "预设 \(preset.name)")
+            lastPresetID = preset.id
+            hint = "\(preset.name) · \(preset.valueText)"
+        case .auto:
+            guard let average = loupe?.averageSceneRGB() else {
+                hint = "自动白平衡：画面尚未就绪，未写入"
+                return
+            }
+            guard let solve = commands.applyAuto(average) else {
+                hint = "自动白平衡：画面没有可用的颜色信息，未写入"
+                return
+            }
+            lastPresetID = preset.id
+            hint = String(format: "自动（灰世界）· %@ · 画面均值 RGB %@%@",
+                          solve.whiteBalance.summary, average.text,
+                          solve.clamped ? " · 已到量程边界（近似）" : "")
+        }
+    }
+
     /// The one place a white-balance drag becomes a document change.
     ///
     /// Quantization is the contract (`WhiteBalance.quantized()`: 25 K, 1 tint), and so is the
@@ -254,9 +469,9 @@ public struct InspectorView: View {
             if isTemperature { draftTemperature = nil } else { draftTint = nil }
         }
         guard let draft = isTemperature ? draftTemperature : draftTint else { return }
-        let shot = asShotWhiteBalance
         var wb = WhiteBalance(temperature: isTemperature ? draft : session.edit.light.temperature,
                               tint: isTemperature ? session.edit.light.tint : draft).quantized()
+        let shot = asShotWhiteBalance
         if isTemperature, let v = wb.temperature, let s = shot.temperature,
            abs(v - s) <= WhiteBalance.temperatureStep / 2 {
             wb.temperature = nil
@@ -264,17 +479,108 @@ public struct InspectorView: View {
         if !isTemperature, let v = wb.tint, let s = shot.tint, abs(v - s) <= WhiteBalance.tintStep / 2 {
             wb.tint = nil
         }
-        let next = wb
-        session.applyEdit { model in
-            model.light.temperature = next.temperature
-            model.light.tint = next.tint
-        }
-        session.commitEdit()
+        commands.commit(wb, label: isTemperature ? "色温" : "色调")
+        lastPresetID = nil
+        hint = nil
     }
 
     private var divider: some View {
         Rectangle()
             .fill(Color.primary.opacity(0.08))
             .frame(height: 1)
+    }
+}
+
+// MARK: - the section's verbs
+
+/// Everything the white-balance section can *do*, without SwiftUI (派单 009).
+///
+/// Three properties, and each one is a contract the tests hold:
+///
+///   1. **One write = one history snapshot.** `commitEdit` is called exactly once per user act, so
+///      ⌘Z takes a preset or a dropper away in one press (the same rule the sliders follow).
+///   2. **One write = one development.** The pair lands in `light.temperature/tint`, which since 006
+///      is the *decoder's* input and part of the rung identity — so the loupe develops again instead
+///      of re-tinting a stale buffer in S1 (identity there).
+///   3. **As shot is `nil`, not a number.** Nothing here invents 6500 K: 原照设置 clears both fields,
+///      which is the state that leaves `CIRAWFilter` alone.
+@MainActor
+public struct WhiteBalanceCommands {
+
+    /// The picker's tag for "no preset matches" — a state, not a menu action.
+    public static let customID = "custom"
+
+    public let session: CatalogSession
+    /// The file's as-shot pair, when the caller has a decode to ask (the loupe's resident buffer).
+    /// Preferred over `session.capabilities` because it is the pair *this* buffer was made with.
+    public let asShot: WhiteBalance?
+
+    public init(session: CatalogSession, asShot: WhiteBalance? = nil) {
+        self.session = session
+        self.asShot = asShot
+    }
+
+    /// Write a pair (quantized), one history snapshot, with a label for the undo strip.
+    ///
+    /// Unlike the slider release this does **not** fold a value that lands within half a step of the
+    /// file's as shot back to `nil`: a preset or a dropper sample is a stated intent ("this is the
+    /// illuminant"), and silently turning 日光 into "as shot" on a 5500 K file would make the menu
+    /// contradict the click. The slider keeps the fold, because there the user's thumb — not a
+    /// preset — produced the number.
+    @discardableResult
+    public func commit(_ whiteBalance: WhiteBalance, label: String) -> WhiteBalance {
+        let wb = whiteBalance.quantized()
+        session.applyEdit { model in
+            model.light.temperature = wb.temperature
+            model.light.tint = wb.tint
+        }
+        session.commitEdit(label: label)
+        return wb
+    }
+
+    /// 原照设置: both fields `nil`, one snapshot. An already-as-shot document is left alone
+    /// (`EditHistory.commit` refuses an unchanged snapshot), so no phantom history entry appears.
+    @discardableResult
+    public func resetToAsShot() -> Bool {
+        guard !session.edit.light.whiteBalance.isAsShot else { return false }
+        session.applyEdit { model in
+            model.light.temperature = nil
+            model.light.tint = nil
+        }
+        session.commitEdit(label: "原照设置")
+        return true
+    }
+
+    /// The eyedropper's whole document effect: solve the sample, write it once (派单 009 C).
+    ///
+    /// `nil` when the sample carries no colour (near-black, or a channel at zero) — in that case the
+    /// document is **not** touched, which is the difference between "the dropper refused" and "the
+    /// dropper wrote a guess". The caller prints the hint either way.
+    @discardableResult
+    public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
+        guard let solve = WhiteBalanceSolver.neutral(for: sample, reference: reference) else { return nil }
+        commit(solve.whiteBalance, label: label)
+        return solve
+    }
+
+    /// 自动: the same solve against the picture's mean colour (grey-world).
+    @discardableResult
+    public func applyAuto(_ average: RGBSample, label: String = "自动白平衡") -> WhiteBalanceSolve? {
+        guard let solve = WhiteBalanceSolver.auto(forAverage: average, reference: reference) else {
+            return nil
+        }
+        commit(solve.whiteBalance, label: label)
+        return solve
+    }
+
+    /// The illuminant the buffer on screen was decoded under — the baseline the solve is relative to.
+    ///
+    /// The document's own pair when it has one, otherwise the file's as shot (派单 006's `nil`). The
+    /// `6500 / 0` fallback inside `Reference` only fires before the first development, where there is
+    /// no buffer to sample anyway.
+    public var reference: WhiteBalanceSolver.Reference {
+        let current = session.edit.light.whiteBalance
+        if !current.isAsShot { return WhiteBalanceSolver.Reference(current) }
+        return WhiteBalanceSolver.Reference(asShot ?? session.capabilities?.asShotWhiteBalance ?? .asShot)
     }
 }

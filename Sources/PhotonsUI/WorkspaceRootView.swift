@@ -260,7 +260,8 @@ public final class WorkspaceRootView: NSView {
         self.gridController = AssetGridController(session: session)
         self.loupeController = LoupeController(session: session)
         self.filmstripController = FilmstripController(session: session)
-        self.inspectorHost = NSHostingView(rootView: InspectorView(session: session))
+        self.inspectorHost = NSHostingView(rootView: InspectorView(session: session,
+                                                                 loupe: loupeController))
         self.browserWidth = WorkspaceLayout.clampBrowserWidth(
             CGFloat(defaults.object(forKey: "photons.browserWidth") as? Double
                     ?? Double(WorkspaceLayout.browserWidthDefault)))

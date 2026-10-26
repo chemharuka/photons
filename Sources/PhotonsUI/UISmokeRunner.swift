@@ -286,11 +286,113 @@ public final class UISmokeRunner {
             checkExportAndPresets(session: session, loupe: root.loupeController,
                                   controller: windowController, window: window,
                                   asset: asset, url: url)
+
+            // 12. 白平衡段：段顺序、预设 = 一条历史 + 一次重解码、吸管的 R/G/B（派单 009）
+            checkWhiteBalanceSection(session: session, loupe: root.loupeController)
         } else {
             fail("no asset for the loupe")
         }
 
         return finish()
+    }
+
+    // MARK: - 白平衡段（派单 009）
+
+    /// 派单 009 in the live window: the section order, one preset = one history entry + one
+    /// development, and the dropper's before/after R/G/B on a real click at the canvas centre.
+    ///
+    /// The click is delivered straight to `LoupeController` at a **view point** of the canvas that is on
+    /// screen, which is exactly what `LoupeCanvasView.mouseDown` does with `NSEvent.locationInWindow` —
+    /// the difference is only that a synthetic `CGEvent` cannot be trusted on a window that has no key
+    /// focus in a shell-launched harness (the same reason the undo menu check above tests the
+    /// validator instead of the click).
+    private func checkWhiteBalanceSection(session: CatalogSession, loupe: LoupeController) {
+        log("白平衡段 (派单 009)")
+        let titles = InspectorView.sectionTitles
+        log("  cards               \(titles.joined(separator: " → "))")
+        check("段顺序是 直方图 → 白平衡 → Light",
+              Array(titles.prefix(3)) == ["直方图", "白平衡", "Light"])
+
+        let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
+        let asShotBefore = session.edit.light.whiteBalance
+        let historyBefore = session.history.count
+        let decodesBefore = decodeTotal()
+
+        // 预设 日光: absolute numbers, one snapshot, one development.
+        commands.commit(WhiteBalancePresets.daylight.whiteBalance!, label: "预设 日光")
+        check("预设 日光 写入 5500 K / 0",
+              session.edit.light.temperature == 5500 && session.edit.light.tint == 0)
+        check("预设 日光 = 一条历史 (\(session.history.count - historyBefore))",
+              session.history.count == historyBefore + 1)
+        waitForDevelopment(past: decodesBefore, timeout: 45)
+        check("预设 日光 触发重解码 (+\(decodeTotal() - decodesBefore))",
+              decodeTotal() > decodesBefore)
+        check("选单显示 日光（不是 自定义）",
+              WhiteBalancePresets.menuLabel(session.edit.light.whiteBalance) == "日光")
+
+        // 吸管: a real click at the canvas centre, sampled from the resident buffer.
+        let canvas = loupe.canvasView
+        let centre = CGPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+        let historyBeforeDrop = session.history.count
+        let decodesBeforeDrop = decodeTotal()
+        guard case .sampled(let before) = loupe.samplePixel(atViewPoint: centre) else {
+            fail("吸管：画布中心取不到像素（画面未就绪？）")
+            commands.resetToAsShot()
+            return
+        }
+        log(String(format: "  sample              src %.0f,%.0f → buf %d,%d @%.2f× · RGB %@",
+                   before.sourceX, before.sourceY, before.bufferX, before.bufferY,
+                   before.decodeScale, before.rgb.text))
+        var solve: WhiteBalanceSolve?
+        loupe.armEyedropper { outcome in
+            if case .sampled(let sample) = outcome { solve = commands.applyDropper(sample.rgb) }
+        }
+        let outcome = loupe.handleEyedropperClick(atViewPoint: centre)
+        check("吸管点击得到取样 (\(String(describing: outcome)))", solve != nil)
+        check("吸管 = 一条历史", session.history.count == historyBeforeDrop + 1)
+        check("吸管后吸管自动关闭", loupe.isEyedropperArmed == false)
+
+        // Wait for the dropper's own development, then read the same point again.
+        waitForDevelopment(past: decodesBeforeDrop, timeout: 45)
+        check("吸管触发重解码 (+\(decodeTotal() - decodesBeforeDrop))",
+              decodeTotal() > decodesBeforeDrop)
+        if case .sampled(let after) = loupe.samplePixel(atViewPoint: centre), let solve {
+            log(String(format: "  解出 %@ · 模型残差 %.2f%% · clamped %@",
+                       solve.whiteBalance.summary, solve.residual * 100,
+                       solve.clamped ? "YES" : "no"))
+            log(String(format: "  应用前 RGB %@ (chroma %.2f%%)", before.rgb.text,
+                       before.rgb.chroma * 100))
+            log(String(format: "  应用后 RGB %@ (chroma %.2f%%)", after.rgb.text,
+                       after.rgb.chroma * 100))
+            check("吸管把取样点推向中性（chroma 下降）", after.rgb.chroma < before.rgb.chroma)
+        } else {
+            fail("吸管：重解码后读不到同一个点")
+        }
+
+        // A click on the letterbox writes nothing.
+        let historyBeforeLetterbox = session.history.count
+        loupe.armEyedropper { _ in }
+        let corner = loupe.handleEyedropperClick(atViewPoint: CGPoint(x: canvas.bounds.midX, y: 2))
+        check("点 letterbox 不写文档、不给历史",
+              corner == LoupeController.DropperOutcome.outsideImage
+                  && session.history.count == historyBeforeLetterbox)
+        loupe.cancelEyedropper()
+
+        // Leave the document as it was found: the checks after this one are about other surfaces.
+        if asShotBefore.isAsShot { commands.resetToAsShot() }
+        log(String(format: "  恢复                %@ (history %d)",
+                   session.edit.light.whiteBalance.summary, session.history.count))
+    }
+
+    /// Real decodes this process has performed, all scales (派单 006's counter, reused here as the
+    /// "one write = one development" evidence).
+    private func decodeTotal() -> Int { RAWDecoder.decodeCounts().values.reduce(0, +) }
+
+    /// Pump until the process has developed more than `count` times, or the deadline passes.
+    private func waitForDevelopment(past count: Int, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while decodeTotal() <= count && Date() < deadline { pump(0.1) }
+        pump(0.2)
     }
 
     // MARK: - export sheet + develop presets (M5)
