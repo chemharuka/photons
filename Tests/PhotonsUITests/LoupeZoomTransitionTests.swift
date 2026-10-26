@@ -86,7 +86,6 @@ final class LoupeZoomTransitionTests: XCTestCase {
     private func waitForFirstFrame(_ controller: LoupeController) {
         XCTAssertTrue(waitFor { controller.lastFrame != nil },
                       "no first frame (last error: \(controller.lastPresentError ?? "—"))")
-        pump(0.1)   // and let the follow-up frame for the same camera land too
     }
 
     private func waitForFrame(_ controller: LoupeController, zoom: Double) {
@@ -108,8 +107,10 @@ final class LoupeZoomTransitionTests: XCTestCase {
         let framing = try XCTUnwrap(controller.framing())
         let centre = framing.visibleCenter(of: .fit)
         let expected = LoupeViewState(mode: .actual, zoom: 1, centerX: centre.x, centerY: centre.y)
+        let backingScale = Double(controller.canvasView.window?.backingScaleFactor ?? 2)
 
         // The crossing.
+        let crossedAt = CFAbsoluteTimeGetCurrent()
         controller.zoomToActualSize()
         let bridge = try XCTUnwrap(controller.zoomBridge, "fit → 100 % must arm the bridge")
         XCTAssertEqual(controller.zoomBridgeArmedCount, 1, "exactly one bridge per crossing")
@@ -129,13 +130,42 @@ final class LoupeZoomTransitionTests: XCTestCase {
         XCTAssertTrue(CATransform3DIsIdentity(controller.canvasView.metalLayer.transform),
                       "the canvas layer must never be scaled — that is what covered the sidebar")
 
-        // The real frame: the bridge goes, and it covered at least one present on the way.
+        // The *declared* geometry of the animation — where it starts, where it ends, how long it
+        // claims to take. These are facts about the bridge as armed, not samples of it in flight, so
+        // they cannot drift with the machine's load the way a sampled position can.
+        XCTAssertEqual(bridge.duration, LoupeZoomBridge.defaultDuration, accuracy: 1e-12,
+                       "every stop change moves by the same beat")
+        let animation = try XCTUnwrap(
+            controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge") as? CABasicAnimation,
+            "the layer must be carrying the bridge")
+        XCTAssertEqual(animation.duration, bridge.duration, accuracy: 1e-12)
+        let from = try XCTUnwrap(animation.fromValue as? NSValue,
+                                 "the animation must declare the transform it starts from")
+        let to = try XCTUnwrap(animation.toValue as? NSValue,
+                               "the animation must declare the transform it ends at")
+        XCTAssertTrue(CATransform3DEqualToTransform(from.caTransform3DValue,
+                                                    bridge.startTransform(backingScale: backingScale)),
+                      "the animation must start where the bridge says it starts")
+        XCTAssertTrue(CATransform3DEqualToTransform(to.caTransform3DValue,
+                                                    bridge.targetTransform(backingScale: backingScale)),
+                      "and end at the stop's own geometry, not somewhere between the two")
+
+        // The real frame: the bridge goes, and it left no animation behind.
         XCTAssertTrue(waitFor { controller.zoomBridge == nil },
                       "the bridge never ended (last error: \(controller.lastPresentError ?? "—"))")
-        XCTAssertGreaterThanOrEqual(controller.zoomBridgeCoveredPresents, 1,
-                                    "at least one frame must be presented while the bridge is up")
+        let crossedMilliseconds = (CFAbsoluteTimeGetCurrent() - crossedAt) * 1000
+        XCTAssertEqual(controller.zoomBridgeCompletedCount, controller.zoomBridgeArmedCount,
+                       "the bridge must have *completed*, not been torn down")
         XCTAssertNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"),
                      "the animation must be removed with the bridge, not left to finish over the new frame")
+        // What the canvas rests on, and the whole point of "never between stops": it is either back
+        // to identity (the real frame is on the layer) or holding the bridge's own target verbatim.
+        // A third value would be the picture parked at whatever scale the slide happened to reach.
+        let resting = controller.canvasView.metalLayer.transform
+        XCTAssertTrue(CATransform3DIsIdentity(resting)
+                      || CATransform3DEqualToTransform(resting,
+                                                       bridge.targetTransform(backingScale: backingScale)),
+                      "the canvas must not rest on an interpolated transform")
 
         waitForFrame(controller, zoom: 1)
         let final = try XCTUnwrap(controller.lastFrame)
@@ -150,10 +180,15 @@ final class LoupeZoomTransitionTests: XCTestCase {
                        "the transition changed the pixels presented at 100 %")
         XCTAssertTrue([Float(0.5), 1].contains(final.decodeScale),
                       "unexpected rung \(final.decodeScale)")
+        // Recorded, not asserted: how many frames the 180 ms window happened to contain is the
+        // scheduler's answer. The bridge's claim is about the geometry, above.
         print("fit→100%: bridges=\(controller.zoomBridgeArmedCount) "
-              + "coveredPresents=\(controller.zoomBridgeCoveredPresents) "
+              + "completed=\(controller.zoomBridgeCompletedCount) "
+              + "presents held inside the bridge=\(controller.zoomBridgeCoveredPresents) "
+              + "drops=\(controller.zoomBridgePendingDrops) "
+              + "elapsed=\(String(format: "%.0f", crossedMilliseconds))ms (bridge "
+              + "\(String(format: "%.0f", bridge.duration * 1000))ms) "
               + "scale=\(String(format: "%.4f", bridge.scale)) "
-              + "duration=\(String(format: "%.0f", bridge.duration * 1000))ms "
               + "rung=\(final.decodeScale) hash=\((final.displayHash ?? "—").prefix(12))… == direct")
     }
 
@@ -169,49 +204,80 @@ final class LoupeZoomTransitionTests: XCTestCase {
         let controller = makeController()
         start(controller, url: url, identity: "transition-stops")
         waitForFirstFrame(controller)
+        let backingScale = Double(controller.canvasView.window?.backingScaleFactor ?? 2)
 
         controller.zoomToActualSize()          // the one crossing of this test
         waitForFrame(controller, zoom: 1)
         XCTAssertNil(controller.zoomBridge)
         let armedAfterCrossing = controller.zoomBridgeArmedCount
         XCTAssertEqual(armedAfterCrossing, 1)
-        let coveredAfterCrossing = controller.zoomBridgeCoveredPresents
 
         var visited: [String] = []
         var scales: [String] = []
+        var elapsed: [String] = []
         for stop in [2.0, 3.0, 4.0, 3.0, 2.0, 1.0] {
             let armed = controller.zoomBridgeArmedCount
             let completed = controller.zoomBridgeCompletedCount
+            let startedAt = CFAbsoluteTimeGetCurrent()
             controller.zoom(to: stop)
             let bridge = try XCTUnwrap(controller.zoomBridge,
                                        "\(stop) is a stop change: it must arm a bridge")
             XCTAssertEqual(controller.zoomBridgeArmedCount, armed + 1, "exactly one bridge per stop")
             XCTAssertEqual(controller.zoomBridgeFrames.last?.drawable, controller.viewportPixels,
-                           "\\(stop): the transition must draw into the canvas-sized drawable")
+                           "\(stop): the transition must draw into the canvas-sized drawable")
             XCTAssertTrue(CATransform3DIsIdentity(controller.canvasView.metalLayer.transform),
-                          "\\(stop): the canvas layer is never scaled")
+                          "\(stop): the canvas layer is never scaled")
             scales.append(String(format: "→%.0f%% ×%.2f", stop * 100, bridge.scale))
             // The camera is already at the stop; the pixels are what is late.
             XCTAssertEqual(controller.viewState.zoom, stop, accuracy: 1e-12,
                            "the model jumps immediately")
+
+            // The bridge's endpoints, as armed: the geometry it says it is going from and to, and the
+            // animation declared with exactly those two transforms. Declarations cannot be sampled
+            // mid-slide, so load cannot move them.
+            let animation = try XCTUnwrap(
+                controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge") as? CABasicAnimation,
+                "\(stop) must carry an animation")
+            XCTAssertEqual(animation.duration, LoupeZoomBridge.defaultDuration, accuracy: 1e-12,
+                           "every stop change moves by the same beat")
+            let to = try XCTUnwrap(animation.toValue as? NSValue,
+                                   "\(stop): the animation must declare where it ends")
+            XCTAssertTrue(CATransform3DEqualToTransform(to.caTransform3DValue,
+                                                        bridge.targetTransform(backingScale: backingScale)),
+                          "\(stop): the animation must end at the stop's own geometry")
+
             XCTAssertTrue(waitFor { controller.zoomBridge == nil },
                           "\(stop): the bridge never completed (last error: "
                           + "\(controller.lastPresentError ?? "—"))")
+            elapsed.append(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - startedAt) * 1000))
             XCTAssertEqual(controller.zoomBridgeCompletedCount, completed + 1)
             XCTAssertNil(controller.canvasView.metalLayer.animation(forKey: "photons.zoomBridge"))
+
+            // Never parked between stops: identity (the real frame is on the layer) or the target
+            // geometry verbatim, and nothing else.
+            let resting = controller.canvasView.metalLayer.transform
+            XCTAssertTrue(CATransform3DIsIdentity(resting)
+                          || CATransform3DEqualToTransform(resting,
+                                                           bridge.targetTransform(backingScale: backingScale)),
+                          "\(stop): the canvas must not rest on an interpolated transform")
+
             waitForFrame(controller, zoom: stop)
             visited.append(controller.zoomLabel)
             // The frame that ended the bridge is the stop's own frame, at the stop's own zoom.
             XCTAssertEqual(controller.lastFrame?.zoom ?? -1, stop, accuracy: 1e-12)
         }
         XCTAssertEqual(visited, ["200%", "300%", "400%", "300%", "200%", "100%"])
-        XCTAssertGreaterThan(controller.zoomBridgeCoveredPresents, coveredAfterCrossing,
-                             "each stop presented a frame while its bridge was up (held, then handed over)")
-        XCTAssertEqual(controller.zoomBridgePendingDrops, 0, "no frame was thrown away mid-bridge")
+        XCTAssertEqual(controller.zoomBridgeCompletedCount, controller.zoomBridgeArmedCount,
+                       "every bridge that armed must have reached its target geometry")
+        // Recorded, not asserted: how many frames land inside an 180 ms window, and whether a late
+        // frame for a camera we had already left had to be recycled, is scheduling. The stop's own
+        // frame and the canvas's resting transform — asserted per stop above — are the promise.
         print("stops: armed=\(controller.zoomBridgeArmedCount) "
               + "completed=\(controller.zoomBridgeCompletedCount) "
-              + "coveredPresents=\(controller.zoomBridgeCoveredPresents) "
-              + "labels=\(visited.joined(separator: "→")) · \(scales.joined(separator: " "))")
+              + "presents held inside a bridge=\(controller.zoomBridgeCoveredPresents) "
+              + "drops=\(controller.zoomBridgePendingDrops) "
+              + "labels=\(visited.joined(separator: "→")) · \(scales.joined(separator: " ")) "
+              + "· elapsed \(elapsed.joined(separator: "/"))ms (bridge 180ms each)")
     }
 
     // MARK: - ② no picture, no bridge

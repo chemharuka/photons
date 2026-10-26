@@ -515,6 +515,14 @@ public final class LoupeController: NSViewController {
     /// Frames whose histogram reached the session — the smoke asserts it is not a second render.
     public private(set) var histogramPublishCount = 0
 
+    /// Read-only, for the cadence tests: **nothing is armed and nothing is measuring**, so a counter
+    /// read now is the settled answer and not a sample taken mid-flight.
+    ///
+    /// It exists so the tests can say "wait until the card is quiet" instead of "sleep 300 ms and
+    /// hope": a `sleep` is the wall clock in a test, and this is a fact about the object. Computed
+    /// from state the class already keeps; it neither changes nor observes anything.
+    public var histogramIsIdle: Bool { histogramPendingKey == nil && !histogramRefreshing }
+
     // MARK: camera (fit / 1:1 / pan / pinch)
 
     /// Where the loupe is looking, in source pixels. The only view-state this type keeps.
@@ -576,6 +584,10 @@ public final class LoupeController: NSViewController {
     public private(set) var staleFrameDrops = 0
     /// Frames that had nothing to draw: no decoded rung was resident when they ran.
     public private(set) var emptyFrameDrops = 0
+
+    /// Read-only, for the cadence tests: no viewport frame is rendering, and none is waiting for the
+    /// queue. "The pans have landed" is a fact, not a duration — this is that fact.
+    public var viewportRenderInFlight: Bool { viewInFlight || viewPending }
 
     /// Last measured frames — printed by `--ui-smoke` and the 10k bench.
     public private(set) var firstFrameMilliseconds: Double = 0
