@@ -19,9 +19,11 @@ import PhotonsUI
 ///      numbers (`histogramRefreshCount`, `histogramPublishCount`);
 ///   ② a pan measures nothing and publishes nothing (`histogramRefreshCount` unchanged, the frames
 ///      counted in `histogramSkippedFrames`);
-///   ③ a frame that is only a *window* into the picture (1:1) publishes nothing and marks
-///      `lastHistogramError == "window frame"`, and the card keeps the whole-picture numbers it had —
-///      zooming must neither move the plot nor blank it;
+///   ③ a frame that is only a *window* into the picture (1:1) publishes **nothing of its own** and marks
+///      `lastHistogramError == "window frame"` while the card keeps the numbers it had — the crop must
+///      never become the plot, and the plot must never be blanked. **045** replaced only the second
+///      half: such a frame now arms one background measurement of the *picture*, so an edit made at 1:1
+///      does reach the card (that is the owner's bug report, `045-histogram-blacks-whites.md`);
 ///   ④ A → B → A is two measurements: the third frame is a cache hit on `Histogram.cacheKey`;
 ///   ⑤ a pan frame costs the same with the card on as with it off.
 @MainActor
@@ -285,12 +287,23 @@ final class HistogramCadenceTests: XCTestCase {
               + "canvas \(atFit.canvas.width)×\(atFit.canvas.height)")
     }
 
-    // MARK: - ③ a window frame publishes nothing (and does not blank the plot)
+    // MARK: - ③ a window frame publishes nothing — the *picture* behind it is measured (045)
 
-    /// At 1:1 the frame is a **crop** of the picture, so its pixels are not the picture's. 034 measures
-    /// nothing there, publishes nothing, and says why; the card keeps the whole-picture numbers it had.
-    /// Back at fit the same edit measures — the plot must not be stuck on the pre-zoom numbers.
-    func testAWindowFramePublishesNothingAndMarksIt() throws {
+    /// 034's rule: "a window frame publishes nothing, and the card keeps the numbers it has". 045 keeps
+    /// the first half and replaces the second.
+    ///
+    /// **Why the second half changed.** The owner reported a histogram that stopped updating while
+    /// dragging 黑色/白色 at 1:1 (`docs/tasks/045-histogram-blacks-whites.md`). 034's trade — no publish,
+    /// `lastHistogramError == "window frame"` — was written down as a choice ("LR 其实会后台更新"), and
+    /// the owner has now called it a bug. So a window frame still publishes **its own pixels** never
+    /// (they are a crop; the plot must not be the crop's), but it now arms one **background**
+    /// measurement of the whole picture, at the picture's own rung. The card therefore follows an edit
+    /// at any zoom, one measurement later, and the frame never waits for it.
+    ///
+    /// Everything 034 guaranteed about *this frame* is asserted here unchanged: nothing published,
+    /// nothing measured inside the frame, the mark says why, and the plot is not blanked. What follows
+    /// the frame is the new part: the edit's numbers arrive, and they are the picture's.
+    func testAWindowFramePublishesNothingAndMeasuresThePictureBehindIt() throws {
         let url = try rawFixture()
         let loupe = makeController()
 
@@ -305,30 +318,43 @@ final class HistogramCadenceTests: XCTestCase {
 
         // The edit that would move the plot — but the camera is at 1:1, so the frame is a window.
         _ = try frame(loupe, url: url, state: pannedState(0), edit: brighter(1))
-        drain()
 
+        // Inside this frame (no pump: the background measurement is applied on main, and main is here):
         XCTAssertEqual(loupe.lastHistogramError, "window frame",
                        "a window frame must say what it is, not silently publish the crop's numbers")
         XCTAssertEqual(loupe.histogramRefreshCount, refreshBefore,
-                       "the crop is not the picture: it must not even be measured")
+                       "the crop is not the picture: this frame must not measure it")
         XCTAssertEqual(loupe.histogramPublishCount, publishBefore,
-                       "and nothing may reach the card")
+                       "and nothing may reach the card from the frame itself")
         XCTAssertEqual(loupe.lastHistogram, whole,
                        "switching fit → 1:1 must not blank the plot (no flash, no empty card)")
         let windowMark = loupe.lastHistogramError
 
-        // …and the camera returning to fit publishes the edit it withheld. This is the half that would
-        // break if the window frame had (wrongly) remembered the key.
+        // …and the picture's measurement follows it (045): the edit is not swallowed.
+        XCTAssertTrue(waitFor { loupe.histogramPublishCount > publishBefore },
+                      "the edit made at 1:1 was never measured — 045's bug")
+        settle(loupe)
+        XCTAssertNil(loupe.lastHistogramError, "a publish answers the mark")
+        XCTAssertEqual(loupe.histogramRefreshCount, refreshBefore + 1,
+                       "exactly one whole-picture measurement, in the background")
+        let atZoom = try XCTUnwrap(loupe.lastHistogram)
+        XCTAssertNotEqual(atZoom.binsDigest(), whole.binsDigest(),
+                          "the withheld edit must be measured")
+        XCTAssertEqual(atZoom.roi, ImageRect(x: 0, y: 0, width: atZoom.canvas.width,
+                                            height: atZoom.canvas.height),
+                       "and it must be the picture's whole grid, not the 1:1 window")
+
+        // Back at fit with the same edit: the picture is already measured, so the frame is a cache hit
+        // and no second measurement happens (034's "A → B → A is two measurements" survives).
         _ = try frame(loupe, url: url, state: .fit, edit: brighter(1))
         drain()
-        XCTAssertNil(loupe.lastHistogramError, "a publish answers the mark")
-        XCTAssertEqual(loupe.histogramRefreshCount, refreshBefore + 1)
-        let atFit = try XCTUnwrap(loupe.lastHistogram)
-        XCTAssertNotEqual(atFit.binsDigest(), whole.binsDigest(),
-                          "the withheld edit must be measured once the whole picture is on screen")
+        XCTAssertEqual(loupe.histogramRefreshCount, refreshBefore + 1,
+                       "the same picture was measured twice — the fit frame re-did the background work")
+        XCTAssertEqual(try XCTUnwrap(loupe.lastHistogram).binsDigest(), atZoom.binsDigest())
 
-        print("034 window: 1:1 frame marked \"\(windowMark ?? "—")\" · "
-              + "measurements \(refreshBefore) → \(loupe.histogramRefreshCount) after returning to fit")
+        print("034/045 window: 1:1 frame marked \"\(windowMark ?? "—")\" · "
+              + "measurements \(refreshBefore) → \(loupe.histogramRefreshCount), published "
+              + "\(loupe.histogramPublishCount - publishBefore) in the background")
     }
 
     // MARK: - ④ A → B → A is two measurements
@@ -486,10 +512,12 @@ final class HistogramCadenceTests: XCTestCase {
     func testPanFramesCostNothingForTheCard() throws {
         let url = try rawFixture()
         let loupe = makeController()
-        // Warm: the graph, the ladder, the pool, and one measurement (so no key is new).
+        // Warm: the graph, the ladder, the pool, and one whole-picture measurement (so no key is new).
+        // 045: the 1:1 frame below arms a *background* measurement of the picture (it is a window), so
+        // "settled" — not "three turns of the run loop" — is what makes the baselines below honest.
         _ = try frame(loupe, url: url, state: pannedState(0))
         _ = try loupe.measureHistogramNow(url: url, identity: "cadence", edit: .neutral)
-        drain()
+        settle(loupe)
 
         let framesBefore = loupe.histogramSkippedFrames
         let measurementsBefore = loupe.histogramRefreshCount
