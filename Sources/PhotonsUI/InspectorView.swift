@@ -152,26 +152,51 @@ public struct InspectorView: View {
         }
     }
 
-    /// 「信息」 → 文件名 → 拍摄参数 → 器材（三行）, in the same card container the histogram uses.
+    /// 「信息」, four rows (派单 022, second version):
+    ///
+    /// ```
+    /// L100000.dng                60 MP                 9000×6000   ← one line, three columns
+    /// Leica SL3                                                  ← camera
+    /// Vario-Elmarit-SL 24-90                                     ← lens
+    /// ISO 100     50 mm     f/2.8     1/250s                     ← the four exposure slots
+    /// ```
+    ///
+    /// + `MissingFileNotice` when the original moved (below the four rows: it reports the file,
+    /// not the photo). The first row carries **values only** and no labels — the user's words were
+    /// 「不要写中文 就 L100000.dng   60 MP   9000×6000」. Rows 2 and 3 are the two halves the
+    /// equipment line used to join, unchanged in wording; both stay marquees so a long lens name
+    /// still truncates with `…` and scrolls on hover.
     ///
     /// The card is the point: the two pinned blocks are one visual unit, and the container's own
-    /// horizontal inset is what puts the three rows at exactly the card content width
-    /// (`330 − 2·12 − 2·16 = 274` at the default panel), truncating at the tail with `…` until the
-    /// pointer is over the row.
+    /// horizontal inset is what puts the rows at exactly the card content width
+    /// (`330 − 2·12 − 2·16 = 274` at the default panel).
     private var infoCard: some View {
         card(Self.infoTitle) {
             VStack(alignment: .leading, spacing: 2) {
-                MarqueeText(text: session.anchorAsset?.filename ?? "未选择照片")
-                // Only for a moved original: a row that is always there would spend every healthy
-                // photo's second line saying "fine".
+                InspectorPhotoInfo.PhotoSpecRow(filename: session.anchorAsset?.filename ?? "未选择照片",
+                                                pixelCount: pixelCount,
+                                                pixelDimensions: pixelDimensions)
+                // Two rows, not one: 相机 and 镜头 are different facts, and the joined line was the
+                // longest in the card (`Leica SL3 · Vario-Elmarit-SL 1:2.8-4/24-90 ASPH.`).
+                MarqueeText(text: camera)
+                MarqueeText(text: lens)
+                InspectorPhotoInfo.InspectorParameterRow(tokens: parameterTokens)
                 if let notice = InspectorPhotoInfo.missingNotice(isMissing: session.anchorAsset?.isMissing ?? false) {
                     MissingFileNotice(text: notice)
                         .accessibilityIdentifier("inspector.info.missing")
                 }
-                InspectorPhotoInfo.InspectorParameterRow(tokens: parameterTokens)
-                MarqueeText(text: equipment)
             }
         }
+    }
+
+    private var pixelCount: String {
+        InspectorPhotoInfo.pixelCount(width: session.anchorAsset?.width,
+                                      height: session.anchorAsset?.height)
+    }
+
+    private var pixelDimensions: String {
+        InspectorPhotoInfo.pixelDimensions(width: session.anchorAsset?.width,
+                                           height: session.anchorAsset?.height)
     }
 
     // MARK: shooting information (派单 014)
@@ -183,10 +208,16 @@ public struct InspectorView: View {
                                   shutter: photoMetadata?.shutter)
     }
 
-    private var equipment: String {
-        InspectorPhotoInfo.equipment(make: session.anchorAsset?.cameraMake,
-                                     model: session.anchorAsset?.cameraModel,
-                                     lens: session.anchorAsset?.lens)
+    /// Two rows, each one bare name — 派单 022:「信息栏目前不需要任何 · 符号」. No joining, no
+    /// splitting of the old `equipment` string: the two halves come straight from the same pair of
+    /// functions `equipment` is built on (`cameraName` / `nonEmpty`), so the wording cannot drift.
+    private var camera: String {
+        InspectorPhotoInfo.camera(make: session.anchorAsset?.cameraMake,
+                                  model: session.anchorAsset?.cameraModel)
+    }
+
+    private var lens: String {
+        InspectorPhotoInfo.lens(session.anchorAsset?.lens)
     }
 
     private var metadataKey: String {

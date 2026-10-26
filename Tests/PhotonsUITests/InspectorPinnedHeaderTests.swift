@@ -43,7 +43,7 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         let height: CGFloat
         let host: NSHostingView<InspectorView>
         let window: NSWindow
-        /// The two marquee rows of the 信息 card: file name, equipment.
+        /// The three marquee rows of the 信息 card: file name (row 1), camera, lens (派单 022).
         let infoRows: [NSRect]
         let histogramPlot: NSRect
         let histogramCards: Int
@@ -132,8 +132,10 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         let short = try host(height: 420)
         defer { tall.window.contentView = nil; short.window.contentView = nil }
 
-        XCTAssertEqual(tall.infoRows.count, 2, "file name + equipment are the two marquees")
-        XCTAssertEqual(short.infoRows.count, 2)
+        // 派单 022 把「相机 · 镜头」一行拆成两行，所以 marquee 从 2 变 3（文件名 / 相机 / 镜头）。
+        // 第 1 行里的两个数值格是普通 Text，不产生 marquee。
+        XCTAssertEqual(tall.infoRows.count, 3, "file name + camera + lens are the three marquees")
+        XCTAssertEqual(short.infoRows.count, 3)
         XCTAssertEqual(tall.infoRows.count, short.infoRows.count)
 
         // The 信息 block: every row at the same y, the same height, the same width.
@@ -176,10 +178,17 @@ final class InspectorPinnedHeaderTests: XCTestCase {
                                     "the histogram was compressed: "
                                     + "\(tall.histogramPlot.height) → \(short.histogramPlot.height)")
         // Its width is the card content width at both heights: the panel is not re-flowed either.
+        // 派单 022: row 0 shares its line with `60 MP` / `9000×6000`, so it is the left column of
+        // that line — it still starts at the content's left edge and stays inside it; 相机 and 镜头
+        // are alone and take the whole content width.
+        let contentMinX: CGFloat = 12 + WorkspaceLayout.cardInsetH
         for panel in [tall, short] {
             XCTAssertEqual(panel.histogramPlot.width, cardContentWidth, accuracy: 0.5,
                            "plot width \(panel.histogramPlot.width) ≠ card content \(cardContentWidth)")
-            for row in panel.infoRows {
+            XCTAssertEqual(panel.infoRows[0].minX, contentMinX, accuracy: 0.5,
+                           "the file name column starts at \(panel.infoRows[0].minX), not \(contentMinX)")
+            XCTAssertLessThanOrEqual(panel.infoRows[0].maxX, contentMinX + cardContentWidth + 0.5)
+            for row in panel.infoRows.dropFirst() {
                 XCTAssertEqual(row.width, cardContentWidth, accuracy: 0.5,
                                "信息 row width \(row.width) ≠ card content \(cardContentWidth)")
             }

@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
+import PhotonsCatalog
 @testable import PhotonsUI
 
 /// 派单 014: the inspector's shooting-information block.
@@ -102,9 +103,16 @@ final class InspectorMetadataTests: XCTestCase {
     // MARK: width
 
     /// The rows come out of a real `NSHostingView` at the default 330 pt inspector, so this is the
-    /// width SwiftUI actually handed them — not a constant read back from a constant. Only the
-    /// filename and equipment rows are marquees now; the exposure row is `InspectorParameterRow`,
-    /// four equal slots that span the same width.
+    /// width SwiftUI actually handed them — not a constant read back from a constant.
+    ///
+    /// The count moves 2 → 3 because 派单 022 splits the one equipment marquee into two (相机 /
+    /// 镜头): the file name, the camera and the lens are now three marquees. The new pixel-count
+    /// and dimension cells are plain `Text` and add no marquee — their geometry is proven by the
+    /// probes in `testFirstRowIsNameLeftPixelsCentreDimensionsRight`, not here.
+    ///
+    /// The width claim has to be split for the same reason: the file name shares its line with the
+    /// two value cells, so it is the *left column* (its `minX` is still the content's left edge,
+    /// its width is what is left before `60 MP`), while 相机 and 镜头 still span the whole content.
     @MainActor
     func testInfoRowsTakeExactlyTheCardContentWidth() throws {
         _ = NSApplication.shared
@@ -118,17 +126,197 @@ final class InspectorMetadataTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
 
         let rows = Self.marqueeRows(in: host)
-        XCTAssertEqual(rows.count, 2, "filename + equipment are marquees; the exposure row is not")
-        guard rows.count == 2 else { return }
+        XCTAssertEqual(rows.count, 3, "file name + camera + lens are marquees; the two value cells and the exposure row are not")
+        guard rows.count == 3 else { return }
 
-        for (index, row) in rows.enumerated() {
-            XCTAssertEqual(row.frame.width, cardContentWidth, accuracy: 0.5,
-                           "row \(index) width \(row.frame.width) ≠ card content \(cardContentWidth)")
-            XCTAssertEqual(row.lineHeight, 14, accuracy: 0.001, "one rhythm for all rows")
+        let frames = rows.map { $0.convert($0.bounds, to: host) }
+        // 12 (panel inset) + 16 (card inset): where every card's content starts.
+        let contentMinX: CGFloat = 12 + WorkspaceLayout.cardInsetH
+        for (index, frame) in frames.enumerated() {
+            XCTAssertEqual(frame.minX, contentMinX, accuracy: 0.5,
+                           "row \(index) starts at \(frame.minX), not at the content's \(contentMinX)")
+            XCTAssertLessThanOrEqual(frame.maxX, contentMinX + cardContentWidth + 0.5,
+                                     "row \(index) runs past the card content")
+            XCTAssertEqual(rows[index].lineHeight, 14, accuracy: 0.001, "one rhythm for all rows")
         }
+        // 相机 and 镜头 are alone on their lines, so they take the full content width.
+        for index in [1, 2] {
+            XCTAssertEqual(frames[index].width, cardContentWidth, accuracy: 0.5,
+                           "row \(index) width \(frames[index].width) ≠ card content \(cardContentWidth)")
+        }
+        XCTAssertLessThan(frames[0].width, cardContentWidth,
+                          "the file name shares its line with 60 MP and 9000×6000")
         print("MARQUEE width: inspector \(inspectorWidth) → card content \(cardContentWidth) pt; "
-              + "rows \(rows.map { String(format: "%.1f", $0.frame.width) })")
+              + "rows \(frames.map { String(format: "%.1f", $0.width) })")
         window.contentView = nil
+    }
+
+    // MARK: 四行：文件名/像素数/尺寸 · 相机 · 镜头 · 参数 (派单 022)
+
+    /// The two formatters, branch by branch — the table the user pinned.
+    func testPixelCountAndDimensionsFormatting() {
+        let cases: [(width: Int?, height: Int?, megapixels: String, dimensions: String)] = [
+            (9000, 6000, "54 MP", "9000×6000"),
+            (6000, 4000, "24 MP", "6000×4000"),
+            (2000, 1000, "2 MP", "2000×1000"),
+            (1000, 900, "0.9 MP", "1000×900"),
+            (nil, nil, "—", "—"),
+            (nil, 6000, "—", "—"),
+            (9000, nil, "—", "—"),
+        ]
+        for c in cases {
+            let size = "\(c.width.map(String.init) ?? "nil")×\(c.height.map(String.init) ?? "nil")"
+            XCTAssertEqual(InspectorPhotoInfo.pixelCount(width: c.width, height: c.height), c.megapixels,
+                           "pixel count of \(size)")
+            XCTAssertEqual(InspectorPhotoInfo.pixelDimensions(width: c.width, height: c.height), c.dimensions,
+                           "dimensions of \(size)")
+        }
+
+        // The two shapes the user spelled out: one space before `MP`, no space around the `×`,
+        // and the multiplication sign is U+00D7 (not the letter x, not `*`).
+        XCTAssertEqual(InspectorPhotoInfo.pixelCount(width: 5500, height: 4400), "24 MP",
+                       "24.2 MP rounds to the nearest megapixel")
+        XCTAssertTrue(InspectorPhotoInfo.pixelCount(width: 9000, height: 6000).hasSuffix(" MP"))
+        XCTAssertFalse(InspectorPhotoInfo.pixelCount(width: 9000, height: 6000).contains("54MP"))
+        XCTAssertEqual(InspectorPhotoInfo.pixelDimensions(width: 9000, height: 6000).unicodeScalars
+                        .filter { $0.value == 0x00D7 }.count, 1)
+        XCTAssertFalse(InspectorPhotoInfo.pixelDimensions(width: 9000, height: 6000).contains(" "))
+
+        // No label anywhere on the row: only digits, the `×`, `MP` and the dash are allowed.
+        let allowed = Set("0123456789. ×MP—")
+        for text in [InspectorPhotoInfo.pixelCount(width: 9000, height: 6000),
+                     InspectorPhotoInfo.pixelDimensions(width: 9000, height: 6000),
+                     InspectorPhotoInfo.pixelCount(width: 1000, height: 900),
+                     InspectorPhotoInfo.pixelCount(width: nil, height: nil)] {
+            XCTAssertTrue(text.allSatisfy { allowed.contains($0) }, "「\(text)」 carries a label")
+        }
+
+        // Branches the table does not list but the code has to answer: exactly one megapixel stays
+        // an integer (`1 MP`), and `round()` at a half goes away from zero (`2.5` → `3 MP`).
+        XCTAssertEqual(InspectorPhotoInfo.pixelCount(width: 1000, height: 1000), "1 MP")
+        XCTAssertEqual(InspectorPhotoInfo.pixelCount(width: 2000, height: 1250), "3 MP")
+
+        print("SPEC format: "
+              + [(9000, 6000), (6000, 4000), (2000, 1000), (1000, 900), (1000, 1000)]
+                .map { "\($0.0)×\($0.1) → \(InspectorPhotoInfo.pixelCount(width: $0.0, height: $0.1))"
+                       + " / \(InspectorPhotoInfo.pixelDimensions(width: $0.0, height: $0.1))" }
+                .joined(separator: " · ")
+              + " · nil → \(InspectorPhotoInfo.pixelCount(width: nil, height: nil))"
+              + " / \(InspectorPhotoInfo.pixelDimensions(width: nil, height: nil))")
+    }
+
+    /// 拆行不改文案: 相机 and 镜头 are exactly the two halves the old single `equipment` row printed,
+    /// and neither carries the `·` the join used (派单 022:「信息栏目前不需要任何 · 符号」).
+    func testCameraAndLensAreTheEquipmentHalvesWithoutASeparator() {
+        XCTAssertEqual(InspectorPhotoInfo.camera(make: "Leica Camera AG", model: "Leica SL3"), "Leica SL3")
+        XCTAssertEqual(InspectorPhotoInfo.lens("Vario-Elmarit-SL 24-90"), "Vario-Elmarit-SL 24-90")
+        // The old line is now the join of the two rows, word for word.
+        XCTAssertEqual(InspectorPhotoInfo.equipment(make: "Leica Camera AG", model: "Leica SL3",
+                                                    lens: "Vario-Elmarit-SL 24-90"),
+                       "\(InspectorPhotoInfo.camera(make: "Leica Camera AG", model: "Leica SL3"))"
+                       + " · "
+                       + "\(InspectorPhotoInfo.lens("Vario-Elmarit-SL 24-90"))")
+
+        // The fallbacks are the existing constants, not new words.
+        XCTAssertEqual(InspectorPhotoInfo.camera(make: "Leica Camera AG", model: nil), "Leica Camera AG")
+        XCTAssertEqual(InspectorPhotoInfo.camera(make: nil, model: "  "), InspectorPhotoInfo.unknownCamera)
+        XCTAssertEqual(InspectorPhotoInfo.lens(nil), InspectorPhotoInfo.unknownLens)
+        XCTAssertEqual(InspectorPhotoInfo.lens("   "), InspectorPhotoInfo.unknownLens)
+
+        for row in [InspectorPhotoInfo.camera(make: "Leica Camera AG", model: "Leica SL3"),
+                    InspectorPhotoInfo.camera(make: nil, model: nil),
+                    InspectorPhotoInfo.lens("Vario-Elmarit-SL 24-90"),
+                    InspectorPhotoInfo.lens(nil)] {
+            XCTAssertFalse(row.contains("·"), "「\(row)」 is a bare name, with no separator")
+        }
+    }
+
+    /// 第 1 行是一行三列, proven on the frames SwiftUI gave the three cells: the file name starts at
+    /// the card content's left edge, `54 MP` is centred on that same band, `9000×6000` ends on its
+    /// right edge — within 1 pt, not "looks centred".
+    @MainActor
+    func testFirstRowIsNameLeftPixelsCentreDimensionsRight() throws {
+        let (session, asset) = try makeSession(width: 9000, height: 6000,
+                                               make: "Leica Camera AG", model: "Leica SL3",
+                                               lens: "Vario-Elmarit-SL 24-90")
+        let panel = try host(session)
+        defer { panel.window.contentView = nil }
+
+        // The four rows, in order: 文件名 / 54 MP / 9000×6000 (one line), 相机, 镜头, then the
+        // existing four-slot parameter row (pinned by `testParameterTokensAreUnpaddedAndOrdered`).
+        XCTAssertEqual(panel.marquees.map(\.text),
+                       [asset.filename, "Leica SL3", "Vario-Elmarit-SL 24-90"],
+                       "row 1 carries the file name, row 2 the camera, row 3 the lens")
+        XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue]?.text, "54 MP")
+        XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text, "9000×6000")
+
+        let contentMinX: CGFloat = 12 + WorkspaceLayout.cardInsetH
+        let contentMidX = contentMinX + cardContentWidth / 2
+        let contentMaxX = contentMinX + cardContentWidth
+        let name = panel.marquees[0].frame
+        let centre = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue])
+        let trailing = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue])
+
+        XCTAssertEqual(name.minX, contentMinX, accuracy: 1,
+                       "file name minX \(name.minX) ≠ content minX \(contentMinX)")
+        XCTAssertEqual(centre.midX, contentMidX, accuracy: 1,
+                       "60 MP midX \(centre.midX) ≠ content midX \(contentMidX)")
+        XCTAssertEqual(trailing.maxX, contentMaxX, accuracy: 1,
+                       "9000×6000 maxX \(trailing.maxX) ≠ content maxX \(contentMaxX)")
+        // The name column stops before the centred value: no overlap on the line.
+        XCTAssertLessThan(name.maxX, centre.minX)
+        // No `·` in any of the four rows' visible text (派单 022).
+        for text in panel.marquees.map(\.text) + [centre.text, trailing.text] {
+            XCTAssertFalse(text.contains("·"), "「\(text)」 carries a separator")
+        }
+        print(String(format: "SPEC row1: name minX %.1f (want %.1f) · 54 MP midX %.1f (want %.1f) · "
+                     + "dims maxX %.1f (want %.1f); name column %.1f pt",
+                     name.minX, contentMinX, centre.midX, contentMidX,
+                     trailing.maxX, contentMaxX, name.width))
+    }
+
+    /// 缺值不塌行: no width/height → `—`, no camera/lens → 未知相机 / 未知镜头, no photo → 未选择照片,
+    /// and every row keeps the height and the y it has with values.
+    @MainActor
+    func testMissingValuesPrintDashesAndKeepTheRowHeights() throws {
+        let (full, _) = try makeSession(width: 9000, height: 6000,
+                                        make: "Leica Camera AG", model: "Leica SL3",
+                                        lens: "Vario-Elmarit-SL 24-90")
+        let (bare, asset) = try makeSession(width: nil, height: nil, make: nil, model: nil, lens: nil)
+        let withValues = try host(full)
+        let withNothing = try host(bare)
+        let empty = try host(CatalogSession())
+        defer {
+            for panel in [withValues, withNothing, empty] { panel.window.contentView = nil }
+        }
+
+        XCTAssertEqual(withNothing.marquees.map(\.text), [asset.filename, "未知相机", "未知镜头"])
+        XCTAssertEqual(withNothing.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue]?.text, "—")
+        XCTAssertEqual(withNothing.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text, "—")
+
+        XCTAssertEqual(empty.marquees.first?.text, "未选择照片")
+        XCTAssertEqual(empty.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue]?.text, "—")
+        XCTAssertEqual(empty.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text, "—")
+
+        for column in [InspectorPhotoInfo.SpecColumn.pixelCount, .pixelDimensions] {
+            let filled = try XCTUnwrap(withValues.probes[column.rawValue])
+            for other in [try XCTUnwrap(withNothing.probes[column.rawValue]),
+                          try XCTUnwrap(empty.probes[column.rawValue])] {
+                XCTAssertEqual(other.height, filled.height, accuracy: 0.5,
+                               "the \(column.rawValue) cell collapsed without a value")
+                XCTAssertEqual(other.minY, filled.minY, accuracy: 0.5,
+                               "the \(column.rawValue) cell moved without a value")
+            }
+        }
+        for index in 0 ..< 3 {
+            XCTAssertEqual(withNothing.marquees[index].frame.minY, withValues.marquees[index].frame.minY,
+                           accuracy: 0.5, "row \(index) moved when a value went missing")
+            XCTAssertEqual(withNothing.marquees[index].frame.height, withValues.marquees[index].frame.height,
+                           accuracy: 0.5, "row \(index) changed height when a value went missing")
+            XCTAssertEqual(empty.marquees[index].frame.minY, withValues.marquees[index].frame.minY,
+                           accuracy: 0.5, "row \(index) moved with no photo selected")
+        }
+        print("SPEC missing: nil size → — / —, no camera/lens → 未知相机 / 未知镜头, rows keep 14 pt")
     }
 
     // MARK: overflow / marquee
@@ -212,6 +400,117 @@ final class InspectorMetadataTests: XCTestCase {
         XCTAssertEqual(MarqueeLayout.duration(overflow: 60), 1.0, accuracy: 0.0001)    // 60 pt/s
         XCTAssertEqual(MarqueeLayout.duration(overflow: 600), 3.0, accuracy: 0.0001)   // 10 s → ceiling
         XCTAssertEqual(MarqueeLayout.duration(overflow: 0), 0, accuracy: 0.0001)
+    }
+
+    // MARK: fixture library (派单 022)
+
+    private var workDir: URL!
+
+    override func setUpWithError() throws {
+        workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photons-inspector-spec-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let workDir { try? FileManager.default.removeItem(at: workDir) }
+    }
+
+    /// One real library with one photo in it, so the inspector reads a *database's* filename and
+    /// width/height instead of a constant handed to the view.
+    ///
+    /// The row is written with SQL rather than through `ImportService`: there is no public
+    /// "set the dimensions" API, and importing a 54 MP original just to read `54 MP` back would
+    /// make the test about the importer. Everything else is the real path — `Catalog.create`,
+    /// `ensureRoot`, `CatalogSession.open`, `selectOnly` — so the value the panel prints comes out
+    /// of `assets.width`/`assets.height` exactly as in the app.
+    @MainActor
+    private func makeSession(width: Int?, height: Int?,
+                             make: String?, model: String?, lens: String?) throws -> (CatalogSession, Asset) {
+        _ = NSApplication.shared
+        let folder = workDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let package = folder.appendingPathComponent("Spec.\(LibraryLayout.packageExtension)")
+        let catalog = try Catalog.create(at: package)
+        let src = folder.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let root = try catalog.ensureRoot(for: src, mode: .reference)
+
+        let name = "L100000.dng"
+        // The original sits where the row says it does: 「原文件已移动」 is not what this is about.
+        try Data([0x00]).write(to: src.appendingPathComponent(name))
+
+        func sqlText(_ value: String?) -> String {
+            value.map { "'" + $0.replacingOccurrences(of: "'", with: "''") + "'" } ?? "NULL"
+        }
+
+        let id = UUID().uuidString
+        try catalog.dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO assets (id, source_root_id, rel_path, filename, ext, kind, size, mtime,
+                                    content_hash, width, height, camera_make, camera_model, lens,
+                                    imported_at, missing)
+                VALUES ('\(id)', '\(root.id)', '\(name)', '\(name)', 'dng', 'raw', 1, 0,
+                        '\(UUID().uuidString)',
+                        \(width.map(String.init) ?? "NULL"), \(height.map(String.init) ?? "NULL"),
+                        \(sqlText(make)), \(sqlText(model)), \(sqlText(lens)),
+                        '2026-10-26T00:00:00Z', 0)
+                """)
+        }
+
+        let session = CatalogSession()
+        try session.open(package)
+        session.selectOnly(id)
+        return (session, try XCTUnwrap(try catalog.asset(id: id)))
+    }
+
+    /// One published line/cell: its text, and the frame SwiftUI gave it in the host's coordinates.
+    private struct Cell {
+        let text: String
+        let frame: NSRect
+        var minX: CGFloat { frame.minX }
+        var midX: CGFloat { frame.midX }
+        var maxX: CGFloat { frame.maxX }
+        var minY: CGFloat { frame.minY }
+        var width: CGFloat { frame.width }
+        var height: CGFloat { frame.height }
+    }
+
+    /// What one hosted panel published: the marquee rows in tree order, and the two value cells as
+    /// `InspectorSpecRowProbe` sees them.
+    private struct SpecPanel {
+        let window: NSWindow
+        let marquees: [Cell]
+        let probes: [String: Cell]
+    }
+
+    @MainActor
+    private func host(_ session: CatalogSession) throws -> SpecPanel {
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: InspectorView(session: session))
+        host.frame = NSRect(x: 0, y: 0, width: inspectorWidth, height: 800)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.45))
+        host.layoutSubtreeIfNeeded()
+
+        let marquees = Self.marqueeRows(in: host)
+            .map { Cell(text: $0.text, frame: $0.convert($0.bounds, to: host)) }
+        var probes: [String: Cell] = [:]
+        for probe in Self.specProbes(in: host) {
+            probes[probe.id] = Cell(text: probe.text, frame: probe.convert(probe.bounds, to: host))
+        }
+        return SpecPanel(window: window, marquees: marquees, probes: probes)
+    }
+
+    @MainActor
+    private static func specProbes(in view: NSView) -> [InspectorSpecRowProbe] {
+        var found: [InspectorSpecRowProbe] = []
+        if let probe = view as? InspectorSpecRowProbe { found.append(probe) }
+        for sub in view.subviews { found += specProbes(in: sub) }
+        return found
     }
 
     // MARK: helpers
