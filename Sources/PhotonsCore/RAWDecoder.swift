@@ -100,19 +100,25 @@ public struct DecodeOptions: Sendable {
     /// White balance applied **inside** the decoder (`neutralTemperature`/`neutralTint`). `.asShot`
     /// leaves Apple's as-shot balance alone, which is the default and the pre-006 behaviour.
     public var whiteBalance: WhiteBalance
+    /// 派单 031: noise reduction / detail applied **inside** the decoder
+    /// (`luminanceNoiseReductionAmount`, `colorNoiseReductionAmount`, `sharpnessAmount`,
+    /// `detailAmount`). `.identity` assigns none of them, which is the pre-031 decode byte for byte.
+    public var detail: DetailSettings
 
     public init(decoderVersion: String? = nil,
                 exposureEV: Float = 0,
                 scale: Float = 1,
                 draft: Bool = false,
                 colorSpace: LinearColorSpace = .extendedLinearSRGB,
-                whiteBalance: WhiteBalance = .asShot) {
+                whiteBalance: WhiteBalance = .asShot,
+                detail: DetailSettings = .identity) {
         self.decoderVersion = decoderVersion
         self.exposureEV = exposureEV
         self.scale = scale
         self.draft = draft
         self.colorSpace = colorSpace
         self.whiteBalance = whiteBalance
+        self.detail = detail
     }
 }
 
@@ -142,6 +148,10 @@ public enum DecodeError: LocalizedError {
     /// The decoder did not keep the white balance we assigned (`§8c`'s read-back rule, applied to
     /// `neutralTemperature`/`neutralTint` instead of the version string).
     case whiteBalanceRejected(assigned: String, readBack: String)
+    /// One of the four detail amounts did not read back as assigned (派单 031). Measured on this
+    /// machine all four read back exactly, so this fires only if Apple changes the properties — but
+    /// a slider that cannot change pixels must never be silently accepted.
+    case detailRejected(name: String, assigned: Double, readBack: Double)
 
     public var errorDescription: String? {
         switch self {
@@ -152,6 +162,7 @@ public enum DecodeError: LocalizedError {
         case .renderFailed: return "CIRAWFilter produced no image (or the version was rejected)"
         case .badDimensions(let s): return "unusable dimensions \(s)"
         case .whiteBalanceRejected(let a, let b): return "white balance \(a) was not accepted by the decoder (it reads back \(b))"
+        case .detailRejected(let n, let a, let b): return "\(n) = \(a) was not accepted by the decoder (it reads back \(b))"
         }
     }
 }
@@ -318,6 +329,62 @@ public final class RAWDecoder {
         }
     }
 
+    /// The four detail amounts, assigned and read back (派单 031).
+    ///
+    /// Two facts make this different from `applyWhiteBalance`, both measured on this machine:
+    ///
+    ///  1. **The filter never clamps.** Assigning 2.0 reads back 2.0; assigning −0.5 reads back −0.5.
+    ///     So the 0…1 range is *ours*, and the slider mapping (`DetailSettings.decodeAmount`) is what
+    ///     keeps us inside it — the read-back below only proves the assignment landed.
+    ///  2. **The filter's own default is not 0 on every axis.** With nothing assigned,
+    ///     `luminanceNoiseReductionAmount` reads 0.000 and `detailAmount` 0.000, but
+    ///     `colorNoiseReductionAmount` and `sharpnessAmount` read **0.500**, and on a Canon body
+    ///     `sharpnessAmount` reads 1.000. That is why the baseline is read here, from the live filter,
+    ///     and why a slider at 0 must assign *nothing*: assigning 0 to the colour NR would switch off
+    ///     half of Apple's default (measured: 1656830 samples move on `L1030433.dng`).
+    ///
+    /// Read-back tolerance is 1e-4 because the properties are `Float`: `Float(0.3)` reads back as
+    /// 0.30000001192, which is the assignment landing, not a rejection.
+    static func applyDetail(_ detail: DetailSettings, to filter: CIRAWFilter,
+                            baseline: DetailBaseline? = nil) throws -> DetailDecodeValues {
+        // The baseline of all four axes, **before** anything is assigned.
+        let base = baseline ?? detailBaseline(of: filter)
+        let values = detail.clamped().decodeValues(baseline: base)
+
+        func assign(_ name: String, _ wanted: Double?,
+                    _ get: () -> Float, _ set: (Float) -> Void) throws {
+            guard let wanted else { return }          // 0 on the slider: leave Apple's value alone
+            set(Float(wanted))
+            let back = Double(get())
+            guard abs(back - wanted) <= 1e-4 else {
+                throw DecodeError.detailRejected(name: name, assigned: wanted, readBack: back)
+            }
+        }
+
+        try assign("luminanceNoiseReductionAmount", values.luminanceNR,
+                   { filter.luminanceNoiseReductionAmount },
+                   { filter.luminanceNoiseReductionAmount = $0 })
+        try assign("colorNoiseReductionAmount", values.colorNR,
+                   { filter.colorNoiseReductionAmount },
+                   { filter.colorNoiseReductionAmount = $0 })
+        try assign("sharpnessAmount", values.sharpness,
+                   { filter.sharpnessAmount },
+                   { filter.sharpnessAmount = $0 })
+        try assign("detailAmount", values.detail,
+                   { filter.detailAmount },
+                   { filter.detailAmount = $0 })
+        return values
+    }
+
+    /// What the filter reports for the four axes with nothing assigned — the baseline the sliders are
+    /// relative to. Exposed for the tests and for a probe that wants to print it.
+    static func detailBaseline(of filter: CIRAWFilter) -> DetailBaseline {
+        DetailBaseline(luminanceNR: Double(filter.luminanceNoiseReductionAmount),
+                       colorNR: Double(filter.colorNoiseReductionAmount),
+                       sharpness: Double(filter.sharpnessAmount),
+                       detail: Double(filter.detailAmount))
+    }
+
     /// Toggle-and-read-back, on this file only (§11.3).
     ///
     /// `isLensCorrectionSupported` alone is not enough: the flag is a claim, and a claim that does
@@ -345,12 +412,21 @@ public final class RAWDecoder {
         /// The file's own white balance, read before anything was assigned. `nil` fields mean the
         /// filter reported nothing usable; a document's `nil` temperature means exactly this.
         public let asShotWhiteBalance: WhiteBalance
+        /// 派单 031: what `CIRAWFilter` reported for the four noise-reduction/detail axes **before** the
+        /// document assigned anything (per body: colour NR and sharpness are not always 0).
+        public let detailBaseline: DetailBaseline
+        /// The four filter values this development actually assigned; all `nil` for a default document.
+        public let detailApplied: DetailDecodeValues
 
         public init(image: LinearImage, capabilities: DecoderCapabilities,
-                    asShotWhiteBalance: WhiteBalance = .asShot) {
+                    asShotWhiteBalance: WhiteBalance = .asShot,
+                    detailBaseline: DetailBaseline = .measured,
+                    detailApplied: DetailDecodeValues = DetailDecodeValues()) {
             self.image = image
             self.capabilities = capabilities
             self.asShotWhiteBalance = asShotWhiteBalance
+            self.detailBaseline = detailBaseline
+            self.detailApplied = detailApplied
         }
     }
 
@@ -411,6 +487,17 @@ public final class RAWDecoder {
         let asShot = Self.asShotWhiteBalance(filter)
         if !options.whiteBalance.isAsShot {
             try Self.applyWhiteBalance(options.whiteBalance, to: filter)
+        }
+
+        // ── 前置 ④ noise reduction / detail, or nothing at all (派单 031) ──────────────────────
+        // The same rule as the white balance: a document that has not touched the panel assigns
+        // **nothing**, because the filter's own defaults are not zero on every axis (colour NR and
+        // sharpness read 0.5, and 1.0 on a Canon body) and writing 0 over them would change pixels
+        // for a control parked at "no change". The baseline is read before any assignment.
+        let detailBaseline = Self.detailBaseline(of: filter)
+        var detailApplied = DetailDecodeValues()
+        if !options.detail.isIdentity {
+            detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline)
         }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
@@ -474,7 +561,8 @@ public final class RAWDecoder {
                                                defaultVersion: filterDefault,
                                                asShotTemperature: asShot.temperature,
                                                asShotTint: asShot.tint)
-        return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot)
+        return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot,
+                             detailBaseline: detailBaseline, detailApplied: detailApplied)
     }
 
     /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).
@@ -620,13 +708,18 @@ public struct DecodeRung: Sendable {
     /// that came out of the ladder reports the cost it was born with, which is what makes "the
     /// preview was 250 ms, the full was 950 ms" measurable after the fact.
     public let milliseconds: Double
+    /// 派单 031: what the decoder reported for the four noise-reduction/detail axes with nothing
+    /// assigned. The inspector prints it as the baseline the 0 position means, so the number under a
+    /// slider is relative to *this body's* default rather than to a nominal zero.
+    public let detailBaseline: DetailBaseline
 
     public init(scale: Float, image: LinearImage, capabilities: DecoderCapabilities,
-                milliseconds: Double) {
+                milliseconds: Double, detailBaseline: DetailBaseline = .measured) {
         self.scale = scale
         self.image = image
         self.capabilities = capabilities
         self.milliseconds = milliseconds
+        self.detailBaseline = detailBaseline
     }
 }
 

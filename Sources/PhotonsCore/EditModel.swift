@@ -28,6 +28,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     public var curve: CurveGroup
     public var color: ColorGroup
     public var detail: DetailGroup
+    /// 派单 031: the four **decode-side** detail amounts (降噪 / 色彩降噪 / 细节 / 锐化), assigned to
+    /// `CIRAWFilter` before it produces pixels. Deliberately not `detail`: that name has held the
+    /// XMP-facing `DetailGroup` placeholders since M1 (`crs:Sharpness`, `crs:LuminanceSmoothing`),
+    /// which the render graph does not consume and which export still reads. One panel, two
+    /// audiences — the decoder takes these, XMP keeps those.
+    public var detailSettings: DetailSettings
     public var effects: EffectsGroup
     /// Local masks (M4). Empty = the graph has no mask stages at all (§3.2): the key chain stays the
     /// M1 seven-link chain and the pixels are byte-identical to M1.
@@ -45,6 +51,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 curve: CurveGroup = .identity,
                 color: ColorGroup = .identity,
                 detail: DetailGroup = .identity,
+                detailSettings: DetailSettings = .identity,
                 effects: EffectsGroup = .identity,
                 masks: [Mask] = [],
                 showMaskID: String? = nil) {
@@ -55,6 +62,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.curve = curve
         self.color = color
         self.detail = detail
+        self.detailSettings = detailSettings
         self.effects = effects
         self.masks = masks
         self.showMaskID = showMaskID
@@ -73,6 +81,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.curve = c.val("curve", v.curve)
         v.color = c.val("color", v.color)
         v.detail = c.val("detail", v.detail)
+        v.detailSettings = c.val("detailSettings", v.detailSettings)
         v.effects = c.val("effects", v.effects)
         v.masks = c.val("masks", v.masks)
         v.showMaskID = c.val("showMaskID", v.showMaskID)
@@ -104,6 +113,13 @@ public struct EditModel: Sendable, Equatable, Codable {
         if processVersion != old.processVersion || schemaVersion != old.schemaVersion {
             return Set(RenderStage.allCases)
         }
+        // 派单 031: the decode inputs are not all inside `light` any more (the white balance is; the
+        // four detail amounts are not), so the question "is this a new development?" is asked once,
+        // over `decodeInputs`, before any group is compared. A new development means every stage's
+        // source pixels are new — the same answer the white balance gets, for the same reason.
+        if decodesDifferently(from: old) {
+            return Set(RenderStage.allCases)
+        }
         var s: Set<RenderStage> = []
         if geometry != old.geometry { s.insert(.geometry) }
         if light != old.light {
@@ -111,15 +127,7 @@ public struct EditModel: Sendable, Equatable, Codable {
             // recovery) and S2 (contrast, highlights, shadows). Blacks/whites are a **level** — the
             // 0 and 1 points of the scene-linear buffer — so they dirty `.sceneLinear` like exposure
             // does: the linear buffer itself is what changed (派单 019). White balance (派单 006)
-            // straddles neither: a change there means a **new development**, so every stage's source
-            // pixels are new.
-            //
-            // 派单 011: the question "is this a new development?" is `decodeInputs`, not a hand-rolled
-            // comparison of two fields — `EditModel.splitFrom(_:)` is the one place that decides, and
-            // the loupe keys its rungs by the same `DecodeInputs`.
-            if decodesDifferently(from: old) {
-                return Set(RenderStage.allCases)
-            }
+            // straddles neither: it was already answered above, by `decodeInputs`.
             if light.exposure != old.light.exposure
                 || light.highlightRecovery != old.light.highlightRecovery
                 || light.whites != old.light.whites
@@ -155,8 +163,9 @@ public struct EditModel: Sendable, Equatable, Codable {
                 s.insert(.maskAtlas); s.insert(.localApply)
             }
         }
-        // `detail` (sharpening / noise reduction) is stored but not rendered by the M1 graph:
-        // those two controls will be mapped onto CIRAWFilter in the decoder, not onto a kernel.
+        // `detail` (the XMP-facing `DetailGroup`) is stored but not rendered by the graph. 派单 031
+        // put the real controls next to it: `detailSettings` is a **decode** input and was answered
+        // above, so — like the white balance — it never appears as a dirty *stage*.
         // 005e: showing a different mask changes only the last pass (the overlay reads the atlas the
         // mask stages already produced), so it dirties nothing but `.display`.
         if showMaskID != old.showMaskID { s.insert(.display) }
