@@ -655,16 +655,18 @@ public struct InspectorView: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.primary)
             }
-            Slider(value: Binding(get: { shown },
-                                  set: { newValue in
-                                      if isTemperature { draftTemperature = newValue }
-                                      else { draftTint = newValue }
-                                  }),
-                   in: range) { editing in
+            // 046: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以按规则
+            // 用长条形；曝光/对比那些只跑渲染的才是圆球。两者的 label / 数值 / 抬起才提交的语义完全相同。
+            BarSlider(value: Binding(get: { shown },
+                                     set: { newValue in
+                                         if isTemperature { draftTemperature = newValue }
+                                         else { draftTint = newValue }
+                                     }),
+                      range: range) { editing in
                 // Release = quantize + one document write = one development (`commitWhiteBalance`).
                 if !editing { commitWhiteBalance(isTemperature: isTemperature) }
             }
-            .controlSize(.mini)
+            .frame(height: 16)
         }
     }
 

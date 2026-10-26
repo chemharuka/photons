@@ -48,6 +48,25 @@ final class SliderStyleTests: XCTestCase {
     /// Light card passes `row.shape`, so a `.bar` in the table is a `.bar` on screen. Pinned on the
     /// source because `sliderRow` is `private` (the same technique `InspectorPinnedHeaderTests` uses
     /// for the 信息 title).
+    /// 色温/色调 也会写进 `CIRAWFilter`（= 重新解码），所以按 046 的规则它们也是长条形 —— 这一条
+    /// 是主线的补充，子代理按「其它全部 .knob」把它们留成了圆球。
+    func testWhiteBalanceRowsDrawTheBarToo() throws {
+        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        guard let start = source.range(of: "private func whiteBalanceRow"),
+              let end = source.range(of: "private var dropperRow") else {
+            return XCTFail("whiteBalanceRow and dropperRow must both exist")
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(body.contains("BarSlider("),
+                      "色温/色调 are decode parameters: they must be the long bar, not the ball")
+        // `BarSlider(value:` trivially contains `Slider(value:` — the lookbehind is the whole point.
+        let roundSlider = try NSRegularExpression(pattern: "(?<!Bar)Slider\\(value:",
+                                                  options: [.dotMatchesLineSeparators])
+        XCTAssertEqual(roundSlider.numberOfMatches(in: body,
+                                                   range: NSRange(body.startIndex..., in: body)),
+                       0, "no round slider may be left in the white-balance rows")
+    }
+
     func testBothCardsPassTheirRowShapeToTheOneRowBuilder() throws {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         XCTAssertTrue(source.contains("shape: row.shape"),
