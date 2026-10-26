@@ -925,7 +925,8 @@ public final class UISmokeRunner {
               labelled == batch.count && comboDrawn.contains("color:yellow")
               && comboDrawn.contains("flag:pick") && dotPainted)
 
-        // 3c.5 — "≥3 星": the grid narrows to the rows the same query returns, and says so in a chip.
+        // 3c.5 — "≥3 星": the grid narrows to the rows the same query returns, and the bar says so
+        // without a removable pill (050: only 「清除全部」 sits right of the slots).
         let queryRows = (try? reader.assets(AssetFilter(ratingAtLeast: 3, limit: 200_000)).count) ?? -1
         session.applyFilter(CatalogFilter(ratingAtLeast: 3))
         pump(0.4)
@@ -934,14 +935,19 @@ public final class UISmokeRunner {
         let filteredRows = session.assets.count
         let filteredItems = gridView.numberOfItems(inSection: 0)
         let allQualify = session.assets.allSatisfy { $0.rating >= 3 }
-        let chipCount = grid.filterBar.chipCount
-        let chip = grid.filterBar.chipText(0) ?? "-"
-        log("filter ≥3 star         query \(queryRows) rows, grid \(filteredRows) rows / \(filteredItems) items, chips \(chipCount) “\(chip)”")
+        // The condition still exists in the model (`chips()` is query vocabulary and the summary);
+        // what 050 removed is the bar drawing it as a clickable pill.
+        let modelChips = session.filter.chips().count
+        let clearVisible = !grid.filterBar.isClearButtonHidden
+        let clearFrame = grid.filterBar.clearButtonFrame
+        log("filter ≥3 star         query \(queryRows) rows, grid \(filteredRows) rows / \(filteredItems) items, model chips \(modelChips), 清除全部 \(clearVisible) @ \(clearFrame)")
         check("筛选“≥3 星”后网格只剩达标项（查询 \(queryRows) 行 = 网格 \(filteredRows) 行 = collectionView \(filteredItems) 项，且全部 rating≥3：\(allQualify)）",
               queryRows > 0 && filteredRows == queryRows && filteredItems == filteredRows
               && filteredRows < rowsBefore && allQualify)
-        check("筛选条件显示成可清除的 chip（\(chipCount) 个，第一个 “\(chip)” 对应星级）",
-              chipCount == 1 && grid.filterBar.chipFacet(0) == .rating && chip.contains("3"))
+        check("条上不再画条件胶囊，只有右端「清除全部」（模型里 \(modelChips) 个条件，按钮可见=\(clearVisible)，无边框=\(!grid.filterBar.clearButtonIsBordered)，右边缘贴 \(clearFrame.maxX) / 条宽 \(grid.filterBar.bounds.width) − 12）",
+              modelChips == 1 && clearVisible
+              && abs(clearFrame.maxX - (grid.filterBar.bounds.width - 12)) < 0.5
+              && !grid.filterBar.clearButtonIsBordered)
 
         // 3c.6 — another photo does not widen the filter (it lives in the session, not the selection).
         if let otherID = session.assets.last?.id {
@@ -951,18 +957,18 @@ public final class UISmokeRunner {
         check("切换照片时筛选不变（仍 \(session.assets.count) 行，\(session.filter.summary)，anchor \(session.anchorID?.prefix(8) ?? "nil")…）",
               session.filter.ratingAtLeast == 3 && session.assets.count == filteredRows)
 
-        // 3c.7 — clicking the chip clears that facet, exactly like a user would.
+        // 3c.7 — pressing 「清除全部」 clears the filter, exactly like a user would. 050: the pill's
+        // × is gone, so this button is the only way out of a filter in the bar itself (a single value
+        // is still dropped from its slot's checklist).
         var cleared = false
-        if let rect = grid.filterBar.chipRect(0),
-           let event = mouseDownEvent(in: grid.filterBar,
-                                      at: NSPoint(x: rect.midX, y: rect.midY), window: window) {
-            grid.filterBar.mouseDown(with: event)
+        if clearVisible {
+            grid.filterBar.performClearAllClick()
             pump(0.4)
             cleared = session.filter == .none && session.assets.count == rowsBefore
         }
-        log("filter chip click      cleared=\(cleared) → \(session.assets.count)/\(rowsBefore) rows, chips \(grid.filterBar.chipCount), grid items \(gridView.numberOfItems(inSection: 0))")
-        check("点 chip 清筛选：库回到 \(rowsBefore) 行、chip 清空（\(grid.filterBar.chipCount) 个），collectionView \(gridView.numberOfItems(inSection: 0)) 项",
-              cleared && grid.filterBar.chipCount == 0
+        log("filter 清除全部        cleared=\(cleared) → \(session.assets.count)/\(rowsBefore) rows, 清除全部 hidden=\(grid.filterBar.isClearButtonHidden), grid items \(gridView.numberOfItems(inSection: 0))")
+        check("点「清除全部」清筛选：库回到 \(rowsBefore) 行、按钮隐藏（\(grid.filterBar.isClearButtonHidden)），collectionView \(gridView.numberOfItems(inSection: 0)) 项",
+              cleared && grid.filterBar.isClearButtonHidden
               && gridView.numberOfItems(inSection: 0) == rowsBefore)
 
         // 3c.8 — metadata, not an edit: no snapshot, no revision bump, no undo entry.
