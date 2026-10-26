@@ -335,15 +335,19 @@ private struct S0Params {
 
 private struct S1Params {
     var a: SIMD4<Float>   // gain, wbR, wbG, wbB
-    var b: SIMD4<Float>   // recovery, identity
+    var b: SIMD4<Float>   // recovery, identity, blacks, whites
+    // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B), now in S1
+    // as well as S2: the black point is a level and levels live here, so a lifted `blacks` maps the
+    // matte's 0 to `−blk/(wht−blk) > 0` in *this* pass. Same convention as S0's `a`/`b` and S3c's `c`.
+    var c: SIMD4<Float>
 }
 
 private struct S2Params {
-    var a: SIMD4<Float>   // blacks, whites, contrast, pivot
+    var a: SIMD4<Float>   // contrast, pivot, pad, pad
     var b: SIMD4<Float>   // highlights, shadows, identity
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
-    // it a lifted black point remaps the matte's 0 to `−blk/(wht−blk) > 0` and the viewport's
-    // background bars light up. Same convention as S0's `a`/`b` and S3c's `c`.
+    // it the shadows/highlights lifts treat the matte's 0 as a picture pixel and the viewport's
+    // background bars light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
     var c: SIMD4<Float>
 }
 
@@ -1090,7 +1094,13 @@ public final class RenderGraph {
 
         case .sceneLinear:
             let p = try kernels.pipeline(file: "s1_scene_linear", function: "s1_scene_linear")
-            // ── S1 is exposure + highlight recovery only (派单 006 B) ────────────────────────────
+            // ── S1 is levels + exposure + highlight recovery (派单 019) ──────────────────────────
+            // Black/white are a **level** (where 0 and 1 are), so they normalise the scene-linear
+            // value *before* the gain: `(v − blk)/max(wht − blk, 1e−3)` then `·gain`. Applied after the
+            // gain instead (which is where blacks/whites used to be, in S2) a lift is absolute against
+            // a value the gain multiplies, so `blacks +` detail fell back under zero as exposure rose
+            // and S2 clamped it away — "the more exposure, the blacker the shadows".
+            //
             // White balance is a **decode** setting now: `light.temperature`/`tint` go to
             // `CIRAWFilter.neutralTemperature`/`neutralTint` and the RAW is developed again, so the
             // pixels arriving here are already balanced. The gains below are literally (1, 1, 1) —
@@ -1098,9 +1108,16 @@ public final class RenderGraph {
             // the two would disagree (measured: at 3500 K / +30 the gain path and the decode path are
             // not the same picture; see `WhiteBalanceTests`).
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
+                && edit.light.blacks == 0 && edit.light.whites == 0
             var params = S1Params(
                 a: SIMD4(edit.light.exposureGain, 1, 1, 1),
-                b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0, 0, 0))
+                b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0,
+                         Float(edit.light.blacks), Float(edit.light.whites)),
+                // The content rect travels with the levels, because a lifted black point maps the
+                // matte's 0 to a positive value in *this* pass (派单 019 §3 item ①). Dispatch stays
+                // the whole canvas — one guard per pixel is cheaper than a second encoder.
+                c: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -1116,15 +1133,17 @@ public final class RenderGraph {
 
         case .toneMap:
             let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
+            // Only what bends the 0…1 range: contrast and the two region lifts. Blacks/whites are a
+            // level and moved to S1 (派单 019), so they no longer appear here — neither in the identity
+            // test nor in `keyMaterial(.toneMap)`.
             let identity = edit.light.contrast == 0 && edit.light.highlights == 0
-                && edit.light.shadows == 0 && edit.light.whites == 0 && edit.light.blacks == 0
+                && edit.light.shadows == 0
             var params = S2Params(
-                a: SIMD4(Float(edit.light.blacks), Float(edit.light.whites),
-                         Float(edit.light.contrast), 0.18),
+                a: SIMD4(Float(edit.light.contrast), 0.18, 0, 0),
                 b: SIMD4(Float(edit.light.highlights), Float(edit.light.shadows), identity ? 1 : 0, 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
-                // encoder, and the guard is what makes "blacks" leave the letterbox alone.
+                // encoder, and the guard is what makes "shadows" leave the letterbox alone.
                 c: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
