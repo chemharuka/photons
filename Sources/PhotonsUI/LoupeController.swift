@@ -553,6 +553,12 @@ public final class LoupeController: NSViewController {
     // Pan/zoom single-flight: a drag emits 60–120 events/s, a window frame costs more than that.
     private var viewInFlight = false
     private var viewPending = false
+    /// True while a pan/zoom frame has been started and not yet reached the canvas.
+    ///
+    /// Read-only diagnostic, used by tests only: a frame that is *in flight* moves no paint counter,
+    /// and a 60 MP frame under load can take seconds, so "the counters stopped moving" is not
+    /// quiescence. Nothing in the app reads this.
+    public var isRenderingViewportFrame: Bool { viewInFlight }
     /// How many pan/pinch requests were folded into a later frame (the never-a-backlog counter).
     public private(set) var viewRenderCoalesced = 0
     public private(set) var viewRenderCount = 0
