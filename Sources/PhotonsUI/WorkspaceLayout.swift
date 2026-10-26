@@ -60,6 +60,39 @@ public enum WorkspaceLayout {
     public static let browserWidthMax: CGFloat = 260
     public static let browserRowHeight: CGFloat = 46
 
+    // The left browser's own vertical contract: a folder **tree** on top, the photo rows below.
+    //
+    // The tree used to be `rows × 46 + 6`, capped at 200 — with one root that is a 52 pt strip, which
+    // is what "这个区域的窗口太窄，大概只有几十 px" describes. A folder tree needs room whether or not
+    // it currently has many rows: it is a navigation surface, not a list of two items. So the floor
+    // is 180 pt, the ceiling is 45 % of the panel (a tall tree must still leave the photos visible),
+    // and the photo list keeps its own floor of 120 pt.
+    public static let browserHeaderHeight: CGFloat = 56
+    public static let browserFooterHeight: CGFloat = 26
+    public static let browserPaneGap: CGFloat = 6
+    /// Padding under the tree's last row, on top of `rows × rowHeight`.
+    public static let browserTreeInset: CGFloat = 6
+    public static let browserTreeMinHeight: CGFloat = 180
+    public static let browserTreeMaxFraction: CGFloat = 0.45
+    public static let browserPhotoListMinHeight: CGFloat = 120
+
+    /// Height the folder tree gets in a browser pane `panelHeight` tall, for `rowCount` visible rows.
+    ///
+    /// Three bounds, in this order: the content (`rows × 46 + 6`), the 45 % ceiling, and what is left
+    /// once the header, the footer and the photo list's 120 pt floor are paid for. The 180 pt floor
+    /// wins over all of them — a tree shorter than three rows cannot show "全部照片 → root → 一个子文件夹",
+    /// which is the whole point of the control.
+    public static func browserTreeHeight(rowCount: Int, panelHeight: CGFloat) -> CGFloat {
+        let content = CGFloat(max(1, rowCount)) * browserRowHeight + browserTreeInset
+        // `max(minHeight, …)` keeps the *floor* true for a panel too short to honour 45 %; a real
+        // panel (window minimum 780 pt) is never that short.
+        let fractionCap = max(browserTreeMinHeight, panelHeight * browserTreeMaxFraction)
+        let roomAbovePhotoList = panelHeight - browserHeaderHeight - browserFooterHeight
+            - browserPhotoListMinHeight - browserPaneGap * 2
+        let cap = max(browserTreeMinHeight, min(fractionCap, roomAbovePhotoList))
+        return min(max(browserTreeMinHeight, content), cap)
+    }
+
     /// Height of the bottom strip: `8 + 69 + 6 = 83`, i.e. **one** row, not two.
     ///
     /// The old 122 was `8 + 50 + 8 + 50 + 6` — exactly two 50 pt cells plus one 8 pt gap. That is

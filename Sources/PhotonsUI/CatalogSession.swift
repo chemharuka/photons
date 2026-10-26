@@ -208,6 +208,18 @@ public final class CatalogSession {
         guard let c = catalog else { return }
         do {
             roots = try c.roots()
+            // One scan for the whole tree, before the rows: the source list and the photo list are
+            // then guaranteed to describe the same library state, and a selected folder that lost
+            // its last photo (a delete, a relink) stops filtering instead of filtering to nothing.
+            folderNodes = (try? c.folderIndex()) ?? [:]
+            if let id = selectedRootID, !roots.contains(where: { $0.id == id }) {
+                selectedRootID = nil
+                selectedFolderPath = ""
+            }
+            if !selectedFolderPath.isEmpty,
+               !(folderNodes[selectedRootID ?? ""] ?? []).contains(where: { $0.path == selectedFolderPath }) {
+                selectedFolderPath = ""
+            }
             // The grid is the library view: everything the catalog has, newest first (the query
             // already orders by capture_time DESC). M3 has no paging; 10k rows is the design point.
             // The filter bar's value is folded into the *same* query the source list uses, so the
@@ -218,7 +230,8 @@ public final class CatalogSession {
                                               sourceRootId: selectedRootID,
                                               limit: 200_000,
                                               flagEquals: f.flag,
-                                              colorLabelEquals: f.colorLabel))
+                                              colorLabelEquals: f.colorLabel,
+                                              folderPath: selectedFolderPath))
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -270,10 +283,39 @@ public final class CatalogSession {
     /// `nil` = all photos. The browser's source list writes this; the grid/list/loupe all follow.
     public private(set) var selectedRootID: String?
 
+    /// A folder inside `selectedRootID`, relative to it and `/`-separated; `""` = the whole root.
+    /// Written together with the root by `selectFolder`, so the tree can never describe a folder
+    /// that belongs to another root.
+    public private(set) var selectedFolderPath: String = ""
+
+    /// Per-root folder trees, filled by `reload()` from one `folderIndex()` scan. The browser draws
+    /// its rows and reads its counts from here — never from `stats.byRoot`, which keys on the
+    /// display name and therefore cannot tell two folders of the same name apart.
+    public private(set) var folderNodes: [String: [FolderNode]] = [:]
+
     public func selectRoot(_ id: String?) {
-        guard id != selectedRootID else { return }
-        selectedRootID = id
+        selectFolder(rootID: id, path: "")
+    }
+
+    /// One click in the folder tree: root + subtree prefix, one reload.
+    public func selectFolder(rootID: String?, path: String) {
+        let normalized = AssetFilter.normalizedFolderPath(path) ?? ""
+        guard rootID != selectedRootID || normalized != selectedFolderPath else { return }
+        selectedRootID = rootID
+        selectedFolderPath = normalized
         reload()
+    }
+
+    /// The folders of one root. Always contains the `""` node (the root itself) when it holds a photo,
+    /// which is where the root row's count comes from.
+    public func folderNodes(forRoot id: String) -> [FolderNode] { folderNodes[id] ?? [] }
+
+    /// Photos per root — read from the same tree the rows are drawn from, so a count can never
+    /// disagree with what expanding the row reveals.
+    public var photoCountByRoot: [String: Int] {
+        var out: [String: Int] = [:]
+        for (id, nodes) in folderNodes { out[id] = nodes.first { $0.path.isEmpty }?.total ?? 0 }
+        return out
     }
 
     public var anchorIndex: Int? {

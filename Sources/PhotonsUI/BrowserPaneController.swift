@@ -12,7 +12,8 @@ import PhotonsCatalog
 /// other surface — streamed real images out of the same cache. The rows now ask the same
 /// `ThumbnailProvider.shared(for:)` the grid and the filmstrip use (one LRU, one single-flight map,
 /// 006 §4), keyed by the tier a 34 pt cell implies, and cancel whatever scrolls away.
-public final class BrowserPaneController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+public final class BrowserPaneController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
+                                          NSOutlineViewDataSource, NSOutlineViewDelegate {
 
     /// Side of the square preview in a photo row, in points. It is the only input to the tier
     /// policy (`ThumbnailProvider.tier(cellEdgePoints:)` → `t256` at 1× and 2×).
@@ -24,7 +25,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private let headerTitle = NSTextField(labelWithString: "素材浏览")
     private let headerCount = NSTextField(labelWithString: "")
     private let footer = NSTextField(labelWithString: "")
-    private let sourcesTable = NSTableView()
+    private let sourcesOutline = NSOutlineView()
     private let photosTable = NSTableView()
     /// 右键：从库中删除… / 查找丢失的文件… — one menu object, the same verbs as the grid.
     public let contextMenu = AssetContextMenu()
@@ -35,14 +36,55 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private weak var session: CatalogSession?
     private var isApplyingModel = false
 
-    /// Rows of the sources table: index 0 is "all photos", the rest map to `roots`.
-    private struct SourceRow {
-        var title: String
-        var detail: String
-        var rootID: String?
-        var status: String?
+    /// The source tree: 全部照片 → each source root → the folders `rel_path` implies.
+    ///
+    /// A class, not a struct, because `NSOutlineView` identifies items by object identity; the tree is
+    /// rebuilt from the session on every `refresh()` (a 10k-photo library has few folders, and the
+    /// nodes carry only counts, never pixels).
+    final class FolderTreeItem: NSObject {
+        enum Kind { case allPhotos, root, folder }
+        let kind: Kind
+        let title: String
+        /// The right-aligned count.
+        let detail: String
+        /// `nil` only for 全部照片.
+        let rootID: String?
+        /// Path relative to the root; `""` is the root itself (and 全部照片).
+        let path: String
+        let status: String?
+        var children: [FolderTreeItem] = []
+
+        init(kind: Kind, title: String, detail: String, rootID: String?, path: String, status: String?) {
+            self.kind = kind
+            self.title = title
+            self.detail = detail
+            self.rootID = rootID
+            self.path = path
+            self.status = status
+        }
+
+        var isAllPhotos: Bool { kind == .allPhotos }
+        var isExpandable: Bool { !children.isEmpty }
+        /// Stable across a rebuild — used to keep the user's expansion state over `reloadData()`.
+        var key: String { "\(rootID ?? "*")|\(path)" }
+        /// SF Symbol: a folder for roots and subfolders, the library glyph for 全部照片.
+        var symbolName: String { kind == .allPhotos ? "photo.on.rectangle" : "folder" }
     }
-    private var sourceRows: [SourceRow] = []
+
+    /// One visible row of the tree, in outline order. What the shape tests read.
+    public struct FolderTreeRow: Equatable {
+        public var title: String
+        public var detail: String
+        public var level: Int
+        public var rootID: String?
+        public var path: String
+        public var isAllPhotos: Bool
+    }
+
+    private var treeRoot: FolderTreeItem?
+    private var allPhotosItem: FolderTreeItem?
+    /// Expansion the user expressed, so a `reload()` does not collapse the folder they opened.
+    private var expandedKeys: Set<String> = []
 
     // MARK: thumbnails
 
@@ -88,8 +130,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         footer.font = .systemFont(ofSize: 10, weight: .medium)
         footer.textColor = .secondaryLabelColor
 
-        configure(table: sourcesTable, rowHeight: WorkspaceLayout.browserRowHeight, identifier: "SourceRowCell")
         configure(table: photosTable, rowHeight: WorkspaceLayout.browserRowHeight, identifier: "PhotoRowCell")
+        configureOutline()
         photosTable.allowsMultipleSelection = true
 
         // 右键：the same two verbs the grid and the filmstrip offer, on the same menu object. The
@@ -99,8 +141,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         photosTable.menu = contextMenu.menu
 
-        sourcesScroll.documentView = sourcesTable
-        sourcesScroll.hasVerticalScroller = false
+        sourcesScroll.documentView = sourcesOutline
+        // The tree scrolls: 180 pt is a floor, a deep `shoot/day2/sub/night` tree goes past it and
+        // must stay reachable without stealing the photo list's room.
+        sourcesScroll.hasVerticalScroller = true
+        sourcesScroll.autohidesScrollers = true
         sourcesScroll.drawsBackground = false
         sourcesScroll.borderType = .noBorder
         photosScroll.documentView = photosTable
@@ -131,9 +176,37 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         table.delegate = self
         table.allowsEmptySelection = false
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
         col.resizingMask = .autoresizingMask
         table.addTableColumn(col)
+    }
+
+    /// The folder tree. Same row height, font and `.sourceList` style as the flat list it replaces —
+    /// what changes is the indentation, the disclosure triangles and the folder glyphs.
+    private func configureOutline() {
+        sourcesOutline.headerView = nil
+        sourcesOutline.rowHeight = WorkspaceLayout.browserRowHeight
+        sourcesOutline.backgroundColor = .clear
+        sourcesOutline.style = .sourceList
+        sourcesOutline.selectionHighlightStyle = .regular
+        sourcesOutline.dataSource = self
+        sourcesOutline.delegate = self
+        sourcesOutline.allowsEmptySelection = true
+        // Deliberately `true`, against the old flat list's `false`: with an empty selection
+        // forbidden, `reloadData()` auto-selects row 0 — which is 全部照片 — and posts a selection
+        // change through the delegate, silently resetting the user's folder filter on every refresh
+        // (a rating, an import, `reload()`). The highlight is installed from the model instead
+        // (`selectSourceItem`), and a click in the empty area below the tree simply keeps the filter.
+        sourcesOutline.allowsMultipleSelection = false
+        sourcesOutline.floatsGroupRows = false
+        // 14 pt per level: a `day2/sub` row still leaves ~150 pt for its name at the 212 pt default
+        // width, and the indent reads as a hierarchy rather than as a stray gap.
+        sourcesOutline.indentationPerLevel = 14
+        sourcesOutline.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("SourceRowCell"))
+        col.resizingMask = .autoresizingMask
+        sourcesOutline.addTableColumn(col)
+        sourcesOutline.outlineTableColumn = col
     }
 
     public override func viewDidLoad() {
@@ -154,21 +227,38 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     private func layoutPanes() {
         let inset = WorkspaceLayout.cardInsetH
-        let headerH: CGFloat = 56
+        let headerH = WorkspaceLayout.browserHeaderHeight
         headerTitle.frame = NSRect(x: inset, y: 18, width: view.bounds.width - inset * 2, height: 16)
         headerCount.frame = NSRect(x: inset, y: 36, width: view.bounds.width - inset * 2, height: 13)
 
         matte.frame = view.bounds
-        let footerH: CGFloat = 26
-        let sourcesH = min(CGFloat(max(1, sourceRows.count)) * WorkspaceLayout.browserRowHeight + 6, 200)
+        let footerH = WorkspaceLayout.browserFooterHeight
+        let gap = WorkspaceLayout.browserPaneGap
+        // The tree's height is the layout contract's, not the row count's: 180 pt floor, 45 % of the
+        // panel ceiling, and the photo list keeps its 120 pt floor underneath.
+        let sourcesH = WorkspaceLayout.browserTreeHeight(rowCount: sourcesOutline.numberOfRows,
+                                                         panelHeight: view.bounds.height)
         let top = headerH
         sourcesScroll.frame = NSRect(x: 6, y: top, width: view.bounds.width - 12, height: sourcesH)
-        let photosTop = top + sourcesH + 6
+        let photosTop = top + sourcesH + gap
         photosScroll.frame = NSRect(x: 6, y: photosTop,
                                     width: view.bounds.width - 12,
-                                    height: max(40, view.bounds.height - photosTop - footerH))
+                                    height: max(WorkspaceLayout.browserPhotoListMinHeight,
+                                                view.bounds.height - photosTop - footerH))
         footer.frame = NSRect(x: inset, y: view.bounds.height - footerH + 6,
                               width: view.bounds.width - inset * 2, height: 13)
+    }
+
+    /// Lay the panes out for a panel of `size` and return the frames that were applied.
+    ///
+    /// The window drives `viewDidLayout` in the app; a controller constructed by a test (or by a
+    /// probe) has no window, and this is the same code path with the frame set explicitly — so the
+    /// height assertions measure the layout that ships, not a copy of the arithmetic.
+    @discardableResult
+    public func applyLayout(in size: CGSize) -> (tree: NSRect, photos: NSRect) {
+        view.frame = NSRect(origin: .zero, size: size)
+        layoutPanes()
+        return (sourcesScroll.frame, photosScroll.frame)
     }
 
     private func observeModel() {
@@ -176,6 +266,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             guard let self, let session = self.session else { return }
             _ = session.assets.count
             _ = session.roots.count
+            _ = session.selectedRootID
+            _ = session.selectedFolderPath
+            _ = session.folderNodes.count
             _ = session.selection
             _ = session.anchorID
             _ = session.stats
@@ -193,20 +286,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             lastLibraryURL = url
             resetThumbnails()
         }
-        sourceRows = [SourceRow(title: "全部照片", detail: "\(session.assets.count)", rootID: nil, status: nil)]
-        let counts = Dictionary(uniqueKeysWithValues: (session.stats?.byRoot ?? []).map { ($0.root, $0) })
-        for root in session.roots {
-            let n = counts[root.displayName]?.count ?? 0
-            sourceRows.append(SourceRow(title: root.displayName,
-                                        detail: "\(n)",
-                                        rootID: root.id,
-                                        status: root.status.rawValue))
-        }
+        rebuildTree(for: session)
         headerCount.stringValue = "\(session.assets.count) 张照片"
         footer.stringValue = session.selection.isEmpty
             ? "未选择"
             : "已选 \(session.selection.count)"
-        sourcesTable.reloadData()
         // `reloadData` clamps the table's selection to what still exists and posts
         // `tableViewSelectionDidChange` for it. That transient row count is not the user's
         // selection: writing it back would collapse a 5-photo selection to one row on every
@@ -216,17 +300,117 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         photosTable.reloadData()
         isApplyingModel = false
         applySelectionFromModel()
-        selectSourceRow()
+        reloadTree()
+        // The tree's row count just changed, and the tree's height is derived from it — lay out in
+        // the same pass instead of waiting for a `viewDidLayout` that a resize may never trigger.
+        layoutPanes()
         // `reloadData` recycles every visible row, so every visible row re-asks for its image.
         // Deferred one runloop turn because the table has not laid its rows out yet.
         DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
     }
 
-    private func selectSourceRow() {
+    // MARK: folder tree
+
+    /// Build 全部照片 → roots → folders from the session.
+    ///
+    /// Counts come from `session.folderNodes`, i.e. from the same `rel_path` scan that the filter
+    /// queries, so a root row and the folders under it can never disagree; `stats.byRoot` is keyed by
+    /// display name and cannot tell two folders named "test" apart, which is why it is not used here.
+    private func rebuildTree(for session: CatalogSession) {
+        for row in 0..<sourcesOutline.numberOfRows {
+            if let item = sourcesOutline.item(atRow: row) as? FolderTreeItem,
+               sourcesOutline.isItemExpanded(item) {
+                expandedKeys.insert(item.key)
+            }
+        }
+        let all = FolderTreeItem(kind: .allPhotos, title: "全部照片",
+                                 // The library's size, not the filtered count: this row is the way
+                                 // *back* to everything, so it must not shrink as a filter is applied.
+                                 detail: "\(session.stats?.total ?? session.assets.count)",
+                                 rootID: nil, path: "", status: nil)
+        let perRoot = session.photoCountByRoot
+        all.children = session.roots.map { root in
+            let rootItem = FolderTreeItem(kind: .root, title: root.displayName,
+                                          detail: "\(perRoot[root.id] ?? 0)",
+                                          rootID: root.id, path: "",
+                                          status: root.status.rawValue)
+            // The aggregation sorts by path, so every parent is attached before its children and a
+            // single pass over the nodes builds the whole subtree. `""` is the root item itself.
+            var itemsByPath: [String: FolderTreeItem] = ["": rootItem]
+            for node in session.folderNodes(forRoot: root.id) where !node.path.isEmpty {
+                let item = FolderTreeItem(kind: .folder, title: node.name,
+                                          detail: "\(node.total)",
+                                          rootID: root.id, path: node.path, status: nil)
+                (itemsByPath[node.parentPath] ?? rootItem).children.append(item)
+                itemsByPath[node.path] = item
+            }
+            return rootItem
+        }
+        treeRoot = all
+        allPhotosItem = all
+    }
+
+    private func reloadTree() {
+        sourcesOutline.reloadData()
+        // 默认展开前两层: 全部照片 open, so the roots are the second visible level. Subfolders stay
+        // collapsed until asked for — a library with 40 folders must not open as a wall of rows.
+        if let all = allPhotosItem {
+            sourcesOutline.expandItem(all)
+            expandedKeys.insert(all.key)
+        }
+        // Then whatever the user had open: a `reload()` (an import, a rating, a click) must not
+        // collapse the folder they just navigated into. Sorted by depth so a parent exists first.
+        for item in allItems().sorted(by: { $0.path.count < $1.path.count }) {
+            guard expandedKeys.contains(item.key), item.isExpandable,
+                  !sourcesOutline.isItemExpanded(item) else { continue }
+            sourcesOutline.expandItem(item)
+        }
+        selectSourceItem()
+    }
+
+    private func allItems() -> [FolderTreeItem] {
+        guard let root = treeRoot else { return [] }
+        var out: [FolderTreeItem] = [root]
+        var stack = root.children
+        while let item = stack.popLast() {
+            out.append(item)
+            stack.append(contentsOf: item.children)
+        }
+        return out
+    }
+
+    private func item(rootID: String?, path: String) -> FolderTreeItem? {
+        let wanted = rootID == nil ? "" : (AssetFilter.normalizedFolderPath(path) ?? "")
+        return allItems().first { $0.rootID == rootID && $0.path == wanted }
+    }
+
+    private func parentItem(of item: FolderTreeItem) -> FolderTreeItem? {
+        allItems().first { node in node.children.contains { $0 === item } }
+    }
+
+    private func expandAncestors(of item: FolderTreeItem) {
+        var chain: [FolderTreeItem] = []
+        var cursor = item
+        while let parent = parentItem(of: cursor) {
+            chain.append(parent)
+            cursor = parent
+        }
+        for parent in chain.reversed() where !sourcesOutline.isItemExpanded(parent) {
+            sourcesOutline.expandItem(parent)
+        }
+    }
+
+    /// Put the outline's highlight on the model's selection. The model is the truth: a refresh that
+    /// cannot find the selected folder falls back to 全部照片, which is also what the session does.
+    private func selectSourceItem() {
         guard let session else { return }
-        let index = sourceRows.firstIndex { $0.rootID == session.selectedRootID } ?? 0
+        let target = item(rootID: session.selectedRootID, path: session.selectedFolderPath)
+            ?? allPhotosItem
+        guard let target else { return }
+        expandAncestors(of: target)
+        let row = sourcesOutline.row(forItem: target)
         isApplyingModel = true
-        sourcesTable.selectRowIndexes([index], byExtendingSelection: false)
+        if row >= 0 { sourcesOutline.selectRowIndexes([row], byExtendingSelection: false) }
         isApplyingModel = false
     }
 
@@ -467,19 +651,38 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     // MARK: data source
 
+    // The folder tree is an `NSOutlineView`: AppKit asks these four, never `numberOfRows(in:)`.
+    public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let node = item as? FolderTreeItem else { return treeRoot == nil ? 0 : 1 }
+        return node.children.count
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        guard let node = item as? FolderTreeItem else { return treeRoot as Any }
+        return node.children[index]
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        (item as? FolderTreeItem)?.isExpandable ?? false
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?,
+                            item: Any) -> NSView? {
+        guard let node = item as? FolderTreeItem else { return nil }
+        let cell = SourceRowCell.reuse(in: outlineView, owner: self)
+        cell.configure(title: node.title, detail: node.detail,
+                       isOffline: node.status == "offline",
+                       isAllPhotos: node.isAllPhotos)
+        return cell
+    }
+
     public func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView === sourcesTable { return sourceRows.count }
+        guard tableView !== sourcesOutline else { return 0 }
         guard showsPhotoList else { return 0 }
         return session?.assets.count ?? 0
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === sourcesTable {
-            let cell = SourceRowCell.reuse(in: tableView, owner: self)
-            let r = sourceRows[row]
-            cell.configure(title: r.title, detail: r.detail, isOffline: r.status == "offline")
-            return cell
-        }
         guard let session, let asset = session.assets[safe: row] else { return nil }
         let cell = PhotoRowCell.reuse(in: tableView, owner: self)
         cell.configure(asset: asset, isActive: session.anchorID == asset.id)
@@ -489,28 +692,94 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isApplyingModel, let session else { return }
-        guard let table = notification.object as? NSTableView else { return }
-        if table === sourcesTable {
-            let row = max(0, table.selectedRow)
-            let rootID = sourceRows[safe: row]?.rootID
-            if rootID != session.selectedRootID { session.selectRoot(rootID) }
-            return
-        }
+        guard let table = notification.object as? NSTableView, table !== sourcesOutline else { return }
         let ids = table.selectedRowIndexes.compactMap { session.assets[safe: $0]?.id }
         guard !ids.isEmpty else { return }
         let anchor = ids.first { session.anchorID == $0 } ?? ids.first
         session.setSelection(Set(ids), anchor: anchor)
     }
 
-    public var sourceRowCount: Int { sourceRows.count }
+    /// A folder row is a filter, not a selection: the same `reload()` the flat list drove.
+    public func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !isApplyingModel, let session else { return }
+        let row = sourcesOutline.selectedRow
+        guard row >= 0, let item = sourcesOutline.item(atRow: row) as? FolderTreeItem else { return }
+        session.selectFolder(rootID: item.rootID, path: item.path)
+    }
+
+    public func outlineViewItemDidExpand(_ notification: Notification) {
+        if let item = notification.userInfo?["NSObject"] as? FolderTreeItem {
+            expandedKeys.insert(item.key)
+        }
+        layoutPanes()
+    }
+
+    public func outlineViewItemDidCollapse(_ notification: Notification) {
+        if let item = notification.userInfo?["NSObject"] as? FolderTreeItem {
+            expandedKeys.remove(item.key)
+        }
+        layoutPanes()
+    }
+
+    // MARK: tree probes (tests and `--ui-smoke`)
+
+    public var folderTreeRowCount: Int { sourcesOutline.numberOfRows }
+    public var folderTreeHeight: CGFloat { sourcesScroll.frame.height }
+    public var photoListHeight: CGFloat { photosScroll.frame.height }
+
+    /// The visible tree rows in outline order, with their depth — the shape assertion.
+    public var folderTreeRows: [FolderTreeRow] {
+        (0..<sourcesOutline.numberOfRows).compactMap { row in
+            guard let item = sourcesOutline.item(atRow: row) as? FolderTreeItem else { return nil }
+            return FolderTreeRow(title: item.title, detail: item.detail,
+                                 level: sourcesOutline.level(forRow: row),
+                                 rootID: item.rootID, path: item.path,
+                                 isAllPhotos: item.isAllPhotos)
+        }
+    }
+
+    /// Open or close one node, as a click on its disclosure triangle does.
+    public func setFolderExpanded(rootID: String?, path: String, _ expanded: Bool) {
+        guard let item = item(rootID: rootID, path: path) else { return }
+        if expanded {
+            expandAncestors(of: item)
+            sourcesOutline.expandItem(item)
+        } else {
+            sourcesOutline.collapseItem(item)
+        }
+        layoutPanes()
+    }
+
+    /// Click a node: the outline's highlight **and** the session's folder filter, in one step.
+    ///
+    /// The observation bridge lands on the next run loop turn; refreshing here is what makes a click
+    /// synchronous (and what a test can assert on without spinning the run loop). The bridge's later
+    /// pass finds nothing changed and is a no-op.
+    public func selectFolderRow(rootID: String?, path: String) {
+        guard let item = item(rootID: rootID, path: path) else { return }
+        expandAncestors(of: item)
+        let row = sourcesOutline.row(forItem: item)
+        isApplyingModel = true
+        if row >= 0 { sourcesOutline.selectRowIndexes([row], byExtendingSelection: false) }
+        isApplyingModel = false
+        session?.selectFolder(rootID: rootID, path: path)
+        refresh()
+    }
+
     public var photoRowCount: Int { photosTable.numberOfRows }
 }
 
 // MARK: - cells
 
 private final class SourceRowCell: NSTableCellView {
+    private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
+
+    /// One cell for all three node kinds: 全部照片, a root, a subfolder. The glyph is what separates
+    /// them at a glance; the outline supplies the indent and the disclosure triangle.
+    private static let iconSide: CGFloat = 13
+    private static let iconToText: CGFloat = 21
 
     static func reuse(in table: NSTableView, owner: Any) -> SourceRowCell {
         let id = NSUserInterfaceItemIdentifier("SourceRowCell")
@@ -522,28 +791,42 @@ private final class SourceRowCell: NSTableCellView {
 
     init() {
         super.init(frame: .zero)
+        icon.imageScaling = .scaleProportionallyDown
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
         title.font = .systemFont(ofSize: 12, weight: .medium)
         title.lineBreakMode = .byTruncatingMiddle
         detail.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         detail.textColor = .tertiaryLabelColor
         detail.alignment = .right
+        addSubview(icon)
         addSubview(title)
         addSubview(detail)
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
-    func configure(title t: String, detail d: String, isOffline: Bool) {
+    func configure(title t: String, detail d: String, isOffline: Bool, isAllPhotos: Bool) {
         title.stringValue = t
         detail.stringValue = d
         title.textColor = isOffline ? .tertiaryLabelColor : .labelColor
         title.toolTip = isOffline ? "offline" : nil
+        // A folder for a root and for every subfolder; the library glyph for 全部照片, so the
+        // "everything" row never reads as a plain folder next to the folder it contains.
+        icon.image = NSImage(systemSymbolName: isAllPhotos ? "photo.on.rectangle" : "folder",
+                             accessibilityDescription: isAllPhotos ? "全部照片" : "文件夹")
+        icon.contentTintColor = isOffline ? .tertiaryLabelColor
+            : (isAllPhotos ? .labelColor : .secondaryLabelColor)
     }
 
     override func layout() {
         super.layout()
+        let side = SourceRowCell.iconSide
+        icon.frame = NSRect(x: 2, y: (bounds.height - side) / 2, width: side, height: side)
+        let textX = SourceRowCell.iconToText
+        // The count keeps its 40 pt gutter on the right; the name truncates in the middle so
+        // "day2-very-long-name" and "...-name" stay distinguishable at 212 pt.
         detail.frame = NSRect(x: bounds.width - 44, y: 14, width: 40, height: 16)
-        title.frame = NSRect(x: 2, y: 13, width: max(10, bounds.width - 52), height: 18)
+        title.frame = NSRect(x: textX, y: 13, width: max(10, bounds.width - textX - 48), height: 18)
     }
 }
 
