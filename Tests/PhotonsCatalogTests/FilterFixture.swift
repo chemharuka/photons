@@ -119,7 +119,7 @@ struct FilterFixture {
         try insert("e.dng", date: "2025-07-01", ext: "dng", rating: 2, flag: "pick", color: "green",
                    camera: (Self.panasonic, "DC-S5"), lens: Self.lens24,
                    minute: 0, iso: 160, focal: 24, shutter: "1/800", aperture: 5.6,
-                   exif: Self.exif(serial: "777", flash: 16, latitude: 30.5, longitude: 121.0))
+                   exif: Self.exif(serial: "777", flash: 25, latitude: 30.5, longitude: 121.0))
     }
 
     func names(_ filter: AssetFilter) throws -> Set<String> {

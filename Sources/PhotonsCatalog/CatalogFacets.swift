@@ -94,14 +94,18 @@ enum FilterSQL {
         return ("COALESCE(" + pieces.joined(separator: ", ") + ")", paths)
     }
 
-    /// 有 / 无 for 闪光灯. `0` = did not fire, anything else = fired, and a missing key is 无.
+    /// 有 / 无 for 闪光灯 — **bit 0 of the EXIF `Flash` value**, not "non-zero".
     ///
-    /// `CAST(… AS INTEGER)` rather than a bare `<> 0`: a JSON string `"0"` compares **greater** than
-    /// the number `0` in SQLite (text sorts above numbers), which would have called an unfired flash
-    /// "fired".
+    /// `Flash` is a bitfield (EXIF 2.3 §4.6.4): bit 0 = *fired*, bit 1–2 = return light, bit 3–4 =
+    /// mode, bit 5 = no flash function. A Leica SL3 writes **`16`** (`0b010000` — "compulsory flash
+    /// mode off, did not fire") on every frame without flash, so `<> 0` called every photo in a
+    /// library "fired" while none of them had. The predicate is therefore `(CAST(v AS INTEGER) & 1)`:
+    /// `16`/`24` → 无, `1`/`5`/`25` → 有, a missing key → 无.
+    ///
+    /// `CAST(… AS INTEGER)` is still needed: a JSON string `"16"` would compare as text otherwise.
     static func flash(_ value: String) -> (sql: String, args: Args) {
         let e = extract(flashPaths)
-        let fired = "(\(e.sql) IS NOT NULL AND CAST(\(e.sql) AS INTEGER) <> 0)"
+        let fired = "(\(e.sql) IS NOT NULL AND (CAST(\(e.sql) AS INTEGER) & 1) = 1)"
         let sql = value == FilterValue.yes
             ? fired
             : "NOT \(fired)"

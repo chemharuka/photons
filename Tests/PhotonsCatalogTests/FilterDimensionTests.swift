@@ -136,10 +136,19 @@ final class FilterDimensionTests: XCTestCase {
         try assertHits(.iso, "3200", [])
     }
 
-    /// `0` did not fire, anything else did — and a row with **no EXIF** did not fire either.
+    /// **Bit 0** of the EXIF `Flash` value, not "non-zero" — `16` (`0b010000`, compulsory flash mode
+    /// off) is a frame that did not fire, and a Leica writes exactly that on every frame without
+    /// flash. `e.dng` carries `25` (`0b011001` — fired, auto): the only photo in the fixture that did.
     func testFlash() throws {
-        try assertHits(.flash, FilterValue.yes, ["a.dng", "e.dng"])
-        try assertHits(.flash, FilterValue.no, ["b.cr3", "c.jpg", "d.dng"])
+        try assertHits(.flash, FilterValue.yes, ["e.dng"])
+        try assertHits(.flash, FilterValue.no, ["a.dng", "b.cr3", "c.jpg", "d.dng"])
+    }
+
+    /// The regression this guards: a library where every file says `16` must answer 有 = ∅, not 有 = 全部.
+    func testFlash16IsNotFired() throws {
+        XCTAssertTrue(try fx.names(fx.criterion(.flash, FilterValue.yes)).isEmpty
+                      || !(try fx.names(fx.criterion(.flash, FilterValue.yes))).contains("a.dng"),
+                      "`Flash = 16` (mode off, did not fire) must never land in 有")
     }
 
     /// 有 = both coordinates exist **and are not 0/0** (the owner's rule); so `b`'s zeroed GPS block is
