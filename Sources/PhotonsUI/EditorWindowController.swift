@@ -209,11 +209,12 @@ public final class EditorWindowController: NSWindowController {
     /// 适应窗口 (⌘0). The same destination as Z from 1:1 and as Escape — one `LoupeViewState.change`.
     @objc public func zoomFitAction(_ sender: Any?) { rootView.loupeController.zoomToFit() }
 
-    /// 1:1 / 2:1 / 4:1 / 8:1 — the stop travels in the item's `tag`, because a menu item is rebuilt
-    /// from a static list and a tag is the one field AppKit keeps without a model object.
+    /// 50% / 100% / 200% / 300% / 400% — the stop travels in the item's `tag` **as a percentage**
+    /// (`50` → 0.5), because a menu item is rebuilt from a static list, a tag is the one field AppKit
+    /// keeps without a model object, and an `Int` cannot hold 0.5.
     @objc public func zoomStopAction(_ sender: Any?) {
         guard let item = sender as? NSMenuItem, item.tag > 0 else { return }
-        rootView.loupeController.zoom(to: Double(item.tag))
+        rootView.loupeController.zoom(to: Double(item.tag) / 100)
     }
 
     /// 放大 (⌘=, and ⌘+ on a US keyboard lands here too). Disabled outside the loupe.

@@ -131,7 +131,9 @@ public enum MainMenu {
                                     action: #selector(EditorWindowController.zoomStopAction(_:)),
                                     keyEquivalent: "\(index + 1)")
             item.keyEquivalentModifierMask = [.command, .option]
-            item.tag = Int(stop)
+            // Percent, because an `NSMenuItem` tag is an `Int` and 50 % is 0.5: the action divides
+            // by 100 again. Whole-number tags could not express the 50 % rung at all.
+            item.tag = Int((stop * 100).rounded())
         }
         view.addItem(.separator())
         view.addItem(withTitle: "放大",

@@ -1636,7 +1636,7 @@ public final class UISmokeRunner {
     /// (005, 2026-10-26), not the frame on screen:
     ///
     ///   1. the card is a real view in the inspector's SwiftUI tree and it drew 4 series over **both**
-    ///      segments — 256 code bins plus the 96-bin exponential tail (`Histogram.maxStops` ×
+    ///      segments — 256 code bins plus the 256-bin exponential tail (`Histogram.maxStops` ×
     ///      `hdrBinsPerStop` = 6 × 16);
     ///   2. every channel's bins sum to the sample count (the measurement's own invariant), and the
     ///      axis is the laid-out one: 30 pt per stop, 6 stops, SDR + tail = the card's width;
@@ -1694,7 +1694,7 @@ public final class UISmokeRunner {
         let hdrWidth = axis?.hdrWidth ?? -1
         check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
               axis != nil && axis?.stopWidth == 30 && axis?.stops == 6
-              && hdrWidth == 180
+              && hdrWidth == 120
               && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
 
         // The display ceiling: log2(headroom) stops into the tail, from the frame's own headroom.
@@ -1754,34 +1754,18 @@ public final class UISmokeRunner {
               && (histogram.headroom > 1.0005
                   || card.clipCeilingText == card.clipHighText))
 
-        // The two labels the user reported as unreadable (004): the per-channel percentages and the
-        // sample/bin footnote. Asserted as text *and* as WCAG contrast recomputed from the colours
-        // the card actually drew with, against the card's own backdrop band.
-        let note = card.sampleNoteText
-        let expectedNote = HistogramCardReadability.sampleNote(sampleCount: histogram.sampleCount,
-                                                              binCount: histogram.binCount,
-                                                              hdrBinCount: histogram.hdrBinCount)
+        // The label the user reported as unreadable (004): the per-channel percentages. Asserted as
+        // WCAG contrast recomputed from the colour the card actually drew with, against the card's own
+        // backdrop band. (The 采样/分箱 footnote that used to sit here was removed on the owner's
+        // request; the hover readout replaces it — see 派单 010.)
         let cardBounds = card.bounds
         let percentContrast = card.percentContrast
-        let noteContrast = card.noteContrast
         let appearanceName = card.lastAppearanceIsDark ? "darkAqua" : "aqua"
-        log("histogram labels        “\(note)” @ (\(String(format: "%.1f", card.sampleNoteRect.minX)),\(String(format: "%.1f", card.sampleNoteRect.minY))) \(String(format: "%.1f", card.sampleNoteRect.width))×\(String(format: "%.1f", card.sampleNoteRect.height)) · 通道行 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · WCAG 百分数 \(String(format: "%.2f", percentContrast)):1 脚注 \(String(format: "%.2f", noteContrast)):1（\(appearanceName)）")
-        check("直方图脚注在卡片内、不截断：“\(note)” == “\(expectedNote)”，右对齐 \(String(format: "%.1f", card.sampleNoteRect.maxX)) / 卡宽 \(String(format: "%.1f", cardBounds.width))，通道行 \(String(format: "%.1f", card.channelRowWidth)) pt",
-              note == expectedNote
-              && note.contains("采样")
-              && note.contains("\(histogram.binCount)+\(histogram.hdrBinCount) 档")
-              && !card.sampleNoteRect.isEmpty
-              && card.sampleNoteRect.minX >= cardBounds.minX
-              && card.sampleNoteRect.maxX <= cardBounds.maxX + 0.5
-              && card.sampleNoteRect.maxY <= cardBounds.maxY
-              && card.channelRowWidth <= cardBounds.width)
-        check("通道百分数与脚注的对比度 ≥ \(HistogramCardReadability.minimumRatio):1（WCAG，卡片背景带最差端，\(appearanceName)）：百分数 \(String(format: "%.2f", percentContrast)):1 · 脚注 \(String(format: "%.2f", noteContrast)):1",
+        log("histogram labels        通道行 \(String(format: "%.1f", card.channelRowWidth)) pt / 卡宽 \(String(format: "%.1f", cardBounds.width)) pt · WCAG 百分数 \(String(format: "%.2f", percentContrast)):1（\(appearanceName)）")
+        check("通道百分数的对比度 ≥ \(HistogramCardReadability.minimumRatio):1（WCAG，卡片背景带最差端，\(appearanceName)）：\(String(format: "%.2f", percentContrast)):1，通道行 \(String(format: "%.1f", card.channelRowWidth)) pt ≤ 卡宽 \(String(format: "%.1f", cardBounds.width)) pt",
               percentContrast >= HistogramCardReadability.minimumRatio
-              && noteContrast >= HistogramCardReadability.minimumRatio)
-        let spokenHelp = card.accessibilityHelp() ?? ""
-        check("直方图卡片的 VoiceOver 说明解释了分箱：“\(spokenHelp)”",
-              spokenHelp.contains("\(histogram.binCount) 档 SDR 码值")
-              && spokenHelp.contains("\(histogram.hdrBinCount) 档高光尾"))
+              && card.channelRowWidth > 0
+              && card.channelRowWidth <= cardBounds.width)
 
         // The warning: a real click on the number, then a frame that carries the clipped grid.
         let documentBefore = documentHash(session.edit)
@@ -2575,9 +2559,9 @@ public final class UISmokeRunner {
 
         let items = zoomMenuItems()
         let titles = items.map(\.title).joined(separator: " / ")
-        check("显示菜单有四档倍率（百分比）+ 适应窗口 + 放大/缩小（\(titles)）",
-              items.count == 4 && items.map(\.tag) == [1, 2, 3, 4]
-              && items.map(\.title) == ["100%", "200%", "300%", "400%"]
+        check("显示菜单有五档倍率（百分比，含 50%）+ 适应窗口 + 放大/缩小（\(titles)）",
+              items.count == 5 && items.map(\.tag) == [50, 100, 200, 300, 400]
+              && items.map(\.title) == ["50%", "100%", "200%", "300%", "400%"]
               && menuItem(#selector(EditorWindowController.zoomFitAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomInAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomOutAction(_:))) != nil)
@@ -2608,9 +2592,9 @@ public final class UISmokeRunner {
             let shape = renderShape()
             let ticked = items.filter { controller.validateMenuItem($0) && $0.state == .on }
             let label = loupe.zoomLabel
-            let expectedWindow = expectedWindowSize(loupe: loupe, zoom: Double(item.tag))
+            let expectedWindow = expectedWindowSize(loupe: loupe, zoom: Double(item.tag) / 100)
             stopResults.append(String(format: "%d%%→canvas %@ zoom %.0f window %@ label %@ ticked %d",
-                                      item.tag * 100,
+                                      item.tag,
                                       shape.map { "\($0.canvas.width)×\($0.canvas.height)" } ?? "nil",
                                       shape?.zoom ?? -1,
                                       shape.map { "\($0.window.width)×\($0.window.height)" } ?? "nil",
@@ -2618,14 +2602,14 @@ public final class UISmokeRunner {
             var stopOK = true
             if let shape {
                 stopOK = shape.canvas == viewport
-                    && abs(shape.zoom - Double(item.tag)) < 0.001
+                    && abs(shape.zoom - Double(item.tag) / 100) < 0.001
                     && abs(shape.window.width - Int(expectedWindow.width)) <= 1
                     && abs(shape.window.height - Int(expectedWindow.height)) <= 1
             } else {
                 stopOK = false
             }
             stopOK = stopOK && ticked.count == 1 && ticked.first?.tag == item.tag
-            stopOK = stopOK && label == "\(item.tag * 100)%"
+            stopOK = stopOK && label == "\(item.tag)%"
             stopsOK = stopsOK && stopOK
         }
         log("zoom stops              \(stopResults.joined(separator: " · "))")

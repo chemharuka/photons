@@ -692,10 +692,10 @@ public final class LoupeController: NSViewController {
     /// and moves with the window (0.31 for 60 MP, 0.72 for 24 MP, 1.0 for a small file).
     public static let zoomStops: [Double] = LoupeViewState.zoomStops
 
-    /// What the 倍率 menu can name. `EditorWindowController.zoomStopAction` reads the stop out of the
-    /// item's `tag` as `Double(tag)`, so a menu item can carry a whole-number zoom only; the 50 % rung
-    /// is reached with ⌘− from 100 % and by pinch, and `currentZoomStop` reports it either way.
-    public static let menuZoomStops: [Double] = [1, 2, 3, 4]
+    /// What the 倍率 menu can name — every numeric rung, including the 50 % one.
+    /// `EditorWindowController.zoomStopAction` reads the stop out of the item's `tag` as **percent**
+    /// (`Double(tag) / 100`), because a menu tag is an `Int` and 0.5 has no integer form.
+    public static let menuZoomStops: [Double] = [0.5, 1, 2, 3, 4]
 
     /// The ladder for the current window and crop — `[fit, 50 %, 100 %, 200 %, 300 %, 400 %]` sorted by
     /// value with the live fit ratio folded in, recomputed per call because a resize changes it
