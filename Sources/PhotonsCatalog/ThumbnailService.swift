@@ -297,6 +297,9 @@ public final class ThumbnailService: @unchecked Sendable {
     private var pending: [Job] = []
     /// Pending *and* in-flight jobs, by key: this dictionary is the single-flight map.
     private var jobs: [ThumbKey: Job] = [:]
+    /// Test-only witness of admission order (see `recordsAdmissionOrder`). Never used by the app.
+    private var recordsAdmissions = false
+    private var admissions: [ThumbKey] = []
     private var counters = Stats()
     private var sequence: Int64 = 0
     private var subscriptionID: Int64 = 0
@@ -521,6 +524,7 @@ public final class ThumbnailService: @unchecked Sendable {
             counters.active = activeCount
             counters.activePeak = max(counters.activePeak, activeCount)
             batch.append(job)
+            if recordsAdmissions { admissions.append(job.key) }
         }
         counters.active = activeCount
         lock.unlock()
@@ -701,6 +705,32 @@ public final class ThumbnailService: @unchecked Sendable {
     public func stats() -> Stats {
         lock.lock(); defer { lock.unlock() }
         return counters
+    }
+
+    // MARK: test-only observation
+
+    /// Witness of the **admission order**: while this is on, `pump()` appends the key of every job it
+    /// hands a worker slot to, inside the same lock that chose it. The array is therefore the
+    /// scheduler's own decision order — a structural property — unlike the order the worker threads
+    /// happen to reach the producer, or the order completions are delivered, both of which move with
+    /// thread scheduling and therefore jitter on a loaded machine.
+    ///
+    /// It changes nothing about dispatch: the app never turns it on, and while it is off the cost is
+    /// one bool test per admission. Set it before a batch; read `admissionWitness()` when idle.
+    public var recordsAdmissionOrder: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return recordsAdmissions }
+        set {
+            lock.lock()
+            recordsAdmissions = newValue
+            if newValue { admissions.removeAll(keepingCapacity: true) }
+            lock.unlock()
+        }
+    }
+
+    /// Keys in the order `pump()` admitted them. Empty unless `recordsAdmissionOrder` is on.
+    public func admissionWitness() -> [ThumbKey] {
+        lock.lock(); defer { lock.unlock() }
+        return admissions
     }
 
     public func resetStats() {
