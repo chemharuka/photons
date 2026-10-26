@@ -60,8 +60,8 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
     float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
     float wHighlight = smoothstep(0.5, 1.0, lum);
-    v *= exp2(d.b.z / 100.0 * 0.8 * wShadow);           // shadows
-    v *= exp2(-d.b.y / 100.0 * 0.8 * wHighlight);       // highlights
+    v *= exp2(d.b.z / 100.0 * 0.8 * wShadow);           // shadows (+ lifts)
+    v *= exp2(d.b.y / 100.0 * 0.8 * wHighlight);        // highlights (+ lifts, LR convention)
 
     // 3. Hue and saturation.
     if (d.c.y != 0.0) { v = rotate_about_grey(v, d.c.y); }

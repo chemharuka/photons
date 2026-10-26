@@ -152,6 +152,31 @@ final class ToneMapTests: XCTestCase {
         XCTAssertLessThan(whitesDown, baseMean - 0.005, "whites −50 must darken")
     }
 
+    /// `highlights +` must *brighten* the highlight zone (less recovery) and `highlights -` must
+    /// recover it, which is the Lightroom gesture. The kernel used `exp2(-highlights …)`, so the panel
+    /// read backwards: dragging right recovered instead of opening the highlights.
+    func testHighlightsFollowLightroomDirection() throws {
+        let image = rampImage()
+        let graph = try makeGraph(image)
+        let opts = RenderOptions(scale: 0.5, wantsPixels: true)
+        let neutral = EditModel.neutral
+        let base = try XCTUnwrap(graph.render(neutral, options: opts).display)
+        let rect = (0, 0, base.width, base.height)
+        let baseMean = meanLuma(base, rect: rect)
+
+        func mean(highlights: Double) throws -> Double {
+            var edit = neutral
+            edit.light.highlights = highlights
+            let img = try XCTUnwrap(graph.render(edit, options: opts).display)
+            return meanLuma(img, rect: rect)
+        }
+
+        let up = try mean(highlights: 50), down = try mean(highlights: -50)
+        print("highlights direction (content mean, neutral = \(baseMean)): +50 = \(up), -50 = \(down)")
+        XCTAssertGreaterThan(up, baseMean + 0.005, "highlights +50 must brighten, not recover")
+        XCTAssertLessThan(down, baseMean - 0.005, "highlights -50 must recover (darken) the highlights")
+    }
+
     /// Monotonicity, per slider, on a fixed picture: five stops of the same slider never fold back.
     func testEachSliderIsMonotoneAcrossItsRange() throws {
         let image = rampImage()
@@ -308,5 +333,40 @@ final class ToneMapTests: XCTestCase {
         XCTAssertLessThan(down, baseMean, "local whites − must darken")
         XCTAssertGreaterThan(blackUp, baseMean, "local blacks + must brighten")
         XCTAssertLessThan(blackDown, baseMean, "local blacks − must darken")
+    }
+
+    /// The same agreement for `highlights`: a bright flat patch (luma 0.75, inside the highlight
+    /// weight) must get brighter with `highlights +` locally too, not just globally.
+    func testLocalHighlightsMatchTheGlobalConvention() throws {
+        let image: LinearImage = {
+            let w = 64, h = 64
+            var rgba = [Float16](repeating: 0, count: w * h * 4)
+            for i in stride(from: 0, to: rgba.count, by: 4) {
+                rgba[i] = Float16(0.75); rgba[i + 1] = Float16(0.75)
+                rgba[i + 2] = Float16(0.75); rgba[i + 3] = 1
+            }
+            return LinearImage(width: w, height: h, rgba: rgba,
+                               colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        }()
+        let graph = try makeGraph(image)
+        let opts = RenderOptions(scale: 1, wantsPixels: true)
+        let base = try XCTUnwrap(graph.render(EditModel.neutral, options: opts).display)
+        let rect = (0, 0, base.width, base.height)
+        let baseMean = meanLuma(base, rect: rect)
+
+        func localMean(highlights: Double) throws -> Double {
+            var edit = EditModel.neutral
+            edit.masks = [Mask(id: "m",
+                               components: [MaskComponent(id: "c",
+                                                          shape: .linearGradient(.default))],
+                               adjustments: LocalAdjustments(highlights: highlights))]
+            let img = try XCTUnwrap(graph.render(edit, options: opts).display)
+            return meanLuma(img, rect: rect)
+        }
+
+        let up = try localMean(highlights: 100), down = try localMean(highlights: -100)
+        print("local highlights: +100 = \(up), −100 = \(down) (neutral \(baseMean))")
+        XCTAssertGreaterThan(up, baseMean, "local highlights + must brighten")
+        XCTAssertLessThan(down, baseMean, "local highlights − must recover")
     }
 }

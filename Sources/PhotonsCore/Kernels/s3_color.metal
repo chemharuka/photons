@@ -80,7 +80,15 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
-    float3 hsl = rgb_to_hsl(clamp(c.rgb, 0.0, 1.0));
+    // HDR headroom is carried around the HSL maths, not through it. `rgb_to_hsl` works on a
+    // *normalised* colour (divide by the largest channel when it is above white), so a pixel at 4×
+    // white keeps its 4× after the round trip: every clamp inside HSL is on the normalized values,
+    // and the result is scaled back by the same factor. Before this, `clamp(c.rgb, 0, 1)` sat right
+    // here, so touching vibrance or saturation flattened every highlight above white to 1.0 — the
+    // picture lost its EDR range the moment a colour slider moved.
+    // For an SDR pixel (max ≤ 1) the factor is exactly 1 and the maths below is bit-identical.
+    float headroomScale = max(1.0, max(c.r, max(c.g, c.b)));
+    float3 hsl = rgb_to_hsl(c.rgb / headroomScale);
     float hueDeg = hsl.x * 360.0;
 
     float3 shift = float3(0.0);
@@ -114,5 +122,5 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
     }
     hsl.y = sat;
 
-    dst.write(float4(hsl_to_rgb(hsl), c.a), gid);
+    dst.write(float4(hsl_to_rgb(hsl) * headroomScale, c.a), gid);
 }

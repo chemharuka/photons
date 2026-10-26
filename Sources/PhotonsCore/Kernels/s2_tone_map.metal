@@ -57,8 +57,12 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
     float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
     float wHighlight = smoothstep(0.5, 1.0, lum);
+    // LR convention for both region sliders: a positive value lifts that region, a negative value
+    // pulls it down. `highlights +` therefore *brightens* the highlight zone (less recovery) and
+    // `highlights -` recovers it — the sign used to be flipped here, which made the panel read
+    // backwards against Lightroom for the same gesture.
     float liftShadow = exp2(p.b.y / 100.0 * 0.8 * wShadow);
-    float liftHighlight = exp2(-p.b.x / 100.0 * 0.8 * wHighlight);
+    float liftHighlight = exp2(p.b.x / 100.0 * 0.8 * wHighlight);
     v *= liftShadow * liftHighlight;
 
     dst.write(float4(max(v, 0.0), c.a), gid);
