@@ -113,17 +113,17 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(f.renderScale(of: .fit, decodeScale: 0.5), 0.8, accuracy: 1e-12)
     }
 
-    // MARK: 3. zoom clamp 1…8
+    // MARK: 3. zoom clamp 25 % … 400 %
 
-    func testZoomIsClampedToHalfThroughFour() {
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.25).zoom, 0.5, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.5, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.5, accuracy: 1e-12)
+    func testZoomIsClampedToAQuarterThroughFour() {
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.1).zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.25, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 4).zoom, 4, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 64).zoom, 4, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.25, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState.clampZoom(12), 4, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState.clampZoom(0.5), 0.5, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState.clampZoom(1.0 / 3.0), 1.0 / 3.0, accuracy: 1e-12)
 
         // A pinch past the ceiling stops at 4 and keeps rendering 4.
         let f = framing()
@@ -131,14 +131,18 @@ final class LoupeZoomTests: XCTestCase {
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 2, aroundView: CGPoint(x: 100, y: 100)) }
         XCTAssertEqual(state.zoom, 4, accuracy: 1e-12)
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 0.5, aroundView: CGPoint(x: 100, y: 100)) }
-        XCTAssertEqual(state.zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 0.25, accuracy: 1e-12)
     }
 
-    /// The six rungs, as percentages. 1:1 is 100 %; the fit rung only says "适应" here because a
-    /// `LoupeViewState` has no window to measure (the controller prints "适应 31%").
+    /// The eight stops, as percentages. 1:1 is 100 %; the thirds print one decimal and stay exact, and
+    /// the fit mode only says "适应" here because a `LoupeViewState` has no window to measure (the
+    /// controller prints "适应 31%").
     func testZoomLabels() {
         XCTAssertEqual(LoupeViewState.fit.zoomLabel, "适应")
+        XCTAssertEqual(actual(zoom: 0.25).zoomLabel, "25%")
+        XCTAssertEqual(actual(zoom: 1.0 / 3.0).zoomLabel, "33.3%")
         XCTAssertEqual(actual(zoom: 0.5).zoomLabel, "50%")
+        XCTAssertEqual(actual(zoom: 2.0 / 3.0).zoomLabel, "66.7%")
         XCTAssertEqual(actual(zoom: 1).zoomLabel, "100%")
         XCTAssertEqual(actual(zoom: 2).zoomLabel, "200%")
         XCTAssertEqual(actual(zoom: 3).zoomLabel, "300%")
@@ -315,16 +319,27 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(dy, 50 * sin(30 * .pi / 180), accuracy: 1e-9)
     }
 
-    func testPanStopsAtTheFrameEdge() {
+    /// The picture may leave the frame now, so a drag is no longer stopped with the window's far edge on
+    /// the crop's: it is stopped by `LoupeFraming.minimumPictureCoverage` — the window's **centre**
+    /// stays on the picture, i.e. at least half the canvas is still photograph. With ½ coverage that is
+    /// exactly "the centre stops at the crop's edge", and it does not spring back.
+    func testPanStopsAtTheCoverageLimitNotAtTheFrameEdge() {
         let f = framing()
         let state = actual(zoom: 2)
+        let window = f.windowSize(of: state)
+        XCTAssertEqual(window.width, 1280, accuracy: 1e-9)
         let far = f.panning(state, byContent: (x: 1e6, y: 1e6))
-        let half = f.windowSize(of: far).width / 2
-        XCTAssertEqual(far.centerX, f.cropOriginX + f.cropWidthPixels - half, accuracy: 1e-6)
-        XCTAssertEqual(far.centerY, f.cropOriginY + f.cropHeightPixels - f.windowSize(of: far).height / 2,
-                       accuracy: 1e-6)
+        XCTAssertEqual(far.centerX, f.cropOriginX + f.cropWidthPixels, accuracy: 1e-6,
+                       "the centre reaches the crop's edge and stops there")
+        XCTAssertEqual(far.centerY, f.cropOriginY + f.cropHeightPixels, accuracy: 1e-6)
+        // Half of the window is hanging off the frame at the limit, and that is the point of the rule.
+        XCTAssertEqual(far.centerX + window.width / 2 - f.cropWidthPixels, window.width / 2,
+                       accuracy: 1e-6, "half a window of background, no more")
         let back = f.panning(far, byContent: (x: -1e6, y: -1e6))
-        XCTAssertEqual(back.centerX, f.cropOriginX + half, accuracy: 1e-6)
+        XCTAssertEqual(back.centerX, f.cropOriginX, accuracy: 1e-6)
+        XCTAssertEqual(back.centerY, f.cropOriginY, accuracy: 1e-6)
+        // Letting go does not move it: the limit is a stop, not a rubber band.
+        XCTAssertEqual(f.panning(far, byContent: (x: 0, y: 0)).centerX, far.centerX, accuracy: 1e-9)
     }
 
     func testPanDoesNothingInFitMode() {
@@ -356,12 +371,12 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(next.zoom, 1.4, accuracy: 1e-12)
         let before = f.mapping(of: .fit).sourcePoint(viewX: 2000, viewY: 100)
         let after = f.mapping(of: next).sourcePoint(viewX: 2000, viewY: 100)
-        // Same source pixel under the cursor, unless the edge clamp had to move the window.
-        let clamped = f.windowCenter(of: next)
-        if abs(clamped.x - next.centerX) < 1e-6, abs(clamped.y - next.centerY) < 1e-6 {
-            XCTAssertEqual(after.x, before.x, accuracy: 1e-6)
-            XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
-        }
+        // The same source pixel under the cursor — no "unless": the camera may leave the frame, so the
+        // anchor is honoured outright.
+        XCTAssertEqual(after.x, before.x, accuracy: 1e-6)
+        XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
+        XCTAssertEqual(f.windowCenter(of: next).x, next.centerX, accuracy: 1e-6,
+                       "the window was never limited: the anchor is inside the picture")
     }
 
     // MARK: 8. the derived document
@@ -399,13 +414,22 @@ final class LoupeZoomTests: XCTestCase {
     }
 
     /// `outputWindow(of:)` is what the loupe renders with; `cropRect(of:)` is the mapping's own
-    /// description of the same rectangle. Moving the window from the document into
-    /// `RenderOptions` must not move the *region*: same origin, same size, in content pixels
-    /// (`zoom` content pixels per source pixel, measured from the crop's corner).
-    func testOutputWindowAndTheDerivedCropNameTheSameRegion() {
+    /// description of the same rectangle. Moving the window from the document into `RenderOptions`
+    /// must not move the *region*: same origin, same size, in content pixels (`zoom` content pixels per
+    /// source pixel, measured from the crop's corner).
+    ///
+    /// They agree **while the window is inside the crop**. Where it is not — the camera may leave the
+    /// picture now (`LoupeFraming.minimumPictureCoverage`) — only the window is the truth: `cropRect`
+    /// becomes the *document's* crop and a document stays inside the crop it describes. That case is
+    /// asserted as such rather than averaged away, and the window's size is asserted to be the
+    /// viewport at the stop, because that is what "the visible window is the canvas" means.
+    func testOutputWindowAndTheDerivedCropNameTheSameRegionWhileItIsInsideTheCrop() {
         let crop = CropRect(left: 0.1, top: 0.08, right: 0.85, bottom: 0.72)
+        var sawInside = 0, sawOutside = 0
         for degrees in [0.0, 7.0] {
             let f = framing(degrees: degrees, crop: crop)
+            let frame = ImageSize(width: Int((f.cropWidthPixels * 1).rounded()),
+                                  height: Int((f.cropHeightPixels * 1).rounded()))
             XCTAssertNil(f.outputWindow(of: .fit), "fit is the whole frame, so it names no window")
             for zoom in [1.0, 2.5, 4.0] {
                 for centre in [(3000.0, 2000.0), (1200.0, 700.0), (5200.0, 3500.0)] {
@@ -414,23 +438,43 @@ final class LoupeZoomTests: XCTestCase {
                     let window = f.outputWindow(of: state)
                     XCTAssertNotNil(window)
                     guard let window else { continue }
-                    // crop rect (source pixels) → content pixels, relative to the crop's origin.
-                    XCTAssertEqual(Double(window.x), (rect.left * f.sourceWidth - f.cropOriginX) * zoom,
-                                   accuracy: 1.0 * zoom,
-                                   "θ=\(degrees) z=\(zoom): window origin x drifted")
-                    XCTAssertEqual(Double(window.y), (rect.top * f.sourceHeight - f.cropOriginY) * zoom,
-                                   accuracy: 1.0 * zoom,
-                                   "θ=\(degrees) z=\(zoom): window origin y drifted")
-                    XCTAssertEqual(Double(window.width), rect.width * f.sourceWidth * zoom,
-                                   accuracy: 1.0 * zoom)
-                    XCTAssertEqual(Double(window.height), rect.height * f.sourceHeight * zoom,
-                                   accuracy: 1.0 * zoom)
-                    // And it never leaves the frame: the crop bounds it.
-                    XCTAssertGreaterThanOrEqual(window.x, 0)
-                    XCTAssertGreaterThanOrEqual(window.y, 0)
+                    // `outputWindow` is in **content (device) pixels**, not source pixels: the window
+                    // is `viewport / zoom` source pixels drawn at `zoom`, which is the viewport — the
+                    // canvas is filled at every stop, and there is no second, hidden zoom.
+                    XCTAssertEqual(Double(window.width), Double(viewport.width), accuracy: 1.0)
+                    XCTAssertEqual(Double(window.height), Double(viewport.height), accuracy: 1.0)
+                    let inside = window.x >= 0 && window.y >= 0
+                        && window.x + window.width <= frame.width
+                        && window.y + window.height <= frame.height
+                    if inside {
+                        sawInside += 1
+                        // crop rect (source pixels) → content pixels, relative to the crop's origin.
+                        XCTAssertEqual(Double(window.x), (rect.left * f.sourceWidth - f.cropOriginX) * zoom,
+                                       accuracy: 1.0 * zoom,
+                                       "θ=\(degrees) z=\(zoom): window origin x drifted")
+                        XCTAssertEqual(Double(window.y), (rect.top * f.sourceHeight - f.cropOriginY) * zoom,
+                                       accuracy: 1.0 * zoom,
+                                       "θ=\(degrees) z=\(zoom): window origin y drifted")
+                        XCTAssertEqual(Double(window.width), rect.width * f.sourceWidth * zoom,
+                                       accuracy: 1.0 * zoom)
+                    } else {
+                        sawOutside += 1
+                        // The derived *document* is still bounded by the frame (a crop rect is a
+                        // normalized rect on the picture, and it may not leave it); the camera may.
+                        XCTAssertGreaterThanOrEqual(rect.left, -1e-9)
+                        XCTAssertGreaterThanOrEqual(rect.top, -1e-9)
+                        XCTAssertLessThanOrEqual(rect.right, 1 + 1e-9)
+                        XCTAssertLessThanOrEqual(rect.bottom, 1 + 1e-9)
+                        XCTAssertTrue(window.x < 0 || window.y < 0
+                                        || window.x + window.width > frame.width
+                                        || window.y + window.height > frame.height,
+                                      "an out-of-frame window must be reported as such")
+                    }
                 }
             }
         }
+        XCTAssertGreaterThan(sawInside, 0, "some of these windows are inside the crop")
+        XCTAssertGreaterThan(sawOutside, 0, "and some are not — that is the new freedom")
     }
 
     // MARK: 9. display headroom

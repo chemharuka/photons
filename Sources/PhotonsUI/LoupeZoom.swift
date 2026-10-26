@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import PhotonsCore
+import QuartzCore
 
 // MARK: - state
 
@@ -28,18 +29,32 @@ public struct LoupeViewState: Equatable, Sendable {
     /// The stop ceiling. Above 4:1 a 60 MP frame is being shown through sixteen canvas pixels per
     /// source pixel — there is no information left to reveal, only interpolation to admire.
     public static let maximumZoom: Double = 4
-    /// The stop floor. Below 1:2 the frame is smaller than the fit view, which is what `mode == .fit`
-    /// already means, so 0.5 is the last rung before the whole frame.
-    ///
-    /// Not to be confused with the *fit ratio*: `LoupeFraming.fitZoom` is a property of the window and
-    /// the crop (0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, 1.0 for a small
-    /// file) and is **not** one of the stops. The ladder is `levels(fitZoom:)`, and it inserts the live
-    /// fit ratio wherever it actually falls.
-    public static let minimumZoom: Double = 0.5
+    /// The stop floor: a quarter of 1:1. Below it there is nothing left to see (the whole frame is
+    /// `mode == .fit`, a separate entry, not a number), and 25 % is the widest *numeric* stop.
+    public static let minimumZoom: Double = 0.25
 
-    /// The discrete stops, ascending. `fit` is a mode rather than a number (`levels(fitZoom:)` puts
-    /// the live ratio in its place), so this is the numeric half of the ladder.
-    public static let zoomStops: [Double] = [0.5, 1, 2, 3, 4]
+    /// The eight numeric stops, ascending — the whole ladder, and the only values a stop change can
+    /// name.
+    ///
+    /// `fit` (适应窗口) is deliberately **not** in here. It is a mode, not a rung, and where it belongs
+    /// in the UI is a decision the user has not made yet (see `LoupeController.zoomFitEntryPoint`).
+    /// Nothing on this ladder may assume anything about the fit ratio: on a 60 MP frame in a 2560-px
+    /// viewport it is 0.31, so it happens to sit between 25 % and 33.3 %; on a 24 MP frame it is 0.72;
+    /// on a file smaller than the viewport it is above 1. The ladder does not care, because the ladder
+    /// no longer contains it.
+    ///
+    /// The thirds are **exact** (`1.0/3.0`, `2.0/3.0`), not 0.333/0.667: they are real zoom factors
+    /// used by the anchor arithmetic, the bridge ratio and the menu's identity, and only their *label*
+    /// is rounded to one decimal (`33.3%`, `66.7%`). Written as divisions so they cannot drift.
+    public static let zoomStops: [Double] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
+
+    /// Index of `zoom` in `zoomStops` when it is exactly on a stop, `nil` between stops.
+    ///
+    /// `1e-9`, not `==`: a zoom that came back from a menu index, a pinch or a bridge ratio is the
+    /// result of a `Double` chain, and the stop table's own values are the ones that must match.
+    public static func stopIndex(of zoom: Double) -> Int? {
+        zoomStops.firstIndex { abs($0 - zoom) < 1e-9 }
+    }
 
     public var mode: Mode
     public var zoom: Double
@@ -57,17 +72,21 @@ public struct LoupeViewState: Equatable, Sendable {
 
     public var isActualSize: Bool { mode == .actual }
 
-    /// 0.5…4, the interactive domain (fit is a separate mode, not a zoom value).
+    /// 0.25…4, the interactive domain (fit is a separate mode, not a zoom value).
+    ///
+    /// The ends clamp rather than wrap, and a non-finite value goes to the end it names: `+∞` is
+    /// "past 400 %" → 400 %, `−∞` → 25 %, `NaN` → the floor (a number that is not a number cannot ask
+    /// for magnification).
     public static func clampZoom(_ zoom: Double) -> Double {
-        guard zoom.isFinite else { return minimumZoom }
+        if zoom.isNaN { return minimumZoom }
         return min(max(zoom, minimumZoom), maximumZoom)
     }
 
     /// `"适应"` for the whole-frame mode, otherwise the stop as a percentage: `"100%"` is 1:1.
     ///
-    /// The fit rung's real ratio is not in here on purpose — a `LoupeViewState` does not know the
-    /// window, so it cannot know what `fitZoom` is. `LoupeController.zoomLabel` adds it
-    /// (`"适应 31%"`); the ladder's own `LoupeZoomLevel.displayLabel` does the same from a known ratio.
+    /// The fit ratio is not in here on purpose — a `LoupeViewState` does not know the window, so it
+    /// cannot know what `LoupeFraming.fitZoom` is. `LoupeController.statusText` adds it where the
+    /// reader can see it move (`"适应 31%"`).
     public var zoomLabel: String {
         switch mode {
         case .fit: return "适应"
@@ -75,130 +94,263 @@ public struct LoupeViewState: Equatable, Sendable {
         }
     }
 
-    /// `0.5 → "50%"`, `1 → "100%"`, `3 → "300%"`. Whole percent: the stops are all whole numbers of
-    /// percent, and a readout with decimals is a readout nobody asked for.
+    /// `0.25 → "25%"`, `1 → "100%"`, `1/3 → "33.3%"`, `2/3 → "66.7%"`, `3 → "300%"`.
+    ///
+    /// Whole percent for the stops that are whole percentages, **one decimal** for the thirds — and
+    /// only in the *label*: `33.3%` is `1.0/3.0` internally, and rounding it to 33 % here would make
+    /// the readout disagree with the stop it names.
     public static func percentLabel(of zoom: Double) -> String {
         let z = zoom.isFinite ? zoom : 1
-        return "\(Int((z * 100).rounded()))%"
+        let percent = z * 100
+        let whole = percent.rounded()
+        if abs(percent - whole) < 1e-6 { return "\(Int(whole))%" }
+        return String(format: "%.1f%%", percent)
     }
 }
 
 // MARK: - the ladder
 
-/// One rung of the zoom ladder: a stop, or the frame's own fit ratio.
+/// One rung of the zoom ladder: a numeric stop and nothing else.
 ///
-/// `fit` is a rung whose *value* moves with the window and the crop, which is why the ladder is a
-/// function (`LoupeViewState.levels(fitZoom:)`) and not a constant. For a 60 MP frame in a 2560-px
-/// viewport it is 0.31 and the ladder is `[0.31 适应, 0.5, 1, 2, 3, 4]`; for a 24 MP frame it can be
-/// 0.72 and the ladder is `[0.5, 0.72 适应, 1, 2, 3, 4]`; for a file smaller than the viewport it is
-/// 1.0 and the 100 % stop folds into it. Nothing here may assume the fit ratio sits below 50 %.
+/// The ladder is the eight values of `LoupeViewState.zoomStops`, ascending, and it is a *constant* —
+/// `fit` is not in it (and never was a value: it is a mode, entered through its own menu item /
+/// shortcut, `LoupeController.zoomFitEntryPoint`), so nothing here depends on the window, the crop or
+/// the fit ratio.
 public struct LoupeZoomLevel: Equatable, Sendable, Comparable {
 
-    /// Canvas pixels per source pixel. For `isFit` this is the live `LoupeFraming.fitZoom`.
+    /// Canvas pixels per source pixel: 0.25, 1/3, 0.5, 2/3, 1, 2, 3, 4.
     public let zoom: Double
-    /// The rung `mode == .fit` corresponds to. Exactly one ladder entry carries it.
-    public let isFit: Bool
 
-    public init(zoom: Double, isFit: Bool = false) {
+    public init(zoom: Double) {
         self.zoom = zoom
-        self.isFit = isFit
     }
 
-    /// `"适应"` / `"50%"` — what the 倍率 menu and the six-state readout use.
-    public var label: String { isFit ? "适应" : LoupeViewState.percentLabel(of: zoom) }
-
-    /// `"适应 31%"` / `"50%"` — the status strip, where the fit ratio is worth printing because the
-    /// user can see it move with the window.
-    public var displayLabel: String {
-        isFit ? "适应 \(LoupeViewState.percentLabel(of: zoom))" : label
-    }
+    /// `"50%"`, `"33.3%"` — what the 倍率 menu and the status readout print.
+    public var label: String { LoupeViewState.percentLabel(of: zoom) }
 
     public static func < (a: LoupeZoomLevel, b: LoupeZoomLevel) -> Bool { a.zoom < b.zoom }
 
-    /// Two rungs this close are the same rung: 0.72 and 0.5 must not both appear, and a fit ratio of
-    /// 0.998 must not sit next to 100 %.
+    /// Two rungs this close are the same rung. The table has no duplicates, so this is only a guard
+    /// for values that came through arithmetic (a pinch, a bridge ratio).
     public static let tolerance = 0.005
 }
 
 extension LoupeViewState {
 
-    /// The ladder for a frame whose fit ratio is `fitZoom`: the fit rung plus the five stops, sorted
-    /// by value and de-duplicated (`LoupeZoomLevel.tolerance`).
-    ///
-    /// Recomputed per call rather than cached: `fitZoom` moves with the window size, the crop and the
-    /// straighten, so a cached table would be a stale table the moment the user resizes. When the fit
-    /// ratio coincides with a stop the **fit rung wins** — `mode == .fit` is the state the camera is
-    /// actually in, and a second entry 0.002 away would be a menu item that does nothing.
-    public static func levels(fitZoom: Double) -> [LoupeZoomLevel] {
-        let fit = fitZoom.isFinite && fitZoom > 0 ? fitZoom : 1
-        let candidates = [LoupeZoomLevel(zoom: fit, isFit: true)]
-            + zoomStops.map { LoupeZoomLevel(zoom: $0) }
-        var out: [LoupeZoomLevel] = []
-        // Ties sort fit-first so the fold below always keeps the fit rung.
-        for level in candidates.sorted(by: { $0.zoom < $1.zoom || ($0.zoom == $1.zoom && $0.isFit) }) {
-            if let last = out.last, abs(last.zoom - level.zoom) < LoupeZoomLevel.tolerance { continue }
-            out.append(level)
-        }
-        return out
-    }
+    /// The ladder: the eight numeric stops, ascending, de-duplicated. No arguments — nothing about it
+    /// depends on the frame any more.
+    public static let levels: [LoupeZoomLevel] = zoomStops.map { LoupeZoomLevel(zoom: $0) }
 
-    /// The rung a raw zoom value lands on: **the largest rung not above it**.
+    /// The rung a raw zoom value lands on: **the largest rung not above it** — "自动往下走一级".
     ///
-    /// This is the "自动往下走一级" rule from one place instead of four event handlers. It is a floor,
-    /// not a nearest-value round: a pinch to 0.9 on a 60 MP frame lands on 50 %, never on 100 %.
-    /// Below the lowest rung the camera shows the whole frame — there is nothing further out than
-    /// fit, and pinching out from fit must not skip the 50 % rung on its way to 100 %.
-    public static func snappedLevel(for target: Double, fitZoom: Double) -> LoupeZoomLevel {
-        let ladder = levels(fitZoom: fitZoom)
+    /// A floor, not a nearest-value round: a pinch to 0.9 lands on 66.7 %, never on 100 %; a pinch to
+    /// 0.34 lands on 33.3 %. Below the lowest rung (25 %) the answer is 25 %: the ladder's floor is a
+    /// stop, and going further out is `fit`, which is an explicit action (`zoomToFit()`), not a snap.
+    /// The comparison uses the table's exact values, so `1.0/3.0` is reachable and nothing hides
+    /// between the rungs.
+    public static func snappedLevel(for target: Double) -> LoupeZoomLevel {
         let t = target.isFinite ? target : 1
-        if let level = ladder.last(where: { $0.zoom <= t + 1e-9 }) { return level }
-        return ladder.first(where: { $0.isFit }) ?? LoupeZoomLevel(zoom: fitZoom, isFit: true)
+        return levels.last(where: { $0.zoom <= t + 1e-9 }) ?? levels[0]
     }
 }
 
-// MARK: - fit ↔ actual bridge
+// MARK: - the scaling bridge (every stop change)
 
-/// The one geometric bridge the loupe draws, and the only thing in `PhotonsUI` that animates.
+/// The one geometric transition the loupe draws, and the only thing in `PhotonsUI` that animates.
 ///
-/// It exists because of a decode, not because of a taste for motion: crossing `fit ↔ actual` is the
-/// one camera change whose frame may have to wait for a full-size development (52–900 ms), and the
-/// canvas meanwhile holds a picture laid out for the *old* camera — the visible jump the user
-/// reported. The picture already on screen is scaled from the rect it occupies to the rect the new
-/// camera will occupy, and the real frame replaces it the moment it presents.
+/// It exists because of a **gap**, not because of a taste for motion: the camera jumps to the new
+/// stop the moment the user asks for it, but the pixels for that stop are not on the canvas yet —
+/// they are being rendered (5 ms from a resident rung, 52–900 ms if a development is in the way).
+/// The canvas meanwhile holds a picture laid out for the *old* camera, so the change reads as a cut.
+/// That was tolerable while the ladder was 40 rungs of ~10 % (1.0, 1.1, …, 4.0 — the ladder the
+/// report says felt smooth); with five stops the same cut is a 2× jump.
 ///
-/// Both content rects are centred on the canvas (`RenderGraph` letterboxes with
-/// `origin = (canvas − content) / 2`), so the map between them is a **pure scale**: no translation,
-/// no anchor-point arithmetic, no geometry-flip ambiguity to get wrong.
+/// So the picture already on screen is carried to where the new camera will put it: one
+/// `CATransform3D` on the canvas layer, from the presentation's current value to the target's.
+///
+/// **The map is a similarity, not a scale about the anchor point.** Both cameras lay the picture out
+/// against the crop (`origin = (canvas − content) / 2`, and the window inside it is the source
+/// rectangle the camera shows), so the transform that turns one into the other is
+///
+///     aN(p) = scale · aO(p) + offset,   scale = zoomN / zoomO,  a = projection in canvas pixels
+///
+/// — a uniform scale `zoomN/zoomO` plus a translation. The translation is what keeps the **cursor's
+/// source pixel under the cursor** while the picture grows around it, and it also absorbs the case
+/// where the window had to be pulled back inside the crop (the anchor cannot be honoured there, and
+/// the offset is then exactly that pull-back, no more). A pure scale about the canvas centre — what
+/// the old `fit ↔ actual` bridge did — only happens to be right when both cameras are centred and
+/// the cursor is in the middle, which is the one case a five-stop ladder almost never lands on.
 public struct LoupeZoomBridge: Equatable, Sendable {
 
-    /// The picture's rect in canvas pixels, before the crossing (the old camera).
+    /// The rect the picture occupies in canvas pixels under the camera that produced it.
     public let fromContent: ImageSize
-    /// The rect the new camera's frame will occupy.
+    /// The rect the target camera's frame will occupy.
     public let toContent: ImageSize
+    /// The projection the texture **on the canvas** was laid out with.
+    public let fromMapping: LoupeMapping
+    /// The projection the target camera will lay out.
+    public let toMapping: LoupeMapping
+    /// The canvas in device pixels (layer bounds × backing scale), y down.
+    public let canvas: ImageSize
+    /// Where the composite already is when the bridge arms: the presentation's own scale and offset.
+    /// A retarget that started from identity would jump the picture back to where it was before the
+    /// previous stop change — the "回跳" of a held ⌘=.
+    public let startScale: Double
+    public let startOffsetX: Double
+    public let startOffsetY: Double
+    /// How long this bridge takes, in seconds (already scaled to the span it covers).
+    public let duration: CFTimeInterval
 
-    public init(fromContent: ImageSize, toContent: ImageSize) {
+    public init(fromContent: ImageSize, toContent: ImageSize,
+                fromMapping: LoupeMapping, toMapping: LoupeMapping, canvas: ImageSize,
+                startScale: Double = 1, startOffsetX: Double = 0, startOffsetY: Double = 0,
+                duration: CFTimeInterval = LoupeZoomBridge.defaultDuration) {
         self.fromContent = fromContent
         self.toContent = toContent
+        self.fromMapping = fromMapping
+        self.toMapping = toMapping
+        self.canvas = canvas
+        self.startScale = startScale
+        self.startOffsetX = startOffsetX
+        self.startOffsetY = startOffsetY
+        self.duration = duration
     }
 
-    /// A content rect thinner than this is a broken frame, not a picture to scale by 2560×.
+    // MARK: the map
+
+    /// The uniform scale from the canvas texture to the target camera: `zoomN / zoomO`.
+    ///
+    /// Uniform because both projections are similarities (the straighten rotation, the flips and the
+    /// half-pixel convention are the same in both), so the only thing that differs is how many canvas
+    /// pixels a source pixel is worth. `100 → 200 %` is 1 → 2; `fit → 100 %` on a 60 MP frame in a
+    /// 2560-px viewport is 0.31 → 1.
+    public var scale: Double {
+        let o = fromMapping.canvasPerSource
+        let n = toMapping.canvasPerSource
+        guard o > 1e-12, n.isFinite else { return 1 }
+        return n / o
+    }
+
+    /// The translation, in device pixels, y down: `aN(p) = scale · aO(p) + offset`.
+    ///
+    /// Taken from the target window's centre — any source pixel names the same map, and this one is
+    /// inside both windows, so it never divides by something degenerate.
+    public var offset: (x: Double, y: Double) {
+        let px = toMapping.cropLeft + toMapping.cropWidth / 2
+        let py = toMapping.cropTop + toMapping.cropHeight / 2
+        let o = fromMapping.viewPoint(sourceX: px, sourceY: py)
+        let n = toMapping.viewPoint(sourceX: px, sourceY: py)
+        let s = scale
+        return (n.x - s * o.x, n.y - s * o.y)
+    }
+
+    /// A change that lays the picture out identically has nothing to bridge — a pan at a fixed zoom,
+    /// or `fit` and `100 %` on a file small enough that they coincide (the frame is already right).
+    /// A rect thinner than this is a broken frame, not a picture to scale by 2560×.
     private static let minimumContentSide = 8
 
-    public var scaleX: Double {
-        fromContent.width >= Self.minimumContentSide
-            ? Double(toContent.width) / Double(fromContent.width) : 1
-    }
-
-    public var scaleY: Double {
-        fromContent.height >= Self.minimumContentSide
-            ? Double(toContent.height) / Double(fromContent.height) : 1
-    }
-
-    /// A crossing between two cameras that lay the picture out identically has nothing to bridge.
     public var isVisible: Bool {
-        scaleX.isFinite && scaleY.isFinite
-            && (abs(scaleX - 1) > 0.002 || abs(scaleY - 1) > 0.002)
+        let s = scale
+        guard s.isFinite, s > 0,
+              fromContent.width >= Self.minimumContentSide,
+              fromContent.height >= Self.minimumContentSide,
+              toContent.width >= Self.minimumContentSide,
+              toContent.height >= Self.minimumContentSide,
+              canvas.width >= Self.minimumContentSide,
+              canvas.height >= Self.minimumContentSide else { return false }
+        let o = offset
+        return abs(s - 1) > 0.002 || abs(o.x) > 0.5 || abs(o.y) > 0.5
     }
+
+    // MARK: the layer transform
+
+    /// `CATransform3D` for `aN(p) = s · aO(p) + o`, expressed in the layer's own coordinates.
+    ///
+    /// `CALayer.transform` is applied about the **anchor point** (the canvas centre here), and its
+    /// coordinates are points with y **up** from the layer's bottom-left, while every number above is
+    /// device pixels with y **down** from the top-left. The two conversions cancel in a way worth
+    /// writing down, since a sign error here slides the picture by half a viewport:
+    ///
+    ///     v_yup = (canvas.height / backingScale) − v_ydown / backingScale
+    ///     t_up  = (o.x / k, (1 − s) · H − o.y / k)         with H = canvas.height / k
+    ///     τ     = t_up − (1 − s) · (W/2, H/2)              (what the anchor-point conjugation leaves)
+    ///
+    /// so `m41 = o.x/k − (1 − s)·W/2` and `m42 = (1 − s)·H/2 − o.y/k`, with `m11 = m22 = s`.
+    public func transform(scale s: Double, offset o: (x: Double, y: Double),
+                          backingScale: Double) -> CATransform3D {
+        let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
+        let w = Double(canvas.width) / k
+        let h = Double(canvas.height) / k
+        var m = CATransform3DIdentity
+        m.m11 = CGFloat(s)
+        m.m22 = CGFloat(s)
+        m.m41 = CGFloat(o.x / k - (1 - s) * w / 2)
+        m.m42 = CGFloat((1 - s) * h / 2 - o.y / k)
+        return m
+    }
+
+    /// The transform the animation ends on.
+    public func targetTransform(backingScale: Double) -> CATransform3D {
+        transform(scale: scale, offset: offset, backingScale: backingScale)
+    }
+
+    /// The transform the animation starts on: identity for a fresh bridge, the presentation's own
+    /// value for one that replaced a running bridge.
+    public func startTransform(backingScale: Double) -> CATransform3D {
+        transform(scale: startScale, offset: (startOffsetX, startOffsetY), backingScale: backingScale)
+    }
+
+    /// Canvas pixel (device pixels, y down) → layer point (points, y up). The test-side half of the
+    /// conversion above, so the map can be asserted in the space it was derived in.
+    public func layerPoint(canvasX: Double, canvasY: Double, backingScale: Double) -> CGPoint {
+        let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
+        return CGPoint(x: canvasX / k, y: (Double(canvas.height) - canvasY) / k)
+    }
+
+    /// The layer's anchor point in its own points — the canvas centre, which is where `CALayer`
+    /// applies the transform about (the default `anchorPoint` is `(0.5, 0.5)`).
+    public func layerAnchor(backingScale: Double) -> CGPoint {
+        let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
+        return CGPoint(x: Double(canvas.width) / k / 2, y: Double(canvas.height) / k / 2)
+    }
+
+    /// Apply a layer transform the way `CALayer` does: about the anchor point, not the origin.
+    ///
+    /// `v' = anchor + M · (v − anchor)`. A plain matrix application would be off by `(1 − scale) ·
+    /// anchor` — half a viewport of drift at 2×, which is exactly the kind of bug this helper exists
+    /// to make impossible to write into a test.
+    public static func apply(_ m: CATransform3D, to v: CGPoint, anchor: CGPoint) -> CGPoint {
+        let x = v.x - anchor.x, y = v.y - anchor.y
+        return CGPoint(x: anchor.x + m.m11 * x + m.m21 * y + m.m41,
+                       y: anchor.y + m.m12 * x + m.m22 * y + m.m42)
+    }
+
+    /// Read `(scale, offset)` back out of a layer transform — the inverse of `transform(scale:offset:)`,
+    /// used to continue a running animation from the value the eye is looking at.
+    public static func offset(ofLayerTransform m: CATransform3D, canvas: ImageSize,
+                              backingScale: Double) -> (scale: Double, x: Double, y: Double) {
+        let k = backingScale.isFinite && backingScale > 0 ? backingScale : 1
+        let w = Double(canvas.width) / k
+        let h = Double(canvas.height) / k
+        let s = Double(m.m11)
+        guard s.isFinite, s > 0 else { return (1, 0, 0) }
+        return (s, k * (Double(m.m41) + (1 - s) * w / 2), k * ((1 - s) * h / 2 - Double(m.m42)))
+    }
+
+    // MARK: how long
+
+    /// 180 ms, easeOut, for **every** stop change — one duration, not a function of the span.
+    ///
+    /// The user's rule: every zoom moves, and it moves by the same beat. A variable duration (60 ms
+    /// per octave, say) makes a 25 % → 33.3 % step feel like a different mechanism than a 100 % → 400 %
+    /// one, and the 2× step the app was tuned on is the one that has to keep its feel. 180 ms is also
+    /// what the original `fit ↔ 100 %` bridge used; it is long enough to read as motion at 60 Hz and
+    /// short enough that the wait for a sharp frame is not what the eye lands on.
+    ///
+    /// The animation is **never waited on**: a real frame that arrives mid-flight retargets the
+    /// composite (or the bridge is cut short at its own target — `LoupeController.finishZoomBridge`),
+    /// and the camera is already on the new stop before the first animation frame is drawn.
+    public static let defaultDuration: CFTimeInterval = 0.180
 }
 
 // MARK: - framing (viewport + crop → all the numbers)
@@ -271,9 +423,9 @@ public struct LoupeFraming: Equatable, Sendable {
     /// `min(1, …)`: an image smaller than the viewport is shown at 1:1, never blown up — the M3 rule.
     /// The result is therefore always in `(0, 1]`, and it is usually **not** one of the zoom stops:
     /// 0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, exactly 1.0 for a file that
-    /// already fits. The ladder (`LoupeViewState.levels(fitZoom:)`) inserts this value as its own rung
-    /// wherever it falls, so the stops (0.5…4) and fit are ordered by value, not by convention —
-    /// nothing may assume fit sits below 50 %, and nothing may assume the current zoom is ≥ fit.
+    /// already fits. It is also not *in* the ladder any more — `fit` is a mode, and its ratio is only
+    /// ever used to lay the whole frame out and to label the readout (`适应 31%`). Nothing may assume
+    /// fit sits below 25 %, below 50 %, or below the current zoom.
     public var fitZoom: Double {
         let z = min(Double(viewport.width) / max(cropWidthPixels, 1e-9),
                     Double(viewport.height) / max(cropHeightPixels, 1e-9))
@@ -287,29 +439,67 @@ public struct LoupeFraming: Equatable, Sendable {
 
     // MARK: window
 
-    /// The visible window, in source pixels.
+    /// How much of the window must keep covering the picture when the camera leaves the crop.
     ///
-    /// At `fit` it is the whole crop. At `actual` it is `viewport ÷ zoom`, clamped to the crop so a
-    /// window that would reach past the frame instead shrinks and letterboxes — which is exactly how
-    /// "fit" itself is rendered, so both modes go through one path.
+    /// The camera is allowed to walk off the edge of the photograph — a zoom anchored on a pixel near
+    /// the corner, or a zoom *out* from a corner, pushes the window outward, and stopping it there
+    /// would move the very pixel the gesture is about. What it may not do is walk so far that the user
+    /// is looking at nothing: the window's centre stays **on the picture**, so at least half of the
+    /// canvas always shows photograph and the way back is always visible. Half is the value that does
+    /// that without a second rule — it needs no knowledge of the zoom, the window or the crop, and it
+    /// fails gracefully: a window bigger than the crop (zoomed out on a small file) has no legal
+    /// excursion at all and is centred, which is what it was always doing.
+    ///
+    /// At the limit the camera **stops**; it does not rubber-band or spring back, so letting go of a
+    /// drag never moves the picture.
+    public static let minimumPictureCoverage: Double = 0.5
+
+    /// The visible window, in source pixels: the viewport at `zoom`, **not** clipped to the crop.
+    ///
+    /// It used to be `min(crop, viewport / zoom)`, which silently rescaled the picture whenever the
+    /// crop was smaller than the viewport — a second, invisible zoom. The window is now the canvas at
+    /// the camera's scale; the part of it that misses the picture is background (`s0_geometry` writes
+    /// zero there, it does not stretch the edge), and `limitedCenter` is what keeps that part from
+    /// taking over the screen.
     public func windowSize(of state: LoupeViewState) -> (width: Double, height: Double) {
         guard state.mode == .actual else {
             return (cropWidthPixels, cropHeightPixels)
         }
         let z = zoom(of: state)
-        return (min(cropWidthPixels, Double(viewport.width) / z),
-                min(cropHeightPixels, Double(viewport.height) / z))
+        return (Double(viewport.width) / z, Double(viewport.height) / z)
     }
 
-    /// Window centre in source pixels, clamped so the window stays inside the crop.
+    /// Window centre in source pixels, limited by `minimumPictureCoverage`.
     public func windowCenter(of state: LoupeViewState) -> (x: Double, y: Double) {
         let size = windowSize(of: state)
         guard state.mode == .actual else {
             return (cropOriginX + cropWidthPixels / 2, cropOriginY + cropHeightPixels / 2)
         }
-        return clampedCenter(x: state.centerX, y: state.centerY, window: size)
+        return limitedCenter(x: state.centerX, y: state.centerY, window: size)
     }
 
+    /// The legal range for a window centre: far enough out that `minimumPictureCoverage` of the window
+    /// still lands on the picture, and no further.
+    ///
+    /// With the coverage rule at ½ this reduces to "the centre stays inside the crop", which is the
+    /// whole policy in one line. The interval is empty for a window larger than the crop — nothing can
+    /// reach ½ coverage then — and a window that big has exactly one sensible place to be.
+    public func limitedCenter(x: Double, y: Double,
+                              window: (width: Double, height: Double)) -> (x: Double, y: Double) {
+        let n = Self.minimumPictureCoverage
+        let minX = cropOriginX + n * window.width - window.width / 2
+        let maxX = cropOriginX + cropWidthPixels + window.width / 2 - n * window.width
+        let minY = cropOriginY + n * window.height - window.height / 2
+        let maxY = cropOriginY + cropHeightPixels + window.height / 2 - n * window.height
+        let cx = maxX <= minX ? cropOriginX + cropWidthPixels / 2 : min(max(x, minX), maxX)
+        let cy = maxY <= minY ? cropOriginY + cropHeightPixels / 2 : min(max(y, minY), maxY)
+        return (cx, cy)
+    }
+
+    /// Kept under its old name for the callers that spelled the containment rule out: a centre that
+    /// keeps the **whole** window inside the crop. Nothing in the camera uses it any more — the loupe
+    /// allows the picture to leave the frame (`limitedCenter`) — but a document-level crop still wants
+    /// this, and it is the honest name for "strictly inside".
     public func clampedCenter(x: Double, y: Double,
                               window: (width: Double, height: Double)) -> (x: Double, y: Double) {
         let halfWidth = window.width / 2, halfHeight = window.height / 2
@@ -456,7 +646,10 @@ public struct LoupeFraming: Equatable, Sendable {
         let cs = cos(theta), sn = sin(theta)
         let dx = (delta.x * cs - delta.y * sn) / z
         let dy = (delta.x * sn + delta.y * cs) / z
-        let centre = clampedCenter(x: state.centerX + dx, y: state.centerY + dy,
+        // A drag that runs off the edge of the picture keeps its picture: the window may hang over the
+        // edge (`minimumPictureCoverage`), it stops where the canvas would stop being photograph, and
+        // it stays there when the hand lets go.
+        let centre = limitedCenter(x: state.centerX + dx, y: state.centerY + dy,
                                    window: windowSize(of: state))
         var next = state
         next.centerX = centre.x
@@ -491,7 +684,10 @@ public struct LoupeFraming: Equatable, Sendable {
         let mapped = mapping(of: state).sourcePoint(viewX: Double(view.x) * backingScale,
                                                     viewY: Double(view.y) * backingScale)
         let centre = windowCenter(of: state)
-        let shifted = clampedCenter(x: centre.x + (mapped.x - anchor.x),
+        // The anchored pixel stays put, exactly, unless the window would end up with less than
+        // `minimumPictureCoverage` of itself on the picture — then it stops at the limit, and this is
+        // the only case in which a zoom moves the pixel it was told to keep.
+        let shifted = limitedCenter(x: centre.x + (mapped.x - anchor.x),
                                     y: centre.y + (mapped.y - anchor.y),
                                     window: windowSize(of: next))
         next.centerX = shifted.x
@@ -502,7 +698,7 @@ public struct LoupeFraming: Equatable, Sendable {
     /// Centre the window on a source pixel (double-click into 1:1, "zoom in here").
     public func centering(_ state: LoupeViewState, onSource point: (x: Double, y: Double)) -> LoupeViewState {
         var next = state
-        let centre = clampedCenter(x: point.x, y: point.y, window: windowSize(of: next))
+        let centre = limitedCenter(x: point.x, y: point.y, window: windowSize(of: next))
         next.centerX = centre.x
         next.centerY = centre.y
         return next
@@ -551,6 +747,11 @@ public struct LoupeMapping: Equatable, Sendable {
 
     public var originX: Double { (Double(viewport.width) - contentWidth) / 2 }
     public var originY: Double { (Double(viewport.height) - contentHeight) / 2 }
+
+    /// Canvas pixels per source pixel this projection draws at — `contentWidth / cropWidth`, which is
+    /// `zoom` for an `actual` camera and `fitZoom` for the whole-frame one. The uniform scale between
+    /// two cameras is the ratio of these (`LoupeZoomBridge.scale`).
+    public var canvasPerSource: Double { contentWidth / max(cropWidth, 1e-9) }
 
     /// Device pixel → source pixel.
     public func sourcePoint(viewX: Double, viewY: Double) -> (x: Double, y: Double) {

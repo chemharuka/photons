@@ -209,12 +209,16 @@ public final class EditorWindowController: NSWindowController {
     /// 适应窗口 (⌘0). The same destination as Z from 1:1 and as Escape — one `LoupeViewState.change`.
     @objc public func zoomFitAction(_ sender: Any?) { rootView.loupeController.zoomToFit() }
 
-    /// 50% / 100% / 200% / 300% / 400% — the stop travels in the item's `tag` **as a percentage**
-    /// (`50` → 0.5), because a menu item is rebuilt from a static list, a tag is the one field AppKit
-    /// keeps without a model object, and an `Int` cannot hold 0.5.
+    /// 25% / 33.3% / 50% / 66.7% / 100% / 200% / 300% / 400% — the stop travels in the item's `tag`
+    /// **as an index** into `LoupeController.menuZoomStops`.
+    ///
+    /// An index, not a percentage: `1.0/3.0` has no hundredths representation, so a `33` tag would
+    /// land the action on 0.33 — a stop the menu never offered — and a `Double` tag on an `NSMenuItem`
+    /// is a boxed `NSNumber` nobody wants to parse back. The array is the table of record.
     @objc public func zoomStopAction(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem, item.tag > 0 else { return }
-        rootView.loupeController.zoom(to: Double(item.tag) / 100)
+        guard let item = sender as? NSMenuItem,
+              LoupeController.menuZoomStops.indices.contains(item.tag) else { return }
+        rootView.loupeController.zoom(to: LoupeController.menuZoomStops[item.tag])
     }
 
     /// 放大 (⌘=, and ⌘+ on a US keyboard lands here too). Disabled outside the loupe.
@@ -276,13 +280,14 @@ public final class EditorWindowController: NSWindowController {
             item.state = rootView.loupeController.viewState.isActualSize ? .off : .on
             return session.mode == .loupe && session.anchorID != nil
         case #selector(zoomStopAction(_:)):
-            // Exactly on this stop, not "at least": 2:1 and 4:1 cannot both be ticked, and a pinch
-            // between stops ticks none of them (the readout still says 1.7:1).
+            // Exactly on this stop, not "at least": 2:1 and 4:1 cannot both be ticked, and `fit`
+            // (which is not a rung) ticks none of them.
             let current = rootView.loupeController.currentZoomStop
-            // The tag carries a **percentage** (`50`), the camera carries a zoom (`0.5`) — comparing
-            // them raw is why no item was ever ticked after the tag moved to percent.
-            let tagZoom = Double(item.tag) / 100
-            item.state = (current.map { abs($0 - tagZoom) < 0.005 } ?? false) ? .on : .off
+            // The tag is an **index** into the stop table, so this is the same double the camera was
+            // set from — `1/3` compares as `1/3`, not as 0.33 or 0.333.
+            let tagZoom = LoupeController.menuZoomStops.indices.contains(item.tag)
+                ? LoupeController.menuZoomStops[item.tag] : .nan
+            item.state = (current.map { abs($0 - tagZoom) < 1e-9 } ?? false) ? .on : .off
             return session.mode == .loupe && session.anchorID != nil
         case #selector(zoomInAction(_:)):
             return session.mode == .loupe && session.anchorID != nil

@@ -611,6 +611,12 @@ public final class RenderGraph {
         /// feather keeps its physical size inside a window. Equal to `content` without a window, so
         /// the no-window path keeps 005d's exact numbers.
         let frameInCanvas: ImageSize
+        /// The window reaches past the frame — the loupe's "let the picture leave the edge" camera.
+        /// S0 writes **background** (`float4(0)`) where the window misses the picture instead of
+        /// stretching the frame's edge texels outward, which is what bare clamp-to-edge would do.
+        /// Always false for a window that names a rect inside the frame, so every pre-existing key,
+        /// golden and edge-sample behaviour is untouched.
+        let backgroundOutside: Bool
         let keys: StageKeys
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
@@ -638,8 +644,20 @@ public final class RenderGraph {
         let whole = ImageRect(x: 0, y: 0, width: frame.width, height: frame.height)
         // A window covering the frame *is* no window: normalizing here means "1:1 on a picture smaller
         // than the viewport" shares the whole-frame key instead of minting one for a full-frame cut.
-        let window = options.outputWindow
-            .map { $0.clamped(in: frame) }
+        //
+        // A window that reaches **outside** the frame is not clamped into it — it is the loupe's
+        // canvas-space camera (`LoupeFraming.windowSize` is the viewport at the zoom, unclipped), and
+        // clamping it would silently re-frame the picture: the render would come back smaller than
+        // the canvas and the canvas would letterbox it, which is a jump, not a crop. Those pixels are
+        // background instead (`backgroundOutside`), and a window wholly inside the frame keeps the
+        // `clamped(in:)` rule it has always had.
+        let requestedWindow = options.outputWindow
+        let backgroundOutside = requestedWindow.map { w in
+            w.x < 0 || w.y < 0
+                || w.x + w.width > frame.width || w.y + w.height > frame.height
+        } ?? false
+        let window = requestedWindow
+            .map { backgroundOutside ? $0 : $0.clamped(in: frame) }
             .flatMap { $0 == whole ? nil : $0 }
 
         let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? frame
@@ -669,7 +687,7 @@ public final class RenderGraph {
                                        identity: input.identity)
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
-                    frameInCanvas: frameInCanvas, keys: keys)
+                    frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys)
     }
 
     // MARK: render
@@ -1061,7 +1079,9 @@ public final class RenderGraph {
                          Float(plan.crop.width), Float(plan.crop.height)),
                 d: SIMD4(costheta(edit), sintheta(edit),
                          edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
-                e: SIMD4(identity ? 1 : 0, 0, 0, 0),
+                // e.y: the window reaches past the frame, so the miss renders as background. Zero on
+                // every in-frame render, which is why this changes no existing pixel.
+                e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0, 0, 0),
                 f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
