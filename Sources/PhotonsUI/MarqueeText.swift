@@ -338,12 +338,65 @@ public enum InspectorPhotoInfo {
     public static let unknownCamera = "未知相机"
     public static let unknownLens = "未知镜头"
 
+    /// The four cells of the exposure row, already formatted and **unpadded**: the row is laid out
+    /// as four equal-width slots (LR's arrangement) rather than as a space-padded string, so the
+    /// fields keep their positions no matter what the values are.
+    public struct ParameterTokens: Equatable, Sendable {
+        public let iso: String
+        public let focal: String
+        public let aperture: String
+        public let shutter: String
+
+        public var all: [String] { [iso, focal, aperture, shutter] }
+    }
+
+    public static func tokens(iso: Int?, focalLength: Double?, aperture: Double?,
+                              shutter: String?) -> ParameterTokens {
+        ParameterTokens(iso: "ISO " + (iso.map { "\($0)" } ?? "—"),
+                        // One decimal on the aperture always: it is a photographic number, and a
+                        // fixed `f/2.8` / `f/32.0` shape keeps the cell from breathing.
+                        focal: (focalLength.map { decimal($0) } ?? "—") + " mm",
+                        aperture: aperture.map { "f/" + String(format: "%.1f", $0) } ?? "f/—",
+                        shutter: self.shutter(shutter) ?? "—")
+    }
+
+    /// The same row as one string — used for the accessibility label and by the tests. The visible
+    /// row is `InspectorParameterRow`, which places these four tokens in equal-width slots
+    /// (ISO flush left, shutter flush right, the other two centred in their slots).
     public static func parameters(iso: Int?, focalLength: Double?, aperture: Double?, shutter: String?) -> String {
-        let isoPart = iso.map { "ISO \($0)" } ?? "ISO —"
-        let focalPart = focalLength.map { "\(decimal($0)) mm" } ?? "— mm"
-        let aperturePart = aperture.map { "f/\(decimal($0))" } ?? "f/—"
-        let shutterPart = self.shutter(shutter) ?? "—"
-        return [isoPart, focalPart, aperturePart, shutterPart].joined(separator: " · ")
+        tokens(iso: iso, focalLength: focalLength, aperture: aperture, shutter: shutter)
+            .all.joined(separator: " · ")
+    }
+
+    /// The exposure row, LR-style: four equal-width slots across the card's content width, ISO
+    /// flush left, shutter flush right, focal length and aperture centred in the two middle slots.
+    ///
+    /// Equal slots rather than spacers on purpose — a spacer pair would let a longer value push its
+    /// neighbours around, which is exactly the "快门位置会动" complaint.
+    public struct InspectorParameterRow: View {
+        public let tokens: InspectorPhotoInfo.ParameterTokens
+
+        public init(tokens: InspectorPhotoInfo.ParameterTokens) { self.tokens = tokens }
+
+        public var body: some View {
+            HStack(spacing: 0) {
+                cell(tokens.iso, alignment: .leading)
+                cell(tokens.focal, alignment: .center)
+                cell(tokens.aperture, alignment: .center)
+                cell(tokens.shutter, alignment: .trailing)
+            }
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+            .lineLimit(1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(tokens.all.joined(separator: " · "))
+        }
+
+        private func cell(_ text: String, alignment: Alignment) -> some View {
+            Text(text)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// `Leica SL3 · Sigma 20-60 DG`; a missing half keeps its slot with `未知相机` / `未知镜头`,

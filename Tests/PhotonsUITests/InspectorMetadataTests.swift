@@ -18,17 +18,42 @@ final class InspectorMetadataTests: XCTestCase {
 
     // MARK: format rules
 
-    func testParametersLinePinsEverySlotInOrder() {
+    /// The row is four *tokens*, laid out by `InspectorParameterRow` in equal-width slots — ISO
+    /// flush left, shutter flush right, focal length and aperture centred. Nothing is space-padded
+    /// any more, so a token must never carry its own surrounding whitespace.
+    func testParameterTokensAreUnpaddedAndOrdered() {
+        let t = InspectorPhotoInfo.tokens(iso: 100, focalLength: 24, aperture: 2.8, shutter: "1/250")
+        XCTAssertEqual(t.iso, "ISO 100")
+        XCTAssertEqual(t.focal, "24 mm")
+        XCTAssertEqual(t.aperture, "f/2.8")
+        XCTAssertEqual(t.shutter, "1/250s")
+        for token in t.all {
+            XCTAssertEqual(token, token.trimmingCharacters(in: .whitespaces),
+                           "\(token) must not carry padding — the slots do the aligning")
+        }
+    }
+
+    func testParametersLineJoinsTheTokensForAccessibility() {
         XCTAssertEqual(
             InspectorPhotoInfo.parameters(iso: 100, focalLength: 24, aperture: 2.8, shutter: "1/250"),
             "ISO 100 · 24 mm · f/2.8 · 1/250s")
-        // 24.0 must not print as "24.0 mm", and f/8 must not print as "f/8.0".
-        XCTAssertEqual(
-            InspectorPhotoInfo.parameters(iso: 64, focalLength: 90, aperture: 8, shutter: "1/60s"),
-            "ISO 64 · 90 mm · f/8 · 1/60s")
         XCTAssertEqual(
             InspectorPhotoInfo.parameters(iso: 3200, focalLength: 24.5, aperture: 1.4, shutter: "2"),
             "ISO 3200 · 24.5 mm · f/1.4 · 2s")
+    }
+
+    /// The four slots are equal width (`maxWidth: .infinity` each), so the shutter column cannot move
+    /// when the values change — that is the whole reason the padded string went away.
+    func testParameterRowGivesEveryFieldTheSameSlotWidth() {
+        let a = InspectorPhotoInfo.tokens(iso: 100, focalLength: 24, aperture: 2.8, shutter: "1/250")
+        let b = InspectorPhotoInfo.tokens(iso: 102_400, focalLength: 8000, aperture: 32, shutter: "1/8000")
+        XCTAssertEqual(a.all.count, 4)
+        XCTAssertEqual(b.all.count, 4)
+        // The widest possible row still fits the card content width at 10 pt monospaced.
+        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let widest = b.all.reduce(CGFloat.zero) { $0 + ($1 as NSString).size(withAttributes: [.font: font]).width }
+        XCTAssertLessThan(widest, cardContentWidth,
+                          "the widest row (\(widest) pt) must fit \(cardContentWidth) pt")
     }
 
     func testParametersLineKeepsAllFourSlotsWhenTheFileIsSilent() {
@@ -76,9 +101,10 @@ final class InspectorMetadataTests: XCTestCase {
 
     // MARK: width
 
-    /// The three rows come out of a real `NSHostingView` at the default 330 pt inspector, so this is
-    /// the width SwiftUI actually handed the `MarqueeRowView`s — not a constant read back from a
-    /// constant.
+    /// The rows come out of a real `NSHostingView` at the default 330 pt inspector, so this is the
+    /// width SwiftUI actually handed them — not a constant read back from a constant. Only the
+    /// filename and equipment rows are marquees now; the exposure row is `InspectorParameterRow`,
+    /// four equal slots that span the same width.
     @MainActor
     func testInfoRowsTakeExactlyTheCardContentWidth() throws {
         _ = NSApplication.shared
@@ -92,13 +118,13 @@ final class InspectorMetadataTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
 
         let rows = Self.marqueeRows(in: host)
-        XCTAssertEqual(rows.count, 3, "filename + shooting parameters + equipment")
-        guard rows.count == 3 else { return }
+        XCTAssertEqual(rows.count, 2, "filename + equipment are marquees; the exposure row is not")
+        guard rows.count == 2 else { return }
 
         for (index, row) in rows.enumerated() {
             XCTAssertEqual(row.frame.width, cardContentWidth, accuracy: 0.5,
                            "row \(index) width \(row.frame.width) ≠ card content \(cardContentWidth)")
-            XCTAssertEqual(row.lineHeight, 14, accuracy: 0.001, "one rhythm for all three rows")
+            XCTAssertEqual(row.lineHeight, 14, accuracy: 0.001, "one rhythm for all rows")
         }
         print("MARQUEE width: inspector \(inspectorWidth) → card content \(cardContentWidth) pt; "
               + "rows \(rows.map { String(format: "%.1f", $0.frame.width) })")

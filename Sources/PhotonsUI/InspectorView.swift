@@ -129,7 +129,7 @@ public struct InspectorView: View {
                 .font(.system(size: 12, weight: .bold))
             VStack(alignment: .leading, spacing: 2) {
                 MarqueeText(text: session.anchorAsset?.filename ?? "未选择照片")
-                MarqueeText(text: shootingParameters, monospacedDigits: true)
+                InspectorPhotoInfo.InspectorParameterRow(tokens: parameterTokens)
                 MarqueeText(text: equipment)
             }
         }
@@ -139,11 +139,11 @@ public struct InspectorView: View {
 
     // MARK: shooting information (派单 014)
 
-    private var shootingParameters: String {
-        InspectorPhotoInfo.parameters(iso: photoMetadata?.iso,
-                                      focalLength: photoMetadata?.focalLength,
-                                      aperture: photoMetadata?.aperture,
-                                      shutter: photoMetadata?.shutter)
+    private var parameterTokens: InspectorPhotoInfo.ParameterTokens {
+        InspectorPhotoInfo.tokens(iso: photoMetadata?.iso,
+                                  focalLength: photoMetadata?.focalLength,
+                                  aperture: photoMetadata?.aperture,
+                                  shutter: photoMetadata?.shutter)
     }
 
     private var equipment: String {
