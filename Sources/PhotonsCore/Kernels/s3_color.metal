@@ -8,9 +8,15 @@ using namespace metal;
 // moving one hue slider cannot produce a seam against its neighbour. Overlapping weights are
 // renormalised, so a pixel sitting between two centres gets a blend rather than double the shift.
 // Each band arrives as (hue, saturation, luminance, centreDegrees).
+//
+// Matte (派单 008 C): a *black* pixel survives this pass today because HSL keeps `l = 0` whatever
+// the saturation does, so the matte happens to come out 0 — but that is an accident of the maths,
+// not a rule, and the moment a hue band or a lift lands on a dark channel the bars tint. The
+// content-rect guard is the rule, the same one S2 and S3a now carry.
 
 struct ColorParams {
     float4 a;   // vibrance, saturation, identity, pad
+    float4 b;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
 
 static inline float3 rgb_to_hsl(float3 c) {
@@ -63,6 +69,13 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
                      uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
     if (p.a.z > 0.5) {
+        dst.write(c, gid);
+        return;
+    }
+
+    // Outside the content rect: the matte, written back unchanged.
+    float2 g = float2(gid);
+    if (g.x < p.b.x || g.y < p.b.y || g.x >= p.b.x + p.b.z || g.y >= p.b.y + p.b.w) {
         dst.write(c, gid);
         return;
     }

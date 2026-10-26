@@ -221,10 +221,9 @@ final class ToneMapTests: XCTestCase {
     /// encode maps 0 to 0 — this pins that they still do, at the extremes, with the sliders that used
     /// to lift the bars.
     ///
-    /// Not covered here: a **curve** whose black end is dragged above 0 (`CurvePoint(0, 0.1)`) lifts
-    /// the matte by design of that LUT (measured: 0.349 in display units, i.e. the sRGB encode of
-    /// 0.1). That is a separate pass with its own "the user asked for this output at 0" semantics and
-    /// is deliberately out of 派单 008's scope; reported, not changed.
+    /// The **curve** used to be the hole in this chain: a LUT with a point at `(0, 0.1)` lifted the
+    /// matte to 0.349 display units. That is fixed in `s3_curve` (派单 008 C) and pinned by
+    /// `CurveMatteTests`; the case is not re-run here because it is no longer a ToneMapTests concern.
     func testMatteSurvivesTheRestOfTheChain() throws {
         let image = rampImage()
         let graph = try makeGraph(image)
