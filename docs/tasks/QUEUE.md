@@ -77,6 +77,22 @@
 - Q8/Q9/Q10 依赖各自的规格文档，规格一到就派，彼此文件不重叠，可三项并行。
 - 每轮 3 个子代理同时写代码（实测有效：终态可控、互相不踩）（本机编译 8 核，再多会互相抢 CPU 且 `make verify` 变慢）。
 
+## 第 12 轮（2026-10-26 晚 · 主线 `s-mainline-dispatch`，五路并行）
+
+| # | 工作流 | 规格 | worktree | 状态 |
+|---|---|---|---|---|
+| Q31 | **黑点/白点改成线性黑电平/白电平**（修「曝光越大暗部越黑」） | `docs/tasks/019-black-white-levels.md` | `/tmp/photons-wt-bw` | 已派 |
+| Q32 | 去 flaky：`ThumbnailServiceTests` + `LoupeQueueTests` | `docs/tasks/020-deflake-wallclock-tests.md` | `/tmp/photons-wt-flaky-a` | 已派 |
+| Q33 | 去 flaky：`HistogramCadenceTests` + `LoupeZoomTransitionTests` | `docs/tasks/020-…` | `/tmp/photons-wt-flaky-b` | 已派 |
+| Q34 | 文件夹树行高 46→28 + ⌘ 多选＝筛选（跨 root 并集） | `docs/tasks/021-folder-tree-row-height-and-multiselect.md` | `/tmp/photons-wt-foldertree` | 已派 |
+| Q35 | 信息栏三行：文件名 / `60 MP` / `9000×6000`（左·中·右，无中文标签） | `docs/tasks/022-inspector-three-rows.md` | `/tmp/photons-wt-inspector` | 已派 |
+
+已合入：`1b38191` **液态玻璃缩放条**（`feat/zoom-glass-slider`，1291 行，定向 19 项绿）。
+
+**验收纪律补丁 `1394157`**：`make test` 原来是 `swift test | tail -40`，管道退出码取 `tail` 的 0，
+所以 `ThumbnailServiceTests` 真红时 `make verify` 仍打印 ALL GREEN（2026-10-26 20:46 实测）。
+现在改成落 `/tmp/photons-test.log` + 失败 `exit 1`。**`1394157` 之前的「全绿」不可全信。**
+
 ## 明确不做（除非用户改口径）
 
 多帧 HDR/超解析、自写 demosaic、DNG 导出、打印/幻灯片/地图/视频/人脸、AI 模型自研。
