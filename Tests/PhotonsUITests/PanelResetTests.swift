@@ -1,0 +1,406 @@
+import XCTest
+import AppKit
+import SwiftUI
+import PhotonsCatalog
+import PhotonsCore
+@testable import PhotonsUI
+
+/// 派单 047 — 双击复位：参数名回该字段的默认，分区名回整组默认，**一条**历史。
+///
+/// What is pinned, and why each assertion is the one that matters:
+///
+///   1. **一条 = 一次 ⌘Z**。双击「Light」把六根滑杆 + 两个绝对电平写回默认，历史只 +1；⌘Z 一步全部
+///      回来（逐字段断言）。写错成「每字段各提交一次」会得到 6 条 —— 下面 `testTheGroupResetIsOne
+///      EntryWhileThePerFieldPathWouldBeSix` 就是这个错误实现的常驻反证：它把两条路径都跑一遍，
+///      一条是 1，另一条是 6。
+///   2. **默认不是字面 0**。参考值是 `EditModel.neutral`（各组自己的默认构造）与 `DetailAxis` 的机身
+///      基线 —— 细节是 `0/50/0/50`（Leica），白平衡是 `nil`（原照）。硬编码 0 会让这条红。
+///   3. **白平衡 = 原照设定 = 重新解码**：`decodeInputs.key` 必须移动过去再回来（这正是「会重新
+///      develop」的机器可读形式，与 `WhiteBalanceSectionTests` 用 `decodeCounts` 测的是同一件事）。
+///   4. **已经默认就不写历史**：双击一下不该长出一条空快照，更不该截断 redo 分支。
+///
+/// 走的是 `PanelResets` —— 面板双击时调用的**同一个**实现（与 `WhiteBalanceCommands` 同一套路），
+/// 所以这里绿的断言就是屏幕上那个动作的断言。视图层的接线（`card(title:reset:)`、
+/// `ResetOnDoubleClick`）在 `testEveryParameterCardCanBeResetFromItsTitle` 里按源码钉住：`swift test`
+/// 没有窗口会话，无障碍树是空的（同 `DetailSectionTests` 的已知限制）。
+@MainActor
+final class PanelResetTests: XCTestCase {
+
+    // MARK: - 1. 双击参数名
+
+    /// 曝光 +2.0 → 双击「曝光」→ 0.0，历史 +1；⌘Z 回到 +2.0。
+    func testDoubleClickingAParameterNameResetsThatFieldAndUndoBringsItBack() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+
+        // A drag that lands on +2.0: one snapshot, the row's own path.
+        session.applyEdit { $0.light.exposure = 2 }
+        XCTAssertTrue(session.commitEdit(label: "拖动"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.field(\.light.exposure, label: "曝光"), "a changed field must reset")
+        XCTAssertEqual(session.edit.light.exposure,
+                       EditModel.neutral.light.exposure, accuracy: 1e-12,
+                       "曝光's default comes from the model (0), not from a literal in the panel")
+        XCTAssertEqual(session.history.count, before + 1, "双击参数名 = 一条历史")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "曝光")
+
+        XCTAssertTrue(session.undo(), "⌘Z must be able to take the reset back")
+        XCTAssertEqual(session.edit.light.exposure, 2, "⌘Z 回到 +2.0")
+        print("曝光 reset: 2 → \(EditModel.neutral.light.exposure) · history +1 · undo → "
+              + "\(session.edit.light.exposure)")
+    }
+
+    /// 每根滑杆的默认都来自它自己的字段（不是同一个 0）：色彩降噪回 50，不是 0。
+    func testEachParametersDefaultIsItsOwnFieldAndNotZero() {
+        // Every tone/color row's default is the neutral document's value for that very key path.
+        for row in InspectorView.lightRows + InspectorView.colorRows {
+            XCTAssertEqual(row.defaultValue, EditModel.neutral[keyPath: row.keyPath])
+        }
+        // 细节: the body's baseline position, which is 50 for colour NR on a Leica (and 100 for
+        // sharpness on an R5) — a 0 here would switch Apple's default off (031).
+        let leica = DetailBaseline.measured
+        XCTAssertEqual(DetailAxis.panelOrder.map { $0.defaultPosition(in: leica) }, [0, 50, 0, 50])
+        XCTAssertNotEqual(DetailAxis.colorNR.defaultPosition(in: leica), 0,
+                          "the panel must not treat 'default' as 'zero'")
+
+        // 色温/色调: as shot = `nil`, because the default is the *file's* balance (006).
+        XCTAssertNil(SessionDefaults.temperature)
+        XCTAssertNil(SessionDefaults.tint)
+        print("defaults · 曝光 \(InspectorView.lightRows[0].defaultValue) · 色彩降噪 "
+              + "\(DetailAxis.colorNR.defaultPosition(in: leica)) · 色温 as shot (nil)")
+    }
+
+    /// 双击「色彩降噪」（细节卡的一根）→ 回机身默认位置，一条历史，可 ⌘Z。
+    func testDoubleClickingADetailParameterGoesBackToTheBodyBaseline() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { $0.detailSettings.setPosition(20, .colorNR, in: .measured) }
+        XCTAssertTrue(session.commitEdit(label: "拖动"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.detail(.colorNR))
+        XCTAssertNil(session.edit.detailSettings.colorNR, "`nil` = 停在该机身的默认位置")
+        XCTAssertEqual(session.edit.detailSettings.position(.colorNR, in: .measured), 50,
+                       "屏幕上是 50，不是 0")
+        XCTAssertEqual(session.history.count, before + 1)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.detailSettings.colorNR, 20)
+    }
+
+    // MARK: - 2. 双击分区名
+
+    /// Light 里六个滑杆 + 两个绝对电平各设非默认值 → 双击「Light」→ 全部回默认，历史**只 +1**。
+    func testDoubleClickingLightPutsEveryFieldBackInOneSnapshot() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+
+        session.applyEdit { model in
+            model.light.exposure = 2
+            model.light.contrast = 40
+            model.light.highlights = -30
+            model.light.shadows = 25
+            model.light.whites = 15
+            model.light.blacks = -10
+            model.light.blackLevel = 0.02
+            model.light.whiteLevel = 1.5
+            // 白平衡不在这张卡里：它有自己的卡和自己的双击，所以这里必须原样保留。
+            model.light.temperature = 5200
+            model.light.tint = 8
+        }
+        XCTAssertTrue(session.commitEdit(label: "一堆调整"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.light), "a changed card must reset")
+
+        // 逐字段：六个滑杆回自己字段的默认，两个电平回 nil。
+        let neutral = EditModel.neutral.light
+        XCTAssertEqual(session.edit.light.exposure, neutral.exposure, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.contrast, neutral.contrast, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.highlights, neutral.highlights, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.shadows, neutral.shadows, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.whites, neutral.whites, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.blacks, neutral.blacks, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.blackLevel, LightGroup.identity.blackLevel)
+        XCTAssertEqual(session.edit.light.whiteLevel, LightGroup.identity.whiteLevel)
+        XCTAssertNil(session.edit.light.blackLevel, "030: 回到滑杆映射 = nil，不是 0")
+        XCTAssertNil(session.edit.light.whiteLevel)
+        // 白平衡原样：Light 的复位不许偷偷把色温也清掉。
+        XCTAssertEqual(session.edit.light.temperature, 5200,
+                       "the Light card does not own the white balance — its reset must not touch it")
+        XCTAssertEqual(session.edit.light.tint, 8)
+
+        XCTAssertEqual(session.history.count, before + 1, "整组复位 = 一条历史，不是 N 条")
+        XCTAssertEqual(session.history.currentSnapshot?.label, InspectorView.Section.light.title,
+                       "the undo label is the card the user double-clicked")
+        print("Light reset: history +\(session.history.count - before) · "
+              + "\(session.edit.light.exposure)/\(session.edit.light.contrast)/"
+              + "\(session.edit.light.highlights)/\(session.edit.light.shadows)/"
+              + "\(session.edit.light.whites)/\(session.edit.light.blacks) · "
+              + "levels \(String(describing: session.edit.light.blackLevel))/"
+              + "\(String(describing: session.edit.light.whiteLevel))")
+    }
+
+    /// 一步 ⌘Z 把整组逐字段带回来。
+    func testOneUndoTakesTheWholeLightGroupBack() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.light.exposure = 1.5
+            model.light.contrast = 22
+            model.light.highlights = -11
+            model.light.shadows = 33
+            model.light.whites = 44
+            model.light.blacks = -55
+        }
+        XCTAssertTrue(session.commitEdit(label: "一堆调整"))
+        XCTAssertTrue(resets.group(.light))
+        XCTAssertTrue(session.undo())
+
+        let restored = session.edit.light
+        XCTAssertEqual(restored.exposure, 1.5, "⌘Z 一步：六个字段逐个回来")
+        XCTAssertEqual(restored.contrast, 22)
+        XCTAssertEqual(restored.highlights, -11)
+        XCTAssertEqual(restored.shadows, 33)
+        XCTAssertEqual(restored.whites, 44)
+        XCTAssertEqual(restored.blacks, -55)
+    }
+
+    /// **反证（常驻）**：把整组复位写成「每字段各提交一次」就是 N 条历史。
+    ///
+    /// 这里把两条路径都跑一遍：`group(.light)` 是 1，逐字段循环是 6。前者一旦被改成后者，第一条
+    /// 断言立刻红 —— 这就是规格第 7 条要的反证，不需要改代码再手动跑一次。
+    func testTheGroupResetIsOneEntryWhileThePerFieldPathWouldBeSix() {
+        func configured() -> CatalogSession {
+            let session = CatalogSession()
+            session.applyEdit { model in
+                model.light.exposure = 2
+                model.light.contrast = 40
+                model.light.highlights = -30
+                model.light.shadows = 25
+                model.light.whites = 15
+                model.light.blacks = -10
+            }
+            session.commitEdit(label: "一堆调整")
+            return session
+        }
+
+        // (a) the shipped path: one entry
+        let one = configured()
+        let oneBefore = one.history.count
+        PanelResets(session: one).group(.light)
+        let oneDelta = one.history.count - oneBefore
+
+        // (b) the failing shape: one applyEdit + one commitEdit per field
+        let many = configured()
+        let manyBefore = many.history.count
+        for row in InspectorView.lightRows {
+            many.applyEdit { $0[keyPath: row.keyPath] = EditModel.neutral[keyPath: row.keyPath] }
+            many.commitEdit(label: row.title)
+        }
+        let manyDelta = many.history.count - manyBefore
+
+        print("group reset · shipped \(oneDelta) snapshot(s) · per-field \(manyDelta) snapshot(s)")
+        XCTAssertEqual(oneDelta, 1, "双击分区必须是**一条**历史")
+        XCTAssertEqual(manyDelta, InspectorView.lightRows.count,
+                       "the per-field route is what this test guards against: it is N, not 1")
+        XCTAssertNotEqual(oneDelta, manyDelta, "一条和 N 条必须是可分辨的，否则这条断言没有意义")
+    }
+
+    // MARK: - 3. 白平衡 = 原照设定
+
+    /// 双击「白平衡」→ `temperature/tint` 回 `nil`，**一条**历史，且 `decodeInputs` 移动（= 重新 develop）。
+    func testTheWhiteBalanceGroupResetIsAsShotAndMovesTheDecodeInputs() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        let asShotKey = session.edit.decodeInputs.key
+
+        session.applyEdit { model in
+            model.light.temperature = 5200
+            model.light.tint = 8
+        }
+        XCTAssertTrue(session.commitEdit(label: "色温"))
+        XCTAssertNotEqual(session.edit.decodeInputs.key, asShotKey,
+                          "显式色温必然是另一份解码输入（= 一次新的 develop）")
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.whiteBalance))
+        XCTAssertNil(session.edit.light.temperature, "原照设定 = nil（不是 5200，也不是 6500）")
+        XCTAssertNil(session.edit.light.tint)
+        XCTAssertTrue(session.edit.light.whiteBalance.isAsShot)
+        XCTAssertEqual(session.edit.decodeInputs.key, asShotKey,
+                       "回到原照：解码输入回到 as shot 那一份，所以会重新 develop")
+        XCTAssertEqual(session.history.count, before + 1, "整组复位 = 一条历史")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "原照设置")
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.light.temperature, 5200)
+        XCTAssertEqual(session.edit.light.tint, 8)
+        print("白平衡 reset: 5200/+8 → as shot · decodeInputs \(session.edit.decodeInputs.key)")
+    }
+
+    /// 双击「色温」（单个参数）只把那一根轴回原照，色调原样。
+    func testDoubleClickingTheTemperatureNameOnlyClearsThatAxis() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.light.temperature = 5200
+            model.light.tint = 12
+        }
+        XCTAssertTrue(session.commitEdit(label: "色温"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.whiteBalanceField(isTemperature: true))
+        XCTAssertNil(session.edit.light.temperature)
+        XCTAssertEqual(session.edit.light.tint, 12, "the other axis keeps what it held")
+        XCTAssertEqual(session.history.count, before + 1)
+
+        XCTAssertTrue(resets.whiteBalanceField(isTemperature: false))
+        XCTAssertNil(session.edit.light.tint)
+        XCTAssertTrue(session.edit.light.whiteBalance.isAsShot)
+    }
+
+    // MARK: - 4. 细节 = 机身基线
+
+    /// 双击「细节」→ 四条滑杆回**基线位置**（Leica `0/50/0/50`），不是全 0，一条历史。
+    func testTheDetailGroupResetReturnsToTheBodyBaselineNotToZero() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        let asShotKey = session.edit.decodeInputs.key
+
+        // All four dragged away from their default positions (20 / 80 / 30 / 70 on any body, since
+        // neither 20 nor 80 is a baseline: Leica is 0/50/0/50, R5 sharpness 100).
+        session.applyEdit { model in
+            model.detailSettings.setPosition(20, .luminanceNR, in: .measured)
+            model.detailSettings.setPosition(80, .colorNR, in: .measured)
+            model.detailSettings.setPosition(30, .detail, in: .measured)
+            model.detailSettings.setPosition(70, .sharpness, in: .measured)
+        }
+        XCTAssertTrue(session.commitEdit(label: "降噪"))
+        XCTAssertNotEqual(session.edit.decodeInputs.key, asShotKey,
+                          "碰过细节就是另一份解码输入")
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.detail))
+
+        let leica = DetailBaseline.measured
+        XCTAssertTrue(session.edit.detailSettings.isIdentity,
+                      "全 nil = 四根都停在机身默认位置")
+        XCTAssertEqual(DetailAxis.panelOrder.map { session.edit.detailSettings.position($0, in: leica) },
+                       [0, 50, 0, 50],
+                       "Leica 基线是 0/50/0/50 —— 不是全 0（0 会关掉 Apple 的色彩降噪）")
+        XCTAssertNotEqual(DetailAxis.panelOrder.map { session.edit.detailSettings.position($0, in: leica) },
+                          [0, 0, 0, 0],
+                          "反证：整组复位写成全 0 会让这条红")
+        XCTAssertEqual(session.edit.decodeInputs.key, asShotKey,
+                       "回到基线 = 回到未碰过面板的那份解码输入（会重新 develop）")
+        XCTAssertEqual(session.history.count, before + 1)
+        XCTAssertEqual(session.history.currentSnapshot?.label, InspectorView.Section.detail.title)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.detailSettings.position(.colorNR, in: leica), 80)
+        print("细节 reset: 20/80/30/70 → \(DetailAxis.panelOrder.map { session.edit.detailSettings.position($0, in: .measured) })")
+    }
+
+    /// R5 的基线不同（锐化 100）：复位不是写死 50 的证据。
+    func testTheDetailResetFollowsTheBodyNotAConstant() {
+        let r5 = DetailBaseline(luminanceNR: 0, colorNR: 0.5, sharpness: 1, detail: 0)
+        XCTAssertEqual(DetailAxis.panelOrder.map { DetailSettings.identity.position($0, in: r5) },
+                       [0, 50, 0, 100],
+                       "a reset that wrote 50 would be wrong on this body")
+        XCTAssertNotEqual(DetailAxis.sharpness.defaultPosition(in: r5),
+                          DetailAxis.sharpness.defaultPosition(in: .measured))
+    }
+
+    // MARK: - 5. Color
+
+    func testTheColorGroupResetIsOneSnapshot() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.color.vibrance = -40
+            model.color.saturation = 60
+        }
+        XCTAssertTrue(session.commitEdit(label: "饱和"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.color))
+        XCTAssertEqual(session.edit.color, ColorGroup.identity)
+        XCTAssertEqual(session.edit.color.vibrance, EditModel.neutral.color.vibrance)
+        XCTAssertEqual(session.edit.color.saturation, EditModel.neutral.color.saturation)
+        XCTAssertEqual(session.history.count, before + 1)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.color.vibrance, -40)
+        XCTAssertEqual(session.edit.color.saturation, 60)
+    }
+
+    // MARK: - 6. 没有变化就不写历史
+
+    func testAResetOnAnAlreadyDefaultPanelWritesNothing() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        XCTAssertEqual(session.history.count, 0, "a fresh session starts with no snapshots")
+
+        XCTAssertFalse(resets.field(\.light.exposure, label: "曝光"))
+        XCTAssertFalse(resets.group(.light))
+        XCTAssertFalse(resets.group(.color))
+        XCTAssertFalse(resets.group(.detail))
+        XCTAssertFalse(resets.group(.whiteBalance))
+        XCTAssertFalse(resets.detail(.colorNR))
+        XCTAssertFalse(resets.whiteBalanceField(isTemperature: true))
+        XCTAssertEqual(session.history.count, 0, "空双击不该长出一条空快照")
+    }
+
+    // MARK: - 7. 每张参数卡都能从标题复位（视图层接线）
+
+    /// `card(title:reset:)` 是分组的唯一入口：四张参数卡都传了 reset，其它卡没有。
+    ///
+    /// `swift test` 里没有窗口会话，双击不可注入，所以这条钉源码 —— 与 `SliderStyleTests`
+    /// (`whiteBalanceRow` 必须是长条) 同一种手法。
+    func testEveryParameterCardCanBeResetFromItsTitle() throws {
+        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("private func card<Content: View>(_ title: String,\n"
+                                      + "                                     reset: (() -> Void)? = nil,"),
+                      "the card builder must take the group reset, or a card cannot get one")
+        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))"),
+                      "the reset must hang on the card's title, not on the card's body")
+
+        // 四张参数卡：Light / Color / 细节 / 白平衡 —— 各一处，且都在标题上。
+        XCTAssertTrue(source.contains("card(Section.light.title, reset: { resetGroup(.light) })"))
+        XCTAssertTrue(source.contains("card(Section.color.title, reset: { resetGroup(.color) })"))
+        XCTAssertTrue(source.contains("card(Section.detail.title, reset: { resetGroup(.detail) })"))
+        XCTAssertTrue(source.contains("card(Section.whiteBalance.title, reset: { resetWhiteBalance() })"))
+
+        // 分组清单就是那四张卡；蒙版是列表，没有「整组默认」。
+        XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
+                       ["whiteBalance", "light", "color", "detail"])
+        XCTAssertEqual(PanelResets.Group.allCases.map(\.title),
+                       [InspectorView.Section.whiteBalance.title, InspectorView.Section.light.title,
+                        InspectorView.Section.color.title, InspectorView.Section.detail.title],
+                       "the undo label is the card the user double-clicked")
+
+        // 每一根滑杆都有复位：`sliderRow` 的 `onReset` 是必填参数，不是可选的。
+        XCTAssertFalse(source.contains("onReset: (() -> Void)? = nil"),
+                       "a row must not be able to opt out of double-click reset")
+        XCTAssertTrue(source.contains("onReset: @escaping () -> Void,"),
+                      "onReset is a required parameter of the one row builder")
+    }
+
+    // MARK: - helpers
+
+    /// The white-balance defaults, named so the assertion above reads as the rule: as shot is `nil`.
+    private enum SessionDefaults {
+        static let temperature = EditModel.neutral.light.temperature
+        static let tint = EditModel.neutral.light.tint
+    }
+
+    private static var inspectorSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PhotonsUITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
+}

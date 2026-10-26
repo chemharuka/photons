@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import PhotonsCatalog
 import PhotonsCore
@@ -11,6 +12,19 @@ import PhotonsCore
 ///
 /// The drag/release split matters: `onEditingChanged` fires once when the drag ends, and that is
 /// exactly one `EditHistory` snapshot. Committing per tick would make ⌘Z undo 1/100 EV at a time.
+///
+/// 派单 047 adds three interactions to **every** row of the panel, and all three live in the two
+/// builders below (`sliderRow` / `card`), never in a card: a card that drew its own row would get a
+/// different behaviour set, which is exactly the bug the single builder exists to prevent.
+///
+///   1. **The number is a field** (`SliderNumberField`): click it (or Tab to it), type, `↵` commits,
+///      `Esc` cancels, losing focus commits. `SliderValueInput` is the parser; a rejected string
+///      beeps, puts the old number back and writes **nothing**. An accepted one takes the drag's own
+///      path (`applyEdit` through the binding, then the gesture-end commit) — one input, one snapshot.
+///   2. **Double-click a parameter's name** → that field back to its own default (`PanelResets.field`,
+///      read from `EditModel.neutral`, never a literal `0`).
+///   3. **Double-click a card's title** → the whole card back in **one** snapshot (`PanelResets.group`),
+///      so ⌘Z takes the group back in one press rather than N.
 public struct InspectorView: View {
 
     /// The cards, in display order (派单 009 A).
@@ -247,11 +261,16 @@ public struct InspectorView: View {
 
     /// Light: tone only. 色温/色调 moved out (派单 009 A) — they are a decode setting, and keeping a
     /// second entry here would be two controls for one fact.
+    ///
+    /// 047: the title resets the whole card (`PanelResets.group(.light)` — one snapshot, and the two
+    /// absolute levels back to `nil`), each name resets its own field.
     private var lightCard: some View {
-        card(Section.light.title) {
+        card(Section.light.title, reset: { resetGroup(.light) }) {
             ForEach(Self.lightRows, id: \.title) { row in
-                sliderRow(row.title, binding(row.keyPath), row.range, row.format, shape: row.shape) {
-                    editing in
+                sliderRow(row.title, binding(row.keyPath), row.range, row.format,
+                          shape: row.shape,
+                          editable: row.editable,
+                          onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
                     // Drag end = one edit action = one history snapshot (never per tick).
                     if !editing { session.commitEdit() }
                 }
@@ -265,11 +284,12 @@ public struct InspectorView: View {
     /// a known illuminant (menu), a number (sliders), or a sample (dropper). All three end in the same
     /// place: one `commitWhiteBalance` → one history snapshot → one development.
     private var whiteBalanceCard: some View {
-        card(Section.whiteBalance.title) {
+        card(Section.whiteBalance.title, reset: { resetWhiteBalance() }) {
             presetRow
             divider
-            whiteBalanceRow("色温", isTemperature: true)
-            whiteBalanceRow("色调", isTemperature: false)
+            ForEach(Self.whiteBalanceRows, id: \.title) { row in
+                whiteBalanceRow(row)
+            }
             dropperRow
             if let hint {
                 Text(hint)
@@ -282,9 +302,15 @@ public struct InspectorView: View {
     }
 
     private var colorCard: some View {
-        card(Section.color.title) {
-            row("自然饱和", \.color.vibrance, -100 ... 100, "%.0f")
-            row("饱和", \.color.saturation, -100 ... 100, "%.0f")
+        card(Section.color.title, reset: { resetGroup(.color) }) {
+            ForEach(Self.colorRows, id: \.title) { row in
+                sliderRow(row.title, binding(row.keyPath), row.range, row.format,
+                          shape: row.shape,
+                          editable: row.editable,
+                          onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+                    if !editing { session.commitEdit() }
+                }
+            }
         }
     }
 
@@ -307,17 +333,16 @@ public struct InspectorView: View {
     ///     live in the Decode card.
     private var detailCard: some View {
         let baseline = detailBaselineValue
-        return card(Section.detail.title) {
+        return card(Section.detail.title, reset: { resetGroup(.detail) }) {
             ForEach(Self.detailContent.rows, id: \.axis) { row in
                 sliderRow(row.title,
                           detailBinding(row.axis, baseline: baseline),
                           row.range,
                           row.format,
                           shape: row.shape,
-                          editable: true,
+                          editable: row.editable,
                           accessibilityID: "inspector.detail.\(row.axis.rawValue)",
-                          onReset: { resetDetail(row.axis) },
-                          onSubmit: { commitDetail(title: row.title) }) { editing in
+                          onReset: { resets.detail(row.axis) }) { editing in
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
@@ -371,13 +396,9 @@ public struct InspectorView: View {
     /// Double-click: back to **this body's default position** — not to 0. On a Leica that is 50 for
     /// colour NR and sharpness, on an R5 it is 100 for sharpness; resetting to 0 would switch Apple's
     /// default off instead of restoring it. One snapshot, one development.
-    private func resetDetail(_ axis: DetailAxis) {
-        guard session.edit.detailSettings[axis] != nil else { return }
-        session.applyEdit { $0.detailSettings[axis] = nil }
-        session.commitEdit(label: "复位")
-        loupe?.endDetailAdjustment()
-    }
-
+    ///
+    /// 047: the body of this verb moved to `PanelResets.detail(_:)` so the panel and the tests run the
+    /// same code; the card's `onReset:` calls it.
     private var decodeCard: some View {
         card(Section.decode.title) {
             VStack(alignment: .leading, spacing: 4) {
@@ -403,11 +424,19 @@ public struct InspectorView: View {
 
     // MARK: building blocks
 
-    private func card<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+    /// A card: its title, and its rows.
+    ///
+    /// `reset` is 派单 047's group verb: when it is given, **double-clicking the title** puts the whole
+    /// card back to its defaults in one snapshot (`PanelResets.group(_:)`). `nil` leaves the title a
+    /// plain title — the histogram, 信息, 预设 and 蒙版 cards have no "default" to go back to.
+    private func card<Content: View>(_ title: String,
+                                     reset: (() -> Void)? = nil,
+                                     @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.primary)
+                .modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))
             content()
         }
         .padding(.horizontal, WorkspaceLayout.cardInsetH)
@@ -422,29 +451,39 @@ public struct InspectorView: View {
         )
     }
 
-    /// A **render** row (曝光 / 对比 / 自然饱和 …): the knob shape is the default, because a tone or
-    /// color control does not re-develop the RAW (046's table).
-    private func row(_ title: String, _ keyPath: WritableKeyPath<EditModel, Double>,
-                     _ range: ClosedRange<Double>, _ format: String) -> some View {
-        sliderRow(title, binding(keyPath), range, format, shape: .knob) { editing in
-            // Drag end = one edit action = one history snapshot (never per tick).
-            if !editing { session.commitEdit() }
-        }
-    }
+    /// A **render** row (曝光 / 对比 / 自然饱和 …): what 046 calls a `.knob` parameter, because a tone
+    /// or color control does not re-develop the RAW.
+    ///
+    /// 047 kept the rule and deleted the helper's reason to exist: the Light and Color cards now both
+    /// iterate a `ToneRow` table, so the shape comes from the row (`row.shape`), not from a literal
+    /// here. Two cards, one table type — a row cannot be born without a shape, a default and a reset.
 
     // MARK: the Light card's rows (046: all six are render parameters → .knob)
 
-    /// One tone row: what the row draws, and which shape it draws.
+    /// One tone row: what the row draws, which shape it draws, and what its default is.
     ///
     /// A table rather than six inline calls because the **shape rule is per parameter class**, and a
     /// test has to be able to hold the six rows' shapes without an accessibility tree
     /// (`LightCardTests`). `keyPath` keeps the write path single-sourced — the card iterates this.
+    ///
+    /// 047 adds the two facts every row needs and no card may answer differently:
+    ///
+    ///   · `editable` — the number is a text field. It is in the table so 「每根滑杆都能输入」is a
+    ///     failing test on a table, not a discovery on screen;
+    ///   · `defaultValue` — derived from `EditModel.neutral`, i.e. from the group's own default
+    ///     initializer. A reset must never be a literal `0`: 曝光 0 and 色彩降噪 50 are both "default",
+    ///     and only the model knows which is which.
     public struct ToneRow: Equatable {
         public var title: String
         public var range: ClosedRange<Double>
         public var format: String
         public var shape: SliderShape
         public var keyPath: WritableKeyPath<EditModel, Double>
+        /// 047: every row in this panel takes a typed number (no card opts out).
+        public var editable: Bool = true
+
+        /// The field's own default, read from the neutral document — never a hard-coded number.
+        public var defaultValue: Double { EditModel.neutral[keyPath: keyPath] }
     }
 
     /// 曝光 / 对比 / 高光 / 阴影 / 白色 / 黑色 — the six tone controls, in display order.
@@ -459,6 +498,18 @@ public struct InspectorView: View {
         ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows),
         ToneRow(title: "白色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.whites),
         ToneRow(title: "黑色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.blacks),
+    ]
+
+    /// 自然饱和 / 饱和 — the Color card's two rows, the same table shape as Light.
+    ///
+    /// 047 put them in a table for the same reason 046 did with Light's: the card's behaviour (shape,
+    /// typeable number, per-parameter reset) is then a value a test can hold, and the two cards cannot
+    /// drift apart. Both are render parameters, so both are `.knob`.
+    public static let colorRows: [ToneRow] = [
+        ToneRow(title: "自然饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.color.vibrance),
+        ToneRow(title: "饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.color.saturation),
     ]
 
     // MARK: the one row shape (派单 040)
@@ -483,12 +534,20 @@ public struct InspectorView: View {
         var controlSize: ControlSize { .mini }
     }
 
-    /// A row: title (double-click resets when `onReset` is given), the number, and the slider.
+    /// A row: title (double-click = that field's default), the number, and the slider.
     ///
-    /// `editable` is the one difference the task asks for: the 细节 card has a number you can type
-    /// (`onSubmit` writes and commits, so a typed value is one history entry and one development),
-    /// the tone cards print theirs. Everything else — fonts, spacing, `controlSize`, the row's height —
-    /// comes from `SliderRowStyle`.
+    /// Three of 047's contracts live here, and nowhere else, so every card gets them:
+    ///
+    ///   · **`editable`** — the number is a `SliderNumberField`: click it, type, `↵`/blur commits, `Esc`
+    ///     cancels, junk beeps and writes nothing. A typed value takes the *drag's* path — the binding
+    ///     write, then `onEditingChanged(false)` — so one input is one history entry, exactly like one
+    ///     drag. (The old 细节-only `TextField(value:format:)` wrote a value the row then had to commit
+    ///     by a second route; it also rounded `0.5` to `1` on the way in.)
+    ///   · **`onReset`** is **required**: a row cannot be built without the thing a double-click on its
+    ///     name should do. It is the card's job to say *what* the default is (`ToneRow.defaultValue`,
+    ///     `DetailAxis`'s body baseline, as-shot for 色温/色调), and `PanelResets`' job to write it.
+    ///   · **the number's format** is the row's own (`%.2f EV`, `%.0f`, …) for display; while editing it
+    ///     shows the clean number, so what the user types back is what the document holds.
     ///
     /// `shape` is 派单 046's only visual switch: `.bar` for the decoder parameters (降噪 / 色彩降噪 /
     /// 细节 / 锐化), `.knob` for everything that acts on the already-decoded render (Light, Color,
@@ -506,27 +565,30 @@ public struct InspectorView: View {
                            _ format: String,
                            shape: SliderShape = .knob,
                            style: SliderRowStyle = .standard,
-                           editable: Bool = false,
+                           editable: Bool = true,
                            accessibilityID: String? = nil,
-                           onReset: (() -> Void)? = nil,
-                           onSubmit: (() -> Void)? = nil,
+                           onReset: @escaping () -> Void,
                            onEditingChanged: @escaping (Bool) -> Void) -> some View {
         VStack(alignment: .leading, spacing: style.rowSpacing) {
             HStack(spacing: style.headSpacing) {
                 Text(title)
                     .font(.system(size: style.labelSize, weight: style.labelWeight))
                     .foregroundStyle(.secondary)
-                    .modifier(ResetOnDoubleClick(action: onReset))
+                    .modifier(ResetOnDoubleClick(action: onReset, help: Self.resetParameterHelp))
                 Spacer(minLength: 4)
                 if editable {
-                    TextField("", value: value, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.trailing)
-                        .font(.system(size: style.readoutSize, design: .monospaced))
-                        .foregroundStyle(.primary)
-                        .frame(width: 40)
-                        .onSubmit { onSubmit?() }
-                        .accessibilityIdentifier(accessibilityID ?? "")
+                    SliderNumberField(value: value.wrappedValue,
+                                      range: range,
+                                      format: format,
+                                      fontSize: style.readoutSize,
+                                      accessibilityID: accessibilityID,
+                                      onCommit: { typed in
+                                          // The drag's own path, in the drag's own order: write through
+                                          // the binding, then the gesture-end commit. One typed value =
+                                          // one `applyEdit` + one `commitEdit` = one history entry.
+                                          value.wrappedValue = typed
+                                          onEditingChanged(false)
+                                      })
                 } else {
                     Text(Self.sliderText(format, value.wrappedValue))
                         .font(.system(size: style.readoutSize, design: .monospaced))
@@ -570,6 +632,28 @@ public struct InspectorView: View {
     }
 
     // MARK: white balance (派单 006 / 009)
+
+    /// One white-balance row: the axis it drives, its travel and its number format.
+    ///
+    /// 047: the card iterates this instead of calling `whiteBalanceRow` twice, so the two rows carry
+    /// the same three interactions as every other row in the panel — and a test can hold the table
+    /// (`PanelEditingTests`) rather than a rendered tree.
+    public struct WhiteBalanceRow: Equatable {
+        public var title: String
+        public var isTemperature: Bool
+        public var range: ClosedRange<Double>
+        public var format: String
+        /// 047: typeable, like every other row (no card opts out).
+        public var editable: Bool = true
+    }
+
+    /// 色温 / 色调, in display order — Kelvin first, as the decoder takes them.
+    public static let whiteBalanceRows: [WhiteBalanceRow] = [
+        WhiteBalanceRow(title: "色温", isTemperature: true,
+                        range: WhiteBalance.temperatureRange, format: "%.0f K"),
+        WhiteBalanceRow(title: "色调", isTemperature: false,
+                        range: WhiteBalance.tintRange, format: "%+.0f"),
+    ]
 
     /// The file's own white balance, as the decode reported it. `nil` until the first development
     /// lands (`session.capabilities`), which is why the row can say "as shot" without a number.
@@ -631,29 +715,42 @@ public struct InspectorView: View {
     ///  · **Drag ≠ decode.** A tick only moves `@State`; release quantizes (25 K / 1 tint) and
     ///    writes the document once. Committing per tick would queue a ~762 ms development per pixel
     ///    of slider travel, and the pixels could never keep up with the thumb anyway.
-    private func whiteBalanceRow(_ title: String, isTemperature: Bool) -> some View {
+    ///
+    /// 047 makes the two rows one table (`whiteBalanceRows`) and gives them the panel's three common
+    /// interactions: the number is typeable (`commitWhiteBalanceValue` — the same quantization and the
+    /// same as-shot fold as a drag release), double-clicking the name puts **that axis** back to as
+    /// shot, and double-clicking the card's title puts both back (`PanelResets.group(.whiteBalance)`).
+    private func whiteBalanceRow(_ row: WhiteBalanceRow) -> some View {
+        let isTemperature = row.isTemperature
         let stored = isTemperature ? session.edit.light.temperature : session.edit.light.tint
         let draft = isTemperature ? draftTemperature : draftTint
         let shot = isTemperature ? asShotWhiteBalance.temperature : asShotWhiteBalance.tint
         // Only a fallback for "no decode yet": the file's value, never a claim about the photo.
         let shown = draft ?? stored ?? shot ?? (isTemperature ? 6500 : 0)
-        let range = isTemperature ? WhiteBalance.temperatureRange : WhiteBalance.tintRange
-        let format = isTemperature ? "%.0f K" : "%+.0f"
 
         return VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
-                Text(title)
+                Text(row.title)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .modifier(ResetOnDoubleClick(
+                        action: { resets.whiteBalanceField(isTemperature: isTemperature) },
+                        help: Self.resetParameterHelp))
                 if stored == nil {
                     Text("as shot")
                         .font(.system(size: 8))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 4)
-                Text(Self.sliderText(format, shown))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.primary)
+                SliderNumberField(value: shown,
+                                  range: row.range,
+                                  format: row.format,
+                                  fontSize: 10,
+                                  width: 52,
+                                  accessibilityID: "inspector.whiteBalance.\(row.title)",
+                                  onCommit: { typed in
+                                      commitWhiteBalanceValue(typed, isTemperature: isTemperature)
+                                  })
             }
             // 046: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以按规则
             // 用长条形；曝光/对比那些只跑渲染的才是圆球。两者的 label / 数值 / 抬起才提交的语义完全相同。
@@ -662,7 +759,7 @@ public struct InspectorView: View {
                                          if isTemperature { draftTemperature = newValue }
                                          else { draftTint = newValue }
                                      }),
-                      range: range) { editing in
+                      range: row.range) { editing in
                 // Release = quantize + one document write = one development (`commitWhiteBalance`).
                 if !editing { commitWhiteBalance(isTemperature: isTemperature) }
             }
@@ -767,8 +864,16 @@ public struct InspectorView: View {
             if isTemperature { draftTemperature = nil } else { draftTint = nil }
         }
         guard let draft = isTemperature ? draftTemperature : draftTint else { return }
-        var wb = WhiteBalance(temperature: isTemperature ? draft : session.edit.light.temperature,
-                              tint: isTemperature ? session.edit.light.tint : draft).quantized()
+        commitWhiteBalanceValue(draft, isTemperature: isTemperature)
+    }
+
+    /// The one place a white-balance *number* becomes a document change — shared by a drag's release
+    /// and by a typed value (047), so both quantize (25 K / 1), both fold a value that lands on the
+    /// file's own back to `nil` (assigning the reported Kelvin is not a no-op: 派单 006 measured
+    /// 0.15–0.40 % of samples moving), and both write exactly one snapshot.
+    private func commitWhiteBalanceValue(_ value: Double, isTemperature: Bool) {
+        var wb = WhiteBalance(temperature: isTemperature ? value : session.edit.light.temperature,
+                              tint: isTemperature ? session.edit.light.tint : value).quantized()
         let shot = asShotWhiteBalance
         if isTemperature, let v = wb.temperature, let s = shot.temperature,
            abs(v - s) <= WhiteBalance.temperatureStep / 2 {
@@ -780,6 +885,33 @@ public struct InspectorView: View {
         commands.commit(wb, label: isTemperature ? "色温" : "色调")
         lastPresetID = nil
         hint = nil
+    }
+
+    // MARK: 派单 047: the panel's resets
+
+    /// The panel's reset verbs, as one value (the `WhiteBalanceCommands` pattern): the view calls them
+    /// on a double-click, the tests call them directly — the same code either way.
+    private var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
+
+    private static let resetParameterHelp = "双击复位此参数"
+    private static let resetGroupHelp = "双击整组复位"
+
+    /// Double-click on a card's title: the whole card back to its defaults, in one snapshot.
+    private func resetGroup(_ group: PanelResets.Group) {
+        resets.group(group)
+    }
+
+    /// Double-click on 「白平衡」.
+    ///
+    /// 白平衡 is the one group whose default is not a number in `EditModel.neutral`: its default is *the
+    /// file's own balance*, i.e. `nil` on both axes (the user's call, 2026-10-27), which is also a new
+    /// development. The slider draft and the menu's selection go with it.
+    private func resetWhiteBalance() {
+        draftTemperature = nil
+        draftTint = nil
+        guard resets.group(.whiteBalance) else { return }
+        lastPresetID = WhiteBalancePresets.asShot.id
+        hint = "原照设置 · 交给解码器（不写温度/色调）"
     }
 
     private var divider: some View {
@@ -811,6 +943,8 @@ public struct DetailCardContent: Equatable, Sendable {
         public var step: Double
         /// 046: a decoder parameter, so the row draws the **bar** — not the round knob.
         public var shape: SliderShape
+        /// 047: typeable, like every other row (no card opts out).
+        public var editable: Bool = true
     }
 
     public var rows: [Row]
@@ -825,23 +959,168 @@ public struct DetailCardContent: Equatable, Sendable {
         })
 }
 
-/// Double-click on a row's label = back to that slider's default (派单 040).
+/// Double-click on a row's label = back to that slider's default (派单 040 / 047).
 ///
-/// A `nil` action leaves the label a plain label, so the tone rows keep exactly the behaviour they
-/// had; the 细节 rows pass one and get 「双击复位为默认位置」, which for them is the *body's* baseline
-/// (50 on a Leica for colour NR), never a nominal 0.
+/// A `nil` action leaves the label a plain label. Every row of a *parameter* card passes one (047 made
+/// the parameter required in `sliderRow`, so a new card cannot forget it): for a tone or color row the
+/// default is the field's own value in `EditModel.neutral`, for a 细节 row it is the *body's* baseline
+/// position (50 on a Leica for colour NR — never a nominal 0), for 色温/色调 it is as shot.
+///
+/// The card titles use it too, with `help` pointing at the group verb instead of the parameter one.
 private struct ResetOnDoubleClick: ViewModifier {
     let action: (() -> Void)?
+    var help: String = "双击复位此参数"
 
     func body(content: Content) -> some View {
         if let action {
             content
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { action() }
-                .help("双击复位为默认位置")
+                .help(help)
         } else {
             content
         }
+    }
+}
+
+// MARK: - 派单 047: typing a number into a row
+
+/// What a row's number accepts, and what a typed value means.
+///
+/// Kept out of the view for the same reason `SliderRowStyle` and `DetailCardContent` are values: the
+/// rules are the contract, and a rule a test can call is a rule that cannot rot silently. `swift test`
+/// has no window session (the accessibility tree is empty, SwiftUI makes no `NSTextField` to poke), so
+/// the keystroke *wiring* is pinned on `SliderNumberField`'s source in `PanelEditingTests` while
+/// everything below is asserted directly.
+enum SliderValueInput {
+
+    /// The two outcomes a submitted string can have.
+    enum Outcome: Equatable {
+        /// A number, already clamped into the row's travel — write it, then commit (one snapshot).
+        case value(Double)
+        /// Not a number: beep, put the old number back, write **nothing** (no edit, no history).
+        case rejected
+    }
+
+    /// `12`, `-3`, `0.5`, `.5`, `-0.25`, `007` are numbers; `abc`, `""`, `  `, `--3`, `+3`, `1,5`,
+    /// `1.2.3`, `nan`, `inf` are not.
+    ///
+    /// The rule is the task's, literally: digits, an optional leading sign, an optional decimal point —
+    /// nothing else. It is deliberately **not** `Double(text)`: that accepts `+3`, `1e5` and `nan`, and
+    /// a row that silently turned `nan` into a document value would poison a cache key.
+    static func parse(_ text: String) -> Double? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        var seenDot = false
+        var digits = 0
+        for (offset, ch) in t.enumerated() {
+            switch ch {
+            case "-" where offset == 0 && t.count > 1:
+                continue
+            case "." where !seenDot:
+                seenDot = true
+            case "0"..."9":
+                digits += 1
+            default:
+                return nil
+            }
+        }
+        guard digits > 0, let v = Double(t), v.isFinite else { return nil }
+        return v
+    }
+
+    /// The number as the field shows it **while editing**: no unit, no leading `+`, no padding, and no
+    /// `format` — `%.0f` would turn a typed `0.5` into `0` on the way back in (047 forbids exactly that
+    /// truncation: typed `0.5` must read back as `0.5`).
+    static func editingText(_ value: Double) -> String {
+        guard value.isFinite else { return "0" }
+        if value == 0 { return "0" }                                  // also −0
+        if value == value.rounded(), abs(value) < 1e9 { return String(format: "%.0f", value) }
+        return String(format: "%.6g", value)
+    }
+
+    /// A submitted string, in the row's own travel.
+    ///
+    /// Out-of-range numbers are **clamped**, not rejected: a slider's travel is a fact about the
+    /// control, and refusing `12` in a ±5 EV row would leave the user with a beep and no explanation.
+    static func resolve(_ text: String, in range: ClosedRange<Double>) -> Outcome {
+        guard let v = parse(text) else { return .rejected }
+        return .value(min(max(v, range.lowerBound), range.upperBound))
+    }
+}
+
+/// One row's number: a readout that turns into a text field (派单 047).
+///
+/// Always a `TextField` — a `Text` plus an `onTapGesture` would give the mouse an entry and the keyboard
+/// none (`Tab` reaches a control, not a label). What changes on focus is the *text*: the row's own
+/// format while resting (`5872 K`, `+0.50 EV`), the clean number while editing (`5872`, `-0.50`), so the
+/// user types what the document will hold.
+///
+/// The three exits are the task's three: `↵` commits, `Esc` cancels (old value back, no write), losing
+/// focus commits. A rejected string beeps **and** restores — and because `onCommit` is never called, no
+/// `applyEdit` and no `commitEdit` happen, which is the "非法输入不写历史" contract.
+struct SliderNumberField: View {
+    let value: Double
+    let range: ClosedRange<Double>
+    let format: String
+    var fontSize: CGFloat = 10
+    var width: CGFloat = 40
+    var accessibilityID: String?
+    /// Write + commit: the row's own path, so a typed value is one history entry exactly like a drag.
+    let onCommit: (Double) -> Void
+
+    @State private var text: String = ""
+    @State private var editing = false
+    @FocusState private var focused: Bool
+
+    private var display: String { InspectorView.sliderText(format, value) }
+
+    var body: some View {
+        TextField("", text: $text)
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.trailing)
+            .font(.system(size: fontSize, design: .monospaced))
+            .foregroundStyle(editing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
+            .frame(width: width)
+            .focused($focused)
+            .onAppear { text = display }
+            .onChange(of: value) { _, _ in if !editing { text = display } }
+            .onChange(of: focused) { _, isFocused in
+                if isFocused { begin() } else if editing { commit() }
+            }
+            .onSubmit { commit(); focused = false }
+            .onExitCommand { cancel() }
+            .accessibilityIdentifier(accessibilityID ?? "")
+            .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 失焦提交")
+    }
+
+    /// Focus gained: swap the formatted readout for the clean number.
+    private func begin() {
+        guard !editing else { return }
+        editing = true
+        text = SliderValueInput.editingText(value)
+    }
+
+    /// `↵` or blur: write it (which commits once), or beep and put the old number back.
+    private func commit() {
+        guard editing else { return }
+        switch SliderValueInput.resolve(text, in: range) {
+        case .value(let typed):
+            editing = false
+            text = InspectorView.sliderText(format, typed)   // what the model is about to hold
+            onCommit(typed)
+        case .rejected:
+            NSSound.beep()
+            editing = false
+            text = display
+        }
+    }
+
+    /// `Esc`: nothing written, not even a beep — the user asked to leave.
+    private func cancel() {
+        editing = false
+        text = display
+        focused = false
     }
 }
 
@@ -936,5 +1215,151 @@ public struct WhiteBalanceCommands {
         let current = session.edit.light.whiteBalance
         if !current.isAsShot { return WhiteBalanceSolver.Reference(current) }
         return WhiteBalanceSolver.Reference(asShot ?? session.capabilities?.asShotWhiteBalance ?? .asShot)
+    }
+}
+
+// MARK: - 派单 047: the panel's resets
+
+/// Everything a double-click on a name or a card title *does*, without SwiftUI.
+///
+/// Same shape and same reason as `WhiteBalanceCommands`: the panel and the tests call one
+/// implementation, so "复位" cannot mean one thing on screen and another in a test.
+///
+/// Three properties, and each is a contract the tests hold:
+///
+///   1. **A default is a field's own default, never a literal.** Tone and color fields are read out of
+///      `EditModel.neutral` (the group's default initializer), 细节 fields go back to `nil` — "stop at
+///      this body's baseline position", which is `0/50/0/50` on a Leica and not 0 — and 色温/色调 go
+///      back to `nil`, i.e. as shot. Hard-coding `0` anywhere here would switch Apple's colour noise
+///      reduction off (031) or claim an illuminant the file never had (006).
+///   2. **One act = one snapshot.** `group(_:)` writes every field inside **one** `applyEdit` and ends
+///      with **one** `commitEdit`, so ⌘Z takes the whole card back in one press. Committing per field
+///      would give a double-click six history entries — the failure `PanelResetTests` keeps a negative
+///      control for.
+///   3. **Nothing changed = nothing written.** Every verb returns `false` and writes no snapshot when
+///      the document is already at the default, so a stray double-click cannot truncate the redo branch.
+@MainActor
+public struct PanelResets {
+
+    /// The cards that have a "default" to go back to.
+    ///
+    /// 蒙版 is deliberately absent: a mask is a *list*, not a group of numbers, so there is no whole-card
+    /// default (047's table says the same). Its individual parameters are resettable in its own panel.
+    public enum Group: String, CaseIterable, Sendable {
+        case whiteBalance
+        case light
+        case color
+        case detail
+
+        /// The card title this group is — the name the user double-clicked, and the undo label.
+        public var title: String {
+            switch self {
+            case .whiteBalance: return InspectorView.Section.whiteBalance.title
+            case .light: return InspectorView.Section.light.title
+            case .color: return InspectorView.Section.color.title
+            case .detail: return InspectorView.Section.detail.title
+            }
+        }
+    }
+
+    public let session: CatalogSession
+    /// The loupe, when there is one: a 细节 reset also ends the preview-rung adjustment, so the frame
+    /// develops full size at the settle (031's rule, which the single-parameter reset already followed).
+    public let loupe: LoupeController?
+
+    public init(session: CatalogSession, loupe: LoupeController? = nil) {
+        self.session = session
+        self.loupe = loupe
+    }
+
+    // MARK: one parameter
+
+    /// Double-click on a row's name: that field back to its own default. One snapshot; `false` when it
+    /// was already there.
+    @discardableResult
+    public func field(_ keyPath: WritableKeyPath<EditModel, Double>, label: String) -> Bool {
+        let fallback = EditModel.neutral[keyPath: keyPath]
+        guard session.edit[keyPath: keyPath] != fallback else { return false }
+        session.applyEdit { $0[keyPath: keyPath] = fallback }
+        return session.commitEdit(label: label)
+    }
+
+    /// Double-click on 降噪 / 色彩降噪 / 细节 / 锐化: back to **this body's default position**.
+    ///
+    /// `nil` is the only honest spelling of that position: the number differs per body (Leica 50, R5
+    /// sharpness 100, Sony luminance NR 38), so the document stores "untouched" and the decoder keeps
+    /// Apple's own amount. One snapshot, and the loupe is told the adjustment is over.
+    @discardableResult
+    public func detail(_ axis: DetailAxis) -> Bool {
+        guard session.edit.detailSettings[axis] != nil else { return false }
+        session.applyEdit { $0.detailSettings[axis] = nil }
+        let committed = session.commitEdit(label: axis.title)
+        loupe?.endDetailAdjustment()
+        return committed
+    }
+
+    /// Double-click on 色温 or 色调: **that axis** back to as shot (`nil`). The other axis keeps whatever
+    /// it holds — a document is allowed to pin Kelvin and follow the file's tint.
+    @discardableResult
+    public func whiteBalanceField(isTemperature: Bool) -> Bool {
+        let current = session.edit.light.whiteBalance
+        let stored = isTemperature ? current.temperature : current.tint
+        guard stored != nil else { return false }
+        let next = isTemperature ? WhiteBalance(temperature: nil, tint: current.tint)
+                                 : WhiteBalance(temperature: current.temperature, tint: nil)
+        session.applyEdit { model in
+            model.light.temperature = next.temperature
+            model.light.tint = next.tint
+        }
+        return session.commitEdit(label: isTemperature ? "色温" : "色调")
+    }
+
+    // MARK: a whole card
+
+    /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
+    @discardableResult
+    public func group(_ group: Group) -> Bool {
+        switch group {
+        case .whiteBalance:
+            // 原照设置: both fields `nil` = "leave the decoder's own balance alone". This is the one
+            // group whose default is the *file's*, not the document's, and it re-develops the RAW.
+            return WhiteBalanceCommands(session: session, asShot: loupe?.asShotWhiteBalance)
+                .resetToAsShot()
+
+        case .light:
+            // The card's own scope, taken from the card's own table (`lightRows`) plus the two absolute
+            // levels — so adding a seventh slider to Light resets it without touching this function.
+            let rows = InspectorView.lightRows
+            let neutral = EditModel.neutral
+            let levels = LightGroup.identity
+            let changed = rows.contains {
+                session.edit[keyPath: $0.keyPath] != neutral[keyPath: $0.keyPath]
+            } || session.edit.light.blackLevel != levels.blackLevel
+              || session.edit.light.whiteLevel != levels.whiteLevel
+            guard changed else { return false }
+            session.applyEdit { model in
+                for row in rows { model[keyPath: row.keyPath] = neutral[keyPath: row.keyPath] }
+                // 030: "the sliders' mapping is in force again" is `nil`, not 0 / 1.
+                model.light.blackLevel = levels.blackLevel
+                model.light.whiteLevel = levels.whiteLevel
+            }
+            // 白平衡 is *not* in this group: it is its own card and its own double-click. One
+            // `applyEdit` + one `commitEdit` = one snapshot, which is the whole point.
+            return session.commitEdit(label: group.title)
+
+        case .color:
+            guard session.edit.color != ColorGroup.identity else { return false }
+            session.applyEdit { $0.color = .identity }
+            return session.commitEdit(label: group.title)
+
+        case .detail:
+            // All four `nil` = 停在机身的基线位置 (0/50/0/50 on a Leica) — *not* 0, which would turn
+            // Apple's colour noise reduction off and move the pixels.
+            guard !session.edit.detailSettings.isIdentity else { return false }
+            session.applyEdit { $0.detailSettings = .identity }
+            let committed = session.commitEdit(label: group.title)
+            loupe?.endDetailAdjustment()
+            return committed
+        }
     }
 }
