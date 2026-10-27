@@ -17,12 +17,14 @@ import PhotonsCore
 //   · the bin split is the measurement's own rule: `v > 1` is the tail (1/64-stop bins above white),
 //     everything else is `srgbEncode(v) × 256` on the code axis.
 //
-// The sample comes from the **presented** frame (`LoupeController.lastFrame.texture`), i.e. after S4:
-// the channels are already sRGB-encoded and clamped at the frame's headroom, so one `srgbDecode` puts
-// them back. That clamp is the one difference from the measurement, and it is a property of the screen,
-// not of this arithmetic: on an SDR panel a pixel the picture holds at +2.0 stops is stored as white,
-// because that is what the panel is being handed. `headroom` is therefore carried along — a frame on an
-// EDR screen reads its tail honestly, an SDR frame reads 255 and says so.
+// **The sample is the measurement's own source, not the presented frame** (2026-10-27). It used to be
+// `LoupeController.lastFrame.texture` — the frame S4 wrote — and S4 is `encode(min(v, headroom))`, so on
+// this panel every channel above +1.98 stop arrived here as *white*: the row could print `255` and never
+// `+2.3`. The owner's complaint is exactly that (「上限就是屏幕亮度」). The reading now comes from the
+// **scene-linear grid** the histogram itself is counted from (`RenderGraph`'s `histogram_sample_linear`
+// pass, 070), so the number under the cursor is the picture's light and the plot's bins are the same
+// pixels. `SampleSource` records which of the two a reading came from, because the difference is
+// observable (255 vs +2.3 on one pixel) and a fallback must not be able to pass for the real thing.
 
 /// The R/G/B sample counts of one histogram bin.
 public struct HistogramBinCounts: Equatable, Sendable {
@@ -40,7 +42,22 @@ public struct HistogramBinCounts: Equatable, Sendable {
     public static let zero = HistogramBinCounts(red: 0, green: 0, blue: 0)
 }
 
-/// One pixel of the presented frame, expressed on the histogram's axis.
+/// Where a `PointerPixel` was read from.
+///
+/// The two sources differ by exactly one clamp, and that clamp is the whole of the owner's complaint
+/// (「上限就是屏幕亮度」): S4 writes `encode(min(v, headroom))`, so on a panel with 2 stops of headroom
+/// every channel above +1.98 stop arrives as white. The scene-linear grid is the measurement's own input
+/// and keeps those stops. Kept as a value on the pixel rather than a comment, so a test can say *which*
+/// path produced a number and a fallback can never be mistaken for the real source.
+public enum PointerSampleSource: String, Equatable, Sendable {
+    /// The histogram's own grid, scene-linear, before S4 (`RenderGraph`'s `histogram_sample_linear`).
+    case sceneLinear
+    /// The frame S4 wrote, decoded again (`LoupeController.sample`). A fallback: over-white channels are
+    /// already white in it.
+    case presented
+}
+
+/// One pixel of the picture, expressed on the histogram's axis.
 public struct PointerPixel: Equatable, Sendable {
 
     /// Where the pixel's luma sits: an sRGB code, or stops of light above white.
@@ -61,19 +78,43 @@ public struct PointerPixel: Equatable, Sendable {
             }
         }
 
-        /// One channel of a presented frame → the level that channel paints.
+        /// Is this level light the *picture* has and the row reports as stops — i.e. above white?
         ///
-        /// Same two cases as the luma, per channel: a channel at or below display white is its sRGB
-        /// **code** (0–255); a channel above it is that channel's own `log2` — one stop is 2×, the
-        /// owner's 「+1 档 = 2×」 — printed as `+x.x`. Mixed rows are the point (`R 255 G +0.8 B 120`):
-        /// a picture can hold a channel over white while the others are still inside the plot.
-        public static func channel(encoded: Float) -> Level {
-            let linear = Histogram.srgbDecode(encoded)
-            if linear > 1 {
-                return .stops(log2(Double(linear)))
+        /// The card paints exactly these values in the clipping colour (「如果 R/G/B 中某个超过屏幕的
+        /// 亮度，就把…字的颜色改为红色」). A code is never over white, whatever its digits say: `255` is
+        /// white, `+0.0` is not a thing (the initialiser rounds to a code at 1.0), so the case *is* the
+        /// predicate and nothing has to compare strings.
+        public var isOverWhite: Bool {
+            if case .stops = self { return true }
+            return false
+        }
+
+        /// One **scene-linear** channel → the level that channel paints.
+        ///
+        /// The shipped measurement's own rule, per channel: at or below white the channel is its sRGB
+        /// **code** (0–255, `srgbEncode(linear) × 255`); above white it is that channel's own `log2` —
+        /// one stop is 2×, the owner's 「+1 档 = 2×」 — printed as `+x.x`. Mixed rows are the point
+        /// (`R 255 G +2.3 B 120`): a picture can hold a channel over white while the others are still
+        /// inside the plot, and the row must say so channel by channel rather than report one luma.
+        ///
+        /// Negative light (a curve can undershoot) reads as code 0, the same clamp `srgbEncode` gets in
+        /// the measurement.
+        public static func channel(linear: Float) -> Level {
+            let value = Double(linear)
+            if value > 1 {
+                return .stops(log2(value))
             }
-            let code = Double(Histogram.srgbEncode(Float(max(linear, 0)))) * 255
+            let code = Double(Histogram.srgbEncode(Float(max(value, 0)))) * 255
             return .code(min(255, max(0, Int(code.rounded()))))
+        }
+
+        /// One channel of a **presented** (S4-encoded) frame → the level that channel paints.
+        ///
+        /// The fallback's spelling: the frame is already on the code axis, so one `srgbDecode` puts it
+        /// back and `channel(linear:)` does the rest. It cannot recover light above the panel's headroom
+        /// — that is S4's clamp, and the reason this is not the shipped path.
+        public static func channel(encoded: Float) -> Level {
+            channel(linear: Histogram.srgbDecode(encoded))
         }
     }
 
@@ -98,40 +139,49 @@ public struct PointerPixel: Equatable, Sendable {
     public let luma: Double
     /// That bin's R/G/B sample counts, `nil` when there is no measurement to look them up in.
     public let counts: HistogramBinCounts?
+    /// Which source produced this reading (`sceneLinear` in the app, `presented` only as a fallback).
+    public let source: PointerSampleSource
 
     public init(level: Level, bin: Int, isTail: Bool, luma: Double,
-                counts: HistogramBinCounts? = nil, channels: [Level]? = nil) {
+                counts: HistogramBinCounts? = nil, channels: [Level]? = nil,
+                source: PointerSampleSource = .sceneLinear) {
         self.level = level
         self.channels = (channels?.count == 3) ? channels! : [level, level, level]
         self.bin = bin
         self.isTail = isTail
         self.luma = luma
         self.counts = counts
+        self.source = source
     }
 
     /// The three channel strings, in R/G/B order — `["245", "128", "64"]`.
     public var channelTexts: [String] { channels.map(\.text) }
 
+    /// Which of the three channels the row must paint in the clipping colour: the ones above white.
+    ///
+    /// Per channel and not per pixel — `R 255 G +2.3 B 8` is a legal row, and only the middle segment is
+    /// light the panel cannot show.
+    public var overWhiteChannels: [Bool] { channels.map(\.isOverWhite) }
+
     /// The channel row as one string, exactly as the card paints it: `R 245 G 128 B 64`.
     public var channelRowText: String { HistogramCardFormat.grouped(channelTexts) }
 
-    /// The pixel of a presented (S4-encoded, RGBA16F) frame, put on `histogram`'s axis.
+    /// The pixel of a **scene-linear** sample (S3 → S4's input), put on `histogram`'s axis.
     ///
-    /// `luma` is the Rec.709 weighted sum of the **decoded** channels — the measurement's own formula,
-    /// so the bin this returns is the bin the plot counted that pixel into (to the tolerance of the
-    /// thumbnail's resampling, which is the measurement's, not this function's).
-    public init(encodedRed: Float, green: Float, blue: Float, histogram: Histogram?) {
+    /// The shipped path (`LoupeController`): the channels are the picture's own light, so a channel the
+    /// picture holds at 4.93 (log2 = +2.3) prints `+2.3` on *any* panel — including an SDR one that
+    /// renders it as white. `luma` is the Rec.709 weighted sum of the linear channels, the measurement's
+    /// own formula, so `bin` is the bin the plot counted this pixel into.
+    public init(linearRed: Float, green: Float, blue: Float, histogram: Histogram?,
+                source: PointerSampleSource = .sceneLinear) {
         let wr = Float(Histogram.lumaWeights.r)
         let wg = Float(Histogram.lumaWeights.g)
         let wb = Float(Histogram.lumaWeights.b)
-        let r = Histogram.srgbDecode(encodedRed)
-        let g = Histogram.srgbDecode(green)
-        let b = Histogram.srgbDecode(blue)
-        let linear = Double(wr * r + wg * g + wb * b)
+        let linear = Double(wr * linearRed + wg * green + wb * blue)
         let sdrBins = max(histogram?.binCount ?? 256, 2)
         // The three channels' own levels travel with the pixel: the channel row is their printout.
-        let channels = [Level.channel(encoded: encodedRed), .channel(encoded: green),
-                        .channel(encoded: blue)]
+        let channels = [Level.channel(linear: linearRed), .channel(linear: green),
+                        .channel(linear: blue)]
 
         if linear > 1 {
             // The tail: 1/64 stop per bin, the last bin is the overflow ("4 stops or more").
@@ -140,15 +190,28 @@ public struct PointerPixel: Equatable, Sendable {
             let bin = scaled >= Double(Histogram.hdrBinCount) ? Histogram.hdrBinCount - 1
                 : max(0, Int(scaled))
             self.init(level: .stops(stops), bin: bin, isTail: true, luma: linear,
-                      counts: Self.counts(histogram, bin: bin, isTail: true), channels: channels)
+                      counts: Self.counts(histogram, bin: bin, isTail: true), channels: channels,
+                      source: source)
         } else {
             let code01 = Double(Histogram.srgbEncode(Float(max(linear, 0))))
             // `binIndex` in the measure loop: `floor(v · bins)` clamped into `[0, bins-1]`.
             let bin = min(sdrBins - 1, max(0, Int(code01 * Double(sdrBins))))
             let code = min(255, max(0, Int((code01 * 255).rounded())))
             self.init(level: .code(code), bin: bin, isTail: false, luma: linear,
-                      counts: Self.counts(histogram, bin: bin, isTail: false), channels: channels)
+                      counts: Self.counts(histogram, bin: bin, isTail: false), channels: channels,
+                      source: source)
         }
+    }
+
+    /// The pixel of a presented (S4-encoded, RGBA16F) frame — **the fallback**, not the shipped source.
+    ///
+    /// S4 wrote `encode(min(v, headroom))`, so a channel the picture holds above the panel's headroom is
+    /// already white here; one `srgbDecode` puts the codes back, and nothing can put the lost stops back.
+    /// Kept because a frame whose measurement has not landed yet still has pixels, and a row that says
+    /// `255` is better than a row that flickers — as long as it says where it read (`source`).
+    public init(encodedRed: Float, green: Float, blue: Float, histogram: Histogram?) {
+        self.init(linearRed: Histogram.srgbDecode(encodedRed), green: Histogram.srgbDecode(green),
+                  blue: Histogram.srgbDecode(blue), histogram: histogram, source: .presented)
     }
 
     /// The counts of one bin, or `nil` when the measurement is missing or too short for this index.
@@ -162,6 +225,61 @@ public struct PointerPixel: Equatable, Sendable {
         guard let r = value(histogram.red), let g = value(histogram.green),
               let b = value(histogram.blue) else { return nil }
         return HistogramBinCounts(red: r, green: g, blue: b)
+    }
+}
+
+// MARK: - where a screen point lands on the measurement's grid
+
+/// The mapping the pointer's readout needs: a texel of the frame **→** the texel of the measurement's
+/// grid that covers it.
+///
+/// The grid is not the frame. `RenderGraph` reduces the picture to ≤ 256 texels on its long edge
+/// (`Histogram.frameSampleLongEdge`) and `histogram_sample_linear` point-samples it on a fixed stride,
+/// `(i + 0.5) · step`, so cell `j` is the picture pixel at `picture.origin + floor((j + 0.5) · step)`.
+/// Asking "what is under the cursor" therefore means: which cell contains this frame texel.
+///
+/// Two properties this type exists to make checkable rather than implicit:
+///
+///   · **it is a pure function** of the picture rect and the grid size, so the arithmetic is testable
+///     without a device, a render or a fixture;
+///   · **the error is bounded by half a cell**, and a cell is `picture.size / grid.size` frame texels —
+///     2.5 texels for a 640 × 400 canvas at the default grid, i.e. 1.25 pt on a 2× screen. That is the
+///     honest resolution of a readout taken off a histogram's own sample, and it is the price of reading
+///     the same pixels the plot counted instead of rendering the picture a second time.
+public struct PointerSampleLattice: Equatable, Sendable {
+
+    /// The picture's rect **inside the frame texture**, in texels (row 0 = the texture's first row).
+    public let picture: ImageRect
+    /// The measurement's grid over that rect.
+    public let grid: ImageSize
+
+    public init(picture: ImageRect, grid: ImageSize) {
+        self.picture = picture
+        self.grid = ImageSize(width: max(1, grid.width), height: max(1, grid.height))
+    }
+
+    /// The lattice the graph will have built for `picture` at `longEdge` — the same function the render
+    /// uses (`Histogram.frameSampleSize`), so a caller can predict the grid from the frame alone.
+    public init(picture: ImageRect, longEdge: Int = Histogram.frameSampleLongEdge) {
+        self.init(picture: picture, grid: Histogram.frameSampleSize(for: picture, longEdge: longEdge))
+    }
+
+    /// Frame texels per grid cell, in x and y.
+    public var step: (x: Double, y: Double) {
+        (Double(max(picture.width, 1)) / Double(grid.width),
+         Double(max(picture.height, 1)) / Double(grid.height))
+    }
+
+    /// The cell that covers frame texel `(x, y)`, clamped into the grid.
+    ///
+    /// `floor` because the kernel's sample sits *inside* the cell it stands for: cell `j` is drawn from
+    /// the pixel at `picture.origin + floor((j + 0.5) · step)`, so a frame texel (whose centre is at
+    /// `t + 0.5` locally) belongs to `j = floor((t − origin + 0.5) / step)`.
+    public func gridTexel(forTextureX x: Int, y: Int) -> (x: Int, y: Int) {
+        let s = step
+        let jx = Int(((Double(x - picture.x) + 0.5) / s.x).rounded(.down))
+        let jy = Int(((Double(y - picture.y) + 0.5) / s.y).rounded(.down))
+        return (x: min(grid.width - 1, max(0, jx)), y: min(grid.height - 1, max(0, jy)))
     }
 }
 

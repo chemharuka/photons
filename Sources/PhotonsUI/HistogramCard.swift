@@ -13,8 +13,10 @@ import PhotonsCore
 // 只要 RGB 值，而且样式和鼠标悬停在直方图上的 RGB 像素个数指示保持一致」. So there is exactly **one** row
 // under the clipping numbers — one slot, one height, one question at a time:
 //
-//   · pointer on the **picture** → `R 245 G 128 B 64`, that pixel's three channels (SDR code 0–255, or
-//     `+x.x` stops for a channel above display white);
+//   · pointer on the **picture** → `R 245 G 128 B 64`, that pixel's three channels of the **picture's own
+//     light** (the measurement's scene-linear sample, not S4's clamped frame — 2026-10-27): an sRGB code
+//     0–255 at or below white, and `+x.x` stops for a channel above it, painted in the clipping colour
+//     (`ClippingMark`, `#FF00C7`) for that segment alone;
 //   · pointer on the **plot**    → `R 1284 G 1291 B 1206`, that bin's R/G/B sample counts;
 //   · anywhere else              → nothing painted, the same slot, the same height.
 //
@@ -116,7 +118,15 @@ public final class HistogramCardView: NSView {
     // ("lastNoteColor 的字体要更大，和过白/等保持一致"). One constant, used by both call sites, so
     // "the same" is an identity the tests can assert (`hoverNumberFont == clipNumberFont`) rather
     // than two literals that happen to agree today.
-    public static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold)
+    /// The row's **size**, and the only place it is written down (2026-10-27).
+    ///
+    /// The coloured `R`/`G`/`B` letters used to be 8 pt bold beside 9.5 pt digits, and the owner saw it:
+    /// 「彩色的 RGB 三个字母大小，调整大一些和数值的 px 一致」. Two independent literals is how they
+    /// drifted, so the size is one constant and both faces are built from it — the digits semibold, the
+    /// letters bold (a label, not a digit), same point size, same cap height.
+    public static let readoutFontSize: CGFloat = 9.5
+    public static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: readoutFontSize,
+                                                                  weight: .semibold)
     public static var hoverNumberFont: NSFont { numberFont }
     public static var clipNumberFont: NSFont { numberFont }
 
@@ -184,8 +194,17 @@ public final class HistogramCardView: NSView {
     /// so "the same" is an identity read off the paint rather than two literals that happen to agree.
     public private(set) var channelValueFont: NSFont = HistogramCardView.numberFont
     public private(set) var channelValueColor: NSColor = .labelColor
+    /// The colours the channel row painted each **value** with, in R/G/B order — the paint's own
+    /// readback, so "the over-white segment is the clipping colour and its neighbours are not" is
+    /// asserted off the draw rather than off the constant (2026-10-27).
+    public private(set) var channelValueColors: [NSColor] = []
+    /// Which channels were above white when the row was painted (`pixel.overWhiteChannels`).
+    public private(set) var channelOverWhite: [Bool] = []
     public private(set) var readoutValueFont: NSFont = HistogramCardView.numberFont
     public private(set) var readoutValueColor: NSColor = .labelColor
+    /// The counts half's per-group value colours — always the neutral `readoutColor`: a count is a
+    /// number of pixels, never light, so nothing there can be above white.
+    public private(set) var readoutValueColors: [NSColor] = []
 
     /// The values the counts half painted, per group (`["1284", "1291", "1206"]`); `[]` when the row is
     /// painting the pixel's channels or nothing at all.
@@ -207,8 +226,12 @@ public final class HistogramCardView: NSView {
     /// `--ui-smoke` legibility check are written against it.
     public static let channelRowHeight: CGFloat = readoutRowHeight
 
-    /// The channel letters' face: 8 pt bold, as the legend and the percentages row used.
-    public static let channelLetterFont = NSFont.systemFont(ofSize: 8, weight: .bold)
+    /// The channel letters' face: **the same size as the values** (2026-10-27), bold so a letter still
+    /// reads as a label rather than a digit. One size constant (`readoutFontSize`), two weights — the
+    /// owner's 「字母…和数值的 px 一致」 is about size, and the tests compare the two faces' point size and
+    /// cap height, not their weight.
+    public static let channelLetterFont = NSFont.monospacedDigitSystemFont(ofSize: readoutFontSize,
+                                                                         weight: .bold)
 
     /// Exactly the strings the **counts** half of the row painted. Empty when nothing is painted — that
     /// emptiness *is* "the row is idle", and it is also the state while the row shows the pixel's channels.
@@ -297,7 +320,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（SDR 区为 0–255 码值，超白通道为 +x.x 档，一次一个空格紧跟字母），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。")
+        setAccessibilityHelp("直方图：R/G/B/亮度四组曲线；横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（画面本身的光，不是屏幕渲染后的值：SDR 区为 0–255 码值，超白通道为 +x.x 档并画成削顶品红），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。")
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -734,24 +757,42 @@ public final class HistogramCardView: NSView {
         channelLetterRects = []
         channelValueRects = []
         channelLetterColors = []
+        channelValueColors = []
+        channelOverWhite = []
 
         guard let pixel = pointerPixel, hoverReading == nil else { return }
 
         let values = pixel.channelTexts
+        // **Per channel, not per pixel** (2026-10-27): only the segment whose channel the picture holds
+        // above white gets the clipping ink — `R 255 G +2.3 B 8` paints one magenta number, and the
+        // letters keep their channel colours. A code is never over white, so nothing else can be
+        // recoloured by accident, and the layout does not move (same font, same strings, same x's).
+        let inks = pixel.channels.map { $0.isOverWhite ? Self.overWhiteColor : color }
         let painted = paintGroups(values, atY: row.minY,
                                   letterFont: Self.channelLetterFont,
                                   letterColors: Self.channelNameColors,
                                   valueFont: Self.numberFont,
-                                  valueColor: color)
+                                  valueColor: color,
+                                  valueColors: inks)
         channelRowValues = values
         channelRowText = HistogramCardFormat.grouped(values)
         channelLetterRects = painted.letters
         channelValueRects = painted.values
         channelLetterColors = painted.colors
+        channelValueColors = painted.valueColors
+        channelOverWhite = pixel.overWhiteChannels
         channelValueFont = Self.numberFont
         channelValueColor = color
         if let last = painted.values.last { channelRowWidth = last.maxX - bounds.minX }
     }
+
+    /// The ink the over-white segments are painted with — **the clipping colour, one constant**.
+    ///
+    /// `#FF00C7`, the same magenta the canvas wash paints (see `ClippingMark`): the digit and the wash
+    /// mark the same fact (light this panel cannot show), so they are the same ink rather than two reds
+    /// that nearly match. Deliberately not `NSColor.systemRed` — a semantic system colour follows the
+    /// appearance, and this one has to be the wash's colour in both.
+    public static var overWhiteColor: NSColor { ClippingMark.color }
 
     /// The channel letters, in row order. One constant, shared with the counts row and the plot's own
     /// legend: `R` is red in both rows because it is red in the curves.
@@ -771,6 +812,10 @@ public final class HistogramCardView: NSView {
         var letters: [NSRect] = []
         var values: [NSRect] = []
         var colors: [NSColor] = []
+        /// One colour per **value**, in group order — `valueColor` unless the caller passed a per-group
+        /// ink (`valueColors`), which is how the over-white segments get the clipping colour and nothing
+        /// else does.
+        var valueColors: [NSColor] = []
     }
 
     /// One row of `letter value` groups, laid out the owner's way (2026-10-26, second pass):
@@ -787,21 +832,27 @@ public final class HistogramCardView: NSView {
     ///     group (this is what replaced the five-character right-aligned field).
     private func paintGroups(_ values: [String], atY y: CGFloat,
                              letterFont: NSFont, letterColors: [NSColor],
-                             valueFont: NSFont, valueColor: NSColor) -> PaintedGroups {
+                             valueFont: NSFont, valueColor: NSColor,
+                             valueColors: [NSColor]? = nil) -> PaintedGroups {
         guard !values.isEmpty else { return PaintedGroups() }
         let groupWidth = bounds.width / CGFloat(values.count)
         let spaceWidth = (" " as NSString).size(withAttributes: [.font: valueFont]).width
         var painted = PaintedGroups()
         for (index, text) in values.enumerated() {
             let color = letterColors[index % letterColors.count]
+            // The value's ink: the caller's per-group colour when it named one, else the row's. Colour
+            // is the only thing this can change — the string, the font and the x's are the same either
+            // way, which is what keeps a magenta `+2.3` from moving its neighbours.
+            let ink = (valueColors?.count == values.count) ? valueColors![index] : valueColor
             let letterRect = drawText(Self.channelLetters[index % Self.channelLetters.count],
                                       at: CGPoint(x: bounds.minX + CGFloat(index) * groupWidth, y: y),
                                       font: letterFont, color: color)
             let valueRect = drawText(text, at: CGPoint(x: letterRect.maxX + spaceWidth, y: y),
-                                     font: valueFont, color: valueColor)
+                                     font: valueFont, color: ink)
             painted.letters.append(letterRect)
             painted.values.append(valueRect)
             painted.colors.append(color)
+            painted.valueColors.append(ink)
         }
         return painted
     }
@@ -835,6 +886,7 @@ public final class HistogramCardView: NSView {
         readoutValueRects = []
         readoutLetterColors = []
         readoutValueTexts = []
+        readoutValueColors = []
         // Re-derived from the live state every draw: a new measurement or a new bin can never leave the
         // previous one's numbers on screen.
         refreshReadoutRow()
@@ -858,6 +910,7 @@ public final class HistogramCardView: NSView {
         readoutValueRects = painted.values
         readoutLetterColors = painted.colors
         readoutValueTexts = values
+        readoutValueColors = painted.valueColors
         readoutValueFont = Self.numberFont
         readoutValueColor = color
         hoverCountText = HistogramCardFormat.readoutCounts(counts)

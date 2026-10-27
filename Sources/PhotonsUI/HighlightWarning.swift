@@ -142,6 +142,26 @@ public enum HighlightWarning {
     }
 }
 
+/// The clipping colour — **one definition for the whole app**.
+///
+/// `#FF00C7` (sRGB 255, 0, 199). It marks light this panel cannot show, in two places that must agree
+/// on sight: the canvas wash (`HighlightOverlayView`, where it is the one colour that cannot be
+/// confused with a photograph) and the histogram card's channel row, whose over-white digits are painted
+/// in it (2026-10-27, 「如果 R/G/B 中某个超过屏幕的亮度，就把…字的颜色改为红色」 — the owner's "red" is
+/// this clipping mark, chosen over the linear-domain accent `#FF375F` because the *semantics* are what
+/// matter: a channel at +2.3 is clipped light, not a parameter that edits scene-linear data).
+///
+/// Deliberately **not** `NSColor.systemRed`: the wash and the digits have to be the same ink, and a
+/// semantic system colour drifts with the appearance while this one must not.
+///
+/// The stored blue is `0.78` rather than `199/255 = 0.78039` because that is the literal the wash has
+/// always been painted with (changing it would move canvas pixels for no gain); `0.78 × 255 = 198.9`, so
+/// the bytes it lands on are `255, 0, 199` at 8-bit — i.e. `#FF00C7` to within a quarter of a code.
+public enum ClippingMark {
+    /// `#FF00C7`, opaque. The wash tints it with alpha; the digits paint it solid.
+    public static let color = NSColor(srgbRed: 1.0, green: 0.0, blue: 0.78, alpha: 1)
+}
+
 /// The magenta wash, drawn *over* the canvas layer.
 ///
 /// A sibling `NSView` of the `CAMetalLayer` rather than an extra pass in `RenderGraph`: the warning
@@ -169,7 +189,8 @@ final class HighlightOverlayView: NSView {
         let cellWidth = bounds.width / CGFloat(grid.columns)
         let cellHeight = bounds.height / CGFloat(grid.rows)
         // A primary, not a tint: this is the one colour that cannot be confused with the picture.
-        let base = NSColor(srgbRed: 1.0, green: 0.0, blue: 0.78, alpha: 1)
+        // One definition for the app — `ClippingMark` (the card's over-white digits paint it too).
+        let base = ClippingMark.color
         for row in 0..<grid.rows {
             for column in 0..<grid.columns {
                 let share = grid.share(column: column, row: row)
