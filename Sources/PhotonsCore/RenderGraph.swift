@@ -397,7 +397,11 @@ private struct HDRCurveParams {
     // S2's `c` and S3c's `c`.
     var b: SIMD4<Float>
     var c: SIMD4<Float>   // slopeW, slopeR, slopeG, slopeB
-    var d: SIMD4<Float>   // lumaR, lumaG, lumaB, pad
+    var d: SIMD4<Float>   // lumaR, lumaG, lumaB, stops per unit u
+    // The black point (first control point's x) of each table, W/R/G/B — 派单 061. The kernel takes
+    // rule 3's sub-black pass-through only where this is 0, because a raised black point is a clip and
+    // the clip has to include the negatives (`s1_7_hdr_curve.metal` rule 3, `CurveLUT.blackPoints`).
+    var e: SIMD4<Float>
 }
 
 private struct ColorParams {
@@ -1581,6 +1585,10 @@ public final class RenderGraph {
             let p = try kernels.pipeline(file: "s1_7_hdr_curve", function: "s1_7_hdr_curve")
             let tables = try hdrCurveTables(for: edit.curve)
             let axis = HDRCurve.axis
+            // 061: where each curve's black point sits. `0` on every table — the shipped default and
+            // every document 051 could produce — leaves the kernel's arithmetic untouched, so the
+            // identity branch, the golden hashes and 018's sub-black all come out as they did.
+            let blackPoints = CurveLUT.blackPoints(edit.curve)
             var params = HDRCurveParams(
                 a: SIMD4(tables.isIdentity && !options.forceCurveArithmetic ? 1 : 0,
                          Float(CurveLUT.size), Float(axis.x0), Float(axis.K)),
@@ -1593,7 +1601,8 @@ public final class RenderGraph {
                 // The luma weights are a parameter, not a constant: changing the working space (a
                 // future Rec2020 move) is one number here and one in `HDRCurve.lumaWeights`.
                 d: SIMD4(Float(HDRCurve.lumaWeights.r), Float(HDRCurve.lumaWeights.g),
-                         Float(HDRCurve.lumaWeights.b), Float(axis.stops)))
+                         Float(HDRCurve.lumaWeights.b), Float(axis.stops)),
+                e: SIMD4(blackPoints[0], blackPoints[1], blackPoints[2], blackPoints[3]))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<HDRCurveParams>.stride, index: 0)
             enc.setBuffer(tables.buffer, offset: 0, index: 1)

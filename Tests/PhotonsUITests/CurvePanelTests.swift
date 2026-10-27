@@ -25,6 +25,12 @@ import PhotonsCore
 ///   7. **画的是引擎的表** — `preview == CurveLUT.buildOne(points)`, element by element.
 ///   8. **尺寸** — measured `fittingSize` at the inspector's 274 pt content width, and the panel's
 ///      height does not move when the document does (that is what would push the cards below it).
+///   9. **端点可以在 x 上移动（061）** — pushing the first point right to `u = 0.2` makes the table one
+///      constant below 0.2 (a **black clip**), pulling the last left to 0.8 makes it one constant
+///      above (a **white clip**), the table stays monotone, the doc keeps strictly increasing x, and
+///      one drag is still one history entry. The **negative control** rebuilds the table from the
+///      *pinned* endpoint 051 wrote and shows those same 100 samples would differ — without it,
+///      "the clip works" would also be green if the table were flat for some other reason.
 ///
 /// The interactions are driven through `CurveEditorModel` — the same struct the view's gesture calls —
 /// because `swift test` has no window session to inject mouse events into (047/040's known limit).
@@ -157,14 +163,36 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(againstInterior.x, 0.3 + CurveEditor.minimumGap, accuracy: 1e-12,
                        "夹取对着**当前**的左邻点算，不是按下时的那个")
 
-        // (e) 端点 x 被钉死，只能上下动
-        let first = CurveEditor.movedPoint(CurvePoint(0.4, 0.9), index: 0, in: start,
+        // (e) **061**: 端点可以在 x 上移动 —— 右移左端点就是调黑点，左移右端点就是调白点
+        let first = CurveEditor.movedPoint(CurvePoint(0.2, 0.9), index: 0, in: start,
                                            from: start[0], lock: .free)
-        XCTAssertEqual(first.x, 0, accuracy: 1e-12, "首点恒在 u = 0")
+        XCTAssertEqual(first.x, 0.2, accuracy: 1e-12, "首点必须能在 x 上移动（051 曾钉在 0）")
         XCTAssertEqual(first.y, 0.9, accuracy: 1e-12)
-        let last = CurveEditor.movedPoint(CurvePoint(0.4, 0.1), index: 3, in: start,
+        let last = CurveEditor.movedPoint(CurvePoint(0.9, 0.1), index: 3, in: start,
                                           from: start[3], lock: .free)
-        XCTAssertEqual(last.x, 1, accuracy: 1e-12, "末点恒在 u = 1")
+        XCTAssertEqual(last.x, 0.9, accuracy: 1e-12, "末点必须能在 x 上移动（051 曾钉在 1）")
+        XCTAssertEqual(last.y, 0.1, accuracy: 1e-12)
+
+        // …但只在区间里：首点 ∈ [0, 次点 − 1e-3]，末点 ∈ [邻点 + 1e-3, 1]，x 仍严格递增
+        XCTAssertEqual(CurveEditor.clampX(5, index: 0, in: start),
+                       start[1].x - CurveEditor.minimumGap, accuracy: 1e-12,
+                       "右移的首点停在次点左边 1e-3 处（不许越过）")
+        XCTAssertEqual(CurveEditor.clampX(-5, index: 0, in: start), 0, accuracy: 1e-12,
+                       "左边界仍是表的 0")
+        XCTAssertEqual(CurveEditor.clampX(-5, index: 3, in: start),
+                       start[2].x + CurveEditor.minimumGap, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditor.clampX(5, index: 3, in: start), 1, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditor.clampX(0.2, index: 0, in: start), 0.2, accuracy: 1e-12,
+                       "区间内原样通过（不是\"永远贴边\"）")
+        for target in [-5.0, 0.0, 0.2, 0.29, 5.0] {
+            let p = CurveEditor.movedPoint(CurvePoint(target, 0.5), index: 0, in: start,
+                                          from: start[0], lock: .free)
+            XCTAssertTrue(CurveEditor.isOrdered([p] + start.dropFirst()), "首点拖到 \(target) 后仍须递增")
+        }
+
+        // **反证**: 钉死端点的那条规则会让上面每一条都红 —— 两种写法都留着，看得见差别
+        XCTAssertNotEqual(first.x, 0, "反证：061 之前的 return 0 会得到 0")
+        XCTAssertNotEqual(last.x, 1, "反证：061 之前的 return 1 会得到 1")
 
         // (f) ⇧ 的两种锁：只改 x / 只改 y
         let onlyX = CurveEditor.movedPoint(CurvePoint(0.5, 0.9), index: 1, in: start,
@@ -391,6 +419,140 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(Array(full[0..<CurveLUT.size]), model.preview,
                        "预览的 W 段与上传给内核的第一段是同一组数")
         print("preview · \(model.preview.count) 点逐元素 == buildOne · 与上传缓冲首段一致")
+    }
+
+    // MARK: - 8b. 061 — the endpoints move in x (that is the black point)
+
+    /// 061 ①：把**首端点右移到 u = 0.2**。表里 `u < 0.2` 的 100 个采样点必须**全部相等**（黑点裁切），
+    /// 之上仍在上升，整张表仍单调不减；文档 x 严格递增；一次拖动只有一条历史；复位逐字节回恒等。
+    ///
+    /// **反证**：拿同一个拖动目标按 051 的「首点钉在 0」重建，同样那 100 个采样点**各不相同** ——
+    /// 没有这一半，「裁切生效」在表恰好因为别的原因变平时也会绿。
+    func testMovingTheFirstEndpointRightClipsTheWholeSegmentBelowItToOneValue() throws {
+        let session = CatalogSession()
+        session.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.45), CurvePoint(1, 1)] }
+        session.commitEdit(label: "起点")
+        let model = CurveEditorModel(session: session, channel: .white)
+        let base = session.history.count
+
+        let origin = model.beginDrag(at: 0)
+        XCTAssertEqual(origin, CurvePoint(0, 0))
+        XCTAssertTrue(model.drag(index: 0, to: CurvePoint(0.2, 0), from: origin!, lock: .free))
+        XCTAssertEqual(session.edit.curve.white[0].x, 0.2, accuracy: 1e-12, "右移首点 = 抬黑点")
+        XCTAssertEqual(session.edit.curve.white[0].y, 0, accuracy: 1e-12, "y 不动")
+        XCTAssertEqual(session.history.count, base, "拖动中不写历史")
+        XCTAssertTrue(model.endDrag())
+        XCTAssertEqual(session.history.count, base + 1, "一次拖动 = 一条历史")
+        XCTAssertTrue(CurveEditor.isOrdered(session.edit.curve.white), "x 仍严格递增")
+
+        let t = model.preview
+        XCTAssertEqual(t, CurveLUT.buildOne(model.points), "预览仍是引擎那张表")
+
+        // u < 0.2 的 100 个抽样（4096 点的表上 u = 0.2 大约落在第 819 个采样）
+        let ids = (0..<100).map { Int((0.2 * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded()) }
+        let below = Set(ids.map { t[$0] })
+        XCTAssertEqual(below.count, 1, "u < 0.2 必须全部相等，实际 \(below.sorted())")
+        XCTAssertEqual(ids.map { t[$0] }.max() ?? -1, 0, accuracy: 1e-7, "first.y = 0 → 裁到 0")
+
+        // …而且不是整张表都平了：0.2 之上仍在上升，整表单调不减
+        XCTAssertGreaterThan(t[Int(0.35 * Double(CurveLUT.size - 1))], 0.05, "0.2 之上必须还在上升")
+        for i in 1..<t.count {
+            XCTAssertGreaterThanOrEqual(t[i], t[i - 1], "端点右移后表在第 \(i) 个采样折回")
+        }
+
+        // **反证**：051 的夹取（首点恒 0）用同一个拖动目标重建 → 同样 100 个采样点各不相同
+        let pinned = CurveLUT.buildOne([CurvePoint(0, 0), CurvePoint(0.5, 0.45), CurvePoint(1, 1)])
+        let pinnedBelow = ids.map { pinned[$0] }
+        XCTAssertGreaterThan(Set(pinnedBelow).count, 1, "钉死的端点：采样点必须各不相同")
+        XCTAssertGreaterThan((pinnedBelow.max() ?? 0) - (pinnedBelow.min() ?? 0), 0.05,
+                             "钉死的端点：暗部是斜坡，不是常量")
+        // 同一条反证钉在源码上：钉死端点的两行不许回来
+        let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
+        XCTAssertFalse(source.contains("if index == 0 { return 0 }"), "端点 x 又被钉死了（061 反证）")
+        XCTAssertFalse(source.contains("if index == points.count - 1 { return 1 }"))
+
+        // 复位：逐字节回到恒等 → 内核走 copy 分支，像素一个字节都不动
+        XCTAssertTrue(model.resetChannel())
+        XCTAssertTrue(CurveLUT.isIdentity(session.edit.curve))
+        XCTAssertEqual(CurveLUT.buildOne(session.edit.curve.white), CurveLUT.identityTable())
+        XCTAssertTrue(CurveLUT.tablesAreIdentity(CurveLUT.build(session.edit.curve)))
+
+        print("black point · first.x 0 → \(session.edit.curve.white[0].x)（复位后）· "
+              + "u<0.2 的 100 点：搬过去 \(below.count) 个值，钉死则 "
+              + "\(Set(pinnedBelow).count) 个值（跨度 \(String(format: "%.3f", (pinnedBelow.max() ?? 0) - (pinnedBelow.min() ?? 0))))")
+    }
+
+    /// 061 ②：把**末端点左移到 u = 0.8** —— `u > 0.8` 全部同一个输出（白点裁切），最后一段斜率 0，
+    /// 所以 +4 EV 之上也停在那里；表仍单调，一次拖动一条历史。
+    func testMovingTheLastEndpointLeftClipsTheHighlightsToOneValue() {
+        let start = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)]
+        let session = CatalogSession()
+        session.applyEdit { $0.curve.white = start }
+        session.commitEdit(label: "起点")
+        let model = CurveEditorModel(session: session, channel: .white)
+        let base = session.history.count
+
+        let origin = model.beginDrag(at: 2)
+        XCTAssertTrue(model.drag(index: 2, to: CurvePoint(0.8, 0.9), from: origin!, lock: .free))
+        XCTAssertEqual(session.edit.curve.white[2].x, 0.8, accuracy: 1e-12, "左移末点 = 降白点")
+        XCTAssertEqual(session.edit.curve.white[2].y, 0.9, accuracy: 1e-10)
+        XCTAssertEqual(session.history.count, base, "拖动中不写历史")
+        XCTAssertTrue(model.endDrag())
+        XCTAssertEqual(session.history.count, base + 1)
+        XCTAssertTrue(CurveEditor.isOrdered(session.edit.curve.white))
+
+        // 直接用点列表建表：u > 0.8 的 100 个抽样全等，且等于 last.y
+        let t = CurveLUT.buildOne(session.edit.curve.white)
+        let ids = (0..<100).map {
+            Int(((0.8 + 0.2 * Double($0 + 1) / 100) * Double(CurveLUT.size - 1)).rounded())
+        }
+        let above = Set(ids.map { t[$0] })
+        XCTAssertEqual(above.count, 1, "u > 0.8 必须全部相等，实际 \(above.sorted())")
+        XCTAssertEqual(ids.map { t[$0] }.max() ?? -1, 0.9, accuracy: 1e-6, "last.y = 0.9")
+        XCTAssertEqual(CurveLUT.slope(of: t), 0, accuracy: 1e-6,
+                       "平的最后一段 → 斜率 0：+4 EV 之上不再上升（rule 4）")
+        for i in 1..<t.count {
+            XCTAssertGreaterThanOrEqual(t[i], t[i - 1], "端点左移后表在第 \(i) 个采样折回")
+        }
+        XCTAssertLessThan(t[Int(0.5 * Double(CurveLUT.size - 1))], 0.8, "0.8 以下不是常量")
+
+        print("white point · last.x = 0.8, y = 0.9 · u>0.8 的 100 点 → \(above.count) 个值 · slope "
+              + "\(CurveLUT.slope(of: t))")
+    }
+
+    /// 061 ⑤：**两种 sub-black 情况都要钉住**（表与 CPU 参考这一侧；渲染侧在 `HDRCurveTests` ⑩）。
+    ///
+    ///   · `first.x == 0` → `x ≤ 0` 直通、符号不变（018 的既有断言必须仍绿）；
+    ///   · `first.x == 0.2` → 负值也落到表里 `u = 0` 那一个常量上（裁切没有洞）。
+    ///
+    /// 两种情况的输出**必须不同**——否则"裁切"与"直通"就只是同一句话的两种说法。
+    func testTheSubBlackRuleFollowsTheBlackPointAndNotTheMoodOfTheDay() {
+        let atZero = CurveLUT.buildOne([CurvePoint(0, 0.4), CurvePoint(1, 1)])
+        let zeroSlope = CurveLUT.slope(of: atZero)
+        for x in [-0.039, -0.004, -1e-9, 0.0] {
+            XCTAssertEqual(HDRCurve.channel(x, table: atZero, slope: zeroSlope, blackPoint: 0), x,
+                           "first.x == 0：\(x) 必须原样穿过（018 的符号保真）")
+        }
+
+        let raised = CurveLUT.buildOne([CurvePoint(0.2, 0.3), CurvePoint(1, 1)])
+        let raisedSlope = CurveLUT.slope(of: raised)
+        let clip = HDRCurve.channel(0, table: raised, slope: raisedSlope, blackPoint: 0.2)
+        XCTAssertGreaterThan(clip, 1e-3, "first.y = 0.3 → 裁到的常量是 0.3 对应的线性值")
+        for x in [-0.039, -0.004, -1e-9, 0.0, 1e-5, 1e-4, 5e-4] {
+            XCTAssertEqual(HDRCurve.channel(x, table: raised, slope: raisedSlope, blackPoint: 0.2),
+                           clip, accuracy: 1e-12, "\(x) 必须与 u = 0 的常量相等（裁切没有洞）")
+        }
+        XCTAssertNotEqual(HDRCurve.channel(-0.039, table: raised, slope: raisedSlope, blackPoint: 0),
+                          clip, "反证：按 first.x == 0 走同一条负值会穿过去 —— 两条路必须不同")
+
+        // 表自己的那一半：u < 0.2 是常量（与 HDRCurve 的 u = 0 项同一个数）
+        let ids = (0..<100).map { Int((0.2 * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded()) }
+        XCTAssertEqual(Set(ids.map { raised[$0] }).count, 1)
+        XCTAssertEqual(Double(raised[0]), 0.3, accuracy: 1e-6)
+        XCTAssertEqual(HDRCurve.axis.inverse(Double(raised[0])), clip, accuracy: 1e-12)
+
+        print("sub-black · first.x=0 → 直通；first.x=0.2 → 常量 "
+              + "\(String(format: "%.6f", clip)) linear（表项 \(raised[0])）")
     }
 
     // MARK: - 9. the panel's size

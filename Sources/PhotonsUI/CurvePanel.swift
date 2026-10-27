@@ -31,7 +31,8 @@ import PhotonsCore
 //      8-bit codes on a saturated HDR pixel, so the tab's tooltip says which one it is (030 §5.2).
 //
 // What is deliberately absent, per 051: black/white-point verticals (042's second half), the three
-// eyedroppers, and any change to the gamma stage the curve sits in.
+// eyedroppers, and any change to the gamma stage the curve sits in. 061 makes the *endpoints* movable
+// in x (that is the black point), and adds no handle beyond the two control points themselves.
 
 // MARK: - the four channels
 
@@ -253,13 +254,31 @@ public enum CurveEditor {
 
     /// Keep a dragged point inside its neighbours, with `minimumGap` on each side.
     ///
-    /// Endpoints are pinned horizontally: the first point is `x = 0` and the last is `x = 1`, because
-    /// the table is *defined* on `0…1` and a curve whose first point sits at 0.2 would answer a
-    /// constant below it (that is a black clip, not a curve). They can still move vertically.
+    /// **061: the endpoints move in x too.** 051 pinned the first point at `x = 0` and the last at
+    /// `x = 1`, which is why "push the black point right" (Lightroom's own black point, and the left
+    /// handle in RapidRAW/LightCraft) was impossible: every endpoint drag became a pure y move. The
+    /// first point may now sit anywhere in `[0, next − gap]` and the last anywhere in
+    /// `[prev + gap, 1]` — the same two rules as `RapidRAW src/components/adjustments/Curves.tsx:448-453`
+    /// (`minX = index === 0 ? 0 : prevX + 0.01`, `maxX = index === last ? 255 : nextX - 0.01`) and
+    /// `LightCraft crates/ui-egui/src/panels/edit/curve.rs:349-357` (`lo = if i == 0 { 0.0 }`,
+    /// `hi = if i + 1 >= v.len() { 1.0 }`). What the moved endpoint *means* is the table's business:
+    /// `CurveLUT.buildOne` holds a constant left of the first point (= a black clip) and right of the
+    /// last (= a white clip), so `x` is where the clip begins, not a value the curve cannot leave.
     public static func clampX(_ x: Double, index: Int, in points: [CurvePoint]) -> Double {
         guard points.indices.contains(index) else { return min(max(x, 0), 1) }
-        if index == 0 { return 0 }
-        if index == points.count - 1 { return 1 }
+        // Endpoints: one side is the edge of the table, the other is the neighbour.
+        if index == 0 {
+            let upper = points.count > 1 ? points[1].x - minimumGap : 1
+            // A neighbour closer than the gap leaves no legal x: stay where we are (the caller's
+            // `next != current` guard then writes nothing), the same rule the interior takes below.
+            guard upper >= 0 else { return points[0].x }
+            return min(max(x, 0), upper)
+        }
+        if index == points.count - 1 {
+            let lower = points[points.count - 2].x + minimumGap
+            guard lower <= 1 else { return points[index].x }
+            return min(max(x, lower), 1)
+        }
         let lower = points[index - 1].x + minimumGap
         let upper = points[index + 1].x - minimumGap
         // Neighbours closer than 2 × the gap leave no legal x: stay where we are rather than jumping
@@ -305,8 +324,9 @@ public enum CurveEditor {
         return (out, slot)
     }
 
-    /// Remove one point. `nil` = refused, and the only refusal is an endpoint: the table needs a
-    /// value at 0 and at 1, so deleting either would leave the curve undefined at an end.
+    /// Remove one point. `nil` = refused, and the only refusal is an endpoint: they are the black and
+    /// the white point (061 — their x is where each clip begins), and a table needs two points to be a
+    /// curve at all (`buildOne` answers the identity below that, i.e. the whole curve would vanish).
     public static func deleting(_ index: Int, from points: [CurvePoint]) -> [CurvePoint]? {
         guard points.indices.contains(index), index != 0, index != points.count - 1 else { return nil }
         var out = points
@@ -601,6 +621,12 @@ public struct CurvePanel: View {
 
         // The curve: one polyline through the engine's 4096 samples. No smoothing here — the table is
         // already smooth (monotone cubic), and a second smoother would round the clamped knees.
+        //
+        // 061: the ends are why this needs no special case. The table's first entries are all
+        // `first.y` and its last all `last.y` (`CurveLUT.buildOne`), so a moved endpoint draws as a
+        // **horizontal** segment into the corner — the black clip / white clip, as RapidRAW draws it
+        // (`M 0 y L points[0].x y`, `src/components/adjustments/Curves.tsx:157-182`). A curve that
+        // joined (0, 0) back to a raised first point would draw a ramp the pixels do not have.
         if table.count >= 2 {
             var curve = Path()
             curve.move(to: CGPoint(x: geometry.x(u: 0), y: geometry.y(v: Double(table[0]))))
