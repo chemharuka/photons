@@ -207,8 +207,12 @@ public enum CropTool {
         let scale = pointScale > 0 ? pointScale : 1
         let c = crop.clamped()
         func view(_ u: Double, _ v: Double) -> CGPoint {
-            let p = mapping.viewPoint(sourceX: u * Double(source.width),
-                                      sourceY: v * Double(source.height))
+            // **Frame space, not source space** (see `LoupeMapping.frameView`): the crop rect is a
+            // rectangle of the *straightened* frame, so its four sides stay axis-aligned on screen and
+            // a straightened picture turns under a still frame. Going through `viewPoint` here would
+            // rotate the frame with the picture (and, before the projection was made uniform, shear it).
+            let p = mapping.frameView(frameX: u * Double(source.width),
+                                      frameY: v * Double(source.height))
             return CGPoint(x: p.x / scale, y: p.y / scale)
         }
 
@@ -423,8 +427,11 @@ public enum CropTool {
         screen = screen.truncatingRemainder(dividingBy: 360)
         if screen > 180 { screen -= 360 }
         if screen < -180 { screen += 360 }
-        let radians = screen * .pi / 180
-        let documentAngle = atan2(sin(radians) * w, cos(radians) * h) * 180 / .pi
+        // S0 rotates in **pixels** now (`s0_geometry.metal`: `o = (uv − ½)·frameSize`, R(θ), back), so
+        // a document angle θ is a screen rotation of θ — on a 3:2 frame as much as on a square one.
+        // The old `atan2(sin Δ·W, cos Δ·H)` existed only to undo the kernel's anisotropic rotation,
+        // which is the shear this task removes.
+        let documentAngle = screen
         // **Minus**, and the sign is worth spelling out: the document's angle is in normalized
         // (y-up) space, where a positive rotation reads clockwise, while the screen is y-down — the
         // same flip that makes the straighten look counter-clockwise on the canvas
@@ -485,10 +492,13 @@ public struct CropToolDrag: Sendable, Equatable {
 
         switch handle {
         case .inside:
+            // The frame is dragged **with** the hand. It used to be `base.left - dx`, i.e. the frame
+            // travelled against the pointer: a left drag moved the box right, which a user reads as
+            // 「拖的是画布，而且方向反了」. Same sign, same magnitude, clamped at the frame's edge.
             let dx = point.x - grab.x, dy = point.y - grab.y
             let width = base.width, height = base.height
-            left = min(max(base.left - dx, 0), 1 - width)
-            top = min(max(base.top - dy, 0), 1 - height)
+            left = min(max(base.left + dx, 0), 1 - width)
+            top = min(max(base.top + dy, 0), 1 - height)
             right = left + width
             bottom = top + height
             return CropRect(left: left, top: top, right: right, bottom: bottom).clamped()

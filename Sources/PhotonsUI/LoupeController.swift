@@ -2542,7 +2542,13 @@ public final class LoupeController: NSViewController {
 
     @discardableResult
     public func beginCropTool() -> Bool {
-        guard let session, session.mode == .loupe, session.anchorAsset != nil else { return false }
+        guard let session, session.mode == .loupe, session.anchorAsset != nil else {
+            // A silent `false` here is indistinguishable from a broken shortcut: the menu item is greyed
+            // by the same two conditions (`EditorWindowController.validateMenuItem`), so ⌘R in a window
+            // with no anchor does *nothing at all*. Say so out loud instead.
+            NSSound.beep()
+            return false
+        }
         guard cropTool.begin() else { return false }
         // The camera is remembered and restored on exit: a precision tool is a temporary fit over the
         // session viewport (`local/src/swift-raw/Zenodeng_Phos/WINDOW_INTEGRATION.md:14`).

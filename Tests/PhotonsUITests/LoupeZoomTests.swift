@@ -268,12 +268,15 @@ final class LoupeZoomTests: XCTestCase {
                 worst = max(worst, hypot(a.x - b.x, a.y - b.y))
             }
         }
-        // The window here is 2560×1600 (1.60) against a 6000×4000 crop (1.50).
-        XCTAssertGreaterThan(worst, 0, "the aspect difference should be visible in the numbers")
-        XCTAssertLessThan(worst / Double(viewport.width), 0.01,
-                          "deviation must stay under 1 % of the window: \(worst) px")
-        print(String(format: "straighten aspect note: 1:1 window vs whole-frame deviates %.2f px over %d px (%.2f%%)",
-                     worst, viewport.width, worst / Double(viewport.width) * 100))
+        // The window here is 2560×1600 (1.60) against a 6000×4000 crop (1.50). This used to deviate —
+        // the mapping rotated window-normalised offsets, so a 1:1 window's effective angle was
+        // `atan(tan θ · 1.60)` instead of θ. Rotating pixel offsets about the frame closes it exactly,
+        // which is what this test's own note asked for (「closing it is a LoupeMapping change (frame
+        // size + window origin …)」). The assertion is inverted on purpose: agreement, not a tolerance.
+        XCTAssertEqual(worst, 0, accuracy: 1e-9,
+                       "the window projection is the whole-frame projection, whatever the aspect")
+        print(String(format: "straighten aspect note: 1:1 window vs whole-frame deviates %.6f px over %d px",
+                     worst, viewport.width))
 
         // At θ = 0 there is nothing to rotate, so the two projections agree exactly.
         let flat = framing(degrees: 0)
@@ -294,7 +297,11 @@ final class LoupeZoomTests: XCTestCase {
             cropLeft: f.cropOriginX, cropTop: f.cropOriginY,
             cropWidth: f.cropWidthPixels, cropHeight: f.cropHeightPixels,
             cosT: cos(degrees * .pi / 180), sinT: sin(degrees * .pi / 180),
-            flipH: flipH, flipV: flipV)
+            flipH: flipH, flipV: flipV,
+            // The frame the rotation turns about. Without it `LoupeMapping` falls back to the *window*
+            // — a different centre once the window is a crop — and the two projections would disagree
+            // for a reason that has nothing to do with the mapping under test.
+            frameWidth: source.width, frameHeight: source.height)
     }
 
     // MARK: 6. pan
