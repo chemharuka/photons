@@ -140,11 +140,13 @@ final class ContrastLogDomainTests: XCTestCase {
     // MARK: - the constants: Swift ↔ kernel
 
     /// A kernel cannot import Swift, so the axis constants exist twice — and a test parses the `.metal`
-    /// file and compares, the way `SaturatedColourTests` does for the luma weights.
+    /// file and compares, the way `SaturatedColourTests` does for the luma weights. Since the masked
+    /// path's seam became the global body, the constants live in `tone_shape.metal` (one file, both
+    /// paths) — `s2_tone_map.metal` no longer has a second copy to drift.
     func testTheKernelConstantsAreTheSwiftConstants() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/PhotonsCore/Kernels/s2_tone_map.metal")
+            .appendingPathComponent("Sources/PhotonsCore/Kernels/tone_shape.metal")
         let text = try String(contentsOf: url, encoding: .utf8)
         func value(_ name: String) throws -> Double {
             for line in text.split(separator: "\n") where line.hasPrefix("constant float \(name) = ") {

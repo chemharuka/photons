@@ -118,27 +118,9 @@ struct S2Params {
 // the shoulder is a `4u(1−u)` bump, whose steepest flank is `3.11·A/w` = 0.53 and whose code-space
 // step is amplified by `2^(0.4167·Δ)`. Both fractions are set to the 2-code banding budget, and both
 // are measured in `ContrastLogDomainTests` (max step 1.80 / 1.67 codes at ±100).
-constant float CT_WHITE_EV = 0.0;
-constant float CT_BLACK_EV = -8.0;
-constant float CT_TOE_W_EV = 3.0;
-constant float CT_SH_LO_EV = -3.2;
-constant float CT_TOE = 0.85;
-constant float CT_SH = 0.55;
-
-/// The bend of one pixel, **in EV**, from its luma's EV. Odd in `contrast` by construction: `−100` is
-/// the same shape mirrored (toe lifted, shoulder pulled down), which is what makes the map a monotone
-/// family in the slider instead of two different curves.
-static inline float s2_contrast_ev(float L, float contrast, float travel) {
-    // 4u(1−u): 0 at both ends of the window, exactly 1 in its middle, C¹ everywhere — so the shoulder
-    // joins the held core and the white point with no step in value or in slope, and *lands on white*
-    // (a pixel at white receives nothing, so nothing below white can be pushed past it).
-    float up = smoothstep(CT_SH_LO_EV, CT_WHITE_EV, L);
-    float shoulder = 4.0 * up * (1.0 - up);
-    // The toe is a **shift** of the far end, not a bump: a gain cannot fold however dark the pixel is,
-    // and it keeps 0 at 0 (no manufactured grey, no new dead black below the knee).
-    float toe = 1.0 - smoothstep(CT_BLACK_EV, CT_BLACK_EV + CT_TOE_W_EV, L);
-    return contrast / 100.0 * travel * (CT_SH * shoulder - CT_TOE * toe);
-}
+// Contrast itself lives in `tone_shape.metal#tone_contrast_ev` — the same body S1.6 (masks) calls,
+// so a global "contrast +100" and a masked one are the same function, not two curves that agree.
+// 0107 merged 2026-10-28; this file used to carry its own copy (`s2_contrast_ev`).
 
 // One body, two entry points. `kContrast` is a compile-time flag, so the pass that runs with
 // `contrast == 0` contains none of the log2/exp2 arithmetic — not "the arithmetic with a zero in it".
@@ -147,7 +129,7 @@ static inline float s2_contrast_ev(float L, float contrast, float travel) {
 // the slider-free pass free of two transcendental ops per pixel. `RenderGraph` dispatches on
 // `edit.light.contrast == 0`.
 //
-// It is a *safety net*, not the identity proof: `s2_contrast_ev` returns exactly 0.0 at contrast 0, so
+// It is a *safety net*, not the identity proof: `tone_contrast_ev` returns exactly 0.0 at contrast 0, so
 // `exp2(0)` is exactly 1 and the contrast path is bit-identical too (`ContrastLogDomainTests` pins
 // both). The **old** power was not: `0.18·(|v|/0.18)^1` is `0.18·(|v|/0.18)` and a division followed by
 // a multiplication is not the identity — measured 980 of 1685 samples off by 1 ULP on the arithmetic
@@ -199,7 +181,7 @@ static inline void s2_body(texture2d<float, access::read> src,
         // Same non-negative luma as the region weights below: a mixed-sign pixel must not read a
         // slightly different luminance here than there.
         float lumaC = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
-        v *= exp2(s2_contrast_ev(log2(lumaC), p.a.x, p.a.y));
+        v *= exp2(tone_contrast_ev(log2(lumaC), p.a.x, p.a.y));
     }
 
     // The **region weights** are computed from the non-negative part, exactly as before the sign was

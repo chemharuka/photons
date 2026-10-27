@@ -177,28 +177,32 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
 // passes and **deletes its power**; nothing in this file changes. Until then the masked path runs the
 // bounded body — the numbers in `LocalToneTests` pin it, so the two cannot silently drift apart.
 //
-// The windows are 0107's, and so is the fixed point: a **held band** [−4.55, −3.20] EV where the slope
-// is exactly 1, placed on the *measured* p50 of the four reference frames (−4.36 … −3.28 EV). A point
-// pivot cannot do that — the frames' median sits 0.8–1.9 EV below 0.18, which is how the old power
-// lost 68 codes of median. Both halves are odd in `contrast`, so −100 is the same shape mirrored.
-constant float CT_SH_LO_EV = -7.20;
-constant float CT_SH_HI_EV = -4.55;
-constant float CT_HI_LO_EV = -3.20;
-constant float CT_HI_HI_EV = 0.00;
-constant float CT_SH_EV = 1.00;   // toe travel at |contrast| = 100, in units of `travel`
-constant float CT_HI_EV = 0.55;   // shoulder travel at |contrast| = 100, in units of `travel`
+// **Merged 2026-10-28:** 0107 landed on main as `ContrastCurve.swift` + `s2_contrast_ev`, and the two
+// bodies are now **one**: the constants and the arithmetic below are 0107's (held band [−5.0, −3.2] EV,
+// shoulder 0.55 / toe 0.85 of `travel`), and `s2_tone_map.metal` calls `tone_contrast_ev` instead of
+// carrying a second copy. A mask's "contrast +100" is therefore not merely *shaped like* the global
+// one — it is the same function, pinned by `ContrastLogDomainTests` (global) and `LocalToneTests`
+// (masked, correlation 1.0000 against the global response).
+constant float CT_WHITE_EV = 0.0;
+constant float CT_BLACK_EV = -8.0;
+constant float CT_TOE_W_EV = 3.0;
+constant float CT_SH_LO_EV = -3.2;
+constant float CT_TOE = 0.85;
+constant float CT_SH = 0.55;
 
 /// The bend of one pixel, in EV, from its luma's EV. `travel` is the CPU's `S2Contrast.travel`
 /// (8 EV of tone map over the axis' own end points ⇒ 1.0 EV today) — an axis constant stays out of the
 /// kernel, the same discipline `HDRCurve.axis` follows.
 static inline float tone_contrast_ev(float L, float contrast, float travel) {
-    float t = contrast / 100.0;
-    float toe = 1.0 - smoothstep(CT_SH_LO_EV, CT_SH_HI_EV, L);
-    float up = smoothstep(CT_HI_LO_EV, CT_HI_HI_EV, L);
-    // 4·a·(1 − a): 0 at both ends of the shoulder window, exactly 1 in its middle, C¹ everywhere — so
-    // the shoulder joins the held band and the white point with no step in value or in slope.
+    // 4u(1−u): 0 at both ends of the window, exactly 1 in its middle, C¹ everywhere — so the shoulder
+    // joins the held core and the white point with no step in value or in slope, and *lands on white*
+    // (a pixel at white receives nothing, so nothing below white can be pushed past it).
+    float up = smoothstep(CT_SH_LO_EV, CT_WHITE_EV, L);
     float shoulder = 4.0 * up * (1.0 - up);
-    return t * travel * (CT_HI_EV * shoulder - CT_SH_EV * toe);
+    // The toe is a **shift** of the far end, not a bump: a gain cannot fold however dark the pixel is,
+    // and it keeps 0 at 0 (no manufactured grey, no new dead black below the knee).
+    float toe = 1.0 - smoothstep(CT_BLACK_EV, CT_BLACK_EV + CT_TOE_W_EV, L);
+    return contrast / 100.0 * travel * (CT_SH * shoulder - CT_TOE * toe);
 }
 
 /// Contrast on one pixel. A pure gain, so `contrast = 0` is the identity exactly (Δ ≡ 0) and 0 stays 0.

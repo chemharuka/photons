@@ -113,7 +113,7 @@ public enum S2Contrast {
     /// the kernel header; it is what keeps the median out of the slider's reach.
     public static var heldBandEV: ClosedRange<Double> { (blackEV + toeWindowEV)...shoulderLoEV }
 
-    /// The bend at one EV, in EV — `s2_contrast_ev` in the kernel, in double precision.
+    /// The bend at one EV, in EV — `tone_contrast_ev` in `tone_shape.metal`, in double precision.
     ///
     /// Used by the tests as the CPU reference and by `RenderGraph` only for the identity decision
     /// (`contrast == 0` ⇒ the entry point without any of this arithmetic).

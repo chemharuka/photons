@@ -451,16 +451,15 @@ final class LocalToneTests: XCTestCase {
     }
 
     /// `tone_contrast_ev` in `tone_shape.metal`, and `s2_contrast_ev` in feat/contrast-0107.
+    /// The seam is no longer a copy: since 0107 merged, the masked path calls the *same*
+    /// `tone_contrast_ev` the global path calls (`tone_shape.metal`), so the CPU reference here is
+    /// `S2Contrast.displacement` — the one mirror both paths are pinned to. `travel` is kept in the
+    /// signature because call sites pass it; it must equal `S2Contrast.travelEV` (asserted below).
     static func seamContrast(_ v: Double, travel: Double) -> Double {
+        precondition(abs(travel - S2Contrast.travelEV) < 1e-12,
+                     "S1.6's contrast travel must be the global one (\(travel) ≠ \(S2Contrast.travelEV))")
         let L = log2(max(v, 1e-9))
-        func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
-            let t = min(max((x - e0) / (e1 - e0), 0), 1)
-            return t * t * (3 - 2 * t)
-        }
-        let toe = 1 - smoothstep(-7.20, -4.55, L)
-        let up = smoothstep(-3.20, 0.0, L)
-        let shoulder = 4 * up * (1 - up)
-        return v * pow(2, 1.0 * travel * (0.55 * shoulder - 1.00 * toe))
+        return v * pow(2, S2Contrast.displacement(EV: L, contrast: 100))
     }
 }
 
