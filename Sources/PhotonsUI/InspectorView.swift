@@ -575,14 +575,15 @@ public struct InspectorView: View {
     ///
     /// `shape` is 派单 046's only visual switch: `.bar` for the decoder parameters (降噪 / 色彩降噪 /
     /// 细节 / 锐化), `.knob` for everything that acts on the already-decoded render (Light, Color,
-    /// 白平衡). Both draw the **same row**: label, number, double-click reset and the
-    /// `onEditingChanged` contract are this function's, not the control's, so a shape can never grow
-    /// a different behaviour.
+    /// 白平衡). 055 made them **one control**: both are `NSSlider`, and `.bar` only swaps the knob's
+    /// drawing for a 10×16 pt bubble plus `focusRingType = .none` (`BubbleSlider`). Both draw the
+    /// **same row**: label, number, double-click reset and the `onEditingChanged` contract are this
+    /// function's, not the control's, so a shape can never grow a different behaviour.
     ///
     /// There is deliberately **no `step:` parameter**. SwiftUI's `Slider` draws tick marks the moment
     /// it is handed one, and 046 forbids ticks on every slider; any quantization belongs to the model
     /// (`DetailSettings.setPosition` rounds to 1 unit), which is why the knob is built from the
-    /// `step`-free initializer and the bar steps by `SliderValueMap.keyboardStep(in:)`.
+    /// `step`-free initializer and `BubbleSlider` keeps `numberOfTickMarks` at 0.
     private func sliderRow(_ title: String,
                            _ value: Binding<Double>,
                            _ range: ClosedRange<Double>,
@@ -621,8 +622,9 @@ public struct InspectorView: View {
             }
             switch shape {
             case .bar:
-                // Decoder parameter: the drawn bar. No step, no ticks (046).
-                BarSlider(value: value, range: range, onEditingChanged: onEditingChanged)
+                // 055: decoder parameter — the *same* NSSlider as `.knob`, with only its knob drawn as
+                // a 10×16 pt rounded bubble and the focus ring switched off. No step, no ticks (046).
+                BubbleSlider(value: value, range: range, onEditingChanged: onEditingChanged)
                     .frame(height: SliderValueMap.rowHeight)
             case .knob:
                 // Render parameter: the system slider, **without** `step:` — a step draws ticks.
@@ -778,12 +780,13 @@ public struct InspectorView: View {
             }
             // 046: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以按规则
             // 用长条形；曝光/对比那些只跑渲染的才是圆球。两者的 label / 数值 / 抬起才提交的语义完全相同。
-            BarSlider(value: Binding(get: { shown },
-                                     set: { newValue in
-                                         if isTemperature { draftTemperature = newValue }
-                                         else { draftTint = newValue }
-                                     }),
-                      range: row.range) { editing in
+            // 055: 长条形与圆球现在是同一个控件（`NSSlider`），这里只是拖动点画成气泡。
+            BubbleSlider(value: Binding(get: { shown },
+                                        set: { newValue in
+                                            if isTemperature { draftTemperature = newValue }
+                                            else { draftTint = newValue }
+                                        }),
+                         range: row.range) { editing in
                 // Release = quantize + one document write = one development (`commitWhiteBalance`).
                 if !editing { commitWhiteBalance(isTemperature: isTemperature) }
             }
