@@ -129,6 +129,20 @@ public final class CatalogSession {
         didSet { if mode == .loupe, anchorID == nil { anchorID = assets.first?.id } }
     }
 
+    // MARK: view state — sort order
+    //
+    // The order the grid, the left browser and the filmstrip read `assets` in. It is **one value in
+    // one place**: the three views never sort anything themselves, they index this array, so "the
+    // three views agree" holds by construction rather than by three copies of a comparator. It is
+    // view state: not in the document, not in `EditHistory`, not in `develop_json` — flipping it must
+    // leave `editRevision`, `history` and the pixels exactly where they were.
+
+    /// `.newestFirst` (default) / `.oldestFirst`, restored from `PhotoSortPreferences` at launch.
+    public private(set) var sortOrder: PhotoSortOrder
+
+    /// Where the choice is remembered (`UserDefaults.standard` in the app).
+    private let sortPreferenceStore: PhotoSortPreferences.Store
+
     // MARK: view state — masks (Q22)
     //
     // None of this is in the document, in a cache key or in history. It is what the canvas and the
@@ -214,8 +228,13 @@ public final class CatalogSession {
     /// open is not written anywhere (there is no library to attach it to).
     private var filterPersistencePath: String?
 
-    public init(filterStore: FilterPersistence.Store = UserDefaults.standard) {
+    public init(filterStore: FilterPersistence.Store = UserDefaults.standard,
+                sortPreferenceStore: PhotoSortPreferences.Store = UserDefaults.standard) {
         filterPersistence = FilterPersistence.Writer(store: filterStore)
+        self.sortPreferenceStore = sortPreferenceStore
+        // Restored before the first `open()`, so a session's very first query already lands in the
+        // order the user chose last time — there is no "restore after the first paint" flicker.
+        sortOrder = PhotoSortPreferences.recall(from: sortPreferenceStore)
     }
 
     // MARK: lifecycle
@@ -289,12 +308,18 @@ public final class CatalogSession {
                 let normalized = Self.normalizedFolders(kept)
                 if normalized != selectedFolders { selectedFolders = normalized }
             }
-            // The grid is the library view: everything the catalog has, newest first (the query
-            // already orders by capture_time DESC). M3 has no paging; 10k rows is the design point.
+            // The grid is the library view: everything the catalog has, in the session's sort order.
+            // M3 has no paging; 10k rows is the design point.
             // The filter bar's value is folded into the *same* query the source list uses, so the
             // visible rows, their order and the count in the top bar can never disagree.
+            //
+            // The order is applied **here and nowhere else** on the load path: the query itself
+            // returns `capture_time DESC` (the catalog's index order), and `sortOrder.sorted` makes
+            // the array the one truth every view reads. Picking `.oldestFirst` therefore needs no
+            // second SQL dialect (`ORDER BY … ASC`) and no second query — one comparator defines
+            // "newest" for the grid, the browser and the strip at once.
             let f = filter
-            assets = try c.assets(f.assetFilter(limit: 200_000, folders: selectedFolders))
+            assets = sortOrder.sorted(try c.assets(f.assetFilter(limit: 200_000, folders: selectedFolders)))
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -346,6 +371,26 @@ public final class CatalogSession {
         guard let hit = ids.first(where: { id in assets.contains { $0.id == id } }) else { return }
         selectOnly(hit)
     }
+
+    // MARK: sort order (view state: one value, three views)
+
+    /// Switch the order the three browsers read the library in, and remember the choice.
+    ///
+    /// No query and no decode: the array is re-sorted **in place from what is already loaded**, so a
+    /// toggle costs one `sorted` and one `reloadData` per view — the thumbnails come back out of the
+    /// shared memory cache (`ThumbnailProvider.serveFromMemory`), which is why the pixel hash, the
+    /// document and the undo stack all read the same afterwards. Bumping `sortOrder` is also the
+    /// one signal the views observe (`ObservationBridge`), so the grid, the left browser and the
+    /// filmstrip refresh from this one write.
+    public func setSortOrder(_ order: PhotoSortOrder) {
+        guard order != sortOrder else { return }
+        sortOrder = order
+        assets = order.sorted(assets)
+        PhotoSortPreferences.remember(order, in: sortPreferenceStore)
+    }
+
+    /// What the sort button does: `新→旧 ⇄ 旧→新`.
+    public func toggleSortOrder() { setSortOrder(sortOrder.toggled) }
 
     // MARK: selection
 
