@@ -245,15 +245,20 @@ final class LocalColorStageTests: XCTestCase {
                        "S3.6 must not pretend to share HSL maths it does not use")
         XCTAssertTrue(hsl.contains("0.3"), "the hue unit (0.3° per unit) must be in the kernel")
 
-        // S1.6 no longer consumes hue/saturation at all — the struct's third float4 is blacks + enabled.
+        // S1.6 no longer consumes hue/saturation at all — the struct's third float4 is
+        // `blacks, contrast travel, pad, enabled` (079 §2.1.2 took the second pad slot for the travel
+        // the contrast bend needs; it is a number for the tone bodies, not a colour field).
         let local = try kernelText("s1_6_local")
-        XCTAssertFalse(local.contains("d.c.y"), "S1.6 must not read a hue field")
-        XCTAssertFalse(local.contains("d.c.z"), "S1.6 must not read a saturation field")
         XCTAssertFalse(local.contains("hueDegrees"), "the hue field must be gone from the descriptor")
         XCTAssertFalse(local.contains("rotate_about_grey"), "the linear-domain rotation is gone")
         XCTAssertFalse(local.contains("float3(grey)"), "the mix-towards-grey saturation is gone")
-        XCTAssertTrue(local.contains("blacks, pad, pad, enabled"),
+        XCTAssertTrue(local.contains("blacks, contrast travel"),
                       "the S1.6 descriptor keeps its stride and drops the two colour fields")
+        XCTAssertTrue(local.contains("tone_contrast") && local.contains("region_weights")
+                      && local.contains("s1_end_points"),
+                      "079: the tone sliders must come from the global include, not a local copy")
+        XCTAssertFalse(local.contains("smoothstep(0.0, 0.5"), "the linear-luma window is gone")
+        XCTAssertFalse(local.contains("pow(max(v, 1e-6)"), "the linear-light contrast power is gone")
     }
 
     // MARK: - ② the stage exists by value, and only then

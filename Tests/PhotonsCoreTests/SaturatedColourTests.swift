@@ -388,13 +388,15 @@ extension SaturatedColourTests {
     }
 
     /// **No kernel may carry its own copy of the weights.** Rec.709's `0.2126` is the tell: it is what
-    /// the eight pre-075 sites all said. One file is exempt on purpose — `s1_scene_linear.metal`'s
-    /// 073B knee luma, which belongs to the blacks/whites work (075 §6.2: 073 owns that file). The
-    /// exemption is a list, not a rule, so when 073 lands and takes the constant the test starts
-    /// covering it and the list must shrink.
+    /// the eight pre-075 sites all said. One file is exempt on purpose — 073B's knee luma, which belongs
+    /// to the blacks/whites work (075 §6.2: 073 owns that file). 079 §2.1.2 moved that luma out of
+    /// `s1_scene_linear.metal` into `tone_shape.metal` (`kEndPointLumaWeights`, so S1 and S1.6's end
+    /// points sample the *same* number instead of two copies), so the exemption follows it: the kernel
+    /// is covered again and the include carries the one literal. The exemption is a list, not a rule —
+    /// `s1_scene_linear.metal` dropping off it is exactly the shrift this list was written for.
     func testNoKernelCarriesItsOwnLumaWeights() throws {
         let dir = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels")
-        let pending = ["s1_scene_linear.metal"]
+        let pending = ["tone_shape.metal"]
         var checked: [String] = []
         for name in try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
         where name.hasSuffix(".metal") && name != "primaries.metal" {
