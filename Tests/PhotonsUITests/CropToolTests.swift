@@ -462,9 +462,15 @@ final class CropToolTests: XCTestCase {
         let session = CatalogSession()
         let tool = CropToolController(session: session)
         XCTAssertTrue(tool.begin())
-        tool.toggleFlipHorizontal()
-        XCTAssertTrue(tool.apply())
+        // 072 §F — the flip is a **document-level** geometry action now: one commit, right here, and
+        // the bar's switch and 变换 ▸ 水平翻转 both read this same bit.
+        let historiesBefore = session.history.snapshots.count
+        XCTAssertTrue(tool.toggleFlipHorizontal())
         XCTAssertTrue(session.edit.geometry.flipHorizontal, "the flip is in the document")
+        XCTAssertEqual(session.history.snapshots.count, historiesBefore + 1, "one flip = one ⌘Z")
+        // An apply that only re-writes what the document already holds commits nothing.
+        XCTAssertFalse(tool.apply(), "the crop did not change, so 应用 has nothing to commit")
+        XCTAssertTrue(session.edit.geometry.flipHorizontal, "and the flip survives 应用 untouched")
 
         let result = try g.render(session.edit, options: RenderOptions(scale: 1, useCache: false,
                                                                      wantsPixels: true))

@@ -1658,3 +1658,39 @@ public struct PanelResets {
         }
     }
 }
+
+// MARK: - 072 §E — the inspector is inert while 裁切 mode owns the canvas
+
+/// The inspector's hosting view, gated at the **event layer**.
+///
+/// The user's report was not 「侧栏要变灰」 but 「同时拖侧栏与裁切框时，侧栏被调节」: the panel kept taking
+/// drags while the crop frame was being dragged, so one hand's gesture was split between two controls
+/// and the document changed under a crop the user had not applied. Greying the rows would not fix that
+/// (a greyed slider still swallows the press; a greyed row still says "right panel"), so the gate is
+/// where the event enters the panel: while `isEditingGated`, `hitTest` answers `nil` for the whole
+/// subtree, which means no AppKit control and no SwiftUI row inside it can be pressed, dragged, typed
+/// into, scrolled or focused. Nothing about the panel's *content* changes, and the moment the tool
+/// closes the same view is live again (one property, flipped by `LoupeController.onCropModeChange`).
+///
+/// 缩放控制条 is **not** in here: it lives on the canvas (`ZoomGlassSlider`), which is why §E4 can keep
+/// it live without weakening §E1.
+public final class InspectorHostingView: NSHostingView<InspectorView> {
+
+    /// True while 裁切 mode is on. Set from the workspace, which owns both halves.
+    public var isEditingGated: Bool = false {
+        didSet {
+            guard isEditingGated != oldValue else { return }
+            // A press that was already in flight when the tool opened must not finish inside the
+            // panel: drop first responder and let AppKit rebuild the cursor rects.
+            if isEditingGated, let window, window.firstResponder === self {
+                window.makeFirstResponder(nil)
+            }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isEditingGated else { return nil }
+        return super.hitTest(point)
+    }
+}

@@ -97,37 +97,35 @@ public final class CropToolController {
     // MARK: draft
 
     /// The geometry being edited. Nothing here is in the document until `apply()`.
+    ///
+    /// 072 §F — **no flips here.** 水平/垂直翻转 is a document-level geometry action
+    /// (`GeometryGroup.flipHorizontal/flipVertical`) shared with 变换 ▸ 水平翻转, so there is exactly
+    /// one field: a `Draft` that carried its own copy could disagree with the document, and the bar's
+    /// switch would then be invisible to ⌘Z until 应用. `begin()` seeds the rest from the document and
+    /// `apply()` writes it back *around* the document's flips (`geometry(flipsOf:)`).
     public struct Draft: Sendable, Equatable {
         public var crop: CropRect = .full
         public var straighten: Double = 0
-        public var flipHorizontal: Bool = false
-        public var flipVertical: Bool = false
         public var lock: AspectLock = .original
 
-        public init(crop: CropRect = .full, straighten: Double = 0,
-                    flipHorizontal: Bool = false, flipVertical: Bool = false,
-                    lock: AspectLock = .original) {
+        public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original) {
             self.crop = crop
             self.straighten = straighten
-            self.flipHorizontal = flipHorizontal
-            self.flipVertical = flipVertical
             self.lock = lock
         }
 
-        /// The draft as a document group.
-        public var geometry: GeometryGroup {
+        /// The draft as a document group, carrying `document`'s flips (the one field, §F).
+        public func geometry(flipsOf document: GeometryGroup) -> GeometryGroup {
             GeometryGroup(crop: crop.clamped().normalizedRect,
                           rotationDegrees: CropTool.clampStraighten(straighten),
-                          flipHorizontal: flipHorizontal,
-                          flipVertical: flipVertical,
+                          flipHorizontal: document.flipHorizontal,
+                          flipVertical: document.flipVertical,
                           aspectLock: lock)
         }
 
         public init(geometry: GeometryGroup) {
             self.init(crop: geometry.cropRect,
                       straighten: geometry.straightenDegrees,
-                      flipHorizontal: geometry.flipHorizontal,
-                      flipVertical: geometry.flipVertical,
                       lock: geometry.aspectLock)
         }
     }
@@ -140,8 +138,9 @@ public final class CropToolController {
         // document — which is what a cancelled draft must print).
         didSet { if isActive != oldValue { publishDraft() } }
     }
-    /// The draft the canvas draws. Setter-free from outside except through the commands below.
-    public private(set) var draft = Draft() {
+    /// The draft the canvas draws. Setter-free from outside except through the commands below — the
+    /// `internal(set)` is the tests' door (a drag's result without an `NSEvent`), never the app's.
+    public internal(set) var draft = Draft() {
         didSet { if draft != oldValue { publishDraft() } }
     }
     /// 九宫格. View state, and the only toggle that does not touch the draft.
@@ -185,7 +184,7 @@ public final class CropToolController {
             session.cropToolDraft = nil
             return
         }
-        session.cropToolDraft = (id, draft.geometry)
+        session.cropToolDraft = (id, draft.geometry(flipsOf: session.edit.geometry))
     }
 
     // MARK: the mode
@@ -215,7 +214,7 @@ public final class CropToolController {
     @discardableResult
     public func apply() -> Bool {
         guard isActive, let session else { return false }
-        let geometry = draft.geometry
+        let geometry = draft.geometry(flipsOf: session.edit.geometry)
         endDrag()
         isActive = false
         session.applyEdit { $0.geometry = geometry }
@@ -266,15 +265,92 @@ public final class CropToolController {
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
     }
 
-    /// 水平翻转 / 垂直翻转.
+    /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
     ///
     /// The flip is applied *inside* the crop frame by S0 (`uv` is flipped in place before the
-    /// rotation, `CanvasPresenter.swift:17-28`), so the box keeps its place and the picture mirrors
-    /// within it — no crop-rect arithmetic, and nothing to keep in sync.
-    public func toggleFlipHorizontal() { draft.flipHorizontal.toggle() }
-    public func toggleFlipVertical() { draft.flipVertical.toggle() }
+    /// rotation), so the box keeps its place and the picture mirrors within it — no crop-rect
+    /// arithmetic, and nothing to keep in sync. What changed in 072: this writes the document with one
+    /// `applyEdit` + one `commitEdit`, so ⌘Z takes it back in one press whether it came from the bar or
+    /// the menu, and the two controls read the same bit.
+    @discardableResult
+    public func toggleFlipHorizontal() -> Bool { flip(horizontal: true) }
+
+    @discardableResult
+    public func toggleFlipVertical() -> Bool { flip(horizontal: false) }
+
+    @discardableResult
+    private func flip(horizontal: Bool) -> Bool {
+        guard let session else { return false }
+        session.applyEdit { model in
+            if horizontal { model.geometry.flipHorizontal.toggle() }
+            else { model.geometry.flipVertical.toggle() }
+        }
+        return session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+    }
+
+    /// The document's flips — what the bar's two switches show (§F: no draft copy).
+    public var flipHorizontal: Bool { session?.edit.geometry.flipHorizontal ?? false }
+    public var flipVertical: Bool { session?.edit.geometry.flipVertical ?? false }
 
     public func toggleGrid() { showsGrid.toggle() }
+
+    // MARK: 比例 (§C1 交换 / §C2 自定义)
+
+    /// The ratio the draft is showing, in **pixels** — the lock's own ratio, or the rect's when the
+    /// lock is 原始/自由 (nothing is constrained, so the rect is the answer).
+    public func pixelRatio(source: ImageSize? = nil) -> Double {
+        let source = source ?? sourceSize
+        if let ratio = draft.lock.ratio { return ratio }
+        let c = draft.crop.clamped()
+        return (c.width * Double(max(source.width, 1))) / max(c.height * Double(max(source.height, 1)), 1e-9)
+    }
+
+    /// 交换长宽 (§C1): the current ratio's reciprocal, applied to the frame.
+    ///
+    /// Applies to whatever is in force — a named preset, 原始 (the frame's physical W:H), or a custom
+    /// ratio — and writes the reciprocal as `.custom` when no preset names it (16:9 → 9:16 has no
+    /// preset, and pretending it were 自由 would drop the constraint on the next drag). The rect is
+    /// re-cut **inside the frame**: same centre, largest area that the frame holds at the new ratio, so
+    /// 16:9 → 9:16 → 16:9 returns to the same four edges and the same pixels. The orientation mapping
+    /// (EXIF 5…8 → the upright frame) has already happened in `sourceSize`, so there is no second,
+    /// implicit swap here — the ratio is divided once, in pixel space.
+    @discardableResult
+    public func swapAspect(source: ImageSize? = nil) -> Bool {
+        let source = source ?? sourceSize
+        let current = pixelRatio(source: source)
+        guard current.isFinite, current > 0 else { return false }
+        let swapped = 1 / current
+        guard swapped.isFinite, swapped > 0 else { return false }
+        applyRatio(swapped, lock: AspectLock.matching(ratio: swapped), source: source)
+        return true
+    }
+
+    /// 自定义比例 (§C2): `W:H`, parsed by `CropTool.ratio(from:)` before it gets here.
+    ///
+    /// The lock is `custom` — the document's own spelling — so the ratio survives a preset switch
+    /// (`setAspect`) and comes back with the document. The rect is re-cut the same way a swap is
+    /// (same centre, largest area the frame holds), and every later handle drag keeps it
+    /// (`CropToolDrag` → `CropTool.constrain`, ≤0.5 % measured in `CropAspectSwapTests`).
+    @discardableResult
+    public func setCustomRatio(_ ratio: Double, source: ImageSize? = nil) -> Bool {
+        guard ratio.isFinite, ratio > 0 else { return false }
+        applyRatio(ratio, lock: .custom(ratio), source: source ?? sourceSize)
+        return true
+    }
+
+    /// Same centre, largest area the **frame** holds at `ratio`, then the lock.
+    private func applyRatio(_ ratio: Double, lock: AspectLock, source: ImageSize) {
+        let c = draft.crop.clamped()
+        let fitted = CropMath.fittedCrop(aspect: ratio, in: .full, source: source)
+        let width = min(max(fitted.width, 1e-6), 1)
+        let height = min(max(fitted.height, 1e-6), 1)
+        // The centre is what the user asked to keep; it is only moved when the max-area rect cannot be
+        // centred there (a crop near an edge has nowhere else to go).
+        let left = min(max(c.centerX - width / 2, 0), 1 - width)
+        let top = min(max(c.centerY - height / 2, 0), 1 - height)
+        draft.lock = lock
+        draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
+    }
 
     /// The current ratio, as the popup shows it.
     public func aspectPreset(source: ImageSize? = nil) -> CropAspectPreset {
@@ -294,9 +370,10 @@ public final class CropToolController {
         var e = edit
         e.geometry.crop = .full
         e.geometry.rotationDegrees = CropTool.clampStraighten(draft.straighten)
-        e.geometry.flipHorizontal = draft.flipHorizontal
-        e.geometry.flipVertical = draft.flipVertical
         e.geometry.aspectLock = .original
+        // 072 §F — the flips are the document's, so they are carried, not overridden: a 水平翻转 from
+        // 变换 ▸ 水平翻转 while the tool is on has to show on the canvas immediately, and there is no
+        // draft copy left that could disagree with it.
         return e
     }
 
@@ -401,19 +478,50 @@ public final class CropToolController {
 
     // MARK: the readout
 
-    /// What the bar prints: `3:2 · 6048×4032` — the ratio the draft renders at, in pixels.
+    /// The three fields of the bar's 信息栏 (072 §D1): [角度] [比值] [像素], in that order, each one a
+    /// **fixed-width** field of its own. There used to be four — the lock's name (`比例`), the ratio and
+    /// the pixel size, glued together by dots in one label — so the bar's width changed with the
+    /// document and the numbers slid around as they were edited. Here each segment is its own string,
+    /// and `CropToolBar` measures the worst case of each once and never lets it grow.
+    public func angleText() -> String { CropToolController.angleText(draft.straighten) }
+
+    /// `+2.5°` / `-45.0°` — the `%+.1f` form the slider has always printed (a leading `+` says
+    /// "turned clockwise" without a legend).
+    public static func angleText(_ degrees: Double) -> String {
+        String(format: "%+.1f°", CropTool.clampStraighten(degrees))
+    }
+
+    /// The ratio the draft renders at, in pixels: `1.50` / `0.56`.
+    public func ratioText(source: ImageSize? = nil) -> String {
+        CropToolController.ratioText(pixelRatio(source: source))
+    }
+
+    /// `6048×4032` — the pixel size of what the frame will commit.
+    public func pixelText(source: ImageSize? = nil) -> String {
+        let pixels = CropMath.outputSize(draft.crop, in: source ?? sourceSize)
+        return "\(pixels.width)×\(pixels.height)"
+    }
+
+    /// The whole 信息栏 in one line, for the QA/status path — the same three segments, separated by a
+    /// single space, and **no** lock name and no dots (§D1).
     public func sizeReadout(source: ImageSize? = nil) -> String {
-        let source = source ?? sourceSize
-        let pixels = CropMath.outputSize(draft.crop, in: source)
-        let ratio = Double(pixels.width) / Double(max(pixels.height, 1))
-        return "\(draft.lock.displayName)·\(CropToolController.ratioText(ratio)) · \(pixels.width)×\(pixels.height)"
+        "\(angleText()) \(ratioText(source: source)) \(pixelText(source: source))"
+    }
+
+    /// The worst string each of the three fields can ever print. `CropToolBar` measures these to size
+    /// its fixed-width fields, and `CropBarLayoutTests` asserts that four extreme drafts produce the
+    /// same `frame(x, width)` — so the constant lives next to the formatter that produces it.
+    public enum WorstCase {
+        /// `-45.0°` — 6 characters, and the minus is the wide one of the two signs.
+        public static let angle = "-45.0°"
+        /// The widest `%.2f` a ratio can print: four integer digits and two decimals.
+        public static let ratio = "9999.99"
+        /// `9999×9999` — four digits per side and the multiplication sign.
+        public static let pixels = "9999×9999"
     }
 
     static func ratioText(_ ratio: Double) -> String {
         guard ratio.isFinite, ratio > 0 else { return "—" }
-        for known in [1.0, 4.0 / 3.0, 3.0 / 2.0, 16.0 / 9.0] {
-            if abs(ratio - known) < 0.01 { return String(format: "%.2f", ratio) }
-        }
         return String(format: "%.2f", ratio)
     }
 }
