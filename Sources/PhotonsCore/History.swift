@@ -272,14 +272,21 @@ public struct EditHistory: Sendable, Equatable, Codable {
     /// - An empty `label` is derived from the dirty groups ("Light + Color").
     ///
     /// - Returns: the snapshot written (or the merged tip), or nil for a no-op.
+    /// - Parameter coalesce: `true` (the default) lets a same-class run fold into the tip — a slider
+    ///   drag is one row however many frames it wrote. Pass `false` for a **discrete command**
+    ///   (双击复位, 换解码版本, a preset): it is one action by definition, and folding it into the drag
+    ///   before it would either hide it inside that drag's row or — when it lands exactly on the
+    ///   drag's start — erase both, leaving ⌘Z with nothing to take back. The default is deliberately
+    ///   the permissive one: a UI that says nothing gets one row per drag, never 300.
     @discardableResult
     public mutating func commit(_ edit: EditModel,
                                 label: String = "",
-                                now: Date = Date()) -> Snapshot? {
+                                now: Date = Date(),
+                                coalesce: Bool = true) -> Snapshot? {
         // 077: a session owns the next snapshot. Committing "inside" it is not an edit yet.
         guard activeSession == nil else { return nil }
         return appendSnapshot(edit, label: label, before: current ?? .neutral,
-                              now: now, allowsMerge: true)
+                              now: now, allowsMerge: coalesce)
     }
 
     /// The one write path. `before` is what the row's diff and label are computed against — the

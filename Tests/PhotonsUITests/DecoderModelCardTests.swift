@@ -291,7 +291,8 @@ final class DecoderModelCardTests: XCTestCase {
     func testTheDecodeCardIsGoneFromThePanel() {
         XCTAssertFalse(InspectorView.sectionTitles.contains("Decode"), "\(InspectorView.sectionTitles)")
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("Decode"))
-        XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版", "蒙版 stays the last card")
+        // 077（2026-10-27）：历史记录成为最后一张卡（蒙版仍是它前面的最后一张参数卡）。
+        XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
     }
 
     // MARK: - helpers

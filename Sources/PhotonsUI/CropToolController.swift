@@ -323,16 +323,21 @@ public final class CropToolController {
     @discardableResult
     private func flip(horizontal: Bool) -> Bool {
         guard let session else { return false }
+        // 077: a flip is a **discrete** action, not a handle position — 072's promise is 「一次翻转 =
+        // 一次 ⌘Z」. So inside a crop session it closes the session first (that leaves the crop-so-far
+        // as its own row, or nothing when the rect did not move) and reopens a fresh one, which keeps
+        // 「应用 with an unchanged crop commits nothing」 true as well.
+        let inSession = session.isToolSessionActive
+        if inSession { session.endToolSession(label: "裁切与旋转") }
+
         let before = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
         session.applyEdit { model in
             if horizontal { model.geometry.flipHorizontal.toggle() }
             else { model.geometry.flipVertical.toggle() }
         }
         let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
-        // 077: inside a crop session this is a no-op (the session owns the next snapshot — the flip
-        // becomes part of the 「裁切」 row at 应用, and 取消 rolls it back); outside one it is its own
-        // row, exactly as before.
         session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before
     }

@@ -728,9 +728,12 @@ public final class CatalogSession {
     /// move neither grows the stack nor truncates the redo branch (and then nothing is written).
     /// The snapshot is `MaskViewState.documentOnly(edit)`: the overlay is view state, so a snapshot
     /// that carried it would make ⌘Z look like it also toggled the mask display.
+    /// - Parameter coalesce: `false` for a discrete command (077): 双击复位 / 换解码版本 / 预设 各自
+    ///   是**一个动作**，不许折进它前面那次拖动里（详见 `EditHistory.commit`）。
     @discardableResult
-    public func commitEdit(label: String = "") -> Bool {
-        let committed = history.commit(MaskViewState.documentOnly(edit), label: label) != nil
+    public func commitEdit(label: String = "", coalesce: Bool = true) -> Bool {
+        let committed = history.commit(MaskViewState.documentOnly(edit), label: label,
+                                       coalesce: coalesce) != nil
         if committed { persist() }
         return committed
     }
@@ -788,6 +791,10 @@ public final class CatalogSession {
     public func beginToolSession(_ tool: String, label: String? = nil) {
         history.beginSession(tool, label: label)
     }
+
+    /// Is a tool session open? A discrete control that writes the document itself (裁切 bar's flips)
+    /// asks this so it can close/reopen the session around its own row (see `CropToolController.flip`).
+    public var isToolSessionActive: Bool { history.isSessionActive }
 
     /// 应用: close the session with exactly one snapshot (`base → edit`), or none if nothing moved.
     @discardableResult

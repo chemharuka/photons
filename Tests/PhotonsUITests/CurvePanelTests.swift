@@ -383,7 +383,11 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(session.history.count, base + 1)
         XCTAssertEqual(session.history.currentSnapshot?.label, "曲线")
 
-        // 反证：每个 tick 都 commit 的那条路
+        // 反证：每个 tick 都 commit 的那条路。
+        //
+        // 077（2026-10-27）之后这条反证的**结论变了**：粒度不再靠 UI 小心，`commit` 自己把同一 class
+        // 的连续提交合并成一行，所以每 tick 提交也只有 **1** 行 —— 这比"UI 必须只提交一次"更稳。
+        // 要让一行一个 tick 成立，必须每步换一个类：下面 `noisy2` 每步同时改白、红两条曲线（两类 ⇒ 永不合并）。
         let noisy = CatalogSession()
         noisy.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 1)] }
         noisy.commitEdit(label: "起点")
@@ -392,8 +396,22 @@ final class CurvePanelTests: XCTestCase {
             noisy.applyEdit { $0.curve.white[1] = CurvePoint(u: 0.5 + 0.02 * Double(step), v: 0.5) }
             noisy.commitEdit(label: "曲线")
         }
-        XCTAssertEqual(noisy.history.count - noisyBase, 10,
-                       "每个 tick 提交一次就是 10 条 —— 这条断言让上一条有意义")
+        XCTAssertEqual(noisy.history.count - noisyBase, 1,
+                       "同参数每 tick 提交也合并成一行（077 的合并发生在 commit 里）")
+
+        let noisy2 = CatalogSession()
+        noisy2.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 1)] }
+        noisy2.commitEdit(label: "起点")
+        let noisy2Base = noisy2.history.count
+        for step in 1...10 {
+            noisy2.applyEdit {
+                $0.curve.white[1] = CurvePoint(u: 0.5 + 0.02 * Double(step), v: 0.5)
+                $0.curve.red[1] = CurvePoint(u: 0.5, v: 0.5 + 0.02 * Double(step))
+            }
+            noisy2.commitEdit(label: "曲线")
+        }
+        XCTAssertEqual(noisy2.history.count - noisy2Base, 10,
+                       "每步两个类 ⇒ 不合并 ⇒ 10 条 —— 这条让「同参数才合并」有意义")
 
         // ⌘Z 一步回到拖动前
         XCTAssertTrue(session.undo())
