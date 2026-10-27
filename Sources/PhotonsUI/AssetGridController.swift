@@ -228,7 +228,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = true   // ⌘ / ⇧ come from AppKit
         collectionView.allowsEmptySelection = false
-        collectionView.backgroundColors = [.clear]
+        // 054/061: the grid's own surface is the canvas matte (`#0F0F0F`), not the window background
+        // showing through a clear collection view. Same constant as the loupe's bands, so the two
+        // views are one colour instead of "darkish" and "slightly different darkish".
+        collectionView.backgroundColors = [.canvasMatte]
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(AssetGridItem.self, forItemWithIdentifier: AssetGridItem.reuseIdentifier)
@@ -248,7 +251,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let scroll = scrollView
         scroll.documentView = collectionView
         scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .canvasMatte
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         // Scrolling is what changes "what is visible", and that is what decides which in-flight

@@ -72,8 +72,14 @@ final class CanvasMatteGreyTests: XCTestCase {
     }
 
     /// The shader carries its own literal (it cannot import Swift), so the two are compared here: the
-    /// declaration in `present.metal` must be `float3(15.0 / 255.0)` and only the **no-backdrop**
-    /// fragment may read it — the backdrop path must stay the picture's own continuation (037/053).
+    /// declaration in `present.metal` must be `float3(15.0 / 255.0)`.
+    ///
+    /// **058 supersedes the old second half of this test.** It used to require that the backdrop
+    /// fragment never read the matte ("outside the window is the picture"). That is true only while the
+    /// window is *inside* the picture: once a shrink pushes the picture's own edge onto the canvas,
+    /// outside the window is not the picture at all, and `saturate()` was smearing one edge column
+    /// across the band. So the backdrop branch now reads the matte for fragments whose UV left `[0,1]`
+    /// and keeps the picture everywhere else — the assertion below pins *that* rule.
     func testTheShaderUsesTheSameValueAndOnlyWithoutABackdrop() throws {
         let source = try String(contentsOf: Self.kernelURL, encoding: .utf8)
         let eight = CanvasPresenter.CanvasMatte.eightBitValue
@@ -86,8 +92,15 @@ final class CanvasMatteGreyTests: XCTestCase {
         XCTAssertTrue(plain.contains("kCanvasMatteDisplay"), "025's fragment does not paint the matte")
         XCTAssertTrue(plain.contains("p.d"), "the matte must be decided by the picture's rect")
         let backdrop = try XCTUnwrap(Self.fragmentSignature("present_fragment_backdrop", in: source))
-        XCTAssertFalse(backdrop.contains("kCanvasMatteDisplay"),
-                       "the backdrop branch must not paint the matte: outside the window is the picture")
+        XCTAssertTrue(backdrop.contains("kCanvasMatteDisplay"),
+                      "058: outside the **picture** the backdrop branch draws the canvas matte")
+        XCTAssertTrue(backdrop.contains("beyondEdge") || backdrop.contains("kPictureEdgeEpsilon"),
+                      "…and only where the picture's own UV left [0,1] — inside it is the picture")
+        // The fetch itself is still clamped (`saturate`), because a GPU cannot skip a texture read —
+        // what must be true is that the **result** is thrown away where the UV left the picture. That
+        // select on `beyondEdge` is the whole fix; without it the clamp is what smeared the column.
+        XCTAssertTrue(backdrop.contains("beyondEdge ? float4(kCanvasMatteDisplay"),
+                      "the out-of-picture result must be replaced by the matte, not kept from the clamp")
     }
 
     /// The two layer backgrounds and the shader are one colour. `LoupeCanvasView` is built for real; the

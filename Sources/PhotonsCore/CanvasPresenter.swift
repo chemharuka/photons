@@ -63,6 +63,83 @@ public struct PresentWindow: Equatable, Sendable {
         let w = Double(max(canvas.width, 1)), h = Double(max(canvas.height, 1))
         return (Double(u0) + canvasX / w * Double(du), Double(v0) + canvasY / h * Double(dv))
     }
+
+    /// This window read as a window on the **whole picture** (058): the same canvas rectangle, said
+    /// in the coordinates of the low-resolution whole-picture texture the backdrop is.
+    ///
+    /// A window is expressed in the frame **texture** (`uv = u0 + canvasUV · du`), and a frame texture
+    /// is not the whole picture: it is a canvas-sized render of one part of it, with the photograph
+    /// letterboxed inside. `placement` is that relationship — which part of the picture the texture
+    /// covers, and where the picture sits inside the texture — so the composition below is the affine
+    /// map `canvas → picture`:
+    ///
+    ///     f   = (uv − rect.origin) / rect.size      // where in the texture's photograph this is
+    ///     u_p = region.origin + f · region.size     // the same point of the whole picture
+    ///
+    /// Two properties come out of it and are what the shader needs: a window that reaches every canvas
+    /// pixel maps into `[0, 1]` (the picture *is* the canvas there), and a window that draws the whole
+    /// picture into the canvas — 适应 — maps to exactly `[0, 1]`, so the backdrop's own texels land on
+    /// the canvas untruncated. Passing the frame window straight to the backdrop (053) skipped this
+    /// composition, and since `du = 1/s > 1` on a shrink the UVs ran far past `[0, 1]` — the sampler's
+    /// `clamp_to_edge` then painted one column of the picture across the canvas, which is the
+    /// stretched-edge artefact the user reported seeing under 053.
+    public func onWholePicture(_ placement: FramePlacement) -> PresentWindow {
+        let r = placement.rect, g = placement.region
+        // A degenerate placement has no rect to normalise against; `0` size is the honest answer and
+        // `PresentWindow`'s initialiser keeps it finite.
+        let sx = Double(r.du) > 1e-12 ? g.width / Double(r.du) : 0
+        let sy = Double(r.dv) > 1e-12 ? g.height / Double(r.dv) : 0
+        return PresentWindow(u0: Float(g.left + (Double(u0) - Double(r.u0)) * sx),
+                             v0: Float(g.top + (Double(v0) - Double(r.v0)) * sy),
+                             du: Float(Double(du) * sx),
+                             dv: Float(Double(dv) * sy))
+    }
+}
+
+/// Where a canvas-sized frame texture sits on the **whole picture** (058) — the second coordinate
+/// system the backdrop needs, and the one 053 was missing.
+///
+/// A frame texture is rendered *for the canvas* (`RenderOptions.canvas`): the photograph is letterboxed
+/// inside it, and the part of the photograph it holds is whatever the camera was looking at. Neither
+/// half is the identity, and both move with the zoom:
+///
+///   · at 300 %, `region` is a ninth of the picture but `rect` is the whole canvas — the texture is all
+///     photograph, of a small region;
+///   · at 适应, `region` is the whole picture but `rect` is the letterboxed rectangle inside the canvas,
+///     so the picture covers `[0, 1]` of the texture only when its aspect matches the canvas's.
+///
+/// `region` is deliberately **not** clamped to `[0, 1]`: the camera may walk off the picture's edge
+/// (`LoupeFraming.minimumPictureCoverage`), and then the texture's own black beyond the photograph is
+/// beyond the picture too — clamping would move the photograph instead of letting it end where it ends.
+public struct FramePlacement: Equatable, Sendable {
+    /// The part of the whole picture the frame texture covers, in picture-normalised coordinates.
+    public var region: CropRect
+    /// The photograph's rect inside the canvas, in canvas-normalised coordinates: `xy` = origin,
+    /// `zw` = size. The identity means the photograph fills the canvas, which is what a window render
+    /// at the camera's own zoom produces.
+    public var rect: PresentWindow
+
+    public init(region: CropRect, rect: PresentWindow) {
+        self.region = region
+        self.rect = rect
+    }
+
+    /// A texture that *is* the whole picture, filling the canvas: the composition is the identity, and
+    /// `window.onWholePicture(.whole)` is `window` — 053's assumption, true only in this case.
+    public static let whole = FramePlacement(region: .full, rect: .whole)
+
+    /// Does the texture hold the whole picture (so a frame window and a picture window are the same
+    /// number)? True at 适应 with no letterbox, and for a texture rendered without a canvas.
+    public var coversPicture: Bool {
+        let eps = 1e-6
+        return abs(region.left) < eps && abs(region.top) < eps
+            && abs(region.right - 1) < eps && abs(region.bottom - 1) < eps
+    }
+
+    /// The composition is the identity: the texture *is* the picture, canvas and picture edges alike.
+    /// `window.onWholePicture(placement) == window` exactly when this is true — 053's assumption, which
+    /// holds for a canvas without letterbox at 适应 and for a texture rendered without a canvas.
+    public var isIdentity: Bool { coversPicture && rect == .whole }
 }
 
 /// Presents an S4 output texture into a `CAMetalLayer` — the last hand-off of the on-screen path.
