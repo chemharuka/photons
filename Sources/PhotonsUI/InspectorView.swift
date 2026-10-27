@@ -25,6 +25,17 @@ import PhotonsCore
 ///      read from `EditModel.neutral`, never a literal `0`).
 ///   3. **Double-click a card's title** → the whole card back in **one** snapshot (`PanelResets.group`),
 ///      so ⌘Z takes the group back in one press rather than N.
+///
+/// 派单 052 adds two facts about that number, and both are per-row data in `ToneRow` so no card can
+/// answer differently:
+///
+///   · **the first keystroke after focus starts the buffer over** (`NumberFieldState.typed(from:to:)`)
+///     — clicking in and typing `1.5` must not land inside the `1.5` that was already there
+///     (`1.1.5`). A first keystroke that *replaces* a text selection is left alone: that is "改一位".
+///   · **the readout is not the document.** 曝光 reads `%.2f EV` and stores on a 0.01 grid; the other
+///     continuous rows read as integers rounded **away** from zero (`ceil` up, `floor` down — never
+///     smaller than the truth) and store what was typed. `ToneRow.rounding` / `.decimals` / `.quantum`
+///     are those three answers.
 public struct InspectorView: View {
 
     /// The cards, in display order (派单 009 A).
@@ -291,8 +302,10 @@ public struct InspectorView: View {
     private var lightCard: some View {
         card(Section.light.title, reset: { resetGroup(.light) }) {
             ForEach(Self.lightRows, id: \.title) { row in
-                sliderRow(row.title, binding(row.keyPath), row.range, row.format,
+                sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
                           shape: row.shape,
+                          decimals: row.decimals,
+                          rounding: row.rounding,
                           editable: row.editable,
                           onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
                     // Drag end = one edit action = one history snapshot (never per tick).
@@ -328,8 +341,10 @@ public struct InspectorView: View {
     private var colorCard: some View {
         card(Section.color.title, reset: { resetGroup(.color) }) {
             ForEach(Self.colorRows, id: \.title) { row in
-                sliderRow(row.title, binding(row.keyPath), row.range, row.format,
+                sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
                           shape: row.shape,
+                          decimals: row.decimals,
+                          rounding: row.rounding,
                           editable: row.editable,
                           onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
                     if !editing { session.commitEdit() }
@@ -505,6 +520,17 @@ public struct InspectorView: View {
         public var keyPath: WritableKeyPath<EditModel, Double>
         /// 047: every row in this panel takes a typed number (no card opts out).
         public var editable: Bool = true
+        /// 052: how many decimals the field shows **while editing** (`1.48` for 曝光, `1.5` for a
+        /// tone row, `0` = the clean number 047 prints — never `2.0`).
+        public var decimals: Int = 0
+        /// 052: how the resting readout rounds. `.outward` is the panel's rule (`ceil` up, `floor`
+        /// down: a readout never reads smaller than the document), `.asIs` is for 曝光, which keeps
+        /// its two decimals — the one row whose number is fine enough to print.
+        public var rounding: SliderRounding = .outward
+        /// 052: the grid the **document** stores on (`0` = store exactly what was typed). 曝光 is
+        /// 0.01 — `edit.light.exposure * 100` is an integer — the others keep their own quantization
+        /// (整数行 stay integers because their step is 1; 细节 / 白平衡 quantize in the model).
+        public var quantum: Double = 0
 
         /// The field's own default, read from the neutral document — never a hard-coded number.
         public var defaultValue: Double { EditModel.neutral[keyPath: keyPath] }
@@ -515,13 +541,23 @@ public struct InspectorView: View {
     /// All six are **render** parameters: they act on the decoded pixels and never re-develop the
     /// RAW, so per 046 they keep the round knob. The day one of them moves into `DecodeInputs`, its
     /// `shape` here turns `.bar` and nothing else about the row changes.
+    ///
+    /// 052: 曝光 is the one row that prints decimals (`%.2f EV`) and stores on a 0.01 grid; the other
+    /// five read as whole numbers rounded away from zero and store what was typed (their 1 step is 1,
+    /// so a drag is already whole).
     public static let lightRows: [ToneRow] = [
-        ToneRow(title: "曝光", range: -5 ... 5, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure),
-        ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast),
-        ToneRow(title: "高光", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.highlights),
-        ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows),
-        ToneRow(title: "白色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.whites),
-        ToneRow(title: "黑色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.blacks),
+        ToneRow(title: "曝光", range: -5 ... 5, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure,
+                decimals: 2, rounding: .asIs, quantum: 0.01),
+        ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast,
+                decimals: 1),
+        ToneRow(title: "高光", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.highlights,
+                decimals: 1),
+        ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows,
+                decimals: 1),
+        ToneRow(title: "白色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.whites,
+                decimals: 1),
+        ToneRow(title: "黑色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.blacks,
+                decimals: 1),
     ]
 
     /// 自然饱和 / 饱和 — the Color card's two rows, the same table shape as Light.
@@ -531,10 +567,36 @@ public struct InspectorView: View {
     /// drift apart. Both are render parameters, so both are `.knob`.
     public static let colorRows: [ToneRow] = [
         ToneRow(title: "自然饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.color.vibrance),
+                keyPath: \.color.vibrance, decimals: 1),
         ToneRow(title: "饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.color.saturation),
+                keyPath: \.color.saturation, decimals: 1),
     ]
+
+    /// 052: how a resting readout turns a document value into the digits beside the slider.
+    ///
+    /// The panel's rule is **outward**: a positive number reads up (`ceil`), a negative one reads
+    /// down (`floor`), so the number on screen is never smaller than the number in the document —
+    /// `1.4829` reads `2`, `-0.4` reads `-1`, and an exact `2` still reads `2`. 曝光 is the one
+    /// exception (`.asIs`): its readout prints two decimals (`1.48 EV`) instead of rounding at all.
+    public enum SliderRounding: String, Equatable, Sendable {
+        /// Print the value the format asks for (`%.2f EV` → `1.48 EV`). 曝光's rule.
+        case asIs
+        /// Whole numbers, rounded away from zero (`ceil` up, `floor` down). Every other row.
+        case outward
+
+        /// The number the format is handed. `−0` comes back as `0`: the panel never prints `-0`.
+        public func apply(_ value: Double) -> Double {
+            switch self {
+            case .asIs:
+                return value
+            case .outward:
+                guard value.isFinite else { return 0 }
+                if value > 0 { return value.rounded(.up) }
+                if value < 0 { return value.rounded(.down) }
+                return 0
+            }
+        }
+    }
 
     // MARK: the one row shape (派单 040)
 
@@ -589,6 +651,8 @@ public struct InspectorView: View {
                            _ format: String,
                            shape: SliderShape = .knob,
                            style: SliderRowStyle = .standard,
+                           decimals: Int = 0,
+                           rounding: SliderRounding = .asIs,
                            editable: Bool = true,
                            accessibilityID: String? = nil,
                            onReset: @escaping () -> Void,
@@ -604,6 +668,8 @@ public struct InspectorView: View {
                     SliderNumberField(value: value.wrappedValue,
                                       range: range,
                                       format: format,
+                                      decimals: decimals,
+                                      rounding: rounding,
                                       fontSize: style.readoutSize,
                                       accessibilityID: accessibilityID,
                                       onCommit: { typed in
@@ -614,7 +680,7 @@ public struct InspectorView: View {
                                           onEditingChanged(false)
                                       })
                 } else {
-                    Text(Self.sliderText(format, value.wrappedValue))
+                    Text(Self.sliderText(format, value.wrappedValue, rounding: rounding))
                         .font(.system(size: style.readoutSize, design: .monospaced))
                         .foregroundStyle(.primary)
                 }
@@ -638,8 +704,12 @@ public struct InspectorView: View {
     /// `String(format: "%.0f", -0.4)` is `"-0"`, so a control parked a hair below zero read `-0`
     /// while it was, for every practical purpose, at zero (the same for `"%.2f"` → `"-0.00"`).
     /// Anything whose formatted form is zero must come out unsigned: the panel says `0`, never `-0`.
-    static func sliderText(_ format: String, _ value: Double) -> String {
-        let text = String(format: format, value)
+    ///
+    /// 052: `rounding` decides what the format is handed — `.outward` for the panel's whole-number
+    /// rows (曝光 passes `.asIs` and keeps its two decimals).
+    static func sliderText(_ format: String, _ value: Double,
+                           rounding: SliderRounding = .asIs) -> String {
+        let text = String(format: format, rounding.apply(value))
         let digits = text.drop { $0 == "-" }
         if !digits.isEmpty, digits.allSatisfy({ $0 == "0" || $0 == "." }) {
             return String(digits)
@@ -647,11 +717,28 @@ public struct InspectorView: View {
         return text
     }
 
+    /// 052: the value a row writes into the **document**, on the row's own grid.
+    ///
+    /// 曝光 is the row this exists for: the readout says `1.48 EV`, so `edit.light.exposure` has to
+    /// be `1.48` and never `1.48293…` — dragging must not put a number nobody can read into a
+    /// cache key. `quantum == 0` means the row has no grid of its own (it stores what was typed;
+    /// 细节 and 白平衡 quantize inside the model, as they always have).
+    static func quantized(_ value: Double, quantum: Double) -> Double {
+        guard quantum > 0, value.isFinite else { return value }
+        let scale = (1 / quantum).rounded()
+        guard scale >= 1, abs(scale * quantum - 1) < 1e-9 else {
+            return (value / quantum).rounded() * quantum
+        }
+        return (value * scale).rounded() / scale
+    }
+
     /// A slider binding that writes through the session, so every tick is observed by the loupe.
-    private func binding(_ keyPath: WritableKeyPath<EditModel, Double>) -> Binding<Double> {
+    private func binding(_ keyPath: WritableKeyPath<EditModel, Double>,
+                         quantum: Double = 0) -> Binding<Double> {
         Binding(get: { session.edit[keyPath: keyPath] },
                 set: { newValue in
-                    session.applyEdit { $0[keyPath: keyPath] = newValue }
+                    let stored = Self.quantized(newValue, quantum: quantum)
+                    session.applyEdit { $0[keyPath: keyPath] = stored }
                 })
     }
 
@@ -1063,6 +1150,24 @@ enum SliderValueInput {
         return String(format: "%.6g", value)
     }
 
+    /// 052: the same clean number, but at most `decimals` places — 曝光's box shows `1.48`, never
+    /// `1.4829`, while a whole number stays whole (`2`, not `2.00`: the panel's integer rows must not
+    /// grow a `.0` just because the user clicked into them).
+    ///
+    /// `decimals == 0` means "no cap" and is the plain 047 form: a `%.0f` row may hold `0.5` (047's
+    /// contract — the field must not truncate what the document legitimately holds), so nothing is
+    /// rounded away that the user did not ask to round.
+    static func editingText(_ value: Double, decimals: Int) -> String {
+        guard decimals > 0 else { return editingText(value) }
+        guard value.isFinite else { return "0" }
+        if value == 0 { return "0" }
+        if value == value.rounded(), abs(value) < 1e9 { return String(format: "%.0f", value) }
+        let text = String(format: "%.\(decimals)f", value)
+        let digits = text.drop { $0 == "-" }
+        if !digits.isEmpty, digits.allSatisfy({ $0 == "0" || $0 == "." }) { return "0" }
+        return text
+    }
+
     /// A submitted string, in the row's own travel.
     ///
     /// Out-of-range numbers are **clamped**, not rejected: a slider's travel is a fact about the
@@ -1073,42 +1178,172 @@ enum SliderValueInput {
     }
 }
 
-/// One row's number: a readout that turns into a text field (派单 047).
+/// 派单 052: what a keystroke means to a number field that has just been focused.
+///
+/// The question the field asks is not "which key was this" but "did the user select something
+/// first". A first keystroke that **replaces** a selection is a local edit (「只想改一位」); one that
+/// merely inserts has to start from an empty buffer (「我以为自己在从头输入」— the bug 052 names:
+/// clicking into `1.5` and typing `1.5` used to give `1.1.5`).
+///
+/// SwiftUI gives a `TextField` no key events and no selection, but it does hand back both strings,
+/// and a change that removes nothing can only be an insertion. That is all this rule needs — no
+/// click counting, no `onTapGesture`, no key monitor.
+enum FirstKeystroke: Equatable {
+    /// Nothing was selected: show exactly what was just typed (empty after a Backspace).
+    case clear(typed: String)
+    /// Something was selected before the key: the field's own replacement is what the user asked for.
+    case inPlace
+
+    /// The whole verdict, as a pure function of the buffer before and after one keystroke.
+    static func decide(from old: String, to new: String) -> FirstKeystroke {
+        // No change is no keystroke: a digit typed over the very same digit must not empty anything.
+        guard old != new else { return .inPlace }
+        let o = Array(old), n = Array(new)
+        var prefix = 0
+        while prefix < o.count, prefix < n.count, o[prefix] == n[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < o.count - prefix, suffix < n.count - prefix,
+              o[o.count - 1 - suffix] == n[n.count - 1 - suffix] { suffix += 1 }
+        let removed = o.count - prefix - suffix
+        let inserted = String(n[prefix ..< max(prefix, n.count - suffix)])
+        // A removal means the keystroke landed on a selection; an insertion means it only extended
+        // the buffer we are about to throw away.
+        if removed > 0, !inserted.isEmpty { return .inPlace }
+        return .clear(typed: inserted)
+    }
+}
+
+/// 052: a row's number while it is being typed — the buffer, and the one rule above.
+///
+/// The view holds this, the tests hold this: `begin` is focus, `typed(from:to:)` is the field's
+/// binding being written, `end` is any of 047's three exits. Keeping the decision here (and not in
+/// the view) is what makes 「第一次按键先清空」 a test instead of a screenshot.
+struct NumberFieldState: Equatable {
+    /// What the field shows.
+    private(set) var text: String = ""
+    /// The field is the first responder's target: `↵`/`Esc`/blur mean something.
+    private(set) var editing = false
+    /// Focus arrived and nothing has been typed yet — the buffer is still the readout it replaced.
+    private(set) var pendingClear = false
+    /// The buffer as focus left it. A change whose `old` is not this one is not a keystroke at all
+    /// (it is the field's own `begin`), so the rule must not read it as one.
+    private(set) var origin: String = ""
+
+    /// Focus gained: the resting readout becomes the clean editing text, and the next keystroke
+    /// starts the buffer over.
+    mutating func begin(_ editingText: String) {
+        text = editingText
+        origin = editingText
+        pendingClear = true
+        editing = true
+    }
+
+    /// One keystroke (or a paste) landed. Returns what the rule decided, or `nil` for an ordinary
+    /// keystroke (the rule is spent); `text` is left holding the buffer the field should show.
+    @discardableResult
+    mutating func typed(from old: String, to new: String) -> FirstKeystroke? {
+        guard old != new else { return nil }        // nothing landed: the rule is not spent
+        let isFirst = editing && pendingClear && old == origin
+        pendingClear = false
+        guard isFirst else {
+            text = new
+            return nil
+        }
+        switch FirstKeystroke.decide(from: old, to: new) {
+        case .clear(let typed):
+            text = typed
+            return .clear(typed: typed)
+        case .inPlace:
+            text = new
+            return .inPlace
+        }
+    }
+
+    /// One of the three exits: the field stops editing and shows `text` (the row's readout, or the
+    /// old value after a cancel).
+    mutating func end(_ text: String) {
+        self.text = text
+        origin = text
+        editing = false
+        pendingClear = false
+    }
+
+    /// What `↵` (or a blur) does with the buffer — 052's one addition to 047's three exits.
+    enum Submission: Equatable {
+        /// A number: write it, then commit (one history entry, exactly like a drag).
+        case value(Double)
+        /// The buffer is **empty**: the user cleared it and left. Keep the old value, write nothing,
+        /// do not beep — `Esc`'s outcome, not the junk string's.
+        case cancelled
+        /// Not a number: beep, restore, write nothing (047's "非法输入不写历史").
+        case rejected
+    }
+
+    /// The exit decision, as a pure function of the buffer.
+    func submission(in range: ClosedRange<Double>) -> Submission {
+        if text.trimmingCharacters(in: .whitespaces).isEmpty { return .cancelled }
+        switch SliderValueInput.resolve(text, in: range) {
+        case .value(let typed): return .value(typed)
+        case .rejected: return .rejected
+        }
+    }
+}
+
+/// One row's number: a readout that turns into a text field (派单 047, 精度 052).
 ///
 /// Always a `TextField` — a `Text` plus an `onTapGesture` would give the mouse an entry and the keyboard
 /// none (`Tab` reaches a control, not a label). What changes on focus is the *text*: the row's own
-/// format while resting (`5872 K`, `+0.50 EV`), the clean number while editing (`5872`, `-0.50`), so the
-/// user types what the document will hold.
+/// format while resting (`1.48 EV`), the clean number while editing (`1.48`), so the user types what
+/// the document will hold.
 ///
 /// The three exits are the task's three: `↵` commits, `Esc` cancels (old value back, no write), losing
 /// focus commits. A rejected string beeps **and** restores — and because `onCommit` is never called, no
 /// `applyEdit` and no `commitEdit` happen, which is the "非法输入不写历史" contract.
+///
+/// 052 adds the buffer rule (`NumberFieldState`): the first keystroke after focus replaces the whole
+/// buffer instead of landing inside it, and a buffer the user emptied and then `↵`'d is a **cancel** —
+/// `history.count` does not move.
 struct SliderNumberField: View {
     let value: Double
     let range: ClosedRange<Double>
     let format: String
+    /// 052: decimals while editing (`2` for 曝光, `1` for a tone row, `0` = 047's clean number).
+    var decimals: Int = 0
+    /// 052: how the resting readout rounds (`.asIs` keeps 曝光's `1.48`; `.outward` is whole numbers).
+    var rounding: InspectorView.SliderRounding = .asIs
     var fontSize: CGFloat = 10
     var width: CGFloat = 40
     var accessibilityID: String?
     /// Write + commit: the row's own path, so a typed value is one history entry exactly like a drag.
     let onCommit: (Double) -> Void
 
-    @State private var text: String = ""
-    @State private var editing = false
+    @State private var state = NumberFieldState()
     @FocusState private var focused: Bool
 
-    private var display: String { InspectorView.sliderText(format, value) }
+    /// `editing` is read as a property so the exits below stay one sentence each.
+    private var editing: Bool { state.editing }
+
+    private var display: String { InspectorView.sliderText(format, value, rounding: rounding) }
+
+    /// The field's own binding: a keystroke goes through `NumberFieldState`, which may hand back a
+    /// shorter buffer than the one SwiftUI just produced (`1.51` → `1`) — that is the whole feature.
+    private var buffer: Binding<String> {
+        Binding(get: { state.text },
+                set: { new in
+                    state.typed(from: state.text, to: new)
+                })
+    }
 
     var body: some View {
-        TextField("", text: $text)
+        TextField("", text: buffer)
             .textFieldStyle(.plain)
             .multilineTextAlignment(.trailing)
             .font(.system(size: fontSize, design: .monospaced))
             .foregroundStyle(editing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
             .frame(width: width)
             .focused($focused)
-            .onAppear { text = display }
-            .onChange(of: value) { _, _ in if !editing { text = display } }
+            .onAppear { state.end(display) }
+            .onChange(of: value) { _, _ in if !editing { state.end(display) } }
             .onChange(of: focused) { _, isFocused in
                 if isFocused { begin() } else if editing { commit() }
             }
@@ -1118,32 +1353,33 @@ struct SliderNumberField: View {
             .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 失焦提交")
     }
 
-    /// Focus gained: swap the formatted readout for the clean number.
+    /// Focus gained: swap the formatted readout for the clean number, and arm the buffer rule.
     private func begin() {
         guard !editing else { return }
-        editing = true
-        text = SliderValueInput.editingText(value)
+        state.begin(SliderValueInput.editingText(value, decimals: decimals))
     }
 
     /// `↵` or blur: write it (which commits once), or beep and put the old number back.
+    ///
+    /// 052: an **empty** buffer is not junk — `↵` on a field the user retyped from scratch and then
+    /// abandoned is a cancel: no write, no history, no beep (the old `1.5` is still there).
     private func commit() {
         guard editing else { return }
-        switch SliderValueInput.resolve(text, in: range) {
+        switch state.submission(in: range) {
         case .value(let typed):
-            editing = false
-            text = InspectorView.sliderText(format, typed)   // what the model is about to hold
+            state.end(InspectorView.sliderText(format, typed, rounding: rounding))  // what the model is about to hold
             onCommit(typed)
+        case .cancelled:
+            cancel()
         case .rejected:
             NSSound.beep()
-            editing = false
-            text = display
+            state.end(display)
         }
     }
 
-    /// `Esc`: nothing written, not even a beep — the user asked to leave.
+    /// `Esc` (or an empty buffer + `↵`): nothing written, not even a beep — the user asked to leave.
     private func cancel() {
-        editing = false
-        text = display
+        state.end(display)
         focused = false
     }
 }
