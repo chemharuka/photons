@@ -146,15 +146,27 @@ final class SubBlackSignalTests: XCTestCase {
         let means = bandMeans(try render(graph, edit))
         print("sub-black staircase with a normal edit:", means.map { String(format: "%.5f", $0) })
         // The five bands at or below zero must end at exactly 0 — the display clamp is the only judge.
-        // The sixth sample is +0.001 *light* (a real, if tiny, positive value): it renders as one code
-        // (0.0053 of full scale), which it always did — the old fixture only hid that by pushing it
-        // below zero with the affine level (`blacks = −5` meant +0.0075 of black point).
+        // The sixth sample is +0.001 of *light* (a real, if tiny, positive value): 0.0053 of full
+        // scale, i.e. code 3.1 on its own.
         for (i, m) in means.enumerated() where i < 5 {
             XCTAssertEqual(m, 0, accuracy: 1e-4,
                            "band \(i) lit up without a lift (\(m)) — the display clamp is the only judge")
         }
-        XCTAssertLessThanOrEqual(means[5] * 255, 2,
-                                 "a +0.001 sample must render as at most two codes, not as grey")
+        // 0107: the bound is **"no brighter than neutral"**, not "≤ 2 codes". The two-code figure was
+        // the *old* curve's: a linear-light power crushes everything below its 0.18 pivot
+        // (0.001 → 0.00049, code 1.6), so the assertion was pinning the arithmetic and not the
+        // invariant. The log2-domain bend's toe is a bounded gain — `2^(−0.85·contrast/100)` = 0.94 at
+        // `+10` — so this sample now renders at 2.8 codes, i.e. *darker* than its own neutral. Pinned as
+        // "an ordinary edit may not brighten the toe", with a loose ceiling that still catches "grey".
+        var neutral = EditModel.neutral
+        neutral.light.blacks = -5
+        let neutralMeans = bandMeans(try render(graph, neutral))
+        print("sub-black staircase: neutral band 6 = \(neutralMeans[5] * 255) codes, "
+              + "with contrast +10 & blacks −5 = \(means[5] * 255)")
+        XCTAssertLessThanOrEqual(means[5] * 255, neutralMeans[5] * 255 + 1e-6,
+                                 "an ordinary edit brightened a +0.001 sample")
+        XCTAssertLessThanOrEqual(means[5] * 255, 4,
+                                 "a +0.001 sample must not render as grey")
     }
 
     /// Blacks stays monotone across its whole range on a sub-black staircase.
