@@ -156,19 +156,22 @@ final class CurveRegionTests: XCTestCase {
         // 反证（第二重）：`1…2` 口径下白点 (1,1) 会被画在左下角，而不是正中。
         XCTAssertEqual(CurveViewMode.hdr.span, 0...CurvePoint.maximum,
                        "HDR 的 span 是整条轴 —— 改回 `1...2` 这条必红")
-        // 刻度：两种视图都画同一组五档（255 在 SDR 的右端、HDR 的正中），但右侧 HDR 半区没有数字。
-        let plotBottom = rowOffset + CurvePanelMetrics.plotRect(
-            in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight)).maxY
-        let tickTop = Int(plotBottom * sdr.scale)
-        let tickBottom = Int((plotBottom + CurvePanelMetrics.tickBand - 2) * sdr.scale)
-        let tickBandRows = tickTop..<tickBottom
-        XCTAssertNotNil(hdr.bbox(of: 0...250, in: tickBandRows), "HDR 视图里刻度带也有字（同一组五档）")
-        // …而右 1/4（HDR 半区）一个数都没有，否则上一条断言会因为「整条带都算有字」而空过。
-        let rightQuarter = Int(0.75 * 274 * sdr.scale)..<Int(274 * sdr.scale)
-        XCTAssertNil(hdr.bbox(of: 0...250, in: tickBandRows, cols: rightQuarter),
-                     "HDR 半区没有可标的数字（069 取消了 stops）：右 1/4 不画刻度")
-        // …而 SDR 视图里那一带**有**刻度（五档码值），否则上一条断言会因为「哪儿都没字」而空过。
-        XCTAssertNotNil(sdr.bbox(of: 0...250, in: tickBandRows), "SDR 视图必须有刻度")
+        // 刻度：069 的五档码值两种视图都画；**用户 2026-10-27：HDR 视图的右半再补 `+1 +2 +3 +4`**
+        // （九个刻度：5 码 + 4 stops）。位图上数标签簇，SDR 五个、HDR 九个 —— 专门的那条测试
+        // （`testTheHdrViewLabelsNineTicksAndTheSdrViewFive`）把它们的位置逐个量出来。
+        let labelRows = Self.tickLabelRows(of: sdr, plotBandTop: sdr.pt(plot.top))
+        XCTAssertEqual(sdr.clusters(darkerThan: 150, in: labelRows).count, 5,
+                       "SDR 视图：五个显示码，一个 stops 都不加")
+        XCTAssertEqual(hdr.clusters(darkerThan: 150, in: labelRows).count, 9,
+                       "HDR 视图：5 码 + 4 stops（+1…+4 在右半）")
+        // 反证的另一半：白点右边（正中 +14 pt 之后，避开 255 标签自身的右半）SDR 视图只有 `191` 与
+        // `255` 两个码，HDR 视图是四个 stops —— 正是用户 2026-10-27 要补的那四档。
+        let rightOfWhite = Int((0.5 * 274 + 14) * sdr.scale)..<Int(274 * sdr.scale)
+        XCTAssertEqual(sdr.clusters(darkerThan: 150, in: labelRows, cols: rightOfWhite).count, 2,
+                       "SDR 视图白点右边是 191 / 255 两个码")
+        XCTAssertEqual(hdr.clusters(darkerThan: 150, in: labelRows, cols: rightOfWhite).count, 4,
+                       "HDR 视图白点右边正好是 +1 +2 +3 +4 四个（用户 2026-10-27 要求的那四档）")
+        XCTAssertNotNil(sdr.bbox(of: 0...250, in: labelRows), "SDR 视图必须有刻度")
 
         // ── ③ 曲线经过自己的控制点：同一条变换的像素级证据 ─────────────────────────────────
         // The curve's ink is measured at three fractions of the box against the *geometry's* own
@@ -197,6 +200,112 @@ final class CurveRegionTests: XCTestCase {
         print("redraw · sdr \(sdr.sha256.prefix(12)) · hdr \(hdr.sha256.prefix(12))"
               + " · 往返 " + (sdr.sha256 == back.sha256 ? "逐字节相同" : "不同")
               + " · 历史 \(session.history.count) · revision \(session.editRevision)")
+    }
+
+    // MARK: - ②b 用户 2026-10-27：HDR 视图右半要有 +1…+4（位图上数标签）
+
+    /// **HDR 视图 9 个刻度、SDR 视图 5 个** —— 数的是**位图上的标签簇**，位置逐个与几何比。
+    ///
+    /// 这条测试是用户那条报告（「HDR 视图下没有 +1 +2 +3 +4 的刻度」）的可执行形式：
+    ///
+    ///   · SDR 视图只有 5 个数字（显示码），一个 stops 都不加；
+    ///   · HDR 视图 9 个，右半四个的中心正好落在 `62.5 / 75 / 87.5 / 100 %` 的 box 宽处 —— 也就是
+    ///     `HDRCurveAxis.u(stops: 1…4)` 的位置（由几何算出，不是写死的 pt）；
+    ///   · 相邻标签的间距、以及每个标签自身的像素宽度都打印出来，证明九个放得下；
+    ///   · 两个视图的位图不同，且**按回去逐字节回到原图**。
+    func testTheHdrViewLabelsNineTicksAndTheSdrViewFive() throws {
+        let card = Self.host(CurvePanel(session: CatalogSession()), width: 274)
+        let sdr = try XCTUnwrap(Self.snapshot(card.host))
+        let rows = sdr.bands(darkerThan: 250)
+        let plotBand = try XCTUnwrap(sdr.plotBand(rows), "没找到绘图区那一带")
+        let labelRows = Self.tickLabelRows(of: sdr, plotBandTop: sdr.pt(plotBand.top))
+        let box = Self.valueBox()
+
+        // ── SDR：五个码值，位置 = 几何的 x ────────────────────────────────────────────────
+        let sdrLayout = CurveAxisTicks.layout(for: .sdr, in: Self.geometry(.sdr))
+        let sdrClusters = sdr.clusters(darkerThan: 150, in: labelRows)
+        XCTAssertEqual(sdrClusters.count, 5, "SDR 视图只画五个显示码（stops 不进这个视图）")
+        Self.assertLabelCentres(sdrClusters, match: sdrLayout, in: sdr, label: "SDR")
+
+        // ── 按一下胶囊 → HDR：九个 ────────────────────────────────────────────────────────
+        let capsule = try XCTUnwrap(Self.capsule(sdr))
+        Self.press(card, at: NSPoint(x: sdr.pt(capsule.midX), y: sdr.pt(capsule.midY)))
+        let hdr = try XCTUnwrap(Self.snapshot(card.host))
+        XCTAssertNotEqual(sdr.sha256, hdr.sha256, "两个视图的位图必须不同")
+
+        let hdrLayout = CurveAxisTicks.layout(for: .hdr, in: Self.geometry(.hdr))
+        let hdrClusters = hdr.clusters(darkerThan: 150, in: labelRows)
+        XCTAssertEqual(hdrClusters.count, 9, "HDR 视图：5 码 + 4 stops = 9 个数字")
+        Self.assertLabelCentres(hdrClusters, match: hdrLayout, in: hdr, label: "HDR")
+
+        // 右半的四个必须是 +1…+4：几何上它们的 x 落在 box 宽 62.5 / 75 / 87.5 / 100 % 处，
+        // 位图上最右那个标签的**右边缘**就贴在 box 的右边缘（`+4` 是右对齐挂的）。
+        XCTAssertEqual(hdrLayout.count, 9)
+        for (placement, fraction) in zip(hdrLayout.suffix(4), [0.625, 0.75, 0.875, 1.0]) {
+            let want = box.minX + CGFloat(fraction) * box.width
+            XCTAssertEqual(placement.x, want, accuracy: 1e-9,
+                           "「\(placement.tick.label)」的刻度线应在 box 宽 \(fraction * 100) % 处")
+        }
+        if hdrClusters.count == 9 {
+            XCTAssertEqual(hdr.pt(hdrClusters[8].right), box.maxX, accuracy: 2.5,
+                           "「+4」的标签右边缘贴在 box 右边（右对齐）")
+            XCTAssertGreaterThan(hdr.pt(hdrClusters[8].midX), hdr.pt(hdrClusters[4].midX) + 100,
+                                 "「+4」在「255」右边一百多点（半个 box 之外）")
+        }
+
+        // ── 间距与标签宽度：九个数放得下 ──────────────────────────────────────────────────
+        var measuredSpacing: [CGFloat] = []
+        for i in 1..<max(hdrClusters.count, 1) {
+            measuredSpacing.append(hdr.pt(hdrClusters[i].left) - hdr.pt(hdrClusters[i - 1].right))
+        }
+        XCTAssertGreaterThanOrEqual(measuredSpacing.min() ?? 0, 8,
+                                    "相邻标签的空白至少 8 pt，实测最窄 \(measuredSpacing.min() ?? 0) pt")
+        let widths = hdrClusters.map { hdr.pt($0.right - $0.left + 1) }
+        // 「255」与「+1」之间是两套刻度的接缝（第 5 与第 6 个簇，只在九个都在时存在）。
+        let seam = hdrClusters.count == 9
+            ? hdr.pt(hdrClusters[5].left) - hdr.pt(hdrClusters[4].right) : CGFloat.nan
+
+        // ── 按回去：逐字节回到原图 ────────────────────────────────────────────────────────
+        Self.press(card, at: NSPoint(x: sdr.pt(capsule.midX), y: sdr.pt(capsule.midY)))
+        let back = try XCTUnwrap(Self.snapshot(card.host))
+        XCTAssertEqual(sdr.sha256, back.sha256, "HDR → SDR 必须逐字节回到原图")
+
+        let f = Self.f
+        print("tick labels · SDR 5: "
+              + sdrClusters.map { f(sdr.pt($0.midX)) }.joined(separator: ", ") + " pt")
+        print("tick labels · HDR 9: "
+              + hdrClusters.map { f(hdr.pt($0.midX)) }.joined(separator: ", ") + " pt"
+              + " · 几何 " + hdrLayout.map { f($0.x) }.joined(separator: ", "))
+        print("tick labels · 像素宽 " + widths.map { f($0) }.joined(separator: ", ")
+              + " pt · 相邻空白 " + measuredSpacing.map { f($0) }.joined(separator: ", ")
+              + " pt · 255↔+1 缝 \(f(seam)) pt")
+    }
+
+    /// The rows of the tick band that carry the **labels**: below the little tick line (`plot.maxY + 3`)
+    /// and above the card's bottom edge. `plotBandTop` is the band's top as measured on the bitmap.
+    static func tickLabelRows(of image: Bitmap, plotBandTop: CGFloat) -> Range<Int> {
+        let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274,
+                                                         height: CurvePanelMetrics.plotHeight))
+        let top = plotBandTop - CurvePanelMetrics.plotInset + plot.maxY + 3
+        let bottom = top + CurvePanelMetrics.tickBand - 3
+        return Int((top * image.scale).rounded())..<Int((bottom * image.scale).rounded())
+    }
+
+    /// Each measured label centre against the geometry's own label centre (the tick's x shifted by the
+    /// anchor and the measured text width). Within 2.5 pt: the two fonts (SwiftUI's `.system(size: 8)`
+    /// and `NSFont.systemFont(ofSize: 8)`) agree, and the anchor rule puts the label where predicted.
+    static func assertLabelCentres(_ clusters: [Bitmap.Box],
+                                   match layout: [CurveAxisTicks.Placement],
+                                   in image: Bitmap, label: String) {
+        XCTAssertEqual(clusters.count, layout.count, "\(label)：标签数必须是刻度数")
+        guard clusters.count == layout.count else { return }
+        for (cluster, placement) in zip(clusters, layout) {
+            let want = placement.anchor.leftEdge(of: placement.x, width: placement.labelWidth)
+                + placement.labelWidth / 2
+            XCTAssertEqual(image.pt(cluster.midX), want, accuracy: 2.5,
+                           "\(label)：「\(placement.tick.label)」的标签中心应在 \(want) pt，"
+                           + "实测 \(image.pt(cluster.midX)) pt")
+        }
     }
 
     /// The region capsule's own rect: the rightmost 0.06-fill cluster inside the card's **first row**.
@@ -500,6 +609,47 @@ final class CurveRegionTests: XCTestCase {
         /// The bounding box of the pixels whose luminance falls in `range`, searched in `rows` only.
         func bbox(of range: ClosedRange<Int>, in rows: Range<Int>) -> Box? {
             bbox(of: range, in: rows, cols: 0..<width)
+        }
+
+        /// One cluster per **label** in the tick band: contiguous column runs with a pixel darker than
+        /// `threshold`, split where more than `gap` empty columns follow. Threshold 150 is what keeps
+        /// the tick lines out (0.35 of `primary` over the card is ≈ 166) and the 8 pt `secondary`
+        /// labels in (≈ 128 at the core) — so the count is "how many numbers are printed".
+        func clusters(darkerThan threshold: Int, in rows: Range<Int>,
+                      cols: Range<Int>? = nil, gap: Int = 4) -> [Box] {
+            let rows = rows.clamped(to: 0..<height)
+            let cols = (cols ?? 0..<width).clamped(to: 0..<width)
+            var columnHasInk = [Bool](repeating: false, count: width)
+            for y in rows {
+                let row = y * width
+                for x in cols where lum[row + x] < threshold { columnHasInk[x] = true }
+            }
+            var ranges: [(start: Int, end: Int)] = []
+            var start: Int?
+            var empties = 0
+            for x in cols {
+                if columnHasInk[x] {
+                    if start == nil { start = x }
+                    empties = 0
+                } else if let s = start {
+                    empties += 1
+                    if empties > gap {
+                        ranges.append((s, x - empties))
+                        start = nil
+                    }
+                }
+            }
+            if let s = start { ranges.append((s, cols.upperBound - 1)) }
+            return ranges.map { range in
+                var top = Int.max, bottom = -1
+                for y in rows {
+                    for x in range.start...max(range.start, range.end)
+                    where lum[y * width + x] < threshold {
+                        top = min(top, y); bottom = max(bottom, y)
+                    }
+                }
+                return Box(left: range.start, right: range.end, top: top, bottom: bottom)
+            }
         }
 
         /// The same, restricted to `cols` — how the tick band's right quarter is shown to be empty.

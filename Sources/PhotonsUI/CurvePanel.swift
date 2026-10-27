@@ -17,14 +17,16 @@ import PhotonsCore
 //      hardest to see: both look like "a curve". This is why `CurveLUT.buildOne` is called and not
 //      re-implemented, and why the test compares the two arrays element by element.
 //
-//   2. **The axis labels are positions on `HDRCurveAxis`, never numbers in this file.** The five
-//      ticks are 0, 18 % grey, display white, +2 EV and +4 EV, and *where* each of them sits is the
-//      shaper's answer — since 062 the axis is the histogram's own: display white is the **middle**
-//      of the card (the histogram's `sdrFraction`), 18 % grey is a quarter of the way in, and the
-//      last tick is the right edge itself. Typing any of those
+//   2. **The axis labels are positions on `HDRCurveAxis`, never numbers in this file.** The ticks
+//      are 069's five display codes (`0 63 127 191 255`, sRGB-decoded) and — in the HDR view only,
+//      user 2026-10-27 — the four stops `+1 … +4 EV`, and *where* each of them sits is the shaper's
+//      answer: since 062 the axis is the histogram's own, so display white is the **middle** of the
+//      card (the histogram's `sdrFraction`), the five codes fill that half, and +4 EV is the right
+//      edge itself. Typing any of those
 //      positions here would be a second copy of the shaper's answer, and the day the axis moves the
-//      card would draw its ticks somewhere the curve does not bend. `CurveAxisTicks` *derives* all
-//      five from the axis; the test asserts equality to 1e-9 and greps this file for the literals.
+//      card would draw its ticks somewhere the curve does not bend. `CurveAxisTicks` *derives* every
+//      one of them from the axis; the test asserts equality to 1e-9 and greps this file for the
+//      literals.
 //
 //   3. **W is a luma gain, not a fourth per-channel table.** `CurveGroup.white` is applied as one
 //      exposure offset to the pixel's luma (the kernel's rule), which preserves hue and saturation;
@@ -245,40 +247,156 @@ public struct CurveAxisTick: Equatable, Sendable {
 /// The ticks, **derived** from `HDRCurveAxis` and from nothing else.
 ///
 /// 069 redrew the axis in the card's `0…2` coordinate — `0…1` is display code `0…255` (`x = 1` is
-/// white), `1…2` is `+0…+4 EV` — and cancelled the stops: the ticks are **five**, the display codes
+/// white), `1…2` is `+0…+4 EV` — and cancelled the stops: the ticks were **five**, the display codes
 /// the owner asked for (`0 63 127 191 255`).
 ///
 /// There is no "SDR / HDR" label on the axis either: `255` ends the code half and that edge *is* the
 /// boundary (「这样也不需要 sdr/hdr 标示了」).
 ///
-/// **Both states print the same five, and neither adds a mark.** Every one of them is a position on
-/// the axis the card draws, so it is true in either span: in `SDR` the `255` is the box's right edge,
-/// in `HDR` (the whole axis) it is the box's **middle** — the same code at the same coordinate, and
-/// the point where the codes end and the EV half begins. The right half of the HDR state carries
-/// **no numbers**: the only ones that would fit there are the +1…+4 stops 069 cancelled, so that half
-/// is grid-and-curve only. (071 printed nothing in the HDR state — a `1…2` span has no codes in it to
-/// label — which left the whole-axis view looking unlabelled. Corrected 2026-10-27 with the span; the
-/// five are not new marks, they are 069's own.)
+/// **2026-10-27 — the user asked for the stops back, in the HDR view only.** 069's 「stops 标记取消」
+/// is not undone as a *rule*, it is superseded for one state: in `HDR` (the whole axis `0…2`) the
+/// right half carries `+1 +2 +3 +4`, because that half is the EV half and it was the only unlabelled
+/// stretch of the card (071's own note — 「left the whole-axis view looking unlabelled」 — was the
+/// earlier sighting of the same complaint). In `SDR` (`0…1`) the card shows the display-code region
+/// and **nothing is added**: the stops are not in that span, so a `+1` there would name a coordinate
+/// the box does not show.
+///
+/// **Both states print the same five codes, at the same coordinates.** Every one of them is a
+/// position on the axis the card draws, so it is true in either span: in `SDR` the `255` is the box's
+/// right edge, in `HDR` (the whole axis) it is the box's **middle** — the same code at the same
+/// coordinate, and the point where the codes end and the EV half begins.
 ///
 /// A display code `c` is the *encoded* value `c/255`; the axis takes **linear** input, so the code is
 /// decoded first and the position is `2·forward(displayCode(c))`, which is exactly `c/255` because
 /// `encode` and `decode` are inverses — the test asserts that equality, so "the tick sits at its own
-/// code" is a fact rather than a rounding coincidence.
+/// code" is a fact rather than a rounding coincidence. A stop `e` is `2·u(stops: e)`, i.e. the
+/// shaper's own answer for "`e` EV above white": `+1 → 1.25`, `+2 → 1.5`, `+3 → 1.75`, `+4 → 2.0`
+/// card coordinates. `+4` landing exactly on `2` is the axis' arithmetic (`u(16) = 1`), not a clamp
+/// here.
 public enum CurveAxisTicks {
 
-    /// The five SDR codes the owner asked for — the same list in both states.
-    ///
-    /// 069: 「stops 标记取消」. The right half of the card carries no `+1 … +4`, no `SDR`/`HDR`
-    /// words, no divider, and the x positions come from the axis, never from a literal here.
-    public static func ticks(_ axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
+    /// The five SDR codes the owner asked for — **the same list in both states**, at the same
+    /// positions. 069's 「stops 标记取消」 still governs *this* list: it has no `+1 … +4` in it and the
+    /// x positions come from the axis, never from a literal here. The stops live in `stops(_:)`.
+    public static func codes(_ axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
         [0, 63, 127, 191, 255].map { code in
             CurveAxisTick(x: 2 * axis.forward(displayCode(Double(code))), label: "\(code)")
+        }
+    }
+
+    /// The HDR half's four stops — `+1 +2 +3 +4` — at the axis' own `u(stops:)`.
+    ///
+    /// Added 2026-10-27 at the user's request (「HDR 视图下没有 +1 +2 +3 +4 的刻度」), which supersedes
+    /// 069's 「stops 标记取消」 **for the HDR view only** — `ticks(for:)` never hands these to `SDR`.
+    /// The label is the EV number and nothing else; the position is
+    /// `2 · axis.u(stops: e)`, so the stops follow the shaper if `whiteU` / `xHI` ever move (062's
+    /// 反证 axis puts white at 0.75 and every one of these four moves with it).
+    public static func stops(_ axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
+        (1...4).map { stop in
+            CurveAxisTick(x: 2 * axis.u(stops: Double(stop)), label: "+\(stop)")
+        }
+    }
+
+    /// What one **view** draws: the five codes, plus the four stops when the box shows the whole axis.
+    ///
+    /// This is the only place the two sets are put side by side, and the only place the view enters
+    /// the ticking. `SDR` = `codes` exactly (069's five, untouched); `HDR` = `codes + stops`, i.e.
+    /// ascending in x (the codes end at `x = 1`, the stops start at `x = 1.25`), which is what lets
+    /// `layout(for:in:)` walk them left to right and drop only what does not fit.
+    public static func ticks(for view: CurveViewMode,
+                             axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
+        switch view {
+        case .sdr: return codes(axis)
+        case .hdr: return codes(axis) + stops(axis)
         }
     }
 
     /// An 8-bit display code as scene-linear light — what the axis' `forward` expects.
     public static func displayCode(_ code: Double) -> Double {
         HDRCurveAxis.srgbDecode(code / 255)
+    }
+
+    // MARK: how a label is hung under the box (so 9 of them cannot overlap)
+
+    /// Where a label's own box starts relative to its tick's x.
+    public enum LabelAnchor: Equatable, Sendable {
+        /// The label's left edge is on the tick (the leftmost tick, so it cannot hang off the card).
+        case leading
+        case centre
+        /// The label's right edge is on the tick (the rightmost one, same reason).
+        case trailing
+
+        /// The `UnitPoint` `GraphicsContext.draw(_:at:anchor:)` wants.
+        public var unitPoint: UnitPoint {
+            switch self {
+            case .leading: return .topLeading
+            case .centre: return .top
+            case .trailing: return .topTrailing
+            }
+        }
+
+        /// The label box's left edge for a tick at `x` and a label `width` wide.
+        public func leftEdge(of x: CGFloat, width: CGFloat) -> CGFloat {
+            switch self {
+            case .leading: return x
+            case .centre: return x - width / 2
+            case .trailing: return x - width
+            }
+        }
+    }
+
+    /// One tick as the card draws it: the line's x, the label's width, and how the label hangs.
+    public struct Placement: Equatable, Sendable {
+        public let tick: CurveAxisTick
+        public let x: CGFloat
+        public let labelWidth: CGFloat
+        public let anchor: LabelAnchor
+    }
+
+    /// The width of a label in the type the card draws it with — **measured, not guessed**, with the
+    /// same `tickLabelSize` the `Canvas` uses. This is what makes "the two sets do not overlap" a
+    /// number the tests can hold instead of an impression.
+    public static func labelWidth(_ label: String,
+                                  font: NSFont? = nil) -> CGFloat {
+        let face = font ?? NSFont.systemFont(ofSize: CurvePanelMetrics.tickLabelSize)
+        return (label as NSString).size(withAttributes: [.font: face]).width
+    }
+
+    /// The ticks this view draws **and their labels' boxes**, left to right, with any label that
+    /// would touch its neighbour dropped.
+    ///
+    /// The rule, in one sentence: a label is kept only if its box starts at least `gap` to the right
+    /// of the last kept label's end. Because `ticks(for:)` is ascending in x, that is a single walk
+    /// and the surviving order is the axis' own. Dropping is **left to right, keeping the earlier
+    /// tick**, which is the priority the card wants: the five codes are the scale (069's, unchanged),
+    /// the stops are the addition, so a narrow card loses `+3`/`+4` before it loses `191`.
+    ///
+    /// At the shipped 274 pt card nothing is dropped (measured: 32.7…33.3 pt between neighbours, widest
+    /// label `255` at 15.33 pt — `CurveReadoutTests.testTheTicksAreFiveCodesInSdrAndNineMarksInHdr`);
+    /// the rule exists so a card narrower than the inspector's minimum could never print two labels on
+    /// top of one another.
+    public static func layout(for view: CurveViewMode,
+                              in geometry: CurvePlotGeometry,
+                              axis: HDRCurveAxis = .standard,
+                              font: NSFont? = nil,
+                              gap: CGFloat = 2) -> [Placement] {
+        let box = geometry.valueBox
+        var out: [Placement] = []
+        var lastMaxX = -CGFloat.greatestFiniteMagnitude
+        for tick in ticks(for: view, axis: axis) {
+            let x = geometry.x(u: tick.x)
+            let width = labelWidth(tick.label, font: font)
+            let half = width / 2
+            // Hang a label inward at the box's ends, centred everywhere else — the rule the draw
+            // code used to apply by index; by position it also survives a dropped tick.
+            let anchor: LabelAnchor = x - half < box.minX ? .leading
+                : (x + half > box.maxX ? .trailing : .centre)
+            let left = anchor.leftEdge(of: x, width: width)
+            guard left >= lastMaxX + gap else { continue }
+            out.append(Placement(tick: tick, x: x, labelWidth: width, anchor: anchor))
+            lastMaxX = left + width
+        }
+        return out
     }
 }
 
@@ -430,7 +548,7 @@ public struct CurvePlotGeometry: Equatable {
     }
 
     /// Where each tick's line goes, in points — `x(u:)` of the axis-derived positions, for this view.
-    public func tickPositions(_ ticks: [CurveAxisTick] = CurveAxisTicks.ticks()) -> [CGFloat] {
+    public func tickPositions(_ ticks: [CurveAxisTick] = CurveAxisTicks.codes()) -> [CGFloat] {
         ticks.map { x(u: $0.x) }
     }
 
@@ -608,10 +726,16 @@ public enum CurveEditor {
 /// Two readings, both derived from the axis and from nothing else:
 ///
 ///   · **输入** — the point's `x` as the *histogram's* number. In the SDR half (`u ≤ whiteU`) that is
-///     a display code 0–255, i.e. `255·u/whiteU`; **above white it is not a code at all**, so the
-///     reading speaks EV there (`+1.50 EV`) rather than inventing a 300th code.
+///     a display code 0–255, i.e. `255·u/whiteU`; above white it is not a code at all, so the reading
+///     speaks in **stops** there (`+1.22`) rather than inventing a 300th code.
 ///   · **输出** — the point's `y` as stops relative to display white, always (`stops(v)`), because
 ///     the y axis is the full +0…+4 EV axis in every mode: 零光 has no stop count, hence `−∞`.
+///
+/// **2026-10-27 — no `EV` suffix, in either half.** 069 wrote `+2.00 EV` on the input side above white
+/// and the bare `+2.00` on the output side; the owner's report is that the word does not fit the row
+/// (「放不下」), so both halves now spell a stop count the same way, `+1.22`, and the row has **one**
+/// shape in every state: `输入 233 输出 +1.22`. Nothing else moved: two decimals, 四舍五入, U+2212 for
+/// negatives, and the reading is still a function of the point alone.
 ///
 /// The view mode is deliberately absent from this type: the same point reads the same in both views
 /// (`testTheReadoutIsTheSameTextInBothViews`), which is the property that makes zooming
@@ -623,12 +747,13 @@ public enum CurvePointReadout {
         "输入 \(input(point)) 输出 \(output(point))"
     }
 
-    /// The x reading: a display code `0…255` while the point is in the SDR half, `+x.xx EV` above it
-    /// (above white there is no code to print — the axis says stops there, so the reading does too).
+    /// The x reading: a display code `0…255` while the point is in the SDR half, the stop count
+    /// above it (above white there is no code to print — the axis says stops there, so the reading
+    /// does too). **Bare `+1.22`, no `EV`** (2026-10-27, same as `output`).
     public static func input(_ point: CurvePoint) -> String {
         point.x <= CurvePoint.sdrBoundary
             ? "\(CurvePoint.code(point.x))"
-            : ev(stops(point.x)) + " EV"
+            : ev(stops(point.x))
     }
 
     /// The y reading, by the same rule: a code on the SDR side, stops above white.
@@ -1142,26 +1267,27 @@ public struct CurvePanel: View {
             }
         }
 
-        // The ticks, at the axis' own positions — five display codes in **both** views (069/071,
-        // corrected 2026-10-27). They are positions on the axis being drawn: the `255` is the SDR
-        // view's right edge and the HDR view's middle, and the HDR state's right half carries no
-        // numbers at all, because the only ones that would fit there are the stops 069 cancelled.
+        // The ticks, at the axis' own positions — 069's five display codes in **both** views, plus the
+        // four stops `+1 … +4` in the **HDR** view only (user 2026-10-27: 「HDR 视图下没有 +1 +2 +3 +4
+        // 的刻度」, which supersedes 069's 「stops 标记取消」 for the whole-axis state). They are
+        // positions on the axis being drawn: the `255` is the SDR view's right edge and the HDR view's
+        // middle, and the stops are the EV half's only numbers. `layout(for:in:)` is what decides how
+        // many the box has room for — 9 at this card's width, fewer if it ever gets narrower, never
+        // two labels on top of one another.
         // The label stays under the **outer** rect (its old y); only the
         // little tick line reaches up to the inset frame, so the 4 pt margin is bridged rather than
         // left floating.
-        let ticks = CurveAxisTicks.ticks(.standard)
-        for (i, tick) in ticks.enumerated() {
-            let x = geometry.x(u: tick.x)
+        for placement in CurveAxisTicks.layout(for: geometry.view, in: geometry) {
+            let x = placement.x
             var line = Path()
             line.move(to: CGPoint(x: x, y: box.maxY))
             line.addLine(to: CGPoint(x: x, y: plot.maxY + 3))
             context.stroke(line, with: .color(Color.primary.opacity(0.35)), lineWidth: 0.7)
 
-            let anchor: UnitPoint = i == 0 ? .topLeading : (i == ticks.count - 1 ? .topTrailing : .top)
-            context.draw(Text(tick.label)
+            context.draw(Text(placement.tick.label)
                             .font(.system(size: CurvePanelMetrics.tickLabelSize))
                             .foregroundStyle(Color.secondary),
-                         at: CGPoint(x: x, y: plot.maxY + 3), anchor: anchor)
+                         at: CGPoint(x: x, y: plot.maxY + 3), anchor: placement.anchor.unitPoint)
         }
     }
 
