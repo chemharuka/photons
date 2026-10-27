@@ -89,8 +89,12 @@ final class DetailSectionTests: XCTestCase {
 
         // The bar is 16 pt tall, like every other row in the panel: no layout jump between shapes.
         XCTAssertEqual(SliderValueMap.rowHeight, 16)
-        XCTAssertLessThan(SliderValueMap.handleHeight, SliderValueMap.rowHeight,
-                          "the 14 pt handle fits inside the 16 pt row")
+        // 055: the drag point is a 10 × 16 pt rounded bubble (was a 3 × 14 pt stroke) — it fills the
+        // 16 pt row's height and is narrower than it is tall, so the row still cannot grow.
+        XCTAssertEqual(BubbleSliderCell.knobSize.height, SliderValueMap.rowHeight,
+                       "the bubble is exactly the 16 pt row high")
+        XCTAssertLessThan(BubbleSliderCell.knobSize.width, SliderValueMap.rowHeight,
+                          "the 10 pt wide bubble fits inside the row")
 
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         let tickedSlider = try NSRegularExpression(pattern: "Slider\\([^)]*step:")
