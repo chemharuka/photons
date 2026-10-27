@@ -69,7 +69,6 @@ public struct InspectorView: View {
         case curve
         case presets
         case masks
-        case decode
 
         public var id: String { rawValue }
 
@@ -84,7 +83,6 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .presets: return "预设"
             case .masks: return "蒙版"
-            case .decode: return "Decode"
             }
         }
     }
@@ -258,8 +256,6 @@ public struct InspectorView: View {
             PresetPanel(session: session)
         case .masks:
             MaskListPanel(session: session)
-        case .decode:
-            decodeCard
         }
     }
 
@@ -491,7 +487,8 @@ public struct InspectorView: View {
         }
     }
 
-    /// 细节 (派单 031, 数值口径 040): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to `CIRAWFilter`.
+    /// 派单 031 / 040 + 解码模型 (owner, 2026-10-27): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to
+    /// `CIRAWFilter`, under a row that says **which decoder** produces the pixels.
     ///
     /// Three rules make this card different from the tone sliders, and all three come from the same
     /// fact — **a tick here is a development, not a render**:
@@ -505,12 +502,24 @@ public struct InspectorView: View {
     ///     (the canvas has to follow it), and the loupe rebuilds from the 0.5 rung while the slider is
     ///     held; 200 ms after the hand stops it develops full size and replaces the frame. One drag is
     ///     still **one** `EditHistory` snapshot, taken on release.
-    ///  3. **Four sliders, no prose.** 040 removed the 「解码参数 · v9 · 基线 0.50」 line under them: the
-    ///     card is four rows of the *same* control every other card uses, and the decoder's own numbers
-    ///     live in the Decode card.
+    ///  3. **The card opens with 解码模型** — the file's own version list (default `8`). Where the running
+    ///     decoder is v9 exactly **two** rows are greyed and inert — 色彩降噪 and 细节 (Apple's
+    ///     `9.dng` reports `isColorNoiseReductionSupported`/`isDetailSupported` = false, and both move
+    ///     zero samples); 降噪 and 锐化 stay live, because the same filter says
+    ///     `isLuminanceNoiseReductionSupported`/`isSharpnessSupported` = true and they move 0.021 /
+    ///     0.510 maxΔ. `DetailAxes` is the seam that says which. Greyed is **not zeroed**: the values
+    ///     are kept, so going back to another version restores exactly the amounts the document had.
     private var detailCard: some View {
         let baseline = detailBaselineValue
+        let caps = session.capabilities
+        let chosen = chosenDecoderSpelling(offered: caps?.supportedVersions ?? [])
+        let axes = Self.detailAxes(effective: caps?.effectiveVersion,
+                                   requested: chosen,
+                                   document: session.edit.decoderVersion)
         return card(Section.detail.title, reset: { resetGroup(.detail) }) {
+            decoderModelRow(chosen: chosen, offered: caps?.supportedVersions ?? [],
+                            effective: caps?.effectiveVersion)
+            divider
             ForEach(Self.detailContent.rows, id: \.axis) { row in
                 sliderRow(row.title,
                           detailBinding(row.axis, baseline: baseline),
@@ -518,10 +527,57 @@ public struct InspectorView: View {
                           row.format,
                           shape: row.shape,
                           editable: row.editable,
+                          enabled: axes.isEnabled(row.axis),
                           accessibilityID: "inspector.detail.\(row.axis.rawValue)",
                           onReset: { resets.detail(row.axis) }) { editing in
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
+            }
+        }
+    }
+
+    /// 「解码模型」 — **the file's own version list**, one item per `supportedDecoderVersions` entry.
+    ///
+    /// Why a list and not V8/V9: on this machine's SL3 DNG the list is
+    /// `6.dng, 7, 7.dng, 8, 8.dng, 9.dng`, and `8` and `8.dng` are *different decodes*
+    /// (`08193a35…` vs `a15055fa…`, and the four detail axes swap validity between them). A two-way
+    /// V8/V9 switch would hide both facts, so the label keeps the spelling and only annotates the
+    /// container: `8`, `8 (DNG)`, `9 (DNG)`.
+    ///
+    /// The line underneath is the **read-back**, never the request: `session.capabilities.effectiveVersion`
+    /// is what the filter reported *after* the assignment, so a version this file cannot honour says
+    /// `已退回 v8` instead of the panel claiming something that did not run.
+    private func decoderModelRow(chosen: String, offered: [String], effective: String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: SliderRowStyle.standard.headSpacing) {
+                Text("解码模型")
+                    .font(.system(size: SliderRowStyle.standard.labelSize,
+                                  weight: SliderRowStyle.standard.labelWeight))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Picker("解码模型", selection: Binding(get: { chosen },
+                                                     set: { spelling in
+                                                         resets.decoderVersion(spelling, offered: offered)
+                                                     })) {
+                    ForEach(Self.decoderChoices(chosen: chosen, offered: offered), id: \.self) { spelling in
+                        Text(Self.decoderVersionLabel(spelling)).tag(spelling)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.mini)
+                .frame(width: 96, alignment: .trailing)
+                .accessibilityIdentifier("inspector.detail.decoderModel")
+            }
+            if let note = Self.decoderModelNote(requested: session.edit.decoderVersion,
+                                                effective: effective) {
+                Text(note)
+                    .font(.system(size: 9))
+                    .foregroundStyle(Self.decoderModelWasDowngraded(requested: session.edit.decoderVersion,
+                                                                   effective: effective)
+                                     ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("inspector.detail.decoderModel.effective")
             }
         }
     }
@@ -555,6 +611,73 @@ public struct InspectorView: View {
     /// so a test can hold the whole surface (`DetailSectionTests.testTheCardPrintsNoDecoderProse`).
     public static let detailContent = DetailCardContent.standard
 
+    /// **Which item is on screen.** The document's own spelling, else the file's default choice
+    /// (`8` when the file offers it — the D2′ default, which is also what `nil` decodes to).
+    ///
+    /// `offered` is empty until the first development lands (the list arrives with
+    /// `DecoderCapabilities.supportedVersions`), in which case `8` is shown and the note stays silent.
+    private func chosenDecoderSpelling(offered: [String]) -> String {
+        if let stored = session.edit.decoderVersion { return stored }
+        return Self.defaultDecoderSpelling(offered: offered)
+    }
+
+    /// What the picker lists: the file's own versions in the file's own order, with the current
+    /// spelling guaranteed present (a document from another body may name one this file lacks — it must
+    /// still be visible, because *that* is what the read-back is about to report).
+    public static func decoderChoices(chosen: String, offered: [String]) -> [String] {
+        var list = offered
+        if list.isEmpty { list = [chosen] }
+        if !list.contains(chosen) { list.insert(chosen, at: 0) }
+        return list
+    }
+
+    /// The menu label: the spelling, with the container called out — `8` and `8 (DNG)` are different
+    /// decodes and the user has to be able to tell which one is selected.
+    public static func decoderVersionLabel(_ spelling: String) -> String {
+        spelling.hasSuffix(".dng") ? String(spelling.dropLast(4)) + " (DNG)" : spelling
+    }
+
+    /// The default choice for a file: **`8` when it is offered** (the version every document used
+    /// before this row existed). Otherwise the nearest version on the older side, else the oldest —
+    /// and with no list at all, `8`. On such a file the document stays `nil`, so Apple's own default
+    /// runs and the read-back line is the only thing that claims a version.
+    public static func defaultDecoderSpelling(offered: [String]) -> String {
+        if offered.isEmpty || offered.contains("8") { return "8" }
+        func number(_ s: String) -> Int { Int(s.prefix(while: { $0.isNumber })) ?? 0 }
+        let sorted = offered.sorted { number($0) < number($1) }
+        return sorted.last(where: { number($0) < 8 }) ?? sorted.first ?? "8"
+    }
+
+    /// The card's four rows, from the **seam** (`DetailAxes.forDecoderVersion`), keyed by the version
+    /// that actually runs.
+    ///
+    /// `effective` wins when there is one (that is what the pixels were made with); before the first
+    /// frame the document's request stands in, so a v9 document opens with 色彩降噪 / 细节 already
+    /// inert (and 降噪 / 锐化 live); with neither, everything is live (the v8 default).
+    public static func detailAxes(effective: String?, requested: String?, document: String?) -> DetailAxes {
+        if let effective { return DetailAxes.forDecoderVersion(effective) }
+        if let requested { return DetailAxes.forDecoderVersion(requested) }
+        if let document { return DetailAxes.forDecoderVersion(document) }
+        return .all
+    }
+
+    /// The line under 「解码模型」: the version that **actually** shaped the frame, never the request.
+    public static func decoderModelNote(requested: String?, effective: String?) -> String? {
+        guard let effective else {
+            return requested == nil ? nil : "正在切换解码器…"
+        }
+        if let requested, requested != effective {
+            return "已退回 v\(effective)"
+        }
+        return "实际 v\(effective)"
+    }
+
+    /// True when the request did not survive the read-back — the note is then drawn in orange.
+    public static func decoderModelWasDowngraded(requested: String?, effective: String?) -> Bool {
+        guard let requested, let effective else { return false }
+        return requested != effective
+    }
+
     /// The decoder's own four values, read once per development. `.measured` until the first one
     /// lands, so the panel can put the sliders on their defaults before there is a buffer to ask.
     private var detailBaselineValue: DetailBaseline {
@@ -586,33 +709,8 @@ public struct InspectorView: View {
 
     /// Double-click: back to **this body's default position** — not to 0. On a Leica that is 50 for
     /// colour NR and sharpness, on an R5 it is 100 for sharpness; resetting to 0 would switch Apple's
-    /// default off instead of restoring it. One snapshot, one development.
-    ///
-    /// 047: the body of this verb moved to `PanelResets.detail(_:)` so the panel and the tests run the
-    /// same code; the card's `onReset:` calls it.
-    private var decodeCard: some View {
-        card(Section.decode.title) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(session.capabilities?.summary ?? "尚未解码")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Text("boost / gamut").font(.system(size: 9)).foregroundStyle(.tertiary)
-                    Spacer()
-                    Text("0 / off").font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                }
-                HStack {
-                    Text("display headroom").font(.system(size: 9)).foregroundStyle(.tertiary)
-                    Spacer()
-                    Text("1.000 · EDR off").font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        }
-    }
-
+    /// default off instead of restoring it. One snapshot, one development. The verb itself lives in
+    /// `PanelResets.detail(_:)`, so the panel and the tests run the same code.
     // MARK: building blocks
 
     /// A card: its title, and its rows.
@@ -808,6 +906,7 @@ public struct InspectorView: View {
                            decimals: Int = 0,
                            rounding: SliderRounding = .asIs,
                            editable: Bool = true,
+                           enabled: Bool = true,
                            accessibilityID: String? = nil,
                            onReset: @escaping () -> Void,
                            onEditingChanged: @escaping (Bool) -> Void) -> some View {
@@ -839,12 +938,24 @@ public struct InspectorView: View {
                         .foregroundStyle(.primary)
                 }
             }
+            // The readback probe sits **inside** the disabled scope, so what it reports is SwiftUI's
+            // own resolved `isEnabled` — not the local `enabled` flag echoed back (see
+            // `DetailRowEnabledProbe`: macOS 27's `Slider` is drawn by SwiftUI, so there is no
+            // `NSControl.isEnabled` to ask).
+            .background(DetailRowEnabledProbe(title: title))
             // 060: **one** `Slider` for both shapes, built by `shapeSlider` below — the accent colour
             // is the only difference, and it lives in exactly one place.
             Self.shapeSlider(value, in: range, shape: shape,
                              controlSize: style.controlSize,
                              onEditingChanged: onEditingChanged)
         }
+        // `enabled: false` is the 解码模型 rule: under V9 the four amounts belong to the decoder, so the
+        // rows are **inert and visibly grey** rather than live controls that quietly do nothing. The
+        // value is untouched — `.disabled` stops input, it does not write — so a document that had
+        // 30 / 70 / 20 / 60 keeps every one of those numbers for the way back to V8.
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.42)
+        .accessibilityIdentifier("inspector.detail.row.\(title)")
     }
 
     /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that says
@@ -1684,6 +1795,26 @@ public struct PanelResets {
         self.loupe = loupe
     }
 
+    // MARK: the decoder model (细节 card, owner 2026-10-27)
+
+    /// Pick one item of the file's own version list, as one document edit and one history entry.
+    ///
+    /// `"8"` (when the file offers it) is stored as **`nil`** — "ask for nothing", which is the D2′
+    /// default and the byte-identical pre-change decode; anything else is stored verbatim. That keeps
+    /// "the default is v8" true without inventing an assignment that Apple's own default does not make.
+    ///
+    /// This is a **decode** input (`EditModel.decodeInputs` carries it), so the rung identity and the
+    /// on-disk buffer both move and the next frame is a fresh development — the expected cost of the
+    /// switch. `false` when the value is already the document's, so a picker reporting its own state
+    /// cannot mint empty snapshots.
+    @discardableResult
+    public func decoderVersion(_ spelling: String, offered: [String]) -> Bool {
+        let stored: String? = (spelling == "8" && (offered.isEmpty || offered.contains("8"))) ? nil : spelling
+        guard stored != session.edit.decoderVersion else { return false }
+        session.applyEdit { $0.decoderVersion = stored }
+        return session.commitEdit(label: "解码模型")
+    }
+
     // MARK: one parameter
 
     /// Double-click on a row's name: that field back to its own default. One snapshot; `false` when it
@@ -1784,9 +1915,15 @@ public struct PanelResets {
 
         case .detail:
             // All four `nil` = 停在机身的基线位置 (0/50/0/50 on a Leica) — *not* 0, which would turn
-            // Apple's colour noise reduction off and move the pixels.
-            guard !session.edit.detailSettings.isIdentity else { return false }
-            session.applyEdit { $0.detailSettings = .identity }
+            // Apple's colour noise reduction off and move the pixels. The card's first row is the
+            // 解码模型, so the same double-click also takes it back to **V8** (the default): a reset
+            // that left the card on V9 would restore four sliders and then grey them out again.
+            let changed = !session.edit.detailSettings.isIdentity || session.edit.decoderVersion != nil
+            guard changed else { return false }
+            session.applyEdit {
+                $0.detailSettings = .identity
+                $0.decoderVersion = nil
+            }
             let committed = session.commitEdit(label: group.title)
             loupe?.endDetailAdjustment()
             return committed
@@ -1827,5 +1964,50 @@ public final class InspectorHostingView: NSHostingView<InspectorView> {
     public override func hitTest(_ point: NSPoint) -> NSView? {
         guard !isEditingGated else { return nil }
         return super.hitTest(point)
+    }
+}
+
+// MARK: - the enabled read-back probe
+
+/// Reports the `isEnabled` SwiftUI actually resolved for one slider row.
+///
+/// Why a probe and not a control: on macOS 27 a SwiftUI `Slider` is drawn by SwiftUI itself — there is
+/// no AppKit slider in the subview tree (055/060 measured it, `SliderStyleTests` records the same) — and
+/// the accessibility tree is empty in a test run, so "is this row live?" has no AppKit property to
+/// read. A child of the row that reads `@Environment(\.isEnabled)` **is** the answer: `.disabled(!enabled)`
+/// is what writes that environment value, so a bug that dropped the modifier reads back `true` here.
+///
+/// Inert in production (a zero-size clear rectangle); the log is only ever read by the tests.
+struct DetailRowEnabledProbe: View {
+    let title: String
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { DetailRowEnabledLog.shared.record(title: title, isEnabled: isEnabled) }
+            .onChange(of: isEnabled) { _, new in
+                DetailRowEnabledLog.shared.record(title: title, isEnabled: new)
+            }
+    }
+}
+
+/// Where `DetailRowEnabledProbe` reports to. A tiny lock-guarded table, keyed by the row's title.
+public final class DetailRowEnabledLog: @unchecked Sendable {
+    public static let shared = DetailRowEnabledLog()
+    private let lock = NSLock()
+    private var values: [String: Bool] = [:]
+
+    public func record(title: String, isEnabled: Bool) {
+        lock.lock(); values[title] = isEnabled; lock.unlock()
+    }
+    public func reset() {
+        lock.lock(); values.removeAll(); lock.unlock()
+    }
+    public func value(_ title: String) -> Bool? {
+        lock.lock(); defer { lock.unlock() }; return values[title]
+    }
+    public var snapshot: [String: Bool] {
+        lock.lock(); defer { lock.unlock() }; return values
     }
 }

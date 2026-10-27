@@ -76,9 +76,9 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     public var cards: [InspectorView.Section] {
         switch self {
         case .adjust:
-            // Everything the panel had before this workspace existed — presets and Decode included
-            // (the ask kept them here: 「以及既有的 预设、Decode 卡也留在这里」).
-            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve, .presets, .decode]
+            // Everything the panel had before this workspace existed — presets included (the ask kept
+            // them here: 「以及既有的 预设 卡也留在这里」).
+            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve, .presets]
         case .transform:
             return []
         case .colour:
