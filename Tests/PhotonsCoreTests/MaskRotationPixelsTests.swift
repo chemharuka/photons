@@ -95,7 +95,8 @@ final class MaskRotationPixelsTests: XCTestCase {
         // to light up 64 × 64 pixels.
         for i in 0..<(width * height) {
             let o = i * 4
-            rgba[o] = bg; rgba[o + 1] = bg; rgba[o + 2] = bg; rgba[o + 3] = 1
+            rgba[o] = Float16(bg); rgba[o + 1] = Float16(bg); rgba[o + 2] = Float16(bg)
+            rgba[o + 3] = 1
         }
         for y in y0..<y1 {
             for x in x0..<x1 {
@@ -254,9 +255,8 @@ final class MaskRotationPixelsTests: XCTestCase {
              NormalizedRect(x: 0.21875, y: 0, width: 0.5625, height: 1), 30),
         ]
         for (frame, crop, angle) in cases {
-            var geometry = GeometryGroup(crop: crop, rotationDegrees: angle,
+            let geometry = GeometryGroup(crop: crop, rotationDegrees: angle,
                                          flipHorizontal: false, flipVertical: false)
-            geometry.rotationDegrees = angle
             let mapping = MaskCanvasMapping(geometry: geometry, source: frame,
                                             content: frame, canvas: frame, origin: (0, 0))
             for probe in [NormalizedPoint(0.1, 0.1), NormalizedPoint(0.5, 0.5),
@@ -272,14 +272,15 @@ final class MaskRotationPixelsTests: XCTestCase {
             }
             // And the same map at 0°, where it must be the identity on the crop-relative offset: the
             // `× frame` / `÷ frame` round trip is not in the θ = 0 path in either place.
-            var upright = GeometryGroup(crop: crop, rotationDegrees: 0,
+            let upright = GeometryGroup(crop: crop, rotationDegrees: 0,
                                         flipHorizontal: false, flipVertical: false)
-            upright.rotationDegrees = 0
             let flat = MaskCanvasMapping(geometry: upright, source: frame, content: frame,
                                          canvas: frame, origin: (0, 0))
-            let here = flat.canvasPoint(NormalizedPoint(0.25, 0.4))
-            let wanted = (crop.x + 0.25 * crop.width) * Double(frame.width) - 0.5
-            let wantedY = (crop.y + 0.4 * crop.height) * Double(frame.height) - 0.5
+            let here = flat.canvasPoint(NormalizedPoint(crop.x + 0.25 * crop.width,
+                                                        crop.y + 0.4 * crop.height))
+            // 0.25 / 0.4 of the way through the crop, out in canvas pixel indices.
+            let wanted = 0.25 * Double(frame.width) - 0.5
+            let wantedY = 0.4 * Double(frame.height) - 0.5
             XCTAssertEqual(here.x, wanted, accuracy: 1e-9, "the θ = 0 map must not round-trip")
             XCTAssertEqual(here.y, wantedY, accuracy: 1e-9)
         }
@@ -308,8 +309,7 @@ final class MaskRotationPixelsTests: XCTestCase {
 
         let image = dotImage(width: 320, height: 200, at: NormalizedPoint(0.4, 0.6), sigma: 30)
         var edit = EditModel.neutral
-        edit.geometry = GeometryGroup(identityWithCrop: NormalizedRect(x: 0.1, y: 0.1,
-                                                                     width: 0.8, height: 0.8))
+        edit.geometry = GeometryGroup(crop: NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8))
         edit.masks = [
             Mask(id: "m-radial", components: [MaskComponent(id: "r", feather: 0.35, shape:
                 .radialGradient(RadialGradientShape(center: NormalizedPoint(0.45, 0.5),
@@ -332,7 +332,8 @@ final class MaskRotationPixelsTests: XCTestCase {
 
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "mask-zero-degrees"))
         let dump = try XCTUnwrap(try graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
-        XCTAssertEqual(dump.maskIDs, ["m-radial", "m-linear", "m-brush"])
+        // The atlas orders its slices by id, not by document order.
+        XCTAssertEqual(dump.maskIDs.sorted(), ["m-brush", "m-linear", "m-radial"])
 
         for (slice, id) in dump.maskIDs.enumerated() {
             var bytes = [UInt8](repeating: 0, count: dump.width * dump.height)

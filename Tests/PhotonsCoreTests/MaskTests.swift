@@ -853,34 +853,66 @@ final class MaskTests: XCTestCase {
     /// S0's mapping backwards: canvas → content → flip → rotate → crop → source pixels. If that
     /// inverse is wrong a mask is silently displaced on every cropped or straightened photo — the
     /// one failure a single uncropped test would never catch.
+    ///
+    /// ── why the old version of this test could not fail (派单 080 rewrote it) ────────────────────
+    /// It modelled the turn as `r = R(θ)·(uv − ½) + ½` — a rotation of **normalised** coordinates —
+    /// because that is what the kernel did. Both sides then agreed on the *sheared* answer, so the
+    /// comparison was green while the mask sat hundreds of pixels off the photograph, and there was
+    /// no way for it to be anything else: a test that re-derived the implementation's coordinates
+    /// pins the coordinates, not the behaviour. The 2/255 tolerance finished the job — it was spent
+    /// on a smoothly feathered 20 px ramp, where even the residual 3.8 px disagreement at 96×65 is
+    /// worth less than one step, and at a size this small the shear itself is only a couple of
+    /// pixels. (Measured: with the kernel fixed and this model left alone it fails at 0.174, i.e. 44
+    /// quantisation steps — the assertion was never the thing protecting the mapping.)
+    ///
+    /// So: the model now spells S0's turn the way S0 spells it (`(uv − ½)·frame` → `R(θ)` →
+    /// `÷ frame`, `s0_geometry.metal` / `frame_turn.metal`), and the second half measures a
+    /// **distance in pixels** — the small hard disc's coverage centroid against the position S0's map
+    /// gives it — because a number in pixels is what the failure actually is. `MaskRotationPixelsTests`
+    /// takes that idea to the end (it compares against the rendered picture instead of a formula);
+    /// this one stays on the crop/flip composition, at unit cost.
     func testAtlasInvertsCropRotationAndFlip() throws {
-        let image = rampImage(width: 96, height: 65)
+        // 960×650, not 96×65: the shear is `|W/H − 1|` in *pixels*, so a thumbnail-sized fixture is
+        // a fixture where the wrong answer is only 0.8 px from the right one.
+        let image = rampImage(width: 960, height: 650)
         let crop = NormalizedRect(x: 0.25, y: 0.2, width: 0.5, height: 0.4)
         let rotation = 7.0
         let shape = RadialGradientShape(center: NormalizedPoint(0.5, 0.4),
                                         radius: NormalizedPoint(0.30, 0.20),
                                         angle: 25)
+        // A second, small disc at a known source point: hard-edged and inside the crop, so its
+        // centroid is the shape's centre and nothing else.
+        let probeSource = NormalizedPoint(crop.x + 0.3 * crop.width, crop.y + 0.3 * crop.height)
+        let probe = RadialGradientShape(center: probeSource,
+                                        radius: NormalizedPoint(0.06, 0.06), angle: 0)
         var edit = EditModel.neutral
         edit.geometry = GeometryGroup(crop: crop, rotationDegrees: rotation,
                                       flipHorizontal: true, flipVertical: false)
-        edit.masks = [Mask(id: "m-crop",
-                           components: [MaskComponent(id: "c", feather: 0.5,
-                                                      shape: .radialGradient(shape))])]
+        edit.masks = [
+            Mask(id: "m-crop",
+                 components: [MaskComponent(id: "c", feather: 0.5, shape: .radialGradient(shape))]),
+            Mask(id: "m-probe",
+                 components: [MaskComponent(id: "p", feather: 0, shape: .radialGradient(probe))]),
+        ]
 
         let dump = try atlas(edit, image)
         let w = Double(image.width), h = Double(image.height)
         let clamped = crop.clamped()
+        let frame = (width: Double(dump.width), height: Double(dump.height))
         let cs = cos(rotation * Double.pi / 180), sn = sin(rotation * Double.pi / 180)
+        // No output window here, so the frame *is* the canvas and `p.f.xy` is its size.
+        let fx = frame.width, fy = frame.height
 
         var worst = 0.0
         for y in 0..<dump.height {
             for x in 0..<dump.width {
-                // Forward model of one canvas pixel, exactly as s0_geometry does it.
-                var u = (Double(x) + 0.5) / Double(dump.width)
-                var v = (Double(y) + 0.5) / Double(dump.height)
+                // Forward model of one canvas pixel, exactly as `s0_geometry` does it: normalise to
+                // the frame, flip, then turn the **pixel** offset about the frame's centre.
+                var u = (Double(x) + 0.5) / fx
+                var v = (Double(y) + 0.5) / fy
                 u = 1 - u                                  // flipHorizontal
-                let o = (u - 0.5, v - 0.5)
-                let r = (o.0 * cs - o.1 * sn, o.0 * sn + o.1 * cs)
+                let px = (u - 0.5) * fx, py = (v - 0.5) * fy
+                let r = ((px * cs - py * sn) / fx, (px * sn + py * cs) / fy)
                 let sx = (clamped.x + (r.0 + 0.5) * clamped.width) * w
                 let sy = (clamped.y + (r.1 + 0.5) * clamped.height) * h
 
@@ -892,6 +924,36 @@ final class MaskTests: XCTestCase {
         XCTAssertLessThan(worst, 2.0 / 255.0,
                           "the atlas does not invert crop/rotation/flip (worst \(worst))")
         XCTAssertLessThan(dump.width, image.width, "the atlas follows the crop, not the source")
+
+        // Where S0's own map puts the probe, in canvas pixel indices (`MaskCanvasMapping` is the same
+        // arithmetic with the flips in it, which is what makes it the right thing to compare to).
+        let mapping = MaskCanvasMapping(geometry: edit.geometry, source: ImageSize(width: image.width,
+                                                                                  height: image.height),
+                                        content: ImageSize(width: dump.width, height: dump.height),
+                                        canvas: ImageSize(width: dump.width, height: dump.height),
+                                        origin: (0, 0))
+        let expectedPoint = mapping.canvasPoint(probeSource)
+
+        var sx = 0.0, sy = 0.0, sw = 0.0
+        let slice = dump.slices[1]
+        for y in 0..<dump.height {
+            for x in 0..<dump.width {
+                let value = Double(slice[y * dump.width + x])
+                if value <= 0 { continue }
+                sx += Double(x) * value
+                sy += Double(y) * value
+                sw += value
+            }
+        }
+        XCTAssertGreaterThan(sw, 0, "the probe disc is not in the frame at all")
+        let offset = (sx / sw - expectedPoint.x, sy / sw - expectedPoint.y)
+        let distance = (offset.0 * offset.0 + offset.1 * offset.1).squareRoot()
+        // 1 px, in pixels: at this size the normalised turn puts the disc 7.6 px away, so this is the
+        // assertion that would have caught it (`MaskRotationPixelsTests` states the same thing at
+        // 9504×6336, against the picture rather than a map).
+        XCTAssertLessThanOrEqual(distance, 1.0,
+                                 "the mask's centroid is \(distance) px from where S0 maps it "
+                                 + "(\(offset.0), \(offset.1)) — a normalised-coordinate turn?")
     }
 
     // MARK: - 005b: the stages exist only with masks
