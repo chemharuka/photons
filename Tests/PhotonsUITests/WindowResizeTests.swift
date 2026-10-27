@@ -142,9 +142,20 @@ final class WindowResizeTests: XCTestCase {
                                     "the drag produced fewer layout passes than expected — the fixture "
                                     + "never exercised the freeze")
 
-        // …and it still drew: one frozen present per pass, at the picture's own geometry.
+        // …and it still drew, at the picture's own geometry.
+        //
+        // 068: **not one draw per pass.** A pass is not a frame — two layout passes can land inside one
+        // display frame, and a draw costs a `nextDrawable()`, i.e. a vsync on the main thread. So the
+        // number is bracketed: at least half the passes drew (the freeze follows the canvas), and never
+        // more than one draw per pass (nothing is drawn twice for the same tick). The elasticity is on
+        // purpose — how many passes a display frame gets is the window server's business, and a test that
+        // pinned it would be pinning `pump(0.004)` instead of the product.
         let frozen = controller.presentRecords.dropFirst(presentsBefore).filter(\.frozen)
-        XCTAssertGreaterThanOrEqual(frozen.count, 12, "the drag presented nothing — the canvas would be stale")
+        XCTAssertGreaterThanOrEqual(frozen.count, sizes.count / 2,
+                                    "the drag presented nothing — the canvas would be stale")
+        XCTAssertLessThanOrEqual(frozen.count, sizes.count,
+                                 "\(frozen.count) frozen draws for \(sizes.count) passes — more than one "
+                                 + "draw per pass means the tick coalescer is not absorbing them")
         for record in frozen {
             XCTAssertEqual(record.pictureQuad, firstQuad,
                            "a frozen present moved the photograph (\(record.pictureQuad) vs "
@@ -263,8 +274,9 @@ final class WindowResizeTests: XCTestCase {
         XCTAssertFalse(stretched.isEmpty,
                        "the counter-proof never drew a stale frame full-bleed — the guard's assertion "
                        + "would go red for no reason")
+        guard let sample = stretched.first else { return }
         print("[067] counter-proof (guard off): \(stretched.count) presents drew a "
-              + "\(stretched[0].frameCanvas.keyString) frame into a \(stretched[0].drawable.keyString) "
+              + "\(sample.frameCanvas.keyString) frame into a \(sample.drawable.keyString) "
               + "drawable — the photograph at another aspect, the 「变扁」 this forbids")
     }
 }

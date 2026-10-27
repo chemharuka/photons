@@ -198,6 +198,13 @@ public final class TopBarView: NSView {
 
 final class WorkspaceDivider: NSView {
     var onDrag: ((CGFloat) -> Void)?
+    /// 068: the two edges of a drag. A divider drag runs its own `nextEvent` loop — AppKit knows nothing
+    /// about it, so it never starts a window live resize and the canvas would go on rendering (and
+    /// presenting) for every mouse-moved tick. The workspace hands both edges to the loupe instead, so a
+    /// divider drag and a window drag follow **the same** freeze (one draw per runloop tick, one render
+    /// at the size the hand stopped on).
+    var onDragBegan: (() -> Void)?
+    var onDragEnded: (() -> Void)?
     private var mouseDownX: CGFloat = 0
 
     override var isFlipped: Bool { true }
@@ -215,6 +222,10 @@ final class WorkspaceDivider: NSView {
 
     override func mouseDown(with event: NSEvent) {
         mouseDownX = convert(event.locationInWindow, from: nil).x
+        onDragBegan?()
+        // `defer` so a throw or an early `break` still ends the gesture: a freeze that is never released
+        // would leave the canvas at the pre-drag geometry with no frame coming.
+        defer { onDragEnded?() }
         while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             if next.type == .leftMouseUp { break }
             let x = convert(next.locationInWindow, from: nil).x
@@ -314,6 +325,14 @@ public final class WorkspaceRootView: NSView {
             self.inspectorWidth = WorkspaceLayout.clampInspectorWidth(self.inspectorWidth - delta)
             self.defaults.set(Double(self.inspectorWidth), forKey: "photons.inspectorWidth")
             self.needsLayout = true
+        }
+        // 068: both dividers resize the **canvas**, so both drags are canvas geometry gestures. A drag
+        // that is not announced freezes nothing, which is the state the 274→360 inspector drag was in:
+        // every mouse-moved tick laid the canvas out and asked for a frame at a size the next tick would
+        // replace — the picture re-fitting on each landed frame, which is the jelly.
+        for divider in [inspectorDivider, browserDivider] {
+            divider.onDragBegan = { [weak self] in self?.beginPanelDividerDrag() }
+            divider.onDragEnded = { [weak self] in self?.endPanelDividerDrag() }
         }
 
         gridController.onActivate = { [weak self] id in self?.session.activate(id) }
@@ -457,6 +476,29 @@ public final class WorkspaceRootView: NSView {
         inspectorWidth = WorkspaceLayout.clampInspectorWidth(w)
         defaults.set(Double(inspectorWidth), forKey: "photons.inspectorWidth")
         needsLayout = true
+    }
+
+    // MARK: panel divider gestures (068)
+
+    /// The two edges of a divider drag, as `WorkspaceDivider` calls them.
+    ///
+    /// Public because the acceptance test has to start where the divider starts: the bug was that a
+    /// divider drag resized the canvas without telling it, so a test that called only
+    /// `setInspectorWidth` in a loop would be testing the *unfixed* wiring and passing.
+    public func beginPanelDividerDrag() {
+        loupeController.beginCanvasGeometryGesture(.panelDivider)
+    }
+
+    public func endPanelDividerDrag() {
+        loupeController.endCanvasGeometryGesture(.panelDivider)
+    }
+
+    /// Both dividers are wired to the canvas freeze (`onDrag`, `onDragBegan`, `onDragEnded`). A drag
+    /// that loses any of the three is a canvas that renders per mouse-moved tick or freezes forever.
+    public var panelDividersAreWired: Bool {
+        [inspectorDivider, browserDivider].allSatisfy {
+            $0.onDrag != nil && $0.onDragBegan != nil && $0.onDragEnded != nil
+        }
     }
 
     public var currentBrowserWidth: CGFloat { browserWidth }
