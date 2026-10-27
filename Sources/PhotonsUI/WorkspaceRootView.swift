@@ -125,6 +125,8 @@ public final class TopBarView: NSView {
         stripButton.action = #selector(stripTapped)
         sortButton.target = self
         sortButton.action = #selector(sortTapped)
+        // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
+        sortButton.image = PhotoSortOrder.icon()
 
         modeControl.target = self
         modeControl.action = #selector(modeChanged)

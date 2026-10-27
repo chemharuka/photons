@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import PhotonsCatalog
 
@@ -33,6 +34,24 @@ public enum PhotoSortOrder: String, CaseIterable, Sendable {
 
     /// The generic sort glyph. Static on purpose — see the note at the top of this file.
     public static let symbol = "arrow.up.arrow.down"
+
+    /// The neighbour buttons' icon box, measured on this machine: `folder` and
+    /// `rectangle.split.1x2` are **18 × 14 pt** at AppKit's default symbol configuration, while
+    /// `arrow.up.arrow.down` is **18 × 15** unscaled — 1 pt taller than the family it has to sit in.
+    /// `pointSize 12.25 / .regular` is the smallest step that lands the arrow on exactly 18 × 14
+    /// without changing its weight (`.regular` is AppKit's default, i.e. the neighbours' weight).
+    /// Encoded here rather than in `TopBarView` so the reason travels with the glyph.
+    public static let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12.25, weight: .regular)
+
+    /// The icon as the toolbar draws it: a **template** image (SF Symbols already are, and this is
+    /// asserted) so the glyph is tinted by `contentTintColor`/`labelColor` and therefore follows the
+    /// light/dark appearance instead of being baked into one colour.
+    public static func icon() -> NSImage? {
+        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: "按拍摄时间排序")
+        let configured = base?.withSymbolConfiguration(symbolConfiguration) ?? base
+        configured?.isTemplate = true
+        return configured
+    }
 
     /// What the button says: the order in force, arrow included.
     public var label: String {
