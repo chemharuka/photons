@@ -173,6 +173,18 @@ enum EditParameters {
             && areEqual(a.vignetteFeather, b.vignetteFeather)
             && areEqual(a.vignetteRoundness, b.vignetteRoundness)
             && areEqual(a.grain, b.grain)
+            // 2026-10-28 — and the same load-bearing rule as `blackOffset` above: `applyEdit`
+            // short-circuits on `isSemanticallyIdentical`, so a field missing from here is a slider
+            // that writes nothing at all. Measured the hard way when 颗粒大小/粗糙度/种子 were added:
+            // without these three lines `applyEdit { grainRoughness = 90 }` returned silently, the
+            // document stayed at 50 and `commitEdit` found nothing to commit — `EffectsCardTests`
+            // (`testOneRowsResetUsesItsOwnDefault`) was the test that caught it.
+            //
+            // The seed compares as `grainSeedValue`, the integer the kernel hashes: a document holding
+            // 3.7 and one holding 4 are the same noise, so they must not mint an undo step either.
+            && areEqual(a.grainSize, b.grainSize)
+            && areEqual(a.grainRoughness, b.grainRoughness)
+            && a.grainSeedValue == b.grainSeedValue
     }
 
     /// Do two mask stacks contribute the same render material?

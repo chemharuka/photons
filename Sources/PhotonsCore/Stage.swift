@@ -68,7 +68,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// what the curve produced, not the other way round, and `s2_tone_map`'s region weights are
     /// defined on display-referred values — which is what the curve hands it.
     public static var allCases: [RenderStage] {
-        [.geometry, .sceneLinear, .curve, .toneMap, .color, .vignette, .grain, .display]
+        [.geometry, .sceneLinear, .curve, .toneMap, .color, .vignette, .display]
     }
 
     /// Execution order including the conditional stages.

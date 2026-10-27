@@ -36,19 +36,28 @@ struct GrainParams {
     float4 c;   // identity, contentOrigin.x, contentOrigin.y, pad
 };
 
-// One round of a 32-bit avalanche hash. Deterministic on every GPU the same way integer arithmetic
-// is: no `fast::` math, no randomness, no `texture` state.
-static inline uint3 grain_scramble(uint3 h) {
-    h = (h ^ (h >> 16)) * 2246822519u;
-    h = (h ^ (h >> 13)) * 3266489917u;
-    return h ^ (h >> 16);
+// A 32-bit avalanche hash over (x, y, seed). Deterministic on every GPU the same way integer
+// arithmetic is: no `fast::` math, no randomness, no `texture` position, no time.
+//
+// **Scalar, not a `uint3`.** The first version hashed `uint3(x, y, seed)` and every operator was
+// component-wise, so the seed only ever reached `.z` and never came back into `.x` — two seeds gave
+// the same picture (measured: seed 7 and seed 8 produced one sha, `EffectsTests`' determinism
+// assertion went red). The three inputs have to be folded into one accumulator *here*, before the
+// avalanche, or the mix has to cross components explicitly; this does the former.
+static inline uint grain_hash(uint x, uint y, uint seed) {
+    uint h = (x * 0x9E3779B1u) ^ (y * 0x85EBCA77u) ^ (seed * 0xC2B2AE3Du);
+    h ^= h >> 15;
+    h *= 0x2545F491u;
+    h ^= h >> 13;
+    h *= 0x9E3779B1u;
+    h ^= h >> 16;
+    return h;
 }
 
-/// A lattice point's noise in [0, 1).
+/// A lattice point's noise in [0, 1), from the **top** 24 bits (one float mantissa's worth) so the
+/// value is strictly below 1 and adjacent cells are not correlated in their low bits.
 static inline float grain_lattice(int2 p, uint seed) {
-    uint3 h = grain_scramble(uint3(uint(p.x), uint(p.y), seed));
-    // 24 bits are enough for one float mantissa and keep the value strictly below 1.
-    return float(h.x >> 8) * (1.0 / 16777216.0);
+    return float(grain_hash(uint(p.x), uint(p.y), seed) >> 8) * (1.0 / 16777216.0);
 }
 
 /// Smooth (smoothstep-interpolated) value noise at `q`, in lattice units.

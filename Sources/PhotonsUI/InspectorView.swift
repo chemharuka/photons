@@ -742,6 +742,9 @@ public struct InspectorView: View {
                 effectsSliderRow(row)
             }
         }
+        // The card's own frame, for the layout test at 300 / 330 / 364 (`EffectsRowProbe.cardID`) —
+        // a background, so it inherits the card's size and cannot change it.
+        .background(EffectsRowProbeHost(rowID: EffectsRowProbe.cardID))
     }
 
     /// One 效果 row: the panel's own `sliderRow`, plus the frame probe the layout tests measure. The

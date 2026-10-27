@@ -15,6 +15,10 @@ import SwiftUI
 /// overflows its card has a frame outside the card, not a shorter one).
 final class EffectsRowProbe: NSView {
 
+    /// The id the card itself is probed under (`effectsCard`'s own `.background`): a row probe measures
+    /// a row, and the layout test also needs the card's frame to say 「行在卡里」.
+    static let cardID = "效果卡"
+
     private(set) var rowID: String = ""
 
     override init(frame frameRect: NSRect) {
