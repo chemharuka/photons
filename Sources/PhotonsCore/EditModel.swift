@@ -32,7 +32,18 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// migration is `detail / 10` — the **amount** a document asks for is preserved (old 100 →
     /// new 10 → amount 1.0), which is to say its look is preserved. Only that one field moves; see
     /// `DetailSettings.migratePreSchema6Detail()` for why it is /10 and not a rescale to 3.
-    public static let currentSchemaVersion = 6
+    /// 7 = 2026-10-28: 颗粒 — `effects.grainSize` (0…100, default **25**), `effects.grainRoughness`
+    /// (0…100, default **50**) and `effects.grainSeed` (0…999, default 0) joined `effects.grain`,
+    /// which keeps its key and is now read as the grain's **amount** (`crs:GrainAmount`). S3.7 renders
+    /// all four; before this version the amount was stored and not rendered.
+    ///
+    /// **Nothing migrates.** The three keys are absent from every document written before this
+    /// version, and an absent key reads as its default — amount 0, so a schema-6 document has
+    /// `hasGrain == false`, S3.7 is not encoded for it, and its pixels are byte-identical (schema 5's
+    /// `blackOffset` pattern, not schema 6's `/10`: no stored number changes *meaning* here). The
+    /// version is therefore **not** stamped on such a document at decode time — it keeps the number
+    /// its own file wrote, and only a document saved by this build carries 7.
+    public static let currentSchemaVersion = 7
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -115,6 +126,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// non-zero), exactly the way `hasLocalColor` is judged for S3.5 — a stage that is present but
     /// neutral would still move the trace and the key chain.
     public var hasHSL: Bool { color.hasBands }
+
+    /// 2026-10-28: does S3.7 exist for this document? Judged **by value** (the grain amount is above
+    /// zero), exactly the way `hasHSL` judges S3.6 — a stage present but neutral would move the trace
+    /// and the key chain for nothing.
+    public var hasGrain: Bool { effects.hasGrain }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
@@ -234,7 +250,23 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
             if color.bands != old.color.bands { s.insert(.hsl) }
         }
-        if effects != old.effects { s.insert(.vignette) }
+        if effects != old.effects {
+            // 2026-10-28: the card is two stages. A vignette drag must not miss a cached grain (S3.7
+            // reads none of those four numbers) and a grain drag must not re-run S3c — the same split
+            // 076 made for Color's two stages.
+            if effects.vignetteAmount != old.effects.vignetteAmount
+                || effects.vignetteMidpoint != old.effects.vignetteMidpoint
+                || effects.vignetteFeather != old.effects.vignetteFeather
+                || effects.vignetteRoundness != old.effects.vignetteRoundness {
+                s.insert(.vignette)
+            }
+            if effects.grain != old.effects.grain
+                || effects.grainSize != old.effects.grainSize
+                || effects.grainRoughness != old.effects.grainRoughness
+                || effects.grainSeedValue != old.effects.grainSeedValue {
+                s.insert(.grain)
+            }
+        }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
         if optics != old.optics { s.insert(.geometry) }
@@ -356,6 +388,12 @@ public struct EditModel: Sendable, Equatable, Codable {
 
         case .vignette:
             return effects.keyString
+
+        case .grain:
+            // 2026-10-28: S3.7's own material — amount, size, roughness and the seed (as the integer
+            // the kernel hashes). Same shape as `.hsl`/`.localColor`: a stage key that names the values
+            // it reads cannot silently stop tracking them, and a seed change must move it.
+            return effects.grainKeyString
 
         case .display:
             return "primaries=\(displayKeyPrimaries)"
@@ -1274,24 +1312,66 @@ public struct DetailGroup: Sendable, Equatable, Codable {
     }
 }
 
-/// Lightroom's Effects panel. Vignette renders in S3; grain is stored for later.
+/// Lightroom's Effects panel: 暗角 (S3c) and 颗粒 (S3.7), both rendered.
+///
+/// The **ranges are the kernels' ranges** — a number the panel can produce and the shader cannot
+/// honour would be a slider that lies:
+///
+///   · `vignetteAmount` −100…100 (`s3_vignette.metal`'s `gain`): negative darkens the corners,
+///     positive brightens them, 0 is the identity (the pass copies);
+///   · `vignetteMidpoint` 0…100 — where the falloff starts (`inner = mix(0.25, 1.05, mid/100)`);
+///   · `vignetteFeather` 0…100 — how soft the transition is (the kernel clamps it to 2…100 %);
+///   · `vignetteRoundness` −100…100 — square (max-norm) → circular (euclidean) blend;
+///   · `grain` 0…100 — the grain's **amount** (standard deviation): 0 = no grain, and then S3.7 is not
+///     encoded at all;
+///   · `grainSize` 0…100 — the cell, in frame fractions;
+///   · `grainRoughness` 0…100 — the weight of the finer octave;
+///   · `grainSeed` 0…999 — the hash's only free variable (see `grainSeedValue`).
+///
+/// Nothing here is a second copy of a value the shader also holds: the defaults are the shader's
+/// neutral, and `keyString`/`grainKeyString` are built from these fields only.
 public struct EffectsGroup: Sendable, Equatable, Codable {
     public var vignetteAmount: Double      // -100…100, default 0 (negative = darker corners)
     public var vignetteMidpoint: Double    // 0…100, default 50
     public var vignetteFeather: Double     // 0…100, default 50
     public var vignetteRoundness: Double   // -100…100, default 0 (square → circular)
-    public var grain: Double               // 0…100, default 0 — stored, not rendered in M1
+    /// 颗粒的**数量** (0…100, default 0). Kept under its original key `grain` so every document
+    /// written before S3.7 re-encodes byte for byte (schema 5's `blackOffset` discipline).
+    public var grain: Double
+    /// 颗粒大小 (0…100, default 25 — Lightroom's own resting position, i.e. fine grain).
+    public var grainSize: Double
+    /// 颗粒粗糙度 (0…100, default 50).
+    public var grainRoughness: Double
+    /// 颗粒种子 (0…999, default 0). Stored as `Double` like every other number in the document; the
+    /// kernel reads `grainSeedValue`, so the shader and the key cannot disagree about what was hashed.
+    public var grainSeed: Double
 
     public static let identity = EffectsGroup()
 
+    /// The seed the kernel actually hashes: rounded and clamped into 0…999. One instantiation, so
+    /// `keyString` and the uniform cannot drift (a `-0.4` and a `0` seed are the same noise).
+    public var grainSeedValue: Int {
+        guard grainSeed.isFinite else { return 0 }
+        return min(max(Int(grainSeed.rounded()), 0), 999)
+    }
+
+    /// Does S3.7 exist for this document? Judged **by value** (the amount is above zero), exactly the
+    /// way `hasHSL` judges S3.6 — a stage that is present but neutral would move the trace and the key
+    /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
+    public var hasGrain: Bool { grain > 0 }
+
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,
                 vignetteFeather: Double = 50, vignetteRoundness: Double = 0,
-                grain: Double = 0) {
+                grain: Double = 0, grainSize: Double = 25,
+                grainRoughness: Double = 50, grainSeed: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
         self.vignetteRoundness = vignetteRoundness
         self.grain = grain
+        self.grainSize = grainSize
+        self.grainRoughness = grainRoughness
+        self.grainSeed = grainSeed
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1302,12 +1382,23 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.vignetteFeather = c.val("vignetteFeather", v.vignetteFeather)
         v.vignetteRoundness = c.val("vignetteRoundness", v.vignetteRoundness)
         v.grain = c.val("grain", v.grain)
+        v.grainSize = c.val("grainSize", v.grainSize)
+        v.grainRoughness = c.val("grainRoughness", v.grainRoughness)
+        v.grainSeed = c.val("grainSeed", v.grainSeed)
         self = v
     }
 
+    /// S3c's material — the four vignette numbers and nothing else. A grain drag must not miss a
+    /// cached vignette (they are different stages, and `.grain` carries its own material).
     public var keyString: String {
         "vig=\(k(vignetteAmount));mid=\(k(vignetteMidpoint));fea=\(k(vignetteFeather))"
             + ";rou=\(k(vignetteRoundness))"
+    }
+
+    /// S3.7's material — the amount, the shape, and the **seed**, so two documents that differ only in
+    /// their seed can never share a cached grain.
+    public var grainKeyString: String {
+        "gamt=\(k(grain));gsz=\(k(grainSize));grou=\(k(grainRoughness));gseed=\(grainSeedValue)"
     }
 }
 

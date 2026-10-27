@@ -263,6 +263,14 @@ extension EditHistory {
         num("effects.vignetteRoundness", .effects,
             before.effects.vignetteRoundness, after.effects.vignetteRoundness)
         num("effects.grain", .effects, before.effects.grain, after.effects.grain)
+        // 2026-10-28 — S3.7's shape and seed. The seed is reported as the integer the kernel
+        // hashes, so a row can never claim a change the pixels cannot see.
+        num("effects.grainSize", .effects, before.effects.grainSize, after.effects.grainSize)
+        num("effects.grainRoughness", .effects, before.effects.grainRoughness, after.effects.grainRoughness)
+        if before.effects.grainSeedValue != after.effects.grainSeedValue {
+            add("effects.grainSeed", .effects,
+                .text("\(before.effects.grainSeedValue)"), .text("\(after.effects.grainSeedValue)"))
+        }
 
         // S0 (029) — lateral CA.
         num("optics.caRed", .geometry, before.optics.caRed, after.optics.caRed)
@@ -407,7 +415,10 @@ extension EditHistory {
         "effects.vignetteMidpoint": "暗角中点",
         "effects.vignetteFeather": "暗角羽化",
         "effects.vignetteRoundness": "暗角圆度",
-        "effects.grain": "颗粒",
+        "effects.grain": "颗粒数量",
+        "effects.grainSize": "颗粒大小",
+        "effects.grainRoughness": "颗粒粗糙度",
+        "effects.grainSeed": "颗粒种子",
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
         "masks.order": "蒙版顺序",

@@ -115,7 +115,9 @@ LR 的 `ToneCurvePV2012` 是 `rdf:Seq` 里每项一个 `"x, y"` **字符串**，
 | `vignetteMidpoint` | `crs:PostCropVignetteMidpoint` | 0…100，默认 50 | 1:1 | ≡ |
 | `vignetteFeather` | `crs:PostCropVignetteFeather` | 0…100，默认 50 | 1:1 | ≡ |
 | `vignetteRoundness` | `crs:PostCropVignetteRoundness` | −100…100，默认 0（−100 方形 → +100 圆形） | 1:1 | ≡ |
-| `grain` | `crs:GrainAmount` | 0…100，默认 0 | 1:1；`GrainSize`（默认 25）/`GrainFrequency`（默认 50）我们无 → 不写，导入丢弃 | ⚠ |
+| `grain` | `crs:GrainAmount` | 0…100，默认 0 | 1:1。**2026-10-28 起 `GrainSize` / `GrainFrequency` 也有字段了**，见下面两行 | ≡ |
+| `grainSize` | `crs:GrainSize` | 0…100，默认 25（LR 的默认也是 25） | 1:1；默认不写键（同 `BlackOffset` 的纪律） | ≡ |
+| `grainRoughness` | `crs:GrainFrequency` | 0…100，默认 50（LR 的默认也是 50） | 1:1；**LR 的 “frequency” 就是粗糙度**，同一根滑杆的两个名字 | ≡ |
 | — | `crs:PostCropVignetteStyle` / `PostCropVignetteHighlightContrast` | 1…3 / 0…100 | 不写（无字段）。我们的暗角不区分 Highlight/Color Priority | ✕ |
 | — | `crs:Texture` / `Clarity2012` / `Dehaze` | −100…100 | 不写（无字段） | ✕ |
 
@@ -140,7 +142,7 @@ LR 的 `ToneCurvePV2012` 是 `rdf:Seq` 里每项一个 `"x, y"` **字符串**，
 | `masks[i].params` | `[String: Double]` 装不下 LR 的嵌套几何与采样结构 |
 
 另记 7 个**部分可映射**（有损/语义偏移，导出报告须逐条标注）：
-`processVersion`、`temperature`、`tint`、`flipHorizontal`、`flipVertical`、`grain`、`detail.lensCorrections`。
+`processVersion`、`temperature`、`tint`、`flipHorizontal`、`flipVertical`、`detail.lensCorrections`。
 
 ## 3. 表 B：导入 LR XMP 时的风险清单
 
@@ -241,7 +243,7 @@ CGImageMetadataRegisterNamespaceForPrefix(m, CFSTR("https://photons.app/ns/edit/
 | `light.highlightRecovery` | 无 `crs:` 键；`photons:highlightRecovery` 只是备份 |
 | `masks.*`（M1–M3） | 结构不可映射（§1.8）；导入侧永远得到 `[]` |
 | `detail.lensCorrections` | 只声明"已做校正"；LR 端的 Profile 状态不能反推我们的 bool |
-| `effects.grain` 的 size/frequency | 我们没有这两个字段，导入必丢 |
+| ~~`effects.grain` 的 size/frequency~~ | **已解决（2026-10-28）**：`grainSize` → `GrainSize`、`grainRoughness` → `GrainFrequency`，双向 1:1 |
 | `xmp:Rating` / `xmp:Label` / `dc:subject` | 由 catalog（DB）写，不是 `EditModel`；真相在库，XMP 只是镜像（D7） |
 
 **一句话**：`crs:` 是给人（Lightroom 用户）看的一份"尽力而为"的副本，`photons:settings` 是我们自己的无损备份，

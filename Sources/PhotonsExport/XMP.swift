@@ -423,6 +423,13 @@ public enum XMPWriter {
         try write(metadata, "crs:PostCropVignetteMidpoint", e.vignetteMidpoint == 50 ? nil : number(e.vignetteMidpoint), &report)
         try write(metadata, "crs:PostCropVignetteFeather", e.vignetteFeather == 50 ? nil : number(e.vignetteFeather), &report)
         try write(metadata, "crs:PostCropVignetteRoundness", zeroOrNil(e.vignetteRoundness), &report)
+        // 2026-10-28: the two shape keys Lightroom has lived in since CS6 and this document had no
+        // field for — `crs:GrainSize` (0…100, LR default 25) is 颗粒大小 and `crs:GrainFrequency`
+        // (0…100, LR default 50) is 颗粒粗糙度: LR's "frequency" *is* the roughness control.
+        // Defaults are omitted, so a document that never touched grain writes exactly the one
+        // `crs:GrainAmount` key it wrote before.
+        try write(metadata, "crs:GrainSize", e.grainSize == 25 ? nil : number(e.grainSize), &report)
+        try write(metadata, "crs:GrainFrequency", e.grainRoughness == 50 ? nil : number(e.grainRoughness), &report)
         try write(metadata, "crs:GrainAmount", zeroOrNil(e.grain), &report)
 
         // MARK: 1.8 masks — nothing maps; allocate for M4 and count the leaves we dropped.

@@ -207,8 +207,9 @@ final class PanelEditingTests: XCTestCase {
                       "the inspector's cards must go through that one row view")
         XCTAssertFalse(source.contains("editable: false"),
                        "no card may opt out of typing (047: 所有卡片统一)")
-        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 4,
-                       "Light / 黑电平 / Color / 细节 all take the fact from their row table")
+        // 2026-10-28: 效果 (暗角 + 颗粒) is the fifth card whose rows come from its own table.
+        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 5,
+                       "Light / 黑电平 / Color / 细节 / 效果 all take the fact from their row table")
 
         // A typed value takes the drag's path: the binding write, then the gesture-end commit.
         XCTAssertTrue(row.contains("value.wrappedValue = typed"))
