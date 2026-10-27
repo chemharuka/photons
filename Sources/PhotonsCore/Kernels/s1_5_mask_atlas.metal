@@ -215,13 +215,19 @@ static inline float brush_alpha(float2 ppx, float2 uv, MaskShapeDesc d,
     return clamp(acc, 0.0, 1.0);
 }
 
-/// Ottosson's OKLab from linear sRGB — the same formulas as `OKLabMetric` on the host (a test
-/// compares the two implementations, so the two cannot drift silently).
+/// Ottosson's OKLab from **linear working primaries** — the same formulas as `OKLabMetric` on the
+/// host (a test compares the two implementations, so the two cannot drift silently).
+///
+/// 075 §2.2: the fold is `M1 · toXYZ(Rec.2020)` with its rows normalised to 1 (white must fold to
+/// `L = 1, a = b = 0`), not Ottosson's published *sRGB* matrix. The host derives it from
+/// `ColorPrimaries.working`; the nine literals below are that product to 10 digits
+/// (verified in `MaskTests`, whose fixed coverages are what a correct fold produces for known sRGB
+/// colours — a stale fold moves them, which is exactly how this line was found).
 static inline float3 oklab(float3 linearRGB) {
     float3 rgb = max(linearRGB, 0.0);
-    float l = dot(rgb, float3(0.4122214708, 0.5363325363, 0.0514459929));
-    float m = dot(rgb, float3(0.2119034982, 0.6806995451, 0.1073969566));
-    float s = dot(rgb, float3(0.0883024619, 0.2817188376, 0.6299787005));
+    float l = dot(rgb, float3(0.6167557877, 0.3601984026, 0.0230458097));
+    float m = dot(rgb, float3(0.2651330603, 0.6358393719, 0.0990275679));
+    float s = dot(rgb, float3(0.1001026312, 0.2039065206, 0.6959908482));
     // Metal's standard library has no `cbrt`; the exponent form is within a few ULP over [0, 1],
     // i.e. far below the 1/255 the masks are read at.
     float3 lms = pow(max(float3(l, m, s), 0.0), float3(1.0 / 3.0));

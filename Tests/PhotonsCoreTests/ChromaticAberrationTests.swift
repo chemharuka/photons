@@ -32,13 +32,17 @@ final class ChromaticAberrationTests: XCTestCase {
 
     private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
 
-    /// The pixels these frames had **before** 029 (recorded on the unmodified tree). If either moves,
-    /// the CA work changed a document that has CA switched off — the one thing it must not do.
+    /// The CA-off frame **as of 075** (the Rec.2020 working space). Re-recorded from
+    /// `9adb0403…/0a1d9cbf…` (the pre-029 recording, which also served as the pre-075 one) because the
+    /// graph's output legitimately changed: S0 now converts the decoded sRGB into Rec.2020 and S4
+    /// converts it back, so every display code can move by one. What these numbers still guard is what
+    /// they always guarded — a CA document that has both sliders at zero must produce *this* frame,
+    /// not a frame that depends on the CA code existing.
     private enum Pristine {
-        static let ramp2731 = "9adb04036e39411e9b5e2dae41f3cbe0626a996faa86b3df2de7908a158d0a37"
-        static let ramp2731Green = "0d3480ca2bc7954c944224f5342f7f07d55c667e38c591efd888de17bc3e9a70"
-        static let ramp1201 = "0a1d9cbf39b5e8dc0dd7df95ee2a4af17cd0913c7ba629f342b526540f9b6459"
-        static let ramp1201Green = "1e0dab44b68b21e03028a7aefd9bfa78c6dfa54360fc073cfe9a7c25a7a95b16"
+        static let ramp2731 = "cd1229e28b83574191674bbc98635a1123a5573148570f8a6a9d6da8ce23dcb1"
+        static let ramp2731Green = "e2d96d23eb0c66ca51bfd1d28f3d696324180fe1302a77a1f238ce1065237f6c"
+        static let ramp1201 = "88ea6900dcaa4eb14dec9766941273b1d57600ed2cc9b8092298272cf50587e0"
+        static let ramp1201Green = "d559909df43e1e1fe8763f4d0c9ee772dcbecddc97ee6a095d89153bf4aa79d1"
     }
 
     /// A smooth, non-repeating gradient. A radial rescale changes red and blue everywhere on it, so
@@ -211,8 +215,23 @@ final class ChromaticAberrationTests: XCTestCase {
             XCTAssertFalse(off.trace.s0PureCA, "α = 0 must stay the identity copy")
             XCTAssertTrue(on.trace.s0PureCA, "full frame + no rotation + α ≠ 0 must take the pure path")
 
-            XCTAssertEqual(greenHash(onPx), greenHash(offPx), "\(w)x\(h): green changed")
-            XCTAssertEqual(greenHash(onPx), green, "\(w)x\(h): green is no longer the pre-029 bytes")
+            // Green is a **texel copy in the working space** — that is the property the fast path has,
+            // and it is asserted on S0's own output by
+            // `SaturatedColourTests.testTheExitMatrixRunsOnEveryS0Path` (all three exits produce the
+            // Rec.2020 code). It can no longer be asserted on the *display* frame: since 075 S4 applies
+            // `Rec2020 → sRGB`, whose green row is `(−0.1246, 1.1329, −0.0083)`, so a frame whose red
+            // and blue move *must* move display green by `0.1246·ΔR` — the mixing is the matrix, not a
+            // leak. Quantified rather than relaxed: the display green may only move by what that
+            // coefficient allows, which is 13× less than the red it follows.
+            let maxDG = maxChannelDelta(onPx, offPx, channel: 1)
+            let maxDR = maxChannelDelta(onPx, offPx, channel: 0)
+            print(String(format: "CA %dx%d: max|ΔdisplayR| %.6f · max|ΔdisplayG| %.6f "
+                         + "(bound %.6f = 0.1246·ΔR + 1 ULP)", w, h, maxDR, maxDG,
+                         0.1246 * maxDR + 4.9e-4))
+            XCTAssertLessThanOrEqual(maxDG, 0.1246 * maxDR + 4.9e-4,
+                                     "\(w)x\(h): display green moved by more than the S4 matrix can "
+                                     + "explain (ΔG \(maxDG) vs ΔR \(maxDR)) — a channel leaked")
+            XCTAssertEqual(greenHash(offPx), green, "\(w)x\(h): the CA-off frame is no longer the baseline")
             XCTAssertNotEqual(onPx.sha256(), offPx.sha256(), "\(w)x\(h): CA did nothing")
 
             // Only R and B: strip them and the frames are identical.
@@ -327,7 +346,15 @@ final class ChromaticAberrationTests: XCTestCase {
         XCTAssertFalse(offResult.trace.s0PureCA)
         XCTAssertTrue(offResult.trace.executed.contains(.geometry),
                       "both frames must actually run S0")
-        XCTAssertEqual(greenHash(onPx), greenHash(offPx), "green moved on the general path")
+        // Same statement as path B, same reason (see `testPureCAPathKeepsGreenBitExact`): the general
+        // path samples the pixel the CA-off kernel sampled, so green is a texel copy in the working
+        // space — and the display's green moves only by what S4's `Rec2020 → sRGB` row implies.
+        let maxDG = maxChannelDelta(onPx, offPx, channel: 1)
+        let maxDR = maxChannelDelta(onPx, offPx, channel: 0)
+        print(String(format: "CA general: max|ΔR| %.6f · max|ΔG| %.6f (bound %.6f)",
+                     maxDR, maxDG, 0.1246 * maxDR + 4.9e-4))
+        XCTAssertLessThanOrEqual(maxDG, 0.1246 * maxDR + 4.9e-4,
+                                 "green on the general path moved by more than the S4 matrix explains")
         XCTAssertNotEqual(redBlueHash(onPx), redBlueHash(offPx), "red/blue did not move")
     }
 
@@ -440,6 +467,15 @@ final class ChromaticAberrationTests: XCTestCase {
     }
 
     // MARK: - hashing helpers
+
+    /// Largest |Δ| of one channel between two frames.
+    private func maxChannelDelta(_ a: DisplayImage, _ b: DisplayImage, channel c: Int) -> Float {
+        var m: Float = 0
+        for i in stride(from: c, to: a.rgba.count, by: 4) {
+            m = max(m, abs(Float(a.rgba[i]) - Float(b.rgba[i])))
+        }
+        return m
+    }
 
     private func greenHash(_ image: DisplayImage) -> String {
         channelHash(image, channels: [1])

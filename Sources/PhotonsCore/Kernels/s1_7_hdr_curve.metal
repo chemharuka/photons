@@ -96,7 +96,8 @@ struct HDRCurveParams {
     float4 b;
     // slopeW, slopeR, slopeG, slopeB — the last segment of each table (rule 4).
     float4 c;
-    // luma weights (Rec709: 0.2126, 0.7152, 0.0722 — the same convention as s2_tone_map:81), then
+    // luma weights (the **working primaries**: Rec.2020 0.2627/0.6780/0.0593 since 075, arriving in
+    // `p.d.xyz` from `HDRCurve.lumaWeights` — never as literals here), then
     // the **identity mask**: bit 0 = W, 1 = R, 2 = G, 3 = B, set for every table that is the
     // identity. The bitrate of `u` per stop is `p.a.w`, not a constant here.
     float4 d;

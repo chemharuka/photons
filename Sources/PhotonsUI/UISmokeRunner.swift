@@ -1733,7 +1733,11 @@ public final class UISmokeRunner {
         }
     }
 
-    /// Rec.709 luma of every pixel, 0…1 (the display texture, i.e. what the user sees).
+    /// Luma of every pixel, 0…1, off the **display** texture (what the user sees).
+    ///
+    /// Rec.709 on purpose, and *not* the working primaries' `ColorPrimaries.working.luminanceWeights`
+    /// (075): these are S4's encoded display codes, so the light behind them is display sRGB — the
+    /// same reason `Histogram.lumaWeights` stays 709 and the render kernels do not.
     private func lumaPlane(_ texture: MTLTexture) -> [Double] {
         let raw = rgba16(texture)
         var out = [Double](repeating: 0, count: texture.width * texture.height)

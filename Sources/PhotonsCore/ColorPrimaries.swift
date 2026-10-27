@@ -268,6 +268,25 @@ public enum ColorPrimaries: String, Sendable, Hashable, CaseIterable, Codable {
     /// 但比任何真实错误（抄错基色 ⇒ 1e-3 量级）小得多。
     public static let whitePointTolerance = 1e-12
 
+    // MARK: - 管线的两端（075 批次 A）
+
+    /// **解码器**写出的基色 —— 仍然是线性 sRGB。
+    ///
+    /// 075 的决定是「解码不动」：`CIContext` 的工作空间、`LinearImageStore` 的缓存键
+    /// （`colorSpace` 在键文本里）以及解码 golden 全部保持原样，磁盘上已有的 60 MP 缓冲继续命中。
+    /// 所以这个常数是**标签的真话**，不是待改项。
+    public static let decoded: ColorPrimaries = .sRGB
+
+    /// 管线的**工作基色**：S0 出口之后、S4 入口之前，所有 stage 里的数字都在这个空间里。
+    ///
+    /// 两处使用，都在 `RenderGraph` 里，且都必须引用**这一个**常数：
+    ///   · S0 的出口矩阵 `conversion(from: .decoded, to: .working)`；
+    ///   · S4 的入口矩阵 `conversion(from: .working, to: 输出基色)`。
+    /// 批次 D（把解码本身搬过去）的全部改动就是把 `decoded` 改成 `.rec2020`，S0 的矩阵随之变成
+    /// 恒等 —— 那时 `conversion` 的 1e-16 残差就要靠 `RenderGraph.primariesMatrix` 的
+    /// `source == target` 分支吃掉，所以它必须存在。
+    public static let working: ColorPrimaries = .rec2020
+
     // MARK: matrices
 
     /// 基色 → XYZ。`Double`，行主序，`Y` 列（第 2 行）就是亮度权重。

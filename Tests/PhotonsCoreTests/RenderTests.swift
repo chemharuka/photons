@@ -53,6 +53,37 @@ final class RenderTests: XCTestCase {
 
     /// The neutral document must produce exactly "decode → sRGB encode": no tone curve, no colour
     /// shift, no resample. If this drifts, every later milestone inherits a hidden baseline offset.
+    ///
+    /// ── 075: "identity" is a claim about **two** populations, not one ────────────────────────────
+    /// The neutral path is decode (linear sRGB) → S0's exit matrix → **linear Rec.2020** → S4's matrix
+    /// → sRGB, so the round trip is an exact identity only where no clip can bite in between it.
+    /// Measured on the fixture (scale 0.125, 942 480 pixels):
+    ///
+    ///   · **934 051 pixels (99.11 %)** have all three decoded channels inside [0, 1] — an ordinary
+    ///     colour, representable in both cubes. There the matrices are exact inverses (`m₂·m₁` = I to
+    ///     2.2e-16 in `Double`, `ColorPrimariesTests.testEveryRoundTripIsTheIdentity`; the same round
+    ///     trip with no storage at all moves a display code by 4.3e-15) and the only error left is the
+    ///     two rgba16Float buffers: **0.229 of an 8-bit code**, growing with exposure the way a
+    ///     *relative* ULP has to — 0.03 codes in the darkest 1 %, 0.06 in 1–5 %, 0.10 in 5–25 %,
+    ///     0.17 in 25–50 %, 0.23 in 50–100 % (the table the test prints). A doubled matrix or the
+    ///     wrong pair is ~1e-3 of the value, three orders above a half ULP, and `ColorPrimariesTests`
+    ///     pins the matrices themselves — the buckets below are what would catch either.
+    ///   · **8 429 pixels (0.89 %)** have a *negative* decoded channel — sub-black signal, which this
+    ///     pipeline is required to carry (`SubBlackSignalTests`: S1's `blackOffset` must be able to
+    ///     lift it back across zero, so it may not be clamped at the decode boundary). Since 075 they
+    ///     are clipped in the **working** cube, after S0's matrix, instead of per channel in the
+    ///     decoded cube: `Rec2020 → sRGB` mixes the negative channels into the survivor and the clip
+    ///     takes the rest — up to **4 codes**, on 422 of those 8 429. A float64 model of exactly what
+    ///     S0 + S4 compute, `encode(clamp(m₂·clamp(m₁·v, 0), 0, 1))`, reproduces the render to
+    ///     **0.051 codes** on those same pixels, so the gap is the clip's *domain*, not a rounding
+    ///     error and not a matrix error (before 075 every one of them matched to 0.03 codes, because
+    ///     the decoded cube and the working cube were the same cube).
+    ///
+    /// One number over both populations is what made this read 0.0155. So the assertion is a
+    /// **shape**: inside the decoded cube every channel within one code with the buffer's own
+    /// arithmetic flat across brightness percentiles; outside it, the render must equal the clip model
+    /// within one code and may never be *brighter* than decode + OETF — a clip can take sub-black
+    /// light away, never invent it.
     func testNeutralRenderIsDecodePlusOETF() throws {
         let (graph, decoded) = try makeGraph()
         var edit = EditModel.neutral
@@ -63,19 +94,89 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(pixels.width, decoded.width)
         XCTAssertEqual(pixels.height, decoded.height)
 
-        var maxError: Float = 0
+        // The two matrices the graph itself uses (`RenderGraph.primariesMatrix` is built from these).
+        let toWorking = ColorPrimaries.conversion(from: ColorPrimaries.decoded, to: ColorPrimaries.working)
+        let fromWorking = ColorPrimaries.conversion(from: ColorPrimaries.working, to: ColorPrimaries.decoded)
+
+        var inside: [(luma: Float, error: Float)] = []
+        var outsideCount = 0
+        var outsideMoved = 0
+        var outsideModelError: Float = 0
+        var outsideAboveIdeal: Float = 0
         var count = 0
+
         for i in stride(from: 0, to: decoded.rgba.count, by: 4) {
-            for c in 0..<3 {
-                let expected = srgbEncode(min(max(Float(decoded.rgba[i + c]), 0), 1))
-                let actual = Float(pixels.rgba[i + c])
-                maxError = max(maxError, abs(expected - actual))
-                count += 1
+            let v = SIMD3<Double>(Double(decoded.rgba[i]), Double(decoded.rgba[i + 1]),
+                                  Double(decoded.rgba[i + 2]))
+            let inDecodedCube = v.x >= 0 && v.y >= 0 && v.z >= 0 && v.x <= 1 && v.y <= 1 && v.z <= 1
+            if inDecodedCube {
+                var error: Float = 0
+                var luma: Float = 0
+                for c in 0..<3 {
+                    let expected = srgbEncode(Float(v[c]))
+                    luma += expected / 3
+                    error = max(error, abs(expected - Float(pixels.rgba[i + c])))
+                }
+                inside.append((luma, error))
+            } else {
+                // What S0 + S4 compute: the exit matrix, the lower clamp in the *working* cube (S4's
+                // `max(c.rgb, 0)`), the inverse matrix, then the display clamp.
+                let working = toWorking.applying(to: v)
+                let clipped = SIMD3<Double>(max(working.x, 0), max(working.y, 0), max(working.z, 0))
+                let back = fromWorking.applying(to: clipped)
+                outsideCount += 1
+                var moved = false
+                for c in 0..<3 {
+                    let model = srgbEncode(Float(min(max(back[c], 0), 1)))
+                    let ideal = srgbEncode(Float(min(max(v[c], 0), 1)))
+                    let actual = Float(pixels.rgba[i + c])
+                    outsideModelError = max(outsideModelError, abs(actual - model))
+                    outsideAboveIdeal = max(outsideAboveIdeal, actual - ideal)
+                    if abs(actual - ideal) > 0.5 / 255 { moved = true }
+                }
+                if moved { outsideMoved += 1 }
             }
+            count += 3
         }
         XCTAssertGreaterThan(count, 0)
-        // rgba16Float carries ~11 bits of mantissa: half rounding shows up at ~5e-4, nothing more.
-        XCTAssertLessThan(maxError, 0.002, "neutral render is not the identity path (max error \(maxError))")
+        XCTAssertGreaterThan(inside.count, 0)
+        XCTAssertGreaterThan(outsideCount, 0, "the fixture must still carry sub-black pixels")
+
+        // 1. Inside the decoded cube: one code everywhere, and the shape across brightness is flat —
+        //    the per-bucket limits are what distinguishes "a half-float ULP" from "a matrix applied
+        //    twice", which is not visible in a single max over the frame.
+        inside.sort { $0.luma < $1.luma }
+        let buckets: [(name: String, lower: Double, upper: Double, limitCodes: Float)] = [
+            ("darkest 1 %", 0, 0.01, 1), ("1–5 %", 0.01, 0.05, 0.5), ("5–25 %", 0.05, 0.25, 0.5),
+            ("25–50 %", 0.25, 0.5, 0.5), ("50–100 %", 0.5, 1, 0.5),
+        ]
+        var worstInside: Float = 0
+        for bucket in buckets {
+            let lower = Int(Double(inside.count) * bucket.lower)
+            let upper = Int(Double(inside.count) * bucket.upper)
+            var worst: Float = 0
+            var sum: Double = 0
+            for k in lower..<upper {
+                worst = max(worst, inside[k].error)
+                sum += Double(inside[k].error)
+            }
+            worstInside = max(worstInside, worst)
+            print("neutral identity [\(bucket.name)]: max |Δ| = \(worst * 255) codes, mean \(sum / Double(max(upper - lower, 1)) * 255) codes, over \(upper - lower) px (limit \(bucket.limitCodes))")
+            XCTAssertLessThanOrEqual(worst * 255, bucket.limitCodes,
+                                     "neutral render drifted inside the decoded cube at brightness \(bucket.name) (max \(worst * 255) codes)")
+        }
+        XCTAssertLessThanOrEqual(worstInside * 255, 1,
+                                 "neutral render is not the identity path inside the decoded cube (max \(worstInside * 255) codes)")
+
+        // 2. Outside it (sub-black here): the clip model, and the direction. `outsideMoved` is printed,
+        //    not asserted on — how many pixels the clip moves is the clip's business, which pixels and
+        //    by how much is not.
+        print("neutral identity outside the decoded cube: \(outsideCount) px, \(outsideMoved) moved by >0.5 codes, "
+              + "max |render − clip model| = \(outsideModelError * 255) codes, max (render − decode+OETF) = \(outsideAboveIdeal * 255) codes")
+        XCTAssertLessThanOrEqual(outsideModelError * 255, 1,
+                                 "outside the decoded cube the render is not the two-matrix clip (\(outsideModelError * 255) codes)")
+        XCTAssertLessThanOrEqual(outsideAboveIdeal * 255, 0.5,
+                                 "a clip may take sub-black light away, never invent it (max +\(outsideAboveIdeal * 255) codes)")
     }
 
     // MARK: - 2. determinism

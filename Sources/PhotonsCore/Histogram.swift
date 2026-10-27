@@ -56,9 +56,12 @@ import CryptoKit
 //   · `binCount` is the *measurement's* resolution, not the file's. The default 256 matches an
 //     8-bit output; a 16-bit export that wants per-code counts would ask for 65536 bins (4 × 256 KB
 //     of counters here, so that is a caller's decision, not a default).
-//   · The four series are R, G, B and **luma** with Rec.709 weights applied to the encoded values
-//     (0.2126, 0.7152, 0.0722). That is the same number a compositor would call luma; scene
-//     luminance is a different quantity and `LinearImage.statistics()` is where it lives.
+//   · The four series are R, G, B and **luma**. Since 075 both entry points are counted in *display*
+//     light: an encoded sample already is, and a scene-linear one is converted from the working
+//     primaries first (`measure`), so the axis, the ceiling and the luma all describe the same space
+//     and Rec.709 (`lumaWeights`) is the right basis for them. The *scene* luma — the working
+//     primaries' own weights, which is what S1/S2/S1.7 use — is `ColorPrimaries.working
+//     .luminanceWeights`, and `LinearImage.statistics()` is where a picture-wide scene luma lives.
 
 /// Scene-linear RGB, as S3 hands it to S4 — **no** transfer function, **no** headroom clamp.
 ///
@@ -161,7 +164,11 @@ public struct Histogram: Sendable, Equatable {
     /// threshold every 8-bit tool uses, on a measurement that no longer arrives encoded.
     public static let clipHighThreshold: Double = 0.999
     public static let clipLowThreshold: Double = 0.001
-    /// Rec.709 weights, applied to encoded values — see the note at the top of this file.
+    /// **Rec.709** — the **display-referred** weights. Both entry points end up in display light: an
+    /// encoded sample is already there, and a scene-linear one is converted into it before it is
+    /// counted (`measure`, 075), so the axis, the ceiling and this luma are all display quantities and
+    /// 709 is the right basis for them. The *working* primaries' weights live in
+    /// `ColorPrimaries.working.luminanceWeights` and are what the render kernels use.
     public static let lumaWeights: (r: Double, g: Double, b: Double) = (0.2126, 0.7152, 0.0722)
 
     /// Bins per channel on the SDR segment.
@@ -408,7 +415,7 @@ extension Histogram {
     ///
     /// Three codes and a luma is one channel more than an `rgba16Float` texture has, and S4 leaves
     /// alpha at 1.0, so the sample kernel spends that channel on the one number the CPU cannot derive
-    /// without four `pow`s per pixel: `srgbEncode(0.2126·R + 0.7152·G + 0.0722·B)` of the **linear**
+    /// without four `pow`s per pixel: `srgbEncode(w·R + w·G + w·B)` of the display **linear**
     /// light, which is the definition the shipped pre-S4 measurement uses. Deriving it on the CPU from
     /// the three codes instead is a different quantity (the OETF is concave: `Σw·code` sits below
     /// `encode(Σw·linear)`, by up to ~0.02 of code near white), and it showed up as the only series
@@ -456,6 +463,22 @@ extension Histogram {
         let high = encoded ? Float(clipHighThreshold) : srgbDecode(Float(clipHighThreshold))
         let low = encoded ? Float(clipLowThreshold) : srgbDecode(Float(clipLowThreshold))
         let (wr, wg, wb) = (Float(lumaWeights.r), Float(lumaWeights.g), Float(lumaWeights.b))
+        // 075 — **the code axis is a display axis.** This measurement is taken before S4, so since the
+        // working space became Rec.2020 the values arriving here are Rec.2020 codes while the axis the
+        // card draws (and the axis `measureFrameHistogram` reads off the finished frame) is sRGB.
+        // Encoding the working code directly put the same picture's red series 8–13 % of the sample
+        // into the wrong bins, and — measured — the two plots disagreed by up to 13 % per bin while
+        // both were "right" in their own space. So a linear sample is converted into the output
+        // primaries first, once per sample, and everything below (bins, thresholds, luma) is display
+        // light. `.sRGB` is the axis because that is what `RenderGraph.measureHistogram` renders and
+        // what `Histogram.primaries` reports.
+        let toDisplay = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
+        let (m00, m01, m02) = (Float(toDisplay[0, 0]), Float(toDisplay[0, 1]), Float(toDisplay[0, 2]))
+        let (m10, m11, m12) = (Float(toDisplay[1, 0]), Float(toDisplay[1, 1]), Float(toDisplay[1, 2]))
+        let (m20, m21, m22) = (Float(toDisplay[2, 0]), Float(toDisplay[2, 1]), Float(toDisplay[2, 2]))
+        // Branch-free, like `lumaMix` below: 1 for a scene-linear sample, 0 when the sample already
+        // *is* a display code. Nine multiplies per pixel against the three `pow`s already spent.
+        let mix: Float = encoded ? 0 : 1
         // The ceiling is a *value* now, not a clamp whose output we read back: a sample at or above it
         // is light this screen would throw away. Slack by half a float16 step (2^-11 relative) — that
         // is the quantisation of the texture the samples came from, and without it a value that is
@@ -497,9 +520,11 @@ extension Histogram {
                     let row = y * frame.width
                     for x in rect.x..<(rect.x + rect.width) {
                         let o = (row + x) * 4
-                        let rv = unbounded(px[o])
-                        let gv = unbounded(px[o + 1])
-                        let bv = unbounded(px[o + 2])
+                        let wr0 = unbounded(px[o]), wg0 = unbounded(px[o + 1]), wb0 = unbounded(px[o + 2])
+                        // Working primaries → display primaries (075), a no-op on an encoded sample.
+                        let rv = wr0 + mix * ((m00 * wr0 + m01 * wg0 + m02 * wb0) - wr0)
+                        let gv = wg0 + mix * ((m10 * wr0 + m11 * wg0 + m12 * wb0) - wg0)
+                        let bv = wb0 + mix * ((m20 * wr0 + m21 * wg0 + m22 * wb0) - wb0)
                         // A frame sample carries the shipped luma in alpha (it is the only channel
                         // left, and deriving it from three codes would be a different quantity —
                         // see `computeFrameSample`).

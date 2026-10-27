@@ -87,6 +87,9 @@ kernel void histogram_sample(texture2d<float, access::read> src [[texture(0)]],
     // around white). The shipped measurement weights **linear** light and encodes the sum, so the
     // frame's luma series is that same number, computed here where four `pow`s per sample texel cost
     // nothing (36 k threads) instead of ~1 ms on the CPU (36 k × 4 pows inside a frame budget).
+    // Rec.709, deliberately (075): this entry point reads S4's **display** texture, so the light it
+    // recovers is display sRGB. The scene-linear sample (`histogram_sample_linear`, the card's own
+    // path) carries no luma at all — the CPU derives it after converting to display primaries.
     float luma = srgb_encode_f(0.2126 * srgb_decode_f(c.r)
                                + 0.7152 * srgb_decode_f(c.g)
                                + 0.0722 * srgb_decode_f(c.b));

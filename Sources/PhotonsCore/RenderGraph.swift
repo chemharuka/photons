@@ -564,8 +564,69 @@ private struct MaskTable {
 }
 
 extension ColorGroup {
-    /// Lightroom's eight band centres, in degrees on the HSL colour wheel.
-    public static let bandCentresDegrees: [Double] = [0, 30, 60, 120, 180, 240, 285, 315]
+    /// The eight band centres, as **hue angles in the graph's working primaries**.
+    ///
+    /// Lightroom's wheel is `[0, 30, 60, 120, 180, 240, 285, 315]` **in sRGB**. A hue angle is not a
+    /// physical colour — it is a direction from grey in whatever RGB basis the three numbers happen to
+    /// be written in — so the moment the working space became Rec.2020 (075) those eight numbers
+    /// stopped naming the colours the bands are named after: measured, a pixel on Lightroom's green
+    /// centre reads **102.6°** in Rec.2020, 17.4° away from 120°, which put it at 0.61 of the green
+    /// tent's weight and made `hue +100` on the green band do 61 % of what the user asked for
+    /// (075 §2.2, `LocalColorStageTests.testFullCanvasHueMatchesTheGlobalBandHue`).
+    ///
+    /// **The decision (owner, 2026-10-27, option A): the hue controls follow the working space.** So
+    /// the centres are re-derived — same eight physical colours, new angles — rather than the hue
+    /// being measured in a display-referred space on the side. The price is that an *existing*
+    /// document's hue band now acts on a slightly different slice of colour than it did (a saturated
+    /// red's band moves by 5.2°, green's by −17.4° in code angle but acts on the same green); the
+    /// benefit is that the local and global hue controls stay one control with one definition, and no
+    /// second sRGB↔Rec.2020 conversion appears anywhere in a frame.
+    ///
+    /// **Cost: none per frame.** This is a `static let` evaluated once; the numbers travel in the same
+    /// eight `float4`s that already carried the centres (`RenderGraph.bandBuffer`).
+    ///
+    /// The sample colour is `hsl(h, 0.85, 0.5)` — the middle of the shades the fixtures and the panel
+    /// use. The hue spread across saturations is ≈0.3° (a linear basis change keeps the *ordering*
+    /// and, nearly, the angle), which is inside the 0.5° the local/global equality test allows.
+    public static let bandCentresDegrees: [Double] = {
+        let lightroom: [Double] = [0, 30, 60, 120, 180, 240, 285, 315]
+        let toWorking = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
+        return lightroom.map { degrees in
+            let w = toWorking.applying(to: linearHSL(h: degrees / 360, s: 0.85, l: 0.5))
+            return linearHSLHue(w) * 360
+        }
+    }()
+
+    /// `hsl → linear RGB`, the same arithmetic as `color_hsl.metal`'s inverse (and as the colour maths
+    /// in `LocalColorStageTests`, which is deliberately an independent implementation).
+    private static func linearHSL(h: Double, s: Double, l: Double) -> SIMD3<Double> {
+        func channel(_ p: Double, _ q: Double, _ t0: Double) -> Double {
+            var t = t0
+            if t < 0 { t += 1 }
+            if t > 1 { t -= 1 }
+            if t < 1.0 / 6.0 { return p + (q - p) * 6 * t }
+            if t < 0.5 { return q }
+            if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6 }
+            return p
+        }
+        if s < 1e-9 { return SIMD3(l, l, l) }
+        let q = l < 0.5 ? l * (1 + s) : l + s - l * s
+        let p = 2 * l - q
+        return SIMD3(channel(p, q, h + 1.0 / 3.0), channel(p, q, h), channel(p, q, h - 1.0 / 3.0))
+    }
+
+    /// The hue of a linear RGB triple, in turns — `rgb_to_hsl`'s `h`, which is what the band tent is
+    /// measured against (`hueDeg = rgb_to_hsl(v).x * 360`).
+    private static func linearHSLHue(_ c: SIMD3<Double>) -> Double {
+        let mx = max(c.x, max(c.y, c.z)), mn = min(c.x, min(c.y, c.z))
+        let d = mx - mn
+        if d < 1e-9 { return 0 }
+        var h: Double
+        if mx == c.x { h = (c.y - c.z) / d + (c.y < c.z ? 6 : 0) }
+        else if mx == c.y { h = (c.z - c.x) / d + 2 }
+        else { h = (c.x - c.y) / d + 4 }
+        return h / 6
+    }
 }
 
 // MARK: - graph
@@ -1756,6 +1817,13 @@ public final class RenderGraph {
                 g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
+            // 075 — the **exit matrix**: what the decoder wrote (linear sRGB) → the graph's working
+            // primaries. A separate buffer (index 1) rather than a field of `S0Params`, whose 112
+            // bytes `ChromaticAberrationTests` pins on both sides; the numbers come from
+            // `ColorPrimaries`, never from literals here or in the kernel.
+            var primaries = RenderGraph.primariesMatrix(from: ColorPrimaries.decoded,
+                                                        to: ColorPrimaries.working)
+            enc.setBytes(&primaries, length: MemoryLayout<simd_float4x4>.stride, index: 1)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 
@@ -1889,8 +1957,9 @@ public final class RenderGraph {
                 b: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)),
                 c: SIMD4(tables.slopes[0], tables.slopes[1], tables.slopes[2], tables.slopes[3]),
-                // The luma weights are a parameter, not a constant: changing the working space (a
-                // future Rec2020 move) is one number here and one in `HDRCurve.lumaWeights`. `.w` is
+                // The luma weights are a parameter, not a constant: changing the working space is one
+                // number in `HDRCurve.lumaWeights` (which reads `ColorPrimaries`) and nothing here —
+                // 075 did exactly that move and this line did not change. `.w` is
                 // the identity mask (062): which of the four tables need the shaper at all. Forcing
                 // the arithmetic path (the tests' `forceCurveArithmetic`) clears it, so the identity
                 // really does go through the shaper.
@@ -1960,10 +2029,14 @@ public final class RenderGraph {
 
         case .display:
             let p = try kernels.pipeline(file: "s4_display", function: "s4_display")
-            let primaries = options.display.primaries
-            let matrix = RenderGraph.primariesMatrix(from: .sRGB, to: primaries)
+            // 075: the source is the **working** space, not sRGB — the S0 exit matrix put every
+            // number into it. `primariesMatrix` is exhaustive over (source, target) and returns the
+            // exact identity only when the two are equal; the kernel's `p.a.x` flag mirrors that
+            // same comparison so the fast path and the matrix can never disagree.
+            let target = RenderGraph.outputPrimaries(options.display.primaries)
+            let matrix = RenderGraph.primariesMatrix(from: ColorPrimaries.working, to: target)
             var params = DisplayParams(m: matrix,
-                                       a: SIMD4(primaries == .sRGB ? 1 : 0,
+                                       a: SIMD4(ColorPrimaries.working == target ? 1 : 0,
                                                 Float(options.display.headroom), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: 0)
@@ -2488,8 +2561,11 @@ public final class RenderGraph {
             var rp = RefineParams(
                 a: SIMD4(Int32(canvas.width), Int32(canvas.height), Int32(q),
                          Int32(max(1, (m.misc.w / Float(q)).rounded()))),
+                // The guided filter's luma, in the **working** primaries (075 batch B): this is the
+                // only luma weight outside a kernel file, which is why it was the easiest one to miss.
                 b: SIMD4(Float(MaskRadius.guidedEpsilon(Double(strength))),
-                         0.2126, 0.7152, 0.0722),
+                         Float(HDRCurve.lumaWeights.r), Float(HDRCurve.lumaWeights.g),
+                         Float(HDRCurve.lumaWeights.b)),
                 c: SIMD4(strength, 0, 0, 0),
                 // One thread per column/row in the 1/q domain: the q-domain rows are at most a few
                 // hundred texels, so a single running sum per thread beats a segmented dispatch.
@@ -2885,15 +2961,51 @@ public final class RenderGraph {
 
     // MARK: primaries
 
-    /// linear sRGB → linear output primaries. Derived from the sRGB → XYZ (D65) and XYZ → P3
-    /// matrices; identical to the constants used by Apple's own P3 conversions.
-    static func primariesMatrix(from: OutputPrimaries, to: OutputPrimaries) -> simd_float4x4 {
-        let identity = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 1, 0), SIMD4(0, 0, 0, 1)))
-        guard from == .sRGB, to == .displayP3 else { return identity }
-        return simd_float4x4(columns: (SIMD4(0.8224621, 0.0331941, 0.0170827, 0),
-                                       SIMD4(0.1775380, 0.9668058, 0.0723974, 0),
-                                       SIMD4(0.0000000, 0.0000000, 0.9105199, 0),
+    /// `ColorPrimaries` → `OutputPrimaries`. Exhaustive on purpose: adding an output target without
+    /// teaching this switch about it is a **compile error**, which is the cheap half of 075 §3.2.
+    static func outputPrimaries(_ target: OutputPrimaries) -> ColorPrimaries {
+        switch target {
+        case .sRGB: return .sRGB
+        case .displayP3: return .displayP3
+        }
+    }
+
+    /// `source` primaries → `target` primaries, column-major, straight out of `ColorPrimaries`.
+    ///
+    /// **075 §3.2 — the silent identity is gone.** This used to be
+    /// `guard from == .sRGB, to == .displayP3 else { return identity }`: one hard-written pair, and
+    /// *everything else* — including the pair the migration was about to produce on every frame —
+    /// fell through to the identity matrix, i.e. sRGB screens would have been handed Rec.2020 numbers
+    /// with no error, no crash, and a test suite that only covered `sRGB → P3`.
+    ///
+    /// Now the table is `ColorPrimaries.conversion`, which is defined for **all nine** (source,
+    /// target) pairs by construction (it is `toXYZ(target)⁻¹ · toXYZ(source)`), and there is no
+    /// fallback branch left to be wrong:
+    ///
+    ///   · `source == target` returns the *exact* identity — `conversion` leaves a ~1e-16 residue on
+    ///     the diagonal, and the identity case is the one where "no matrix at all" must be true, not
+    ///     approximately true;
+    ///   · every other pair is asserted to be a real conversion before it is returned: white-point
+    ///     preserving (row sums 1) and **not** the identity. A failure here is a bug in the derivation
+    ///     or in the enum, and there is no valid pixel output for either.
+    static func primariesMatrix(from source: ColorPrimaries, to target: ColorPrimaries) -> simd_float4x4 {
+        if source == target { return identityMatrix }
+        let m = ColorPrimaries.conversion(from: source, to: target)
+        precondition(m.preservesWhitePoint(within: 1e-9),
+                     "\(source.rawValue) → \(target.rawValue) does not preserve the D65 white point — "
+                     + "a converted neutral would change colour, which no output stage can fix")
+        precondition(m.maxAbsoluteDifference(from: .identity) > 1e-6,
+                     "\(source.rawValue) → \(target.rawValue) came out as the identity matrix — "
+                     + "the exact failure 075 §3.2 was written about (a silent no-op conversion)")
+        return simd_float4x4(columns: (SIMD4(Float(m[0, 0]), Float(m[1, 0]), Float(m[2, 0]), 0),
+                                       SIMD4(Float(m[0, 1]), Float(m[1, 1]), Float(m[2, 1]), 0),
+                                       SIMD4(Float(m[0, 2]), Float(m[1, 2]), Float(m[2, 2]), 0),
                                        SIMD4(0, 0, 0, 1)))
+    }
+
+    /// The 4×4 identity, in the same (column-major) shape `primariesMatrix` returns.
+    static var identityMatrix: simd_float4x4 {
+        simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 1, 0), SIMD4(0, 0, 0, 1)))
     }
 }
 

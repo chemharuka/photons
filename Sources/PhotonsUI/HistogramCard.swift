@@ -1150,6 +1150,11 @@ public enum HistogramCardReadability {
 
     /// WCAG relative luminance of an sRGB colour (alpha is the caller's problem: these colours are
     /// opaque by construction, and the *old* ones are composited by the test before measuring).
+    ///
+    /// **These three coefficients must stay Rec.709** (075 §2.1 listed this file among the weight
+    /// sites; it is not one). WCAG 2.1's relative luminance is defined on sRGB primaries for
+    /// *accessibility contrast* — the numbers are normative, they are about UI colours, and they have
+    /// nothing to do with what the render pipeline's working space is.
     public static func relativeLuminance(of color: NSColor) -> Double {
         guard let srgb = color.usingColorSpace(.sRGB) else { return .nan }
         return 0.2126 * linear(srgb.redComponent)

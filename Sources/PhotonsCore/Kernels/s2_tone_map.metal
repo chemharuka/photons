@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "primaries.metal"
 using namespace metal;
 
 // S2 — tone map: parametric curve (Lightroom's Light panel), the two region lifts, final clamp.
@@ -122,7 +123,7 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // so the windows are exposure-invariant in width and can be read off the card. A pixel at or below
     // zero lum reads a very negative L, which is the shadow end: exactly right for a sub-black sample
     // that a lift has already pulled above zero.
-    float lum = max(dot(max(v, 0.0), float3(0.2126, 0.7152, 0.0722)), 1e-9);
+    float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
     float L = log2(lum);
     float wShadow = 1.0 - smoothstep(SHADOW_LO_EV, SHADOW_HI_EV, L);
     float wHighlight = smoothstep(HIGHLIGHT_LO_EV, HIGHLIGHT_HI_EV, L);

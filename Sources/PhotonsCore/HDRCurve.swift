@@ -157,10 +157,14 @@ public enum HDRCurve {
 
     public static let axis = HDRCurveAxis.standard
 
-    /// Rec709 luminance weights — the same convention `s2_tone_map.metal:81` uses. The camera's
-    /// working space is **linear sRGB** (`s4_display.metal`, `RenderGraph.primariesMatrix`), so
-    /// these are the weights for the space the numbers are actually in.
-    public static let lumaWeights = (r: 0.2126, g: 0.7152, b: 0.0722)
+    /// The **working primaries'** luminance weights — Rec.2020's `0.2627/0.6780/0.0593` since 075,
+    /// read from `ColorPrimaries` so this file cannot drift from the kernels. The curve's shaper reads
+    /// them off `p.d.xyz` (`s1_7_hdr_curve.metal`), so this one constant sets the luma of S1.7 on both
+    /// sides; `s2_tone_map`/`s1_6_local` take the same three numbers from `Kernels/primaries.metal`.
+    public static let lumaWeights = {
+        let w = ColorPrimaries.working.luminanceWeights
+        return (r: w.x, g: w.y, b: w.z)
+    }()
 
     /// The table's interpolation, on CPU: clamp `u` into [0,1], lerp, plus rule 4's continuation.
     public static func lutValue(_ table: [Float], slope: Float, u: Double) -> Double {

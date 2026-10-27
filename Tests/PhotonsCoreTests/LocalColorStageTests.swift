@@ -82,7 +82,14 @@ final class LocalColorStageTests: XCTestCase {
             let band = centres[x % centres.count]
             let shade = shades[(x / centres.count) % shades.count]
             _ = y
-            return Self.hslToRGB(h: band / 360.0, s: shade.s, l: shade.l)
+            // Built **in the working primaries** (075 option A): the centres are Rec.2020 hue angles,
+            // so a colour made with `hslToRGB` in sRGB would sit up to 0.3° off its own centre and the
+            // band tent would weight it 0.99 instead of 1 — a fixture that cannot tell "the band is
+            // right" from "the band is nearly right". Converting back through `fromWorking` keeps the
+            // frame a plain linear-sRGB decode, which is what the graph's input is.
+            let w = Self.hslToRGB(h: band / 360.0, s: shade.s, l: shade.l)
+            let s = Self.fromWorking.applying(to: SIMD3(w.0, w.1, w.2))
+            return (s.x, s.y, s.z)
         }
     }
 
@@ -169,17 +176,29 @@ final class LocalColorStageTests: XCTestCase {
     }
 
     /// Hue in degrees of a display pixel, after undoing S4's encode.
+    /// A display pixel, back in the **working primaries** — the space the hue/saturation controls are
+    /// defined in (075, option A). Measuring a hue shift on the display codes instead would compare a
+    /// 9° rotation *in Rec.2020* against a rotated triple read in sRGB, and the basis change alone
+    /// turns that into 11.1° — which is a property of the measurement, not of the control.
+    private func workingPixel(_ img: DisplayImage, _ index: Int) -> (Double, Double, Double) {
+        let v = SIMD3(Self.decode(Double(img.rgba[index * 4])),
+                      Self.decode(Double(img.rgba[index * 4 + 1])),
+                      Self.decode(Double(img.rgba[index * 4 + 2])))
+        let w = Self.toWorking.applying(to: v)
+        return (w.x, w.y, w.z)
+    }
+
+    /// sRGB ↔ working, once, from `ColorPrimaries` (never hand-written literals).
+    private static let toWorking = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
+    private static let fromWorking = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
+
     private func hueDegrees(_ img: DisplayImage, _ index: Int) -> Double {
-        let r = Self.decode(Double(img.rgba[index * 4]))
-        let g = Self.decode(Double(img.rgba[index * 4 + 1]))
-        let b = Self.decode(Double(img.rgba[index * 4 + 2]))
+        let (r, g, b) = workingPixel(img, index)
         return Self.rgbToHSL(r, g, b).h * 360
     }
 
     private func saturation(_ img: DisplayImage, _ index: Int) -> Double {
-        let r = Self.decode(Double(img.rgba[index * 4]))
-        let g = Self.decode(Double(img.rgba[index * 4 + 1]))
-        let b = Self.decode(Double(img.rgba[index * 4 + 2]))
+        let (r, g, b) = workingPixel(img, index)
         return Self.rgbToHSL(r, g, b).s
     }
 
@@ -475,8 +494,17 @@ final class LocalColorStageTests: XCTestCase {
                                  "the local hue must be the global band rotation, not a second one")
 
         // Mean signed hue shift, over pixels with enough chroma for a hue to mean anything.
+        // Pixels whose rotated colour leaves the **display** gamut are skipped: S4 clamps at white,
+        // and a clamped channel measures a smaller hue shift than the control applied (measured: the
+        // whole-set mean reads 8.42° where the rotation is 9.00°). That is the cost the owner accepted
+        // with option A — a wide-gamut hue rotation can push a saturated colour past sRGB — and it is
+        // a property of the *display*, not of the control, so it does not belong in the calibration.
+        func unclipped(_ img: DisplayImage, _ i: Int) -> Bool {
+            (0..<3).allSatisfy { Double(img.rgba[i * 4 + $0]) < 0.999 }
+        }
         var localShift = 0.0, globalShift = 0.0, counted = 0
-        for i in 0..<(image.width * image.height) where saturation(neutral, i) > 0.1 {
+        for i in 0..<(image.width * image.height) where saturation(neutral, i) > 0.1
+            && unclipped(b, i) && unclipped(a, i) {
             let h0 = hueDegrees(neutral, i)
             localShift += Self.hueDelta(h0, hueDegrees(b, i))
             globalShift += Self.hueDelta(h0, hueDegrees(a, i))

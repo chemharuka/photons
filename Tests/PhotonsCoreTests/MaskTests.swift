@@ -215,8 +215,20 @@ final class MaskTests: XCTestCase {
     }
 
     /// §4.4: nearest sample in the `OKLabMetric` space, then the soft threshold.
+    /// `OKLabMetric` is defined on the graph's **working primaries** — Rec.2020 since 075 — while the
+    /// mask fixtures are linear sRGB. Every expectation that feeds a fixture colour into the metric
+    /// converts first. Skipping this step is not a rounding difference: it reads Rec.2020 codes with
+    /// an sRGB fold (or vice versa) and moved the colour-range ramp's mid-threshold by 0.01 of
+    /// coverage, which is 2.5 codes — measured on the first Rec.2020 build of 075.
+    static func workingLinear(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+        let w = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
+            .applying(to: SIMD3(r, g, b))
+        return (w.x, w.y, w.z)
+    }
+
     private func colourRangeAlpha(r: Double, g: Double, b: Double, _ s: ColorRangeShape) -> Double {
-        let lab = OKLabMetric.fromLinear(r, g, b)
+        let c = Self.workingLinear(r, g, b)
+        let lab = OKLabMetric.fromLinear(c.0, c.1, c.2)
         var best = Double.infinity
         for sample in s.samples where sample.count >= 3 {
             best = min(best, OKLabMetric.distance(lab,
@@ -231,7 +243,8 @@ final class MaskTests: XCTestCase {
     /// §4.5: OKLab L (headroom clamped to 1) with a two-sided feather, inverted pairs repaired.
     private func luminanceRangeAlpha(r: Double, g: Double, b: Double, _ s: LuminanceRangeShape) -> Double {
         let o = s.ordered
-        let L = OKLabMetric.fromLinear(min(max(r, 0), 1), min(max(g, 0), 1), min(max(b, 0), 1)).L
+        let clamped = Self.workingLinear(min(max(r, 0), 1), min(max(g, 0), 1), min(max(b, 0), 1))
+        let L = OKLabMetric.fromLinear(clamped.0, clamped.1, clamped.2).L
         let loF = max(o.lowFeather, 0), hiF = max(o.highFeather, 0)
         let inLow = smoothstep(o.low - loF, max(o.low + loF, o.low - loF + 1e-5), L)
         let inHigh = 1 - smoothstep(o.high - hiF, max(o.high + hiF, o.high - hiF + 1e-5), L)
@@ -332,7 +345,8 @@ final class MaskTests: XCTestCase {
 
     /// Nearest-sample distance in the metric space, for the boundary assertions.
     static func colourDistance(_ c: (Double, Double, Double), from samples: [[Double]]) -> Double {
-        let lab = OKLabMetric.fromLinear(c.0, c.1, c.2)
+        let w = workingLinear(c.0, c.1, c.2)
+        let lab = OKLabMetric.fromLinear(w.0, w.1, w.2)
         return samples.reduce(Double.infinity) { best, s in
             min(best, OKLabMetric.distance(lab, OKLabMetric.fromSRGB(s[0], s[1], s[2])))
         }
