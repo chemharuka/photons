@@ -206,6 +206,9 @@ public final class LoupeCanvasView: NSView {
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        // 080: the 分屏 line is chrome the user placed, so it is the innermost gesture on the canvas —
+        // a drag that starts on it moves the line and never pans the picture or paints a mask.
+        if controller?.beginCompareDrag(atViewPoint: point) == true { return }
         switch controller?.gestureOwner(atViewPoint: point, clickCount: event.clickCount) {
         case .cropTool:
             isCropDragging = controller?.beginCropDrag(
@@ -263,6 +266,10 @@ public final class LoupeCanvasView: NSView {
             controller?.continueCropDrag(atViewPoint: convert(event.locationInWindow, from: nil))
             return
         }
+        if controller?.isDraggingCompare == true {
+            controller?.continueCompareDrag(atViewPoint: convert(event.locationInWindow, from: nil))
+            return
+        }
         if isShaping {
             controller?.continueShapeDrag(at: convert(event.locationInWindow, from: nil))
             return
@@ -286,6 +293,10 @@ public final class LoupeCanvasView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        if controller?.isDraggingCompare == true {
+            controller?.endCompareDrag()
+            return
+        }
         if isCropDragging {
             isCropDragging = false
             controller?.endCropDrag()
@@ -402,6 +413,37 @@ public enum LoupeCanvasGesture: Equatable, Sendable {
     }
 }
 
+/// What a frame the loupe asks for is **of** (080).
+///
+/// One enum rather than two booleans, because 「显示原图」 and 前后对比 are not independent: the compare
+/// mode is a split between the same two pictures `\` chooses between, and a state machine with four
+/// reachable combinations (both off, one on, the other on, both on) has three behaviours to define
+/// and one of them is nonsense. Here the precedence is total and testable:
+/// `showOriginal` wins over 对比 (「先看原图」 is a request to see one picture), and 对比 wins over
+/// nothing.
+public enum LoupeFrameMode: Equatable, Sendable {
+    /// The document, as edited.
+    case edited
+    /// `\` — the decode, display-encoded (`RenderSource.decoded`).
+    case original
+    /// Before/after: the decode on one side of a draggable line, the document on the other.
+    case compare(CompareSplit)
+
+    public var isOriginal: Bool { self == .original }
+    public var compareSplit: CompareSplit? {
+        if case .compare(let split) = self { return split }
+        return nil
+    }
+
+    public var label: String {
+        switch self {
+        case .edited: return "编辑后"
+        case .original: return "原图"
+        case .compare: return "前后对比"
+        }
+    }
+}
+
 /// Fits or zooms the anchor photo through `RenderGraph` and presents the S4 texture.
 ///
 /// One ladder, keyed on `LoupeViewState` (a camera position in **source pixels**) and on the
@@ -422,6 +464,7 @@ public enum LoupeCanvasGesture: Equatable, Sendable {
 /// bigger rung lands the ladder stores it and **one** replacement frame goes up. A frame never
 /// develops, so it is never queued behind ImageIO — which is the difference between "the picture
 /// freezes for a second" and "the picture is briefly soft".
+
 public final class LoupeController: NSViewController, HeadroomSource {
 
     public struct FrameResult {
@@ -468,6 +511,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// picture rect), in which case the readout falls back to `texture` and says so
         /// (`PointerPixel.source`).
         public let sceneLinearSample: LinearSample?
+        /// 080: what this frame is **of** — the document, the decode (`\`), or a before/after
+        /// composite of the two. A frame's pixels are only half of what a caller needs to know: the
+        /// pointer readout, the status strip and the tests all have to say whether the picture on the
+        /// canvas is the edit or the original (`BeforeAfterUITests` reads this instead of inferring it
+        /// from a hash).
+        public let mode: LoupeFrameMode
     }
 
     /// One frame's cost, in milliseconds, as measured on the render queue.
@@ -580,6 +629,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         var generation: Int
         /// Only edit frames carry a slider timestamp.
         let changedAt: CFAbsoluteTime
+        /// 080: what the frame is of, snapshotted with the document and the camera. A `\` or a
+        /// 对比 drag that lands while a frame is in flight must not be undone by that frame
+        /// presenting — the generation gate drops it, and this field is why the follow-up renders
+        /// the right thing without reading the controller from the render queue.
+        var mode: LoupeFrameMode = .edited
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -671,6 +725,182 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// Read back every presented frame and hash it. Off by default: a 2560×1600 readback is 32 MB.
     public var hashesFrames = false
+
+    // MARK: - 080 · 原图 / 前后对比 (state)
+
+    /// 「显示原图」(`\`). True while the canvas is showing the **decode** rather than the document.
+    ///
+    /// Nothing about this reaches `EditModel`, `CatalogSession` or the history: it is a fact about
+    /// what the next frame is *of*, and the only thing it changes is `frameMode` — which the frame
+    /// builder reads. That is the whole mechanism behind 「显示原图不写文档、不产生历史」.
+    public private(set) var showOriginal = false
+
+    /// The 前后对比 split, or `nil` when 对比 is off.
+    ///
+    /// Kept as a `CompareSplit` (axis + fraction) rather than a pair of numbers because the drag
+    /// hands exactly that value to the composite, and the axis and the position have to travel
+    /// together or a horizontal split can be dragged with the vertical arithmetic.
+    public private(set) var compareSplit: CompareSplit?
+
+    /// What the next frame will be of. `showOriginal` wins over 对比 (see `LoupeFrameMode`).
+    public var frameMode: LoupeFrameMode {
+        if showOriginal { return .original }
+        if let split = compareSplit { return .compare(split) }
+        return .edited
+    }
+
+    /// How many times the frame mode changed, and how many frames each mode produced — the numbers a
+    /// test reads to tell "the toggle re-rendered once" from "the toggle started a loop".
+    public private(set) var frameModeChanges = 0
+    public private(set) var originalFrames = 0
+    public private(set) var compareFrames = 0
+
+    /// `\` — show the decode, or go back to the document.
+    ///
+    /// A toggle rather than a press-and-hold because AppKit cannot report a key *release* for a menu
+    /// key equivalent: LR's `\` is a toggle too (press to see, press again), and the same verb is
+    /// what the menu row offers. Returns the new state so a caller can assert it.
+    @discardableResult
+    public func toggleShowOriginal() -> Bool {
+        setShowOriginal(!showOriginal)
+        return showOriginal
+    }
+
+    @discardableResult
+    public func setShowOriginal(_ on: Bool) -> Bool {
+        guard on != showOriginal else { return showOriginal }
+        showOriginal = on
+        frameModeDidChange()
+        return showOriginal
+    }
+
+    /// Y — before/after. Off → on splits the canvas at the current fraction (50 % the first time).
+    @discardableResult
+    public func toggleCompare() -> Bool {
+        setCompare(compareSplit == nil)
+        return compareSplit != nil
+    }
+
+    @discardableResult
+    public func setCompare(_ on: Bool) -> Bool {
+        if on {
+            guard compareSplit == nil else { return true }
+            compareSplit = lastCompareSplit ?? .half
+        } else {
+            guard let previous = compareSplit else { return false }
+            lastCompareSplit = previous
+            compareSplit = nil
+        }
+        frameModeDidChange()
+        return compareSplit != nil
+    }
+
+    /// ⇧Y — 左右 ↔ 上下. Keeps the fraction, because the user is asking about the *layout* of the
+    /// line they already placed.
+    public func toggleCompareAxis() {
+        guard var split = compareSplit else { return }
+        split.axis = split.axis == .vertical ? .horizontal : .vertical
+        compareSplit = split
+        lastCompareSplit = split
+        frameModeDidChange()
+    }
+
+    public func setCompareAxis(_ axis: CompareSplit.Axis) {
+        guard var split = compareSplit, split.axis != axis else { return }
+        split.axis = axis
+        compareSplit = split
+        lastCompareSplit = split
+        frameModeDidChange()
+    }
+
+    /// Move the line. Called by the drag (and by the menu's 50 % row): **no document, no history, no
+    /// decode** — a new line is a new composite of two textures that already exist, so it costs one
+    /// render of the pair and nothing else.
+    public func setCompareFraction(_ fraction: Double) {
+        guard var split = compareSplit else { return }
+        let next = min(max(fraction.isFinite ? fraction : 0.5, 0), 1)
+        guard abs(next - split.fraction) > 1e-6 else { return }
+        split.fraction = next
+        compareSplit = split
+        lastCompareSplit = split
+        compareSplitDrags += 1
+        frameModeDidChange()
+    }
+
+    /// The split a drag remembers when 对比 is switched off and on again.
+    private var lastCompareSplit: CompareSplit?
+    /// How many times the line moved — the counter 「拖动分界线不写文档」 is stated against.
+    public private(set) var compareSplitDrags = 0
+
+    /// A mode change is a new intent for the canvas: the in-flight frame (if any) belongs to the old
+    /// one, so the generation moves and a frame is asked for. `autoRenderEnabled == false` (tests,
+    /// `--ui-smoke`) means the caller drives the frames itself, and nothing is asked for here.
+    ///
+    /// The request is the camera path, not the edit path: 对比 and `\` change what a frame is *of*,
+    /// never the document, so a mode change must not look like an edit (no latency sample, no
+    /// settle frame) — and `requestViewportRender` coalesces, so a drag's hundreds of line positions
+    /// cost one render at a time.
+    private func frameModeDidChange() {
+        frameModeChanges += 1
+        generation += 1
+        guard autoRenderEnabled else { return }
+        requestViewportRender()
+    }
+
+    // MARK: - 080 · the divider drag
+
+    /// True while the pointer is dragging the 分屏 line.
+    public private(set) var isDraggingCompare = false
+
+    /// How close to the line a click has to land, in points. Wide enough to grab with a mouse, narrow
+    /// enough that a click meant for the picture (a pan, a mask) is not taken by the line.
+    public static let compareGrabPoints = 9.0
+
+    /// Where along the split axis a canvas point sits, 0…1.
+    ///
+    /// The canvas is drawn in **device pixels** (`viewportPixels`) and hit-tested in points
+    /// (`LoupeCanvasView.isFlipped`, so view `y = 0` is the picture's top row). One conversion, used
+    /// by the hit test and by the drag, so a line that is grabbable is also a line that moves where
+    /// the hand is.
+    public func compareFraction(atViewPoint point: CGPoint) -> Double {
+        let bounds = canvasView.bounds
+        guard bounds.width > 1, bounds.height > 1 else { return 0.5 }
+        let x = Double(point.x / bounds.width)
+        let y = Double(point.y / bounds.height)
+        let fraction = (compareSplit?.axis ?? .vertical) == .vertical ? x : y
+        return min(max(fraction, 0), 1)
+    }
+
+    /// Is this click on the line? `nil` (对比 off) is never a hit.
+    public func compareDividerHit(atViewPoint point: CGPoint) -> Bool {
+        guard let split = compareSplit else { return false }
+        let canvas = viewportPixels
+        let extent = split.axis == .vertical ? canvas.width : canvas.height
+        guard extent > 0 else { return false }
+        let lineFraction = Double(split.dividerPixel(canvas: canvas)) / Double(extent)
+        let grab = Self.compareGrabPoints * backingScale / Double(extent)
+        return abs(compareFraction(atViewPoint: point) - lineFraction) <= grab
+    }
+
+    /// A click on the line takes the drag. Returns `false` so the canvas's other gestures (pan, crop,
+    /// paint) are untouched when the click was not on it.
+    @discardableResult
+    public func beginCompareDrag(atViewPoint point: CGPoint) -> Bool {
+        guard compareDividerHit(atViewPoint: point) else { return false }
+        isDraggingCompare = true
+        return true
+    }
+
+    /// Move the line. Nothing is written: the document, the history and the decode ladder are not
+    /// touched, and the frame that follows is a composite of two renders whose keys did not move.
+    public func continueCompareDrag(atViewPoint point: CGPoint) {
+        guard isDraggingCompare else { return }
+        setCompareFraction(compareFraction(atViewPoint: point))
+    }
+
+    public func endCompareDrag() {
+        isDraggingCompare = false
+    }
 
     /// Ask for a histogram at all — the inspector card's switch.
     ///
@@ -3598,9 +3828,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // 067/066: the canvas this job is for, published to the render queue so a job overtaken by
             // a resize is dropped instead of rendered.
             canvasSizeBox.store(source.viewport)
-            return RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
-                             viewport: source.viewport, edit: source.edit, state: source.state,
-                             target: target, generation: gen, changedAt: changedAt)
+            var job = RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
+                                viewport: source.viewport, edit: source.edit, state: source.state,
+                                target: target, generation: gen, changedAt: changedAt)
+            job.mode = frameMode
+            return job
         }
         guard let session, session.mode == .loupe,
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
@@ -3610,9 +3842,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the picture under the frame is the picture the frame is measured against. Geometry is not
         // a decode input, so this costs a render and never a development (task 035).
         let edit = cropTool.isActive ? cropTool.previewEdit(from: session.edit) : session.edit
-        return RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
-                         edit: edit, state: viewState, target: target, generation: gen,
-                         changedAt: changedAt)
+        var job = RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
+                            edit: edit, state: viewState, target: target, generation: gen,
+                            changedAt: changedAt)
+        // 080: the mode is snapshotted with the camera and the document, so the frame the queue
+        // renders is the frame the user asked for even if `\` is pressed again while it is in flight.
+        job.mode = frameMode
+        return job
     }
 
     /// One frame, on the render queue. It **never develops**: it renders from the rung the ladder
@@ -3689,7 +3925,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // frame looks up is the rung the arrival was stored under.
             let frame = try makeFrame(url: job.url, cacheIdentity: job.baseIdentity,
                                       viewport: job.viewport, decodeScale: rung.scale,
-                                      edit: job.edit, state: job.state,
+                                      edit: job.edit, state: job.state, mode: job.mode,
                                       hashPixels: hashesFrames, resolve: .residentOnly)
             decodeMilliseconds = rung.milliseconds
             return frame
@@ -4336,12 +4572,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// must never read `session.edit` itself and race a slider).
     public func makeFrame(asset: Asset, url: URL, viewport: ImageSize, decodeScale: Float,
                           edit: EditModel? = nil, state: LoupeViewState? = nil,
+                          mode: LoupeFrameMode = .edited,
                           hashPixels: Bool = false) throws -> FrameResult {
         try makeFrame(url: url,
                       cacheIdentity: "\(asset.contentHash)|\(asset.id)",
                       viewport: viewport, decodeScale: decodeScale,
                       edit: edit ?? session?.edit ?? .neutral,
-                      state: state ?? viewState,
+                      state: state ?? viewState, mode: mode,
                       hashPixels: hashPixels)
     }
 
@@ -4349,11 +4586,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `cacheIdentity` only has to be stable per file; anything that changes pixels is in the key
     /// chain already.
     public func makeFrame(url: URL, viewport: ImageSize, decodeScale: Float, edit: EditModel,
-                          state: LoupeViewState = .fit,
+                          state: LoupeViewState = .fit, mode: LoupeFrameMode = .edited,
                           hashPixels: Bool = false) throws -> FrameResult {
         try makeFrame(url: url, cacheIdentity: url.lastPathComponent,
                       viewport: viewport, decodeScale: decodeScale, edit: edit,
-                      state: state, hashPixels: hashPixels)
+                      state: state, mode: mode, hashPixels: hashPixels)
     }
 
     /// Whether a frame may develop the rung it wants.
@@ -4369,6 +4606,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     private func makeFrame(url: URL, cacheIdentity baseIdentity: String, viewport: ImageSize,
                            decodeScale: Float, edit model: EditModel, state: LoupeViewState,
+                           mode: LoupeFrameMode = .edited,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
         // 派单 011: the white balance is a **decode** input, so it is part of the *rung*, not of the
@@ -4419,72 +4657,171 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         guard let graph else { throw RenderError.allocationFailed("loupe graph") }
 
-        // The camera: the document's own crop is the frame at every zoom, and 1:1 (or beyond) is an
-        // **output window** into it — S0 crops/straightens/flips the whole frame and hands back that
-        // rectangle, so the projection, the vignette and the mask feather are the frame's, not the
-        // window's (`RenderOptions.outputWindow`). `fit` names no window, i.e. the whole frame.
-        let projected = LoupeFraming(viewport: viewport,
-                                     decoded: ImageSize(width: image.width, height: image.height),
-                                     decodeScale: ds,
-                                     edit: model)
-        let outputWindow = projected.outputWindow(of: state)
-        let scale = max(0.01, projected.renderScale(of: state, decodeScale: ds))
-        let window = projected.windowPixels(of: state)
+        // The camera. 080: 「显示原图」 shows the **whole decode**, so its framing is the whole decode's
+        // — the crop is a property of the document, and a frame of the decode that framed itself with
+        // the crop would be the right pixels of the wrong picture (it would take the crop's rectangle
+        // out of a whole frame, or letterbox a whole frame into a crop's aspect).
+        struct Shot {
+            let projected: LoupeFraming
+            let window: ImageRect?
+            let scale: Double
+            let pixels: ImageSize
+        }
+        func shot(_ cameraEdit: EditModel) -> Shot {
+            // 1:1 (or beyond) is an **output window** into the frame: S0 cropped/straightened/flipped
+            // the whole frame and hands back that rectangle, so the projection, the vignette and the
+            // mask feather are the frame's, not the window's. `fit` names no window.
+            let projected = LoupeFraming(viewport: viewport,
+                                         decoded: ImageSize(width: image.width, height: image.height),
+                                         decodeScale: ds,
+                                         edit: cameraEdit)
+            return Shot(projected: projected,
+                        window: projected.outputWindow(of: state),
+                        scale: max(0.01, projected.renderScale(of: state, decodeScale: ds)),
+                        pixels: projected.windowPixels(of: state))
+        }
+        let editedShot = shot(model)
+        let originalShot = shot(model.disregardingGeometry)
         let primaries: OutputPrimaries = (presenter?.storage ?? .linear16) == .linear16 ? .displayP3 : .sRGB
         let ceiling = displayHeadroom.headroom
-        let t1 = CFAbsoluteTimeGetCurrent()
-        // The histogram's trigger (005, 034). It is still keyed by the picture and not by the camera —
-        // a pan or a zoom changes the camera and leaves the key alone — but there is no debounce any
-        // more: a key that moved is measured **from this frame's own texture**, once the render below
-        // has produced it. `histogramStep` decides; `deliver` applies it on main.
-        let coverage = pictureCoverage(projected, state: state)
-        // 070: **whether** to measure is decided before the render, because the measurement now rides
-        // the frame's own command buffer (one 256-grid stride pass + a 0.29 MB readback). A pan, a zoom
-        // or a resize changes the camera and not the picture's key, so those frames ask for nothing and
-        // pay nothing — the same rule 034 had, moved one step earlier.
-        let measureHistogram = wantsHistogramMeasurement(edit: model, identity: cacheIdentity,
-                                                        fallbackScale: decodeScale,
-                                                        coverage: coverage)
-        // 2026-10-27 — the pointer's readout rides the same stride sample the histogram is counted
-        // from, so a frame that measures also answers "what is under the cursor" and costs nothing
-        // extra. A frame that measures *nothing* (a pan, a zoom) still has a pointer over it, so it
-        // asks for the sample alone: the plot stays put (no payload is published) while the row follows
-        // the pixels that just moved under the cursor.
+        // The histogram's trigger (005, 034): keyed by the picture, not by the camera. 080: a `\` frame
+        // measures nothing — the plot is of the **document's** picture, and republishing the decode's
+        // numbers over it would be the card lying about what the sliders are doing.
+        let coverage = pictureCoverage(editedShot.projected, state: state)
         let wantsPointerSample = pointerReadoutWanted
-        let result = try graph.render(model, options: RenderOptions(
-            canvas: viewport,
-            scale: scale,
-            outputWindow: outputWindow,
-            display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
-            useCache: true,
-            wantsPixels: false,
-            collectHistogram: measureHistogram,
-            histogramSampleLongEdge: (measureHistogram || wantsPointerSample)
-                ? Histogram.frameSampleLongEdge : 0))
-        let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
-        guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
-        // The histogram, out of the same render: `result.histogram` is measured on the **scene-linear**
+        let measureHistogram = mode != .original
+            && wantsHistogramMeasurement(edit: model, identity: cacheIdentity,
+                                         fallbackScale: decodeScale, coverage: coverage)
+
+        // One render over the resident rung. `useCache: true` in both sources: the edited pipeline's
+        // keys are the document's, so a compare frame hits S1…S3 exactly where the plain frame did and
+        // leaving 对比 asks for nothing new.
+        func renderOne(_ source: RenderSource, _ s: Shot, _ editForRender: EditModel,
+                       measure: Bool) throws -> (result: RenderResult, ms: Double) {
+            let t = CFAbsoluteTimeGetCurrent()
+            let r = try graph.render(editForRender, options: RenderOptions(
+                canvas: viewport,
+                scale: s.scale,
+                outputWindow: s.window,
+                display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
+                useCache: true,
+                wantsPixels: false,
+                collectHistogram: measure,
+                histogramSampleLongEdge: (measure || wantsPointerSample)
+                    ? Histogram.frameSampleLongEdge : 0,
+                source: source))
+            return (r, (CFAbsoluteTimeGetCurrent() - t) * 1000)
+        }
+
+        let t1 = CFAbsoluteTimeGetCurrent()
+        // The document's frame is rendered in every mode but `\`: 对比 needs it on one side of the
+        // line, and 原图 does not — which is why `\` costs one pass and 对比 costs two plus the
+        // composite.
+        var editedShotResult: (result: RenderResult, ms: Double)?
+        if mode != .original {
+            editedShotResult = try renderOne(.edited, editedShot, model, measure: measureHistogram)
+        }
+
+        let texture: MTLTexture
+        let drawing: RenderResult
+        let renderMs: Double
+        var photoRect: ImageRect
+        switch mode {
+        case .edited:
+            guard let e = editedShotResult, let out = e.result.output else {
+                throw RenderError.executeFailed("loupe produced no texture")
+            }
+            drawing = e.result
+            texture = out
+            renderMs = e.ms
+            photoRect = e.result.drawnRect
+        case .original:
+            let o = try renderOne(.decoded, originalShot, model.disregardingGeometry, measure: false)
+            guard let out = o.result.output else {
+                throw RenderError.executeFailed("loupe produced no texture")
+            }
+            drawing = o.result
+            texture = out
+            renderMs = o.ms
+            photoRect = o.result.drawnRect
+            originalFrames += 1
+        case .compare(let split):
+            guard let e = editedShotResult, let editedTexture = e.result.output else {
+                throw RenderError.executeFailed("loupe produced no texture")
+            }
+            let o = try renderOne(.decoded, originalShot, model.disregardingGeometry, measure: false)
+            guard let originalTexture = o.result.output else {
+                graph.recycle(output: editedTexture)
+                throw RenderError.executeFailed("loupe produced no decode texture")
+            }
+            // The two frames are recycled the moment the composite has read them: the composite is
+            // what the canvas presents, and it came from the same pool.
+            let composed: MTLTexture
+            do {
+                composed = try graph.composite(original: originalTexture, edited: editedTexture,
+                                               split: split)
+            } catch {
+                graph.recycle(output: originalTexture)
+                graph.recycle(output: editedTexture)
+                throw error
+            }
+            graph.recycle(output: originalTexture)
+            graph.recycle(output: editedTexture)
+            drawing = e.result
+            texture = composed
+            renderMs = e.ms + o.ms
+            // The matte is painted only outside **both** pictures: a comparison of a cropped document
+            // with the whole frame is two differently-placed photographs inside one canvas, and the
+            // union is the only rect that is outside neither.
+            photoRect = Self.union(e.result.drawnRect, o.result.drawnRect, in: e.result.canvas)
+            compareFrames += 1
+        }
+
+        // The histogram, out of the edited render: `result.histogram` is measured on the **scene-linear**
         // texture S4 read (not on S4's clamped output, which stops at the panel's headroom — 070), so
         // a picture with three stops of highlight above white plots three stops above white.
-        deliver(histogramStep(for: model, measured: result.histogram,
-                              milliseconds: result.histogramMilliseconds,
-                              identity: cacheIdentity,
-                              coverage: coverage, primaries: primaries, ceiling: ceiling,
-                              fallbackScale: decodeScale, sourceURL: url,
-                              startedAt: t1))
+        if let e = editedShotResult {
+            deliver(histogramStep(for: model, measured: e.result.histogram,
+                                  milliseconds: e.result.histogramMilliseconds,
+                                  identity: cacheIdentity,
+                                  coverage: coverage, primaries: primaries, ceiling: ceiling,
+                                  fallbackScale: decodeScale, sourceURL: url,
+                                  startedAt: t1))
+        }
         let hash = hashPixels ? LoupeController.hash(texture) : nil
         // The clipping warning's input. Only read while the warning is on: it is a UI aid, and a
         // readback nobody looks at is a millisecond nobody asked for.
         let clipped = (session?.highlightWarning ?? false)
             ? HighlightWarning.grid(of: texture) : nil
-        return FrameResult(texture: texture, canvas: result.canvas, content: result.content,
-                           photoRect: result.drawnRect,
+        // The pointer's readout rides a stride sample of the picture **before S4**, and the lattice it
+        // is indexed with is the frame's picture rect. A compare frame's rect is the union of two
+        // pictures (the presenter's matte rule), so that lattice would describe a rectangle the grid
+        // was not sampled over — the readout falls back to the presented bytes instead, which for a
+        // composite is the only honest answer.
+        let pointerSample: LinearSample? = {
+            if case .compare = mode { return nil }
+            return drawing.histogramSample
+        }()
+        let shotForFrame = mode == .original ? originalShot : editedShot
+        return FrameResult(texture: texture, canvas: drawing.canvas, content: drawing.content,
+                           photoRect: photoRect,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
                            editRevision: session?.editRevision ?? 0, displayHash: hash,
-                           zoom: projected.zoom(of: state), headroom: ceiling, window: window,
-                           clipped: clipped, sceneLinearSample: result.histogramSample)
+                           zoom: shotForFrame.projected.zoom(of: state), headroom: ceiling,
+                           window: shotForFrame.pixels,
+                           clipped: clipped,
+                           sceneLinearSample: pointerSample,
+                           mode: mode)
+    }
+
+    /// The bounding box of two rects, clipped to the canvas — the matte rule for a compare frame.
+    static func union(_ a: ImageRect, _ b: ImageRect, in canvas: ImageSize) -> ImageRect {
+        let x0 = min(a.x, b.x), y0 = min(a.y, b.y)
+        let x1 = max(a.maxX, b.maxX), y1 = max(a.maxY, b.maxY)
+        return ImageRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0))
+            .intersected(in: canvas)
     }
 
     /// SHA-256 of an rgba16f texture's bytes, taken while it is still out of the pool.

@@ -340,6 +340,28 @@ public final class EditorWindowController: NSWindowController {
         rootView.loupeController.cancelCropTool()
     }
 
+    // MARK: 080 · 原图 / 前后对比
+    //
+    // Three verbs, no document. Each one asks the loupe to change what its next frame is *of*; the
+    // loupe re-renders (or composites) and nothing is written to the edit, the history or the decode
+    // ladder. The menu is the keyboard's home for them (`\`, Y, ⇧Y), and the ticks below are the
+    // state the user cannot otherwise see.
+
+    /// 显示 ▸ 显示原图 (`\`): the decode, or the document again.
+    @objc public func toggleShowOriginalAction(_ sender: Any?) {
+        rootView.loupeController.toggleShowOriginal()
+    }
+
+    /// 显示 ▸ 前后对比 (Y): split the canvas between the decode and the document.
+    @objc public func toggleCompareAction(_ sender: Any?) {
+        rootView.loupeController.toggleCompare()
+    }
+
+    /// 显示 ▸ 对比方向 (⇧Y): 左右 ↔ 上下.
+    @objc public func toggleCompareAxisAction(_ sender: Any?) {
+        rootView.loupeController.toggleCompareAxis()
+    }
+
     /// All six rating items share this action; the stars come from the item's tag.
     @objc public func ratingAction(_ sender: Any?) {
         guard let item = sender as? NSMenuItem else { return }
@@ -379,6 +401,28 @@ public final class EditorWindowController: NSWindowController {
         case #selector(redoAction(_:)):
             item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
             return session.canRedo
+        case #selector(toggleShowOriginalAction(_:)):
+            // Ticked while the canvas is showing the decode; the title says which picture the click
+            // would bring back, so an item that is on does not read like a command to turn it on.
+            item.state = rootView.loupeController.showOriginal ? .on : .off
+            item.title = rootView.loupeController.showOriginal ? "显示原图（已开启）" : "显示原图"
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(toggleCompareAction(_:)):
+            item.state = rootView.loupeController.compareSplit == nil ? .off : .on
+            if let split = rootView.loupeController.compareSplit {
+                // The title carries the state the tick cannot: which way the line runs and where it is.
+                item.title = "前后对比（\(split.axis.displayName) "
+                    + "\(Int((split.fraction * 100).rounded())) %）"
+            } else {
+                item.title = "前后对比"
+            }
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(toggleCompareAxisAction(_:)):
+            // Grey until 对比 is on (there is no line to turn), then it names the axis a click would
+            // switch *to*, which is what the title promises.
+            let axis = rootView.loupeController.compareSplit?.axis ?? .vertical
+            item.title = "对比方向：" + axis.displayName
+            return rootView.loupeController.compareSplit != nil
         case #selector(showGridAction(_:)):
             item.state = session.mode == .grid ? .on : .off
             return true

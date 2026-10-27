@@ -122,6 +122,44 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// The all-defaults document: renders as "decode → display encode", nothing else.
     public static let neutral = EditModel()
 
+    // MARK: - 080 · 原图 / 对比
+
+    /// The document **without its geometry**: full crop, no straighten, no flip, no CA.
+    ///
+    /// This is the document 「显示原图」(`\`) is rendered with, and the reason it is a *document* rather
+    /// than a render flag alone: the camera (`LoupeFraming`) is derived from the document's crop, so
+    /// a frame of the whole decode needs the framing of the whole decode too — otherwise the
+    /// picture would be correct and placed as if it had been cropped.
+    ///
+    /// Everything else is kept: the light/curve/colour values are irrelevant to that render (it
+    /// never visits their stages) but leaving them alone keeps this a *projection* of the document
+    /// rather than a second document — a value changed here can never leak back into the user's.
+    public var disregardingGeometry: EditModel {
+        var v = self
+        v.geometry = .identity
+        v.optics = .identity
+        return v
+    }
+
+    /// The document with every **parameter** group zeroed and its geometry kept.
+    ///
+    /// This is the spelling 「参数清零后的渲染」, i.e. exactly what `\` must *not* be: it still crops,
+    /// straightens and flips, so on a cropped document it shows a differently-framed picture from the
+    /// decode. It exists here — public, one definition — so the test can render it and show that the
+    /// two are different pixels (`BeforeAfterTests`), and so the refutation can make `\` return *this*
+    /// and watch the first assertion go red.
+    public var disregardingParameters: EditModel {
+        var v = self
+        v.light = .identity
+        v.curve = .identity
+        v.color = .identity
+        v.effects = .identity
+        v.optics = .identity
+        v.masks = []
+        v.showMaskID = nil
+        return v
+    }
+
     /// 派单 076: does S3.6 exist for this document? Judged **by value** (any of the 24 band numbers is
     /// non-zero), exactly the way `hasLocalColor` is judged for S3.5 — a stage that is present but
     /// neutral would still move the trace and the key chain.

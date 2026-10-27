@@ -196,6 +196,26 @@ public enum MainMenu {
             item.tag = index
         }
         view.addItem(.separator())
+        // 080 — 原图 / 前后对比. `\` and Y are the two keys LR puts on this pair, both **bare** (no ⌘),
+        // like the rating rows: they are viewing verbs the hand hits without leaving the picture.
+        // The items carry no target, so AppKit resolves them through the responder chain to the window
+        // controller, which ticks them against `LoupeController.frameMode` (`validateMenuItem`).
+        let originalItem = view.addItem(withTitle: "显示原图",
+                                        action: #selector(EditorWindowController.toggleShowOriginalAction(_:)),
+                                        keyEquivalent: "\\")
+        originalItem.keyEquivalentModifierMask = []
+        let compareItem = view.addItem(withTitle: "前后对比",
+                                       action: #selector(EditorWindowController.toggleCompareAction(_:)),
+                                       keyEquivalent: "y")
+        compareItem.keyEquivalentModifierMask = []
+        // ⇧Y swaps the layout of the line the user already placed (左右 ↔ 上下). One row, not a
+        // submenu: the submenu spelling taught two places for one verb, which is what the 变换 menu
+        // was cut down for (072 §F).
+        let compareAxisItem = view.addItem(withTitle: "对比方向：左右",
+                                           action: #selector(EditorWindowController.toggleCompareAxisAction(_:)),
+                                           keyEquivalent: "y")
+        compareAxisItem.keyEquivalentModifierMask = [.shift]
+        view.addItem(.separator())
         view.addItem(withTitle: "放大",
                      action: #selector(EditorWindowController.zoomInAction(_:)),
                      keyEquivalent: "=")

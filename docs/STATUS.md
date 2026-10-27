@@ -74,6 +74,31 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
   渲染只用已驻留 rung。全解码期间 20 帧平移从 **5816 ms 串联 → render p50 4.0–4.5 ms / 20-20 ≤ 8 ms**；
   1:1 首帧 24–26 ms（基线 52）；fit↔1:1 仍只解码 2 次。墙钟断言改为可数断言（解码次数/rungArrivals/viewRenderCount）。
 
+## 第 11 轮 · 080 原图 / 前后对比（`\` / Y / ⇧Y）
+
+- **「显示原图」是解码，不是参数清零后的渲染**。`RenderOptions.source = .decoded` 让 `RenderGraph` 走
+  `S0（identity 几何）→ S4`：S0 仍做 decoded(sRGB)→working(Rec.2020) 的出口矩阵，所以这一帧就是
+  `OETF(M_working→out · M_decoded→working · decode)`，没有第二个渲染路径。
+  - 合成图（200×150，渐变 + 硬边 + 超白）：原图 `6329e95c…`、参数清零 `5e7c5480…`，**maxΔ 254.88 码**（画框都不同）；
+  - 与 CPU 参考（解码 + 两条基色矩阵 + sRGB OETF + clamp）逐码 **maxΔ 0.274 码**（90 000 个通道，阈值 1 码）；
+  - **诚实的边界**：文档没有几何改动时，解码与 neutral 渲染本来就是同一张图（实测 **maxΔ 0.000 码**，
+    管线在 neutral 处逐级恒等）。所以「两种做法像素不同」只有带裁剪/拉直/翻转的文档才可证；测试把两个事实都印出来了。
+  - 真实 RAW（L1030433，1280×800 fit）：同一次运行内原图 / 编辑后 / 参数清零是**三个不同 SHA**（测试打印三者；
+    绝对值随面板 headroom 变，所以这里不写死，只钉「互不相同」）。
+- **前后对比**：`CompareSplit`（axis + fraction，除数是画布像素数）→ `s5_before_after`（读两帧已编码的 S4 输出、写一帧；
+  分界线 2 px、0.5 码、`CompareSide.divider` 不属于任何一侧）。1280×800、50 % 时分界线在列 **640**：
+  十个采样点的归属与 `CompareSplit.side(x:y:)` 逐一相符（左右各 5 点，含 letterbox 的 0 像素）；⇧Y 换成上下（行 400）。
+- **不写文档、不产生历史、不停渲染**：拖动分界线 50 %→30 %（列 640→**384**）并进出模式，`documentHash` 不变、
+  `history.count` 不变、`RAWDecoder.decodeCounts()` 预热后 **2 → 2**；退出（原图 / 对比 / 拖过分界线）后重渲的帧 SHA
+  与进入前**逐位相同**——同一次运行内比较，三个模式退出后都是同一个值。
+- **代价**：原图帧 2 个 pass（S0/S4），对比帧 两帧 + 1 个合成 pass；都不新增解码。
+- **菜单**：显示 ▸ 显示原图（`\`）/ 前后对比（Y，标题带「左右 50 %」）/ 对比方向（⇧Y）；勾选与标题由
+  `validateMenuItem` 按 `LoupeFrameMode` 给，`\` 与 Y 都是无修饰键（与 星级 一行同样的约定）。
+- **反证**：`RenderOptions.originalRendersAsParametersCleared`（仅测试）把 `\` 换成「参数清零后走整条管线」→
+  与原图**同字节**（`5e7c5480…`，maxΔ 0.000），于是「两者不同」这条断言必红。
+- **套件**：`BeforeAfterTests`（7）、`BeforeAfterUITests`（6）、`RenderTests`（19）、`LoupeRenderTests`（6）、
+  `LayoutContractTests`（12）全绿。
+
 ## 已知待修（下一轮）
 
 1. ~~直方图窗口帧 +104 ms~~ → **已修并更正**（`b55e4de`）：104 ms 只存在于 **debug** 构建（`-Onone` 下 CPU binning 94 ms），
