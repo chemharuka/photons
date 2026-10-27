@@ -495,9 +495,15 @@ final class ContrastLogDomainTests: XCTestCase {
 
     // MARK: - ⑤ cost
 
-    /// One 4.10 Mpx frame (2560×1600), median of 30×20 dispatches: the contrast entry point must not
-    /// cost more than **0.2 ms** over the plain one. Measured on this machine it costs nothing (the
-    /// pass is bandwidth-bound), and the printed number is the evidence.
+    /// One 4.10 Mpx frame (2560×1600): the contrast entry point must not cost more than **0.2 ms** over
+    /// the plain one. Measured on this machine it costs nothing — the pass is bandwidth-bound, the extra
+    /// work is two transcendentals per pixel.
+    ///
+    /// Measured **paired**: each round times the plain entry point and the contrast entry point back to
+    /// back on the same frame, and the statistic is the median of the *differences*. That is what makes
+    /// a 0.2 ms budget assertable at all — an unpaired pair of medians on a loaded machine drifts by
+    /// 0.5 ms between the two (measured: unpaired +0.011 ms on an idle machine, +0.517 ms while another
+    /// test run was finishing), while the paired difference of the same round does not.
     func testTheContrastBendCostsNothingOnAFullFrame() throws {
         let w = 2560, h = 1600
         var px = [Float](repeating: 0, count: w * h * 4)
@@ -506,13 +512,23 @@ final class ContrastLogDomainTests: XCTestCase {
             px[i] = t * 1.2; px[i + 1] = t; px[i + 2] = t * 0.8; px[i + 3] = 1
         }
         let harness = try S2Harness()
-        let plain = try harness.time(px, width: w, height: h, contrast: 0, entry: "s2_tone_map")
-        let up = try harness.time(px, width: w, height: h, contrast: 100, entry: "s2_tone_map_contrast")
-        let down = try harness.time(px, width: w, height: h, contrast: -100, entry: "s2_tone_map_contrast")
-        print(String(format: "⑤ 4.10 Mpx S2 pass: plain %.3f ms, contrast +100 %.3f ms (Δ %+.3f), "
-                     + "−100 %.3f ms (Δ %+.3f)", plain, up, up - plain, down, down - plain))
-        XCTAssertLessThanOrEqual(up - plain, 0.2, "the bend must stay inside the 0.2 ms budget")
-        XCTAssertLessThanOrEqual(down - plain, 0.2, "the bend must stay inside the 0.2 ms budget")
+        // Warm-up: the first dispatch pays the kernel's code-load, which is not the pass's cost.
+        _ = try harness.time(px, width: w, height: h, contrast: 0, entry: "s2_tone_map", batches: 3, perBatch: 10)
+        var plain: [Double] = [], up: [Double] = [], down: [Double] = [], dUp: [Double] = [], dDown: [Double] = []
+        for _ in 0..<9 {
+            let a = try harness.time(px, width: w, height: h, contrast: 0, entry: "s2_tone_map")
+            let b = try harness.time(px, width: w, height: h, contrast: 100, entry: "s2_tone_map_contrast")
+            let c = try harness.time(px, width: w, height: h, contrast: -100, entry: "s2_tone_map_contrast")
+            plain.append(a); up.append(b); down.append(c)
+            dUp.append(b - a); dDown.append(c - a)
+        }
+        func median(_ v: [Double]) -> Double { v.sorted()[v.count / 2] }
+        func worst(_ v: [Double]) -> Double { v.max() ?? .infinity }
+        print(String(format: "⑤ 4.10 Mpx S2 pass: plain %.3f ms | contrast +100 %.3f ms (paired Δ median %+.3f, worst %+.3f)"
+                     + " | −100 %.3f ms (paired Δ median %+.3f, worst %+.3f)",
+                     median(plain), median(up), median(dUp), worst(dUp), median(down), median(dDown), worst(dDown)))
+        XCTAssertLessThanOrEqual(median(dUp), 0.2, "the bend must stay inside the 0.2 ms budget")
+        XCTAssertLessThanOrEqual(median(dDown), 0.2, "the bend must stay inside the 0.2 ms budget")
     }
 }
 

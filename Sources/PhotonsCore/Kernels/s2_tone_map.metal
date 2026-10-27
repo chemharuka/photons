@@ -105,8 +105,8 @@ constant float HIGHLIGHT_HI_EV = -1.2;
 // `CT_WHITE_EV` is display white, `CT_BLACK_EV` the tone map's floor. `CT_TOE_W_EV` is the width of
 // the toe's transition (so the toe is at full travel from `CT_BLACK_EV + CT_TOE_W_EV` = −5.0 EV
 // down), `CT_SH_LO_EV` the bottom of the shoulder's window (the shoulder's own top is `CT_WHITE_EV`,
-// so the bump peaks at −1.6 EV). `CT_HELD_*` is the band in between: `Δ` is exactly 0 there, which
-// is what pins the median.
+// so the bump peaks at −1.6 EV). Between them — `[CT_BLACK_EV + CT_TOE_W_EV, CT_SH_LO_EV]`, i.e.
+// −5.0 … −3.2 EV — both terms are 0: that is the **held core**, and it is what pins the median.
 //
 // `CT_TOE` / `CT_SH` are the two travels as a fraction of `p.a.y` (= 8/(white − black) = 1.0 EV).
 // The toe is a *gain* on the far side of a smoothstep, so its steepest slope is `1.5·A/w` = 0.575;
