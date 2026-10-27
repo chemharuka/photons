@@ -89,6 +89,22 @@ public struct PointerPixel: Equatable, Sendable {
             return false
         }
 
+        /// Is this level light the **panel** cannot show, given the ceiling it has right now?
+        ///
+        /// `isOverWhite` answers the picture's question (is it above 1.0 — above display white). This
+        /// answers the screen's, and the two differ exactly when the screen has headroom: `+0.6` on a
+        /// panel whose budget is 1.695 (0.76 stop) is lost, and on one at 4.08 (2.03 stops) it is
+        /// shown. That is why the card takes its ink from **this** and its number from
+        /// `DisplayHeadroom.ceilingStops` — one reading of the screen, used for both halves of the
+        /// indicator (2026-10-27, 「调节屏幕亮度后要更新直方图中屏幕亮度指示」).
+        public func exceeds(headroom: Double) -> Bool {
+            let ceiling = log2(max(headroom, 1))
+            switch self {
+            case .code: return false
+            case .stops(let stops): return stops > ceiling + 1e-9
+            }
+        }
+
         /// One **scene-linear** channel → the level that channel paints.
         ///
         /// The shipped measurement's own rule, per channel: at or below white the channel is its sRGB
@@ -162,6 +178,14 @@ public struct PointerPixel: Equatable, Sendable {
     /// Per channel and not per pixel — `R 255 G +2.3 B 8` is a legal row, and only the middle segment is
     /// light the panel cannot show.
     public var overWhiteChannels: [Bool] { channels.map(\.isOverWhite) }
+
+    /// Which channels are light **this panel, at this ceiling, cannot show** — the picture's
+    /// above-white flag narrowed by the screen's budget. `overWhiteChannels` is headroom-free; this is
+    /// what the card inks, so growing the budget (a brighter screen) un-magenta's a channel that now
+    /// fits.
+    public func channelsBeyond(headroom: Double) -> [Bool] {
+        channels.map { $0.exceeds(headroom: headroom) }
+    }
 
     /// The channel row as one string, exactly as the card paints it: `R 245 G 128 B 64`.
     public var channelRowText: String { HistogramCardFormat.grouped(channelTexts) }

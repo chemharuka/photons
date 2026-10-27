@@ -38,10 +38,14 @@ import PhotonsCore
 // every card width gets the same 50/50 — the owner's 「左侧 50% 是 sdr，右侧 50% 是 hdr」 — and the
 // tail's stops are `plot.width / 8` apart (50 pt on a 400 pt card, 30.5 pt on the inspector's 244 pt).
 // Everything right of the dashed orange tick is light this panel cannot show: the tick is the display
-// ceiling (`log2(headroom)` stops above white) and it comes from the *measurement's* own headroom, not
-// from whatever screen the window is on by the time the card redraws — so the plot and its ceiling
-// always describe the same screen. On an SDR screen the tick sits exactly on the SDR/tail boundary,
-// which is the honest picture: no headroom at all.
+// ceiling (`log2(headroom)` stops above white). **It is the live screen's budget** (2026-10-27): the
+// card asks a `HeadroomSource` — the loupe in the app, a fixed value in the tests — after every
+// presented frame, on the window/app notifications, and on a 0.5 s timer that runs only while the card
+// is visible, because macOS moves `maximumExtendedDynamicRangeColorComponentValue` when the brightness
+// slider moves and posts nothing at all. A measurement's own headroom is only the fallback for a card
+// with no source. On an SDR screen the tick sits exactly on the SDR/tail boundary, which is the honest
+// picture: no headroom at all. The row's clipping ink uses the same number (`effectiveHeadroom`), so
+// "the tick is here" and "this `+x.x` is lost" are one statement.
 //
 // Decisions worth writing down:
 //
@@ -79,6 +83,10 @@ public final class HistogramCardView: NSView {
     public var histogram: Histogram? {
         didSet {
             guard histogram != oldValue else { return }
+            // A measurement carries its own headroom. Without an injected source that is the ceiling
+            // (the pre-2026-10-27 rule) — so the cached live value is dropped and the draw re-derives
+            // it. With a source, the live screen wins and the measurement's number is only a fallback.
+            if headroomSource == nil { displayedHeadroom = nil }
             // A new measurement moves the counts under the pointer, so the row follows it: the bin is
             // the same bin, its numbers are not.
             refreshReadoutRow()
@@ -109,6 +117,10 @@ public final class HistogramCardView: NSView {
     /// Where the display-ceiling tick was painted, and what it means in stops above white.
     public private(set) var lastCeilingMarkerX: CGFloat = .nan
     public private(set) var lastCeilingStops: Double = 0
+    /// The headroom the tick was painted for, and the chip's text — read back off the draw, so
+    /// "the number followed the screen" is asserted on the paint rather than on the input.
+    public private(set) var lastCeilingHeadroom: Double = 1
+    public private(set) var lastCeilingText = ""
     /// The clipping percentages exactly as painted, in the luma channel (what the numbers mean).
     public private(set) var clipHighText = "—"
     public private(set) var clipLowText = "—"
@@ -213,7 +225,9 @@ public final class HistogramCardView: NSView {
     /// readback, so "the over-white segment is the clipping colour and its neighbours are not" is
     /// asserted off the draw rather than off the constant (2026-10-27).
     public private(set) var channelValueColors: [NSColor] = []
-    /// Which channels were above white when the row was painted (`pixel.overWhiteChannels`).
+    /// Which channels were beyond the **live ceiling** when the row was painted
+    /// (`pixel.channelsBeyond(headroom:)`) — the ink predicate itself, so "the segment that is magenta
+    /// is the segment that is lost" is read off the draw rather than derived a second time.
     public private(set) var channelOverWhite: [Bool] = []
     public private(set) var readoutValueFont: NSFont = HistogramCardView.numberFont
     public private(set) var readoutValueColor: NSColor = .labelColor
@@ -400,6 +414,7 @@ public final class HistogramCardView: NSView {
         setAccessibilityIdentifier("histogram-card")
         setAccessibilityLabel("直方图")
         setAccessibilityRole(.group)
+        installAppHeadroomObservers()
         updateAccessibilityHelp()
     }
 
@@ -472,6 +487,216 @@ public final class HistogramCardView: NSView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        // The screen source follows the window, because the budget is per screen (`window.screen`, not
+        // `NSScreen.main`). An injected source is left alone: a test's number is not the display's.
+        (headroomSource as? ScreenHeadroomSource)?.window = window
+        installWindowHeadroomObservers()
+        headroomEvent()
+    }
+
+    // MARK: - the ceiling is *live* (2026-10-27)
+    //
+    // 派单: 「调节屏幕亮度后要更新直方图中屏幕亮度指示」. The ceiling tick and the `屏 1.20×` chip were
+    // drawn from `histogram.headroom` — the headroom the *measurement* was taken at — and rebuilt only
+    // when a new frame arrived, so on a settled window the brightness slider moved and the plot's
+    // marker stood still. `DisplayHeadroom`'s own note says the number is AppKit's report *for this
+    // screen*, and macOS posts no notification when it moves: the only way to see a new budget is to
+    // ask again.
+    //
+    // So the card asks, through one `HeadroomSource`, at **three** chances, and repaints only when the
+    // answer actually moved (`headroomChangeEpsilon` = 1e-3):
+    //
+    //   ① **after every presented frame** (`noteFramePresented`, called by `LoupeController` from the
+    //      one place every frame goes through). A drag already asks 60×/s; the read is a property.
+    //   ② **on the three notifications that exist** — `didChangeScreen` (the window moved to another
+    //      panel), `didChangeBackingProperties` (resolution/HDR mode changed), `didBecomeActive` (the
+    //      app came back, which is when a brightness change made elsewhere becomes visible again).
+    //   ③ **a 0.5 s timer**, and this is the only path that can catch the brightness slider: no
+    //      notification is posted, so a settled window with no frames would otherwise never look. It
+    //      runs **only while the card is visible and its window is key/main** — a background window
+    //      waking the main thread twice a second to read a number nobody can see is not a trade worth
+    //      making (`shouldPollHeadroom`, `isPollingHeadroom`, `headroomPollCount`).
+    //
+    // Why not read once per `draw`? Because a draw is what a *change* triggers; a value that changed
+    // outside the app cannot be discovered by drawing. Read-then-decide is the shape: one number is
+    // read, and only a real difference repaints.
+
+    /// Where the ceiling comes from. `nil` = **the measurement's own headroom**, which is the behaviour
+    /// before 2026-10-27 and what every card built without a display (previews, most unit tests) wants.
+    /// The inspector's host injects the loupe (`LoupeController: HeadroomSource`) — one reader of the
+    /// screen for the whole app, including the presenter's "the layer takes 16-bit" answer.
+    public var headroomSource: HeadroomSource? {
+        didSet {
+            guard headroomSource !== oldValue else { return }
+            // A different source is a different claim about the screen: forget the old answer and ask.
+            displayedHeadroom = nil
+            headroomEvent()
+        }
+    }
+
+    /// The number the card last accepted from its source (`nil` until the first read, and always `nil`
+    /// while no source is injected).
+    public private(set) var displayedHeadroom: Double?
+
+    /// How much the headroom has to move before it is worth a repaint. `1e-3` is far below what
+    /// `屏 %.2f×` can show (a 0.001 change in a 4.08× ceiling is 0.0004 pt on a 400 pt card) and far
+    /// above the noise of a repeated AppKit read, which is exactly the gap this gate has to sit in.
+    public static let headroomChangeEpsilon: Double = 1e-3
+
+    /// How often the low-frequency poll reads the screen while the card is visible.
+    public var headroomPollInterval: TimeInterval = 0.5
+    /// Reads of the source — one per frame-presented tick, one per notification, one per poll.
+    public private(set) var headroomReadCount = 0
+    /// **Repaints caused by a moved ceiling** — the counter 「变了才重画」 is about. Ten polls of an
+    /// unchanged screen leave it at 0; one moved budget moves it by 1.
+    public private(set) var headroomRedrawCount = 0
+    /// Timer ticks that ran (the timer's own pulse, independent of whether the read found a change).
+    public private(set) var headroomPollCount = 0
+
+    /// The switch the red-proof pulls: with polling off, a brightness change with no frame and no
+    /// notification is **never** noticed — which is what this whole section exists to prevent.
+    public var headroomPollingEnabled = true
+    /// The switch the other red-proof pulls: with the gate off, every read repaints (`headroomRedrawCount`
+    /// grows even though nothing moved). Both are real behaviour switches, not test scaffolding: a
+    /// headless host turns polling off, and the gate is a property of "did the number move".
+    public var headroomRepaintsUnconditionally = false
+
+    /// What the tick, the chip and the pointer row's ink are derived from: the source's last answer
+    /// when there is one, otherwise the measurement's own headroom.
+    /// **One number for all three** — 「同一个数值源」 as a property, not as three reads that agree today.
+    public var effectiveHeadroom: Double {
+        if let displayedHeadroom { return max(displayedHeadroom, 1) }
+        return max(histogram?.headroom ?? DisplayHeadroom.sdrHeadroom, 1)
+    }
+
+    /// Read the source and repaint **only if the ceiling moved**. Returns whether it moved.
+    @discardableResult
+    public func refreshHeadroomIfNeeded() -> Bool {
+        headroomReadCount += 1
+        let next: Double
+        if let source = headroomSource {
+            next = max(source.readHeadroom().headroom, 1)
+        } else {
+            next = max(histogram?.headroom ?? DisplayHeadroom.sdrHeadroom, 1)
+        }
+        if headroomRepaintsUnconditionally {
+            displayedHeadroom = next
+            headroomRedrawCount += 1
+            needsDisplay = true
+            return true
+        }
+        guard abs(next - effectiveHeadroom) >= Self.headroomChangeEpsilon else { return false }
+        displayedHeadroom = next
+        headroomRedrawCount += 1
+        needsDisplay = true
+        return true
+    }
+
+    /// ① The loupe calls this after every frame that reached the layer (`LoupeController.onFramePresented`).
+    public func noteFramePresented() {
+        refreshHeadroomIfNeeded()
+    }
+
+    /// `true` while the card is on screen in a key/main window — the condition the 0.5 s poll runs under.
+    public var shouldPollHeadroom: Bool {
+        guard headroomPollingEnabled, headroomSource != nil else { return false }
+        guard let window, window.isVisible else { return false }
+        guard !isHiddenOrHasHiddenAncestor else { return false }
+        guard bounds.width > 1, bounds.height > 1 else { return false }
+        return window.isKeyWindow || window.isMainWindow
+    }
+
+    /// `true` while the low-frequency timer is installed. The visibility test asserts on this — a timer
+    /// that keeps running behind a hidden card is the cost this rule refuses.
+    public var isPollingHeadroom: Bool { headroomTimer != nil }
+
+    private var headroomTimer: Timer?
+    private var headroomTrampoline: HeadroomTimerTrampoline?
+    private var windowHeadroomTokens: [NSObjectProtocol] = []
+    private var appHeadroomTokens: [NSObjectProtocol] = []
+
+    /// ② (window half) and the timer's start/stop. The three names the brief asks for, plus the two
+    /// window edges that decide *whether* polling is worth doing at all (key ↔ resigned, ordered
+    /// off ↔ on) — those are not headroom events, they are the visibility condition changing.
+    private func installWindowHeadroomObservers() {
+        let center = NotificationCenter.default
+        for token in windowHeadroomTokens { center.removeObserver(token) }
+        windowHeadroomTokens.removeAll()
+        guard let window else { return }
+        func observe(_ name: Notification.Name, _ handler: @escaping () -> Void) {
+            windowHeadroomTokens.append(center.addObserver(forName: name, object: window,
+                                                           queue: .main) { _ in handler() })
+        }
+        observe(NSWindow.didChangeScreenNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.didChangeBackingPropertiesNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.didBecomeKeyNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.didResignKeyNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.didBecomeMainNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.willCloseNotification) { [weak self] in self?.headroomEvent() }
+    }
+
+    /// ② (app half), installed once: `didBecomeActive` is when a brightness change made in another app
+    /// becomes ours to notice again.
+    private func installAppHeadroomObservers() {
+        guard appHeadroomTokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+            appHeadroomTokens.append(center.addObserver(forName: name, object: nil,
+                                                       queue: .main) { [weak self] _ in
+                self?.headroomEvent()
+            })
+        }
+    }
+
+    /// One place: read, then decide whether the timer should be running at all.
+    private func headroomEvent() {
+        refreshHeadroomIfNeeded()
+        updateHeadroomPolling()
+    }
+
+    /// Start or stop the 0.5 s poll for the current visibility. Idempotent, so every observer can call it.
+    private func updateHeadroomPolling() {
+        if shouldPollHeadroom {
+            guard headroomTimer == nil else { return }
+            let trampoline = HeadroomTimerTrampoline(self)
+            let timer = Timer(timeInterval: headroomPollInterval, target: trampoline,
+                              selector: #selector(HeadroomTimerTrampoline.fire(_:)),
+                              userInfo: nil, repeats: true)
+            // `.common`: a level slider drag puts the run loop in event-tracking mode, and that is
+            // exactly when the panel's budget is being changed.
+            RunLoop.main.add(timer, forMode: .common)
+            headroomTrampoline = trampoline
+            headroomTimer = timer
+        } else {
+            headroomTimer?.invalidate()
+            headroomTimer = nil
+            headroomTrampoline = nil
+        }
+    }
+
+    /// ③ One poll. Counted, then the same read-then-decide as every other path; if the card stopped being
+    /// visible between two ticks (a window closed under us) the timer retires itself here.
+    fileprivate func headroomTimerFired() {
+        headroomPollCount += 1
+        guard shouldPollHeadroom else { updateHeadroomPolling(); return }
+        refreshHeadroomIfNeeded()
+    }
+
+    public override func viewDidHide() {
+        super.viewDidHide()
+        updateHeadroomPolling()
+    }
+
+    public override func viewDidUnhide() {
+        super.viewDidUnhide()
+        headroomEvent()
+    }
+
+    deinit {
+        headroomTimer?.invalidate()
+        let center = NotificationCenter.default
+        for token in windowHeadroomTokens { center.removeObserver(token) }
+        for token in appHeadroomTokens { center.removeObserver(token) }
     }
 
     /// The plot rect the axis is laid out in *right now* (the same arithmetic `draw` uses), or `nil`
@@ -623,7 +848,7 @@ public final class HistogramCardView: NSView {
             // The stop grid's numbers and the ceiling tick go on top of the curves — they are the
             // axis, and an axis must stay readable over a filled plot.
             drawStopLabels(axis)
-            drawCeilingTick(axis, histogram: histogram)
+            drawCeilingTick(axis)
         } else {
             drawStopLabels(axis)
             drawText("还没有可测的帧", at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
@@ -724,12 +949,17 @@ public final class HistogramCardView: NSView {
     /// This is what the extra range is *for* — a picture that ends left of the tick is fully visible,
     /// one that runs past it is losing detail to the panel. On an SDR screen the tick lands on the
     /// SDR/tail boundary, which is the whole truth about that screen.
-    private func drawCeilingTick(_ axis: HistogramAxis, histogram: Histogram) {
-        let headroom = max(histogram.headroom, 1)
+    ///
+    /// The headroom comes from `effectiveHeadroom` — the **live** number when a source is injected, the
+    /// measurement's own when not — and the same number is what `lastCeilingHeadroom` / `lastCeilingText`
+    /// hand back, so the painted tick and the readback cannot describe two different screens.
+    private func drawCeilingTick(_ axis: HistogramAxis) {
+        let headroom = max(effectiveHeadroom, 1)
         let stops = log2(headroom)
         let x = axis.x(ceiling: headroom)
         lastCeilingMarkerX = x
         lastCeilingStops = stops
+        lastCeilingHeadroom = headroom
 
         let path = NSBezierPath()
         path.move(to: CGPoint(x: x, y: axis.plot.minY))
@@ -739,7 +969,8 @@ public final class HistogramCardView: NSView {
         NSColor.systemOrange.withAlphaComponent(0.9).setStroke()
         path.stroke()
 
-        let text = String(format: "屏 %.2f×", headroom)
+        let text = DisplayHeadroom.ceilingLabel(headroom)
+        lastCeilingText = text
         let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [.font: font,
                                                          .foregroundColor: NSColor.systemOrange]
@@ -882,10 +1113,13 @@ public final class HistogramCardView: NSView {
 
         let values = pixel.channelTexts
         // **Per channel, not per pixel** (2026-10-27): only the segment whose channel the picture holds
-        // above white gets the clipping ink — `R 255 G +2.3 B 8` paints one magenta number, and the
-        // letters keep their channel colours. A code is never over white, so nothing else can be
-        // recoloured by accident, and the layout does not move (same font, same strings, same x's).
-        let inks = pixel.channels.map { $0.isOverWhite ? Self.overWhiteColor : color }
+        // above the *screen's* ceiling gets the clipping ink — `R 255 G +0.6 B 8` paints one magenta
+        // number on a 1.695× panel and none on a 4.08× one (2026-10-27, 「调节屏幕亮度后要更新直方图中屏幕
+        // 亮度指示」: the row's ink and the plot's ceiling tick are the same number, read once from
+        // `effectiveHeadroom`). A code is never over a ceiling, so nothing else can be recoloured by
+        // accident, and the layout does not move (same font, same strings, same x's).
+        let beyondCeiling = pixel.channelsBeyond(headroom: effectiveHeadroom)
+        let inks = beyondCeiling.map { $0 ? Self.overWhiteColor : color }
         let painted = paintGroups(values, atY: row.minY,
                                   letterFont: Self.channelLetterFont,
                                   letterColors: Self.channelNameColors,
@@ -898,7 +1132,7 @@ public final class HistogramCardView: NSView {
         channelValueRects = painted.values
         channelLetterColors = painted.colors
         channelValueColors = painted.valueColors
-        channelOverWhite = pixel.overWhiteChannels
+        channelOverWhite = beyondCeiling
         channelValueFont = Self.numberFont
         channelValueColor = color
         if let last = painted.values.last { channelRowWidth = last.maxX - bounds.minX }
@@ -1070,6 +1304,31 @@ public final class HistogramCardView: NSView {
     }
 }
 
+// MARK: - the timer's target
+//
+// A `Timer` retains its target, and a repeating timer that retained the card would keep a closed
+// inspector alive for as long as the run loop spins. The trampoline holds the card **weakly** and
+// retires the timer the first time it finds nobody to tick — so the card's lifetime is the timer's
+// lifetime, with no `deinit` ordering to depend on.
+
+private final class HeadroomTimerTrampoline: NSObject {
+
+    weak var target: HistogramCardView?
+
+    init(_ target: HistogramCardView) {
+        self.target = target
+        super.init()
+    }
+
+    @objc func fire(_ timer: Timer) {
+        guard let target else {
+            timer.invalidate()
+            return
+        }
+        target.headroomTimerFired()
+    }
+}
+
 // MARK: - the pointer's reading lands here
 
 /// The card is the loupe's `PointerReadoutTarget`: `LoupeCanvasView` tracks the pointer once, and the
@@ -1214,6 +1473,16 @@ private struct HistogramCardHost: NSViewRepresentable {
         view.histogram = histogram
         view.showsHighlightWarning = showsHighlightWarning
         view.onToggleHighlightWarning = onToggle
+        // Which screen's budget the ceiling is (2026-10-27). The loupe is the app's one reader of the
+        // display — it already owns `layerAcceptsEDR` and it re-renders when the budget moves — so the
+        // card asks it rather than reading `NSScreen` a second time. Without a loupe (previews, tests)
+        // a plain screen source keeps the ceiling live; with neither, the measurement's headroom stands.
+        if let loupe {
+            view.headroomSource = loupe
+            loupe.onFramePresented = { [weak view] in view?.noteFramePresented() }
+        } else {
+            view.headroomSource = ScreenHeadroomSource()
+        }
         // The card registers itself as the pointer's reader; the loupe holds it weakly and pushes the
         // reading it already has (a pointer that is already over the picture when the card appears).
         loupe?.pointerReadoutTarget = view
