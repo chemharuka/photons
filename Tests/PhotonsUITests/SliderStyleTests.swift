@@ -112,12 +112,31 @@ final class SliderStyleTests: XCTestCase {
         }
 
         // `sliderRow` 走那唯一一处，并且只差 `shape`（= 颜色）。
-        let builder = try Self.body(of: "private func sliderRow", upTo: "/// One slider's readout",
-                                    in: Self.inspectorSource)
-        XCTAssertTrue(builder.contains("Self.shapeSlider(value, in: range, shape: shape"),
+        //
+        // 蒙版也要同一行之后，行视图搬到了 `SliderRow.swift`（一个 `private` 方法不能当整块面板
+        // 的行）。所以这里分两半钉：**行视图**把 shape 交给 `shapeSlider`、自己不设 controlSize；
+        // **`sliderRow`** 只是把参数原样转给 `SliderRow`，面板里没有第二份行。
+        let row = try Self.body(of: "struct SliderRow: View", upTo: "    var body: some View",
+                                in: Self.sliderRowSource)
+        XCTAssertTrue(row.contains("var shape: SliderShape = .knob"),
+                      "行的颜色仍然只由 shape 决定")
+        let rowBody = try String(contentsOf: Self.sliderRowSource, encoding: .utf8)
+        XCTAssertTrue(rowBody.contains("InspectorView.shapeSlider(value, in: range, shape: shape"),
                       "sliderRow 只把 shape 交给那唯一一处滑杆构造")
-        XCTAssertTrue(builder.contains(".controlSize(style.controlSize)") == false,
-                      "control size 由 shapeSlider 统一给（.mini），行构造器不再自己设")
+        XCTAssertFalse(rowBody.contains(".controlSize(style.controlSize)"),
+                       "control size 由 shapeSlider 统一给（.mini），行视图不再自己设")
+        XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: rowBody), 0,
+                       "行视图自己也不造 Slider —— 只有 shapeSlider 造")
+        XCTAssertFalse(rowBody.contains("onReset: @escaping () -> Void"),
+                       "SliderRow 的 onReset 是 `let`（必填），不是可选参数")
+
+        let forwarder = try Self.body(of: "private func sliderRow",
+                                      upTo: "/// 060: the panel's **only** slider view",
+                                      in: Self.inspectorSource)
+        XCTAssertTrue(forwarder.contains("SliderRow(title: title"),
+                      "卡片的 sliderRow 必须转给那唯一一个行视图")
+        XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: forwarder), 0,
+                       "卡片这一侧不许再有一份自己的 Slider")
 
         // 颜色那句话本身：`.bar` 黄、`.linear` 红 #FF375F、`.knob` 不设 tint —— 三类，一处定义。
         let slider = try Self.body(of: "static func shapeSlider", upTo: "/// One slider's readout",
@@ -419,6 +438,11 @@ final class SliderStyleTests: XCTestCase {
 
     private static var sliderShapeSource: URL {
         repoRoot.appendingPathComponent("Sources/PhotonsUI/SliderShape.swift")
+    }
+
+    /// The row view — `InspectorView.sliderRow` forwards to it, and 蒙版 uses it directly.
+    private static var sliderRowSource: URL {
+        repoRoot.appendingPathComponent("Sources/PhotonsUI/SliderRow.swift")
     }
 
     /// 055 的实现文件；060 之后它**必须不存在**（`FileManager` 那条断言就是钉这个）。
