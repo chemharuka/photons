@@ -47,9 +47,9 @@ public enum StageAlgorithmVersion {
     public static let sceneLinear = 2
     /// Unchanged.
     public static let maskAtlas = 1
-    /// **2** — 0107: a mask's contrast is the same bounded log2-EV bend as S2's (`tone_contrast`), not
-    /// the linear-light power it used to carry.
-    public static let localApply = 2
+    /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
+    /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
+    public static let localApply = 3
     /// Unchanged (030's HDR curve).
     public static let curve = 1
     /// **2** — 0107: contrast became a displacement in log2 EV over a held core with a bounded shoulder
