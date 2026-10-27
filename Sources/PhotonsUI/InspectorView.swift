@@ -655,17 +655,17 @@ public struct InspectorView: View {
     ///   · **the number's format** is the row's own (`%.2f EV`, `%.0f`, …) for display; while editing it
     ///     shows the clean number, so what the user types back is what the document holds.
     ///
-    /// `shape` is 派单 046's only visual switch: `.bar` for the decoder parameters (降噪 / 色彩降噪 /
-    /// 细节 / 锐化), `.knob` for everything that acts on the already-decoded render (Light, Color,
-    /// 白平衡). 055 made them **one control**: both are `NSSlider`, and `.bar` only swaps the knob's
-    /// drawing for a 10×16 pt bubble plus `focusRingType = .none` (`BubbleSlider`). Both draw the
-    /// **same row**: label, number, double-click reset and the `onEditingChanged` contract are this
-    /// function's, not the control's, so a shape can never grow a different behaviour.
+    /// `shape` is 派单 046's parameter-class switch, and since **060 it is only the accent colour**:
+    /// `.bar` for the decoder parameters (降噪 / 色彩降噪 / 细节 / 锐化, plus 色温/色调) draws the
+    /// system **orange**; `.knob` for everything that acts on the already-decoded render (Light, Color)
+    /// takes no tint at all, i.e. the system accent — blue unless the user changed it. 060 deleted
+    /// 055's bubble control: both shapes are **one** `Slider`, one row, one behaviour, so a shape can
+    /// never grow a different feel, focus state or accessibility story again; the colour is the only
+    /// thing that differs, and it is the thing the user asked to be able to see.
     ///
     /// There is deliberately **no `step:` parameter**. SwiftUI's `Slider` draws tick marks the moment
     /// it is handed one, and 046 forbids ticks on every slider; any quantization belongs to the model
-    /// (`DetailSettings.setPosition` rounds to 1 unit), which is why the knob is built from the
-    /// `step`-free initializer and `BubbleSlider` keeps `numberOfTickMarks` at 0.
+    /// (`DetailSettings.setPosition` rounds to 1 unit).
     private func sliderRow(_ title: String,
                            _ value: Binding<Double>,
                            _ range: ClosedRange<Double>,
@@ -706,19 +706,32 @@ public struct InspectorView: View {
                         .foregroundStyle(.primary)
                 }
             }
-            switch shape {
-            case .bar:
-                // 055: decoder parameter — the *same* NSSlider as `.knob`, with only its knob drawn as
-                // a 10×16 pt rounded bubble and the focus ring switched off. No step, no ticks (046).
-                BubbleSlider(value: value, range: range, onEditingChanged: onEditingChanged)
-                    .frame(height: SliderValueMap.rowHeight)
-            case .knob:
-                // Render parameter: the system slider, **without** `step:` — a step draws ticks.
-                Slider(value: value, in: range, onEditingChanged: onEditingChanged)
-                    .controlSize(style.controlSize)
-                    .frame(height: SliderValueMap.rowHeight)
-            }
+            // 060: **one** `Slider` for both shapes, built by `shapeSlider` below — the accent colour
+            // is the only difference, and it lives in exactly one place.
+            Self.shapeSlider(value, in: range, shape: shape,
+                             controlSize: style.controlSize,
+                             onEditingChanged: onEditingChanged)
         }
+    }
+
+    /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that tells a
+    /// decoder parameter from a render one: `.bar` → `Color.orange`, `.knob` → no tint at all (the
+    /// system accent, blue unless the user changed it).
+    ///
+    /// It is a function, not a copy-pasted modifier chain, because the colour test has to render **this
+    /// view** to sample a pixel: a test that re-declares `.tint(…)` on its own copy would keep passing
+    /// after the panel's tint was deleted, which is exactly the counter-proof 060 asks for.
+    ///
+    /// No `step:` — SwiftUI draws tick marks the moment it is handed one (046), on both shapes.
+    static func shapeSlider(_ value: Binding<Double>,
+                            in range: ClosedRange<Double>,
+                            shape: SliderShape,
+                            controlSize: ControlSize = .mini,
+                            onEditingChanged: @escaping (Bool) -> Void) -> some View {
+        Slider(value: value, in: range, onEditingChanged: onEditingChanged)
+            .controlSize(controlSize)
+            .frame(height: SliderValueMap.rowHeight)
+            .tint(shape == .bar ? Color.orange : nil)
     }
 
     /// One slider's readout, with the negative zero taken out.
@@ -778,6 +791,9 @@ public struct InspectorView: View {
         public var format: String
         /// 047: typeable, like every other row (no card opts out).
         public var editable: Bool = true
+        /// 060: 色温/色调 写 `CIRAWFilter`（= 重新解码），所以它们是「解 RAW 参数」→ `.bar` → 橙色。
+        /// 类别归 `SliderShape` 一处表达，行视图照着上色，不写死一个颜色。
+        public var shape: SliderShape = .bar
     }
 
     /// 色温 / 色调, in display order — Kelvin first, as the decoder takes them.
@@ -885,19 +901,20 @@ public struct InspectorView: View {
                                       commitWhiteBalanceValue(typed, isTemperature: isTemperature)
                                   })
             }
-            // 046: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以按规则
-            // 用长条形；曝光/对比那些只跑渲染的才是圆球。两者的 label / 数值 / 抬起才提交的语义完全相同。
-            // 055: 长条形与圆球现在是同一个控件（`NSSlider`），这里只是拖动点画成气泡。
-            BubbleSlider(value: Binding(get: { shown },
-                                        set: { newValue in
-                                            if isTemperature { draftTemperature = newValue }
-                                            else { draftTint = newValue }
-                                        }),
-                         range: row.range) { editing in
+            // 046/060: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以是
+            // 「解 RAW 参数」→ 橙色强调色；曝光/对比那些只跑渲染的滑杆跟随系统强调色（默认蓝）。
+            // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
+            // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
+            Self.shapeSlider(Binding(get: { shown },
+                                     set: { newValue in
+                                         if isTemperature { draftTemperature = newValue }
+                                         else { draftTint = newValue }
+                                     }),
+                             in: row.range,
+                             shape: row.shape) { editing in
                 // Release = quantize + one document write = one development (`commitWhiteBalance`).
                 if !editing { commitWhiteBalance(isTemperature: isTemperature) }
             }
-            .frame(height: 16)
         }
     }
 
