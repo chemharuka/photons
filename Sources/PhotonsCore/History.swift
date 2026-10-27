@@ -42,7 +42,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         switch self {
         case .light: return [.sceneLinear, .toneMap]
         case .curve: return [.curve]
-        case .color: return [.color]
+        case .color: return [.color, .hsl]
         case .detail: return []
         case .effects: return [.vignette]
         case .geometry: return [.geometry]

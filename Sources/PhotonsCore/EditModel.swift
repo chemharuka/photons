@@ -111,6 +111,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// The all-defaults document: renders as "decode → display encode", nothing else.
     public static let neutral = EditModel()
 
+    /// 派单 076: does S3.6 exist for this document? Judged **by value** (any of the 24 band numbers is
+    /// non-zero), exactly the way `hasLocalColor` is judged for S3.5 — a stage that is present but
+    /// neutral would still move the trace and the key chain.
+    public var hasHSL: Bool { color.hasBands }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = EditModel.neutral
@@ -220,7 +225,15 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
         }
         if curve != old.curve { s.insert(.curve) }
-        if color != old.color { s.insert(.color) }
+        // 076: the color group is two stages now — `bands` is S3.6's, `vibrance`/`saturation` are
+        // S3's — so a band drag must not report `.color` (S3 would re-run and produce the same pixels)
+        // and a saturation drag must not report `.hsl` (S3.6 would re-run for nothing).
+        if color != old.color {
+            if color.vibrance != old.color.vibrance || color.saturation != old.color.saturation {
+                s.insert(.color)
+            }
+            if color.bands != old.color.bands { s.insert(.hsl) }
+        }
         if effects != old.effects { s.insert(.vignette) }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
@@ -329,7 +342,17 @@ public struct EditModel: Sendable, Equatable, Codable {
             return curve.keyString
 
         case .color:
-            return color.keyString
+            // 076: **vibrance and saturation only.** The eight bands left this stage for S3.6, where they
+            // run in OKLCh in the display-referred domain; keeping them in this material would make an
+            // HSL drag miss S3 — a pass that no longer reads them — for nothing. `hsl=` below carries
+            // them instead, so a band move misses exactly S3.6 and what follows it.
+            return "vib=\(k(color.vibrance));sat=\(k(color.saturation))"
+
+        case .hsl:
+            // 派单 076: S3.6's own material — the 24 band numbers and nothing else (vibrance and
+            // saturation are S3's). Same shape as `.localColor`: a stage key that names the values it
+            // reads cannot silently stop tracking them.
+            return "hsl=\(color.hslKeyString)"
 
         case .vignette:
             return effects.keyString
@@ -1179,13 +1202,27 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         return out
     }
 
+    /// The whole group is default — **not** the predicate S3 uses. Since 076 the group feeds two
+    /// stages: S3 reads `vibrance`/`saturation` (its identity flag is those two only) and S3.6 reads
+    /// `bands` (`hasBands`). This one stays what it always was: "this panel has nothing in it".
     public var isIdentity: Bool {
         vibrance == 0 && saturation == 0 && bands.allSatisfy { $0.isIdentity }
     }
 
+    /// True when any of the 24 band numbers is non-zero — the predicate 派单 076 makes by **value**,
+    /// never by "the color group exists": S3.6 must not appear in the pipeline for a document whose
+    /// bands are all 0, or the pre-076 trace, key chain and pixels would move.
+    public var hasBands: Bool { !bands.allSatisfy(\.isIdentity) }
+
+    /// `vib=…;sat=…` — S3's material (076).
     public var keyString: String {
-        let b = bands.map(\.keyString).joined(separator: ";")
-        return "vib=\(k(vibrance));sat=\(k(saturation));bands=\(b)"
+        "vib=\(k(vibrance));sat=\(k(saturation))"
+    }
+
+    /// `bands=…` — S3.6's material (076). Same spelling the color material used for its band tail, so
+    /// a log line still reads the 24 numbers the way it always did.
+    public var hslKeyString: String {
+        "bands=" + bands.map(\.keyString).joined(separator: ";")
     }
 }
 

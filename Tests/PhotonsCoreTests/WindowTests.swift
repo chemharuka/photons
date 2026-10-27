@@ -181,24 +181,30 @@ final class WindowTests: XCTestCase {
              "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000"),
             ("toneMap", "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c",
              "e955d86c228b8bd3e3e67cd1811a122752a8ea72a80998688cbfd6614f6eba9f|con=20.00000;hi=-30.00000;sh=15.00000"),
-            ("color", "b089325e5bea7421da06db1b768de114edf3e6e499732f66725874cec17bbb03",
-             "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c|vib=15.00000;sat=-10.00000;bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
-            ("vignette", "c5397d45681a5eb5da1f9fa881e1c4d2c1e47c87c3f974a79d191e05f1d52825",
-             "b089325e5bea7421da06db1b768de114edf3e6e499732f66725874cec17bbb03|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
-            ("display", "ff23ec2b89f81155cd2cd25d5448102fe9a3ccb1e8d89a7c432193c95c45ca4e",
-             "c5397d45681a5eb5da1f9fa881e1c4d2c1e47c87c3f974a79d191e05f1d52825|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("color", "8f24a72830945bf0bc0f1d65ae71d7ab7744298063a22f7a8b84ae6a98e8c8bf",
+             "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c|vib=15.00000;sat=-10.00000"),
+            // 076: the eight bands are S3.6's material now, so a document that carries one gains an
+            // eighth link **between S3 and the vignette**. Without a band it does not exist at all, and
+            // the chain is the M1 seven (HSLTests pins that side).
+            ("hsl", "236992e189991bbd791f5542eff39898ca993c032bc195ffa37f043aa9459237",
+             "8f24a72830945bf0bc0f1d65ae71d7ab7744298063a22f7a8b84ae6a98e8c8bf|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
+            ("vignette", "65b1f81b51b687705b53f58b98dea640781997a096697cbc953aac9c43a08b95",
+             "236992e189991bbd791f5542eff39898ca993c032bc195ffa37f043aa9459237|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
+            ("display", "960607c6a93e077ed584673ba03e21ef2ce48ba890402d73ba9fa52fe2ecb39b",
+             "65b1f81b51b687705b53f58b98dea640781997a096697cbc953aac9c43a08b95|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
             "geometry": explicit.geometry, "sceneLinear": explicit.sceneLinear,
             "toneMap": explicit.toneMap, "curve": explicit.curve, "color": explicit.color,
+            "hsl": explicit.hsl ?? "",
             "vignette": explicit.vignette, "display": explicit.display,
         ]
         let keys = RenderKeyChain.keys(explicit, identity: "keyvec-fixture")
         let keyByStage: [String: String] = [
             "geometry": keys.geometry, "sceneLinear": keys.sceneLinear, "toneMap": keys.toneMap,
-            "curve": keys.curve, "color": keys.color, "vignette": keys.vignette,
-            "display": keys.display,
+            "curve": keys.curve, "color": keys.color, "hsl": keys.hsl ?? "",
+            "vignette": keys.vignette, "display": keys.display,
         ]
         for (name, digest, canonical) in expected {
             XCTAssertEqual(actual[name], canonical, "\(name): canonical text moved with outputWindow == nil")

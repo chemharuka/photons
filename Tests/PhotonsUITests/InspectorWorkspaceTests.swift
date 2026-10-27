@@ -50,8 +50,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(InspectorWorkspaceState().selection, .adjust, "首次打开必须是调整")
         // 调整 = 既有面板的卡片：蒙版交给它自己的工作区，裁切交给「变换」（2026-10-27）。
         XCTAssertEqual(InspectorView.sections(in: .adjust),
-                       InspectorView.scrollingSections.filter { $0 != .masks && $0 != .crop },
-                       "调整 = 既有面板的卡片，只把蒙版和裁切交给各自的工作区")
+                       InspectorView.scrollingSections.filter { $0 != .masks && $0 != .crop && $0 != .hsl },
+                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL 交给各自的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -61,8 +61,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（2026-10-27：裁切搬进来，它是这个工作区的第一张卡）。
         XCTAssertEqual(titles[.transform], ["裁切"])
-        // 「如果功能没做好就先空着」：这两个是**空数组**，不是占位。
-        XCTAssertEqual(titles[.colour], [])
+        // 076: 色彩 也有卡片了（HSL），它同样是第一张。
+        XCTAssertEqual(titles[.colour], ["HSL"])
         XCTAssertEqual(titles[.history], [])
 
         // 图标必须有名字可念（.help 与 accessibilityLabel 都用它），空工作区的 tooltip 说明「尚未实现」。
@@ -105,7 +105,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片的枚举多了一张（2026-10-27：裁切，10 张，直方图仍排第一、蒙版仍排最后）。
+        // 卡片枚举：Decode 删除后 9 张；裁切（变换）与 HSL（色彩）各加一张 → 10 张。
+        // 直方图仍排第一、蒙版仍排最后 —— 这张测试钉的是过滤，不是重排。
         XCTAssertEqual(InspectorView.Section.allCases.count, 10)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
@@ -248,8 +249,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         defer { panel.window.contentView = nil }
         let plot = panel.histogramPlot
 
-        // 变换 不再是空的（2026-10-27：它有一张裁切卡），所以剩下两个。
-        for workspace in [InspectorWorkspace.colour, .history] {
+        // 变换 与 色彩 都不再是空的（裁切 / HSL），只剩历史记录还是空的。
+        for workspace in [InspectorWorkspace.history] {
             panel.state.select(workspace)
             try waitFor(panel, until: { $0.cards.workspace == workspace.rawValue })
 

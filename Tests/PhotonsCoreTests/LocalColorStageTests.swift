@@ -215,20 +215,35 @@ final class LocalColorStageTests: XCTestCase {
     /// The shared maths is one file, and both kernels compile it. This is the only claim in this
     /// suite that is not about pixels, and it is the reason the pixels can be expected to agree: a
     /// second copy of `rgb_to_hsl` would drift the day someone touches one of them.
+    ///
+    /// 076 moved the eight **hue bands** out of this include and out of S3: they are S3.6's
+    /// (`s3_6_hsl.metal`), on OKLCh. What remains shared here is exactly the pair S3 and S3.5 both
+    /// need — one RGB↔HSL conversion and the two slider mappings — and the assertion follows the code:
+    /// the band helper must be *gone* from the include and must not reappear in either kernel.
     func testBothColourStagesCompileTheSameHSLInclude() throws {
         let shared = try kernelText("color_hsl")
-        for fn in ["rgb_to_hsl", "hue_channel", "hsl_to_rgb", "hsl_band_shift",
+        for fn in ["rgb_to_hsl", "hue_channel", "hsl_to_rgb", "hsl_hue_turns",
                    "hsl_rotate_hue", "hsl_scale_saturation"] {
             XCTAssertTrue(shared.contains("static inline"), "the include must only define inline helpers")
             XCTAssertTrue(shared.contains(fn), "color_hsl.metal must define \(fn)")
         }
+        XCTAssertFalse(shared.contains("hsl_band_shift"),
+                       "the eight bands are S3.6's now (076): they are not HSL maths")
 
         for kernel in ["s3_color", "s3_5_local_color"] {
             let text = try kernelText(kernel)
             XCTAssertTrue(text.contains("#include \"color_hsl.metal\""),
                           "\(kernel).metal must compile the shared HSL include")
             XCTAssertFalse(text.contains("static inline float3 rgb_to_hsl"), "\(kernel).metal must not keep a copy")
+            XCTAssertFalse(text.contains("hsl_band_shift"), "\(kernel).metal must not re-grow the band maths")
         }
+
+        // S3.6 is self-contained on purpose: its maths is OKLCh, and OKLCh ≠ HSL.
+        let hsl = try kernelText("s3_6_hsl")
+        XCTAssertTrue(hsl.contains("kernel void s3_6_hsl"), "S3.6 must exist as its own kernel")
+        XCTAssertFalse(hsl.contains("#include \"color_hsl.metal\""),
+                       "S3.6 must not pretend to share HSL maths it does not use")
+        XCTAssertTrue(hsl.contains("0.3"), "the hue unit (0.3° per unit) must be in the kernel")
 
         // S1.6 no longer consumes hue/saturation at all — the struct's third float4 is blacks + enabled.
         let local = try kernelText("s1_6_local")
@@ -465,14 +480,21 @@ final class LocalColorStageTests: XCTestCase {
         XCTAssertGreaterThan(peak, 1.05, "saturation flattened the highlight — the headroom was lost")
     }
 
-    /// **Hue**: the same rotation, in the same units. The global control is per-band, so the
-    /// comparison is made where the band weight is 1 — on pixels whose hue sits on a band centre,
-    /// with all eight bands set to the same value. There a band slider at +30 is a uniform +9°, and a
-    /// mask at +30 must be the same +9°: the pixel difference is ≤ 1 code and the mean hue shift
-    /// agrees within 0.5°.
-    func testFullCanvasHueMatchesTheGlobalBandHue() throws {
-        let image = bandCentrePicture()
-        let graph = try makeGraph(image, identity: "056-hue")
+    /// **Hue**: the same *unit*, in two different *spaces*.
+    ///
+    /// 056 could assert a pixel-identity here because the band slider and the mask slider ran the same
+    /// HSL arithmetic. 076 moved the bands to OKLCh (079 结论 4: linear-light HSL made `l` mean two
+    /// things), so the two controls now rotate in different spaces — a +30 on either is **9.00°**, and
+    /// the resulting RGB cannot be identical because "rotate 9° at constant HSL `l`" and "rotate 9° at
+    /// constant OKLab `L`" are different curves.
+    ///
+    /// So this test now holds what is still true and is still worth a sentinel: **the unit is shared**
+    /// (0.3° per unit on both sides, measured in each stage's own space), and it reports the pixel
+    /// difference that the domain split costs. Unifying the two spaces is 079 §2.6.1's item 5 — the
+    /// same move for S3/S3.5's saturation, hue and vibrance — and is not part of 076.
+    func testTheBandAndTheMaskShareTheHueUnitNotTheSpace() throws {
+        let image = colourWheel(width: 48, height: 32)
+        let graph = try makeGraph(image, identity: "076-hue-unit")
 
         var global = EditModel.neutral
         for i in global.color.bands.indices { global.color.bands[i].hue = 30 }
@@ -481,24 +503,13 @@ final class LocalColorStageTests: XCTestCase {
         local.masks = [fullCanvasMask(LocalAdjustments(hue: 30))]
 
         let coverage = try XCTUnwrap(graph.maskAtlas(local, options: RenderOptions(scale: 1)))
-        XCTAssertGreaterThanOrEqual(coverage.slices.flatMap { $0 }.min() ?? 0, 0.999)
+        XCTAssertGreaterThanOrEqual(coverage.slices.flatMap { $0 }.min() ?? 0, 0.999,
+                                    "the mask must cover the frame, or the comparison proves nothing")
 
         let neutral = try display(graph, EditModel.neutral)
-        let a = try display(graph, global)
-        let b = try display(graph, local)
+        let a = try display(graph, global)      // S3.6 — OKLCh
+        let b = try display(graph, local)       // S3.5 — HSL
 
-        let diffs = codeDifferences(a, b)
-        print("HUE +30 · local mask vs all-8-bands +30: max |Δcode| = \(diffs.max() ?? 0), "
-              + "\(diffs.filter { $0 > 0 }.count)/\(diffs.count) channels differ")
-        XCTAssertLessThanOrEqual(diffs.max() ?? 0, 1,
-                                 "the local hue must be the global band rotation, not a second one")
-
-        // Mean signed hue shift, over pixels with enough chroma for a hue to mean anything.
-        // Pixels whose rotated colour leaves the **display** gamut are skipped: S4 clamps at white,
-        // and a clamped channel measures a smaller hue shift than the control applied (measured: the
-        // whole-set mean reads 8.42° where the rotation is 9.00°). That is the cost the owner accepted
-        // with option A — a wide-gamut hue rotation can push a saturated colour past sRGB — and it is
-        // a property of the *display*, not of the control, so it does not belong in the calibration.
         func unclipped(_ img: DisplayImage, _ i: Int) -> Bool {
             (0..<3).allSatisfy { Double(img.rgba[i * 4 + $0]) < 0.999 }
         }
@@ -506,19 +517,28 @@ final class LocalColorStageTests: XCTestCase {
         for i in 0..<(image.width * image.height) where saturation(neutral, i) > 0.1
             && unclipped(b, i) && unclipped(a, i) {
             let h0 = hueDegrees(neutral, i)
-            localShift += Self.hueDelta(h0, hueDegrees(b, i))
-            globalShift += Self.hueDelta(h0, hueDegrees(a, i))
+            localShift += Self.hueDelta(h0, hueDegrees(b, i))               // HSL angle
+            let w0 = workingPixel(neutral, i), w1 = workingPixel(a, i)
+            let o0 = OKLCh.fromLinear(SIMD3(w0.0, w0.1, w0.2)).hue
+            let o1 = OKLCh.fromLinear(SIMD3(w1.0, w1.1, w1.2)).hue
+            globalShift += Self.hueDelta(o0, o1)                            // OKLCh angle
             counted += 1
         }
         XCTAssertGreaterThan(counted, 20, "the fixture must have coloured pixels")
         let localMean = localShift / Double(counted)
         let globalMean = globalShift / Double(counted)
-        print(String(format: "HUE +30 · mean shift: local %+.3f°  global %+.3f°  |Δ| %.3f°  (n=%d)",
-                     localMean, globalMean, abs(localMean - globalMean), counted))
-        XCTAssertEqual(localMean, globalMean, accuracy: 0.5,
-                       "local and global hue must be the same angle")
-        // 0.3°/unit is the mapping S3's band sliders use; +30 units is +9°.
-        XCTAssertEqual(localMean, 9.0, accuracy: 0.5, "+30 must be the global 9°, not 30°")
+        let diffs = codeDifferences(a, b)
+        print(String(format: "HUE +30 · band (OKLCh) %+.3f°  mask (HSL) %+.3f°  |Δ| %.3f°  (n=%d)",
+                     globalMean, localMean, abs(localMean - globalMean), counted)
+              + " · pixels differ by up to \(diffs.max() ?? 0) codes"
+              + " (\(diffs.filter { $0 > 0 }.count)/\(diffs.count) channels)")
+        // The shared fact: one unit is 0.3°, so +30 is 9° on both controls.
+        XCTAssertEqual(localMean, 9.0, accuracy: 0.5, "+30 units must be 9° for the mask")
+        XCTAssertEqual(globalMean, 9.0, accuracy: 0.5, "+30 units must be 9° for the band")
+        // The difference that remains is a *space* difference, and it is recorded rather than denied.
+        XCTAssertGreaterThan(diffs.max() ?? 0, 1,
+                             "the two controls are in different spaces since 076 — if this drops to "
+                             + "≤1 code, someone unified them and this comment is stale")
     }
 
     // MARK: - ④ the domain, proved against the two global controls
