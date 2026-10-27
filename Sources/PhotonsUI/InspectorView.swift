@@ -51,6 +51,11 @@ public struct InspectorView: View {
         /// setting (006), not a tone control, and burying it under six sliders misrepresented that.
         case whiteBalance
         case light
+        /// 派单 071: 黑电平 — the additive linear black trim. Its own card, directly under Light, and
+        /// **not** a seventh row of Light: it is the panel's only linear-domain parameter, and 046's
+        /// row-shape rule is per parameter class, so a card of its own is what lets it carry the red
+        /// accent without pretending the six tone sliders changed colour.
+        case blackLevel
         case color
         /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
         /// are the same panel in Lightroom, and below the tone controls because they act on the
@@ -70,6 +75,7 @@ public struct InspectorView: View {
             case .histogram: return "直方图"
             case .whiteBalance: return "白平衡"
             case .light: return "Light"
+            case .blackLevel: return "黑电平"
             case .color: return "Color"
             case .detail: return "细节"
             case .curve: return "曲线"
@@ -176,6 +182,8 @@ public struct InspectorView: View {
             whiteBalanceCard
         case .light:
             lightCard
+        case .blackLevel:
+            blackLevelCard
         case .color:
             colorCard
         case .detail:
@@ -320,6 +328,64 @@ public struct InspectorView: View {
                 }
             }
         }
+    }
+
+    /// 派单 071: 黑电平 — one row: the additive linear black trim (±0.01, 1/1000 steps).
+    ///
+    /// The panel's only `.linear` row (red `#FF375F`): the colour convention 071 set is
+    /// **blue = default / yellow = raw/decode / red = linear domain**, and this is the first
+    /// parameter that is arithmetic on the scene-linear buffer rather than a render control.
+    ///
+    /// Everything else is 047/048's row contract, unchanged — the name is the field's reset, the
+    /// number is a `SliderNumberField` (type an integer −10…+10, `↵` commits, `Esc` cancels, junk
+    /// writes nothing), and double-clicking the card title resets it in one snapshot.
+    ///
+    /// **The slider's unit is not the document's.** The document stores `slider / 1000` as a Double
+    /// (−7 → −0.007), because a 1/1000 trim has to be able to say `0.002`; the row shows the integer.
+    /// `blackLevelBinding` is the only translation in the panel, and `LightGroup`'s two mapping
+    /// functions are what it translates with — so the number on screen, the number in the key
+    /// material and the number the kernel adds are one value.
+    private var blackLevelCard: some View {
+        card(Section.blackLevel.title,
+             reset: { resets.field(\.light.blackOffset, label: Section.blackLevel.title) }) {
+            ForEach(Self.blackLevelRows, id: \.title) { row in
+                sliderRow(row.title, blackLevelBinding(row), row.range, row.format,
+                          shape: row.shape,
+                          decimals: row.decimals,
+                          rounding: row.rounding,
+                          editable: row.editable,
+                          accessibilityID: "inspector.blackLevel.offset",
+                          onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+                    // Drag end = one edit action = one history snapshot (never per tick).
+                    if !editing { session.commitEdit() }
+                }
+            }
+        }
+    }
+
+    /// 071: the 黑电平 card's one row, as data like every other row table.
+    ///
+    /// A `ToneRow` with one thing spelled out: `range` and the number the row shows are the
+    /// **slider's** units (integers −10…+10), while `keyPath` is the document's field
+    /// (`light.blackOffset`, −0.01…+0.01). `LightGroup.blackOffset(fromSlider:)` and
+    /// `blackOffsetSliderPosition` are the conversion — see `blackLevelBinding`.
+    ///
+    /// The row is named 偏移 and the card 黑电平: the card is the control the user asked for
+    /// (「加一个黑电平滑块」), the row is what the number is. Printing 黑电平 twice in a one-row card
+    /// is the only alternative, and it reads like a bug.
+    public static let blackLevelRows: [ToneRow] = [
+        ToneRow(title: "偏移", range: LightGroup.blackOffsetSliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.light.blackOffset, decimals: 1),
+    ]
+
+    /// 071: slider position ↔ document value. Position is an integer-valued Double (the model rounds
+    /// to a whole 1/1000 tick — there is no `step:`, 046), so a drag lands on `n/1000` exactly.
+    private func blackLevelBinding(_ row: ToneRow) -> Binding<Double> {
+        Binding(get: { (session.edit[keyPath: row.keyPath] * 1000).rounded() },
+                set: { position in
+                    let offset = LightGroup.blackOffset(fromSlider: position)
+                    session.applyEdit { $0[keyPath: row.keyPath] = offset }
+                })
     }
 
     /// 白平衡 (派单 009): preset menu, the two absolute sliders, and the dropper.
@@ -657,9 +723,10 @@ public struct InspectorView: View {
     ///     shows the clean number, so what the user types back is what the document holds.
     ///
     /// `shape` is 派单 046's parameter-class switch, and since **060 it is only the accent colour**:
-    /// `.bar` for the decoder parameters (降噪 / 色彩降噪 / 细节 / 锐化, plus 色温/色调) draws the
-    /// system **orange**; `.knob` for everything that acts on the already-decoded render (Light, Color)
-    /// takes no tint at all, i.e. the system accent — blue unless the user changed it. 060 deleted
+    /// `.bar` for the decoder parameters (降噪 / 色彩降噪 / 细节 / 锐化, plus 色温/色调) draws
+    /// **yellow**, `.linear` (the 黑电平 trim, 071) draws `#FF375F`, and `.knob` for everything that
+    /// acts on the already-decoded render (Light, Color) takes no tint at all, i.e. the system accent —
+    /// blue unless the user changed it. The three colours are `SliderShape.accent`, and only there. 060 deleted
     /// 055's bubble control: both shapes are **one** `Slider`, one row, one behaviour, so a shape can
     /// never grow a different feel, focus state or accessibility story again; the colour is the only
     /// thing that differs, and it is the thing the user asked to be able to see.
@@ -715,15 +782,17 @@ public struct InspectorView: View {
         }
     }
 
-    /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that tells a
-    /// decoder parameter from a render one: `.bar` → `Color.orange`, `.knob` → no tint at all (the
-    /// system accent, blue unless the user changed it).
+    /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that says
+    /// which domain a parameter lives in: `.bar` → yellow (raw/decode), `.linear` → `#FF375F`
+    /// (linear-domain arithmetic, 071), `.knob` → no tint at all (the system accent, blue unless the
+    /// user changed it). The colours themselves are `SliderShape.accent` — one definition, in one
+    /// place, so a third category could not grow a second palette.
     ///
     /// It is a function, not a copy-pasted modifier chain, because the colour test has to render **this
     /// view** to sample a pixel: a test that re-declares `.tint(…)` on its own copy would keep passing
     /// after the panel's tint was deleted, which is exactly the counter-proof 060 asks for.
     ///
-    /// No `step:` — SwiftUI draws tick marks the moment it is handed one (046), on both shapes.
+    /// No `step:` — SwiftUI draws tick marks the moment it is handed one (046), on all three shapes.
     static func shapeSlider(_ value: Binding<Double>,
                             in range: ClosedRange<Double>,
                             shape: SliderShape,
@@ -732,7 +801,7 @@ public struct InspectorView: View {
         Slider(value: value, in: range, onEditingChanged: onEditingChanged)
             .controlSize(controlSize)
             .frame(height: SliderValueMap.rowHeight)
-            .tint(shape == .bar ? Color.orange : nil)
+            .tint(shape.accent)
     }
 
     /// One slider's readout, with the negative zero taken out.
@@ -792,7 +861,7 @@ public struct InspectorView: View {
         public var format: String
         /// 047: typeable, like every other row (no card opts out).
         public var editable: Bool = true
-        /// 060: 色温/色调 写 `CIRAWFilter`（= 重新解码），所以它们是「解 RAW 参数」→ `.bar` → 橙色。
+        /// 060/071: 色温/色调 写 `CIRAWFilter`（= 重新解码），所以它们是「解 RAW 参数」→ `.bar` → 黄。
         /// 类别归 `SliderShape` 一处表达，行视图照着上色，不写死一个颜色。
         public var shape: SliderShape = .bar
     }
@@ -903,7 +972,8 @@ public struct InspectorView: View {
                                   })
             }
             // 046/060: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以是
-            // 「解 RAW 参数」→ 橙色强调色；曝光/对比那些只跑渲染的滑杆跟随系统强调色（默认蓝）。
+            // 「解 RAW 参数」→ 黄色强调色（071 把 060 的橙改成了黄）；曝光/对比那些只跑渲染的滑杆
+            // 跟随系统强调色（默认蓝），线性域的「黑电平」是红 #FF375F。
             // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
             // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
             Self.shapeSlider(Binding(get: { shown },

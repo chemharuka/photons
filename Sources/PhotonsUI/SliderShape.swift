@@ -1,6 +1,7 @@
 import Foundation
+import SwiftUI
 
-// MARK: - 046: 两种滑杆形状
+// MARK: - 046: 滑杆形状（060 一个控件，071 三类配色）
 
 /// 派单 046 —— 一个参数该归哪一类（用户规则，2026-10-27）：
 ///
@@ -22,17 +23,53 @@ import Foundation
 /// 强调色，默认蓝）。用户原话：「都改成 SwiftUI，只不过强调色不同，这样用来区分。默认的强调色应该是
 /// 蓝色，然后与 RAW 解码有关的改为橙色。」
 ///
-/// **两类都不许画刻度线。** SwiftUI 的 `Slider` 只要拿到 `step:` 就画刻度，所以整个面板没有一处
+/// **071（用户 2026-10-27 重新定案，覆盖 060 的配色）**：颜色现在表达的是参数**在哪个域**，共三类：
+///
+/// | 类别 | 颜色 | 行 |
+/// |---|---|---|
+/// | 默认（解 RAW 之后的渲染：Light / Color / 曲线面板） | **蓝 = 系统强调色**（不设 tint） | 与 060 相同 |
+/// | raw / 解码参数（写 `CIRAWFilter`，会重新 develop） | **黄**（060 是橙 → 改） | 降噪 / 色彩降噪 / 细节 / 锐化 / 色温 / 色调 |
+/// | **线性域**（直接加在 scene-linear 缓冲上的算术） | **`#FF375F`** | 黑电平（071） |
+///
+/// 三类都还是**同一个** `Slider`、同一个 `sliderRow`，`accent` 是唯一的差别，而且是**唯一**的颜色
+/// 来源（`HistogramCard` 的橙色刻度是「显示 headroom」的语义标记，不是滑杆 tint，不在这里）。
+///
+/// **三类都不许画刻度线。** SwiftUI 的 `Slider` 只要拿到 `step:` 就画刻度，所以整个面板没有一处
 /// 传 `step:`（`sliderRow` 连这个参数都不收）；量化在模型层做 —— `DetailSettings.setPosition` 把位置
 /// 四舍五入到 1 个单位，和键盘一步是同一个量（`SliderValueMap.keyboardStep(in:)`）。
 ///
 /// 强调色是**唯一**的差异。label、数值框、双击复位、`onEditingChanged`（按下 true / 抬起 false）
-/// 都由 `InspectorView.sliderRow` 提供，两类共用同一段代码。
+/// 都由 `InspectorView.sliderRow` 提供，三类共用同一段代码。
 public enum SliderShape: String, CaseIterable, Sendable, Equatable {
-    /// 解码参数：橙色强调色（`.tint(Color.orange)`）。没有刻度。
+    /// 解码参数：**黄色**强调色。没有刻度。
     case bar
     /// 渲染参数：不设 tint，跟随系统强调色（默认蓝）。没有刻度。
     case knob
+    /// 071：**线性域**参数，直接改 scene-linear 缓冲的算术。`#FF375F`（红）。没有刻度。
+    case linear
+
+    /// 这条滑杆的强调色 —— 面板里**唯一**的一份颜色定义。
+    ///
+    /// `nil` 是「跟随系统」（SwiftUI 的 `.tint(nil)`），不是「没有颜色」：渲染参数必须跟着用户的
+    /// 系统强调色走，写死一个蓝色会在暖色主题下变成另一种「不跟随」的错。
+    public var accent: Color? {
+        switch self {
+        case .knob: return nil
+        case .bar: return SliderShape.rawAccent
+        case .linear: return SliderShape.linearAccent
+        }
+    }
+
+    /// raw / 解码参数 = **黄**（071 改的；060 是橙）。
+    ///
+    /// 用系统 `Color.yellow` 而不是写死一个 RGB：它就是「黄」，在深/浅色主题与提高对比度下都由系统
+    /// 处理。实测的取色像素见 `SliderStyleTests`（报告里给了数字）。
+    public static let rawAccent = Color.yellow
+
+    /// 线性域 = **`#FF375F`**（用户指定的红）。sRGB 逐通道写死：这个颜色是用户给的品牌色，
+    /// 不该随系统主题漂移。
+    public static let linearAccent = Color(.sRGB, red: 1.0, green: 55.0 / 255, blue: 95.0 / 255,
+                                          opacity: 1)
 }
 
 // MARK: - 数值映射

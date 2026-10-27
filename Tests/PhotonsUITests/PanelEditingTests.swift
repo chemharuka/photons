@@ -202,8 +202,8 @@ final class PanelEditingTests: XCTestCase {
                       "sliderRow must draw the typeable number, not a Text")
         XCTAssertFalse(source.contains("editable: false"),
                        "no card may opt out of typing (047: 所有卡片统一)")
-        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 3,
-                       "Light / Color / 细节 all take the fact from their row table")
+        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 4,
+                       "Light / 黑电平 / Color / 细节 all take the fact from their row table")
 
         // A typed value takes the drag's path: the binding write, then the gesture-end commit.
         XCTAssertTrue(source.contains("value.wrappedValue = typed"))

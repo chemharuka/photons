@@ -112,6 +112,12 @@ enum EditParameters {
             && areEqual(a.temperature, b.temperature)
             && areEqual(a.tint, b.tint)
             && areEqual(a.highlightRecovery, b.highlightRecovery)
+            // 071: **this line is load-bearing, not bookkeeping.** `CatalogSession.applyEdit`
+            // short-circuits on `isSemanticallyIdentical`, so a field that is missing here is a field
+            // whose slider writes nothing at all — measured: before this line the 黑电平 slider moved,
+            // `applyEdit` returned silently, and the document stayed at 0. A step is 0.001, i.e. a
+            // thousand `dirtyTolerance`s, so no tolerance can hide one.
+            && areEqual(a.blackOffset, b.blackOffset)
     }
 
     /// As shot (`nil`) is a *state*, not a number: a document that follows the file and one that

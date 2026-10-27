@@ -394,6 +394,10 @@ private struct S1Params {
     // 030: blackLevel, whiteLevel, hasBlack, hasWhite. The absolute spelling of the same two levels;
     // the flags are 0 unless a level dropper (or a document) set one, and then the slider is ignored.
     var d: SIMD4<Float>
+    // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between `d`'s levels and the
+    // gain. 0 for every document that never used the control, and then the kernel skips the addition
+    // (so those documents keep 019's arithmetic byte for byte).
+    var e: SIMD4<Float>
 }
 
 private struct S2Params {
@@ -1592,7 +1596,15 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .sceneLinear:
-            let p = try kernels.pipeline(file: "s1_scene_linear", function: "s1_scene_linear")
+            // 071: two entry points in one shader file. `s1_scene_linear` is 019's arithmetic; the
+            // `_trim` variant is the same templated body with `v += blackOffset` compiled in. The
+            // choice is `blackOffset != 0` — the same condition that decides whether `boff` enters the
+            // key material — and it is a *dispatch* choice rather than a branch inside the kernel
+            // because a branch alone moved 2980/12309 scene-linear samples of the push document by an
+            // ULP (see the shader header).
+            let p = try kernels.pipeline(file: "s1_scene_linear",
+                                         function: edit.light.blackOffset == 0
+                                             ? "s1_scene_linear" : "s1_scene_linear_trim")
             // ── S1 is levels + exposure + highlight recovery (派单 019) ──────────────────────────
             // Black/white are a **level** (where 0 and 1 are), so they normalise the scene-linear
             // value *before* the gain: `(v − blk)/max(wht − blk, 1e−3)` then `·gain`. Applied after the
@@ -1609,6 +1621,9 @@ public final class RenderGraph {
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
                 && edit.light.blacks == 0 && edit.light.whites == 0
                 && edit.light.blackLevel == nil && edit.light.whiteLevel == nil
+                // 071: a trim on its own is *not* the identity — it moves pixels — so it takes the
+                // copy branch away exactly like a level does.
+                && edit.light.blackOffset == 0
             let levels = edit.light.levels
             var params = S1Params(
                 a: SIMD4(edit.light.exposureGain, 1, 1, 1),
@@ -1625,7 +1640,11 @@ public final class RenderGraph {
                 // 019's arithmetic bit for bit.
                 d: SIMD4(Float(levels.black), Float(levels.white),
                          edit.light.blackLevel == nil ? 0 : 1,
-                         edit.light.whiteLevel == nil ? 0 : 1))
+                         edit.light.whiteLevel == nil ? 0 : 1),
+                // 071: the additive linear trim, clamped once (`clampedBlackOffset`) so the number in
+                // the key material and the number the kernel adds cannot disagree. 0 → the kernel's
+                // branch is not taken at all.
+                e: SIMD4(Float(edit.light.clampedBlackOffset), 0, 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
