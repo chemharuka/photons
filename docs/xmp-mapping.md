@@ -96,6 +96,16 @@ LR 的 `ToneCurvePV2012` 是 `rdf:Seq` 里每项一个 `"x, y"` **字符串**，
 | `bands[i].luminance` | `crs:LuminanceAdjustment<Band>` | −100…100 | 1:1 | ≈ |
 | — | `crs:ConvertToGrayscale` / `GrayMixer<Band>` | 布尔 / −100…100 | 不写：`EditModel` 没有黑白转换与黑白混合 | ✕ |
 
+### 1.5b colorGrading（2026-10-28，S3.8；**故意不写 `crs:`**）
+
+| 字段 | `crs:` 键 | 量程 / 默认 | 转换 | 等级 |
+|---|---|---|---|---|
+| `shadows/midtones/highlights.hue` | `crs:ColorGrade{Shadow,Midtone,Highlight}Hue` | LR：0…360 **绝对角度**；我方：−100…100 **相对偏移**（±30°） | **不写**。我方是「在这个像素自己的色相上偏移」，LR 是「把这个区域的色相转到某个角度」——按绝对角度写出去，导入后同一张照片会换一个样子（而且我方的 0 = 不动，在 LR 里 0 = 红）。要映射必须先定一条「绝对 = 像素色相 + 偏移」的规则，而区域里每个像素的色相本来就不同，没有唯一解 | ✕ |
+| `….saturation` / `….lightness` | `crs:ColorGrade{Shadow,Midtone,Highlight}Sat` / `…Lum` | −100…100，默认 0 | 可 1:1（将来可加）；本版不写，理由同上：一个组只写两个轴会导出半个分级 | ✕ |
+
+`docs/xmp-mapping.md` 的立场一贯是「语义不同就不写，而不是写一个看起来像的值」（§3 的风险清单）。
+色彩分级按这条纪律整组不写；`EditModel` 里那九个数只在本机的 `edit.json` 里，这一版没有第二个消费者。
+
 ### 1.6 detail（M1 不渲染，仅存储；将来喂 `CIRAWFilter`）
 
 | 字段 | `crs:` 键 | 量程 / 默认 | 转换 | 等级 |

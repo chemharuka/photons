@@ -24,6 +24,10 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
     case light
     case curve
     case color
+    /// 2026-10-28 (P0 色彩分级): the nine wheel numbers — a develop setting like every other group, so
+    /// a preset either carries it or does not touch it. (Its own group because `EditModel` gives it one:
+    /// `RenderGroup.colorGrading`, S3.8.)
+    case colorGrading
     case detail
     case effects
 
@@ -34,6 +38,7 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
         case .light: return .light
         case .curve: return .curve
         case .color: return .color
+        case .colorGrading: return .colorGrading
         case .detail: return .detail
         case .effects: return .effects
         }
@@ -54,6 +59,7 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
         case "tone", "exposure", "whitebalance", "wb": self = .light
         case "tonecurve", "curves": self = .curve
         case "hsl", "colour": self = .color
+        case "colorgrading", "grading", "grade", "split", "splittoning", "colorbalance": self = .colorGrading
         case "crop", "transform": self = .geometry
         case "sharpening", "noise", "lens": self = .detail
         case "vignette", "grain": self = .effects
@@ -137,6 +143,7 @@ public struct Preset: Sendable, Equatable, Codable {
             case .light: out.light = edit.light
             case .curve: out.curve = edit.curve
             case .color: out.color = edit.color
+            case .colorGrading: out.colorGrading = edit.colorGrading
             case .detail: out.detail = edit.detail
             case .effects: out.effects = edit.effects
             }
@@ -158,6 +165,7 @@ public struct Preset: Sendable, Equatable, Codable {
             case .light: out.light = edit.light
             case .curve: out.curve = edit.curve
             case .color: out.color = edit.color
+            case .colorGrading: out.colorGrading = edit.colorGrading
             case .detail: out.detail = edit.detail
             case .effects: out.effects = edit.effects
             }
@@ -197,6 +205,8 @@ public struct Preset: Sendable, Equatable, Codable {
             case .light: try fragment.encode(edit.light, forKey: AnyCodingKey(group.rawValue))
             case .curve: try fragment.encode(edit.curve, forKey: AnyCodingKey(group.rawValue))
             case .color: try fragment.encode(edit.color, forKey: AnyCodingKey(group.rawValue))
+            case .colorGrading:
+                try fragment.encode(edit.colorGrading, forKey: AnyCodingKey(group.rawValue))
             case .detail: try fragment.encode(edit.detail, forKey: AnyCodingKey(group.rawValue))
             case .effects: try fragment.encode(edit.effects, forKey: AnyCodingKey(group.rawValue))
             }
@@ -228,6 +238,9 @@ public struct Preset: Sendable, Equatable, Codable {
             if groups.contains(.light) { edit.light = fragment.val("light", edit.light) }
             if groups.contains(.curve) { edit.curve = fragment.val("curve", edit.curve) }
             if groups.contains(.color) { edit.color = fragment.val("color", edit.color) }
+            if groups.contains(.colorGrading) {
+                edit.colorGrading = fragment.val("colorGrading", edit.colorGrading)
+            }
             if groups.contains(.detail) { edit.detail = fragment.val("detail", edit.detail) }
             if groups.contains(.effects) { edit.effects = fragment.val("effects", edit.effects) }
         }

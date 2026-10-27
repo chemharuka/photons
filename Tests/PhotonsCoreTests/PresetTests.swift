@@ -243,7 +243,8 @@ final class PresetTests: XCTestCase {
         let mapped = Set(PresetGroup.allCases.map(\.renderGroup))
         XCTAssertEqual(mapped, Set(RenderGroup.allCases).subtracting([.masks]),
                        "every document group is presetable except masks")
-        XCTAssertEqual(PresetGroup.allCases.count, 6)
+        // 6 → 7 with 2026-10-28's 色彩分级 (S3.8): a develop group like the rest, so a preset can carry it.
+        XCTAssertEqual(PresetGroup.allCases.count, 7)
     }
 
     func testPresetGroupParsingAcceptsTokensAndReportsUnknown() {

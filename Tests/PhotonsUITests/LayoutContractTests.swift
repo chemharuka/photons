@@ -194,6 +194,46 @@ final class LayoutContractTests: XCTestCase {
                                     "比实测更窄的面板会出现没有验证过的行宽")
     }
 
+    // MARK: the inspector's 色彩分级 card
+
+    /// **The card, as a layout contract** (2026-10-28, P0 色彩分级): where it sits (the 色彩 workspace,
+    /// after HSL — the pipeline's own `.hsl, .grade` order), how many rows it draws (**9** = 3 wheels ×
+    /// 3 axes), and the panel width identity every row is measured at.
+    ///
+    /// The rendered proof is `ColorGradingCardTests`, which hosts the panel and measures the nine rows at
+    /// exactly 244 / 274 / 308 pt of card content.
+    func testTheColorGradingCardIsNineRowsAfterHSLInTheColourWorkspace() throws {
+        XCTAssertEqual(InspectorView.Section.colorGrading.title, "色彩分级")
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading],
+                       "色彩工作区的两张卡：HSL 在前，色彩分级在后")
+        let sections = InspectorView.sections(in: .colour)
+        XCTAssertEqual(sections, [.hsl, .colorGrading], "渲染顺序来自 Section.allCases：\(sections)")
+
+        // The pipeline says the same: S3.8 runs directly after S3.6 and before the vignette.
+        let order = RenderStage.order
+        let hsl = try XCTUnwrap(order.firstIndex(of: .hsl))
+        let grade = try XCTUnwrap(order.firstIndex(of: .grade))
+        let vignette = try XCTUnwrap(order.firstIndex(of: .vignette))
+        XCTAssertEqual(grade, hsl + 1, "S3.8 紧跟 S3.6：\(order.map(\.short))")
+        XCTAssertEqual(grade + 1, vignette, "…且在暗角之前")
+
+        // 3 wheels × 3 axes, derived from the card's own table.
+        XCTAssertEqual(InspectorView.gradeRows.count, GradeRegion.allCases.count * GradeAxis.allCases.count)
+        XCTAssertEqual(InspectorView.colorGradingRowCount, 9)
+        XCTAssertEqual(InspectorView.gradeRows.map(\.region),
+                       (0..<3).flatMap { [GradeRegion.allCases[$0], GradeRegion.allCases[$0],
+                                          GradeRegion.allCases[$0]] })
+        XCTAssertEqual(InspectorView.gradeRows.map(\.axis), Array(repeating: GradeAxis.allCases,
+                                                                  count: 3).flatMap { $0 })
+        XCTAssertEqual(InspectorView.gradeRows.first?.title, "色相")
+        XCTAssertEqual(InspectorView.gradeRows.map(\.fieldKey).first, "colorGrading.shadows.hue")
+
+        // The panel widths `WorkspaceLayout` allows ↔ the card content widths the rows are measured at.
+        let contentWidths = [WorkspaceLayout.inspectorWidthMin, 330, WorkspaceLayout.inspectorWidthMax]
+            .map { $0 - 2 * 12 - 2 * WorkspaceLayout.cardInsetH }
+        XCTAssertEqual(contentWidths, [244, 274, 308])
+    }
+
     // MARK: grid
 
     func testGridColumnsFollowThePureFunctionAtThreeWidths() {

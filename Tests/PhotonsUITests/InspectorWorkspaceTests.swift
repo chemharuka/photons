@@ -52,8 +52,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(InspectorView.sections(in: .adjust),
                        InspectorView.scrollingSections.filter {
                            $0 != .masks && $0 != .crop && $0 != .hsl && $0 != .history
+                               && $0 != .colorGrading
                        },
-                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 历史记录交给各自的工作区")
+                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 色彩分级 / 历史记录交给各自的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -62,9 +63,10 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.adjust],
                        ["白平衡", "黑电平", "Light", "Color", "黑白", "细节", "曲线", "效果", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
-        // 变换 有卡片了（裁切），色彩 有卡片了（HSL），历史记录有卡片了（077 的时间线）。
+        // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
         XCTAssertEqual(titles[.transform], ["裁切"])
-        XCTAssertEqual(titles[.colour], ["HSL"])
+        XCTAssertEqual(titles[.colour], ["HSL", "色彩分级"],
+                       "色彩工作区：HSL 在前，色彩分级在后（Section.allCases 的顺序 = 管线的顺序）")
         XCTAssertEqual(titles[.history], ["历史记录"])
 
         // 图标必须有名字可念（.help 与 accessibilityLabel 都用它），空工作区的 tooltip 说明「尚未实现」。
@@ -108,9 +110,9 @@ final class InspectorWorkspaceTests: XCTestCase {
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
         // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张；
-        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张。
+        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张，色彩分级（S3.8）→ 15 张。
         // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 14)
+        XCTAssertEqual(InspectorView.Section.allCases.count, 15)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])

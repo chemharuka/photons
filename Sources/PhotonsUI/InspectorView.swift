@@ -75,6 +75,17 @@ public struct InspectorView: View {
         /// sliders*, not a list of independent parameters, and the 色彩 workspace (073) exists to give
         /// them a home of their own. It is the same 24 document numbers Lightroom's HSL panel writes.
         case hsl
+        /// 2026-10-28 (P0 色彩分级) — **色彩分级**: 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
+        ///
+        /// Directly after HSL, which is the pipeline's own order (`RenderStage.order` is … `.hsl,
+        /// .grade, .vignette`): the per-hue bands first, then the per-luminance wheels, then the
+        /// effects. Its own card rather than three more rows under Color or nine under HSL for 076's
+        /// reason: it is a different partition of the picture (luminance, not hue), its own stage, its
+        /// own group and its own double-click — a reset here must not undo a band drag and vice versa.
+        ///
+        /// It lives in the **色彩** workspace (with HSL), because 色彩 and 分级 are one workspace's
+        /// subject and the 调整 panel is already nine cards long.
+        case colorGrading
         /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
         /// are the same panel in Lightroom, and below the tone controls because they act on the
         /// decoded pixels rather than on the render.
@@ -116,6 +127,7 @@ public struct InspectorView: View {
             case .color: return "Color"
             case .blackAndWhite: return "黑白"
             case .hsl: return "HSL"
+            case .colorGrading: return "色彩分级"
             case .detail: return "细节"
             case .curve: return "曲线"
             case .effects: return "效果"
@@ -294,6 +306,8 @@ public struct InspectorView: View {
             blackAndWhiteCard
         case .hsl:
             hslCard
+        case .colorGrading:
+            colorGradingCard
         case .detail:
             detailCard
         case .curve:
@@ -739,6 +753,105 @@ public struct InspectorView: View {
                 case .saturation: model.color.bands[band].saturation = value
                 case .luminance: model.color.bands[band].luminance = value
                 }
+            }
+        })
+    }
+
+    /// 2026-10-28 (P0 色彩分级) — **色彩分级**: three wheels, 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
+    ///
+    /// ```text
+    /// 阴影      色相   −100…100      ±30° of OKLCh hue
+    ///           饱和                  chroma × (1 + s/100)
+    ///           亮度                  ±1 stop of linear light
+    /// 中间调    色相 / 饱和 / 亮度    …the same three, for the band between the two windows
+    /// 高光      色相 / 饱和 / 亮度    …and for everything above −1.2 EV
+    /// ```
+    ///
+    /// The rows are the `gradeRows` table (3 regions × 3 axes). A caption row above each wheel is a
+    /// plain `Text`: the card is *three wheels*, and a list of nine sliders with no seams would make the
+    /// user read the region off the row title every time.
+    ///
+    /// ## Why three rows and not a circular picker
+    ///
+    /// Lightroom and darktable both draw a **disc** (hue as an angle, saturation as a radius: Lr's
+    /// wheels, darktable's `colorbalance rgb` hue/chroma pad). This card draws two sliders and a gain
+    /// instead, and the reasons are this panel's own furniture, not a shortcut:
+    ///
+    ///  1. **Every parameter in this panel is a `SliderRow`** (040/046/047/052): a typeable number, a
+    ///     double-click reset, an accessibility identifier and a probe a test can measure. A disc has no
+    ///     read-out, no keyboard input, no reset target and no accessibility tree — it would be the one
+    ///     control in the panel that cannot be typed into or read by VoiceOver.
+    ///  2. **Precision.** At the narrowest panel (244 pt of card content) a 40-pt disc is ≈ 19° per
+    ///     point and ≈ 2.5 % of chroma per point — you cannot enter 「色相 +7」, and the two things a
+    ///     grade is for (a small hue rotation, a small chroma change) are exactly the small ones. The
+    ///     slider's travel is 0.3° and 1 % per unit, and `↵` types an exact number.
+    ///  3. **The model stores a hue *offset*, not an angle** (`GradeWheel.hue` documents why): a disc
+    ///     would have to draw a "centre = no shift" dot at its own middle, which is not what a colour
+    ///     wheel looks like and would invite reading it as an absolute hue.
+    ///  4. **Two axes, two numbers, two history rows.** A disc writes a pair, so a drag would be one
+    ///     field that cannot say which of the two moved — and the timeline's 「色相 0 → +12」 row
+    ///     (077) would become 「一对坐标」.
+    ///  5. Nothing is lost: the disc *is* these two numbers, and a future picker can be added **above**
+    ///     these rows as a shortcut that writes them (a swatch, like the HSL card's band strip), without
+    ///     this card or the document changing at all.
+    private var colorGradingCard: some View {
+        card(Section.colorGrading.title, reset: { resetGroup(.colorGrading) }) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(GradeRegion.allCases) { region in
+                    Text(region.title)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, region == .shadows ? 0 : 4)
+                        .accessibilityIdentifier("inspector.colorGrading.section.\(region.rawValue)")
+                    ForEach(Self.gradeRows.filter { $0.region == region }) { row in
+                        sliderRow(row.title, gradeBinding(row), row.range, row.format,
+                                  shape: row.shape,
+                                  decimals: row.decimals,
+                                  rounding: row.rounding,
+                                  editable: row.editable,
+                                  accessibilityID: "inspector.colorGrading.\(row.fieldKey)",
+                                  onReset: { resets.colorGradingField(row) }) { editing in
+                            if !editing { session.commitEdit(label: Self.gradeLabel(row)) }
+                        }
+                        .background(ColorGradingProbeHost(rowID: row.fieldKey))
+                    }
+                }
+            }
+        }
+        .background(ColorGradingProbeHost(rowID: ColorGradingProbe.cardID))
+    }
+
+    /// The nine rows, in draw order: 阴影 → 中间调 → 高光, each 色相 → 饱和 → 亮度. Derived from the two
+    /// enums, so the card and every test iterate the same list.
+    public static let gradeRows: [GradeRow] = GradeRegion.allCases.flatMap { region in
+        GradeAxis.allCases.map { axis in
+            GradeRow(region: region, axis: axis, title: axis.title)
+        }
+    }
+
+    /// The card's row count as one number — **9 = 3 wheels × 3 axes**, derived, never a second literal.
+    public static var colorGradingRowCount: Int { gradeRows.count }
+
+    /// The undo label for one drag: 「色彩分级 阴影」. **One wheel, one row** — a drag of 色相 and then
+    /// 饱和 of the same wheel folds into it (`EditField.gestureClass` makes the wheel the class), and a
+    /// different wheel is a different label, hence a different row.
+    static func gradeLabel(_ row: GradeRow) -> String {
+        "\(Section.colorGrading.title) \(row.region.title)"
+    }
+
+    /// One row's number, read and written through the document: `colorGrading.shadows.hue`.
+    ///
+    /// A closure rather than a key path because the pair (region, axis) is table state — the same reason
+    /// the HSL card's binding takes a band index. The read side is the document's own value, so the
+    /// number on screen is the number S3.8 is handed.
+    private func gradeBinding(_ row: GradeRow) -> Binding<Double> {
+        Binding(get: {
+            session.edit[keyPath: row.region.wheel][row.axis]
+        }, set: { value in
+            let stored = Self.quantized(value, quantum: row.quantum)
+            session.applyEdit { model in
+                model[keyPath: row.region.wheel][row.axis] = stored
             }
         })
     }
@@ -2172,6 +2285,8 @@ public struct PanelResets {
         case detail
         /// 2026-10-28: 效果 — 暗角 + 颗粒, eight numbers, one double-click.
         case effects
+        /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
+        case colorGrading
 
         /// The card title this group is — the name the user double-clicked, and the undo label.
         public var title: String {
@@ -2182,6 +2297,7 @@ public struct PanelResets {
             case .blackAndWhite: return InspectorView.Section.blackAndWhite.title
             case .detail: return InspectorView.Section.detail.title
             case .effects: return InspectorView.Section.effects.title
+            case .colorGrading: return InspectorView.Section.colorGrading.title
             }
         }
     }
@@ -2460,7 +2576,35 @@ public struct PanelResets {
             guard session.edit.effects != EffectsGroup.identity else { return false }
             session.applyEdit { $0.effects = .identity }
             return session.commitEdit(label: group.title, coalesce: false)
+
+        case .colorGrading:
+            // 2026-10-28 (P0 色彩分级): the card's own nine numbers, back to `ColorGradingGroup.identity`
+            // (all zeros) in one snapshot. Nothing else is touched — not `color.vibrance` (Color's), not
+            // the bands (HSL's) — which is 076's rule for `.color` read from the other side: a
+            // double-click on this card must not undo work done on another one.
+            //
+            // The padded `guard` is what keeps a stray double-click from minting an empty snapshot (and
+            // truncating a redo branch): nothing changed, nothing written.
+            guard !session.edit.colorGrading.isIdentity else { return false }
+            session.applyEdit { $0.colorGrading = .identity }
+            return session.commitEdit(label: group.title, coalesce: false)
         }
+    }
+
+    // MARK: 色彩分级 (S3.8, 2026-10-28)
+
+    /// Double-click on one of the card's nine rows: **that** number back to its own default (0, i.e. "this
+    /// axis of this wheel does nothing"), one snapshot, `coalesce: false` — a reset is a discrete command,
+    /// not the continuation of the drag before it (the same rule `blackAndWhiteField` follows).
+    ///
+    /// `row` is a table value, so the row a test resets is the row the card drew.
+    @discardableResult
+    public func colorGradingField(_ row: GradeRow) -> Bool {
+        guard session.edit[keyPath: row.region.wheel][row.axis] != row.defaultValue else { return false }
+        session.applyEdit { model in
+            model[keyPath: row.region.wheel][row.axis] = row.defaultValue
+        }
+        return session.commitEdit(label: row.title, coalesce: false)
     }
 }
 
