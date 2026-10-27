@@ -398,6 +398,17 @@ extension Histogram {
                 bins: bins, rect: rect, headroom: headroom, encoded: false)
     }
 
+    /// The same measurement with the sweep's width forced, for the test that proves the blocks and the
+    /// one thread agree (`HistogramParallelTests`). Not public: production always takes the machine's
+    /// own answer from `countWorkers`, and a caller that could pin it would be able to make the plot
+    /// slower by asking for one thread.
+    static func compute(_ sample: LinearSample, bins: Int = 256,
+                        rect: ImageRect? = nil, headroom: Double = 1,
+                        workers: Int) -> Histogram {
+        measure(width: sample.width, height: sample.height, rgba: sample.rgba,
+                bins: bins, rect: rect, headroom: headroom, encoded: false, workers: workers)
+    }
+
     /// Measure an **already display-encoded** image: its codes are the axis, so nothing is encoded.
     ///
     /// Not the same as `compute(LinearSample)` with a decode in front of it: a decode→encode round trip
@@ -446,7 +457,8 @@ extension Histogram {
     /// linear light (encoded here) — the only difference between the two entry points.
     private static func measure(width: Int, height: Int, rgba: [Float16],
                                 bins: Int, rect: ImageRect?, headroom: Double,
-                                encoded: Bool, lumaInAlpha: Bool = false) -> Histogram {
+                                encoded: Bool, lumaInAlpha: Bool = false,
+                                workers: Int? = nil) -> Histogram {
         let binCount = min(max(bins, 2), 1 << 16)
         let hdrCount = hdrBinCount
         let stride = binCount + hdrCount
@@ -497,7 +509,7 @@ extension Histogram {
         // `pow` at all now that the input is linear). `Histogram.maxLongEdge` is what keeps the number
         // of pixels this block ever sees at ~0.5 M rather than 60 M.
         let statsBase = 4 * stride
-        var counts = [Int](repeating: 0, count: 4 * stride + 12)
+        let blockInts = 4 * stride + 12
         let scale = Float(binCount)
         // Where the luma series comes from, as arithmetic rather than a branch: a *frame* sample
         // carries its luma in the (otherwise unused) alpha channel — `srgbEncode(Σw·linear)`, the
@@ -507,81 +519,80 @@ extension Histogram {
         // 0.58 Mpx measurement), which is a real regression in the test suite's own budget.
         let lumaMix: Float = lumaInAlpha ? 1 : 0
 
+        // P1d — the sweep runs over **row blocks**, one per core, each into its own counter block.
+        //
+        // The arithmetic per pixel is untouched: same `pow`, same comparisons, same index, so every
+        // bin and every ratio is bit-identical to the single-threaded loop this replaced (the counters
+        // are integers, and a sum of integers does not care about the order it is summed in). What
+        // changes is only how many cores are doing it: 1.4–1.8 ms of one core for a 43 k-pixel grid
+        // was 100 % of the histogram's wall time, and four `pow`s per pixel is exactly the shape of
+        // loop that parallelises cleanly.
+        //
+        // `Histogram.countWorkers` keeps a small sample on one core: the dispatch costs ~30–60 µs and
+        // below ~16 k pixels the threads would earn less than they spend.
+        var counts = [UInt32](repeating: 0, count: blockInts)
+        let rows = rect.height
+        let sweep = workers ?? Histogram.countWorkers(width: rect.width, height: rows)
+
         rgba.withUnsafeBufferPointer { px in
             counts.withUnsafeMutableBufferPointer { c in
-                let base = c.baseAddress!
-                let g0 = stride, b0 = 2 * stride, l0 = 3 * stride
-                // The twelve counters are locals of this closure rather than captures, so they can
-                // stay in registers while the bins are being incremented.
-                var hiR = 0, hiG = 0, hiB = 0, hiL = 0
-                var ceR = 0, ceG = 0, ceB = 0, ceL = 0
-                var loR = 0, loG = 0, loB = 0, loL = 0
-                for y in rect.y..<(rect.y + rect.height) {
-                    let row = y * frame.width
-                    for x in rect.x..<(rect.x + rect.width) {
-                        let o = (row + x) * 4
-                        let wr0 = unbounded(px[o]), wg0 = unbounded(px[o + 1]), wb0 = unbounded(px[o + 2])
-                        // Working primaries → display primaries (075), a no-op on an encoded sample.
-                        let rv = wr0 + mix * ((m00 * wr0 + m01 * wg0 + m02 * wb0) - wr0)
-                        let gv = wg0 + mix * ((m10 * wr0 + m11 * wg0 + m12 * wb0) - wg0)
-                        let bv = wb0 + mix * ((m20 * wr0 + m21 * wg0 + m22 * wb0) - wb0)
-                        // A frame sample carries the shipped luma in alpha (it is the only channel
-                        // left, and deriving it from three codes would be a different quantity —
-                        // see `computeFrameSample`).
-                        let lv = lumaMix * unbounded(px[o + 3])
-                            + (1 - lumaMix) * (wr * rv + wg * gv + wb * bv)
-
-                        base[combinedIndex(rv, sdrBins: binCount, scale: scale,
-                                           encoded: encoded)] += 1
-                        base[g0 + combinedIndex(gv, sdrBins: binCount, scale: scale,
-                                                encoded: encoded)] += 1
-                        base[b0 + combinedIndex(bv, sdrBins: binCount, scale: scale,
-                                                encoded: encoded)] += 1
-                        base[l0 + combinedIndex(lv, sdrBins: binCount, scale: scale,
-                                                encoded: encoded)] += 1
-
-                        // Clipping is counted in the same pass, from the same values, so the ratios
-                        // and the bins can never describe two different samples.
-                        if rv > high { hiR += 1 }
-                        if gv > high { hiG += 1 }
-                        if bv > high { hiB += 1 }
-                        if lv > high { hiL += 1 }
-                        if rv >= ceilingFloor { ceR += 1 }
-                        if gv >= ceilingFloor { ceG += 1 }
-                        if bv >= ceilingFloor { ceB += 1 }
-                        if lv >= ceilingFloor { ceL += 1 }
-                        if rv < low { loR += 1 }
-                        if gv < low { loG += 1 }
-                        if bv < low { loB += 1 }
-                        if lv < low { loL += 1 }
+                guard let dst = c.baseAddress else { return }
+                if sweep <= 1 {
+                    Histogram.countRows(px, into: dst, statsBase: statsBase,
+                                        frameWidth: frame.width, x0: rect.x, width: rect.width,
+                                        y0: rect.y, rows: rows,
+                                        sdrBins: binCount, scale: scale, encoded: encoded,
+                                        m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12,
+                                        m20: m20, m21: m21, m22: m22, mix: mix,
+                                        wr: wr, wg: wg, wb: wb, lumaMix: lumaMix,
+                                        high: high, low: low, ceilingFloor: ceilingFloor)
+                    return
+                }
+                // One flat scratch block for all chunks: nothing is allocated inside the sweep, and
+                // the merge below is a plain sum over `blockInts` integers per chunk.
+                //
+                // More chunks than cores on purpose: `concurrentPerform` feeds them to the pool as
+                // threads free up, which is what balances the unequal blocks against this machine's
+                // two efficiency cores — a contiguous split eight ways leaves the block that lands on
+                // an E core to finish the sweep on its own.
+                let chunks = min(rows, max(sweep, sweep * 2))
+                let per = (rows + chunks - 1) / chunks
+                var scratch = [UInt32](repeating: 0, count: blockInts * chunks)
+                scratch.withUnsafeMutableBufferPointer { s in
+                    guard let raw = s.baseAddress else { return }
+                    DispatchQueue.concurrentPerform(iterations: chunks) { k in
+                        let y0 = rect.y + k * per
+                        let chunk = min(per, rect.y + rows - y0)
+                        guard chunk > 0 else { return }
+                        Histogram.countRows(px, into: raw + k * blockInts, statsBase: statsBase,
+                                            frameWidth: frame.width, x0: rect.x, width: rect.width,
+                                            y0: y0, rows: chunk,
+                                            sdrBins: binCount, scale: scale, encoded: encoded,
+                                            m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12,
+                                            m20: m20, m21: m21, m22: m22, mix: mix,
+                                            wr: wr, wg: wg, wb: wb, lumaMix: lumaMix,
+                                            high: high, low: low, ceilingFloor: ceilingFloor)
                     }
                 }
-                base[statsBase] = hiR
-                base[statsBase + 1] = hiG
-                base[statsBase + 2] = hiB
-                base[statsBase + 3] = hiL
-                base[statsBase + 4] = ceR
-                base[statsBase + 5] = ceG
-                base[statsBase + 6] = ceB
-                base[statsBase + 7] = ceL
-                base[statsBase + 8] = loR
-                base[statsBase + 9] = loG
-                base[statsBase + 10] = loB
-                base[statsBase + 11] = loL
+                for i in 0..<blockInts { dst[i] = scratch[i] }
+                for k in 1..<chunks {
+                    let off = k * blockInts
+                    for i in 0..<blockInts { dst[i] &+= scratch[off + i] }
+                }
             }
         }
 
         // The sample's pixel count is the red series' own total: one invariant instead of a second
         // counter that could (silently) disagree with the bins.
-        let counted = counts[0..<stride].reduce(0, +)
+        let counted = counts[0..<stride].reduce(0) { $0 + Int($1) }
         let n = Double(max(counted, 1))
         func channel(_ offset: Int, _ hiIndex: Int, _ ceilIndex: Int,
                      _ loIndex: Int) -> HistogramChannel {
-            HistogramChannel(bins: Array(counts[offset..<(offset + binCount)]),
-                             hdrBins: Array(counts[(offset + binCount)..<(offset + stride)]),
-                             clippedHigh: Double(counts[hiIndex]) / n,
-                             clippedCeiling: Double(counts[ceilIndex]) / n,
-                             clippedLow: Double(counts[loIndex]) / n)
+            HistogramChannel(bins: counts[offset..<(offset + binCount)].map(Int.init),
+                             hdrBins: counts[(offset + binCount)..<(offset + stride)].map(Int.init),
+                             clippedHigh: Double(Int(counts[hiIndex])) / n,
+                             clippedCeiling: Double(Int(counts[ceilIndex])) / n,
+                             clippedLow: Double(Int(counts[loIndex])) / n)
         }
         return Histogram(binCount: binCount, sampleCount: counted, canvas: frame,
                          roi: rect, sampleSize: frame, primaries: .sRGB,
@@ -590,6 +601,92 @@ extension Histogram {
                          green: channel(stride, statsBase + 1, statsBase + 5, statsBase + 9),
                          blue: channel(2 * stride, statsBase + 2, statsBase + 6, statsBase + 10),
                          luma: channel(3 * stride, statsBase + 3, statsBase + 7, statsBase + 11))
+    }
+
+    /// Rows `y0 ..< y0 + rows` of the measured rect, counted into `base`.
+    ///
+    /// This is the counting loop that used to live inline in `measure`, lifted out so it can be called
+    /// once per row block. The body is unchanged on purpose: parallelising the sweep must not move a
+    /// bin, and the cheapest way to guarantee that is to keep the arithmetic that was already measured
+    /// — one `srgbEncode` per channel, the same `binIndex` comparisons, the same twelve scalars.
+    @inline(__always)
+    private static func countRows(_ px: UnsafeBufferPointer<Float16>,
+                                  into base: UnsafeMutablePointer<UInt32>, statsBase: Int,
+                                  frameWidth: Int, x0: Int, width: Int, y0: Int, rows: Int,
+                                  sdrBins: Int, scale: Float, encoded: Bool,
+                                  m00: Float, m01: Float, m02: Float,
+                                  m10: Float, m11: Float, m12: Float,
+                                  m20: Float, m21: Float, m22: Float, mix: Float,
+                                  wr: Float, wg: Float, wb: Float, lumaMix: Float,
+                                  high: Float, low: Float, ceilingFloor: Float) {
+        let block = sdrBins + hdrBinCount
+        let g0 = block, b0 = 2 * block, l0 = 3 * block
+        // The twelve counters are locals of this function rather than loads through `base`, so they
+        // can stay in registers while the bins are being incremented.
+        var hiR = 0, hiG = 0, hiB = 0, hiL = 0
+        var ceR = 0, ceG = 0, ceB = 0, ceL = 0
+        var loR = 0, loG = 0, loB = 0, loL = 0
+        for y in y0..<(y0 + rows) {
+            let row = y * frameWidth
+            for x in x0..<(x0 + width) {
+                let o = (row + x) * 4
+                let wr0 = unbounded(px[o]), wg0 = unbounded(px[o + 1]), wb0 = unbounded(px[o + 2])
+                // Working primaries → display primaries (075), a no-op on an encoded sample.
+                let rv = wr0 + mix * ((m00 * wr0 + m01 * wg0 + m02 * wb0) - wr0)
+                let gv = wg0 + mix * ((m10 * wr0 + m11 * wg0 + m12 * wb0) - wg0)
+                let bv = wb0 + mix * ((m20 * wr0 + m21 * wg0 + m22 * wb0) - wb0)
+                // A frame sample carries the shipped luma in alpha (it is the only channel left, and
+                // deriving it from three codes would be a different quantity — see
+                // `computeFrameSample`).
+                let lv = lumaMix * unbounded(px[o + 3])
+                    + (1 - lumaMix) * (wr * rv + wg * gv + wb * bv)
+
+                base[combinedIndex(rv, sdrBins: sdrBins, scale: scale, encoded: encoded)] += 1
+                base[g0 + combinedIndex(gv, sdrBins: sdrBins, scale: scale, encoded: encoded)] += 1
+                base[b0 + combinedIndex(bv, sdrBins: sdrBins, scale: scale, encoded: encoded)] += 1
+                base[l0 + combinedIndex(lv, sdrBins: sdrBins, scale: scale, encoded: encoded)] += 1
+
+                // Clipping is counted in the same pass, from the same values, so the ratios and the
+                // bins can never describe two different samples.
+                if rv > high { hiR += 1 }
+                if gv > high { hiG += 1 }
+                if bv > high { hiB += 1 }
+                if lv > high { hiL += 1 }
+                if rv >= ceilingFloor { ceR += 1 }
+                if gv >= ceilingFloor { ceG += 1 }
+                if bv >= ceilingFloor { ceB += 1 }
+                if lv >= ceilingFloor { ceL += 1 }
+                if rv < low { loR += 1 }
+                if gv < low { loG += 1 }
+                if bv < low { loB += 1 }
+                if lv < low { loL += 1 }
+            }
+        }
+        base[statsBase] = UInt32(hiR)
+        base[statsBase + 1] = UInt32(hiG)
+        base[statsBase + 2] = UInt32(hiB)
+        base[statsBase + 3] = UInt32(hiL)
+        base[statsBase + 4] = UInt32(ceR)
+        base[statsBase + 5] = UInt32(ceG)
+        base[statsBase + 6] = UInt32(ceB)
+        base[statsBase + 7] = UInt32(ceL)
+        base[statsBase + 8] = UInt32(loR)
+        base[statsBase + 9] = UInt32(loG)
+        base[statsBase + 10] = UInt32(loB)
+        base[statsBase + 11] = UInt32(loL)
+    }
+
+    /// How many row blocks the sweep is split into.
+    ///
+    /// 1 below ~16 k pixels: `DispatchQueue.concurrentPerform` costs 30–60 µs to start the threads and
+    /// a sample that small would lose more than it gains. Everything the shipped paths measure is
+    /// above the line (a 256-long-edge frame grid is 43 k pixels, the picture measurement up to 1 M),
+    /// and the cap at 8 is deliberate — past that the loop is bounded by the eight-byte load per
+    /// pixel, not by cores, and the efficiency cores would only lengthen the slowest block.
+    static func countWorkers(width: Int, height: Int) -> Int {
+        let cores = min(8, ProcessInfo.processInfo.activeProcessorCount)
+        guard cores > 1, height >= 8, width * height >= 16_384 else { return 1 }
+        return min(cores, height)
     }
 
     /// The historical name for `computeEncoded`: a hand-built, display-encoded fixture measured on the
