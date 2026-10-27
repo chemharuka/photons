@@ -209,7 +209,8 @@ public struct LinearImage: Sendable {
             let m = Swift.max(r, Swift.max(g, b))
             if m > maxV { maxV = m }
             if m > 1.0 { over += 1 }
-            sum += Double(0.2126 * r + 0.7152 * g + 0.0722 * b)
+            let w = ColorPrimaries.working.luminanceWeights
+            sum += Double(w.x) * Double(r) + Double(w.y) * Double(g) + Double(w.z) * Double(b)
             n += 1
             i += sampleStride
         }
@@ -289,7 +290,8 @@ public struct LinearImage: Sendable {
             var x = 0
             while x < width {
                 let o = (row + x) * 4
-                let l = 0.2126 * Double(rgba[o]) + 0.7152 * Double(rgba[o + 1]) + 0.0722 * Double(rgba[o + 2])
+                let w = ColorPrimaries.working.luminanceWeights
+                let l = w.x * Double(rgba[o]) + w.y * Double(rgba[o + 1]) + w.z * Double(rgba[o + 2])
                 if y < half { top += l; nt += 1 } else { bottom += l; nb += 1 }
                 x += sampleStride
             }

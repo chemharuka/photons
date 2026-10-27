@@ -91,10 +91,18 @@ final class ColorPrimariesTests: XCTestCase {
             .joined(separator: " · "))
     }
 
-    /// 仓里**已经在运**的那七个常数（`RenderGraph.primariesMatrix`，Apple 的 sRGB→P3 数字）
-    /// 必须与本文件的推导一致 —— 这证明「换基色」不是换了一套数学，而是把同一套数学用在更宽的
-    /// 基色上。差 1.1e-7 全部来自那七个常数的第七位小数。
+    /// 仓里**已经在运**的那七个常数（Apple 的 sRGB→P3 数字）必须与本文件的推导一致 —— 这证明
+    /// 「换基色」不是换了一套数学，而是把同一套数学用在更宽的基色上。差 1.1e-7 全部来自那七个
+    /// 常数的第七位小数。
+    ///
+    /// 075 批次 A 之后这七个数字**不再写在 `RenderGraph.primariesMatrix` 里**（那个函数改成从本
+    /// 文件读），所以它们移到了这个测试里：对照物必须独立于被对照的东西，否则这条断言就变成了
+    /// 「自己等于自己」。它们现在的职责是给 `ColorPrimaries` 的推导做外部锚点。
     func testTheDerivationMatchesTheMatrixAlreadyShipping() {
+        // Apple 的 sRGB → Display P3（行主序），075 之前就是 `RenderGraph.primariesMatrix` 的实现。
+        let appleSRGBToP3 = [[0.8224621, 0.1775380, 0.0000000],
+                             [0.0331941, 0.9668058, 0.0000000],
+                             [0.0170827, 0.0723974, 0.9105199]]
         let shipped = RenderGraph.primariesMatrix(from: .sRGB, to: .displayP3)
         // `simd_float4x4` 是列主序（`columns.0` 是第一**列**），本文件是行主序。
         let reference = [[Double(shipped.columns.0.x), Double(shipped.columns.1.x), Double(shipped.columns.2.x)],
@@ -103,10 +111,56 @@ final class ColorPrimariesTests: XCTestCase {
 
         let ours = ColorPrimaries.conversion(from: .sRGB, to: .displayP3)
         assertMatrix(ours, equals: reference, accuracy: 5e-7, "sRGB → P3（对照已在运的常数）")
+        assertMatrix(ours, equals: appleSRGBToP3, accuracy: 5e-7,
+                     "sRGB → P3（对照 Apple 的常数，不再经过 RenderGraph）")
 
         print("sRGB→P3 vs 已在运的常数 · max|Δ| = "
               + String(format: "%.2e", (0..<3).flatMap { r in (0..<3).map { c in abs(ours[r, c] - reference[r][c]) } }.max() ?? 0))
     }
+
+    // MARK: - 075 §3.2: the full (source, target) table, no silent identity
+
+    /// **每一条**基色组合都必须给出真的转换矩阵，只有「源 = 目标」才允许是恒等。
+    ///
+    /// 075 之前 `RenderGraph.primariesMatrix` 的写法是
+    /// `guard from == .sRGB, to == .displayP3 else { return identity }`：一个手写的组合，其余全部
+    /// 静默退恒等。搬到 Rec.2020 之后**每一帧**都撞进那个 `else` —— sRGB 屏直接显示 Rec.2020 数值，
+    /// 不报错、不崩、单测（只覆盖 sRGB→P3）还绿着。这条测试遍历 3×3，并逐条断言：
+    ///   · 白点保持（`preservesWhitePoint`，行和 1）——否则中性会偏色；
+    ///   · 源 ≠ 目标 ⇒ **不是**恒等（差 > 1e-6），源 = 目标 ⇒ **正好**是恒等；
+    ///   · 与 `ColorPrimaries.conversion` 逐元素一致（±1e-7，float32 的舍入）。
+    func testEveryPrimariesPairIsARealConversion() {
+        var printed: [String] = []
+        for source in ColorPrimaries.allCases {
+            for target in ColorPrimaries.allCases {
+                let m = RenderGraph.primariesMatrix(from: source, to: target)
+                let rows = [[Double(m.columns.0.x), Double(m.columns.1.x), Double(m.columns.2.x)],
+                            [Double(m.columns.0.y), Double(m.columns.1.y), Double(m.columns.2.y)],
+                            [Double(m.columns.0.z), Double(m.columns.1.z), Double(m.columns.2.z)]]
+                let asMatrix = Matrix3(rows: rows)
+                if source == target {
+                    XCTAssertEqual(asMatrix.maxAbsoluteDifference(from: .identity), 0,
+                                   "\(source.rawValue) → 自己：必须是**逐位**单位阵，"
+                                   + "conversion 的 1e-16 残差不能漏进来")
+                    continue
+                }
+                XCTAssertGreaterThan(asMatrix.maxAbsoluteDifference(from: .identity), 1e-6,
+                                     "\(source.rawValue) → \(target.rawValue) 退化成了恒等 —— "
+                                     + "这就是 075 §3.2 的静默错误")
+                XCTAssertTrue(asMatrix.preservesWhitePoint(within: 1e-6),
+                              "\(source.rawValue) → \(target.rawValue) 不保白点")
+                let reference = ColorPrimaries.conversion(from: source, to: target)
+                XCTAssertLessThanOrEqual(asMatrix.maxAbsoluteDifference(from: reference), 1e-7,
+                                         "\(source.rawValue) → \(target.rawValue)：float32 桥接有损")
+                printed.append("\(source.rawValue)→\(target.rawValue) min "
+                               + String(format: "%+.6f", asMatrix.minimum))
+            }
+        }
+        // 六条非恒等组合：三条「窄→宽」全为正（凸组合），三条「宽→窄」必然有负系数。
+        XCTAssertEqual(printed.count, 6)
+        print("primaries 表 · " + printed.joined(separator: " · "))
+    }
+
 
     // MARK: - 2. sRGB → Rec2020, the matrix this migration hangs on
 

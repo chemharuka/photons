@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "primaries.metal"
 using namespace metal;
 
 // S1.6 — local adjustments, between S1 (scene linear) and S2 (tone map).
@@ -53,7 +54,7 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     float gamma = exp2(d.b.x / 100.0 * 2.0);            // contrast
     v = 0.18 * pow(max(v, 1e-6) / 0.18, gamma);
 
-    float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
+    float lum = dot(v, kWorkingLumaWeights);
     float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
     float wHighlight = smoothstep(0.5, 1.0, lum);
     v *= exp2(d.b.z / 100.0 * 0.8 * wShadow);           // shadows (+ lifts)

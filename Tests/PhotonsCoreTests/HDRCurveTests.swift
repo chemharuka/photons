@@ -444,14 +444,27 @@ final class HDRCurveTests: XCTestCase {
             }
             let values = channelValues(try render(graph, edit, headroom: 64), count: count,
                                        channel: channel)
+            // A step-back only matters if the picture can show it, so the criterion is **one 8-bit
+            // display code**: what this test is about is a visible fold (073's highlight window folded
+            // by −0.28 of a stop across 21 sampled levels), not the last bit of the shaper's
+            // quantisation. Measured after 075: the W curve steps back 4.8e-7 at level 136, where the
+            // value is 4.2e-5 — that is 5.5e-4 of a code, i.e. a level the export writes as 0 either
+            // way. The old assertion counted it because it demanded bit-exact monotonicity of a curve
+            // whose gain is a 64-stop LUT of the luma; R, G and B are still exactly monotone.
             var drops = 0
             var worstDrop: Float = 0
+            var worstCodes = 0.0
             for i in 1..<count where values[i] < values[i - 1] {
-                drops += 1
-                worstDrop = max(worstDrop, values[i - 1] - values[i])
+                let codes = encodeD(Double(values[i - 1])) - encodeD(Double(values[i]))
+                if codes > 1.0 / 255.0 {
+                    drops += 1
+                    worstDrop = max(worstDrop, values[i - 1] - values[i])
+                    worstCodes = max(worstCodes, codes)
+                }
             }
-            print(String(format: "030 pixel monotonicity (%@): %d levels, %d drops, worst %.3e",
-                         name, count, drops, worstDrop))
+            print(String(format: "030 pixel monotonicity (%@): %d levels, %d folds > 1 code "
+                         + "(worst %.3e linear = %.2f codes)", name, count, drops, worstDrop,
+                         worstCodes * 255))
             XCTAssertEqual(drops, 0, "\(name) curve folded over \(drops) of \(count) levels")
         }
     }
@@ -817,9 +830,19 @@ final class HDRCurveTests: XCTestCase {
 
         let base = try render(graph, .neutral, headroom: 64)
         let curved = try render(graph, redOnly, headroom: 64)
+        // Green and blue are untouched **in the working space** — that is what "the curve tables are
+        // per channel" means, and S1.7 leaves them byte-identical (a kernel-level property asserted by
+        // the R-only curve's own output). On the *display* frame they can no longer be bit-identical:
+        // since 075 S4 applies `Rec2020 → sRGB`, whose row 1 is `(−0.1246, 1.1329, −0.0083)`, so a
+        // pixel whose red the curve moved exports a green that follows it by `0.1246·ΔR`. Quantified,
+        // not relaxed: ≤ that coefficient, plus one `Float16` ULP.
+        let dR = abs(Float(curved.rgba[0]) - Float(base.rgba[0]))
         for channel in 1...2 {
-            XCTAssertEqual(curved.rgba[channel].bitPattern, base.rgba[channel].bitPattern,
-                           "channel \(channel) moved when only R had a curve")
+            let d = abs(Float(curved.rgba[channel]) - Float(base.rgba[channel]))
+            print(String(format: "062 channel %d: |Δ| %.6f (budget %.6f, ΔR %.6f)",
+                         channel, d, 0.1246 * dR + 4.9e-4, dR))
+            XCTAssertLessThanOrEqual(d, 0.1246 * dR + 4.9e-4,
+                                     "channel \(channel) moved by more than the S4 matrix explains")
         }
         XCTAssertNotEqual(curved.rgba[0].bitPattern, base.rgba[0].bitPattern,
                           "the R curve must actually change R")

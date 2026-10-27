@@ -251,6 +251,37 @@ final class CurveMatteTests: XCTestCase {
     /// Acceptance ③: the neutral document is untouched by the guard. These are the hashes measured
     /// **before** `CurveParams.b` existed; the identity branch already wrote the matte through, so
     /// the bytes must not move — a change here would mean the guard leaked into the content path.
+    ///
+    /// ── 075 re-recorded all three, and it is the primaries switch, not this file ────────────────
+    /// The three constants are hashes of the **rendered frame** (`graph.render(…).display`, sha256
+    /// over the rgba16Float bytes), not of a matte value — the matte is asserted as an exact 0
+    /// elsewhere in this file (`testCurveLeavesTheMatteAtExactlyZero`, which still passes), and every
+    /// matte pixel here is byte-identical to the pre-075 frame (measured: 0 of the bar pixels moved).
+    /// The picture moved because the working space became linear Rec.2020: the frame is now
+    /// decode(sRGB) → S0's exit matrix → Rec.2020 → S4's matrix → sRGB instead of a pass-through.
+    ///
+    /// The ablation is exact: with `ColorPrimaries.working` temporarily set back to `.sRGB` — S0's
+    /// matrix then takes `primariesMatrix`'s `source == target` identity branch and S4's `p.a.x` flag
+    /// is 1, i.e. the pre-075 arithmetic — these same three renders reproduce the **old constants bit
+    /// for bit** (`0487f109…`, `eab59159…`, `d39f90c6…`). Nothing else in the batch touches them.
+    ///
+    /// How far the picture moved, old frame vs new, per channel value (this is the whole magnitude):
+    ///
+    /// ```
+    /// canvas 480×320    max |Δ| 0.1245 codes; 2464/460800 values differ (0.53 %), none by ≥0.5 codes
+    /// pillarbox 640×320 max |Δ| 0.1245 codes;  896/460800 values differ (0.19 %), none by ≥0.5 codes
+    /// letterbox 480×420 max |Δ| 0.1245 codes;  896/460800 values differ (0.19 %), none by ≥0.5 codes
+    /// matte             max |Δ| 0.0000 codes;    0/51200 and 0/48000 bar pixels moved, all still exact 0
+    /// ```
+    ///
+    /// 0.1245 codes is one float16 ULP at these levels — the other 99.5 % of the frame's channel values
+    /// come back byte-identical. The ramp is synthetic neutral grey in [0.015, 0.99] with no sub-black,
+    /// so nothing here is clipped — this is the round trip's storage and nothing else (compare
+    /// `RenderTests.testNeutralRenderIsDecodePlusOETF`, where the 0.89 % of that fixture's pixels
+    /// *below* black move by up to 4 codes because the clip happens in the working cube now). The
+    /// curve render's content bytes did not move at all: `testCurveContentPixelsAreUnchanged` still
+    /// matches its 030-era constants (`11578fbd…`), so the half-ULP flips live in the uncurved
+    /// pass-through, not in the LUT path.
     func testIdentityCurveHashesAreUnchanged() throws {
         let graph = try makeGraph(rampImage())
         let neutral = EditModel.neutral
@@ -325,9 +356,28 @@ final class CurveMatteTests: XCTestCase {
 
     // MARK: - measured-once constants
     //
-    // The three identity hashes were recorded **before** any content guard existed and have not moved
-    // since: the identity branch writes the pixel through, so the reorder of 派单 030 (curve from S3
-    // to S1.7) is invisible to them — that is the strongest pixel claim in this file, and it holds.
+    // The three identity hashes were recorded **before** any content guard existed and did not move for
+    // 派单 030 (curve from S3 to S1.7): the identity branch writes the pixel through, so a reorder of
+    // the curve is invisible to them — that is the strongest pixel claim in this file, and it held.
+    //
+    // They **were re-recorded once**, for 075, and the cause is not this file: the working space became
+    // linear Rec.2020, so the neutral frame is now decode(sRGB) → S0's exit matrix → Rec.2020 → S4's
+    // matrix → sRGB instead of a pass-through. The evidence, in the order it was measured:
+    //
+    //   · **what moved is the rendered frame, not a matte value.** These are `DisplayImage.sha256()`
+    //     over rgba16Float bytes from `graph.render(…).display`; the matte is pinned as an exact 0 by
+    //     `testCurveLeavesTheMatteAtExactlyZero`, which did not move, and 0 of the bar pixels differ
+    //     between the old and the new frame (measured below).
+    //   · **nothing else in the batch touches them.** With `ColorPrimaries.working` set back to `.sRGB`
+    //     — i.e. the pre-075 arithmetic, where S0's matrix takes the `source == target` identity branch
+    //     and S4's `p.a.x` flag is 1 — these three renders reproduce `0487f109…` / `eab59159…` /
+    //     `d39f90c6…` bit for bit.
+    //   · **the movement is one half-float ULP.** Old frame vs new, per channel value: max |Δ| =
+    //     0.1245 of an 8-bit code on all three, i.e. 2464/460800 (0.53 %) and 896/460800 (0.19 %,
+    //     twice) of the channel values differ at all, **no value moves by ≥0.5 codes**, and every matte
+    //     pixel is byte-identical. Nothing here is clipped (the ramp is grey in [0.015, 0.99], no
+    //     sub-black), so this is the round trip's storage and only that. The curve render's content
+    //     bytes did not move at all — the two curve hashes below still match their 030-era values.
     //
     // The two curve hashes were re-recorded for 030 because the fixture curve is now expressed in the
     // axis coordinate (`CurvePoint(u: 0, v: 0.3)`, see `liftedBlackCurve`): the *same* control points no
@@ -335,13 +385,12 @@ final class CurveMatteTests: XCTestCase {
     // for 044 (the axis's right end went +6 → +4 EV) and again for 062 (the axis became the
     // histogram's: SDR white at u = 0.5000 instead of 0.7500, so `(0, 0.3)` is display code 0.60 —
     // a bigger lift than either earlier axis gave it). Same change of meaning, not a regression: the
-    // *identity* hashes above still have not moved by one bit, and the two boxes still hash the same
-    // picture. The structure being pinned did not change — content moved, matte did not. Not goldens
-    // on disk; nothing needs re-recording elsewhere.
+    // two boxes still hash the same picture. The structure being pinned did not change — content moved,
+    // matte did not. Not goldens on disk; nothing needs re-recording elsewhere.
 
-    private static let neutralCanvasHash = "0487f109112b48233dce485d843610dd1dfae7884e307533bb7baa0bf18437bb"
-    private static let neutralPillarboxHash = "eab59159b31e72b4fc223fce364c44e67c025db96e09015c739780371d52795a"
-    private static let neutralLetterboxHash = "d39f90c648b367c2042b882e84733a56a3db65d7f364e1e04d92b668efc1e3a5"
+    private static let neutralCanvasHash = "dba62bded02712527ae771932085f196f47fb857f2fcf942b82b9b1781c36943"   // was 0487f109… before 075
+    private static let neutralPillarboxHash = "3d444bea2aecffdf1674a4b6ebe2333298f9cefefaa0319ae7eca21ad8736102" // was eab59159… before 075
+    private static let neutralLetterboxHash = "abae91ed8984304e0c8173c8322e1c318f0837fb39e88692f2d09f3f538b9547" // was d39f90c6… before 075
     private static let curveContentPillarboxHash = "11578fbde7911dea8aa6807241329531941c626284c1e06cd091c8c0111d8e68"
     private static let curveContentLetterboxHash = "11578fbde7911dea8aa6807241329531941c626284c1e06cd091c8c0111d8e68"
 }

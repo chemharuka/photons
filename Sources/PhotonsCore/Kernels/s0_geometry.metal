@@ -29,6 +29,26 @@ using namespace metal;
 // red and blue are sampled at a radius scaled by `1 + α` about the source centre (`p.g`, `p.e.z`).
 // No second stage, no second texture — the three samples are of the same pixel, which is the whole
 // reason this belongs here rather than after S1.
+//
+// ── 075: the **exit matrix** (decoded primaries → working primaries) ─────────────────────────────
+// The decoder still writes linear **sRGB** (`RAWDecoder`'s `extendedLinearSRGB`, cache key and all),
+// and every stage after this one is defined in the graph's working primaries — `ColorPrimaries.working`,
+// Rec.2020 since 075. So the conversion is one 3×3 at this stage's exit, applied to every
+// photograph-carrying write below. Background writes stay `float4(0)` (the matrix maps 0 to 0, and
+// the matte is not a colour).
+//
+// Two properties the pixels depend on:
+//   · **Neutral content is unchanged.** The matrix is a white-point-preserving convex combination
+//     (row sums 1, all coefficients ≥ 0), so `r = g = b = v` comes out `(v, v, 0.9999994v)` in
+//     float32 — 6e-7, against a Float16 step of 2.4e-4 at 0.18. Same half code, bit for bit.
+//   · **The fast paths keep their meaning.** The identity copy and the pure-CA path are fast because
+//     they avoid *resampling*; they are not "no arithmetic", and the matrix runs on both (as does the
+//     general path). A tl;dr for the next reader: there is no branch here that skips the matrix.
+//
+// It arrives as a **uniform**, not as nine literals, so the numbers have exactly one source of truth
+// (`ColorPrimaries.conversion`), and it is a *separate* buffer rather than a field of `S0Params`: that
+// struct is 112 bytes and pinned on both sides by `ChromaticAberrationTests` (a wrong size reads the
+// wrong uniform and does not fail, so the pin is worth more than the 64 bytes).
 struct S0Params {
     float4 a;   // canvasSize.xy, contentOrigin.xy
     float4 b;   // contentSize.xy, srcSize.xy
@@ -59,6 +79,14 @@ static inline float4 sample_bilinear(texture2d<float, access::read> src,
     return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
 }
 
+// The 075 exit matrix, applied to a photograph texel. Alpha rides through untouched: it is the
+// matte/coverage channel (`s2_tone_map` reads `c.a == 0` as "no photograph here"), not colour.
+// `m` is column-major, as Metal and `simd_float4x4` both are; `RenderGraph` feeds it from
+// `ColorPrimaries.conversion(from: .sRGB, to: .working)`, transposed once at the call site.
+static inline float4 to_working_primaries(float4 c, constant float4x4 &m) {
+    return float4((m * float4(c.rgb, 0.0)).xyz, c.a);
+}
+
 // Two entry points, like `s1_scene_linear` (071) and for the same reason — **byte identity on the
 // path that does not rotate**. Rotating in pixels (the cropfix) means the mapping is
 // `(uv − ½)·frameSize → R(θ) → ÷ frameSize + ½`, and at θ = 0 that round trip is *not* the identity
@@ -84,6 +112,7 @@ template <bool HAS_ROTATION>
 static inline void s0_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S0Params &p,
+                           constant float4x4 &primaries,
                            uint2 gid) {
     int2 canvas = int2(p.a.xy);
     if (int(gid.x) >= canvas.x || int(gid.y) >= canvas.y) { return; }
@@ -91,8 +120,12 @@ static inline void s0_body(texture2d<float, access::read> src,
 
     // Identity: crop is full, no rotation, no flip, canvas == source, whole frame. Copy texel-for-
     // texel so the neutral path stays bit-exact (the determinism and identity tests depend on it).
+    // The exit matrix still runs — "identity" is about the *sampling*, not about the colour space —
+    // and it is exactly why neutral content stays bit-exact: the matrix maps `(v,v,v)` to itself in
+    // Float16 (see the header).
     if (p.e.x > 0.5) {
-        dst.write(src.read(uint2(clamp(int2(gid), int2(0), srcSize - 1))), gid);
+        dst.write(to_working_primaries(src.read(uint2(clamp(int2(gid), int2(0), srcSize - 1))),
+                                       primaries), gid);
         return;
     }
 
@@ -127,7 +160,7 @@ static inline void s0_body(texture2d<float, access::read> src,
         float4 green = src.read(uint2(gid));
         float4 red = sample_bilinear(src, axis + d * (1.0 + p.g.x), srcSize);
         float4 blue = sample_bilinear(src, axis + d * (1.0 + p.g.y), srcSize);
-        dst.write(float4(red.r, green.g, blue.b, green.a), gid);
+        dst.write(to_working_primaries(float4(red.r, green.g, blue.b, green.a), primaries), gid);
         return;
     }
 
@@ -174,7 +207,7 @@ static inline void s0_body(texture2d<float, access::read> src,
     // come from a scaled radius. With both α at zero it is exactly the old single sample: that branch
     // is cold for every document that has never touched the sliders.
     if (p.g.x == 0.0 && p.g.y == 0.0) {
-        dst.write(sample_bilinear(src, px, srcSize), gid);
+        dst.write(to_working_primaries(sample_bilinear(src, px, srcSize), primaries), gid);
         return;
     }
     float4 green = sample_bilinear(src, px, srcSize);
@@ -182,7 +215,7 @@ static inline void s0_body(texture2d<float, access::read> src,
     float2 d = px - axis;
     float4 red = sample_bilinear(src, axis + d * (1.0 + p.g.x), srcSize);
     float4 blue = sample_bilinear(src, axis + d * (1.0 + p.g.y), srcSize);
-    dst.write(float4(red.r, green.g, blue.b, green.a), gid);
+    dst.write(to_working_primaries(float4(red.r, green.g, blue.b, green.a), primaries), gid);
 }
 
 // The default path — no rotation in the code at all, so the crop/scale/flip mapping is the one 029
@@ -190,14 +223,16 @@ static inline void s0_body(texture2d<float, access::read> src,
 kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
                         texture2d<float, access::write> dst [[texture(1)]],
                         constant S0Params &p [[buffer(0)]],
+                        constant float4x4 &primaries [[buffer(1)]],
                         uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false>(src, dst, p, gid);
+    s0_body<false>(src, dst, p, primaries, gid);
 }
 
 // The same body with the pixel-space turn compiled in. Picked only for a straightened document.
 kernel void s0_geometry_rot(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             constant S0Params &p [[buffer(0)]],
+                            constant float4x4 &primaries [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true>(src, dst, p, gid);
+    s0_body<true>(src, dst, p, primaries, gid);
 }

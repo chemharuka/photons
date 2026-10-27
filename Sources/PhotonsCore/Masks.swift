@@ -406,12 +406,41 @@ public enum OKLabMetric {
         return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
     }
 
-    /// Linear sRGB (the graph's working space) → OKLab.
+    /// Linear **working primaries** (Rec.2020 since 075) → OKLab.
+    ///
+    /// **075 §2.2.** The nine numbers used to be Ottosson's *sRGB* LMS matrix
+    /// (`0.4122214708, 0.5363325363, 0.0514459929, …`), which was right while the graph's working
+    /// space was linear sRGB and is a silent colour error now that it is Rec.2020: the same
+    /// coefficients applied to Rec.2020 codes fold the *wrong* light. Measured on a saturated red,
+    /// the error is **0.1252** in OKLab against a `chromaSpan` of 0.4 — 31 % of the tolerance span,
+    /// gradually wrong, and invisible in a golden.
+    ///
+    /// It is derived, not copied: `M1 · toXYZ(ColorPrimaries.working)`, i.e. Ottosson's normative
+    /// LMS matrix times the working primaries' own RGB→XYZ. The kernel's copy
+    /// (`s1_5_mask_atlas.metal`) has the resulting nine literals, and three tests hold the pair
+    /// together: the CPU/GPU agreement test, and the two fixed-coverage tests, whose expected values
+    /// are what a *correct* fold produces for known sRGB colours. Base invariance is the property
+    /// being preserved: a correct fold gives the same OKLab for the same physical colour whichever
+    /// base the numbers are written in, so the metric stays comparable with 005c/056's measurements.
+    public static let lmsFold: Matrix3 = {
+        let ottossonLMS = Matrix3(rows: [[0.8189330101, 0.3618667424, -0.1288597137],
+                                        [0.0329845436, 0.9293118715, 0.0361456387],
+                                        [0.0482003018, 0.2643662691, 0.6338517070]])
+        // Rows normalised to sum to 1, exactly as Ottosson's published sRGB matrix is: white
+        // `(1,1,1)` is the LMS triple of D65 and must fold to `L = 1, a = b = 0`, not to 0.999999.
+        // (`MaskTests.testOKLabMetricMatchesPublishedValues` pins that at 1e-6.)
+        let m = ottossonLMS * ColorPrimaries.working.toXYZ
+        let s = m.rowSums
+        return Matrix3(rows: (0..<3).map { r in (0..<3).map { c in m[r, c] / s[r] } })
+    }()
+
+    /// Linear working primaries → OKLab.
     public static func fromLinear(_ r: Double, _ g: Double, _ b: Double)
         -> (L: Double, a: Double, b: Double) {
-        let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
-        let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
-        let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+        let f = lmsFold
+        let l = f[0, 0] * r + f[0, 1] * g + f[0, 2] * b
+        let m = f[1, 0] * r + f[1, 1] * g + f[1, 2] * b
+        let s = f[2, 0] * r + f[2, 1] * g + f[2, 2] * b
         let l_ = cbrt(max(l, 0)), m_ = cbrt(max(m, 0)), s_ = cbrt(max(s, 0))
         return (L: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
                 a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
@@ -419,9 +448,16 @@ public enum OKLabMetric {
     }
 
     /// sRGB-encoded 0…1 (the storage space of `ColorRangeShape.samples`) → OKLab.
+    ///
+    /// The decode lands in linear sRGB, so the sRGB → working conversion runs here, once per stored
+    /// sample: a picked colour is an sRGB triple by contract (the picker reads display codes) and the
+    /// metric is defined on the working space.
     public static func fromSRGB(_ r: Double, _ g: Double, _ b: Double)
         -> (L: Double, a: Double, b: Double) {
-        fromLinear(sRGBToLinear(r), sRGBToLinear(g), sRGBToLinear(b))
+        let toWorking = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
+        let v = SIMD3(sRGBToLinear(r), sRGBToLinear(g), sRGBToLinear(b))
+        let w = toWorking.applying(to: v)
+        return fromLinear(w.x, w.y, w.z)
     }
 
     /// Distance in the normalised metric space, i.e. what the colour range compares against its

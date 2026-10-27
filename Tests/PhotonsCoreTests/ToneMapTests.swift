@@ -1,6 +1,6 @@
 import XCTest
 import Metal
-import PhotonsCore
+@testable import PhotonsCore
 
 /// 派单 008 — the two things the Light panel's black/white controls got wrong.
 ///
@@ -656,7 +656,10 @@ private struct S2KernelHarness {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/PhotonsCore/Kernels/s2_tone_map.metal")
-        let source = try String(contentsOf: url, encoding: .utf8)
+        // Through the same include expander the product uses: `s2_tone_map.metal` asks for
+        // `primaries.metal` (the working-space luma weights, 075), and `makeLibrary(source:)` has no
+        // include search path of its own.
+        let source = try KernelLibrary.expandingLocalIncludes(of: url)
         let library = try device.makeLibrary(source: source, options: nil)
         let fn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map"))
         self.device = device
