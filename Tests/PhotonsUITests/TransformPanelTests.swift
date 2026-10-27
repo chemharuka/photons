@@ -50,8 +50,9 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop"])
         // 调整工作区不受影响：裁切是它自己的工作区的卡片。
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("裁切"))
-        // 蒙版仍是枚举里的最后一张（`DecoderModelCardTests` 也钉这一条）。
-        XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
+        // 077（2026-10-28）：历史记录排在枚举末尾；蒙版仍是它前面最后一张参数卡
+        // （`DecoderModelCardTests` 也钉这一条）。
+        XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
 
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
