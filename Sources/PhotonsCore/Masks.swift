@@ -1155,7 +1155,10 @@ public enum MaskSourceFrame {
 /// The kernel walks this backwards (`source_uv` in `s1_5_mask_atlas.metal`); the bounds code needs
 /// the forward direction, and if the two disagree by a sign a mask's dirty rectangle lands on the
 /// wrong side of a rotated frame — invisible on an uncropped, unrotated test and wrong everywhere
-/// else. `testMaskBoundsInvertTheS0Mapping` pins them against each other.
+/// else. `MaskRotationPixelsTests.testMaskCanvasMappingTurnsPixels` pins them against each other
+/// (including *which space* the turn happens in — a bounds map that shears in step with a shearing
+/// kernel agrees with it and is worth nothing, which is exactly how the atlas's normalised turn
+/// survived 073).
 public struct MaskCanvasMapping: Sendable, Equatable {
     public var source: ImageSize
     public var content: ImageSize
