@@ -35,11 +35,20 @@ using namespace metal;
 //     everything that is not photograph with 0), then the content rect for a window whose rect
 //     covers the canvas. `(0, 0.3)` in u is 0.054 in linear — 0.26 in display units — so without
 //     the guards the letterbox would be a grey band.
-//  3. **`x ≤ 0` passes through, sign preserved** (派单 018). log of a negative is undefined, and
-//     the decoder delivers sub-black detail (measured min −0.039). Those samples are S2's business
-//     (its `max(v, 0)`), exactly as before; the curve may not delete them. A consequence worth
-//     stating: a *exactly* zero input can never be lifted by the curve, because it takes this
-//     branch — the matte's 0 and a true-black pixel's 0 both come out 0.
+//  3. **`x ≤ 0` passes through, sign preserved** (派单 018) — **while the curve starts at zero
+//     light**. log of a negative is undefined, and the decoder delivers sub-black detail (measured
+//     min −0.039). Those samples are S2's business (its `max(v, 0)`), exactly as before; the curve
+//     may not delete them. A consequence worth stating: a *exactly* zero input can never be lifted by
+//     the curve, because it takes this branch — the matte's 0 and a true-black pixel's 0 both come
+//     out 0.
+//
+//     **The one exception is a raised black point (派单 061).** The user can move the first control
+//     point right in x, and `CurveLUT.buildOne` then holds a constant left of it: everything below
+//     `first.x` maps to `first.y`. That clip has to include the negatives, or "raise the black point"
+//     would crush the shadows and spare the sub-black — a clip with a hole in it. So `p.e` carries
+//     each table's `first.x` and the pass-through is taken only when it is 0. Two cases, both
+//     asserted (`HDRCurveTests`, `CurvePanelTests`): `first.x == 0` → 018 intact; `first.x > 0` →
+//     clipped, like Lightroom.
 //  4. **`u > 1` continues at the last segment's slope, never clamped.** `slope` is derived from the
 //     table's last two entries `(lut[N-1] − lut[N-2]) · (N-1)`, which is exactly 1 for the identity
 //     table, so identity is identity above +4 EV too: the f32 round trip over 1e-6…64 (64 is
@@ -74,6 +83,11 @@ struct HDRCurveParams {
     // then **stops per unit u** (`K/ln 2` = 16.0000220). A future colour basis change is one number
     // on the CPU side, not a kernel edit.
     float4 d;
+    // blackU of each table — W, R, G, B — i.e. the x of that curve's first control point (派单 061).
+    // 0 = the curve starts at zero light and rule 3 passes sub-black through; > 0 = a raised black
+    // point, and everything below it (negatives included) is the table's constant. Per table because
+    // the four curves are independent: a black point moved on R must not touch G or B.
+    float4 e;
 };
 
 static inline float hdr_lut(device const float *lut, int offset, int n, float u) {
@@ -111,9 +125,17 @@ static inline float hdr_inverse(float u, float x0, float K) {
 }
 
 /// One channel through its table, with rules 3 and 4.
+///
+/// `blackU` is this table's black point (`p.e`): rule 3's pass-through is taken only when the curve
+/// still starts at zero light. With a raised black point the sampler's `u = 0` entry *is* the clip's
+/// output — `hdr_lut` at `u = 0` returns `lut[offset]`, which `CurveLUT.buildOne` set to `first.y` —
+/// so the negatives land on exactly the same value as the shadow band above them.
 static inline float hdr_channel(float x, device const float *lut, int offset, int n,
-                                float slope, float x0, float K) {
-    if (x <= 0.0) { return x; }                       // rule 3: sub-black detail, sign preserved
+                                float slope, float x0, float K, float blackU) {
+    if (x <= 0.0) {
+        if (blackU <= 0.0) { return x; }              // rule 3: sub-black detail, sign preserved
+        return hdr_inverse(hdr_lut(lut, offset, n, 0.0), x0, K);   // 061: the black clip
+    }
     float u = hdr_forward(x, x0, K);
     float v = hdr_lut(lut, offset, n, u) + max(u - 1.0, 0.0) * clamp(slope, 0.0, 1.0);
     return hdr_inverse(v, x0, K);
@@ -151,6 +173,11 @@ kernel void s1_7_hdr_curve(texture2d<float, access::read> src [[texture(0)]],
     float3 v = c.rgb;
 
     // W: one exposure offset for the whole pixel, so hue and saturation survive it.
+    //
+    // A raised black point on W (`p.e.x > 0`) needs no branch here: the table's `0…first.x` segment is
+    // a constant, and a constant on a *gain* curve is one gain value — every luma below the black point
+    // gets the same output u. `y ≤ 0` is not that case at all: a non-positive luma has no `u`, so
+    // there is no curve to consult and no gain to apply (018's sub-black band, untouched).
     float y = dot(max(c.rgb, float3(0.0)), p.d.xyz);
     if (y > 0.0) {
         float uy = hdr_forward(y, x0, K);
@@ -167,9 +194,9 @@ kernel void s1_7_hdr_curve(texture2d<float, access::read> src [[texture(0)]],
     }
 
     // R, G, B: separable, so a curve on R cannot move G or B by even one bit.
-    v.r = hdr_channel(v.r, lut, n, n, p.c.y, x0, K);
-    v.g = hdr_channel(v.g, lut, 2 * n, n, p.c.z, x0, K);
-    v.b = hdr_channel(v.b, lut, 3 * n, n, p.c.w, x0, K);
+    v.r = hdr_channel(v.r, lut, n, n, p.c.y, x0, K, p.e.y);
+    v.g = hdr_channel(v.g, lut, 2 * n, n, p.c.z, x0, K, p.e.z);
+    v.b = hdr_channel(v.b, lut, 3 * n, n, p.c.w, x0, K, p.e.w);
 
     dst.write(float4(v, c.a), gid);
 }

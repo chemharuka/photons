@@ -98,7 +98,41 @@ public enum CurveLUT {
         return (table[table.count - 1] - table[table.count - 2]) * Float(table.count - 1)
     }
 
+    /// The **black point** of each table — its first control point's x after `buildOne`'s own
+    /// normalisation — in buffer order (W, R, G, B). 0 means "this curve starts at zero light".
+    ///
+    /// This is the one number the kernel cannot read out of the table (`061`). Rule 3 of
+    /// `s1_7_hdr_curve.metal` passes `x ≤ 0` through with its sign (018's sub-black detail) — but that
+    /// is only right while the curve still *starts* at `u = 0`. Once the first point sits at 0.2, the
+    /// table's `0…0.2` segment is a constant: the black point has been raised, and a raised black point
+    /// that spared the negatives would be a clip with a hole in it. So the kernel gets `first.x` per
+    /// table and takes the pass-through branch only when it is 0. See `HDRCurve.channel`.
+    ///
+    /// `min` over the clamped xs, not `sorted().first` on the raw doubles: it is the same point
+    /// `buildOne` starts from (it clamps then sorts), and an empty list answers 0 = no clip, which is
+    /// the identity.
+    public static func blackPoints(_ group: CurveGroup) -> [Float] {
+        group.tables.map { points in
+            let xs = points.map { min(max($0.x, 0), 1) }
+            return Float(xs.min() ?? 0)
+        }
+    }
+
     /// One table from control points: normalise, then Fritsch–Carlson, then **enforce** monotonicity.
+    ///
+    /// **The two ends are constants, not extrapolations (061).** A point list need not start at `x = 0`
+    /// or end at `x = 1`: `x` left of the first point answers `first.y`, and `x` right of the last
+    /// answers `last.y`. That is what makes a movable endpoint mean what the user expects — the first
+    /// point's x **is** the black point (everything below it crushed to one output), the last point's
+    /// x **is** the white point. Both references agree, from opposite ends of their pipelines:
+    /// `RapidRAW src-tauri/src/shaders/shader.wgsl:438-441` (`if (x <= first.x) { return first.y / 255; }`
+    /// / `if (x >= last.x) { return last.y / 255; }`) and `LightCraft crates/color/src/spline.rs:58-65`
+    /// (`x <= xs[0] → ys[0]`, `x >= xs[n-1] → ys[n-1]`). A linear extrapolation would instead keep
+    /// rising below the black point — i.e. invent detail the clip is there to remove.
+    ///
+    /// The identity is *inside* this rule, not a special case: `[(0,0), (1,1)]` has its first point at
+    /// 0 and its last at 1, so there is no constant segment at all and the table is `i/(N−1)` to the
+    /// last bit (`HDRCurveTests` and `CurvePanelTests` compare the arrays, not a tolerance).
     ///
     /// Layer 2 of §5.4: Fritsch–Carlson guarantees the *interpolant* is monotone between monotone
     /// data, but a user can still hand us y values that go down (the editor forbids it, documents do

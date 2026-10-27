@@ -110,19 +110,38 @@ public enum HDRCurve {
     }
 
     /// One channel through one table — `hdr_channel` in the kernel.
-    public static func channel(_ x: Double, table: [Float], slope: Float) -> Double {
-        if x <= 0 { return x }
+    ///
+    /// `blackPoint` is the table's first control point's x (`CurveLUT.blackPoints`), and it decides
+    /// **which of 061's two sub-black cases** applies:
+    ///
+    ///   · `0` — the curve starts at zero light, so `x ≤ 0` passes through bit for bit (018: the
+    ///     decoder's measured min is −0.039 and the curve may not delete it);
+    ///   · `> 0` — the black point has been raised: `x ≤ 0` lands on the table's `u = 0` entry, which
+    ///     is `first.y`, exactly the value every positive sample below `first.x` already gets. One
+    ///     constant for the whole segment, negatives included.
+    public static func channel(_ x: Double, table: [Float], slope: Float,
+                               blackPoint: Double = 0) -> Double {
+        if x <= 0 {
+            guard blackPoint > 0, table.count >= 2 else { return x }
+            return axis.inverse(lutValue(table, slope: slope, u: 0))
+        }
         return axis.inverse(lutValue(table, slope: slope, u: axis.forward(x)))
     }
 
     /// A whole pixel: W first (a luma gain, hue-preserving), then R/G/B (separable).
     ///
     /// `tables` is the 4 × `CurveLUT.size` layout the GPU buffer has: W, R, G, B.
+    /// `blackPoints` is `CurveLUT.blackPoints` in the same order; the default (all zero) is the
+    /// pre-061 behaviour, i.e. every curve starting at zero light.
     public static func pixel(_ rgb: (Double, Double, Double), tables: [Float],
-                             slopes: [Float]? = nil) -> (Double, Double, Double) {
+                             slopes: [Float]? = nil,
+                             blackPoints: [Float]? = [0, 0, 0, 0]) -> (Double, Double, Double) {
         let n = CurveLUT.size
         guard tables.count == CurveLUT.tableCount * n else { return rgb }
         let s = slopes ?? CurveLUT.slopes(tables)
+        // Where each curve's black point sits (061): 0 = starts at zero light, > 0 = a raised black
+        // point, which turns `x ≤ 0` from a pass-through into the table's own constant.
+        let black = blackPoints ?? [0, 0, 0, 0]
         // Sliced, not passed whole: `lutValue` takes its length from the table it is handed, so a
         // whole 4-table buffer would interpolate across table boundaries.
         let w = Array(tables[0..<n]), r = Array(tables[n..<2 * n]), g = Array(tables[2 * n..<3 * n]),
@@ -137,9 +156,9 @@ public enum HDRCurve {
             let gain = pow(2, dv)
             rr *= gain; gg *= gain; bb *= gain
         }
-        return (channel(rr, table: r, slope: s[1]),
-                channel(gg, table: g, slope: s[2]),
-                channel(bb, table: b, slope: s[3]))
+        return (channel(rr, table: r, slope: s[1], blackPoint: Double(black[1])),
+                channel(gg, table: g, slope: s[2], blackPoint: Double(black[2])),
+                channel(bb, table: b, slope: s[3], blackPoint: Double(black[3])))
     }
 
     /// The exposure offset the W curve asks for at luma `y`, in stops. What the curve panel prints.

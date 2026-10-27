@@ -500,6 +500,124 @@ final class HDRCurveTests: XCTestCase {
         }
     }
 
+    // MARK: - ⑧b (061) a raised black point is a clip — in the table and in the pixels
+
+    /// 061 ①：首端点右移到 `u = 0.2` → 表里 `u < 0.2` 是常量，渲染上整段暗部被压到**同一个**输出。
+    ///
+    /// `u = 0.2` 是 `x = x0·expm1(0.2·K) ≈ 2.0e-3`，所以下面五个输入都在段内。三条通道给同一条曲线，
+    /// 灰色带因此整段变成同一个灰值 —— 相等是像素级的，不是"红通道大致相同"。
+    /// **反证**：同一条曲线把首点放回 0（051 只能画出的形状），同样的五个输入是斜坡，不是常量。
+    func testRaisedBlackPointFlattensTheShadowFootToOneValueInPixels() throws {
+        let axis = HDRCurve.axis
+        let edge = axis.inverse(0.2)
+        print(String(format: "061 black point: u = 0.2 ↔ x = %.6f linear（段内输入都在它下面）", edge))
+        XCTAssertGreaterThan(edge, 1.5e-3, "1.5e-3 必须真的在 u = 0.2 以下")
+
+        let below: [Float] = [8e-5, 2e-4, 5e-4, 1e-3, 1.5e-3]
+        let above: [Float] = [4e-3, 0.02, 0.18, 1.0]
+        let values = below + above
+        let graph = try makeGraph(bands(values))
+
+        let raised: [CurvePoint] = [CurvePoint(0.2, 0.3), CurvePoint(0.6, 0.5), CurvePoint(1, 1)]
+        var edit = EditModel.neutral
+        edit.curve.red = raised
+        edit.curve.green = raised
+        edit.curve.blue = raised
+        let out = bandValues(try render(graph, edit), count: values.count)
+
+        let flat = Set(out.prefix(below.count))
+        XCTAssertEqual(flat.count, 1, "u < 0.2 的每个输入都必须映射到同一个输出，实际 \(flat.sorted())")
+        XCTAssertEqual(out[0], out[below.count - 1], "段的两端也必须相等")
+        // 不是"整张图变黑"：段外仍在上升，且被裁到的那个值确实抬高了暗部
+        XCTAssertGreaterThan(out[below.count + 1], out[below.count], "0.2 之上必须还在上升")
+
+        // 整帧的 min/max/mean：暗部的下限被抬到那个常量上，均值随之上升 —— "压平"看得见
+        let clippedImage = try render(graph, edit)
+        let neutralImage = try render(graph, .neutral)
+        func stats(_ img: DisplayImage) -> (min: Float, max: Float, mean: Double) {
+            var lo = Double.greatestFiniteMagnitude, hi = -Double.greatestFiniteMagnitude
+            var sum = 0.0
+            let n = img.width * img.height
+            for i in 0..<n {
+                let v = Double(img.rgba[i * 4])
+                lo = min(lo, v); hi = max(hi, v); sum += v
+            }
+            return (Float(lo), Float(hi), sum / Double(max(n, 1)))
+        }
+        let clippedStats = stats(clippedImage), neutralStats = stats(neutralImage)
+        XCTAssertGreaterThan(clippedStats.min, neutralStats.min, "最暗的像素必须被抬起来（裁到 first.y）")
+        XCTAssertEqual(clippedStats.min, out[0], accuracy: 1e-5, "整帧最暗值 == 段内的常量")
+        print(String(format: "061 frame min/max/mean: neutral %.4f/%.4f/%.4f → 抬黑点 %.4f/%.4f/%.4f",
+                     neutralStats.min, neutralStats.max, neutralStats.mean,
+                     clippedStats.min, clippedStats.max, clippedStats.mean))
+
+        // **反证**：051 的形状（首点钉在 0），同样的五个输入是斜坡
+        var pinned = EditModel.neutral
+        let pinnedCurve: [CurvePoint] = [CurvePoint(0, 0), CurvePoint(0.6, 0.5), CurvePoint(1, 1)]
+        pinned.curve.red = pinnedCurve
+        pinned.curve.green = pinnedCurve
+        pinned.curve.blue = pinnedCurve
+        let pinnedOut = bandValues(try render(graph, pinned), count: values.count)
+        XCTAssertGreaterThan(Set(pinnedOut.prefix(below.count)).count, 1,
+                             "钉死的端点：暗部是斜坡，不是常量")
+
+        // 表与 CPU 参考说的是同一件事
+        let t = table(raised)
+        XCTAssertEqual(Set((0..<100).map { t[$0 * (Int(0.2 * Double(CurveLUT.size)) / 100)] }).count, 1,
+                       "表里 u < 0.2 的 100 个抽样全等")
+        XCTAssertEqual(HDRCurve.channel(1e-4, table: t, slope: CurveLUT.slope(of: t), blackPoint: 0.2),
+                       axis.inverse(Double(t[0])), accuracy: 1e-12)
+
+        print(String(format: "061 clip: 段内 5 个输入 → %d 个显示值（%.4f）；钉死则 %d 个（%.4f…%.4f）",
+                     flat.count, out[0], Set(pinnedOut.prefix(below.count)).count,
+                     pinnedOut[0], pinnedOut[below.count - 1]))
+    }
+
+    /// 061 ⑤：**两种 sub-black 情况**，一条都不许被"裁切"顺手删掉。
+    ///
+    ///   · `first.x == 0` → 018 的阶梯原样穿过（负值不动、0 不动）；
+    ///   · `first.x == 0.2` → 负值也落到表里 `u = 0` 的那个常量上：抬黑点是一次**裁切**，不是一次
+    ///     只对正值生效的暗部拉伸。
+    func testSubBlackIsClippedOnlyWhenTheBlackPointMoves() throws {
+        let values: [Float] = [-0.004, -0.003, -0.002, -0.001, 0.0, 0.001]
+        let graph = try makeGraph(bands(values))
+        let base = bandValues(try render(graph, .neutral), count: values.count)
+
+        // (a) 018：曲线起于零光 → 负值与 0 一个字节都不动
+        var startsAtZero = EditModel.neutral
+        startsAtZero.curve.white = [CurvePoint(0, 0.4), CurvePoint(1, 1)]
+        let atZero = bandValues(try render(graph, startsAtZero), count: values.count)
+        for i in 0..<5 {
+            XCTAssertEqual(atZero[i], base[i], "first.x == 0：band \(values[i]) 被动了（018 回归）")
+        }
+        XCTAssertGreaterThan(atZero[5], base[5], "正值那一带仍随曲线走")
+
+        // (b) 061：黑点右移到 0.2 → 整段（负值 + 0）裁到同一个常量
+        let lifted: [CurvePoint] = [CurvePoint(0.2, 0.3), CurvePoint(1, 1)]
+        var raised = EditModel.neutral
+        raised.curve.red = lifted
+        raised.curve.green = lifted
+        raised.curve.blue = lifted
+        let clipped = bandValues(try render(graph, raised), count: values.count)
+        XCTAssertEqual(Set(clipped.prefix(5)).count, 1,
+                       "负值与 0 必须是同一个输出（裁切不能有洞），实际 \(clipped.prefix(5))")
+        XCTAssertGreaterThan(clipped[0], base[0], "被裁到 first.y 的常量上，不是穿过去再被 S2 压成 0")
+
+        // CPU 参考：同一条规则，两种结果
+        let t = table(lifted)
+        let slope = CurveLUT.slope(of: t)
+        let clip = HDRCurve.axis.inverse(Double(t[0]))
+        for x in [-0.004, -0.001, 0.0] {
+            XCTAssertEqual(HDRCurve.channel(x, table: t, slope: slope, blackPoint: 0.2), clip,
+                           accuracy: 1e-12, "\(x) 必须等于常量 \(clip)")
+            XCTAssertEqual(HDRCurve.channel(x, table: t, slope: slope, blackPoint: 0), x,
+                           "反证：同一个表按 first.x == 0 走，\(x) 会原样穿过（两条路必须不同）")
+        }
+
+        print(String(format: "061 sub-black: 0 黑点 → 阶梯不动（%d 个值）；0.2 黑点 → 常量 %.5f",
+                     5, clipped[0]))
+    }
+
     // MARK: - ⑨ W is a luma gain
 
     /// A saturated pixel through a W-only curve keeps its hue: `r/g` and `b/g` are invariant, and a
@@ -688,6 +806,49 @@ final class HDRCurveTests: XCTestCase {
         crossed.light.blackLevel = 0.4
         crossed.light.whiteLevel = 0.4
         XCTAssertGreaterThanOrEqual(crossed.light.levels.white - crossed.light.levels.black, 1e-3)
+    }
+
+    /// 061 ③：**曲线端点和黑电平是两件事，顺序是先电平后曲线** —— 而且它们**不合并**。
+    ///
+    /// `light.blackLevel` 是 S1 的线性电平（019），`first.x` 是曲线域的裁切（061）。S1 在 S1.7 之前
+    /// （`RenderStage.order`），所以曲线看到的是**已经电平过的**值：黑电平 0.10 把 0.1011 压到 0.0012，
+    /// 而曲线黑点的裁切边是 `u = 0.2 ↔ x = 2.0e-3` —— 于是这一带正好被曲线裁成同一个值。
+    /// **反证**：黑电平归零时同样的输入在裁切边之上，曲线一个都不裁。
+    func testBlackLevelRunsBeforeTheCurveSoTheBlackPointSeesTheLevelledValue() throws {
+        let values: [Float] = [0.1011, 0.1012, 0.105, 0.15, 0.5]
+        let graph = try makeGraph(bands(values), identity: "curve-levels")
+
+        let lifted: [CurvePoint] = [CurvePoint(0.2, 0), CurvePoint(0.6, 0.45), CurvePoint(1, 1)]
+        var both = EditModel.neutral
+        both.light.blackLevel = 0.10          // +10 % of white, in S1's linear units
+        both.curve.red = lifted
+        both.curve.green = lifted
+        both.curve.blue = lifted
+        let out = bandValues(try render(graph, both), count: values.count)
+
+        // S1 first: 0.1011 → (0.1011 − 0.10)/0.9 = 1.2e-3, below the curve's 2.0e-3 edge → clipped.
+        XCTAssertEqual(out[0], 0, "S1 电平把它压到裁切边之下 → 曲线裁成 0")
+        XCTAssertEqual(out[1], 0)
+        XCTAssertGreaterThan(out[2], 0, "0.105 电平后仍高于裁切边，曲线不裁")
+        XCTAssertGreaterThan(out[3], out[2])
+        XCTAssertGreaterThan(out[4], out[3], "曲线仍单调")
+
+        // 反证：同一个曲线，黑电平归零 → 同样的输入全在裁切边之上，一个都不裁
+        var curveOnly = EditModel.neutral
+        curveOnly.curve.red = lifted
+        curveOnly.curve.green = lifted
+        curveOnly.curve.blue = lifted
+        let plain = bandValues(try render(graph, curveOnly), count: values.count)
+        XCTAssertGreaterThan(plain[0], 0.02, "没有电平，0.1011 远在 2.0e-3 之上 → 不裁")
+        XCTAssertNotEqual(plain[0], 0)
+
+        // 两条规则各自只脏自己那一级：电平整 S1，曲线整 S1.7 —— 谁也不是谁的别名
+        XCTAssertEqual(both.changedStages(from: curveOnly), [.sceneLinear])
+        XCTAssertEqual(curveOnly.changedStages(from: .neutral), [.curve])
+
+        print("061 levels+curve · blackLevel 0.10 + first.x 0.2: "
+              + out.map { String(format: "%.4f", $0) }.joined(separator: " ")
+              + " · 只有曲线: " + plain.map { String(format: "%.4f", $0) }.joined(separator: " "))
     }
 
     /// The fields are a level (S1), so they dirty exactly what the sliders do — and the curve dirties
