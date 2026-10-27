@@ -243,13 +243,21 @@ final class CropOverlayFollowTests: XCTestCase {
 
         // Four directions, 100 pt each, from the same camera: the picture has to move with the hand
         // (same sign, same distance) and the frame is a rect of the picture, so it travels with it.
+        //
+        // `scrollPan` normalises on `NSEvent.isDirectionInvertedFromDevice`, because that flag is what
+        // says whose direction the deltas are: with 「自然滚动」 on they already describe the **content**,
+        // with it off they describe the **device**, which is the other way round. A CGEvent carries the
+        // non-inverted form, so the expectation is `−delta` here — the distance is unchanged, and this
+        // loop is about the frame following the picture, not about which way round it is.
+        // `PanFollowTests.testScrollIsTheSameGestureWhicheverWayTheSystemIsSet` pins the direction
+        // itself, both ways round.
         let home = loupe.viewState
         var previous = try photoRect(loupe)
         var previousFrame = frameRect(try XCTUnwrap(loupe.cropOverlayLayoutForTesting))
-        for (name, dx, dy, expected) in [("left", Int32(-100), Int32(0), (-100.0, 0.0)),
-                                        ("right", Int32(100), Int32(0), (100.0, 0.0)),
-                                        ("up", Int32(0), Int32(-100), (0.0, -100.0)),
-                                        ("down", Int32(0), Int32(100), (0.0, 100.0))] {
+        for (name, dx, dy) in [("left", Int32(-100), Int32(0)),
+                               ("right", Int32(100), Int32(0)),
+                               ("up", Int32(0), Int32(-100)),
+                               ("down", Int32(0), Int32(100))] {
             // Back to the same camera before each direction, so "100 pt" is measured from a known place.
             loupe.zoom(to: 1, aroundView: CGPoint(x: 450, y: 300))
             loupe.panImage(byPoints: CGSize(width: -home.centerX + 1500, height: -home.centerY + 1000))
@@ -260,6 +268,8 @@ final class CropOverlayFollowTests: XCTestCase {
             guard let event = scrollEvent(deltaX: dx, deltaY: dy) else {
                 throw XCTSkip("this OS will not hand back a scroll NSEvent from a CGEvent")
             }
+            let sign: Double = event.isDirectionInvertedFromDevice ? 1 : -1
+            let expected = (Double(dx) * sign, Double(dy) * sign)
             loupe.canvasView.scrollWheel(with: event)
             CropUITestSupport.pump(0.01)
             let after = try photoRect(loupe)
