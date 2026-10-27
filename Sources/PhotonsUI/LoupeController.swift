@@ -1069,6 +1069,10 @@ public final class LoupeController: NSViewController {
             container.addSubview(overlay)
         }
         cropOverlay.isHidden = true
+        // The mask chrome belongs to the inspector's 蒙版 workspace, so it starts away — and
+        // `setMasksWorkspaceActive` is what puts it up (2026-10-27: 「退出蒙版菜单栏后应该隐藏」).
+        draftOverlay.isHidden = true
+        maskHandlesOverlay.isHidden = true
         // The tool strip. Above the overlays (it takes clicks), below the zoom pill (which stays the
         // topmost chrome), and hidden until 裁切 mode is on.
         container.addSubview(cropBar)
@@ -1553,6 +1557,14 @@ public final class LoupeController: NSViewController {
             // picture that is on screen right now. With no bridge the target geometry *is* the picture.
             syncCropOverlay(progress: bridging ? 0 : nil)
         }
+        // ③ (2026-10-27) — the mask chrome rides the **same** camera callback. A pan moves the picture
+        // on this line (no animation), so the grips and the rubber band are re-projected on this line;
+        // a stop change puts them on frame 0 of the bridge, and the bridge's own tick carries them the
+        // rest of the way (`presentZoomBridgeFrame`). No second timeline, for the same reason there is
+        // no second camera.
+        if syncsMaskOverlaysOnCameraChange {
+            syncMaskOverlays(progress: bridging ? 0 : nil)
+        }
         requestViewportRender()
     }
 
@@ -1816,7 +1828,11 @@ public final class LoupeController: NSViewController {
         // ② (2026-10-27) — the picture on the canvas is the stop's own geometry now, so the overlay
         // lands on the same projection in the same call. At rest the error is exactly zero, because
         // this is the non-animating path's own layout function (`cropToolLayout()`).
-        defer { syncCropOverlay() }
+        defer {
+            syncCropOverlay()
+            // ③ — and the mask chrome lands with it: the same end of the same bridge.
+            syncMaskOverlays()
+        }
         if let pending = pendingFrame {
             pendingFrame = nil
             present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
@@ -1931,6 +1947,13 @@ public final class LoupeController: NSViewController {
             syncCropOverlay(progress: progress)
         }
         recordCropOverlayFollowFrame(serial: serial, progress: progress)
+        // ③ (2026-10-27) — the mask chrome moves on the same tick, at the same progress, through the
+        // same curve as the pixels that just went up. The grips go back with the frame, so they sit on
+        // the picture the eye is looking at rather than on where it will be in 180 ms.
+        if followsMaskOverlaysDuringBridge {
+            syncMaskOverlays(progress: progress)
+        }
+        recordMaskOverlayFrame(serial: serial, progress: progress)
     }
 
     /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
@@ -1958,6 +1981,9 @@ public final class LoupeController: NSViewController {
         // camera's projection in the same turn, so a switch can never leave the old photo's frame on
         // screen: the same gate that ends the pixels ends the overlay.
         if wasBridging { syncCropOverlay() }
+        // ③ — the same gate ends the mask chrome: a torn-down bridge must not leave a grip at a
+        // mid-transition coordinate nobody is going to animate away.
+        if wasBridging { syncMaskOverlays() }
         // The canvas still holds the old picture seen through whatever window the bridge had reached:
         // put it back at the geometry it was drawn with, or a resize would leave the picture stuck at a
         // mid-transition scale until the next frame lands. Deferred — this is called from
@@ -2438,6 +2464,14 @@ public final class LoupeController: NSViewController {
     private var shapeDragStartView: CGPoint?
     private var shapeDragStartSource: NormalizedPoint?
 
+    /// The rubber band **in source pixels** — the space the projection maps *from*. Stored here and
+    /// re-projected on every frame (`syncMaskOverlays`) instead of as view points, which is what makes
+    /// a pan or a zoom carry the band with the picture: a band kept in view points is frozen at the
+    /// coordinates of the mouse-down, and that was the reported 「不跟手」.
+    private var shapeDraft: (kind: MaskCreationKind,
+                             start: (x: Double, y: Double),
+                             current: (x: Double, y: Double))?
+
     /// Gestures that landed a new mask / a new geometry, and gestures that were refused because the
     /// drag was shorter than a click (the smoke prints both; a refused gesture is not a failure).
     public private(set) var shapeDragsCreated = 0
@@ -2460,15 +2494,23 @@ public final class LoupeController: NSViewController {
 
     public func beginShapeDrag(at point: CGPoint) {
         guard let mode = shapeDragMode,
-              let source = normalizedSourcePoint(forViewPoint: point) else { return }
+              let source = normalizedSourcePoint(forViewPoint: point),
+              let pixels = sourcePoint(forViewPoint: point) else { return }
         shapeDragStartView = point
         shapeDragStartSource = source
-        draftOverlay.draft = (kind: mode.kind, start: point, current: point)
+        shapeDraft = (kind: mode.kind, start: pixels, current: pixels)
+        syncMaskOverlays()
     }
 
     public func continueShapeDrag(at point: CGPoint) {
-        guard let start = shapeDragStartView, let mode = shapeDragMode else { return }
-        draftOverlay.draft = (kind: mode.kind, start: start, current: point)
+        guard shapeDragStartView != nil, let mode = shapeDragMode else { return }
+        // The band moves in **source** space, so the next frame (a pan, a zoom, a resize) can put it
+        // back on the picture: the hand's view point is converted once, here.
+        if var draft = shapeDraft, let pixels = sourcePoint(forViewPoint: point) {
+            draft.current = pixels
+            shapeDraft = draft
+            syncMaskOverlays()
+        }
         // An adjustment follows the hand live (the same rule as a brush stroke: the pixels move
         // while the mouse is down, the history grows once on mouse-up).
         guard case .adjust(let maskID, let component, let kind) = mode,
@@ -2485,7 +2527,8 @@ public final class LoupeController: NSViewController {
         defer {
             shapeDragStartView = nil
             shapeDragStartSource = nil
-            draftOverlay.draft = nil
+            shapeDraft = nil
+            syncMaskOverlays()
         }
         guard let mode = shapeDragMode, let start = shapeDragStartSource else { return }
         let endPoint = point ?? shapeDragStartView ?? .zero
@@ -2515,7 +2558,8 @@ public final class LoupeController: NSViewController {
     public func cancelShapeDrag() {
         shapeDragStartView = nil
         shapeDragStartSource = nil
-        draftOverlay.draft = nil
+        shapeDraft = nil
+        syncMaskOverlays()
     }
 
     /// The shape a drag means, or nil when it is too short to be one (a click, not a gradient).
@@ -2575,20 +2619,206 @@ public final class LoupeController: NSViewController {
                                 feather: mask.components[target.component].feather)
     }
 
+    // MARK: the projection the mask chrome is drawn in (2026-10-27)
+
+    /// The projection the **pixels on the canvas** are drawn with right now, plus the carry from it to
+    /// what the eye is looking at.
+    ///
+    /// At rest it is the camera's own mapping and the identity carry — bit-for-bit the arithmetic this
+    /// file always used (`1·p + 0` is `p`). During a stop change the canvas holds the *old* picture
+    /// re-presented every display tick through a sampling window, which is **one similarity**
+    /// (`LoupeZoomBridge.map(atProgress:)`) and not any camera's projection: the grips have to be
+    /// projected by `bridge.fromMapping` — the mapping those pixels were laid out with — and then
+    /// carried by that frame's own map. Exactly the rule `cropToolLayout(bridge:progress:)` follows
+    /// for the crop frame, so the two overlays cannot disagree about where the picture is.
+    public struct MaskPictureProjection: Equatable, Sendable {
+        /// The mapping the pixels on the canvas were laid out with.
+        public var mapping: LoupeMapping
+        /// `p ↦ scale·p + offset`, in **device pixels**, y down. Identity when nothing is animating.
+        public var carry: CropCarry
+        /// Device pixels per point.
+        public var pointScale: Double
+    }
+
+    /// Where the mask chrome belongs this instant, in the projection the canvas pixels are in.
+    ///
+    /// `progress` names the frame of a running bridge explicitly; left out, the progress the bridge has
+    /// reached right now is used. A `viewport` override (the headless tests) is always the idle path:
+    /// a bridge is measured against the live canvas, never against a size someone made up.
+    public func maskPictureProjection(viewport: ImageSize? = nil,
+                                      backingScale scaleOverride: Double? = nil,
+                                      progress: Double? = nil) -> MaskPictureProjection? {
+        let scale = scaleOverride ?? backingScale
+        if viewport == nil, let bridge = zoomBridge {
+            let frame = progress ?? zoomBridgeProgress()
+            return MaskPictureProjection(mapping: bridge.fromMapping,
+                                         carry: CropCarry(bridge.map(atProgress: frame)),
+                                         pointScale: scale)
+        }
+        guard let framing = framing(viewport: viewport) else { return nil }
+        return MaskPictureProjection(mapping: framing.mapping(of: viewState),
+                                     carry: .identity, pointScale: scale)
+    }
+
+    // MARK: when the mask chrome is on the canvas at all
+
+    /// True while the inspector is showing the **蒙版** workspace. The canvas' mask chrome belongs to
+    /// that panel: grips and the rubber band are drawn only while it is up, and a workspace switch
+    /// takes them away instead of leaving them floating over a 调节 panel the user is reading.
+    ///
+    /// View state, and the loupe's own copy of it — `WorkspaceRootView` publishes the panel's selection
+    /// (`InspectorWorkspaceState.onChange` → `setMasksWorkspaceActive`).
+    public private(set) var masksWorkspaceActive = false
+
+    /// How many times the overlays were **laid out** (geometry computed and assigned). A hidden
+    /// overlay must not appear here at all, which is the number 「隐藏期间更新计数 == 0」 is about.
+    public private(set) var maskOverlaySyncCount = 0
+    /// Updates refused because the mask workspace is not on screen — the geometry computations the
+    /// gate saved. Counted separately so "it did not update" is a claim about a count, not a silence.
+    public private(set) var maskOverlayHiddenSkips = 0
+
+    /// Test seams, the same pair the crop overlay has: `false` reproduces the two defects being fixed
+    /// (the chrome that only moved when the document changed, and one that cut straight to the target
+    /// instead of travelling with the animation), so the reverse evidence is a measurement.
+    public var syncsMaskOverlaysOnCameraChange = true
+    public var followsMaskOverlaysDuringBridge = true
+
+    /// One frame of a bridge, as the mask chrome was **drawn** on it: which bridge, at what progress,
+    /// and the whole thing the overlay views were left holding.
+    ///
+    /// Recorded by the present tick itself (not reconstructed in a test), because the claim is about
+    /// what the eye saw: the same tick, the same progress, the same curve.
+    public struct MaskOverlayFrame: Equatable, Sendable {
+        public let serial: Int
+        public let progress: Double
+        public let handles: MaskHandlesLayout?
+        public let draft: MaskDraftShape?
+    }
+
+    /// Every bridge frame's mask chrome, in order — append-only and capped like the frame log.
+    public private(set) var maskOverlayFollowFrames: [MaskOverlayFrame] = []
+    private static let maskOverlayFollowFrameLimit = 512
+
+    /// The inspector switched to (or away from) the 蒙版 workspace.
+    ///
+    /// Away hides **for real**: both overlays stop drawing and are emptied, every gesture that was
+    /// pointing at a canvas coordinate is dropped, and `syncMaskOverlays` refuses to compute anything
+    /// (so a 120 Hz bridge cannot spend a line of arithmetic on chrome nobody can see).
+    ///
+    /// The armed 新建 state is deliberately **not** cleared — that is the panel's state, not a
+    /// gesture's, and losing it would mean re-choosing 线性渐变 after a glance at 色彩. What is dropped
+    /// is the rubber band and the drag, so coming back finds no half-drawn shape from another tab.
+    public func setMasksWorkspaceActive(_ active: Bool) {
+        guard masksWorkspaceActive != active else { return }
+        masksWorkspaceActive = active
+        guard !active else {
+            syncMaskOverlays()
+            return
+        }
+        // A grip drag in flight puts the shape back to what it was at mouse-down and commits nothing,
+        // so a switch mid-drag leaves the document and the history exactly as they were.
+        if maskCanvas.isDraggingHandle { maskCanvas.cancelHandleDrag() }
+        shapeDragStartView = nil
+        shapeDragStartSource = nil
+        shapeDraft = nil
+        maskHandlesOverlay.active = nil
+        syncMaskOverlays()          // the gate now hides, empties and skips
+    }
+
+    /// **The only writer** of the mask overlays (2026-10-27).
+    ///
+    /// Six callers, one function: `setViewState` (every pan tick and every zoom tick), the bridge's own
+    /// present tick (`presentZoomBridgeFrame`, with the very progress the pixels went up at),
+    /// `finishZoomBridge`, `cancelZoomBridge`, `viewDidLayout` (a resize is a new projection) and
+    /// `refreshMaskHandles` (a document or drag change). No timer of its own — the picture already has
+    /// one, and a second timeline would drift against it.
+    private func syncMaskOverlays(progress: Double? = nil) {
+        guard masksWorkspaceActive else {
+            maskOverlayHiddenSkips += 1
+            hideMaskOverlays()
+            return
+        }
+        guard let projection = maskPictureProjection(progress: progress) else {
+            // No projection at all (no photo): draw nothing rather than something made up.
+            maskHandlesOverlay.layout = nil
+            draftOverlay.draft = nil
+            return
+        }
+        maskOverlaySyncCount += 1
+        maskHandlesOverlay.isHidden = false
+        draftOverlay.isHidden = false
+        maskHandlesOverlay.layout = maskHandlesLayout(projection)
+        // The rubber band lives in **source pixels**; the projection is applied here, on every frame,
+        // which is what makes it travel with a pan and with a zoom animation.
+        if let draft = shapeDraft {
+            func point(_ p: (x: Double, y: Double)) -> CGPoint {
+                let v = projection.mapping.viewPoint(sourceX: p.x, sourceY: p.y)
+                return CGPoint(x: projection.carry.applyX(v.x) / projection.pointScale,
+                               y: projection.carry.applyY(v.y) / projection.pointScale)
+            }
+            draftOverlay.draft = MaskDraftShape(kind: draft.kind,
+                                                start: point(draft.start),
+                                                current: point(draft.current))
+        } else {
+            draftOverlay.draft = nil
+        }
+    }
+
+    /// Leave nothing on screen and nothing to hit: no layout, no band, no highlight, not drawn.
+    private func hideMaskOverlays() {
+        if maskHandlesOverlay.layout != nil { maskHandlesOverlay.layout = nil }
+        if draftOverlay.draft != nil { draftOverlay.draft = nil }
+        if maskHandlesOverlay.active != nil { maskHandlesOverlay.active = nil }
+        if !maskHandlesOverlay.isHidden { maskHandlesOverlay.isHidden = true }
+        if !draftOverlay.isHidden { draftOverlay.isHidden = true }
+    }
+
+    private func recordMaskOverlayFrame(serial: Int, progress: Double) {
+        guard masksWorkspaceActive else { return }
+        maskOverlayFollowFrames.append(MaskOverlayFrame(serial: serial, progress: progress,
+                                                        handles: maskHandlesOverlay.layout,
+                                                        draft: draftOverlay.draft))
+        if maskOverlayFollowFrames.count > Self.maskOverlayFollowFrameLimit {
+            maskOverlayFollowFrames
+                .removeFirst(maskOverlayFollowFrames.count - Self.maskOverlayFollowFrameLimit)
+        }
+    }
+
+    /// The views themselves, for the tests that measure what was **drawn** (`isHidden`, `frame`,
+    /// `layout`, `draft`). A copy would be a second thing that could be right while the screen is wrong.
+    var maskHandlesOverlayView: MaskHandlesOverlayView { maskHandlesOverlay }
+    var maskDraftOverlayView: MaskDraftOverlayView { draftOverlay }
+    var maskHandlesLayoutForTesting: MaskHandlesLayout? { maskHandlesOverlay.layout }
+    var maskDraftForTesting: MaskDraftShape? { draftOverlay.draft }
+
     /// Grips and guides in view points for the overlay (and for the tests: this is what a click is
     /// hit-tested against).
     ///
     /// `viewport`/`backingScale` exist for the headless tests — without a window the canvas has no
     /// size and no scale, and a hit test must still be able to say "this point, in this frame".
+    ///
+    /// `nil` while the inspector is **not** showing the 蒙版 workspace: hidden chrome is not drawn, not
+    /// hit-testable and not computed (see `setMasksWorkspaceActive`). A click where a grip used to be
+    /// therefore belongs to the canvas — a pan — which is the second half of the report
+    /// 「蒙版控件在退出蒙版菜单栏后应该隐藏」.
     public func maskHandlesLayout(viewport: ImageSize? = nil,
-                                  backingScale scaleOverride: Double? = nil) -> MaskHandlesLayout? {
-        guard let target = maskHandleTarget(), let framing = framing(viewport: viewport) else {
-            return nil
-        }
-        let scale = scaleOverride ?? backingScale
+                                  backingScale scaleOverride: Double? = nil)
+        -> MaskHandlesLayout? {
+        guard masksWorkspaceActive,
+              let projection = maskPictureProjection(viewport: viewport,
+                                                     backingScale: scaleOverride) else { return nil }
+        return maskHandlesLayout(projection)
+    }
+
+    /// The layout in one explicit projection — the projection is the *only* variable, so what is
+    /// drawn, what is hit and what the tests measure cannot drift apart.
+    private func maskHandlesLayout(_ projection: MaskPictureProjection) -> MaskHandlesLayout? {
+        guard let target = maskHandleTarget() else { return nil }
         return MaskHandles.layout(shape: target.shape, feather: target.feather,
-                                  source: session?.maskSourceSize ?? ImageSize(width: 1, height: 1),
-                                  mapping: framing.mapping(of: viewState), pointScale: scale)
+                                  source: cropSourceSize,
+                                  mapping: projection.mapping,
+                                  pointScale: projection.pointScale,
+                                  carry: projection.carry)
     }
 
     /// The grip under `point` (view points), or nil.
@@ -2655,10 +2885,12 @@ public final class LoupeController: NSViewController {
         refreshMaskHandles()
     }
 
-    /// Rebuild the overlay from the live document. Cheap (a dozen points) and idempotent: the
-    /// overlay's setter compares before it redraws, so calling it on every mouse move is free.
+    /// Rebuild the overlays from the live document and the current projection. Cheap (a dozen points)
+    /// and idempotent: the overlay's setter compares before it redraws, so calling it on every mouse
+    /// move is free. A document change does **not** move the picture, so the projection is the idle one
+    /// unless a stop change happens to be travelling (then the running bridge's frame is used).
     public func refreshMaskHandles() {
-        maskHandlesOverlay.layout = maskHandlesLayout()
+        syncMaskOverlays()
     }
 
     /// Control-point drags committed through the canvas (one per ⌘Z).

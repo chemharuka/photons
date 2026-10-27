@@ -392,6 +392,15 @@ public final class WorkspaceRootView: NSView {
             self?.inspectorHost.isEditingGated = active
         }
 
+        // 蒙版 workspace → the canvas' mask chrome (2026-10-27). `selection` is the panel's one writer
+        // (`InspectorWorkspaceState.selection`), and its `onChange` fires synchronously, so the grips
+        // are away in the same turn as the tab click — a turn of delay would leave them hittable while
+        // the panel is already showing 调节. The initial value is pushed too: the app opens on `.adjust`.
+        inspectorWorkspaces.onChange = { [weak self] workspace in
+            self?.loupeController.setMasksWorkspaceActive(workspace == .masks)
+        }
+        loupeController.setMasksWorkspaceActive(inspectorWorkspaces.selection == .masks)
+
         showModule(for: session.mode)
         applyBrowserMode()
         observeModel()
