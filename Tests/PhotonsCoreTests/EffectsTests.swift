@@ -578,6 +578,14 @@ final class EffectsTests: XCTestCase {
         XCTAssertEqual(grainOnly.changedStages(from: .neutral), [.grain])
         XCTAssertTrue(grainOnly.hasGrain)
 
+        // The render-inputs key is the document's "did anything render-relevant move" string: a
+        // document with no grain must not gain a segment for a stage it does not have (§3.2).
+        XCTAssertFalse(EditModel.neutral.renderInputs.key.contains("s3.7-grain"))
+        var grained = EditModel.neutral
+        grained.effects.grain = 1
+        XCTAssertTrue(grained.renderInputs.key.contains("s3.7-grain"))
+        XCTAssertNotEqual(grained.renderInputs.key, EditModel.neutral.renderInputs.key)
+
         // S3.7 runs after S3c and before S4 — the order is the array, so it is checkable.
         let order = RenderStage.order
         XCTAssertLessThan(order.firstIndex(of: .vignette)!,

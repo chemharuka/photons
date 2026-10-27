@@ -148,6 +148,10 @@ public struct RenderInputs: Sendable, Equatable {
         RenderStage.order
             .filter { $0 != .localColor || edit.hasLocalColor }
             .filter { $0 != .hsl || edit.hasHSL }
+            // 2026-10-28: S3.7 is the third conditional stage, so a document with no grain keeps this
+            // key **byte for byte** — without the filter every existing document's `renderInputs.key`
+            // would grow a `s3.7-grain=gamt=0…` segment and miss every cached thumbnail once.
+            .filter { $0 != .grain || edit.hasGrain }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }
