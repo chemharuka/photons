@@ -383,7 +383,7 @@ public struct InspectorView: View {
     /// document's 1/1000 tick can be resolved to 1/10 000 of linear light — the owner's 「不是只能
     /// 取整数」); there is no `step:` (046), so the model does the snapping.
     private func blackLevelBinding(_ row: ToneRow) -> Binding<Double> {
-        Binding(get: { (session.edit[keyPath: row.keyPath] * 1000).rounded() },
+        Binding(get: { LightGroup.blackOffsetSliderPosition(of: session.edit.light) },
                 set: { position in
                     let offset = LightGroup.blackOffset(fromSlider: position)
                     session.applyEdit { $0[keyPath: row.keyPath] = offset }

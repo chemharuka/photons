@@ -611,6 +611,12 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// same 0.1-step grid so the knob does not wobble around a value the row cannot print.
     public var blackOffsetSliderPosition: Double { (blackOffset * 1000 * 10).rounded() / 10 }
 
+    /// The same position for any light group — the panel's binding reads it, so the knob and the model
+    /// can never disagree on the grid.
+    public static func blackOffsetSliderPosition(of light: LightGroup) -> Double {
+        (light.blackOffset * 1000 * 10).rounded() / 10
+    }
+
     /// The trim as the kernel gets it: clamped into the envelope, so a hand-edited document cannot
     /// push the linear buffer around by more than ±0.01.
     public var clampedBlackOffset: Double {

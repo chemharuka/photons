@@ -43,7 +43,7 @@ final class BlackLevelCardTests: XCTestCase {
     }
 
     /// 行表本身：一行、整数行程、整数读数、可键入、线性域形状、绑 `light.blackOffset`。
-    func testTheRowIsOneDecimalSliderOnTheLinearDomain() {
+    func testTheRowIsOneDecimalSliderOnTheLinearDomain() throws {
         let rows = InspectorView.blackLevelRows
         XCTAssertEqual(rows.count, 1, "一行")
         let row = rows[0]
@@ -67,6 +67,19 @@ final class BlackLevelCardTests: XCTestCase {
         edit[keyPath: row.keyPath] = LightGroup.blackOffset(fromSlider: -7.5)
         XCTAssertEqual(edit.light.blackOffset, -0.0075, "滑杆 −7.5 必须写进 −0.0075")
         XCTAssertEqual((edit[keyPath: row.keyPath] * 10000).rounded() / 10, -7.5, "读回来还是 −7.5")
+        // 滑杆的 getter 必须走 `LightGroup.blackOffsetSliderPosition(of:)`（0.1 格），
+        // 否则拖动时值会被吸回整数——这条是用户实测「拖动还是只能整数」的回归点。
+        var probe = LightGroup.identity
+        probe.blackOffset = -0.0075
+        XCTAssertEqual(LightGroup.blackOffsetSliderPosition(of: probe), -7.5, "getter 必须保留 0.1 格")
+        XCTAssertNotEqual(LightGroup.blackOffsetSliderPosition(of: probe),
+                          (probe.blackOffset * 1000).rounded(), "不能是整数取整那份")
+        let panelSource = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        XCTAssertTrue(panelSource.contains("LightGroup.blackOffsetSliderPosition(of: session.edit.light)"),
+                      "binding 的 getter 必须是 0.1 格那个函数")
+        XCTAssertFalse(panelSource.contains("(session.edit[keyPath: row.keyPath] * 1000).rounded()"),
+                       "旧整数 getter 不许回来")
+
         // 非整数位置落在 0.1 格上：这就是「不是只能取整数」。
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: 3.34), 0.0033, "3.34 → 3.3 格 → 0.0033")
     }
