@@ -59,16 +59,18 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(ticks.last?.x ?? -1, 1, accuracy: 1e-12, "255 码 = 白点 x = 1")
         XCTAssertEqual(axis.stops(at: ticks.last!.x / 2), 0, accuracy: 1e-12, "白点就是 +0 EV")
 
-        // In points: the tick x is `x/2` of the way across the **value box** (064 / 069).
+        // In points: in the SDR view (the default, 071) the tick x is its own card coordinate of the
+        // way across the **value box** — `0…1` fills it, so `255` sits on the right edge.
         let plot = CGRect(x: 0, y: 0, width: 274, height: 189)
         let geometry = CurvePlotGeometry(plot: plot)
         let box = geometry.valueBox
         let positions = geometry.tickPositions(ticks)
         for (position, want) in zip(positions, expected) {
-            XCTAssertEqual(position, box.minX + CGFloat(want / 2) * box.width, accuracy: 1e-9)
+            XCTAssertEqual(position, box.minX + CGFloat(want) * box.width, accuracy: 1e-9)
         }
         XCTAssertEqual(positions[0], box.minX, accuracy: 1e-9)
-        XCTAssertEqual(positions[positions.count - 1], box.midX, accuracy: 1e-9, "白点在正中")
+        XCTAssertEqual(positions[positions.count - 1], box.maxX, accuracy: 1e-9,
+                       "SDR 视图里白点在右端（071：0…1 铺满；069 的全幅视图里它在正中）")
 
         print("ticks · " + zip(ticks, positions)
             .map { "\($0.label)@x=\(String(format: "%.6f", $0.x))→\(String(format: "%.3f", $1))" }
@@ -102,6 +104,73 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertTrue(source.contains("CurvePoint.sdrBoundary") && source.contains("* 4"))
         XCTAssertFalse(source.contains("label: \"SDR\"") || source.contains("label: \"HDR\""),
                        "轴上不许出现 SDR/HDR 字样（069）")
+    }
+
+    // MARK: - 1b. 071 — one transform for everything
+
+    /// **同一变换**：曲线、网格、控制点、命中判定、读数、`isVisible` 都走 `CurvePlotGeometry`，
+    /// 而比例只在一处算 —— 源码级断言 + 一条行为级的等式。
+    ///
+    /// 这条测试的存在理由不是洁癖：069/070 的 bug 全是「曲线和点各算各的」——曲线用表里的 `0…1`、
+    /// 点用卡片的 `0…2`，两张图各自都「像曲线」。把比例钉成一处，就没有第二个地方可以漂移。
+    func testEveryDrawingPathUsesTheOneTransform() throws {
+        let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
+
+        // ① span 的减法只有一处（`spanOriginAndWidth`），除以 span 宽度的比例也只有一处（`fraction`）。
+        // 注释不参与计数：`///` 行里写着同一条规则，代码才是证据。
+        let code = source.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        func occurrences(_ needle: String) -> Int {
+            source.components(separatedBy: needle).count - 1
+        }
+        func codeOccurrences(_ needle: String) -> Int {
+            code.components(separatedBy: needle).count - 1
+        }
+        XCTAssertEqual(codeOccurrences("span.upperBound - span.lowerBound"), 1,
+                       "span 的减法必须只出现一次（spanOriginAndWidth）")
+        XCTAssertEqual(codeOccurrences("- origin) / width"), 1,
+                       "归一化比例必须只在 fraction(_:) 里出现一次")
+        XCTAssertEqual(occurrences("func fraction("), 1)
+        XCTAssertEqual(occurrences("func coordinate("), 1)
+
+        // ② 每一个图元都必须经过几何：曲线取样、控制点、网格、刻度、命中、可见性。
+        for call in ["geometry.x(u: cardX)", "geometry.yRaw(v: 2 * Double(table[i]))",
+                     "geometry.point(p)", "geometry.isVisible(p)", "geometry.hitIndex(",
+                     "geometry.gridLines()", "geometry.x(u: tick.x)",
+                     "geometry.u(atX:", "geometry.v(atY:"] {
+            XCTAssertTrue(source.contains(call), "绘图/命中路径没走几何：\(call)")
+        }
+        // ③ 绘制代码里不许自己乘 / 除盒子的宽高 —— 那就是第二份比例。
+        let drawBody = (source.components(separatedBy: "private func draw(into").last ?? "")
+            .components(separatedBy: "// MARK: one gesture").first ?? ""
+        for forbidden in ["valueBox.width", "valueBox.height", "box.width *", "box.height *"] {
+            XCTAssertFalse(drawBody.contains(forbidden), "draw 里自己算比例：\(forbidden)")
+        }
+        XCTAssertTrue(drawBody.contains("geometry.valueBox"), "draw 仍从几何取盒子")
+
+        // ④ 行为等式：同一个点，`point(_:)` == (`x(u:)`, `y(v:)`)；每一档刻度都落在网格的 x 上。
+        let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight))
+        for view in CurveViewMode.allCases {
+            let g = CurvePlotGeometry(plot: plot, view: view)
+            for p in [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1), CurvePoint(2, 2),
+                      CurvePoint(1.5, 1.2), CurvePoint(0.25, 0.9)] {
+                XCTAssertEqual(g.point(p), CGPoint(x: g.x(u: p.x), y: g.y(v: p.y)),
+                               "\(view): point(_:) 与 x/y 不是同一个变换")
+            }
+            // 网格线、边框、对角线与取值盒同源：最外两条竖线就是 box 的两条边。
+            let grid = g.gridLines()
+            XCTAssertEqual(grid.vertical.first!, g.valueBox.minX)
+            XCTAssertEqual(grid.vertical.last!, g.valueBox.maxX)
+            XCTAssertEqual(grid.horizontal.first!, g.valueBox.minY)
+            XCTAssertEqual(grid.horizontal.last!, g.valueBox.maxY)
+            // 命中判定用的是画点那个位置：点在屏幕上，就点得到。
+            for p in [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1.5, 1.5)] where g.isVisible(p) {
+                XCTAssertEqual(g.hitIndex([p], at: g.point(p)), 0,
+                               "\(view): 画出来的点必须点得到：\(p)")
+            }
+        }
+        print("transform · span 减法 1 处 · 归一化 1 处 · 9 条绘图路径全部走几何")
     }
 
     // MARK: - 2. insert
@@ -758,7 +827,7 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(geometry.y(v: 2), box.minY)
 
         // 刻度：位置仍由 axis 推出（差为 0），且标签仍在外框下方那一带（tickBand 没变）。
-        // 069：五档码值，全部视图里 255 码落在正中（x = 1 = 白点）。
+        // 071：默认视图是 SDR，`0…1` 铺满，所以 255 码（x = 1 = 白点）落在**右端**。
         let ticks = CurveAxisTicks.ticks()
         let axis = HDRCurveAxis.standard
         let expected = [0.0, 63, 127, 191, 255].map {
@@ -766,10 +835,11 @@ final class CurvePanelTests: XCTestCase {
         }
         let positions = geometry.tickPositions(ticks)
         XCTAssertEqual(positions[0], box.minX, accuracy: 1e-12)
-        XCTAssertEqual(positions[positions.count - 1], box.midX, accuracy: 1e-12, "白点在正中")
+        XCTAssertEqual(positions[positions.count - 1], box.maxX, accuracy: 1e-12,
+                       "SDR 视图里白点在右端")
         for ((tick, want), position) in zip(zip(ticks, expected), positions) {
             XCTAssertEqual(tick.x, want, accuracy: 0, "刻度 \(tick.label) 的位置来自 HDRCurveAxis")
-            XCTAssertEqual(position - (box.minX + CGFloat(want / 2) * box.width), 0, accuracy: 1e-12,
+            XCTAssertEqual(position - (box.minX + CGFloat(want) * box.width), 0, accuracy: 1e-12,
                            "刻度 \(tick.label) 的位置差必须为 0")
         }
         // 外框（标签所在的那块）与取值盒的关系：只差一个 inset，布局没动
