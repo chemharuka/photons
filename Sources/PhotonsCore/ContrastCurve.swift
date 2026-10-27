@@ -33,14 +33,20 @@ import Foundation
 ///   · **the core `[−5.0, −3.2]` EV is held**: `Δ = 0` exactly, slope exactly 1. That band is where
 ///     the four reference frames' median lives (measured p50 ∈ `[−4.07, −3.19]` EV), which is why
 ///     `contrast = ±100` moves the median by **0 codes** on all four (the old power moved it by −56
-///     at `+100` and +23 at `−100` on `L1030402`). This is not decoration: a *point* pivot cannot do it. A bounded sigmoid (tanh, full
-///     gain 2×) hinged at the middle of the range moves the median by **+10.5 / +5.9 / −3.4 / +16.7**
-///     codes on these frames — one static curve cannot put its fixed point on four different
-///     medians, and a fixed point that is off by 0.5 EV costs ~13 codes. The band is the honest
-///     version of "the mid-tones do not move" (`ContrastLogDomainTests` measures both).
+///     at `+100` and +23 at `−100` on `L1030402`).
+///
+///     This is not decoration: a *point* pivot cannot do it. A bounded sigmoid (tanh, full gain 2×)
+///     hinged at the middle of the range moves these medians by **+10.5 / +5.9 / −3.4 / +16.7**
+///     codes — one static curve cannot put its fixed point on four different medians, and a fixed
+///     point off by 0.5 EV costs ~13 codes. A held *band* is the honest version of "the mid-tones do
+///     not move", and it is the same construction 074's region windows use ("neither slider acts
+///     between −3.9 and −3.2 EV").
 ///   · **the toe is a *shift*** (`1 − smoothstep(black, black + 3, L)`): a gain below the black knee,
-///     so it can never fold (slope stays ≥ 1 − 1.5·travel/w = 0.575 at full travel) and it keeps 0
-///     at 0 — no manufactured grey, no crushed deep black. Its window is anchored to `blackEV`.
+///     so it can never fold (slope stays ≥ 1 − 1.5·toeFraction·travel/w = 0.575 at full travel) and it
+///     keeps 0 at 0 — no manufactured grey. The price is stated rather than hidden: at `+100` the
+///     samples between −8 and −5 EV are halved, which took the deepest frame from 0.97 % to 1.14 % of
+///     dead black (+0.17 points; the old curve took the same frame to 23.9 %). Its window is anchored
+///     to `blackEV`.
 ///   · **the shoulder is a *bump*** (`4u(1−u)`, 0 at both ends of `[−3.2, 0]`): it *lands on display
 ///     white*, so nothing at or below white can be pushed past it. Measured margin: the bump's peak
 ///     displacement is 0.55 EV against 1.6 EV of headroom at the peak, so the "≤1 % on the ceiling"
@@ -69,7 +75,7 @@ import Foundation
 /// *axis*, which is what the two constants below are.
 ///
 /// The `.metal` copy of these numbers is `CT_*` in `s2_tone_map.metal`;
-/// `ContrastLogDomainTests.testTheKernelConstantsAreTheseOnes` parses the kernel and asserts the two
+/// `ContrastLogDomainTests.testTheKernelConstantsAreTheSwiftConstants` parses the kernel and asserts the two
 /// copies are equal, because a kernel cannot import Swift.
 public enum S2Contrast {
 
