@@ -218,6 +218,24 @@ public struct DisplayImage: Sendable {
     }
 }
 
+/// P1d — the two halves of a histogram measurement inside one frame, as nanoseconds.
+///
+/// Split deliberately: they have nothing in common to fix. `readback` is `getBytes` of the sampled
+/// grid (0.29 MB at 256 long edge, a `.shared` texture — memcpy speed, ~0.03 ms and not movable);
+/// `binning` is `Histogram.compute`'s counting loop, which is where the 1.4–1.8 ms used to live.
+public struct HistogramCost: Sendable, Equatable {
+    public var readbackNanoseconds: Int = 0
+    public var binningNanoseconds: Int = 0
+    public var totalMilliseconds: Double {
+        Double(readbackNanoseconds + binningNanoseconds) / 1e6
+    }
+    public static let zero = HistogramCost()
+    public init(readbackNanoseconds: Int = 0, binningNanoseconds: Int = 0) {
+        self.readbackNanoseconds = readbackNanoseconds
+        self.binningNanoseconds = binningNanoseconds
+    }
+}
+
 public final class RenderResult {
     public let canvas: ImageSize
     public let content: ImageSize
@@ -269,12 +287,20 @@ public final class RenderResult {
     /// so the number under the pointer and the bin under the pointer are one measurement. `nil` when no
     /// grid was asked for.
     public let histogramSample: LinearSample?
+    /// P1d — what the measurement cost, part by part, in this frame. `histogramMilliseconds` is the
+    /// sum of the two, kept because the card prints one number; this is what a stopwatch argues with.
+    ///
+    /// The split exists because the two halves have different fixes: the readback is a fixed 0.29–0.35
+    /// MB copy (already at memcpy speed), and the binning was a single-threaded loop with four `pow`
+    /// calls per pixel (~1.5 ms at a 43 k-pixel grid) — `Histogram.measure` now spreads the rows over
+    /// the cores, and this is the receipt that says which half moved.
+    public let histogramCost: HistogramCost
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, window: ImageRect,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
-         histogramSample: LinearSample? = nil) {
+         histogramSample: LinearSample? = nil, histogramCost: HistogramCost = .zero) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -288,6 +314,7 @@ public final class RenderResult {
         self.histogram = histogram
         self.histogramMilliseconds = histogramMilliseconds
         self.histogramSample = histogramSample
+        self.histogramCost = histogramCost
     }
 }
 
@@ -355,6 +382,14 @@ public struct MaskStageReport: Sendable {
     /// overlay and S1.6 consumed the same buffer, §6 005e ⑤).
     public var showMaskID: String?
     public var showMaskSlice: Int?
+    /// P1e — true when those pixels came from the reused slot instead of a pass in **this** frame.
+    ///
+    /// The overlay is one pointwise pass over the display frame (0.46 ms at 4.10 Mpx). Its output is a
+    /// pure function of (display frame, atlas slice, mask id), so a frame whose key chain did not move
+    /// — no drag, no parameter, no mask switch, no camera move — would compute the same bytes again.
+    /// `showMaskReused` is the receipt that it did not: the pass count over a static run is a fact the
+    /// report states per frame rather than something a reader has to believe.
+    public var showMaskReused: Bool = false
 
     public init() {}
 
@@ -901,6 +936,28 @@ public final class RenderGraph {
         let bounds: [String: MaskRect]
     }
     private var localEntry: LocalEntry?
+    /// P1e — the `showMask` overlay's own reuse slot: the display frame with the overlay painted, plus
+    /// the key it was painted for.
+    ///
+    /// The pass is one pointwise compute over the whole canvas reading the atlas slice, and its output
+    /// is a pure function of the display frame the key chain already names, the slice, and the mask id.
+    /// A frame that moved none of those (a workspace switch, a redraw after the window regained focus,
+    /// an animation that never touched the document) used to pay it again — 0.46 ms at 4.10 Mpx, a whole
+    /// S4 for pixels that would be byte-identical. This slot is what turns that into a lookup.
+    ///
+    /// The texture here is the graph's, not the pool's: it is handed out as a frame so the canvas can
+    /// present it, and `recycle(output:)` refuses to pool it (see there). Dropped whenever a frame shows
+    /// no overlay, so hiding the mask returns the canvas-sized texture instead of holding 32.8 MB.
+    private struct ShowMaskEntry {
+        /// Everything the pass reads: the upstream chain's resume key, the display key, the atlas key,
+        /// the mask id and the slice. Equal key ⇒ equal pixels.
+        let key: String
+        let texture: MTLTexture
+    }
+    private var showMaskEntry: ShowMaskEntry?
+    /// How many times the overlay pass has actually run on this graph. The counter exists for the same
+    /// reason `compositeResumes` does: "it was skipped 20 times" is a measurement, not an opinion.
+    public private(set) var showMaskPasses: Int = 0
     /// One reusable array texture (allocation on a size/count change only).
     private var atlasPool: (key: String, texture: MTLTexture)?
     private var maskTables: [String: MaskTable] = [:]
@@ -1513,27 +1570,72 @@ public final class RenderGraph {
         // frame, reading the slice S1.6 consumed. When no id is set — or the id names no enabled mask
         // — nothing is encoded and `finish` is the frame the document produced, byte for byte.
         var showsMask = false
+        var pendingOverlay: ShowMaskEntry?
         if !decodeOnly, let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
            let slice = atlas.ids.firstIndex(of: wanted) {
-            let overlay = try pool.obtain(plan.canvas)
-            let p = try kernels.pipeline(file: "s4_show_mask", function: "s4_show_mask")
-            guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            enc.setComputePipelineState(p)
-            enc.setTexture(shown, index: 0)
-            enc.setTexture(atlas.texture, index: 1)
-            enc.setTexture(overlay, index: 2)
-            var params = ShowMaskParams(a: SIMD4(Int32(slice), 0, 0, 0),
-                                        b: SIMD4(0.5, 1, 0, 0))
-            enc.setBytes(&params, length: MemoryLayout<ShowMaskParams>.stride, index: 0)
-            dispatch(enc, p, plan.canvas)
-            enc.endEncoding()
-            // The display texture is never a cache entry (`render` skips the cache for `.display`),
-            // so recycling it here is what keeps the pool honest.
-            pool.recycle(shown)
-            finish = overlay
+            // P1e — the key this pass's output is a function of. `compositeKey` is the resume key of the
+            // last stage above S4 (081): when it matches, every stage upstream of S4 would have been a
+            // hit, so the frame S4 read is the same bytes the slot was painted over. The display key
+            // adds the panel options S4 encodes with, the atlas key adds the selection and the tiling
+            // the slice came from, and the id/slice name which slice was painted.
+            let atlasKey = plan.keys.key(for: .maskAtlas) + tilingSuffix + semanticSuffix
+            // The window and the drawn rect are in the key as well even though the display key should
+            // already name them: a false miss costs one pass, a false hit shows yesterday's frame, so
+            // the gate errs on the side of painting.
+            let window = plan.windowRect
+            let drawn = plan.drawnRect
+            let overlayKey = [compositeKey ?? "", plan.keys.key(for: .display), atlasKey,
+                              wanted, "\(slice)", "\(plan.canvas.width)x\(plan.canvas.height)",
+                              "\(window.x),\(window.y),\(window.width),\(window.height)",
+                              "\(drawn.x),\(drawn.y),\(drawn.width),\(drawn.height)"]
+                .joined(separator: "|")
+            if let entry = showMaskEntry, entry.key == overlayKey {
+                // Nothing the pass reads moved: the pixels it would write are the ones already in hand.
+                // The display frame this frame just produced is not needed — give it straight back so
+                // the pool is left exactly as a cached frame leaves it.
+                pool.recycle(shown)
+                finish = entry.texture
+                if report != nil {
+                    report?.showMaskID = wanted
+                    report?.showMaskSlice = slice
+                    report?.showMaskReused = true
+                }
+            } else {
+                let overlay = try pool.obtain(plan.canvas)
+                let p = try kernels.pipeline(file: "s4_show_mask", function: "s4_show_mask")
+                guard let enc = cb.makeComputeCommandEncoder() else {
+                    pool.recycle(overlay)
+                    throw RenderError.commandBufferFailed
+                }
+                enc.setComputePipelineState(p)
+                enc.setTexture(shown, index: 0)
+                enc.setTexture(atlas.texture, index: 1)
+                enc.setTexture(overlay, index: 2)
+                var params = ShowMaskParams(a: SIMD4(Int32(slice), 0, 0, 0),
+                                            b: SIMD4(0.5, 1, 0, 0))
+                enc.setBytes(&params, length: MemoryLayout<ShowMaskParams>.stride, index: 0)
+                dispatch(enc, p, plan.canvas)
+                enc.endEncoding()
+                // The display texture is never a cache entry (`render` skips the cache for `.display`),
+                // so recycling it here is what keeps the pool honest.
+                pool.recycle(shown)
+                finish = overlay
+                // Not committed to the slot yet: the pass is only a pass once the command buffer
+                // succeeded, and a slot pointing at a texture from a frame that threw would hand the
+                // next frame an uninitialised canvas.
+                pendingOverlay = ShowMaskEntry(key: overlayKey, texture: overlay)
+                if report != nil {
+                    report?.showMaskID = wanted
+                    report?.showMaskSlice = slice
+                    report?.showMaskReused = false
+                }
+            }
             showsMask = true
-            report?.showMaskID = wanted
-            report?.showMaskSlice = slice
+        } else if !decodeOnly, edit.showMaskID == nil {
+            // Hiding the overlay releases the slot: a canvas-sized texture (32.8 MB at 4.10 Mpx) held
+            // for a pass that is not being shown is memory the next frame's stages want.
+            if let old = showMaskEntry { pool.recycle(old.texture) }
+            showMaskEntry = nil
         }
 
         // MARK: the histogram's sample (005, 2026-10-26: the picture, before the display transform)
@@ -1604,6 +1706,15 @@ public final class RenderGraph {
             ? (cb.gpuEndTime - cb.gpuStartTime) * 1000
             : wall
         trace.gpuMilliseconds = gpu
+        // P1e — the overlay pass's output becomes the slot only now that it really ran. What the slot
+        // replaces is the graph's own texture, so it goes back to the pool here rather than being
+        // dropped on the floor (`recycle(output:)` refuses to pool the slot's texture, so nothing else
+        // could have taken it).
+        if let pending = pendingOverlay {
+            if let old = showMaskEntry, old.texture !== pending.texture { pool.recycle(old.texture) }
+            showMaskEntry = pending
+            showMaskPasses += 1
+        }
         // 073 — the per-stage counters, merged from the frame's own trace so the two can never
         // disagree about what this frame ran (`s1Passes` and `s1_6Passes` are read by S1CacheTests).
         for stage in trace.executed { stageRuns[stage, default: 0] += 1 }
@@ -1619,6 +1730,7 @@ public final class RenderGraph {
         /// the cursor (2026-10-27). 0.29 MB for a 256-long-edge grid — the frame texture beside it is
         /// 33 MB, so this is the cheap half of a frame.
         var histogramSample: LinearSample?
+        var histogramCost = HistogramCost.zero
         if let source = histogramSource {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
             // The picture, from the layout S0 actually drew with — not the content rect, which holds
@@ -1629,8 +1741,11 @@ public final class RenderGraph {
                 // not the picture, so no key moves and no plot is updated — but the pixels under the
                 // pointer did move, and the readout has to follow them.
                 let tSample = CFAbsoluteTimeGetCurrent()
+                let rbStart = DispatchTime.now().uptimeNanoseconds
                 let sample = readSample(grid.texture)
+                let rbEnd = DispatchTime.now().uptimeNanoseconds
                 histogramSample = sample
+                histogramCost = HistogramCost(readbackNanoseconds: Int(rbEnd - rbStart))
                 if options.collectHistogram {
                     // 070: the picture's own pixels, sampled off the scene-linear texture (not S4's
                     // clamped output, which cannot hold anything above the panel's headroom).
@@ -1641,9 +1756,12 @@ public final class RenderGraph {
                     let pixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
                                                      in: sourceSize)
                     let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
+                    let binStart = DispatchTime.now().uptimeNanoseconds
                     histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
                                                          headroom: options.display.headroom)
                         .relabelled(canvas: pixels, roi: own)
+                    histogramCost.binningNanoseconds =
+                        Int(DispatchTime.now().uptimeNanoseconds - binStart)
                     histogramMilliseconds = (CFAbsoluteTimeGetCurrent() - tSample) * 1000
                 }
                 pool.recycle(grid.texture)
@@ -1662,14 +1780,17 @@ public final class RenderGraph {
 
         if options.wantsPixels {
             let pixels = readback(finalTexture, primaries: options.display.primaries, bitDepth: options.display.bitDepth)
-            pool.recycle(finalTexture)
+            // The overlay's slot texture is the graph's (see `recycle(output:)`); recycling it here
+            // would hand the next frame's stages a texture the slot still points at.
+            if showMaskEntry?.texture !== finalTexture { pool.recycle(finalTexture) }
             return RenderResult(canvas: plan.canvas, content: plan.content,
                                 drawnRect: plan.drawnRect,
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask, histogram: histogramPayload,
                                 histogramMilliseconds: histogramMilliseconds,
-                                histogramSample: histogramSample)
+                                histogramSample: histogramSample,
+                                histogramCost: histogramCost)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect,
@@ -1677,11 +1798,20 @@ public final class RenderGraph {
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask, histogram: histogramPayload,
                             histogramMilliseconds: histogramMilliseconds,
-                            histogramSample: histogramSample)
+                            histogramSample: histogramSample,
+                            histogramCost: histogramCost)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
+    ///
+    /// One texture is the exception: the `showMask` overlay's slot (P1e). Its output is handed out as a
+    /// frame so the canvas can present it, but the graph keeps it as the next static frame's pixels —
+    /// pooling it would let the next stage allocation overwrite the very bytes the slot promises to
+    /// reuse, and the frame after that would present a corrupted overlay. It is the graph's texture, so
+    /// "returning" it is a no-op; it goes back to the pool when the slot is replaced (`invalidateCache`,
+    /// a new overlay key, or the overlay being hidden).
     public func recycle(output: MTLTexture) {
+        if let e = showMaskEntry, e.texture === output { return }
         pool.recycle(output)
     }
 
@@ -2061,6 +2191,8 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
+        if let e = showMaskEntry { pool.recycle(e.texture) }
+        showMaskEntry = nil
     }
 
     // MARK: - 2026-10-28 (P1b): what this graph is holding, and how to give it back
@@ -2070,6 +2202,7 @@ public final class RenderGraph {
     public var heldTextureBytes: Int {
         var bytes = cacheBytes + s1CacheBytes
         if let e = localEntry { bytes += e.texture.width * e.texture.height * 8 }
+        if let e = showMaskEntry { bytes += e.texture.width * e.texture.height * 8 }
         if let a = atlasPool {
             bytes += a.texture.width * a.texture.height * 2 * a.texture.arrayLength
         }
