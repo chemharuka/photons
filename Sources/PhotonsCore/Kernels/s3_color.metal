@@ -1,30 +1,33 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// S3b — colour: eight HSL bands (Lightroom's red/orange/yellow/green/aqua/blue/purple/magenta),
-// then vibrance, then global saturation.
+// S3b — colour: vibrance, then global saturation.
 //
-// The HSL maths — `rgb_to_hsl` / `hsl_to_rgb` / the band weights / the two slider mappings — lives
-// in `color_hsl.metal`, which **`s3_5_local_color` includes as well** (派单 056). A local mask's
-// saturation +40 and the global saturation slider at +40 therefore run the same arithmetic, not two
-// copies of it, which is what makes a full-canvas mask agree with the global control.
+// **The eight HSL bands are not here any more** (派单 076). They used to run `rgb_to_hsl` on this
+// stage's linear input, which made one 亮度 slider mean two different things — pure blue and pure
+// yellow both read HSL `l = 0.5` on linear light while their luminance differs by 6.9× (079 结论 4).
+// They now live in S3.6 (`s3_6_hsl.metal`), on OKLCh, on the display-referred output of this stage.
+// What stays here is exactly what S3.5's local colour shares: the same `color_hsl.metal` include, so
+// a full-canvas mask at saturation +40 equals this slider at +40.
+//
+// The HSL maths — `rgb_to_hsl` / `hsl_to_rgb` / the two slider mappings — lives in
+// `color_hsl.metal`, which **`s3_5_local_color` includes as well** (派单 056).
 //
 // Matte (派单 008 C): a *black* pixel survives this pass today because HSL keeps `l = 0` whatever
 // the saturation does, so the matte happens to come out 0 — but that is an accident of the maths,
-// not a rule, and the moment a hue band or a lift lands on a dark channel the bars tint. The
-// content-rect guard is the rule, the same one S2 and S3a now carry.
+// not a rule, and the moment a lift lands on a dark channel the bars tint. The content-rect guard is
+// the rule, the same one S2 and S3a now carry.
 
 #include "color_hsl.metal"
 
 struct ColorParams {
-    float4 a;   // vibrance, saturation, identity, pad
+    float4 a;   // vibrance, saturation, identity(all-zero → this pass writes through), pad
     float4 b;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
 
 kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
                      texture2d<float, access::write> dst [[texture(1)]],
                      constant ColorParams &p [[buffer(0)]],
-                     constant float4 *bands [[buffer(1)]],
                      uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
     if (p.a.z > 0.5) {
@@ -63,11 +66,6 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
     float peak = max(c.r, max(c.g, c.b));
     float headroomScale = peak > 1.0 ? peak / 0.9 : 1.0;
     float3 hsl = rgb_to_hsl(max(c.rgb, 0.0) / headroomScale);
-
-    float3 shift = hsl_band_shift(hsl.x * 360.0, hsl.y, bands);
-    hsl = hsl_rotate_hue(hsl, shift.x);
-    hsl = hsl_scale_saturation(hsl, shift.y);
-    hsl.z = clamp(hsl.z * (1.0 + shift.z / 100.0), 0.0, 1.0);
 
     // Vibrance moves unsaturated pixels most: the gain scales with (1 - saturation), so skin tones
     // and already-saturated reds stay put while muted colour wakes up.

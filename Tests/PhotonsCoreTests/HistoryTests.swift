@@ -277,11 +277,42 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(EditHistory.dirtyStages(for: [.detail]), [])   // stored, not rendered
         // 056: the masks group feeds S3.5 as well — a mask's hue/saturation moved there.
         XCTAssertEqual(EditHistory.dirtyStages(for: [.masks]), [.maskAtlas, .localApply, .localColor])
+        // 076: the color group feeds **two** stages — S3 (vibrance/saturation) and S3.6 (the bands).
+        XCTAssertEqual(EditHistory.dirtyStages(for: [.color]), [.color, .hsl])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.light, .masks]),
                        [.sceneLinear, .toneMap, .maskAtlas, .localApply, .localColor])
         XCTAssertFalse(RenderGroup.detail.affectsRender)
         XCTAssertTrue(RenderGroup.curve.affectsRender)
         XCTAssertTrue(RenderGroup.masks.affectsRender)
+    }
+
+    /// 076: one group, two stages — and the *stage* answer has to be as fine as the key chain is, or a
+    /// band drag would re-run S3 (a pass that no longer reads a band) and a saturation drag would re-run
+    /// S3.6 (a pass that does not read saturation).
+    func testTheColorGroupDirtiesExactlyTheStageThatReadsWhatMoved() {
+        let base = EditModel.neutral
+        func stages(_ mutate: (inout EditModel) -> Void) -> Set<RenderStage> {
+            var e = base
+            mutate(&e)
+            return e.changedStages(from: base)
+        }
+        XCTAssertEqual(stages { $0.color.bands[0].hue = 12 }, [.hsl])
+        XCTAssertEqual(stages { $0.color.bands[7].luminance = -30 }, [.hsl])
+        XCTAssertEqual(stages { $0.color.bands = Array(repeating: HSLBand(hue: 5, saturation: 5,
+                                                                          luminance: 5), count: 8) },
+                       [.hsl])
+        XCTAssertEqual(stages { $0.color.vibrance = 20 }, [.color])
+        XCTAssertEqual(stages { $0.color.saturation = -40 }, [.color])
+        XCTAssertEqual(stages { $0.color.vibrance = 20; $0.color.bands[2].saturation = 30 },
+                       [.color, .hsl])
+        // The predicate the key chain uses: by **value**, never by "the group exists".
+        var zeroed = base
+        zeroed.color.bands = ColorGroup.identityBands
+        XCTAssertFalse(zeroed.hasHSL)
+        XCTAssertNil(RenderKeyChain.links(identity: "dirty-076", sourceSize: ImageSize(width: 8, height: 8),
+                                          canvas: ImageSize(width: 8, height: 8),
+                                          content: ImageSize(width: 8, height: 8),
+                                          edit: zeroed, display: DisplayOptions()).hsl)
     }
 
     // MARK: ⑥ float tolerance

@@ -10,7 +10,7 @@ import SwiftUI
 /// | # | 工作区 | 图标 | 卡片 |
 /// |---|---|---|---|
 /// | 1 | 调整（默认） | `slider.horizontal.3` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设（Decode 卡已删除，解码模型移入细节卡） |
-/// | 2 | 变换 | `crop.rotate` | —（旋转 / 裁切 / 校正 现在都不是检查器卡片） |
+/// | 2 | 变换 | `crop.rotate` | 裁切（2026-10-27：比例 / 角度 / 翻转 / 九宫格 / 应用取消） |
 /// | 3 | 色彩 | `paintpalette` | —（HSL 未实现） |
 /// | 4 | 蒙版 | `circle.dashed` | 蒙版 |
 /// | 5 | 历史记录 | `clock.arrow.circlepath` | —（未实现） |
@@ -48,10 +48,12 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         // 默认打开的是「调整」——这是用户的第一条要求。
         XCTAssertEqual(InspectorWorkspaceState().selection, .adjust, "首次打开必须是调整")
-        // 077（2026-10-27）：调整里没有 蒙版（有自己的工作区）也没有 历史记录（同上）。
+        // 调整 = 既有面板的卡片：蒙版 / 裁切 / HSL 各有自己的工作区，历史记录也有（077）。
         XCTAssertEqual(InspectorView.sections(in: .adjust),
-                       InspectorView.scrollingSections.filter { $0 != .masks && $0 != .history },
-                       "调整 = 既有面板的卡片，只把蒙版与历史记录交给它们自己的工作区")
+                       InspectorView.scrollingSections.filter {
+                           $0 != .masks && $0 != .crop && $0 != .hsl && $0 != .history
+                       },
+                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 历史记录交给各自的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -59,10 +61,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.adjust],
                        ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
-        // 「如果功能没做好就先空着」：这两个还是**空数组**，不是占位。
-        XCTAssertEqual(titles[.transform], [])
-        XCTAssertEqual(titles[.colour], [])
-        // 077（2026-10-27）：历史记录不再是空工作区 —— 它有一张时间线卡。
+        // 变换 有卡片了（裁切），色彩 有卡片了（HSL），历史记录有卡片了（077 的时间线）。
+        XCTAssertEqual(titles[.transform], ["裁切"])
+        XCTAssertEqual(titles[.colour], ["HSL"])
         XCTAssertEqual(titles[.history], ["历史记录"])
 
         // 图标必须有名字可念（.help 与 accessibilityLabel 都用它），空工作区的 tooltip 说明「尚未实现」。
@@ -105,10 +106,11 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片的枚举（Decode 卡删除后 9 张，077 加了历史记录 → 10 张，直方图仍排第一）—— 这张测试
-        // 钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 10)
+        // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张。
+        // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 12)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
+        XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
     }
 
     // MARK: - 3. 切换器的位置：直方图下方、滚动区上方
@@ -243,30 +245,29 @@ final class InspectorWorkspaceTests: XCTestCase {
 
     // MARK: - 6. 空工作区：没有卡片、没有占位、不崩、直方图还在
 
-    func testEmptyWorkspacesRenderNoCardsAndNeverHideTheHistogram() throws {
+    func testEveryWorkspaceDrawsExactlyItsTableAndNeverHidesTheHistogram() throws {
         let panel = try host(width: Self.inspectorWidth, height: Self.panelHeight)
         defer { panel.window.contentView = nil }
         let plot = panel.histogramPlot
 
-        // 077（2026-10-27）：历史记录有自己的卡片了，所以空工作区只剩这两个。
-        for workspace in [InspectorWorkspace.transform, .colour] {
+        // 077 之后**没有空工作区了**：五个都有卡。这条用例原先钉「空工作区不画占位、不抢直方图」，
+        // 现在钉它更强的一面：屏幕上画出来的卡片**正好**是表里那几张（多一张就是占位，少一张就是丢卡）。
+        for workspace in InspectorWorkspace.allCases {
             panel.state.select(workspace)
             try waitFor(panel, until: { $0.cards.workspace == workspace.rawValue })
 
-            XCTAssertEqual(panel.cards.cardIDs, [], "\(workspace.title) 还没实现，卡片必须是空的")
-            XCTAssertEqual(panel.numberFields, 0)
-            XCTAssertEqual(panel.maskCards, 0)
+            XCTAssertEqual(panel.cards.cardIDs, InspectorView.sections(in: workspace).map(\.rawValue),
+                           "\(workspace.title) 画出来的卡必须**正好**是表里那几张（多＝占位，少＝丢卡）")
             XCTAssertEqual(panel.histogramCards, 1, "\(workspace.title)：直方图仍然在")
             XCTAssertEqual(panel.histogramPlot.minY, plot.minY, accuracy: 0.001)
-            // 空的滚动区高度只剩底部那 14 pt 内缩 —— 没有占位大图，也没有「尚未实现」的文案块。
-            XCTAssertLessThanOrEqual(panel.cards.frame.height, 15,
-                                     "\(workspace.title) 的滚动内容高 \(panel.cards.frame.height) pt，"
-                                     + "不该有占位内容")
+            // 滚动内容的高度就是卡片本身的高度：没有占位大图，也没有「尚未实现」的文案块。
+            XCTAssertGreaterThan(panel.cards.frame.height, 15, "\(workspace.title) 有卡就该有高度")
             XCTAssertNil(panel.tabs.first { $0.isSelected && $0.workspace != workspace.rawValue },
                          "\(workspace.title) 必须是唯一选中的那个")
             XCTAssertEqual(panel.tabs.filter(\.isSelected).map(\.workspace), [workspace.rawValue])
-            print(String(format: "CARDS %@ · [] · doc h %.2f · histogram still at y %.2f",
-                         workspace.rawValue, panel.cards.frame.height, panel.histogramPlot.minY))
+            print(String(format: "CARDS %@ · %@ · doc h %.2f · histogram still at y %.2f",
+                         workspace.rawValue, "\(panel.cards.cardIDs)",
+                         panel.cards.frame.height, panel.histogramPlot.minY))
         }
     }
 
@@ -423,8 +424,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         let tabs = try String(contentsOf: Self.tabsSource, encoding: .utf8)
         XCTAssertTrue(tabs.contains("public var cards: [InspectorView.Section]"),
                       "唯一一张「工作区 → 卡片」表在 InspectorWorkspace.cards")
-        XCTAssertTrue(tabs.contains("case .transform:\n            return []"),
-                      "变换还没实现：空表，不是占位")
+        XCTAssertTrue(tabs.contains("case .transform:\n            // 2026-10-27 — 裁切."),
+                      "变换 认领裁切卡（2026-10-27：卡片从菜单/浮动栏搬进了工作区）")
+        XCTAssertTrue(tabs.contains("return [.crop]"), "变换工作区的第一张卡 = 裁切")
     }
 
     // MARK: - harness

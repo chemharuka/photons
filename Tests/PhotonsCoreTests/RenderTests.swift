@@ -413,6 +413,58 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(img.height, pixels.height)
     }
 
+    // MARK: - 9. HSL (076): a bandless document is the pre-076 graph, byte for byte
+
+    /// **The hard acceptance for 派单 076**, on the real decoder rather than a synthetic ramp: a
+    /// document whose 24 band values are all 0 must render the pre-076 graph — no `s3.6` in the trace,
+    /// no `hsl` link in the key chain, and the same pixel hash as the neutral document.
+    ///
+    /// (A synthetic version of this lives in `HSLTests`, where it can also check the *values*; this one
+    /// exists because "the stage is gone" has to be true of a real RAW at a real scale, where the key
+    /// chain carries an orientation, a decoder version and a white balance.)
+    func testABandlessDocumentDoesNotVisitTheHSLStage() throws {
+        let (graph, _) = try makeGraph(scale: 0.125)
+        var zeroed = EditModel.neutral
+        zeroed.color.bands = Array(repeating: HSLBand(), count: ColorGroup.bandCount)
+        zeroed.color.vibrance = 12          // the rest of the colour group is *not* the HSL card's
+        var plain = zeroed
+        plain.color.bands = ColorGroup.identityBands
+
+        let options = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
+        let a = try graph.render(zeroed, options: options)
+        let b = try graph.render(plain, options: options)
+        let pa = try XCTUnwrap(a.display), pb = try XCTUnwrap(b.display)
+
+        XCTAssertFalse(a.trace.executed.contains(.hsl),
+                       "no band value: S3.6 must not be in the pipeline")
+        XCTAssertNil(a.keys.hsl, "no band value: no hsl link in the key chain")
+        XCTAssertFalse(a.keys.shortTrace.contains("s3.6"))
+        XCTAssertEqual(pa.sha256(), pb.sha256(),
+                       "all-zero bands must be byte-identical to no HSL at all")
+        print("076 · bandless: \(a.keys.shortTrace) · sha \(pa.sha256().prefix(12))…")
+    }
+
+    /// The same document **with** one band: one more stage in the trace, one more link in the chain, and
+    /// different pixels — the other half of the acceptance (a stage that never runs is not a feature).
+    func testAOneBandDocumentRunsTheHSLStageAndMovesThePixels() throws {
+        let (graph, _) = try makeGraph(scale: 0.125)
+        var plain = EditModel.neutral
+        plain.color.vibrance = 12
+        var banded = plain
+        banded.color.bands[3] = HSLBand(hue: 0, saturation: -100, luminance: 0)   // 绿 → grey
+
+        let options = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
+        let a = try graph.render(plain, options: options)
+        let b = try graph.render(banded, options: options)
+        let pa = try XCTUnwrap(a.display), pb = try XCTUnwrap(b.display)
+
+        XCTAssertTrue(b.trace.executed.contains(.hsl), "a band must run S3.6")
+        XCTAssertNotNil(b.keys.hsl)
+        XCTAssertEqual(Array(b.keys.pipeline.suffix(3)), [.hsl, .vignette, .display])
+        XCTAssertNotEqual(pa.sha256(), pb.sha256(), "saturation −100 on 绿 must change the picture")
+        print("076 · banded: \(b.keys.shortTrace) · sha \(pb.sha256().prefix(12))…")
+    }
+
     // MARK: - 8. recorded golden images (L2 for the graph)
 
     /// Compares against `Tests/Golden/render-*.json`, which `make verify` records. Mirrors the CLI

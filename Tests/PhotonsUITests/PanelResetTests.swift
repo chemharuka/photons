@@ -337,6 +337,64 @@ final class PanelResetTests: XCTestCase {
         XCTAssertEqual(session.edit.color.saturation, 60)
     }
 
+    // MARK: - 5b. HSL (076)
+
+    /// Double-clicking the **HSL card's title** takes all 24 band numbers back to 0 in **one** snapshot,
+    /// and ⌘Z restores every one of them.
+    func testTheHSLCardResetsAllTwentyFourBandsInOneSnapshot() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            for i in 0..<ColorGroup.bandCount {
+                model.color.bands[i] = HSLBand(hue: Double(i * 3 - 10), saturation: 20,
+                                               luminance: Double(-i))
+            }
+            model.color.vibrance = 25          // another card's field: it must survive
+        }
+        XCTAssertTrue(session.commitEdit(label: "HSL"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.hsl())
+        XCTAssertEqual(session.edit.color.bands, ColorGroup.identityBands)
+        XCTAssertEqual(session.edit.color.vibrance, 25, "the HSL card does not own vibrance")
+        XCTAssertEqual(session.history.count, before + 1, "one edit action, one snapshot")
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.color.bands[7].luminance, -7)
+        XCTAssertEqual(session.edit.color.bands[0].hue, -10)
+    }
+
+    /// Double-clicking **one row** of the HSL card takes that one field of that one band back to 0 —
+    /// the band the panel is showing, not band 0, and not the other two axes.
+    func testOneHSLRowResetsOnlyThatBandAndThatAxis() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { $0.color.bands[5] = HSLBand(hue: 30, saturation: -40, luminance: 12) }
+        XCTAssertTrue(session.commitEdit(label: "HSL row"))
+
+        XCTAssertTrue(resets.hslField(5, .saturation))
+        XCTAssertEqual(session.edit.color.bands[5], HSLBand(hue: 30, saturation: 0, luminance: 12))
+        XCTAssertEqual(session.edit.color.bands, ColorGroup.identityBands.enumerated().map { i, b in
+            i == 5 ? HSLBand(hue: 30, saturation: 0, luminance: 12) : b
+        })
+        // Nothing left to do on that row → no snapshot.
+        XCTAssertFalse(resets.hslField(5, .saturation))
+        // A band and an axis that hold nothing, and an index that does not exist.
+        XCTAssertFalse(resets.hslField(4, .hue))
+        XCTAssertFalse(resets.hslField(99, .hue))
+        print("HSL ROW RESET · band 5 = " + session.edit.color.bands[5].keyString
+              + " · history \(session.history.count)")
+    }
+
+    /// The **card** reset is wired to the title, like the other parameter cards (047's contract).
+    func testTheHSLCardCanBeResetFromItsTitle() throws {
+        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("card(Section.hsl.title, reset: { resets.hsl() })"),
+                      "the HSL card's title must carry the whole-card reset")
+        XCTAssertTrue(source.contains("onReset: { resets.hslField(band, axis) })"),
+                      "each HSL row's name must reset that row's own field")
+    }
+
     // MARK: - 6. 没有变化就不写历史
 
     func testAResetOnAnAlreadyDefaultPanelWritesNothing() {
@@ -351,6 +409,9 @@ final class PanelResetTests: XCTestCase {
         XCTAssertFalse(resets.group(.whiteBalance))
         XCTAssertFalse(resets.detail(.colorNR))
         XCTAssertFalse(resets.whiteBalanceField(isTemperature: true))
+        // 076: the HSL card and its three rows, on a document that has no bands.
+        XCTAssertFalse(resets.hsl())
+        XCTAssertFalse(resets.hslField(0, .hue))
         XCTAssertEqual(session.history.count, 0, "空双击不该长出一条空快照")
     }
 
@@ -365,7 +426,7 @@ final class PanelResetTests: XCTestCase {
         XCTAssertTrue(source.contains("private func card<Content: View>(_ title: String,\n"
                                       + "                                     reset: (() -> Void)? = nil,"),
                       "the card builder must take the group reset, or a card cannot get one")
-        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))"),
+        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))"),
                       "the reset must hang on the card's title, not on the card's body")
 
         // 四张参数卡：Light / Color / 细节 / 白平衡 —— 各一处，且都在标题上。

@@ -60,6 +60,12 @@ public struct InspectorView: View {
         case blackLevel
         case light
         case color
+        /// 派单 076: **HSL** — the eight colour bands, on OKLCh, in the 色彩 workspace.
+        ///
+        /// Its own card rather than six more rows under Color: the bands are a *selector plus three
+        /// sliders*, not a list of independent parameters, and the 色彩 workspace (073) exists to give
+        /// them a home of their own. It is the same 24 document numbers Lightroom's HSL panel writes.
+        case hsl
         /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
         /// are the same panel in Lightroom, and below the tone controls because they act on the
         /// decoded pixels rather than on the render.
@@ -68,6 +74,14 @@ public struct InspectorView: View {
         /// amounts, then the curve that reprofiles what came out of both.
         case curve
         case presets
+        /// 2026-10-27: 裁切 — the 变换 workspace's **first** card.
+        ///
+        /// It is a `Section` like every other card (「`Section` 仍然是唯一的卡片清单」), and it is the
+        /// only one the 变换 workspace claims. Its position in `allCases` is after 预设 and before 蒙版
+        /// for one reason: 蒙版 has to stay the last card of the enum (`DecoderModelCardTests` holds
+        /// that, and the panel's own order says the same), while 裁切 belongs to a workspace of its own
+        /// and is therefore invisible in 调整 either way.
+        case crop
         case masks
         /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
         /// only one that is a *reading* rather than a control: it can jump, and delete the newest row
@@ -83,9 +97,11 @@ public struct InspectorView: View {
             case .light: return "Light"
             case .blackLevel: return "黑电平"
             case .color: return "Color"
+            case .hsl: return "HSL"
             case .detail: return "细节"
             case .curve: return "曲线"
             case .presets: return "预设"
+            case .crop: return "裁切"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
@@ -255,12 +271,18 @@ public struct InspectorView: View {
             blackLevelCard
         case .color:
             colorCard
+        case .hsl:
+            hslCard
         case .detail:
             detailCard
         case .curve:
             curveCard
         case .presets:
             PresetPanel(session: session)
+        case .crop:
+            // 2026-10-27: 变换工作区的第一张卡 —— 比例 / 角度 / 翻转 / 九宫格 / 应用取消，卡头一个直角尺
+            // 按钮进出裁切模式。卡本身在 `TransformPanel.swift`（同一套行样式，`sliderRow` 一字未改）。
+            cropTransformCard
         case .masks:
             MaskListPanel(session: session)
         case .history:
@@ -496,6 +518,66 @@ public struct InspectorView: View {
                 }
             }
         }
+    }
+
+    /// 派单 076 — **HSL**: eight band selectors, and the selected band's three sliders.
+    ///
+    /// The card is one idea in two rows: *which colour am I talking about* (the eight buttons, each
+    /// drawn in the colour it names), and *what should happen to it* (色相 / 饱和 / 亮度, in the
+    /// `HSLAxis` table). Everything about a row — typeable number, blue knob, double-click reset — is
+    /// 047's contract, inherited from `sliderRow` rather than re-implemented here; the only thing this
+    /// card adds is that a row's *target* is `color.bands[selected]`.
+    ///
+    /// **Blue** on purpose: `.knob` is the panel's "acts on the already-decoded render" class (060),
+    /// which is exactly what S3.6 does — it runs in the display-referred domain, after the tone map.
+    /// Yellow would claim a decode parameter and red a scene-linear one; neither is true.
+    ///
+    /// Selection is **view state** (`InspectorWorkspaceState.hslBand`): picking 绿 writes no document,
+    /// takes no snapshot and moves no revision. The three sliders write through `applyEdit` on drag and
+    /// commit once on release, like every other row.
+    private var hslCard: some View {
+        let band = min(max(workspaces.hslBand, 0), ColorGroup.bandCount - 1)
+        return card(Section.hsl.title, reset: { resets.hsl() }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HSLBandStrip(selection: band) { workspaces.selectBand($0) }
+                ForEach(HSLAxis.allCases, id: \.rawValue) { axis in
+                    sliderRow(axis.title, hslBinding(axis, band: band), HSLAxis.range, "%.0f",
+                              shape: .knob,
+                              decimals: 0,
+                              rounding: .outward,
+                              editable: true,
+                              accessibilityID: "inspector.hsl.\(axis.rawValue)",
+                              onReset: { resets.hslField(band, axis) }) { editing in
+                        if !editing { session.commitEdit() }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `color.bands[band].hue/saturation/luminance` as a slider binding.
+    ///
+    /// A closure, not a key path: the band index is view state, and `\EditModel.color.bands[i].hue`
+    /// cannot be written as a `WritableKeyPath`. The read side is the document's own value (no draft
+    /// copy), so the number on screen is the number the kernel is handed.
+    private func hslBinding(_ axis: HSLAxis, band: Int) -> Binding<Double> {
+        Binding(get: {
+            guard session.edit.color.bands.indices.contains(band) else { return 0 }
+            switch axis {
+            case .hue: return session.edit.color.bands[band].hue
+            case .saturation: return session.edit.color.bands[band].saturation
+            case .luminance: return session.edit.color.bands[band].luminance
+            }
+        }, set: { value in
+            session.applyEdit { model in
+                guard model.color.bands.indices.contains(band) else { return }
+                switch axis {
+                case .hue: model.color.bands[band].hue = value
+                case .saturation: model.color.bands[band].saturation = value
+                case .luminance: model.color.bands[band].luminance = value
+                }
+            }
+        })
     }
 
     /// 派单 031 / 040 + 解码模型 (owner, 2026-10-27): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to
@@ -753,26 +835,16 @@ public struct InspectorView: View {
     /// `reset` is 派单 047's group verb: when it is given, **double-clicking the title** puts the whole
     /// card back to its defaults in one snapshot (`PanelResets.group(_:)`). `nil` leaves the title a
     /// plain title — the histogram, 信息, 预设 and 蒙版 cards have no "default" to go back to.
+    ///
+    /// The chrome itself lives in `InspectorCardShell`, because one card (裁切, `TransformPanel.swift`)
+    /// carries an **accessory in its header** — the ruler button that enters 裁切 mode — and a second
+    /// copy of the glass/hairline/inset chain is exactly how two cards start to look different.
     private func card<Content: View>(_ title: String,
                                      reset: (() -> Void)? = nil,
-                                     @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.primary)
-                .modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))
+                                     @ViewBuilder _ content: @escaping () -> Content) -> some View {
+        InspectorCardShell(title: title, reset: reset, accessory: { EmptyView() }) {
             content()
         }
-        .padding(.horizontal, WorkspaceLayout.cardInsetH)
-        .padding(.vertical, WorkspaceLayout.cardInsetV)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Small widget container: glass here, matte everywhere else (§2b item 5).
-        .background(.regularMaterial,
-                    in: RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 
     /// A **render** row (曝光 / 对比 / 自然饱和 …): what 046 calls a `.knob` parameter, because a tone
@@ -936,7 +1008,11 @@ public struct InspectorView: View {
     /// 蒙版 needed the same row, and a `private` method of this view cannot be the panel's row. There
     /// is still exactly one row view, one `Slider` (`shapeSlider`) and one set of numbers
     /// (`SliderRowStyle`) — a card that called `SliderRow` directly would get the same thing.
-    private func sliderRow(_ title: String,
+    ///
+    /// `internal`, not `private`: the 裁切 card (`TransformPanel.swift`) is the panel's second caller
+    /// and must draw the **same** row — a card that built its own label/number/slider chain is exactly
+    /// the 040 bug (「细节卡的样式和其他不一致」) coming back under a new name.
+    func sliderRow(_ title: String,
                            _ value: Binding<Double>,
                            _ range: ClosedRange<Double>,
                            _ format: String,
@@ -1288,7 +1364,8 @@ public struct InspectorView: View {
     /// on a double-click, the tests call them directly — the same code either way.
     private var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
 
-    /// The two tooltips: `SliderRow` and 蒙版 use them too, so they are the panel's, not one card's.
+    /// The two tooltips: `SliderRow`、蒙版与 `InspectorCardShell` 都用它们，所以是面板的，不是某张卡的。
+    /// `internal`（不是 `private`）：`InspectorCardShell` 在文件作用域，裁切卡的头部件要用同一套标题行。
     static let resetParameterHelp = "双击复位此参数"
     static let resetGroupHelp = "双击整组复位"
 
@@ -1357,6 +1434,58 @@ public struct DetailCardContent: Equatable, Sendable {
             Row(axis: $0, title: $0.title, range: $0.range,
                 format: $0.format, step: $0.step, shape: .bar)
         })
+}
+
+/// The panel's **card chrome**: glass, hairline, insets, and a title row with an optional accessory.
+///
+/// One definition, used by both `InspectorView.card(_:reset:_:)` (accessory = `EmptyView`) and the
+/// 裁切 card (`TransformPanel.swift`), whose header carries the 直角尺 button that enters 裁切 mode.
+/// A second copy of this chain — the four paddings, the material, the 9 pt corner, the 8 % hairline —
+/// is how two cards in the same column start to look like two different panels.
+///
+/// The title keeps 047's double-click verb (`ResetOnDoubleClick`) when a `reset` is given, so a card
+/// with an accessory cannot accidentally lose the group reset.
+struct InspectorCardShell<Accessory: View, Content: View>: View {
+
+    let title: String
+    var reset: (() -> Void)?
+
+    private let accessory: () -> Accessory
+    private let content: () -> Content
+
+    init(title: String,
+         reset: (() -> Void)? = nil,
+         @ViewBuilder accessory: @escaping () -> Accessory,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.reset = reset
+        self.accessory = accessory
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))
+                Spacer(minLength: 0)
+                accessory()
+            }
+            content()
+        }
+        .padding(.horizontal, WorkspaceLayout.cardInsetH)
+        .padding(.vertical, WorkspaceLayout.cardInsetV)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Small widget container: glass here, matte everywhere else (§2b item 5).
+        .background(.regularMaterial,
+                    in: RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
 }
 
 /// Double-click on a row's label = back to that slider's default (派单 040 / 047).
@@ -1904,6 +2033,41 @@ public struct PanelResets {
 
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
     @discardableResult
+    public func hsl() -> Bool {
+        guard session.edit.color.hasBands else { return false }
+        session.applyEdit { $0.color.bands = ColorGroup.identityBands }
+        return session.commitEdit(label: InspectorView.Section.hsl.title)
+    }
+
+    /// Double-click on one of the HSL card's three rows: **that** band's field back to 0 (its own
+    /// default — `HSLBand()` is all zeros, which is "this band does nothing"), one snapshot.
+    ///
+    /// The band index is view state, so it is an argument here rather than something this type could
+    /// look up: the row the user double-clicked is the row the panel drew.
+    @discardableResult
+    public func hslField(_ band: Int, _ axis: HSLAxis) -> Bool {
+        guard session.edit.color.bands.indices.contains(band) else { return false }
+        let current = session.edit.color.bands[band]
+        let already: Bool
+        switch axis {
+        case .hue: already = current.hue == 0
+        case .saturation: already = current.saturation == 0
+        case .luminance: already = current.luminance == 0
+        }
+        guard !already else { return false }
+        session.applyEdit { model in
+            guard model.color.bands.indices.contains(band) else { return }
+            switch axis {
+            case .hue: model.color.bands[band].hue = 0
+            case .saturation: model.color.bands[band].saturation = 0
+            case .luminance: model.color.bands[band].luminance = 0
+            }
+        }
+        return session.commitEdit(label: axis.title)
+    }
+
+    /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
+    @discardableResult
     public func group(_ group: Group) -> Bool {
         switch group {
         case .whiteBalance:
@@ -1934,8 +2098,17 @@ public struct PanelResets {
             return session.commitEdit(label: group.title, coalesce: false)
 
         case .color:
-            guard session.edit.color != ColorGroup.identity else { return false }
-            session.applyEdit { $0.color = .identity }
+            // 076: **vibrance and saturation only.** The eight bands are the HSL card's (S3.6), with
+            // their own title reset (`resets.hsl()`); letting this verb write them would make a
+            // double-click on Color undo work done on another card.
+            guard session.edit.color.vibrance != 0 || session.edit.color.saturation != 0 else {
+                return false
+            }
+            session.applyEdit { model in
+                model.color.vibrance = 0
+                model.color.saturation = 0
+            }
+            // 077: 双击复位是命令，不参与合并。
             return session.commitEdit(label: group.title, coalesce: false)
 
         case .detail:
@@ -1971,6 +2144,11 @@ public struct PanelResets {
 ///
 /// 缩放控制条 is **not** in here: it lives on the canvas (`ZoomGlassSlider`), which is why §E4 can keep
 /// it live without weakening §E1.
+///
+/// 2026-10-27 — the *decision* of when to gate moved to `WorkspaceRootView.updateInspectorGate()`,
+/// because it now has two inputs: the crop mode and the workspace. 变换 is exempt (that card **is** the
+/// crop tool's controls — the 直角尺 button, 比例, 角度, 应用/取消), every other workspace is gated
+/// exactly as §E1 measured. This class only implements one bool.
 public final class InspectorHostingView: NSHostingView<InspectorView> {
 
     /// True while 裁切 mode is on. Set from the workspace, which owns both halves.

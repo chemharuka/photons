@@ -337,8 +337,8 @@ final class SliderStyleTests: XCTestCase {
                       "the row hands the card's closure straight to the Slider (one true/false pair per drag)")
 
         // 源码：三张卡都只在「抬起」时提交 —— 没有一处在中途 commit。
-        XCTAssertEqual(Self.occurrences(of: "if !editing { session.commitEdit() }", in: source), 3,
-                       "Light / Color / 黑电平 都只在 false 时提交（拖动中只 applyEdit）")
+        XCTAssertEqual(Self.occurrences(of: "if !editing { session.commitEdit() }", in: source), 4,
+                       "Light / Color / 黑电平 / HSL 都只在 false 时提交（拖动中只 applyEdit）")
         XCTAssertTrue(source.contains("if editing { beginDetailDrag() } else { commitDetail(title: row.title) }"),
                       "细节卡也是抬起才提交（拖动中只起步预览档）")
         XCTAssertFalse(source.contains("if editing { session.commitEdit() }"),

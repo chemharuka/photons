@@ -321,16 +321,25 @@ public enum MaskHandles {
     /// `pointScale` is the backing scale (device pixels per point) and is only ever a divisor: the
     /// mapping produces device pixels because the renderer works in them, and everything a hand
     /// touches is in points.
+    ///
+    /// `carry` is the **picture's own screen transform** — `p ↦ scale·p + offset` in device pixels,
+    /// applied *after* the projection, exactly as `CropTool.layout` applies it (2026-10-27, the
+    /// 「蒙版控件不跟手」 fix). During a stop change the pixels on the canvas are the *old* picture
+    /// carried by `LoupeZoomBridge`'s similarity, so a bridge frame is not any camera's projection:
+    /// the grips have to be projected by the mapping those pixels were laid out with and then carried
+    /// by that frame's own map. Identity (the default, and every non-animating call) leaves the
+    /// arithmetic bit-for-bit as it was — `1·p + 0` is `p`.
     public static func layout(shape: MaskShape,
                              feather: Double,
                              source: ImageSize,
                              mapping: LoupeMapping,
-                             pointScale: Double = 1) -> MaskHandlesLayout {
+                             pointScale: Double = 1,
+                             carry: CropCarry = .identity) -> MaskHandlesLayout {
         let scale = pointScale > 0 ? pointScale : 1
         func view(_ p: NormalizedPoint) -> CGPoint {
             let v = mapping.viewPoint(sourceX: p.x * Double(source.width),
                                       sourceY: p.y * Double(source.height))
-            return CGPoint(x: v.x / scale, y: v.y / scale)
+            return CGPoint(x: carry.applyX(v.x) / scale, y: carry.applyY(v.y) / scale)
         }
 
         var layout = MaskHandlesLayout()

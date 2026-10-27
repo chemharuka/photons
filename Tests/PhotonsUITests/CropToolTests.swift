@@ -657,8 +657,13 @@ final class CropToolTests: XCTestCase {
 
     // MARK: - 6. the shortcuts
 
-    /// 进入 ⌘R / 应用 ⌘⏎ / 取消 ⌘. — and none of them collides with an existing menu item.
-    func testTheCropShortcutsDoNotCollideWithTheMenu() {
+    /// 进入 ⌘R —— and it collides with nothing.
+    ///
+    /// 2026-10-27: the menu used to carry three crop keys (⌘R / ⌘⏎ / ⌘.). 应用 and 取消 are rows of the
+    /// inspector's 裁切 card now (and ↵ / Esc on the canvas), so the menu keeps **one** key. What this
+    /// test pins is unchanged in spirit: the one shortcut the tool still claims is unique, and the three
+    /// verbs are on the responder chain so a menu item (or the panel) can fire them.
+    func testTheCropShortcutDoesNotCollideWithTheMenu() {
         _ = NSApplication.shared
         let menu = MainMenu.build()
         var entries: [(key: String, modifiers: UInt, title: String)] = []
@@ -674,17 +679,24 @@ final class CropToolTests: XCTestCase {
         }
         walk(menu)
 
-        let ours: Set<String> = ["r", "\r", "."]
+        let ours: Set<String> = ["r"]
         let collisions = entries.filter { ours.contains($0.key) && $0.modifiers == 1 << 20 } // ⌘
             .map { "\($0.title)" }
-        print("035 shortcuts: ⌘R / ⌘⏎ / ⌘. · menu items with those keys: \(collisions)")
-        XCTAssertEqual(collisions.count, 3, "exactly our three items carry ⌘R, ⌘⏎ and ⌘.")
+        print("035 shortcuts: ⌘R · menu items with that key: \(collisions)")
+        XCTAssertEqual(collisions.count, 1, "exactly one item carries ⌘R — the crop toggle")
+        XCTAssertTrue(collisions.first?.contains("裁切") == true, "and it is 变换 ▸ 裁切: \(collisions)")
 
-        // Nothing else in the menu uses a bare ⌘R, ⌘⏎ or ⌘. .
-        let others = entries.filter { ours.contains($0.key) && !$0.title.contains("裁切") }
+        // Nothing else in the menu uses a bare ⌘R.
+        let others = entries.filter { $0.key == "r" && $0.modifiers == 1 << 20 && !$0.title.contains("裁切") }
         XCTAssertTrue(others.isEmpty, "a shortcut the menu already had: \(others.map(\.title))")
 
-        // The three actions exist on the responder chain's owner, so the items can fire.
+        // 应用 / 取消 are panel rows now, so the menu must not promise them any more.
+        let retired = entries.filter { $0.key == "\r" || $0.key == "." }
+            .filter { $0.modifiers == 1 << 20 && $0.title.contains("裁切") }
+        XCTAssertTrue(retired.isEmpty, "应用/取消裁切 的菜单行已经搬进裁切卡：\(retired.map(\.title))")
+
+        // The three actions exist on the responder chain's owner, so a menu item (or the panel) can
+        // fire them.
         let window = EditorWindowController()
         XCTAssertTrue(window.responds(to: #selector(EditorWindowController.toggleCropAction(_:))))
         XCTAssertTrue(window.responds(to: #selector(EditorWindowController.applyCropAction(_:))))

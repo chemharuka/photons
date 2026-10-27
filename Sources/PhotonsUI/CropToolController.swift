@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Observation
 import PhotonsCore
 
 // MARK: - the crop tool's view state (task 035)
@@ -88,10 +89,18 @@ public enum CropAspectPreset: String, Sendable, Equatable, Hashable, CaseIterabl
 /// The crop tool: mode, draft, drag lifecycle, and the one commit.
 ///
 /// Owned by `LoupeController` (the canvas is where the gestures are) and driven by the menu, the
-/// canvas and the floating bar. Every geometry entry point takes the **upright source frame** as a
-/// parameter; the app passes `CatalogSession.maskSourceSize` and nothing else, which is what keeps a
-/// portrait file as accurate as a landscape one (task 028).
+/// canvas, the floating bar and (since 2026-10-27) the 变换 workspace's 裁切 card. Every geometry entry
+/// point takes the **upright source frame** as a parameter; the app passes
+/// `CatalogSession.maskSourceSize` and nothing else, which is what keeps a portrait file as accurate
+/// as a landscape one (task 028).
+///
+/// **`@Observable` since 2026-10-27** — and only for the panel's sake. `isActive`, `draft` and
+/// `showsGrid` are what the 裁切 card draws, and the card must not keep a second copy of any of them
+/// (a mirror would need a `sync()` and would drift, which is exactly the bug the bar was written
+/// against). Making the tool observable means the card reads *this* object and SwiftUI redraws when it
+/// changes; nothing about the tool's behaviour, its writes or its history changed.
 @MainActor
+@Observable
 public final class CropToolController {
 
     // MARK: draft

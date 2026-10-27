@@ -97,10 +97,18 @@ public enum MainMenu {
             item.tag = index
         }
 
-        // 变换 — **before 显影** (072 §F). Everything that moves the picture's geometry lives here:
-        // the crop tool's three verbs, the two flips, and (reserved, not shipped as dead grey rows)
-        // 梯形校正 / 四边形校正. They used to sit at the top of 显影, which said they were a *look*;
-        // they are not — they change where the pixels come from, not their colour.
+        // 变换 — **before 显影** (072 §F). Everything that moves the picture's geometry lives under
+        // this title: it changes where the pixels come from, not what colour they are.
+        //
+        // 2026-10-27 — the panel took the verbs. The user's ask: 「将裁切下拉菜单中的相关功能，移动到右侧
+        // 第二栏「变换」……第一个卡片是裁切；点按直角尺图标后进入裁切模式」. So the 应用裁切 / 取消裁切 /
+        // 水平翻转 / 垂直翻转 rows are **deleted**, not duplicated: those four verbs (and 比例 / 角度 /
+        // 九宫格) are the 裁切 card's rows now, and a menu that mirrors a panel teaches the user two
+        // places to look for one control. What stays is the **shortcut carrier**: ⌘R must still enter
+        // and leave 裁切 mode (「⌘R 必须仍能进/出裁切」), and it is the very verb the card's 直角尺
+        // button calls (`LoupeController.toggleCropTool()`: enter, or apply-and-leave).
+        //
+        // ↵ (应用) and Esc (取消) on the canvas are untouched, so the keyboard lost nothing.
         //
         // 梯形校正 / 四边形校正 (**not built**): the contract is 072 §F — they belong to
         // `GeometryGroup` as a new group of corner offsets, they need their own renderer stage, and
@@ -110,37 +118,12 @@ public enum MainMenu {
         main.addItem(transformItem)
         let transform = NSMenu(title: "变换")
         transformItem.submenu = transform
-        // 裁切与旋转 (⌘R — the R every photo app puts on its crop tool, and the key Phos uses,
-        // `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`).
-        //
-        // The three items are one tool in three verbs: enter/apply, apply, cancel. ↵ and Esc do the
-        // same thing from the canvas without touching the menu, which is why the menu items carry
-        // ⌘-modified keys: a bare Return or Escape in a menu item steals the key from every text
-        // field in the window. Both 应用 and 取消 are **grey with the tool off** (072 §D4:
-        // `validateMenuItem` returns `isCropToolActive`, so ⌘⏎ and ⌘. do nothing then either).
-        transform.addItem(withTitle: "裁切与旋转",
+        // The R every photo app puts on its crop tool, and the key Phos uses
+        // (`local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`). Ticked while the
+        // frame is up (`validateMenuItem`), grey where there is no photo to crop.
+        transform.addItem(withTitle: "裁切",
                           action: #selector(EditorWindowController.toggleCropAction(_:)),
                           keyEquivalent: "r")
-        let applyCrop = transform.addItem(withTitle: "应用裁切",
-                                          action: #selector(EditorWindowController.applyCropAction(_:)),
-                                          keyEquivalent: "\r")
-        applyCrop.keyEquivalentModifierMask = [.command]
-        let cancelCrop = transform.addItem(withTitle: "取消裁切",
-                                           action: #selector(EditorWindowController.cancelCropAction(_:)),
-                                           keyEquivalent: ".")
-        cancelCrop.keyEquivalentModifierMask = [.command]
-        transform.addItem(.separator())
-        // 翻转 — **document-level geometry**, one ⌘Z each, and the same bit the crop bar's two
-        // switches read (`LoupeController.flipHorizontal()`; 072 §F).
-        let flipH = transform.addItem(withTitle: "水平翻转",
-                                      action: #selector(EditorWindowController.flipHorizontalAction(_:)),
-                                      keyEquivalent: "h")
-        flipH.keyEquivalentModifierMask = [.command, .option]
-        let flipV = transform.addItem(withTitle: "垂直翻转",
-                                      action: #selector(EditorWindowController.flipVerticalAction(_:)),
-                                      keyEquivalent: "v")
-        flipV.keyEquivalentModifierMask = [.command, .option]
-        transform.addItem(.separator())
         // Reserved: 梯形校正 / 四边形校正 go here (see the comment above — no dead rows).
 
         // Develop — presets. The list is the library's, so the menu is rebuilt every time it opens

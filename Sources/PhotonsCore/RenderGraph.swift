@@ -446,6 +446,18 @@ private struct ColorParams {
     var b: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 }
 
+/// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076).
+private struct HSLParamsU {
+    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+}
+
+/// One band as the kernel reads it: the three slider values in units, and the reach towards the
+/// previous/next centre in **OKLCh degrees** (which is what makes the weights a partition of unity).
+private struct HSLBandU {
+    var v: SIMD4<Float>   // hue, saturation, luminance (units), centre (OKLCh degrees)
+    var e: SIMD4<Float>   // halfWidth to the previous centre, halfWidth to the next, pad, pad
+}
+
 private struct VignetteParams {
     var a: SIMD4<Float>   // amount, midpoint, feather, roundness
     var b: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (the whole frame, in content pixels)
@@ -566,6 +578,13 @@ private struct MaskTable {
 extension ColorGroup {
     /// The eight band centres, as **hue angles in the graph's working primaries**.
     ///
+    /// **076 note.** These are *not* what S3.6 weights against any more: the bands left S3 (linear
+    /// light) for S3.6 (OKLCh), and a band's centre is now an **OKLCh** hue —
+    /// `HSLBands.centresDegrees`, the same eight physical colours measured in the space the maths runs
+    /// in. What survives here is the *wheel*: `LocalColorStageTests` builds its fixture pixels at these
+    /// angles (a mask's hue is still an HSL angle, so "the colour Lightroom calls red" has to be
+    /// addressable in HSL), and `linearHSL` below is the conversion both derivations share.
+    ///
     /// Lightroom's wheel is `[0, 30, 60, 120, 180, 240, 285, 315]` **in sRGB**. A hue angle is not a
     /// physical colour — it is a direction from grey in whatever RGB basis the three numbers happen to
     /// be written in — so the moment the working space became Rec.2020 (075) those eight numbers
@@ -599,7 +618,10 @@ extension ColorGroup {
 
     /// `hsl → linear RGB`, the same arithmetic as `color_hsl.metal`'s inverse (and as the colour maths
     /// in `LocalColorStageTests`, which is deliberately an independent implementation).
-    private static func linearHSL(h: Double, s: Double, l: Double) -> SIMD3<Double> {
+    ///
+    /// Internal since 076: `HSLBands.centresDegrees` builds the eight band colours with it, so the
+    /// wheel's colours and the HSL stage's centres are the same eight physical colours by construction.
+    static func linearHSL(h: Double, s: Double, l: Double) -> SIMD3<Double> {
         func channel(_ p: Double, _ q: Double, _ t0: Double) -> Double {
             var t = t0
             if t < 0 { t += 1 }
@@ -617,7 +639,7 @@ extension ColorGroup {
 
     /// The hue of a linear RGB triple, in turns — `rgb_to_hsl`'s `h`, which is what the band tent is
     /// measured against (`hueDeg = rgb_to_hsl(v).x * 360`).
-    private static func linearHSLHue(_ c: SIMD3<Double>) -> Double {
+    static func linearHSLHue(_ c: SIMD3<Double>) -> Double {
         let mx = max(c.x, max(c.y, c.z)), mn = min(c.x, min(c.y, c.z))
         let d = mx - mn
         if d < 1e-9 { return 0 }
@@ -728,7 +750,6 @@ public final class RenderGraph {
     /// four keys answers the same question with a bounded cost: compare four point lists, rebuild
     /// only the slices whose key moved, `copyMemory` 16 KB each.
     private var curveTablesCache: HDRCurveTableCache?
-    private var bandBuffers: [String: MTLBuffer] = [:]
 
     /// 005e: the semantic routes (system matte, then Vision) and the in-memory raster cache of §5.2.
     /// The cache lives with the graph because its lifetime is the session's, and it is keyed by
@@ -1974,16 +1995,33 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .color:
+            // 076: vibrance and saturation only — the eight bands live in S3.6 now (OKLCh). The
+            // `isIdentity` flag still means "nothing to do", which is why it reads the two fields this
+            // pass actually consumes rather than the whole group.
             let p = try kernels.pipeline(file: "s3_color", function: "s3_color")
-            let bands = try bandBuffer(for: edit.color)
             var params = ColorParams(
                 a: SIMD4(Float(edit.color.vibrance), Float(edit.color.saturation),
-                         edit.color.isIdentity ? 1 : 0, 0),
+                         edit.color.vibrance == 0 && edit.color.saturation == 0 ? 1 : 0, 0),
                 b: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
-            enc.setBuffer(bands.buffer, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
+        case .hsl:
+            // 076 — the eight bands, in OKLCh, on display-referred data. One buffer: eight
+            // `HSLBandU`s (values + the reach towards each neighbour). The centres come from
+            // `HSLBands.centresDegrees`, i.e. the same eight physical colours the wheel names,
+            // measured in the space this pass computes in.
+            let p = try kernels.pipeline(file: "s3_6_hsl", function: "s3_6_hsl")
+            let bands = try hslBandBuffer(for: edit.color)
+            var params = HSLParamsU(
+                a: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
+            let enc = try encoder(cb, p, in: src, out: out)
+            enc.setBytes(&params, length: MemoryLayout<HSLParamsU>.stride, index: 0)
+            enc.setBuffer(bands, offset: 0, index: 1)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 
@@ -2948,23 +2986,29 @@ public final class RenderGraph {
         return (b, cache.slopes, cache.allIdentity, cache.identityMask)
     }
 
-    private func bandBuffer(for color: ColorGroup) throws -> LUTResource {
-        let key = color.keyString
-        if let b = bandBuffers[key] {
-            return LUTResource(buffer: b, isIdentity: color.isIdentity)
-        }
-        var words: [SIMD4<Float>] = []
+    /// The eight bands as S3.6 reads them (派单 076): three slider values in units and the reach towards
+    /// each neighbour, in **OKLCh degrees**, from `HSLBands`.
+    ///
+    /// **Not cached.** The geometry (the eight centres and their reaches) is a constant — `HSLBands`'
+    /// `static let` — so the only thing that changes per frame is 24 floats, and a 264-byte buffer per
+    /// render is cheaper than a dictionary that would grow by one entry per slider tick during a drag
+    /// (which is what the pre-076 `bandBuffers` cache did).
+    private func hslBandBuffer(for color: ColorGroup) throws -> MTLBuffer {
+        var words: [HSLBandU] = []
+        words.reserveCapacity(ColorGroup.bandCount)
         for (i, band) in color.bands.prefix(ColorGroup.bandCount).enumerated() {
-            let centre = ColorGroup.bandCentresDegrees[min(i, ColorGroup.bandCentresDegrees.count - 1)]
-            words.append(SIMD4(Float(band.hue), Float(band.saturation), Float(band.luminance), Float(centre)))
+            let centre = HSLBands.centresDegrees[min(i, HSLBands.centresDegrees.count - 1)]
+            let extent = HSLBands.extents[min(i, HSLBands.extents.count - 1)]
+            words.append(HSLBandU(v: SIMD4(Float(band.hue), Float(band.saturation),
+                                           Float(band.luminance), centre),
+                                  e: SIMD4(extent.left, extent.right, 0, 0)))
         }
         guard let b = device.makeBuffer(bytes: words,
-                                        length: MemoryLayout<SIMD4<Float>>.stride * words.count,
+                                        length: MemoryLayout<HSLBandU>.stride * words.count,
                                         options: .storageModeShared) else {
             throw RenderError.allocationFailed("HSL bands")
         }
-        bandBuffers[key] = b
-        return LUTResource(buffer: b, isIdentity: color.isIdentity)
+        return b
     }
 
     // MARK: primaries

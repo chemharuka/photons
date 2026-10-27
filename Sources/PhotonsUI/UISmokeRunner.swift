@@ -323,8 +323,8 @@ public final class UISmokeRunner {
               && !scrollTitles.contains(InspectorView.Section.histogram.title))
         let adjustTitles = InspectorView.cardTitles(in: .adjust)
         log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
-        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设 / Decode，直方图不在其中",
-              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设", "Decode"])
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设，直方图与裁切都不在其中",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
@@ -2413,6 +2413,11 @@ public final class UISmokeRunner {
     private func checkMaskShapes(session: CatalogSession, loupe: LoupeController,
                                  controller: EditorWindowController, window: NSWindow,
                                  asset: Asset, url: URL) {
+        // 派单 073 + 2026-10-27: 蒙版卡住在「蒙版」工作区，而画布上的蒙版控件（手柄、橡皮筋）也只在
+        // 那个工作区上出现（切走即隐藏）。这一段要拖径向的右缘手柄，所以先切过去，跑完切回「调整」。
+        showInspectorWorkspace(.masks, controller: controller, window: window)
+        defer { restoreAdjustWorkspace(controller: controller, window: window) }
+
         loupe.autoRenderEnabled = false
         session.maskTool = .off
         session.setShowMask(nil)
