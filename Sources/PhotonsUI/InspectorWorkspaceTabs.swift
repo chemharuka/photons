@@ -92,7 +92,9 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         case .masks:
             return [.masks]
         case .history:
-            return []
+            // 派单 077: the timeline card. Not `.histogram` (pinned, every workspace) and not a
+            // parameter card: the history is a reading of what happened, not a control.
+            return [.history]
         }
     }
 

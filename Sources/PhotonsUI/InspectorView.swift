@@ -83,6 +83,10 @@ public struct InspectorView: View {
         /// and is therefore invisible in 调整 either way.
         case crop
         case masks
+        /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
+        /// only one that is a *reading* rather than a control: it can jump, and delete the newest row
+        /// of a class, and it can never write the document.
+        case history
 
         public var id: String { rawValue }
 
@@ -99,6 +103,9 @@ public struct InspectorView: View {
             case .presets: return "预设"
             case .crop: return "裁切"
             case .masks: return "蒙版"
+            // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
+            // above it, so it belongs under them).
+            case .history: return "历史记录"
             }
         }
     }
@@ -278,6 +285,10 @@ public struct InspectorView: View {
             cropTransformCard
         case .masks:
             MaskListPanel(session: session)
+        case .history:
+            // 077: the timeline draws its own header and card chrome (the mask list does the same):
+            // it needs a count line, and it is not a parameter card with a reset.
+            HistoryPanel(session: session)
         }
     }
 
@@ -1813,7 +1824,7 @@ public struct WhiteBalanceCommands {
             model.light.temperature = wb.temperature
             model.light.tint = wb.tint
         }
-        session.commitEdit(label: label)
+        session.commitEdit(label: label, coalesce: false)
         return wb
     }
 
@@ -1826,7 +1837,7 @@ public struct WhiteBalanceCommands {
             model.light.temperature = nil
             model.light.tint = nil
         }
-        session.commitEdit(label: "原照设置")
+        session.commitEdit(label: "原照设置", coalesce: false)
         return true
     }
 
@@ -1953,7 +1964,8 @@ public struct PanelResets {
             // The same edit, not a second one: 版本 + 四轴 = 一条历史 (see the type's own note above).
             $0.detailSettings = .identity
         }
-        return session.commitEdit(label: "解码模型")
+        // 077: 换解码版本是**一个命令**，不参与"同参数连续拖动"的合并。
+        return session.commitEdit(label: "解码模型", coalesce: false)
     }
 
     // MARK: one parameter
@@ -1965,7 +1977,8 @@ public struct PanelResets {
         let fallback = EditModel.neutral[keyPath: keyPath]
         guard session.edit[keyPath: keyPath] != fallback else { return false }
         session.applyEdit { $0[keyPath: keyPath] = fallback }
-        return session.commitEdit(label: label)
+        // 077: 双击复位是一个命令（默认值那一下），不折进它前面那次拖动。
+        return session.commitEdit(label: label, coalesce: false)
     }
 
     /// Double-click on 降噪 / 色彩降噪 / 细节 / 锐化: back to **this body's default position**.
@@ -1977,7 +1990,7 @@ public struct PanelResets {
     public func detail(_ axis: DetailAxis) -> Bool {
         guard session.edit.detailSettings[axis] != nil else { return false }
         session.applyEdit { $0.detailSettings[axis] = nil }
-        let committed = session.commitEdit(label: axis.title)
+        let committed = session.commitEdit(label: axis.title, coalesce: false)
         loupe?.endDetailAdjustment()
         return committed
     }
@@ -1995,7 +2008,7 @@ public struct PanelResets {
             model.light.temperature = next.temperature
             model.light.tint = next.tint
         }
-        return session.commitEdit(label: isTemperature ? "色温" : "色调")
+        return session.commitEdit(label: isTemperature ? "色温" : "色调", coalesce: false)
     }
 
     // MARK: a whole card
@@ -2015,7 +2028,7 @@ public struct PanelResets {
     public func curve() -> Bool {
         guard !CurveLUT.isIdentity(session.edit.curve) else { return false }
         session.applyEdit { $0.curve = .identity }
-        return session.commitEdit(label: InspectorView.Section.curve.title)
+        return session.commitEdit(label: InspectorView.Section.curve.title, coalesce: false)
     }
 
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
@@ -2082,7 +2095,7 @@ public struct PanelResets {
             }
             // 白平衡 is *not* in this group: it is its own card and its own double-click. One
             // `applyEdit` + one `commitEdit` = one snapshot, which is the whole point.
-            return session.commitEdit(label: group.title)
+            return session.commitEdit(label: group.title, coalesce: false)
 
         case .color:
             // 076: **vibrance and saturation only.** The eight bands are the HSL card's (S3.6), with
@@ -2095,7 +2108,8 @@ public struct PanelResets {
                 model.color.vibrance = 0
                 model.color.saturation = 0
             }
-            return session.commitEdit(label: group.title)
+            // 077: 双击复位是命令，不参与合并。
+            return session.commitEdit(label: group.title, coalesce: false)
 
         case .detail:
             // All four `nil` = 停在机身的基线位置 (0/50/0/50 on a Leica) — *not* 0, which would turn
@@ -2108,7 +2122,7 @@ public struct PanelResets {
                 $0.detailSettings = .identity
                 $0.decoderVersion = nil
             }
-            let committed = session.commitEdit(label: group.title)
+            let committed = session.commitEdit(label: group.title, coalesce: false)
             loupe?.endDetailAdjustment()
             return committed
         }

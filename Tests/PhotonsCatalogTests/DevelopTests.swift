@@ -158,8 +158,10 @@ final class DevelopTests: XCTestCase {
     func testHistoryRowsMapOneToOneToSnapshots() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)          // seq 1 = "import"
+        // 077（2026-10-27）：同参数连续两次保存已经**合并成一行**（连续拖动 = 一次操作），所以 `b` 带上
+        // `contrast` —— 一次改两个类，不参与合并。断言（一行一个状态）原样不动。
         let a = edit(exposure: 0.5)
-        let b = edit(exposure: 1.0)
+        let b = edit(exposure: 1.0, contrast: 10)
         let c = edit(exposure: 1.0, contrast: 20)
         _ = try catalog.appendDevelop(a, label: "Exposure", forAsset: id)
         _ = try catalog.appendDevelop(b, label: "Exposure", forAsset: id)
@@ -172,11 +174,37 @@ final class DevelopTests: XCTestCase {
         XCTAssertEqual(rows.count, try rowCount(catalog, id), "no phantom rows")
     }
 
+    /// 077: a **merged** row keeps its `seq` while its document moves (a slider drag rewrites the tip),
+    /// so `saveDevelop` must let the stored bytes follow the stack. Without that the reopen shows the
+    /// pre-merge state at the tip and the next save throws `historyInconsistent`.
+    func testAMergedRowPersistsItsFinalDocument() throws {
+        let catalog = try newLibrary()
+        let id = try insertAsset(catalog)              // seq 1 = "import"
+        _ = try catalog.appendDevelop(edit(exposure: 0.2), label: "曝光", forAsset: id)
+        _ = try catalog.appendDevelop(edit(exposure: 0.6), label: "曝光", forAsset: id)
+        let merged = try catalog.appendDevelop(edit(exposure: 1.2), label: "曝光", forAsset: id)
+
+        XCTAssertEqual(merged.historyRows, 2, "三次连续拖动 = 一条（import + 合并的曝光）")
+        let rows = try catalog.historyRows(forAsset: id)
+        XCTAssertEqual(rows.map(\.seq), [1, 2], "合并保留串起点的 seq")
+        XCTAssertEqual(rows.last?.label, "曝光", "label 属于串起点")
+        XCTAssertEqual(rows.last?.edit, edit(exposure: 1.2), "存的是串终点，不是第一次的 0.2")
+
+        // …and the stack it comes back as is the one that was written: no phantom inconsistency.
+        let reopened = try catalog.editHistory(forAsset: id)
+        XCTAssertEqual(reopened.count, 2)
+        XCTAssertEqual(reopened.current?.light.exposure ?? 0, 1.2, accuracy: 1e-12)
+        XCTAssertEqual(reopened.snapshots.last?.seq, 2)
+        XCTAssertNoThrow(try catalog.saveDevelop(edit(exposure: 1.2), history: reopened, forAsset: id),
+                        "重开后再保存不许报 historyInconsistent")
+    }
+
     func testHistoryRebuildsWithItsCursor() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)
+        // 077（2026-10-27）：同参数连续保存合并成一行，所以 `b` 同时改 `contrast`（两个类 ⇒ 两行）。
         let a = edit(exposure: 0.5)
-        let b = edit(exposure: 1.5)
+        let b = edit(exposure: 1.5, contrast: 5)
         _ = try catalog.appendDevelop(a, label: "Exposure", forAsset: id)
         let saved = try catalog.appendDevelop(b, label: "Exposure", forAsset: id)
 
@@ -238,8 +266,9 @@ final class DevelopTests: XCTestCase {
     func testRedoBranchIsDroppedWhenACommitFollowsAnUndo() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)
+        // 077（2026-10-27）：同参数连续保存合并成一行，所以 `b` 同时改对比（两个类 ⇒ 两行）。
         let a = edit(exposure: 0.5)
-        let b = edit(exposure: 1.5)
+        let b = edit(exposure: 1.5, contrast: 5)
         let c = edit(exposure: 2.5)
         _ = try catalog.appendDevelop(a, forAsset: id)
         _ = try catalog.appendDevelop(b, forAsset: id)
@@ -262,8 +291,9 @@ final class DevelopTests: XCTestCase {
     func testReopenKeepsTheCursorWhereItWasLeft() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)
+        // 077（2026-10-27）：同上 —— 两次同参数保存已是一行，所以 `b` 带 `contrast`。
         let a = edit(exposure: 0.5)
-        let b = edit(exposure: 1.5)
+        let b = edit(exposure: 1.5, contrast: 5)
         _ = try catalog.appendDevelop(a, forAsset: id)
         _ = try catalog.appendDevelop(b, forAsset: id)
 
@@ -352,8 +382,9 @@ final class DevelopTests: XCTestCase {
     func testCorruptHistoryRowIsLeftOutAndQuarantined() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)
+        // 077（2026-10-27）：两次同参数保存会合并成一行，这里要的是**两行**，所以第二次同时改对比。
         let a = edit(exposure: 0.5)
-        let b = edit(exposure: 1.5)
+        let b = edit(exposure: 1.5, contrast: 5)
         _ = try catalog.appendDevelop(a, forAsset: id)
         _ = try catalog.appendDevelop(b, forAsset: id)
         // Rot a middle snapshot the way a torn write would: seq 2 is gone, seqs 1 and 3 are fine.
@@ -501,10 +532,13 @@ final class DevelopTests: XCTestCase {
                 """)
         }
 
+        // 077（2026-10-27）：两次同参数提交会**合并**（不 INSERT，也就碰不到触发器），所以每次同时改
+        // 对比 —— 一次两个类，两行，seq 3 与 4 都是新行，3 撞触发器。测试主体（事务原子性）不变。
         var history = try catalog.editHistory(forAsset: id)
-        history.commit(edit(exposure: 0.5), label: "Exposure")
-        history.commit(edit(exposure: 0.75), label: "Exposure")   // seq 3 and 4: the 3 hits the trigger
-        XCTAssertThrowsError(try catalog.saveDevelop(edit(exposure: 0.75), history: history, forAsset: id))
+        history.commit(edit(exposure: 0.5, contrast: 5), label: "Exposure")
+        history.commit(edit(exposure: 0.75, contrast: 10), label: "Exposure")
+        XCTAssertThrowsError(try catalog.saveDevelop(edit(exposure: 0.75, contrast: 10),
+                                                     history: history, forAsset: id))
 
         XCTAssertEqual(try catalog.develop(forAsset: id), edit(exposure: 0.25), "no half-written document")
         XCTAssertEqual(try storedVersion(catalog, id), before.developVersion, "no version bump")
@@ -514,7 +548,8 @@ final class DevelopTests: XCTestCase {
 
         // Drop the trigger: the same save now lands whole.
         try catalog.dbQueue.write { db in try db.execute(sql: "DROP TRIGGER boom") }
-        let saved = try catalog.saveDevelop(edit(exposure: 0.75), history: history, forAsset: id)
+        let saved = try catalog.saveDevelop(edit(exposure: 0.75, contrast: 10),
+                                            history: history, forAsset: id)
         XCTAssertEqual(saved.historyRows, 4)
         XCTAssertEqual(try catalog.historyRows(forAsset: id).map(\.seq), [1, 2, 3, 4])
     }
@@ -526,14 +561,15 @@ final class DevelopTests: XCTestCase {
         // second must append to what the first persisted instead of overwriting it.
         var first: Catalog? = try newLibrary()
         let id = try insertAsset(first!, name: "seq.dng")
-        _ = try first!.appendDevelop(edit(exposure: 0.1), forAsset: id)
-        _ = try first!.appendDevelop(edit(exposure: 0.2), forAsset: id)
+        // 077（2026-10-27）：同参数连续保存合并成一行，所以每次同时改对比（两个类 ⇒ 一行一次）。
+        _ = try first!.appendDevelop(edit(exposure: 0.1, contrast: 1), forAsset: id)
+        _ = try first!.appendDevelop(edit(exposure: 0.2, contrast: 2), forAsset: id)
         first = nil
 
         let second = try Catalog.open(at: packageURL())
         XCTAssertEqual(try second.historyRows(forAsset: id).map(\.seq), [1, 2, 3], "the first process's rows")
-        _ = try second.appendDevelop(edit(exposure: 0.3), forAsset: id)
-        _ = try second.appendDevelop(edit(exposure: 0.4), forAsset: id)
+        _ = try second.appendDevelop(edit(exposure: 0.3, contrast: 3), forAsset: id)
+        _ = try second.appendDevelop(edit(exposure: 0.4, contrast: 4), forAsset: id)
 
         let third = try Catalog.open(at: packageURL())
         let rows = try third.historyRows(forAsset: id)

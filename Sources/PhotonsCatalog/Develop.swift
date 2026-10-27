@@ -348,13 +348,28 @@ extension Catalog {
                 WHERE asset_id = ? AND seq >= ? AND seq NOT IN (\(keepSQL))
                 """, arguments: StatementArguments(keepArgs))
 
-            // 2. New rows only. An existing seq keeps its bytes even if the label would differ today.
+            // 2. New rows only — plus one exception, 077: a **merged** row keeps its `seq` while its
+            //    document moves (a slider drag writes the tip again and again), so its stored bytes
+            //    must follow the stack or a reopen would show the pre-merge state at the tip and the
+            //    next save would throw `historyInconsistent`. `label` / `created_at` still belong to
+            //    the row's first commit, so they are left exactly as stored.
+            var storedJSON: [Int: String] = [:]
+            for row in try Row.fetchAll(db, sql: """
+                SELECT seq, develop_json FROM asset_history WHERE asset_id = ?
+                """, arguments: [id]) {
+                storedJSON[row["seq"]] = row["develop_json"]
+            }
             for snap in history.snapshots {
-                let exists = try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM asset_history WHERE asset_id = ? AND seq = ?
-                    """, arguments: [id, snap.seq]) ?? 0
-                if exists > 0 { continue }
                 let json = snap.edit == edit ? blob : (encoded[snap.seq] ?? blob)
+                if let existing = storedJSON[snap.seq] {
+                    if existing != json {
+                        try db.execute(sql: """
+                            UPDATE asset_history SET develop_json = ?
+                            WHERE asset_id = ? AND seq = ?
+                            """, arguments: [json, id, snap.seq])
+                    }
+                    continue
+                }
                 try db.execute(sql: """
                     INSERT INTO asset_history(asset_id, seq, develop_json, label, created_at)
                     VALUES(?, ?, ?, ?, ?)

@@ -264,7 +264,12 @@ final class MaskSliderRowTests: XCTestCase {
 
         XCTAssertEqual(maskValue(session, mask.id).feather, 0.35, accuracy: 1e-12,
                        "↵ 提交 → 文档 0.35")
-        XCTAssertEqual(session.history.count, historyBefore + 1, "一次输入 = 一条历史")
+        // 077（2026-10-27）：输入**同一个参数**紧跟在它自己的拖动之后 ⇒ 同一次连续操作，合并成一行。
+        // 所以这条断言从"+1"改成"+0"，而"一次输入不是一次按键一条"由合并本身保证（逐键提交也只会有一行）。
+        // 后面「不透明度」那一段（另一个参数）仍然 +1，那才是"输入确实写了一条历史"的证明。
+        XCTAssertEqual(session.history.count, historyBefore,
+                       "同参数：输入折进刚才那次拖动的那一行")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "蒙版羽化")
         XCTAssertEqual(field.stringValue, "0.35", "读数换成提交后的值")
         print("MASK typing · 「0.35」↵ → feather \(maskValue(session, mask.id).feather)"
               + " · history +\(session.history.count - historyBefore) · 读数 \(field.stringValue)")
@@ -273,13 +278,13 @@ final class MaskSliderRowTests: XCTestCase {
         try enter("5", into: field, in: window)
         XCTAssertEqual(maskValue(session, mask.id).feather, 1, accuracy: 1e-12,
                        "超范围被钳到上限 1.0，不是 beep，也不是 5")
-        XCTAssertEqual(session.history.count, historyBefore + 2)
+        XCTAssertEqual(session.history.count, historyBefore, "仍是同一行（钳位不是第二次操作）")
         print("MASK typing · 「5」↵ → feather \(maskValue(session, mask.id).feather)（钳到上限）")
 
         // Esc → nothing written, the number goes back to the readout.
         try enter("0.1", into: field, in: window, cancel: true)
         XCTAssertEqual(maskValue(session, mask.id).feather, 1, accuracy: 1e-12, "Esc 不写文档")
-        XCTAssertEqual(session.history.count, historyBefore + 2, "Esc 不写历史")
+        XCTAssertEqual(session.history.count, historyBefore, "Esc 不写历史")
         XCTAssertEqual(field.stringValue, "1.00", "Esc 之后读数回到文档的值")
         print("MASK typing · 「0.1」Esc → feather \(maskValue(session, mask.id).feather) · history 不变")
 
@@ -289,6 +294,8 @@ final class MaskSliderRowTests: XCTestCase {
         XCTAssertEqual(maskValue(session, mask.id).opacity, 0.35, accuracy: 1e-12,
                        "百分比行：输入 35 = 文档 0.35")
         XCTAssertEqual(opacity.stringValue, "35%")
+        // 另一个参数 ⇒ 一行新的历史：输入确实写了一条，而不是"什么都不写"。
+        XCTAssertEqual(session.history.count, historyBefore + 1, "换一个参数的输入 = 一条历史")
         print("MASK typing · 「35」↵ → opacity \(maskValue(session, mask.id).opacity)"
               + " · 读数 \(opacity.stringValue)")
     }

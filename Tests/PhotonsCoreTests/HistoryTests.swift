@@ -101,8 +101,13 @@ final class HistoryTests: XCTestCase {
 
     func testDepthCapDropsOldestAndKeepsCursorInBounds() {
         var h = history(depth: 3)
+        // 077（2026-10-27）:**每次提交改两个字段**。这条用例的主体是保留深度与游标，
+        // 而它原先用 10 次连续 `light.exposure` 驱动 —— 按 077 的合并契约那已经是**一行**
+        // （同 class 连续拖动 = 一次操作）。改参数而不是改断言：cap / 淘汰 / 游标 / seq 全部原样。
+        // 合并本身由 `HistoryPanelTests.testFiveDragsOfOneSliderAreOneRow` 正面钉住。
         for i in 1...10 {
-            h.commit(edit { $0.light.exposure = Double(i) }, label: "e\(i)", now: t0)
+            h.commit(edit { $0.light.exposure = Double(i); $0.light.contrast = -Double(i) },
+                     label: "e\(i)", now: t0)
             XCTAssertLessThan(h.cursor, h.count)
             XCTAssertGreaterThanOrEqual(h.cursor, 0)
         }
@@ -146,7 +151,11 @@ final class HistoryTests: XCTestCase {
 
     func testShrinkingDepthKeepsTheCursorOnTheSameSnapshot() {
         var h = history()
-        for i in 1...5 { h.commit(edit { $0.light.exposure = Double(i) }, label: "e\(i)", now: t0) }
+        // 077（2026-10-27）: 同前一条 —— 连续同参数提交已是一行，所以每次提交改两个字段。
+        for i in 1...5 {
+            h.commit(edit { $0.light.exposure = Double(i); $0.light.contrast = -Double(i) },
+                     label: "e\(i)", now: t0)
+        }
         XCTAssertEqual(h.cursor, 5)
 
         h.setMaxDepth(3)
@@ -363,8 +372,21 @@ final class HistoryTests: XCTestCase {
         var h = history()
         h.commit(edit { $0.light.exposure = 1 }, label: "Exposure", now: t0)
         XCTAssertNil(h.commit(edit { $0.light.exposure = 1 + 1e-9 }, label: "jitter", now: t0))
-        XCTAssertNotNil(h.commit(edit { $0.light.exposure = 1 + 1e-3 }, label: "real", now: t0))
+        // 077（2026-10-27）: 末步换成**另一个参数**。原用例用 `exposure = 1 + 1e-3` 证明"过了容差就是
+        // 一次真编辑"，而 077 规定同一 class 的连续提交**合并**成一行 —— 两条规则在同一个字段上必然
+        // 冲突。断言（+1 行）保留，驱动换成 `color.vibrance`；紧接着补一句正面断言：同参数过容差
+        // 仍然合并、`current` 跟着走（新旧两条规则同时钉住，谁坏了都红）。
+        var real = h.current!
+        real.color.vibrance = 1e-3
+        XCTAssertNotNil(h.commit(real, label: "real", now: t0))
         XCTAssertEqual(h.count, 3)
+
+        var sameClass = real
+        sameClass.color.vibrance = 2e-3
+        let merged = h.commit(sameClass, label: "same class", now: t0)
+        XCTAssertEqual(merged?.seq, h.snapshots.last?.seq, "同参数连拖：覆盖栈顶，seq 不变")
+        XCTAssertEqual(h.count, 3, "同参数过容差仍是编辑（`current` 移动），但只有一行")
+        XCTAssertEqual(h.current?.color.vibrance ?? 0, 2e-3, accuracy: 1e-12)
     }
 
     // MARK: ⑦ masks: empty and absent are the same

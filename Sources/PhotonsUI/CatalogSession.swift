@@ -728,9 +728,12 @@ public final class CatalogSession {
     /// move neither grows the stack nor truncates the redo branch (and then nothing is written).
     /// The snapshot is `MaskViewState.documentOnly(edit)`: the overlay is view state, so a snapshot
     /// that carried it would make ⌘Z look like it also toggled the mask display.
+    /// - Parameter coalesce: `false` for a discrete command (077): 双击复位 / 换解码版本 / 预设 各自
+    ///   是**一个动作**，不许折进它前面那次拖动里（详见 `EditHistory.commit`）。
     @discardableResult
-    public func commitEdit(label: String = "") -> Bool {
-        let committed = history.commit(MaskViewState.documentOnly(edit), label: label) != nil
+    public func commitEdit(label: String = "", coalesce: Bool = true) -> Bool {
+        let committed = history.commit(MaskViewState.documentOnly(edit), label: label,
+                                       coalesce: coalesce) != nil
         if committed { persist() }
         return committed
     }
@@ -747,6 +750,72 @@ public final class CatalogSession {
         restore(model)
         persist()
         return true
+    }
+
+    // MARK: history panel (077)
+
+    /// Click a row: move the cursor there and show it. **Not** an edit.
+    ///
+    /// `EditHistory.jump(to:)` only moves the cursor (no snapshot, nothing truncated), so this is one
+    /// render and one write of `history_end`; the redo branch survives, and the *next* edit is what
+    /// truncates it — which is the user's 「如果继续操作了，恢复点后面的操作就没了」.
+    @discardableResult
+    public func jumpToHistory(seq: Int) -> Bool {
+        guard let index = history.index(of: seq), index != history.cursor else { return false }
+        guard let model = history.jump(to: seq) else { return false }
+        restore(model)
+        persist()
+        return true
+    }
+
+    /// Delete one row of the timeline — 「可直接删除某个操作，其他不动」.
+    ///
+    /// Only the newest row of its class can go (`EditHistory.deletable(at:)`); the rule lives in the
+    /// model so the panel's button and the model cannot disagree. Deleting **creates no snapshot**:
+    /// it removes one, and the document moves only when the row the cursor stood on is the one
+    /// removed (then the previous row's state is shown, one render).
+    @discardableResult
+    public func deleteHistoryEntry(at index: Int) -> Bool {
+        let seqBefore = history.currentSeq
+        guard history.delete(at: index) else { return false }
+        if history.currentSeq != seqBefore, let model = history.current { restore(model) }
+        persist()
+        return true
+    }
+
+    /// Rows for the panel: seq, label, the field-level summary, the time, and the two flags.
+    public var historyRows: [HistoryRow] { history.rows }
+
+    /// Begin a tool session (077): from here to `endToolSession` the history records **nothing**, so
+    /// a crop/rotate gesture is one row however many handle positions it went through.
+    public func beginToolSession(_ tool: String, label: String? = nil) {
+        history.beginSession(tool, label: label)
+    }
+
+    /// Is a tool session open? A discrete control that writes the document itself (裁切 bar's flips)
+    /// asks this so it can close/reopen the session around its own row (see `CropToolController.flip`).
+    public var isToolSessionActive: Bool { history.isSessionActive }
+
+    /// 应用: close the session with exactly one snapshot (`base → edit`), or none if nothing moved.
+    @discardableResult
+    public func endToolSession(label: String? = nil) -> Bool {
+        let committed = history.endSession(MaskViewState.documentOnly(edit), label: label) != nil
+        if committed { persist() }
+        return committed
+    }
+
+    /// 取消: close the session with zero snapshots.
+    ///
+    /// The document goes back to where the tool started — normally a no-op (a draft tool never writes
+    /// the document), but a control that *does* write inside a session (裁切 bar's flips) must not
+    /// survive a cancel with no history row to undo it. One render, no snapshot.
+    public func cancelToolSession() {
+        let base = history.activeSession?.base
+        history.cancelSession()
+        guard let base, !EditHistory.isSemanticallyIdentical(edit, base) else { return }
+        edit = MaskViewState.restoring(base, keeping: edit.showMaskID)
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
     }
 
     /// ⇧⌘Z.

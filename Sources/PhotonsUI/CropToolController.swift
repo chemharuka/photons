@@ -239,15 +239,19 @@ public final class CropToolController {
         drag = nil
         rotating = false
         lastHandle = nil
+        // 077: the tool session is what makes 「裁切完成后只保留一个记录」 a property of the history
+        // rather than a property of this file's discipline. From here to `apply()` / `cancel()` the
+        // history records nothing, so no handle position, angle or draft rect can become a row.
+        session.beginToolSession("裁切", label: "裁切与旋转")
         return true
     }
 
     /// 应用 (↵): the draft becomes the document, **once**.
     ///
-    /// One `applyEdit`, one `commitEdit` — so one ⌘Z, and an apply whose geometry equals what the
-    /// document already had commits nothing (the two calls are no-ops by construction:
-    /// `applyEdit` short-circuits on a semantically identical model and `EditHistory.commit` on an
-    /// unchanged snapshot).
+    /// One `applyEdit`, and one snapshot — the session's (`endSession`), taken against the document as
+    /// it was when the tool was entered. An apply whose geometry equals what the document already had
+    /// commits nothing (`applyEdit` short-circuits on a semantically identical model and the session
+    /// ends with nothing to record).
     @discardableResult
     public func apply() -> Bool {
         guard isActive, let session else { return false }
@@ -259,7 +263,7 @@ public final class CropToolController {
         endDrag()
         isActive = false
         session.applyEdit { $0.geometry = geometry }
-        let committed = session.commitEdit(label: "裁切与旋转")
+        let committed = session.endToolSession(label: "裁切与旋转")
         if committed { appliedCount += 1 }
         return committed
     }
@@ -270,6 +274,9 @@ public final class CropToolController {
         guard isActive else { return }
         endDrag()
         isActive = false
+        // 077: zero rows, and (for a tool whose bar can write mid-session, e.g. the flips) the
+        // document goes back to the state the session started from.
+        session?.cancelToolSession()
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         cancelledCount += 1
     }
@@ -280,6 +287,9 @@ public final class CropToolController {
         guard isActive else { return }
         endDrag()
         isActive = false
+        // 077: the session ends with zero rows (the draft is discarded, and any mid-session document
+        // write is rolled back by `cancelToolSession`).
+        session?.cancelToolSession()
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
     }
 
@@ -322,11 +332,23 @@ public final class CropToolController {
     @discardableResult
     private func flip(horizontal: Bool) -> Bool {
         guard let session else { return false }
+        // 077: a flip is a **discrete** action, not a handle position — 072's promise is 「一次翻转 =
+        // 一次 ⌘Z」. So inside a crop session it closes the session first (that leaves the crop-so-far
+        // as its own row, or nothing when the rect did not move) and reopens a fresh one, which keeps
+        // 「应用 with an unchanged crop commits nothing」 true as well.
+        let inSession = session.isToolSessionActive
+        if inSession { session.endToolSession(label: "裁切与旋转") }
+
+        let before = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
         session.applyEdit { model in
             if horizontal { model.geometry.flipHorizontal.toggle() }
             else { model.geometry.flipVertical.toggle() }
         }
-        return session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
+        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        // The answer the bar needs is "did the document move", not "was a row written".
+        return after != before
     }
 
     /// The document's flips — what the bar's two switches show (§F: no draft copy).
