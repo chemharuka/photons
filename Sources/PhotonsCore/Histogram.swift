@@ -27,6 +27,22 @@ import CryptoKit
 // does not move when the camera zooms or pans or when the window resizes, and the card's 「采样 N px」
 // is the same number at fit, at 1:1 and at 400 %.
 //
+// **3b. A frame that is the whole picture also measures *this* domain (070).** The card follows a
+// drag out of the frame it just drew, and that frame's own texture is not usable for this: S4 has
+// encoded it *and* clamped it at `DisplayOptions.headroom` (`min(v, headroom)` in `s4_display.metal`),
+// so on a +2 stop screen everything brighter than +2 stops arrives as the same number and the plot
+// cannot show the three stops a picture may actually have. `RenderOptions.histogramSampleLongEdge`
+// therefore makes the render stride-sample its **pre-S4** texture into a ≤ 256-long-edge grid
+// (`histogram_sample_linear`) and hands back the same `Histogram` this file builds from a
+// `LinearSample` — one extra dispatch, 0.29 MB read back, measured inside the frame's own command
+// buffer. `headroom` in that histogram still only labels the screen (the ceiling tick and
+// `clippedCeiling`); it cannot move a bin, which is the whole point.
+//
+// `RenderGraph.measureFrameHistogram(fromFrame:)` remains as the **display-referred** measurement of
+// an S4 texture — codes, clamped at the panel's headroom. It is what `HistogramLetterboxTests` and
+// 070's counter-proof (`HistogramHeadroomTests`) use to show what the old source could not see; the
+// card no longer calls it.
+//
 // The tail: `maxStops × hdrBinsPerStop` = 4 × 64 = **256 bins of 1/64 stop** above white (005 was
 // 4 × 8 = 32 bins of 1/8 stop — one bin per 12 % of light, which made the tail's spikes tower over
 // the SDR segment because a tail bin covered a far wider slice of the picture than a code bin did).

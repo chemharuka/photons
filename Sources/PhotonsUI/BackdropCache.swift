@@ -140,6 +140,12 @@ public final class BackdropCache {
     /// consumer needs a rect to measure over, and "the whole picture is the whole texture" is a fact
     /// about *this* render that belongs with the texture.
     public private(set) var content: ImageRect?
+    /// The histogram this render measured, on its **scene-linear** texture (070: the same
+    /// `collectHistogram` + `histogramSampleLongEdge` the frame path uses). It rides the backdrop
+    /// because that render is already the whole picture: the zoomed-in edit that needs a
+    /// whole-picture histogram then costs no readback and no second render. `nil` when the render did
+    /// not ask for one (or measured nothing), in which case the consumer renders its own.
+    public private(set) var histogram: Histogram?
     /// Generations that reached the cache. The number the acceptance test pins.
     public private(set) var generationCount = 0
     /// The last generation's own cost, in milliseconds, measured around `graph.render` on the queue.
@@ -204,8 +210,8 @@ public final class BackdropCache {
     /// A render landed. Returns `false` when it was refused (another photo, or a request that no
     /// longer names the document) — the controller then drops the texture instead of drawing it.
     @discardableResult
-    func finish(_ texture: MTLTexture, key: Key, content: ImageRect, milliseconds: Double,
-                serial: Int) -> Bool {
+    func finish(_ texture: MTLTexture, key: Key, content: ImageRect, histogram: Histogram?,
+                milliseconds: Double, serial: Int) -> Bool {
         guard serial == self.serial, inFlightSerial == serial, inFlight == key else {
             if inFlight == key { inFlight = nil }
             return false
@@ -215,6 +221,7 @@ public final class BackdropCache {
         self.key = key
         self.size = ImageSize(width: texture.width, height: texture.height)
         self.content = content
+        self.histogram = histogram
         generationCount += 1
         lastGenerationMilliseconds = milliseconds
         lastError = nil
