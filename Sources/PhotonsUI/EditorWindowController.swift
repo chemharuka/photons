@@ -17,6 +17,10 @@ public final class EditorWindowController: NSWindowController {
                               defer: false)
         window.title = "Photons"
         window.titleVisibility = .hidden
+        // 标题栏本身必须是**透明**的：它盖在 contentView 之上，只要 AppKit 在那里画自己的底板，
+        // 底下那块 `HeaderGlassView`（.headerView / .behindWindow）就会被压低一层——那正是
+        // 「系统红绿灯看着像自画的」这半个问题的来源（另一半是顶栏曾经填的不透明底色）。
+        // 三颗按钮仍然由 AppKit 提供：尺寸/位置/点击/失焦变灰都不是我们画的。
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false      // only the title strip drags (Phos contract)
         window.minSize = WorkspaceLayout.minimumWindowSize

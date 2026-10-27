@@ -140,11 +140,19 @@ public final class TopBarView: NSView {
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        // Matte, not glass: the top container is a large panel like the others.
-        NSColor.windowBackgroundColor.withAlphaComponent(0.96).setFill()
-        bounds.fill()
+        // **不填底色**。这一条背后是 `HeaderGlassView` 的系统材质（`.headerView` / `.behindWindow`），
+        // 也就是红绿灯所在的标题栏区域。以前这里填的 `windowBackgroundColor(0.96)` 是那块把玻璃
+        // 架空的底板：按钮画在它上面，采样背景却被它挡死，原生按钮因此看着像自画的扁平圆点。
+        // 这里只剩顶栏下沿的 1 pt 分隔线，画在材质之上（这一层不透明，但只有 1 pt、在按钮下方）。
         NSColor.labelColor.withAlphaComponent(0.10).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+
+    /// 空白处不吃鼠标：顶栏只有按钮/分段控件/状态文本接事件，其余命中要落到窗口自己的窗体上
+    /// （标题栏那条拖动、以及 `isMovableByWindowBackground == false` 的契约都靠这个）。
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
     }
 
     public func update(mode: CatalogSession.Mode, assetCount: Int, selectionCount: Int,
@@ -286,6 +294,8 @@ public final class WorkspaceRootView: NSView {
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
     private let inspectorBackdrop = NSVisualEffectView()
+    /// 顶栏那条（含红绿灯所在的标题栏区域）背后的系统材质。见 `HeaderGlassView`。
+    public let headerGlass = HeaderGlassView()
     private let bridge = ObservationBridge()
 
     private var browserWidth: CGFloat
@@ -337,7 +347,9 @@ public final class WorkspaceRootView: NSView {
         canvasHost.wantsLayer = true
         canvasHost.layer?.backgroundColor = NSColor.black.cgColor
 
-        for v: NSView in [topBar, browserPane.view, browserDivider, canvasHost,
+        // 玻璃**最先加**：它必须在最底层（`subviews[0]`），顶栏控件和红绿灯都在它上面。
+        // 红绿灯本身由 AppKit 画在 contentView 之上，所以这里只要保证不在按钮上方盖任何不透明层。
+        for v: NSView in [headerGlass, topBar, browserPane.view, browserDivider, canvasHost,
                           inspectorDivider, inspectorBackdrop, inspectorHost,
                           filmstripController.view, importProgressBar] {
             addSubview(v)
@@ -462,6 +474,10 @@ public final class WorkspaceRootView: NSView {
 
         topBar.frame = g.topBar
         topBar.contentLeading = g.toolContentLeading
+        // 玻璃铺满顶栏那一条的**整宽**，从窗口上边缘一直到顶栏下沿：红绿灯（标题栏里那 16…36 pt）
+        // 和顶栏控件都画在它上面，中间不许再有别的底板。高度跟着 `topBar.maxY` 走，窗口缩放、
+        // 全屏、红绿灯位置变化都不会把它留在原地。
+        headerGlass.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(1, g.topBar.maxY))
         // 顶栏右上角那块状态文本要落在检查器列上方：列宽从这里进 `TopBarStatusCluster`。
         topBar.statusColumnWidth = g.inspector.width
         browserPane.view.frame = g.browser
@@ -590,5 +606,20 @@ public final class WorkspaceRootView: NSView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         needsLayout = true
+    }
+
+    /// 顶栏那一条的**空白处不吃鼠标**：命中要落到窗口自己的窗体上，由 AppKit 去处理拖动
+    /// （`isMovableByWindowBackground == false`，窗口只能靠顶栏那条拖）。
+    ///
+    /// `super.hitTest` 先问子视图，所以按钮/分段控件/状态文本照样拿到自己的点击；只有
+    /// 「命中的是 root 自己」这一种情况才交还给窗口——玻璃和顶栏已经各自在空白处返回 nil，
+    /// 这里是最后一层。
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        guard hit === self else { return hit }
+        // `hitTest` 的入参在**父视图**坐标系里（不是自己的），要先换成本地坐标再比那条带。
+        let local = superview.map { convert(point, from: $0) } ?? point
+        let band = headerGlass.frame.height > 0 ? headerGlass.frame : topBar.frame
+        return band.contains(local) ? nil : hit
     }
 }
