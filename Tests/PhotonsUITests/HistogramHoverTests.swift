@@ -27,7 +27,11 @@ final class HistogramHoverTests: XCTestCase {
 
     /// The card's shipped minimum width (inspector 300 − 24 padding − 32 inset) and its height.
     private let minimumCardWidth: CGFloat = 244
-    private let cardHeight: CGFloat = 104
+    /// The card's height, **read from the card**: 023 merged the brightness row into the values row and
+    /// left the freed line as bottom inset, so the pinned literal was 104 while the ink stopped at 87.5.
+    /// 2026-10-27 removed that slack — the card is `contentHeight` (90 pt) now. Reading the constant
+    /// keeps this file about the row, not about the number (`HistogramCardHeightTests` pins the height).
+    private let cardHeight: CGFloat = HistogramCardView.contentHeight
     private let plot = NSRect(x: 0, y: 0, width: 300, height: 58)
 
     /// Where code bin 128 lands on the shipped-minimum card. The card's plot spans its full width

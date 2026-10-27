@@ -252,13 +252,31 @@ public final class HistogramCardView: NSView {
 
     /// The card's own title is the inspector's (`card("直方图")`), so nothing is drawn twice: the
     /// plot starts at the top edge of this view.
-    private let plotInsetTop: CGFloat = 0
-    private let plotHeight: CGFloat = 58
-    private let clipRowHeight: CGFloat = 15
+    ///
+    /// **Why these are static and why there is a `contentHeight`** (2026-10-27): the card used to pin
+    /// `104` while it stacked **two** text rows under the plot (the pixel's brightness was the second).
+    /// 023 merged them into one slot, and the freed line was given back as bottom inset — so the card
+    /// kept 14 pt of nothing under its last row, which is what the owner saw (「直方图卡片底部空太多了…
+    /// 可以窄一些」). The height is now *derived*: top inset + plot + the 5 pt gap + the clipping row +
+    /// the one readout row, i.e. exactly where the ink stops, 90 pt. Nothing about the plot, the gap or
+    /// either text row moved — only the slack under the last row is gone (`HistogramCardHeightTests`
+    /// measures the gap from a real draw, so re-adding slack has to argue with a number).
+    private static let plotInsetTop: CGFloat = 0
+    private static let plotHeight: CGFloat = 58
+    private static let clipRowHeight: CGFloat = 15
+    /// The 5 pt between the plot's bottom edge and the clipping row (`drawClipRows`).
+    private static let clipRowGap: CGFloat = 5
+
+    /// The card's whole content: everything down to the bottom of the one readout row, and no more.
+    /// This is the intrinsic height *and* the SwiftUI frame, so the two cannot disagree.
+    public static let contentHeight: CGFloat = plotInsetTop + plotHeight + clipRowGap
+        + clipRowHeight + readoutRowHeight
 
     public override var isFlipped: Bool { true }
 
-    public override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 104) }
+    public override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.contentHeight)
+    }
 
     public init() {
         super.init(frame: .zero)
@@ -324,7 +342,7 @@ public final class HistogramCardView: NSView {
             removeTrackingArea(hoverTrackingArea)
             self.hoverTrackingArea = nil
         }
-        let plot = NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight)
+        let plot = NSRect(x: 0, y: Self.plotInsetTop, width: bounds.width, height: Self.plotHeight)
         guard plot.width > 1, plot.height > 1 else { return }
         let area = NSTrackingArea(rect: plot,
                                   options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow],
@@ -344,7 +362,8 @@ public final class HistogramCardView: NSView {
     /// when the card is too small to have one.
     private var liveAxis: HistogramAxis? {
         guard bounds.width > 80, bounds.height > 60 else { return nil }
-        return HistogramAxis(plot: NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight))
+        return HistogramAxis(plot: NSRect(x: 0, y: Self.plotInsetTop, width: bounds.width,
+                                          height: Self.plotHeight))
     }
 
     public override func mouseMoved(with event: NSEvent) {
@@ -433,7 +452,7 @@ public final class HistogramCardView: NSView {
         let readoutColor = HistogramCardReadability.readoutColor(isDark: dark)
         lastHoverColor = readoutColor
 
-        let plot = NSRect(x: 0, y: plotInsetTop, width: bounds.width, height: plotHeight)
+        let plot = NSRect(x: 0, y: Self.plotInsetTop, width: bounds.width, height: Self.plotHeight)
         let axis = HistogramAxis(plot: plot)
         lastAxis = axis
         lastCeilingMarkerX = .nan
@@ -509,14 +528,15 @@ public final class HistogramCardView: NSView {
     /// Where the card's one row sits: directly under the clipping numbers, a function of the card's own
     /// geometry only (never of the state), at the font's fixed height.
     ///
-    /// 023 removed the brightness row that used to be under this one. The card keeps its pinned 104 pt and
-    /// its 58 pt plot (`InspectorPinnedHeaderTests`, `HistogramHoverTests`), so the freed line cannot
-    /// shrink the card and must not grow the plot: it is given back as the card's bottom inset, and the row
-    /// stays exactly where the pixel row already was. No state can move it, and there is no second slot
-    /// left empty where the brightness used to be.
+    /// 023 removed the brightness row that used to be under this one. That row's height is **gone**
+    /// (2026-10-27): the card is `contentHeight` — plot + gap + clipping row + this row — so the slot's
+    /// bottom edge *is* the card's bottom edge, and the empty line the second row used to occupy is no
+    /// longer inside the card at all (「底部空太多了」). The plot, the 5 pt gap and the clipping row are
+    /// untouched; only the slack under this row was removed. No state can move it, and there is no
+    /// second slot left empty where the brightness used to be.
     private func rowSlot(below plot: NSRect, in bounds: NSRect) -> NSRect {
-        NSRect(x: bounds.minX, y: plot.maxY + 5 + clipRowHeight, width: bounds.width,
-               height: Self.readoutRowHeight)
+        NSRect(x: bounds.minX, y: plot.maxY + Self.clipRowGap + Self.clipRowHeight,
+               width: bounds.width, height: Self.readoutRowHeight)
     }
 
     /// The two-segment surface: a flat SDR bed, a tinted tail, the quarter-tone guides inside the
@@ -986,7 +1006,7 @@ public struct HistogramCard: View {
                           showsHighlightWarning: session.highlightWarning,
                           loupe: loupe,
                           onToggle: { session.toggleHighlightWarning() })
-            .frame(height: 104)
+            .frame(height: HistogramCardView.contentHeight)
     }
 }
 
