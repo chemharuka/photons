@@ -320,6 +320,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             _ = session.metadataRevision
             _ = session.filter
             _ = session.allCameraKeys
+            // 排序是会话上的一个值，三个视图都读它：这一行就是「点了按钮，网格跟着重排」的全部接线
+            // （`reloadData` 复用的还是同一批单元格，缩略图从内存层同步取出，不重新解码）。
+            _ = session.sortOrder
         }, { [weak self] in
             self?.refresh()
         })
@@ -563,6 +566,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     /// Cells currently on screen.
     public var visibleCellCount: Int { collectionView.indexPathsForVisibleItems().count }
+
+    /// The photos the grid is **actually drawing**, in layout order (index 0 = top-left).
+    ///
+    /// Read off the live cells (`cardView.asset`), not off `session.assets`: a grid that did not react
+    /// to a sort change would still be holding the previous photos here, which is exactly the state
+    /// the "three views agree" assertion has to be able to see. The probe is what the sort tests and
+    /// `--ui-smoke` compare across the three browsers.
+    public var renderedAssetIDs: [String] {
+        collectionView.indexPathsForVisibleItems()
+            .sorted { ($0.section, $0.item) < ($1.section, $1.item) }
+            .compactMap { (collectionView.item(at: $0) as? AssetGridItem)?.cardView.asset?.id }
+    }
 
     /// Cells on screen that are drawing a real thumbnail rather than the placeholder. This is the
     /// assertion that separates "the grid streams images" from "the grid still draws swatches".

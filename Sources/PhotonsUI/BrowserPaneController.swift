@@ -282,6 +282,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             _ = session.anchorID
             _ = session.stats
             _ = session.metadataRevision
+            // 排序（网格/胶片条/左侧栏同源）：这一行让左侧照片行跟着换序，见 `PhotoSortOrder`。
+            _ = session.sortOrder
         }, { [weak self] in
             self?.refresh()
         })
@@ -853,6 +855,17 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     public var photoRowCount: Int { photosTable.numberOfRows }
+
+    /// The photos the left list is **actually drawing**, row 0 first.
+    ///
+    /// Read off the live `PhotoRowCell`s (`assetID`), the same honesty rule as the grid's
+    /// `renderedAssetIDs`: a list that ignored the sort order would keep its old rows here, and the
+    /// three-view consistency assertion is what would notice.
+    public var renderedPhotoRowIDs: [String] {
+        (0..<photosTable.numberOfRows).compactMap {
+            (photosTable.view(atColumn: 0, row: $0, makeIfNecessary: false) as? PhotoRowCell)?.assetID
+        }
+    }
 }
 
 // MARK: - cells
