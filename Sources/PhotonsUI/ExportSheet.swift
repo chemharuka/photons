@@ -67,15 +67,26 @@ public enum UIExportRenderer {
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)
+        // 2026-10-28 (P1b) — the export's own graph, with the pool policy a one-shot frame wants:
+        //
+        //   · `textureRetention: .none` — nothing is kept between frames, because there is no next
+        //     frame. A 60 Mpx intermediate is 483 MB and the session is over when this returns.
+        //   · `useCache: false` below — one frame cannot hit a cache it fills, so caching here only
+        //     pins textures; the render loop gives each stage's input straight back to the pool
+        //     instead, which is what holds the peak at two frame textures rather than eleven.
+        //   · `releaseAllTextures()` on the way out — the atlas and any slot the frame did keep go
+        //     back before the next picture in a batch decodes, so a 20-image batch no longer peaks at
+        //     20 × the export's own working set.
         let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity,
                                                       sourceURL: url),
-                                    cacheBudgetBytes: 384_000_000)
+                                    textureRetention: .none)
+        defer { graph.releaseAllTextures() }
         let options = RenderOptions(canvas: nil,
                                     scale: scale / Double(decodeScale),
                                     display: DisplayOptions(primaries: preset.colorSpace,
                                                             bitDepth: preset.effectiveBitDepth,
                                                             headroom: 1),
-                                    useCache: true,
+                                    useCache: false,
                                     wantsPixels: true)
         let result = try graph.render(edit, options: options)
         guard let pixels = result.display else { throw UIExportError.noPixels(item.name) }

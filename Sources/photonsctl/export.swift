@@ -123,16 +123,21 @@ func cmdExportBatch(_ a: Args) throws {
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)
+        // 2026-10-28 (P1b) — the same one-shot pool policy the window's export uses (`UIExportRenderer`):
+        // nothing retained between frames, no stage cache for a frame that can never hit one, and
+        // everything handed back when the image is done, so a 60 Mpx batch runs at one export's
+        // working set instead of accumulating one per image.
         let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity,
                                                       sourceURL: url),
-                                    cacheBudgetBytes: 384_000_000)
+                                    textureRetention: .none)
+        defer { graph.releaseAllTextures() }
         let display = DisplayOptions(primaries: preset.colorSpace,
                                      bitDepth: preset.effectiveBitDepth,
                                      headroom: 1)
         let options = RenderOptions(canvas: nil,
                                     scale: scale / Double(decodeScale),
                                     display: display,
-                                    useCache: true,
+                                    useCache: false,
                                     wantsPixels: true)
         let result = try graph.render(edit, options: options)
         guard let pixels = result.display else {
