@@ -479,7 +479,9 @@ final class DetailTests: XCTestCase {
         XCTAssertEqual(old.detailSettings.luminanceNR, 30)
         XCTAssertEqual(old.detailSettings.colorNR, 40)
         XCTAssertEqual(old.detailSettings.sharpness, 60)
-        XCTAssertEqual(EditModel.currentSchemaVersion, 6)
+        // 2026-10-28: the current version is 7 (颗粒 的三个字段); the migration still divides a
+        // schema-5 position by ten and stamps the **current** version.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 7)
 
         // Old 50 → amount 0.5 → new position 5.
         let half = try migrate(#"""
@@ -506,7 +508,7 @@ final class DetailTests: XCTestCase {
         // **The migration must not run twice.** `/10` is not idempotent, so a converted document is
         // stamped with the new version; re-encoding and decoding it again must keep position 10.
         XCTAssertEqual(old.schemaVersion, EditModel.currentSchemaVersion,
-                       "a document whose 细节 position was converted is now a schema-6 document")
+                       "a document whose 细节 position was converted is now a current-schema document")
         let roundTripped = try JSONDecoder().decode(EditModel.self,
                                                     from: try JSONEncoder().encode(old))
         XCTAssertEqual(roundTripped.detailSettings.detail, 10, "10 must not be divided again on reload")

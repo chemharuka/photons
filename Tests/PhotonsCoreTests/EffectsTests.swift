@@ -31,6 +31,20 @@ final class EffectsTests: XCTestCase {
     private static let frameWidth = 1500
     private static let frameHeight = 2731
 
+    /// **The neutral frame's sha, recorded on the build *before* the Effects card existed** (main
+    /// `2c0629d`, this machine's GPU, the same `flat()` frame):
+    ///
+    ///     % ./.build/debug/photonsctl render L1030402.dng --edit Tests/Fixtures/edit-neutral.json \
+    ///           --out … --scale 0.25          →  pixels 1fa052b05a298028…   (both builds, byte for byte)
+    ///     FLATPROBE 23f2b0da1b1aa0f6…         ← this constant, from a probe test in a worktree at 2c0629d
+    ///
+    /// It is the reference that makes 「中性零变化」 a *test* rather than a promise between two renders
+    /// of the same build: both sides of that comparison would carry the same bug. Pinned as a constant
+    /// because the fixture is synthetic and the GPU is this machine's — the same reason
+    /// `BwLevelsTests` pins its recorded identity.
+    private static let preEffectsNeutralSHA =
+        "23f2b0da1b1aa0f65bb1cf9298748769c2ac769b2698b3d46131792cac1f4d06"
+
     // MARK: - fixtures
 
     private func makeGraph(_ image: LinearImage, identity: String = "effects-tests") throws -> RenderGraph {
@@ -191,6 +205,10 @@ final class EffectsTests: XCTestCase {
 
         XCTAssertEqual(a.sha256(), b.sha256(), "显式写回 .identity 也必须零像素变化")
         XCTAssertEqual(a.sha256(), c.sha256(), "过一趟 JSON 也不能变")
+        // …and against the **pre-card build's** recorded frame: the one comparison that catches a pass
+        // that runs at amount 0 and moves pixels anyway (both sides above would agree on that bug).
+        XCTAssertEqual(a.sha256(), Self.preEffectsNeutralSHA,
+                       "中性帧必须与加卡之前的构建逐字节相同（sha 是那个构建记录的）")
 
         // The stage list is the pre-S3.7 list, exactly: seven passes, no S3.7.
         let links = RenderKeyChain.links(identity: "effects-tests",
