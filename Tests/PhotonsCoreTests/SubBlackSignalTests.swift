@@ -13,6 +13,13 @@ import PhotonsCore
 /// These tests pin the two halves of the contract: nothing changes for an ordinary edit (the display
 /// clamp in S4 still ends at the same pixels), and a strong lift can now resolve a staircase that
 /// lives entirely below zero.
+///
+/// **073B changed which control is the lift.** `blacks` is a pure multiplier now (±3 EV at the dark
+/// end), and multiplying a negative keeps it negative — so the *only* additive operator that can pull
+/// sub-black data across zero is 071's `blackOffset`. The tests below therefore pin the staircase
+/// against `blackOffset` (which is what the owner asked for: 「可选到 −10 和 +10，对应于让 0 值变为
+/// ±0.01」), and pin the *negative* claim for `blacks`: with a multiplier the sub-black bands stay
+/// clamped, which is the price of "0 → 0" and the reason the affine level was never the right shape.
 final class SubBlackSignalTests: XCTestCase {
 
     private func makeGraph(_ image: LinearImage) throws -> RenderGraph {
@@ -62,35 +69,42 @@ final class SubBlackSignalTests: XCTestCase {
 
     /// A strong lift must resolve the staircase: neighbouring bands are visibly different.
     ///
-    /// The lift has to be **additive**, because that is what a negative value needs: `exposure` and
-    /// `shadows` multiply, and multiplying a negative keeps it negative (so those sliders still cannot
-    /// reach below black — a property of the maths, not of the clamp). `blacks +` moves the input black
-    /// point *down*, which adds light, so it is the operator that can pull sub-black data up.
-    func testAnAdditiveLiftResolvesASubBlackStaircase() throws {
+    /// The lift has to be **additive**, because that is what a negative value needs: `exposure`,
+    /// `blacks` and `shadows` multiply, and multiplying a negative keeps it negative (a property of the
+    /// maths, not of the clamp). That is 071's `blackOffset` — `+0.01` shifts every sample by 0.01 in
+    /// scene-linear light *before* the gain, so −0.004…+0.001 becomes +0.006…+0.011 and the whole
+    /// staircase comes out above black, separated.
+    func testTheBlackOffsetResolvesASubBlackStaircase() throws {
         let graph = try makeGraph(staircase())
         var edit = EditModel.neutral
-        edit.light.blacks = 100          // blk = −0.15: −0.004 → 0.146 … +0.001 → 0.151
+        edit.light.blackOffset = 0.01    // −0.004 → +0.006 … +0.001 → +0.011
 
         let means = bandMeans(try render(graph, edit))
-        print("sub-black staircase means (blacks +100):", means.map { String(format: "%.4f", $0) })
+        print("sub-black staircase means (blackOffset +0.01):", means.map { String(format: "%.4f", $0) })
         for i in 1..<means.count {
-            XCTAssertGreaterThanOrEqual(means[i], means[i - 1] - 1e-4,
-                                        "band \(i) dropped below band \(i-1): \(means)")
+            XCTAssertGreaterThan(means[i], means[i - 1] + 1e-5,
+                                 "band \(i) did not separate from band \(i-1): \(means)")
         }
+        XCTAssertGreaterThan(means.first!, 0.001, "the darkest band was not pulled above black")
         XCTAssertGreaterThan(means.last! - means.first!, 0.001,
                              "the staircase collapsed — the sub-black signal is still being clamped")
     }
 
-    /// The same lift on an image whose sub-black samples are already gone (all ≥ 0) must give the
-    /// same answer as before the change — proving the difference really is the preserved sign.
-    func testTheResolvedStaircaseNeedsTheSubBlackSamples() throws {
+    /// **`blacks` cannot do that, and that is the point.** With a multiplier (`v·2^(3·Δ·w)`) the four
+    /// negative bands stay negative and S2/S4 clamp them to 0; only the positive band moves. The old
+    /// affine level did pull them up — by moving the *whole picture*, which is the complaint 073B
+    /// answers. `0 → 0` is a feature here: a black end point must not manufacture grey.
+    func testBlacksIsMultiplicativeSoTheSubBlackBandsStayClamped() throws {
         let graph = try makeGraph(staircase())
-        var additive = EditModel.neutral
-        additive.light.blacks = 100
-        let means = bandMeans(try render(graph, additive))
-        // The two darkest bands differ by ~1e-3 linear; on screen that is a visible step, not a flat 0.
-        XCTAssertGreaterThan(means[1] - means[0], 1e-5,
-                             "bands −0.004 and −0.003 read the same: \(means)")
+        var edit = EditModel.neutral
+        edit.light.blacks = 100
+        let means = bandMeans(try render(graph, edit))
+        print("sub-black staircase means (blacks +100):", means.map { String(format: "%.4f", $0) })
+        for i in 0..<5 {
+            XCTAssertEqual(means[i], 0, accuracy: 1e-4,
+                           "band \(i) (a negative sample) was lifted by a multiplier: \(means)")
+        }
+        XCTAssertGreaterThan(means[5], 0.01, "the positive band must still be inside the toe")
     }
 
     /// An ordinary edit (no lift) ends at the same pixels as before: the display clamp in S4 is the
@@ -99,14 +113,20 @@ final class SubBlackSignalTests: XCTestCase {
         let graph = try makeGraph(staircase())
         var edit = EditModel.neutral
         edit.light.contrast = 10          // a real tone-map pass, but no lift
-        edit.light.blacks = -5
+        edit.light.blacks = -5            // 073B: a multiplier, so it darkens rather than shifting
 
         let means = bandMeans(try render(graph, edit))
         print("sub-black staircase with a normal edit:", means.map { String(format: "%.5f", $0) })
-        for (i, m) in means.enumerated() {
+        // The five bands at or below zero must end at exactly 0 — the display clamp is the only judge.
+        // The sixth sample is +0.001 *light* (a real, if tiny, positive value): it renders as one code
+        // (0.0053 of full scale), which it always did — the old fixture only hid that by pushing it
+        // below zero with the affine level (`blacks = −5` meant +0.0075 of black point).
+        for (i, m) in means.enumerated() where i < 5 {
             XCTAssertEqual(m, 0, accuracy: 1e-4,
                            "band \(i) lit up without a lift (\(m)) — the display clamp is the only judge")
         }
+        XCTAssertLessThanOrEqual(means[5] * 255, 2,
+                                 "a +0.001 sample must render as at most two codes, not as grey")
     }
 
     /// Blacks stays monotone across its whole range on a sub-black staircase.

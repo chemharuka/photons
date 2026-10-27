@@ -440,8 +440,21 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public var contrast: Double          // -100…100, default 0
     public var highlights: Double        // -100…100, default 0
     public var shadows: Double           // -100…100, default 0
-    public var whites: Double            // -100…100, default 0; + expands the white point (brighter)
-    public var blacks: Double            // -100…100, default 0; + lifts the black point (brighter)
+    /// 073B — the **white end point**: ±0.6 EV plus a small additive level (0.06 at full travel,
+    /// quadratic so a short travel is nearly pure EV), over a 2 EV window that ends at display white
+    /// and decays above it (shoulder). Both terms ride the same weight, so nothing moves below −2 EV.
+    ///
+    /// It used to be an affine level (`wht = 1 − whites/100·0.15`, 派单 019), which brightened the
+    /// whole picture and moved the mid-tones; `+` still means "up", the shape is what changed. The
+    /// affine spelling now belongs only to `whiteLevel` below, where "this sample is white" is a level.
+    public var whites: Double            // -100…100, default 0; + moves the white point up
+    /// 073B — the **black end point**: a pure multiplicative EV at the dark end, ±3 EV at the very
+    /// bottom (`0 → 0`), weighted by a 7 EV window on `log2` light so the mid-tones are outside it.
+    ///
+    /// It used to be an affine level (`blk = −blacks/100·0.15`), which moved every pixel, including
+    /// 50 % grey — that is not what the control is for. The affine spelling now belongs only to
+    /// `blackLevel` below, where "this sample is black" really is a level. `+` still lifts the shadows.
+    public var blacks: Double            // -100…100, default 0
     /// Absolute white balance in Kelvin, fed to `CIRAWFilter.neutralTemperature` — **not** a gain on
     /// S1 (派单 006 B). `nil` = as shot: the decoder is left alone and the inspector shows the number
     /// the file reports (`DecoderCapabilities.asShotTemperature`).
@@ -456,18 +469,19 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public var highlightRecovery: Double // 0…1, default 0
 
     /// Absolute black level in **scene-linear** light (`0.18` means "the 18 % grey patch reads
-    /// here"), or `nil` = use the `blacks` slider's mapping (派单 030).
+    /// here"), or `nil` = no absolute level at all (派单 030).
     ///
-    /// Why an absolute value exists at all: a slider's travel cannot express an HDR white point. The
-    /// sliders reach `blk ∈ [−0.15, +0.15]` (plenty — a black sample is always below −3 EV) and
-    /// `wht ∈ [0.85, 1.15]` (**not** plenty — a +1 EV highlight needs `wht = 2.0`).
+    /// Since 073B this is the *only* affine level left in S1, and it is the dropper's spelling on
+    /// purpose: a sampled "this is black" means "make this value 0", which is a level and nothing else.
+    /// The `blacks` slider is a different animal (an EV window over the dark end), so the two never
+    /// coexist in one document — `levels` picks this field when it is set, and the UI clears it when the
+    /// slider is dragged.
     ///
-    /// **Exactly one of the two spellings is in force**: this field when non-nil, the slider
-    /// otherwise. The slider clears this to `nil` when it is dragged, so two black points cannot
-    /// exist (`temperature`'s `nil` discipline, 派单 006).
+    /// Why an absolute value exists at all: a slider's travel cannot express an HDR white point. A
+    /// `whiteLevel` of 2.0 (a +1 EV highlight) is not reachable by `wht ∈ [0.85, 1.15]`.
     public var blackLevel: Double?
-    /// Absolute white level in scene-linear light; `nil` = the `whites` slider's mapping. Same rules
-    /// as `blackLevel`, with `white ≥ black + 1e-3` enforced on the pair.
+    /// Absolute white level in scene-linear light; `nil` = no absolute level. Same rules as
+    /// `blackLevel`, with `white ≥ black + 1e−3` enforced on the pair.
     public var whiteLevel: Double?
 
     /// 派单 071 — an **additive** black trim in scene-linear units: +0.01…−0.01, default 0.
@@ -584,10 +598,16 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     public var isIdentity: Bool { self == LightGroup.identity }
 
-    /// The black level the `blacks` slider asks for, `blk = −blacks/100·0.15` (派单 019, unchanged).
+    /// The black level the `blacks` slider *used to* ask for, `blk = −blacks/100·0.15` (派单 019).
+    ///
+    /// 073B kept the arithmetic and stopped using it for the picture: the slider is an EV window now,
+    /// so this value only reaches `levels` (and from there the curve panel's reference line and the
+    /// `blL`/`whL` key tokens). Reading it as "where black is" would be wrong for a 073B document; it
+    /// is here because `LevelPair` is still the one place the *dropper's* level is reconciled.
     public var sliderBlackLevel: Double { -blacks / 100 * 0.15 }
 
-    /// The white level the `whites` slider asks for, `wht = 1 − whites/100·0.15`.
+    /// The white level the `whites` slider used to ask for, `wht = 1 − whites/100·0.15`. See
+    /// `sliderBlackLevel`.
     public var sliderWhiteLevel: Double { 1 - whites / 100 * 0.15 }
 
     // MARK: - 071: the additive linear trim's mapping
@@ -627,8 +647,14 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     /// Where 0 and 1 are, after the absolute fields and the sliders are reconciled.
     ///
-    /// One answer, one place: S1, the level droppers and the curve panel's reference lines all read
-    /// this, so "which black point is in force" cannot be answered two ways.
+    /// One answer, one place: S1's `kLevels` entry point, the level droppers and the curve panel's
+    /// reference lines all read this, so "which black point is in force" cannot be answered two ways.
+    ///
+    /// 073B: the **slider** half is legacy arithmetic. The sliders are EV windows now and never reach
+    /// S1 as a level, so for a document without a dropper these numbers describe where an *019-era*
+    /// document's level would have been — the flags in S1's `d` are 0, so the kernel ignores them. The
+    /// curve panel's reference line still draws them; that is a follow-up ticket (the line should show
+    /// the window, not the old level), not a second black point.
     public var levels: LevelPair {
         let blk = min(max(blackLevel ?? sliderBlackLevel,
                           LightGroup.blackLevelRange.lowerBound), LightGroup.blackLevelRange.upperBound)
