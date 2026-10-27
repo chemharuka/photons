@@ -3130,9 +3130,9 @@ public final class UISmokeRunner {
 
         let items = zoomMenuItems()
         let titles = items.map(\.title).joined(separator: " / ")
-        check("显示菜单有八档倍率（25/33.3/50/66.7/100/200/300/400%，tag 为下标）+ 适应窗口 + 放大/缩小（\(titles)）",
-              items.count == 8 && items.map(\.tag) == Array(0..<8)
-              && items.map(\.title) == ["25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
+        check("显示菜单有九档倍率（12.5/25/33.3/50/66.7/100/200/300/400%，tag 为下标）+ 适应窗口 + 放大/缩小（\(titles)）",
+              items.count == 9 && items.map(\.tag) == Array(0..<9)
+              && items.map(\.title) == ["12.5%", "25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
               && menuItem(#selector(EditorWindowController.zoomFitAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomInAction(_:))) != nil
               && menuItem(#selector(EditorWindowController.zoomOutAction(_:))) != nil)
@@ -3141,12 +3141,12 @@ public final class UISmokeRunner {
         // a rung (its ratio depends on the window), so it cannot appear here at all.
         let ladder = loupe.zoomLevels
         let ladderLabels = ladder.map(\.label).joined(separator: " / ")
-        check("倍率档位表为八档数值（\(ladderLabels)），fit 不在表内",
-              ladder.count == 8
+        check("倍率档位表为九档数值（\(ladderLabels)），fit 不在表内",
+              ladder.count == 9
               && ladder.map(\.zoom) == LoupeViewState.zoomStops
               && ladder.map(\.zoom) == ladder.map(\.zoom).sorted()
               && ladder.allSatisfy { $0.label.hasSuffix("%") }
-              && ladder.map(\.label) == ["25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"])
+              && ladder.map(\.label) == ["12.5%", "25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"])
 
         /// What the renderer would be asked for, at the camera's current state.
         func renderShape() -> (canvas: ImageSize, zoom: Double, window: ImageSize)? {
@@ -3186,7 +3186,7 @@ public final class UISmokeRunner {
             stopsOK = stopsOK && stopOK
         }
         log("zoom stops              \(stopResults.joined(separator: " · "))")
-        check("八档倍率切换后 canvas == 视口、渲染倍率 == 档位（含 1/3、2/3）、可见窗口 == 视口/倍率，且状态条文字为档位标签（\(stopResults.joined(separator: " · "))）",
+        check("九档倍率切换后 canvas == 视口、渲染倍率 == 档位（含 1/3、2/3）、可见窗口 == 视口/倍率，且状态条文字为档位标签（\(stopResults.joined(separator: " · "))）",
               stopsOK)
 
         // ⌘0 → fit; ⌘= → 100 %; ⌘= → 200 %; then ⌘− all the way down:
@@ -3223,23 +3223,23 @@ public final class UISmokeRunner {
         let zoomOutKey = shortcut("-")
         let afterOut = loupe.zoomLabel
         var downChain: [String] = []
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             _ = shortcut("-")
             downChain.append(loupe.viewState.isActualSize ? loupe.zoomLabel : "fit")
         }
-        // 200 % → 100 → 66.7 → 50 → 33.3 → 25, then one more ⌘− for fit.
+        // 200 % → 100 → 66.7 → 50 → 33.3 → 25 → 12.5, then one more ⌘− for fit.
         _ = shortcut("-")
         let backToFit = loupe.viewState.isActualSize
         let downChainText = ([afterOut] + downChain).joined(separator: " → ")
         log("zoom keys               ⌘0 matched=\(fitKey.matched) via \(fitKey.via) → actual \(fitState) · ⌘= \(zoomInKey.matched)/\(zoomInKey.via) → \(afterIn) · ⌘= → \(afterSecondIn) · ⌘− \(zoomOutKey.matched)/\(zoomOutKey.via) → \(downChainText) · ⌘− → fit \(!backToFit)")
-        check("⌘0/⌘=/⌘− 命中真实菜单快捷键（matched \(fitKey.matched)/\(zoomInKey.matched)/\(zoomOutKey.matched)）并走完八档阶梯：适应窗口 → \(afterIn) → \(afterSecondIn) → \(downChainText) → 适应窗口（\(!backToFit)）",
+        check("⌘0/⌘=/⌘− 命中真实菜单快捷键（matched \(fitKey.matched)/\(zoomInKey.matched)/\(zoomOutKey.matched)）并走完九档阶梯：适应窗口 → \(afterIn) → \(afterSecondIn) → \(downChainText) → 适应窗口（\(!backToFit)）",
               fitKey.matched && zoomInKey.matched && zoomOutKey.matched
               && !fitState && afterIn == "100%" && afterSecondIn == "200%"
               && afterOut == "100%"
-              && downChain == ["66.7%", "50%", "33.3%", "25%"]
+              && downChain == ["66.7%", "50%", "33.3%", "25%", "12.5%"]
               && !backToFit)
 
-        // 右下角的固定档位拖动条（液态玻璃药丸）：存在、八格刻度、从左拖到右落在 400 %，且**途经
+        // 画布右上的固定档位拖动条（液态玻璃药丸）：存在、九格刻度、从左拖到右落在 400 %，且**途经
         // 的每个值都在档位表里**。60 个中间位置的指针事件是重点——中间值一次都不许出现；
         // 并且从「适应」拖出去必须直接落到数值档，途中不能停在 fit（fit 只能由 ⌘0 进入）。
         let pill = loupe.zoomSlider
@@ -3275,8 +3275,8 @@ public final class UISmokeRunner {
         let chipFit = (loupe.currentZoomStop == nil, pill.labelText, pill.thumbIndex == nil,
                        pill.thumbCenterX)
         log("zoom slider             \(pill.geometry.edges.count) 刻度 · 背板 \(pillBackdrop) · fit 态「\(pillFitState.0)」着色 \(pillFitState.2) · 途经 \(pillPath) · 落点 \(loupe.zoomLabel) · chip→fit \(chipFit.0) 文案「\(chipFit.1)」· fit thumb x \(String(format: "%.2f", chipFit.3)) / 左端 \(String(format: "%.2f", pill.geometry.thumbLeftLimit))–右端 \(String(format: "%.2f", pill.geometry.thumbRightLimit))")
-        check("右下角液态玻璃拖动条存在、八格刻度，从「适应」拖动不会停在 fit、途经的每个值都在档位表里（\(pillPath)），从左拖到右最终落在 400%，点 chip 回到「适应」（\(chipFit.1)）",
-              pill.geometry.edges.count == 8
+        check("液态玻璃拖动条存在、九格刻度，从「适应」拖动不会停在 fit、途经的每个值都在档位表里（\(pillPath)），从左拖到右最终落在 400%，点 chip 回到「适应」（\(chipFit.1)）",
+              pill.geometry.edges.count == 9
               && pill.geometry.levels == LoupeController.zoomStops
               && pillFitState.0 == "适应" && pillFitState.2 == 0
               && pillOffLadder.isEmpty
