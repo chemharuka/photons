@@ -489,6 +489,20 @@ final class MaskTests: XCTestCase {
     ///     curve is not, and that is what `processVersion` 2 declares (`docs/tasks/030` §10.1).
     ///     Nothing about the invariance criteria was relaxed: same seven links, same counts, same
     ///     `masks == []` → no mask stages.
+    ///   · 069 — **曲线坐标换单位，`curve` 一行的数字变、含义不变**. Two spelling facts, no
+    ///     coordinate fact, and the conversion is arithmetic, not a re-recording:
+    ///       1. `x_new = 2·x_old`, `y_new = 2·y_old` — the stored pair is now the card's `0…2` axis
+    ///          (`0…1` SDR display code, `1…2` = +4 EV) while the engine kept its `0…1` axis at
+    ///          `u = x/2` (`EditModel.swift:1016,1019`; `CurveLUT` reads `.u`/`.v`, so the table, the
+    ///          shaper and the kernel see the **same numbers as before**). `CurveStorageTests
+    ///          .testTheNewCoordinateIsTwiceTheAxis` recomputes that factor from the anchors.
+    ///          So `0.3000,0.2500` → `0.600000,0.500000` and `1.0000,1.0000` → `2.000000,2.000000`,
+    ///          and the identity tables `0…1` → `0…2` the same way.
+    ///       2. `%.4f` → `%.6f` (`CurvePoint.keyString`, `EditModel.swift:1036`): six decimals for a
+    ///          continuous coordinate. `0.6000` and `0.600000` are the same number, spelled longer.
+    ///     Everything else in the `curve` line is unchanged, and the four downstream links
+    ///     (`toneMap`/`color`/`vignette`/`display`) moved **only** because they chain-digest this
+    ///     line — their materials are byte-identical to 005a's, which is what the last four rows show.
     ///
     /// Nothing about the *structure* changed, and the mask-side invariance criteria below are not
     /// touched. If this test fails again, the empty-mask path changed and every golden, every disk
@@ -506,16 +520,16 @@ final class MaskTests: XCTestCase {
              "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10"),
             ("sceneLinear", "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f",
              "1ba3968fd210c7dca1650a3a7aed55b73e4e958240b52b42850642edd7b3c578|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"),
-            ("curve", "de27c78cac82467aa9cb1cc0b44b55819f607766707368a2a81d1dc5b961023c",
-             "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f|w=0.0000,0.0000;0.3000,0.2500;1.0000,1.0000|r=0.0000,0.0000;1.0000,1.0000|g=0.0000,0.0000;1.0000,1.0000|b=0.0000,0.0000;1.0000,1.0000"),
-            ("toneMap", "7481b2f8470a346fb83f5e926abe32676fc8d1f86859bd06b6e013b028cabdd1",
-             "de27c78cac82467aa9cb1cc0b44b55819f607766707368a2a81d1dc5b961023c|con=20.00000;hi=-30.00000;sh=15.00000"),
-            ("color", "f16e16346deb972a94cfb1ab288d8e746cd5470f8221527998e72fa700a016e9",
-             "7481b2f8470a346fb83f5e926abe32676fc8d1f86859bd06b6e013b028cabdd1|vib=15.00000;sat=-10.00000;bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
-            ("vignette", "aeb4ea9e65653681f95ef6b84b07f9812e849ad4638ff7ad3e2a00438960238c",
-             "f16e16346deb972a94cfb1ab288d8e746cd5470f8221527998e72fa700a016e9|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
-            ("display", "df5fd57369a835ae8e6df28b610a599ac8a59bef0576dbeea9b6c55148465577",
-             "aeb4ea9e65653681f95ef6b84b07f9812e849ad4638ff7ad3e2a00438960238c|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("curve", "e955d86c228b8bd3e3e67cd1811a122752a8ea72a80998688cbfd6614f6eba9f",
+             "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000"),
+            ("toneMap", "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c",
+             "e955d86c228b8bd3e3e67cd1811a122752a8ea72a80998688cbfd6614f6eba9f|con=20.00000;hi=-30.00000;sh=15.00000"),
+            ("color", "b089325e5bea7421da06db1b768de114edf3e6e499732f66725874cec17bbb03",
+             "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c|vib=15.00000;sat=-10.00000;bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
+            ("vignette", "c5397d45681a5eb5da1f9fa881e1c4d2c1e47c87c3f974a79d191e05f1d52825",
+             "b089325e5bea7421da06db1b768de114edf3e6e499732f66725874cec17bbb03|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
+            ("display", "ff23ec2b89f81155cd2cd25d5448102fe9a3ccb1e8d89a7c432193c95c45ca4e",
+             "c5397d45681a5eb5da1f9fa881e1c4d2c1e47c87c3f974a79d191e05f1d52825|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

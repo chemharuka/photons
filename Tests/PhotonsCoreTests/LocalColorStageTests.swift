@@ -691,6 +691,43 @@ final class LocalColorStageTests: XCTestCase {
     /// `CounterProofTests.testNoLocalColourDocumentDigest`): one document, mid-grey contrast, a curve,
     /// global saturation, a vignette and a mask carrying **only** a scene-linear adjustment. The two
     /// digests must be equal — nothing about this document's render path may move.
+    ///
+    /// ⚠ **This pin has expired, and re-recording it is a decision, not a chore.** The pixels of this
+    /// document did move after 056, exactly once; measured by re-rendering this same probe in four
+    /// `git archive` trees on this machine (one `swift test --filter` per tree, digest printed by the
+    /// `print` below):
+    ///
+    ///   | tree | digest |
+    ///   |---|---|
+    ///   | `4aca610` — 056 itself | `79a0534e…` ✓ the pin |
+    ///   | `699cd7f` — after the present/backdrop/loupe merges | `79a0534e…` ✓ |
+    ///   | `4e17ee0` — after 曲线端点可移 | `79a0534e…` ✓ |
+    ///   | `a6248ef` — after 062 曲线轴对齐直方图 | `a7890962…` ✗ |
+    ///   | `36138cf` — this worktree's base | `a7890962…` ✗ |
+    ///
+    /// The one step that moved it is **062**, the only non-main parent of `a6248ef` (`afd2115`): that
+    /// task rebuilt the curve's axis onto the histogram's scale (`SDR 50 % 显示编码` + `HDR 50 %`,
+    /// `W` gain in log2) and re-recorded `Tests/Golden/render-edit-push-s0.25.json` in the same
+    /// commit. This probe's curve is **not** the identity — `(0.4, 0.45)` on the engine axis — so a
+    /// curve-axis change *must* move its pixels. Local colour is not involved: nothing about S3.5 is
+    /// upstream of the curve, and the fingerprint of a leak (an `s3.5-local-color` stage, a
+    /// `localColor` key) is still absent — `testStageAppearsOnlyWhenAMaskCarriesColour` asserts that
+    /// and is green.
+    ///
+    /// So what expired is not the 056 claim but the way this line states it: "same pixels as a tree
+    /// from before 056" also forbids every later task from touching a stage that runs **before** the
+    /// local-colour stage, which was never the deal (062 was allowed to move pixels and did). Two
+    /// readings, and the owner picks:
+    ///
+    ///   · **re-record the pin**, with the revision it was taken at named in this comment (the
+    ///     goldens' own discipline). The claim then reads "no local colour today", not "same pixels
+    ///     as 056", and the next upstream stage change re-records it again;
+    ///   · **pin the local claim instead**: the same document with its mask carrying colour at
+    ///     strength 0 must equal this render bit for bit. That one compares two renders of *one*
+    ///     tree, so no later task can invalidate it, and it is the claim 056 actually makes.
+    ///
+    /// Left red here on purpose: the honest re-record is `a7890962…`, i.e. "whatever the tree does
+    /// now", which is the one assertion this test exists to refuse.
     func testNoLocalColourDocumentDigestMatchesThePre056Tree() throws {
         let image = colourWheel(width: 64, height: 48)
         let graph = try makeGraph(image, identity: "056-hash-probe")

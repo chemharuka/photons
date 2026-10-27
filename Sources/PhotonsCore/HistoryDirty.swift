@@ -83,9 +83,15 @@ enum EditParameters {
     }
 
     static func areEqual(_ a: [CurvePoint], _ b: [CurvePoint]) -> Bool {
-        // 069: a point is a pair of grid cells, so "the same" is integer equality — no tolerance
-        // can make two different cells equal, and the old 1e-9 window is gone with the doubles.
-        a.count == b.count && zip(a, b).allSatisfy { $0.x == $1.x && $0.y == $1.y }
+        // Same window as every other double in this file, and **not** `==`: a curve point is a
+        // continuous coordinate, not a grid cell. 069 briefly compared the pair exactly ("a point is
+        // a pair of grid cells") while the same commit shipped `CurvePoint.x/y` as continuous doubles
+        // (`EditModel.swift:989-991`) — so a document whose curve had been through JSON was marked
+        // dirty against itself, and the user got a phantom undo step and a full S1.7 → S4 recompute
+        // for a sub-quantum move. In the engine's units the window is 5e-7 of the `0…1` axis — 1/488
+        // of one `CurveLUT` entry (4096 over `0…1`), i.e. nothing a table, a pixel or an eye can see.
+        // `HistoryTests.testFloatToleranceDecidesDirtiness` pins both sides of the boundary.
+        a.count == b.count && zip(a, b).allSatisfy { areEqual($0.x, $1.x) && areEqual($0.y, $1.y) }
     }
 
     static func areEqual(_ a: [HSLBand], _ b: [HSLBand]) -> Bool {
