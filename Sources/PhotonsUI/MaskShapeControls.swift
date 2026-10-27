@@ -95,8 +95,29 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
 // flipped coordinate space, so it sits exactly under the hand at fit, at 1:1 and at 8:1 — and it is
 // not a render: the document is not touched until mouse-up.
 
+/// One instant of a gradient rubber band, in **view points** — what `MaskDraftOverlayView` draws.
+///
+/// A value of its own (rather than a tuple) because the loupe keeps one of these per animation frame
+/// in its overlay log, and a claim about "what was drawn on frame t" has to be comparable
+/// (`LoupeController.MaskOverlayFrame.draft`). The *source* of these numbers is not here:
+/// `LoupeController` stores the drag in source pixels and re-projects it every frame — a rubber band
+/// kept in view points could not follow a pan, which was the defect.
+public struct MaskDraftShape: Equatable, Sendable {
+    public var kind: MaskCreationKind
+    /// The mouse-down point, in view points.
+    public var start: CGPoint
+    /// Where the hand is now, in view points.
+    public var current: CGPoint
+
+    public init(kind: MaskCreationKind, start: CGPoint, current: CGPoint) {
+        self.kind = kind
+        self.start = start
+        self.current = current
+    }
+}
+
 final class MaskDraftOverlayView: NSView {
-    var draft: (kind: MaskCreationKind, start: CGPoint, current: CGPoint)? {
+    var draft: MaskDraftShape? {
         didSet { needsDisplay = true }
     }
 

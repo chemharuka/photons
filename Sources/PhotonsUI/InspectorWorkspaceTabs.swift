@@ -129,7 +129,20 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
 public final class InspectorWorkspaceState {
 
     /// The workspace the panel is showing. **View state**: never in the document, never in history.
-    public var selection: InspectorWorkspace
+    ///
+    /// The `didSet` is the switch's one outgoing edge (2026-10-27): the canvas' mask chrome belongs to
+    /// the 蒙版 workspace, so `WorkspaceRootView` hangs `onChange` here and tells the loupe. It fires
+    /// **synchronously, on the main thread**, in the same turn as the click — a hidden overlay that
+    /// appeared one run-loop turn later would still be hittable for that turn.
+    public var selection: InspectorWorkspace {
+        didSet {
+            guard selection != oldValue else { return }
+            onChange?(selection)
+        }
+    }
+
+    /// Called for every selection change (not for a re-selection of the same tab).
+    public var onChange: ((InspectorWorkspace) -> Void)?
 
     public init(_ selection: InspectorWorkspace = .adjust) {
         self.selection = selection
