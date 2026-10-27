@@ -620,6 +620,9 @@ public final class LoupeController: NSViewController {
     /// ladder's buffers (guarded by its own lock).
     private let decodeQueue = DecodeQueue(label: "photons.loupe.decode")
     private var presenter: CanvasPresenter?
+    /// The layer's presenter, for a test that asserts on what reached the drawable (068). Read-only and
+    /// `nil` only before `viewDidLoad` — the app never reaches for it.
+    public var canvasPresenter: CanvasPresenter? { presenter }
     private var graph: RenderGraph?
     private var graphIdentity: String?
     /// 065: the **photo** `graph` was built from (`contentHash|assetID`, or a frame source's identity).
@@ -1122,15 +1125,26 @@ public final class LoupeController: NSViewController {
             // old frame across a new canvas, which is the stretch this task exists to remove.
             if canvasChanged { cancelZoomBridge(rePresent: false) }
         }
-        // 067: while the hand is moving, a layout pass draws the frame that is already on the canvas at
-        // its own geometry and asks for nothing. Not "coalesced" — zero. A window drag therefore costs
-        // one re-present per pass (a full-canvas quad, or two with a backdrop) and no render, no
-        // development and no `nextDrawable()` for a frame nobody would see.
-        if isLiveResizing && !disableResizeCoalescing {
+        // 068: **one** rule for every gesture that moves the canvas — a window edge, the inspector's
+        // divider, the browser's divider — because the canvas sees one thing from all of them: bounds
+        // changing many times, faster than a frame can be presented.
+        //
+        // Inside the gesture a layout pass draws the frame already on the canvas at its own geometry
+        // and asks for no render, and the **draw is coalesced to one per runloop tick**. The draw is
+        // what costs, not the quad: `present` takes a drawable with `displaySyncEnabled`, i.e.
+        // `nextDrawable()` on the main thread waits for the next vsync. A drag that is laid out twice
+        // per display frame therefore made one of the two presents wait for a vsync it had already
+        // missed — the window server showed the layer at the last size it had, then the late present
+        // moved it, twice per frame. That alternation is the 「果冻」.
+        if isCanvasGeometryFrozen {
             liveResizeLayouts += 1
-            rePresentFrozen()
+            scheduleFrozenPresent()
             return
         }
+        // The hand let go: the last size never got a frame of its own, so exactly one render is asked
+        // for, at the canvas that is on screen now. `releaseFrozenCanvasIfNeeded` is the same funnel
+        // the gesture's own end uses, so the two callers cost one request between them.
+        if releaseFrozenCanvasIfNeeded() { return }
         requestResizeRender()
     }
 
@@ -1210,6 +1224,24 @@ public final class LoupeController: NSViewController {
         screenTokens.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                               object: nil, queue: .main) { [weak self] _ in
             self?.refreshDisplay()
+        })
+        // 068: the window's own two edges of a live resize, observed rather than only overridden. The
+        // `NSView` pair (`viewWillStartLiveResize`) is sent down the hierarchy, but the canvas is three
+        // levels below the content view and the freeze must not depend on that delivery: the release is
+        // what puts a correct frame on the final size, and a missed `viewDidEndLiveResize` would leave
+        // the picture frozen at its pre-drag geometry. `beginCanvasGeometryGesture` is idempotent per
+        // source, so a double delivery costs nothing.
+        screenTokens.append(center.addObserver(forName: NSWindow.willStartLiveResizeNotification,
+                                              object: nil, queue: .main) { [weak self] note in
+            guard let self, let window = self.view.window else { return }
+            guard (note.object as? NSWindow) === window else { return }
+            self.beginLiveResize()
+        })
+        screenTokens.append(center.addObserver(forName: NSWindow.didEndLiveResizeNotification,
+                                              object: nil, queue: .main) { [weak self] note in
+            guard let self, let window = self.view.window else { return }
+            guard (note.object as? NSWindow) === window else { return }
+            self.endLiveResize()
         })
     }
 
@@ -3043,8 +3075,9 @@ public final class LoupeController: NSViewController {
     public func requestResizeRender() {
         guard autoRenderEnabled else { return }
         resizeRequests += 1
-        if isLiveResizing && !disableResizeCoalescing {
-            // Belt and braces: nothing inside a drag may reach the render queue, however it got here.
+        if isCanvasGeometryFrozen {
+            // Belt and braces: nothing inside a gesture may reach the render queue, however it got
+            // here. Counted, because "0" is the number the acceptance test asserts.
             liveResizeRenderRequests += 1
             return
         }
@@ -3066,6 +3099,15 @@ public final class LoupeController: NSViewController {
             // No canvas big enough to render into (a collapsed pane): nothing to do, and nothing left
             // in flight — the next layout will ask again.
             resizeInFlight = false
+            return
+        }
+        // 068: the canvas already holds a frame made for exactly this viewport — a follow-up that was
+        // only queued because the layout pass arrived before the previous render landed. Rendering it
+        // again would produce the same pixels at the same size: this is what keeps a gesture's release
+        // to **one** render instead of one plus the follow-up the coalescer had already armed.
+        if let frame = lastFrame, frame.canvas == viewportPixels, !disableResizeCoalescing {
+            resizeInFlight = false
+            resizePending = false
             return
         }
         canvasSizeBox.store(viewport)
@@ -4177,11 +4219,17 @@ public final class LoupeController: NSViewController {
                                     pictureQuad: request.pictureQuad,
                                     backdropQuad: request.backdropQuad, zoom: zoom,
                                     frozen: frozen))
+        // 068: the canvas the layer is now showing something for. A frozen draw is skipped when this is
+        // already the canvas on screen — a gesture that stopped moving must stop drawing.
+        lastPresentCanvas = canvas
         frozenFrame = FrozenFrame(texture: texture, photoRect: photoRect,
                                   frameCanvas: frameCanvas, canvas: canvas, window: window,
                                   backdropWindow: backdropWindow, placement: placement, zoom: zoom)
         return true
     }
+
+    /// The canvas of the last present that reached the layer.
+    private var lastPresentCanvas: ImageSize?
 
     /// The frame on the canvas, with the geometry it was drawn with: what a live resize re-draws.
     ///
@@ -4201,46 +4249,127 @@ public final class LoupeController: NSViewController {
     }
     private var frozenFrame: FrozenFrame?
 
-    // MARK: - live resize (067)
+    // MARK: - geometry gestures (068)
 
-    /// The window drag is in progress: **no render is requested until it ends.**
+    /// A gesture that moves the canvas. Two entry points the user names — dragging the window's edge
+    /// and dragging the inspector's divider — plus the browser's divider, which is the same event
+    /// stream one pane over.
     ///
-    /// The alternative (one coalesced render per drag, 066's shape) still renders during the drag,
-    /// which is what made a drag of a zoomed-in 60 MP frame freeze the window: a frame costs tens of
-    /// milliseconds, and the drag delivers a layout pass every 8 ms. The picture does not need new
-    /// pixels while the hand is moving — it needs to stay put, which is a re-present, not a render.
-    public private(set) var isLiveResizing = false
-    /// Layout passes that fell inside a live resize, and the number of frames they asked for (0).
-    public private(set) var liveResizeLayouts = 0
-    /// Render requests a live resize made while the hand was moving — the number a regression shows up
-    /// in, and the one the test asserts is 0 (`WindowResizeTests`).
-    public private(set) var liveResizeRenderRequests = 0
+    /// They are *one* type and *one* freeze, not two implementations: a divider drag does not start a
+    /// window live resize (AppKit has no idea a plain `mouseDown` loop is resizing anything), so the
+    /// workspace tells the canvas, and from there the rule is identical — no render while the hand is
+    /// moving, one per runloop tick to follow it, one render at the size it stops on.
+    public enum CanvasGeometryGesture: Hashable, Sendable {
+        /// A window edge, held. Also implied by `NSWindow.inLiveResize`, so this one is a convenience.
+        case windowLiveResize
+        /// The inspector's (or the browser's) divider, held.
+        case panelDivider
+    }
 
-    public func beginLiveResize() {
-        guard !isLiveResizing else { return }
-        isLiveResizing = true
+    private var activeGeometryGestures: Set<CanvasGeometryGesture> = []
+    /// How many gestures are held right now (a window edge and a divider at once is a real state).
+    public var activeGeometryGestureCount: Int { activeGeometryGestures.count }
+    /// Layout passes that fell inside a gesture (they drew a frozen frame and asked for no render).
+    public private(set) var liveResizeLayouts = 0
+    /// Render requests a gesture made while the hand was moving — the number a regression shows up in,
+    /// and the one the acceptance test asserts is 0.
+    public private(set) var liveResizeRenderRequests = 0
+    /// Frozen draws the layer was actually handed, and the ones folded into a draw already queued for
+    /// this runloop tick. "Forty layout passes, twenty draws" is these two numbers.
+    public private(set) var frozenDrawCount = 0
+    public private(set) var coalescedDrawCount = 0
+    /// Frames that arrived while the hand was moving and were **not** drawn (068). A resize is not a new
+    /// picture: the canvas is moving, so any frame landing now would re-fit the photograph under the hand
+    /// into a size the next layout pass replaces. The release renders the exact final size instead.
+    public private(set) var framesHeldDuringGesture = 0
+
+    /// Is a gesture moving the canvas right now?
+    ///
+    /// `NSWindow.inLiveResize` is asked directly rather than trusted from the view messages: it is the
+    /// documented source of truth (NSView.h: "inLiveResize can be called at any time to determine if
+    /// the window is performing a live resize"), it costs nothing, and it makes the freeze independent
+    /// of whether AppKit delivered `viewWillStartLiveResize` to a view this far down the hierarchy.
+    public var isCanvasGeometryFrozen: Bool {
+        if disableResizeCoalescing { return false }
+        if !activeGeometryGestures.isEmpty { return true }
+        return view.window?.inLiveResize ?? false
+    }
+
+    /// The window drag is in progress. Kept as the 067 name so the existing resize tests read the same,
+    /// and implemented as the `.windowLiveResize` gesture so there is one code path.
+    public var isLiveResizing: Bool { activeGeometryGestures.contains(.windowLiveResize) }
+
+    public func beginLiveResize() { beginCanvasGeometryGesture(.windowLiveResize) }
+    public func endLiveResize() { endCanvasGeometryGesture(.windowLiveResize) }
+
+    public func beginCanvasGeometryGesture(_ gesture: CanvasGeometryGesture) {
+        guard activeGeometryGestures.insert(gesture).inserted else { return }
+        guard activeGeometryGestures.count == 1 else { return }
         liveResizeLayouts = 0
+        releasedForCanvas = nil
         // The transition is measured against the canvas that is about to move: it cannot continue. The
         // teardown does not re-present here — the next layout pass draws the frozen frame, and it is
         // the pass that knows the new canvas.
         cancelZoomBridge(rePresent: false)
     }
 
-    /// The hand let go: **one** render request, for the canvas that is on screen now.
+    /// The hand let go. One render, at the canvas that is on screen now — see
+    /// `releaseFrozenCanvasIfNeeded`.
+    public func endCanvasGeometryGesture(_ gesture: CanvasGeometryGesture) {
+        guard activeGeometryGestures.remove(gesture) != nil else { return }
+        releaseFrozenCanvasIfNeeded()
+    }
+
+    /// The canvas the release already asked a frame for. Two callers can reach a release for the same
+    /// final size (the gesture's own end, and the first layout pass after it); the canvas is the key,
+    /// so the second one is the same intent and costs nothing.
+    private var releasedForCanvas: ImageSize?
+
+    /// A gesture ended: one render request, and only for a canvas that has not already been asked for.
     ///
     /// Deliberately not debounced: the final size always gets a frame, which a timer cannot promise
     /// (the user can outrun it). At 适应 the frame that comes back is laid out for the new viewport, so
-    /// the picture re-fits by itself — that is the one camera change a drag is allowed to cause.
-    public func endLiveResize() {
-        guard isLiveResizing else { return }
-        isLiveResizing = false
+    /// the picture re-fits by itself — that is the one camera change a gesture is allowed to cause.
+    @discardableResult
+    private func releaseFrozenCanvasIfNeeded() -> Bool {
+        guard liveResizeLayouts > 0, !isCanvasGeometryFrozen else { return false }
+        liveResizeLayouts = 0
+        guard let canvas = jobViewport(), canvas != releasedForCanvas else { return false }
+        releasedForCanvas = canvas
         requestResizeRender()
+        return true
+    }
+
+    /// One frozen draw per runloop tick, for the size the canvas has **when the tick runs** — which is
+    /// the whole point: the passes in between are sizes nobody will ever see.
+    private var frozenPresentQueued = false
+
+    private func scheduleFrozenPresent() {
+        guard frozenFrame != nil else { return }
+        if frozenPresentQueued {
+            coalescedDrawCount += 1
+            return
+        }
+        frozenPresentQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.frozenPresentQueued = false
+            self.rePresentFrozenOnce()
+        }
+    }
+
+    /// The frozen frame at the canvas on screen now — skipped when the last present already drew this
+    /// canvas, so a gesture that stops moving stops drawing.
+    @discardableResult
+    private func rePresentFrozenOnce() -> Bool {
+        guard viewportPixels != lastPresentCanvas else { return false }
+        return rePresentFrozen()
     }
 
     /// Draw the frame that is on the canvas again, with the geometry it was drawn with, on the canvas
     /// that is on screen now (067).
     ///
-    /// This is the whole of what a window drag does to the picture:
+    /// This is the whole of what a gesture does to the picture:
     ///
     ///   · **smaller canvas** → the same picture at the same pixels, cropped by the surface. No
     ///     rescaling, because the window is stretched by the canvas ratio and the quad comes out
@@ -4252,8 +4381,9 @@ public final class LoupeController: NSViewController {
     ///     preview resolution instead of a grey or black band.
     ///   · **no backdrop cached yet** (a document opened seconds ago) → that area is the canvas colour
     ///     `#0F0F0F`. Never black, never stretched: the fallback is the clear colour, in that order.
-    private func rePresentFrozen() {
-        guard let frozen = frozenFrame, let presenter else { return }
+    @discardableResult
+    private func rePresentFrozen() -> Bool {
+        guard let frozen = frozenFrame, let presenter else { return false }
         let canvas = viewportPixels
         let window = frozen.window.stretched(to: canvas, from: frozen.canvas)
         let backdropWindow = frozen.backdropWindow.stretched(to: canvas, from: frozen.canvas)
@@ -4261,10 +4391,13 @@ public final class LoupeController: NSViewController {
         // canvas at the old size may no longer cover it at the new one, and that is exactly when the
         // backdrop is wanted. `nil` (nothing cached for this document) leaves the clear colour.
         let drawn = backdropTexture(for: window)
-        presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.photoRect,
-                      frameCanvas: frozen.frameCanvas, window: window, placement: frozen.placement,
-                      backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
-                      serial: 0, zoom: frozen.zoom, frozen: true)
+        let ok = presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.photoRect,
+                               frameCanvas: frozen.frameCanvas, window: window,
+                               placement: frozen.placement,
+                               backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
+                               serial: 0, zoom: frozen.zoom, frozen: true)
+        if ok { frozenDrawCount += 1 }
+        return ok
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
@@ -4311,6 +4444,17 @@ public final class LoupeController: NSViewController {
             session?.ingestedSourceFrame = (assetID, graphAtFrame.sourceSize)
         }
         let canvas = viewportPixels
+        // 068: **while the hand is moving, nothing new goes on the canvas.** A frame that lands now was
+        // either rendered for a canvas the hand has already left, or for this one — but fitted into a
+        // size the next tick replaces. Drawing either re-fits the photograph under the hand, which is
+        // the movement being reported; the frozen frame stays where it is and the release renders the
+        // exact final size. A canvas with nothing on it is the one exception: with no frame to hold, the
+        // arriving frame is the best picture there is.
+        if !forceStaleCanvasPresent, isCanvasGeometryFrozen, frozenFrame != nil {
+            framesHeldDuringGesture += 1
+            if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            return
+        }
         // 066's stale-canvas rule, kept (067 does not make it unnecessary): a frame rendered for another
         // canvas cannot be drawn here **as if it filled this one** — the quads are pixel rectangles of
         // the canvas the frame was rendered for, so a full-bleed present of an old-canvas frame is the

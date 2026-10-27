@@ -366,6 +366,28 @@ public final class CanvasPresenter {
     /// Why the last frame did not reach the screen (`nil` = it did).
     public private(set) var lastFailure: String?
 
+    // MARK: what the layer was actually handed (068)
+
+    /// One present that reached a drawable: the canvas its quads were computed for, the drawable it
+    /// actually drew into, and the two quads. A resize test asserts on this instead of on the picture:
+    /// `drawableSize == canvas` is the invariant (068's check makes it structural), and `canvas` is a
+    /// pixel rectangle of the canvas that was on screen when the pass ran.
+    public struct PresentedGeometry: Equatable, Sendable {
+        public let canvas: ImageSize
+        public let drawableSize: ImageSize
+        public let pictureQuad: ImageRect
+        public let backdropQuad: ImageRect?
+    }
+
+    /// The last present that reached a drawable (nil before the first drawable).
+    public private(set) var presentedGeometry: PresentedGeometry?
+    /// Presents that reached a drawable — the number a coalescing test counts. It is a *draw*, not a
+    /// request: a resize that is merged into one runloop tick shows up here once.
+    public private(set) var presentCount = 0
+    /// Requests refused because their quads belonged to another canvas (see `present`). 0 in the app;
+    /// the counter exists so "a frame for the old canvas was never drawn" is a number, not a promise.
+    public private(set) var droppedStaleFrameCount = 0
+
     public init(device: MTLDevice? = nil, storage: Storage = .linear16) throws {
         guard let d = device ?? MTLCreateSystemDefaultDevice() else {
             throw RenderError.noMetalDevice
@@ -396,9 +418,13 @@ public final class CanvasPresenter {
     /// **`drawableSize` is the canvas, and it must be the canvas that is on screen now** (025, 066):
     /// a texture rendered for another size can never be drawn correctly — the quads are pixel
     /// rectangles, so an old-canvas frame in a new drawable is the photograph at the wrong aspect
-    /// (「变扁」). The controller drops such a frame before it gets here; this parameter is the size the
-    /// quads were computed against, and it is the layer's size that has to follow it, not the other
-    /// way round.
+    /// (「变扁」). This parameter is the size the quads were computed against, and it is the layer's
+    /// size that has to follow it, not the other way round.
+    ///
+    /// 068 makes that a **check**, not a convention: a request whose canvas is not the drawable asked
+    /// for is refused before `nextDrawable()` — the pass would draw the photograph at another aspect,
+    /// and taking a drawable for it costs a vsync on the main thread (which, inside a drag, is the
+    /// jelly). `droppedStaleFrameCount` is the number of times it happened, and it is 0 in the app.
     ///
     /// A layer that refuses a 16-bit drawable (`nextDrawable()` returning nil) falls back to the
     /// 8-bit sRGB path **once**, and keeps that choice: silently retrying every frame would halve the
@@ -406,6 +432,12 @@ public final class CanvasPresenter {
     @discardableResult
     public func present(_ request: PresentRequest, in layer: CAMetalLayer, wantsEDR: Bool = false,
                         drawableSize: ImageSize? = nil, onComplete: (() -> Void)? = nil) -> Bool {
+        if let drawableSize, drawableSize != request.canvas {
+            droppedStaleFrameCount += 1
+            lastFailure = "request is for a \(request.canvas.keyString) canvas, drawable is "
+                + "\(drawableSize.keyString) — refused before the GPU work"
+            return false
+        }
         // The quads are pixel rectangles of the request's canvas, so that — not the texture's own
         // size, and not "whatever the layer last had" — is the drawable they belong in.
         let target = drawableSize ?? request.canvas
@@ -455,6 +487,12 @@ public final class CanvasPresenter {
             cb.addCompletedHandler { _ in onComplete() }
         }
         cb.commit()
+        // Recorded only when a drawable was actually handed the pixels: this is the log a resize test
+        // reads for "every frame that reached the screen was drawn for the canvas on screen".
+        presentedGeometry = PresentedGeometry(canvas: request.canvas, drawableSize: target,
+                                              pictureQuad: request.pictureQuad,
+                                              backdropQuad: request.backdropQuad)
+        presentCount += 1
         lastFailure = nil
         return true
     }
