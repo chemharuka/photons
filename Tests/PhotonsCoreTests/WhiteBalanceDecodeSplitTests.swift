@@ -36,7 +36,7 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         e.light.whites = 10
         e.light.blacks = -5
         e.light.highlightRecovery = 0.4
-        e.curve.white = [CurvePoint(0, 0), CurvePoint(0.3, 0.25), CurvePoint(1, 1)]
+        e.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.3, v: 0.25), CurvePoint(u: 1, v: 1)]
         e.color.vibrance = 15
         e.color.saturation = -10
         e.geometry.rotationDegrees = 1.5
@@ -64,9 +64,9 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         var blacks = base; blacks.light.blacks = 30
         var recovery = base; recovery.light.highlightRecovery = 0.1
         var toneCurve = base
-        toneCurve.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.62), CurvePoint(1, 1)]
+        toneCurve.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.62), CurvePoint(u: 1, v: 1)]
         var channelCurve = base
-        channelCurve.curve.red = [CurvePoint(0, 0.02), CurvePoint(1, 0.98)]
+        channelCurve.curve.red = [CurvePoint(u: 0, v: 0.02), CurvePoint(u: 1, v: 0.98)]
         var colour = base; colour.color.vibrance = -35
         var bands = base; bands.color.bands[3].hue = 20
         var geometry = base; geometry.geometry.rotationDegrees = 3   // straighten is a render input
@@ -100,7 +100,7 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         edited.light.exposure = -2
         edited.light.contrast = 60
         edited.light.blacks = -50
-        edited.curve.blue = [CurvePoint(0, 0.1), CurvePoint(1, 0.9)]
+        edited.curve.blue = [CurvePoint(u: 0, v: 0.1), CurvePoint(u: 1, v: 0.9)]
         edited.color.saturation = 40
         edited.effects.vignetteAmount = 25
         edited.geometry.flipHorizontal = true
@@ -222,7 +222,7 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         var render = asShot
         render.light.exposure = 1.2
         render.light.contrast = 40
-        render.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        render.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
         render.color.vibrance = 30
         XCTAssertEqual(render.decodeInputs.appending(to: photo), photo,
                        "exposure/contrast/curve/colour moved the rung identity")

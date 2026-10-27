@@ -34,6 +34,11 @@ import PhotonsCore
 // What is deliberately absent, per 051: black/white-point verticals (042's second half), the three
 // eyedroppers, and any change to the gamma stage the curve sits in. 061 makes the *endpoints* movable
 // in x (that is the black point), and adds no handle beyond the two control points themselves.
+//
+// 069 adds two things and changes no gesture: the point under the hand gets its coordinates in the
+// card's footer row (`输入 233 输出 +1.22`), and the plot can zoom into one half of the axis
+// (`CurveViewMode`). `CurvePoint` is an integer grid cell (0…511 per axis) as of the same order, so
+// "where did the point land" has exactly one answer in the document, in the read-out and in the key.
 
 // MARK: - the four channels
 
@@ -102,56 +107,98 @@ public enum CurveChannel: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-// MARK: - the horizontal axis' five ticks
+// MARK: - the two view modes (069)
 
-/// One tick on the curve's x axis: where it is (in `u`) and what it says.
+/// Which part of the axis the plot is showing — **two states**, `all ⇄ sdr`.
+///
+/// 069's 「精细调节」: the card can zoom into the SDR half of the axis so a cell that is 0.5 pt wide
+/// at full width is 1 pt wide. Crucially the *grid does not change* — `sdr` magnifies the lower-left
+/// quadrant of the same 512 × 512 cells (cells `0…255` on each axis, 256 of them), so "the SDR view
+/// is a 256 × 256 grid" is the consequence of the magnification, not a second coordinate system. One
+/// coordinate space means a point's read-out, its stored cell and its table entry are identical in
+/// both modes (`testTheReadoutIsTheSameTextInBothViews`), and the drag code needs no per-view branch.
+///
+/// **There is no HDR mode.** The owner's rule is 「按钮是两态，不单独对 HDR 做设置」: the HDR half is
+/// reached by nothing, and `+0…+4` exists only as the right four of `all`'s seven ticks.
+///
+/// **The button's second label is 「HDR 区域」 by the owner's decision, and it is not a typo.** The
+/// cycle is `all → sdr → all`, so the button in the SDR state takes you back to *all*; the owner was
+/// asked which words it should wear there and answered 「全部区域就叫 HDR 区域」. Do not "fix" it to
+/// 全部区域 — `testTheViewButtonSaysSdrThenHdr` pins both strings.
+public enum CurveViewMode: String, CaseIterable, Identifiable, Sendable {
+    /// The whole axis: 512 cells per axis, display white in the middle (062).
+    case all
+    /// The lower-left quadrant: input **and** output below display white — cells `0…255`.
+    case sdr
+
+    public var id: String { rawValue }
+
+    /// The other state. Two states, so "next" and "other" are the same thing.
+    public var next: CurveViewMode { self == .all ? .sdr : .all }
+
+    public var title: String {
+        switch self {
+        case .all: return "全部视图"
+        case .sdr: return "SDR 视图"
+        }
+    }
+
+    /// What the button says — the state pressing it switches to. `sdr`'s label is 「HDR 区域」 by the
+    /// owner's decision (see the type's note): the button there returns to the whole axis.
+    public var buttonTitle: String {
+        switch self {
+        case .all: return "SDR 区域"
+        case .sdr: return "HDR 区域"
+        }
+    }
+}
+
+// MARK: - the horizontal axis' ticks
+
+/// One tick on the curve's x axis: where it is and what it says.
 public struct CurveAxisTick: Equatable, Sendable {
-    /// Position in the curve's own coordinate, `0…1` — the same unit as `CurvePoint.x` and as the
-    /// table's index, so the tick, the point and the pixel all speak one language.
-    public let u: Double
+    /// Position on the card's own `0…2` coordinate — **the same number as `CurvePoint.x`** (069), so
+    /// the tick, the point and the read-out all speak one language. The engine's axis is `x / 2`.
+    public let x: Double
     public let label: String
 
-    public init(u: Double, label: String) {
-        self.u = u
+    public init(x: Double, label: String) {
+        self.x = x
         self.label = label
     }
 }
 
-/// The seven ticks, **derived** from `HDRCurveAxis` and from nothing else.
+/// The ticks, **derived** from `HDRCurveAxis` and from nothing else.
 ///
-/// The axis is the histogram's since 062: the left half is SDR *display codes* (0–255 across 50 % of
-/// the card) and the right half is +0…+4 EV at 12.5 % per stop. So the ticks read in that language
-/// too — `0`, `127`, `255` for the SDR half and `+1`, `+2`, `+3`, `+4` for the HDR half — and each
-/// one still sits at `forward`/`u(stops:)` of the value it prints, so this file holds no positions.
+/// 069 redrew the axis in the card's `0…2` coordinate — `0…1` is display code `0…255` (`x = 1` is
+/// white), `1…2` is `+0…+4 EV` — so the ticks are **nine**: the five codes the owner asked for
+/// (`0 63 127 191 255`) and the four stops (`+1 +2 +3 +4`, with `+4` on the right edge at `x = 2`).
 ///
-/// A display code `c` is the *encoded* value `c/255`; the axis takes **linear** input, so the code
-/// is decoded first. That is the same pair of functions the shader uses, not an approximation.
+/// There is no "SDR / HDR" label on the axis: the numbers say it. `255` is followed by `+1`, and that
+/// jump *is* the boundary — the owner's 「这样也不需要 sdr/hdr 标示了」.
+///
+/// A display code `c` is the *encoded* value `c/255`; the axis takes **linear** input, so the code is
+/// decoded first and the position is `2·forward(displayCode(c))`, which is exactly `c/255` because
+/// `encode` and `decode` are inverses — the test asserts that equality, so "the tick sits at its own
+/// code" is a fact rather than a rounding coincidence. The stops are `2·u(stops: s) = 1 + 0.25·s`.
 public enum CurveAxisTicks {
 
-    public static func ticks(_ axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
-        [
-            CurveAxisTick(u: axis.forward(0), label: "0"),
-            CurveAxisTick(u: axis.forward(displayCode(127)), label: "127"),
-            CurveAxisTick(u: axis.forward(displayCode(255)), label: "255"),
-            CurveAxisTick(u: axis.u(stops: 1), label: "+1"),
-            CurveAxisTick(u: axis.u(stops: 2), label: "+2"),
-            CurveAxisTick(u: axis.u(stops: 3), label: "+3"),
-            CurveAxisTick(u: axis.u(stops: 4), label: "+4"),
-        ]
+    /// The five SDR codes the owner asked for — **and nothing on the HDR half**.
+    ///
+    /// 069: 「stops 标记取消」. The right half of the card is left blank: no `+1 … +4`, no `SDR`/`HDR`
+    /// words, no divider. It is still the +0…+4 EV half (the positioning maths did not change), it
+    /// simply carries no label — the numbers `0 … 255` already say where display white is.
+    public static func ticks(_ axis: HDRCurveAxis = .standard,
+                             view: CurveViewMode = .all) -> [CurveAxisTick] {
+        _ = view      // both views label the same five codes; the SDR view just magnifies them
+        return [0, 63, 127, 191, 255].map { code in
+            CurveAxisTick(x: 2 * axis.forward(displayCode(Double(code))), label: "\(code)")
+        }
     }
 
     /// An 8-bit display code as scene-linear light — what the axis' `forward` expects.
     public static func displayCode(_ code: Double) -> Double {
         HDRCurveAxis.srgbDecode(code / 255)
-    }
-
-    /// The one grey line under the plot — the card's statement of what the two halves are.
-    ///
-    /// Both numbers are the axis's: the SDR half's width is `whiteU` as a percentage, and the right
-    /// end is `stops(at: 1)`. Neither is typed here, for the same reason the ticks are not.
-    public static func footnote(_ axis: HDRCurveAxis = .standard) -> String {
-        String(format: "横轴与直方图一致：左半 SDR（0–255）占 %.0f%%，右半 +0…+%.0f EV",
-               100 * axis.whiteU, axis.stops(at: 1))
     }
 }
 
@@ -162,6 +209,12 @@ public enum CurveAxisTicks {
 /// Both directions live here — `x(u:)` / `u(atX:)` are inverses, and `y(v:)` flips because AppKit's y
 /// grows down while a curve's y grows up. Keeping this out of the `Canvas` closure is what lets the
 /// tests ask "where is the +2 tick, in points" without a window.
+///
+/// **069 — the view is a window on the same axis, not a second one.** `view` names the span the box
+/// shows; `x(u:)` maps *that* span onto the box, so `.all` is the identity mapping it always was and
+/// `.sdr` is exactly twice as fine (half the axis across the same width). `u`/`v` remain the only
+/// coordinate: a point's stored cell, its position here and its read-out are the same number in both
+/// modes.
 public struct CurvePlotGeometry: Equatable {
 
     /// The plot's own rect — the card's frame, the tick band's top. **Not** where the values land.
@@ -176,47 +229,91 @@ public struct CurvePlotGeometry: Equatable {
     /// Insetting the box the values map into keeps the circle's centre **exactly** where the value is.
     public let inset: CGFloat
 
-    public init(plot: CGRect, inset: CGFloat = CurvePanelMetrics.pointInset) {
+    /// Which cells the box shows (069). `.all` is the whole axis.
+    public let view: CurveViewMode
+
+    public init(plot: CGRect, inset: CGFloat = CurvePanelMetrics.pointInset,
+                view: CurveViewMode = .all) {
         self.plot = plot
         self.inset = max(inset, 0)
+        self.view = view
     }
 
     /// The box the values live in: `plot` inset by `inset` on every side. The grid, the frame and the
     /// y = x diagonal are all drawn on *this* box, so "the grid does not touch its frame" cannot happen.
     public var valueBox: CGRect { plot.insetBy(dx: inset, dy: inset) }
 
-    /// A `u` in 0…1 → an x in the **value box**, so `x(0) == inset` and `x(1) == width − inset`.
+    /// The `u` span the box shows — `0…1` for `.all`, the **SDR half** for `.sdr`.
+    ///
+    /// The SDR view is exactly half the axis (`0…whiteU`), which is what makes its magnification a
+    /// clean 2×: one cell is `1/511` of the axis, so it is `2/511` of this span — twice the screen
+    /// distance it has in `.all` (`testTheSdrViewDoublesTheGridStep`). It also puts the `255` tick
+    /// (`forward(displayCode(255)) == whiteU`, 062) **exactly** on the right edge, which is the label
+    /// the owner's five-tick set ends on.
+    public var xSpan: ClosedRange<Double> {
+        switch view {
+        case .all: return 0...CurvePoint.maximum
+        case .sdr: return 0...CurvePoint.sdrBoundary
+        }
+    }
+
+    /// A coordinate in the view's span — **the card's own `CurvePoint.x`, `0…2`** (the parameter keeps
+    /// its old label `u` for the call sites; the engine's `u` is half of it) → an x in the value box:
+    /// `x(1) == width − inset` for `.all`, and the same for the view's own two ends otherwise.
     /// Clamped: a drag that leaves the card still lands on an edge.
     public func x(u: Double) -> CGFloat {
         let box = valueBox
-        return box.minX + CGFloat(min(max(u.isFinite ? u : 0, 0), 1)) * max(box.width, 0)
+        let span = xSpan
+        let value = u.isFinite ? u : span.lowerBound
+        let t = (min(max(value, span.lowerBound), span.upperBound) - span.lowerBound)
+            / (span.upperBound - span.lowerBound)
+        return box.minX + CGFloat(t) * max(box.width, 0)
     }
 
     /// The curve's value (0…1, 1 = brighter) → a y in the value box (y grows *down*).
     public func y(v: Double) -> CGFloat {
         let box = valueBox
-        return box.maxY - CGFloat(min(max(v.isFinite ? v : 0, 0), 1)) * max(box.height, 0)
+        let span = xSpan
+        let value = v.isFinite ? v : span.lowerBound
+        let t = (min(max(value, span.lowerBound), span.upperBound) - span.lowerBound)
+            / (span.upperBound - span.lowerBound)
+        return box.maxY - CGFloat(t) * max(box.height, 0)
     }
 
     public func point(_ p: CurvePoint) -> CGPoint { CGPoint(x: x(u: p.x), y: y(v: p.y)) }
 
-    /// Inverse of `x(u:)`. Outside the value box it answers 0 or 1, never a number off the axis.
+    /// Whether this point is inside the view — the drawing and the hit test both ask, so a point the
+    /// card does not show cannot be dragged by pressing where it is not drawn (069).
+    ///
+    /// The test is on the point's `u`/`v`, i.e. on the same numbers the mapping uses, so "drawn" and
+    /// "hittable" cannot disagree with "where it maps". In the SDR view that is cells `0…255`: cell
+    /// 255 (`255/511 = 0.49902`) is inside, cell 256 (`0.50098`) is outside.
+    public func isVisible(_ p: CurvePoint) -> Bool {
+        xSpan.contains(p.x) && xSpan.contains(p.y)
+    }
+
+    /// Inverse of `x(u:)`. Outside the value box it answers the view's own ends, never a number off
+    /// the axis.
     public func u(atX x: CGFloat) -> Double {
         let box = valueBox
-        guard box.width > 0 else { return 0 }
-        return Double(min(max((x - box.minX) / box.width, 0), 1))
+        let span = xSpan
+        guard box.width > 0 else { return span.lowerBound }
+        let t = Double(min(max((x - box.minX) / box.width, 0), 1))
+        return span.lowerBound + t * (span.upperBound - span.lowerBound)
     }
 
     /// Inverse of `y(v:)`.
     public func v(atY y: CGFloat) -> Double {
         let box = valueBox
-        guard box.height > 0 else { return 0 }
-        return Double(min(max((box.maxY - y) / box.height, 0), 1))
+        let span = xSpan
+        guard box.height > 0 else { return span.lowerBound }
+        let t = Double(min(max((box.maxY - y) / box.height, 0), 1))
+        return span.lowerBound + t * (span.upperBound - span.lowerBound)
     }
 
-    /// Where each tick's line goes, in points — `x(u:)` of the axis-derived positions.
+    /// Where each tick's line goes, in points — `x(u:)` of the axis-derived positions, for this view.
     public func tickPositions(_ ticks: [CurveAxisTick] = CurveAxisTicks.ticks()) -> [CGFloat] {
-        ticks.map { x(u: $0.u) }
+        ticks.map { x(u: $0.x) }
     }
 
     /// The nearest control point within `radius` of `location`, or `nil` in the empty area.
@@ -224,10 +321,14 @@ public struct CurvePlotGeometry: Equatable {
     /// Nearest, not first: two points can sit inside the hit radius of one another (the clamp only
     /// limits x, and a drag can put two points on the same y), and "first match in array order" would
     /// then grab the wrong one — the classic "why does this point jump to that one" bug.
+    ///
+    /// 069: points outside the view are skipped. They are still drawn nowhere, and their clamped
+    /// screen position sits *on* the frame — without this filter a press on the SDR view's right edge
+    /// would grab a point living in the HDR half.
     public func hitIndex(_ points: [CurvePoint], at location: CGPoint,
                          radius: CGFloat = CurvePanelMetrics.hitRadius) -> Int? {
         var best: (index: Int, distance: CGFloat)?
-        for (i, p) in points.enumerated() {
+        for (i, p) in points.enumerated() where isVisible(p) {
             let c = point(p)
             let d = hypot(c.x - location.x, c.y - location.y)
             guard d <= radius else { continue }
@@ -237,7 +338,8 @@ public struct CurvePlotGeometry: Equatable {
     }
 
     /// The 4 × 4 grid's lines (5 vertical + 5 horizontal, including the frame) — on the **value box**,
-    /// so the outermost lines are exactly the box the values map into.
+    /// so the outermost lines are exactly the box the values map into. The divisions are of the
+    /// *view*, so the SDR quadrant's grid is 4 × 4 over 256 cells (069).
     public func gridLines(divisions: Int = CurvePanelMetrics.gridDivisions)
         -> (vertical: [CGFloat], horizontal: [CGFloat]) {
         let n = max(divisions, 1)
@@ -279,30 +381,37 @@ public enum CurveAxisLock: Sendable {
 /// Pure on purpose: these are the four interactions the card offers (insert / clamp / move / delete),
 /// and the tests drive them directly instead of trying to inject mouse events into a SwiftUI view —
 /// `swift test` has no window session, and an accessibility tree is empty (047's known limit).
+///
+/// 069: every operation is on the **grid**, so "1e-3 of u" became "one cell"
+/// (`minimumGapSteps`) and the clamp's answer is a cell, never a coordinate between two.
 public enum CurveEditor {
 
-    /// The gap the clamp keeps between neighbours. 1e-3 of the table's 4096 entries is ~4 samples, so
-    /// two points can never land on the same sample and produce a zero-width segment — `buildOne`
-    /// rejects those (`h > 1e-9`) and would silently fall back to the identity table.
+    /// The gap the clamp keeps between neighbours, in the card's own coordinate (`0…2`, 069).
+    ///
+    /// 051 asked for `1e-3` of the axis so two points can never share a table sample (4096 samples,
+    /// `buildOne` rejects a zero-width segment and would fall back to the identity table). The number
+    /// is kept as it was and now means `1e-3` of the `0…2` coordinate — half as much of the axis as
+    /// before, i.e. a *tighter* clamp, and still far wider than one table sample (2.4e-4).
     public static let minimumGap = 1e-3
 
-    /// Keep a dragged point inside its neighbours, with `minimumGap` on each side.
+    /// Keep a dragged point inside its neighbours, one gap away on each side.
     ///
     /// **061: the endpoints move in x too.** 051 pinned the first point at `x = 0` and the last at
     /// `x = 1`, which is why "push the black point right" (Lightroom's own black point, and the left
     /// handle in RapidRAW/LightCraft) was impossible: every endpoint drag became a pure y move. The
     /// first point may now sit anywhere in `[0, next − gap]` and the last anywhere in
-    /// `[prev + gap, 1]` — the same two rules as `RapidRAW src/components/adjustments/Curves.tsx:448-453`
+    /// `[prev + gap, 2]` — the same two rules as `RapidRAW src/components/adjustments/Curves.tsx:448-453`
     /// (`minX = index === 0 ? 0 : prevX + 0.01`, `maxX = index === last ? 255 : nextX - 0.01`) and
     /// `LightCraft crates/ui-egui/src/panels/edit/curve.rs:349-357` (`lo = if i == 0 { 0.0 }`,
     /// `hi = if i + 1 >= v.len() { 1.0 }`). What the moved endpoint *means* is the table's business:
     /// `CurveLUT.buildOne` holds a constant left of the first point (= a black clip) and right of the
     /// last (= a white clip), so `x` is where the clip begins, not a value the curve cannot leave.
     public static func clampX(_ x: Double, index: Int, in points: [CurvePoint]) -> Double {
-        guard points.indices.contains(index) else { return min(max(x, 0), 1) }
+        let maximum = CurvePoint.maximum
+        guard points.indices.contains(index) else { return min(max(x, 0), maximum) }
         // Endpoints: one side is the edge of the table, the other is the neighbour.
         if index == 0 {
-            let upper = points.count > 1 ? points[1].x - minimumGap : 1
+            let upper = points.count > 1 ? points[1].x - minimumGap : maximum
             // A neighbour closer than the gap leaves no legal x: stay where we are (the caller's
             // `next != current` guard then writes nothing), the same rule the interior takes below.
             guard upper >= 0 else { return points[0].x }
@@ -310,8 +419,8 @@ public enum CurveEditor {
         }
         if index == points.count - 1 {
             let lower = points[points.count - 2].x + minimumGap
-            guard lower <= 1 else { return points[index].x }
-            return min(max(x, lower), 1)
+            guard lower <= maximum else { return points[index].x }
+            return min(max(x, lower), maximum)
         }
         let lower = points[index - 1].x + minimumGap
         let upper = points[index + 1].x - minimumGap
@@ -321,7 +430,7 @@ public enum CurveEditor {
         return min(max(x, lower), upper)
     }
 
-    /// The point a drag produces: ⇧'s axis lock, then the clamp, then the unit square.
+    /// The point a drag produces: ⇧'s axis lock, then the clamp, then the card's square.
     public static func movedPoint(_ target: CurvePoint, index: Int, in points: [CurvePoint],
                                   from origin: CurvePoint, lock: CurveAxisLock) -> CurvePoint {
         guard points.indices.contains(index) else { return target }
@@ -331,8 +440,7 @@ public enum CurveEditor {
         case .x: locked = CurvePoint(target.x, origin.y)
         case .y: locked = CurvePoint(origin.x, target.y)
         }
-        return CurvePoint(clampX(locked.x, index: index, in: points),
-                          min(max(locked.y, 0), 1))
+        return CurvePoint(clampX(locked.x, index: index, in: points), locked.y)
     }
 
     /// Insert a point at `(x, y)` in x order. The new x is clamped into the stretch it fell in, so a
@@ -343,7 +451,6 @@ public enum CurveEditor {
     public static func insert(_ point: CurvePoint, into points: [CurvePoint]) -> (points: [CurvePoint], index: Int)? {
         guard points.count >= 2 else { return nil }
         let sorted = points.sorted { $0.x < $1.x }
-        let y = min(max(point.y, 0), 1)
         // Which stretch does x fall in?
         var slot = sorted.count - 1
         for (i, p) in sorted.enumerated() where p.x > point.x { slot = i; break }
@@ -354,7 +461,7 @@ public enum CurveEditor {
         guard slot > 0, upper >= lower else { return nil }
         let x = min(max(point.x, lower), upper)
         var out = sorted
-        out.insert(CurvePoint(x, y), at: slot)
+        out.insert(CurvePoint(x, point.y), at: slot)
         return (out, slot)
     }
 
@@ -371,6 +478,65 @@ public enum CurveEditor {
     /// Strictly increasing x — the invariant `buildOne` depends on (`h > 1e-9`).
     public static func isOrdered(_ points: [CurvePoint]) -> Bool {
         zip(points, points.dropFirst()).allSatisfy { $0.x < $1.x }
+    }
+}
+
+// MARK: - the point's coordinates, as the card prints them (069)
+
+/// The one line the card shows while a point is under the hand: `输入 233 输出 +1.22`.
+///
+/// Two readings, both derived from the axis and from nothing else:
+///
+///   · **输入** — the point's `x` as the *histogram's* number. In the SDR half (`u ≤ whiteU`) that is
+///     a display code 0–255, i.e. `255·u/whiteU`; **above white it is not a code at all**, so the
+///     reading speaks EV there (`+1.50 EV`) rather than inventing a 300th code.
+///   · **输出** — the point's `y` as stops relative to display white, always (`stops(v)`), because
+///     the y axis is the full +0…+4 EV axis in every mode: 零光 has no stop count, hence `−∞`.
+///
+/// The view mode is deliberately absent from this type: the same point reads the same in all three
+/// views (`testTheReadoutIsTheSameTextInAllThreeViews`), which is the property that makes zooming
+/// safe — a read-out that changed when you zoomed would be a second coordinate system.
+public enum CurvePointReadout {
+
+    /// `输入 233 输出 +1.22` — one space, no colon, no brackets (the owner's own spelling).
+    public static func text(for point: CurvePoint) -> String {
+        "输入 \(input(point)) 输出 \(output(point))"
+    }
+
+    /// The x reading: a display code `0…255` while the point is in the SDR half, `+x.xx EV` above it
+    /// (above white there is no code to print — the axis says stops there, so the reading does too).
+    public static func input(_ point: CurvePoint) -> String {
+        point.x <= CurvePoint.sdrBoundary
+            ? "\(CurvePoint.code(point.x))"
+            : ev(stops(point.x)) + " EV"
+    }
+
+    /// The y reading, by the same rule: a code on the SDR side, stops above white.
+    public static func output(_ point: CurvePoint) -> String {
+        point.y <= CurvePoint.sdrBoundary ? "\(CurvePoint.code(point.y))" : ev(stops(point.y))
+    }
+
+    /// `0…2` → stops above display white: the HDR half is `EV = (x − 1)·4` (069), the SDR half is the
+    /// negative answer the axis gives (`log2` of the light `x/255` stands for).
+    public static func stops(_ coordinate: Double) -> Double {
+        coordinate <= CurvePoint.sdrBoundary
+            ? log2(max(Double(CurvePoint.code(coordinate)) / 255, 1e-9))
+            : (coordinate - 1) * 4
+    }
+
+    /// Two decimals, half **away from zero** (四舍五入), `+` on a positive value, U+2212 on a negative
+    /// one, and no sign at all on zero.
+    ///
+    /// Formatted from the rounded hundredths as integers rather than through `String(format:)`: a printf
+    /// conversion rounds to nearest-*even*, so `0.125` would print `0.12` where the owner asked for
+    /// 四舍五入 (`0.125 → 0.13`, `testTheReadingRoundsHalfAwayFromZeroOnTheBoundary`).
+    public static func ev(_ value: Double) -> String {
+        guard value.isFinite else { return value < 0 ? "\u{2212}∞" : "∞" }
+        let scaled = (value * 100).rounded()
+        guard scaled != 0 else { return "0.00" }
+        let cents = min(Int(abs(scaled)), 99_999_999)
+        let body = "\(cents / 100)." + String(format: "%02d", cents % 100)
+        return (scaled > 0 ? "+" : "\u{2212}") + body
     }
 }
 
@@ -410,17 +576,21 @@ public struct CurveEditorModel {
 
     public var isCurrentChannelIdentity: Bool { points == CurvePoint.linear }
 
-    /// The curve's value at `u`, read **out of the table** (nearest sample: the table is 4096 entries
+    /// The curve's value at `x`, read **out of the table** (nearest sample: the table is 4096 entries
     /// over 0…1, so a sample is 2.4e-4 wide — finer than the pixel the click landed on).
     ///
     /// This is what a click in empty space gives its new point: `y` is the curve's value there, not 0.
+    /// Both arguments and the answer are the card's `0…2` coordinate (069); the `/2` to the table's
+    /// axis happens here and nowhere else.
     /// A point born at 0 would drop the curve to black at that x, which is a tone change the user did
     /// not ask for — the click was "put a handle here".
-    public func value(atU u: Double) -> Double {
+    public func value(atX x: Double) -> Double {
         let table = preview
-        guard !table.isEmpty else { return min(max(u, 0), 1) }
-        let t = min(max(u, 0), 1) * Double(table.count - 1)
-        return Double(table[min(max(Int(t.rounded()), 0), table.count - 1)])
+        // The table runs over the engine's `0…1` axis, i.e. half the card's `0…2` coordinate.
+        let u = min(max(x / 2, 0), 1)
+        guard !table.isEmpty else { return u * 2 }
+        let t = u * Double(table.count - 1)
+        return 2 * Double(table[min(max(Int(t.rounded()), 0), table.count - 1)])
     }
 
     // MARK: writing
@@ -433,9 +603,9 @@ public struct CurveEditorModel {
 
     /// One click in the empty area: insert, then commit — a click is a complete action.
     @discardableResult
-    public func insert(atU u: Double) -> Int? {
+    public func insert(atX x: Double) -> Int? {
         let current = points
-        guard let inserted = CurveEditor.insert(CurvePoint(u, value(atU: u)), into: current) else {
+        guard let inserted = CurveEditor.insert(CurvePoint(x, value(atX: x)), into: current) else {
             return nil
         }
         write(inserted.points)
@@ -514,8 +684,12 @@ public enum CurvePanelMetrics {
     /// A press has to travel this far to be a drag rather than a click.
     public static let dragThreshold: CGFloat = 2
     public static let tickLabelSize: CGFloat = 8
-    public static let footnoteSize: CGFloat = 8
     public static let tabHeight: CGFloat = 18
+    /// The footer row's height (069), and therefore the height of the coordinates line in **both**
+    /// states: the row is the two buttons' height whether or not a point is under the hand, so
+    /// 「行高不变、不许跳动」 is a constant here rather than a consequence of the text happening to be
+    /// shorter than a button. `CurvePanelTests` measures the two states and compares them.
+    public static let footerHeight: CGFloat = 15
 
     /// The plot rect inside a drawing area of `size` — the tick band is *inside* the area, so the
     /// Canvas and the hit test cannot disagree about where the plot is.
@@ -524,6 +698,77 @@ public enum CurvePanelMetrics {
         return CGRect(x: plotInset, y: plotInset,
                       width: max(size.width - 2 * plotInset, 1),
                       height: max(height - plotInset, 1))
+    }
+}
+
+// MARK: - the card's furniture
+
+/// A 9 pt secondary-capsule button — the card's one button style (tabs' 区域 switch, 复位本通道,
+/// 全部复位), so the three controls cannot drift apart.
+public struct CurvePanelButton: View {
+    public let title: String
+    public let identifier: String
+    public let action: () -> Void
+
+    public init(_ title: String, identifier: String, action: @escaping () -> Void) {
+        self.title = title
+        self.identifier = identifier
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+/// The card's footer row: the point under the hand at the left, `复位本通道` / `全部复位` at the right.
+///
+/// 069 — the owner's 「和「复位本通道」在同一行，坐标在左侧，颜色字体参考直方图下方的 RGB 显示」:
+///
+///   · the face and colour are the histogram's own — `HistogramCardView.numberFont` (9.5 pt semibold
+///     monospaced digits) and the secondary label colour. **Not a copy of the numbers**: the same
+///     constant the histogram's `R 245 G 128 B 64` row paints with, asserted in source
+///     (`testTheReadingUsesTheHistogramsOwnNumberFont`). If the histogram's row changes size, this
+///     line changes with it, which is what "各界面一致" means as an invariant;
+///   · the row's height is `footerHeight` in **both** states — no reading, or the longest reading —
+///     so pressing a point never nudges the cards below (`testTheReadoutRowKeepsItsHeight`).
+public struct CurvePanelFooter: View {
+
+    /// `输入 233 输出 +1.22`, or `nil` when nothing is under the hand.
+    public let reading: String?
+    public let resetChannel: () -> Void
+    public let resetAll: () -> Void
+
+    public init(reading: String?, resetChannel: @escaping () -> Void,
+                resetAll: @escaping () -> Void) {
+        self.reading = reading
+        self.resetChannel = resetChannel
+        self.resetAll = resetAll
+    }
+
+    public var body: some View {
+        HStack(spacing: 6) {
+            Text(reading ?? "")
+                .font(Font(HistogramCardView.numberFont))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(height: CurvePanelMetrics.footerHeight, alignment: .leading)
+                .accessibilityIdentifier("curve.readout")
+            Spacer(minLength: 6)
+            CurvePanelButton("复位本通道", identifier: "curve.button.复位本通道", action: resetChannel)
+            CurvePanelButton("全部复位", identifier: "curve.button.全部复位", action: resetAll)
+        }
+        .frame(height: CurvePanelMetrics.footerHeight)
     }
 }
 
@@ -543,6 +788,10 @@ public struct CurvePanel: View {
     /// The selected tab. View state on purpose: it is not a document fact (a channel selection is not
     /// an edit), so it never enters the history.
     @State private var channel: CurveChannel = .white
+
+    /// The plot's zoom (069). View state as well, and for the same reason: switching the region
+    /// changes nothing in the document, the history or the sidecar.
+    @State private var viewMode: CurveViewMode = .all
 
     /// The press in flight: which point, its value at press, and how far it has travelled.
     @State private var press: Press?
@@ -574,20 +823,28 @@ public struct CurvePanel: View {
         // view. The symptom would be the worst kind — the frame follows the drag, the curve does not.
         let points = model.points
         let table = model.preview
+        // 069: the reading is a function of the point and of nothing else — not of the view, so
+        // zooming cannot change what a point says (`testTheReadoutIsTheSameTextInAllThreeViews`).
+        let reading = press.flatMap { p -> String? in
+            guard let index = p.index, points.indices.contains(index) else { return nil }
+            return CurvePointReadout.text(for: points[index])
+        }
+        let mode = viewMode
         return VStack(alignment: .leading, spacing: 6) {
-            channelTabs
-            plot(points: points, table: table)
-            footnote
-            buttons
+            channelTabs(mode: mode)
+            plot(points: points, table: table, mode: mode)
+            CurvePanelFooter(reading: reading,
+                             resetChannel: { model.resetChannel() },
+                             resetAll: { model.resetAll() })
         }
         // Greedy in width so the plot spans the card (274 pt at the default inspector, 244 at the
         // minimum) instead of collapsing to its ideal 117 pt; the height stays the fixed sum above.
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: the four tabs
+    // MARK: the four tabs and the region switch
 
-    private var channelTabs: some View {
+    private func channelTabs(mode: CurveViewMode) -> some View {
         HStack(spacing: 4) {
             ForEach(CurveChannel.allCases) { candidate in
                 Button { channel = candidate } label: {
@@ -606,14 +863,23 @@ public struct CurvePanel: View {
                 .accessibilityIdentifier("curve.channel.\(candidate.rawValue)")
                 .accessibilityLabel(candidate.name)
             }
+            // 069 — 顶部的小按钮, the same capsule as the reset buttons. Its label is the **next**
+            // state: 「SDR 区域」 in the whole view, 「HDR 区域」 in the SDR view (the owner's wording;
+            // pressing it there returns to the whole axis — see `CurveViewMode`).
+            CurvePanelButton(mode.buttonTitle, identifier: "curve.view") {
+                viewMode = viewMode.next
+            }
+            .help("视图：\(viewMode.title)。SDR 视图把 x 0…1（显示码 0–255）铺满绘图区，右半区可以按住 ⇧ 回到全部视图看 +0…+4 EV")
+            .accessibilityLabel("视图 \(viewMode.title)")
         }
     }
 
     // MARK: the plot
 
-    private func plot(points: [CurvePoint], table: [Float]) -> some View {
+    private func plot(points: [CurvePoint], table: [Float], mode: CurveViewMode) -> some View {
         GeometryReader { proxy in
-            let geometry = CurvePlotGeometry(plot: CurvePanelMetrics.plotRect(in: proxy.size))
+            let geometry = CurvePlotGeometry(plot: CurvePanelMetrics.plotRect(in: proxy.size),
+                                             view: mode)
             Canvas { context, _ in
                 draw(into: &context, geometry: geometry, points: points, table: table)
             }
@@ -635,6 +901,7 @@ public struct CurvePanel: View {
         // tick labels still hang off the outer rect, at their old y.
         let box = geometry.valueBox
         let tint = channel.tint
+        let span = geometry.xSpan
 
         // The plot's own field, so the grid reads as graph paper rather than as card background.
         context.fill(Path(roundedRect: plot, cornerRadius: 3),
@@ -653,7 +920,8 @@ public struct CurvePanel: View {
         }
         context.stroke(gridPath, with: .color(Color.primary.opacity(0.10)), lineWidth: 0.5)
 
-        // y = x, dashed: the identity, so "did I change anything" is answerable by eye.
+        // y = x, dashed: the identity, so "did I change anything" is answerable by eye. It is the
+        // identity *within the view*, which is true in all three modes (069).
         var diagonal = Path()
         diagonal.move(to: CGPoint(x: box.minX, y: box.maxY))
         diagonal.addLine(to: CGPoint(x: box.maxX, y: box.minY))
@@ -668,18 +936,25 @@ public struct CurvePanel: View {
         // **horizontal** segment into the corner — the black clip / white clip, as RapidRAW draws it
         // (`M 0 y L points[0].x y`, `src/components/adjustments/Curves.tsx:157-182`). A curve that
         // joined (0, 0) back to a raised first point would draw a ramp the pixels do not have.
+        //
+        // 069: only the samples inside the view are drawn. A zoomed view would otherwise clamp every
+        // outside sample onto the frame and paint a line along the edge that is not in the table.
         if table.count >= 2 {
             var curve = Path()
-            curve.move(to: CGPoint(x: geometry.x(u: 0), y: geometry.y(v: Double(table[0]))))
-            for i in 1..<table.count {
+            var started = false
+            for i in 0..<table.count {
                 let u = Double(i) / Double(table.count - 1)
-                curve.addLine(to: CGPoint(x: geometry.x(u: u), y: geometry.y(v: Double(table[i]))))
+                guard span.contains(u) else { continue }
+                let p = CGPoint(x: geometry.x(u: u), y: geometry.y(v: Double(table[i])))
+                if started { curve.addLine(to: p) } else { curve.move(to: p); started = true }
             }
-            context.stroke(curve, with: .color(tint), lineWidth: 1.4)
+            if started { context.stroke(curve, with: .color(tint), lineWidth: 1.4) }
         }
 
-        // Control points: 3 pt filled dots; the one under the hand gets a ring.
-        for (i, p) in points.enumerated() {
+        // Control points: 3 pt filled dots; the one under the hand gets a ring. 069: a point outside
+        // the view is not drawn (it would sit on the frame), but it is still in the document and still
+        // bends the curve through the samples above.
+        for (i, p) in points.enumerated() where geometry.isVisible(p) {
             let centre = geometry.point(p)
             let r = CurvePanelMetrics.pointRadius
             let dot = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r,
@@ -693,13 +968,14 @@ public struct CurvePanel: View {
             }
         }
 
-        // The seven ticks, at the axis' own positions. The label stays under the **outer** rect (its
-        // old y); only the little tick line reaches up to the inset frame, so the 4 pt margin is
-        // bridged rather than left floating. The labels speak the histogram's language: display codes
-        // on the SDR half (`0 / 127 / 255`), EV on the HDR half (`+1 … +4`).
-        let ticks = CurveAxisTicks.ticks()
+        // The ticks, at the axis' own positions — for this view's half of the axis (069). The label
+        // stays under the **outer** rect (its old y); only the little tick line reaches up to the
+        // inset frame, so the 4 pt margin is bridged rather than left floating. The labels speak the
+        // histogram's language: display codes on the SDR half (`0 / 127 / 255`), EV on the HDR half
+        // (`+0 … +4`).
+        let ticks = CurveAxisTicks.ticks(.standard, view: geometry.view)
         for (i, tick) in ticks.enumerated() {
-            let x = geometry.x(u: tick.u)
+            let x = geometry.x(u: tick.x)
             var line = Path()
             line.move(to: CGPoint(x: x, y: box.maxY))
             line.addLine(to: CGPoint(x: x, y: plot.maxY + 3))
@@ -728,8 +1004,10 @@ public struct CurvePanel: View {
 
         guard let index = current.index, let origin = current.origin,
               current.travelled >= CurvePanelMetrics.dragThreshold else { return }
+        // 069: the target is the card's own `0…2` coordinate, and the geometry has already clamped it
+        // into the box — a drag can land anywhere in `0…2` (no grid, no quantisation).
         let target = CurvePoint(geometry.u(atX: value.location.x),
-                               geometry.v(atY: value.location.y))
+                                geometry.v(atY: value.location.y))
         let lock = CurveAxisLock.from(translation: value.translation,
                                       shift: NSEvent.modifierFlags.contains(.shift))
         // `applyEdit` only — ten of these make one history entry, because nothing commits until `released`.
@@ -750,7 +1028,7 @@ public struct CurvePanel: View {
         } else {
             // A press that travelled in the empty area is nothing (there is no pan on this card).
             guard current.travelled < CurvePanelMetrics.dragThreshold else { return }
-            insert(at: geometry.u(atX: current.location.x))
+            insert(atX: geometry.u(atX: current.location.x))
         }
     }
 
@@ -768,39 +1046,8 @@ public struct CurvePanel: View {
         }
     }
 
-    private func insert(at u: Double) {
-        guard let index = model.insert(atU: u) else { return }
+    private func insert(atX x: Double) {
+        guard let index = model.insert(atX: x) else { return }
         justInserted = (index, ProcessInfo.processInfo.systemUptime)
-    }
-
-    // MARK: the footnote and the two buttons
-
-    private var footnote: some View {
-        Text(CurveAxisTicks.footnote())
-            .font(.system(size: CurvePanelMetrics.footnoteSize))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var buttons: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            smallButton("复位本通道") { model.resetChannel() }
-            smallButton("全部复位") { model.resetAll() }
-        }
-    }
-
-    private func smallButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color.primary.opacity(0.06)))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("curve.button.\(title)")
     }
 }

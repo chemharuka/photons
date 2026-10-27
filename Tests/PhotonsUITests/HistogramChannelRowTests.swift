@@ -379,7 +379,7 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(card.channelLetterColors, HistogramCardView.channelNameColors,
                        "通道行的 R/G/B 就是 channelNameColors 那三个颜色")
 
-        // The footnote row's counts use the same three colours.
+        // The counts row uses the same three colours.
         if let axis = card.lastAxis {
             card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
         }

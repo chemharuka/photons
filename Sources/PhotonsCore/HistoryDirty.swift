@@ -83,7 +83,9 @@ enum EditParameters {
     }
 
     static func areEqual(_ a: [CurvePoint], _ b: [CurvePoint]) -> Bool {
-        a.count == b.count && zip(a, b).allSatisfy { areEqual($0.x, $1.x) && areEqual($0.y, $1.y) }
+        // 069: a point is a pair of grid cells, so "the same" is integer equality — no tolerance
+        // can make two different cells equal, and the old 1e-9 window is gone with the doubles.
+        a.count == b.count && zip(a, b).allSatisfy { $0.x == $1.x && $0.y == $1.y }
     }
 
     static func areEqual(_ a: [HSLBand], _ b: [HSLBand]) -> Bool {

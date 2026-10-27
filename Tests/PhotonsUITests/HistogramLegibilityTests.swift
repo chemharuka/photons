@@ -18,11 +18,11 @@ private let cardHeight: CGFloat = 104
 ///
 ///   ① both colours clear 4.5 : 1 at the **worst** end of the card's backdrop band, in aqua *and*
 ///      in darkAqua (the old ones are asserted to fail, so the table is not decoration);
-///   ② the hierarchy survives — the footnote stays quieter than the percentages;
-///   ③ nothing shrank: 8.5 pt monospaced digits for the percentage, 8 pt for the footnote;
+///   ② the hierarchy survives — the caption stays quieter than the percentages;
+///   ③ nothing shrank: 8.5 pt monospaced digits for the percentage, 8 pt for the caption;
 ///   ④ at the card's minimum width (the inspector's 300 pt floor minus the inspector's 24 pt of
 ///      padding and the card's 32 pt of inset = **244 pt**) both rows fit: the channel row (the cursor
-///      pixel's R/G/B — the percentages it replaced are gone) and the footnote row, unabbreviated;
+///      pixel's R/G/B — the percentages it replaced are gone) and the caption row, unabbreviated;
 ///   ⑤ the sentence says what it means (「采样 … px · 直方图 256+256 档」) and VoiceOver spells the
 ///      binning out (「256 档 SDR 码值 + 256 档高光尾」).
 @MainActor

@@ -48,7 +48,7 @@ public struct HDRCurveAxis: Sendable, Equatable {
     public let xHI: Double
     /// Where SDR white (`x = 1`) sits, and the width the SDR half gets: `0.5` (派单 062).
     ///
-    /// It is one number on purpose: the tick positions, the panel footnote and the kernel's uniform
+    /// It is one number on purpose: the tick positions, the card's caption and the kernel's uniform
     /// all read it, so "SDR is half the card" cannot drift between them. A value other than 0.5 is
     /// **not** a supported alternative axis — it exists so a test can put white back at 044's 0.75
     /// and watch the tick assertions and the pixel table go red (062's 反证).

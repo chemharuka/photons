@@ -3,7 +3,7 @@ import AppKit
 import PhotonsCore
 import PhotonsUI
 
-/// 010 — the histogram card's **hover readout**: the line the owner deleted as a footnote
+/// 010 — the histogram card's **hover readout**: the line the owner deleted as a caption
 /// (「采样 898k px · 直方图 256+256 档」) now shows what the pointer is over.
 ///
 /// Two claims, tested apart because they fail differently:

@@ -22,7 +22,7 @@ final class PresetSnapshotTests: XCTestCase {
         m.light = LightGroup(exposure: 0.75, contrast: 12, highlights: -30, shadows: 18,
                              whites: 5, blacks: -8, temperature: 5400, tint: 7,
                              highlightRecovery: 0.25)
-        m.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.62), CurvePoint(1, 1)]
+        m.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.62), CurvePoint(u: 1, v: 1)]
         m.color.saturation = -12
         m.color.bands[3] = HSLBand(hue: 10, saturation: -20, luminance: 5)
         m.detail.sharpening = 40

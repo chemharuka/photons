@@ -78,7 +78,7 @@ final class MatteIsNotPartOfThePictureTests: XCTestCase {
         // u: (0, 0.5) maps u = 0 to u = 0.5, which is +9 stops of lift at the bottom of the axis —
         // by far the most aggressive shadow lift in this list, and therefore the one most likely to
         // light a background-only window up if the matte guard ever went missing.
-        liftedCurve.curve.white = [CurvePoint(0, 0.5), CurvePoint(0.5, 0.7), CurvePoint(1, 1)]
+        liftedCurve.curve.white = [CurvePoint(u: 0, v: 0.5), CurvePoint(u: 0.5, v: 0.7), CurvePoint(u: 1, v: 1)]
         edits.append(("curve lifted at the toe", liftedCurve))
         var saturated = EditModel.neutral
         saturated.color.saturation = 100

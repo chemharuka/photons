@@ -1968,7 +1968,7 @@ public final class UISmokeRunner {
               && card.channelRowRect == channelSlotWithPixel
               && card.channelRowRect.height == HistogramCardView.channelRowHeight)
 
-        // 010 — the deleted footnote's line is the pointer's reading now. Four samples, each against
+        // 010 — the deleted caption line is the pointer's reading now. Four samples, each against
         // the *measurement's* own bins (not against the formatter it is testing), plus the two facts
         // the owner asked for by name: the font is the clipping numbers' font, and leaving clears it.
         if let hoverAxis = axis ?? card.lastAxis {

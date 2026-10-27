@@ -318,7 +318,7 @@ final class HDRCurveTests: XCTestCase {
         // Pixels: the copy branch is byte-for-byte.
         let graph = try makeGraph(solid((0.18, 0.1, 0.02)))
         var identityEdit = EditModel.neutral
-        identityEdit.curve = CurveGroup(white: [CurvePoint(0, 0), CurvePoint(1, 1)])
+        identityEdit.curve = CurveGroup(white: [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 1)])
         let neutral = try render(graph, .neutral)
         let identity = try render(graph, identityEdit)
         print("030 identity curve: neutral \(neutral.sha256().prefix(16))… vs identity \(identity.sha256().prefix(16))…")
@@ -377,13 +377,13 @@ final class HDRCurveTests: XCTestCase {
     func testEveryTableIsMonotone() {
         let shapes: [(String, [CurvePoint])] = [
             ("identity", CurvePoint.linear),
-            ("S mild", [CurvePoint(0, 0), CurvePoint(0.25, 0.20), CurvePoint(0.75, 0.80), CurvePoint(1, 1)]),
-            ("S hard", [CurvePoint(0, 0), CurvePoint(0.2, 0.03), CurvePoint(0.4, 0.22),
-                        CurvePoint(0.6, 0.78), CurvePoint(0.8, 0.97), CurvePoint(1, 1)]),
-            ("0.36-stop cliff", [CurvePoint(0, 0), CurvePoint(0.4, 0.35), CurvePoint(0.42, 0.75),
-                                 CurvePoint(1, 1)]),
-            ("roll-off", [CurvePoint(0, 0), CurvePoint(1, 0.86)]),
-            ("black end lifted", [CurvePoint(0, 0.3), CurvePoint(1, 1)]),
+            ("S mild", [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.25, v: 0.20), CurvePoint(u: 0.75, v: 0.80), CurvePoint(u: 1, v: 1)]),
+            ("S hard", [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.2, v: 0.03), CurvePoint(u: 0.4, v: 0.22),
+                        CurvePoint(u: 0.6, v: 0.78), CurvePoint(u: 0.8, v: 0.97), CurvePoint(u: 1, v: 1)]),
+            ("0.36-stop cliff", [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.4, v: 0.35), CurvePoint(u: 0.42, v: 0.75),
+                                 CurvePoint(u: 1, v: 1)]),
+            ("roll-off", [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 0.86)]),
+            ("black end lifted", [CurvePoint(u: 0, v: 0.3), CurvePoint(u: 1, v: 1)]),
         ]
 
         var seed: UInt64 = 0x5DEECE66D
@@ -393,15 +393,15 @@ final class HDRCurveTests: XCTestCase {
         }
         var randoms: [(String, [CurvePoint])] = []
         for r in 0..<20 {
-            var pts = [CurvePoint(0, Double(next()) * 0.2)]
+            var pts = [CurvePoint(u: 0, v: Double(next()) * 0.2)]
             var x = 0.02
-            var y = pts[0].y
+            var y = pts[0].v
             while x < 0.98 {
                 y = min(1, y + next() * 0.25)
-                pts.append(CurvePoint(x, y))
+                pts.append(CurvePoint(u: x, v: y))
                 x += 0.02 + next() * 0.08
             }
-            pts.append(CurvePoint(1, min(1, y + next() * 0.2)))
+            pts.append(CurvePoint(u: 1, v: min(1, y + next() * 0.2)))
             randoms.append(("random \(r)", pts))
         }
 
@@ -430,8 +430,8 @@ final class HDRCurveTests: XCTestCase {
         let count = 2048
         let image = logBands(count: count, from: 1e-5, to: 64)
         let graph = try makeGraph(image)
-        let sCurve = [CurvePoint(0, 0), CurvePoint(0.2, 0.03), CurvePoint(0.4, 0.22),
-                      CurvePoint(0.6, 0.78), CurvePoint(0.8, 0.97), CurvePoint(1, 1)]
+        let sCurve = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.2, v: 0.03), CurvePoint(u: 0.4, v: 0.22),
+                      CurvePoint(u: 0.6, v: 0.78), CurvePoint(u: 0.8, v: 0.97), CurvePoint(u: 1, v: 1)]
 
         for (name, channel) in [("W", 0), ("R", 1), ("G", 2), ("B", 3)] {
             var edit = EditModel.neutral
@@ -476,7 +476,7 @@ final class HDRCurveTests: XCTestCase {
         let zeroImage = bands([0, 1e-4])
         let zeroGraph = try makeGraph(zeroImage, identity: "hdr-curve-zero")
         var lifted = EditModel.neutral
-        lifted.curve.white = [CurvePoint(0, 0.10), CurvePoint(1, 1)]
+        lifted.curve.white = [CurvePoint(u: 0, v: 0.10), CurvePoint(u: 1, v: 1)]
         let liftedOut = bandValues(try render(zeroGraph, lifted, headroom: 64), count: 2)
         print(String(format: "030 endpoints: lifted (0,0.10): x=0 → %.6f, x=1e-4 → %.6f",
                      liftedOut[0], liftedOut[1]))
@@ -489,10 +489,10 @@ final class HDRCurveTests: XCTestCase {
         // the same. The W curve turns `v` back into light, so the claim is `out = x(v)` — which on
         // this axis is the same statement as "an exposure offset of `log2(x(v)/x(u64))`".
         var rolled = EditModel.neutral
-        rolled.curve.white = [CurvePoint(0, 0), CurvePoint(1, 0.86)]
+        rolled.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 0.86)]
         let rolledOut = bandValues(try render(graph, rolled, headroom: 64), count: 3)
         let u64 = HDRCurve.axis.forward(64)
-        let rampTable = table([CurvePoint(0, 0), CurvePoint(1, 0.86)])
+        let rampTable = table([CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 0.86)])
         let v64 = HDRCurve.lutValue(rampTable, slope: CurveLUT.slope(of: rampTable), u: u64)
         let expected = HDRCurve.axis.inverse(v64)
         print(String(format: "030 endpoints: roll-off (1,0.86): x=64 → %.4f (analytic %.4f, v=%.4f)",
@@ -502,7 +502,7 @@ final class HDRCurveTests: XCTestCase {
 
         // Black end pressed *and* the middle pulled down: 1e-4 gets smaller but stays positive.
         var pressed = EditModel.neutral
-        pressed.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.3), CurvePoint(1, 1)]
+        pressed.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.3), CurvePoint(u: 1, v: 1)]
         let pressedOut = bandValues(try render(graph, pressed, headroom: 64), count: 3)
         XCTAssertGreaterThan(pressedOut[0], 0, "a pressed curve must not delete the 1e-4 level")
         XCTAssertLessThan(pressedOut[0], identity[0], "…it must make it darker")
@@ -542,7 +542,7 @@ final class HDRCurveTests: XCTestCase {
         let ceiling = [Float(0.2), 0.5, 1, 2, 4, 8, 16, 32, 64]
         let ceilGraph = try makeGraph(bands(ceiling), identity: "hdr-curve-ceiling")
         var ceilEdit = EditModel.neutral
-        ceilEdit.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 0.5)]
+        ceilEdit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 0.5)]
         let ceilOut = bandValues(try render(ceilGraph, ceilEdit, headroom: 64), count: ceiling.count)
         print("030 ceiling curve (1,0.5): " + ceilOut.map { String(format: "%.4f", $0) }.joined(separator: " "))
         for i in 3..<ceiling.count {
@@ -571,11 +571,11 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(back1000 / 1000, 1, accuracy: 1e-2, "x = 1000 at slope 1 must stay 1000")
 
         // Slope 0: the user's ceiling at xHI (+4 EV).
-        XCTAssertEqual(CurveLUT.slope(of: table([CurvePoint(0, 0), CurvePoint(0.99, 1), CurvePoint(1, 1)])),
+        XCTAssertEqual(CurveLUT.slope(of: table([CurvePoint(u: 0, v: 0), CurvePoint(u: 0.99, v: 1), CurvePoint(u: 1, v: 1)])),
                        0, accuracy: 1e-6, "a flat last segment has slope 0")
 
         var hardTop = EditModel.neutral
-        hardTop.curve.white = [CurvePoint(0, 0), CurvePoint(0.99, 1), CurvePoint(1, 1)]
+        hardTop.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.99, v: 1), CurvePoint(u: 1, v: 1)]
         let topOut = bandValues(try render(graph, hardTop, headroom: 4096), count: 2)
         let top1000 = decode(topOut[1])
         print(String(format: "030 ceiling at the white end: 1000 → %.4f", top1000))
@@ -592,7 +592,7 @@ final class HDRCurveTests: XCTestCase {
         let graph = try makeGraph(bands(values))
 
         var lifted = EditModel.neutral
-        lifted.curve.white = [CurvePoint(0, 0.4), CurvePoint(1, 1)]
+        lifted.curve.white = [CurvePoint(u: 0, v: 0.4), CurvePoint(u: 1, v: 1)]
 
         let base = bandValues(try render(graph, .neutral), count: values.count)
         let curved = bandValues(try render(graph, lifted), count: values.count)
@@ -604,7 +604,7 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertGreaterThan(curved[5], base[5], "the positive band must still follow the curve")
 
         // The reference arithmetic: sign-preserving, exact.
-        let t = table([CurvePoint(0, 0.4), CurvePoint(1, 1)])
+        let t = table([CurvePoint(u: 0, v: 0.4), CurvePoint(u: 1, v: 1)])
         let slope = CurveLUT.slope(of: t)
         for x in [-0.039, -0.004, -1e-9, 0.0] {
             XCTAssertEqual(HDRCurve.channel(x, table: t, slope: slope), x,
@@ -632,7 +632,7 @@ final class HDRCurveTests: XCTestCase {
         let values = below + above
         let graph = try makeGraph(bands(values))
 
-        let raised: [CurvePoint] = [CurvePoint(0.2, 0.3), CurvePoint(0.6, 0.5), CurvePoint(1, 1)]
+        let raised: [CurvePoint] = [CurvePoint(u: 0.2, v: 0.3), CurvePoint(u: 0.6, v: 0.5), CurvePoint(u: 1, v: 1)]
         var edit = EditModel.neutral
         edit.curve.red = raised
         edit.curve.green = raised
@@ -667,7 +667,7 @@ final class HDRCurveTests: XCTestCase {
 
         // **反证**：051 的形状（首点钉在 0），同样的五个输入是斜坡
         var pinned = EditModel.neutral
-        let pinnedCurve: [CurvePoint] = [CurvePoint(0, 0), CurvePoint(0.6, 0.5), CurvePoint(1, 1)]
+        let pinnedCurve: [CurvePoint] = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.5), CurvePoint(u: 1, v: 1)]
         pinned.curve.red = pinnedCurve
         pinned.curve.green = pinnedCurve
         pinned.curve.blue = pinnedCurve
@@ -699,7 +699,7 @@ final class HDRCurveTests: XCTestCase {
 
         // (a) 018：曲线起于零光 → 负值与 0 一个字节都不动
         var startsAtZero = EditModel.neutral
-        startsAtZero.curve.white = [CurvePoint(0, 0.4), CurvePoint(1, 1)]
+        startsAtZero.curve.white = [CurvePoint(u: 0, v: 0.4), CurvePoint(u: 1, v: 1)]
         let atZero = bandValues(try render(graph, startsAtZero), count: values.count)
         for i in 0..<5 {
             XCTAssertEqual(atZero[i], base[i], "first.x == 0：band \(values[i]) 被动了（018 回归）")
@@ -707,7 +707,7 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertGreaterThan(atZero[5], base[5], "正值那一带仍随曲线走")
 
         // (b) 061：黑点右移到 0.2 → 整段（负值 + 0）裁到同一个常量
-        let lifted: [CurvePoint] = [CurvePoint(0.2, 0.3), CurvePoint(1, 1)]
+        let lifted: [CurvePoint] = [CurvePoint(u: 0.2, v: 0.3), CurvePoint(u: 1, v: 1)]
         var raised = EditModel.neutral
         raised.curve.red = lifted
         raised.curve.green = lifted
@@ -740,7 +740,7 @@ final class HDRCurveTests: XCTestCase {
         let colour: (Float, Float, Float) = (0.6, 0.2, 0.1)
         let graph = try makeGraph(solid(colour))
         var edit = EditModel.neutral
-        edit.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        edit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         let base = try render(graph, .neutral, headroom: 64)
         let curved = try render(graph, edit, headroom: 64)
@@ -787,7 +787,7 @@ final class HDRCurveTests: XCTestCase {
     /// against the analytic reference (so a kernel/CPU disagreement is caught) and printed as
     /// display codes (so the appearance change is readable).
     func testAFixedCurveOnTheNewAxisIsTheAnalyticReference() throws {
-        let push = [CurvePoint(0, 0), CurvePoint(0.22, 0.17), CurvePoint(0.55, 0.58), CurvePoint(1, 1)]
+        let push = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.22, v: 0.17), CurvePoint(u: 0.55, v: 0.58), CurvePoint(u: 1, v: 1)]
         var edit = EditModel.neutral
         edit.curve.white = push
         let levels: [Float] = [0.02, 0.05, 0.18, 0.5, 1, 2, 4, 8, 16]
@@ -813,7 +813,7 @@ final class HDRCurveTests: XCTestCase {
     func testChannelsAreIndependent() throws {
         let graph = try makeGraph(solid((0.35, 0.45, 0.55)))
         var redOnly = EditModel.neutral
-        redOnly.curve.red = [CurvePoint(0, 0), CurvePoint(0.5, 0.3), CurvePoint(1, 1)]
+        redOnly.curve.red = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.3), CurvePoint(u: 1, v: 1)]
 
         let base = try render(graph, .neutral, headroom: 64)
         let curved = try render(graph, redOnly, headroom: 64)
@@ -842,7 +842,7 @@ final class HDRCurveTests: XCTestCase {
     /// axis and 0.705 now, which is why the assertion still has teeth (and N = 2048, 0.179, sits
     /// between them).
     func testTablePrecisionIsWhy4096() {
-        let cliff = [CurvePoint(0, 0), CurvePoint(0.4, 0.35), CurvePoint(0.42, 0.75), CurvePoint(1, 1)]
+        let cliff = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.4, v: 0.35), CurvePoint(u: 0.42, v: 0.75), CurvePoint(u: 1, v: 1)]
         let reference = table(cliff, size: 65536)
         let referenceSlope = CurveLUT.slope(of: reference)
 
@@ -901,7 +901,7 @@ final class HDRCurveTests: XCTestCase {
         var withMask = EditModel.neutral
         withMask.masks = [Mask(id: "m", components: [MaskComponent(id: "c", shape: .linearGradient(.default))])]
         var curved = withMask
-        curved.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         let a = links(withMask), b = links(curved)
         XCTAssertNotEqual(a.curve, b.curve, "a curve change must move its own key")
@@ -973,8 +973,8 @@ final class HDRCurveTests: XCTestCase {
         let graph = try makeGraph(bands(values), identity: "curve-levels")
 
         // 裁切边钉在 x 上（2.0e-3），u 从轴取 —— 轴换了，这条断言的意义不变。
-        let lifted: [CurvePoint] = [CurvePoint(HDRCurve.axis.forward(2.0e-3), 0),
-                                    CurvePoint(0.6, 0.45), CurvePoint(1, 1)]
+        let lifted: [CurvePoint] = [CurvePoint(u: HDRCurve.axis.forward(2.0e-3), v: 0),
+                                    CurvePoint(u: 0.6, v: 0.45), CurvePoint(u: 1, v: 1)]
         var both = EditModel.neutral
         both.light.blackLevel = 0.10          // +10 % of white, in S1's linear units
         both.curve.red = lifted
@@ -1011,7 +1011,7 @@ final class HDRCurveTests: XCTestCase {
     /// only itself. `changedStages` is group-level by design (D10): downstream is the key chain's job.
     func testDirtyStages() {
         var base = EditModel.neutral
-        base.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        base.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         var newer = base
         newer.light.blackLevel = 0.02
@@ -1022,7 +1022,7 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(whiteNext.changedStages(from: base), [.sceneLinear])
 
         var curved = base
-        curved.curve.white = [CurvePoint(0, 0), CurvePoint(0.6, 0.4), CurvePoint(1, 1)]
+        curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.4), CurvePoint(u: 1, v: 1)]
         XCTAssertEqual(curved.changedStages(from: base), [.curve])
 
         var warm = base
@@ -1064,7 +1064,7 @@ final class HDRCurveTests: XCTestCase {
         """#.utf8)
         let old = try JSONDecoder().decode(EditModel.self, from: legacy)
         XCTAssertEqual(old.curve.white.count, 3, "the schema-3 `rgb` key must land in `white`")
-        XCTAssertEqual(old.curve.white[1], CurvePoint(0.5, 0.62))
+        XCTAssertEqual(old.curve.white[1], CurvePoint(u: 0.5, v: 0.62))
 
         let encoded = try JSONEncoder().encode(old.curve)
         let text = String(decoding: encoded, as: UTF8.self)
@@ -1087,10 +1087,10 @@ final class HDRCurveTests: XCTestCase {
     func testFrameAndTableCosts() throws {
         // Tables: one changed table, then all four (a document switch).
         let pointSets: [[CurvePoint]] = [
-            [CurvePoint(0, 0), CurvePoint(0.2, 0.05), CurvePoint(0.5, 0.5), CurvePoint(0.8, 0.95), CurvePoint(1, 1)],
-            [CurvePoint(0, 0), CurvePoint(0.3, 0.25), CurvePoint(1, 1)],
-            [CurvePoint(0, 0), CurvePoint(0.6, 0.55), CurvePoint(1, 1)],
-            [CurvePoint(0, 0), CurvePoint(0.5, 0.4), CurvePoint(1, 1)],
+            [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.2, v: 0.05), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 0.8, v: 0.95), CurvePoint(u: 1, v: 1)],
+            [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.3, v: 0.25), CurvePoint(u: 1, v: 1)],
+            [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.55), CurvePoint(u: 1, v: 1)],
+            [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.4), CurvePoint(u: 1, v: 1)],
         ]
         var one = 0.0
         for _ in 0..<20 {
@@ -1119,8 +1119,8 @@ final class HDRCurveTests: XCTestCase {
                        iterations: Int, useCache: Bool) throws -> Double {
             let graph = try RenderGraph(input: RenderInput(image: image, identity: "bench-\(label)"))
             var curved = EditModel.neutral
-            curved.curve.white = [CurvePoint(0, 0), CurvePoint(0.25, 0.18),
-                                  CurvePoint(0.75, 0.82), CurvePoint(1, 1)]
+            curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.25, v: 0.18),
+                                  CurvePoint(u: 0.75, v: 0.82), CurvePoint(u: 1, v: 1)]
             func measure(_ edit: EditModel, force: Bool) throws -> [Double] {
                 var times: [Double] = []
                 for _ in 0..<iterations {

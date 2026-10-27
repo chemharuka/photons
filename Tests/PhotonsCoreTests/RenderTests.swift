@@ -270,7 +270,7 @@ final class RenderTests: XCTestCase {
     // MARK: - 6. curve LUT
 
     func testCurveLUTIsMonotoneAndPinnedAtTheEnds() {
-        let points = [CurvePoint(0, 0), CurvePoint(0.25, 0.15), CurvePoint(0.6, 0.7), CurvePoint(1, 1)]
+        let points = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.25, v: 0.15), CurvePoint(u: 0.6, v: 0.7), CurvePoint(u: 1, v: 1)]
         let table = CurveLUT.buildOne(points)
         XCTAssertEqual(table.count, CurveLUT.size)
         XCTAssertEqual(table.first!, 0, accuracy: 1e-4)
