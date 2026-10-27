@@ -448,13 +448,33 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// whole picture and moved the mid-tones; `+` still means "up", the shape is what changed. The
     /// affine spelling now belongs only to `whiteLevel` below, where "this sample is white" is a level.
     public var whites: Double            // -100…100, default 0; + moves the white point up
-    /// 073B — the **black end point**: a pure multiplicative EV at the dark end, ±3 EV at the very
-    /// bottom (`0 → 0`), weighted by a 7 EV window on `log2` light so the mid-tones are outside it.
+    /// 073B/073C — the **black end point**: half the travel is a multiplicative EV on the dark end
+    /// (`0 → 0`), the second half blends in a black-point **level** move so the black end can really
+    /// be moved — pushed down it reaches 0, pulled up it floats off the floor.
+    ///
+    ///     t = blacks/100,  a = |t|,  m = smoothstep(0.5, 1, a)
+    ///     EV:    v *= exp2(3 · t · (1 − ½m) · wb)      wb = the 7 EV toe (full below −11.2 EV, 0 at −4.2)
+    ///     level: v  = toe(v + 0.005 · t · m · wl)      wl = a 2.5 EV window, −6.9 … −4.4 EV, C¹ clip at 0
+    ///
+    /// Why the second half exists: a pure multiplier cannot move the black *point* (`0 → 0` for every
+    /// gain), so `blacks = −100` used to leave the darkest pixels at 1/8 of their value — never at 0 —
+    /// and `blacks = +100` could never float the black off the floor. The owner's brief (2026-10-27)
+    /// was 「滑块开始为加减 EV，后面逐步变为修改电平」, which is exactly this blend. `m` is 0 for the
+    /// whole first half, so `|blacks| ≤ 50` is 073B's arithmetic bit for bit (and `RenderGraph` even
+    /// picks 073B's entry point there — see `blacksEVToLevelSplit`).
     ///
     /// It used to be an affine level (`blk = −blacks/100·0.15`), which moved every pixel, including
     /// 50 % grey — that is not what the control is for. The affine spelling now belongs only to
     /// `blackLevel` below, where "this sample is black" really is a level. `+` still lifts the shadows.
     public var blacks: Double            // -100…100, default 0
+
+    /// 073C — where the travel switches mechanism, `|blacks| = 50`.
+    ///
+    /// Not a taste knob: it is the zero of the blend factor `m(a) = smoothstep(0.5, 1, a)`, so below it
+    /// the level term is *exactly* zero and the kernel's 073B instantiation is the correct one. Moving
+    /// this number without moving `m` would put a discontinuity in the middle of the slider; moving
+    /// both would change the first half of the travel, which is pinned to be bit-identical.
+    public static let blacksEVToLevelSplit: Double = 50
     /// Absolute white balance in Kelvin, fed to `CIRAWFilter.neutralTemperature` — **not** a gain on
     /// S1 (派单 006 B). `nil` = as shot: the decoder is left alone and the inspector shows the number
     /// the file reports (`DecoderCapabilities.asShotTemperature`).
