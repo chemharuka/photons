@@ -1169,7 +1169,11 @@ public final class CatalogSession {
         var failures: [String] = []
         for id in targets {
             if id == loadedEditAssetID {
-                if let report = pasteIntoLiveDocument(payload) { reports.append(report) }
+                if let report = pasteIntoLiveDocument(payload) {
+                    reports.append(report)
+                } else {
+                    failures.append("当前照片在工具会话里：先应用或取消裁切/蒙版工具再粘贴")
+                }
                 continue
             }
             guard let catalog else { continue }
@@ -1198,6 +1202,10 @@ public final class CatalogSession {
     /// The mask overlay (`showMaskID`) is pasted back on top because it is view state, exactly as
     /// `undo()` does.
     private func pasteIntoLiveDocument(_ payload: EditSnapshot) -> SettingsPasteReport? {
+        // A tool session owns the next snapshot (`EditHistory.beginSession`): an edit made inside it
+        // records no row of its own, so a paste here would move the document with nothing to undo.
+        // Refused rather than folded into the tool's base.
+        guard !isToolSessionActive else { return nil }
         let current = MaskViewState.documentOnly(edit)
         let merged = payload.applied(to: current)
         let fields = EditHistory.changedFields(between: current, and: merged)

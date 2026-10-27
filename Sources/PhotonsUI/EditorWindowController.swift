@@ -270,9 +270,23 @@ public final class EditorWindowController: NSWindowController {
         return responder is NSTextField
     }
 
+    /// Hand a ⌘C/⌘V the text editor asked for to that editor, and report whether it took it.
+    ///
+    /// Sent **to the first responder** rather than `to: nil`: a `nil` target resolves from the key
+    /// window, and a window that is not key (a sheet is up, the app is in the background, a test
+    /// process never activated) has no key window — the shortcut would then vanish silently instead
+    /// of reaching the field the user is typing in.
+    private func forwardTextCommand(_ selector: Selector, sender: Any?) -> Bool {
+        guard let responder = window?.firstResponder, responder.responds(to: selector) else {
+            return false
+        }
+        NSApp.sendAction(selector, to: responder, from: sender)
+        return true
+    }
+
     @objc public func copySettingsAction(_ sender: Any?) {
         if isTextEditing {
-            NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
+            _ = forwardTextCommand(#selector(NSText.copy(_:)), sender: sender)
             return
         }
         session.copySettingsFromAnchor()
@@ -287,7 +301,7 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func pasteSettingsAction(_ sender: Any?) {
         if isTextEditing {
-            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
+            _ = forwardTextCommand(#selector(NSText.paste(_:)), sender: sender)
             return
         }
         session.pasteSettings()

@@ -44,8 +44,14 @@ final class CopySettingsAccessoryView: NSView {
     private(set) var statusLabel: NSTextField!
 
     /// `presetPopUp` index → preset. 自定义 is index 0 and is never selectable by the user directly.
-    private static let popUpPresets: [CopySettingsSelection.Preset?] =
+    static let popUpPresets: [CopySettingsSelection.Preset?] =
         [nil] + CopySettingsSelection.Preset.allCases
+
+    /// Where a preset sits in the popup (0 = 自定义). Used by the dialog's own `refreshControls` and by
+    /// the tests, so neither has to re-derive the offset.
+    static func popUpIndex(of preset: CopySettingsSelection.Preset) -> Int {
+        popUpPresets.firstIndex(where: { $0 == preset }) ?? 0
+    }
 
     init(selection: CopySettingsSelection, purpose: Purpose) {
         self.selection = selection
