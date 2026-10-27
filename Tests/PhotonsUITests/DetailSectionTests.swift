@@ -89,12 +89,12 @@ final class DetailSectionTests: XCTestCase {
 
         // The bar is 16 pt tall, like every other row in the panel: no layout jump between shapes.
         XCTAssertEqual(SliderValueMap.rowHeight, 16)
-        // 055: the drag point is a 10 × 16 pt rounded bubble (was a 3 × 14 pt stroke) — it fills the
-        // 16 pt row's height and is narrower than it is tall, so the row still cannot grow.
-        XCTAssertEqual(BubbleSliderCell.knobSize.height, SliderValueMap.rowHeight,
-                       "the bubble is exactly the 16 pt row high")
-        XCTAssertLessThan(BubbleSliderCell.knobSize.width, SliderValueMap.rowHeight,
-                          "the 10 pt wide bubble fits inside the row")
+        // **060 改了这里的两条断言**：055 量的是自绘气泡（`BubbleSliderCell.knobSize` 10 × 16 pt，
+        // 宽 < 行高）。气泡控件删掉了，改成钉「同一个 SwiftUI Slider，橙色只从 tint 来」——
+        // 形状不再是控件，颜色才是区分。
+        let builderSource = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        XCTAssertTrue(builderSource.contains(".tint(shape == .bar ? Color.orange : nil)"),
+                      "060: 细节的四根是解 RAW 参数 → 橙色；圆形/长条的控件之分已经不存在")
 
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         let tickedSlider = try NSRegularExpression(pattern: "Slider\\([^)]*step:")

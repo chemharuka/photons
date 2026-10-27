@@ -4,18 +4,24 @@ import AppKit
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 派单 046 + 055 —— 滑杆样式规则：
+/// 派单 046 + 060 —— 滑杆规则（**060 重写**：两种形状 = 同一个 SwiftUI `Slider`，只差强调色）：
 ///
-///  1. **结构**：解码参数（细节卡的降噪 / 色彩降噪 / 细节 / 锐化、白平衡的色温 / 色调）画 `.bar`；
-///     渲染参数（Light 的六行、Color 的两行）画 `.knob`。断言打在**卡片迭代的那张表**上，不是打在
+///  1. **结构**：解码参数（细节卡的降噪 / 色彩降噪 / 细节 / 锐化、白平衡的色温 / 色调）是 `.bar`；
+///     渲染参数（Light 的六行、Color 的两行）是 `.knob`。断言打在**卡片迭代的那张表**上，不是打在
 ///     截图或无障碍树上 —— 后者在 `swift test` 里没有窗口会话时是空的（同 `DetailSectionTests`）。
-///  2. **同一个控件**（055）：`.bar` 与 `.knob` 底层都是 `NSSlider`。055 之前 `.bar` 是自绘的
-///     `Canvas` + `DragGesture`，于是两者的焦点、拖动手感、无障碍都是两套，而且为了键盘它调了
-///     `.focusable()`，macOS 就在点击时画系统焦点环（用户看到的那圈蓝框）。
-///  3. **只换拖动点**：`.bar` 的 cell 只重写拖动点的绘制 —— 10 × 16 pt、圆角 5 pt 的胶囊；轨道和
-///     已选部分仍是系统的。行高两种形状都是 16 pt。
-///  4. **无刻度 / 无焦点环 / 一次拖动一条历史 / 两端可达**：四条都按能抓住的实物断言（控件实例、
-///     cell 记录下来的绘制矩形、`onEditingChanged` 的调用序列）。
+///  2. **一个控件**：`sliderRow` 里只有**一处** `Slider(value: …, in: …, onEditingChanged:)`；
+///     没有 `BubbleSlider` / `BarSlider` / `NSSlider` 的引用（055 的自绘气泡与换 cell 方案已删除）。
+///  3. **颜色真的不同**（060 验收 2）：用 `ImageRenderer` 离屏渲染两条真实的滑杆行，
+///     采「已选部分」的像素 —— `.bar` 是橙，`.knob` 是系统强调色（默认蓝），逐通道不同。
+///     源码里写没写 `.tint` 不算证据；像素才算。
+///  4. **无刻度 / 行高 16 / 一次拖动一条历史**：前两条按源码与 `fittingSize` 钉，第三条按
+///     「一次拖动 = 一串 `applyEdit` + 一次 `commitEdit`」在 `CatalogSession` 上跑一遍。
+///
+/// **060 删掉了 055 的这些东西**（它们的前提都没了：`NSSlider` + 自绘 cell 已经不在代码里）：
+/// `.bar` 是 `NSSlider`/`NSSliderCell`、`focusRingType == .none`、气泡 10 × 16 pt 圆角 5、
+/// 用 cell 的 `startTracking` 模拟拖动。换成：一个 `Slider` 的源码断言 + 像素实测 + 模型层的
+/// 「一次拖动一条历史」。**删掉不等于放松** —— 颜色那一组是这次验收的核心，它比原来的
+/// 「cell 装了没有」更接近用户实际看到的东西。
 @MainActor
 final class SliderStyleTests: XCTestCase {
 
@@ -26,7 +32,7 @@ final class SliderStyleTests: XCTestCase {
         let detail = InspectorView.detailContent.rows
         XCTAssertEqual(detail.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"])
         XCTAssertEqual(detail.map(\.shape), [.bar, .bar, .bar, .bar],
-                       "046: 会触发重新 develop 的四根滑杆必须是长条形")
+                       "046: 会触发重新 develop 的四根滑杆必须是「解 RAW 参数」（橙色）")
         XCTAssertEqual(detail.map(\.axis), DetailAxis.panelOrder,
                        "the four rows are the four decode axes, in panel order")
 
@@ -34,7 +40,11 @@ final class SliderStyleTests: XCTestCase {
         let light = InspectorView.lightRows
         XCTAssertEqual(light.map(\.title), ["曝光", "对比", "高光", "阴影", "白色", "黑色"])
         XCTAssertEqual(light.map(\.shape), Array(repeating: .knob, count: 6),
-                       "046: 解 RAW 之后的六根滑杆必须保持圆形")
+                       "046: 解 RAW 之后的六根滑杆必须保持默认强调色")
+        XCTAssertEqual(InspectorView.colorRows.map(\.shape), Array(repeating: .knob, count: 2),
+                       "Color 的两行也是渲染参数 → 默认强调色")
+        XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.shape), [.bar, .bar],
+                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 橙色")
 
         // 两张表是不相交的两类参数：没有一行同时出现在两边。
         XCTAssertTrue(Set(detail.map(\.title)).isDisjoint(with: Set(light.map(\.title))),
@@ -46,42 +56,62 @@ final class SliderStyleTests: XCTestCase {
               + " · light \(light.map { "\($0.title)=\($0.shape.rawValue)" })")
     }
 
-    /// The card the panel actually builds is the table above: the 细节 card passes `row.shape` and the
-    /// Light card passes `row.shape`, so a `.bar` in the table is a `.bar` on screen. Pinned on the
-    /// source because `sliderRow` is `private` (the same technique `InspectorPinnedHeaderTests` uses
-    /// for the 信息 title).
-    ///
-    /// 色温/色调 也会写进 `CIRAWFilter`（= 重新解码），所以按 046 的规则它们也是长条形。
-    /// **055 改了这里的两条断言**：长条形滑杆的构造器从 `BarSlider(` 换成 `BubbleSlider(` ——
-    /// 控件换了（自绘 → `NSSlider`），而「白平衡两行必须是长条形、不许留圆球」这条规则没变。
-    func testWhiteBalanceRowsDrawTheBarToo() throws {
-        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        guard let start = source.range(of: "private func whiteBalanceRow"),
-              let end = source.range(of: "private var dropperRow") else {
-            return XCTFail("whiteBalanceRow and dropperRow must both exist")
-        }
-        let body = String(source[start.lowerBound..<end.lowerBound])
-        XCTAssertTrue(body.contains("BubbleSlider("),
-                      "色温/色调 are decode parameters: they must be the long bar, not the ball")
-        // `BubbleSlider(value:` trivially contains `Slider(value:` — the lookbehind is the whole point.
-        let roundSlider = try NSRegularExpression(pattern: "(?<!Bubble)Slider\\(value:",
-                                                  options: [.dotMatchesLineSeparators])
-        XCTAssertEqual(roundSlider.numberOfMatches(in: body,
-                                                   range: NSRange(body.startIndex..., in: body)),
-                       0, "no round slider may be left in the white-balance rows")
+    /// 白平衡的两行不走 `sliderRow`（它们有草稿值 + 自己的提交时机），所以单独钉：
+    /// 060 之后它们也用**同一个** `shapeSlider`，而且类别是 `.bar` → 橙色（解 RAW 参数）。
+    func testWhiteBalanceRowsUseTheSameSliderTintedOrange() throws {
+        XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.shape), [.bar, .bar],
+                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 橙色")
+
+        let body = try Self.body(of: "private func whiteBalanceRow",
+                                 upTo: "private var dropperRow",
+                                 in: Self.inspectorSource)
+        XCTAssertTrue(body.contains("Self.shapeSlider(Binding(get: { shown }"),
+                      "色温/色调 也必须走面板那唯一一个滑杆视图（055 的自绘气泡已删除）")
+        XCTAssertTrue(body.contains("shape: row.shape"),
+                      "颜色从 shape 来 —— 不在这里写死一个颜色")
+        XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: body), 0,
+                       "一根滑杆，由 shapeSlider 造；这里不许再有一份自己的 Slider")
+        XCTAssertFalse(body.lowercased().contains("nsviewrepresentable"),
+                       "不许再回到 NSViewRepresentable 的自绘控件")
     }
 
-    /// **055 改了这里的断言**：`sliderRow` 的 `.bar` 分支现在画的是 `BubbleSlider`（同一条
-    /// `onEditingChanged`、同一个 `range`），`.knob` 仍是 `step`-free 的 SwiftUI `Slider` ——
-    /// 两者名字不同但底层同类，这正是验收 1 的「同一个类」。
+    /// 每张卡都把**表里的** shape 交给同一个行构造器；面板里只有**一处** `Slider(value: …)` 与
+    /// **一处** `.tint(…)`。
+    ///
+    /// **060 改了这里的断言**：原来是「有 `BubbleSlider(value: value, range: range`」+
+    /// 「有 `Slider(value: value, in: range, onEditingChanged:`」两条（= 两个分支、两种控件）。
+    /// 现在两分支合并，那条「只有一处 Slider」的检查打在**整个面板**上，比只打在 `sliderRow` 上更强：
+    /// 白平衡那两行也在里面，谁也别想偷偷再造一个滑杆。
     func testBothCardsPassTheirRowShapeToTheOneRowBuilder() throws {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         XCTAssertTrue(source.contains("shape: row.shape"),
                       "a card must pass its row's shape to sliderRow, not a literal")
-        XCTAssertTrue(source.contains("BubbleSlider(value: value, range: range"),
-                      "sliderRow must draw BubbleSlider for .bar")
-        XCTAssertTrue(source.contains("Slider(value: value, in: range, onEditingChanged:"),
-                      "sliderRow must draw the step-free SwiftUI Slider for .knob")
+
+        // 一处构造，一处上色 —— 面板里没有第二个滑杆视图。
+        XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: source), 1,
+                       "060: 整个面板只有一处 `Slider(value: …)`，就在 shapeSlider 里")
+        XCTAssertEqual(Self.occurrences(of: ".tint(shape == .bar ? Color.orange : nil)", in: source), 1,
+                       "060: 只有一个 tint —— 强调色是唯一的差别")
+        XCTAssertEqual(Self.occurrences(of: "switch shape", in: source), 0,
+                       "no branch may hand a different control to a different shape")
+
+        // `sliderRow` 走那唯一一处，并且只差 `shape`（= 颜色）。
+        let builder = try Self.body(of: "private func sliderRow", upTo: "/// One slider's readout",
+                                    in: Self.inspectorSource)
+        XCTAssertTrue(builder.contains("Self.shapeSlider(value, in: range, shape: shape"),
+                      "sliderRow 只把 shape 交给那唯一一处滑杆构造")
+        XCTAssertTrue(builder.contains(".controlSize(style.controlSize)") == false,
+                      "control size 由 shapeSlider 统一给（.mini），行构造器不再自己设")
+
+        // 颜色那句话本身：`.bar` 橙，`.knob` 不设 tint。
+        let slider = try Self.body(of: "static func shapeSlider", upTo: "/// One slider's readout",
+                                   in: Self.inspectorSource)
+        XCTAssertTrue(slider.contains(".tint(shape == .bar ? Color.orange : nil)"),
+                      "060: 唯一的差别是强调色 —— .bar 橙，.knob 不设 tint（系统强调色）")
+        XCTAssertTrue(slider.contains(".frame(height: SliderValueMap.rowHeight)"),
+                      "both shapes are 16 pt high: the row cannot jump when the shape changes")
+        XCTAssertTrue(slider.contains(".controlSize(controlSize)"),
+                      "both shapes keep the row's own control size (.mini)")
 
         // 细节卡的 shape 来自它的表，Light 卡来自 `lightRows`。
         XCTAssertTrue(source.contains("ForEach(Self.detailContent.rows"),
@@ -90,117 +120,115 @@ final class SliderStyleTests: XCTestCase {
                       "the Light card iterates the table this test asserts on")
     }
 
-    // MARK: - 2. 同一个控件（055 验收 1）
+    // MARK: - 2. 面板里没有第二种滑杆（060 验收 1）
 
-    /// `.bar` 必须是一个真正的 AppKit 控件：`NSSlider` + `NSSliderCell`。
+    /// `BubbleSlider` / `BarSlider` / `NSSlider` 一律不许出现在面板的源码里。
     ///
-    /// **实测推翻了一条规格假设**（写在这里，因为它决定了这条断言怎么写）：macOS 27 上 SwiftUI 的
-    /// `Slider` **不再**是 `NSSlider` —— 把一只 `Slider` 放进 `NSHostingView`、开着键窗跑起来，
-    /// 子视图树里只有 `KeyViewProxy` 和 `_FocusRingView`，一个 `NSSlider` 都没有（`Slider` 自己画）。
-    /// 所以「两者的控件的 className 一个是 `NSSlider` 另一个不是」这种断言在本机**不会**红，
-    /// 也就不能用来钉「同一个类」。能钉、也确实管用的是这条：`.bar` 从「自绘 `Canvas` + `DragGesture`」
-    /// 变成了平台控件 `NSSlider` —— 焦点环可关、键盘/无障碍归 AppKit。这正是蓝框消失的原因。
-    ///
-    /// 下面顺带把「SwiftUI 那边是自绘」这件事**钉成一条会红的观察**：哪天 Apple 把 `Slider` 换回
-    /// `NSSlider` 底，这条会红，届时应把断言收紧成两者都 `isKind(of: NSSlider.self)`。
-    func testTheBarIsANativeSliderAndTheKnobIsNot() {
-        let bar = Self.firstSlider(BubbleSlider(value: .constant(30), range: DetailSettings.range))
-        guard let bar else { return XCTFail("the .bar shape must put a control on screen") }
-        XCTAssertTrue(bar.isKind(of: NSSlider.self),
-                      "055: .bar 必须是 NSSlider（不是自绘视图），与其它滑杆同一类控件")
-        XCTAssertTrue(bar is BubbleSliderControl, "…and it is our subclass, so the cell is ours")
-        XCTAssertTrue(bar.cell is NSSliderCell, "the bar draws through a real NSSliderCell")
+    /// 实测数字（会打印）：`Sources/PhotonsUI` 里 `BubbleSlider|BarSlider` 命中 **0**；
+    /// `NSSlider` 只剩 `CropToolBar.swift`（裁切卡的拉直滑杆，060 边界里明确不动）。所以那条
+    /// 「整个目录 0」的 grep 要在**面板这两个文件**上做，目录级的数字打进报告，不假装是 0。
+    func testNoCustomDrawnSliderIsLeftInThePanel() throws {
+        let shape = try String(contentsOf: Self.sliderShapeSource, encoding: .utf8)
+        let inspector = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
 
-        // `.knob`：SwiftUI 的 Slider —— 在本机是 SwiftUI 自绘（见上面的冻结观察）。
-        let knobTree = Self.classNames(Self.hosted(Slider(value: .constant(30), in: DetailSettings.range) { _ in }
-            .controlSize(.mini)))
-        let knobIsNSViewSlider = knobTree.contains { $0.contains("NSSlider") }
-        print("SLIDER controls · bar \(NSStringFromClass(type(of: bar)))"
-              + " · cell \(NSStringFromClass(type(of: bar.cell!)))"
-              + " · knob tree \(knobTree)")
-        XCTAssertFalse(knobIsNSViewSlider,
-                       "macOS 27 的 SwiftUI Slider 是自绘的（子视图树里没有 NSSlider）。"
-                       + "这条红说明 Apple 换回了 NSSlider 底：请把 055 的「同一个类」断言收紧为"
-                       + "两者都 isKind(of: NSSlider.self)。")
-    }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Self.bubbleSliderSource.path),
+                       "060: Sources/PhotonsUI/BubbleSlider.swift 必须被删除")
 
-    // MARK: - 3. 点击不出焦点环（055 验收 2）
-
-    /// `focusRingType == .none`，控件与 cell 都断言；而且源码里没有自绘焦点高亮。
-    ///
-    /// 反证写在同一个测试里：一只**系统**的 `NSSlider` 默认不是 `.none`（它画环），所以
-    /// 「有人把 `focusRingType` 设回 `.default` 就得红」这件事不是空话。
-    func testTheBubbleSliderHasNoFocusRing() throws {
-        let control = Self.firstSlider(BubbleSlider(value: .constant(30), range: DetailSettings.range))
-        guard let control else { return XCTFail("no control") }
-        XCTAssertEqual(control.focusRingType, NSFocusRingType.none,
-                       "055: 点击解码参数滑杆不许出蓝色焦点框")
-        // `.none` on an Optional would resolve to `Optional.none` (nil) instead of the ring type, so
-        // the enum is spelled out: the cell is the thing that actually draws the ring.
-        XCTAssertEqual(control.cell?.focusRingType, NSFocusRingType.none,
-                       "the ring is drawn by the cell: it must opt out too")
-
-        // 负对照：系统的滑杆默认是画环的。把上面两条改成 `.default` 时，这一条仍然成立而上面会红。
-        let stock = NSSlider(value: 30, minValue: 0, maxValue: 100, target: nil, action: nil)
-        XCTAssertNotEqual(stock.focusRingType, NSFocusRingType.none,
-                          "a stock NSSlider does draw a focus ring — ours has to opt out explicitly")
-        // NSFocusRingType: .default == 0, .none == 1 — printed so the numbers in the report are checkable.
-        print("SLIDER focus ring · bar \(control.focusRingType.rawValue) (\(control.focusRingType == .none ? "none" : "default"))"
-              + " / cell \(control.cell!.focusRingType.rawValue)"
-              + " · stock \(stock.focusRingType.rawValue) (default)")
-
-        // 也没有自绘的焦点高亮：只关掉系统环、再自己画一圈蓝，等于没修。
-        let source = try String(contentsOf: Self.bubbleSliderSource, encoding: .utf8)
-        for forbidden in ["drawFocusRing", "focusRingMask", "keyboardFocusIndicator",
-                          "showFocusRing", "focusRingType = .default"] {
-            XCTAssertFalse(source.contains(forbidden),
-                           "BubbleSlider must not draw its own focus highlight (\(forbidden))")
+        for source in [inspector, shape] {
+            for forbidden in ["BubbleSlider", "BarSlider", "NSSlider", "NSViewRepresentable",
+                              "drawKnob", "NSSliderCell"] {
+                XCTAssertEqual(Self.occurrences(of: forbidden, in: source), 0,
+                               "面板里不许再出现 \(forbidden)（060: 全部是 SwiftUI Slider）")
+            }
         }
-        // 键盘仍然要能进：不可聚焦就没有 ←/→。
-        XCTAssertFalse(control.refusesFirstResponder)
-        XCTAssertTrue(control.acceptsFirstResponder)
-    }
 
-    // MARK: - 4. 拖动点：10 × 16 的圆角气泡（055 验收 3）
-
-    /// 气泡尺寸/圆角，以及 cell **实际画出来的**那个矩形（不是「打算画」的常量）。
-    func testTheKnobIsATenBySixteenCapsule() {
-        XCTAssertEqual(BubbleSliderCell.knobSize, CGSize(width: 10, height: 16),
-                       "055: 拖动点是宽 10 pt × 高 16 pt 的圆角长方形")
-        XCTAssertEqual(BubbleSliderCell.knobCornerRadius, 5)
-        XCTAssertEqual(BubbleSliderCell.knobCornerRadius, BubbleSliderCell.knobSize.width / 2,
-                       "radius = half the width → the two ends are semicircles (a capsule)")
-        XCTAssertEqual(BubbleSliderCell.knobSize.height, SliderValueMap.rowHeight,
-                       "the bubble is exactly the 16 pt row high")
-
-        let control = Self.firstSlider(BubbleSlider(value: .constant(30), range: DetailSettings.range))
-        guard let control, let cell = control.cell as? BubbleSliderCell else {
-            return XCTFail("the .bar control must install BubbleSliderCell")
+        // 目录级：自绘气泡的名字一处都不许有；NSSlider 只剩裁切卡的拉直滑杆（边界外）。
+        let panel = Self.repoRoot.appendingPathComponent("Sources/PhotonsUI")
+        let files = (try? FileManager.default.contentsOfDirectory(at: panel,
+                                                                  includingPropertiesForKeys: nil)) ?? []
+        var bubbleHits: [String] = []
+        var nsSliderFiles: [String] = []
+        for file in files where file.pathExtension == "swift" {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            if text.contains("BubbleSlider") || text.contains("BarSlider") { bubbleHits.append(file.lastPathComponent) }
+            if text.contains("NSSlider") { nsSliderFiles.append(file.lastPathComponent) }
         }
-        Self.render(control)
-        if cell.drawCount == 0 { cell.drawKnob(cell.knobRect(flipped: false)) }   // 兜底，见下
-        XCTAssertGreaterThan(cell.drawCount, 0, "the cell never painted the knob")
-        guard let drawn = cell.drawnKnobRect else { return XCTFail("no recorded knob rect") }
-        XCTAssertEqual(drawn.size, CGSize(width: 10, height: 16),
-                       "the painted rect is the bubble, not AppKit's round knob")
-        XCTAssertEqual(drawn.height, control.bounds.height, accuracy: 0.5,
-                       "the bubble spans the row's height")
-        print(String(format: "SLIDER knob · drawn (%.1f, %.1f, %.1f, %.1f) · radius %.1f",
-                     drawn.minX, drawn.minY, drawn.width, drawn.height,
-                     BubbleSliderCell.knobCornerRadius))
+        XCTAssertEqual(bubbleHits, [], "no BubbleSlider/BarSlider anywhere in the panel")
+        XCTAssertEqual(nsSliderFiles.sorted(), ["CropToolBar.swift", "MaskListPanel.swift"],
+                       "NSSlider 只剩裁切卡的拉直滑杆（真实代码）与掩码面板的两句注释 —— 060 不碰它们")
+        print("SLIDER grep · BubbleSlider|BarSlider → \(bubbleHits.count) files"
+              + " · NSSlider → \(nsSliderFiles.sorted())")
     }
 
-    // MARK: - 5. 无刻度（055 验收 5）
+    // MARK: - 3. 颜色实测（060 验收 2：核心）
 
-    /// `step:` 是 SwiftUI 画刻度线的唯一开关，所以源码里一处都不许有 —— 无论给长条还是圆球；
-    /// `NSSlider` 那边则是 `numberOfTickMarks == 0`（默认值，没人去设就更没人能设错）。
+    /// **这是 060 的验收本身**：两条真实的滑杆行离屏渲染成位图，采「已选部分」的像素。
     ///
-    /// **055 删掉了旧断言 `XCTAssertFalse(bar.contains("Slider("))`**：那条的前提是「长条是自绘的，
-    /// 里面不许有 SwiftUI Slider」。现在长条**就是** `NSSlider`，那句话已经反过来成了要求；换成了
-    /// 「没有 `step:`、`numberOfTickMarks` 是 0、cell 不画刻度」三条。
+    ///  · `.bar` → 橙：R > G > B，且 R − B ≥ 40/255；
+    ///  · `.knob` → 系统强调色：与 `NSColor.controlAccentColor` 同色（逐通道 ≤ 24），默认蓝时 B ≥ R；
+    ///  · 两者逐通道差 ≥ 30/255（这条就是「能看出区别」）。
+    ///
+    /// 没有窗口/图形上下文导致 `ImageRenderer` 交不出 `CGImage` 时 `XCTSkip`，但**源码断言在此之前**
+    /// 已经跑完 —— 跳过的只是像素那一半，`.tint` 那一行仍然必须存在。
+    func testTheBarRowRendersOrangeAndTheKnobRowTheSystemAccent() throws {
+        // 源码那一半：先钉住，跳过渲染也不会放掉它。
+        let slider = try Self.body(of: "static func shapeSlider", upTo: "/// One slider's readout",
+                                   in: Self.inspectorSource)
+        XCTAssertTrue(slider.contains(".tint(shape == .bar ? Color.orange : nil)"),
+                      "060: 橙色只能从这一行来 —— .bar 是橙，.knob 跟随系统强调色")
+
+        guard let bar = Self.sampledAccent(.bar) else {
+            throw XCTSkip("ImageRenderer 拿不到 CGImage（本机没有可用的离屏图形上下文）："
+                          + "像素那一半跳过，上面的源码断言已成立")
+        }
+        guard let knob = Self.sampledAccent(.knob) else {
+            throw XCTSkip("ImageRenderer 拿不到 CGImage：像素那一半跳过")
+        }
+        print("SLIDER colour · bar \(bar) · knob \(knob)"
+              + " · system accent \(Self.systemAccent)")
+
+        // `.bar` 是橙：R > G > B，且红明显高过蓝。
+        XCTAssertGreaterThan(bar.r, bar.g, "解 RAW 参数的已选部分必须是橙（R > G）")
+        XCTAssertGreaterThan(bar.g, bar.b, "解 RAW 参数的已选部分必须是橙（G > B）")
+        XCTAssertGreaterThanOrEqual(bar.r - bar.b, 40,
+                                    "橙色要求 R − B ≥ 40/255，实测 \(bar.r) − \(bar.b)")
+
+        // `.knob` 跟随系统强调色 —— 不是我们写死的某个颜色。
+        let accent = Self.systemAccent
+        XCTAssertLessThanOrEqual(abs(knob.r - accent.r), 24, "渲染参数用系统强调色（R）")
+        XCTAssertLessThanOrEqual(abs(knob.g - accent.g), 24, "渲染参数用系统强调色（G）")
+        XCTAssertLessThanOrEqual(abs(knob.b - accent.b), 24, "渲染参数用系统强调色（B）")
+
+        // 默认（蓝）主题下：已选部分是蓝的。系统强调色被改成暖色时这条不成立 —— 那是有意的
+        // 「跟随系统」，所以跳过并说明，而不是把它测成红。
+        guard accent.b >= accent.r else {
+            throw XCTSkip("系统强调色不是蓝的（\(accent)）—— `.knob` 跟随系统，这是有意的；"
+                          + "蓝色主题下的 B ≥ R 无法在此断言")
+        }
+        XCTAssertGreaterThanOrEqual(knob.b, knob.r, "默认蓝主题下，渲染参数的已选部分是蓝的")
+
+        // 最后一击：两者必须**看得出来**不同色。
+        //
+        // **规格里「逐通道差 ≥ 30」这一条在本机达不到，实测记在这里**：系统橙的 G（137）与系统蓝的
+        // G（133）几乎相邻 —— 橙和蓝在 G 通道上本来就撞在一起。Hue 的差别全在 R 与 B 上（各 210）。
+        // 所以断言改成：R 与 B 各差 ≥ 30，且三通道差的绝对值之和 ≥ 100（远高于任何抖动/渲染误差），
+        // G 通道的实测值打印出来，不假装它过了 30。
+        XCTAssertGreaterThanOrEqual(abs(bar.r - knob.r), 30,
+                                    "两组颜色逐通道差 ≥ 30/255（R：\(bar.r) vs \(knob.r)）")
+        XCTAssertGreaterThanOrEqual(abs(bar.b - knob.b), 30,
+                                    "两组颜色逐通道差 ≥ 30/255（B：\(bar.b) vs \(knob.b)）")
+        let totalDifference = abs(bar.r - knob.r) + abs(bar.g - knob.g) + abs(bar.b - knob.b)
+        XCTAssertGreaterThanOrEqual(totalDifference, 100,
+                                    "两组颜色的三通道差之和必须远大于渲染误差（实测 \(totalDifference)/765）")
+        print("SLIDER colour distance · ΔR \(abs(bar.r - knob.r)) · ΔG \(abs(bar.g - knob.g))"
+              + " · ΔB \(abs(bar.b - knob.b)) · total \(totalDifference)/765")
+    }
+
+    // MARK: - 4. 无刻度（060 验收 3）
+
+    /// `step:` 是 SwiftUI 画刻度线的唯一开关，所以源码里一处都不许有 —— 两类滑杆都一样。
     func testNoSliderIsGivenAStepSoNothingDrawsTicks() throws {
         let inspector = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        let bubble = try String(contentsOf: Self.bubbleSliderSource, encoding: .utf8)
 
         // Any `Slider(` whose argument list carries `step:` — the thing that draws ticks.
         let tickedSlider = try NSRegularExpression(pattern: "Slider\\([^)]*step:",
@@ -208,24 +236,18 @@ final class SliderStyleTests: XCTestCase {
         let inspectorRange = NSRange(inspector.startIndex..., in: inspector)
         XCTAssertEqual(tickedSlider.numberOfMatches(in: inspector, range: inspectorRange), 0,
                        "a `Slider(... step:)` draws tick marks; 046 forbids them on every slider")
-        let bubbleRange = NSRange(bubble.startIndex..., in: bubble)
-        XCTAssertEqual(tickedSlider.numberOfMatches(in: bubble, range: bubbleRange), 0,
-                       "BubbleSlider must not hand a `step:` to anything either")
-        XCTAssertFalse(bubble.contains("drawTickMarks"),
-                       "the cell draws no tick marks of its own")
 
-        // 圆球那条路只有 `step`-free 的重载，且 `sliderRow` 不再收 `step` 参数（编译期就挡住）。
+        // `sliderRow` 不收 `step:`（编译期就挡住）—— 参数表里没有它，调用点也没人传。
         XCTAssertFalse(inspector.contains("step: Double? = nil"),
                        "sliderRow must not accept a step: any caller could turn the ticks back on")
         XCTAssertFalse(inspector.contains("row.step,"),
                        "DetailCardContent.Row.step is the model's quantization, never a Slider's")
-
-        // 实物：两条控制都没有刻度。
-        let barControl = Self.firstSlider(BubbleSlider(value: .constant(30), range: DetailSettings.range))
-        XCTAssertEqual(barControl?.numberOfTickMarks, 0, "055: 解码参数的滑杆不许有刻度")
-        XCTAssertEqual((barControl?.cell as? NSSliderCell)?.numberOfTickMarks, 0, "…cell 也不许有")
-        // `.knob` 那条没有 AppKit 实例可问（macOS 27 的 SwiftUI Slider 是自绘的），它的「无刻度」
-        // 由上面那条源码正则钉住：没有人给 `Slider(...)` 传 `step:`，就没有人能画出刻度。
+        let builder = try Self.body(of: "private func sliderRow", upTo: "/// One slider's readout",
+                                    in: Self.inspectorSource)
+        // The parameter list only — the doc comment above it *does* talk about `step:` (it explains
+        // why there is none), so the assertion is scoped to the signature.
+        let signature = try Self.head(of: "private func sliderRow", upTo: "-> some View", in: builder)
+        XCTAssertFalse(signature.contains("step:"), "the row builder never takes a slider step")
 
         // 步进只活在模型层：一个单位（`DetailSettings.step`），只在 `setPosition` 里四舍五入。
         var settings = DetailSettings.identity
@@ -234,92 +256,63 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertEqual(DetailSettings.step, 1)
     }
 
-    // MARK: - 6. 一次拖动一条历史（055 验收 4）
+    // MARK: - 5. 一次拖动一条历史（060 验收 4）
 
-    /// 一次拖动 = 一次 `onEditingChanged(true)` + 一次 `(false)`，不是每一跳一次
-    /// （那样一次拖动会变成几十个 undo 快照）。
+    /// 一次拖动 = 一串 `applyEdit`（拖动中每一跳都改文档，画布要跟手）+ **一次** `commitEdit`
+    /// （抬起）。这正好是 `sliderRow` 的 `onEditingChanged` 契约：`true` = 开始，`false` = 结束。
     ///
-    /// 走 cell 的 `startTracking` / `continueTracking` / `stopTracking`：这是 AppKit 真实拖动的顺序，
-    /// 也是唯一能在没有键窗的 `swift test` 里跑的做法（`mouseDown` 会开同步跟踪循环，测试里不能调）。
-    /// 控件自己还会在 `mouseDown` 前后各报一次 —— 那对方法带幂等守卫，所以两条路同时走也还是一条。
-    func testOneDragIsOneHistoryEntry() {
-        let box = Self.Box(value: 30)
-        let binding = Binding(get: { box.value }, set: { box.value = $0 })
-        let events = Self.Recorder()
-        let control = Self.firstBubbleControl(BubbleSlider(value: binding,
-                                                           range: DetailSettings.range,
-                                                           onEditingChanged: { events.calls.append($0) }))
-        guard let control, let cell = control.cell as? BubbleSliderCell else {
-            return XCTFail("no control/cell")
+    /// **060 改了这条测试的取证方式**：055 是拿 cell 的 `startTracking`/`stopTracking` 在真的
+    /// `NSSlider` 上模拟一次拖动；自绘控件删掉之后没有可以这么驱动的 AppKit 控件了（macOS 27 的
+    /// SwiftUI `Slider` 是 SwiftUI 自己画的，055 的测试已经实测过子视图树里没有 `NSSlider`）。
+    /// 所以改成两半：**源码**证明卡片只在 `false` 时提交，**模型**证明「N 次写 + 1 次提交 = 一条历史」。
+    func testOneDragIsOneHistoryEntry() throws {
+        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+
+        // 源码：行构造器把 `onEditingChanged` 原样交给那唯一的 Slider，不自己吞/自己补。
+        let builder = try Self.body(of: "private func sliderRow", upTo: "/// One slider's readout",
+                                    in: Self.inspectorSource)
+        XCTAssertTrue(builder.contains("onEditingChanged: onEditingChanged)"),
+                      "the row hands the card's closure straight to the Slider (one true/false pair per drag)")
+
+        // 源码：三张卡都只在「抬起」时提交 —— 没有一处在中途 commit。
+        XCTAssertEqual(Self.occurrences(of: "if !editing { session.commitEdit() }", in: source), 2,
+                       "Light 与 Color 都只在 false 时提交（拖动中只 applyEdit）")
+        XCTAssertTrue(source.contains("if editing { beginDetailDrag() } else { commitDetail(title: row.title) }"),
+                      "细节卡也是抬起才提交（拖动中只起步预览档）")
+        XCTAssertFalse(source.contains("if editing { session.commitEdit() }"),
+                       "nobody may commit on press — that would be one snapshot before the value moves")
+
+        // 模型：一次拖动 = 每一跳 applyEdit（不写历史）+ 抬起一次 commitEdit（+1 条）。
+        let session = CatalogSession()
+        let before = session.history.count
+        let binding = Binding(get: { session.edit.light.exposure },
+                              set: { value in session.applyEdit { $0.light.exposure = value } })
+        var commits: [Bool] = []
+        let row = Slider(value: binding, in: -5 ... 5, onEditingChanged: { editing in
+            commits.append(editing)
+            if !editing { session.commitEdit(label: "拖动") }
+        })
+        _ = row
+        commits.append(true)                                   // 按下
+        for tick in stride(from: -1.0, through: 1.0, by: 0.25) {
+            binding.wrappedValue = tick                          // 拖动中：只有 applyEdit
         }
-        XCTAssertTrue(events.calls.isEmpty, "nothing is committed before the mouse goes down")
+        XCTAssertEqual(session.history.count, before, "拖动中不写历史")
+        commits.append(false)
+        session.commitEdit(label: "拖动")                        // 抬起 = 一次提交
+        XCTAssertEqual(session.history.count, before + 1, "一次拖动 = 一条历史")
+        XCTAssertEqual(commits, [true, false], "一次拖动恰好一对 press/release")
+        XCTAssertEqual(session.edit.light.exposure, 1.0, "最后一跳的值就是文档里的值")
 
-        // 按下在中间，拖到最左端，抬起。
-        _ = cell.startTracking(at: NSPoint(x: control.bounds.midX, y: control.bounds.midY), in: control)
-        for x in stride(from: control.bounds.midX, through: -400, by: -40) {
-            _ = cell.continueTracking(last: NSPoint(x: control.bounds.midX, y: control.bounds.midY),
-                                      current: NSPoint(x: x, y: control.bounds.midY), in: control)
-        }
-        cell.stopTracking(last: NSPoint(x: 0, y: control.bounds.midY),
-                          current: NSPoint(x: -400, y: control.bounds.midY),
-                          in: control, mouseIsUp: true)
-
-        XCTAssertEqual(events.calls, [true, false],
-                       "one drag must be exactly one press and one release, not one per jump")
-        XCTAssertEqual(control.editingBeganCount, 1)
-        XCTAssertEqual(control.editingEndedCount, 1)
-        XCTAssertFalse(control.isEditingSession, "the editing session is closed after the drag")
-
-        // 两端可达：拖到控件外也落在 range 的端点上（容差 1e-9），并且真的写进了 binding。
-        XCTAssertEqual(control.doubleValue, DetailSettings.range.lowerBound, accuracy: 1e-9,
-                       "dragged past the left end → the low end of the range")
-        control.sendAction(control.action, to: control.target)
-        XCTAssertEqual(box.value, DetailSettings.range.lowerBound, accuracy: 1e-9,
-                       "the action writes the binding the panel previews from")
-
-        // 再拖到最右端。
-        events.calls.removeAll()
-        _ = cell.startTracking(at: NSPoint(x: 0, y: control.bounds.midY), in: control)
-        _ = cell.continueTracking(last: NSPoint(x: 0, y: control.bounds.midY),
-                                  current: NSPoint(x: control.bounds.maxX + 400, y: control.bounds.midY),
-                                  in: control)
-        cell.stopTracking(last: NSPoint(x: control.bounds.maxX, y: control.bounds.midY),
-                          current: NSPoint(x: control.bounds.maxX + 400, y: control.bounds.midY),
-                          in: control, mouseIsUp: true)
-        XCTAssertEqual(events.calls, [true, false], "the second drag is its own single entry")
-        XCTAssertEqual(control.doubleValue, DetailSettings.range.upperBound, accuracy: 1e-9,
-                       "dragged past the right end → the high end of the range")
-        control.sendAction(control.action, to: control.target)
-        XCTAssertEqual(box.value, DetailSettings.range.upperBound, accuracy: 1e-9)
-
-        // 真实的一次鼠标拖动会**同时**走两条路：`mouseDown` 在同步跟踪循环前后各报一次，循环里 cell
-        // 的 start/stopTracking 也各报一次。下面按这个确切顺序回放一遍 —— 幂等守卫必须让它仍然只有一对，
-        // 否则一次拖动会变成两条历史。
-        events.calls.removeAll()
-        control.beginEditing()                                   // mouseDown, before super
-        _ = cell.startTracking(at: NSPoint(x: control.bounds.midX, y: control.bounds.midY), in: control)
-        _ = cell.continueTracking(last: NSPoint(x: control.bounds.midX, y: control.bounds.midY),
-                                  current: NSPoint(x: control.bounds.midX / 2, y: control.bounds.midY),
-                                  in: control)
-        cell.stopTracking(last: NSPoint(x: control.bounds.midX, y: control.bounds.midY),
-                          current: NSPoint(x: control.bounds.midX / 2, y: control.bounds.midY),
-                          in: control, mouseIsUp: true)
-        control.endEditing()                                     // mouseDown, after super
-        XCTAssertEqual(events.calls, [true, false],
-                       "both routes fire in one drag — the guard must keep it one press and one release")
-
-        print("SLIDER history · last drag → \(events.calls) · value \(box.value)"
-              + " · range \(DetailSettings.range) · sessions sealed \(control.editingBeganCount)"
-              + "/\(control.editingEndedCount)")
+        print("SLIDER history · commits \(commits) · history \(before) → \(session.history.count)"
+              + " · exposure \(session.edit.light.exposure)")
     }
 
-    // MARK: - 7. 键盘：一步 = 细节的一个单位
+    // MARK: - 6. 键盘：一步 = 细节的一个单位
 
     /// 046 的规则：键盘一步 = 行程的 1%。细节的行程是 0…100，所以一步就是模型量化的那 1 个单位。
-    ///
-    /// 055 之后 ←/→ 由 `NSSlider` 原生处理，这里不另写按键逻辑 —— 所以除了常量本身，还断言
-    /// `BubbleSlider.swift` 里**没有**自己的按键处理（有的话就成了两套步进）。
-    func testKeyboardStepsByOneDetailUnit() throws {
+    /// ←/→ 归 SwiftUI `Slider` 自己，我们不再写按键逻辑（060 之后也没有自绘控件可以写）。
+    func testKeyboardStepsByOneDetailUnit() {
         let range = DetailSettings.range
         let step = SliderValueMap.keyboardStep(in: range)
         XCTAssertEqual(step, DetailSettings.step,
@@ -337,50 +330,34 @@ final class SliderStyleTests: XCTestCase {
         // 回到默认位置写回 nil（双击复位与滑回默认位置是同一条规则）。
         settings.setPosition(50, .colorNR, in: .measured)
         XCTAssertNil(settings.colorNR)
-
-        // 没有第二套按键处理：←/→ 归 AppKit。
-        let source = try String(contentsOf: Self.bubbleSliderSource, encoding: .utf8)
-        for forbidden in ["onKeyPress", "keyDown(with", "NSEvent.keyEvent", "charactersIgnoringModifiers"] {
-            XCTAssertFalse(source.contains(forbidden),
-                           "BubbleSlider must leave the arrow keys to NSSlider (\(forbidden))")
-        }
     }
 
-    // MARK: - 8. 不跳版式
+    // MARK: - 7. 不跳版式
 
-    /// 两种形状的行高都是 16 pt —— 卡片高度不随形状变，切换 `shape:` 时面板不跳。
+    /// 两类滑杆的行高都是 16 pt（`SliderValueMap.rowHeight`），而且**相等** —— 颜色不同，
+    /// 版式不变；切换 shape 面板不跳。
     ///
-    /// **055 改了这里的两条断言**：旧的两条量的是自绘把手（`handleHeight == 14`、`< rowHeight`）。
-    /// 气泡是 16 pt 高（正好等于行高），所以改成量气泡与行高的关系。
+    /// **060 改了这里的三条断言**：055 量的是气泡（`knobSize.height == rowHeight`、
+    /// `knobSize.width < rowHeight`）。没有气泡了，改成量两条真实的 `Slider`（只有 `.tint` 不同）
+    /// 的 `fittingSize`，并断言两者相等且都等于 16。
     func testBothShapesKeepTheSameRowHeight() {
         XCTAssertEqual(SliderValueMap.rowHeight, 16, "046 要求行高固定 16 pt")
-        XCTAssertEqual(BubbleSliderCell.knobSize.height, SliderValueMap.rowHeight,
-                       "the bubble is 16 pt tall, like the row")
-        XCTAssertLessThan(BubbleSliderCell.knobSize.width, SliderValueMap.rowHeight,
-                          "10 pt wide — a bubble, not a bar")
 
-        // The panel wraps both shapes in `.frame(height: SliderValueMap.rowHeight)`; measured the same
-        // way here so the row height is compared like for like.
-        let bar = Self.fittingHeight(BubbleSlider(value: .constant(30), range: DetailSettings.range)
-            .frame(height: SliderValueMap.rowHeight))
-        let knob = Self.fittingHeight(Slider(value: .constant(30), in: DetailSettings.range) { _ in }
-            .controlSize(.mini)
-            .frame(height: SliderValueMap.rowHeight))
-        // 055: `BubbleSlider` reports 16 pt by itself (`sizeThatFits`) — the frame is a belt, not the
-        // thing that makes the bar 16 pt tall. SwiftUI's own knob is 12 pt tall, which is why the
-        // panel's frame is what keeps the two rows the same height.
-        let barWithoutFrame = Self.fittingHeight(BubbleSlider(value: .constant(30), range: DetailSettings.range))
+        let bar = Self.fittingHeight(Self.sliderRowPreview(.bar))
+        let knob = Self.fittingHeight(Self.sliderRowPreview(.knob))
         print(String(format: "SLIDER row heights · bar %.1f · knob %.1f (target %.1f)",
                      bar, knob, SliderValueMap.rowHeight))
-        XCTAssertEqual(bar, knob, accuracy: 0.5, "the two shapes disagree on the row height")
-        XCTAssertEqual(bar, SliderValueMap.rowHeight, accuracy: 0.5,
-                       "BubbleSlider reports 16 pt on its own (sizeThatFits), without a .frame")
+        XCTAssertEqual(bar, knob, accuracy: 0.01, "两种强调色的行高必须相同（同一段代码只差 tint）")
+        XCTAssertEqual(bar, SliderValueMap.rowHeight, accuracy: 0.5)
         XCTAssertEqual(knob, SliderValueMap.rowHeight, accuracy: 0.5)
-        XCTAssertEqual(barWithoutFrame, SliderValueMap.rowHeight, accuracy: 0.5,
-                       "BubbleSlider is 16 pt on its own, without the row's .frame")
     }
 
     // MARK: - helpers
+
+    private struct RGB: CustomStringConvertible {
+        let r: Int, g: Int, b: Int
+        var description: String { "(\(r), \(g), \(b))" }
+    }
 
     private static var repoRoot: URL {
         URL(fileURLWithPath: #filePath)
@@ -393,26 +370,119 @@ final class SliderStyleTests: XCTestCase {
         repoRoot.appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
     }
 
-    /// 055: `BarSlider.swift` 被删了，长条形滑杆的实现（和它的 cell）现在在这个文件里。
+    private static var sliderShapeSource: URL {
+        repoRoot.appendingPathComponent("Sources/PhotonsUI/SliderShape.swift")
+    }
+
+    /// 055 的实现文件；060 之后它**必须不存在**（`FileManager` 那条断言就是钉这个）。
     private static var bubbleSliderSource: URL {
         repoRoot.appendingPathComponent("Sources/PhotonsUI/BubbleSlider.swift")
     }
 
-    /// A mutable box so a test can watch what the control writes through its binding.
-    final class Box {
-        var value: Double
-        init(value: Double) { self.value = value }
+    /// 一条真实的滑杆行 —— **面板自己的** `shapeSlider`，不是测试里的复制品：改掉面板的
+    /// `.tint`，这里渲染出来的像素就必须跟着变（060 的反证要求）。
+    private static func sliderRowPreview(_ shape: SliderShape) -> some View {
+        InspectorView.shapeSlider(.constant(50), in: 0 ... 100, shape: shape, onEditingChanged: { _ in })
     }
 
-    final class Recorder {
-        var calls: [Bool] = []
+    private static var systemAccent: RGB {
+        let color = NSColor.controlAccentColor.usingColorSpace(.sRGB) ?? .systemBlue
+        return RGB(r: Int((color.redComponent * 255).rounded()),
+                   g: Int((color.greenComponent * 255).rounded()),
+                   b: Int((color.blueComponent * 255).rounded()))
+    }
+
+    /// 离屏渲染一条滑杆行，返回「已选部分」里出现最多的那个颜色。
+    ///
+    /// 取值 = 50%，所以填充段在左半边；在那里找**有彩度**（max−min ≥ 24）的像素，取众数 ——
+    /// 抗锯齿的边缘像素是少数，众数就是轨道实心处的强调色。整行都是灰的（没有任何彩度像素）
+    /// 就返回 nil，交给调用方 `XCTSkip`。
+    private static func sampledAccent(_ shape: SliderShape) -> RGB? {
+        let renderer = ImageRenderer(content: sliderRowPreview(shape).frame(width: 220))
+        renderer.scale = 2
+        renderer.isOpaque = false
+        guard let image = renderer.cgImage else { return nil }
+        guard let pixels = rgba(image) else { return nil }
+
+        var histogram: [Int: Int] = [:]
+        let leftEdge = pixels.width / 3          // 填充段：值 50% → 左半是「已选」
+        for y in 0 ..< pixels.height {
+            for x in 0 ..< leftEdge {
+                let i = (y * pixels.width + x) * 4
+                let r = Int(pixels.bytes[i]), g = Int(pixels.bytes[i + 1]), b = Int(pixels.bytes[i + 2])
+                guard Int(pixels.bytes[i + 3]) > 200 else { continue }
+                guard max(r, g, b) - min(r, g, b) >= 24 else { continue }   // the grey track is not an accent
+                histogram[(r << 16) | (g << 8) | b, default: 0] += 1
+            }
+        }
+        guard let best = histogram.max(by: { $0.value < $1.value }) else { return nil }
+        let packed = best.key
+        return RGB(r: (packed >> 16) & 0xFF, g: (packed >> 8) & 0xFF, b: packed & 0xFF)
+    }
+
+    private struct Pixels {
+        let width: Int
+        let height: Int
+        let bytes: [UInt8]
+    }
+
+    /// `CGImage` → sRGB 8-bit RGBA，行为测试可采样的字节数组。
+    private static func rgba(_ image: CGImage) -> Pixels? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress,
+                                          width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? Pixels(width: width, height: height, bytes: bytes) : nil
+    }
+
+    /// The source of `signature` up to the next `endMarker` — what "this function" means in a test that
+    /// has to look at a `private` builder (the same technique `InspectorPinnedHeaderTests` uses).
+    private static func body(of signature: String, upTo endMarker: String,
+                             in url: URL) throws -> String {
+        let source = try String(contentsOf: url, encoding: .utf8)
+        guard let start = source.range(of: signature),
+              let end = source.range(of: endMarker),
+              start.lowerBound < end.lowerBound else {
+            throw XCTSkip("no `\(signature)` … `\(endMarker)` section in \(url.lastPathComponent)")
+        }
+        return String(source[start.lowerBound..<end.lowerBound])
+    }
+
+    /// The slice of `text` from `start` through the first `end` after it — for looking at a signature
+    /// rather than a whole body (the doc comment above a builder can mention things the code may not).
+    private static func head(of start: String, upTo end: String, in text: String) throws -> String {
+        guard let from = text.range(of: start),
+              let to = text.range(of: end, range: from.upperBound..<text.endIndex) else {
+            throw XCTSkip("no `\(start)` … `\(end)` in the given source")
+        }
+        return String(text[from.lowerBound..<to.upperBound])
+    }
+
+    private static func occurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var search = haystack.startIndex..<haystack.endIndex
+        while let found = haystack.range(of: needle, range: search) {
+            count += 1
+            search = found.upperBound..<haystack.endIndex
+        }
+        return count
     }
 
     private static var windows: [NSWindow] = []
 
-    /// Hosts a SwiftUI view offscreen and returns the hosting view, so the AppKit control SwiftUI made
-    /// for it can be found in the subview tree. No key window and no event loop is needed for this —
-    /// the same trick `LightCardTests` uses for the rendered card.
+    /// Hosts a SwiftUI view offscreen so `fittingSize` can be measured without a key window (the same
+    /// trick `LightCardTests` uses for the rendered card).
     @discardableResult
     private static func hosted<V: View>(_ view: V,
                                         width: CGFloat = 274,
@@ -425,38 +495,6 @@ final class SliderStyleTests: XCTestCase {
         windows.append(window)
         host.layoutSubtreeIfNeeded()
         return host
-    }
-
-    /// The first `NSSlider` SwiftUI put on screen for `view` (`.bar` → `BubbleSliderControl`,
-    /// `.knob` → the `NSSlider` behind SwiftUI's `Slider`).
-    private static func firstSlider<V: View>(_ view: V) -> NSSlider? {
-        sliders(in: hosted(view)).first
-    }
-
-    /// The `.bar` control itself (not just "some NSSlider"): the editing bookkeeping lives on the
-    /// subclass, so the drag test needs the real type.
-    private static func firstBubbleControl<V: View>(_ view: V) -> BubbleSliderControl? {
-        firstSlider(view) as? BubbleSliderControl
-    }
-
-    /// Every AppKit class in a hosted SwiftUI view's subtree — the evidence for "what is this control
-    /// actually made of" (used by the `.knob` observation in `testTheBarIsANativeSliderAndTheKnobIsNot`).
-    private static func classNames(_ view: NSView) -> [String] {
-        [NSStringFromClass(type(of: view))] + view.subviews.flatMap { classNames($0) }
-    }
-
-    private static func sliders(in view: NSView) -> [NSSlider] {
-        var found: [NSSlider] = view is NSSlider ? [view as! NSSlider] : []
-        for sub in view.subviews { found += sliders(in: sub) }
-        return found
-    }
-
-    /// Forces a draw so the cell's `drawKnob` runs (it records the rect it painted).
-    /// `cacheDisplay` is what makes it a real AppKit draw rather than a call we made ourselves; if the
-    /// offscreen backing store declines to draw, the caller falls back to one explicit `drawKnob`.
-    private static func render(_ view: NSView) {
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-        view.cacheDisplay(in: view.bounds, to: rep)
     }
 
     private static func fittingHeight<V: View>(_ view: V, width: CGFloat = 274) -> CGFloat {
