@@ -78,6 +78,18 @@ public struct LinearSample: Sendable {
     }
 
     public var size: ImageSize { ImageSize(width: width, height: height) }
+
+    /// One texel's scene-linear RGB, or `nil` when the index is outside the grid.
+    ///
+    /// The pointer's readout reads here (`PointerPixel(linearRed:…)`): the grid is the measurement's own
+    /// input, so the number under the cursor and the bin the plot drew come from one place. Values above
+    /// 1 are legal and are the reason the row has a `+x.x` form at all.
+    public func texel(x: Int, y: Int) -> (red: Float, green: Float, blue: Float)? {
+        guard x >= 0, y >= 0, x < width, y < height else { return nil }
+        let i = (y * width + x) * 4
+        guard i >= 0, i + 3 < rgba.count else { return nil }
+        return (Float(rgba[i]), Float(rgba[i + 1]), Float(rgba[i + 2]))
+    }
 }
 
 /// One channel's distribution plus the three ratios that make it actionable.

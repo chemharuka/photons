@@ -459,6 +459,14 @@ public final class LoupeController: NSViewController {
         /// Clipped-pixel grid (the highlight warning's input), when the warning was armed. `nil`
         /// otherwise — the readback only happens when someone is looking at it.
         public let clipped: ClippedGrid?
+        /// The **scene-linear sample the histogram was counted from** (2026-10-27), i.e. the picture's
+        /// pixels before S4 at the measurement's ≤ 256-long-edge lattice. The pointer's readout reads
+        /// this instead of `texture`, because `texture` is S4's output and S4 is
+        /// `encode(min(v, headroom))`: on this panel everything above +1.98 stop left the frame as
+        /// white. `nil` when no grid was asked for (nobody is reading the pointer, or the render had no
+        /// picture rect), in which case the readout falls back to `texture` and says so
+        /// (`PointerPixel.source`).
+        public let sceneLinearSample: LinearSample?
     }
 
     /// One frame's cost, in milliseconds, as measured on the render queue.
@@ -1938,14 +1946,31 @@ public final class LoupeController: NSViewController {
     public private(set) var pointerCanvasPoint: CGPoint?
     /// The pixel the row is currently reporting, `nil` when nothing is painted.
     public private(set) var pointerReadout: PointerPixel?
+    /// Which source the current reading came from — the readback the acceptance numbers are about
+    /// (`sceneLinear` in the app; `presented` only when the frame carried no measurement grid).
+    public private(set) var pointerReadoutSource: PointerSampleSource?
     /// How many 1×1 texture readbacks the pointer has cost. The throttle is asserted from this number:
     /// a still pointer must not read, and 100 moves must not read 100 times.
     public private(set) var pointerReadbackCount = 0
     /// Where the reading is published (the histogram card). `weak`: a rebuilt inspector releases the
     /// old card, and the loupe must not write into it.
     public weak var pointerReadoutTarget: (any PointerReadoutTarget)? {
-        didSet { publishPointerReadout() }
+        didSet {
+            // A plain bool mirror, because the decision is made on the **render** queue and a weak
+            // reference may not be loaded from there: `makeFrame` reads this flag, main writes it here.
+            pointerReadoutWanted = pointerReadoutTarget != nil
+            publishPointerReadout()
+            // A card that appears after the picture did needs a frame that **carries the sample**: the
+            // frames rendered before it existed asked for no grid, and without this the row would keep
+            // reading S4's clamped white until some unrelated render happened. One extra frame, once.
+            if pointerReadoutTarget != nil, let frame = lastFrame, frame.sceneLinearSample == nil {
+                scheduleRender()
+            }
+        }
     }
+    /// Does anyone want a pointer reading? Main-thread written, render-queue read (see above). It is
+    /// what asks a frame for the scene-linear sample even when the frame measures nothing.
+    private var pointerReadoutWanted = false
 
     /// Which frame the last readback was taken from, and from which texel — together they are the
     /// throttle: the same texel of the same frame is never read twice.
@@ -1995,15 +2020,24 @@ public final class LoupeController: NSViewController {
     /// **only when the answer can have changed** — a different texel, or a different frame. A resting
     /// pointer and a stream of move events in the same pixel both cost nothing, which is what keeps the
     /// readout off the frame-time budget.
+    ///
+    /// **What is read** (2026-10-27): the frame's `sceneLinearSample` — the measurement's own grid, the
+    /// pixels the plot counted, before S4 — mapped through `PointerSampleLattice`. That is the fix for
+    /// the owner's 「上限就是屏幕亮度」: the presented frame is `encode(min(v, headroom))`, so a pixel
+    /// the picture holds at +2.3 stops is white in it and can never print `+2.3`. Only a frame with no
+    /// grid (nobody reading, or a render without a picture rect) falls back to the frame texture, and the
+    /// resulting pixel says `source == .presented` so the two can never be confused.
     private func refreshPointerReadout() {
         guard let point = pointerCanvasPoint, let frame = lastFrame else {
             pointerReadoutTarget?.clearPointerReadout()
             pointerReadout = nil
+            pointerReadoutSource = nil
             return
         }
         guard let texel = textureTexel(forViewPoint: point) else {
             pointerReadoutTarget?.clearPointerReadout()
             pointerReadout = nil
+            pointerReadoutSource = nil
             return
         }
         if pointerSampleFrame == frameSerial, let last = pointerSampleTexel,
@@ -2014,13 +2048,15 @@ public final class LoupeController: NSViewController {
         pointerSampleFrame = frameSerial
         pointerSampleTexel = texel
         pointerReadbackCount += 1
-        guard let pixel = Self.sample(frame.texture, x: texel.x, y: texel.y,
-                                      histogram: lastHistogram) else {
+        let pixel = Self.sample(frame, x: texel.x, y: texel.y, histogram: lastHistogram)
+        guard let pixel else {
             pointerReadout = nil
+            pointerReadoutSource = nil
             pointerReadoutTarget?.clearPointerReadout()
             return
         }
         pointerReadout = pixel
+        pointerReadoutSource = pixel.source
         pointerReadoutTarget?.showPointerReadout(pixel)
     }
 
@@ -2051,11 +2087,33 @@ public final class LoupeController: NSViewController {
                 y: min(frame.texture.height - 1, max(0, Int(ty))))
     }
 
-    /// One texel of an rgba16f frame, as a `PointerPixel`.
+    /// One texel of a frame, as a `PointerPixel` — **the scene-linear grid when the frame has one**,
+    /// the presented texture otherwise.
+    ///
+    /// This is the shipped entry point (`refreshPointerReadout`). The grid is the histogram's own
+    /// sample, so the reading is the light the *picture* holds — `+2.3` on a panel that renders it as
+    /// white — and the frame texture is only the fallback for a frame that carried no grid.
+    /// Static and public so the tests can call it on a frame they built themselves, and assert which
+    /// source answered (`PointerPixel.source`).
+    public static func sample(_ frame: FrameResult, x: Int, y: Int,
+                              histogram: Histogram?) -> PointerPixel? {
+        if let grid = frame.sceneLinearSample {
+            let lattice = PointerSampleLattice(picture: frame.photoRect, grid: grid.size)
+            let cell = lattice.gridTexel(forTextureX: x, y: y)
+            if let texel = grid.texel(x: cell.x, y: cell.y) {
+                return PointerPixel(linearRed: texel.red, green: texel.green, blue: texel.blue,
+                                    histogram: histogram)
+            }
+        }
+        return sample(frame.texture, x: x, y: y, histogram: histogram)
+    }
+
+    /// One texel of an rgba16f **presented** frame, as a `PointerPixel` — the fallback path.
     ///
     /// Static and public so the tests can call it on a texture they built themselves — the acceptance
     /// test reads the same texel a second way and compares, which is only meaningful if both sides are
-    /// the same code path.
+    /// the same code path. What it cannot do is recover light above the panel's headroom: S4 already
+    /// clamped it, which is why the frame path also carries the scene-linear grid.
     public static func sample(_ texture: MTLTexture, x: Int, y: Int,
                               histogram: Histogram?) -> PointerPixel? {
         guard texture.pixelFormat == .rgba16Float,
@@ -3995,6 +4053,12 @@ public final class LoupeController: NSViewController {
         let measureHistogram = wantsHistogramMeasurement(edit: model, identity: cacheIdentity,
                                                         fallbackScale: decodeScale,
                                                         coverage: coverage)
+        // 2026-10-27 — the pointer's readout rides the same stride sample the histogram is counted
+        // from, so a frame that measures also answers "what is under the cursor" and costs nothing
+        // extra. A frame that measures *nothing* (a pan, a zoom) still has a pointer over it, so it
+        // asks for the sample alone: the plot stays put (no payload is published) while the row follows
+        // the pixels that just moved under the cursor.
+        let wantsPointerSample = pointerReadoutWanted
         let result = try graph.render(model, options: RenderOptions(
             canvas: viewport,
             scale: scale,
@@ -4003,7 +4067,8 @@ public final class LoupeController: NSViewController {
             useCache: true,
             wantsPixels: false,
             collectHistogram: measureHistogram,
-            histogramSampleLongEdge: measureHistogram ? Histogram.frameSampleLongEdge : 0))
+            histogramSampleLongEdge: (measureHistogram || wantsPointerSample)
+                ? Histogram.frameSampleLongEdge : 0))
         let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
         guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
         // The histogram, out of the same render: `result.histogram` is measured on the **scene-linear**
@@ -4027,7 +4092,7 @@ public final class LoupeController: NSViewController {
                            capabilities: decodedCaps, primaries: primaries,
                            editRevision: session?.editRevision ?? 0, displayHash: hash,
                            zoom: projected.zoom(of: state), headroom: ceiling, window: window,
-                           clipped: clipped)
+                           clipped: clipped, sceneLinearSample: result.histogramSample)
     }
 
     /// SHA-256 of an rgba16f texture's bytes, taken while it is still out of the pool.
@@ -4537,6 +4602,11 @@ public final class LoupeController: NSViewController {
         }
         lastFrame = frame
         lastPresentError = nil
+        // A new frame is a new answer for the pixel under the pointer, and since 2026-10-27 it is also
+        // a new `sceneLinearSample`: the row must follow the picture without waiting for the next mouse
+        // move, or a pan would leave the previous frame's numbers on screen while the pixels move under
+        // a still cursor. The (frame, texel) throttle makes this one read per frame.
+        if pointerCanvasPoint != nil { refreshPointerReadout() }
         recordMeasurements(frame)
         lastTimings = FrameTimings(decode: frame.decodeMilliseconds,
                                    render: frame.renderMilliseconds,

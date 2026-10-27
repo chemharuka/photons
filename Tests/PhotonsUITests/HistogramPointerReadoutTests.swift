@@ -137,15 +137,25 @@ final class HistogramPointerReadoutTests: XCTestCase {
 
     // MARK: - ① the number is the pixel's
 
-    /// The pixel under the pointer, through the whole shipped path: tracking point → texel → 1×1
-    /// readback → histogram axis → the card's row. The expectation is computed **independently**, from
-    /// a second readback of the same texel, so a formatter that agrees with itself cannot pass.
+    /// The pixel under the pointer, through the whole shipped path: tracking point → the frame's
+    /// **scene-linear sample grid** → the card's row. The expectation is computed **independently**, from
+    /// the same grid texel read with this file's own stride arithmetic, so a formatter that agrees with
+    /// itself cannot pass.
+    ///
+    /// 2026-10-27 — the source changed. It used to be the presented frame (`lastFrame.texture`), which S4
+    /// has already clamped at the panel's headroom; `HistogramOverWhiteReadoutTests` is where that
+    /// difference is measured (one pixel: `255` there, `+2.3` here).
     func testTheRowReportsThePixelUnderThePointer() throws {
         let url = try rawFixture()
         let controller = makeLoupe(url: url, identity: "pointer-pixel")
         let card = drawnCard(width: cardWidth, histogram: knownCounts())
         controller.pointerReadoutTarget = card
+        // The card appearing after the picture is what asks the next frame for a sample grid.
+        XCTAssertTrue(waitFor { controller.lastFrame?.sceneLinearSample != nil },
+                      "帧没带上 scene-linear 采样网格")
+        pump(0.05)
         let frame = try XCTUnwrap(controller.lastFrame)
+        let grid = try XCTUnwrap(frame.sceneLinearSample)
         let hist = knownCounts()
         let k = Double(controller.canvasView.window?.backingScaleFactor ?? 2)
 
@@ -154,18 +164,18 @@ final class HistogramPointerReadoutTests: XCTestCase {
         for point in points {
             controller.pointerMoved(to: point)
             let texel = try XCTUnwrap(controller.textureTexel(forViewPoint: point))
-            // The independent readback: the same texel, straight off the texture.
-            var raw = [UInt16](repeating: 0, count: 4)
-            raw.withUnsafeMutableBytes { buffer in
-                frame.texture.getBytes(buffer.baseAddress!,
-                                       bytesPerRow: 4 * MemoryLayout<UInt16>.size,
-                                       from: MTLRegionMake2D(texel.x, texel.y, 1, 1),
-                                       mipmapLevel: 0)
-            }
-            func channel(_ i: Int) -> Float { Float(Float16(bitPattern: raw[i])) }
-            let linear = Double(Float(Histogram.lumaWeights.r) * Histogram.srgbDecode(channel(0))
-                                + Float(Histogram.lumaWeights.g) * Histogram.srgbDecode(channel(1))
-                                + Float(Histogram.lumaWeights.b) * Histogram.srgbDecode(channel(2)))
+            // The independent readback: the same grid cell, straight off the `LinearSample`.
+            let stepX = Double(frame.photoRect.width) / Double(grid.size.width)
+            let stepY = Double(frame.photoRect.height) / Double(grid.size.height)
+            let cx = min(grid.size.width - 1,
+                         max(0, Int((Double(texel.x - frame.photoRect.x) + 0.5) / stepX)))
+            let cy = min(grid.size.height - 1,
+                         max(0, Int((Double(texel.y - frame.photoRect.y) + 0.5) / stepY)))
+            let raw = try XCTUnwrap(grid.texel(x: cx, y: cy))
+            func channel(_ i: Int) -> Float { i == 0 ? raw.red : (i == 1 ? raw.green : raw.blue) }
+            let linear = Double(Float(Histogram.lumaWeights.r) * raw.red
+                                + Float(Histogram.lumaWeights.g) * raw.green
+                                + Float(Histogram.lumaWeights.b) * raw.blue)
             let expected: String
             if linear > 1 {
                 expected = String(format: "%+.1f", log2(linear))
@@ -174,34 +184,32 @@ final class HistogramPointerReadoutTests: XCTestCase {
             }
 
             let pixel = try XCTUnwrap(controller.pointerReadout)
+            XCTAssertEqual(pixel.source, .sceneLinear, "读数来自 measurement 的 scene-linear 网格")
             render(card)
             // 023 deleted the brightness row (「不需要亮度信息了，只要 RGB 值」), so the row paints the
             // pixel's **channels** and nothing else. The brightness is still computed — and this asserts it
-            // is still *this* texel's — but it is no longer painted: the readout state is idle and nothing
-            // bare-numbered reaches the row. The "the number is the pixel's" claim is carried by the three
-            // channels below (also computed from the texture, not from the card).
+            // is still *this* pixel's — but it is no longer painted.
             XCTAssertEqual(pixel.level.text, expected,
-                           "texel (\(texel.x), \(texel.y)) at \(point)：亮度仍是这颗 texel 的（只是不再显示）")
+                           "grid cell (\(cx), \(cy)) at \(point)：亮度仍是这颗像素的（只是不再显示）")
             XCTAssertEqual(card.readoutState, .idle, ".image 已删除：指针在画面上时读数态是 idle")
             XCTAssertEqual(card.hoverCountText, "", "指针在画面上不显示计数")
             XCTAssertTrue(card.readoutValueTexts.isEmpty, "没有任何裸数字被画到这一行上")
-            // The channel row: the same texel, each channel on its own axis (a code, or +x.x above
-            // display white) — computed here from the texture, not from the card's own arithmetic.
+            // The channel row: the same pixel, each channel on its own axis (a code, or +x.x above
+            // display white) — computed here from the grid, not from the card's own arithmetic.
             let expectedChannels = [channel(0), channel(1), channel(2)].map { c -> String in
-                let linear = Histogram.srgbDecode(c)
-                if linear > 1 { return String(format: "%+.1f", log2(Double(linear))) }
-                let code = (Double(Histogram.srgbEncode(Float(max(linear, 0)))) * 255).rounded()
+                if c > 1 { return String(format: "%+.1f", log2(Double(c))) }
+                let code = (Double(Histogram.srgbEncode(Float(max(c, 0)))) * 255).rounded()
                 return "\(min(255, max(0, Int(code))))"
             }
             XCTAssertEqual(card.channelRowText,
                            "R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])",
-                           "texel (\(texel.x), \(texel.y)): 通道行就是这颗像素的三通道值")
+                           "grid cell (\(cx), \(cy)): 通道行就是这颗像素的三通道值")
             XCTAssertEqual(card.channelRowValues, expectedChannels)
             XCTAssertEqual(card.channelRowValues.count, 3)
-            // The same texel, put on the axis by the *same* rule but with the test's own histogram:
+            // The same pixel, put on the axis by the *same* rule but with the test's own histogram:
             // the bin index and the counts have to be that histogram's, or the row's numbers would
             // describe a bin the card never drew.
-            let reference = PointerPixel(encodedRed: channel(0), green: channel(1), blue: channel(2),
+            let reference = PointerPixel(linearRed: raw.red, green: raw.green, blue: raw.blue,
                                          histogram: hist)
             XCTAssertEqual(reference.bin, pixel.bin)
             XCTAssertEqual(reference.isTail, pixel.isTail)
@@ -211,10 +219,35 @@ final class HistogramPointerReadoutTests: XCTestCase {
             XCTAssertEqual(counts.green, (reference.isTail ? hist.green.hdrBins : hist.green.bins)[reference.bin])
             XCTAssertEqual(counts.blue, (reference.isTail ? hist.blue.hdrBins : hist.blue.bins)[reference.bin])
             XCTAssertEqual(k, 2, accuracy: 1e-9)
-            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) · linear \(String(format: "%.4f", linear)) · 亮度 “\(pixel.level.text)”（不再显示，expected “\(expected)”） · 通道 “\(card.channelRowText)” (expected “R \(expectedChannels[0]) G \(expectedChannels[1]) B \(expectedChannels[2])”) · bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
+            lines.append("point \(point) → texel (\(texel.x),\(texel.y)) → cell (\(cx),\(cy)) · linear "
+                         + "\(String(format: "%.4f/%.4f/%.4f", raw.red, raw.green, raw.blue)) · 亮度 "
+                         + "“\(pixel.level.text)”（不再显示，expected “\(expected)”） · 通道 "
+                         + "“\(card.channelRowText)” · 墨色 \(card.channelValueColors.map { $0.description }) · "
+                         + "bin \(pixel.bin)\(pixel.isTail ? " (tail)" : "")")
         }
-        print("pointer row vs an independent readback of the same texel:")
+        print("pointer row vs an independent readback of the same scene-linear grid cell:")
         print(lines.map { "        " + $0 }.joined(separator: "\n"))
+    }
+
+    /// The channel inks follow the channels: a code segment is the neutral readout ink, and only an
+    /// over-white segment takes the clipping mark — never the other way round.
+    func testEachSegmentsInkFollowsItsChannel() throws {
+        let url = try rawFixture()
+        let controller = makeLoupe(url: url, identity: "pointer-ink")
+        let card = drawnCard(width: cardWidth, histogram: knownCounts())
+        controller.pointerReadoutTarget = card
+        XCTAssertTrue(waitFor { controller.lastFrame?.sceneLinearSample != nil })
+        controller.pointerMoved(to: CGPoint(x: 160, y: 100))
+        render(card)
+        let neutral = HistogramCardReadability.readoutColor(isDark: false)
+        XCTAssertEqual(card.channelOverWhite.count, 3)
+        for (index, over) in card.channelOverWhite.enumerated() {
+            XCTAssertEqual(card.channelValueColors[index],
+                           over ? HistogramCardView.overWhiteColor : neutral,
+                           "第 \(index) 段的墨色与这一通道是否超白一一对应")
+        }
+        print("pointer ink: “\(card.channelRowText)” · over-white \(card.channelOverWhite) · "
+              + "inks \(card.channelValueColors.map { $0.description })")
     }
 
     /// The pointer *on the plot* shows counts in the row and leaves the **pixel half blank** — that half

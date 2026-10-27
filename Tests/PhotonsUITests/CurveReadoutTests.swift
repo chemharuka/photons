@@ -103,8 +103,20 @@ final class CurveReadoutTests: XCTestCase {
         XCTAssertTrue(panel.contains(".foregroundStyle(.secondary)"), "颜色是次要色")
 
         let card = try String(contentsOf: Self.histogramSource, encoding: .utf8)
-        XCTAssertTrue(card.contains("public static let numberFont = NSFont.monospacedDigitSystemFont"
-                                    + "(ofSize: 9.5, weight: .semibold)"))
+        // 2026-10-27 — the size became **one named constant** (`readoutFontSize`) because the coloured
+        // R/G/B letters had drifted to 8 pt beside 9.5 pt digits. The claim is unchanged (the curve's
+        // readout uses the histogram's number font); what it is asserted *through* is the single source:
+        // one literal, and both faces built from it.
+        XCTAssertTrue(card.contains("NSFont.monospacedDigitSystemFont(ofSize: readoutFontSize"),
+                      "数值字体由 readoutFontSize 构造")
+        XCTAssertEqual(card.components(separatedBy: "= 9.5").count - 1, 1,
+                       "字号字面量只在 readoutFontSize 一处（别处不许再写 9.5）")
+        XCTAssertEqual(card.components(separatedBy: "ofSize: readoutFontSize").count - 1, 2,
+                       "两个字体（数值 + 字母）都由这一个常量构造")
+        XCTAssertEqual(HistogramCardView.numberFont.pointSize, HistogramCardView.readoutFontSize,
+                       accuracy: 0)
+        XCTAssertEqual(HistogramCardView.channelLetterFont.pointSize, HistogramCardView.readoutFontSize,
+                       accuracy: 0, "字母与数值同一个字号")
         XCTAssertTrue(card.contains("valueFont: Self.numberFont"), "直方图用同一个常量")
         print("font · \(HistogramCardView.numberFont.fontName) "
               + "\(HistogramCardView.numberFont.pointSize) pt · 面板与直方图同一个常量")

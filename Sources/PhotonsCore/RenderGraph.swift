@@ -224,11 +224,22 @@ public final class RenderResult {
     /// (070 — the GPU pass itself is part of the frame's own command buffer, so its milliseconds are
     /// in `trace.gpuMilliseconds`, not here). 0 when nothing was measured.
     public let histogramMilliseconds: Double
+    /// The **scene-linear sample** the histogram was counted from, when the render produced one
+    /// (2026-10-27, for the pointer's readout): the ≤ 256-long-edge grid of the picture's pixels
+    /// *before* S4, i.e. exactly the bytes `histogram` was binned from.
+    ///
+    /// It is handed out because a per-pixel question ("what is under the cursor") cannot be answered
+    /// from `histogram` — bins are counts, not pixels — and cannot be answered from `output` either,
+    /// which S4 has already clamped at the panel's headroom. This is the same lattice the plot draws,
+    /// so the number under the pointer and the bin under the pointer are one measurement. `nil` when no
+    /// grid was asked for.
+    public let histogramSample: LinearSample?
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, window: ImageRect,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
-         histogram: Histogram? = nil, histogramMilliseconds: Double = 0) {
+         histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
+         histogramSample: LinearSample? = nil) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -241,6 +252,7 @@ public final class RenderResult {
         self.showsMask = showsMask
         self.histogram = histogram
         self.histogramMilliseconds = histogramMilliseconds
+        self.histogramSample = histogramSample
     }
 }
 
@@ -1113,7 +1125,9 @@ public final class RenderGraph {
             // The histogram reads what S4 is about to read: scene-linear RGB after S2/S3, before the
             // primaries matrix, the transfer function and the headroom clamp. Captured here rather
             // than looked up afterwards because S4's output is the only texture a caller ever sees.
-            if stage == .display, options.collectHistogram { histogramSource = current }
+            if stage == .display, options.collectHistogram || options.histogramSampleLongEdge > 0 {
+                histogramSource = current
+            }
 
             let out = try pool.obtain(plan.canvas)
             try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
@@ -1184,7 +1198,7 @@ public final class RenderGraph {
         // dispatch of 36 k threads and 0.29 MB of readback, which is what the card can afford on every
         // frame that changes the picture.
         var sampleGrid: (texture: MTLTexture, size: ImageSize)?
-        if options.collectHistogram, options.histogramSampleLongEdge > 0,
+        if options.histogramSampleLongEdge > 0,
            let source = histogramSource, !plan.drawnRect.isEmpty {
             let picture = plan.drawnRect
             let grid = Histogram.frameSampleSize(for: picture,
@@ -1235,29 +1249,39 @@ public final class RenderGraph {
         // asks for, that is ~0.58 Mpx, not 4.10 M — let alone the 60 M of a full export.
         var histogramPayload: Histogram?
         var histogramMilliseconds = 0.0
+        /// The grid itself, kept when one was built: the pointer's readout asks it for the texel under
+        /// the cursor (2026-10-27). 0.29 MB for a 256-long-edge grid — the frame texture beside it is
+        /// 33 MB, so this is the cheap half of a frame.
+        var histogramSample: LinearSample?
         if let source = histogramSource {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
             // The picture, from the layout S0 actually drew with — not the content rect, which holds
             // background around a window that reaches past the frame (048).
             let picture = plan.drawnRect
             if let grid = sampleGrid {
-                // 070: the picture's own pixels, sampled off the scene-linear texture (not S4's
-                // clamped output, which cannot hold anything above the panel's headroom).
+                // The readback happens even for a frame nothing measures: a pan changes the camera and
+                // not the picture, so no key moves and no plot is updated — but the pixels under the
+                // pointer did move, and the readout has to follow them.
                 let tSample = CFAbsoluteTimeGetCurrent()
                 let sample = readSample(grid.texture)
+                histogramSample = sample
+                if options.collectHistogram {
+                    // 070: the picture's own pixels, sampled off the scene-linear texture (not S4's
+                    // clamped output, which cannot hold anything above the panel's headroom).
+                    // Labelled with the **picture's** own grid, exactly as `measureFrameHistogram`
+                    // labels its numbers, so the card's canvas/ROI and 「采样 N px」 mean the same thing
+                    // whichever path measured: the render's canvas is a viewport (or a backdrop's
+                    // 4096), and neither is the picture.
+                    let pixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
+                                                     in: sourceSize)
+                    let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
+                    histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
+                                                         headroom: options.display.headroom)
+                        .relabelled(canvas: pixels, roi: own)
+                    histogramMilliseconds = (CFAbsoluteTimeGetCurrent() - tSample) * 1000
+                }
                 pool.recycle(grid.texture)
-                // Labelled with the **picture's** own grid, exactly as `measureFrameHistogram` labels
-                // its numbers, so the card's canvas/ROI and 「采样 N px」 mean the same thing whichever
-                // path measured: the render's canvas is a viewport (or a backdrop's 4096), and neither
-                // is the picture.
-                let pixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
-                                                 in: sourceSize)
-                let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
-                histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
-                                                     headroom: options.display.headroom)
-                    .relabelled(canvas: pixels, roi: own)
-                histogramMilliseconds = (CFAbsoluteTimeGetCurrent() - tSample) * 1000
-            } else {
+            } else if options.collectHistogram {
                 let sample = readSample(source)
                 histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
                                                      headroom: options.display.headroom)
@@ -1278,14 +1302,16 @@ public final class RenderGraph {
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask, histogram: histogramPayload,
-                                histogramMilliseconds: histogramMilliseconds)
+                                histogramMilliseconds: histogramMilliseconds,
+                                histogramSample: histogramSample)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect,
                             window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask, histogram: histogramPayload,
-                            histogramMilliseconds: histogramMilliseconds)
+                            histogramMilliseconds: histogramMilliseconds,
+                            histogramSample: histogramSample)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
