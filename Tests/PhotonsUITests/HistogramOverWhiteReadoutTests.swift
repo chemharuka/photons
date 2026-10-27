@@ -212,22 +212,39 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
         XCTAssertEqual(card.channelLetterColors, HistogramCardView.channelNameColors)
     }
 
-    /// Two channels over white, one inside: only those two segments are magenta.
-    func testTwoOverWhiteChannelsAreTheOnlyMagentaSegments() {
+    /// Two channels above white, one inside: **the ink is the panel's answer, not the picture's**
+    /// (2026-10-27). On the fixture's 2-stop panel (`headroom 4`) the `+2.3` channel is light it cannot
+    /// show and `+0.5` fits, so only one segment is magenta; on an SDR panel (`headroom 1`) both are.
+    /// The row's digits never move — 「相对屏幕白点的 +x.x」 is the picture's, the ink is the screen's.
+    func testOnlyTheChannelsBeyondThePanelAreMagenta() {
+        let pixel = linearPixel(twoPointThreeStops, 0.2158, Float(pow(2.0, 0.5)))
+
+        // ① the 4× (2-stop) fixture: `+0.5` is inside the budget, `+2.3` is not.
         let card = drawnCard()
-        card.showPointerReadout(linearPixel(twoPointThreeStops, 0.2158, Float(pow(2.0, 0.5))))
+        card.showPointerReadout(pixel)
         let rep = render(card)
         XCTAssertEqual(card.channelRowText, "R +2.3 G 128 B +0.5")
-        XCTAssertEqual(card.channelOverWhite, [true, false, true])
+        XCTAssertEqual(card.channelOverWhite, [true, false, false],
+                       "2 档的屏幕装得下 +0.5，装不下 +2.3")
 
         let r = inkStats(rep, card.channelValueRects[0])
         let g = inkStats(rep, card.channelValueRects[1])
         let b = inkStats(rep, card.channelValueRects[2])
-        print("two-over-white row: “\(card.channelRowText)” · 削顶色像素 R \(r.ink)/\(r.total) · "
+        print("two-over-white row on a 4× panel: “\(card.channelRowText)” · 削顶色像素 R \(r.ink)/\(r.total) · "
               + "G \(g.ink)/\(g.total) · B \(b.ink)/\(b.total)")
         XCTAssertGreaterThan(r.ink, 8, "R +2.3 是削顶色")
         XCTAssertEqual(g.ink, 0, "G 128 不是削顶色")
-        XCTAssertGreaterThan(b.ink, 8, "B +0.5 是削顶色")
+        XCTAssertEqual(b.ink, 0, "B +0.5 在这块屏上装得下 → 不是削顶色")
+
+        // ② the same row on an SDR panel: everything above white is lost.
+        let sdr = drawnCard(histogram: measuredHistogram(headroom: 1))
+        sdr.showPointerReadout(pixel)
+        let sdrRep = render(sdr)
+        XCTAssertEqual(sdr.channelRowText, "R +2.3 G 128 B +0.5", "数字一模一样")
+        XCTAssertEqual(sdr.channelOverWhite, [true, false, true], "SDR 屏：超白的两段都丢")
+        XCTAssertGreaterThan(inkStats(sdrRep, sdr.channelValueRects[0]).ink, 8)
+        XCTAssertGreaterThan(inkStats(sdrRep, sdr.channelValueRects[2]).ink, 8)
+        XCTAssertEqual(inkStats(sdrRep, sdr.channelValueRects[1]).ink, 0)
     }
 
     // MARK: - ③ above white is never clamped to a code

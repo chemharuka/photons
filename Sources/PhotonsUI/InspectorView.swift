@@ -932,6 +932,10 @@ public struct InspectorView: View {
     /// There is deliberately **no `step:` parameter**. SwiftUI's `Slider` draws tick marks the moment
     /// it is handed one, and 046 forbids ticks on every slider; any quantization belongs to the model
     /// (`DetailSettings.setPosition` rounds to 1 unit).
+    /// The row itself is `SliderRow` (`SliderRow.swift`), and this is only the cards' door to it:
+    /// 蒙版 needed the same row, and a `private` method of this view cannot be the panel's row. There
+    /// is still exactly one row view, one `Slider` (`shapeSlider`) and one set of numbers
+    /// (`SliderRowStyle`) — a card that called `SliderRow` directly would get the same thing.
     private func sliderRow(_ title: String,
                            _ value: Binding<Double>,
                            _ range: ClosedRange<Double>,
@@ -945,52 +949,10 @@ public struct InspectorView: View {
                            accessibilityID: String? = nil,
                            onReset: @escaping () -> Void,
                            onEditingChanged: @escaping (Bool) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: style.rowSpacing) {
-            HStack(spacing: style.headSpacing) {
-                Text(title)
-                    .font(.system(size: style.labelSize, weight: style.labelWeight))
-                    .foregroundStyle(.secondary)
-                    .modifier(ResetOnDoubleClick(action: onReset, help: Self.resetParameterHelp))
-                Spacer(minLength: 4)
-                if editable {
-                    SliderNumberField(value: value.wrappedValue,
-                                      range: range,
-                                      format: format,
-                                      decimals: decimals,
-                                      rounding: rounding,
-                                      fontSize: style.readoutSize,
-                                      accessibilityID: accessibilityID,
-                                      onCommit: { typed in
-                                          // The drag's own path, in the drag's own order: write through
-                                          // the binding, then the gesture-end commit. One typed value =
-                                          // one `applyEdit` + one `commitEdit` = one history entry.
-                                          value.wrappedValue = typed
-                                          onEditingChanged(false)
-                                      })
-                } else {
-                    Text(Self.sliderText(format, value.wrappedValue, rounding: rounding))
-                        .font(.system(size: style.readoutSize, design: .monospaced))
-                        .foregroundStyle(.primary)
-                }
-            }
-            // The readback probe sits **inside** the disabled scope, so what it reports is SwiftUI's
-            // own resolved `isEnabled` — not the local `enabled` flag echoed back (see
-            // `DetailRowEnabledProbe`: macOS 27's `Slider` is drawn by SwiftUI, so there is no
-            // `NSControl.isEnabled` to ask).
-            .background(DetailRowEnabledProbe(title: title))
-            // 060: **one** `Slider` for both shapes, built by `shapeSlider` below — the accent colour
-            // is the only difference, and it lives in exactly one place.
-            Self.shapeSlider(value, in: range, shape: shape,
-                             controlSize: style.controlSize,
-                             onEditingChanged: onEditingChanged)
-        }
-        // `enabled: false` is the 解码模型 rule: under V9 the four amounts belong to the decoder, so the
-        // rows are **inert and visibly grey** rather than live controls that quietly do nothing. The
-        // value is untouched — `.disabled` stops input, it does not write — so a document that had
-        // 30 / 70 / 20 / 60 keeps every one of those numbers for the way back to V8.
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.42)
-        .accessibilityIdentifier("inspector.detail.row.\(title)")
+        SliderRow(title: title, value: value, range: range, format: format, shape: shape,
+                  style: style, decimals: decimals, rounding: rounding, editable: editable,
+                  enabled: enabled, accessibilityID: accessibilityID, onReset: onReset,
+                  onEditingChanged: onEditingChanged)
     }
 
     /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that says
@@ -1326,8 +1288,9 @@ public struct InspectorView: View {
     /// on a double-click, the tests call them directly — the same code either way.
     private var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
 
-    private static let resetParameterHelp = "双击复位此参数"
-    private static let resetGroupHelp = "双击整组复位"
+    /// The two tooltips: `SliderRow` and 蒙版 use them too, so they are the panel's, not one card's.
+    static let resetParameterHelp = "双击复位此参数"
+    static let resetGroupHelp = "双击整组复位"
 
     /// Double-click on a card's title: the whole card back to its defaults, in one snapshot.
     private func resetGroup(_ group: PanelResets.Group) {
@@ -1404,9 +1367,12 @@ public struct DetailCardContent: Equatable, Sendable {
 /// position (50 on a Leica for colour NR — never a nominal 0), for 色温/色调 it is as shot.
 ///
 /// The card titles use it too, with `help` pointing at the group verb instead of the parameter one.
-private struct ResetOnDoubleClick: ViewModifier {
+///
+/// Internal, not `private`: `SliderRow` (its own file) and 蒙版's card title install the same gesture,
+/// so the modifier that means 「双击…复位」 lives in one place for the whole panel.
+struct ResetOnDoubleClick: ViewModifier {
     let action: (() -> Void)?
-    var help: String = "双击复位此参数"
+    var help: String = InspectorView.resetParameterHelp
 
     func body(content: Content) -> some View {
         if let action {

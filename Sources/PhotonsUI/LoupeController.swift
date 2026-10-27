@@ -422,7 +422,7 @@ public enum LoupeCanvasGesture: Equatable, Sendable {
 /// bigger rung lands the ladder stores it and **one** replacement frame goes up. A frame never
 /// develops, so it is never queued behind ImageIO — which is the difference between "the picture
 /// freezes for a second" and "the picture is briefly soft".
-public final class LoupeController: NSViewController {
+public final class LoupeController: NSViewController, HeadroomSource {
 
     public struct FrameResult {
         public let texture: MTLTexture
@@ -1286,6 +1286,30 @@ public final class LoupeController: NSViewController {
 
     /// The headroom the *next* frame will be rendered with. `1` whenever EDR is unavailable.
     public var headroom: Double { displayHeadroom.headroom }
+
+    /// The display, asked again — `HeadroomSource` for the histogram card's ceiling (2026-10-27).
+    ///
+    /// **One reader of the screen for the whole app.** `refreshDisplay()` re-reads
+    /// `window.screen?.maximumExtendedDynamicRangeColorComponentValue` (the property that moves when the
+    /// brightness slider moves) and applies it, including the layer's `layerAcceptsEDR` answer — which a
+    /// bare `NSScreen` read cannot know. It is a no-op when nothing moved, so the card's poll costs a
+    /// property read and a comparison on a settled window.
+    ///
+    /// A moved budget also means a **re-render at the new ceiling** (`setDisplayHeadroom` schedules
+    /// one): the tick and the pixels must describe the same screen, and a frame measured at the old
+    /// budget would leave 削顶 describing a display that no longer exists.
+    public func readHeadroom() -> DisplayHeadroom {
+        refreshDisplay()
+        return displayHeadroom
+    }
+
+    /// Called after every frame that reached the layer — the histogram card's ceiling re-read, and
+    /// nothing else (2026-10-27). One place, because `presentCanvas` is the only path to the layer.
+    ///
+    /// A brightness change moves the screen's EDR budget and posts no notification, so a presented
+    /// frame is the cheapest chance to notice it; the card's own 0.5 s poll covers the frames that never
+    /// come. `nil` (no card) costs one branch.
+    public var onFramePresented: (() -> Void)?
 
     /// What the status strip shows: display class, headroom, and where the camera is — in percent,
     /// with the fit rung's real ratio (`适应 31%`), so the number moves with the window.
@@ -4410,6 +4434,10 @@ public final class LoupeController: NSViewController {
         frozenFrame = FrozenFrame(texture: texture, photoRect: photoRect,
                                   frameCanvas: frameCanvas, canvas: canvas, window: window,
                                   backdropWindow: backdropWindow, placement: placement, zoom: zoom)
+        // 2026-10-27: a frame that reached the layer is a free chance to re-read the screen's EDR budget
+        // (the brightness slider moves it and posts no notification). One property read that ends in
+        // "nothing changed" nine times out of ten — the histogram card's ceiling is the consumer.
+        onFramePresented?()
         return true
     }
 

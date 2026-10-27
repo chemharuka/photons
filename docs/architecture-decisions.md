@@ -380,8 +380,21 @@ M3 时记录的"`L1030433.dng` 渲染成 180°，因为文件里读不到 orient
   只有卡片窄到 SDR 段不足 60 pt 时才压缩 stop 宽度（`HistogramAxis.minimumSDRWidth`），因为照片 95 % 的信息在 SDR 段。
 - **两段共用一个峰值**（`HistogramCardFormat.scalePeak`）：排除绘制路径的首末 bin 后取最大值，所以削顶尖峰不会把整张图压平。
 
-**显示上限刻度**：`Histogram.headroom` 随测量一起走（不是读当前屏幕），卡片画在 `log2(headroom)` stop 处
-（1.695× → +0.76 stop；SDR → 正好落在 SDR/尾段分界线上）。落在刻度左边的像素这块屏全能显示，右边的是屏丢掉的部分。
+**显示上限刻度**：卡片画在 `log2(headroom)` stop 处（1.695× → +0.76 stop；SDR → 正好落在 SDR/尾段分界线上）。
+落在刻度左边的像素这块屏全能显示，右边的是屏丢掉的部分。
+
+**这个 headroom 是现场读的，不是测量时记下的**（2026-10-27，用户报「调节屏幕亮度后要更新直方图中屏幕亮度指示」）。
+亮度滑杆会改 `NSScreen.maximumExtendedDynamicRangeColorComponentValue`，而 macOS **不为它发任何通知**，
+所以缓存的数会在用户松开滑杆后一直错下去。读数收进 `HeadroomSource`（`ScreenHeadroomSource` 现场读
+`window.screen`；`LoupeController` 也 conform，这样全 app 只有一个读屏的人，还带着 presenter 的
+`layerAcceptsEDR` 答案；`FixedHeadroomSource` 供测试注入 1.0 → 1.695 → 4.08）。三路刷新，全都“读了变才重画”
+（`headroomChangeEpsilon = 1e-3`，`headroomRedrawCount` 是那个计数器）：① 每帧呈现后（`presentCanvas` 的
+`onFramePresented`）；② `didChangeScreen` / `didChangeBackingProperties` / `didBecomeActive`（以及 key/occlusion，
+后者决定轮询要不要跑）；③ **0.5 s 低频定时器**——这是亮度变化唯一能被发现的路径，且只在卡片可见、窗口没失焦时跑
+（`shouldPollHeadroom`，隐藏/失焦/收起/移除都会停）。没有注入源时退回 `Histogram.headroom`（旧行为）。
+测量自己的 `headroom` 仍决定 `clippedCeiling`：重画是同步的，重新测量不是，两者会短暂不同步——刻度说的是
+**现在这块屏**，削顶说的是**这一帧的钳位**。指针行里的 `+x.x` 用的是同一个数（`PointerPixel.channelsBeyond(headroom:)`）：
+同一颗 `+0.5` 的像素在 1.695× 屏上是削顶色，在 4.08× 屏上是普通行色。
 
 **三个比例**（`HistogramChannel`）：`clippedHigh`（>0.999，超过 SDR 白，**不再等于"丢细节"**）、
 `clippedCeiling`（S4 钳位处，真正丢掉的细节；headroom=1 时与前者相等）、`clippedLow`。卡片上行依次是

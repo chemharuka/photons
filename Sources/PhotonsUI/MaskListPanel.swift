@@ -22,6 +22,14 @@ import PhotonsCore
 /// never one per tick. The drag writes through `writeMask(commit: false)` — `applyEdit`, so the
 /// revision moves and the loupe's 50 ms debounce turns a hundred ticks into a few frames — and the
 /// mouse-up calls `commitEdit` once. Committing per tick would make ⌘Z walk back 1/100 EV at a time.
+///
+/// **The rows are the panel's rows, not this card's.** Every number here goes through `SliderRow`
+/// (the same view the tone cards, 白平衡, 细节 and 黑电平 draw), and every parameter is a row of a
+/// table (`MaskSliderRow` / `MaskShapeSliderRow`). So the three interactions the rest of the panel
+/// promises — double-click a name to reset it, click the number to type it (`↵` commits, `Esc`
+/// cancels, out of range clamps), the same label/number/track style — are properties of the row view
+/// rather than things this file remembered to do. The card's own title takes the group gesture
+/// (`PanelResets.maskCard(_:)`: this mask's parameter surface, one snapshot).
 public struct MaskListPanel: View {
     @Bindable public var session: CatalogSession
 
@@ -46,7 +54,7 @@ public struct MaskListPanel: View {
                 adjustmentsSection(mask)
                 // The brush numbers belong to a brush mask; a gradient's own parameters are below.
                 if selectedIsBrush { dividers }
-                shapeSection
+                shapeSection(for: mask)
             }
         }
         .padding(.horizontal, WorkspaceLayout.cardInsetH)
@@ -73,8 +81,13 @@ public struct MaskListPanel: View {
 
     private var header: some View {
         HStack(spacing: 6) {
+            // 双击卡片标题 = 整张卡复位（其它卡一样）：这张卡没有「整组」的 `PanelResets.Group`
+            // 分支（蒙版是列表），默认是**这一张蒙版**的参数面（见 `PanelResets.maskCard(_:)`）。
             Text("蒙版")
                 .font(.system(size: 11, weight: .bold))
+                .modifier(ResetOnDoubleClick(
+                    action: { if let id = session.selectedMaskID { resets.maskCard(id) } },
+                    help: InspectorView.resetGroupHelp))
             Text("\(masks.count)/\(Mask.maxCount)")
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
@@ -238,18 +251,9 @@ public struct MaskListPanel: View {
             .onChange(of: mask.name) { _, next in nameDraft = next }
             .onAppear { nameDraft = mask.name }
 
-            ForEach(MaskLevelParameter.allCases, id: \.rawValue) { parameter in
-                sliderRow(parameter.label,
-                          value: parameter.isPercent ? parameter.value(mask) * 100
-                                                     : parameter.value(mask),
-                          range: parameter.isPercent ? 0 ... 100 : parameter.range,
-                          format: parameter.isPercent ? "%.0f%%" : parameter.format,
-                          set: { value in
-                              session.setMaskLevel(mask.id, parameter,
-                                                   parameter.isPercent ? value / 100 : value)
-                          },
-                          commit: { session.commitEdit(label: "蒙版\(parameter.label)") })
-                    .help(parameter.help)
+            ForEach(MaskSliderRow.level) { row in
+                maskRow(row, for: mask)
+                    .help(row.help)
             }
 
             Toggle(isOn: invertBinding(mask)) {
@@ -301,16 +305,9 @@ public struct MaskListPanel: View {
                     .foregroundStyle(.tertiary)
             }
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(MaskAdjustmentParameter.allCases, id: \.rawValue) { parameter in
-                    sliderRow(parameter.label,
-                              value: mask.adjustments[keyPath: parameter.keyPath],
-                              range: parameter.range,
-                              format: parameter.format,
-                              set: { value in
-                                  session.setMaskAdjustment(mask.id, parameter, value)
-                              },
-                              commit: { session.commitEdit(label: "局部\(parameter.label)") })
-                        .help(parameter.help)
+                ForEach(MaskSliderRow.adjustments) { row in
+                    maskRow(row, for: mask)
+                        .help(row.help)
                 }
             }
         }
@@ -334,9 +331,11 @@ public struct MaskListPanel: View {
     }
 
     /// The rows this panel built, in order — what the smoke reads back to prove the controls exist.
+    ///
+    /// Read off the same table the card iterates (`MaskSliderRow`), so the smoke's list cannot drift
+    /// from the rows on screen.
     private var parameterLabels: [String] {
-        MaskLevelParameter.allCases.map(\.label) + ["反转", "混合"]
-            + MaskAdjustmentParameter.allCases.map(\.label)
+        MaskSliderRow.level.map(\.title) + ["反转", "混合"] + MaskSliderRow.adjustments.map(\.title)
     }
 
     /// The rows that belong to the shape the mask actually holds.
@@ -346,7 +345,7 @@ public struct MaskListPanel: View {
     /// ramp, the radius of an ellipse, a tolerance — and every write goes through
     /// `setMaskComponentShape`, with one commit per slider gesture (the same drag/release rule the
     /// Light card follows, so ⌘Z is one step and not one per tick).
-    @ViewBuilder private var shapeSection: some View {
+    @ViewBuilder private func shapeSection(for mask: Mask) -> some View {
         if let entry = selectedComponent, let kind = MaskCreationKind.of(entry.component.shape) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
@@ -362,7 +361,7 @@ public struct MaskListPanel: View {
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
-                shapeParameters(shape: entry.component.shape)
+                shapeParameters(for: mask, component: entry.index, shape: entry.component.shape)
                 if kind.isAdjustable {
                     Toggle(isOn: adjustBinding) {
                         Text("拖动画面调整形状")
@@ -377,64 +376,39 @@ public struct MaskListPanel: View {
         }
     }
 
-    @ViewBuilder private func shapeParameters(shape: MaskShape) -> some View {
-        switch shape {
-        case .linearGradient(let g):
-            sliderRow("中点", value: g.midpoint, range: 0.05 ... 0.95, format: "%.2f", set: { value in
-                writeShape(.linearGradient(LinearGradientShape(start: g.start, end: g.end,
-                                                               midpoint: value)))
-            }, commit: { session.commitEdit(label: "渐变中点") })
-        case .radialGradient(let g):
-            sliderRow("半径", value: max(g.radius.x, g.radius.y), range: 0.02 ... 1.2, format: "%.3f",
-                      set: { value in
-                          writeShape(.radialGradient(RadialGradientShape(
-                              center: g.center,
-                              radius: NormalizedPoint(value, value), angle: g.angle)))
-                      }, commit: { session.commitEdit(label: "椭圆半径") })
-            sliderRow("角度", value: g.angle, range: -180 ... 180, format: "%.0f°", set: { value in
-                writeShape(.radialGradient(RadialGradientShape(center: g.center,
-                                                               radius: g.radius, angle: value)))
-            }, commit: { session.commitEdit(label: "椭圆角度") })
-        case .colorRange(let c):
-            HStack(spacing: 5) {
-                ForEach(Array(c.samples.prefix(4).enumerated()), id: \.offset) { _, sample in
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(Color(.sRGB,
-                                    red: sample.count > 0 ? sample[0] : 0.5,
-                                    green: sample.count > 1 ? sample[1] : 0.5,
-                                    blue: sample.count > 2 ? sample[2] : 0.5))
-                        .frame(width: 14, height: 10)
-                        .overlay(RoundedRectangle(cornerRadius: 2)
-                            .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
-                }
-                Spacer(minLength: 4)
-                Text("\(c.samples.count) 个样本")
-                    .font(.system(size: 8, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+    /// The selected shape's own rows, from its table (`MaskShapeSliderRow.rows(for:)`): the same row
+    /// view, the same three interactions and the same numbers the section always had — it just comes
+    /// from data now, so 「每一根都有双击复位」 is a property of the table (`MaskSliderRowTests` walks it).
+    ///
+    /// The colour swatches above 容差 are the one thing here that is not a row: they report what a
+    /// mask was sampled from, they are not a control.
+    @ViewBuilder private func shapeParameters(for mask: Mask, component: Int,
+                                              shape: MaskShape) -> some View {
+        if case .colorRange(let c) = shape {
+            sampleSwatches(c)
+        }
+        ForEach(MaskShapeSliderRow.rows(for: shape), id: \.title) { row in
+            shapeRow(row, for: mask, component: component, shape: shape)
+        }
+    }
+
+    /// What a colour-range mask was sampled from: up to four swatches, and how many samples it holds.
+    private func sampleSwatches(_ c: ColorRangeShape) -> some View {
+        HStack(spacing: 5) {
+            ForEach(Array(c.samples.prefix(4).enumerated()), id: \.offset) { _, sample in
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color(.sRGB,
+                                red: sample.count > 0 ? sample[0] : 0.5,
+                                green: sample.count > 1 ? sample[1] : 0.5,
+                                blue: sample.count > 2 ? sample[2] : 0.5))
+                    .frame(width: 14, height: 10)
+                    .overlay(RoundedRectangle(cornerRadius: 2)
+                        .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
             }
-            sliderRow("容差", value: c.tolerance, range: 0.02 ... 1.0, format: "%.2f", set: { value in
-                writeShape(.colorRange(ColorRangeShape(samples: c.samples, tolerance: value,
-                                                       smoothness: c.smoothness)))
-            }, commit: { session.commitEdit(label: "颜色容差") })
-        case .luminanceRange(let l):
-            sliderRow("下限", value: l.low, range: 0 ... 1, format: "%.2f", set: { value in
-                writeShape(.luminanceRange(LuminanceRangeShape(low: min(value, l.high), high: l.high,
-                                                               lowFeather: l.lowFeather,
-                                                               highFeather: l.highFeather)))
-            }, commit: { session.commitEdit(label: "亮度下限") })
-            sliderRow("上限", value: l.high, range: 0 ... 1, format: "%.2f", set: { value in
-                writeShape(.luminanceRange(LuminanceRangeShape(low: l.low, high: max(value, l.low),
-                                                               lowFeather: l.lowFeather,
-                                                               highFeather: l.highFeather)))
-            }, commit: { session.commitEdit(label: "亮度上限") })
-        case .semantic(let s):
-            sliderRow("软边", value: s.softEdge, range: 0 ... 0.6, format: "%.2f", set: { value in
-                var next = s
-                next.softEdge = value
-                writeShape(.semantic(next))
-            }, commit: { session.commitEdit(label: "语义软边") })
-        case .brush, .unsupported:
-            EmptyView()
+            Spacer(minLength: 4)
+            Text("\(c.samples.count) 个样本")
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -460,34 +434,78 @@ public struct MaskListPanel: View {
         }
     }
 
-    /// One document slider: label + live number on top, the control underneath, and **one commit on
-    /// mouse-up** (`onEditingChanged` fires once when the drag ends). `set` runs for every tick and
-    /// must not commit — that is what keeps ⌘Z at gesture granularity.
-    private func sliderRow(_ title: String, value: Double, range: ClosedRange<Double>,
-                           format: String, set: @escaping (Double) -> Void,
-                           commit: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                Text(String(format: format, value))
-                    .font(.system(size: 10, design: .monospaced))
-            }
-            Slider(value: Binding(get: { value }, set: set), in: range) { editing in
-                // Drag end = one snapshot, exactly like the Light card.
-                if !editing { commit() }
-            }
-            .controlSize(.mini)
-        }
+    /// One document row of this card: the panel's row view (`SliderRow`), plus this card's write path.
+    ///
+    /// Three of 047's contracts now come from the row itself — the name's double-click (`onReset`),
+    /// the typeable number (`↵` commits, `Esc` cancels, out-of-range clamps), the label/number/slider
+    /// style — and the two that are the card's job stay here: one write per tick (so the pixels
+    /// follow the thumb) and **one** `commitEdit` on mouse-up (so ⌘Z is one step).
+    private func maskRow(_ row: MaskSliderRow, for mask: Mask) -> some View {
+        SliderRow(title: row.title,
+                  value: Binding(get: { row.display(mask) },
+                                 set: { value in
+                                     row.write(value, into: session, maskID: mask.id, commit: false)
+                                 }),
+                  range: row.range,
+                  format: row.format,
+                  shape: row.shape,
+                  decimals: row.decimals,
+                  rounding: row.rounding,
+                  accessibilityID: "inspector.mask.\(row.title)",
+                  rowIdentifierPrefix: "inspector.mask.row",
+                  onReset: { resets.mask(row, in: mask) },
+                  onEditingChanged: { editing in
+                      if !editing { session.commitEdit(label: row.label) }
+                  })
     }
 
-    private func writeShape(_ shape: MaskShape) {
-        guard let mask = selectedMask, let entry = selectedComponent else { return }
-        session.setMaskComponentShape(mask.id, component: entry.index, shape: shape,
-                                      commit: false, label: "")
+    /// One row of the selected shape (中点 / 半径 / 角度 / 容差 / 下限 / 上限 / 软边).
+    ///
+    /// Same row view, same interaction; the only difference from `maskRow` is that the value is a
+    /// field of the component's `MaskShape`, so the write rebuilds the shape through the row's own
+    /// `apply` (which is what keeps the geometry the row does not own).
+    private func shapeRow(_ row: MaskShapeSliderRow, for mask: Mask, component: Int,
+                          shape: MaskShape) -> some View {
+        SliderRow(title: row.title,
+                  value: Binding(get: { row.read(shape) },
+                                 set: { value in
+                                     session.setMaskComponentShape(
+                                         mask.id, component: component,
+                                         shape: row.apply(shape, value), commit: false, label: "")
+                                 }),
+                  range: row.range,
+                  format: row.format,
+                  shape: row.shape,
+                  decimals: row.decimals,
+                  rounding: row.rounding,
+                  accessibilityID: "inspector.mask.\(row.title)",
+                  rowIdentifierPrefix: "inspector.mask.row",
+                  onReset: { resets.maskShape(row, in: mask, component: component) },
+                  onEditingChanged: { editing in
+                      if !editing { session.commitEdit(label: row.label) }
+                  })
     }
+
+    /// A **view-state** row (the brush). No commit hook on purpose: these numbers are captured by each
+    /// stroke, so moving them must not rewrite the picture or grow the undo stack — and their
+    /// double-click puts them back on the session's own defaults without a snapshot for the same
+    /// reason. It is still the same row: same label, same typeable number, same slider.
+    private func brushRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+                          format: String, decimals: Int, reset: @escaping () -> Void) -> some View {
+        SliderRow(title: title,
+                  value: value,
+                  range: range,
+                  format: format,
+                  decimals: decimals,
+                  accessibilityID: "inspector.mask.\(title)",
+                  rowIdentifierPrefix: "inspector.mask.row",
+                  onReset: reset,
+                  onEditingChanged: { _ in })
+    }
+
+    /// The card's reset verbs — the same object the other cards call, so 「复位」 cannot mean one thing
+    /// here and another in `PanelResets`' tests.
+    private var resets: PanelResets { PanelResets(session: session) }
 
     // MARK: tools + brush
 
@@ -518,27 +536,12 @@ public struct MaskListPanel: View {
 
     private var dividers: some View {
         VStack(alignment: .leading, spacing: 4) {
-            slider("大小", value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f")
-            slider("硬度", value: brushHardnessBinding, range: 0 ... 1, format: "%.2f")
-            slider("流量", value: brushFlowBinding, range: 0.05 ... 1, format: "%.2f")
-        }
-    }
-
-    /// A **view-state** slider (the brush). No commit hook on purpose: these numbers are captured by
-    /// each stroke, so moving them must not rewrite the picture or the undo stack.
-    private func slider(_ title: String, value: Binding<Double>,
-                        range: ClosedRange<Double>, format: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                Text(String(format: format, value.wrappedValue))
-                    .font(.system(size: 10, design: .monospaced))
-            }
-            Slider(value: value, in: range)
-                .controlSize(.mini)
+            brushRow("大小", value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f",
+                     decimals: 3, reset: { session.brushSize = CatalogSession.defaultBrushSize })
+            brushRow("硬度", value: brushHardnessBinding, range: 0 ... 1, format: "%.2f",
+                     decimals: 2, reset: { session.brushHardness = CatalogSession.defaultBrushHardness })
+            brushRow("流量", value: brushFlowBinding, range: 0.05 ... 1, format: "%.2f",
+                     decimals: 2, reset: { session.brushFlow = CatalogSession.defaultBrushFlow })
         }
     }
 

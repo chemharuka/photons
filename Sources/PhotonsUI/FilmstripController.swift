@@ -223,6 +223,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             _ = session.selection
             _ = session.anchorID
             _ = session.metadataRevision
+            // 排序（与网格、左侧栏同一个值）：点了按钮，胶片条按 `session.assets` 的新顺序重排。
+            _ = session.sortOrder
         }, { [weak self] in
             self?.refresh()
         })
@@ -535,4 +537,15 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     /// Cells actually laid out — `--ui-smoke` asserts this against the library row count.
     public var itemCount: Int { collectionView.numberOfItems(inSection: 0) }
+
+    /// The photos the strip is **actually drawing**, left to right.
+    ///
+    /// Read off the live cells (`cardView.asset`) for the same reason the grid's probe is: a strip
+    /// that had not followed a sort change would still be showing the old sequence, and this is the
+    /// array the three-view consistency assertion compares.
+    public var renderedAssetIDs: [String] {
+        collectionView.indexPathsForVisibleItems()
+            .sorted { ($0.section, $0.item) < ($1.section, $1.item) }
+            .compactMap { (collectionView.item(at: $0) as? FilmstripCell)?.cardView.asset?.id }
+    }
 }

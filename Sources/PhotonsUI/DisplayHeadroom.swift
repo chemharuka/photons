@@ -113,4 +113,103 @@ public struct DisplayHeadroom: Equatable, Sendable {
     public var detailText: String {
         "\(displayText)  [screen \(screenName ?? "—"), max EDR \(String(format: "%.2f", maximumEDRComponent)), \(source.rawValue)]"
     }
+
+    /// Where this screen's ceiling sits on the plot's tail, in stops above display white.
+    /// **The one conversion** — the tick, the chip's text and the pointer row's "is this light the
+    /// panel can show" all come from here, so they cannot disagree.
+    public var ceilingStops: Double { log2(max(headroom, 1)) }
+
+    /// The chip the card paints next to the ceiling tick: `屏 1.70×`. One formatter, because the
+    /// number on screen and the number in the log/report have to be the same string.
+    public static func ceilingLabel(_ headroom: Double) -> String {
+        String(format: "屏 %.2f×", headroom)
+    }
+}
+
+// MARK: - where the ceiling comes from (2026-10-27)
+//
+// 派单: 「调节屏幕亮度后要更新直方图中屏幕亮度指示」.
+//
+// macOS does not announce a brightness change. Dragging the brightness slider moves
+// `maximumExtendedDynamicRangeColorComponentValue` — the panel's EDR budget, which is what the ceiling
+// tick and the `屏 x.xx×` chip are made of — and posts **no notification at all**. There is no
+// `didChangeBrightnessNotification`, and the notifications that do exist
+// (`didChangeScreenParameters` / `didChangeBackingProperties` / `didBecomeActive`) only fire when
+// something else happens. So a value cached when the window opened is stale for as long as the owner
+// leaves the slider where they put it, which is exactly the bug.
+//
+// The fix is a **provider that is asked, never remembered**: everything that needs the ceiling calls
+// `readHeadroom()` again, and that call goes to the live `NSScreen` property every time. The card then
+// decides whether the answer moved (`headroomChangeEpsilon`) — an unchanged read costs no repaint.
+//
+// One type per reason a number could come from: the live screen, and a fixed value a test states.
+
+/// A thing that can be asked what the screen can show **right now**.
+///
+/// `@MainActor` because `NSScreen`'s EDR properties are only meaningful on the main thread, and because
+/// every caller (the card's draw, the timer, the loupe) is on it already.
+@MainActor
+public protocol HeadroomSource: AnyObject {
+    /// The display's budget, read **fresh**. A source that answers from a stored value is not a source.
+    func readHeadroom() -> DisplayHeadroom
+}
+
+/// The live screen: `window.screen?.maximumExtendedDynamicRangeColorComponentValue`, read on demand.
+///
+/// `window.screen` and not `NSScreen.main`: the budget belongs to the screen the window is on, and a
+/// window parked on an external SDR monitor must not borrow the built-in XDR panel's ceiling.
+@MainActor
+public final class ScreenHeadroomSource: HeadroomSource {
+
+    /// The window whose screen is the truth. Weak — the card outlives nothing, and a source that kept
+    /// its window alive would keep a closed editor's window around.
+    public weak var window: NSWindow?
+    /// Whether the drawable can carry extended range at all (the presenter's answer, handed in). The
+    /// card does not own a layer, so this is the honest default: "if the screen offers headroom, the
+    /// plot may assume the canvas can use it".
+    public var layerAcceptsEDR: Bool
+    /// How many times the screen was actually asked — the counter behind "the provider reads live".
+    public private(set) var readCount = 0
+    /// The raw AppKit number the last read returned, kept so a report can quote it beside the headroom.
+    public private(set) var lastMaximumEDRComponent: Double = 1
+    /// The screen the last read resolved to (`nil` when there was no window and no main screen).
+    public private(set) var lastScreenName: String?
+
+    public init(window: NSWindow? = nil, layerAcceptsEDR: Bool = true) {
+        self.window = window
+        self.layerAcceptsEDR = layerAcceptsEDR
+    }
+
+    public func readHeadroom() -> DisplayHeadroom {
+        readCount += 1
+        let screen = window?.screen ?? NSScreen.main
+        let resolved = DisplayHeadroom.current(for: screen, layerAcceptsEDR: layerAcceptsEDR)
+        lastMaximumEDRComponent = resolved.maximumEDRComponent
+        lastScreenName = resolved.screenName
+        return resolved
+    }
+}
+
+/// A stated value — the injection point. The tests drive `headroom` through a sequence
+/// (`1.0 → 1.695 → 4.08`) exactly as a brightness slider would move the real one.
+@MainActor
+public final class FixedHeadroomSource: HeadroomSource {
+
+    /// The number the next read answers. Mutable on purpose: this is the stand-in for the slider.
+    public var headroom: Double
+    public var screenName: String?
+    public private(set) var readCount = 0
+
+    public init(headroom: Double = DisplayHeadroom.sdrHeadroom, screenName: String? = "injected") {
+        self.headroom = headroom
+        self.screenName = screenName
+    }
+
+    public func readHeadroom() -> DisplayHeadroom {
+        readCount += 1
+        let isHDR = headroom > DisplayHeadroom.sdrHeadroom + 1e-9
+        return DisplayHeadroom(headroom: headroom, screenName: screenName,
+                               maximumEDRComponent: headroom,
+                               source: isHDR ? .extendedRange : .sdr)
+    }
 }

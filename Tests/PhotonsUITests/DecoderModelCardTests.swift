@@ -210,8 +210,11 @@ final class DecoderModelCardTests: XCTestCase {
                       "every row must take the seam's answer, not a constant")
         XCTAssertTrue(source.contains("Self.detailAxes(capabilities: caps"),
                       "the rows' axes must come from the decoded capabilities first")
-        XCTAssertTrue(source.contains(".disabled(!enabled)"), "灰 = .disabled")
-        XCTAssertTrue(source.contains(".opacity(enabled ? 1 : 0.42)"),
+        // 蒙版共用同一行之后，行的外观（灰 = `.disabled` + 半透明）搬到了 `SliderRow.swift`；卡的
+        // 决定（`enabled:` 从 seam 来）仍在检查器里。
+        let row = try String(contentsOf: Self.sliderRowSource, encoding: .utf8)
+        XCTAssertTrue(row.contains(".disabled(!enabled)"), "灰 = .disabled")
+        XCTAssertTrue(row.contains(".opacity(enabled ? 1 : 0.42)"),
                       "灰 must be visible, not only semantic")
         XCTAssertTrue(source.contains("caps?.supportedVersions"),
                       "the list must come from the file, not from a hard-coded pair")
@@ -294,6 +297,15 @@ final class DecoderModelCardTests: XCTestCase {
     // MARK: - helpers
 
     private static var windows: [NSWindow] = []
+
+    /// The panel's one row view — where the row's own appearance (grey = `.disabled` + 0.42) lives now.
+    private static var sliderRowSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PhotonsUITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent("Sources/PhotonsUI/SliderRow.swift")
+    }
 
     private static var inspectorSource: URL {
         URL(fileURLWithPath: #filePath)

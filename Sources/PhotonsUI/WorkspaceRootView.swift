@@ -84,11 +84,18 @@ public final class TopBarView: NSView {
     public var onModeChange: ((CatalogSession.Mode) -> Void)?
     public var onToggleFilmstrip: (() -> Void)?
     public var onToggleBrowser: (() -> Void)?
+    /// 排序按钮（`新→旧 / 旧→新`）。One click flips the order the grid, the browser and the strip read.
+    public var onToggleSort: (() -> Void)?
 
     private let openButton = ToolButton(title: "打开", symbol: "folder")
     private let modeControl = NSSegmentedControl(labels: ["网格", "单图"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let stripButton = ToolButton(title: "胶片条", symbol: "rectangle.split.1x2")
+    /// 胶片条按钮右边那一个：同款 `ToolButton`、同高、10 pt 间距。
+    ///
+    /// 文字是**当前顺序**（`新→旧` / `旧→新`），图标是通用的 `arrow.up.arrow.down` 且不随方向变——
+    /// 两处同时描述状态会互相打架，所以方向只由文字说一次（见 `PhotoSortOrder`）。
+    private let sortButton = ToolButton(title: PhotoSortOrder.default.label, symbol: PhotoSortOrder.symbol)
     /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
     /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
@@ -103,7 +110,8 @@ public final class TopBarView: NSView {
 
     /// 顶栏最后一个可交互控件的右边缘。公开给测试：簇的左边缘永远在它右边
     /// （`TopBarStatusCluster.Metrics.minimumGapFromControls` 之外），再长的库名也压不到按钮上。
-    public var controlsTrailingEdge: CGFloat { stripButton.frame.maxX }
+    /// 排序按钮排在胶片条按钮后面，所以它是这一行最右的一个。
+    public var controlsTrailingEdge: CGFloat { sortButton.frame.maxX }
 
     public override var isFlipped: Bool { true }
 
@@ -115,6 +123,10 @@ public final class TopBarView: NSView {
         openButton.action = #selector(openTapped)
         stripButton.target = self
         stripButton.action = #selector(stripTapped)
+        sortButton.target = self
+        sortButton.action = #selector(sortTapped)
+        // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
+        sortButton.image = PhotoSortOrder.icon()
 
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
@@ -122,7 +134,7 @@ public final class TopBarView: NSView {
         modeControl.controlSize = .small
         modeControl.selectedSegment = 0
 
-        for v: NSView in [openButton, modeControl, stripButton, statusCluster] {
+        for v: NSView in [openButton, modeControl, stripButton, sortButton, statusCluster] {
             addSubview(v)
         }
         addSeparator()
@@ -170,6 +182,22 @@ public final class TopBarView: NSView {
         needsLayout = true
     }
 
+    /// 排序按钮的状态：文字 = 当前顺序，tooltip = 键 + 顺序。
+    ///
+    /// 只改字和 tooltip，**不改图标**（`arrow.up.arrow.down` 是静态的通用排序语义），也不给按钮加
+    /// active 底色——「现在是什么顺序」已经在字里说清楚了，再加一处高亮就是第二个信号。
+    /// 字宽会变（`新→旧` 与 `旧→新` 不等宽），所以这里必须重新布局，否则状态簇的右边界会留在旧宽度上。
+    public func updateSortOrder(_ order: PhotoSortOrder) {
+        sortButton.title = order.label
+        sortButton.toolTip = order.tooltip
+        needsLayout = true
+    }
+
+    /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
+    public var sortButtonView: ToolButton { sortButton }
+    /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
+    public var filmstripButtonView: ToolButton { stripButton }
+
     public override func layout() {
         super.layout()
         let h = bounds.height
@@ -191,6 +219,10 @@ public final class TopBarView: NSView {
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += 11
         place(stripButton, width: stripButton.intrinsicContentSize.width)
+        // 排序按钮紧挨着胶片条按钮：同一行、同一 28 pt 命中高、10 pt 间距（和打开↔分段控件、
+        // 分段控件↔胶片条用的是同一个数），顶栏里排在最后，所以不压住右上角的状态簇。
+        x += 10
+        place(sortButton, width: sortButton.intrinsicContentSize.width)
 
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
@@ -217,6 +249,7 @@ public final class TopBarView: NSView {
 
     @objc private func openTapped() { onOpen?() }
     @objc private func stripTapped() { onToggleFilmstrip?() }
+    @objc private func sortTapped() { onToggleSort?() }
     @objc private func modeChanged() { onModeChange?(modeControl.selectedSegment == 0 ? .grid : .loupe) }
 }
 
@@ -384,6 +417,13 @@ public final class WorkspaceRootView: NSView {
         topBar.onOpen = { [weak self] in self?.openLibraryPanel() }
         topBar.onModeChange = { [weak self] mode in self?.session.mode = mode }
         topBar.onToggleFilmstrip = { [weak self] in self?.toggleFilmstrip() }
+        // 排序：一个值写进会话，网格/左侧栏/胶片条各自观察它（三个 `observeModel` 都读
+        // `session.sortOrder`），按钮文字在 `updateTopBar` 里跟着刷新。
+        topBar.onToggleSort = { [weak self] in
+            guard let self else { return }
+            self.session.toggleSortOrder()
+            self.updateTopBar()
+        }
 
         // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
         // One switch, published by the loupe when the mode actually changes (so a drag tick cannot
@@ -411,6 +451,8 @@ public final class WorkspaceRootView: NSView {
             _ = self.session.assets.count
             _ = self.session.selection
             _ = self.session.libraryURL
+            // 排序按钮的字 = 当前顺序：会话里的值一变（按钮、菜单、测试），顶栏就重画。
+            _ = self.session.sortOrder
         }, { [weak self] in
             guard let self else { return }
             self.showModule(for: self.session.mode)
@@ -424,6 +466,7 @@ public final class WorkspaceRootView: NSView {
                       selectionCount: session.selection.count,
                       libraryName: session.libraryURL?.deletingPathExtension().lastPathComponent,
                       filmstrip: browserMode == .filmstrip)
+        topBar.updateSortOrder(session.sortOrder)
     }
 
     // MARK: modules

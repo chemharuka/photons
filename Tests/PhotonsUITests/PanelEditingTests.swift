@@ -197,17 +197,22 @@ final class PanelEditingTests: XCTestCase {
     /// points of 047 are the only places the behaviour lives.
     func testTheRowBuilderDrawsTheNumberFieldEverywhere() throws {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        // 蒙版也要同一行之后，行视图搬到了 `SliderRow.swift`（`InspectorView.sliderRow` 只剩转交）：
+        // 「数值框 / 输入走拖动那条路」这三条钉在**行视图自己**的文件上，其余仍钉在检查器上。
+        let row = try String(contentsOf: Self.sliderRowSource, encoding: .utf8)
 
-        XCTAssertTrue(source.contains("SliderNumberField(value: value.wrappedValue"),
-                      "sliderRow must draw the typeable number, not a Text")
+        XCTAssertTrue(row.contains("SliderNumberField(value: value.wrappedValue"),
+                      "the one row view must draw the typeable number, not a Text")
+        XCTAssertTrue(source.contains("SliderRow(title: title"),
+                      "the inspector's cards must go through that one row view")
         XCTAssertFalse(source.contains("editable: false"),
                        "no card may opt out of typing (047: 所有卡片统一)")
         XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 4,
                        "Light / 黑电平 / Color / 细节 all take the fact from their row table")
 
         // A typed value takes the drag's path: the binding write, then the gesture-end commit.
-        XCTAssertTrue(source.contains("value.wrappedValue = typed"))
-        XCTAssertTrue(source.contains("onEditingChanged(false)"))
+        XCTAssertTrue(row.contains("value.wrappedValue = typed"))
+        XCTAssertTrue(row.contains("onEditingChanged(false)"))
 
         // 057: the row still builds the same field (an `NSTextField` under SwiftUI now), and the three
         // exits + the beep live in one place — `NumberField.swift`, pinned there rather than here.
@@ -474,6 +479,15 @@ final class PanelEditingTests: XCTestCase {
 
     private static func occurrences(of needle: String, in text: String) -> Int {
         text.components(separatedBy: needle).count - 1
+    }
+
+    /// The panel's one row view — every card, 蒙版 included, draws through it.
+    private static var sliderRowSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PhotonsUITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent("Sources/PhotonsUI/SliderRow.swift")
     }
 
     private static var inspectorSource: URL {
