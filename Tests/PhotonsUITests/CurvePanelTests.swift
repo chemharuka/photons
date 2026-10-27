@@ -70,7 +70,7 @@ final class CurvePanelTests: XCTestCase {
         }
         XCTAssertEqual(positions[0], box.minX, accuracy: 1e-9)
         XCTAssertEqual(positions[positions.count - 1], box.maxX, accuracy: 1e-9,
-                       "SDR 视图里白点在右端（071：0…1 铺满；069 的全幅视图里它在正中）")
+                       "SDR 视图里白点在右端（071：0…1 铺满；HDR 视图是整条 0…2，白点在正中）")
 
         print("ticks · " + zip(ticks, positions)
             .map { "\($0.label)@x=\(String(format: "%.6f", $0.x))→\(String(format: "%.3f", $1))" }
