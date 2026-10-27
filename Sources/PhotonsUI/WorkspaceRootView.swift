@@ -89,11 +89,21 @@ public final class TopBarView: NSView {
     private let modeControl = NSSegmentedControl(labels: ["网格", "单图"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let stripButton = ToolButton(title: "胶片条", symbol: "rectangle.split.1x2")
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let countLabel = NSTextField(labelWithString: "")
+    /// 右上角那一块状态文本（照片数 · 已选 · 库名+build），三段的字体/颜色/高度和对齐规则
+    /// 都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
+    public let statusCluster = TopBarStatusCluster()
     private var separators: [NSView] = []
 
     public var contentLeading: CGFloat = WorkspaceLayout.trafficLightsWidth + 10
+
+    /// 检查器列的宽度：`statusCluster` 用它算库名那一栏的预算，好让整块落在检查器列上方。
+    public var statusColumnWidth: CGFloat = WorkspaceLayout.inspectorWidthDefault {
+        didSet { if statusColumnWidth != oldValue { needsLayout = true } }
+    }
+
+    /// 顶栏最后一个可交互控件的右边缘。公开给测试：簇的左边缘永远在它右边
+    /// （`TopBarStatusCluster.Metrics.minimumGapFromControls` 之外），再长的库名也压不到按钮上。
+    public var controlsTrailingEdge: CGFloat { stripButton.frame.maxX }
 
     public override var isFlipped: Bool { true }
 
@@ -112,14 +122,7 @@ public final class TopBarView: NSView {
         modeControl.controlSize = .small
         modeControl.selectedSegment = 0
 
-        statusLabel.font = .systemFont(ofSize: 10, weight: .medium)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.alignment = .right
-        countLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        countLabel.textColor = .tertiaryLabelColor
-        countLabel.alignment = .right
-
-        for v: NSView in [openButton, modeControl, stripButton, statusLabel, countLabel] {
+        for v: NSView in [openButton, modeControl, stripButton, statusCluster] {
             addSubview(v)
         }
         addSeparator()
@@ -148,17 +151,14 @@ public final class TopBarView: NSView {
                        libraryName: String?, filmstrip: Bool) {
         modeControl.selectedSegment = mode == .grid ? 0 : 1
         stripButton.isActive = filmstrip
-        countLabel.stringValue = assetCount == 0 ? "" : "\(assetCount) 张"
-        // 047: the corner also carries the **build** revision (`photons-demo 4a7c34b`), so a glance
-        // answers "is this the build with my merge?" without going back to a commit list.
-        let stamp = BuildStamp.revision
-        if let libraryName {
-            statusLabel.stringValue = selectionCount > 1
-                ? "已选 \(selectionCount) · \(libraryName) \(stamp)"
-                : "\(libraryName) \(stamp)"
-        } else {
-            statusLabel.stringValue = "未打开库 \(stamp)"
-        }
+        // 047: the corner carries the **build** revision, so a glance answers "is this the build with
+        // my merge?" without going back to a commit list. Since 2026-10-27 the three facts are one
+        // block of one type (`TopBarStatusCluster`): `45 张` · `已选 4` · `photons-demo 4a7c34b`.
+        // The library name lives only in the rightmost segment (full name in its tooltip).
+        statusCluster.update(assetCount: assetCount,
+                             selectionCount: selectionCount,
+                             libraryName: libraryName)
+        needsLayout = true
     }
 
     public override func layout() {
@@ -183,10 +183,26 @@ public final class TopBarView: NSView {
         x += 11
         place(stripButton, width: stripButton.intrinsicContentSize.width)
 
-        let right = bounds.width - 16
-        let statusWidth = min(280, max(0, right - x - 12))
-        statusLabel.frame = NSRect(x: right - statusWidth, y: (h - 14) / 2, width: statusWidth, height: 14)
-        countLabel.frame = NSRect(x: right - statusWidth - 70, y: (h - 14) / 2, width: 62, height: 14)
+        // 状态三连：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
+        //
+        // 两个约束，取更紧的那个：
+        // ① 检查器列宽（`statusColumnWidth`）：让整块留在列上方，而不是横到画布上去；
+        // ② 顶栏最后一个可交互控件的右边缘 + 16 pt：库名再长也不许压到按钮上。
+        // ①② 都塞不下"…+版本号"时 `width(limit:)` 返回 0，整块隐藏（退化到没有状态文本，
+        // 而不是压住控件或画出一段被剪碎的省略号）。
+        let rightEdge = bounds.width - TopBarStatusCluster.Metrics.trailingInset
+        let controlLimit = controlsTrailingEdge + TopBarStatusCluster.Metrics.minimumGapFromControls
+        let limit = max(0, rightEdge - controlLimit)
+        statusCluster.columnWidth = statusColumnWidth
+        statusCluster.widthLimit = limit
+        let clusterWidth = statusCluster.width(limit: limit)
+        let clusterHeight = TopBarStatusCluster.Metrics.lineHeight
+        statusCluster.isHidden = clusterWidth <= 0
+        statusCluster.frame = NSRect(x: rightEdge - clusterWidth,
+                                     y: ((h - clusterHeight) / 2).rounded(),
+                                     width: clusterWidth,
+                                     height: clusterHeight)
+        statusCluster.needsLayout = true
     }
 
     @objc private func openTapped() { onOpen?() }
@@ -432,6 +448,8 @@ public final class WorkspaceRootView: NSView {
 
         topBar.frame = g.topBar
         topBar.contentLeading = g.toolContentLeading
+        // 顶栏右上角那块状态文本要落在检查器列上方：列宽从这里进 `TopBarStatusCluster`。
+        topBar.statusColumnWidth = g.inspector.width
         browserPane.view.frame = g.browser
         browserDivider.frame = NSRect(x: g.browserDivider.minX - 2, y: g.browserDivider.minY,
                                       width: g.browserDivider.width + 4, height: g.browserDivider.height)
