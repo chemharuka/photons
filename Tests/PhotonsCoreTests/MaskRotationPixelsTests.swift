@@ -123,7 +123,12 @@ final class MaskRotationPixelsTests: XCTestCase {
                                                         center: sourceUV,
                                                         radius: NormalizedPoint(radius, radius),
                                                         angle: 0)))],
-                           adjustments: LocalAdjustments(exposure: 1))]
+                           // **Identity** adjustments on purpose: the mask must not change a pixel of
+                           // the picture it is being compared against. A local exposure brightens
+                           // whatever the mask covers, so on a broken build the picture's own centroid
+                           // would be pulled towards the misplaced mask and the two errors would
+                           // partly cancel — a measurement that fails with the wrong number.
+                           adjustments: LocalAdjustments())]
         return edit
     }
 
@@ -302,9 +307,9 @@ final class MaskRotationPixelsTests: XCTestCase {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         // Straight from `main`, recorded by this test before the kernel learned to turn pixels.
         let pinned = [
-            "radial": "PIN_RADIAL",
-            "linear": "PIN_LINEAR",
-            "brush": "PIN_BRUSH",
+            "m-radial": "d0f3daf35670af6d387c0cef0cc3819d500cdbda128eece6dea60a134fa0878a",
+            "m-linear": "50266d9be21ce5d74d99906335099d75c4119fcaf9f5d345e2ccfbb7e1b93428",
+            "m-brush": "7af8a92cf35a30e9f87cbbff19185fc14800eb1e96fe3f8b7ed4ceb853012e73",
         ]
 
         let image = dotImage(width: 320, height: 200, at: NormalizedPoint(0.4, 0.6), sigma: 30)
@@ -341,7 +346,7 @@ final class MaskRotationPixelsTests: XCTestCase {
                 bytes[i] = UInt8(min(max((Double(dump.slices[slice][i]) * 255).rounded(), 0), 255))
             }
             let digest = SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
-            print("ATLAS-DIGEST \(id) \(digest.prefix(16))…")
+            print("ATLAS-DIGEST \(id) \(digest)")
             if let want = pinned[id] {
                 XCTAssertEqual(digest, want,
                                "\(id): a document at straighten = 0 must keep its atlas byte for byte")
