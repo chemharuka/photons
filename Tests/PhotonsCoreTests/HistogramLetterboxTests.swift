@@ -14,7 +14,7 @@ import PhotonsCore
 ///
 /// What is pinned here, in the order the派单 asks for it:
 ///
-///   1. **The rect is the drawing's**, not a derivation from two sizes: `RenderResult.pictureRect`
+///   1. **The rect is the drawing's**, not a derivation from two sizes: `RenderResult.photoRect`
 ///      equals the bounding box of the pixels S0 actually wrote — checked on a rendered frame, both
 ///      in a fit letterbox (bars 234 above / 235 below, i.e. asymmetric) and in a window that leaves
 ///      the frame (picture at (300, 200) of the canvas).
@@ -106,7 +106,7 @@ final class HistogramLetterboxTests: XCTestCase {
 
     /// The frame the user sees at 1:1 when the picture is smaller than the viewport: S0 writes the
     /// photograph at an offset and background around it. The old `(canvas − content) / 2` rect is the
-    /// whole window here, so it counted that background; `pictureRect` is the photograph.
+    /// whole window here, so it counted that background; `photoRect` is the photograph.
     func testAWindowThatLeavesTheFrameMeasuresThePictureNotTheBackground() throws {
         let graph = try makeGraph(asymmetricImage())
         let canvas = ImageSize(width: 1600, height: 1002)
@@ -117,8 +117,8 @@ final class HistogramLetterboxTests: XCTestCase {
         defer { graph.recycle(output: texture) }
 
         let drawn = drawnBounds(texture)
-        XCTAssertEqual(result.pictureRect, drawn,
-                       "pictureRect must be the rect S0 actually drew the picture in, not a derivation")
+        XCTAssertEqual(result.drawnRect, drawn,
+                       "photoRect must be the rect S0 actually drew the picture in, not a derivation")
 
         // The premise the old code assumed, stated so its failure is visible: the content rect is the
         // window (there is nothing to letterbox — canvas == window here), so the guess is the canvas.
@@ -127,16 +127,16 @@ final class HistogramLetterboxTests: XCTestCase {
                               width: result.content.width, height: result.content.height)
         XCTAssertEqual(guess, ImageRect(x: 0, y: 0, width: 1600, height: 1002),
                        "the old rect is the whole window — the premise「content is centred」is what broke")
-        XCTAssertNotEqual(result.pictureRect, guess, "and the picture is not that window")
+        XCTAssertNotEqual(result.drawnRect, guess, "and the picture is not that window")
 
-        let backgroundSamples = guess.area - result.pictureRect.area
+        let backgroundSamples = guess.area - result.drawnRect.area
         let wrong = try graph.measureFrameHistogram(fromFrame: texture, edit: .neutral, content: guess)
         let right = try graph.measureFrameHistogram(fromFrame: texture, edit: .neutral,
-                                                    content: result.pictureRect)
-        print("048 window-leaves-frame: canvas \(canvas.keyString) → picture \(result.pictureRect) "
+                                                    content: result.drawnRect)
+        print("048 window-leaves-frame: canvas \(canvas.keyString) → picture \(result.drawnRect) "
               + "drawn \(drawn); bin0 with the guess \(wrong.histogram.red.bins[0]) "
               + "(\(String(format: "%.1f", 100 * Double(wrong.histogram.red.bins[0]) / Double(max(wrong.histogram.red.total, 1)))) % of the sample) "
-              + "vs with pictureRect \(right.histogram.red.bins[0]) "
+              + "vs with photoRect \(right.histogram.red.bins[0]) "
               + "(\(String(format: "%.1f", 100 * Double(right.histogram.red.bins[0]) / Double(max(right.histogram.red.total, 1)))) %)")
 
         XCTAssertGreaterThan(wrong.histogram.red.bins[0], right.histogram.red.bins[0] * 3,
@@ -147,7 +147,7 @@ final class HistogramLetterboxTests: XCTestCase {
         // The in-render measurement the same frame carries (`collectHistogram`) must agree with the
         // from-frame one about *where* the picture is: one layout, two measurements.
         let shipped = try XCTUnwrap(result.histogram)
-        XCTAssertEqual(shipped.roi, result.pictureRect,
+        XCTAssertEqual(shipped.roi, result.drawnRect,
                        "the receipt the frame carries names the rect the frame was measured over")
     }
 
@@ -168,14 +168,14 @@ final class HistogramLetterboxTests: XCTestCase {
         let drawn = drawnBounds(texture)
         XCTAssertEqual(drawn, ImageRect(x: 0, y: 234, width: 1600, height: 533),
                        "234 rows above, 235 below — an asymmetric fixture on purpose")
-        XCTAssertEqual(result.pictureRect, drawn)
-        XCTAssertEqual(result.pictureRect.y + result.pictureRect.height, 767,
+        XCTAssertEqual(result.drawnRect, drawn)
+        XCTAssertEqual(result.drawnRect.y + result.drawnRect.height, 767,
                        "the picture's last row is 766; row 767 is the bottom bar")
-        XCTAssertLessThanOrEqual(result.pictureRect.maxX, result.canvas.width)
-        XCTAssertLessThanOrEqual(result.pictureRect.maxY, result.canvas.height)
+        XCTAssertLessThanOrEqual(result.drawnRect.maxX, result.canvas.width)
+        XCTAssertLessThanOrEqual(result.drawnRect.maxY, result.canvas.height)
 
         let shipped = try XCTUnwrap(result.histogram)
-        XCTAssertEqual(shipped.roi, result.pictureRect, "the fit frame's receipt is the same rect")
+        XCTAssertEqual(shipped.roi, result.drawnRect, "the fit frame's receipt is the same rect")
 
         // The top bar is picture-free: nothing but exactly 0 in it, all 234 rows of it.
         let raw = bytes(texture)

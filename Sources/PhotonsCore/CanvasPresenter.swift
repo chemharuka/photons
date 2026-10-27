@@ -3,17 +3,22 @@ import Metal
 import QuartzCore
 import CoreGraphics
 
-/// Which part of the source texture the present quad reads — `uv = origin + corner · size`.
+/// Which part of a texture a draw reads — `uv = window.xy + canvasPosition · window.zw`.
 ///
-/// The quad itself always covers the whole drawable, so this is the *only* thing that moves the
-/// picture: it is how the loupe carries the frame on screen from one camera to the next without
-/// touching the layer's geometry (a layer transform would scale the drawable past the canvas and
-/// expose the window behind it — the two bugs 025 reports).
+/// The window is expressed against the **canvas**, not against the quad: a frame texture is
+/// canvas-sized, and the window is the map that places it there. Two consequences, both load-bearing
+/// since 067:
 ///
-/// `size` and `origin` are in normalised texture coordinates and are deliberately **not** clamped to
-/// `[0, 1]`: a shrinking window is larger than the texture, and `clamp_to_edge` in the fragment
-/// sampler is what extends the picture's own edge pixels over the rest of the canvas, so a shrink
-/// never shows an unrendered band.
+///   · the quad that draws the photograph is *derived* from this window and the photograph's rect in
+///     the texture (`PresentRequest`), so the geometry and the sampling cannot disagree;
+///   · a quad that covers the whole canvas reads exactly this window, which is why the covering case
+///     is bit-identical to 025's full-screen pass.
+///
+/// `size` and `origin` are deliberately **not** clamped: a shrunk frame sampled through a wider
+/// window used to be how 025 filled the canvas, and the arithmetic here is still what places a frame
+/// on a canvas of a different size (`stretched(to:from:)`). What changed in 067 is that the *quad*
+/// is bounded, so no fragment ever reads past the picture: the window describes the map, the quad
+/// describes the coverage, and only the second one decides where the canvas gets paint.
 public struct PresentWindow: Equatable, Sendable {
     public var u0: Float
     public var v0: Float
@@ -35,9 +40,8 @@ public struct PresentWindow: Equatable, Sendable {
     /// a texture of `texture` pixels.
     ///
     /// The canvas *samples* the inverse of that map (`texel = (p − origin) / s`), which is why a
-    /// shrinking window (`s < 1`) comes out **larger** than the texture: its `du` is `1/s`, the UVs run
-    /// past `[0, 1]`, and `clamp_to_edge` is what fills the canvas. A growing one (`s > 1`) is a
-    /// sub-rect — the canvas then shows part of the picture, which is exactly what zooming in means.
+    /// shrinking window (`s < 1`) comes out **larger** than the texture and a growing one (`s > 1`) is
+    /// a sub-rect.
     public init(scale s: Double, originX: Double, originY: Double,
                 canvas: ImageSize, texture: ImageSize) {
         let w = Double(max(texture.width, 1)), h = Double(max(texture.height, 1))
@@ -76,13 +80,10 @@ public struct PresentWindow: Equatable, Sendable {
     ///     f   = (uv − rect.origin) / rect.size      // where in the texture's photograph this is
     ///     u_p = region.origin + f · region.size     // the same point of the whole picture
     ///
-    /// Two properties come out of it and are what the shader needs: a window that reaches every canvas
-    /// pixel maps into `[0, 1]` (the picture *is* the canvas there), and a window that draws the whole
-    /// picture into the canvas — 适应 — maps to exactly `[0, 1]`, so the backdrop's own texels land on
-    /// the canvas untruncated. Passing the frame window straight to the backdrop (053) skipped this
-    /// composition, and since `du = 1/s > 1` on a shrink the UVs ran far past `[0, 1]` — the sampler's
-    /// `clamp_to_edge` then painted one column of the picture across the canvas, which is the
-    /// stretched-edge artefact the user reported seeing under 053.
+    /// Two properties come out of it and are what the backdrop needs: a window that reaches every
+    /// canvas pixel maps into `[0, 1]` (the picture *is* the canvas there), and a window that draws the
+    /// whole picture into the canvas — 适应 — maps to exactly `[0, 1]`, so the backdrop's own texels
+    /// land on the canvas untruncated.
     public func onWholePicture(_ placement: FramePlacement) -> PresentWindow {
         let r = placement.rect, g = placement.region
         // A degenerate placement has no rect to normalise against; `0` size is the honest answer and
@@ -94,6 +95,71 @@ public struct PresentWindow: Equatable, Sendable {
                              du: Float(Double(du) * sx),
                              dv: Float(Double(dv) * sy))
     }
+
+    /// The same map on a canvas that has changed size while the picture has not moved — 067's
+    /// live-resize geometry.
+    ///
+    /// `uv` is a texture coordinate and `canvasPosition` is a *fraction* of the canvas, so keeping the
+    /// uv of a canvas **pixel** fixed while the canvas grows or shrinks means scaling the window's
+    /// size by the ratio and leaving its origin alone:
+    ///
+    ///     uv(p_px) = u0 + p_px / W_new · du_new = u0 + p_px / W_old · du_old
+    ///
+    /// A window stretched this way draws the same picture at the same canvas pixels: a smaller
+    /// drawable crops it, a larger one shows more of it, and nothing is rescaled. That is exactly the
+    /// behaviour a window drag wants — the picture must not stretch while the hand is moving
+    /// (「变扁」), and the area a grown canvas exposes is filled by the backdrop through this same
+    /// map, i.e. with the picture's own low-resolution continuation instead of a colour or a black
+    /// band. `PresentRequest` derives both quads from the window, so the frozen case needs no
+    /// geometry of its own.
+    public func stretched(to newCanvas: ImageSize, from oldCanvas: ImageSize) -> PresentWindow {
+        guard oldCanvas.width > 0, oldCanvas.height > 0,
+              newCanvas.width > 0, newCanvas.height > 0 else { return self }
+        let sx = Float(newCanvas.width) / Float(oldCanvas.width)
+        let sy = Float(newCanvas.height) / Float(oldCanvas.height)
+        return PresentWindow(u0: u0, v0: v0, du: du * sx, dv: dv * sy)
+    }
+
+    /// The canvas rectangle — normalised, y down — where a texture sub-rect lands through this window.
+    /// The inverse of the shader's map: `canvasPosition = (uv − u0) / du`.
+    ///
+    /// `nil` for a degenerate axis (a zero window has no rectangle; `makeParams` used to divide by it
+    /// and the fragment had to floor the divisor to survive), which the callers turn into an empty
+    /// quad instead of a divide-by-zero.
+    public func canvasRect(ofTexture u: Double, _ v: Double,
+                           _ width: Double, _ height: Double)
+        -> (x: Double, y: Double, width: Double, height: Double)? {
+        let dx = Double(du), dy = Double(dv)
+        guard abs(dx) > 1e-9, abs(dy) > 1e-9 else { return nil }
+        return ((u - Double(u0)) / dx, (v - Double(v0)) / dy, width / dx, height / dy)
+    }
+
+    /// The same rectangle in **canvas pixels**, rounded to whole pixels and clipped to the canvas.
+    ///
+    /// Clipping is not a correction — the GPU would clip the quad anyway — but it keeps the numbers
+    /// the pass is handed inside the surface it draws on, which is what `PresentQuadInvariantTests`
+    /// asserts (a quad that is inside the canvas by construction cannot be the reason a band appears).
+    /// Rounding is the cost of `ImageRect` being integral: on a *settled* frame the rect comes from the
+    /// render's own receipt and is exact; on a bridge frame it is off by less than one pixel, and the
+    /// sampling is unaffected because the shader takes its uv from the canvas position, not from the
+    /// quad's local coordinates.
+    public func canvasRect(of textureRect: ImageRect, texture: ImageSize,
+                           canvas: ImageSize) -> ImageRect {
+        let w = Double(max(texture.width, 1)), h = Double(max(texture.height, 1))
+        guard let r = canvasRect(ofTexture: Double(textureRect.x) / w,
+                                 Double(textureRect.y) / h,
+                                 Double(textureRect.width) / w,
+                                 Double(textureRect.height) / h) else { return Self.noRect }
+        let cw = Double(max(canvas.width, 1)), ch = Double(max(canvas.height, 1))
+        let x0 = (r.x * cw).rounded(), y0 = (r.y * ch).rounded()
+        let x1 = ((r.x + r.width) * cw).rounded(), y1 = ((r.y + r.height) * ch).rounded()
+        return ImageRect(x: Int(x0), y: Int(y0),
+                         width: Int(max(0, x1 - x0)), height: Int(max(0, y1 - y0)))
+            .intersected(in: canvas)
+    }
+
+    /// A rect with no area — "nothing of this is on the canvas".
+    static var noRect: ImageRect { ImageRect(x: 0, y: 0, width: 0, height: 0) }
 }
 
 /// Where a canvas-sized frame texture sits on the **whole picture** (058) — the second coordinate
@@ -137,9 +203,97 @@ public struct FramePlacement: Equatable, Sendable {
     }
 
     /// The composition is the identity: the texture *is* the picture, canvas and picture edges alike.
-    /// `window.onWholePicture(placement) == window` exactly when this is true — 053's assumption, which
-    /// holds for a canvas without letterbox at 适应 and for a texture rendered without a canvas.
     public var isIdentity: Bool { coversPicture && rect == .whole }
+}
+
+/// **The one thing a present takes** (067).
+///
+/// 054–065 passed the picture's rectangle through four call sites (settled frame, bridge frame,
+/// bridge stop, bridge teardown) and three of them could forget or mis-space it; the fragment then
+/// painted the frame's `float4(0)` letterbox as black, or painted `#0F0F0F` at a rect the picture had
+/// already left. A request cannot be forgotten — there is no overload without one — and its geometry
+/// is derived, not passed alongside:
+///
+///   · `pictureQuad` is where the photograph lands on the canvas. It follows from `window` and
+///     `photoRect` (the photograph's rect *inside* the frame texture, which is the render's own
+///     receipt) by inversion, so a bridge frame's quad moves with the bridge's map instead of staying
+///     where the held frame's rect was;
+///   · `backdropQuad` is where the whole picture lands, which follows from `backdropWindow` alone.
+///
+/// The pass then draws at most two quads into a cleared surface; the fragment never asks whether a
+/// texel is the photograph. See `present.metal`.
+public struct PresentRequest {
+
+    /// This frame's texture: the photograph, letterboxed with zeros outside `photoRect`.
+    public let picture: MTLTexture
+    /// The canvas every rect in this request is expressed in, in pixels — the surface the quads were
+    /// computed for. `present` draws into a drawable of exactly this size: a surface of another size
+    /// is the photograph at another aspect, which is the 066 bug, and the one thing this type refuses
+    /// to do quietly.
+    public let canvas: ImageSize
+    /// Where the photograph goes on the canvas, in canvas pixels. **The** geometry of the picture.
+    public let pictureQuad: ImageRect
+    /// The texels of `picture` the quad reads: the frame's window (identity for a settled frame).
+    public let window: PresentWindow
+    /// The whole picture at low resolution, drawn *behind* the picture quad. `nil` = none.
+    public let backdrop: MTLTexture?
+    /// Where the whole picture goes on the canvas, in canvas pixels. Derived from `backdropWindow`.
+    public let backdropQuad: ImageRect?
+    /// The texels of `backdrop` its quad reads — picture coordinates (058).
+    public let backdropWindow: PresentWindow
+
+    /// The request every call site builds: the geometry is inverted from the frame's own window.
+    ///
+    /// `photoRect` is the photograph's rect inside `picture` in that texture's pixels — for a
+    /// settled frame, `RenderResult.photoRect`; for the frame held on the canvas during a zoom,
+    /// its own receipt. `canvas` is the surface the pass will draw into (the drawable), which is what
+    /// makes the quad resolution-independent.
+    public init(picture: MTLTexture, photoRect: ImageRect, window: PresentWindow,
+                canvas: ImageSize, backdrop: MTLTexture? = nil,
+                backdropWindow: PresentWindow = .whole) {
+        let texture = ImageSize(width: picture.width, height: picture.height)
+        let quad = window.canvasRect(of: photoRect, texture: texture, canvas: canvas)
+        var backdropQuad: ImageRect?
+        if let backdrop {
+            let low = ImageSize(width: backdrop.width, height: backdrop.height)
+            let whole = ImageRect(x: 0, y: 0, width: low.width, height: low.height)
+            let derived = backdropWindow.canvasRect(of: whole, texture: low, canvas: canvas)
+            backdropQuad = derived.isEmpty ? nil : derived
+        }
+        self.init(picture: picture, canvas: canvas, pictureQuad: quad, window: window,
+                  backdrop: backdrop, backdropQuad: backdropQuad, backdropWindow: backdropWindow)
+    }
+
+    /// Explicit geometry — for a caller that has the quads and not the windows (a test that wants to
+    /// place a quad by hand) and for the initialiser above. The window still decides the sampling, so
+    /// the two cannot be independent numbers in practice.
+    public init(picture: MTLTexture, canvas: ImageSize, pictureQuad: ImageRect,
+                window: PresentWindow, backdrop: MTLTexture? = nil,
+                backdropQuad: ImageRect? = nil, backdropWindow: PresentWindow = .whole) {
+        self.picture = picture
+        self.canvas = canvas
+        self.pictureQuad = pictureQuad
+        self.window = window
+        self.backdrop = backdropQuad == nil ? nil : backdrop
+        self.backdropQuad = backdropQuad
+        self.backdropWindow = backdropWindow
+    }
+
+    /// Nothing to draw on the picture: a degenerate window, or a quad the canvas does not hold. The
+    /// pass still clears, which is the honest picture of "the frame reached nothing here".
+    public var hasPicture: Bool { !pictureQuad.isEmpty && window.du != 0 && window.dv != 0 }
+
+    /// What the pass will draw, in painter's order: the backdrop first, the picture over it.
+    public var quads: [(rect: ImageRect, window: PresentWindow, texture: MTLTexture)] {
+        var out: [(rect: ImageRect, window: PresentWindow, texture: MTLTexture)] = []
+        if let backdrop, let backdropQuad {
+            out.append((backdropQuad, backdropWindow, backdrop))
+        }
+        if hasPicture {
+            out.append((pictureQuad, window, picture))
+        }
+        return out
+    }
 }
 
 /// Presents an S4 output texture into a `CAMetalLayer` — the last hand-off of the on-screen path.
@@ -152,18 +306,18 @@ public final class CanvasPresenter {
 
     /// 054 — the colour of the canvas **around** the picture: `#0F0F0F`.
     ///
-    /// One definition for the four places that must not drift: the shader's matte (`present.metal`),
-    /// the render pass's clear colour, and the two layer backgrounds in `LoupeController`. The bands
-    /// around a fitted picture are *not* a layer colour — S2/S4 write `float4(0)` outside the
-    /// photograph, so the black lives **in the canvas texture** and the matte has to be painted by the
-    /// present pass. The layer colour only covers the frame before the first drawable arrives, and the
-    /// clear colour only the area a triangle does not reach; both are set to the same value so the
-    /// canvas never flashes black on its way to grey.
+    /// Since 067 this colour has exactly **one** producer on screen: the render pass's clear colour.
+    /// The shader does not carry it any more (it used to paint it per fragment from `photoRect`,
+    /// which is how a present that forgot the rect drew black instead), and the two layer backgrounds
+    /// in `LoupeController` keep it for the frames before the first drawable arrives. The bands around
+    /// a fitted picture are *not* a layer colour and no longer anything the pass computes: S2/S4 write
+    /// `float4(0)` outside the photograph, the picture quad simply does not cover those pixels, and
+    /// the clear colour shows through. The texture's zeros are never sampled — which is also what
+    /// leaves the photograph's bytes and the histogram (measured on S4 over the photograph) untouched.
     ///
     /// The value is a **display-encoded** (`sRGB`-encoded) 8-bit code, because that is the space
-    /// `#0F0F0F` is written in. The 16-bit layer stores linear light, so that path needs
-    /// `linear` — the same number through the sRGB EOTF — and `present.metal` gets it by running the
-    /// display value through `present_transfer`, exactly as it does for every photograph pixel.
+    /// `#0F0F0F` is written in. The 16-bit layer stores linear light, so that path needs `linear` —
+    /// the same number through the sRGB EOTF.
     public enum CanvasMatte {
         /// `#0F` — 15 of 255.
         public static let eightBitValue: UInt8 = 0x0F
@@ -237,38 +391,24 @@ public final class CanvasPresenter {
         layer.displaySyncEnabled = true
     }
 
-    /// Draw `texture` into `layer`. Returns true when a frame was actually presented.
+    /// Draw one request into `layer`. Returns true when a frame was actually presented.
     ///
-    /// **`drawableSize` is the canvas, and it is not the texture's own size** (025): a texture larger
-    /// than the canvas must never reach the drawable, or the picture would spill over the browser
-    /// pane, the inspector and the top bar. The size is passed in by the caller that owns the layout
-    /// (`LoupeController.viewportPixels`) and the part of the texture to show is named separately.
-    ///
-    /// **`backdrop`** (037) is a low-resolution copy of *the whole picture*, passed while a shrink is
-    /// in flight: see `render(_:window:backdrop:backdropWindow:into:linearize:)` for what the pass
-    /// does with it. `nil` — the default, and every caller that has not been wired up yet — keeps the
-    /// 025 behaviour exactly (`clamp_to_edge` stretching the picture's own edge).
+    /// **`drawableSize` is the canvas, and it must be the canvas that is on screen now** (025, 066):
+    /// a texture rendered for another size can never be drawn correctly — the quads are pixel
+    /// rectangles, so an old-canvas frame in a new drawable is the photograph at the wrong aspect
+    /// (「变扁」). The controller drops such a frame before it gets here; this parameter is the size the
+    /// quads were computed against, and it is the layer's size that has to follow it, not the other
+    /// way round.
     ///
     /// A layer that refuses a 16-bit drawable (`nextDrawable()` returning nil) falls back to the
     /// 8-bit sRGB path **once**, and keeps that choice: silently retrying every frame would halve the
     /// frame rate on exactly the machines where it failed.
-    ///
-    /// **`pictureRect`** (054) is where the photograph sits **inside the frame texture**, in canvas
-    /// pixels of the drawable — `RenderResult.pictureRect` for a settled frame. The pass paints
-    /// `#0F0F0F` outside it, which is the letterbox the user sees in fit mode; inside it every byte is
-    /// unchanged. `nil` — every caller that has not been wired up, and every caller whose texture is
-    /// the picture itself — means "the picture is the whole canvas", i.e. no matte at all, and is
-    /// bit-for-bit 025's output. Pass it only when the texture was rendered for exactly this drawable
-    /// size: the rect is normalised by the drawable, so a frame rendered for a different canvas would
-    /// put the boundary in the wrong place. With a `backdrop` the matte is not drawn at all (the canvas
-    /// outside the main window is the picture's own low-res continuation), so the rect is ignored.
     @discardableResult
-    public func present(_ texture: MTLTexture, in layer: CAMetalLayer, wantsEDR: Bool = false,
-                        drawableSize: ImageSize? = nil, window: PresentWindow = .whole,
-                        backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
-                        pictureRect: ImageRect? = nil,
-                        onComplete: (() -> Void)? = nil) -> Bool {
-        let target = drawableSize ?? ImageSize(width: texture.width, height: texture.height)
+    public func present(_ request: PresentRequest, in layer: CAMetalLayer, wantsEDR: Bool = false,
+                        drawableSize: ImageSize? = nil, onComplete: (() -> Void)? = nil) -> Bool {
+        // The quads are pixel rectangles of the request's canvas, so that — not the texture's own
+        // size, and not "whatever the layer last had" — is the drawable they belong in.
+        let target = drawableSize ?? request.canvas
         let size = CGSize(width: max(1, target.width), height: max(1, target.height))
         if layer.drawableSize != size { layer.drawableSize = size }
 
@@ -292,8 +432,8 @@ public final class CanvasPresenter {
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        // 054: the same matte the fragment paints, so the frame a drawable does not cover (first frame,
-        // a clipped edge) is grey from the very first present instead of flashing black.
+        // 067: the clear colour is the *whole* canvas colour. Everything a quad does not cover is
+        // this, from the first drawable on — there is no second producer of the matte anywhere.
         pass.colorAttachments[0].clearColor = CanvasMatte.clearColor(linear: storage == .linear16)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
             lastFailure = "no render encoder"
@@ -301,20 +441,8 @@ public final class CanvasPresenter {
         }
 
         do {
-            let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
-                                                      fragment: Self.fragmentName(backdrop),
-                                                      pixelFormat: drawable.texture.pixelFormat)
-            var params = Self.makeParams(linearize: storage == .linear16, window: window,
-                                         backdrop: backdrop, backdropWindow: backdropWindow,
-                                         canvas: target, pictureRect: pictureRect)
-            enc.setRenderPipelineState(pipeline)
-            enc.setFragmentTexture(texture, index: 0)
-            // Bound even when there is no backdrop: the fragment's two-sample branch is uniform but
-            // the compiler still emits the fetch, and a nil texture there trips the debug layer.
-            enc.setFragmentTexture(backdrop ?? texture, index: 1)
-            enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
-            enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
-            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            try draw(request, into: enc, linearize: storage == .linear16,
+                     format: drawable.texture.pixelFormat)
             enc.endEncoding()
         } catch {
             enc.endEncoding()
@@ -335,32 +463,11 @@ public final class CanvasPresenter {
     /// arithmetic with no window server in the way.
     ///
     /// The on-screen path cannot be read back (`framebufferOnly`), so this is how a test looks at
-    /// *pixels*: what a window does to the canvas is visible here and nowhere else. It is also the
-    /// shape any future offscreen consumer wants, which is why it is the same pipeline and the same
-    /// params rather than a test-only copy of the shader.
-    ///
-    /// ### `backdrop` (037)
-    ///
-    /// A shrinking window is larger than the texture, so the canvas has area the main frame does not
-    /// reach; 025 filled it with the picture's own edge (`clamp_to_edge`), which the user sees as a
-    /// band of stretched colour around the picture. `backdrop` is the *whole picture* at low
-    /// resolution (`backdropWindow` = where the canvas reads it, normally `.whole`): the pass samples
-    /// it for the canvas outside the main window and cross-fades over a `backdropFeatherPixels`-wide
-    /// band so the two do not meet on a hard seam. Zoomed in the main window covers the canvas, so
-    /// the whole canvas is main-frame colour and the backdrop fetch changes nothing.
-    ///
-    /// `backdrop == nil` is the 025 path unchanged: one sample, `clamp_to_edge`, and the output is
-    /// **byte for byte** what it was before this parameter existed (pinned by
-    /// `BackdropPresenterTests.testNoBackdropOutputIsByteIdenticalTo025`).
-    ///
-    /// `pictureRect` (054) is the same argument `present` takes: the photograph's rect inside the
-    /// frame texture, in canvas pixels of `target`. Outside it the pass writes `#0F0F0F`. It is the
-    /// only way a test can look at the matte, since the on-screen drawable is `framebufferOnly`.
+    /// *pixels*: what the quads (and the clear) do to a canvas is visible here and nowhere else. It is
+    /// the same pipeline and the same `PresentParams` the drawable gets, not a test-only copy.
     @discardableResult
-    public func render(_ texture: MTLTexture, window: PresentWindow = .whole,
-                       backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
-                       pictureRect: ImageRect? = nil,
-                       into target: MTLTexture, linearize: Bool? = nil) -> Bool {
+    public func render(_ request: PresentRequest, into target: MTLTexture,
+                       linearize: Bool? = nil) -> Bool {
         guard let cb = queue.makeCommandBuffer() else {
             lastFailure = "no command buffer"
             return false
@@ -376,19 +483,7 @@ public final class CanvasPresenter {
             return false
         }
         do {
-            let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
-                                                      fragment: Self.fragmentName(backdrop),
-                                                      pixelFormat: target.pixelFormat)
-            var params = Self.makeParams(linearize: linear, window: window,
-                                         backdrop: backdrop, backdropWindow: backdropWindow,
-                                         canvas: ImageSize(width: target.width, height: target.height),
-                                         pictureRect: pictureRect)
-            enc.setRenderPipelineState(pipeline)
-            enc.setFragmentTexture(texture, index: 0)
-            enc.setFragmentTexture(backdrop ?? texture, index: 1)
-            enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
-            enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
-            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            try draw(request, into: enc, linearize: linear, format: target.pixelFormat)
             enc.endEncoding()
         } catch {
             enc.endEncoding()
@@ -401,92 +496,66 @@ public final class CanvasPresenter {
         return cb.error == nil
     }
 
-    // MARK: - the CPU half of the kernel contract
+    // MARK: - the one draw
 
-    /// The width, in canvas pixels, of the cross-fade between the main frame and the backdrop.
+    /// **The only place this type draws.** At most two quads — the low-resolution whole picture, then
+    /// the photograph — into one encoder that has already cleared the canvas to `#0F0F0F`.
     ///
-    /// Two pixels, measured **inside** the picture's own edge: wide enough that a low-resolution
-    /// backdrop does not meet the sharp frame on a visible step, narrow enough that the picture is not
-    /// visibly soft while a zoom runs. Outside the edge the backdrop is what is drawn, unchanged.
-    public static let backdropFeatherPixels: Double = 2
-
-    /// Which of `present.metal`'s two fragments to draw with.
-    ///
-    /// Two entry points rather than one shader with a branch: a uniform branch is not free on a GPU
-    /// that cannot predicate a texture fetch (measured at +0.03 ms per 4.10 Mpx frame), and the
-    /// no-backdrop path is supposed to cost what it cost before 037. `present_fragment` is 025's
-    /// fragment; `present_fragment_backdrop` is the one that reads `backdrop`.
-    static func fragmentName(_ backdrop: MTLTexture?) -> String {
-        backdrop == nil ? "present_fragment" : "present_fragment_backdrop"
-    }
-
-    /// Fills every field of `PresentParams`. One place, so `present` and `render` cannot disagree —
-    /// and so a test can pin the values without a drawable.
-    ///
-    /// `d` is the one field whose *source* depends on the fragment that will read it, because the two
-    /// fragments ask different questions:
-    ///
-    /// - with a **backdrop** the feather ramps against the main window's rect on the canvas, which is
-    ///   the window (`-u0/du`, `1/du`) — 037's meaning, untouched;
-    /// - without one, `d` is where the **photograph** is (`pictureRect`, 054), and the fragment paints
-    ///   `#0F0F0F` outside it. No picture rect means `(0, 0, 1, 1)` — "the picture is the whole
-    ///   canvas", no matte — which is what every pre-054 caller gets, and why the pinned 025 hashes
-    ///   (identity, shrink, zoom) do not move.
-    static func makeParams(linearize: Bool, window: PresentWindow,
-                           backdrop: MTLTexture?, backdropWindow: PresentWindow,
-                           canvas: ImageSize, pictureRect: ImageRect? = nil) -> PresentParams {
-        // A degenerate window has no rectangle to feather against; treat it as "no backdrop" rather
-        // than dividing by zero and blending against garbage.
-        let usable = backdrop != nil && window.du > 1e-9 && window.dv > 1e-9
-        let du = Double(usable ? window.du : 1), dv = Double(usable ? window.dv : 1)
-        let u0 = Double(usable ? window.u0 : 0), v0 = Double(usable ? window.v0 : 0)
-        // uv = u0 + p·du, so the picture occupies p ∈ [-u0/du, (1-u0)/du] — the rect in
-        // canvas-normalised coordinates that the fragment feathers against.
-        let windowRect = SIMD4<Float>(Float(-u0 / du), Float(-v0 / dv), Float(1 / du), Float(1 / dv))
-        // 054: the photograph's own rect, normalised by the canvas the fragment works in. Only the
-        // no-backdrop fragment reads it (the backdrop path is the picture everywhere), so a backdrop
-        // request keeps 037's window rect and cannot be pulled off its feather by this argument.
-        let picture: SIMD4<Float>
-        if let pictureRect, !pictureRect.isEmpty, canvas.width > 0, canvas.height > 0 {
-            let w = Float(canvas.width), h = Float(canvas.height)
-            picture = SIMD4(Float(pictureRect.x) / w, Float(pictureRect.y) / h,
-                            Float(pictureRect.width) / w, Float(pictureRect.height) / h)
-        } else {
-            picture = SIMD4(0, 0, 1, 1)
+    /// They are separate draws, not one shader with a branch, for the reason 037 gave and 067 keeps:
+    /// a GPU cannot predicate a texture fetch, so a uniform branch still pays for the fetch. Two draws
+    /// of four vertices is the cheap way to have the picture read the frame and the band read the
+    /// backdrop. Painter's order does the compositing: no blending, no depth buffer, the later quad
+    /// simply replaces the earlier one where it lands.
+    private func draw(_ request: PresentRequest, into enc: MTLRenderCommandEncoder,
+                      linearize: Bool, format: MTLPixelFormat) throws {
+        let quads = request.quads
+        guard !quads.isEmpty else { return }
+        // One pipeline for every quad: the fragment does not know which texture it reads, which is the
+        // whole point — it samples what the binding says and transfers it.
+        let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
+                                                  fragment: "present_fragment",
+                                                  pixelFormat: format)
+        enc.setRenderPipelineState(pipeline)
+        let canvas = request.canvas
+        for quad in quads {
+            var params = PresentParams(quad: Self.normalised(quad.rect, canvas: canvas),
+                                       window: SIMD4(quad.window.u0, quad.window.v0,
+                                                     quad.window.du, quad.window.dv),
+                                       misc: SIMD4(linearize ? 1 : 0, 0, 0, 0))
+            enc.setFragmentTexture(quad.texture, index: 0)
+            enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
+            enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
-        let rect = usable ? windowRect : picture
-        let featherPixels = Self.backdropFeatherPixels
-        let feather = SIMD4<Float>(Float(featherPixels / Double(canvas.width)),
-                                   Float(featherPixels / Double(canvas.height)),
-                                   usable ? 1 : 0, 0)
-        return PresentParams(a: SIMD4(linearize ? 1 : 0, 0, 0, 0),
-                             b: SIMD4(window.u0, window.v0, window.du, window.dv),
-                             c: SIMD4(backdropWindow.u0, backdropWindow.v0,
-                                      backdropWindow.du, backdropWindow.dv),
-                             d: rect, e: feather)
     }
 
-    /// The CPU side of the struct both sides must agree on.
+    /// A quad in canvas-normalised coordinates — the space the vertex stage draws in, and the space the
+    /// window's `uv = u0 + p · du` is written against.
+    static func normalised(_ rect: ImageRect, canvas: ImageSize) -> SIMD4<Float> {
+        let w = Float(max(canvas.width, 1)), h = Float(max(canvas.height, 1))
+        return SIMD4(Float(rect.x) / w, Float(rect.y) / h,
+                     Float(rect.width) / w, Float(rect.height) / h)
+    }
+
+    /// The CPU half of the struct both sides must agree on.
     ///
     /// `PresentParams` is handed to the GPU as raw bytes (`setVertexBytes`/`setFragmentBytes`), so the
     /// Swift layout and the `present.metal` declaration are one contract with no compiler check
-    /// between them — and this project has already read a stale parameter silently once. Five
-    /// `float4`s, 16 bytes each, stride 80; `BackdropPresenterTests` parses `present.metal` and pins
+    /// between them — and this project has already read a stale parameter silently once. Three
+    /// `float4`s, 16 bytes each, stride 48; `BackdropPresenterTests` parses `present.metal` and pins
     /// both sides against these numbers.
     struct PresentParams {
-        /// linearize, pad, pad, pad
-        var a: SIMD4<Float>
-        /// The main frame's sampled window: `xy` = origin, `zw` = size, normalised texture
-        /// coordinates (values outside `[0, 1]` on a shrink are what `clamp_to_edge` fills from).
-        var b: SIMD4<Float>
-        /// The backdrop's sampled window, same encoding. Only read when `e.z != 0`.
-        var c: SIMD4<Float>
-        /// The picture's rectangle **on the canvas**, normalised: `xy` = origin, `zw` = size.
-        /// Read by `present_fragment` (054: the matte is painted outside it) and by the backdrop
-        /// fragment's feather (037: the main window's rect). See `makeParams` for which one it holds.
-        var d: SIMD4<Float>
-        /// `xy` = the feather width per axis (canvas-normalised, measured inside the rect),
-        /// `z` = has backdrop.
-        var e: SIMD4<Float>
+        /// The rectangle this draw covers, **canvas-normalised**: `xy` = origin, `zw` = size.
+        var quad: SIMD4<Float>
+        /// The uv window the quad reads: `xy` = origin, `zw` = size, normalised texture coordinates.
+        var window: SIMD4<Float>
+        /// `x` = linearize; the rest is padding so the field stays a `float4`.
+        var misc: SIMD4<Float>
+
+        init(quad: SIMD4<Float>, window: SIMD4<Float>, misc: SIMD4<Float>) {
+            self.quad = quad
+            self.window = window
+            self.misc = misc
+        }
     }
 }
