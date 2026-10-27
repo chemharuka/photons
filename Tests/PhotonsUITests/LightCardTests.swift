@@ -53,6 +53,29 @@ final class LightCardTests: XCTestCase {
         XCTAssertEqual(style.controlSize, .mini, "the knob is still .mini, as it has always been")
     }
 
+    /// 052: the same table carries each row's **precision** — how the readout rounds, how many
+    /// decimals the edit box shows, and (for 曝光 alone) the grid the document stores on.
+    func testTheLightRowsCarryTheirDisplayAndStoragePrecision() {
+        let exposure = InspectorView.lightRows[0]
+        XCTAssertEqual(exposure.format, "%.2f EV", "曝光 reads two decimals — never a whole number")
+        XCTAssertEqual(exposure.rounding, .asIs, "…so its readout is not rounded away from zero")
+        XCTAssertEqual(exposure.decimals, 2, "the edit box shows exactly what the readout does")
+        XCTAssertEqual(exposure.quantum, 0.01, "and the document lives on a 0.01 grid")
+        XCTAssertEqual(InspectorView.sliderText(exposure.format, 1.4829, rounding: exposure.rounding),
+                       "1.48 EV")
+
+        for row in InspectorView.lightRows.dropFirst() {
+            XCTAssertEqual(row.format, "%.0f", "\(row.title) prints a whole number")
+            XCTAssertEqual(row.rounding, .outward, "\(row.title) rounds away from zero, never inwards")
+            XCTAssertEqual(row.decimals, 1, "\(row.title) shows one decimal only while editing")
+            XCTAssertEqual(row.quantum, 0, "\(row.title) stores what was typed (its step is already 1)")
+            XCTAssertEqual(InspectorView.sliderText(row.format, 1.4829, rounding: row.rounding), "2")
+            XCTAssertEqual(InspectorView.sliderText(row.format, -0.4, rounding: row.rounding), "-1")
+        }
+        print("LIGHT precision: 曝光 %.2f EV / .asIs / decimals 2 / quantum 0.01 · "
+              + "others %.0f / .outward / decimals 1 / no quantum")
+    }
+
     /// The rendered card exposes the same six rows as the table — degraded to a print when the
     /// accessibility tree is not available in this environment (as in `DetailSectionTests`).
     func testTheRenderedCardStillCarriesTheSixRows() {
