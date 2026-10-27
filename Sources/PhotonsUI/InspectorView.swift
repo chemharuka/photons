@@ -69,6 +69,10 @@ public struct InspectorView: View {
         case curve
         case presets
         case masks
+        /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
+        /// only one that is a *reading* rather than a control: it can jump, and delete the newest row
+        /// of a class, and it can never write the document.
+        case history
 
         public var id: String { rawValue }
 
@@ -83,6 +87,9 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .presets: return "预设"
             case .masks: return "蒙版"
+            // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
+            // above it, so it belongs under them).
+            case .history: return "历史记录"
             }
         }
     }
@@ -256,6 +263,10 @@ public struct InspectorView: View {
             PresetPanel(session: session)
         case .masks:
             MaskListPanel(session: session)
+        case .history:
+            // 077: the timeline draws its own header and card chrome (the mask list does the same):
+            // it needs a count line, and it is not a parameter card with a reset.
+            HistoryPanel(session: session)
         }
     }
 

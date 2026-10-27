@@ -48,9 +48,10 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         // 默认打开的是「调整」——这是用户的第一条要求。
         XCTAssertEqual(InspectorWorkspaceState().selection, .adjust, "首次打开必须是调整")
+        // 077（2026-10-27）：调整里没有 蒙版（有自己的工作区）也没有 历史记录（同上）。
         XCTAssertEqual(InspectorView.sections(in: .adjust),
-                       InspectorView.scrollingSections.filter { $0 != .masks },
-                       "调整 = 既有面板的卡片，只把蒙版交给它自己的工作区")
+                       InspectorView.scrollingSections.filter { $0 != .masks && $0 != .history },
+                       "调整 = 既有面板的卡片，只把蒙版与历史记录交给它们自己的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -58,10 +59,11 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.adjust],
                        ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
-        // 「如果功能没做好就先空着」：这三个是**空数组**，不是占位。
+        // 「如果功能没做好就先空着」：这两个还是**空数组**，不是占位。
         XCTAssertEqual(titles[.transform], [])
         XCTAssertEqual(titles[.colour], [])
-        XCTAssertEqual(titles[.history], [])
+        // 077（2026-10-27）：历史记录不再是空工作区 —— 它有一张时间线卡。
+        XCTAssertEqual(titles[.history], ["历史记录"])
 
         // 图标必须有名字可念（.help 与 accessibilityLabel 都用它），空工作区的 tooltip 说明「尚未实现」。
         for workspace in InspectorWorkspace.allCases {
@@ -103,8 +105,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片的枚举少了一张（Decode 卡删除，9 张，直方图仍排第一）—— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 9)
+        // 卡片的枚举（Decode 卡删除后 9 张，077 加了历史记录 → 10 张，直方图仍排第一）—— 这张测试
+        // 钉的是过滤，不是重排。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 10)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
     }
 
@@ -245,7 +248,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         defer { panel.window.contentView = nil }
         let plot = panel.histogramPlot
 
-        for workspace in [InspectorWorkspace.transform, .colour, .history] {
+        // 077（2026-10-27）：历史记录有自己的卡片了，所以空工作区只剩这两个。
+        for workspace in [InspectorWorkspace.transform, .colour] {
             panel.state.select(workspace)
             try waitFor(panel, until: { $0.cards.workspace == workspace.rawValue })
 

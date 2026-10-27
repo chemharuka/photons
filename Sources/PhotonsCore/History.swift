@@ -79,7 +79,12 @@ public struct EditHistory: Sendable, Equatable, Codable {
 
     /// Bumped when the persisted envelope changes shape. Snapshots themselves are `EditModel`,
     /// which carries its own `schemaVersion` — history never rewrites them.
-    public static let currentSchemaVersion = 1
+    ///
+    /// 2 = 派单 077: a `Snapshot` carries `changes`, the **field-level** diff it introduced
+    /// (`HistoryFields.swift`). Absent in a version-1 envelope, where the diff is recomputed from the
+    /// neighbouring snapshots on load — so an old `asset_history` opens with readable rows and needs
+    /// no migration.
+    public static let currentSchemaVersion = 2
 
     /// 200 steps of whole-document JSON is at most a few hundred KB; unbounded is a leak, 50 is
     /// too few for a slider-drag session that commits per release.
@@ -99,12 +104,36 @@ public struct EditHistory: Sendable, Equatable, Codable {
         public var label: String
         public var edit: EditModel
         public var createdAt: Date
+        /// 077: the **field-level** diff this snapshot introduced, in a fixed order
+        /// (`EditHistory.changedFields(between:and:)`). Empty for the baseline, and empty in a
+        /// version-1 envelope until `init(rows:)` / `init(from:)` recompute it from the neighbour.
+        ///
+        /// Stored rather than derived, for one reason: **deleting a middle row must not rewrite the
+        /// row after it.** A derived diff would compare against the new (further-back) predecessor
+        /// and silently re-word somebody else's line.
+        public var changes: [FieldChange]
 
-        public init(seq: Int, label: String, edit: EditModel, createdAt: Date = Date()) {
+        public init(seq: Int, label: String, edit: EditModel, createdAt: Date = Date(),
+                    changes: [FieldChange] = []) {
             self.seq = seq
             self.label = label
             self.edit = edit
             self.createdAt = createdAt
+            self.changes = changes
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case seq, label, edit, createdAt, changes
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.seq = try c.decode(Int.self, forKey: .seq)
+            self.label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+            self.edit = try c.decode(EditModel.self, forKey: .edit)
+            self.createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+            // Forgiving: version-1 rows have no `changes` (see `backfillChanges`).
+            self.changes = try c.decodeIfPresent([FieldChange].self, forKey: .changes) ?? []
         }
     }
 
@@ -120,6 +149,33 @@ public struct EditHistory: Sendable, Equatable, Codable {
     /// Seq the next commit will take. Stored rather than derived so it survives truncation of the
     /// tip and eviction of the tail without ever reusing a number.
     public private(set) var nextSeq: Int
+    /// 077: the tool session in progress, if any (裁切 / 旋转 / …). While one is open `commit` is a
+    /// no-op, so a session is **exactly one** snapshot — taken by `endSession`, against the state the
+    /// session started from. Transient by design: a session that is open when the app quits never
+    /// existed, because nothing of it was ever committed.
+    public private(set) var activeSession: ToolSession?
+
+    /// One tool session: what it is called, the state it started from, and where the cursor stood.
+    public struct ToolSession: Sendable, Equatable {
+        /// The tool's name (`"裁切"`), used as the row's label unless `endSession` passes another.
+        public let tool: String
+        public let label: String
+        /// The document **before** the tool was entered. `endSession` diffs against this, not against
+        /// whatever the live document had become — which is what keeps the 20 handle positions out.
+        public let base: EditModel
+        public let cursorAtStart: Int
+        public let seqAtStart: Int?
+
+        public init(tool: String, label: String, base: EditModel, cursorAtStart: Int, seqAtStart: Int?) {
+            self.tool = tool
+            self.label = label
+            self.base = base
+            self.cursorAtStart = cursorAtStart
+            self.seqAtStart = seqAtStart
+        }
+    }
+
+    public var isSessionActive: Bool { activeSession != nil }
 
     // MARK: init
 
@@ -165,6 +221,7 @@ public struct EditHistory: Sendable, Equatable, Codable {
             cursor = max(0, snapshots.count - 1)
         }
         nextSeq = (snapshots.last?.seq ?? -1) + 1
+        backfillChanges()
         enforceDepth()
     }
 
@@ -206,15 +263,33 @@ public struct EditHistory: Sendable, Equatable, Codable {
     /// - No-op (returns nil) when `edit` is semantically identical to the current state: an
     ///   unchanged document must not grow the stack, and — importantly — must not truncate the
     ///   redo branch either, so a stray commit cannot destroy the future.
-    /// - Truncates everything after the cursor (the redo branch) before appending.
+    /// - No-op (returns nil) while a **tool session** is open (077): a session is one snapshot, and
+    ///   `endSession` is the only thing that takes it. A UI that commits per handle position gets
+    ///   nothing — the granularity is the session's, not the timer's.
+    /// - **Merges into the tip** when the top of the stack is the last snapshot and both it and this
+    ///   commit move exactly one gesture class (077): a slider drag is one row, not 300.
+    /// - Otherwise truncates everything after the cursor (the redo branch) and appends.
     /// - An empty `label` is derived from the dirty groups ("Light + Color").
     ///
-    /// - Returns: the snapshot written, or nil for a no-op.
+    /// - Returns: the snapshot written (or the merged tip), or nil for a no-op.
     @discardableResult
     public mutating func commit(_ edit: EditModel,
                                 label: String = "",
                                 now: Date = Date()) -> Snapshot? {
-        let before = current ?? .neutral
+        // 077: a session owns the next snapshot. Committing "inside" it is not an edit yet.
+        guard activeSession == nil else { return nil }
+        return appendSnapshot(edit, label: label, before: current ?? .neutral,
+                              now: now, allowsMerge: true)
+    }
+
+    /// The one write path. `before` is what the row's diff and label are computed against — the
+    /// state on screen for an ordinary commit, the session's base for a tool session (077).
+    @discardableResult
+    mutating func appendSnapshot(_ edit: EditModel,
+                                 label: String,
+                                 before: EditModel,
+                                 now: Date,
+                                 allowsMerge: Bool) -> Snapshot? {
         // "same document", not "same pixels": a mask rename redraws nothing but must still be
         // undoable, so the no-op test is the stricter of the two questions.
         guard !EditHistory.isSemanticallyIdentical(before, edit) else { return nil }
@@ -223,18 +298,101 @@ public struct EditHistory: Sendable, Equatable, Codable {
         // name itself after; it is a masks-panel edit all the same.
         if labelGroups.isEmpty && before.masks != edit.masks { labelGroups = [.masks] }
 
+        let changes = EditHistory.changedFields(between: before, and: edit)
+
+        // 077 — coalesce a continuous drag into the row it started.
+        //
+        // The test for "continuous" is deliberately **structural**, not temporal: the cursor is at
+        // the tip (nothing was undone or jumped away in between) and the parameter class is the
+        // same. darktable asks the GUI instead (`focus_hash`: "is the same control still focused"),
+        // which is exactly what this design refuses — a history row must not depend on the window
+        // server's idea of focus, and a 300 ms timer is a guess. A different class in between
+        // (`exposure, contrast, exposure`) breaks the run, which is the user's rule.
+        if allowsMerge, cursor == snapshots.count - 1, snapshots.count >= 2,
+           let mine = EditHistory.mergeClass(of: changes),
+           let theirs = EditHistory.mergeClass(of: snapshots[snapshots.count - 1].changes),
+           mine == theirs {
+            let tip = snapshots[snapshots.count - 1]
+            let runStart = snapshots[snapshots.count - 2].edit
+            let mergedChanges = EditHistory.changedFields(between: runStart, and: edit)
+            // Dragged back to where the run started: the row has nothing left to say, so it goes
+            // away entirely (and the cursor with it). "拖过去又拖回来" is not an edit.
+            if mergedChanges.isEmpty {
+                snapshots.removeLast()
+                cursor = snapshots.count - 1
+                return nil
+            }
+            var merged = tip
+            merged.edit = edit
+            merged.changes = mergedChanges
+            // `seq`, `label` and `createdAt` stay the run's **first** ones: the row's identity is
+            // when the drag began, and `seq` is a stable identity nothing may renumber.
+            snapshots[snapshots.count - 1] = merged
+            return merged
+        }
+
         if cursor + 1 < snapshots.count {
             snapshots.removeSubrange((cursor + 1)...)
         }
         let snap = Snapshot(seq: nextSeq,
                             label: EditHistory.derivedLabel(label, groups: labelGroups),
                             edit: edit,
-                            createdAt: now)
+                            createdAt: now,
+                            changes: changes)
         snapshots.append(snap)
         nextSeq = snap.seq + 1
         cursor = snapshots.count - 1
         enforceDepth()
         return snap
+    }
+
+    /// The class a commit belongs to, or nil when it is not a single-gesture change.
+    ///
+    /// A multi-class commit (paste settings, a group reset, a preset) is one action that moved
+    /// several panels; it is never "the same drag continued", so it never merges and never gets
+    /// merged into.
+    static func mergeClass(of changes: [FieldChange]) -> String? {
+        let classes = Set(changes.map(\.field.gestureClass))
+        return classes.count == 1 ? classes.first : nil
+    }
+
+    // MARK: tool sessions (077)
+
+    /// Open a tool session: from here until `endSession` / `cancelSession`, `commit` records nothing.
+    ///
+    /// Entering a tool is **not** an edit (nothing is committed), and neither is any handle position
+    /// inside it — see `endSession` for the one row a session may leave behind. A session opened
+    /// while one is already open is ignored: nesting would produce two rows for one gesture.
+    public mutating func beginSession(_ tool: String, label: String? = nil) {
+        guard activeSession == nil else { return }
+        activeSession = ToolSession(tool: tool,
+                                    label: label ?? tool,
+                                    base: current ?? .neutral,
+                                    cursorAtStart: cursor,
+                                    seqAtStart: currentSeq)
+    }
+
+    /// Close a session with **exactly one** snapshot: `base → edit`, or none at all if the tool
+    /// changed nothing.
+    ///
+    /// The diff is taken against `base`, so the row reads 「裁切: 裁切 x 0 → 0.12 …」 and every
+    /// intermediate rectangle the user dragged through is absent from the history. Returns nil when
+    /// there is no session, or when the session left the document where it found it.
+    @discardableResult
+    public mutating func endSession(_ edit: EditModel, label: String? = nil,
+                                    now: Date = Date()) -> Snapshot? {
+        guard let session = activeSession else { return nil }
+        activeSession = nil
+        // `allowsMerge: false`: two crop sessions are two actions. A session has already declared
+        // its own boundaries, and merging across them would quietly undo that declaration.
+        return appendSnapshot(edit, label: label ?? session.label, before: session.base,
+                              now: now, allowsMerge: false)
+    }
+
+    /// Close a session with **zero** snapshots — 取消. Nothing was committed inside it, so this only
+    /// drops the session; a redo branch that existed before the tool is left exactly as it was.
+    public mutating func cancelSession() {
+        activeSession = nil
     }
 
     // MARK: navigating
@@ -272,6 +430,98 @@ public struct EditHistory: Sendable, Equatable, Codable {
         guard !snapshots.isEmpty else { return nil }
         cursor = snapshots.count - 1
         return snapshots[cursor].edit
+    }
+
+    // MARK: deleting a row (077)
+
+    /// The diff this row introduced, as it was recorded when it was committed.
+    public func changedFields(at index: Int) -> [FieldChange] {
+        snapshot(at: index)?.changes ?? []
+    }
+
+    /// The row's fields that **no later snapshot touches** — i.e. the ones this row is still the
+    /// newest statement about.
+    public func newestFields(at index: Int) -> Set<String> {
+        guard snapshots.indices.contains(index) else { return [] }
+        var mine = Set(snapshots[index].changes.map(\.field.key))
+        guard !mine.isEmpty else { return [] }
+        for later in snapshots[(index + 1)...] {
+            for change in later.changes { mine.remove(change.field.key) }
+        }
+        return mine
+    }
+
+    /// True when every field this row moved is still the newest statement about that field — the
+    /// 「最新的该类操作」 the panel badges, and the only rows the panel lets the user delete.
+    ///
+    /// One predicate, deliberately: if the badge and the delete button were two conditions, the
+    /// panel could offer a delete on a row it is not marking, or mark a row it will not delete,
+    /// and either one is a lie about the same fact.
+    public func isNewestOfClass(at index: Int) -> Bool {
+        guard index > 0, snapshots.indices.contains(index) else { return false }
+        let all = Set(snapshots[index].changes.map(\.field.key))
+        return !all.isEmpty && newestFields(at: index) == all
+    }
+
+    /// May this row be deleted on its own?
+    ///
+    /// ```
+    ///   deletable(i) ⟺ i > 0 ∧ changes(i) ≠ ∅ ∧ ∀ j > i : fields(j) ∩ fields(i) = ∅
+    /// ```
+    ///
+    /// **Why deleting a row is safe at all** — three structural facts, no analogy:
+    ///
+    /// 1. A snapshot is an **absolute** state, not a delta (D10). Removing row i leaves
+    ///    `snapshots[i+1].edit` byte-identical, so no other row has to be recomputed or re-worded.
+    /// 2. `fields(i)` is untouched by every later row ⇒ every later row carries i's value forward.
+    ///    The step from i−1 to i+1 therefore has equal values on those fields, which is exactly what
+    ///    "the step is gone, the document is not" means.
+    /// 3. `seq` is a stable identity and is never renumbered (`Snapshot.seq`), so the surviving rows
+    ///    keep their numbers and the store deletes exactly one row.
+    ///
+    /// **Why a covered row is refused**: it is the only record of what that parameter looked like
+    /// mid-stack. Deleting it would silently move the value the user can jump back to, with nothing
+    /// on screen to explain it. (The user's rule — 「只有最新的该类操作可以单独删除」 — is this.)
+    public func deletable(at index: Int) -> Bool { isNewestOfClass(at: index) }
+
+    /// Delete one row. `cursor` stays on the same snapshot where possible (see below); `nextSeq` is
+    /// **not** rewound, so no seq is ever reused.
+    ///
+    /// | deleted index | cursor |
+    /// |---|---|
+    /// | `< cursor` | `cursor − 1` — still the same snapshot, the picture does not move |
+    /// | `== cursor` | `max(0, i − 1)` — you cannot stand on a row that no longer exists; the
+    ///   document becomes the previous row's, which the caller shows (one render) |
+    /// | `> cursor` | unchanged — the deleted row was in the redo branch |
+    ///
+    /// Returns false (and changes nothing) when `deletable(at:)` is false.
+    @discardableResult
+    public mutating func delete(at index: Int) -> Bool {
+        guard deletable(at: index) else { return false }
+        let wasCurrent = index == cursor
+        snapshots.remove(at: index)
+        if wasCurrent {
+            cursor = max(0, index - 1)
+        } else if index < cursor {
+            cursor -= 1
+        }
+        cursor = min(max(cursor, 0), max(0, snapshots.count - 1))
+        return true
+    }
+
+    /// Fill in `changes` for rows that arrive without them (a version-1 envelope, or rows built from
+    /// `asset_history`, which stores no diff).
+    ///
+    /// Recomputed from the **neighbour that is there now**, so after a reload the row that followed
+    /// a deleted one shows the surviving transition. That is the honest reading of a stack that no
+    /// longer has that predecessor; within a session the stored `changes` are what keeps every other
+    /// row byte-identical (see `Snapshot.changes`).
+    mutating func backfillChanges() {
+        guard snapshots.count > 1 else { return }
+        for i in snapshots.indices.dropFirst() where snapshots[i].changes.isEmpty {
+            snapshots[i].changes = EditHistory.changedFields(between: snapshots[i - 1].edit,
+                                                            and: snapshots[i].edit)
+        }
     }
 
     // MARK: depth
@@ -324,6 +574,7 @@ public struct EditHistory: Sendable, Equatable, Codable {
         let rawCursor = c.val("cursor", max(0, self.snapshots.count - 1))
         self.cursor = self.snapshots.isEmpty ? 0 : min(max(rawCursor, 0), self.snapshots.count - 1)
         self.nextSeq = max(self.nextSeq, (self.snapshots.map(\.seq).max() ?? -1) + 1)
+        backfillChanges()
         enforceDepth()
     }
 
