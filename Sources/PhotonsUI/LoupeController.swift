@@ -326,7 +326,8 @@ public final class LoupeCanvasView: NSView {
     public override func scrollWheel(with event: NSEvent) {
         controller?.scrollPan(deltaX: event.scrollingDeltaX,
                              deltaY: event.scrollingDeltaY,
-                             precise: event.hasPreciseScrollingDeltas)
+                             precise: event.hasPreciseScrollingDeltas,
+                             inverted: event.isDirectionInvertedFromDevice)
     }
 
     /// ⑥ — the pinch is the loupe's zoom, crop mode included (`magnify(by:at:)` is the same ladder and
@@ -1459,21 +1460,36 @@ public final class LoupeController: NSViewController {
         zoomToActualSize(aroundView: point)
     }
 
-    /// Drag pan. `delta` is in view points; the *content* moves with the hand, so the camera moves
-    /// the other way — in source pixels, through the straighten rotation.
+    /// Drag pan. `delta` is the delta the event reported, in **window** points — the space
+    /// `NSEvent.locationInWindow` is in, y up. The picture follows the hand: the pixel grabbed at
+    /// `mouseDown` stays under the cursor, so the camera moves the other way. The y term is the one
+    /// place the two conventions meet — window coordinates are y **up**, the projection is y **down**
+    /// (`LoupeCanvasView.isFlipped`) — so it is negated on the way in; without that a drag downwards
+    /// moved the picture upwards, which is the bug the user reported.
     public func panImage(byPoints delta: CGSize) {
         guard viewState.isActualSize, let framing = framing() else { return }
         let scale = backingScale
-        let content = (x: -Double(delta.width) * scale, y: -Double(delta.height) * scale)
+        let content = (x: -Double(delta.width) * scale, y: Double(delta.height) * scale)
         panBy(contentDelta: content, framing: framing)
     }
 
     /// Wheel / two-finger scroll. A wheel notch reports ~1 point; a trackpad reports pixels, so the
     /// two are scaled differently instead of one of them feeling like glue.
-    public func scrollPan(deltaX: CGFloat, deltaY: CGFloat, precise: Bool) {
+    ///
+    /// `inverted` is `NSEvent.isDirectionInvertedFromDevice`, and it is **not** a hint — it is the
+    /// whole rule. With 「自然滚动」 on (the macOS default) the system has already inverted
+    /// `scrollingDelta*` so that they describe the movement of the **content**
+    /// (`NSEvent.isDirectionInvertedFromDevice`: "the values are automatically inverted according to
+    /// the user's preferences … such that it feels like they are moving the content"), so the picture
+    /// moves by `+delta`. With it off the deltas are the **device's** own direction, and the picture
+    /// moves by `−delta`. Reading `scrollingDeltaY` and negating it — what this did — makes the two
+    /// settings behave differently; normalising on the flag is what makes the result depend only on
+    /// which way the fingers went.
+    public func scrollPan(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, inverted: Bool) {
         guard viewState.isActualSize, let framing = framing() else { return }
         let factor = precise ? backingScale : backingScale * 12
-        let content = (x: -Double(deltaX) * factor, y: -Double(deltaY) * factor)
+        let sign: Double = inverted ? 1 : -1
+        let content = (x: -Double(deltaX) * factor * sign, y: -Double(deltaY) * factor * sign)
         panBy(contentDelta: content, framing: framing)
     }
 
