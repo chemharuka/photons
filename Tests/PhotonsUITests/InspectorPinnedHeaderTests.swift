@@ -17,9 +17,11 @@ import SwiftUI
 ///     pinned region has the same frame in both. The leaves are the real ones SwiftUI laid out —
 ///     `MarqueeRowView` (the info rows) and `HistogramCardView` (the plot) — not constants read back
 ///     from constants.
-///   · **The histogram is not squeezed.** Its plot is 104 pt of card at 420 as at 800 (ratio 1.00 ≥
+///   · **The histogram is not squeezed.** The card is `contentHeight` pt at 420 as at 800 (ratio 1.00 ≥
 ///     0.99); a `VStack` that lets both children flex would have taken it from the plot first, which is
-///     the failure mode this whole layout exists to prevent.
+///     the failure mode this whole layout exists to prevent. The number used to be the literal 104 —
+///     the two-row card 023 left behind — and is now read from the card (90 pt since 2026-10-27, when
+///     the slack under the merged readout row was removed; `HistogramCardHeightTests` pins that value).
 ///   · **The settings below really do scroll.** The scroll viewport is what absorbs the height that is
 ///     gone (800 − 259 = 541 vs 420 − 259 = 161), and scrolling the document moves the cards inside it
 ///     while the pinned leaves stay exactly where they were. A view that is only *below* the pinned
@@ -34,8 +36,11 @@ final class InspectorPinnedHeaderTests: XCTestCase {
     private var cardContentWidth: CGFloat {
         Self.inspectorWidth - 2 * 12 - 2 * WorkspaceLayout.cardInsetH
     }
-    /// The plot's own height (`HistogramCard.intrinsicContentSize`), which the pinning must not shrink.
-    private static let plotHeight: CGFloat = 104
+    /// The card's own height (`HistogramCard.intrinsicContentSize`), which the pinning must not shrink.
+    /// Read from the card rather than typed: 104 was the two-row height 023 left behind (the merged
+    /// readout row freed a line, and 2026-10-27 finally took it back out of the card — see
+    /// `HistogramCardHeightTests`).
+    private static let cardHeight: CGFloat = HistogramCardView.contentHeight
 
     // MARK: - what a hosted panel looks like at one window height
 
@@ -172,8 +177,8 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         let short = try host(height: 420)
         defer { tall.window.contentView = nil; short.window.contentView = nil }
 
-        XCTAssertEqual(short.histogramPlot.height, Self.plotHeight, accuracy: 0.001,
-                       "the plot must be its own 104 pt at 420 pt of window")
+        XCTAssertEqual(short.histogramPlot.height, Self.cardHeight, accuracy: 0.001,
+                       "the card must be its own \(Self.cardHeight) pt at 420 pt of window")
         XCTAssertGreaterThanOrEqual(short.histogramPlot.height, tall.histogramPlot.height * 0.99,
                                     "the histogram was compressed: "
                                     + "\(tall.histogramPlot.height) → \(short.histogramPlot.height)")

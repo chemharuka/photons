@@ -27,7 +27,11 @@ final class HistogramPointerReadoutTests: XCTestCase {
     private let canvasPoints = CGSize(width: 320, height: 200)
     private let viewport = ImageSize(width: 640, height: 400)
     private let cardWidth: CGFloat = 244
-    private let cardHeight: CGFloat = 104
+    /// The card's height, **read from the card**: 023 merged the brightness row into the values row and
+    /// left the freed line as bottom inset, so the pinned literal was 104 while the ink stopped at 87.5.
+    /// 2026-10-27 removed that slack — the card is `contentHeight` (90 pt) now. Reading the constant
+    /// keeps this file about the row, not about the number (`HistogramCardHeightTests` pins the height).
+    private let cardHeight: CGFloat = HistogramCardView.contentHeight
 
     override func tearDown() {
         for window in windows { window.orderOut(nil) }

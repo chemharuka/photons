@@ -372,16 +372,19 @@ final class HistogramAxisTests: XCTestCase {
     @MainActor
     private func bitmap(of histogram: Histogram, cardWidth: CGFloat, scale: CGFloat) -> NSBitmapImageRep {
         let card = HistogramCardView()
-        card.frame = NSRect(x: 0, y: 0, width: cardWidth, height: 104)
+        // The card's own height (90 pt since 2026-10-27 — 104 was the two-row card; the plot this file
+        // measures did not move, see `HistogramCardHeightTests`). Only the canvas under the plot shrinks.
+        let cardHeight = HistogramCardView.contentHeight
+        card.frame = NSRect(x: 0, y: 0, width: cardWidth, height: cardHeight)
         card.appearance = NSAppearance(named: .aqua)
         card.histogram = histogram
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
                                    pixelsWide: Int(cardWidth * scale),
-                                   pixelsHigh: Int(104 * scale),
+                                   pixelsHigh: Int(cardHeight * scale),
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                    isPlanar: false, colorSpaceName: .deviceRGB,
                                    bytesPerRow: 0, bitsPerPixel: 0)!
-        rep.size = NSSize(width: cardWidth, height: 104)
+        rep.size = NSSize(width: cardWidth, height: cardHeight)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         card.draw(card.bounds)

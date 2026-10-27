@@ -6,7 +6,9 @@ import PhotonsUI
 /// The card's minimum content width: inspector 300 pt (`WorkspaceLayout.inspectorWidthMin`)
 /// − 2 × 12 pt scroll padding − 2 × 16 pt card inset.
 private let minimumCardWidth: CGFloat = 244
-private let cardHeight: CGFloat = 104
+// The card's own height (90 pt since 2026-10-27; 104 was the two-row height 023 left behind — see
+// `HistogramCardHeightTests`). Read from the card so this file measures legibility, not layout.
+private let cardHeight: CGFloat = HistogramCardView.contentHeight
 
 /// 004 — the histogram card's two secondary labels were **unreadable**, and this file is the proof
 /// that they are not any more.
