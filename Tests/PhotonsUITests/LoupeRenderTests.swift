@@ -213,7 +213,8 @@ final class LoupeRenderTests: XCTestCase {
         descriptor.usage = [.shaderRead, .shaderWrite]
         let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
         let presenter = try CanvasPresenter()
-        XCTAssertTrue(presenter.present(texture, in: layer, wantsEDR: true),
+        XCTAssertTrue(presenter.presentForTest(texture, in: layer, wantsEDR: true,
+                                               drawableSize: ImageSize(width: 64, height: 64)),
                       presenter.lastFailure ?? "present failed")
         XCTAssertEqual(presenter.storage, .linear16, "the layer must not have fallen back to 8-bit")
 

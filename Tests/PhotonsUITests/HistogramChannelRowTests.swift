@@ -331,11 +331,11 @@ final class HistogramChannelRowTests: XCTestCase {
         let pictureRep = render(card)
         XCTAssertEqual(card.channelRowText, "R 245 G 128 B 64", "像素行是这颗像素的三通道值")
         XCTAssertEqual(card.channelRowValues, ["245", "128", "64"])
-        let pictureRects = card.channelValueRects
+        let photoRects = card.channelValueRects
         let pictureFont = card.channelValueFont
         let pictureColour = card.channelValueColor
-        guard pictureRects.count == 3 else { return XCTFail("像素行应画三组值，实际 \(pictureRects.count)") }
-        let pictureGlyph = glyphColour(pictureRep, pictureRects[0])
+        guard photoRects.count == 3 else { return XCTFail("像素行应画三组值，实际 \(photoRects.count)") }
+        let pictureGlyph = glyphColour(pictureRep, photoRects[0])
 
         // ② pointer on the plot, same three strings as counts.
         guard let axis = card.lastAxis else { return XCTFail("卡片没画出坐标轴") }
@@ -356,7 +356,7 @@ final class HistogramChannelRowTests: XCTestCase {
                        "就是 readoutColor 那一套：numberFont 9.5 semibold")
         XCTAssertEqual(pictureColour, countsColour, "两态的数值颜色相同")
         XCTAssertEqual(pictureColour, HistogramCardReadability.readoutColor(isDark: false))
-        XCTAssertEqual(pictureRects, countsRects, "同样的字符串、同一个槽 → 逐点相同的矩形")
+        XCTAssertEqual(photoRects, countsRects, "同样的字符串、同一个槽 → 逐点相同的矩形")
         XCTAssertEqual(card.channelRowRect, card.readoutRowRect, "…因为它们就是同一行")
         XCTAssertEqual(pictureGlyph.n, countsGlyph.n, "同一串数字 → 同样多的字形像素")
         XCTAssertEqual(pictureGlyph.r, countsGlyph.r, accuracy: 0.02, "字形像素颜色相同（R）")
@@ -364,7 +364,7 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(pictureGlyph.b, countsGlyph.b, accuracy: 0.02, "字形像素颜色相同（B）")
         XCTAssertGreaterThan(pictureGlyph.n, 0, "位图里真的画了字")
         print("023 style identity: 字体 \(pictureFont.fontName) \(String(format: "%.1f", pictureFont.pointSize))pt · "
-              + "颜色 \(pictureColour) == \(countsColour) · rects 相同 \(pictureRects == countsRects) · "
+              + "颜色 \(pictureColour) == \(countsColour) · rects 相同 \(photoRects == countsRects) · "
               + "字形像素 \(pictureGlyph.n)/\(countsGlyph.n) 均值 "
               + "\(String(format: "%.3f/%.3f/%.3f", pictureGlyph.r, pictureGlyph.g, pictureGlyph.b))")
     }

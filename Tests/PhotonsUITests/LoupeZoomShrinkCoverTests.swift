@@ -140,15 +140,27 @@ final class LoupeZoomShrinkCoverTests: XCTestCase {
               + "\(String(format: "%.3f", fit.last!.window.u0 + fit.last!.window.du))] — covers")
     }
 
-    // MARK: - ② the pixels: the canvas is picture, not fill
+    // MARK: - ② the pixels: a shrink is a smaller picture on the canvas, never a smear
 
-    func testTheShrinkingCanvasIsFilledWithThePicturesOwnEdge() throws {
+    /// **067 supersedes `testTheShrinkingCanvasIsFilledWithThePicturesOwnEdge`.**
+    ///
+    /// 025's answer to a shrinking frame was `clamp_to_edge`: the full-canvas quad sampled past the
+    /// texture, so the picture's own border was stretched over everything the frame no longer reached —
+    /// "the canvas is picture, not fill". 067 answers it with geometry: the picture is a quad at the
+    /// shrinking map, and what the quad does not cover is the canvas colour. The old answer is not just
+    /// ugly at a shrink, it is the mechanism behind the user's complaint — a band of the picture's own
+    /// (letterboxed, `float4(0)`) edge is exactly the "pure black" they kept seeing at the edge of the
+    /// canvas.
+    ///
+    /// What replaces it, as pixels: no unrendered black anywhere, the quad's own pixels are the picture,
+    /// and the band is `#0F0F0F` — three channels equal — at every canvas pixel outside it.
+    func testTheShrinkingCanvasIsTheCanvasColourAroundASmallerPicture() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
         let presenter = try CanvasPresenter(device: device)
         let size = ImageSize(width: 64, height: 48)
 
         // A source that cannot be mistaken for the clear colour, with a distinct one-pixel border so
-        // "clamped edge" and "stretched interior" are different answers.
+        // "the picture" and "the canvas" are different answers.
         let interior: [Float] = [0.2, 0.4, 0.6, 1]
         let border: [Float] = [0.8, 0.2, 0.2, 1]
         let source = try XCTUnwrap(Self.makeTexture(device: device, size: size, format: .rgba16Float,
@@ -164,40 +176,74 @@ final class LoupeZoomShrinkCoverTests: XCTestCase {
         let window = PresentWindow(scale: 0.5, originX: Double(canvas.width) * 0.1,
                                    originY: Double(canvas.height) * 0.1,
                                    canvas: canvas, texture: size)
-        XCTAssertTrue(window.coversWholeTexture, "a shrinking window must be bigger than the texture")
+        XCTAssertTrue(window.coversWholeTexture, "a shrinking window is bigger than the texture")
         XCTAssertGreaterThan(Double(window.du), 1)
 
-        XCTAssertTrue(presenter.render(source, window: window, into: target, linearize: false),
-                      presenter.lastFailure ?? "the present pass failed")
+        let request = PresentRequest(picture: source,
+                                     photoRect: ImageRect(x: 0, y: 0, width: size.width,
+                                                            height: size.height),
+                                     window: window, canvas: canvas)
+        // scale 0.5 about (6.4, 4.8) on a 64×48 canvas: the picture is the middle half.
+        XCTAssertEqual(request.pictureQuad, ImageRect(x: 6, y: 5, width: 32, height: 24))
+        XCTAssertTrue(presenter.render(request, into: target, linearize: false))
         let pixels = Self.read(target)
+        func pixel(_ x: Int, _ y: Int) -> [Float] { pixels[y * size.width + x] }
 
-        // Every pixel of the canvas is real content: none is the pass's clear colour.
+        // ① nothing on the canvas is unrendered black — the 025 report, and the user's 「纯黑」.
         let black = pixels.filter { $0[0] == 0 && $0[1] == 0 && $0[2] == 0 }
         XCTAssertEqual(black.count, 0, "\(black.count) of \(pixels.count) canvas pixels are unrendered black")
-        // The corners read the *border* texel (clamp_to_edge), the middle the interior.
-        func pixel(_ x: Int, _ y: Int) -> [Float] { pixels[y * size.width + x] }
-        for (x, y) in [(0, 0), (size.width - 1, 0), (0, size.height - 1), (size.width - 1, size.height - 1)] {
-            XCTAssertEqual(pixel(x, y)[0], border[0], accuracy: 1e-3,
-                           "corner (\(x), \(y)) is not the picture's own edge")
-            XCTAssertEqual(pixel(x, y)[1], border[1], accuracy: 1e-3)
-        }
-        XCTAssertEqual(pixel(size.width / 2, size.height / 2)[0], interior[0], accuracy: 1e-3,
-                       "the middle of the canvas must show the picture, not the edge")
 
-        // The counterexample: the same target, cleared and *not* covered, is exactly the black band the
-        // report was about. It is the same amount of canvas the layer transform used to leave bare.
+        // ② the band is the canvas colour, 15/255 on all three channels, exactly.
+        let matte = Float(CanvasPresenter.CanvasMatte.displayEncoded)
+        var outside = 0
+        for y in 0..<size.height {
+            for x in 0..<size.width {
+                guard x >= 6, x < 38, y >= 5, y < 29 else {
+                    let p = pixel(x, y)
+                    XCTAssertEqual(p[0], matte, accuracy: 1.0 / 255, "band (\(x), \(y)) r")
+                    XCTAssertEqual(p[1], p[0], accuracy: 1.0 / 255, "band (\(x), \(y)) g (grey)")
+                    XCTAssertEqual(p[2], p[0], accuracy: 1.0 / 255, "band (\(x), \(y)) b (grey)")
+                    outside += 1
+                    continue
+                }
+                // ③ inside the quad: the picture's own pixels — its interior three pixels in, and a rim
+                // that is a blend of the interior and the texture's one-pixel border (the quad is the
+                // picture at half size, so the border is half a pixel wide). Never the canvas colour.
+                let p = pixel(x, y)
+                if x >= 9, x < 35, y >= 8, y < 26 {
+                    XCTAssertEqual(p[0], interior[0], accuracy: 1e-3, "picture (\(x), \(y)) r")
+                    XCTAssertEqual(p[1], interior[1], accuracy: 1e-3, "picture (\(x), \(y)) g")
+                    XCTAssertEqual(p[2], interior[2], accuracy: 1e-3, "picture (\(x), \(y)) b")
+                } else {
+                    for c in 0..<3 {
+                        let lo = min(interior[c], border[c]) - 1e-3
+                        let hi = max(interior[c], border[c]) + 1e-3
+                        XCTAssertTrue(p[c] >= lo && p[c] <= hi,
+                                      "rim (\(x), \(y)) channel \(c) = \(p[c]) is neither the picture "
+                                      + "nor its border")
+                    }
+                    XCTAssertGreaterThan(abs(p[0] - matte), 0.05, "rim (\(x), \(y)) is the canvas colour")
+                }
+            }
+        }
+        XCTAssertEqual(outside, pixels.count - 32 * 24, "the band is everything outside the quad")
+
+        // ④ the counterexample: a cleared target is the black band the report was about — the same
+        // amount of canvas a layer transform used to leave bare, and the same amount 025 filled with a
+        // stretched edge instead of a colour.
         let bare = try XCTUnwrap(Self.makeTexture(device: device, size: size, format: .rgba16Float,
                                                   usage: [.shaderRead, .renderTarget]))
         Self.clearToBlack(bare, device: device)
         let barePixels = Self.read(bare)
         XCTAssertEqual(barePixels.filter { $0[0] == 0 && $0[1] == 0 && $0[2] == 0 }.count, barePixels.count,
                        "the cleared target is the counterexample: black everywhere")
+
         print(String(format: "shrink frame (picture scale 0.5 about (%.1f, %.1f) px): %d canvas pixels, "
-                     + "0 unrendered; corners = edge (%.2f, %.2f, %.2f), middle = picture (%.2f, %.2f, %.2f); "
-                     + "a cleared target is black in all %d",
+                     + "0 unrendered black; %d outside the quad are #0F0F0F (%.4f); centre is the picture "
+                     + "(%.2f, %.2f, %.2f); a cleared target is black in all %d",
                      Double(canvas.width) * 0.1, Double(canvas.height) * 0.1,
-                     pixels.count, border[0], border[1], border[2],
-                     interior[0], interior[1], interior[2], barePixels.count))
+                     pixels.count, outside, matte, interior[0], interior[1], interior[2],
+                     barePixels.count))
     }
 
     // MARK: - texture helpers (rgba16Float, shared storage, CPU readable)

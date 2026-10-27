@@ -11,7 +11,7 @@ import PhotonsCore
 /// fit mode the bands around the photograph are **inside the canvas texture**, because S2/S4 write
 /// `float4(0)` for every pixel that is not the photograph, and a `CAMetalLayer`'s `backgroundColor` is
 /// behind that texture and never shows through it. So the colour is painted by the present pass, where
-/// the picture's rect on the canvas (`PresentParams.d`, filled from `RenderResult.pictureRect`) says
+/// the picture's rect on the canvas (`PresentParams.d`, filled from `RenderResult.photoRect`) says
 /// where the photograph is, and the layer colour + `MTLClearColor` are set to the same value so the
 /// canvas is grey from the very first frame instead of flashing black.
 ///
@@ -29,7 +29,7 @@ import PhotonsCore
 ///      painted over the photograph.
 ///   4. **The backdrop branch is still the picture.** With a backdrop the canvas outside the main
 ///      window is the backdrop's colour, not the matte, and the picture rect changes nothing there.
-///   5. **The histogram cannot see it.** Measured on the S4 frame over `pictureRect`, the bins are
+///   5. **The histogram cannot see it.** Measured on the S4 frame over `photoRect`, the bins are
 ///      per-bin equal before and after the matte is drawn, and the frame's own corner is still exactly
 ///      `0` — the colour never enters the texture.
 @MainActor
@@ -71,67 +71,89 @@ final class CanvasMatteGreyTests: XCTestCase {
         print("canvas matte: #0F0F0F = 15/255 encoded, \(CanvasPresenter.CanvasMatte.linear) linear")
     }
 
-    /// The shader carries its own literal (it cannot import Swift), so the two are compared here: the
-    /// declaration in `present.metal` must be `float3(15.0 / 255.0)`.
+    /// **067 — the shader has no matte at all, and that is the point.**
     ///
-    /// **058 supersedes the old second half of this test.** It used to require that the backdrop
-    /// fragment never read the matte ("outside the window is the picture"). That is true only while the
-    /// window is *inside* the picture: once a shrink pushes the picture's own edge onto the canvas,
-    /// outside the window is not the picture at all, and `saturate()` was smearing one edge column
-    /// across the band. So the backdrop branch now reads the matte for fragments whose UV left `[0,1]`
-    /// and keeps the picture everywhere else — the assertion below pins *that* rule.
-    func testTheShaderUsesTheSameValueAndOnlyWithoutABackdrop() throws {
+    /// 054 painted `#0F0F0F` per fragment from `PresentParams.d`; 067 deleted the constant, the field
+    /// and the branch, and the colour is now the render pass's clear. This test is the structural half:
+    /// the words are gone from the kernel (comments stripped), and the clear colour — the one producer
+    /// left — is the constant asserted above. If somebody reintroduces a fragment-side matte, this goes
+    /// red before the black band comes back.
+    func testTheShaderPaintsNoMatteBecauseThePassClearsToIt() throws {
         let source = try String(contentsOf: Self.kernelURL, encoding: .utf8)
-        let eight = CanvasPresenter.CanvasMatte.eightBitValue
-        let declaration = try XCTUnwrap(source.split(separator: "\n").first { $0.contains("kCanvasMatteDisplay") },
-                                        "present.metal has no matte constant")
-        XCTAssertTrue(declaration.contains("float3(\(eight).0 / 255.0)"),
-                      "the shader's matte is not #0\(String(format: "%02X", eight)): \(declaration)")
+        let code = Self.stripped(source)
+        for gone in ["kCanvasMatte", "kCanvasMatteDisplay", "kPictureEdgeEpsilon",
+                     "present_fragment_backdrop", "backdrop_weight", "p.d"] {
+            XCTAssertFalse(code.contains(gone), "present.metal still contains `\(gone)`")
+        }
+        // One fragment, one sample, one transfer — nothing that could be told the wrong rectangle.
+        XCTAssertEqual(code.components(separatedBy: "fragment float4 ").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "fragment float4 present_fragment(").count - 1, 1)
 
-        let plain = try XCTUnwrap(Self.fragmentSignature("present_fragment", in: source))
-        XCTAssertTrue(plain.contains("kCanvasMatteDisplay"), "025's fragment does not paint the matte")
-        XCTAssertTrue(plain.contains("p.d"), "the matte must be decided by the picture's rect")
-        let backdrop = try XCTUnwrap(Self.fragmentSignature("present_fragment_backdrop", in: source))
-        XCTAssertTrue(backdrop.contains("kCanvasMatteDisplay"),
-                      "058: outside the **picture** the backdrop branch draws the canvas matte")
-        XCTAssertTrue(backdrop.contains("beyondEdge") || backdrop.contains("kPictureEdgeEpsilon"),
-                      "…and only where the picture's own UV left [0,1] — inside it is the picture")
-        // The fetch itself is still clamped (`saturate`), because a GPU cannot skip a texture read —
-        // what must be true is that the **result** is thrown away where the UV left the picture. That
-        // select on `beyondEdge` is the whole fix; without it the clamp is what smeared the column.
-        XCTAssertTrue(backdrop.contains("beyondEdge ? float4(kCanvasMatteDisplay"),
-                      "the out-of-picture result must be replaced by the matte, not kept from the clamp")
+        // The clear colour is where the grey comes from, in both present paths of the presenter.
+        let presenter = try String(contentsOf: Self.presenterURL, encoding: .utf8)
+        XCTAssertEqual(presenter.components(separatedBy:
+            "clearColor = CanvasMatte.clearColor(linear:").count - 1, 2,
+                       "the drawable path and the readback path must both clear to the matte")
+        XCTAssertTrue(presenter.contains("CanvasMatte.clearColor(linear: linear)"),
+                      "the readback path's clear is the matte, not black")
     }
 
-    /// 054b — the black band during a zoom.
+    /// **One entry point** (067, invariant 5): the controller cannot hand a present the wrong geometry
+    /// because it has exactly one place to hand a present anything at all.
     ///
-    /// The settled frame gets `pictureRect`, so the present pass paints `#0F0F0F` outside the
-    /// photograph. The **bridge** frames did not, so the same zeros S2/S4 wrote were drawn as pure
-    /// black the moment a zoom started — a black band in both directions, against a grey canvas.
-    /// The bridge now carries the held frame's rect; this pins that it does, and that it is the rect
-    /// the frame was presented with (not a second computation that could drift).
-    func testTheZoomBridgeCarriesTheHeldFramesPictureRect() throws {
-        let source = try String(contentsOf: Self.kernelURL, encoding: .utf8)
-        XCTAssertTrue(source.contains("kCanvasMatteDisplay"))
+    /// 054b's version of this test asserted that every bridge frame carried `photoRect` — a wiring
+    /// fact that had to be *remembered* at four call sites and was forgotten at one of them (the bridge
+    /// stop, which drew the letterbox as pure black). The assertion that replaces it is structural: one
+    /// call into `CanvasPresenter.present`, one `PresentRequest`, no rect argument to forget. The
+    /// semantic half — that the quad follows the bridge's map — is measured on a GPU by
+    /// `PresentQuadInvariantTests`.
+    func testThereIsOnePresentPathAndItCannotBeToldTheWrongRect() throws {
+        let controller = try String(contentsOf: Self.loupeURL, encoding: .utf8)
+        XCTAssertEqual(controller.components(separatedBy: "presenter.present(").count - 1, 1,
+                       "exactly one call into `CanvasPresenter.present` — the presenter is reached "
+                       + "through `presentCanvas` and nowhere else")
+        XCTAssertEqual(controller.components(separatedBy: "PresentRequest(").count - 1, 1,
+                       "…and it builds exactly one request type")
+        // The optional rect is gone: `photoRect:` is a required argument of the request's initialiser,
+        // so "no rect" is no longer expressible at a call site.
+        XCTAssertEqual(controller.components(separatedBy: "photoRect: nil").count - 1, 0,
+                       "a present with no picture rect is what drew the frame's zeros as black")
+        XCTAssertTrue(controller.contains("PresentRequest(picture: texture, photoRect: photoRect,"),
+                      "the one request path takes the photograph's rect as a *required* argument")
 
-        let controller = try String(contentsOf: Self.loupeSource, encoding: .utf8)
-        guard let arm = controller.range(of: "let bridge = LoupeZoomBridge("),
-              let end = controller.range(of: "guard bridge.isVisible") else {
-            return XCTFail("the bridge is no longer armed in one place")
-        }
-        let call = String(controller[arm.lowerBound..<end.lowerBound])
-        XCTAssertTrue(call.contains("pictureRect: canvasPicture"),
-                      "the bridge must take the rect the frame on the canvas was presented with")
-        XCTAssertTrue(call.contains("$0.canvas == texture"),
-                      "…and only when that texture is the one the bridge holds")
+        // The bridge carries no rect of its own any more: its geometry is the window it already has.
+        let zoom = try String(contentsOf: Self.zoomURL, encoding: .utf8)
+        XCTAssertFalse(Self.stripped(zoom).contains("photoRect"),
+                       "LoupeZoomBridge.photoRect is deleted — the present derives the quad from the "
+                       + "window, so the band cannot stay where the old camera left it")
+    }
 
-        guard let present = controller.range(of: "private func presentZoomBridgeFrame"),
-              let presentEnd = controller.range(of: "if !ok {", range: present.upperBound..<controller.endIndex) else {
-            return XCTFail("presentZoomBridgeFrame moved")
+    /// The settled present is the one that has the render's own receipt, and it must use it: the quad is
+    /// inverted from the photograph's rect inside the frame texture, so a letterboxed 适应 frame is grey
+    /// around a picture that is exactly where S0 drew it.
+    func testTheSettledPresentUsesTheRendersOwnPictureRect() throws {
+        let text = try String(contentsOf: Self.loupeURL, encoding: .utf8)
+        XCTAssertTrue(text.contains("presentCanvas(presenter, texture: frame.texture, "
+                                    + "photoRect: frame.photoRect,"),
+                      "the settled frame's rect is not taken from `RenderResult.photoRect`")
+        XCTAssertTrue(text.contains("canvasPicture = (frame.photoRect, canvas)"),
+                      "the rect must be remembered: every later re-present of this frame (a bridge, a "
+                      + "teardown, a window drag) derives its quad from it")
+
+        // And the on-screen pass accepts it (skipped, like 037's own real-layer test, when this session
+        // hands out no drawable — a layer needs a visible window for one).
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
+        let presenter = try CanvasPresenter(device: device)
+        let layer = CAMetalLayer()
+        CanvasPresenter.configure(layer, storage: presenter.storage)
+        let canvas = ImageSize(width: 64, height: 48)
+        layer.drawableSize = CGSize(width: canvas.width, height: canvas.height)
+        let frame = try letterboxed(device, canvas, picture: ImageRect(x: 16, y: 12, width: 32, height: 24))
+        if !presenter.presentForTest(frame, in: layer, drawableSize: canvas, window: .whole,
+                                     picture: ImageRect(x: 16, y: 12, width: 32, height: 24)) {
+            throw XCTSkip("no drawable in this session: \(presenter.lastFailure ?? "—")")
         }
-        let body = String(controller[present.lowerBound..<presentEnd.lowerBound])
-        XCTAssertTrue(body.contains("pictureRect: bridge.pictureRect"),
-                      "every bridge frame must hand the matte its rect, or the band is black")
+        XCTAssertNil(presenter.lastFailure)
     }
 
     /// The two layer backgrounds and the shader are one colour. `LoupeCanvasView` is built for real; the
@@ -163,36 +185,6 @@ final class CanvasMatteGreyTests: XCTestCase {
         print("layers: metalLayer + container = NSColor.canvasMatte = (#0F0F0F)")
     }
 
-    /// The matte is only correct if the *call site* hands the pass the picture's rect: a settled frame is
-    /// canvas-sized, so `p.d` is `(0,0,1,1)` unless someone supplies the photograph's place inside it.
-    /// The shader cannot guess that (the letterbox pixels are ordinary zeros), so the wiring is pinned
-    /// here — text, because the only other witness is a drawable nobody can read back.
-    func testTheSettledPresentHandsThePictureRectToThePass() throws {
-        let text = try String(contentsOf: Self.loupeURL, encoding: .utf8)
-        XCTAssertTrue(text.contains("let picture = frame.canvas == canvas ? frame.pictureRect : nil"),
-                      "the settled frame's picture rect is not taken from RenderResult.pictureRect")
-        XCTAssertEqual(text.components(separatedBy: "pictureRect: picture").count - 1, 2,
-                       "both `window: .whole` presents (the settled frame and the bridge's stop) must "
-                       + "carry the picture rect")
-        XCTAssertTrue(text.contains("canvasPicture = picture.map { ($0, canvas) }"),
-                      "the rect must be remembered for the bridge-cancel re-present")
-
-        // And the on-screen pass accepts it (skipped, like 037's own real-layer test, when this session
-        // hands out no drawable — a layer needs a visible window for one).
-        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
-        let presenter = try CanvasPresenter(device: device)
-        let layer = CAMetalLayer()
-        CanvasPresenter.configure(layer, storage: presenter.storage)
-        let canvas = ImageSize(width: 64, height: 48)
-        layer.drawableSize = CGSize(width: canvas.width, height: canvas.height)
-        let frame = try letterboxed(device, canvas, picture: ImageRect(x: 16, y: 12, width: 32, height: 24))
-        if !presenter.present(frame, in: layer, drawableSize: canvas, window: .whole,
-                              pictureRect: ImageRect(x: 16, y: 12, width: 32, height: 24)) {
-            throw XCTSkip("no drawable in this session: \(presenter.lastFailure ?? "—")")
-        }
-        XCTAssertNil(presenter.lastFailure)
-    }
-
     // MARK: - 2. the letterbox is grey, the photograph is untouched
 
     /// A canvas-sized frame with the photograph in the middle 50 % — the fit mode the user reported.
@@ -211,11 +203,17 @@ final class CanvasMatteGreyTests: XCTestCase {
                                               [.shaderRead, .renderTarget])
             let reference = try makeTexture(device, canvas.width, canvas.height, format,
                                             [.shaderRead, .renderTarget])
-            XCTAssertTrue(presenter.render(src, window: .whole, pictureRect: picture,
+            XCTAssertTrue(presenter.renderForTest(src, window: .whole, picture: picture,
                                            into: matteTarget, linearize: linear),
                           presenter.lastFailure ?? "the present pass failed")
-            // No picture rect = the pre-054 pass, exactly.
-            XCTAssertTrue(presenter.render(src, window: .whole, into: reference, linearize: linear),
+            // 025's pass, for comparison: **one quad over the whole canvas reading the whole texture**.
+            // That is exactly what the pass wrote before 054 existed — the frame's zeros in the
+            // letterbox and all — so it is the baseline the photograph must not move against.
+            let pre054 = PresentRequest(
+                picture: src, canvas: canvas,
+                pictureQuad: ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height),
+                window: .whole)
+            XCTAssertTrue(presenter.render(pre054, into: reference, linearize: linear),
                           presenter.lastFailure ?? "the present pass failed")
 
             // ①  the four corners.
@@ -274,9 +272,9 @@ final class CanvasMatteGreyTests: XCTestCase {
                                   [.shaderRead, .renderTarget])
         let t8 = try makeTexture(device, canvas.width, canvas.height, .bgra8Unorm,
                                  [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(src, window: .whole, pictureRect: whole, into: t16, linearize: true),
+        XCTAssertTrue(presenter.renderForTest(src, window: .whole, picture: whole, into: t16, linearize: true),
                       presenter.lastFailure ?? "the present pass failed")
-        XCTAssertTrue(presenter.render(src, window: .whole, pictureRect: whole, into: t8, linearize: false),
+        XCTAssertTrue(presenter.renderForTest(src, window: .whole, picture: whole, into: t8, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
 
         let h16 = Self.hash(t16), h8 = Self.hash(t8)
@@ -308,7 +306,7 @@ final class CanvasMatteGreyTests: XCTestCase {
                                      [.shaderRead, .renderTarget])
         // A rect entirely off this canvas: every fragment is outside the picture.
         let nowhere = ImageRect(x: canvas.width * 4, y: canvas.height * 4, width: 8, height: 8)
-        XCTAssertTrue(presenter.render(src, window: .whole, pictureRect: nowhere, into: target, linearize: true),
+        XCTAssertTrue(presenter.renderForTest(src, window: .whole, picture: nowhere, into: target, linearize: true),
                       presenter.lastFailure ?? "the present pass failed")
 
         let h = Self.hash(target)
@@ -337,38 +335,42 @@ final class CanvasMatteGreyTests: XCTestCase {
         let backdrop = try solid(device, 512, 512, [0.90, 0.20, 0.60, 1])
         // A centred half-canvas window: the main frame occupies the middle quarter of the canvas.
         let window = PresentWindow(u0: -0.5, v0: -0.5, du: 2, dv: 2)
-        let picture = ImageRect(x: 128, y: 128, width: 256, height: 256)
 
         let withRect = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                        [.shaderRead, .renderTarget])
         let withoutRect = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                           [.shaderRead, .renderTarget])
         // Display-encoded storage (`linearize: false`) so the fixture's colours read back as written.
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
-                                       pictureRect: picture, into: withRect, linearize: false),
+        // 067: the photograph is the whole of the 256² frame texture, so the quad is the middle quarter
+        // of the canvas — **not** a rect handed to the fragment. The second render is the same request
+        // without the backdrop, i.e. what the canvas colour does where the picture is not.
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
+                                              into: withRect, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
-                                       into: withoutRect, linearize: false),
+        XCTAssertTrue(presenter.renderForTest(frame, window: window,
+                                              into: withoutRect, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
 
-        XCTAssertEqual(Self.hash(withRect).exact, Self.hash(withoutRect).exact,
-                       "the picture rect must not reach the backdrop branch")
         for (name, x, y) in [("top-left", 0, 0), ("top-right", canvas.width - 1, 0),
                              ("bottom-left", 0, canvas.height - 1)] {
             let got = Self.pixel(withRect, x, y)
             XCTAssertEqual(Double(got[0]), 0.90, accuracy: 1.0 / 255, "\(name) r")
             XCTAssertEqual(Double(got[1]), 0.20, accuracy: 1.0 / 255, "\(name) g")
             XCTAssertEqual(Double(got[2]), 0.60, accuracy: 1.0 / 255, "\(name) b")
+            // …and without a backdrop the same pixels are the canvas colour, not black and not the
+            // photograph's edge: that is the fallback order (067).
+            let bare = Self.displayCode(Self.pixel(withoutRect, x, y), linear: false)
+            XCTAssertEqual(bare, 15, accuracy: 1, "\(name) without a backdrop must be #0F0F0F")
         }
         let inside = Self.pixel(withRect, canvas.width / 2, canvas.height / 2)
         XCTAssertEqual(Double(inside[0]), 0.42, accuracy: 1.0 / 255, "the main frame is still the frame")
         print("backdrop: corners are the backdrop (0.90, 0.20, 0.60), centre is the frame; "
-              + "picture rect changed no byte")
+              + "without a backdrop the same corners are #0F0F0F")
     }
 
     // MARK: - 5. the histogram cannot see it
 
-    /// The histogram measures **S4's texture** over `pictureRect` (048/049), and the matte is painted
+    /// The histogram measures **S4's texture** over `photoRect` (048/049), and the matte is painted
     /// later, in the present pass. A real render with a real letterbox: the frame's own corner is still
     /// exactly `0`, the bins are per-bin equal before and after the matte is drawn, and the presented
     /// canvas — where the same corner *is* grey — is what changed.
@@ -385,11 +387,11 @@ final class CanvasMatteGreyTests: XCTestCase {
         let texture = try XCTUnwrap(result.output, "the render handed back no texture")
         defer { graph.recycle(output: texture) }
         // 2400×800 fitted into 1200×800: bars above and below, the photograph in the middle.
-        XCTAssertEqual(result.pictureRect, ImageRect(x: 0, y: 200, width: 1200, height: 400),
+        XCTAssertEqual(result.drawnRect, ImageRect(x: 0, y: 200, width: 1200, height: 400),
                        "the fixture's letterbox is not where this test assumes it is")
 
         let before = try graph.measureFrameHistogram(fromFrame: texture, edit: .neutral, bins: 256,
-                                                     content: result.pictureRect)
+                                                     content: result.drawnRect)
         for channel in Histogram.Channel.allCases {
             XCTAssertGreaterThan(before.histogram[channel].bins.reduce(0, +), 0,
                                  "\(channel) measured nothing")
@@ -405,14 +407,14 @@ final class CanvasMatteGreyTests: XCTestCase {
         let presenter = try CanvasPresenter(device: device)
         let presented = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                         [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(texture, window: .whole, pictureRect: result.pictureRect,
+        XCTAssertTrue(presenter.renderForTest(texture, window: .whole, picture: result.drawnRect,
                                        into: presented, linearize: true),
                       presenter.lastFailure ?? "the present pass failed")
         let corner = Self.displayCode(Self.pixel(presented, 0, 0), linear: true)
         XCTAssertEqual(corner, 15, accuracy: 1, "the presented canvas corner is not #0F0F0F")
 
         let after = try graph.measureFrameHistogram(fromFrame: texture, edit: .neutral, bins: 256,
-                                                    content: result.pictureRect)
+                                                    content: result.drawnRect)
         var checked = 0
         for channel in Histogram.Channel.allCases {
             XCTAssertEqual(after.histogram[channel].bins, before.histogram[channel].bins,
@@ -452,6 +454,33 @@ final class CanvasMatteGreyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/PhotonsUI/LoupeController.swift")
+    }
+
+    /// `CanvasPresenter.swift` — the matte's remaining producer is the clear colour, and it is asserted
+    /// where it is written rather than where it is used.
+    private static var presenterURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsCore/CanvasPresenter.swift")
+    }
+
+    /// `LoupeZoom.swift` — the bridge's own geometry, which no longer mentions the picture's rect.
+    private static var zoomURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/LoupeZoom.swift")
+    }
+
+    /// A source file with `//` comments removed: "this word is gone" means gone from the **code**, not
+    /// that the file stopped explaining why it went.
+    private static func stripped(_ source: String) -> String {
+        source.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).components(separatedBy: "//").first ?? "" }
+            .joined(separator: "\n")
     }
 
     /// The text of one fragment function, brace-balanced — the same shape `BackdropPresenterTests` uses

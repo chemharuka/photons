@@ -92,6 +92,28 @@ public final class LoupeCanvasView: NSView {
 
     public override var acceptsFirstResponder: Bool { true }
 
+    // MARK: live resize (067)
+    //
+    // A window drag delivers a layout pass per frame, and every pass used to ask for a render: a
+    // dozen stale renders of a 60 MP frame, each presented with `nextDrawable()` on the main thread.
+    // That is the freeze the user reported. 067's rule is stronger than coalescing — **nothing is
+    // rendered while the hand is moving**: the picture already on the canvas is re-drawn with the
+    // geometry it was drawn with (cropped when the window shrinks, the low-res backdrop in the area
+    // a grown window exposes), and the one render for the size the hand stopped on is requested when
+    // the drag ends.
+    //
+    // AppKit already tells a view both edges of a live resize, and `inLiveResize` covers the passes in
+    // between, so the controller never has to guess from a size delta.
+    public override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        controller?.beginLiveResize()
+    }
+
+    public override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        controller?.endLiveResize()
+    }
+
     // MARK: the pointer (one source for the zoom anchor *and* the histogram readout)
     //
     // Two features ask "where is the pointer, and what is under it": the zoom commands anchor on that
@@ -402,11 +424,11 @@ public final class LoupeController: NSViewController {
         public let texture: MTLTexture
         public let canvas: ImageSize
         public let content: ImageSize
-        /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.pictureRect`,
+        /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.photoRect`,
         /// carried so the present pass can paint the canvas matte (`#0F0F0F`) around the picture and
         /// never over it. The letterbox bands are *in* the texture (S2/S4 write 0 outside the picture), so
         /// this rect is the only thing that says where they are.
-        public let pictureRect: ImageRect
+        public let photoRect: ImageRect
         public let decodeScale: Float
         public let decodeMilliseconds: Double
         public let renderMilliseconds: Double
@@ -511,7 +533,13 @@ public final class LoupeController: NSViewController {
         /// to get wrong — which single-flight flag it is allowed to release: a scheduled frame must not
         /// release a pan's flag, or a second pan frame could start while the first is still rendering
         /// and the newest camera would stop winning.
-        enum Kind { case scheduled, view, edit }
+        enum Kind {
+            case scheduled, view, edit
+            /// 067: a frame the layout asked for because the canvas changed. Its own kind so it can be
+            /// single-flight — one render at a time, at most one follow-up at the final size — while a
+            /// *live* drag (which is the storm) asks for nothing at all.
+            case resize
+        }
 
         let kind: Kind
         let url: URL
@@ -1061,9 +1089,21 @@ public final class LoupeController: NSViewController {
             let canvasChanged = lastLaidOutViewport != nil && zoomBridgeCanvas != nil
                 && zoomBridgeCanvas != size
             lastLaidOutViewport = size
-            if canvasChanged { cancelZoomBridge() }
+            // 067: the teardown re-presents the frame that is on the canvas **with the geometry it was
+            // drawn with** (`rePresentFrozen`), not with a fresh `.whole` window — the latter maps the
+            // old frame across a new canvas, which is the stretch this task exists to remove.
+            if canvasChanged { cancelZoomBridge(rePresent: false) }
         }
-        scheduleRender()
+        // 067: while the hand is moving, a layout pass draws the frame that is already on the canvas at
+        // its own geometry and asks for nothing. Not "coalesced" — zero. A window drag therefore costs
+        // one re-present per pass (a full-canvas quad, or two with a backdrop) and no render, no
+        // development and no `nextDrawable()` for a frame nobody would see.
+        if isLiveResizing && !disableResizeCoalescing {
+            liveResizeLayouts += 1
+            rePresentFrozen()
+            return
+        }
+        requestResizeRender()
     }
 
     private func observeModel() {
@@ -1560,10 +1600,7 @@ public final class LoupeController: NSViewController {
             startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
             layerAnchorPoint: canvasView.metalLayer.anchorPoint,
             layerIsFlipped: canvasView.metalLayer.isGeometryFlipped,
-            anchor: anchor,
-            // 054b: the held frame's own picture rect, so every bridge frame can paint the canvas
-            // matte outside the photograph instead of leaving S2/S4's zeros as a black band.
-            pictureRect: canvasPicture.flatMap { $0.canvas == texture ? $0.rect : nil })
+            anchor: anchor)
         guard bridge.isVisible else {
             // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
             // clamped to the same rect): the arriving frame *is* the whole change.
@@ -1650,12 +1687,17 @@ public final class LoupeController: NSViewController {
             let canvas = viewportPixels
             let drawn = backdropTexture(for: target)
             let backdropWindow = target.onWholePicture(canvasPlacement)
-            presenter.present(texture, in: canvasView.metalLayer,
-                              wantsEDR: wantsExtendedDynamicRange,
-                              drawableSize: canvas, window: target, backdrop: drawn,
-                              backdropWindow: backdropWindow)
-            recordBackdropPresent(window: target, backdropWindow: backdropWindow, drawn: drawn,
-                                  placement: canvasPlacement, serial: serial)
+            // 067: the held frame's own picture rect, read through the stop's window — so the
+            // photograph lands where the *stop's* map puts it. This is the call that used to pass no
+            // rect at all: 054's matte needs one, and without it the frame's `float4(0)` letterbox was
+            // drawn as **pure black** (the user's 「缩小时，如果画面在边缘，纯黑色背景还是存在」).
+            let picture = canvasPicture?.rect
+                ?? ImageRect(x: 0, y: 0, width: texture.width, height: texture.height)
+            presentCanvas(presenter, texture: texture, photoRect: picture,
+                          frameCanvas: canvasPicture?.canvas ?? canvas, window: target,
+                          placement: canvasPlacement, backdrop: drawn,
+                          backdropWindow: backdropWindow, canvas: canvas, serial: serial,
+                          zoom: lastFrame?.zoom ?? 0)
             recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
                                                   drawable: canvas, canvas: canvas))
         }
@@ -1716,11 +1758,16 @@ public final class LoupeController: NSViewController {
         // window has to be read in the picture's coordinates before the backdrop is sampled through it.
         let placement = canvasPlacement
         let backdropWindow = window.onWholePicture(placement)
-        let ok = presenter.present(texture, in: canvasView.metalLayer,
-                                   wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, window: window, backdrop: drawn,
-                                   backdropWindow: backdropWindow,
-                                   pictureRect: bridge.pictureRect) { [weak self] in
+        // 067: the photograph's rect inside the held texture, read through **this frame's** window.
+        // The quad therefore moves with the bridge: a zoom no longer draws the old matte at the old,
+        // unscaled rect (the user's 「边缘 0f 的遮罩固定住，等渲染完了突然消失」).
+        let picture = canvasPicture?.rect
+            ?? ImageRect(x: 0, y: 0, width: texture.width, height: texture.height)
+        let ok = presentCanvas(presenter, texture: texture, photoRect: picture,
+                               frameCanvas: canvasPicture?.canvas ?? canvas, window: window,
+                               placement: placement, backdrop: drawn,
+                               backdropWindow: backdropWindow, canvas: canvas, serial: serial,
+                               zoom: lastFrame?.zoom ?? 0) { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)
@@ -1730,8 +1777,6 @@ public final class LoupeController: NSViewController {
             zoomBridgePresentsInFlight = max(0, zoomBridgePresentsInFlight - 1)
             return
         }
-        recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: drawn,
-                              placement: placement, serial: serial)
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
                                               drawable: canvas, canvas: canvas))
     }
@@ -1739,7 +1784,12 @@ public final class LoupeController: NSViewController {
     /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
     /// viewport, and a bridge measured against the old one is a window in the wrong space. Tear it
     /// down instead of leaving the picture somewhere in between.
-    public func cancelZoomBridge() {
+    ///
+    /// `rePresent` says whether this call should put the frame back on the canvas. `viewDidLayout`
+    /// passes `false` during a live resize, because `rePresentFrozen` is about to draw the same frame
+    /// with the same (stretched) geometry — two presents of one frame is one too many, and they would
+    /// fight over which canvas they were built for.
+    public func cancelZoomBridge(rePresent: Bool = true) {
         guard zoomBridge != nil || pendingFrame != nil || zoomBridgeTicker != nil else { return }
         if let pending = pendingFrame, let graph = pending.graph {
             queue.async { graph.recycle(output: pending.frame.texture) }
@@ -1751,28 +1801,19 @@ public final class LoupeController: NSViewController {
         zoomBridge = nil
         zoomBridgeCanvas = nil
         // The canvas still holds the old picture seen through whatever window the bridge had reached:
-        // put it back to 1:1, or a resize would leave the picture stuck at a mid-transition scale
-        // until the next frame lands. Deferred — this is called from `viewDidLayout`, and taking a
-        // drawable mid-layout is asking for trouble. Guarded by identity, so a frame that arrived in
-        // the meantime wins.
-        guard let stuck = canvasTexture?.texture else { return }
+        // put it back at the geometry it was drawn with, or a resize would leave the picture stuck at a
+        // mid-transition scale until the next frame lands. Deferred — this is called from
+        // `viewDidLayout`, and taking a drawable mid-layout is asking for trouble. Guarded by identity,
+        // so a frame that arrived in the meantime wins.
+        //
+        // 067: go through `rePresentFrozen` rather than re-presenting with a fresh `.whole` window.
+        // `.whole` maps the held frame across whatever canvas is current — which is the stretch
+        // (「变扁」) this task removes; the frozen geometry keeps the picture's pixel size and lets the
+        // surface crop or extend it.
+        guard rePresent, let stuck = canvasTexture?.texture else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.zoomBridge == nil, self.canvasTexture?.texture === stuck,
-                  let presenter = self.presenter else { return }
-            let window = PresentWindow.whole
-            let drawn = self.backdropTexture(for: window)
-            // 054: the same frame is going back on the layer at `window: .whole`, so it needs the same
-            // picture rect it was presented with — otherwise the matte would grey out the photograph.
-            // 058: and the backdrop is sampled in **picture** space, from the placement the frame had.
-            let picture = self.canvasPicture.flatMap { $0.canvas == self.viewportPixels ? $0.rect : nil }
-            let placement = self.canvasPlacement
-            let backdropWindow = window.onWholePicture(placement)
-            presenter.present(stuck, in: self.canvasView.metalLayer,
-                              wantsEDR: self.wantsExtendedDynamicRange,
-                              drawableSize: self.viewportPixels, window: window, backdrop: drawn,
-                              backdropWindow: backdropWindow, pictureRect: picture)
-            self.recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: drawn,
-                                       placement: placement, serial: 0)
+            guard let self, self.zoomBridge == nil, self.canvasTexture?.texture === stuck else { return }
+            self.rePresentFrozen()
         }
     }
 
@@ -2780,6 +2821,109 @@ public final class LoupeController: NSViewController {
         startViewportRender()
     }
 
+    // MARK: resize (066 / 067)
+
+    /// Counters a resize test reads instead of watching the picture.
+    ///
+    /// `decodeRequests` is the decode storm's own number: every request that reaches `DecodeQueue`
+    /// (a joined one included — the count is of *requests*, so a storm is visible even when the queue
+    /// dedupes it). `resizeRequests` is what a live drag must leave at **zero**.
+    public private(set) var decodeRequests = 0
+    /// Frames the layout asked for (`requestResizeRender`), and how many of those were folded into the
+    /// frame already running. A programmatic resize storm is "twelve layout passes, two renders".
+    public private(set) var resizeRequests = 0
+    public private(set) var resizeCoalesced = 0
+    public private(set) var resizeRenderStarts = 0
+    /// Queued frames that never rendered: their canvas had moved before the render queue reached them.
+    public private(set) var staleCanvasDrops = 0
+    /// Frames the presenter refused because they were rendered for another canvas.
+    public private(set) var canvasMismatchDrops = 0
+
+    /// Counter-proof switch for `WindowResizeTests`: `true` reproduces the pre-066 behaviour — every
+    /// layout pass renders, and a frame for an old canvas is presented anyway. Off in the app and in
+    /// every other test; it exists so the acceptance assertions can be shown to go red for the reason
+    /// they name (a test that cannot go red is not a test).
+    public var disableResizeCoalescing = false
+    /// Second half of the same counter-proof: present a frame into the drawable of the *previous*
+    /// present, which is how the photograph came out stretched (「变扁」).
+    public var forceStaleCanvasPresent = false
+
+    private var resizeInFlight = false
+    private var resizePending = false
+
+    /// The canvas a queued frame was made for, readable from the render queue (main writes it, the
+    /// queue reads it). A job whose viewport is not this one is already wrong: rendering it spends GPU
+    /// time on pixels that cannot be presented.
+    private final class CanvasSizeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: ImageSize?
+        func store(_ new: ImageSize?) { lock.lock(); value = new; lock.unlock() }
+        func current() -> ImageSize? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    private let canvasSizeBox = CanvasSizeBox()
+
+    /// The canvas a job should be made for: the frame source's declared viewport in the harness, the
+    /// live viewport in the app, and `nil` when there is not enough of a canvas to render into.
+    private func jobViewport() -> ImageSize? {
+        if let source = frameSource { return source.viewport }
+        let viewport = viewportPixels
+        guard viewport.width > 8, viewport.height > 8 else { return nil }
+        return viewport
+    }
+
+    /// The layout changed the canvas outside a live drag (a programmatic resize, a screen change, the
+    /// pane appearing): re-render **once** for the canvas that is here, with at most one follow-up.
+    ///
+    /// A *live* drag does not come here at all — `viewDidLayout` returns before this while
+    /// `isLiveResizing`, which is 067's rule: no request is made while the hand is moving. This path
+    /// exists for the changes that have no beginning and no end to hang a freeze on, and it must not
+    /// be a storm: one frame in flight, one more at the final size, and the follow-up is guaranteed
+    /// (unlike a debounce, which is a timer the user can outrun).
+    public func requestResizeRender() {
+        guard autoRenderEnabled else { return }
+        resizeRequests += 1
+        if isLiveResizing && !disableResizeCoalescing {
+            // Belt and braces: nothing inside a drag may reach the render queue, however it got here.
+            liveResizeRenderRequests += 1
+            return
+        }
+        if disableResizeCoalescing {
+            // The 066 counter-proof: the pre-fix shape — every layout pass renders.
+            scheduleRender()
+            return
+        }
+        if resizeInFlight {
+            resizePending = true
+            resizeCoalesced += 1
+            return
+        }
+        startResizeRender()
+    }
+
+    private func startResizeRender() {
+        guard let viewport = jobViewport(), var job = makeJob(kind: .resize) else {
+            // No canvas big enough to render into (a collapsed pane): nothing to do, and nothing left
+            // in flight — the next layout will ask again.
+            resizeInFlight = false
+            return
+        }
+        canvasSizeBox.store(viewport)
+        // A resize is a new intent like any other: a frame or a development still on its way belongs
+        // to the canvas that no longer exists.
+        generation += 1
+        job.generation = generation
+        resizeRenderStarts += 1
+        resizeInFlight = true
+        queue.async { [weak self] in self?.renderFrame(job) }
+    }
+
+    private func finishResizeRender() {
+        resizeInFlight = false
+        guard resizePending else { return }
+        resizePending = false
+        startResizeRender()
+    }
+
     private func startViewportRender() {
         guard let job = makeJob(kind: .view) else { return }
         viewRenderStarts += 1
@@ -2804,14 +2948,17 @@ public final class LoupeController: NSViewController {
         // 派单 031: while a detail slider moves, ask the ladder for the preview rung only.
         let target = detailPreview ? DecodeLadder.previewScale : DecodeLadder.fullScale
         if let source = frameSource {
+            // 067/066: the canvas this job is for, published to the render queue so a job overtaken by
+            // a resize is dropped instead of rendered.
+            canvasSizeBox.store(source.viewport)
             return RenderJob(kind: kind, url: source.url, baseIdentity: source.identity,
                              viewport: source.viewport, edit: source.edit, state: source.state,
                              target: target, generation: gen, changedAt: changedAt)
         }
         guard let session, session.mode == .loupe,
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
-        let viewport = viewportPixels
-        guard viewport.width > 8, viewport.height > 8 else { return nil }
+        guard let viewport = jobViewport() else { return nil }
+        canvasSizeBox.store(viewport)
         // 裁切 mode renders the tool's preview document (whole frame + draft straighten/flips), so
         // the picture under the frame is the picture the frame is measured against. Geometry is not
         // a decode input, so this costs a render and never a development (task 035).
@@ -2826,6 +2973,20 @@ public final class LoupeController: NSViewController {
     /// between a pan that costs 5 ms while a 60 MP development runs and a pan that costs 800 ms
     /// because the development was dispatched first on the same queue.
     private func renderFrame(_ job: RenderJob) {
+        // 066/067: a frame made for a canvas that has since moved cannot be presented — the quads are
+        // pixel rectangles of the canvas the frame was rendered for, so an old-canvas texture in a new
+        // drawable is the picture **stretched** (the reported 「变扁」). Dropped here, before the GPU work
+        // and before the development request, so a drag's backlog costs nothing instead of draining
+        // stale frames. 067 does not make this redundant: the live-resize path renders nothing, but a
+        // render already queued when the drag started still has to die here.
+        if !disableResizeCoalescing, let live = canvasSizeBox.current(), live != job.viewport {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.staleCanvasDrops += 1
+                self.releaseFlight(for: job.kind)
+            }
+            return
+        }
         requestDevelopment(ladder.plan(identity: job.identity, target: job.target), job: job)
 
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -2845,7 +3006,7 @@ public final class LoupeController: NSViewController {
                     if job.changedAt > 0 {
                         self.editLatencies.append((CFAbsoluteTimeGetCurrent() - job.changedAt) * 1000)
                     }
-                case .view, .scheduled:
+                case .view, .scheduled, .resize:
                     self.viewRenderCount += 1
                 }
             } else if frame != nil {
@@ -2853,11 +3014,18 @@ public final class LoupeController: NSViewController {
             } else {
                 self.emptyFrameDrops += 1
             }
-            switch job.kind {
-            case .edit: self.finishEditRender()
-            case .view: self.finishViewRender()
-            case .scheduled: break
-            }
+            self.releaseFlight(for: job.kind)
+        }
+    }
+
+    /// Release the single-flight flag a frame owns. One function, so a dropped frame (a stale canvas,
+    /// an empty rung) cannot leave its kind's flag set and stall every later frame of that kind.
+    private func releaseFlight(for kind: RenderJob.Kind) {
+        switch kind {
+        case .edit: finishEditRender()
+        case .view: finishViewRender()
+        case .resize: finishResizeRender()
+        case .scheduled: break
         }
     }
 
@@ -2905,6 +3073,10 @@ public final class LoupeController: NSViewController {
             pendingDetailPreviewIdentity = nil
         }
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
+            // 067: counted where the request is made, not where the queue accepts it — a joined
+            // request is still a request, and "twelve resizes, no decode storm" needs the number that
+            // a dedupe would hide.
+            decodeRequests += 1
             decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
                                 work: { try Self.develop(url: job.url,
                                                          scale: scale,
@@ -3456,7 +3628,7 @@ public final class LoupeController: NSViewController {
         let clipped = (session?.highlightWarning ?? false)
             ? HighlightWarning.grid(of: texture) : nil
         return FrameResult(texture: texture, canvas: result.canvas, content: result.content,
-                           pictureRect: result.pictureRect,
+                           photoRect: result.drawnRect,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
@@ -3519,6 +3691,11 @@ public final class LoupeController: NSViewController {
         /// the whole picture (适应 with no letterbox, a texture rendered without a canvas) — 053's
         /// literal rule, kept as the special case it always was.
         public var windowsAreIdentical: Bool { window == backdropWindow }
+
+        /// 067: where the photograph was drawn on the canvas, in canvas pixels — the quad the pass was
+        /// handed, derived from `window` and the frame's own picture rect. It is the number that makes
+        /// a present correct or not, so it is recorded rather than inferred from the window.
+        public let pictureQuad: ImageRect
     }
 
     /// Every present, in order (capped; it is a log).
@@ -3552,13 +3729,13 @@ public final class LoupeController: NSViewController {
 
     private func recordBackdropPresent(window: PresentWindow, backdropWindow: PresentWindow,
                                        drawn: MTLTexture?, placement: FramePlacement,
-                                       serial: Int) {
+                                       pictureQuad: ImageRect, serial: Int) {
         let size = drawn.map { ImageSize(width: $0.width, height: $0.height) }
         if size == nil { backdroplessDrawCount += 1 } else { backdropDrawCount += 1 }
         backdropPresents.append(BackdropPresent(serial: serial, window: window,
                                                 backdropWindow: backdropWindow, backdrop: size,
                                                 coversCanvas: window.coversCanvas,
-                                                placement: placement))
+                                                placement: placement, pictureQuad: pictureQuad))
         if backdropPresents.count > Self.backdropPresentLimit {
             backdropPresents.removeFirst(backdropPresents.count - Self.backdropPresentLimit)
         }
@@ -3572,6 +3749,158 @@ public final class LoupeController: NSViewController {
     /// which is also the only case where 053's rule would have been right.
     private var canvasPlacement: FramePlacement {
         canvasContent?.placement ?? .whole
+    }
+
+    // MARK: - the one present path (067)
+
+    /// One settled present, as a resize test reads it: the drawable the quads were computed for, and
+    /// the canvas the frame texture was **rendered** for. `drawable == frameCanvas` is the invariant
+    /// that 066's 「变扁」 violates (a frame for a 1200×800 canvas drawn into a 1600×500 one is the
+    /// photograph at another aspect); the only presents where the two differ on purpose are the ones
+    /// a live resize makes, and those keep the picture's pixel geometry (`pictureQuad` unchanged)
+    /// instead of re-deriving it.
+    public struct PresentRecord: Equatable, Sendable {
+        public let drawable: ImageSize
+        public let frameCanvas: ImageSize
+        public let pictureQuad: ImageRect
+        public let backdropQuad: ImageRect?
+        public let zoom: Double
+        /// 067: this present drew the frame that was already on the canvas at its own geometry,
+        /// because a window drag is in progress. No render was asked for.
+        public let frozen: Bool
+    }
+    /// Every present, in order (capped; it is a log).
+    public private(set) var presentRecords: [PresentRecord] = []
+    private static let presentRecordLimit = 256
+    /// The last present: what the layer was handed, and what the frame inside it was made for.
+    public var lastPresented: PresentRecord? { presentRecords.last }
+    /// Where the photograph sits on the canvas, in drawable pixels, as the layer was last given it.
+    public var presentedPictureQuad: ImageRect? { lastPresented?.pictureQuad }
+
+    private func recordPresent(_ record: PresentRecord) {
+        presentRecords.append(record)
+        if presentRecords.count > Self.presentRecordLimit {
+            presentRecords.removeFirst(presentRecords.count - Self.presentRecordLimit)
+        }
+    }
+
+    /// **The only call into `CanvasPresenter`.** Every path — settled frame, bridge frame, the stop the
+    /// bridge lands on, the teardown after a resize, and the frozen frame a live resize re-draws — comes
+    /// through here, which is what makes "somebody forgot to hand the geometry over" a compile error
+    /// rather than a black band: there is no overload without a picture rect and a window.
+    ///
+    /// The quad is not passed: `PresentRequest` inverts the window onto the photograph's own rect, so
+    /// the geometry follows the map. A bridge frame's picture therefore moves with the bridge, which is
+    /// exactly the bug the user reported (「放大时边缘 0f 的遮罩会固定住，渲染完了突然消失」— the old matte
+    /// sat at the held frame's unscaled rect while the picture moved).
+    @discardableResult
+    private func presentCanvas(_ presenter: CanvasPresenter, texture: MTLTexture,
+                               photoRect: ImageRect, frameCanvas: ImageSize,
+                               window: PresentWindow, placement: FramePlacement,
+                               backdrop: MTLTexture?, backdropWindow: PresentWindow,
+                               canvas: ImageSize, serial: Int, zoom: Double, frozen: Bool = false,
+                               completion: (() -> Void)? = nil) -> Bool {
+        let request = PresentRequest(picture: texture, photoRect: photoRect, window: window,
+                                     canvas: canvas, backdrop: backdrop,
+                                     backdropWindow: backdropWindow)
+        let ok = presenter.present(request, in: canvasView.metalLayer,
+                                   wantsEDR: wantsExtendedDynamicRange,
+                                   drawableSize: canvas, onComplete: completion)
+        guard ok else { return false }
+        recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: backdrop,
+                              placement: placement, pictureQuad: request.pictureQuad, serial: serial)
+        recordPresent(PresentRecord(drawable: canvas, frameCanvas: frameCanvas,
+                                    pictureQuad: request.pictureQuad,
+                                    backdropQuad: request.backdropQuad, zoom: zoom,
+                                    frozen: frozen))
+        frozenFrame = FrozenFrame(texture: texture, photoRect: photoRect,
+                                  frameCanvas: frameCanvas, canvas: canvas, window: window,
+                                  backdropWindow: backdropWindow, placement: placement, zoom: zoom)
+        return true
+    }
+
+    /// The frame on the canvas, with the geometry it was drawn with: what a live resize re-draws.
+    ///
+    /// It is deliberately **not** a `PresentRequest`: the request's quads belong to one canvas, and the
+    /// whole point of freezing is that the canvas may change under it. Holding the *window* instead
+    /// means `PresentWindow.stretched(to:from:)` can say "the same picture, on a different surface",
+    /// and the quads come out of the same derivation as everything else.
+    private struct FrozenFrame {
+        let texture: MTLTexture
+        let photoRect: ImageRect
+        let frameCanvas: ImageSize
+        let canvas: ImageSize
+        let window: PresentWindow
+        let backdropWindow: PresentWindow
+        let placement: FramePlacement
+        let zoom: Double
+    }
+    private var frozenFrame: FrozenFrame?
+
+    // MARK: - live resize (067)
+
+    /// The window drag is in progress: **no render is requested until it ends.**
+    ///
+    /// The alternative (one coalesced render per drag, 066's shape) still renders during the drag,
+    /// which is what made a drag of a zoomed-in 60 MP frame freeze the window: a frame costs tens of
+    /// milliseconds, and the drag delivers a layout pass every 8 ms. The picture does not need new
+    /// pixels while the hand is moving — it needs to stay put, which is a re-present, not a render.
+    public private(set) var isLiveResizing = false
+    /// Layout passes that fell inside a live resize, and the number of frames they asked for (0).
+    public private(set) var liveResizeLayouts = 0
+    /// Render requests a live resize made while the hand was moving — the number a regression shows up
+    /// in, and the one the test asserts is 0 (`WindowResizeTests`).
+    public private(set) var liveResizeRenderRequests = 0
+
+    public func beginLiveResize() {
+        guard !isLiveResizing else { return }
+        isLiveResizing = true
+        liveResizeLayouts = 0
+        // The transition is measured against the canvas that is about to move: it cannot continue. The
+        // teardown does not re-present here — the next layout pass draws the frozen frame, and it is
+        // the pass that knows the new canvas.
+        cancelZoomBridge(rePresent: false)
+    }
+
+    /// The hand let go: **one** render request, for the canvas that is on screen now.
+    ///
+    /// Deliberately not debounced: the final size always gets a frame, which a timer cannot promise
+    /// (the user can outrun it). At 适应 the frame that comes back is laid out for the new viewport, so
+    /// the picture re-fits by itself — that is the one camera change a drag is allowed to cause.
+    public func endLiveResize() {
+        guard isLiveResizing else { return }
+        isLiveResizing = false
+        requestResizeRender()
+    }
+
+    /// Draw the frame that is on the canvas again, with the geometry it was drawn with, on the canvas
+    /// that is on screen now (067).
+    ///
+    /// This is the whole of what a window drag does to the picture:
+    ///
+    ///   · **smaller canvas** → the same picture at the same pixels, cropped by the surface. No
+    ///     rescaling, because the window is stretched by the canvas ratio and the quad comes out
+    ///     unchanged (`PresentWindow.stretched`).
+    ///   · **larger canvas** → the same picture at the same pixels, and the area the surface grew by is
+    ///     filled by the **low-resolution whole picture through the same map** — the backdrop's quad is
+    ///     derived from the backdrop window, which is stretched alongside, so its content lands where
+    ///     that content belongs. So a grown window shows more of the photograph's surroundings at
+    ///     preview resolution instead of a grey or black band.
+    ///   · **no backdrop cached yet** (a document opened seconds ago) → that area is the canvas colour
+    ///     `#0F0F0F`. Never black, never stretched: the fallback is the clear colour, in that order.
+    private func rePresentFrozen() {
+        guard let frozen = frozenFrame, let presenter else { return }
+        let canvas = viewportPixels
+        let window = frozen.window.stretched(to: canvas, from: frozen.canvas)
+        let backdropWindow = frozen.backdropWindow.stretched(to: canvas, from: frozen.canvas)
+        // The gate is geometric and is asked about the **stretched** window: a frame that covered the
+        // canvas at the old size may no longer cover it at the new one, and that is exactly when the
+        // backdrop is wanted. `nil` (nothing cached for this document) leaves the clear colour.
+        let drawn = backdropTexture(for: window)
+        presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.photoRect,
+                      frameCanvas: frozen.frameCanvas, window: window, placement: frozen.placement,
+                      backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
+                      serial: 0, zoom: frozen.zoom, frozen: true)
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
@@ -3610,13 +3939,28 @@ public final class LoupeController: NSViewController {
             session?.ingestedSourceFrame = (assetID, graphAtFrame.sourceSize)
         }
         let canvas = viewportPixels
+        // 066's stale-canvas rule, kept (067 does not make it unnecessary): a frame rendered for another
+        // canvas cannot be drawn here **as if it filled this one** — the quads are pixel rectangles of
+        // the canvas the frame was rendered for, so a full-bleed present of an old-canvas frame is the
+        // photograph at another aspect, the reported 「变扁」.
+        //
+        // What it *can* do is what a live resize does: keep its own pixel geometry and let this surface
+        // crop or extend it (`PresentWindow.stretched`). That is the difference between "the picture is
+        // stretched into the window" and "the window changed around the picture" — and it means a frame
+        // that lost the race with a resize is one correct frame rather than a blank canvas. A frame for
+        // this canvas is requested on top; only if one can be made, since re-requesting the same canvas
+        // would be a loop.
+        let staleCanvas = !forceStaleCanvasPresent && canvas != frame.canvas
+        if staleCanvas { canvasMismatchDrops += 1 }
         // The frame that is about to be replaced: it stays out of the render pool until this one's
         // drawable is committed (the bridge may still be sampling it), and is recycled then.
         let replaced = canvasTexture
         let t0 = CFAbsoluteTimeGetCurrent()
         // A settled frame is the whole picture at the canvas size, so `window: .whole` covers the
         // canvas and the pass gets no backdrop — the rule is the window's, not this call site's.
-        let settledWindow = PresentWindow.whole
+        let settledWindow = staleCanvas
+            ? PresentWindow.whole.stretched(to: canvas, from: frame.canvas)
+            : PresentWindow.whole
         // 058: which part of the picture this frame holds and where the photograph sits inside it —
         // the camera's own mapping, the same one `canvasContent` stores below. Recorded even though a
         // covering present draws no backdrop: the record must still say what a backdrop *would* have
@@ -3625,16 +3969,15 @@ public final class LoupeController: NSViewController {
             .map { $0.framePlacement(of: $0.mapping(of: state)) } ?? .whole
         let settledBackdropWindow = settledWindow.onWholePicture(settledPlacement)
         let drawn = backdropTexture(for: settledWindow)
-        // 054: that same canvas-sized frame letterboxes the photograph with 0 around it (S2/S4 write
-        // the matte into the texture), so the present pass needs the picture's rect to put `#0F0F0F`
-        // around it instead of showing those zeros as black. Only when the frame was rendered for
-        // exactly this drawable: the rect is normalised by the drawable's size.
-        let picture = frame.canvas == canvas ? frame.pictureRect : nil
-        let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
-                                   wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, window: settledWindow,
-                                   backdrop: drawn, backdropWindow: settledBackdropWindow,
-                                   pictureRect: picture) { [weak self] in            guard let self else { return }
+        // 067: the photograph's rect inside the frame texture is the *only* geometry this present
+        // supplies — the quad on the canvas follows from it and from the window. There is no optional
+        // "pass the rect if you remember" argument any more, which is what used to turn a letterboxed
+        // frame into a black band.
+        let ok = presentCanvas(presenter, texture: frame.texture, photoRect: frame.photoRect,
+                               frameCanvas: frame.canvas, window: settledWindow,
+                               placement: settledPlacement, backdrop: drawn,
+                               backdropWindow: settledBackdropWindow, canvas: canvas, serial: 0,
+                               zoom: frame.zoom, frozen: staleCanvas) { [weak self] in            guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
         }
@@ -3659,9 +4002,13 @@ public final class LoupeController: NSViewController {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)
-        canvasPicture = picture.map { ($0, canvas) }
-        recordBackdropPresent(window: settledWindow, backdropWindow: settledBackdropWindow,
-                              drawn: drawn, placement: settledPlacement, serial: 0)
+        // 067: kept — not for the matte (there is none any more) but because it is the **only** thing
+        // that says where the photograph is inside the texture on the canvas. Every present that
+        // re-draws this frame (a bridge, a teardown, a window drag) derives its quad from it.
+        canvasPicture = (frame.photoRect, canvas)
+        // The frame landed at its own canvas: ask for one for the canvas that is on screen, if the
+        // renderer can produce it. (A stale frame is presented frozen, not dropped — see above.)
+        if staleCanvas, jobViewport() != frame.canvas { requestResizeRender() }
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
         // on this serial, so the next move re-reads instead of trusting the previous picture's texel.
@@ -3916,7 +4263,7 @@ public final class LoupeController: NSViewController {
         }
         do {
             // The picture's own rect inside this frame's texture, as the **render laid it out**
-            // (`RenderResult.pictureRect` is derived from S0's own origin/frame-origin — the numbers
+            // (`RenderResult.photoRect` is derived from S0's own origin/frame-origin — the numbers
             // the kernel was handed), not `(canvas − content) / 2`: that guess assumes the picture is
             // centred in the content rect, which stops being true the moment a window reaches past
             // the frame (a 1:1 view of a picture smaller than the viewport). There the content rect
@@ -3924,7 +4271,7 @@ public final class LoupeController: NSViewController {
             // guess measures the background — bin 0 filled with canvas, which is the bug 048 reports.
             // Handing the drawn rect over also skips the engine's matte probe, which cannot tell a
             // black band that belongs to the picture from a letterbox.
-            let content = result.pictureRect
+            let content = result.drawnRect
             let measurement = try graph.measureFrameHistogram(fromFrame: texture, edit: edit,
                                                               bins: 256, content: content,
                                                               primaries: primaries,

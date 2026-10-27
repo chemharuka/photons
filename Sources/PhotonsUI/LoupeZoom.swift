@@ -245,21 +245,18 @@ public struct LoupeZoomBridge: Equatable, Sendable {
     /// transition, not just at the two ends (025).
     public let anchor: LoupeZoomAnchor
 
-    /// 054b: where the photograph sits **inside the held texture**, in that texture's pixels.
-    ///
-    /// A letterboxed frame carries `float4(0)` outside the picture (S2/S4 write it), and only the
-    /// present pass can turn that into the canvas matte — which it does from this rect. Without it a
-    /// bridge frame drew those zeros as **black**, so the 054 grey appeared at rest and a black band
-    /// appeared the moment a zoom started (both directions). Optional because a frame that fills its
-    /// texture needs none: `nil` is "the picture is the whole texture".
-    public let pictureRect: ImageRect?
+    // 067: the bridge no longer carries `photoRect`. It existed so every bridge frame could hand the
+    // present pass the rect to paint `#0F0F0F` outside (054b) — and it was the *held frame's* rect,
+    // not this frame's, so during a zoom the grey band stayed where the old camera had put the
+    // photograph while the picture moved under it (the user's 「放大时边缘 0f 的遮罩会固定住，渲染完了
+    // 突然消失」). The present pass takes its geometry from the window now, so a bridge frame's quad
+    // follows `window(atProgress:)` by construction and there is no second number to carry.
 
     public init(fromContent: ImageSize, toContent: ImageSize,
                 fromMapping: LoupeMapping, toMapping: LoupeMapping, canvas: ImageSize,
                 startScale: Double = 1, startOffsetX: Double = 0, startOffsetY: Double = 0,
                 layerAnchorPoint: CGPoint = .zero, layerIsFlipped: Bool = true,
                 anchor: LoupeZoomAnchor = .center,
-                pictureRect: ImageRect? = nil,
                 duration: CFTimeInterval = LoupeZoomBridge.defaultDuration) {
         self.fromContent = fromContent
         self.toContent = toContent
@@ -272,7 +269,6 @@ public struct LoupeZoomBridge: Equatable, Sendable {
         self.layerAnchorPoint = layerAnchorPoint
         self.layerIsFlipped = layerIsFlipped
         self.anchor = anchor
-        self.pictureRect = pictureRect
         self.duration = duration
     }
 

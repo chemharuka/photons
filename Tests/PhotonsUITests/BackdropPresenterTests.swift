@@ -42,7 +42,6 @@ final class BackdropPresenterTests: XCTestCase {
     }
 
     func testPresentParamsLayoutIsTheSameOnBothSides() throws {
-        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
         let url = Self.kernelURL
         let source = try String(contentsOf: url, encoding: .utf8)
 
@@ -58,10 +57,11 @@ final class BackdropPresenterTests: XCTestCase {
             fields.append((name: parts[1], type: parts[0]))
         }
 
-        // The shader's half: five `float4`s, in this order, or the offsets below are wrong.
-        XCTAssertEqual(fields.map(\.name), ["a", "b", "c", "d", "e"],
+        // 067: **three** `float4`s — the quad, the window, the flags. `d` (the picture's rect, 054) is
+        // gone, which is the whole point of the task: the rect is not a shader argument any more.
+        XCTAssertEqual(fields.map(\.name), ["quad", "window", "misc"],
                        "present.metal's PresentParams changed shape; the Swift side must follow")
-        XCTAssertEqual(fields.map(\.type), Array(repeating: "float4", count: 5),
+        XCTAssertEqual(fields.map(\.type), Array(repeating: "float4", count: 3),
                        "every field of PresentParams is a float4 so the offsets are plain multiples of 16")
 
         // Metal/Clang field offsets for a struct of float4s, computed from the parsed text.
@@ -80,8 +80,7 @@ final class BackdropPresenterTests: XCTestCase {
         // The Swift half.
         let layout = MemoryLayout<CanvasPresenter.PresentParams>.self
         let swiftOffsets = [
-            layout.offset(of: \.a), layout.offset(of: \.b), layout.offset(of: \.c),
-            layout.offset(of: \.d), layout.offset(of: \.e),
+            layout.offset(of: \.quad), layout.offset(of: \.window), layout.offset(of: \.misc),
         ].map { $0 ?? -1 }
 
         XCTAssertEqual(swiftOffsets, metalOffsets,
@@ -89,75 +88,88 @@ final class BackdropPresenterTests: XCTestCase {
         XCTAssertEqual(layout.stride, metalSize,
                        "Swift stride \(layout.stride) vs present.metal sizeof \(metalSize)")
         // The numbers themselves, so a refactor cannot quietly renumber them.
-        XCTAssertEqual(swiftOffsets, [0, 16, 32, 48, 64])
-        XCTAssertEqual(layout.stride, 80)
-        XCTAssertEqual(layout.size, 80, "stride and size agree, so a copy of `size` bytes is complete")
+        XCTAssertEqual(swiftOffsets, [0, 16, 32])
+        XCTAssertEqual(layout.stride, 48)
+        XCTAssertEqual(layout.size, 48, "stride and size agree, so a copy of `size` bytes is complete")
 
-        // Two entry points: 025's fragment must not even declare the backdrop texture, or the
-        // no-backdrop draw pays for a fetch it never uses.
+        // One fragment function, and it asks **nothing** about the photograph: no matte constant, no
+        // picture rect, no second texture, no "outside the picture" test. This is the assertion that
+        // makes the old class of bug unrepresentable rather than fixed — a fragment that cannot see a
+        // rect cannot be handed the wrong one.
+        XCTAssertNil(Self.fragmentSignature("present_fragment_backdrop", in: source),
+                     "067: there is one fragment; the backdrop is a second **quad**, not a second shader")
         let plain = try XCTUnwrap(Self.fragmentSignature("present_fragment", in: source))
+        let code = Self.stripped(source)
         XCTAssertTrue(plain.contains("texture2d<float> src [[texture(0)]]"))
-        XCTAssertFalse(plain.contains("texture(1)"),
-                       "present_fragment is 025's: no backdrop binding, no second fetch")
-        let fill = try XCTUnwrap(Self.fragmentSignature("present_fragment_backdrop", in: source))
-        XCTAssertTrue(fill.contains("texture2d<float> src [[texture(0)]]"))
-        XCTAssertTrue(fill.contains("texture2d<float> backdrop [[texture(1)]]"),
-                      "the backdrop must be texture(1): that is where both call sites bind it")
-        XCTAssertEqual(CanvasPresenter.fragmentName(nil), "present_fragment")
-        XCTAssertEqual(CanvasPresenter.fragmentName(try solid(device, 2, 2, [0, 0, 0, 1])),
-                       "present_fragment_backdrop")
+        XCTAssertEqual(plain.components(separatedBy: "texture(").count - 1, 1,
+                       "the one fragment binds one texture; which one is the caller's business")
+        for gone in ["p.d", "kCanvasMatte", "photoRect", "beyondEdge", "backdrop_weight"] {
+            XCTAssertFalse(Self.stripped(source).contains(gone),
+                           "`\(gone)` is still in present.metal — the fragment is still asking where "
+                           + "the photograph is instead of drawing a rectangle")
+        }
+        // …and the geometry it *does* read: a quad in canvas space and a window in texture space.
+        XCTAssertTrue(code.contains("p.quad"), "the vertex stage must place the quad")
+        XCTAssertTrue(code.contains("p.window"), "…and take uv from the canvas position through the window")
+        XCTAssertTrue(code.contains("o.position = float4(canvasPosition.x * 2.0 - 1.0"),
+                      "the quad's canvas rectangle is the clip-space rectangle — no other geometry exists")
 
-        print("PresentParams: 5 × float4, offsets \(metalOffsets), stride \(metalSize) — Swift and present.metal agree")
+        print("PresentParams: 3 × float4, offsets \(metalOffsets), stride \(metalSize) — Swift and "
+              + "present.metal agree; one fragment, no matte, no picture rect")
     }
 
-    /// The `float4 c` / `float4 d` slots must actually carry what the fragment reads them for: the
-    /// backdrop window, the main window's rect on the canvas, and the has-backdrop flag.
-    func testMakeParamsEncodesTheBackdropGeometry() throws {
+    /// The quad and the window the request hands the pass: the photograph's place on the canvas is
+    /// **derived** from the frame's window, so the two can never be independent numbers.
+    func testTheRequestDerivesTheQuadFromTheWindow() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
-        let dummy = try solid(device, 8, 8, [0.5, 0.5, 0.5, 1])
+        let dummy = try solid(device, 256, 256, [0.5, 0.5, 0.5, 1])
         let canvas = ImageSize(width: 512, height: 512)
+        let whole = ImageRect(x: 0, y: 0, width: 256, height: 256)
 
-        // A centred 0.25 canvas window: the picture spans canvas px [192, 320).
-        let window = PresentWindow(u0: -1.5, v0: -1.5, du: 4, dv: 4)
-        let with = CanvasPresenter.makeParams(linearize: true, window: window,
-                                              backdrop: dummy,
-                                              backdropWindow: PresentWindow(u0: 0.1, v0: 0.2,
-                                                                            du: 0.5, dv: 0.6),
-                                              canvas: canvas)
-        XCTAssertEqual(with.a.x, 1, "linearize flag")
-        XCTAssertEqual(with.b.x, window.u0)
-        XCTAssertEqual(with.b.w, window.du)
-        XCTAssertEqual(with.c, SIMD4<Float>(0.1, 0.2, 0.5, 0.6), "the backdrop's own uv window")
-        XCTAssertEqual(with.d.x, Float(0.375), accuracy: Float(1e-6), "rect origin = -u0/du")
-        XCTAssertEqual(with.d.y, Float(0.375), accuracy: Float(1e-6))
-        XCTAssertEqual(with.d.z, Float(0.25), accuracy: Float(1e-6), "rect size = 1/du")
-        XCTAssertEqual(with.d.w, Float(0.25), accuracy: Float(1e-6))
-        XCTAssertEqual(with.e.z, 1, "has-backdrop flag")
-        XCTAssertEqual(with.e.x, Float(CanvasPresenter.backdropFeatherPixels / 512), accuracy: Float(1e-9))
-        XCTAssertEqual(with.e.y, Float(CanvasPresenter.backdropFeatherPixels / 512), accuracy: Float(1e-9))
+        // A centred half-canvas window (`du = 4`): the picture occupies canvas px [192, 320).
+        let request = PresentRequest(picture: dummy, photoRect: whole,
+                                     window: PresentWindow(u0: -1.5, v0: -1.5, du: 4, dv: 4),
+                                     canvas: canvas)
+        XCTAssertEqual(request.pictureQuad, ImageRect(x: 192, y: 192, width: 128, height: 128),
+                       "the quad is the inverse of the window, in canvas pixels")
+        XCTAssertEqual(CanvasPresenter.normalised(request.pictureQuad, canvas: canvas),
+                       SIMD4<Float>(0.375, 0.375, 0.25, 0.25),
+                       "…and that is exactly the rectangle `PresentParams.quad` carries")
 
-        // No backdrop: the flag is 0 and the geometry is neutral, whatever the window says.
-        let without = CanvasPresenter.makeParams(linearize: false, window: window, backdrop: nil,
-                                                 backdropWindow: .whole, canvas: canvas)
-        XCTAssertEqual(without.e.z, 0, "no backdrop ⇒ the fragment takes 025's path")
-        XCTAssertEqual(without.a.x, 0)
-        XCTAssertEqual(without.d, SIMD4<Float>(0, 0, 1, 1))
+        // The backdrop's quad is derived the same way, from its own window.
+        let withBackdrop = PresentRequest(picture: dummy, photoRect: whole,
+                                          window: .whole, canvas: canvas,
+                                          backdrop: dummy,
+                                          backdropWindow: PresentWindow(u0: 0.25, v0: 0.25,
+                                                                        du: 0.5, dv: 0.5))
+        XCTAssertEqual(withBackdrop.backdropQuad, ImageRect(x: -256, y: -256, width: 1024, height: 1024)
+                        .intersected(in: canvas),
+                       "the whole picture through a half-picture window covers 4 × the canvas, clipped")
+        XCTAssertEqual(withBackdrop.pictureQuad, ImageRect(x: 0, y: 0, width: 512, height: 512))
+        XCTAssertEqual(withBackdrop.quads.count, 2, "backdrop first, picture over it")
+        XCTAssertTrue(withBackdrop.quads.first?.texture === dummy)
+        XCTAssertTrue(withBackdrop.quads.last?.texture === dummy)
 
-        // A degenerate window cannot be feathered against; it must not divide by zero either — in the
-        // params, or in the shader (which is chosen by the binding, not by the flag).
-        let degenerate = CanvasPresenter.makeParams(linearize: true,
-                                                    window: PresentWindow(u0: 0, v0: 0, du: 0, dv: 0),
-                                                    backdrop: dummy, backdropWindow: .whole, canvas: canvas)
-        XCTAssertEqual(degenerate.e.z, 0)
-        XCTAssertTrue(degenerate.d.x.isFinite && degenerate.d.z.isFinite)
+        // A degenerate window has no rectangle at all: nothing of the picture is on the canvas, and the
+        // pass must clear rather than paint NaN (the old code had to floor a divisor in the fragment for
+        // this; now there is no fragment arithmetic to divide by).
+        let degenerate = PresentRequest(picture: dummy, photoRect: whole,
+                                        window: PresentWindow(u0: 0, v0: 0, du: 0, dv: 0),
+                                        canvas: canvas)
+        XCTAssertTrue(degenerate.pictureQuad.isEmpty)
+        XCTAssertFalse(degenerate.hasPicture, "a zero-sized window draws no picture quad")
+        XCTAssertTrue(degenerate.quads.isEmpty)
 
         let presenter = try CanvasPresenter(device: device)
         let small = try makeTexture(device, 8, 8, .rgba16Float, [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(dummy, window: PresentWindow(u0: 0, v0: 0, du: 0, dv: 0),
-                                       backdrop: dummy, into: small, linearize: false))
+        XCTAssertTrue(presenter.render(degenerate, into: small, linearize: false))
         let px = Self.readRGBA16(small)
         XCTAssertTrue(px.allSatisfy { $0.isFinite }, "a zero-sized window painted NaN")
-        Self.assertColour(Self.pixel(px, 8, 4, 4), [0.5, 0.5, 0.5, 1], "still the main frame")
+        // Everything is the clear colour — the canonical `#0F0F0F`, in the transfer function of the
+        // attachment (`linearize: false` here, so the display-encoded 15/255).
+        for i in stride(from: 0, to: px.count, by: 4) {
+            XCTAssertEqual(Double(px[i]), CanvasPresenter.CanvasMatte.displayEncoded, accuracy: 2e-3)
+        }
     }
 
     // MARK: - ② `backdrop: nil` is byte-for-byte 025
@@ -167,50 +179,113 @@ final class BackdropPresenterTests: XCTestCase {
     /// target format, same linearize flag: the hash must not move. `exact` is the rgba16Float / bgra8
     /// bit pattern; `q8` is the same pixels quantised to 8 bits, which is the form that survives a
     /// different GPU's rounding.
-    func testNoBackdropOutputIsByteIdenticalTo025() throws {
+    func testACoveringQuadIsByteIdenticalTo025() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
         let presenter = try CanvasPresenter(device: device)
         let size = ImageSize(width: 64, height: 48)
         let src = try patterned(device, size)
         let target16 = try makeTexture(device, size.width, size.height, .rgba16Float,
                                        [.shaderRead, .renderTarget])
-        let target8 = try makeTexture(device, size.width, size.height, .bgra8Unorm,
-                                      [.shaderRead, .renderTarget])
-        let shrink = PresentWindow(scale: 0.5, originX: Double(size.width) * 0.1,
-                                   originY: Double(size.height) * 0.1, canvas: size, texture: size)
+        // A zoomed-in frame: the picture covers the canvas, so its quad *is* the canvas and 025's
+        // arithmetic is all that is left. (A covering window is the case where the drawn rectangle and
+        // the sampled window say the same thing — which is why this hash is allowed to be the one
+        // recorded before any of this existed.)
         let zoom = PresentWindow(scale: 1.7, originX: -Double(size.width) * 0.2,
                                  originY: -Double(size.height) * 0.15, canvas: size, texture: size)
+        XCTAssertLessThan(Double(zoom.du), 1, "a zooming window is a sub-rect of the texture")
 
         let cases: [(name: String, window: PresentWindow, linear: Bool, target: MTLTexture,
                      exact: String, eightBit: String)] = [
             ("identity/linear16", .whole, true, target16,
              "6ceb6f49b8d386e804bdef1ea144251b967041b9cedb92c8a9f6c0c4c5fab3cc",
              "7abcb9ffb5a891e9946457ecb3edfd9cb39e1fb9092dd5268011dab7209fc62e"),
-            ("shrink/linear16", shrink, true, target16,
-             "1243b1acbd4a72bdfdcccbcb7eaa2a75f8743a7f2addcaea43d3ee65146cdb64",
-             "d635dc4e54cd853cc592b21e1cdd02c5ea700f4533a3946a79abe6fab05e488a"),
-            ("shrink/encoded", shrink, false, target16,
-             "ac372bdffa30436a0efbe9e68ce9f3a17806a78a9d53d9e136aa33c4e6ea8cd2",
-             "6c990d3552c71cda070b5e5e90a6628c7b768435545713405e6128b511e83105"),
             ("zoom/linear16", zoom, true, target16,
              "91616dc57255d327ce35a3206afa39b6ad9932f667f8388862241567e72b2c15",
              "2fddaf8d6c343f098aa4a90a78460df62d98877c8672b265df076fed9b651e30"),
-            ("shrink/srgb8", shrink, false, target8,
-             "fda8d469f3202fbebeb4310622c15f7faf978492d0203f863f151e406b57d495",
-             "d51a15d76b7ef6a7a3a95f510f28e536a245d7e316d5acdc7eca2fc236d11d10"),
         ]
 
         var lines: [String] = []
         for c in cases {
-            XCTAssertTrue(presenter.render(src, window: c.window, into: c.target, linearize: c.linear),
+            XCTAssertTrue(presenter.renderForTest(src, window: c.window, into: c.target, linearize: c.linear),
                           presenter.lastFailure ?? "the present pass failed")
             let h = Self.hash(c.target)
             XCTAssertEqual(h.exact, c.exact,
-                           "\(c.name): the no-backdrop path is no longer 025's output (exact hash)")
+                           "\(c.name): a covering quad must still write exactly what 025 wrote (exact hash)")
             XCTAssertEqual(h.eightBit, c.eightBit, "\(c.name): 8-bit hash moved")
             lines.append("  \(c.name): \(h.exact.prefix(16))… ✓")
         }
-        print("no-backdrop output, hashed against 5ae8a64:\n" + lines.joined(separator: "\n"))
+        print("covering quads, hashed against 5ae8a64:\n" + lines.joined(separator: "\n"))
+    }
+
+    /// 067 — **a shrinking frame no longer smears its own edge across the canvas.**
+    ///
+    /// 025's answer to "the frame does not reach the canvas" was `clamp_to_edge`: the picture's border
+    /// pixels stretched over everything the frame missed. 053/058 replaced the *band* with the low-res
+    /// picture when there was one, and 067 replaces the mechanism: the picture is a quad, so what it does
+    /// not cover is not painted by it at all. The pixels the old answer produced are recorded here
+    /// (`shrink/exact`) so the difference is a number, not an opinion.
+    func testAShrinkingFrameDrawsItsQuadAndLeavesTheRestToTheCanvas() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
+        let presenter = try CanvasPresenter(device: device)
+        let size = ImageSize(width: 64, height: 48)
+        let canvas = size
+        let source = try solid(device, size.width, size.height, [0.30, 0.60, 0.90, 1])
+        let target = try makeTexture(device, size.width, size.height, .rgba16Float,
+                                     [.shaderRead, .renderTarget])
+        let shrink = PresentWindow(scale: 0.5, originX: Double(size.width) * 0.1,
+                                   originY: Double(size.height) * 0.1, canvas: canvas, texture: size)
+
+        let request = PresentRequest(picture: source,
+                                     photoRect: ImageRect(x: 0, y: 0, width: size.width,
+                                                            height: size.height),
+                                     window: shrink, canvas: canvas)
+        // scale 0.5 about (6.4, 4.8): the picture is the middle half, px [6, 58) × [5, 43).
+        XCTAssertEqual(request.pictureQuad, ImageRect(x: 6, y: 5, width: 32, height: 24),
+                       "the quad is what the map says, not the whole canvas")
+        XCTAssertTrue(presenter.render(request, into: target, linearize: true))
+        let px = Self.readRGBA16(target)
+        func p(_ x: Int, _ y: Int) -> [Float] { Self.pixel(px, canvas.width, x, y) }
+
+        // Inside the quad: the picture, its own pixels. (`linearize: true` stores linear light, so the
+        // expected value is the source's display-encoded colour through the sRGB EOTF.)
+        func linear(_ v: Double) -> Float { Float(pow((v + 0.055) / 1.055, 2.4)) }
+        let expected = [linear(0.30), linear(0.60), linear(0.90), 1]
+        for (x, y) in [(6, 5), (37, 27), (20, 10), (6, 28)] {
+            Self.assertColour(p(x, y), expected, "inside the quad at (\(x), \(y))")
+        }
+        // Outside: the canvas colour — not the picture's edge, which is what 025 wrote there.
+        var smeared = 0
+        var unset = 0
+        for y in 0..<canvas.height {
+            for x in 0..<canvas.width {
+                let inside = x >= 6 && x < 38 && y >= 5 && y < 29
+                if inside { continue }
+                let c = p(x, y)
+                if abs(Double(c[2]) - Double(expected[2])) < 1e-3 { smeared += 1 }
+                if abs(Double(c[0]) - CanvasPresenter.CanvasMatte.linear) > 2e-3 { unset += 1 }
+            }
+        }
+        XCTAssertEqual(smeared, 0, "\(smeared) pixels outside the quad are still the picture's edge")
+        XCTAssertEqual(unset, 0, "\(unset) pixels outside the quad are not the canvas colour")
+
+        // The old answer, for the record: 025's full-canvas quad with `clamp_to_edge` — the frame's own
+        // border stretched over the band. Spelled with explicit geometry, because the request's derived
+        // quad cannot ask for "cover the canvas" while the map says otherwise.
+        let legacy = try makeTexture(device, size.width, size.height, .rgba16Float,
+                                     [.shaderRead, .renderTarget])
+        let pre067 = PresentRequest(picture: source, canvas: canvas,
+                                    pictureQuad: ImageRect(x: 0, y: 0, width: canvas.width,
+                                                           height: canvas.height),
+                                    window: shrink)
+        XCTAssertTrue(presenter.render(pre067, into: legacy, linearize: true))
+        let legacyPixels = Self.readRGBA16(legacy)
+        XCTAssertEqual(Self.pixel(legacyPixels, canvas.width, 0, 0)[2], expected[2], accuracy: 1e-3,
+                       "the counterexample is 025: the picture's colour at the canvas corner")
+        print(String(format: "[067] shrink (s = 0.5 about (6.4, 4.8)): quad px [6, 38) × [5, 29) is the "
+                     + "picture; %d pixels outside are all #0F0F0F (linear %.6f); 025 wrote the edge "
+                     + "colour there (corner b = %.3f)", unset,
+                     CanvasPresenter.CanvasMatte.linear,
+                     Self.pixel(legacyPixels, canvas.width, 0, 0)[2]))
     }
 
     /// The same fixture plus an explicit `backdrop: nil` *and* an equal-looking window: the argument
@@ -225,8 +300,8 @@ final class BackdropPresenterTests: XCTestCase {
         let b = try makeTexture(device, size.width, size.height, .rgba16Float, [.shaderRead, .renderTarget])
         let shrink = PresentWindow(scale: 0.4, originX: 3, originY: 5, canvas: size, texture: size)
 
-        XCTAssertTrue(presenter.render(src, window: shrink, into: a, linearize: true))
-        XCTAssertTrue(presenter.render(src, window: shrink, backdrop: nil,
+        XCTAssertTrue(presenter.renderForTest(src, window: shrink, into: a, linearize: true))
+        XCTAssertTrue(presenter.renderForTest(src, window: shrink, backdrop: nil,
                                        backdropWindow: PresentWindow(u0: 0.3, v0: 0.7, du: 0.2, dv: 0.1),
                                        into: b, linearize: true))
         XCTAssertEqual(Self.hash(a).exact, Self.hash(b).exact,
@@ -253,7 +328,7 @@ final class BackdropPresenterTests: XCTestCase {
         let window = PresentWindow(u0: -1.5, v0: -1.5, du: 4, dv: 4)
         XCTAssertTrue(window.coversWholeTexture, "a shrinking window is larger than its texture")
 
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        into: target, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
         let px = Self.readRGBA16(target)
@@ -268,18 +343,15 @@ final class BackdropPresenterTests: XCTestCase {
                        (320, 256), (256, 191), (256, 320)] {
             Self.assertColour(p(x, y), back, "outside the window at (\(x), \(y)) must be the backdrop")
         }
-        // ③ the two pixels inside each edge are a ramp between them, monotonically.
-        for (inner, outer, axis, fixed) in [(192, 193, "x", 256), (319, 318, "x", 256),
-                                            (192, 193, "y", 256)] {
-            let a = axis == "x" ? p(inner, fixed) : p(fixed, inner)
-            let b = axis == "x" ? p(outer, fixed) : p(fixed, outer)
-            let lo = min(main[1], back[1]), hi = max(main[1], back[1])
-            XCTAssertGreaterThan(a[1], lo + 2.0 / 255, "edge pixel (\(inner)) is not blended: \(a[1])")
-            XCTAssertLessThan(a[1], hi - 2.0 / 255, "edge pixel (\(inner)) is not blended: \(a[1])")
-            XCTAssertGreaterThan(b[1], lo + 2.0 / 255, "second edge pixel (\(outer)) is not blended: \(b[1])")
-            XCTAssertLessThan(b[1], hi - 2.0 / 255)
-            XCTAssertLessThan(abs(b[1] - hi), abs(a[1] - hi),
-                              "the ramp must climb towards the main frame, not away from it")
+        // ③ the edge is **hard and exact**: the last canvas pixel outside the quad is the backdrop, the
+        // first inside is the frame. 037–065 cross-faded two pixels here; 067 does not need to, because
+        // the boundary is a quad edge rather than a per-fragment decision, and the invariant the task
+        // asks for ("inside the photograph, tolerance 0") forbids softening the photograph's own edge.
+        for (x, y) in [(191, 256), (320, 256), (256, 191), (256, 320)] {
+            Self.assertColour(p(x, y), back, "one pixel outside the quad at (\(x), \(y)) is the backdrop")
+        }
+        for (x, y) in [(192, 256), (319, 256), (256, 192), (256, 319)] {
+            Self.assertColour(p(x, y), main, "one pixel inside the quad at (\(x), \(y)) is the frame")
         }
 
         // No canvas pixel is the pass's clear colour: the backdrop covers what the frame does not.
@@ -289,15 +361,19 @@ final class BackdropPresenterTests: XCTestCase {
         }
         XCTAssertEqual(unpainted, 0, "\(unpainted) of \(px.count / 4) canvas pixels are unrendered black")
 
-        // The counterexample, in the same geometry: without a backdrop the outside is 025's stretched
-        // edge — the main frame's colour — which is the band the user reported seeing.
+        // The counterexample, in the same geometry: without a backdrop the outside is the **canvas
+        // colour** — not 025's stretched edge (which is what the user reported seeing, a band of the
+        // picture's own border smeared across the window it does not reach).
         let bare = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                    [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, into: bare, linearize: false))
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, into: bare, linearize: false))
         let barePixels = Self.readRGBA16(bare)
         for (x, y) in [(0, 0), (511, 511)] {
-            XCTAssertEqual(Self.pixel(barePixels, canvas.width, x, y)[0], main[0], accuracy: 1.0 / 255,
-                           "025's corner is the picture's own edge — the band this replaces")
+            let code = CanvasPresenter.CanvasMatte.displayEncoded
+            XCTAssertEqual(Double(Self.pixel(barePixels, canvas.width, x, y)[0]), code, accuracy: 1.0 / 255,
+                           "without a backdrop the corner is #0F0F0F, not the picture's edge")
+            XCTAssertNotEqual(Self.pixel(barePixels, canvas.width, x, y)[0], main[0],
+                              "…and certainly not the frame's colour stretched over the canvas")
         }
         print(String(format: "backdrop fill: 512² canvas, window px [192, 320), main (%.2f, %.2f, %.2f), "
                      + "backdrop (%.2f, %.2f, %.2f); corner = %.3f with backdrop, %.3f without",
@@ -333,7 +409,7 @@ final class BackdropPresenterTests: XCTestCase {
         XCTAssertGreaterThan(Double(window.du), 1, "the window must read past the texture")
         XCTAssertNotEqual(Double(window.du), 2.0, "not a power-of-two scale")
 
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        into: target, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
         func p(_ x: Int, _ y: Int) -> [Float] { Self.pixelAt(target, x, y) }
@@ -346,10 +422,13 @@ final class BackdropPresenterTests: XCTestCase {
                        (470, 1080), (3370, 1080), (2000, 315), (2000, 1845)] {
             Self.assertColour(p(x, y), back, "outside at (\(x), \(y))")
         }
-        for (x, y) in [(480, 1080), (481, 1080), (3359, 1080), (3358, 1080), (2000, 324), (2000, 325)] {
-            let v = p(x, y)[1]
-            XCTAssertGreaterThan(v, min(main[1], back[1]) + 2.0 / 255, "edge pixel (\(x), \(y)) not blended")
-            XCTAssertLessThan(v, max(main[1], back[1]) - 2.0 / 255, "edge pixel (\(x), \(y)) not blended")
+        // The edge is the quad's, exactly: nothing is cross-faded, so a 1-px step is what a 1-px boundary
+        // looks like (067).
+        for (x, y) in [(480, 1080), (3359, 1080), (2000, 324)] {
+            Self.assertColour(p(x, y), main, "first pixel inside the quad at (\(x), \(y))")
+        }
+        for (x, y) in [(479, 1080), (3360, 1080), (2000, 323)] {
+            Self.assertColour(p(x, y), back, "last pixel outside the quad at (\(x), \(y))")
         }
 
         // The engine does not care how big the backdrop is — only where the canvas reads it. The same
@@ -359,7 +438,7 @@ final class BackdropPresenterTests: XCTestCase {
             let other = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                         [.shaderRead, .renderTarget])
             let size = try solid(device, w, h, back)
-            XCTAssertTrue(presenter.render(frame, window: window, backdrop: size,
+            XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: size,
                                            into: other, linearize: false))
             XCTAssertTrue(Self.bytesEqual(target, other),
                           "a \(w)×\(h) backdrop of the same colour must render the same canvas")
@@ -383,7 +462,7 @@ final class BackdropPresenterTests: XCTestCase {
         // it is backdrop: read through the whole backdrop that is its left half at x = 77 and its
         // right half at x = 179; read through the backdrop's right half it is blue at both.
         let window = PresentWindow(u0: 0, v0: 0, du: 5, dv: 1)
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: .whole, into: target, linearize: false))
         var px = Self.readRGBA16(target)
         XCTAssertEqual(Self.pixel(px, canvas.width, 77, 40)[0], Float(0.9), accuracy: 1.0 / 255,
@@ -393,7 +472,7 @@ final class BackdropPresenterTests: XCTestCase {
         XCTAssertEqual(Self.pixel(px, canvas.width, 20, 40)[1], Float(0.9), accuracy: 1.0 / 255,
                        "inside the frame is still the frame")
 
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: PresentWindow(u0: 0.5, v0: 0, du: 0.5, dv: 1),
                                        into: target, linearize: false))
         px = Self.readRGBA16(target)
@@ -415,8 +494,8 @@ final class BackdropPresenterTests: XCTestCase {
         let window = PresentWindow(scale: 0.5, originX: 0, originY: 0,
                                    canvas: ImageSize(width: 64, height: 48),
                                    texture: ImageSize(width: 32, height: 24))
-        if !presenter.present(frame, in: layer, drawableSize: ImageSize(width: 64, height: 48),
-                              window: window, backdrop: backdrop) {
+        if !presenter.presentForTest(frame, in: layer, drawableSize: ImageSize(width: 64, height: 48),
+                                     window: window, backdrop: backdrop) {
             throw XCTSkip("no drawable in this session: \(presenter.lastFailure ?? "—")")
         }
         XCTAssertNil(presenter.lastFailure)
@@ -444,66 +523,58 @@ final class BackdropPresenterTests: XCTestCase {
         // The baseline: 025's fragment, verbatim in shape (two float4s, one sample, clamp_to_edge).
         let old = try baselinePipeline(device, format: target.pixelFormat)
         var oldParams = Scratch025(a: SIMD4<Float>(1, 0, 0, 0), b: SIMD4<Float>(0, 0, 1, 1))
+        let oldDraw: [(texture: MTLTexture, bytes: [UInt8])] =
+            [(frame, withUnsafeBytes(of: &oldParams) { Array($0) })]
 
-        // The new fragment, no backdrop: `e.z == 0` — the path every caller is on today.
+        // 067's pass, one quad (the picture covering the canvas) and two (a backdrop behind it).
         let pipeline = try newPipeline(device, format: target.pixelFormat)
-        var nilParams = CanvasPresenter.makeParams(linearize: true, window: .whole, backdrop: nil,
-                                                   backdropWindow: .whole, canvas: canvas)
-        XCTAssertEqual(nilParams.e.z, 0)
+        var picture = CanvasPresenter.PresentParams(quad: SIMD4(0, 0, 1, 1),
+                                                    window: SIMD4(0, 0, 1, 1),
+                                                    misc: SIMD4(1, 0, 0, 0))
+        let pictureBytes = withUnsafeBytes(of: &picture) { Array($0) }
+        let oneDraw: [(texture: MTLTexture, bytes: [UInt8])] = [(frame, pictureBytes)]
+        let twoDraws: [(texture: MTLTexture, bytes: [UInt8])] = [(backdrop, pictureBytes),
+                                                                 (frame, pictureBytes)]
 
-        // The new fragment with a backdrop, frame covering the canvas (the "全覆盖" case).
-        let bdPipeline = try newPipeline(device, format: target.pixelFormat,
-                                         fragment: CanvasPresenter.fragmentName(backdrop))
-        XCTAssertEqual(CanvasPresenter.fragmentName(backdrop), "present_fragment_backdrop")
-        var bdParams = CanvasPresenter.makeParams(linearize: true, window: .whole, backdrop: backdrop,
-                                                  backdropWindow: .whole, canvas: canvas)
-        XCTAssertEqual(bdParams.e.z, 1)
-
-        func measureOld() -> Double {
-            time(device: device, pipeline: old, source: frame, backdrop: nil, target: target,
-                 vertexBytes: withUnsafeBytes(of: &oldParams) { Array($0) }, iterations: 60)
-        }
-        func measureNil() -> Double {
-            time(device: device, pipeline: pipeline, source: frame, backdrop: nil, target: target,
-                 vertexBytes: withUnsafeBytes(of: &nilParams) { Array($0) }, iterations: 60)
-        }
-        func measureBackdrop() -> Double {
-            time(device: device, pipeline: bdPipeline, source: frame, backdrop: backdrop, target: target,
-                 vertexBytes: withUnsafeBytes(of: &bdParams) { Array($0) }, iterations: 60)
+        func measure(_ pipeline: MTLRenderPipelineState,
+                     _ draws: [(texture: MTLTexture, bytes: [UInt8])]) -> Double {
+            time(device: device, pipeline: pipeline, target: target, draws: draws, iterations: 60)
         }
 
         // The GPU clocks up under load, and a 4 Mpx pass is short enough that an un-warmed sample
         // measures the ramp instead of the shader: one discarded pass per configuration first.
-        _ = (measureOld(), measureNil(), measureBackdrop())
+        _ = (measure(old, oldDraw), measure(pipeline, oneDraw), measure(pipeline, twoDraws))
 
         // Three rounds, alternating order: a residual drift shows up as three different numbers instead
         // of one wrong one, and the fastest of them is how fast the draw can go.
-        let roundA = (old: measureOld(), nil_: measureNil(), backdrop: measureBackdrop())
-        let roundB = (backdrop: measureBackdrop(), nil_: measureNil(), old: measureOld())
-        let roundC = (old: measureOld(), nil_: measureNil(), backdrop: measureBackdrop())
+        let roundA = (old: measure(old, oldDraw), one: measure(pipeline, oneDraw),
+                      two: measure(pipeline, twoDraws))
+        let roundB = (two: measure(pipeline, twoDraws), one: measure(pipeline, oneDraw),
+                      old: measure(old, oldDraw))
+        let roundC = (old: measure(old, oldDraw), one: measure(pipeline, oneDraw),
+                      two: measure(pipeline, twoDraws))
         let oldMS = min(roundA.old, roundB.old, roundC.old)
-        let nilMS = min(roundA.nil_, roundB.nil_, roundC.nil_)
-        let bdMS = min(roundA.backdrop, roundB.backdrop, roundC.backdrop)
+        let oneMS = min(roundA.one, roundB.one, roundC.one)
+        let twoMS = min(roundA.two, roundB.two, roundC.two)
 
-        let nilDelta = nilMS - oldMS
-        let bdDelta = bdMS - nilMS
-        print(String(format: "present 4.10 Mpx (median draw+wait, best of two rounds): "
-                     + "025 %.3f ms · backdrop=nil %.3f ms (%+.3f) · backdrop full-cover %.3f ms "
-                     + "(%+.3f over nil)\n  rounds (025 / nil / backdrop): %.3f %.3f %.3f · "
-                     + "%.3f %.3f %.3f · %.3f %.3f %.3f",
-                     oldMS, nilMS, nilDelta, bdMS, bdDelta,
-                     roundA.old, roundA.nil_, roundA.backdrop,
-                     roundB.old, roundB.nil_, roundB.backdrop,
-                     roundC.old, roundC.nil_, roundC.backdrop))
+        let oneDelta = oneMS - oldMS
+        let twoDelta = twoMS - oneMS
+        print(String(format: "present 4.10 Mpx (median draw+wait): 025 one quad %.3f ms · 067 one quad "
+                     + "%.3f ms (%+.3f) · 067 two quads %.3f ms (%+.3f over one — the backdrop's cost)"
+                     + "\n  rounds (025 / one / two): %.3f %.3f %.3f · %.3f %.3f %.3f · %.3f %.3f %.3f",
+                     oldMS, oneMS, oneDelta, twoMS, twoDelta,
+                     roundA.old, roundA.one, roundA.two,
+                     roundB.old, roundB.one, roundB.two,
+                     roundC.old, roundC.one, roundC.two))
 
         if benchmarks {
-            // Same fragment *function* as the baseline, so this is an equality with the noise floor. A
-            // single uniform branch around the backdrop fetch — the shape this started in — measured
-            // +0.03 ms here, which is why the two paths are two entry points.
-            XCTAssertLessThanOrEqual(nilDelta, 0.05,
-                                     "the no-backdrop path must cost what 025 cost (was \(oldMS), now \(nilMS))")
-            XCTAssertLessThanOrEqual(bdDelta, 0.30,
-                                     "a backdrop may cost ≤0.3 ms on a full-cover frame (cost \(bdDelta))")
+            // The task's ceiling: presenting the picture as a quad instead of 025's full-screen pass may
+            // cost at most 0.2 ms on a 4.10 Mpx canvas — it is the same sample with one multiply more in
+            // the vertex stage, and the vertex stage runs four times per draw.
+            XCTAssertLessThanOrEqual(oneDelta, 0.2,
+                                     "presenting a quad cost \(oneDelta) ms over 025's full-screen pass")
+            XCTAssertLessThanOrEqual(twoDelta, 0.2,
+                                     "the backdrop quad cost \(twoDelta) ms (a second 4-vertex draw)")
         } else {
             throw XCTSkip("timing printed; set PHOTONS_BENCH=1 to assert the ceilings")
         }
@@ -572,13 +643,11 @@ final class BackdropPresenterTests: XCTestCase {
         return try device.makeRenderPipelineState(descriptor: desc)
     }
 
-    /// Per-draw cost of one full-canvas present, in milliseconds.
-    ///
-    /// `drawsPerSample` draws share one command buffer and one wait: a single 4.10 Mpx draw is only a
-    /// few hundred microseconds, so an unamortised `waitUntilCompleted` is most of what a one-draw
-    /// sample would measure and the shader's own cost disappears into it.
-    private func time(device: MTLDevice, pipeline: MTLRenderPipelineState, source: MTLTexture,
-                      backdrop: MTLTexture?, target: MTLTexture, vertexBytes: [UInt8],
+    /// Per-draw cost of one pass, in milliseconds. `draws` is the sequence the pass makes — one quad
+    /// for the picture, two with a backdrop — each with its own params, so the measurement is the shape
+    /// the presenter actually encodes.
+    private func time(device: MTLDevice, pipeline: MTLRenderPipelineState, target: MTLTexture,
+                      draws: [(texture: MTLTexture, bytes: [UInt8])],
                       iterations: Int = 24, drawsPerSample: Int = 8) -> Double {
         guard let queue = device.makeCommandQueue() else { return .infinity }
         var samples: [Double] = []
@@ -593,11 +662,16 @@ final class BackdropPresenterTests: XCTestCase {
                 pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
                 guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return .infinity }
                 enc.setRenderPipelineState(pipeline)
-                enc.setFragmentTexture(source, index: 0)
-                enc.setFragmentTexture(backdrop ?? source, index: 1)
-                vertexBytes.withUnsafeBytes { enc.setVertexBytes($0.baseAddress!, length: $0.count, index: 0) }
-                vertexBytes.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
-                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                for draw in draws {
+                    enc.setFragmentTexture(draw.texture, index: 0)
+                    draw.bytes.withUnsafeBytes {
+                        enc.setVertexBytes($0.baseAddress!, length: $0.count, index: 0)
+                    }
+                    draw.bytes.withUnsafeBytes {
+                        enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0)
+                    }
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                }
                 enc.endEncoding()
             }
             cb.commit()
@@ -625,6 +699,20 @@ final class BackdropPresenterTests: XCTestCase {
         guard let start = source.range(of: "fragment float4 \(name)(") else { return nil }
         guard let end = source.range(of: "{", range: start.upperBound..<source.endIndex) else { return nil }
         return String(source[start.lowerBound..<end.lowerBound])
+    }
+
+    private static func vertexSignature(_ name: String, in source: String) -> String? {
+        guard let start = source.range(of: " \(name)(") else { return nil }
+        guard let end = source.range(of: "{", range: start.upperBound..<source.endIndex) else { return nil }
+        return String(source[start.lowerBound..<end.lowerBound])
+    }
+
+    /// The source with `//` comments removed — so "this word is gone" means it is gone from the *code*,
+    /// not that the file stopped explaining why it went.
+    private static func stripped(_ source: String) -> String {
+        source.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).components(separatedBy: "//").first ?? "" }
+            .joined(separator: "\n")
     }
 
     // MARK: - texture helpers (rgba16Float / bgra8, shared storage, CPU readable)

@@ -451,6 +451,16 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
         window.setContentSize(NSSize(width: 420, height: 300))
         controller.canvasView.frame = window.contentLayoutRect
         controller.view.layoutSubtreeIfNeeded()
+        // 067: the frame source's viewport **is** the canvas a frame is rendered for, so a harness that
+        // resizes the window has to say so — the app derives it from the viewport on every job. A frame
+        // rendered for the old canvas is refused at present (`AFrameForAStaleCanvasIsNeverDrawn`), which
+        // is what 「变扁」 needs and what a stale harness viewport would otherwise loop on.
+        if var source = controller.frameSource {
+            source = LoupeController.FrameSource(url: source.url, identity: source.identity,
+                                                 viewport: controller.viewportPixels,
+                                                 state: source.state, edit: source.edit)
+            controller.frameSource = source
+        }
         pump(0.02)
 
         XCTAssertNil(controller.zoomBridge, "a resize must tear the bridge down")

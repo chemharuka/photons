@@ -332,7 +332,7 @@ final class BackdropTransformTests: XCTestCase {
                                      [.shaderRead, .renderTarget])
 
         // ── the fix: picture coordinates, so the band is the content the frame texture does not have.
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: backdropWindow, into: target, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
         var band: [Float] = []
@@ -362,7 +362,7 @@ final class BackdropTransformTests: XCTestCase {
         // picture's edge colour — the exact artefact the user saw.
         let mutated = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                       [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: window, into: mutated, linearize: false))
         var flat: [Float] = []
         for x in 205 ..< 256 { flat.append(Self.pixelAt(mutated, x, 128)[0]) }
@@ -506,7 +506,7 @@ final class BackdropTransformTests: XCTestCase {
         let frame = try solid(device, 320, 200, [0.55, 0.55, 0.55, 1])
         let fixed = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                     [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: backdropWindow, into: fixed,
                                        linearize: false), presenter.lastFailure ?? "the present pass failed")
 
@@ -543,7 +543,7 @@ final class BackdropTransformTests: XCTestCase {
         // ── the counterexample: 053's `backdropWindow: window` on the same window and the same frame.
         let mutated = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                       [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: window, into: mutated, linearize: false))
         let mutLeft = Self.pixelAt(mutated, 2, 200)
         let mutRight = Self.pixelAt(mutated, 637, 200)
@@ -589,7 +589,7 @@ final class BackdropTransformTests: XCTestCase {
         let frame = try solid(device, 128, 128, frameColour)
         let target = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                      [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: backdropWindow, into: target, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
 
@@ -609,31 +609,32 @@ final class BackdropTransformTests: XCTestCase {
         // The picture itself is untouched.
         Self.assertColour(Self.pixelAt(target, 128, 128), frameColour, "the middle is the frame")
 
-        // The seam: inside the edge, a ramp — the two pixels of feather, not a step.
-        var ramp: [Float] = []
-        for x in 63 ... 68 { ramp.append(Self.pixelAt(target, x, 128)[0]) }
-        for (a, b) in zip(ramp, ramp.dropFirst()) {
-            XCTAssertGreaterThanOrEqual(b, a - 1.0 / 255, "the seam must not go backwards: \(ramp)")
-        }
-        XCTAssertLessThan(ramp[0], ramp[2] - 0.1, "x 63 → 65 must climb off the matte: \(ramp)")
-        XCTAssertLessThan(ramp[2], ramp[4] - 0.1, "x 65 → 67 must climb towards the frame: \(ramp)")
-        XCTAssertGreaterThan(ramp[5], frameColour[0] - 1.0 / 255, "and reach the frame a feather in")
+        // The seam is the quad's edge, exactly: x 63 is the canvas colour, x 64 is the frame. 037–065
+        // ramped over two pixels inside the picture; 067 draws a rectangle, and a rectangle has an edge
+        // (the task's invariant is "inside the photograph, tolerance 0", which a ramp would violate).
+        var edge: [Float] = []
+        for x in 62 ... 66 { edge.append(Self.pixelAt(target, x, 128)[0]) }
+        XCTAssertEqual(edge[0], matte, accuracy: 1.0 / 255, "x 62 is outside the picture")
+        XCTAssertEqual(edge[1], matte, accuracy: 1.0 / 255, "x 63 is outside the picture")
+        XCTAssertEqual(edge[2], frameColour[0], accuracy: 1.0 / 255, "x 64 is the picture's first column")
+        XCTAssertEqual(edge[4], frameColour[0], accuracy: 1.0 / 255, "x 66 is the picture")
 
-        // The counterexample, same window, no backdrop: 025's `clamp_to_edge` stretches the frame's own
-        // edge across the canvas — a picture-coloured band, three channels of 0.9, everywhere.
+        // The counterexample, same window, no backdrop: 025's `clamp_to_edge` stretched the frame's own
+        // edge across the canvas — a picture-coloured band. 067 has no such band: what the picture does
+        // not cover is the canvas colour, and there is nothing to smear.
         let bare = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                    [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, into: bare, linearize: false))
-        Self.assertColour(Self.pixelAt(bare, 0, 0), frameColour,
-                          "without a backdrop the corner is the frame's stretched edge (025) — the band")
-        XCTAssertGreaterThan(abs(Self.pixelAt(bare, 0, 0)[0] - matte), 0.5,
-                             "the matte and the stretched edge must be far apart at the same pixel")
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, into: bare, linearize: false))
+        XCTAssertEqual(Self.pixelAt(bare, 0, 0)[0], matte, accuracy: 1.0 / 255,
+                       "without a backdrop the corner is the canvas colour, not a band of the picture")
+        XCTAssertGreaterThan(abs(Self.pixelAt(bare, 0, 0)[0] - frameColour[0]), 0.5,
+                             "…and it is nowhere near the picture — the band 025 drew is gone")
 
-        print(String(format: "[058] picture at ½ canvas: corner (0,0) = %.4f (%.1f/255) matte · "
-                     + "025's same corner = %.3f · seam x63…68 = %@",
+        print(String(format: "[067] picture at ½ canvas: corner (0,0) = %.4f (%.1f/255) matte · "
+                     + "same corner without a backdrop = %.4f · seam x62…66 = %@",
                      Self.pixelAt(target, 0, 0)[0], Self.pixelAt(target, 0, 0)[0] * 255,
                      Self.pixelAt(bare, 0, 0)[0],
-                     ramp.map { String(format: "%.3f", $0) }.joined(separator: " → ")))
+                     edge.map { String(format: "%.3f", $0) }.joined(separator: " → ")))
     }
 
     /// 058 ④: a covering window never draws the backdrop, and when one is handed in anyway the frame
@@ -652,14 +653,14 @@ final class BackdropTransformTests: XCTestCase {
                                PresentWindow(u0: -3, v0: 7, du: 11, dv: 0.25)] {
             let out = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                       [.shaderRead, .renderTarget])
-            XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+            XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                            backdropWindow: backdropWindow, into: out,
                                            linearize: false))
             renders.append(Self.bytes(out))
         }
         let plain = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                     [.shaderRead, .renderTarget])
-        XCTAssertTrue(presenter.render(frame, window: window, into: plain, linearize: false))
+        XCTAssertTrue(presenter.renderForTest(frame, window: window, into: plain, linearize: false))
         renders.append(Self.bytes(plain))
 
         for (i, data) in renders.enumerated() where i > 0 {
@@ -703,7 +704,7 @@ final class BackdropTransformTests: XCTestCase {
         for backdropWindow in [window, PresentWindow.whole] {
             let out = try makeTexture(device, canvas.width, canvas.height, .rgba16Float,
                                       [.shaderRead, .renderTarget])
-            XCTAssertTrue(presenter.render(frame, window: window, backdrop: backdrop,
+            XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                            backdropWindow: backdropWindow, into: out, linearize: false))
             renders.append(Self.bytes(out))
         }
@@ -746,7 +747,7 @@ final class BackdropTransformTests: XCTestCase {
             var samples: [Double] = []
             for _ in 0 ..< 60 {
                 let t0 = CFAbsoluteTimeGetCurrent()
-                _ = presenter.render(frame, window: window, backdrop: backdrop,
+                _ = presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                      backdropWindow: backdropWindow, into: target, linearize: true)
                 samples.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             }
@@ -762,8 +763,9 @@ final class BackdropTransformTests: XCTestCase {
                      old.p50, old.p95, new.p50, new.p95, new.p95 - old.p95))
         XCTAssertGreaterThan(old.p95, 0)
         XCTAssertGreaterThan(new.p95, 0)
-        XCTAssertEqual(CanvasPresenter.fragmentName(backdrop), "present_fragment_backdrop",
-                       "both draws go through the backdrop fragment — the comparison is one shader")
+        // 067: there is **one** fragment for every request — the backdrop is a second quad, not a second
+        // shader — so "both draws go through the same kernel" is now true by construction and the 053
+        // assertion that compared two fragment names has nothing left to compare.
 
         // ── 058: the matte select, isolated. Same window, same frame, same backdrop; one backdrop
         // window lands inside the picture for every fragment, the other outside it for every fragment.
