@@ -555,7 +555,9 @@ public final class HistogramCardView: NSView {
 
     /// The switch the red-proof pulls: with polling off, a brightness change with no frame and no
     /// notification is **never** noticed — which is what this whole section exists to prevent.
-    public var headroomPollingEnabled = true
+    public var headroomPollingEnabled = true {
+        didSet { if headroomPollingEnabled != oldValue { updateHeadroomPolling() } }
+    }
     /// The switch the other red-proof pulls: with the gate off, every read repaints (`headroomRedrawCount`
     /// grows even though nothing moved). Both are real behaviour switches, not test scaffolding: a
     /// headless host turns polling off, and the gate is a property of "did the number move".
@@ -597,14 +599,32 @@ public final class HistogramCardView: NSView {
         refreshHeadroomIfNeeded()
     }
 
-    /// `true` while the card is on screen in a key/main window — the condition the 0.5 s poll runs under.
+    /// `true` while the card is on screen **and nothing has paused it** — the condition the 0.5 s poll
+    /// runs under.
+    ///
+    /// Two rules, deliberately separate:
+    ///
+    ///   · **visibility** (structural, here): the card is in a visible window, is not hidden with its
+    ///     ancestors, is not miniaturised, and has a size. A card the owner cannot see must not wake the
+    ///     main thread twice a second;
+    ///   · **focus** (`headroomPollPaused`): the window losing key or the app resigning active pauses
+    ///     the poll, and gaining them back resumes it. It is a *notification-driven* flag rather than a
+    ///     `window.isKeyWindow` test inside this property, because the events are what carry the meaning
+    ///     ("the user went somewhere else") and because a test session has no key window at all — the
+    ///     same notifications AppKit posts are what the visibility test drives.
     public var shouldPollHeadroom: Bool {
-        guard headroomPollingEnabled, headroomSource != nil else { return false }
-        guard let window, window.isVisible else { return false }
+        guard headroomPollingEnabled, headroomSource != nil, !headroomPollPaused else { return false }
+        guard let window, window.isVisible, !window.isMiniaturized else { return false }
         guard !isHiddenOrHasHiddenAncestor else { return false }
-        guard bounds.width > 1, bounds.height > 1 else { return false }
-        return window.isKeyWindow || window.isMainWindow
+        // A window that is entirely behind another one is on screen and useless: AppKit reports that as
+        // an occlusion state, and only while the app is active (a background window has no occlusion
+        // information, which is why the test is scoped to `NSApp.isActive`).
+        if NSApp.isActive, !window.occlusionState.contains(.visible) { return false }
+        return bounds.width > 1 && bounds.height > 1
     }
+
+    /// `true` between "this window/app stopped being the one the user is looking at" and its opposite.
+    public private(set) var headroomPollPaused = false
 
     /// `true` while the low-frequency timer is installed. The visibility test asserts on this — a timer
     /// that keeps running behind a hidden card is the cost this rule refuses.
@@ -629,23 +649,42 @@ public final class HistogramCardView: NSView {
         }
         observe(NSWindow.didChangeScreenNotification) { [weak self] in self?.headroomEvent() }
         observe(NSWindow.didChangeBackingPropertiesNotification) { [weak self] in self?.headroomEvent() }
-        observe(NSWindow.didBecomeKeyNotification) { [weak self] in self?.headroomEvent() }
-        observe(NSWindow.didResignKeyNotification) { [weak self] in self?.headroomEvent() }
-        observe(NSWindow.didBecomeMainNotification) { [weak self] in self?.headroomEvent() }
-        observe(NSWindow.willCloseNotification) { [weak self] in self?.headroomEvent() }
+        // Becoming visible again (ordered front, uncovered, un-miniaturised) is the third way the poll
+        // has to come back: AppKit reports it as an occlusion change, not as a key change.
+        observe(NSWindow.didChangeOcclusionStateNotification) { [weak self] in self?.headroomEvent() }
+        observe(NSWindow.didBecomeKeyNotification) { [weak self] in self?.resumeHeadroomPolling() }
+        observe(NSWindow.didBecomeMainNotification) { [weak self] in self?.resumeHeadroomPolling() }
+        observe(NSWindow.didResignKeyNotification) { [weak self] in self?.pauseHeadroomPolling() }
+        observe(NSWindow.willCloseNotification) { [weak self] in self?.pauseHeadroomPolling() }
     }
 
     /// ② (app half), installed once: `didBecomeActive` is when a brightness change made in another app
-    /// becomes ours to notice again.
+    /// becomes ours to notice again — and `didResignActive` is exactly the "nobody is looking" case.
     private func installAppHeadroomObservers() {
         guard appHeadroomTokens.isEmpty else { return }
         let center = NotificationCenter.default
-        for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
-            appHeadroomTokens.append(center.addObserver(forName: name, object: nil,
-                                                       queue: .main) { [weak self] _ in
-                self?.headroomEvent()
-            })
-        }
+        appHeadroomTokens.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                   object: nil, queue: .main) { [weak self] _ in
+            self?.resumeHeadroomPolling()
+        })
+        appHeadroomTokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification,
+                                                   object: nil, queue: .main) { [weak self] _ in
+            self?.pauseHeadroomPolling()
+        })
+    }
+
+    /// The window/app is not the one being looked at any more: stop the tick, but still take one reading
+    /// (the budget may have moved while it was in the background).
+    private func pauseHeadroomPolling() {
+        headroomPollPaused = true
+        refreshHeadroomIfNeeded()
+        updateHeadroomPolling()
+    }
+
+    private func resumeHeadroomPolling() {
+        headroomPollPaused = false
+        refreshHeadroomIfNeeded()
+        updateHeadroomPolling()
     }
 
     /// One place: read, then decide whether the timer should be running at all.
@@ -784,6 +823,12 @@ public final class HistogramCardView: NSView {
     public override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds
         guard bounds.width > 80, bounds.height > 60 else { return }
+
+        // Drawing is proof the card is on screen (2026-10-27): if the headroom poll is not running and
+        // should be, this is the moment to start it. It costs one boolean when the timer already exists,
+        // and it covers the paths AppKit announces with nothing at all — a window ordered front while
+        // another app is active, a card SwiftUI revealed by re-laying out the inspector.
+        updateHeadroomPolling()
 
         // The appearance resolves once, here: the row's two contents paint with colours derived from it,
         // and neither may read a stale value from the other's last draw.
