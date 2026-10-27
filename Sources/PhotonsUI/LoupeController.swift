@@ -1617,8 +1617,9 @@ public final class LoupeController: NSViewController {
             let drawn = backdropTexture(for: target)
             presenter.present(texture, in: canvasView.metalLayer,
                               wantsEDR: wantsExtendedDynamicRange,
-                              drawableSize: canvas, window: target, backdrop: drawn)
-            recordBackdropPresent(window: target, drawn: drawn, serial: serial)
+                              drawableSize: canvas, window: target, backdrop: drawn,
+                              backdropWindow: target)
+            recordBackdropPresent(window: target, backdropWindow: target, drawn: drawn, serial: serial)
             recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
                                                   drawable: canvas, canvas: canvas))
         }
@@ -1677,7 +1678,8 @@ public final class LoupeController: NSViewController {
         let drawn = backdropTexture(for: window)
         let ok = presenter.present(texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, window: window, backdrop: drawn) { [weak self] in
+                                   drawableSize: canvas, window: window, backdrop: drawn,
+                                   backdropWindow: window) { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)
@@ -1687,7 +1689,7 @@ public final class LoupeController: NSViewController {
             zoomBridgePresentsInFlight = max(0, zoomBridgePresentsInFlight - 1)
             return
         }
-        recordBackdropPresent(window: window, drawn: drawn, serial: serial)
+        recordBackdropPresent(window: window, backdropWindow: window, drawn: drawn, serial: serial)
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
                                               drawable: canvas, canvas: canvas))
     }
@@ -1719,8 +1721,9 @@ public final class LoupeController: NSViewController {
             let drawn = self.backdropTexture(for: window)
             presenter.present(stuck, in: self.canvasView.metalLayer,
                               wantsEDR: self.wantsExtendedDynamicRange,
-                              drawableSize: self.viewportPixels, window: window, backdrop: drawn)
-            self.recordBackdropPresent(window: window, drawn: drawn, serial: 0)
+                              drawableSize: self.viewportPixels, window: window, backdrop: drawn,
+                              backdropWindow: window)
+            self.recordBackdropPresent(window: window, backdropWindow: window, drawn: drawn, serial: 0)
         }
     }
 
@@ -3440,14 +3443,28 @@ public final class LoupeController: NSViewController {
         /// The bridge that drew it (`zoomBridgeArmedCount`), or 0 for a settled frame or a teardown.
         public let serial: Int
         public let window: PresentWindow
+        /// The window the **low-resolution picture** was read through (053).
+        ///
+        /// Must be the same value as `window` at every call site: the backdrop is the *whole picture*,
+        /// so the frame's own mapping puts it in exactly the same place and it shrinks with the same
+        /// animation. Recorded here rather than assumed, because passing `.whole` instead (the default
+        /// this parameter used to get) spreads the whole picture over the canvas at every zoom level —
+        /// a static fit-sized picture, which is precisely the bug the user reported.
+        public let backdropWindow: PresentWindow
         /// The backdrop's pixel size — `nil` when the pass was given none.
         public let backdrop: ImageSize?
         /// Whether the window already reached every canvas pixel.
         public let coversCanvas: Bool
+
+        /// Do the picture and the backdrop read through one mapping? (053's rule, as a value.)
+        public var windowsMatch: Bool { window == backdropWindow }
     }
 
     /// Every present, in order (capped; it is a log).
     public private(set) var backdropPresents: [BackdropPresent] = []
+    /// The last present, with both windows it was given — read-only, for a caller (or a test) that
+    /// wants the current mapping without copying the log (053).
+    public var lastBackdropPresent: BackdropPresent? { backdropPresents.last }
     /// Presents that carried a backdrop, and presents that did not.
     public private(set) var backdropDrawCount = 0
     public private(set) var backdroplessDrawCount = 0
@@ -3472,10 +3489,12 @@ public final class LoupeController: NSViewController {
         return backdrop.texture
     }
 
-    private func recordBackdropPresent(window: PresentWindow, drawn: MTLTexture?, serial: Int) {
+    private func recordBackdropPresent(window: PresentWindow, backdropWindow: PresentWindow,
+                                       drawn: MTLTexture?, serial: Int) {
         let size = drawn.map { ImageSize(width: $0.width, height: $0.height) }
         if size == nil { backdroplessDrawCount += 1 } else { backdropDrawCount += 1 }
-        backdropPresents.append(BackdropPresent(serial: serial, window: window, backdrop: size,
+        backdropPresents.append(BackdropPresent(serial: serial, window: window,
+                                                backdropWindow: backdropWindow, backdrop: size,
                                                 coversCanvas: window.coversCanvas))
         if backdropPresents.count > Self.backdropPresentLimit {
             backdropPresents.removeFirst(backdropPresents.count - Self.backdropPresentLimit)
@@ -3529,7 +3548,7 @@ public final class LoupeController: NSViewController {
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, window: settledWindow,
-                                   backdrop: drawn) { [weak self] in
+                                   backdrop: drawn, backdropWindow: settledWindow) { [weak self] in
             guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
@@ -3555,7 +3574,8 @@ public final class LoupeController: NSViewController {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)
-        recordBackdropPresent(window: settledWindow, drawn: drawn, serial: 0)
+        recordBackdropPresent(window: settledWindow, backdropWindow: settledWindow,
+                              drawn: drawn, serial: 0)
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
         // on this serial, so the next move re-reads instead of trusting the previous picture's texel.
