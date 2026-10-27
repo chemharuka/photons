@@ -166,6 +166,11 @@ public final class CropToolController {
     private var rotating = false
     private var rotateStart: Double = 0
 
+    /// With this `false`, `effectiveCrop` hands back the stored rect untouched — the anti-proof for
+    /// 「旋转后框自动缩小」. A test flips it to show that the containment and monotonicity criteria go
+    /// red without the constraint; nothing in the app touches it.
+    var clampsToRotatedFrame = true
+
     public init(session: CatalogSession?) {
         self.session = session
     }
@@ -174,6 +179,27 @@ public final class CropToolController {
     /// property (not a stored copy) so a photo switch cannot leave the tool measuring the previous
     /// picture's aspect.
     public var sourceSize: ImageSize { session?.maskSourceSize ?? ImageSize(width: 1, height: 1) }
+
+    // MARK: the draft's rect, as the turned picture allows it
+
+    /// `draft.crop` **as the straightened picture allows it**: the stored rect shrunk — centre and
+    /// pixel aspect kept — until it is fully inscribed in the sensor's turned quad
+    /// (`CropMath.clampedToRotatedFrame`).
+    ///
+    /// The stored rect is *not* written back, and that is the point: 拉直 is a view of the user's
+    /// rect, so dragging the angle back to 0° gives the whole frame back instead of leaving it
+    /// ratcheted smaller, and the shrink is idempotent by construction rather than by care.
+    ///
+    /// Every reader goes through this one function — the overlay (`layout`), the bar's pixel readout,
+    /// the inspector's draft and 应用 — so the frame on screen and the rect the document records are
+    /// the same four numbers (the 072 rule: one writer, one value).
+    public func effectiveCrop(source: ImageSize? = nil, degrees: Double? = nil) -> CropRect {
+        let src = source ?? sourceSize
+        let stored = draft.crop.clamped()
+        let angle = CropTool.clampStraighten(degrees ?? draft.straighten)
+        guard clampsToRotatedFrame, angle != 0 else { return stored }
+        return CropMath.clampedToRotatedFrame(stored, in: src, degrees: angle)
+    }
 
     /// Hand the live draft to the inspector (派单 049). One property write, no render, no document:
     /// the row recomputes two strings, and only while the tool is on. Cleared the moment the tool
@@ -184,7 +210,9 @@ public final class CropToolController {
             session.cropToolDraft = nil
             return
         }
-        session.cropToolDraft = (id, draft.geometry(flipsOf: session.edit.geometry))
+        var geometry = draft.geometry(flipsOf: session.edit.geometry)
+        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
+        session.cropToolDraft = (id, geometry)
     }
 
     // MARK: the mode
@@ -214,7 +242,11 @@ public final class CropToolController {
     @discardableResult
     public func apply() -> Bool {
         guard isActive, let session else { return false }
-        let geometry = draft.geometry(flipsOf: session.edit.geometry)
+        // **The same rect the overlay drew.** 应用 commits `effectiveCrop`, not `draft.crop`: at a
+        // non-zero straighten the stored rect is the user's *intent* and the constraint is what the
+        // picture allows, so writing the stored one would commit a frame the user never saw.
+        var geometry = draft.geometry(flipsOf: session.edit.geometry)
+        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
         endDrag()
         isActive = false
         session.applyEdit { $0.geometry = geometry }
@@ -301,7 +333,7 @@ public final class CropToolController {
     public func pixelRatio(source: ImageSize? = nil) -> Double {
         let source = source ?? sourceSize
         if let ratio = draft.lock.ratio { return ratio }
-        let c = draft.crop.clamped()
+        let c = effectiveCrop(source: source)
         return (c.width * Double(max(source.width, 1))) / max(c.height * Double(max(source.height, 1)), 1e-9)
     }
 
@@ -385,7 +417,7 @@ public final class CropToolController {
     public func layout(mapping: LoupeMapping, source: ImageSize? = nil,
                        pointScale: Double = 1,
                        carry: CropCarry = .identity) -> CropToolLayout {
-        CropTool.layout(crop: draft.crop,
+        CropTool.layout(crop: effectiveCrop(source: source),
                         source: source ?? sourceSize,
                         mapping: mapping,
                         pointScale: pointScale,
@@ -408,11 +440,13 @@ public final class CropToolController {
     ///     「裁切框会出画布边缘，进入左侧和上方」 the user saw after zooming in from a full frame.
     ///   · **the photo.** `0…1²`: a crop rect is a rect of the frame, and a frame has no pixels
     ///     outside itself, so a frame past it is a frame over blank canvas.
-    ///   · **the straightened photo.** At θ ≠ 0 the frame's own corners are turned *out* of the
-    ///     sensor, and `CropMath.inscribedCrop` is the largest rect that samples no background. This
-    ///     is the "框内不许出现空白" half of the same rule, and it is why the check is not a
-    ///     bounding-box test on the AABB of the rotated corners (which would be *bigger* than the
-    ///     photo, not smaller).
+    ///
+    /// The **straightened** photo is a third bound and it is *not* a rect: at θ ≠ 0 the legal region
+    /// is the sensor's turned quad, which depends on where the rect sits. It is enforced where it can
+    /// be exact — `effectiveCrop`, a shrink about the rect's own centre — instead of by cutting this
+    /// room down to the centred `inscribedCrop`. The old intersection was safe but wrong in the other
+    /// direction: it pulled a frame near the edge of the picture toward the middle as soon as the
+    /// angle left 0°.
     ///
     /// `framePoint` is axis-aligned (S0's zoom plus an offset — the rotation belongs to the picture,
     /// not to the frame the crop is drawn in), so two corners are enough for the pull-back, and the
@@ -426,13 +460,17 @@ public final class CropToolController {
         var left = min(a.x, b.x) / w, right = max(a.x, b.x) / w
         var top = min(a.y, b.y) / h, bottom = max(a.y, b.y) / h
 
-        let photo = CropMath.inscribedCrop(of: src, degrees: draft.straighten)
-        left = max(left, photo.left); top = max(top, photo.top)
-        right = min(right, photo.right); bottom = min(bottom, photo.bottom)
+        // The picture's own `0…1²` is the only rect bound left here. The **straightened** bound is no
+        // longer an intersection with the centred `inscribedCrop`: that rect is the largest one at the
+        // *frame's* centre, and cutting a room out of it dragged a frame at the edge of the picture
+        // toward the middle (「旋转后框会自己跑」). The turned picture's real bound depends on where the
+        // rect is, so it is a shrink about the rect's own centre — `effectiveCrop` — not a room.
+        left = max(left, 0); top = max(top, 0)
+        right = min(right, 1); bottom = min(bottom, 1)
         guard right > left + 1e-9, bottom > top + 1e-9 else {
-            // Nothing of the frame is on screen (a degenerate projection): the photo's own safe area
-            // is the only answer that keeps the arithmetic finite.
-            return photo
+            // Nothing of the frame is on screen (a degenerate projection): the whole frame is the only
+            // answer that keeps the arithmetic finite; `effectiveCrop` then fits it to the picture.
+            return .full
         }
         return CropRect(left: left, top: top, right: right, bottom: bottom)
     }
@@ -513,7 +551,10 @@ public final class CropToolController {
 
         rotating = rotate && (handle == .outside || handle == .inside)
         rotateStart = draft.straighten
-        drag = CropToolDrag(handle: rotating ? .inside : handle, crop: draft.crop, grab: normalized)
+        // The hand grabs the frame **it can see**, which at a non-zero straighten is the constrained
+        // one (`effectiveCrop`), not the stored intent behind it.
+        drag = CropToolDrag(handle: rotating ? .inside : handle,
+                            crop: effectiveCrop(source: source), grab: normalized)
         isDragging = true
         return true
     }
@@ -537,7 +578,17 @@ public final class CropToolController {
                                                    to: normalized, centre: centre, source: source)
             return
         }
-        draft.crop = drag.crop(at: normalized, source: source, lock: draft.lock)
+        let next = drag.crop(at: normalized, source: source, lock: draft.lock)
+        // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
+        // shrinking (there is no size at that centre), and jumping it back to the middle from under the
+        // hand would be worse than ignoring it: the last legal frame stands. Everything else is stored
+        // as the hand drew it — the constraint is applied on the way *out* (`effectiveCrop`), so a
+        // frame pushed against the turned edge pins there and comes back smoothly.
+        if clampsToRotatedFrame, draft.straighten != 0,
+           CropMath.rotatedFrameScale(next, in: source, degrees: draft.straighten) <= 0 {
+            return
+        }
+        draft.crop = next
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.
@@ -593,9 +644,12 @@ public final class CropToolController {
         CropToolController.ratioText(pixelRatio(source: source))
     }
 
-    /// `6048×4032` — the pixel size of what the frame will commit.
+    /// `6048×4032` — the pixel size of what the frame will commit, i.e. of `effectiveCrop`: at a
+    /// non-zero straighten the picture's own quad is the smaller of the two, and the readout has to
+    /// print the frame the user is looking at, not the intent stored behind it.
     public func pixelText(source: ImageSize? = nil) -> String {
-        let pixels = CropMath.outputSize(draft.crop, in: source ?? sourceSize)
+        let src = source ?? sourceSize
+        let pixels = CropMath.outputSize(effectiveCrop(source: src), in: src)
         return "\(pixels.width)×\(pixels.height)"
     }
 
