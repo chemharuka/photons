@@ -26,7 +26,13 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// `temperature`/`tint`/`blackLevel` rule), so a schema-4 blob re-encodes byte for byte and only
     /// the version number says the schema grew. Nothing migrates: an absent key reads as 0, which is
     /// the value the old documents mean.
-    public static let currentSchemaVersion = 5
+    /// 6 = 派单 042: `detailSettings.detail`'s travel became **0…30** (it maps to `detailAmount`
+    /// 0…3, the range Apple's `CIRAWFilter.h:148-154` documents) while the other three axes keep
+    /// 0…100 → 0…1. A schema-5 document stored the same amount on the old 0…100 travel, so the
+    /// migration is `detail / 10` — the **amount** a document asks for is preserved (old 100 →
+    /// new 10 → amount 1.0), which is to say its look is preserved. Only that one field moves; see
+    /// `DetailSettings.migratePreSchema6Detail()` for why it is /10 and not a rescale to 3.
+    public static let currentSchemaVersion = 6
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -137,6 +143,23 @@ public struct EditModel: Sendable, Equatable, Codable {
         // decoder's own balance". The version is the document's, so this is the only place the
         // migration can be decided.
         if v.schemaVersion < 3 { v.light.migratePreSchema3WhiteBalance() }
+        // 派单 042: the 细节 slider's travel changed 0…100 → 0…30 (amount 0…3). Positions arrive
+        // clamped to the *legacy* ceiling (see `DetailSettings.position(in:_:)`), so the conversion
+        // has to happen here, where the document's version is known: `/10` keeps the amount — i.e.
+        // the look — and touches nothing but `detail`. The `clamped()` after it then brings every
+        // axis back inside its own travel (a hand-edited schema-6 `detail: 100` becomes 30,
+        // amount 3.0, rather than surviving as an out-of-range position).
+        //
+        // The version is stamped **only when a detail position was actually converted**, because
+        // `/10` is not idempotent and this file's rule is that a document keeps its own version
+        // number (`BlackLevelTests` pins "a schema-4 blob re-encodes byte for byte"). Without the
+        // stamp, a migrated document saved back as schema 5 would be divided by ten again on the
+        // next open — amount 1.0 → 0.1. A document with no `detailSettings.detail` is not stamped,
+        // so its version *and* its bytes are untouched.
+        if v.schemaVersion < 6, v.detailSettings.migratePreSchema6Detail() {
+            v.schemaVersion = EditModel.currentSchemaVersion
+        }
+        v.detailSettings = v.detailSettings.clamped()
         self = v
     }
 

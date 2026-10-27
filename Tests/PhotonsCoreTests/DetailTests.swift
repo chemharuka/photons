@@ -2,24 +2,33 @@ import XCTest
 import CoreImage
 @testable import PhotonsCore
 
-/// 派单 031 / 040 — 降噪 / 色彩降噪 / 细节 / 锐化 是**解码**参数（`CIRAWFilter`），不是后处理。
+/// 派单 031 / 040 / 042 — 降噪 / 色彩降噪 / 细节 / 锐化 是**解码**参数（`CIRAWFilter`），不是后处理。
 ///
-/// 040 改的是**单位**：滑杆显示 0…100，默认位置 = 该机身在那一根轴上的基线 × 100
-/// （Leica L1030433 → `0 / 50 / 0 / 50`，R5 锐化 → 100，Sony ARW 降噪 → 38），映射是
-/// `位置 / 100`，而**停在默认位置 = 不赋值**（031 的纪律：写 0 进色彩降噪会关掉 Apple 的一半降噪）。
+/// 040 改的是**单位**：滑杆显示位置，默认位置 = 该机身在那一根轴上的基线换算出来的位置
+/// （Leica L1030433 → `0 / 50 / 0 / 50`，R5 锐化 → 100，Sony ARW 降噪 → 38），而**停在默认位置
+/// = 不赋值**（031 的纪律：写 0 进色彩降噪会关掉 Apple 的一半降噪）。
 ///
-/// The tests here are the contract of that sentence, in four groups:
+/// 042 改的是**量程**，按 Apple 头文件的 amount 上限分裂（`CIRAWFilter.h`）：
 ///
-///  1. **The mapping.** 0…100 is the only travel; the default position is the body's, not a constant;
-///     a position at the default assigns nothing, everything else assigns `position / 100`.
-///  2. **The decode key.** All four are decode inputs, so every one of them moves `DecodeInputs`,
+///   · 降噪 / 色彩降噪 / 锐化：位置 0…100 → amount 0…1（`h:115-138`），`位置 / 100`；
+///   · 细节：位置 **0…30** → amount **0…3**（`h:148-154`），`位置 / 10`——042 之前四根共用
+///     0…100，细节只用到文档上限的 1/3。
+///
+/// The tests here are the contract of that sentence, in five groups:
+///
+///  1. **The mapping.** Each axis has its own travel and its own position → amount divisor; the
+///     default position is the body's, not a constant; a position at the default assigns nothing.
+///  2. **The migration.** A schema-5 document's `detail` position (0…100) is divided by 10, which
+///     keeps the amount — and therefore the look — and touches no other axis.
+///  3. **The decode key.** All four are decode inputs, so every one of them moves `DecodeInputs`,
 ///     the rung identity and `DecodeCacheKey`; putting the slider back on its default must hit the
 ///     old key again. A document that never touched the panel must produce the **byte-identical**
 ///     keys of 030.
-///  3. **The pixels.** The four properties are assigned before `CIRAWFilter` produces an image, and
+///  4. **The pixels.** The four properties are assigned before `CIRAWFilter` produces an image, and
 ///     the untouched document — and one parked on its default positions — is byte-for-byte the
-///     pre-031 decode.
-///  4. **The measurement.** What this machine's decoder actually honours, printed and pinned — see
+///     pre-031 decode. The 细节 axis at its new right end (3.0) must move the picture more than the
+///     old right end (1.0) did, measured in 8-bit codes.
+///  5. **The measurement.** What this machine's decoder actually honours, printed and pinned — see
 ///     `DetailSettings`' header for the numbers and for why v8/v9 disagree.
 final class DetailTests: XCTestCase {
 
@@ -73,20 +82,31 @@ final class DetailTests: XCTestCase {
         XCTAssertEqual(canonR5.defaultPositions[.sharpness], 100)
     }
 
-    /// Requirement 2: **every** slider travels 0…100 (细节 too — the user's 2026-10-27 correction),
-    /// both ends are reachable, and anything outside is clamped rather than stored.
-    func testEverySliderTravelsZeroToHundredAndClamps() {
-        XCTAssertEqual(DetailSettings.range, 0...100, "one travel for all four axes")
-        XCTAssertEqual(DetailSettings.step, 1)
-        XCTAssertEqual(DetailSettings.format, "%.0f", "整数，没有百分号")
+    /// Requirement 2 (042): **each axis has its own travel** — 细节 0…30 (amount 0…3), the other
+    /// three 0…100 (amount 0…1) — both ends are reachable, and anything outside is clamped rather
+    /// than stored.
+    func testEachAxisTravelsItsOwnRangeAndClamps() {
+        XCTAssertEqual(DetailAxis.detail.range, 0...30, "细节 0…30 → amount 0…3 (CIRAWFilter.h:148-154)")
+        for axis in [DetailAxis.luminanceNR, .colorNR, .sharpness] {
+            XCTAssertEqual(axis.range, 0...100, "\(axis) keeps the 0…100 → 0…1 travel")
+            XCTAssertEqual(axis.maxAmount, 1)
+            XCTAssertEqual(axis.positionPerAmount, 100)
+        }
+        XCTAssertEqual(DetailAxis.detail.maxAmount, 3, "Apple's header: 3 is maximum detail enhancement")
+        XCTAssertEqual(DetailAxis.detail.positionPerAmount, 10, "position / 10 = detailAmount")
+        for axis in DetailAxis.allCases {
+            XCTAssertEqual(axis.step, 1, "\(axis) quantizes to whole position units")
+            XCTAssertEqual(axis.format, "%.0f", "整数，没有百分号")
+        }
 
         for axis in DetailAxis.allCases {
             var s = DetailSettings.identity
+            let top = axis.range.upperBound
 
             s.setPosition(0, axis, in: leica)
             XCTAssertEqual(s.position(axis, in: leica), 0, "\(axis) left end")
-            s.setPosition(100, axis, in: leica)
-            XCTAssertEqual(s.position(axis, in: leica), 100, "\(axis) right end")
+            s.setPosition(top, axis, in: leica)
+            XCTAssertEqual(s.position(axis, in: leica), top, "\(axis) right end")
 
             // Out of travel: clamped, and stored as the end — unless the end *is* the default position,
             // in which case "the left end" is the untouched state (`nil`), not a stored 0.
@@ -98,14 +118,41 @@ final class DetailTests: XCTestCase {
                 XCTAssertEqual(s[axis], 0, "\(axis) below zero stores the left end")
             }
             s.setPosition(1_000, axis, in: leica)
-            XCTAssertEqual(s[axis], 100, "\(axis) above one hundred")
+            XCTAssertEqual(s[axis], top, "\(axis) above its right end")
 
             // Quantized to the step, and back on the default clears the field instead of storing it.
             s.setPosition(30.4, axis, in: leica)
-            XCTAssertEqual(s[axis], 30, "\(axis) is not quantized")
+            XCTAssertEqual(s[axis], min(30, top), "\(axis) is not quantized")
             s.setPosition(axis.defaultPosition(in: leica), axis, in: leica)
             XCTAssertNil(s[axis], "\(axis) on its default must be nil, not a number")
         }
+    }
+
+    /// 042's three acceptance assertions, verbatim: 30 is the new right end and assigns 3.0, 100 is
+    /// clamped to 30, and the Leica's detail baseline sits at position 0 — so 15 is *not* its default
+    /// but 0 is; on a body whose baseline is 0.5 the default position is 15 and 15 clears the field.
+    func testTheDetailTravelOfThirtyMapsToThreeAndClampsAtThirty() {
+        var s = DetailSettings.identity
+        s.setPosition(30, .detail, in: leica)
+        XCTAssertEqual(s.detail, 30, "30 is inside the travel and is not the Leica's default")
+        XCTAssertEqual(s.decodeValues(baseline: leica).detail ?? -1, 3.0, accuracy: 1e-9,
+                       "position 30 must assign detailAmount 3.0")
+
+        s.setPosition(100, .detail, in: leica)
+        XCTAssertEqual(s.detail, 30, "100 is out of the 0…30 travel: clamped to 30, not stored")
+
+        // A body whose detail baseline is 0.5 (its own value is half of Apple's range) opens at 15.
+        let half = DetailBaseline(luminanceNR: 0, colorNR: 0.5, sharpness: 0.5, detail: 0.5)
+        XCTAssertEqual(DetailAxis.detail.defaultPosition(in: half), 15)
+        var parked = DetailSettings.identity
+        parked.setPosition(15, .detail, in: half)
+        XCTAssertNil(parked.detail, "15 IS the default position on that body, so it must write nil")
+        XCTAssertNil(parked.decodeValues(baseline: half).detail, "…and assign nothing")
+        // …and the Leica's own default is 0, so 15 is a real assignment there (amount 1.5).
+        var onLeica = DetailSettings.identity
+        onLeica.setPosition(15, .detail, in: leica)
+        XCTAssertEqual(onLeica.detail, 15)
+        XCTAssertEqual(onLeica.decodeValues(baseline: leica).detail ?? -1, 1.5, accuracy: 1e-9)
     }
 
     /// The Sonys of the world: a default position that is neither 0 nor 50 must still round-trip.
@@ -119,58 +166,77 @@ final class DetailTests: XCTestCase {
         XCTAssertNil(s[.luminanceNR])
     }
 
-    /// Requirement 2 (the mapping half): `position / 100`, and a position **at the default** assigns
-    /// nothing at all. 031's rule survives the renormalisation — it is now "don't write the baseline",
-    /// not "don't write 0".
+    /// Requirement 2 (the mapping half): `position / positionPerAmount` — `/100` on the three 0…1
+    /// axes, `/10` on 细节 — and a position **at the default** assigns nothing at all. 031's rule
+    /// survives the renormalisation: it is now "don't write the baseline", not "don't write 0".
     func testPositionMapsToThePropertyAndTheDefaultAssignsNothing() {
+        func amount(_ slider: Double?, _ axis: DetailAxis = .luminanceNR,
+                    _ baseline: Double = 0.5) -> Double? {
+            DetailSettings.decodeAmount(slider: slider, axis: axis, baseline: baseline)
+        }
+
         // Straight division: 0 → 0.0 is a real assignment when the body's own value is 0.5.
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 0, baseline: 0.5), 0)
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 30, baseline: 0.5)!, 0.30, accuracy: 1e-9)
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 55, baseline: 0.5)!, 0.55, accuracy: 1e-9)
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 100, baseline: 0.5), 1)
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 100, baseline: 0), 1)
+        XCTAssertEqual(amount(0), 0)
+        XCTAssertEqual(amount(30)!, 0.30, accuracy: 1e-9)
+        XCTAssertEqual(amount(55)!, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(amount(100), 1)
+        XCTAssertEqual(amount(100, .luminanceNR, 0), 1)
+
+        // 042: the 细节 axis divides by 10, because Apple's `detailAmount` tops out at 3.
+        XCTAssertEqual(amount(30, .detail, 0), 3)
+        XCTAssertEqual(amount(15, .detail, 0)!, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(amount(10, .detail, 0), 1, "the old right end (0…100's 100 → amount 1.0) is 10 now")
+        XCTAssertEqual(amount(1_000, .detail, 0), 3, "clamped to 30 → 3.0, not 10.0")
 
         // The default positions of all three bodies assign nothing.
         for (name, baseline) in [("leica", leica), ("r5", canonR5), ("sony", sonyARW)] {
             for axis in DetailAxis.allCases {
                 let position = axis.defaultPosition(in: baseline)
-                let value = DetailSettings.decodeAmount(slider: position,
+                let value = DetailSettings.decodeAmount(slider: position, axis: axis,
                                                         baseline: baseline[keyPath: baselineKeyPath(axis)])
                 XCTAssertNil(value, "\(name) \(axis) at its default position \(position) assigned \(value ?? 0)")
             }
         }
-        XCTAssertNil(DetailSettings.decodeAmount(slider: 50, baseline: 0.5))
-        XCTAssertNil(DetailSettings.decodeAmount(slider: 0, baseline: 0))
-        XCTAssertNil(DetailSettings.decodeAmount(slider: nil, baseline: 0.5), "nil = untouched")
+        XCTAssertNil(amount(50))
+        XCTAssertNil(amount(0, .luminanceNR, 0))
+        XCTAssertNil(amount(0, .detail, 0))
+        XCTAssertNil(amount(nil), "nil = untouched")
 
         // A default that does not land on an integer (Sony 0.377 → 38) assigns nothing either, while
         // one step below it is a real 0.37.
-        XCTAssertNil(DetailSettings.decodeAmount(slider: 38, baseline: 0.377))
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 37, baseline: 0.377)!, 0.37, accuracy: 1e-9)
+        XCTAssertNil(amount(38, .luminanceNR, 0.377))
+        XCTAssertEqual(amount(37, .luminanceNR, 0.377)!, 0.37, accuracy: 1e-9)
 
         // Clamped, not overflowed: the filter itself accepts 2.0 and −0.5 verbatim
         // (`testTheFilterDoesNotClampSoTheMappingMust`), so an out-of-travel position must not leak.
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: 1_000, baseline: 0.5), 1)
-        XCTAssertEqual(DetailSettings.decodeAmount(slider: -1_000, baseline: 0.5), 0)
+        XCTAssertEqual(amount(1_000), 1)
+        XCTAssertEqual(amount(-1_000), 0)
+        XCTAssertEqual(amount(1_000, .detail, 0), 3)
+        XCTAssertEqual(amount(-1_000, .detail, 0.5), 0, "clamped to 0, which is not 0.5's default position")
 
-        // Exhaustive: every position, five plausible baselines, always inside 0…1, and `nil` exactly
-        // on the default position.
-        for baseline in [0.0, 0.004, 0.377, 0.5, 1.0] {
-            let defaultPosition = (baseline * 100).rounded()
-            for slider in stride(from: 0.0, through: 100.0, by: 5) {
-                let v = DetailSettings.decodeAmount(slider: slider, baseline: baseline)
-                if abs(slider - baseline * 100) < 0.5 {
-                    XCTAssertNil(v, "slider \(slider) baseline \(baseline) is the default position")
-                    continue
+        // Exhaustive, per axis: every position, five plausible baselines, always inside the axis'
+        // own amount range, and `nil` exactly on the default position (baseline × travel).
+        for axis in DetailAxis.allCases {
+            let per = axis.positionPerAmount
+            let top = axis.range.upperBound
+            for baseline in [0.0, 0.004, 0.377, 0.5, 1.0] {
+                let defaultPosition = (baseline * top).rounded()
+                for slider in stride(from: 0.0, through: top, by: top / 20) {
+                    let v = DetailSettings.decodeAmount(slider: slider, axis: axis, baseline: baseline)
+                    if abs(slider - baseline * top) < 0.5 {
+                        XCTAssertNil(v, "\(axis) slider \(slider) baseline \(baseline) is the default position")
+                        continue
+                    }
+                    let unwrapped = v ?? -1
+                    XCTAssertEqual(unwrapped, slider / per, accuracy: 1e-9,
+                                   "\(axis) slider \(slider) baseline \(baseline)")
+                    XCTAssertGreaterThanOrEqual(unwrapped, 0)
+                    XCTAssertLessThanOrEqual(unwrapped, axis.maxAmount)
                 }
-                let unwrapped = v ?? -1
-                XCTAssertEqual(unwrapped, slider / 100, accuracy: 1e-9,
-                               "slider \(slider) baseline \(baseline)")
-                XCTAssertGreaterThanOrEqual(unwrapped, 0)
-                XCTAssertLessThanOrEqual(unwrapped, 1)
+                XCTAssertEqual(DetailSettings.decodeAmount(slider: defaultPosition, axis: axis,
+                                                           baseline: baseline), nil,
+                               "\(axis) baseline \(baseline): the default position assigned something")
             }
-            XCTAssertEqual(DetailSettings.decodeAmount(slider: defaultPosition, baseline: baseline), nil,
-                           "baseline \(baseline): the default position assigned something")
         }
     }
 
@@ -208,6 +274,13 @@ final class DetailTests: XCTestCase {
         XCTAssertNil(q.detail, "infinity is not a slider position")
         XCTAssertNil(DetailSettings(luminanceNR: .nan).clamped().luminanceNR)
         XCTAssertTrue(DetailSettings(luminanceNR: .nan).quantized().isIdentity)
+
+        // 042: each axis has its own ceiling — 200 on 细节 is 30 (amount 3.0), not 100.
+        XCTAssertEqual(DetailSettings(detail: 200).quantized().detail, 30)
+        XCTAssertEqual(DetailSettings(detail: 29.6).quantized().detail, 30)
+        XCTAssertEqual(DetailSettings(detail: 12.4).quantized().detail, 12, "细节 quantizes to whole units")
+        XCTAssertEqual(DetailSettings(detail: 12).decodeValues(baseline: leica).detail ?? -1, 1.2,
+                       accuracy: 1e-9, "one 细节 unit is 0.1 of detailAmount")
     }
 
     // MARK: - 2. the decode key (no GPU, no file)
@@ -257,7 +330,7 @@ final class DetailTests: XCTestCase {
         let homeCache = DecodeCacheKey(fileSHA256: "abc", decoderVersion: "8").digest
 
         for axis in DetailAxis.allCases {
-            for value in [30.0, 100.0] {
+            for value in [axis.range.upperBound * 0.3, axis.range.upperBound] {
                 var doc = base
                 doc.detailSettings[axis] = value
                 XCTAssertNotEqual(doc.decodeInputs, homeInputs, "\(axis) did not move decodeInputs")
@@ -301,7 +374,7 @@ final class DetailTests: XCTestCase {
     func testDetailSplitIsDecodeNotRender() {
         let old = EditModel.neutral
         for detail in [DetailSettings(luminanceNR: 30), DetailSettings(colorNR: 20),
-                       DetailSettings(sharpness: 40), DetailSettings(detail: 60)] {
+                       DetailSettings(sharpness: 40), DetailSettings(detail: 20)] {
             var new = old
             new.detailSettings = detail
             XCTAssertEqual(new.splitFrom(old), .decode)
@@ -359,17 +432,100 @@ final class DetailTests: XCTestCase {
                        "{}")
     }
 
-    /// 031's −100…+100 documents: the format is unreleased (`processVersion` is 2), so there is no
-    /// migration — but a negative position cannot exist in the new semantics, and reading it as "a
-    /// little less NR than Apple chose" would silently switch the body's noise reduction off. It
-    /// therefore falls back to the axis' default; positive values are simply clamped to 0…100.
+    /// 031's −100…+100 documents: negatives cannot exist in the new semantics, and reading one as "a
+    /// little less NR than Apple chose" would silently switch the body's noise reduction off, so they
+    /// fall back to the axis' default.
+    ///
+    /// 042: `DetailSettings` on its own has **no version** — the document's is one level up — so its
+    /// decode admits the legacy 0…100 envelope on 细节 (`DetailAxis.decodeCeiling`) instead of
+    /// clamping to 0…30. Clamping to 30 here would turn a schema-5 `detail: 100` (amount 1.0) into
+    /// amount 0.3 before the migration ever ran. `EditModel` is where the value is normalised —
+    /// see `testASchemaFiveDetailPositionIsDividedByTen`.
     func testOldDocumentsAreClampedAndNegativesFallBackToTheDefault() throws {
         let old = try JSONDecoder().decode(DetailSettings.self, from: Data(
             #"{"luminanceNR":-40,"colorNR":-20,"sharpness":150,"detail":30}"#.utf8))
         XCTAssertNil(old.luminanceNR, "a negative position is a pre-040 document, not an instruction")
         XCTAssertNil(old.colorNR)
         XCTAssertEqual(old.sharpness, 100, "clamped to the new travel")
-        XCTAssertEqual(old.detail, 30)
+        XCTAssertEqual(old.detail, 30, "kept as decoded: the migration needs the old spelling")
+
+        // …and the legacy envelope is exactly the old travel: 100 survives the decode untouched,
+        // 500 does not.
+        let legacy = try JSONDecoder().decode(DetailSettings.self, from: Data(
+            #"{"detail":100}"#.utf8))
+        XCTAssertEqual(legacy.detail, 100)
+        let wild = try JSONDecoder().decode(DetailSettings.self, from: Data(
+            #"{"detail":500}"#.utf8))
+        XCTAssertEqual(wild.detail, 100, "clamped to the legacy ceiling, not to 0…30 and not to 500")
+    }
+
+    /// 042's migration, at the document level (the only level that knows the version): the 细节
+    /// position is divided by 10, which preserves the **amount** — and therefore the look — while
+    /// the other three axes are left exactly as they were.
+    func testASchemaFiveDetailPositionIsDividedByTen() throws {
+        func migrate(_ json: String) throws -> EditModel {
+            try JSONDecoder().decode(EditModel.self, from: Data(json.utf8))
+        }
+
+        // Old 100 → amount 1.0 → new position 10 (which still means amount 1.0).
+        let old = try migrate(#"""
+        {"schemaVersion":5,"processVersion":2,
+         "detailSettings":{"luminanceNR":30,"colorNR":40,"sharpness":60,"detail":100}}
+        """#)
+        XCTAssertEqual(old.detailSettings.detail, 10, "old 100 → new 10")
+        XCTAssertEqual(old.detailSettings.decodeValues(baseline: leica).detail ?? -1, 1.0, accuracy: 1e-9,
+                       "the amount — the look — is what the migration preserves")
+        // The other three axes are untouched, byte for byte.
+        XCTAssertEqual(old.detailSettings.luminanceNR, 30)
+        XCTAssertEqual(old.detailSettings.colorNR, 40)
+        XCTAssertEqual(old.detailSettings.sharpness, 60)
+        XCTAssertEqual(EditModel.currentSchemaVersion, 6)
+
+        // Old 50 → amount 0.5 → new position 5.
+        let half = try migrate(#"""
+        {"schemaVersion":5,"processVersion":2,"detailSettings":{"detail":50}}
+        """#)
+        XCTAssertEqual(half.detailSettings.detail, 5, "old 50 → new 5")
+        XCTAssertEqual(half.detailSettings.decodeValues(baseline: leica).detail ?? -1, 0.5, accuracy: 1e-9)
+
+        // A default document stays a default document (no detail key at all).
+        let untouched = try migrate(#"{"schemaVersion":5,"processVersion":2}"#)
+        XCTAssertTrue(untouched.detailSettings.isIdentity)
+
+        // A schema-6 document is **not** divided again: 10 means 10 (amount 1.0), and an
+        // out-of-travel 100 written by hand lands on the axis' own ceiling.
+        let current = try migrate(#"""
+        {"schemaVersion":6,"processVersion":2,"detailSettings":{"detail":10}}
+        """#)
+        XCTAssertEqual(current.detailSettings.detail, 10, "a schema-6 position must not be migrated twice")
+        let handEdited = try migrate(#"""
+        {"schemaVersion":6,"processVersion":2,"detailSettings":{"detail":100}}
+        """#)
+        XCTAssertEqual(handEdited.detailSettings.detail, 30, "clamped to 0…30, amount 3.0")
+
+        // **The migration must not run twice.** `/10` is not idempotent, so a converted document is
+        // stamped with the new version; re-encoding and decoding it again must keep position 10.
+        XCTAssertEqual(old.schemaVersion, EditModel.currentSchemaVersion,
+                       "a document whose 细节 position was converted is now a schema-6 document")
+        let roundTripped = try JSONDecoder().decode(EditModel.self,
+                                                    from: try JSONEncoder().encode(old))
+        XCTAssertEqual(roundTripped.detailSettings.detail, 10, "10 must not be divided again on reload")
+        XCTAssertEqual(roundTripped.detailSettings, old.detailSettings)
+
+        // …and a schema-5 document with **no** detail position keeps its version, so the
+        // `BlackLevelTests` discipline (a doc keeps its own version) still holds where nothing was
+        // converted.
+        XCTAssertEqual(untouched.schemaVersion, 5, "nothing was converted, so the version is untouched")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let text = String(decoding: try encoder.encode(untouched), as: UTF8.self)
+        XCTAssertTrue(text.contains("\"schemaVersion\":5"), "still written back as schema 5")
+
+        print("042 migration: schema-5 detail 100 → \(old.detailSettings.detail ?? -1)"
+              + " (amount \(old.detailSettings.decodeValues(baseline: leica).detail ?? -1)) · "
+              + "50 → \(half.detailSettings.detail ?? -1)"
+              + " (amount \(half.detailSettings.decodeValues(baseline: leica).detail ?? -1))"
+              + " · version stamped \(old.schemaVersion)")
     }
 
     // MARK: - 3. the filter itself: range, read-back, and who clamps
@@ -412,12 +568,13 @@ final class DetailTests: XCTestCase {
         let baseline = RAWDecoder.detailBaseline(of: filter)
 
         // Positions chosen away from this body's defaults (0/50/0/50), so all four are assignments.
-        let settings = DetailSettings(luminanceNR: 30, colorNR: 40, sharpness: 20, detail: 55)
+        let settings = DetailSettings(luminanceNR: 30, colorNR: 40, sharpness: 20, detail: 12)
         let expected = settings.quantized().decodeValues(baseline: baseline)
         XCTAssertEqual(try XCTUnwrap(expected.luminanceNR), 0.30, accuracy: 1e-9)
         XCTAssertEqual(try XCTUnwrap(expected.colorNR), 0.40, accuracy: 1e-9)
         XCTAssertEqual(try XCTUnwrap(expected.sharpness), 0.20, accuracy: 1e-9)
-        XCTAssertEqual(try XCTUnwrap(expected.detail), 0.55, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(expected.detail), 1.20, accuracy: 1e-9,
+                       "042: 细节 divides by 10, so 12 is amount 1.2")
 
         // A default document assigns nothing at all: every property keeps the value Apple reported.
         let untouched = try RAWDecoder.applyDetail(.identity, to: filter, baseline: baseline)
@@ -472,14 +629,16 @@ final class DetailTests: XCTestCase {
         XCTAssertEqual(Double(filter.luminanceNoiseReductionAmount), -0.5, accuracy: 1e-6)
 
         // …and what the production path does with a document that carries an out-of-travel value:
-        // 1000 is clamped to the top of the travel (100 → 1.0), not handed to the filter as 10.0.
+        // 500 is clamped to the top of each axis' own travel (100 → 1.0 for the three 0…1 axes,
+        // 30 → 3.0 for 细节), not handed to the filter as 5.0 or 50.0.
         let extremes = DetailSettings(luminanceNR: 500, colorNR: 500, sharpness: 500, detail: 500)
         let applied = try RAWDecoder.applyDetail(extremes, to: filter)
         XCTAssertEqual(Double(filter.luminanceNoiseReductionAmount), 1, accuracy: 1e-6)
         XCTAssertEqual(Double(filter.colorNoiseReductionAmount), 1, accuracy: 1e-6)
         XCTAssertEqual(Double(filter.sharpnessAmount), 1, accuracy: 1e-6)
-        XCTAssertEqual(Double(filter.detailAmount), 1, accuracy: 1e-6)
-        XCTAssertEqual(applied.summary, "nr=1.00 c=1.00 sh=1.00 d=1.00")
+        XCTAssertEqual(Double(filter.detailAmount), 3, accuracy: 1e-6,
+                       "042: 细节 tops out at Apple's 3.0, not at 1.0")
+        XCTAssertEqual(applied.summary, "nr=1.00 c=1.00 sh=1.00 d=3.00")
     }
 
     // MARK: - 4. the pixels
@@ -525,7 +684,7 @@ final class DetailTests: XCTestCase {
         var report: [String] = []
         for axis in DetailAxis.allCases {
             var settings = DetailSettings.identity
-            settings[axis] = 100
+            settings[axis] = axis.range.upperBound
             let image = try decoder().decodeDetailed(url,
                                                      options: DecodeOptions(scale: probeScale,
                                                                             detail: settings)).image
@@ -533,7 +692,7 @@ final class DetailTests: XCTestCase {
             report.append("\(axis.rawValue)=\(diff)")
             if diff > 0 { moved.append(axis.rawValue) }
         }
-        print("decoder v\(base.capabilities.effectiveVersion): samples moved by 100 — "
+        print("decoder v\(base.capabilities.effectiveVersion): samples moved at each axis' right end — "
               + report.joined(separator: " "))
         XCTAssertFalse(moved.isEmpty,
                        "none of the four detail properties moved a single sample; the sliders are dead "
@@ -542,6 +701,47 @@ final class DetailTests: XCTestCase {
         let l = try decoder().decodeDetailed(url, options: DecodeOptions(scale: probeScale,
                                                                         detail: DetailSettings(luminanceNR: 50)))
         XCTAssertNotNil(l.detailApplied.luminanceNR)
+    }
+
+    /// 042's pixel acceptance: the 细节 slider's **new** right end is really three times the old one.
+    ///
+    /// Three full-size decodes of the fixture at the default decoder version — untouched, the old
+    /// ceiling (_amount 1.0_, i.e. what position `100` meant before 042 and what position `10` means
+    /// now) and the new ceiling (position `30`, amount 3.0). The frame hash must move, and the largest
+    /// 8-bit channel move at the new end must be **larger** than at the old one: that is what "the
+    /// extra travel reaches the pixels, not only the label" means.
+    func testTheDetailTravelOfThreeMovesThePixelsMoreThanTheOldCeilingDid() throws {
+        let url = try fixtureURL()
+        let untouched = try decoder().decodeDetailed(url, options: DecodeOptions())
+        func frame(_ position: Double) throws -> RAWDecoder.DecodeOutcome {
+            try decoder().decodeDetailed(url, options: DecodeOptions(
+                detail: DetailSettings(detail: position)))
+        }
+        let old = try frame(10)     // amount 1.0 — the pre-042 right end, in today's spelling
+        let new = try frame(30)     // amount 3.0 — Apple's documented maximum
+
+        XCTAssertNil(untouched.detailApplied.detail, "0 is this body's baseline: nothing assigned")
+        XCTAssertEqual(try XCTUnwrap(old.detailApplied.detail), 1.0, accuracy: 1e-6)
+        XCTAssertEqual(try XCTUnwrap(new.detailApplied.detail), 3.0, accuracy: 1e-6)
+
+        let oldDelta = Self.maxCodeDelta(untouched.image.rgba, old.image.rgba)
+        let newDelta = Self.maxCodeDelta(untouched.image.rgba, new.image.rgba)
+        let oldMoved = Self.differingSamples(untouched.image.rgba, old.image.rgba)
+        let newMoved = Self.differingSamples(untouched.image.rgba, new.image.rgba)
+        print("042 细节 pixels (full size, v\(untouched.capabilities.effectiveVersion)): "
+              + "\(untouched.image.width)×\(untouched.image.height) · amount 1.0 → maxΔ "
+              + String(format: "%.2f", oldDelta) + " codes / \(oldMoved) samples · amount 3.0 → maxΔ "
+              + String(format: "%.2f", newDelta) + " codes / \(newMoved) samples · sha "
+              + "\(untouched.image.sha256().prefix(12))/\(old.image.sha256().prefix(12))"
+              + "/\(new.image.sha256().prefix(12))")
+
+        XCTAssertNotEqual(new.image.sha256(), untouched.image.sha256(),
+                          "细节 30 must not render as the untouched frame")
+        XCTAssertNotEqual(new.image.sha256(), old.image.sha256(),
+                          "细节 30 must not render as the old ceiling either")
+        XCTAssertGreaterThan(newDelta, oldDelta,
+                             "the new right end (3.0) must move the picture more than the old one (1.0) "
+                             + "did — otherwise the extra travel is only on the slider")
     }
 
     /// The measurement this task rests on, printed for the report: at the default decoder (v8) only
@@ -562,7 +762,7 @@ final class DetailTests: XCTestCase {
             var line = "v\(version) (read back \(base.capabilities.effectiveVersion)):"
             for axis in DetailAxis.allCases {
                 var settings = DetailSettings.identity
-                settings[axis] = 100
+                settings[axis] = axis.range.upperBound
                 let image = try decoder().decodeDetailed(url,
                                                          options: DecodeOptions(decoderVersion: version,
                                                                                 scale: probeScale,
@@ -634,5 +834,27 @@ final class DetailTests: XCTestCase {
         var n = 0
         for i in 0..<a.count where a[i] != b[i] { n += 1 }
         return n
+    }
+
+    /// The largest 8-bit sRGB channel move between two linear frames, over the samples that differ.
+    ///
+    /// `code` is `BwLevelsTests`' yardstick (sRGB code 0…255 of a scene-linear value), and the encode
+    /// is evaluated **only** where the frames differ — a 60 MP pair shares essentially all of its
+    /// samples, and 240 M `pow` calls would make this the slowest test in the suite.
+    private static func maxCodeDelta(_ a: [Float16], _ b: [Float16]) -> Double {
+        guard a.count == b.count else { return 255 }
+        var worst = 0.0
+        for i in 0..<a.count where a[i] != b[i] {
+            let d = abs(code(a[i]) - code(b[i]))
+            if d > worst { worst = d }
+        }
+        return worst
+    }
+
+    /// sRGB code 0…255 of a linear value (the same 8-bit yardstick `BwLevelsTests` uses).
+    private static func code(_ v: Float16) -> Double {
+        let x = max(Double(v), 0)
+        let e = x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055
+        return e * 255
     }
 }

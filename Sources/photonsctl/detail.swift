@@ -49,13 +49,17 @@ func cmdDetail(_ a: Args) throws {
     print("  " + String(repeating: "-", count: 74))
 
     let axes: [(String, DetailAxis)] = DetailAxis.panelOrder.map { ($0.rawValue, $0) }
-    // 派单 040: the sliders are 0…100 positions now, and the default position is the body's own
-    // baseline × 100 — so the probe walks the two ends and the two interesting middles.
-    let sliders: [Double] = [0, 30, 50, 100]
+    // 派单 040: the sliders are positions, and 042 split the travel per axis — 细节 0…30
+    // (amount 0…3), the other three 0…100 (amount 0…1). So each axis walks its *own* four
+    // interesting positions: the two ends and the two middles, from its own range.
+    func sliders(for axis: DetailAxis) -> [Double] {
+        let hi = axis.range.upperBound
+        return [0, (hi * 0.3).rounded(), (hi / 2).rounded(), hi]
+    }
 
     for (name, axis) in axes {
         let defaultPosition = axis.defaultPosition(in: b)
-        for slider in sliders {
+        for slider in sliders(for: axis) {
             var settings = DetailSettings()
             settings[axis] = slider
             let outcome = try decoder.decodeDetailed(url,
@@ -79,7 +83,8 @@ func cmdDetail(_ a: Args) throws {
         decoderVersion: version, scale: scale,
         detail: DetailSettings(luminanceNR: 1_000, colorNR: 1_000,
                                sharpness: 1_000, detail: 1_000)))
-    note("out-of-travel   slider 1000 → assigned \(extremes.detailApplied.summary)  (0…1 is our clamp, not Apple's)")
+    note("out-of-travel   slider 1000 → assigned \(extremes.detailApplied.summary)"
+         + "  (0…3 for detail, 0…1 for the rest — the clamp is ours, not Apple's)")
 }
 
 private func f4(_ v: Double) -> String { String(format: "%.4f", v) }
