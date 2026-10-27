@@ -243,6 +243,15 @@ public final class WorkspaceRootView: NSView {
     public let loupeController: LoupeController
     public let filmstripController: FilmstripController
     public let inspectorHost: InspectorHostingView
+    /// **Which inspector workspace is showing** (派单 073), owned by the window's root rather than by
+    /// the SwiftUI panel, so anything outside that panel — `--ui-smoke`, a future menu command, a
+    /// test that hosts the real window — has one reachable handle on it.
+    ///
+    /// 派单 073's switcher is view state: selecting a workspace writes no document and no history.
+    /// The state lives here, `InspectorView` receives the *same object* through its
+    /// `init(session:loupe:workspaces:)`, so `root.inspectorWorkspaces.select(.masks)` rebuilds the
+    /// panel's card list exactly as clicking the tab does.
+    public let inspectorWorkspaces: InspectorWorkspaceState
     /// The one line of import feedback (进度 + 取消), floating at the bottom of the canvas.
     public let importProgressBar = ImportProgressBar()
 
@@ -271,8 +280,13 @@ public final class WorkspaceRootView: NSView {
         self.gridController = AssetGridController(session: session)
         self.loupeController = LoupeController(session: session)
         self.filmstripController = FilmstripController(session: session)
+        // The panel gets **this** object, not a fresh one: the root is the handle the smoke runner
+        // (and the unit test behind it) switches workspaces through.
+        let workspaces = InspectorWorkspaceState()
+        self.inspectorWorkspaces = workspaces
         self.inspectorHost = InspectorHostingView(rootView: InspectorView(session: session,
-                                                                          loupe: loupeController))
+                                                                          loupe: loupeController,
+                                                                          workspaces: workspaces))
         self.browserWidth = WorkspaceLayout.clampBrowserWidth(
             CGFloat(defaults.object(forKey: "photons.browserWidth") as? Double
                     ?? Double(WorkspaceLayout.browserWidthDefault)))

@@ -267,6 +267,9 @@ public final class UISmokeRunner {
                                controller: windowController, window: window,
                                asset: asset, url: url)
 
+            // 9b. 派单 073: the five workspaces — the panel's cards vs the table, and no document
+            checkInspectorWorkspaces(session: session, controller: windowController, window: window)
+
             // 10. the six mask shapes, drawn and created through the inspector's own API
             checkMaskShapes(session: session, loupe: root.loupeController,
                             controller: windowController, window: window,
@@ -308,10 +311,20 @@ public final class UISmokeRunner {
     /// validator instead of the click).
     private func checkWhiteBalanceSection(session: CatalogSession, loupe: LoupeController) {
         log("白平衡段 (派单 009)")
-        let titles = InspectorView.sectionTitles
-        log("  cards               \(titles.joined(separator: " → "))")
-        check("段顺序是 直方图 → 白平衡 → Light",
-              Array(titles.prefix(3)) == ["直方图", "白平衡", "Light"])
+        // 派单 073 之后「段顺序」有两个答案，这里分开量：
+        //   · 滚动区（`scrollingSections`）里没有直方图 —— 它钉在切换器上方，从来不在滚动区；
+        //   · 调整工作区（默认）把这些卡全放进来，顺序不变。
+        // 旧的这条断言读的是 `sectionTitles`（含直方图）却只取前三位，黑电平（派单 071）插到
+        // 白平衡下面之后就已经对不上了 —— 它红在黑电平上，不是红在工作区上。
+        let scrollTitles = InspectorView.scrollingSections.map(\.title)
+        log("  scroll cards        \(scrollTitles.joined(separator: " → "))")
+        check("滚动区段顺序是 白平衡 → 黑电平 → Light → Color → 细节 → 曲线 → 预设 → Decode（直方图钉在顶上，不在滚动区里）",
+              Array(scrollTitles.prefix(3)) == ["白平衡", "黑电平", "Light"]
+              && !scrollTitles.contains(InspectorView.Section.histogram.title))
+        let adjustTitles = InspectorView.cardTitles(in: .adjust)
+        log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设 / Decode，直方图不在其中",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设", "Decode"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
@@ -1800,13 +1813,148 @@ public final class UISmokeRunner {
     }
 
     /// The mask panel's readback seam, in the live view tree (`MaskListPanel`'s 1 × 1 background).
-    private func maskProbe(in view: NSView?) -> MaskPanelProbe? {
+    ///
+    /// **Static and internal** so `UISmokeWorkspaceTests` can drive *this* function against a hosted
+    /// panel: since 派单 073 the mask card only exists in the 蒙版 workspace, and the smoke's own
+    /// answer to that (switch first) has to be checkable without `make ui-smoke` opening a window.
+    static func maskProbe(in view: NSView?) -> MaskPanelProbe? {
         guard let view else { return nil }
         if let probe = view as? MaskPanelProbe { return probe }
         for subview in view.subviews {
             if let found = maskProbe(in: subview) { return found }
         }
         return nil
+    }
+
+    /// The scroll area's readback seam: which workspace the panel built, and which cards.
+    private func cardsProbe(in view: NSView?) -> InspectorCardsProbe? {
+        guard let view else { return nil }
+        if let probe = view as? InspectorCardsProbe { return probe }
+        for subview in view.subviews {
+            if let found = cardsProbe(in: subview) { return found }
+        }
+        return nil
+    }
+
+    // MARK: - 检查器工作区（派单 073）
+
+    /// Switch the inspector to `workspace` **through the window's own handle** and wait until the
+    /// panel has actually rebuilt with that workspace's cards.
+    ///
+    /// Before 派单 073 the panel built every card, so a check could just walk the window tree and find
+    /// the one it wanted. Now the tree only holds the workspace that is selected (调整 by default), so
+    /// every check that reads a card has to say which workspace it is talking about — that is what this
+    /// function is: one place that presses the tab and waits, instead of each check guessing.
+    ///
+    /// The wait is on the panel's own readback seam (`InspectorCardsProbe`: which workspace, which
+    /// cards), not on a fixed sleep: the titles are compared against `InspectorView.sections(in:)`, the
+    /// view's own filter of the membership table, so a panel that rebuilds late is waited for and a
+    /// panel that rebuilds *wrong* is still reported by the caller's assertion (this function returns
+    /// what the panel built, it does not assert it).
+    @discardableResult
+    private func showInspectorWorkspace(_ workspace: InspectorWorkspace,
+                                        controller: EditorWindowController,
+                                        window: NSWindow,
+                                        timeout: TimeInterval = 8) -> InspectorCardsProbe? {
+        controller.rootView?.inspectorWorkspaces.select(workspace)
+        let expected = InspectorView.sections(in: workspace).map(\.id)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            window.contentView?.layoutSubtreeIfNeeded()
+            if let probe = cardsProbe(in: window.contentView),
+               probe.workspace == workspace.rawValue, probe.cardIDs == expected {
+                // One more turn so the cards' own probe hosts (the mask panel's included) are attached
+                // before a caller reads them: SwiftUI builds the tree, AppKit lays it out a beat later.
+                pump(0.12)
+                window.contentView?.layoutSubtreeIfNeeded()
+                return cardsProbe(in: window.contentView)
+            }
+            pump(0.05)
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        return cardsProbe(in: window.contentView)
+    }
+
+    /// Back to 调整 — the workspace the panel opens in, and the one every later check assumes.
+    private func restoreAdjustWorkspace(controller: EditorWindowController, window: NSWindow) {
+        showInspectorWorkspace(.adjust, controller: controller, window: window)
+    }
+
+    /// The mask card's readback seam, waited for. `nil` under any workspace that does not own 蒙版
+    /// (调整 included) — which is exactly why the mask checks switch first.
+    private func waitForMaskPanel(controller: EditorWindowController, window: NSWindow,
+                                  timeout: TimeInterval = 8) -> MaskPanelProbe? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            window.contentView?.layoutSubtreeIfNeeded()
+            if let probe = Self.maskProbe(in: window.contentView) { return probe }
+            pump(0.05)
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        return Self.maskProbe(in: window.contentView)
+    }
+
+    // MARK: - 五个工作区（派单 073 的验收：表 → 面板，且切换不动文档）
+
+    /// The switcher, checked on the **hosted panel** rather than on the enum it reads:
+    ///
+    ///   1. each of the five workspaces is switched to through the window's own handle, and the scroll
+    ///      area then reports exactly the cards `InspectorWorkspace.cards` names — in panel order,
+    ///      `[]` for the three whose features do not exist yet (「如果功能没做好就先空着」: no cards, and
+    ///      no placeholder either);
+    ///   2. the histogram stays pinned in **every** workspace, empty ones included — it is not a card a
+    ///      workspace can hide — and the mask card exists in exactly one workspace (蒙版), which is the
+    ///      fact that made the old checks report red for a panel that was working;
+    ///   3. switching is view state: `editRevision`, `history.count`, `history.cursor` and the document
+    ///      hash read the same before and after the whole sweep.
+    ///
+    /// Both card assertions are kept on purpose: `cards` (the table) must match what the panel drew, and
+    /// `sections(in:)` (the view's filter of it) must match too. A workspace can decide *whether* a card
+    /// appears; if either one started deciding the order, the two would disagree here.
+    private func checkInspectorWorkspaces(session: CatalogSession,
+                                          controller: EditorWindowController,
+                                          window: NSWindow) {
+        log("检查器工作区 (派单 073)")
+        let revisionBefore = session.editRevision
+        let depthBefore = session.history.count
+        let cursorBefore = session.history.cursor
+        let docBefore = documentHash(session.edit)
+        var report: [String] = []
+
+        for workspace in InspectorWorkspace.allCases {
+            let probe = showInspectorWorkspace(workspace, controller: controller, window: window)
+            let titles = probe?.cardTitles ?? []
+            let wantedTitles = workspace.cards.map(\.title)
+            let wantedIDs = InspectorView.sections(in: workspace).map(\.rawValue)
+            let histogramPinned = findHistogramCard(in: window.contentView) != nil
+            let maskCard = Self.maskProbe(in: window.contentView) != nil
+            report.append("\(workspace.title)·\(titles.isEmpty ? "[]" : titles.joined(separator: "/"))")
+            log("  \(workspace.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0)) cards \(wantedTitles.isEmpty ? "[]" : wantedTitles.joined(separator: " / ")) · 面板报 \(probe?.cardTitles.description ?? "nil") · 直方图钉住 \(histogramPinned) · 蒙版卡 \(maskCard)")
+            check("切到「\(workspace.title)」：滚动区卡片 = \(wantedTitles.isEmpty ? "[]（空工作区，不画占位）" : wantedTitles.joined(separator: " / "))，直方图仍钉在顶上，蒙版卡 \(workspace == .masks ? "在" : "不在")",
+                  probe?.workspace == workspace.rawValue
+                  && titles == wantedTitles
+                  && probe?.cardIDs == wantedIDs
+                  && histogramPinned
+                  && maskCard == (workspace == .masks))
+        }
+
+        // 一轮之后必须回到默认的「调整」——后面的检查（白平衡/倍率/导出）都按默认面板假设走。
+        showInspectorWorkspace(.adjust, controller: controller, window: window)
+        let back = cardsProbe(in: window.contentView)
+        let adjustTitles = InspectorWorkspace.adjust.cards.map(\.title)
+        check("切遍五个工作区后回到「调整」（面板报 \(back?.workspace ?? "nil")，卡片 \(back?.cardTitles.joined(separator: " / ") ?? "nil")）",
+              back?.workspace == InspectorWorkspace.adjust.rawValue
+              && back?.cardTitles == adjustTitles)
+
+        let revisionAfter = session.editRevision
+        let depthAfter = session.history.count
+        let docAfter = documentHash(session.edit)
+        log("workspace sweep         \(report.joined(separator: " · ")) · editRevision \(revisionBefore)→\(revisionAfter) · history \(depthBefore)→\(depthAfter) cursor \(cursorBefore)→\(session.history.cursor) · 文档 hash \(docBefore == docAfter ? "不变" : "变了")")
+        check("切遍五个工作区不动文档：editRevision \(revisionBefore)→\(revisionAfter)、history \(depthBefore)→\(depthAfter)（cursor \(cursorBefore)→\(session.history.cursor)）、文档 hash 前后相同",
+              revisionAfter == revisionBefore
+              && depthAfter == depthBefore
+              && session.history.cursor == cursorBefore
+              && docAfter == docBefore)
     }
 
     // MARK: - 直方图卡片 + 高光警告（005f 的 UI）
@@ -2530,6 +2678,12 @@ public final class UISmokeRunner {
     private func checkMaskParameters(session: CatalogSession, loupe: LoupeController,
                                      controller: EditorWindowController, window: NSWindow,
                                      asset: Asset, url: URL) {
+        // 派单 073: 蒙版卡现在住在「蒙版」工作区里，默认的「调整」根本不构建它。所以这整段先按用户
+        // 的做法切过去（`MaskListPanel` 在树上 = 面板真的在屏幕上），跑完切回「调整」——后面
+        // 的白平衡/倍率检查读的是调整工作区。
+        showInspectorWorkspace(.masks, controller: controller, window: window)
+        defer { restoreAdjustWorkspace(controller: controller, window: window) }
+
         loupe.autoRenderEnabled = false
         session.maskTool = .off
         session.setShowMask(nil)
@@ -2843,7 +2997,7 @@ public final class UISmokeRunner {
         let orderAfter = session.edit.masks.map(\.id)
         let expectedOrder = [second.id] + orderBefore.filter { $0 != second.id }
         pump(0.2)
-        let probeOrder = maskProbe(in: window.contentView)?.listOrder
+        let probeOrder = waitForMaskPanel(controller: controller, window: window)?.listOrder
         log("mask order              \(orderBefore.map { String($0.suffix(4)) }) → \(orderAfter.map { String($0.suffix(4)) }) · 键材质 \(materialBefore == session.edit.maskSelectionMaterial ? "不变（按 id 排序）" : "变了") · 面板 \(probeOrder ?? []) · history \(depthBeforeMove) → \(session.history.count)")
         check("上/下移改变顺序：文档数组重排为 \(orderAfter.map { String($0.suffix(4)) })、落盘 JSON 变了、面板列表跟着变、history +1；而键材质不变——Core 的组合顺序与键都按 id 字典序（D6），所以上下移是文档顺序，不是渲染顺序（这不是回归，是 005/M4 §3 的排序规则）",
               moved && orderAfter == expectedOrder
@@ -2927,8 +3081,8 @@ public final class UISmokeRunner {
         pump(0.2)
         let required = MaskLevelParameter.allCases.map(\.label) + ["反转", "混合"]
             + MaskAdjustmentParameter.allCases.map(\.label)
-        guard let probe = maskProbe(in: window.contentView) else {
-            fail("检查器里找不到蒙版参数面板的读回点（MaskPanelProbe）")
+        guard let probe = waitForMaskPanel(controller: controller, window: window) else {
+            fail("蒙版工作区里找不到蒙版参数面板的读回点（MaskPanelProbe）：切到「蒙版」后 `MaskListPanel` 应当出现在检查器的视图树里")
             for m in session.edit.masks { session.deleteMask(m.id) }
             loupe.autoRenderEnabled = true
             return
