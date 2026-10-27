@@ -18,11 +18,12 @@ import PhotonsCore
 ///     every pre-change document already is).
 ///  2. **The document, not the view.** One switch = one field + one history entry; the four amounts
 ///     keep their numbers (greyed is not zeroed); the switch is a decode input (the key moves).
-///  3. **The four rows follow the effective version** through the `DetailAxes` seam — under v9 exactly
-///     two are greyed (色彩降噪 + 细节, Apple's `isColorNoiseReductionSupported`/`isDetailSupported` =
-///     false and zero samples moved), the other two stay live (降噪 + 锐化, flags true, 0.021 / 0.510
-///     maxΔ) — and the read-back (`DetailRowEnabledLog`, SwiftUI's own `isEnabled`) is what the test
-///     reads.
+///  3. **The four rows follow `capabilities.detailAxes`** — Apple's per-instance `isSupported` flags,
+///     read off the filter that made the pixels (`DetailAxes.supported(by:)`) and carried in
+///     `DecoderCapabilities`. On this machine's `9.dng` exactly two are greyed (色彩降噪 + 细节) and the
+///     other two stay live (降噪 + 锐化); the version-prefix table `DetailAxes.forDecoderVersion` is
+///     only the pre-first-frame fallback. The read-back (`DetailRowEnabledLog`, SwiftUI's own
+///     `isEnabled`) is what the test reads.
 ///  4. **The read-back wins over the request**: `已退回 v8` when the file kept something else.
 @MainActor
 final class DecoderModelCardTests: XCTestCase {
@@ -129,7 +130,7 @@ final class DecoderModelCardTests: XCTestCase {
         XCTAssertEqual(DetailAxes.forDecoderVersion("9"), .v9)
 
         XCTAssertEqual(DetailAxes.forDecoderVersion("8"), .all,
-                       "placeholder until DetailCapability lands: only v9's two axes are known to be off")
+                       "the fallback table knows only v9's two dead axes")
         XCTAssertEqual(DetailAxes.forDecoderVersion("8.dng"), .all)
         XCTAssertEqual(DetailAxes.forDecoderVersion("6"), .all)
 
@@ -188,7 +189,8 @@ final class DecoderModelCardTests: XCTestCase {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         XCTAssertTrue(source.contains("enabled: axes.isEnabled(row.axis)"),
                       "every row must take the seam's answer, not a constant")
-        XCTAssertTrue(source.contains("Self.detailAxes(effective: caps?.effectiveVersion"))
+        XCTAssertTrue(source.contains("Self.detailAxes(capabilities: caps"),
+                      "the rows' axes must come from the decoded capabilities first")
         XCTAssertTrue(source.contains(".disabled(!enabled)"), "灰 = .disabled")
         XCTAssertTrue(source.contains(".opacity(enabled ? 1 : 0.42)"),
                       "灰 must be visible, not only semantic")
@@ -196,6 +198,56 @@ final class DecoderModelCardTests: XCTestCase {
                       "the list must come from the file, not from a hard-coded pair")
         XCTAssertTrue(source.contains("inspector.detail.decoderModel"))
         XCTAssertFalse(source.contains("Section.decode"), "the Decode card is gone")
+    }
+
+    /// **The data source, end to end**: a real `9.dng` develop's `capabilities` — Apple's flags —
+    /// reach the four hosted rows. The version string is the *same* in both branches, so this test
+    /// fails if the card goes back to `DetailAxes.forDecoderVersion` (or if the flags are ignored
+    /// anywhere on the way).
+    func testTheHostedCardGreysFromTheDecodedCapabilitiesAndNotFromTheVersionString() throws {
+        let url = try Self.fixtureURL()
+        let offered = try RAWDecoder.availableVersions(for: url)
+        try XCTSkipUnless(offered.contains("9.dng"), "this fixture offers no v9.dng: \(offered)")
+
+        let caps = try RAWDecoder().decodeDetailed(url, options: DecodeOptions(decoderVersion: "9.dng",
+                                                                              scale: 0.125)).capabilities
+        print("MODEL decoded v\(caps.effectiveVersion) · axes[\(caps.detailAxesProvenance.rawValue)]"
+              + " \(caps.detailAxes.flagSummary)")
+
+        // ① the pure function the card calls returns the capabilities value verbatim.
+        XCTAssertEqual(InspectorView.detailAxes(capabilities: caps, requested: "9.dng", document: "9.dng"),
+                       caps.detailAxes)
+        XCTAssertFalse(caps.detailAxes.cnr, "Apple: isColorNoiseReductionSupported = false on 9.dng")
+        XCTAssertFalse(caps.detailAxes.detail, "Apple: isDetailSupported = false on 9.dng")
+
+        // ② the hosted card, read back through SwiftUI's own `isEnabled`.
+        DetailRowEnabledLog.shared.reset()
+        let session = CatalogSession()
+        session.applyEdit { $0.decoderVersion = "9.dng" }
+        session.recordCapabilities(caps)
+        _ = Self.host(session: session)
+        let log = DetailRowEnabledLog.shared.snapshot
+        print("MODEL hosted rows for the decoded v9: \(log.sorted { $0.key < $1.key })")
+        DetailRowEnabledLog.shared.reset()
+        guard !log.isEmpty else {
+            print("MODEL row probe: no window session — the in-view read-back is unavailable")
+            return
+        }
+        XCTAssertEqual(log[DetailAxis.luminanceNR.title], true, "降噪 is live under v9 (flag true)")
+        XCTAssertEqual(log[DetailAxis.colorNR.title], false, "色彩降噪 is greyed under v9 (flag false)")
+        XCTAssertEqual(log[DetailAxis.detail.title], false, "细节 is greyed under v9 (flag false)")
+        XCTAssertEqual(log[DetailAxis.sharpness.title], true, "锐化 is live under v9 (flag true)")
+    }
+
+    private static func fixtureURL() throws -> URL {
+        let candidates = [
+            ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"],
+            NSString(string: "~/Desktop/test/L1030433.dng").expandingTildeInPath,
+        ].compactMap { $0 }
+        for c in candidates where FileManager.default.fileExists(atPath: c) {
+            return URL(fileURLWithPath: c)
+        }
+        throw XCTSkip("no RAW fixture; set PHOTONS_TEST_RAW")
     }
 
     // MARK: - 4. the read-back

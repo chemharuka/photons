@@ -138,12 +138,43 @@ public enum LinearColorSpace: String, Sendable, CaseIterable {
     }
 }
 
-/// 「版本 → 四轴可用性」 — **the seam** (owner, 2026-10-27; re-measured 2026-10-27 after the first
-/// pass of this task claimed "v9 = all four off", which the numbers below refute).
+/// 「哪些细节轴还能到达像素」 — **the seam** (owner, 2026-10-27).
 ///
-/// The 细节 card must not guess which of its four amounts survive a given decoder version: the answer
-/// is per **body and version**. Measured on this machine, `L1030433.dng`, **full size 9520×6336**,
-/// one axis at a time (slider 100, maxΔ of the decoded samples against the untouched decode):
+/// The 细节 card must not guess which of its four amounts survive a given decode: the answer is
+/// per **body, per file and per decoder version**, and Apple answers it per *filter instance*.
+///
+/// ## Where the answer comes from (this is the primary source)
+///
+/// `CIRAWFilter` publishes one readonly BOOL per axis — macOS 27.0 SDK, `CIRAWFilter.h:121`
+/// (`isLuminanceNoiseReductionSupported`), `:129` (`isColorNoiseReductionSupported`), `:137`
+/// (`isSharpnessSupported`), `:153` (`isDetailSupported`), `:161` (`isMoireReductionSupported`):
+///
+/// > *"The 'isXSupported' property is false if the current image doesn't support this adjustment."*
+///
+/// So `DetailAxes.supported(by:)` reads the four flags off the **live filter**, after the decoder
+/// version has been assigned and read back, and before any amount is written. That value is what
+/// `DecoderCapabilities.detailAxes` carries from the decode to the inspector
+/// (`DecodeRung.capabilities`), so the veto in `applyDetail` and the greyed rows in `InspectorView`
+/// are literally the same five booleans — no second derivation, no drift.
+///
+/// Measured on this machine (`L1030433.dng`, SL3, re-read after every `decoderVersion` assignment):
+///
+/// ```
+/// requested   read back   nr     cnr    detail  sharpness  moire
+/// 6.dng       6.dng       true   true   true    true       true
+/// 7           7           true   true   true    true       true
+/// 7.dng       7.dng       true   true   true    true       true
+/// 8           8           true   true   true    true       true
+/// 8.dng       8.dng       true   true   true    true       true
+/// 9           8  ← bare 9 is not offered; the assignment is a silent no-op
+/// 9.dng       9.dng       true   false  false   true       false
+/// ```
+///
+/// (`9` reads back as `8` and therefore reports v8's all-true set — the read-back in
+/// `decodeDetailed` is what keeps that from being reported as v9.)
+///
+/// The same table, measured on **pixels** (full size 9520×6336, one axis at a time, slider 100,
+/// maxΔ against the untouched decode) agrees item for item, which is why the flags may drive the UI:
 ///
 /// ```
 /// version   luminance NR (降噪)   colour NR (色彩降噪)   detail (细节)   sharpness (锐化)
@@ -152,54 +183,84 @@ public enum LinearColorSpace: String, Sendable, CaseIterable {
 /// v9.dng    0.021 ✓ live         0      dead            0      dead     0.510  ✓ live
 /// ```
 ///
-/// **Conclusion this seam encodes: under v9 only 色彩降噪 and 细节 are gone; 降噪 and 锐化 still
-/// reach the pixels.** Two independent sources agree:
+/// ## Why the UI does not run the pixel probe instead
 ///
-///   · the pixels above (`photonsctl detail`, full size) — cnr/detail move **0** samples under v9,
-///     nr moves 0.021 and sharpness 0.510;
-///   · Apple's own flags on the same `9.dng` filter — `isColorNoiseReductionSupported = false`,
-///     `isDetailSupported = false`, `isMoireReductionSupported = false`, while
-///     `isLuminanceNoiseReductionSupported = true` and `isSharpnessSupported = true`.
+/// The probe above is the *arbiter* (it is what proves the flags are not lying), but it cannot drive
+/// a panel: one full-size probe costs **159–214 s per axis per file per version** (four axes × seven
+/// offered versions ≈ two hours for one photo), it needs a full 60 MP development per sample, and it
+/// would have to run **before** the card can draw. Apple's flags come back in microseconds from the
+/// instance that is already decoding. Hence: flags drive the UI, the pixel table is the evidence
+/// that they are right, and `forDecoderVersion(_:)` below is the coarse fallback for when there is
+/// no live filter yet.
 ///
-/// So: **色彩降噪 / 细节 = v9 不支持（Apple 口径 + 像素双重确认）；降噪 / 锐化 = v9 仍可用.**
-/// A four-grey v9 card would have been a lie in both directions — two live sliders disabled.
+/// ## The fallback, and why it stays
 ///
-/// (Both columns are full-size decodes. At `scaleFactor 0.25` v8's sharpness moves **0** samples —
-/// the sharpen stage only runs at scale 1 — so a "dead axis" measured on a preview rung is not the
-/// same claim as one measured at full size. `DetailCapability` will have to carry the scale too.)
-///
-/// **REPLACEMENT POINT.** `DetailCapability` (Core, in flight, cached by `cameraKey + decoderVersion`)
-/// will answer this question with numbers instead of a version prefix. When it lands, replace the body
-/// of `forDecoderVersion(_:)` — and nothing else: the card, `RAWDecoder`'s per-axis suppression and the
-/// tests all read this one function. Until then: **v9 = `.v9` (nr + sharpness on), every other version
-/// = `.all`**, which is deliberately coarse (v8's own luminance NR / detail are ~dead, and v8.dng
-/// reshuffles the set) and must not be read as a capability claim.
+/// `forDecoderVersion(_:)` is **only** for the window before the first frame of this photo exists
+/// (the card has to draw something while the development runs) and for a `DecoderCapabilities`
+/// built without a filter (tests, logs). It is a version *prefix* table — deliberately coarse: it
+/// knows v9's two dead axes and nothing else, so v8's own dead luminance NR / detail and v8.dng's
+/// reshuffled set are reported as "all live". It must never be read as a capability claim;
+/// `DecoderCapabilities.detailAxesProvenance` says which of the two answered.
 public struct DetailAxes: Sendable, Equatable {
 
     public var nr: Bool
     public var cnr: Bool
     public var detail: Bool
     public var sharpness: Bool
+    /// The fifth flag of the same family (`isMoireReductionSupported`). Not a panel row — the
+    /// inspector has no moiré slider — but it is read from the same instance at the same moment, so
+    /// `DecoderCapabilities.supportsMoireReduction` is an instance fact too instead of a prefix guess.
+    public var moire: Bool
 
-    public init(nr: Bool, cnr: Bool, detail: Bool, sharpness: Bool) {
-        self.nr = nr; self.cnr = cnr; self.detail = detail; self.sharpness = sharpness
+    public init(nr: Bool, cnr: Bool, detail: Bool, sharpness: Bool, moire: Bool = true) {
+        self.nr = nr; self.cnr = cnr; self.detail = detail; self.sharpness = sharpness; self.moire = moire
+    }
+
+    /// Where an answer came from. A log line (and the tests) can say "Apple said so on this file"
+    /// versus "nobody has decoded this photo yet, so the version table guessed".
+    public enum Provenance: String, Sendable {
+        case filterFlags
+        case versionTable
     }
 
     /// Every axis on — the placeholder for "no known reason to grey anything".
-    public static let all = DetailAxes(nr: true, cnr: true, detail: true, sharpness: true)
+    public static let all = DetailAxes(nr: true, cnr: true, detail: true, sharpness: true, moire: true)
 
     /// **v9** — Apple's `9.dng` decoder deadens colour NR and detail only; luminance NR and
-    /// sharpness still move pixels (table above, both sources). Never `.all` (that would leave two
-    /// dead sliders live) and never "everything off" (that would take two working sliders away).
+    /// sharpness still move pixels (both tables above). Never `.all` (that would leave two dead
+    /// sliders live) and never "everything off" (that would take two working sliders away).
     ///
     /// There is deliberately **no** all-off constant: no measured version deadens all four, and the
     /// previous `.none` was returned for every `9*` spelling, which the measurements above refute.
-    public static let v9 = DetailAxes(nr: true, cnr: false, detail: false, sharpness: true)
+    public static let v9 = DetailAxes(nr: true, cnr: false, detail: false, sharpness: true, moire: false)
 
-    /// **The seam.** `version` is the *effective* decoder version (`"8"`, `"8.dng"`, `"9.dng"`, …), the
-    /// one the read-back produced — never the request.
+    /// **The primary source: Apple's own per-instance answer.**
+    ///
+    /// Call this on the filter that is about to develop the pixels, *after* `decoderVersion` has been
+    /// assigned **and read back** (a version the file does not offer leaves the old one in place, so
+    /// reading the flags before the read-back would report the previous decoder), and *before* any
+    /// amount is written — the flags do not depend on the amounts (measured: identical before and
+    /// after assigning all four), but "the questions you ask of a live object" are only auditable in
+    /// one order.
+    public static func supported(by filter: CIRAWFilter) -> DetailAxes {
+        DetailAxes(nr: filter.isLuminanceNoiseReductionSupported,
+                   cnr: filter.isColorNoiseReductionSupported,
+                   detail: filter.isDetailSupported,
+                   sharpness: filter.isSharpnessSupported,
+                   moire: filter.isMoireReductionSupported)
+    }
+
+    /// **The fallback.** `version` is a decoder version string (`"8"`, `"8.dng"`, `"9.dng"`, …) —
+    /// the *effective* one where a read-back produced it, the document's request before the first
+    /// frame. Coarse on purpose: see the type doc.
     public static func forDecoderVersion(_ version: String) -> DetailAxes {
         version.hasPrefix("9") ? .v9 : .all
+    }
+
+    /// The single entry point both decode paths share: a live filter wins, otherwise the table.
+    public static func resolve(live filter: CIRAWFilter?, fallback version: String) -> DetailAxes {
+        if let filter { return supported(by: filter) }
+        return forDecoderVersion(version)
     }
 
     public func isEnabled(_ axis: DetailAxis) -> Bool {
@@ -213,6 +274,11 @@ public struct DetailAxes: Sendable, Equatable {
 
     /// True when at least one amount can still reach the pixels.
     public var anyEnabled: Bool { nr || cnr || detail || sharpness }
+
+    /// One line for the evidence log: `nr=1 cnr=0 detail=0 sharp=1 moire=0`.
+    public var flagSummary: String {
+        "nr=\(nr ? 1 : 0) cnr=\(cnr ? 1 : 0) detail=\(detail ? 1 : 0) sharp=\(sharpness ? 1 : 0) moire=\(moire ? 1 : 0)"
+    }
 }
 
 public enum DecodeError: LocalizedError {
@@ -423,6 +489,10 @@ public final class RAWDecoder {
     ///
     /// Read-back tolerance is 1e-4 because the properties are `Float`: `Float(0.3)` reads back as
     /// 0.30000001192, which is the assignment landing, not a rejection.
+    ///
+    /// `axes` is `DecoderCapabilities.detailAxes` — Apple's per-instance `isSupported` flags, read
+    /// from this very filter (`DetailAxes.supported(by:)`). Under v9 that is 色彩降噪 + 细节 off; the
+    /// default `.all` is only for a caller that has no capabilities at all (probes, tests).
     static func applyDetail(_ detail: DetailSettings, to filter: CIRAWFilter,
                             baseline: DetailBaseline? = nil,
                             axes: DetailAxes = .all) throws -> DetailDecodeValues {
@@ -582,24 +652,42 @@ public final class RAWDecoder {
             try Self.applyWhiteBalance(options.whiteBalance, to: filter)
         }
 
-        // ── 前置 ④ noise reduction / detail, or nothing at all (派单 031) ──────────────────────
+        // ── 前置 ④ which axes are alive, from the instance itself ────────────────────────────
+        // 解码模型 (owner, 2026-10-27): Apple answers "does THIS file, at THIS decoder version,
+        // honour this amount" per filter instance — `isLuminanceNoiseReductionSupported` /
+        // `isColorNoiseReductionSupported` / `isSharpnessSupported` / `isDetailSupported`
+        // (`CIRAWFilter.h:121/129/137/153`). Read them now: the version has been assigned **and read
+        // back** above (so bare `9`, which the file refuses and which stays at v8, reports v8's
+        // flags and not v9's), and nothing has been assigned to the amounts yet.
+        //
+        // This one value is the whole answer, and it is built into `capabilities` **here**, before
+        // the veto, so the veto below literally consumes `capabilities.detailAxes` — the same field
+        // the inspector greys its rows from. No second derivation can drift from it.
+        let detailAxes = DetailAxes.supported(by: filter)
+        let capabilities = DecoderCapabilities(requestedVersion: resolvedRequest,
+                                               effectiveVersion: effective,
+                                               defaultVersion: filterDefault,
+                                               supportedVersions: offered,
+                                               detailAxes: detailAxes,
+                                               asShotTemperature: asShot.temperature,
+                                               asShotTint: asShot.tint)
+
+        // ── 前置 ⑤ noise reduction / detail, or nothing at all (派单 031) ──────────────────────
         // The same rule as the white balance: a document that has not touched the panel assigns
         // **nothing**, because the filter's own defaults are not zero on every axis (colour NR and
         // sharpness read 0.5, and 1.0 on a Canon body) and writing 0 over them would change pixels
         // for a control parked at "no change". The baseline is read before any assignment.
         let detailBaseline = Self.detailBaseline(of: filter)
         var detailApplied = DetailDecodeValues()
-        // 解码模型 (owner, 2026-10-27): the four amounts are assigned only when the **effective**
-        // decoder still honours that axis — `DetailAxes` is the seam that answers it, **per axis**.
-        // Under v9 Apple's ML stage takes 色彩降噪 and 细节 (both move zero samples and report
-        // `isColorNoiseReductionSupported`/`isDetailSupported` = false), while 降噪 and 锐化 stay live
-        // (`isLuminanceNoiseReductionSupported`/`isSharpnessSupported` = true, 0.021 / 0.510 maxΔ) — so
-        // a v9 develop assigns exactly two of the four. The document keeps its numbers either way;
+        // The veto, **axis by axis**, from the capabilities that travelled with these pixels. Under
+        // v9 Apple's ML stage takes 色彩降噪 and 细节 (both move zero samples and report those two
+        // flags false), while 降噪 and 锐化 stay live (flags true, 0.021 / 0.510 maxΔ) — so a v9
+        // develop assigns exactly two of the four. The document keeps its numbers either way;
         // switching back to v8 assigns them again untouched.
-        let detailAxes = DetailAxes.forDecoderVersion(effective)
-        if !options.detail.isIdentity && detailAxes.anyEnabled {
+        let axes = capabilities.detailAxes
+        if !options.detail.isIdentity && axes.anyEnabled {
             detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline,
-                                                 axes: detailAxes)
+                                                 axes: axes)
         }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
@@ -658,12 +746,6 @@ public final class RAWDecoder {
         let image = LinearImage(width: w, height: h, rgba: rgba,
                                 colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
                                 orientation: .up)
-        let capabilities = DecoderCapabilities(requestedVersion: resolvedRequest,
-                                               effectiveVersion: effective,
-                                               defaultVersion: filterDefault,
-                                               supportedVersions: offered,
-                                               asShotTemperature: asShot.temperature,
-                                               asShotTint: asShot.tint)
         return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot,
                              detailBaseline: detailBaseline, detailApplied: detailApplied)
     }

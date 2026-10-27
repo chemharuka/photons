@@ -2,15 +2,21 @@ import Foundation
 
 /// What the system RAW pipeline *actually* delivers, as opposed to what was asked for.
 ///
-/// Two facts drive this type (docs/architecture-decisions.md §11.1):
+/// Three facts drive this type (docs/architecture-decisions.md §11.1):
 ///
 /// - Assigning a decoder version a body does not whitelist **silently leaves the old value in
 ///   place** — measured on this machine: `decoderVersion = "9"` on an SL3 file (which offers
 ///   `9.dng` but not bare `9`) reads back `8`; `"6"` reads back whatever was set before. There is
 ///   no error. So the only honest way to know the version is to read it back.
-/// - v9 turns three sliders into no-ops: writing chroma noise reduction, detail or moiré
-///   reduction changes zero pixels. The UI must disable them rather than let a user move a
-///   control that does nothing.
+/// - Which of the four detail amounts still reach the pixels is a **per-instance** fact, and Apple
+///   publishes it per instance (`isLuminanceNoiseReductionSupported` /
+///   `isColorNoiseReductionSupported` / `isSharpnessSupported` / `isDetailSupported`,
+///   `CIRAWFilter.h:121/129/137/153`). `detailAxes` is that answer, read off the filter that made
+///   these very pixels — see `DetailAxes` for the measured table and for why the UI is driven by
+///   the flags rather than by a pixel probe.
+/// - v9 turns three sliders into no-ops: writing chroma noise reduction, detail or moiré reduction
+///   changes zero pixels. The UI must disable them rather than let a user move a control that does
+///   nothing — and it must disable **exactly** the rows `detailAxes` marks dead, never a prefix guess.
 public struct DecoderCapabilities: Sendable, Equatable {
     /// The string handed to `DecodeOptions.decoderVersion`, if any.
     public let requestedVersion: String?
@@ -28,10 +34,21 @@ public struct DecoderCapabilities: Sendable, Equatable {
     /// The request did not survive: the decoder handed back a different version.
     public var downgraded: Bool { requestedVersion.map { $0 != effectiveVersion } ?? false }
 
-    /// v9 removes these three (measured: writes have zero effect on the pixels).
-    public let supportsChromaNoiseReduction: Bool
-    public let supportsDetail: Bool
-    public let supportsMoireReduction: Bool
+    /// **Which axes this decode honours**, read from the live `CIRAWFilter`'s own `isSupported`
+    /// flags (`DetailAxes.supported(by:)`, after the version read-back and before any amount was
+    /// assigned). One value, two consumers: `RAWDecoder`'s per-axis veto and `InspectorView`'s greyed
+    /// rows. Nothing derives it a second time.
+    public let detailAxes: DetailAxes
+
+    /// Where `detailAxes` came from — Apple, on this very instance, or the coarse version table.
+    public let detailAxesProvenance: DetailAxes.Provenance
+
+    /// v9 removes these three (measured: writes have zero effect on the pixels). Computed from
+    /// `detailAxes`, so the live-filter answer drives them too; on the fallback path they keep the
+    /// version-table meaning they always had.
+    public var supportsChromaNoiseReduction: Bool { detailAxes.cnr }
+    public var supportsDetail: Bool { detailAxes.detail }
+    public var supportsMoireReduction: Bool { detailAxes.moire }
 
     /// The **as-shot white balance** the decoder used for these pixels (`nil` = the filter reported
     /// nothing usable). It lives here because this is the value that travels from a development to
@@ -42,17 +59,24 @@ public struct DecoderCapabilities: Sendable, Equatable {
     public let asShotTemperature: Double?
     public let asShotTint: Double?
 
+    /// - Parameter detailAxes: the live filter's answer. `nil` means "no filter has decoded this
+    ///   photo yet" (a hand-built value in a test, a log line): the version table stands in, and
+    ///   `detailAxesProvenance` says `.versionTable` so a caller can tell the two apart.
     public init(requestedVersion: String?, effectiveVersion: String, defaultVersion: String,
                 supportedVersions: [String] = [],
+                detailAxes: DetailAxes? = nil,
                 asShotTemperature: Double? = nil, asShotTint: Double? = nil) {
         self.requestedVersion = requestedVersion
         self.effectiveVersion = effectiveVersion
         self.defaultVersion = defaultVersion
         self.supportedVersions = supportedVersions
-        let sliders = Self.sliders(for: effectiveVersion)
-        self.supportsChromaNoiseReduction = sliders.chromaNR
-        self.supportsDetail = sliders.detail
-        self.supportsMoireReduction = sliders.moire
+        if let detailAxes {
+            self.detailAxes = detailAxes
+            self.detailAxesProvenance = .filterFlags
+        } else {
+            self.detailAxes = DetailAxes.forDecoderVersion(effectiveVersion)
+            self.detailAxesProvenance = .versionTable
+        }
         self.asShotTemperature = asShotTemperature
         self.asShotTint = asShotTint
     }
@@ -62,11 +86,13 @@ public struct DecoderCapabilities: Sendable, Equatable {
         WhiteBalance(temperature: asShotTemperature, tint: asShotTint)
     }
 
-    /// Per-version slider availability. Only v9 is known to drop controls; everything below keeps
-    /// the full set (v6/v7/v8 all honour them).
+    /// Per-version slider availability — **the fallback**, not the capability claim. Only v9 is known
+    /// to drop controls; everything below keeps the full set (v6/v7/v8 all honour them). It answers
+    /// for the window before a photo has ever been decoded and for callers with no filter; the
+    /// per-instance truth is `DetailAxes.supported(by:)`.
     public static func sliders(for version: String) -> (chromaNR: Bool, detail: Bool, moire: Bool) {
-        if version.hasPrefix("9") { return (false, false, false) }
-        return (true, true, true)
+        let axes = DetailAxes.forDecoderVersion(version)
+        return (axes.cnr, axes.detail, axes.moire)
     }
 
     /// Every version identifier the SDK can hand out (`CIRAWDecoderVersion` constants).
@@ -92,11 +118,13 @@ public struct DecoderCapabilities: Sendable, Equatable {
         return (fallback, true)
     }
 
-    /// One line for the UI / logs. Never claims v9 when v8 ran.
+    /// One line for the UI / logs. Never claims v9 when v8 ran, and never lets a table answer pass
+    /// for Apple's.
     public var summary: String {
         var s = "v\(effectiveVersion)"
         if let r = requestedVersion, downgraded { s += " (requested v\(r), not offered → v\(effectiveVersion))" }
         if !supportsChromaNoiseReduction { s += " · chroma NR / detail / moiré unavailable" }
+        s += " · axes[\(detailAxesProvenance.rawValue)] \(detailAxes.flagSummary)"
         return s
     }
 }
