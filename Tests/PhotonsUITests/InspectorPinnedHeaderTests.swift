@@ -54,7 +54,11 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         let histogramCards: Int
         let scrollViewport: NSRect
         let scrollDocument: NSRect
-        let maskProbe: NSRect
+        /// 派单 073: the scrolling half's own anchor. It used to be the 蒙版 card's `MaskPanelProbe`,
+        /// but 蒙版 now lives in its own **workspace** — the default panel (调整) does not build that
+        /// card at all, so the anchor is the `InspectorCardsProbe` the scroll content publishes about
+        /// itself (it covers the document and exists in every workspace, empty ones included).
+        let contentProbe: NSRect
 
         var infoBlockBottom: CGFloat { infoRows.map(\.maxY).max() ?? 0 }
     }
@@ -75,17 +79,17 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         let histograms = Self.views(of: "HistogramCardView", in: host)
         let scrolls = Self.views(of: "HostingScrollView", in: host)
         let documents = Self.views(of: "DocumentView", in: host)
-        let probes = Self.views(of: "MaskPanelProbe", in: host)
+        let probes = Self.views(of: "InspectorCardsProbe", in: host)
         let histogramPlot = try XCTUnwrap(histograms.first.map { $0.convert($0.bounds, to: host) },
                                           "the histogram plot is not in the tree")
         let scrollViewport = try XCTUnwrap(scrolls.first.map { $0.convert($0.bounds, to: host) },
                                            "the scroll viewport is not in the tree")
         let scrollDocument = try XCTUnwrap(documents.first.map { $0.convert($0.bounds, to: host) },
                                            "the scroll document is not in the tree")
-        // The 蒙版 card's own probe (it already ships one) is the deepest known leaf of the scroll
-        // content — a named anchor inside the scrolling half, not a heuristic pick.
-        let maskProbe = try XCTUnwrap(probes.first.map { $0.convert($0.bounds, to: host) },
-                                      "the mask panel probe is not in the tree")
+        // The scroll content's own probe — a named anchor inside the scrolling half, not a heuristic
+        // pick, and one that does not depend on which workspace is selected (073).
+        let contentProbe = try XCTUnwrap(probes.first.map { $0.convert($0.bounds, to: host) },
+                                         "the scroll content probe is not in the tree")
 
         return Panel(height: height, host: host, window: window,
                      infoRows: rows,
@@ -93,7 +97,7 @@ final class InspectorPinnedHeaderTests: XCTestCase {
                      histogramCards: histograms.count,
                      scrollViewport: scrollViewport,
                      scrollDocument: scrollDocument,
-                     maskProbe: maskProbe)
+                     contentProbe: contentProbe)
     }
 
     private static func views(of className: String, in root: NSView) -> [NSView] {
@@ -220,7 +224,7 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         XCTAssertEqual(short.scrollViewport.height + short.scrollViewport.minY, 420, accuracy: 0.5)
         XCTAssertLessThan(short.scrollViewport.height, tall.scrollViewport.height)
         XCTAssertGreaterThan(short.scrollDocument.height, short.scrollViewport.height,
-                             "the 蒙版 card is below the fold at 420 — the region really is scrollable")
+                             "the 调整 cards run past the fold at 420 — the region really is scrollable")
 
         // Move the scroll offset: the settings move, the pinned blocks do not. This is the assertion
         // that separates "below the pinned block" from "scrolls".
@@ -232,28 +236,28 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         short.host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
 
-        let scrolledProbe = try XCTUnwrap(Self.views(of: "MaskPanelProbe", in: short.host).first
+        let scrolledProbe = try XCTUnwrap(Self.views(of: "InspectorCardsProbe", in: short.host).first
                                             .map { $0.convert($0.bounds, to: short.host) })
         let scrolledRows = Self.views(of: "MarqueeRowView", in: short.host)
             .map { $0.convert($0.bounds, to: short.host) }
         let scrolledPlot = try XCTUnwrap(Self.views(of: "HistogramCardView", in: short.host).first
                                            .map { $0.convert($0.bounds, to: short.host) })
 
-        XCTAssertEqual(short.maskProbe.minY - scrolledProbe.minY, offset, accuracy: 0.5,
+        XCTAssertEqual(short.contentProbe.minY - scrolledProbe.minY, offset, accuracy: 0.5,
                        "the scroll offset did not move the settings: "
-                       + "\(short.maskProbe.minY) → \(scrolledProbe.minY) for \(offset) pt")
+                       + "\(short.contentProbe.minY) → \(scrolledProbe.minY) for \(offset) pt")
         XCTAssertEqual(scrolledPlot.minY, short.histogramPlot.minY, accuracy: 0.001,
                        "the histogram scrolled with the settings")
         XCTAssertEqual(scrolledRows.map(\.minY), short.infoRows.map(\.minY),
                        "the 信息 rows scrolled with the settings")
 
         print(String(format: "SCROLL viewport y %.1f h %.1f (800) vs y %.1f h %.1f (420); "
-                     + "document h %.1f; 蒙版 probe y %.1f → %.1f at offset %.0f; "
+                     + "document h %.1f; content probe y %.1f → %.1f at offset %.0f; "
                      + "pinned y %.1f / %.1f unchanged",
                      tall.scrollViewport.minY, tall.scrollViewport.height,
                      short.scrollViewport.minY, short.scrollViewport.height,
                      short.scrollDocument.height,
-                     short.maskProbe.minY, scrolledProbe.minY, offset,
+                     short.contentProbe.minY, scrolledProbe.minY, offset,
                      scrolledRows.first?.minY ?? -1, scrolledPlot.minY))
     }
 
