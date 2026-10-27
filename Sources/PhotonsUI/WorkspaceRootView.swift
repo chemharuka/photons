@@ -428,9 +428,13 @@ public final class WorkspaceRootView: NSView {
         // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
         // One switch, published by the loupe when the mode actually changes (so a drag tick cannot
         // flicker it), wired here because this view owns both halves.
-        loupeController.onCropModeChange = { [weak self] active in
-            self?.inspectorHost.isEditingGated = active
-        }
+        //
+        // 2026-10-27 — the gate now depends on **two** facts: the mode and the workspace. 变换 *is* the
+        // crop tool's own panel (its header is the 直角尺 button that exits the mode, its last row is
+        // 应用/取消), so gating it would leave the user with a frame they cannot apply from the panel
+        // they just opened. Every other workspace stays inert exactly as §E1 measured it.
+        loupeController.onCropModeChange = { [weak self] _ in self?.updateInspectorGate() }
+        workspaces.onSelectionChange = { [weak self] _ in self?.updateInspectorGate() }
 
         // 蒙版 workspace → the canvas' mask chrome (2026-10-27). `selection` is the panel's one writer
         // (`InspectorWorkspaceState.selection`), and its `onChange` fires synchronously, so the grips
@@ -452,6 +456,19 @@ public final class WorkspaceRootView: NSView {
     public override var acceptsFirstResponder: Bool { true }
 
     // MARK: observation
+
+    /// 072 §E1's event gate, re-decided from its two inputs: the crop mode and the workspace.
+    ///
+    /// The panel goes inert (`hitTest → nil`) while 裁切 mode owns the canvas, **except** in 变换, where
+    /// the panel *is* the crop tool's own controls (2026-10-27: the 直角尺 button, 比例, 角度 and the
+    /// 应用/取消 pair all live in that card). Both callers — `onCropModeChange` and
+    /// `InspectorWorkspaceState.onSelectionChange` — land here, so the two facts cannot be applied
+    /// one without the other, and a workspace switch while the frame is up hands the panel over
+    /// (or away) exactly once.
+    private func updateInspectorGate() {
+        let cropOwnsPanel = inspectorWorkspaces.selection == .transform
+        inspectorHost.isEditingGated = loupeController.isCropToolActive && !cropOwnsPanel
+    }
 
     private func observeModel() {
         bridge.observe({ [weak self] in

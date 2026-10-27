@@ -229,6 +229,11 @@ final class CropBarLayoutTests: XCTestCase {
         // ⌘⏎ and ⌘. pressed on the canvas with no crop mode: nothing is written, nothing is counted.
         // A **second, real** editor window (its own session) so the drag-free assertions cannot borrow
         // the state of the bar's session above.
+        //
+        // 2026-10-27: 应用裁切 / 取消裁切 are no longer menu rows — they are the 裁切 card's two buttons
+        // (whose `isEnabled` is asserted in `TransformPanelTests`). What §D4 says is about the **verbs**,
+        // so the gate is asked of the verbs themselves: a bare `NSMenuItem` carrying the selector gets
+        // the same answer a panel button gets.
         let editor = EditorWindowController()
         let menu = MainMenu.build()
         func item(_ title: String) -> NSMenuItem? {
@@ -242,10 +247,16 @@ final class CropBarLayoutTests: XCTestCase {
             walk(menu)
             return found
         }
-        let applyItem = try XCTUnwrap(item("应用裁切"))
-        let cancelItem = try XCTUnwrap(item("取消裁切"))
-        XCTAssertFalse(editor.validateMenuItem(applyItem), "§D4: menu 应用裁切 is disabled by default")
-        XCTAssertFalse(editor.validateMenuItem(cancelItem), "§D4: menu 取消裁切 is disabled by default")
+        XCTAssertNil(item("应用裁切"), "应用裁切 的菜单行已经搬进裁切卡")
+        XCTAssertNil(item("取消裁切"), "取消裁切 的菜单行已经搬进裁切卡")
+        let applyItem = NSMenuItem(title: "应用裁切",
+                                   action: #selector(EditorWindowController.applyCropAction(_:)),
+                                   keyEquivalent: "")
+        let cancelItem = NSMenuItem(title: "取消裁切",
+                                    action: #selector(EditorWindowController.cancelCropAction(_:)),
+                                    keyEquivalent: "")
+        XCTAssertFalse(editor.validateMenuItem(applyItem), "§D4: 应用裁切 is disabled by default")
+        XCTAssertFalse(editor.validateMenuItem(cancelItem), "§D4: 取消裁切 is disabled by default")
 
         let editorRoot = try XCTUnwrap(editor.rootView)
         editorRoot.loupeController.autoRenderEnabled = false

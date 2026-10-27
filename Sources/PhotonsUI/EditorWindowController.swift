@@ -250,33 +250,26 @@ public final class EditorWindowController: NSWindowController {
     //
     // The menu never touches the document: it asks the loupe's tool to enter, apply or cancel, and
     // the tool owns the draft, the one commit and the camera.
+    //
+    // 2026-10-27 — the 变换 submenu keeps **one** row now (⌘R): 应用 / 取消 / 两个翻转 live in the
+    // inspector's 裁切 card. `applyCropAction` and `cancelCropAction` stay because they are the
+    // responder-chain verbs the panel and `--ui-smoke` call by name (and `CropToolTests` pins that they
+    // exist on the window); they are no longer menu rows.
 
-    /// 变换 ▸ 裁切与旋转 (⌘R): enter the tool, or apply and leave if it is already on.
+    /// 变换 ▸ 裁切 (⌘R) **and** the 裁切 card's 直角尺 button: enter the tool, or apply and leave if it
+    /// is already on.
     @objc public func toggleCropAction(_ sender: Any?) {
         rootView.loupeController.toggleCropTool()
     }
 
-    /// 变换 ▸ 应用裁切 (⌘⏎): one snapshot, one ⌘Z.
+    /// 应用裁切 — one snapshot, one ⌘Z. The card's 应用 button and ↵ on the canvas.
     @objc public func applyCropAction(_ sender: Any?) {
         rootView.loupeController.applyCropTool()
     }
 
-    /// 变换 ▸ 取消裁切 (⌘.): nothing is written.
+    /// 取消裁切: nothing is written. The card's 取消 button and Esc on the canvas.
     @objc public func cancelCropAction(_ sender: Any?) {
         rootView.loupeController.cancelCropTool()
-    }
-
-    /// 变换 ▸ 水平翻转 (⌥⌘H): a document-level geometry action, one ⌘Z.
-    ///
-    /// The same call the crop bar's 水平 switch makes (`CropToolController.toggleFlipHorizontal` →
-    /// `session.applyEdit` + `commitEdit`), so there is one field, one label and one way back.
-    @objc public func flipHorizontalAction(_ sender: Any?) {
-        rootView.loupeController.flipHorizontal()
-    }
-
-    /// 变换 ▸ 垂直翻转 (⌥⌘V).
-    @objc public func flipVerticalAction(_ sender: Any?) {
-        rootView.loupeController.flipVertical()
     }
 
     /// All six rating items share this action; the stars come from the item's tag.
@@ -310,21 +303,11 @@ public final class EditorWindowController: NSWindowController {
             // Ticked while the frame is up, and enabled only where there is a photo to crop.
             item.state = rootView.loupeController.isCropToolActive ? .on : .off
             return session.mode == .loupe && session.anchorID != nil
-        case #selector(applyCropAction(_:)):
-            // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply, and a
-            // live ⌘⏎ that silently did nothing (or worse, committed an untouched document) is the
-            // thing this pins.
+        case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
+            // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or
+            // cancel. (2026-10-27: the two rows moved into the 裁切 card, whose buttons follow the same
+            // rule; these two verbs stay on the responder chain for the panel and `--ui-smoke`.)
             return rootView.loupeController.isCropToolActive
-        case #selector(cancelCropAction(_:)):
-            return rootView.loupeController.isCropToolActive
-        case #selector(flipHorizontalAction(_:)):
-            // 变换 ▸ 翻转: ticked when the document is flipped, live where there is a photo. The tick
-            // reads the **document's** bit — the same one the crop bar's switch shows (072 §F).
-            item.state = rootView.loupeController.isFlippedHorizontally ? .on : .off
-            return session.mode == .loupe && session.anchorID != nil
-        case #selector(flipVerticalAction(_:)):
-            item.state = rootView.loupeController.isFlippedVertically ? .on : .off
-            return session.mode == .loupe && session.anchorID != nil
         case #selector(redoAction(_:)):
             item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
             return session.canRedo

@@ -365,7 +365,7 @@ final class PanelResetTests: XCTestCase {
         XCTAssertTrue(source.contains("private func card<Content: View>(_ title: String,\n"
                                       + "                                     reset: (() -> Void)? = nil,"),
                       "the card builder must take the group reset, or a card cannot get one")
-        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))"),
+        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))"),
                       "the reset must hang on the card's title, not on the card's body")
 
         // 四张参数卡：Light / Color / 细节 / 白平衡 —— 各一处，且都在标题上。
