@@ -243,6 +243,324 @@ extension CombineOp {
     }
 }
 
+// MARK: - the mask panel's rows, as one table
+
+/// One slider row of the 蒙版 card, as data — the same shape `ToneRow` gives the tone cards.
+///
+/// 蒙版 was the last card drawing its own rows: a bare `Slider` with a `Text` beside it, so its
+/// numbers could not be typed, its names had no double-click, and its labels were set in their own
+/// sizes. The fix is the panel's own: **one table per card, one row view** (`SliderRow`), so every
+/// promise the other cards make (label double-click = default, click the number to type it,
+/// `↵`/`Esc`/clamp) is a property of the table rather than a thing this panel remembered to do.
+///
+/// The table is also what makes 「每一根蒙版滑杆」 a loop in a test instead of a screenshot
+/// (`MaskSliderRowTests` walks `all` and resets each row once).
+///
+/// Nothing here invents a number:
+///   · `range` / `format` are `MaskLevelParameter`'s and `MaskAdjustmentParameter`'s own (cited
+///     against `Masks.swift` there);
+///   · `defaultValue` is `Mask.fallback` / `LocalAdjustments.identity` read through the parameter;
+///   · opacity is shown as a **percentage** (the panel has always printed `%.0f%%`), so `document(_:)`
+///     is the one place the row's unit becomes the mask's normalised 0…1.
+public struct MaskSliderRow: Sendable, Identifiable, Equatable {
+
+    /// Which document field the row writes.
+    public enum Target: Sendable, Equatable {
+        case level(MaskLevelParameter)
+        case adjustment(MaskAdjustmentParameter)
+    }
+
+    public var title: String
+    public var target: Target
+    /// The slider's travel, **in the row's own units** (opacity: 0…100 %).
+    public var range: ClosedRange<Double>
+    public var format: String
+    /// 052: decimals while editing (`2` for the normalised rows, `1`/`0` for the ±100 ones).
+    public var decimals: Int
+    /// 052: how the resting readout rounds (`.outward` for the whole-number rows — the panel's rule;
+    /// `.asIs` for the rows that print decimals, like 曝光).
+    public var rounding: InspectorView.SliderRounding
+    /// 047: the undo label one gesture gets — the words the mask panel has always used.
+    public var label: String
+    public var help: String
+
+    /// 046: 蒙版量 is a **render** parameter (it acts on the already-decoded selection), so the row is
+    /// `.knob` — the system accent, no colour of its own. The mask panel has no second palette.
+    public var shape: SliderShape { .knob }
+
+    public var id: String {
+        switch target {
+        case .level(let p): return "mask.level.\(p.rawValue)"
+        case .adjustment(let p): return "mask.adjust.\(p.rawValue)"
+        }
+    }
+
+    /// The row's own units → the document's value. The one conversion in this file.
+    public func document(_ value: Double) -> Double {
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        switch target {
+        case .level(.opacity): return clamped / 100          // percent on screen, 0…1 in the mask
+        case .level, .adjustment: return clamped
+        }
+    }
+
+    /// The document's value → the row's own units.
+    public func display(_ mask: Mask) -> Double {
+        switch target {
+        case .level(let parameter):
+            let stored = parameter.value(mask)
+            return parameter.isPercent ? stored * 100 : stored
+        case .adjustment(let parameter):
+            return mask.adjustments[keyPath: parameter.keyPath]
+        }
+    }
+
+    /// Core's default, in the row's own units (`不透明度` = 100 %, 羽化/精修 = 0, 强度 = 100, …).
+    public var defaultValue: Double {
+        switch target {
+        case .level(let parameter):
+            return parameter.isPercent ? parameter.defaultValue * 100 : parameter.defaultValue
+        case .adjustment(let parameter):
+            return parameter.defaultValue
+        }
+    }
+
+    /// Write one value into a mask **in place** — the whole-card reset uses this to keep every field
+    /// inside one `applyEdit`.
+    public func apply(_ displayValue: Double, to mask: inout Mask) {
+        let value = document(displayValue)
+        switch target {
+        case .level(let parameter): parameter.write(&mask, value)
+        case .adjustment(let parameter): mask.adjustments[keyPath: parameter.keyPath] = value
+        }
+    }
+
+    /// The live/typed path: the session's own write door, so the clamping, the label and the "commit
+    /// only when the gesture ends" rule are the ones the mask panel already had.
+    @MainActor
+    @discardableResult
+    public func write(_ displayValue: Double, into session: CatalogSession, maskID: String,
+                      commit: Bool) -> Bool {
+        session.writeMask(maskID, label: label, commit: commit) { apply(displayValue, to: &$0) }
+    }
+
+    // MARK: the shipped table
+
+    /// 不透明度 / 羽化 / 精修, in that order.
+    public static let level: [MaskSliderRow] = MaskLevelParameter.allCases.map { parameter in
+        MaskSliderRow(title: parameter.label,
+                      target: .level(parameter),
+                      range: parameter.isPercent ? 0 ... 100 : parameter.range,
+                      format: parameter.isPercent ? "%.0f%%" : parameter.format,
+                      decimals: parameter.isPercent ? 0 : 2,
+                      rounding: parameter.isPercent ? .outward : .asIs,
+                      label: "蒙版\(parameter.label)",
+                      help: parameter.help)
+    }
+
+    /// 强度 plus the ten local sliders, in the order `LocalAdjustments` declares them.
+    public static let adjustments: [MaskSliderRow] = MaskAdjustmentParameter.allCases.map { parameter in
+        // 曝光 keeps two decimals (and `.asIs`, like the Light card's 曝光); the rest print whole
+        // numbers and round outward — the same two rules the tone rows follow.
+        let isExposure = parameter == .exposure
+        return MaskSliderRow(title: parameter.label,
+                             target: .adjustment(parameter),
+                             range: parameter.range,
+                             format: parameter.format,
+                             decimals: isExposure ? 2 : 1,
+                             rounding: isExposure ? .asIs : .outward,
+                             label: "局部\(parameter.label)",
+                             help: parameter.help)
+    }
+
+    /// Every parameter row the 蒙版 card draws, in draw order — what `MaskPanelProbe` reports and what
+    /// 「每一根蒙版滑杆都能复位 / 都能输入」 is asserted over.
+    public static var all: [MaskSliderRow] { level + adjustments }
+}
+
+/// One row of the selected shape's own section (中点 / 半径 / 角度 / 容差 / 下限 / 上限 / 软边).
+///
+/// A second table type because these rows read and write a `MaskShape`, not a `Mask`: the shape is a
+/// tagged union, so each row carries the closure that rebuilds its own case. The defaults are the
+/// Core value types' own (`LinearGradientShape.default.midpoint` = 0.5, `RadialGradientShape.default`
+/// radius 0.25 / angle 0, `ColorRangeShape.default.tolerance` = 0.30,
+/// `LuminanceRangeShape.default` 0…1, `SemanticShape.default.softEdge` = 0.20) — never a literal
+/// re-typed here.
+public struct MaskShapeSliderRow: Sendable {
+
+    public var title: String
+    public var range: ClosedRange<Double>
+    public var format: String
+    public var decimals: Int
+    public var rounding: InspectorView.SliderRounding
+    /// The undo label one gesture gets (the words the shape section has always used).
+    public var label: String
+    /// The shape's value in the row's units.
+    public var read: @Sendable (MaskShape) -> Double
+    /// Rebuild the shape with one row changed (the geometry the row does not own is preserved).
+    public var apply: @Sendable (MaskShape, Double) -> MaskShape
+    /// Core's default, in the row's units.
+    public var defaultValue: Double
+
+    /// 046: the shape parameters are render-domain numbers → `.knob` (system accent).
+    public var shape: SliderShape { .knob }
+
+    /// The rows the selected shape actually has — **empty for a brush** (a brush's own numbers are
+    /// the view-state rows below the section) and for a shape this build does not know.
+    public static func rows(for shape: MaskShape) -> [MaskShapeSliderRow] {
+        switch shape {
+        case .linearGradient:
+            return [MaskShapeSliderRow(
+                title: "中点", range: 0.05 ... 0.95, format: "%.2f", decimals: 2, rounding: .asIs,
+                label: "渐变中点",
+                read: { if case .linearGradient(let g) = $0 { return g.midpoint } else { return .nan } },
+                apply: { shape, value in
+                    guard case .linearGradient(let g) = shape else { return shape }
+                    return .linearGradient(LinearGradientShape(start: g.start, end: g.end,
+                                                               midpoint: value))
+                },
+                defaultValue: LinearGradientShape.default.midpoint)]
+
+        case .radialGradient:
+            return [
+                MaskShapeSliderRow(
+                    title: "半径", range: 0.02 ... 1.2, format: "%.3f", decimals: 3, rounding: .asIs,
+                    label: "椭圆半径",
+                    read: { if case .radialGradient(let g) = $0 {
+                        return max(g.radius.x, g.radius.y) } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .radialGradient(let g) = shape else { return shape }
+                        return .radialGradient(RadialGradientShape(center: g.center,
+                                                                   radius: NormalizedPoint(value, value),
+                                                                   angle: g.angle))
+                    },
+                    defaultValue: RadialGradientShape.default.radius.x),
+                MaskShapeSliderRow(
+                    title: "角度", range: -180 ... 180, format: "%.0f°", decimals: 1, rounding: .outward,
+                    label: "椭圆角度",
+                    read: { if case .radialGradient(let g) = $0 { return g.angle } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .radialGradient(let g) = shape else { return shape }
+                        return .radialGradient(RadialGradientShape(center: g.center,
+                                                                   radius: g.radius, angle: value))
+                    },
+                    defaultValue: RadialGradientShape.default.angle),
+            ]
+
+        case .colorRange:
+            return [MaskShapeSliderRow(
+                title: "容差", range: 0.02 ... 1.0, format: "%.2f", decimals: 2, rounding: .asIs,
+                label: "颜色容差",
+                read: { if case .colorRange(let c) = $0 { return c.tolerance } else { return .nan } },
+                apply: { shape, value in
+                    guard case .colorRange(let c) = shape else { return shape }
+                    return .colorRange(ColorRangeShape(samples: c.samples, tolerance: value,
+                                                       smoothness: c.smoothness))
+                },
+                defaultValue: ColorRangeShape.default.tolerance)]
+
+        case .luminanceRange:
+            return [
+                MaskShapeSliderRow(
+                    title: "下限", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: "亮度下限",
+                    read: { if case .luminanceRange(let l) = $0 { return l.low } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .luminanceRange(let l) = shape else { return shape }
+                        // The pair stays ordered (`low ≤ high`), exactly as the drag path writes it.
+                        return .luminanceRange(LuminanceRangeShape(low: min(value, l.high),
+                                                                   high: l.high,
+                                                                   lowFeather: l.lowFeather,
+                                                                   highFeather: l.highFeather))
+                    },
+                    defaultValue: LuminanceRangeShape.default.low),
+                MaskShapeSliderRow(
+                    title: "上限", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: "亮度上限",
+                    read: { if case .luminanceRange(let l) = $0 { return l.high } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .luminanceRange(let l) = shape else { return shape }
+                        return .luminanceRange(LuminanceRangeShape(low: l.low,
+                                                                   high: max(value, l.low),
+                                                                   lowFeather: l.lowFeather,
+                                                                   highFeather: l.highFeather))
+                    },
+                    defaultValue: LuminanceRangeShape.default.high),
+            ]
+
+        case .semantic:
+            return [MaskShapeSliderRow(
+                title: "软边", range: 0 ... 0.6, format: "%.2f", decimals: 2, rounding: .asIs,
+                label: "语义软边",
+                read: { if case .semantic(let s) = $0 { return s.softEdge } else { return .nan } },
+                apply: { shape, value in
+                    guard case .semantic(var s) = shape else { return shape }
+                    s.softEdge = value
+                    return .semantic(s)
+                },
+                defaultValue: SemanticShape.default.softEdge)]
+
+        case .brush, .unsupported:
+            return []
+        }
+    }
+}
+
+// MARK: - the panel's reset verbs, for 蒙版
+
+/// Double-click on a mask row's name, and on the 蒙版 card's title — the same two verbs every other
+/// card has, with the same guarantee: **one act = one snapshot**.
+///
+/// They live on `PanelResets` (not in the view) for 047's reason: the panel and the tests must call
+/// one implementation, or 「复位」 means one thing on screen and another in a test. They are not
+/// `Group` cases — `Group` is the enum `PanelResetTests` holds to exactly four *number* cards, and a
+/// mask is a list; the whole-card verb is spelled `maskCard(_:)`, like `curve()` is for the curve
+/// (which is also not a field group).
+extension PanelResets {
+
+    /// Double-click on 不透明度 / 羽化 / 精修 / 强度 / 曝光 …: that one field back to its Core default.
+    /// `false` when it was already there, so a stray double-click cannot truncate the redo branch.
+    @discardableResult
+    public func mask(_ row: MaskSliderRow, in mask: Mask) -> Bool {
+        guard row.display(mask) != row.defaultValue else { return false }
+        return row.write(row.defaultValue, into: session, maskID: mask.id, commit: true)
+    }
+
+    /// Double-click on 中点 / 半径 / 角度 / 容差 / 下限 / 上限 / 软边: that one shape field back to the
+    /// Core value type's default, one snapshot.
+    @discardableResult
+    public func maskShape(_ row: MaskShapeSliderRow, in mask: Mask, component: Int) -> Bool {
+        guard mask.components.indices.contains(component) else { return false }
+        let current = mask.components[component].shape
+        guard row.read(current) != row.defaultValue else { return false }
+        session.setMaskComponentShape(mask.id, component: component,
+                                      shape: row.apply(current, row.defaultValue),
+                                      commit: true, label: row.label)
+        return true
+    }
+
+    /// Double-click on the 蒙版 card's title: **this mask's parameters** back to their defaults, in one
+    /// snapshot — 不透明度 / 羽化 / 精修 / 反转 and the whole `LocalAdjustments` set.
+    ///
+    /// The drawn shape's geometry (中点 / 半径 / 角度 / 容差 / 下限 / 上限 / 软边) is deliberately **not**
+    /// in here: those numbers describe the gesture the user drew on the photo (a ramp's midpoint, an
+    /// ellipse's radius), and a double-click on the card title must not move the selection somewhere
+    /// nobody drew. Each of them has its own double-click on its own name, and the trash button is how
+    /// a mask goes away.
+    @discardableResult
+    public func maskCard(_ id: String) -> Bool {
+        guard let mask = session.edit.masks.first(where: { $0.id == id }) else { return false }
+        var next = mask
+        for row in MaskSliderRow.level { row.apply(row.defaultValue, to: &next) }
+        next.adjustments = .identity
+        // 反转 is a checkbox, not a row, and its default is the fallback mask's: off.
+        next.invert = Mask.fallback.invert
+        guard next != mask else { return false }
+        return session.writeMask(id, label: InspectorView.Section.masks.title, commit: false) { $0 = next }
+            && session.commitEdit(label: InspectorView.Section.masks.title)
+    }
+}
+
 // MARK: - the session: one writer for every parameter
 
 extension CatalogSession {
