@@ -43,7 +43,18 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// `blackOffset` pattern, not schema 6's `/10`: no stored number changes *meaning* here). The
     /// version is therefore **not** stamped on such a document at decode time — it keeps the number
     /// its own file wrote, and only a document saved by this build carries 7.
-    public static let currentSchemaVersion = 7
+    /// 8 = 2026-10-28 (P0-4): 黑白 — `color.blackAndWhite` (default `false`) and
+    /// `color.bands[i].mix` (−100…100, default 0, on the **same** eight-band table the HSL panel
+    /// edits: `HSLBand.mix` is the per-hue share of the grey, Lightroom's B&W mixer). S3.4 renders
+    /// both; before this version neither existed.
+    ///
+    /// **Nothing migrates, and the encoding is additive.** `blackAndWhite` is written only when it is
+    /// `true` and `mix` only when it is non-zero (the `blackOffset`/`temperature` rule), so a schema-7
+    /// document re-encodes **byte for byte** and an absent key reads as its default: switch off, mixes
+    /// 0, `hasBW == false`, S3.4 not encoded, pixels unchanged. Like schema 7, the version is not
+    /// stamped at decode time on a document that carries neither key — a document keeps the number its
+    /// own file wrote, and only a document this build saves carries 8.
+    public static let currentSchemaVersion = 8
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -170,6 +181,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// and the key chain for nothing.
     public var hasGrain: Bool { effects.hasGrain }
 
+    /// 2026-10-28 (P0-4): does S3.4 exist for this document? Judged **by value** — the 黑白 switch,
+    /// not "the color group exists" and not "a mix is non-zero": a mix with the switch off is a value
+    /// waiting for the switch, and it renders nothing (Lightroom behaves the same way, and it is what
+    /// makes 「切回彩色」 bit-identical with the mixes still in the document).
+    public var hasBlackAndWhite: Bool { color.blackAndWhite }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = EditModel.neutral
@@ -282,11 +299,22 @@ public struct EditModel: Sendable, Equatable, Codable {
         // 076: the color group is two stages now — `bands` is S3.6's, `vibrance`/`saturation` are
         // S3's — so a band drag must not report `.color` (S3 would re-run and produce the same pixels)
         // and a saturation drag must not report `.hsl` (S3.6 would re-run for nothing).
+        //
+        // 2026-10-28: it is three. 黑白's material is the switch plus `bands[i].mix`, so a mix drag
+        // dirties S3.4 and nothing else — not S3.6 (which does not read it) and not S3 (which does not
+        // read the band table at all).
         if color != old.color {
             if color.vibrance != old.color.vibrance || color.saturation != old.color.saturation {
                 s.insert(.color)
             }
-            if color.bands != old.color.bands { s.insert(.hsl) }
+            // Counts are always `ColorGroup.bandCount` after `normalize`, but zip is what makes this
+            // impossible to get wrong if a hand-written document ever says otherwise.
+            let hslMoved = zip(color.bands, old.color.bands).contains {
+                $0.hue != $1.hue || $0.saturation != $1.saturation || $0.luminance != $1.luminance
+            }
+            if hslMoved { s.insert(.hsl) }
+            let mixMoved = zip(color.bands, old.color.bands).contains { $0.mix != $1.mix }
+            if color.blackAndWhite != old.color.blackAndWhite || mixMoved { s.insert(.bw) }
         }
         if effects != old.effects {
             // 2026-10-28: the card is two stages. A vignette drag must not miss a cached grain (S3.7
@@ -423,6 +451,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             // saturation are S3's). Same shape as `.localColor`: a stage key that names the values it
             // reads cannot silently stop tracking them.
             return "hsl=\(color.hslKeyString)"
+
+        case .bw:
+            // 2026-10-28 (P0-4): S3.4's own material — the switch and the eight mixes, nothing else
+            // (the three HSL axes are S3.6's, and a mix value must not be able to move S3.6's key).
+            // Naming the switch is redundant with the link's existence, on purpose: the same
+            // belt-and-braces `bw=1` the reader of a log line needs to see why the stage is there.
+            return "bw=\(color.blackAndWhite ? 1 : 0);\(color.bwMixKeyString)"
 
         case .vignette:
             return effects.keyString
@@ -1242,12 +1277,19 @@ public struct CurvePoint: Sendable, Equatable, Codable, Hashable {
     public var keyString: String { String(format: "%.6f,%.6f", x, y) }
 }
 
-/// Lightroom's Color panel: global saturation, vibrance, and the eight HSL bands.
+/// Lightroom's Color panel: global saturation, vibrance, the eight HSL bands, and 黑白.
 public struct ColorGroup: Sendable, Equatable, Codable {
     public var vibrance: Double      // -100…100, default 0
     public var saturation: Double    // -100…100, default 0
     /// Exactly eight bands, in Lightroom order: red, orange, yellow, green, aqua, blue, purple, magenta.
     public var bands: [HSLBand]
+    /// 黑白 (2026-10-28, P0-4): Lightroom's 「黑白」 switch. `true` means S3.4 converts the colour
+    /// image to monochrome; the per-hue weights that decide how bright each hue lands in the grey are
+    /// `bands[i].mix`, on the **same** eight-band table the HSL panel edits.
+    ///
+    /// Written only when `true`, so a document that never used the switch re-encodes byte for byte
+    /// (the `blackOffset` discipline) and reads back as the pre-S3.4 graph.
+    public var blackAndWhite: Bool
 
     public static let bandCount = 8
 
@@ -1256,10 +1298,12 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     public static let identity = ColorGroup()
 
     public init(vibrance: Double = 0, saturation: Double = 0,
-                bands: [HSLBand] = ColorGroup.identityBands) {
+                bands: [HSLBand] = ColorGroup.identityBands,
+                blackAndWhite: Bool = false) {
         self.vibrance = vibrance
         self.saturation = saturation
         self.bands = ColorGroup.normalize(bands)
+        self.blackAndWhite = blackAndWhite
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1268,7 +1312,18 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         v.vibrance = c.val("vibrance", v.vibrance)
         v.saturation = c.val("saturation", v.saturation)
         v.bands = ColorGroup.normalize(c.val("bands", v.bands))
+        v.blackAndWhite = c.val("blackAndWhite", v.blackAndWhite)
         self = v
+    }
+
+    /// Written by hand for one reason: `blackAndWhite` is **absent** when it is `false`, which is what
+    /// keeps a schema-7 document's JSON byte-identical (§3.2 discipline, the `blackOffset` rule).
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(vibrance, forKey: AnyCodingKey("vibrance"))
+        try c.encode(saturation, forKey: AnyCodingKey("saturation"))
+        try c.encode(bands, forKey: AnyCodingKey("bands"))
+        if blackAndWhite { try c.encode(blackAndWhite, forKey: AnyCodingKey("blackAndWhite")) }
     }
 
     /// Tolerate hand-written or future documents: always eight bands, missing ones identity.
@@ -1278,17 +1333,26 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         return out
     }
 
-    /// The whole group is default — **not** the predicate S3 uses. Since 076 the group feeds two
-    /// stages: S3 reads `vibrance`/`saturation` (its identity flag is those two only) and S3.6 reads
-    /// `bands` (`hasBands`). This one stays what it always was: "this panel has nothing in it".
+    /// The whole group is default — **not** the predicate any of the three stages uses. Since 076 the
+    /// group feeds S3 (`vibrance`/`saturation`) and S3.6 (`bands`); since 2026-10-28 it also feeds
+    /// S3.4 (`blackAndWhite` + `bands[i].mix`). This one stays what it always was: "this panel has
+    /// nothing in it".
     public var isIdentity: Bool {
-        vibrance == 0 && saturation == 0 && bands.allSatisfy { $0.isIdentity }
+        vibrance == 0 && saturation == 0 && !blackAndWhite && bands.allSatisfy { $0.isIdentity }
     }
 
-    /// True when any of the 24 band numbers is non-zero — the predicate 派单 076 makes by **value**,
-    /// never by "the color group exists": S3.6 must not appear in the pipeline for a document whose
-    /// bands are all 0, or the pre-076 trace, key chain and pixels would move.
-    public var hasBands: Bool { !bands.allSatisfy(\.isIdentity) }
+    /// True when any of the 24 HSL numbers (hue/saturation/luminance) is non-zero — the predicate
+    /// 派单 076 makes by **value**, never by "the color group exists": S3.6 must not appear in the
+    /// pipeline for a document whose bands are all 0, or the pre-076 trace, key chain and pixels would
+    /// move.
+    ///
+    /// A `mix` value is deliberately **not** one of the 24: S3.6 reads only the three HSL axes, so a
+    /// document whose only band values are mixes must not encode S3.6 for nothing (the same split 076
+    /// made between `vibrance`/`saturation` and `bands`).
+    public var hasBands: Bool { bands.contains { !$0.isHSLIdentity } }
+
+    /// True when any band carries a 黑白混合 value. Part of S3.4's material, not S3.6's.
+    public var hasMix: Bool { bands.contains { $0.mix != 0 } }
 
     /// `vib=…;sat=…` — S3's material (076).
     public var keyString: String {
@@ -1296,9 +1360,16 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     }
 
     /// `bands=…` — S3.6's material (076). Same spelling the color material used for its band tail, so
-    /// a log line still reads the 24 numbers the way it always did.
+    /// a log line still reads the 24 numbers the way it always did. The mixes are **not** here: they
+    /// are S3.4's, and a mix drag must not miss a cached S3.6 output (`bwGrayKeyString` carries them).
     public var hslKeyString: String {
         "bands=" + bands.map(\.keyString).joined(separator: ";")
+    }
+
+    /// `gray=…` — S3.4's per-hue weights, in band order. All eight, always: the stage's link exists
+    /// only when the switch is on, so there is no "default" spelling to preserve inside it.
+    public var bwMixKeyString: String {
+        "gray=" + bands.map(\.mixKeyString).joined(separator: ";")
     }
 }
 
@@ -1306,15 +1377,54 @@ public struct HSLBand: Sendable, Equatable, Codable, Hashable {
     public var hue: Double         // -100…100 → ±30°
     public var saturation: Double  // -100…100
     public var luminance: Double   // -100…100
+    /// 黑白混合 (2026-10-28, P0-4): this hue's share of the grey, −100…100, default 0.
+    ///
+    /// Lightroom's B&W mixer lives on the same eight hues as its HSL mixer — the panel swaps, the
+    /// bands do not — so it is stored on the band rather than in a second eight-band table. Rendered
+    /// only when `ColorGroup.blackAndWhite` is on (S3.4); a value left behind by a document that has
+    /// since switched back to colour is inert **and encodes nothing**, which is what makes the return
+    /// to colour bit-identical.
+    public var mix: Double
 
-    public init(hue: Double = 0, saturation: Double = 0, luminance: Double = 0) {
+    public init(hue: Double = 0, saturation: Double = 0, luminance: Double = 0, mix: Double = 0) {
         self.hue = hue
         self.saturation = saturation
         self.luminance = luminance
+        self.mix = mix
     }
 
-    public var isIdentity: Bool { hue == 0 && saturation == 0 && luminance == 0 }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = HSLBand()
+        v.hue = c.val("hue", v.hue)
+        v.saturation = c.val("saturation", v.saturation)
+        v.luminance = c.val("luminance", v.luminance)
+        v.mix = c.val("mix", v.mix)
+        self = v
+    }
+
+    /// `mix` is written only when it is non-zero — a schema-7 document's band list re-encodes byte for
+    /// byte, which is the same rule `LightGroup.blackOffset` follows and the reason S3.6's key material
+    /// (`keyString`, three numbers) did not have to move when the fourth arrived.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(hue, forKey: AnyCodingKey("hue"))
+        try c.encode(saturation, forKey: AnyCodingKey("saturation"))
+        try c.encode(luminance, forKey: AnyCodingKey("luminance"))
+        if mix != 0 { try c.encode(mix, forKey: AnyCodingKey("mix")) }
+    }
+
+    /// The three **HSL** axes only — what S3.6 reads, and the predicate `hasBands` asks.
+    public var isHSLIdentity: Bool { hue == 0 && saturation == 0 && luminance == 0 }
+
+    /// The whole band is default, mix included: "this band has nothing in it" (`ColorGroup.isIdentity`).
+    public var isIdentity: Bool { isHSLIdentity && mix == 0 }
+
+    /// `h,s,l` — S3.6's key material for this band (076), unchanged by 黑白.
     public var keyString: String { "\(k(hue)),\(k(saturation)),\(k(luminance))" }
+
+    /// `m` — S3.4's key material for this band.
+    public var mixKeyString: String { k(mix) }
 }
 
 /// Stored, not rendered: sharpening and noise reduction belong on `CIRAWFilter`

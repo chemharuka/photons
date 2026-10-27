@@ -279,7 +279,8 @@ final class HistoryTests: XCTestCase {
         // 056: the masks group feeds S3.5 as well — a mask's hue/saturation moved there.
         XCTAssertEqual(EditHistory.dirtyStages(for: [.masks]), [.maskAtlas, .localApply, .localColor])
         // 076: the color group feeds **two** stages — S3 (vibrance/saturation) and S3.6 (the bands).
-        XCTAssertEqual(EditHistory.dirtyStages(for: [.color]), [.color, .hsl])
+        // 2026-10-28: three — S3.4 (黑白 switch + mixes) sits between them in `RenderStage.order`.
+        XCTAssertEqual(EditHistory.dirtyStages(for: [.color]), [.color, .bw, .hsl])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.light, .masks]),
                        [.sceneLinear, .toneMap, .maskAtlas, .localApply, .localColor])
         XCTAssertFalse(RenderGroup.detail.affectsRender)

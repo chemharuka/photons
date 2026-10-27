@@ -229,7 +229,14 @@ extension EditHistory {
                 bandsBefore[i].saturation, bandsAfter[i].saturation)
             num("color.bands[\(i)].luminance", .color,
                 bandsBefore[i].luminance, bandsAfter[i].luminance)
+            // 2026-10-28 (P0-4): 黑白混合 — the same eight bands, a fourth number per band. It sits
+            // directly under the three it shares a row group with, so a history line reads the band's
+            // four values in panel order.
+            num("color.bands[\(i)].mix", .color, bandsBefore[i].mix, bandsAfter[i].mix)
         }
+        // The 黑白 switch itself: a structural flag, so the row says 「黑白 关 → 开」 rather than a
+        // number (`FieldValue.flag`, the same shape `light.lensCorrections` uses).
+        flag("color.blackAndWhite", .color, before.color.blackAndWhite, after.color.blackAndWhite)
 
         // Detail — stored (XMP) and decode-side amounts share the group, so they share the rows.
         num("detail.sharpening", .detail, before.detail.sharpening, after.detail.sharpening)
@@ -401,6 +408,7 @@ extension EditHistory {
         "light.blackOffset": "黑电平微调",
         "color.vibrance": "自然饱和",
         "color.saturation": "饱和",
+        "color.blackAndWhite": "黑白",
         "detail.sharpening": "锐化",
         "detail.sharpeningRadius": "锐化半径",
         "detail.noiseLuminance": "亮度降噪",
@@ -469,6 +477,7 @@ extension EditHistory {
         case "hue": name = "色相"
         case "saturation": name = "饱和"
         case "luminance": name = "明度"
+        case "mix": name = "黑白混合"
         default: name = String(axis)
         }
         return "HSL[\(index)] \(name)"

@@ -71,11 +71,12 @@ final class PresetSnapshotTests: XCTestCase {
         let document = richEdit()
         let snapshot = EditSnapshot.capture(document)
         // crop 4 edges + straighten 1 + aspect lock 1 + light 9 + rgb curve 1 + saturation 1
-        // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 57 leaves.
+        // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 66 leaves.
         print("sparse snapshot: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
               + "  groups \(snapshot.groups.map(\.rawValue).sorted())")
-        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 57,
-                       "8 geometry + 9 light + 4 curve + 26 color + 5 detail + 5 effects")
+        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 66,
+                       "8 geometry + 9 light + 4 curve + 35 color (2 + switch + 8 bands × 4)"
+                       + " + 5 detail + 5 effects")
         XCTAssertEqual(snapshot.fieldCount, 22,
                        "crop 4 + straighten 1 + aspect 1 + light 9 + rgb curve 1 + saturation 1"
                        + " + one band 3 + sharpening 1 + vignette 1")

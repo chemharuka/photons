@@ -221,6 +221,52 @@ public enum HSLBands {
         return t * t * (3 - 2 * t)
     }
 
+    // MARK: - 黑白 (2026-10-28, P0-4)
+
+    /// How much light `+100` of 黑白混合 adds to the grey: **one stop**.
+    ///
+    /// A stop is the unit the 曝光 slider uses — `grey · 2^(units/100)`, a factor of two of **linear**
+    /// light — and not S3.6's 亮度, which is ±1 stop of *perceptual* lightness (`L · 2^(units/100)`,
+    /// i.e. 8× the light for a mid tone). Two different jobs: 亮度 says "this colour is lighter", the
+    /// 黑白混合 says "this colour deposits more light in the print", which is density, and density is
+    /// linear. Multiplicative either way, so black stays black (`0 · 2^k = 0`) and a shadow cannot be
+    /// lifted by a colour slider it does not contain.
+    public static let mixStopsPerFull: Double = 1
+
+    /// The eight-band mix at one hue, in **slider units** (±100 after the gate) — the kernel's inner
+    /// loop, on the host, exactly like `shift(...)`.
+    ///
+    /// The value is `Σ w_i · mix_i / Σ w_i`, gated by chroma: a neutral pixel has no hue, so it has no
+    /// share to weigh and the answer is exactly `0` (which is what makes `exp2(0) = 1` and leaves the
+    /// grey at `L`). No band value at all on this hue is also `0`, for the same reason.
+    public static func mix(hueDeg: Double, chroma: Double, bands: [HSLBand]) -> Double {
+        let gate = chromaGate(for: chroma)
+        guard gate > 0 else { return 0 }
+        var wSum = 0.0
+        var acc = 0.0
+        for i in 0..<min(bands.count, centresDegrees.count) {
+            let w = weight(i, hueDeg: hueDeg)
+            if w == 0 { continue }
+            acc += w * bands[i].mix
+            wSum += w
+        }
+        guard wSum > 0 else { return 0 }
+        return acc / wSum * gate
+    }
+
+    /// The whole S3.4 stage for one linear-RGB pixel — what `s3_4_bw.metal` computes, in Double.
+    ///
+    /// **The grey is the pixel's OKLab lightness, cubed back into linear light** (`L³` is what
+    /// `OKLCh.toLinear(L: C: 0)` returns, and it is the value a neutral pixel of that lightness already
+    /// has), lifted by the hue's mix: `L³ · 2^(mix/100)`. `HSLTests`/`BlackAndWhiteTests` hold the
+    /// kernel to this, so a change of space, of lift or of gate cannot happen on one side only.
+    public static func gray(_ rgb: SIMD3<Double>, bands: [HSLBand]) -> Double {
+        let lch = OKLCh.fromLinear(rgb)
+        let m = mix(hueDeg: lch.hue, chroma: lch.C, bands: bands)
+        let linear = lch.L * lch.L * lch.L
+        return max(linear * pow(2, m / 100 * mixStopsPerFull), 0)
+    }
+
     /// The whole stage for one linear-RGB pixel: what S3.6 does, in Double.
     ///
     /// **The three sliders' definitions** (076 §4):
