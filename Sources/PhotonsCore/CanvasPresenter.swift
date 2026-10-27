@@ -73,6 +73,38 @@ public struct PresentWindow: Equatable, Sendable {
 /// `RenderGraph` and the drawable.
 public final class CanvasPresenter {
 
+    /// 054 — the colour of the canvas **around** the picture: `#0F0F0F`.
+    ///
+    /// One definition for the four places that must not drift: the shader's matte (`present.metal`),
+    /// the render pass's clear colour, and the two layer backgrounds in `LoupeController`. The bands
+    /// around a fitted picture are *not* a layer colour — S2/S4 write `float4(0)` outside the
+    /// photograph, so the black lives **in the canvas texture** and the matte has to be painted by the
+    /// present pass. The layer colour only covers the frame before the first drawable arrives, and the
+    /// clear colour only the area a triangle does not reach; both are set to the same value so the
+    /// canvas never flashes black on its way to grey.
+    ///
+    /// The value is a **display-encoded** (`sRGB`-encoded) 8-bit code, because that is the space
+    /// `#0F0F0F` is written in. The 16-bit layer stores linear light, so that path needs
+    /// `linear` — the same number through the sRGB EOTF — and `present.metal` gets it by running the
+    /// display value through `present_transfer`, exactly as it does for every photograph pixel.
+    public enum CanvasMatte {
+        /// `#0F` — 15 of 255.
+        public static let eightBitValue: UInt8 = 0x0F
+        /// `0F0F0F` as the display-encoded value every 8-bit path stores.
+        public static let displayEncoded: Double = Double(eightBitValue) / 255
+        /// The same colour as linear light, for the `rgba16Float` / extended-linear drawable.
+        public static let linear: Double = {
+            let v = displayEncoded
+            return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }()
+
+        /// The render pass's clear colour, in the transfer function of the attachment.
+        public static func clearColor(linear: Bool) -> MTLClearColor {
+            let v = linear ? self.linear : displayEncoded
+            return MTLClearColor(red: v, green: v, blue: v, alpha: 1)
+        }
+    }
+
     /// How the drawable stores its pixels. Chosen by what the layer accepts, not by a preference.
     public enum Storage: String, Sendable {
         /// rgba16Float + `extendedLinearDisplayP3`; values are linear light, >1 allowed (EDR-ready).
@@ -143,10 +175,21 @@ public final class CanvasPresenter {
     /// A layer that refuses a 16-bit drawable (`nextDrawable()` returning nil) falls back to the
     /// 8-bit sRGB path **once**, and keeps that choice: silently retrying every frame would halve the
     /// frame rate on exactly the machines where it failed.
+    ///
+    /// **`pictureRect`** (054) is where the photograph sits **inside the frame texture**, in canvas
+    /// pixels of the drawable — `RenderResult.pictureRect` for a settled frame. The pass paints
+    /// `#0F0F0F` outside it, which is the letterbox the user sees in fit mode; inside it every byte is
+    /// unchanged. `nil` — every caller that has not been wired up, and every caller whose texture is
+    /// the picture itself — means "the picture is the whole canvas", i.e. no matte at all, and is
+    /// bit-for-bit 025's output. Pass it only when the texture was rendered for exactly this drawable
+    /// size: the rect is normalised by the drawable, so a frame rendered for a different canvas would
+    /// put the boundary in the wrong place. With a `backdrop` the matte is not drawn at all (the canvas
+    /// outside the main window is the picture's own low-res continuation), so the rect is ignored.
     @discardableResult
     public func present(_ texture: MTLTexture, in layer: CAMetalLayer, wantsEDR: Bool = false,
                         drawableSize: ImageSize? = nil, window: PresentWindow = .whole,
                         backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
+                        pictureRect: ImageRect? = nil,
                         onComplete: (() -> Void)? = nil) -> Bool {
         let target = drawableSize ?? ImageSize(width: texture.width, height: texture.height)
         let size = CGSize(width: max(1, target.width), height: max(1, target.height))
@@ -172,7 +215,9 @@ public final class CanvasPresenter {
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // 054: the same matte the fragment paints, so the frame a drawable does not cover (first frame,
+        // a clipped edge) is grey from the very first present instead of flashing black.
+        pass.colorAttachments[0].clearColor = CanvasMatte.clearColor(linear: storage == .linear16)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
             lastFailure = "no render encoder"
             return false
@@ -184,7 +229,7 @@ public final class CanvasPresenter {
                                                       pixelFormat: drawable.texture.pixelFormat)
             var params = Self.makeParams(linearize: storage == .linear16, window: window,
                                          backdrop: backdrop, backdropWindow: backdropWindow,
-                                         canvas: target)
+                                         canvas: target, pictureRect: pictureRect)
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentTexture(texture, index: 0)
             // Bound even when there is no backdrop: the fragment's two-sample branch is uniform but
@@ -230,19 +275,25 @@ public final class CanvasPresenter {
     /// `backdrop == nil` is the 025 path unchanged: one sample, `clamp_to_edge`, and the output is
     /// **byte for byte** what it was before this parameter existed (pinned by
     /// `BackdropPresenterTests.testNoBackdropOutputIsByteIdenticalTo025`).
+    ///
+    /// `pictureRect` (054) is the same argument `present` takes: the photograph's rect inside the
+    /// frame texture, in canvas pixels of `target`. Outside it the pass writes `#0F0F0F`. It is the
+    /// only way a test can look at the matte, since the on-screen drawable is `framebufferOnly`.
     @discardableResult
     public func render(_ texture: MTLTexture, window: PresentWindow = .whole,
                        backdrop: MTLTexture? = nil, backdropWindow: PresentWindow = .whole,
+                       pictureRect: ImageRect? = nil,
                        into target: MTLTexture, linearize: Bool? = nil) -> Bool {
         guard let cb = queue.makeCommandBuffer() else {
             lastFailure = "no command buffer"
             return false
         }
+        let linear = linearize ?? (target.pixelFormat == .rgba16Float)
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].clearColor = CanvasMatte.clearColor(linear: linear)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
             lastFailure = "no render encoder"
             return false
@@ -251,10 +302,10 @@ public final class CanvasPresenter {
             let pipeline = try kernels.renderPipeline(file: "present", vertex: "present_vertex",
                                                       fragment: Self.fragmentName(backdrop),
                                                       pixelFormat: target.pixelFormat)
-            let linear = linearize ?? (target.pixelFormat == .rgba16Float)
             var params = Self.makeParams(linearize: linear, window: window,
                                          backdrop: backdrop, backdropWindow: backdropWindow,
-                                         canvas: ImageSize(width: target.width, height: target.height))
+                                         canvas: ImageSize(width: target.width, height: target.height),
+                                         pictureRect: pictureRect)
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentTexture(texture, index: 0)
             enc.setFragmentTexture(backdrop ?? texture, index: 1)
@@ -294,9 +345,19 @@ public final class CanvasPresenter {
 
     /// Fills every field of `PresentParams`. One place, so `present` and `render` cannot disagree —
     /// and so a test can pin the values without a drawable.
+    ///
+    /// `d` is the one field whose *source* depends on the fragment that will read it, because the two
+    /// fragments ask different questions:
+    ///
+    /// - with a **backdrop** the feather ramps against the main window's rect on the canvas, which is
+    ///   the window (`-u0/du`, `1/du`) — 037's meaning, untouched;
+    /// - without one, `d` is where the **photograph** is (`pictureRect`, 054), and the fragment paints
+    ///   `#0F0F0F` outside it. No picture rect means `(0, 0, 1, 1)` — "the picture is the whole
+    ///   canvas", no matte — which is what every pre-054 caller gets, and why the pinned 025 hashes
+    ///   (identity, shrink, zoom) do not move.
     static func makeParams(linearize: Bool, window: PresentWindow,
                            backdrop: MTLTexture?, backdropWindow: PresentWindow,
-                           canvas: ImageSize) -> PresentParams {
+                           canvas: ImageSize, pictureRect: ImageRect? = nil) -> PresentParams {
         // A degenerate window has no rectangle to feather against; treat it as "no backdrop" rather
         // than dividing by zero and blending against garbage.
         let usable = backdrop != nil && window.du > 1e-9 && window.dv > 1e-9
@@ -304,7 +365,19 @@ public final class CanvasPresenter {
         let u0 = Double(usable ? window.u0 : 0), v0 = Double(usable ? window.v0 : 0)
         // uv = u0 + p·du, so the picture occupies p ∈ [-u0/du, (1-u0)/du] — the rect in
         // canvas-normalised coordinates that the fragment feathers against.
-        let rect = SIMD4<Float>(Float(-u0 / du), Float(-v0 / dv), Float(1 / du), Float(1 / dv))
+        let windowRect = SIMD4<Float>(Float(-u0 / du), Float(-v0 / dv), Float(1 / du), Float(1 / dv))
+        // 054: the photograph's own rect, normalised by the canvas the fragment works in. Only the
+        // no-backdrop fragment reads it (the backdrop path is the picture everywhere), so a backdrop
+        // request keeps 037's window rect and cannot be pulled off its feather by this argument.
+        let picture: SIMD4<Float>
+        if let pictureRect, !pictureRect.isEmpty, canvas.width > 0, canvas.height > 0 {
+            let w = Float(canvas.width), h = Float(canvas.height)
+            picture = SIMD4(Float(pictureRect.x) / w, Float(pictureRect.y) / h,
+                            Float(pictureRect.width) / w, Float(pictureRect.height) / h)
+        } else {
+            picture = SIMD4(0, 0, 1, 1)
+        }
+        let rect = usable ? windowRect : picture
         let featherPixels = Self.backdropFeatherPixels
         let feather = SIMD4<Float>(Float(featherPixels / Double(canvas.width)),
                                    Float(featherPixels / Double(canvas.height)),
@@ -331,7 +404,9 @@ public final class CanvasPresenter {
         var b: SIMD4<Float>
         /// The backdrop's sampled window, same encoding. Only read when `e.z != 0`.
         var c: SIMD4<Float>
-        /// The main frame's rectangle **on the canvas**, normalised: `xy` = origin, `zw` = size.
+        /// The picture's rectangle **on the canvas**, normalised: `xy` = origin, `zw` = size.
+        /// Read by `present_fragment` (054: the matte is painted outside it) and by the backdrop
+        /// fragment's feather (037: the main window's rect). See `makeParams` for which one it holds.
         var d: SIMD4<Float>
         /// `xy` = the feather width per axis (canvas-normalised, measured inside the rect),
         /// `z` = has backdrop.

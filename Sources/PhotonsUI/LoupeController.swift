@@ -5,6 +5,20 @@ import Metal
 import PhotonsCore
 import PhotonsCatalog
 
+extension NSColor {
+    /// 054 — the colour of the canvas around the picture: `#0F0F0F`, from
+    /// `CanvasPresenter.CanvasMatte` and nowhere else.
+    ///
+    /// The bands around a fitted photograph are painted by the present pass (they live *in* the canvas
+    /// texture — S2/S4 write 0 there), so this colour is only what shows while there is no drawable
+    /// yet, or behind a layer that has not been drawn into. It is the same value as the fragment's
+    /// matte and the pass's clear colour so the canvas cannot flash black on its way to grey.
+    static let canvasMatte = NSColor(srgbRed: CGFloat(CanvasPresenter.CanvasMatte.displayEncoded),
+                                     green: CGFloat(CanvasPresenter.CanvasMatte.displayEncoded),
+                                     blue: CGFloat(CanvasPresenter.CanvasMatte.displayEncoded),
+                                     alpha: 1)
+}
+
 /// The loupe canvas: a plain `NSView` whose backing layer is a `CAMetalLayer`.
 ///
 /// No `NSScrollView`, no layer zooming, no `MTKView` (research `ui-stack.md` F6: every editor that
@@ -41,8 +55,10 @@ public final class LoupeCanvasView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        // The canvas is the matte-black surface the photo sits on, so a fit photo reads as a photo.
-        metalLayer.backgroundColor = NSColor.black.cgColor
+        // The canvas is the matte surface the photo sits on, so a fit photo reads as a photo. 054: it
+        // is `#0F0F0F`, the same value the present pass paints outside the picture — this colour is
+        // only seen before the first drawable arrives.
+        metalLayer.backgroundColor = NSColor.canvasMatte.cgColor
         metalLayer.isOpaque = true
     }
 
@@ -386,6 +402,11 @@ public final class LoupeController: NSViewController {
         public let texture: MTLTexture
         public let canvas: ImageSize
         public let content: ImageSize
+        /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.pictureRect`,
+        /// carried so the present pass can paint the canvas matte (`#0F0F0F`) around the picture and
+        /// never over it. The letterbox bands are *in* the texture (S2/S4 write 0 outside the picture), so
+        /// this rect is the only thing that says where they are.
+        public let pictureRect: ImageRect
         public let decodeScale: Float
         public let decodeMilliseconds: Double
         public let renderMilliseconds: Double
@@ -963,7 +984,9 @@ public final class LoupeController: NSViewController {
 
     public override func loadView() {
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.cgColor
+        // 054: the view behind the canvas is the same `#0F0F0F` as the matte the pass paints, so a
+        // resize that exposes it for a frame shows grey, not a black edge.
+        container.layer?.backgroundColor = NSColor.canvasMatte.cgColor
         canvasView.frame = container.bounds
         canvasView.autoresizingMask = [.width, .height]
         canvasView.controller = self
@@ -1469,6 +1492,12 @@ public final class LoupeController: NSViewController {
     // (instead of the landing frame being recycled the moment it is presented).
     private var canvasTexture: (texture: MTLTexture, graph: RenderGraph?)?
 
+    /// 054: where the photograph sat inside `canvasTexture`, in canvas pixels, and the canvas it was
+    /// normalised against. `cancelZoomBridge` re-presents that same texture with `window: .whole`; without
+    /// this the matte it paints would cover the photograph, because a canvas-sized frame's letterbox is
+    /// inside the texture and the rect is the only thing that says where the picture is.
+    private var canvasPicture: (rect: ImageRect, canvas: ImageSize)?
+
     /// The bridge's display-cadence driver. A `Timer` on the main run loop in `.common` mode, at
     /// 120 Hz: the window is a *parameter of the present pass*, not a layer property, so nothing in
     /// Core Animation can interpolate it for us — and a present is a full-screen quad, i.e. the same
@@ -1717,9 +1746,13 @@ public final class LoupeController: NSViewController {
                   let presenter = self.presenter else { return }
             let window = PresentWindow.whole
             let drawn = self.backdropTexture(for: window)
+            // 054: the same frame is going back on the layer at `window: .whole`, so it needs the same
+            // picture rect it was presented with — otherwise the matte would grey out the photograph.
+            let picture = self.canvasPicture.flatMap { $0.canvas == self.viewportPixels ? $0.rect : nil }
             presenter.present(stuck, in: self.canvasView.metalLayer,
                               wantsEDR: self.wantsExtendedDynamicRange,
-                              drawableSize: self.viewportPixels, window: window, backdrop: drawn)
+                              drawableSize: self.viewportPixels, window: window, backdrop: drawn,
+                              pictureRect: picture)
             self.recordBackdropPresent(window: window, drawn: drawn, serial: 0)
         }
     }
@@ -3404,6 +3437,7 @@ public final class LoupeController: NSViewController {
         let clipped = (session?.highlightWarning ?? false)
             ? HighlightWarning.grid(of: texture) : nil
         return FrameResult(texture: texture, canvas: result.canvas, content: result.content,
+                           pictureRect: result.pictureRect,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
@@ -3526,10 +3560,15 @@ public final class LoupeController: NSViewController {
         // canvas and the pass gets no backdrop — the rule is the window's, not this call site's.
         let settledWindow = PresentWindow.whole
         let drawn = backdropTexture(for: settledWindow)
+        // 054: that same canvas-sized frame letterboxes the photograph with 0 around it (S2/S4 write
+        // the matte into the texture), so the present pass needs the picture's rect to put `#0F0F0F`
+        // around it instead of showing those zeros as black. Only when the frame was rendered for
+        // exactly this drawable: the rect is normalised by the drawable's size.
+        let picture = frame.canvas == canvas ? frame.pictureRect : nil
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, window: settledWindow,
-                                   backdrop: drawn) { [weak self] in
+                                   backdrop: drawn, pictureRect: picture) { [weak self] in
             guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
@@ -3555,6 +3594,7 @@ public final class LoupeController: NSViewController {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)
+        canvasPicture = picture.map { ($0, canvas) }
         recordBackdropPresent(window: settledWindow, drawn: drawn, serial: 0)
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
