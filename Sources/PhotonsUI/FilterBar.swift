@@ -77,13 +77,30 @@ enum FilterDisplay {
         }
     }
 
-    /// The slot control's own title: 「全部星级」 when nothing is ticked, else 「星级 1★、2★」.
+    /// The slot control's own title, in three states (051).
+    ///
+    /// Nothing ticked → 「全部星级」. Exactly one value → 「星级 5★」, because the value *is* the answer.
+    /// Two or more → 「部分星级」: spelling out 「星级 1★、2★、5★」 spends 200 pt to say "some" and pushes
+    /// the other slots off the bar, which is the failure 050 just fixed from the other end.
+    ///
+    /// **Boolean dimensions keep the enumeration.** 闪光灯 and GPS only ever offer 有/无, so 「部分闪光灯」
+    /// would read like a bug: one tick there is still a complete answer, and 050's chips are gone, so
+    /// the bar is the only place that says which one.
     static func slotTitle(_ slot: FilterSlot, cameraLabels: [String: String] = [:]) -> String {
-        guard !slot.values.isEmpty else { return "全部\(title(slot.dimension))" }
-        let joined = slot.values
-            .map { value(slot.dimension, $0, cameraLabels: cameraLabels) }
-            .joined(separator: "、")
-        return "\(title(slot.dimension)) \(joined)"
+        let name = title(slot.dimension)
+        guard !slot.values.isEmpty else { return "全部\(name)" }
+        if Self.isBoolean(slot.dimension) || slot.values.count == 1 {
+            let shown = slot.values
+                .map { value(slot.dimension, $0, cameraLabels: cameraLabels) }
+                .joined(separator: "、")
+            return "\(name) \(shown)"
+        }
+        return "部分\(name)"
+    }
+
+    /// 有/无 dimensions — the two whose facet list is a fixed pair rather than a ladder.
+    static func isBoolean(_ dimension: FilterDimension) -> Bool {
+        dimension == .flash || dimension == .gps
     }
 }
 
@@ -650,7 +667,12 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     func slotChecklistRows(at index: Int) -> [FilterChecklistRow] {
         guard filter.slots.indices.contains(index) else { return [] }
         let slot = filter.slots[index]
-        var rows = [FilterChecklistRow(title: FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels),
+        // 051: the accent row at the top of a slot's list is an **action**, so it says what it does.
+        // It used to repeat the selection (「星级 1★、2★、5★」) in blue, which read as a value and made
+        // the list's first line longer than the button that opened it.
+        var rows = [FilterChecklistRow(title: slot.values.isEmpty
+                                        ? "全部\(FilterDisplay.title(slot.dimension))"
+                                        : "取消选择",
                                        enabled: !slot.values.isEmpty,
                                        kind: .action)]
         let values = facetValues(slot.dimension)

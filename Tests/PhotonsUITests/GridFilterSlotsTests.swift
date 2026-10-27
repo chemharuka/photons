@@ -186,15 +186,61 @@ final class GridFilterSlotsTests: XCTestCase {
 
     func testOneSlotCanHoldSeveralValuesShownJoinedByCommas() {
         tick(["1", "5"], at: 0)
-        XCTAssertEqual(bar.slotTitle(at: 0), "星级 1★、5★")
+        // 051: two or more values collapse to 「部分星级」 — the bar says *that* some are picked and
+        // spends the recovered width on the other slots, not on enumerating this one.
+        XCTAssertEqual(bar.slotTitle(at: 0), "部分星级")
         XCTAssertEqual(bar.slotValues(at: 0), ["1", "5"])
 
         // 1★ OR 5★ → the 5★ and the 1★ photos (not the 3★, the 2★ or the unrated one).
         XCTAssertEqual(Set(session.assets.map(\.filename)), ["a.dng", "d.dng"])
 
         tick(["1", "2", "5"], at: 0)
-        XCTAssertEqual(bar.slotTitle(at: 0), "星级 1★、2★、5★", "the owner's own example")
+        XCTAssertEqual(bar.slotTitle(at: 0), "部分星级", "the owner's own example: three values are 部分")
         XCTAssertEqual(Set(session.assets.map(\.filename)), ["a.dng", "d.dng", "e.dng"])
+    }
+
+    /// 051: the three states of a slot title, and the accent row that says what it *does*.
+    ///
+    /// The rule is the owner's: 「选择后，菜单名称改成部分相机/部分ISO，除非只选择了一个，此时就用所选名称。
+    /// 这个逻辑对布尔类型的选项不成立」.
+    func testTheSlotTitleSaysPartInsteadOfListingValues() {
+        XCTAssertEqual(bar.slotTitle(at: 0), "全部星级", "nothing ticked")
+        XCTAssertEqual(bar.slotMenuTitles(at: 0).first, "全部星级",
+                       "with nothing ticked the action row is still 「全部…」 (and disabled)")
+
+        tick(["5"], at: 0)
+        XCTAssertEqual(bar.slotTitle(at: 0), "星级 5★", "one value *is* the answer, so name it")
+
+        tick(["5", "1"], at: 0)
+        XCTAssertEqual(bar.slotTitle(at: 0), "部分星级")
+        bar.openSlotPopover(at: 0)
+        XCTAssertEqual(bar.slotMenuTitles(at: 0).first, "取消选择",
+                       "the accent row is an action: it must not repeat the selection it would clear")
+        bar.closeSlotPopover()
+
+        // A ladder dimension whose values are long words, not stars.
+        tick([], at: 0)
+        XCTAssertEqual(bar.slotTitle(at: 0), "全部星级")
+    }
+
+    /// 布尔维度不适用「部分」：闪光灯/GPS 只有有/无，说「部分闪光灯」读起来像 bug。
+    func testBooleanDimensionsKeepTheirWord() throws {
+        // 五个默认槽位是满的，`choose` 加不进第六个维度 —— 先腾出位置再选闪光灯。
+        clearDimensions()
+        choose(.flash)
+        let slot = try XCTUnwrap(bar.slotDimensions.firstIndex(of: .flash))
+        XCTAssertEqual(bar.slotTitle(at: slot), "全部闪光灯")
+
+        tick([FilterValue.yes], at: slot)
+        XCTAssertEqual(bar.slotTitle(at: slot), "闪光灯 有", "a boolean tick is a complete answer")
+        bar.openSlotPopover(at: slot)
+        XCTAssertEqual(bar.slotMenuTitles(at: slot).first, "取消选择")
+        bar.closeSlotPopover()
+
+        tick([FilterValue.yes, FilterValue.no], at: slot)
+        XCTAssertEqual(bar.slotValues(at: slot), [FilterValue.yes, FilterValue.no])
+        XCTAssertEqual(bar.slotTitle(at: slot), "闪光灯 有、无",
+                       "both is still spelled out, not 「部分闪光灯」")
     }
 
     func testSlotsAreAndedTogether() {
@@ -506,7 +552,7 @@ final class GridFilterSlotsTests: XCTestCase {
         bar.performSlotRow(at: one)
         settle()
         XCTAssertEqual(bar.slotValues(at: 0), ["5", "1"])
-        XCTAssertEqual(bar.slotTitle(at: 0), "星级 5★、1★")
+        XCTAssertEqual(bar.slotTitle(at: 0), "部分星级")
         XCTAssertTrue(bar.isSlotPopoverOpen(at: 0))
 
         bar.closeSlotPopover()
