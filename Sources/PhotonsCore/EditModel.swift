@@ -619,8 +619,9 @@ public struct LevelPair: Sendable, Equatable {
 /// 派单 030 moved this curve from S3 (after the tone map, on 0…1 display data) to **S1.7** (before
 /// the tone map, on unbounded scene-linear light), so the two axes mean new things:
 ///
-///   · x is the **log-light coordinate** `u = log1p(x/x0)/K` of `HDRCurveAxis` — `u = 0` is zero
-///     light, `u = 0.7500` is SDR white, `u = 1` is +4 EV (044: was +6);
+///   · x is the **axis coordinate** `u` of `HDRCurveAxis` — since 062 the histogram's own axis, so
+///     the left half of the card is SDR display code 0–255 (`u = 0` is zero light, `u = 0.5000` is
+///     SDR white) and the right half is +0…+4 EV (`u = 1`);
 ///   · y is the same coordinate, i.e. the curve answers "map this u to that u".
 ///
 /// The point lists keep their shape, their 0…1 range and `CurvePoint.linear` — only the meaning of

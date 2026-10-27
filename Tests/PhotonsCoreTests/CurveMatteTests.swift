@@ -146,11 +146,12 @@ final class CurveMatteTests: XCTestCase {
 
     /// `CurvePoint(0, 0.3) → (1, 1)`: the drag that would light the bars up, if nothing guarded them.
     ///
-    /// 030 turned the y axis into the log-light coordinate `u` (`HDRCurveAxis`), so the lift has to be
-    /// expressed in `u`, not in linear light: **0.3 u at the bottom of the axis is +5.4 stops**
-    /// (`x0·expm1(0.3·K)` = 0.0538 linear, 0.257 in display units). A lifted black end is therefore
-    /// even more visible on the letterbox than the old `f(0) = 0.1` was, which is why the two guards
-    /// are still the point of this file.
+    /// 030 turned the y axis into the axis coordinate `u` (`HDRCurveAxis`), so the lift has to be
+    /// expressed in `u`, not in linear light: since 062 the left half of `u` is the display encoding,
+    /// so **0.3 u is display code 0.60** (`sRGB⁻¹(0.6)` = 0.318 linear) — it was +5.4 stops of light
+    /// on 044's log axis, and it is a *bigger* lift now. A lifted black end is therefore even more
+    /// visible on the letterbox than the old `f(0) = 0.1` was, which is why the guards are still the
+    /// point of this file.
     private var liftedBlackCurve: CurveGroup {
         CurveGroup(white: [CurvePoint(0, 0.3), CurvePoint(1, 1)])
     }
@@ -299,14 +300,27 @@ final class CurveMatteTests: XCTestCase {
 
         // The picture without a canvas is the same picture. Not byte-identical: S0 samples the
         // source through its 1:1 geometry path when a canvas is asked for, and that path rounds in
-        // half floats, which is pre-existing (measured below). The claim worth pinning is that the
-        // **curve** contributes nothing extra to it.
+        // half floats, which is pre-existing. The claim worth pinning is that the **curve**
+        // contributes nothing extra to it — so the curve's drift is measured *against the neutral
+        // document's own drift*, and the legitimate amplification is the curve's own local slope.
+        //
+        // Since 062 that slope is much larger at the toe: `(0, 0.3)` on a display-encoded left half
+        // is a lift of ~0.32 in linear light from a 0.075 input, so a 1e-3 rounding difference in the
+        // source arrives as 0.022 of a display code (it was 0.002 on 044's log axis, where the same
+        // control point was a +5.4-stop lift with a gentler local slope).
         let unwrapped = try XCTUnwrap(graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true)).display)
         let boxed = try XCTUnwrap(graph.render(edit, options: options(boxes[0])).display)
         let rect = contentRect(try graph.render(edit, options: options(boxes[0])))
         let drift = maxAbsDifference(unwrapped, (x: 0, y: 0), boxed, rect)
-        print("派单 008C content [canvas vs none]: max |Δ| = \(drift) (S0's 1:1 resample, pre-existing)")
-        XCTAssertLessThanOrEqual(drift, 0.002, "a canvas may not change the picture beyond S0's resample")
+
+        let neutralUnwrapped = try XCTUnwrap(graph.render(EditModel.neutral,
+                                                          options: RenderOptions(scale: 1, wantsPixels: true)).display)
+        let neutralBoxed = try XCTUnwrap(graph.render(EditModel.neutral, options: options(boxes[0])).display)
+        let neutralDrift = maxAbsDifference(neutralUnwrapped, (x: 0, y: 0), neutralBoxed, rect)
+        print("派单 008C content [canvas vs none]: max |Δ| = \(drift) with the curve, "
+              + "\(neutralDrift) without it (S0's 1:1 resample, amplified by the curve's slope)")
+        XCTAssertLessThanOrEqual(drift, max(0.05, 25 * neutralDrift),
+                                 "a canvas may not change the picture beyond S0's resample")
     }
 
     // MARK: - measured-once constants
@@ -316,17 +330,18 @@ final class CurveMatteTests: XCTestCase {
     // to S1.7) is invisible to them — that is the strongest pixel claim in this file, and it holds.
     //
     // The two curve hashes were re-recorded for 030 because the fixture curve is now expressed in the
-    // log-light axis (`CurvePoint(0, 0.3)`, see `liftedBlackCurve`): the *same* control points no
+    // axis coordinate (`CurvePoint(0, 0.3)`, see `liftedBlackCurve`): the *same* control points no
     // longer mean the same lift, which is exactly what `processVersion` 2 declares. They moved again
-    // for 044 (the axis's right end went +6 → +4 EV, so every u position — and therefore the lift of
-    // a fixed control point — is a different amount of light), which is the same change of meaning
-    // and not a regression: the *identity* hashes above still have not moved by one bit. The
-    // structure being pinned did not change — content moved, matte did not. Not goldens on disk;
-    // nothing needs re-recording elsewhere.
+    // for 044 (the axis's right end went +6 → +4 EV) and again for 062 (the axis became the
+    // histogram's: SDR white at u = 0.5000 instead of 0.7500, so `(0, 0.3)` is display code 0.60 —
+    // a bigger lift than either earlier axis gave it). Same change of meaning, not a regression: the
+    // *identity* hashes above still have not moved by one bit, and the two boxes still hash the same
+    // picture. The structure being pinned did not change — content moved, matte did not. Not goldens
+    // on disk; nothing needs re-recording elsewhere.
 
     private static let neutralCanvasHash = "0487f109112b48233dce485d843610dd1dfae7884e307533bb7baa0bf18437bb"
     private static let neutralPillarboxHash = "eab59159b31e72b4fc223fce364c44e67c025db96e09015c739780371d52795a"
     private static let neutralLetterboxHash = "d39f90c648b367c2042b882e84733a56a3db65d7f364e1e04d92b668efc1e3a5"
-    private static let curveContentPillarboxHash = "b82e9168ac9026b8cc9147012cd3942155dca47d8a350bc8515d209a8298550c"
-    private static let curveContentLetterboxHash = "b82e9168ac9026b8cc9147012cd3942155dca47d8a350bc8515d209a8298550c"
+    private static let curveContentPillarboxHash = "11578fbde7911dea8aa6807241329531941c626284c1e06cd091c8c0111d8e68"
+    private static let curveContentLetterboxHash = "11578fbde7911dea8aa6807241329531941c626284c1e06cd091c8c0111d8e68"
 }
