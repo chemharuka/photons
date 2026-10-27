@@ -35,6 +35,8 @@ func cmdDetail(_ a: Args) throws {
     let untouched = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: version,
                                                                           scale: scale))
     note("decoder         v\(untouched.capabilities.effectiveVersion)")
+    note("axes            \(untouched.capabilities.detailAxes.flagSummary)"
+         + "  [\(untouched.capabilities.detailAxesProvenance.rawValue)]")
     let b = untouched.detailBaseline
     note("baseline        luminanceNR \(f4(b.luminanceNR)) · colorNR \(f4(b.colorNR))"
          + " · sharpness \(f4(b.sharpness)) · detail \(f4(b.detail))")

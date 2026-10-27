@@ -502,18 +502,20 @@ public struct InspectorView: View {
     ///     (the canvas has to follow it), and the loupe rebuilds from the 0.5 rung while the slider is
     ///     held; 200 ms after the hand stops it develops full size and replaces the frame. One drag is
     ///     still **one** `EditHistory` snapshot, taken on release.
-    ///  3. **The card opens with 解码模型** — the file's own version list (default `8`). Where the running
-    ///     decoder is v9 exactly **two** rows are greyed and inert — 色彩降噪 and 细节 (Apple's
-    ///     `9.dng` reports `isColorNoiseReductionSupported`/`isDetailSupported` = false, and both move
-    ///     zero samples); 降噪 and 锐化 stay live, because the same filter says
-    ///     `isLuminanceNoiseReductionSupported`/`isSharpnessSupported` = true and they move 0.021 /
-    ///     0.510 maxΔ. `DetailAxes` is the seam that says which. Greyed is **not zeroed**: the values
-    ///     are kept, so going back to another version restores exactly the amounts the document had.
+    ///  3. **The card opens with 解码模型** — the file's own version list (default `8`). Which rows are
+    ///     greyed comes from `session.capabilities.detailAxes`: Apple's per-instance flags, read off
+    ///     the filter that made the pixels on screen (`isColorNoiseReductionSupported` /
+    ///     `isDetailSupported` / `isLuminanceNoiseReductionSupported` / `isSharpnessSupported`,
+    ///     `CIRAWFilter.h:121/129/137/153`). On this machine's `9.dng` that is exactly **two** rows
+    ///     inert — 色彩降噪 and 细节 (both move zero samples) — while 降噪 and 锐化 stay live (0.021 /
+    ///     0.510 maxΔ). Before the first frame `DetailAxes.forDecoderVersion` stands in, so a v9
+    ///     document opens correctly and a v8 one is live. Greyed is **not zeroed**: the values are
+    ///     kept, so going back to another version restores exactly the amounts the document had.
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
         let chosen = chosenDecoderSpelling(offered: caps?.supportedVersions ?? [])
-        let axes = Self.detailAxes(effective: caps?.effectiveVersion,
+        let axes = Self.detailAxes(capabilities: caps,
                                    requested: chosen,
                                    document: session.edit.decoderVersion)
         return card(Section.detail.title, reset: { resetGroup(.detail) }) {
@@ -648,8 +650,25 @@ public struct InspectorView: View {
         return sorted.last(where: { number($0) < 8 }) ?? sorted.first ?? "8"
     }
 
-    /// The card's four rows, from the **seam** (`DetailAxes.forDecoderVersion`), keyed by the version
-    /// that actually runs.
+    /// The card's four rows: **capabilities first**, the version table only as a fallback.
+    ///
+    /// ① `capabilities.detailAxes` when there is one — that is Apple's own per-instance answer, read
+    /// off the filter that produced the pixels on screen, and the *same field* the develop's veto
+    /// consumes. Nothing else in the app may re-derive it.
+    ///
+    /// ② Otherwise the coarse `DetailAxes.forDecoderVersion` table, keyed by the spelling that is
+    /// most likely to run: the document's request (there is no read-back before the first frame), else
+    /// the picker's choice, else v8. This is only the placeholder for the window in which a v9
+    /// document has not developed yet, and for a `DecoderCapabilities` built without a filter.
+    public static func detailAxes(capabilities: DecoderCapabilities?,
+                                  requested: String?,
+                                  document: String?) -> DetailAxes {
+        if let caps = capabilities { return caps.detailAxes }
+        return detailAxes(effective: nil, requested: requested ?? document, document: document)
+    }
+
+    /// The table-only form, kept for the pre-first-frame path and for tests that want to ask what the
+    /// fallback says without minting a `DecoderCapabilities`.
     ///
     /// `effective` wins when there is one (that is what the pixels were made with); before the first
     /// frame the document's request stands in, so a v9 document opens with 色彩降噪 / 细节 already
