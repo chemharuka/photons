@@ -171,6 +171,136 @@ final class CurveStorageTests: XCTestCase {
         print("clamp · CurvePoint(5,5) → (2,2) · 框内值原样保留")
     }
 
+    // MARK: 5b. the axis is not a written-down 2
+
+    /// `u = x / 2` is the map every consumer already has; after the map was written as "the SDR half
+    /// fills `0…whiteU`, the HDR half fills `whiteU…1`" it must still be the *same bits* — that is what
+    /// makes it safe to widen the card later without re-recording a single pixel.
+    func testTheAxisMapIsStillXOverTwoToday() {
+        var worstU = 0.0, worstRound = 0.0
+        for i in 0...20000 {
+            let x = CurvePoint.maximum * Double(i) / 20000
+            let p = CurvePoint(x, x)
+            worstU = max(worstU, abs(p.u - x / 2))
+            worstRound = max(worstRound, abs(CurvePoint(u: p.u, v: p.v).x - x))
+            XCTAssertEqual(p.v, p.u, "x == y 的点两个坐标必须一致")
+        }
+        XCTAssertEqual(worstU, 0, "u 与 x/2 逐位相等（20 001 个采样）")
+        XCTAssertEqual(worstRound, 0, "x → u → x 逐位回到原点")
+        // The split is written once, so the anchors of a *wider* card are the same expression:
+        // 1 is still display white and `maximum` is still the right edge.
+        XCTAssertEqual(CurvePoint.axisCoordinate(CurvePoint.sdrBoundary),
+                       HDRCurveAxis.standard.whiteU, accuracy: 0, "x = 1 就是白点")
+        XCTAssertEqual(CurvePoint.axisCoordinate(CurvePoint.maximum), 1, accuracy: 0, "x = max 就是右端")
+        XCTAssertEqual(CurvePoint.cardCoordinate(1), CurvePoint.maximum, accuracy: 0)
+        print("axis map · u − x/2 max |Δ| = \(worstU) · round trip max |Δ| = \(worstRound)")
+    }
+
+    /// A point as a **document** carries it. `CurvePoint`'s public inits are the interaction's (clamp)
+    /// and the file's (throw), so an `x` beyond today's card — which is exactly what a future-version
+    /// file or a synthetic fixture holds — can only be decoded. The keys are the synthesized ones.
+    private func pointFromDocument(_ x: Double, _ y: Double) throws -> CurvePoint {
+        let json = "{\"x\":\(x),\"y\":\(y)}".data(using: .utf8)!
+        return try JSONDecoder().decode(CurvePoint.self, from: json)
+    }
+
+    // MARK: 7. near-coincident control points
+
+    /// Two points a few nanometres apart are **one** point to the table, and the newer one wins. The
+    /// window is `CurveLUT.dedupeWindow(axis:)` — a fraction of the card, not a constant.
+    ///
+    /// The counter-proof (`==` instead of the window) makes this case red: `0.4` and `0.4 + 10ε` are
+    /// distinct `Double`s, so an equality test keeps both, and both is what the spike comes from.
+    func testPointsInsideTheAxisWindowCollapseToTheNewest() throws {
+        let axis = CurvePoint.maximum
+        let epsilon = CurveLUT.coordinateEpsilon(axis: axis)
+        let window = CurveLUT.dedupeWindow(axis: axis)
+        XCTAssertEqual(epsilon, axis * 1e-9, "分辨率是量程的 1e-9")
+        XCTAssertEqual(window, axis * 1e-6, "窗口是量程的 1e-6（pre-069 的 1e-6 换算到 0…2）")
+        XCTAssertEqual(window / epsilon, 1000, accuracy: 1e-6)
+
+        let older = CurvePoint(0.4, 0.45)
+        let newer = CurvePoint(0.4 + 10 * epsilon, 0.9)
+        XCTAssertNotEqual(older, newer, "两个点的坐标确实不同")
+
+        let kept = CurveLUT.dedupe([older, newer], axis: axis)
+        XCTAssertEqual(kept.count, 1, "相距 10ε 的两点是同一个点")
+        XCTAssertEqual(kept.first, newer, "留下的是较新的那个")
+
+        // The boundary is the window itself: half of it is one point, twice it is two.
+        let halfWindow = CurvePoint(0.4 + window / 2, 0.9)
+        let twoWindows = CurvePoint(0.4 + 2 * window, 0.9)
+        XCTAssertEqual(CurveLUT.dedupe([older, halfWindow], axis: axis).count, 1, "半个窗口 → 一点")
+        XCTAssertEqual(CurveLUT.dedupe([older, twoWindows], axis: axis).count, 2, "两个窗口 → 两点")
+
+        // …and the collapse is **bit-exact**: a near-duplicate must be erased, not smoothed.
+        let both = CurveLUT.buildOne([CurvePoint(0, 0), older, newer, CurvePoint(2, 2)])
+        let one = CurveLUT.buildOne([CurvePoint(0, 0), newer, CurvePoint(2, 2)])
+        XCTAssertEqual(both, one, "近重合点在表里必须被逐位擦掉")
+
+        // A real gap (0.001 ≫ window) is two points, and the table must show it — without this the
+        // equality above would be satisfied by a `buildOne` that ignores the second point anyway.
+        let apart = CurvePoint(0.401, 0.9)
+        XCTAssertEqual(CurveLUT.dedupe([older, apart], axis: axis).count, 2)
+        XCTAssertNotEqual(CurveLUT.buildOne([CurvePoint(0, 0), older, apart, CurvePoint(2, 2)]),
+                          CurveLUT.buildOne([CurvePoint(0, 0), apart, CurvePoint(2, 2)]),
+                          "0.001 是真正的两点，表必须不同")
+
+        // No spike: the surviving curve's steepest sample step is a small multiple of the mean step.
+        let diffs = zip(one, one.dropFirst()).map { $1 - $0 }
+        let meanStep = diffs.reduce(0, +) / Float(diffs.count)
+        let ratio = diffs.max()! / meanStep
+        XCTAssertTrue(diffs.allSatisfy { $0 >= 0 }, "单调不折")
+        XCTAssertLessThan(ratio, 4, "最陡一步不超过平均步长的 4 倍")
+        print("near-coincident · ε = \(epsilon) · 窗口 = \(window) · 10ε 距离 \(newer.x - older.x) → 1 点"
+              + " · 0.5×窗口 → 1 点 · 2×窗口 → 2 点 · 0.001 → 2 点"
+              + " · 最陡/平均步长比 \(ratio)")
+    }
+
+    /// The window is a **fraction of the axis**: a pair `3e-6` apart is one point on a `0…4` card and
+    /// two points on today's `0…2` card, with no code change between them.
+    func testTheWindowFollowsTheAxisAndAPointBeyondTwoStillBuildsATable() throws {
+        let wide = 2 * CurvePoint.maximum      // the +8 EV card `maximum`'s comment anticipates
+        XCTAssertEqual(CurveLUT.coordinateEpsilon(axis: wide), 2 * CurveLUT.coordinateEpsilon(),
+                       "分辨率随量程线性缩放，不写死")
+        XCTAssertEqual(CurveLUT.dedupeWindow(axis: wide), 2 * CurveLUT.dedupeWindow(),
+                       "窗口同样随量程线性缩放")
+
+        let p = try pointFromDocument(3.0, 1.0)                  // deep inside a 0…4 card
+        let tenEps = try pointFromDocument(3.0 + 10 * CurveLUT.coordinateEpsilon(axis: wide), 1.5)
+        XCTAssertEqual(CurveLUT.dedupe([p, tenEps], axis: wide).count, 1, "0…4 上相距 10ε → 一点")
+        // 3e-6 sits *between* the two windows (2e-6 on 0…2, 4e-6 on 0…4): the same pair of points is
+        // one point on the wider card and two on today's — the window really is the axis's.
+        let between = try pointFromDocument(3.0 + 3e-6, 1.5)
+        XCTAssertEqual(CurveLUT.dedupe([p, between], axis: wide).count, 1, "3e-6 ≤ 窗口(0…4)")
+        XCTAssertEqual(CurveLUT.dedupe([p, between], axis: CurvePoint.maximum).count, 2,
+                       "3e-6 > 窗口(0…2)：同一对是两点")
+        XCTAssertEqual(CurveLUT.dedupe([p, try pointFromDocument(3.001, 1.5)], axis: wide).count, 2,
+                       "0.001 ≫ 窗口 仍然是两点")
+
+        // A knot past the card's right edge must be **used**, not clamped away: today `x = 3` maps to
+        // `u = 1.5` (`x / 2`), i.e. past the last sample, so the table can only show the segment up to
+        // `u = 1`. What it shows there has to be the spline's own rising value — below the last knot
+        // (0.75) and above the previous one (0.5), not the identity's 1.0, not a flat tail.
+        let s = try pointFromDocument(3.0, 1.5)
+        XCTAssertEqual(s.u, 1.5, accuracy: 0, "x = 3 在今天的轴上是 u = 1.5，没有截到 1.0")
+        let table = CurveLUT.buildOne([CurvePoint(0, 0), CurvePoint(1, 1), s])
+        XCTAssertEqual(table.count, CurveLUT.size)
+        XCTAssertFalse(CurveLUT.isIdentityTable(table), "不能退回恒等")
+        XCTAssertTrue(zip(table, table.dropFirst()).allSatisfy { $1 >= $0 }, "单调不折")
+        XCTAssertGreaterThan(table.last!, 0.5, "表尾仍在该段上（不是被压回上一个节点）")
+        XCTAssertLessThan(table.last!, 0.75, "…且没有跳到最后一个节点的值")
+        XCTAssertNotEqual(table.last!, 1, "没有被静默截断成恒等")
+        // The steepness of the whole table, sample by sample: the steepest step over the mean step.
+        let diffs = zip(table, table.dropFirst()).map { $1 - $0 }
+        let meanStep = diffs.reduce(0, +) / Float(diffs.count)
+        let ratio = diffs.max()! / meanStep
+        XCTAssertLessThan(ratio, 4, "无尖刺：最陡一步 < 平均步长的 4 倍")
+        print("beyond 2 · ε(4) = \(CurveLUT.coordinateEpsilon(axis: wide))"
+              + " · 窗口(4) = \(CurveLUT.dedupeWindow(axis: wide))"
+              + " · x = 3 → u = \(s.u) · 表尾 \(table.last!) · 最陡/平均 \(ratio)")
+    }
+
     // MARK: 6. versions
 
     func testAFutureVersionIsRefusedButTheRestOfTheDocumentLoads() throws {

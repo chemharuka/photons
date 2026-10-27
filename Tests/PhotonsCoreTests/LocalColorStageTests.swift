@@ -685,64 +685,100 @@ final class LocalColorStageTests: XCTestCase {
         XCTAssertLessThan(abs(h - n), abs(f - n), "amount 50 must be a half measure")
     }
 
-    // MARK: - ⑥ the "no local colour" hash, and the cost
+    // MARK: - ⑥ the local claim (zero colour = same pixels), and the cost
 
-    /// The **same probe** as the one run against the pre-056 tree (`git archive HEAD` +
-    /// `CounterProofTests.testNoLocalColourDocumentDigest`): one document, mid-grey contrast, a curve,
-    /// global saturation, a vignette and a mask carrying **only** a scene-linear adjustment. The two
-    /// digests must be equal — nothing about this document's render path may move.
+    /// ⑥ The **local** claim 056 makes: local colour at strength 0 changes nothing, and local colour at
+    /// a real strength changes everything. Both halves are rendered from one tree, so no later task can
+    /// expire them.
     ///
-    /// ⚠ **This pin has expired, and re-recording it is a decision, not a chore.** The pixels of this
-    /// document did move after 056, exactly once; measured by re-rendering this same probe in four
-    /// `git archive` trees on this machine (one `swift test --filter` per tree, digest printed by the
-    /// `print` below):
+    /// What stood here until 2026-10-27 was a digest recorded from the tree *before* 056 (`79a0534e…`),
+    /// with the claim "a document without local colour renders the same pixels as before 056". That
+    /// claim expired — and not because of 056: 062 rebuilt the curve's axis onto the histogram's scale
+    /// (`SDR 50 %` display codes, `HDR 50 %`, `W` gain in log2) and this probe's digest became
+    /// `a7890962…`. The curve here is **not** the identity — `(0.4, 0.45)` on the engine axis — so an
+    /// axis change *must* move these pixels, and 062 was allowed to move pixels. The two numbers are
+    /// kept below as a note, never as an assertion: re-recording "whatever the tree does now" is the
+    /// one assertion this test exists to refuse, and 056's real promise is narrower anyway.
     ///
     ///   | tree | digest |
     ///   |---|---|
-    ///   | `4aca610` — 056 itself | `79a0534e…` ✓ the pin |
-    ///   | `699cd7f` — after the present/backdrop/loupe merges | `79a0534e…` ✓ |
-    ///   | `4e17ee0` — after 曲线端点可移 | `79a0534e…` ✓ |
-    ///   | `a6248ef` — after 062 曲线轴对齐直方图 | `a7890962…` ✗ |
-    ///   | `36138cf` — this worktree's base | `a7890962…` ✗ |
+    ///   | `4aca610` — 056 itself | `79a0534e7ffa6eaf…` |
+    ///   | `699cd7f`, `4e17ee0` — present/backdrop/loupe, 曲线端点可移 | `79a0534e…` |
+    ///   | `a6248ef`, `36138cf` — after 062 曲线轴对齐直方图 | `a7890962…` |
     ///
-    /// The one step that moved it is **062**, the only non-main parent of `a6248ef` (`afd2115`): that
-    /// task rebuilt the curve's axis onto the histogram's scale (`SDR 50 % 显示编码` + `HDR 50 %`,
-    /// `W` gain in log2) and re-recorded `Tests/Golden/render-edit-push-s0.25.json` in the same
-    /// commit. This probe's curve is **not** the identity — `(0.4, 0.45)` on the engine axis — so a
-    /// curve-axis change *must* move its pixels. Local colour is not involved: nothing about S3.5 is
-    /// upstream of the curve, and the fingerprint of a leak (an `s3.5-local-color` stage, a
-    /// `localColor` key) is still absent — `testStageAppearsOnlyWhenAMaskCarriesColour` asserts that
-    /// and is green.
+    /// The claim 056 actually makes, in three versions of the **same document** (contrast 20, the same
+    /// white curve, global saturation 12, vignette −30) differing only in one full-canvas mask:
     ///
-    /// So what expired is not the 056 claim but the way this line states it: "same pixels as a tree
-    /// from before 056" also forbids every later task from touching a stage that runs **before** the
-    /// local-colour stage, which was never the deal (062 was allowed to move pixels and did). Two
-    /// readings, and the owner picks:
+    ///   · **① explicit zero** — the mask spells `hue: 0, saturation: 0`;
+    ///   · **② absent** — the file never wrote those two keys, so the decoder's default `0` stands;
+    ///   · **③ real strength** — the same mask at `hue: +10, saturation: +40`.
     ///
-    ///   · **re-record the pin**, with the revision it was taken at named in this comment (the
-    ///     goldens' own discipline). The claim then reads "no local colour today", not "same pixels
-    ///     as 056", and the next upstream stage change re-records it again;
-    ///   · **pin the local claim instead**: the same document with its mask carrying colour at
-    ///     strength 0 must equal this render bit for bit. That one compares two renders of *one*
-    ///     tree, so no later task can invalidate it, and it is the claim 056 actually makes.
-    ///
-    /// Left red here on purpose: the honest re-record is `a7890962…`, i.e. "whatever the tree does
-    /// now", which is the one assertion this test exists to refuse.
-    func testNoLocalColourDocumentDigestMatchesThePre056Tree() throws {
+    /// ① and ② must be the same pixels, bit for bit, and neither may put S3.5 in the trace or the key
+    /// chain: "0/0 is not colour" (`LocalAdjustments.contributesLocalColor`) is the promise. ③ must
+    /// differ — otherwise the equality is also what a renderer that ignored the mask entirely would
+    /// produce — and ① must differ from the document with **no mask at all**, which proves the mask's
+    /// scene-linear work is live while its zero colour is not.
+    func testZeroStrengthLocalColourIsBitExactAndRealColourIsNot() throws {
         let image = colourWheel(width: 64, height: 48)
-        let graph = try makeGraph(image, identity: "056-hash-probe")
-        var edit = EditModel.neutral
-        edit.light.contrast = 20
-        edit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.4, v: 0.45), CurvePoint(u: 1, v: 1)]
-        edit.color.saturation = 12
-        edit.effects.vignetteAmount = -30
-        edit.masks = [fullCanvasMask(LocalAdjustments(amount: 100, exposure: 0.6, contrast: 10))]
-        let frame = try display(graph, edit)
-        print("NO-LOCAL-COLOUR DIGEST \(frame.sha256())")
-        // Recorded from the pre-056 tree by the counter-proof run; the two builds share no code path
-        // for this document beyond the one that already existed.
-        XCTAssertEqual(frame.sha256(), "79a0534e7ffa6eafe94f6b8c22c34eb246b1fc69327c101d0d7129a5c356a550",
-                       "a document without local colour must render the same pixels as before 056")
+        let graph = try makeGraph(image, identity: "056-local-claim")
+
+        var base = EditModel.neutral
+        base.light.contrast = 20
+        base.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.4, v: 0.45), CurvePoint(u: 1, v: 1)]
+        base.color.saturation = 12
+        base.effects.vignetteAmount = -30
+
+        // ② "the file said nothing": the decoder fills a missing key with 0, which is why "spelled out
+        // as 0" and "absent" are the same model value. Asserted, so ① and ② are known to differ only in
+        // how the document writes the mask — a value type has no absent field.
+        let absent = try JSONDecoder().decode(LocalAdjustments.self, from: Data(
+            #"{"amount":100,"exposure":0.6,"contrast":10}"#.utf8))
+        let explicitZero = LocalAdjustments(amount: 100, exposure: 0.6, contrast: 10,
+                                            hue: 0, saturation: 0)
+        XCTAssertEqual(absent, explicitZero, "缺失的 hue/saturation 解码成 0")
+        XCTAssertFalse(explicitZero.contributesLocalColor, "0/0 不构成局部色彩")
+
+        var spelledOut = base
+        spelledOut.masks = [fullCanvasMask(explicitZero)]
+        var silent = base
+        silent.masks = [fullCanvasMask(absent)]
+        var coloured = base
+        coloured.masks = [fullCanvasMask(LocalAdjustments(amount: 100, exposure: 0.6, contrast: 10,
+                                                          hue: 10, saturation: 40))]
+        var noMask = base
+        noMask.masks = []
+
+        struct Shot { let digest: String; let stages: [RenderStage]; let hasLocalColourStage: Bool }
+        func shot(_ edit: EditModel) throws -> Shot {
+            let result = try graph.render(edit, options: RenderOptions(
+                scale: 1, display: DisplayOptions(headroom: 1), useCache: false, wantsPixels: true))
+            let frame = try XCTUnwrap(result.display)
+            return Shot(digest: frame.sha256(),
+                        stages: result.trace.executed,
+                        hasLocalColourStage: result.keys.localColor != nil)
+        }
+        let one = try shot(spelledOut), two = try shot(silent)
+        let three = try shot(coloured), none = try shot(noMask)
+
+        XCTAssertEqual(one.digest, two.digest,
+                       "① 显式 hue/saturation = 0 与 ② 文件没写它，必须是同一像素")
+        XCTAssertNotEqual(one.digest, three.digest,
+                          "③ hue +10 / saturation +40 必须动像素（反空洞：不然后面的相等什么也没证明）")
+        XCTAssertNotEqual(one.digest, none.digest,
+                          "蒙版的场景线性工作（曝光 +0.6 / 对比 +10）确实在场，零色彩不许把整个蒙版关掉")
+
+        XCTAssertFalse(one.hasLocalColourStage, "① 不许在 key chain 里造出 localColor")
+        XCTAssertFalse(two.hasLocalColourStage, "② 同上")
+        XCTAssertTrue(three.hasLocalColourStage, "③ 才是 S3.5 该存在的理由")
+        XCTAssertFalse(one.stages.contains(.localColor))
+        XCTAssertFalse(two.stages.contains(.localColor))
+        XCTAssertTrue(three.stages.contains(.localColor))
+        XCTAssertTrue(one.stages.contains(.localApply), "① 的 S1.6 仍然跑")
+        XCTAssertTrue(two.stages.contains(.localApply), "② 的 S1.6 仍然跑")
+
+        print("LOCAL CLAIM · ① explicit-0 \(one.digest) · ② absent \(two.digest)"
+              + " · ③ +10/+40 \(three.digest) · no mask \(none.digest)")
+        print("LOCAL CLAIM stages · ① \(one.stages.map(\.rawValue).joined(separator: " "))")
     }
 
     /// 4.10 Mpx, cache off: what the extra stage costs. Printed on every run, asserted only under
