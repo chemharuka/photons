@@ -20,6 +20,14 @@ import Foundation
 // meaningless on another photo (docs/xmp-mapping.md §1.8, docs/architecture-decisions.md D11), so
 // paste never touches `masks` or `showMaskID`. That is a structural guarantee, not a rule the
 // merge code has to remember.
+//
+// **Known gap (2026-10-28, recorded rather than implied):** 色彩分级 (`EditModel.colorGrading`, S3.8)
+// has no `ColorGradingPatch` yet, so 「复制设置」 does not carry it — a paste of 全部 leaves the
+// destination's grade alone and does not overwrite it either (nothing is written, so nothing is
+// lost on the destination). Presets **do** carry it (`PresetGroup.colorGrading`). The patch is the
+// follow-up: nine optional numbers, one per `GradeWheel` axis, and the section table would gain a
+// 「色彩分级」 row. Until then this file says so, because a group that silently is not copied is
+// worse than one this header names.
 
 /// Which fields belong to which group. Used for reporting what a clipboard payload carries.
 public enum EditSnapshotGroup: String, CaseIterable, Sendable, Hashable {
