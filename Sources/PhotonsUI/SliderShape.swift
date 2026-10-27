@@ -84,8 +84,9 @@ public enum SliderValueMap {
     /// 滑杆行的固定高度。两类参数都钉这个高度，切换形状时面板不跳版式（046 要求 4）。
     public static let rowHeight: CGFloat = 16
 
-    /// 键盘一步 = 行程的 1%。细节的四根滑杆行程 0…100，所以一步正好是 1 个单位，与
-    /// `DetailSettings.step` 相同（`SliderStyleTests` 钉住这个等式）。
+    /// 键盘一步 = 行程的 1%。042 之后四根轴不再是同一个行程：降噪/色彩降噪/锐化 0…100（一步 1 个
+    /// 单位，等于 `DetailAxis.step`），细节 0…30（一步 0.3 个单位 —— SwiftUI 的 `Slider` 会按 1%
+    /// 自己走，`setPosition` 再量化到整数）。
     ///
     /// ←/→ 由 SwiftUI `Slider` 原生处理，这个常量不再被生产代码调用 —— 它留在这里是因为它**就是**
     /// 那条规则本身（「一步 = 行程的 1%」），测试仍按名字引用它。

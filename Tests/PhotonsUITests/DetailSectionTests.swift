@@ -28,12 +28,21 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertTrue(InspectorView.scrollingSections.contains(.detail))
     }
 
-    /// 040: four rows, 0…100 each, opening on the **body's** positions — 0 / 50 / 0 / 50 on a Leica,
-    /// and 100 for sharpness on a body that reports 1.0. The card reads this table, so this is the
-    /// panel's table, not a copy of it.
+    /// 040/042: four rows, each with **its own** travel — 细节 0…30 (amount 0…3, Apple's
+    /// `CIRAWFilter.h:148-154`), the other three 0…100 (amount 0…1) — opening on the **body's**
+    /// positions: 0 / 50 / 0 / 50 on a Leica, and 100 for sharpness on a body that reports 1.0. The
+    /// card reads the axis table, so this is the panel's table, not a copy of it.
     func testTheFourRowsOpenOnTheBodyDefaults() {
         XCTAssertEqual(DetailAxis.panelOrder.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"])
-        XCTAssertEqual(DetailSettings.range, 0...100, "细节 is 0…100 too (user's correction, 2026-10-27)")
+        XCTAssertEqual(DetailAxis.detail.range, 0...30, "042: 细节 0…30 → amount 0…3")
+        for axis in [DetailAxis.luminanceNR, .colorNR, .sharpness] {
+            XCTAssertEqual(axis.range, 0...100, "\(axis) keeps 0…100 → amount 0…1")
+        }
+        // The card's rows carry those travels — no row may fall back to a shared 0…100.
+        let rows = InspectorView.detailContent.rows
+        XCTAssertEqual(rows.map(\.range), [0...100, 0...100, 0...30, 0...100])
+        XCTAssertEqual(rows.map(\.step), [1, 1, 1, 1])
+        XCTAssertEqual(rows.map(\.format), Array(repeating: "%.0f", count: 4))
 
         let leica = DetailBaseline.measured
         XCTAssertEqual(DetailAxis.panelOrder.map { DetailSettings.identity.position($0, in: leica) },

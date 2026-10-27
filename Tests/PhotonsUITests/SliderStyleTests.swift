@@ -291,11 +291,12 @@ final class SliderStyleTests: XCTestCase {
         let signature = try Self.head(of: "private func sliderRow", upTo: "-> some View", in: builder)
         XCTAssertFalse(signature.contains("step:"), "the row builder never takes a slider step")
 
-        // 步进只活在模型层：一个单位（`DetailSettings.step`），只在 `setPosition` 里四舍五入。
+        // 步进只活在模型层：每根轴一个单位（`DetailAxis.step`），只在 `setPosition` 里四舍五入。
         var settings = DetailSettings.identity
         settings.setPosition(50.4, .luminanceNR, in: .measured)
         XCTAssertEqual(settings.luminanceNR, 50, "50.4 quantizes to a whole slider unit")
-        XCTAssertEqual(DetailSettings.step, 1)
+        XCTAssertEqual(DetailAxis.luminanceNR.step, 1)
+        XCTAssertEqual(DetailAxis.detail.step, 1, "042: 细节's unit is 1 position = 0.1 of detailAmount")
     }
 
     // MARK: - 5. 一次拖动一条历史（060 验收 4）
@@ -352,18 +353,28 @@ final class SliderStyleTests: XCTestCase {
 
     // MARK: - 6. 键盘：一步 = 细节的一个单位
 
-    /// 046 的规则：键盘一步 = 行程的 1%。细节的行程是 0…100，所以一步就是模型量化的那 1 个单位。
+    /// 046 的规则：键盘一步 = 行程的 1%。042 之后行程按轴分裂，所以这条等式只在 0…100 的三根轴上
+    /// 成立（一步 = 1 个单位 = `DetailAxis.step`）；细节的行程是 0…30，1% 是 0.3 个单位，`setPosition`
+    /// 会把它量化到整数（所以细节的键盘微调用的是 SwiftUI `Slider` 自己的步长，不是这个常量）。
     /// ←/→ 归 SwiftUI `Slider` 自己，我们不再写按键逻辑（060 之后也没有自绘控件可以写）。
     func testKeyboardStepsByOneDetailUnit() {
-        let range = DetailSettings.range
+        let range = DetailAxis.luminanceNR.range
         let step = SliderValueMap.keyboardStep(in: range)
-        XCTAssertEqual(step, DetailSettings.step,
+        XCTAssertEqual(step, DetailAxis.luminanceNR.step,
                        "the keyboard step and the model's quantization must be the same amount")
 
         XCTAssertEqual(SliderValueMap.nudged(50, by: step, in: range), 51)
         XCTAssertEqual(SliderValueMap.nudged(50, by: -step, in: range), 49)
         XCTAssertEqual(SliderValueMap.nudged(0, by: -step, in: range), 0, "no wrap-around at the ends")
         XCTAssertEqual(SliderValueMap.nudged(100, by: step, in: range), 100)
+
+        // 042: 细节's travel is a third as wide, so 1 % of it is 0.3 — the model quantizes that to a
+        // whole unit, which is why this constant is not what drives the 细节 row.
+        let detailRange = DetailAxis.detail.range
+        XCTAssertEqual(SliderValueMap.keyboardStep(in: detailRange), 0.3, accuracy: 1e-9)
+        var detail = DetailSettings(detail: 12)
+        detail.setPosition(SliderValueMap.nudged(12, by: 0.3, in: detailRange), .detail, in: .measured)
+        XCTAssertEqual(detail.detail, 12, "12.3 quantizes back to 12 — the 0.3 tick is not a whole unit")
 
         // 键盘一步在文档里的效果：50 → 51，一个 `setPosition` 就够，一个快照。
         var settings = DetailSettings.identity

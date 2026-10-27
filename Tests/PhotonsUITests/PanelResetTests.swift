@@ -270,7 +270,8 @@ final class PanelResetTests: XCTestCase {
         let asShotKey = session.edit.decodeInputs.key
 
         // All four dragged away from their default positions (20 / 80 / 30 / 70 on any body, since
-        // neither 20 nor 80 is a baseline: Leica is 0/50/0/50, R5 sharpness 100).
+        // neither 20 nor 80 is a baseline: Leica is 0/50/0/50, R5 sharpness 100; 042 细节's travel is
+        // 0…30, so 30 is its right end — amount 3.0, still not the Leica's default position 0).
         session.applyEdit { model in
             model.detailSettings.setPosition(20, .luminanceNR, in: .measured)
             model.detailSettings.setPosition(80, .colorNR, in: .measured)

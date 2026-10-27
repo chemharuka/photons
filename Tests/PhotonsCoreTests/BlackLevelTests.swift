@@ -160,11 +160,11 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(old.light.blackOffset, 0)
         XCTAssertFalse(String(decoding: try encoder.encode(old), as: UTF8.self).contains("blackOffset"))
 
-        // 新文档：schemaVersion 5，而且**仍然**不写 blackOffset 这个键。
-        XCTAssertEqual(EditModel.currentSchemaVersion, 5)
-        XCTAssertEqual(EditModel.neutral.schemaVersion, 5)
+        // 新文档：schemaVersion 6（042 加了 detail 的量程），而且**仍然**不写 blackOffset 这个键。
+        XCTAssertEqual(EditModel.currentSchemaVersion, 6)
+        XCTAssertEqual(EditModel.neutral.schemaVersion, 6)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
-        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 5"), "新文档是版本 5")
+        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 6"), "新文档是版本 6")
         XCTAssertFalse(fresh.contains("blackOffset"), "0 不写键 —— 旧 blob 的逐字节稳定靠这条")
 
         // 用过控件的文档才写键，而且读回来还是同一个数。

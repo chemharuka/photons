@@ -334,8 +334,12 @@ public final class RAWDecoder {
     /// Two facts make this different from `applyWhiteBalance`, both measured on this machine:
     ///
     ///  1. **The filter never clamps.** Assigning 2.0 reads back 2.0; assigning −0.5 reads back −0.5.
-    ///     So the 0…1 range is *ours*, and the slider mapping (`DetailSettings.decodeAmount`) is what
-    ///     keeps us inside it — the read-back below only proves the assignment landed.
+    ///     So the ranges are *ours*, and they are **per axis** (Apple's header, `CIRAWFilter.h`):
+    ///     `detailAmount` is **0…3** (`h:148-154`, "A value of 3 indicates maximum detail
+    ///     enhancement"), while `luminanceNoiseReductionAmount`, `colorNoiseReductionAmount` and
+    ///     `sharpnessAmount` are **0…1** (`h:115-122`, `h:123-130`, `h:131-138`). The slider mapping
+    ///     (`DetailSettings.decodeAmount(slider:axis:baseline:)`) is what keeps us inside them — the
+    ///     read-back below only proves the assignment landed, not that the range was respected.
     ///  2. **The filter's own default is not 0 on every axis.** With nothing assigned,
     ///     `luminanceNoiseReductionAmount` reads 0.000 and `detailAmount` 0.000, but
     ///     `colorNoiseReductionAmount` and `sharpnessAmount` read **0.500**, and on a Canon body

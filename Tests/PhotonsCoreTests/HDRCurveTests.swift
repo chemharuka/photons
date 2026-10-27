@@ -1053,10 +1053,11 @@ final class HDRCurveTests: XCTestCase {
     // MARK: - the model: names and versions
 
     /// `curve.white` is the stored name, a schema-3 document's `rgb` reads back into it, and only
-    /// `white` is written. `schemaVersion` 5 (4 at the time of the curve rename; 071 added
-    /// `light.blackOffset` on top) / `processVersion` 2 record the meaning change.
+    /// `white` is written. `schemaVersion` 6 (4 at the time of the curve rename; 071 added
+    /// `light.blackOffset` on top, 042 the per-axis 细节 travel) / `processVersion` 2 record the
+    /// meaning changes.
     func testCurveModelNamingAndVersion() throws {
-        XCTAssertEqual(EditModel.currentSchemaVersion, 5)
+        XCTAssertEqual(EditModel.currentSchemaVersion, 6)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 
         let legacy = Data(#"""

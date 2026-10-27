@@ -496,11 +496,13 @@ public struct InspectorView: View {
     /// Three rules make this card different from the tone sliders, and all three come from the same
     /// fact — **a tick here is a development, not a render**:
     ///
-    ///  1. **The number is a slider position, 0…100.** `value / 100` is what gets assigned; the
-    ///     *default* position is the body's own baseline × 100 (Leica 0/50/0/50, R5 sharpness 100,
-    ///     Sony ARW luminance NR 38), and a slider sitting there assigns **nothing**. That is what keeps
-    ///     an untouched document byte-identical, and why a resting colour-NR slider must not push a
-    ///     0.0 into Apple's 0.5.
+    ///  1. **The number is a slider position, and the travel is per axis (042).** 细节 is **0…30**
+    ///     and `position / 10` is the `detailAmount` it assigns (Apple's 0…3, `CIRAWFilter.h:148-154`);
+    ///     the other three are **0…100** and `position / 100` is their amount (0…1,
+    ///     `h:115-138`). The *default* position is the body's own baseline on that axis, in that
+    ///     axis' units (Leica 0/50/0/50, R5 sharpness 100, Sony ARW luminance NR 38), and a slider
+    ///     sitting there assigns **nothing**. That is what keeps an untouched document
+    ///     byte-identical, and why a resting colour-NR slider must not push a 0.0 into Apple's 0.5.
     ///  2. **Drag = preview rung, release = full size.** The thumb writes the document on every tick
     ///     (the canvas has to follow it), and the loupe rebuilds from the 0.5 rung while the slider is
     ///     held; 200 ms after the hand stops it develops full size and replaces the frame. One drag is
@@ -1219,11 +1221,13 @@ public struct DetailCardContent: Equatable, Sendable {
         public var axis: DetailAxis
         /// The row's label — also the undo label for one drag.
         public var title: String
-        /// The slider's travel (0…100 for all four).
+        /// The slider's travel, from the axis itself: 细节 **0…30** (amount 0…3), the other three
+        /// 0…100 (amount 0…1). 042 — one travel per axis, per Apple's `CIRAWFilter.h`.
         public var range: ClosedRange<Double>
         /// The number's format: integers, no percent sign.
         public var format: String
-        /// The quantization the **model** applies (1 unit = 0.01 of a `CIRAWFilter` amount).
+        /// The quantization the **model** applies (1 position unit = **0.1** of `detailAmount`,
+        /// 0.01 of the other three).
         ///
         /// 046: this is never handed to a `Slider` — a `step:` makes SwiftUI draw tick marks, and no
         /// slider in this panel has them. `DetailSettings.setPosition` is what rounds.
@@ -1238,11 +1242,13 @@ public struct DetailCardContent: Equatable, Sendable {
 
     public init(rows: [Row]) { self.rows = rows }
 
-    /// The shipped card: the four axes of `DetailAxis.panelOrder`, one travel, one format, one shape.
+    /// The shipped card: the four axes of `DetailAxis.panelOrder`, each row's travel / number format /
+    /// step taken from **its own axis** (042: 细节 0…30 → amount 0…3, the other three 0…100 → 0…1),
+    /// one shape.
     public static let standard = DetailCardContent(
         rows: DetailAxis.panelOrder.map {
-            Row(axis: $0, title: $0.title, range: DetailSettings.range,
-                format: DetailSettings.format, step: DetailSettings.step, shape: .bar)
+            Row(axis: $0, title: $0.title, range: $0.range,
+                format: $0.format, step: $0.step, shape: .bar)
         })
 }
 
