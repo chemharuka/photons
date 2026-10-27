@@ -176,6 +176,11 @@ public final class BackdropCache {
 
     // MARK: the state machine
 
+    /// Guards `serial` only, and only because of one caller: `isCurrent(_:)` is asked from the render
+    /// **queue** (065 — a superseded generation must not even start its render) while every mutation is
+    /// on main. Everything else in this type stays main-thread state.
+    private let serialLock = NSLock()
+
     /// Take the request. Returns the serial the completion must present to be accepted.
     @discardableResult
     func begin(_ key: Key) -> Int {
@@ -183,6 +188,17 @@ public final class BackdropCache {
         inFlight = key
         inFlightSerial = serial
         return serial
+    }
+
+    /// Is `serial` still the current one? A render that began before an `invalidate()` answers `false`.
+    ///
+    /// 065: 「可取消」— a generation for the photo that just left must not render. Adopting it was already
+    /// refused by `finish`; this makes the *work* go away too, so the new photo's bottom image is never
+    /// queued behind 36 ms of a picture nobody is looking at.
+    public func isCurrent(_ serial: Int) -> Bool {
+        serialLock.lock()
+        defer { serialLock.unlock() }
+        return serial == self.serial
     }
 
     /// A render landed. Returns `false` when it was refused (another photo, or a request that no
@@ -222,7 +238,9 @@ public final class BackdropCache {
     /// Counters survive on purpose — "how many generations did this session make" is a fact about the
     /// session, not about the picture on screen, and the tests read it across a photo switch.
     public func invalidate() {
+        serialLock.lock()
         serial += 1
+        serialLock.unlock()
         inFlight = nil
         texture = nil
         key = nil
