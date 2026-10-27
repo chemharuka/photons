@@ -563,7 +563,9 @@ extension ColorGroup {
 ///
 /// Thumbnail, preview and export all come through here and differ only by `scale` (and the canvas
 /// for a viewport). Every stage boundary is a cache key, so a slider that only touches S3 cannot
-/// re-run S1 (docs/architecture-decisions.md D5/D6/D12).
+/// re-run S1 (docs/architecture-decisions.md D5/D6/D12). S1 and S1.6 have slots of their own
+/// (`S1Entry`, §073) because the linear pass must be decided by *its own* inputs and its cost is
+/// what a red-vs-blue slider step is measured in.
 public final class RenderGraph {
     public let deviceName: String
     /// Upright source dimensions.
@@ -596,6 +598,56 @@ public final class RenderGraph {
     private var cache: [RenderStage: CacheEntry] = [:]
     private var cacheOrder: [RenderStage] = []
     private var cacheBytes = 0
+
+    /// 073 — **S1's output has its own slot**, and it is keyed by S1's own inputs.
+    ///
+    /// The user's report: 「每次动蓝色滑块，黑电平校准还得跑一次」. S1 is the linear-domain pass
+    /// (levels → black trim → exposure gain → highlight recovery), so a *red* change must re-run it
+    /// and nothing else should. The chain has had a per-stage cache since D5/D6 — a stage whose key
+    /// did not move is a hit — but S1 was sharing the generic slot with six other stages, which made
+    /// three things impossible to state or to test:
+    ///
+    ///   · **how often S1 runs** was only derivable from a frame's trace, never a number;
+    ///   · the entry was the **first victim** of the generic budget (`cacheOrder.removeFirst()`), so on
+    ///     a canvas big enough to exceed 1.5 GB — a 60 Mpx export is 480 MB *per stage* — S1 was evicted
+    ///     on every frame and re-ran even when its key had not moved;
+    ///   · the key was "whatever `RenderKeyChain` says", which is right but not *narrow*: this slot
+    ///     names the exact inputs S1 reads (`s1Key`) and proves, byte for byte, that dropping any of
+    ///     them serves a stale picture (`S1CacheTests.testRedGroupIsLoadBearing`).
+    ///
+    /// Exactly **one** texture lives here (4.10 Mpx rgba16Float = 33 MB); a key change replaces it and
+    /// gives the old one back to the pool, and `invalidateCache()` frees it.
+    private struct S1Entry {
+        let key: String
+        let texture: MTLTexture
+    }
+    private var s1Entry: S1Entry?
+    /// Whether the red group (blacks/whites sliders, the absolute levels and 071's trim) is part of
+    /// `s1Key`. **Never false in the app.** `S1CacheTests` sets it to false to demonstrate what a key
+    /// that ignores the red group does: it serves a red change the previous linear buffer, and the
+    /// byte-identical assertion has to fail. A cache whose key cannot be shown to be load-bearing is a
+    /// cache nobody can trust.
+    private let s1KeyIncludesRedGroup: Bool
+
+    /// 073 — how many times each stage **ran**, and how many times its output came out of a cache,
+    /// over the life of this graph. Merged from the frame's own trace at the end of `render`, so the
+    /// counters cannot disagree with what the frame reported (`.sceneLinear` and `.localApply`
+    /// included, both of which now have slots of their own).
+    public private(set) var stageRuns: [RenderStage: Int] = [:]
+    public private(set) var stageHits: [RenderStage: Int] = [:]
+    /// The number the acceptance of 073 reads: 1 for a burst of blue slider steps, one per red step.
+    public var s1Passes: Int { stageRuns[.sceneLinear] ?? 0 }
+    public var s1Hits: Int { stageHits[.sceneLinear] ?? 0 }
+    /// S1.6 (`localApply`) — the mask stage a blue mask slider re-runs and S1 must not.
+    public var s1_6Passes: Int { stageRuns[.localApply] ?? 0 }
+    public var s1_7Passes: Int { stageRuns[.curve] ?? 0 }
+    /// How many S1 textures are being held (0 or 1) and what they cost.
+    public var s1CacheTextures: Int { s1Entry == nil ? 0 : 1 }
+    public var s1CacheBytes: Int {
+        guard let e = s1Entry else { return 0 }
+        return e.texture.width * e.texture.height * 8
+    }
+    public var s1CacheKey: String? { s1Entry?.key }
 
     /// 030: **one** 64 KB buffer, rewritten in place per changed table (§6.4).
     ///
@@ -649,7 +701,8 @@ public final class RenderGraph {
     private var maskTables: [String: MaskTable] = [:]
 
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
-                semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider()) throws {
+                semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider(),
+                s1KeyIncludesRedGroup: Bool = true) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
         guard let queue = device.makeCommandQueue() else { throw RenderError.noMetalDevice }
         self.device = device
@@ -658,6 +711,7 @@ public final class RenderGraph {
         self.kernels = KernelLibrary(device: device)
         self.input = input
         self.cacheBudgetBytes = cacheBudgetBytes
+        self.s1KeyIncludesRedGroup = s1KeyIncludesRedGroup
         self.pool = TexturePool(device: device)
         self.semanticProvider = semanticMatte
         self.semanticStore = SemanticMatteStore()
@@ -848,6 +902,49 @@ public final class RenderGraph {
                     s0PureCA: untransformed && caOn, drawnRect: drawnRect)
     }
 
+    // MARK: - S1's key (073)
+
+    /// 073 — the key of the linear pass: **everything S1 reads, and nothing else**.
+    ///
+    /// Two halves, and both are already the chain's own words:
+    ///
+    ///   · `plan.keys.geometry` — the decode identity (`DecodeInputs.key` + photo id), the source and
+    ///     canvas sizes, EXIF orientation, the output window, and crop/straighten/flip/CA. This is S0's
+    ///     key, and S1 reads S0's output, so it is S1's input too: a crop or a zoom miss is a different
+    ///     buffer, not a cache the linear pass may serve from.
+    ///   · `edit.keyMaterial(.sceneLinear)` — the levels (`blk`/`wht` sliders, `blackLevel`,
+    ///     `whiteLevel`), 071's `blackOffset`, the exposure gain, white balance (a decode input, so the
+    ///     identity moves with it) and highlight recovery.
+    ///
+    /// **What is deliberately absent** is everything from S1.6 down — mask adjustments, the curve, the
+    /// tone map's contrast/highlights/shadows, colour, vignette, display — which is why a blue step
+    /// reaches this texture instead of re-deriving the linear domain.
+    ///
+    /// One honest caveat, and it is a fact about where the arithmetic lives rather than about the
+    /// cache: the **exposure**, **whites**, **blacks** and **highlight recovery** sliders are blue in
+    /// the inspector (they belong to the render, not to the decode) but their arithmetic is inside S1
+    /// (`s1_scene_linear.metal` ①②③). Moving them out of the key would serve a stale frame — that is
+    /// exactly what `testRedGroupIsLoadBearing` demonstrates — so they are in it, and a step of one of
+    /// those sliders costs one S1 pass. `S1CacheTests` prints the measured cost of both kinds.
+    ///
+    /// `s1KeyIncludesRedGroup: false` (tests only) deletes the red half — the sliders, the two absolute
+    /// levels and the trim — from the material, which is the refutation 073 asks for.
+    private func s1Key(_ edit: EditModel, _ plan: Plan) -> String {
+        guard !s1KeyIncludesRedGroup else { return plan.keys.key(for: .sceneLinear) }
+        var stripped = edit
+        stripped.light.blacks = 0
+        stripped.light.whites = 0
+        stripped.light.blackOffset = 0
+        stripped.light.blackLevel = nil
+        stripped.light.whiteLevel = nil
+        // The same two-step construction `RenderKeyChain.links` + `keys` use, so the neutral red group
+        // is the *only* difference: `H(geometryKey | material)` and then the digest.
+        let canonical = KeyBuilder(plan.keys.geometry)
+            .add(stripped.keyMaterial(.sceneLinear))
+            .canonical
+        return KeyBuilder.digest(of: canonical)
+    }
+
     // MARK: render
 
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
@@ -892,6 +989,34 @@ public final class RenderGraph {
             let key = plan.keys.key(for: stage)
                 + (stage.isMaskStage ? tilingSuffix : "")
                 + (stage.index >= RenderStage.maskAtlas.index ? semanticSuffix : "")
+
+            // 073 — S1 has a slot of its own (see `S1Entry`), so the linear pass is decided here
+            // rather than by the generic stage cache below. The key is `s1Key`, i.e. decode identity ×
+            // geometry × **everything S1 reads** — a blue slider moves nothing in it, so those frames
+            // reach S1's texture and skip the pass; a red one moves `boff`/`blL`/`whL` and misses.
+            if stage == .sceneLinear {
+                let s1Key = self.s1Key(edit, plan)
+                if options.useCache, let e = s1Entry, e.key == s1Key,
+                   e.texture.width == plan.canvas.width, e.texture.height == plan.canvas.height {
+                    trace.record(stage, executed: false)
+                    current = e.texture
+                    continue
+                }
+                let out = try pool.obtain(plan.canvas)
+                try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
+                           options: options, table: table, report: &report)
+                trace.record(stage, executed: true)
+                if options.useCache {
+                    // The old texture goes back **after** the new one is in hand, so a failed
+                    // allocation cannot leave the slot pointing at a recycled texture.
+                    if let old = s1Entry, old.texture !== out { pool.recycle(old.texture) }
+                    s1Entry = S1Entry(key: s1Key, texture: out)
+                } else {
+                    transient.append(out)
+                }
+                current = out
+                continue
+            }
 
             // S1.6 keeps its own slot (like the atlas) because it can be updated **in place**: the
             // same texture, a smaller dispatch. A plain stage-cache entry cannot express that.
@@ -1100,6 +1225,10 @@ public final class RenderGraph {
             ? (cb.gpuEndTime - cb.gpuStartTime) * 1000
             : wall
         trace.gpuMilliseconds = gpu
+        // 073 — the per-stage counters, merged from the frame's own trace so the two can never
+        // disagree about what this frame ran (`s1Passes` and `s1_6Passes` are read by S1CacheTests).
+        for stage in trace.executed { stageRuns[stage, default: 0] += 1 }
+        for stage in trace.skipped { stageHits[stage, default: 0] += 1 }
 
         // The measurement's one readback, of the pre-S4 texture — read *before* the transients go back
         // to the pool, so what is counted is the texture this frame wrote and not whatever the pool
@@ -1488,6 +1617,7 @@ public final class RenderGraph {
         cache.removeAll()
         cacheOrder.removeAll()
         cacheBytes = 0
+        s1Entry = nil
         atlasCache = nil
         localEntry = nil
     }
