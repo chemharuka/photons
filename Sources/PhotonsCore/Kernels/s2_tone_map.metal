@@ -2,11 +2,38 @@
 #include "primaries.metal"
 using namespace metal;
 
-// S2 — tone map: parametric curve (Lightroom's Light panel), the two region lifts, final clamp.
+// S2 — tone map: the contrast bend (a bounded S in log2 EV, 0107), the two region lifts, final clamp.
 //
-// Order: contrast around the scene-linear mid-grey pivot (0.18) → region lifts for shadows/highlights
-// weighted by an **EV window** → the final clamp. It is monotone in every slider and exact identity at
-// all zeros, which is what M1 has to prove.
+// Order: **contrast as an EV displacement** → region lifts for shadows/highlights weighted by an
+// **EV window** → the final clamp. It is monotone in every slider and exact identity at all zeros,
+// which is what M1 has to prove.
+//
+// **0107 replaced the contrast curve.** It used to be a linear-light power around a 0.18 pivot
+// (`v = sign(v)·0.18·(|v|/0.18)^(2^(contrast/100·2))`): one exponent over the whole range (a 4×
+// slope at +100, i.e. a shear, not a bend) with no upper asymptote (`0.18·(v/0.18)^4 = 1` at
+// v = 0.276, mid-grey + 0.62 EV). Measured on the four reference frames at +100: 12.5 / 3.1 / 1.5 /
+// 12.9 % of the samples on code 255 and the median 86 → 30 codes; at −100 the median went *up*
+// (86 → 109), because ¼ is a toe lift, not a flattening.
+//
+// The replacement is a **displacement in EV over a held core**, `v *= 2^Δ(L)`, `L = log2(luma)`:
+//
+//   · the core `[−5.0, −3.2]` EV is **held** (`Δ = 0`, slope 1) — that is where the four frames'
+//     median sits (p50 ∈ [−4.07, −3.19] EV), so the median moves by **0 codes**. A point pivot
+//     cannot do that: a bounded tanh S hinged at the middle of the range moves these medians by
+//     +10.5 / +5.9 / −3.4 / +16.7 codes, measured — a static curve cannot put its fixed point on
+//     four different medians. See `S2Contrast` for the full argument.
+//   · the **toe** (`blackEV … blackEV+3`) is a *shift*, i.e. a gain: it cannot fold (slope ≥ 0.575
+//     at full travel) and it keeps 0 at 0.
+//   · the **shoulder** (`[−3.2, 0]`) is a *bump* that **lands on display white**: no sample at or
+//     below white can be pushed past it (peak displacement 0.55 EV against 1.6 EV of headroom).
+//     Measured at +100: 0.00–0.01 % on the ceiling, i.e. the neutral frame's own count.
+//   · both terms are 0 for `L ≥ 0`, so **HDR samples above white pass through bit for bit** and 079
+//     §4's "no upper clamp in S2" holds: the bound is the shape, not a `min()`.
+//
+// `travel` = `8/(whiteEV − blackEV)` = 1.0 EV replaces the old constant `2.0` — derived from the two
+// end points of the axis (darktable's `contrast *= 8/(white_ev − black_ev)` normalisation), not
+// chosen. The numbers live in `S2Contrast` (Swift) and in the `CT_*` block below; a test parses this
+// file and asserts the two copies are equal.
 //
 // **Blacks/whites are not here** (派单 019). They are the two end points, a scene-linear quantity, so
 // they live in S1 (`s1_scene_linear`, 073B). What is left here is *how the range bends between the end
@@ -57,7 +84,10 @@ using namespace metal;
 // pixel identity, not an epsilon — so a test can assert the matte is 0.
 
 struct S2Params {
-    float4 a;   // contrast, pivot, pad, pad
+    // contrast, travel (EV of bend at |contrast| = 100, from `S2Contrast.travelEV`), pad, pad.
+    // `.y` used to carry the pivot (0.18) for the linear-light power; that power is gone (0107) and
+    // the slot now carries the number that replaced its constant `2.0` — see the header.
+    float4 a;
     float4 b;   // highlights, shadows, identity, pad
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
@@ -70,10 +100,59 @@ constant float SHADOW_HI_EV = -3.9;
 constant float HIGHLIGHT_LO_EV = -3.2;
 constant float HIGHLIGHT_HI_EV = -1.2;
 
-kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
-                        texture2d<float, access::write> dst [[texture(1)]],
-                        constant S2Params &p [[buffer(0)]],
-                        uint2 gid [[thread_position_in_grid]]) {
+// ── 0107 — the contrast bend's axis constants (the `.metal` copy of `S2Contrast`) ──────────────
+//
+// `CT_WHITE_EV` is display white, `CT_BLACK_EV` the tone map's floor. `CT_TOE_W_EV` is the width of
+// the toe's transition (so the toe is at full travel from `CT_BLACK_EV + CT_TOE_W_EV` = −5.0 EV
+// down), `CT_SH_LO_EV` the bottom of the shoulder's window (the shoulder's own top is `CT_WHITE_EV`,
+// so the bump peaks at −1.6 EV). `CT_HELD_*` is the band in between: `Δ` is exactly 0 there, which
+// is what pins the median.
+//
+// `CT_TOE` / `CT_SH` are the two travels as a fraction of `p.a.y` (= 8/(white − black) = 1.0 EV).
+// The toe is a *gain* on the far side of a smoothstep, so its steepest slope is `1.5·A/w` = 0.575;
+// the shoulder is a `4u(1−u)` bump, whose steepest flank is `3.11·A/w` = 0.53 and whose code-space
+// step is amplified by `2^(0.4167·Δ)`. Both fractions are set to the 2-code banding budget, and both
+// are measured in `ContrastLogDomainTests` (max step 1.80 / 1.67 codes at ±100).
+constant float CT_WHITE_EV = 0.0;
+constant float CT_BLACK_EV = -8.0;
+constant float CT_TOE_W_EV = 3.0;
+constant float CT_SH_LO_EV = -3.2;
+constant float CT_TOE = 0.85;
+constant float CT_SH = 0.55;
+
+/// The bend of one pixel, **in EV**, from its luma's EV. Odd in `contrast` by construction: `−100` is
+/// the same shape mirrored (toe lifted, shoulder pulled down), which is what makes the map a monotone
+/// family in the slider instead of two different curves.
+static inline float s2_contrast_ev(float L, float contrast, float travel) {
+    // 4u(1−u): 0 at both ends of the window, exactly 1 in its middle, C¹ everywhere — so the shoulder
+    // joins the held core and the white point with no step in value or in slope, and *lands on white*
+    // (a pixel at white receives nothing, so nothing below white can be pushed past it).
+    float up = smoothstep(CT_SH_LO_EV, CT_WHITE_EV, L);
+    float shoulder = 4.0 * up * (1.0 - up);
+    // The toe is a **shift** of the far end, not a bump: a gain cannot fold however dark the pixel is,
+    // and it keeps 0 at 0 (no manufactured grey, no new dead black below the knee).
+    float toe = 1.0 - smoothstep(CT_BLACK_EV, CT_BLACK_EV + CT_TOE_W_EV, L);
+    return contrast / 100.0 * travel * (CT_SH * shoulder - CT_TOE * toe);
+}
+
+// One body, two entry points. `kContrast` is a compile-time flag, so the pass that runs with
+// `contrast == 0` contains none of the log2/exp2 arithmetic — not "the arithmetic with a zero in it".
+// That is 071's lesson (a branch inside the function is *in the code*, and the compiler is free to
+// reorder around it: 071 measured that spelling moving 2980/12309 samples by an ULP) and it also keeps
+// the slider-free pass free of two transcendental ops per pixel. `RenderGraph` dispatches on
+// `edit.light.contrast == 0`.
+//
+// It is a *safety net*, not the identity proof: `s2_contrast_ev` returns exactly 0.0 at contrast 0, so
+// `exp2(0)` is exactly 1 and the contrast path is bit-identical too (`ContrastLogDomainTests` pins
+// both). The **old** power was not: `0.18·(|v|/0.18)^1` is `0.18·(|v|/0.18)` and a division followed by
+// a multiplication is not the identity — measured 980 of 1685 samples off by 1 ULP on the arithmetic
+// path (0 codes at 8 bits, but not "bit for bit"). The shipped pipeline never saw it, because the
+// all-zero document takes the `identity` copy branch above; that is the fact this ticket recorded
+// before changing anything.
+template <bool kContrast>
+static inline void s2_body(texture2d<float, access::read> src,
+                           texture2d<float, access::write> dst,
+                           constant S2Params &p, uint2 gid) {
     float4 c = src.read(gid);
     if (p.b.z > 0.5) {
         dst.write(c, gid);
@@ -106,13 +185,17 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // not clamp it away before its own maths.)
     float3 v = c.rgb;
 
-    float pivot = max(p.a.y, 1e-3);
-    float gamma = exp2(p.a.x / 100.0 * 2.0);
-    // Sign-preserving power: `pow` is undefined for a negative base, and the curve has to stay
-    // odd-symmetric around zero so a sub-black pixel keeps its sub-black sign through the contrast
-    // step (at gamma == 1 this is the identity on both sides of zero). The 1e-6 floor is the
-    // existing guard against `pow(near-zero, large gamma)` collapsing; it only bites below 1e-6.
-    v = sign(v) * pivot * pow(max(abs(v) / pivot, 1e-6), gamma);
+    // ── contrast: a bounded S in log2 EV over a held core (0107) ───────────────────────────────
+    //
+    // This replaces the linear-light power (see the header for the measured "before"). It is a
+    // *displacement in EV*, `v *= 2^Δ(L)`: contrast moves the shadow end and the highlight end in
+    // opposite directions and leaves the band they cannot reach (the median's) alone.
+    if (kContrast) {
+        // Same non-negative luma as the region weights below: a mixed-sign pixel must not read a
+        // slightly different luminance here than there.
+        float lumaC = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
+        v *= exp2(s2_contrast_ev(log2(lumaC), p.a.x, p.a.y));
+    }
 
     // The **region weights** are computed from the non-negative part, exactly as before the sign was
     // preserved. A pixel with mixed signs (one channel sub-black) would otherwise read a slightly
@@ -142,4 +225,21 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // before. Measured: keeping the sign *through* the write instead moved 260 of 3.05 M pixels by one
     // code in the push fixture — a real but pointless change in the wrong place.
     dst.write(float4(max(v, 0.0), c.a), gid);
+}
+
+// The two instantiated entry points (see the `kContrast` note above the body): the first is byte for
+// byte the pass every document with `contrast == 0` has always run, the second is the only place the
+// log2-domain bend exists.
+kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        constant S2Params &p [[buffer(0)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    s2_body<false>(src, dst, p, gid);
+}
+
+kernel void s2_tone_map_contrast(texture2d<float, access::read> src [[texture(0)]],
+                                 texture2d<float, access::write> dst [[texture(1)]],
+                                 constant S2Params &p [[buffer(0)]],
+                                 uint2 gid [[thread_position_in_grid]]) {
+    s2_body<true>(src, dst, p, gid);
 }

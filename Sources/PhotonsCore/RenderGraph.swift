@@ -1938,14 +1938,20 @@ public final class RenderGraph {
             throw RenderError.executeFailed("mask atlas must be encoded by encodeAtlas")
 
         case .toneMap:
-            let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
+            // 0107: two entry points, chosen by whether the document has a contrast setting at all.
+            // The one without it contains none of the log2/exp2 arithmetic, so `contrast == 0` is the
+            // pass it always was (see the `kContrast` note in the kernel).
+            let toneFunction = edit.light.contrast == 0 ? "s2_tone_map" : "s2_tone_map_contrast"
+            let p = try kernels.pipeline(file: "s2_tone_map", function: toneFunction)
             // Only what bends the 0…1 range: contrast and the two region lifts. Blacks/whites are a
             // level and moved to S1 (派单 019), so they no longer appear here — neither in the identity
             // test nor in `keyMaterial(.toneMap)`.
             let identity = edit.light.contrast == 0 && edit.light.highlights == 0
                 && edit.light.shadows == 0
             var params = S2Params(
-                a: SIMD4(Float(edit.light.contrast), 0.18, 0, 0),
+                // `.y` is the bend's full-scale travel in EV — 8/(white − black) of the axis, the
+                // derived replacement for the old hard-coded `2.0` (0107, `S2Contrast.travelEV`).
+                a: SIMD4(Float(edit.light.contrast), Float(S2Contrast.travelEV), 0, 0),
                 b: SIMD4(Float(edit.light.highlights), Float(edit.light.shadows), identity ? 1 : 0, 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
