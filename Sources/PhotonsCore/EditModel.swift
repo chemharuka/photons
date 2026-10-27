@@ -371,7 +371,34 @@ public struct EditModel: Sendable, Equatable, Codable {
 
     /// Canonical text for the parameters a given stage consumes. Fed into the cache-key chain;
     /// must stay stable and order-independent across processes (no dictionary iteration).
+    ///
+    /// P1f (079 §2.7.1): the text also names **which generation of that stage's arithmetic** produced
+    /// the pixels (`StageAlgorithmVersion`, appended as `;alg=N`). Parameters alone cannot separate two
+    /// kernels that read the same numbers and compute different pixels — which is how a replaced
+    /// contrast curve stayed servable under an unchanged key. The token is unconditional, so a key
+    /// string always answers "which algorithm wrote this", not only after the first bump; the one-time
+    /// re-recording of the pinned vectors (`MaskTests`, `WindowTests`) is the price and it is paid here.
     public func keyMaterial(_ stage: RenderStage) -> String {
+        keyMaterial(stage, algorithmVersion: true)
+    }
+
+    /// `algorithmVersion: false` drops the `;alg=N` token, i.e. rebuilds the **pre-P1f material**
+    /// byte for byte. **Never false in the app.**
+    ///
+    /// `CacheVersionTests.testRemovingTheVersionFromTheKeyMaterialMakesTheClaimFail` sets it and shows
+    /// what a key that does not name its own arithmetic does: the old key and the new key become the
+    /// same string, which is exactly the bug (a replaced contrast curve served from a stale file). A
+    /// key whose load-bearing half cannot be switched off in a test is a key nobody can trust — the
+    /// same discipline as `RenderGraph.s1KeyIncludesRedGroup`.
+    public func keyMaterial(_ stage: RenderStage, algorithmVersion: Bool) -> String {
+        material(stage) + (algorithmVersion ? StageAlgorithmVersion.token(stage) : "")
+    }
+
+    /// The parameters a stage reads, without the algorithm-version token of `keyMaterial`.
+    ///
+    /// Split out because the token is a property of the *kernel*, not of the document: nothing that
+    /// asks "did the document move?" should see it (a version bump is not an edit).
+    private func material(_ stage: RenderStage) -> String {
         switch stage {
         case .geometry:
             // Byte-identical to the M1 material for every document that predates `aspectLock`

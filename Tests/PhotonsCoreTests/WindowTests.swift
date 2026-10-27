@@ -153,6 +153,11 @@ final class WindowTests: XCTestCase {
     /// The `geometry` link and the `curve`/`color`/`vignette`/`display` *materials* are otherwise
     /// untouched, and `outputWindow: nil` is the whole frame, so it must append nothing at all.
     ///
+    /// P1f (079 §2.7.1) is the fourth migration, and it is the same rows again: every link's material
+    /// now ends with `;alg=N` (`StageAlgorithmVersion`), so each text gained one token and every digest
+    /// below it moved. The window's own spelling is unchanged — `win=` is appended *after* the material,
+    /// so a window still shows up as the last field of the geometry link and nowhere else.
+    ///
     /// 069 is the third allowed migration and it is the same one `MaskTests
     /// .testEmptyMasksProduceTheM1KeysByteForByte` records in full: the curve's stored pair is now
     /// the card's `0…2` axis (`x_new = 2·x_old`, `y_new = 2·y_old`) and is spelled with six decimals
@@ -173,25 +178,25 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(implicit.display, explicit.display)
 
         let expected: [(String, String, String)] = [
-            ("geometry", "1ba3968fd210c7dca1650a3a7aed55b73e4e958240b52b42850642edd7b3c578",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10"),
-            ("sceneLinear", "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f",
-             "1ba3968fd210c7dca1650a3a7aed55b73e4e958240b52b42850642edd7b3c578|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"),
-            ("curve", "e955d86c228b8bd3e3e67cd1811a122752a8ea72a80998688cbfd6614f6eba9f",
-             "93a5c3537e7949dba719f9719b031770ba5dd01c01b9b499a556db6c9cda9e9f|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000"),
-            ("toneMap", "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c",
-             "e955d86c228b8bd3e3e67cd1811a122752a8ea72a80998688cbfd6614f6eba9f|con=20.00000;hi=-30.00000;sh=15.00000"),
-            ("color", "8f24a72830945bf0bc0f1d65ae71d7ab7744298063a22f7a8b84ae6a98e8c8bf",
-             "9c8b69dacacf6ad4d4a5b9f5799145e0727834d350ff66625f0ca864767fd09c|vib=15.00000;sat=-10.00000"),
+            ("geometry", "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702",
+             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=1"),
+            ("sceneLinear", "b132ce255825acb03824afe5c3cb87c382100d30c8dfa9e963da787e8445a259",
+             "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=2"),
+            ("curve", "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862",
+             "b132ce255825acb03824afe5c3cb87c382100d30c8dfa9e963da787e8445a259|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=1"),
+            ("toneMap", "05142812c655c99dea5ab453ac2af77494cef58b7a18415288a4ba36ff14c720",
+             "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862|con=20.00000;hi=-30.00000;sh=15.00000;alg=2"),
+            ("color", "f892e08c35ca610318bed049c532447691e98388e36f109a74d4c35ac28689b1",
+             "05142812c655c99dea5ab453ac2af77494cef58b7a18415288a4ba36ff14c720|vib=15.00000;sat=-10.00000;alg=1"),
             // 076: the eight bands are S3.6's material now, so a document that carries one gains an
             // eighth link **between S3 and the vignette**. Without a band it does not exist at all, and
             // the chain is the M1 seven (HSLTests pins that side).
-            ("hsl", "236992e189991bbd791f5542eff39898ca993c032bc195ffa37f043aa9459237",
-             "8f24a72830945bf0bc0f1d65ae71d7ab7744298063a22f7a8b84ae6a98e8c8bf|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"),
-            ("vignette", "65b1f81b51b687705b53f58b98dea640781997a096697cbc953aac9c43a08b95",
-             "236992e189991bbd791f5542eff39898ca993c032bc195ffa37f043aa9459237|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000"),
-            ("display", "960607c6a93e077ed584673ba03e21ef2ce48ba890402d73ba9fa52fe2ecb39b",
-             "65b1f81b51b687705b53f58b98dea640781997a096697cbc953aac9c43a08b95|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("hsl", "dd931703b82b82d3da85a41e650656a0fbe80b97b857dede331932aa92abfccc",
+             "f892e08c35ca610318bed049c532447691e98388e36f109a74d4c35ac28689b1|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("vignette", "cf94b69589fdcbf285420c7bb8e877c4798e405a2bf70c5080fe8d5ee0ae4393",
+             "dd931703b82b82d3da85a41e650656a0fbe80b97b857dede331932aa92abfccc|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=1"),
+            ("display", "ca5397d08f679e8678438676bdafef1414af48c4bbf1f48116391082220bc2f1",
+             "cf94b69589fdcbf285420c7bb8e877c4798e405a2bf70c5080fe8d5ee0ae4393|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

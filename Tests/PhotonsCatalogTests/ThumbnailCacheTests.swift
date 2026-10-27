@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import PhotonsCore
 @testable import PhotonsCatalog
 
 /// M3.5 cache contract: content-addressed keys, atomic writes, LRU, tier policy.
@@ -158,16 +159,30 @@ final class ThumbnailCacheTests: XCTestCase {
 
     // MARK: layout
 
+    /// `thumbs/<namespace>/xx/yy/<digest>.jpg` — the namespace (P1f) is what makes "which generation
+    /// of the arithmetic wrote this file?" a directory instead of an unanswerable question about a
+    /// sha256. A placeholder goes under `p`, a graph file under `g-<fingerprint>`, and neither can be
+    /// confused for the other by path.
     func testPathLayoutIsShardedByName() throws {
         let cache = try ThumbnailCache(root: root)
         let key = ThumbKey.preview(contentHash: hash("a"), tier: .t512)
         let url = cache.url(for: key)
         XCTAssertEqual(url.lastPathComponent, "\(key.digest).jpg")
-        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, String(key.digest.dropFirst(2).prefix(2)))
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent,
+                       String(key.digest.dropFirst(2).prefix(2)))
         XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent,
                        String(key.digest.prefix(2)))
-        XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .standardizedFileURL.path, root.standardizedFileURL.path)
+        // …and the namespace above the shards: `p` here, `g-<fingerprint>` for a graph key.
+        XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent()
+                        .deletingLastPathComponent().lastPathComponent, ThumbNamespace.preview)
+        XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent()
+                        .deletingLastPathComponent().deletingLastPathComponent()
+                        .standardizedFileURL.path, root.standardizedFileURL.path)
+
+        let graph = ThumbKey.graph(contentHash: hash("a"), tier: .t512, developJSON: "{}")
+        XCTAssertEqual(graph.namespace, "g-" + StageAlgorithmVersion.fingerprint)
+        XCTAssertTrue(cache.url(for: graph).path.contains("/g-\(StageAlgorithmVersion.fingerprint)/"))
+        XCTAssertNotEqual(graph.namespace, key.namespace, "the two pipelines never share a directory")
     }
 
     // MARK: ③ LRU
