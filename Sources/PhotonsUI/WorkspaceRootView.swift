@@ -242,7 +242,7 @@ public final class WorkspaceRootView: NSView {
     public let gridController: AssetGridController
     public let loupeController: LoupeController
     public let filmstripController: FilmstripController
-    public let inspectorHost: NSHostingView<InspectorView>
+    public let inspectorHost: InspectorHostingView
     /// The one line of import feedback (进度 + 取消), floating at the bottom of the canvas.
     public let importProgressBar = ImportProgressBar()
 
@@ -271,8 +271,8 @@ public final class WorkspaceRootView: NSView {
         self.gridController = AssetGridController(session: session)
         self.loupeController = LoupeController(session: session)
         self.filmstripController = FilmstripController(session: session)
-        self.inspectorHost = NSHostingView(rootView: InspectorView(session: session,
-                                                                 loupe: loupeController))
+        self.inspectorHost = InspectorHostingView(rootView: InspectorView(session: session,
+                                                                          loupe: loupeController))
         self.browserWidth = WorkspaceLayout.clampBrowserWidth(
             CGFloat(defaults.object(forKey: "photons.browserWidth") as? Double
                     ?? Double(WorkspaceLayout.browserWidthDefault)))
@@ -321,6 +321,13 @@ public final class WorkspaceRootView: NSView {
         topBar.onOpen = { [weak self] in self?.openLibraryPanel() }
         topBar.onModeChange = { [weak self] mode in self?.session.mode = mode }
         topBar.onToggleFilmstrip = { [weak self] in self?.toggleFilmstrip() }
+
+        // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
+        // One switch, published by the loupe when the mode actually changes (so a drag tick cannot
+        // flicker it), wired here because this view owns both halves.
+        loupeController.onCropModeChange = { [weak self] active in
+            self?.inspectorHost.isEditingGated = active
+        }
 
         showModule(for: session.mode)
         applyBrowserMode()

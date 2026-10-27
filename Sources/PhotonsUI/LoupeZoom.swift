@@ -620,17 +620,27 @@ public struct LoupeFraming: Equatable, Sendable {
     public var cropOriginX: Double { crop.left * sourceWidth }
     public var cropOriginY: Double { crop.top * sourceHeight }
 
-    /// Canvas pixels per source pixel when the whole crop is fitted into the viewport.
+    /// Canvas pixels per source pixel when the **whole source frame** is fitted into the viewport.
+    ///
+    /// 072 §A0 — the base is the full frame (`sourceWidth`/`sourceHeight`: the upright frame S0
+    /// ingested, before any crop), and the crop is only the *visible window*. It used to be measured
+    /// on the crop (`cropWidthPixels`), which made fit mean "blow the kept part up to the viewport":
+    /// a 50 % crop was drawn at twice the scale of the picture it was cut out of, so `fit`, `1:1` and
+    /// `2:1` were three different ratios depending on the document's crop rect. One invariant now:
+    ///
+    ///     fit  = the whole frame fits the viewport      (a 50 % crop covers half of it)
+    ///     1:1  = one source pixel → one device pixel    (crop or no crop)
+    ///     2:1  = two device pixels per source pixel     (crop or no crop)
     ///
     /// `min(1, …)`: an image smaller than the viewport is shown at 1:1, never blown up — the M3 rule.
     /// The result is therefore always in `(0, 1]`, and it is usually **not** one of the zoom stops:
     /// 0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, exactly 1.0 for a file that
-    /// already fits. It is also not *in* the ladder any more — `fit` is a mode, and its ratio is only
-    /// ever used to lay the whole frame out and to label the readout (`适应 31%`). Nothing may assume
-    /// fit sits below 25 %, below 50 %, or below the current zoom.
+    /// already fits. It is also not *in* the ladder — `fit` is a mode, and its ratio is only ever used
+    /// to lay the frame out and to label the readout (`适应 31%`). Nothing may assume fit sits below
+    /// 25 %, below 50 %, or below the current zoom.
     public var fitZoom: Double {
-        let z = min(Double(viewport.width) / max(cropWidthPixels, 1e-9),
-                    Double(viewport.height) / max(cropHeightPixels, 1e-9))
+        let z = min(Double(viewport.width) / max(sourceWidth, 1e-9),
+                    Double(viewport.height) / max(sourceHeight, 1e-9))
         guard z.isFinite, z > 0 else { return 1 }
         return min(1, z)
     }

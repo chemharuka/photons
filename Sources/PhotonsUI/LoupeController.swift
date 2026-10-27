@@ -910,6 +910,19 @@ public final class LoupeController: NSViewController {
     /// The camera the 裁切 tool borrowed: restored on 应用/取消, so a precision tool never leaves the
     /// user at a zoom they did not choose (`WINDOW_INTEGRATION.md:14` — 临时fit，退出恢复会话视口).
     private var cropEntryState: LoupeViewState?
+    /// 072 §E1/§E2 — 「裁切模式打开 / 关闭」, published exactly once per change.
+    ///
+    /// The workspace hangs the inspector's event layer on this: while the frame owns the canvas the
+    /// right-hand panel is **inert** (its hosting view answers `hitTest → nil`), not merely greyed, and
+    /// the moment the tool closes the panel is live again. View state, like the mode itself.
+    public var onCropModeChange: ((Bool) -> Void)?
+    /// What the callback was last told, so a drag tick cannot republish it.
+    private var publishedCropModeActive = false
+    /// 072 §A1 — 确认/取消裁切后, the picture is carried from the crop framing to the entry framing by
+    /// the stop-change bridge. That is the one animation in the loupe, so leaving the tool forces it on
+    /// even when the *scale* happens to match (a crop change moves the picture's content, not only its
+    /// ratio), instead of cutting.
+    public private(set) var cropExitAnimations = 0
     /// The continuous value a *pinch* has accumulated, in the same units as `viewState.zoom`.
     ///
     /// The camera itself is always on a rung (`LoupeViewState.snappedLevel`), which would otherwise
@@ -1446,7 +1459,8 @@ public final class LoupeController: NSViewController {
         setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale))
     }
 
-    private func setViewState(_ next: LoupeViewState, anchor: LoupeZoomAnchor = .center) {
+    private func setViewState(_ next: LoupeViewState, anchor: LoupeZoomAnchor = .center,
+                              forceAnimation: Bool = false) {
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
@@ -1471,7 +1485,8 @@ public final class LoupeController: NSViewController {
         //
         // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
         // animating a drag would leave the picture behind the hand.
-        if let framing = framing(), movesScale(from: previous, to: next, framing: framing) {
+        if let framing = framing(),
+           forceAnimation || movesScale(from: previous, to: next, framing: framing) {
             armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
         }
         requestViewportRender()
@@ -2582,7 +2597,17 @@ public final class LoupeController: NSViewController {
     }
 
     private func leaveCropTool() {
-        if let previous = cropEntryState { setViewState(previous) }
+        if let previous = cropEntryState {
+            // 072 §A1 — **动画**回到进入前 framing, not a cut. The endpoint is the entry camera
+            // itself (`previous`, restored verbatim: same rung, same pan — nothing is re-fitted or
+            // re-centred), and the travel there is the loupe's own stop-change bridge, forced on
+            // because a crop change moves the picture's *content* as well as its ratio.
+            let leaving = viewState
+            setViewState(previous, forceAnimation: true)
+            if viewState == previous, leaving != previous {
+                cropExitAnimations += 1
+            }
+        }
         cropEntryState = nil
         refreshCropTool()
         requestEditRender()
@@ -2600,6 +2625,43 @@ public final class LoupeController: NSViewController {
         lastHandledAnchorID = anchor
         refreshCropTool()
     }
+
+    // MARK: 变换 ▸ 水平翻转 / 垂直翻转 (072 §F)
+
+    /// 菜单 ▸ 变换 ▸ 水平翻转 (⌥⌘H) and 裁切工具栏的 水平 switch — **one** action, one field.
+    ///
+    /// The flip is a **document-level geometry action**: `GeometryGroup.flipHorizontal` is written
+    /// through `applyEdit`, committed once, and undone by one ⌘Z. It used to be a *draft* flag of the
+    /// crop tool, which meant the bar and the menu could disagree about it and the bar's switch was
+    /// invisible to ⌘Z until the crop was applied. Now the document is the only place a flip lives, so
+    /// the menu's tick, the bar's switch and S0's `uv` flip all read the same bit.
+    @discardableResult
+    public func flipHorizontal() -> Bool { flip(horizontal: true) }
+
+    /// 菜单 ▸ 变换 ▸ 垂直翻转 (⌥⌘V) / 裁切工具栏的 垂直 switch.
+    @discardableResult
+    public func flipVertical() -> Bool { flip(horizontal: false) }
+
+    @discardableResult
+    private func flip(horizontal: Bool) -> Bool {
+        guard let session, session.mode == .loupe, session.anchorID != nil else {
+            NSSound.beep()          // nothing to flip: say so instead of a silent no-op
+            return false
+        }
+        session.applyEdit { model in
+            if horizontal { model.geometry.flipHorizontal.toggle() }
+            else { model.geometry.flipVertical.toggle() }
+        }
+        // The picture changed, so the frame the crop tool draws must follow it (the overlay is built
+        // from the same flips) — and a mode that is on gets one render.
+        if cropTool.isActive { refreshCropTool() }
+        requestEditRender()
+        return session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+    }
+
+    /// The document's flips — what the menu ticks and the bar's two switches show.
+    public var isFlippedHorizontally: Bool { session?.edit.geometry.flipHorizontal ?? false }
+    public var isFlippedVertically: Bool { session?.edit.geometry.flipVertical ?? false }
 
     /// The crop frame's layout in view points, for the overlay and for the tests.
     ///
@@ -2623,8 +2685,8 @@ public final class LoupeController: NSViewController {
                                    sourceHeight: Double(frame.height),
                                    crop: .full,
                                    straightenDegrees: cropTool.draft.straighten,
-                                   flipH: cropTool.draft.flipHorizontal,
-                                   flipV: cropTool.draft.flipVertical).mapping(of: viewState)
+                                   flipH: isFlippedHorizontally,
+                                   flipV: isFlippedVertically).mapping(of: viewState)
         }
         return cropTool.layout(mapping: mapping, source: cropSourceSize, pointScale: scale)
     }
@@ -2687,9 +2749,16 @@ public final class LoupeController: NSViewController {
         let active = cropTool.isActive
         cropOverlay.isHidden = !active
         cropBar.isHidden = !active
-        // 手势优先级: the zoom pill is canvas chrome, and in 裁切 mode the canvas belongs to the
-        // frame — a pinch or a stop change would move the picture out from under the box.
-        zoomSlider.isHidden = active
+        // 072 §E4 — the zoom pill is **not** a sidebar 调节, and the user asked for it explicitly:
+        // 「进入裁切模式的缩放功能也要保留」. Nothing hides it here any more (it used to be hidden while
+        // the frame was up). It is canvas chrome: the frame owns the *picture* gestures, the pill owns
+        // the camera, and neither can move the other's number.
+        // 072 §E1/§E2 — the mode change is published once, so the workspace can put the inspector's
+        // event layer away (and hand it back on exit) instead of merely greying its rows.
+        if publishedCropModeActive != active {
+            publishedCropModeActive = active
+            onCropModeChange?(active)
+        }
         guard active else {
             cropOverlay.layout = nil
             cropOverlay.active = nil

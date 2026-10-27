@@ -97,6 +97,52 @@ public enum MainMenu {
             item.tag = index
         }
 
+        // 变换 — **before 显影** (072 §F). Everything that moves the picture's geometry lives here:
+        // the crop tool's three verbs, the two flips, and (reserved, not shipped as dead grey rows)
+        // 梯形校正 / 四边形校正. They used to sit at the top of 显影, which said they were a *look*;
+        // they are not — they change where the pixels come from, not their colour.
+        //
+        // 梯形校正 / 四边形校正 (**not built**): the contract is 072 §F — they belong to
+        // `GeometryGroup` as a new group of corner offsets, they need their own renderer stage, and
+        // until both exist there is no row here at all (a grey item teaches the user a command that
+        // does nothing). The insertion point is the separator below.
+        let transformItem = NSMenuItem()
+        main.addItem(transformItem)
+        let transform = NSMenu(title: "变换")
+        transformItem.submenu = transform
+        // 裁切与旋转 (⌘R — the R every photo app puts on its crop tool, and the key Phos uses,
+        // `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`).
+        //
+        // The three items are one tool in three verbs: enter/apply, apply, cancel. ↵ and Esc do the
+        // same thing from the canvas without touching the menu, which is why the menu items carry
+        // ⌘-modified keys: a bare Return or Escape in a menu item steals the key from every text
+        // field in the window. Both 应用 and 取消 are **grey with the tool off** (072 §D4:
+        // `validateMenuItem` returns `isCropToolActive`, so ⌘⏎ and ⌘. do nothing then either).
+        transform.addItem(withTitle: "裁切与旋转",
+                          action: #selector(EditorWindowController.toggleCropAction(_:)),
+                          keyEquivalent: "r")
+        let applyCrop = transform.addItem(withTitle: "应用裁切",
+                                          action: #selector(EditorWindowController.applyCropAction(_:)),
+                                          keyEquivalent: "\r")
+        applyCrop.keyEquivalentModifierMask = [.command]
+        let cancelCrop = transform.addItem(withTitle: "取消裁切",
+                                           action: #selector(EditorWindowController.cancelCropAction(_:)),
+                                           keyEquivalent: ".")
+        cancelCrop.keyEquivalentModifierMask = [.command]
+        transform.addItem(.separator())
+        // 翻转 — **document-level geometry**, one ⌘Z each, and the same bit the crop bar's two
+        // switches read (`LoupeController.flipHorizontal()`; 072 §F).
+        let flipH = transform.addItem(withTitle: "水平翻转",
+                                      action: #selector(EditorWindowController.flipHorizontalAction(_:)),
+                                      keyEquivalent: "h")
+        flipH.keyEquivalentModifierMask = [.command, .option]
+        let flipV = transform.addItem(withTitle: "垂直翻转",
+                                      action: #selector(EditorWindowController.flipVerticalAction(_:)),
+                                      keyEquivalent: "v")
+        flipV.keyEquivalentModifierMask = [.command, .option]
+        transform.addItem(.separator())
+        // Reserved: 梯形校正 / 四边形校正 go here (see the comment above — no dead rows).
+
         // Develop — presets. The list is the library's, so the menu is rebuilt every time it opens
         // (`PresetMenu.menuNeedsUpdate`): a preset created in the inspector card shows up here
         // without a relaunch, and a deleted one cannot be applied from a stale item.
@@ -104,25 +150,6 @@ public enum MainMenu {
         main.addItem(developItem)
         let develop = NSMenu(title: "显影")
         developItem.submenu = develop
-        // 裁切与旋转 (⌘R — the R every photo app puts on its crop tool, and the key Phos uses,
-        // `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`).
-        //
-        // The three items are one tool in three verbs: enter/apply, apply, cancel. ↵ and Esc do the
-        // same thing from the canvas without touching the menu, which is why the menu items carry
-        // ⌘-modified keys: a bare Return or Escape in a menu item steals the key from every text
-        // field in the window.
-        develop.addItem(withTitle: "裁切与旋转",
-                        action: #selector(EditorWindowController.toggleCropAction(_:)),
-                        keyEquivalent: "r")
-        let applyCrop = develop.addItem(withTitle: "应用裁切",
-                                        action: #selector(EditorWindowController.applyCropAction(_:)),
-                                        keyEquivalent: "\r")
-        applyCrop.keyEquivalentModifierMask = [.command]
-        let cancelCrop = develop.addItem(withTitle: "取消裁切",
-                                         action: #selector(EditorWindowController.cancelCropAction(_:)),
-                                         keyEquivalent: ".")
-        cancelCrop.keyEquivalentModifierMask = [.command]
-        develop.addItem(.separator())
         let presetItem = NSMenuItem(title: "预设", action: nil, keyEquivalent: "")
         presetItem.submenu = PresetMenu(kind: .apply)
         develop.addItem(presetItem)

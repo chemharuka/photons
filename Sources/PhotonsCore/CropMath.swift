@@ -205,6 +205,20 @@ extension AspectLock: Codable {
         }
         return .custom(r)
     }
+
+    /// The same question asked of a bare ratio — 072 §C1/§C2.
+    ///
+    /// 交换长宽 produces ratios that no preset names (9:16, 3:4, 2:3), so they have to be stored as
+    /// `.custom`, but one that *does* land on a preset (a 1:1 swap, or 9:16 swapped back to 16:9) should
+    /// come back as that preset — otherwise the popup would show 自由 for a 16:9 frame and the next
+    /// drag would lose the constraint's name.
+    public static func matching(ratio: Double, tolerance: Double = 1e-6) -> AspectLock {
+        guard ratio.isFinite, ratio > 0 else { return .original }
+        for lock in [AspectLock.square, .threeTwo, .fourThree, .sixteenNine] {
+            if let known = lock.ratio, abs(known - ratio) <= tolerance { return lock }
+        }
+        return .custom(ratio)
+    }
 }
 
 // MARK: - crop math (pure, no GPU, no Metal)

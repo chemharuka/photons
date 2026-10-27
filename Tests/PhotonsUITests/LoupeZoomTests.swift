@@ -170,12 +170,35 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(small.fitZoom, 1, accuracy: 1e-12)
     }
 
+    /// 072 §A0 — a small crop is **not** blown up to fill the viewport: `fit` is measured on the whole
+    /// frame, so the kept part covers its share of the canvas and `1:1` is one source pixel per device
+    /// pixel whatever the crop is.
+    ///
+    /// The old expectation (`fitZoom == 1` for a 1250×800 crop in a 2560×1600 viewport) was exactly the
+    /// 「用裁切尺寸算」 answer this task removes: it magnified the crop by 2560/1250 = 2.05 to fill the
+    /// width, so the same 1:1 camera was *not* 1:1 on a cropped document. The numbers below are the two
+    /// formulas measured side by side.
     func testSmallCropIsShownAtOneToOneInsideTheViewport() {
-        // A 1000×800 crop in a 2560×1600 viewport: fit == 1:1, and a 4:1 window is still inside.
-        let f = framing(crop: CropRect(left: 0.25, top: 0.25, right: 0.5, bottom: 0.45))
+        let crop = CropRect(left: 0.25, top: 0.25, right: 0.5, bottom: 0.45)
+        let f = framing(crop: crop)
         XCTAssertEqual(f.cropWidthPixels, 1500, accuracy: 1e-9)
         XCTAssertEqual(f.cropHeightPixels, 800, accuracy: 1e-9)
-        XCTAssertEqual(f.fitZoom, 1, accuracy: 1e-12)
+
+        // A0: the base is the full 6000×4000 frame → 2560/6000 = 0.4267, 1600/4000 = 0.4 → 0.4.
+        XCTAssertEqual(f.fitZoom, 0.4, accuracy: 1e-12, "fit is the whole frame's ratio, not the crop's")
+        // Anti-proof: the crop-based value the task calls wrong is min(2560/1500, 1600/800) = 1.7067 —
+        // the crop magnified by 1.71 to fill the viewport width, on a frame whose fit is 0.4.
+        let wrong = min(Double(viewport.width) / f.cropWidthPixels,
+                        Double(viewport.height) / f.cropHeightPixels)
+        XCTAssertEqual(wrong, 2560.0 / 1500.0, accuracy: 1e-12)
+        XCTAssertNotEqual(f.fitZoom, wrong, "「用裁切尺寸算」 is the value A0 forbids")
+
+        // The crop on screen at fit: 1500 × 0.4 = 600 pt wide, 800 × 0.4 = 320 pt tall, centred.
+        XCTAssertEqual(f.contentSize(of: .fit).width, 600, accuracy: 1e-9)
+        XCTAssertEqual(f.contentSize(of: .fit).height, 320, accuracy: 1e-9)
+        // 1:1 and 2:1 are the same camera for a cropped and an uncropped frame.
+        XCTAssertEqual(f.contentSize(of: actual(zoom: 1)).width, Double(viewport.width), accuracy: 1e-9)
+        XCTAssertEqual(f.contentSize(of: actual(zoom: 2)).width, Double(viewport.width), accuracy: 1e-9)
         let window = f.windowSize(of: actual(zoom: 4, x: 2250, y: 1800))
         XCTAssertEqual(window.width, 640, accuracy: 1e-9)
         XCTAssertTrue(window.height <= f.cropHeightPixels + 1e-9)

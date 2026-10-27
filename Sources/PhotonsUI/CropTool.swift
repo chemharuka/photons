@@ -454,6 +454,43 @@ public enum CropTool {
                                         degrees: Double) -> Bool {
         CropMath.fitsInsideSource(crop, in: source, degrees: degrees)
     }
+
+    // MARK: a custom ratio the user typed (072 §C2)
+
+    /// `"4:3" → 4/3`, `"16:9" → 1.777…`, `"1.5" → 1.5`, `"4/3" → 4/3`. `nil` for anything that is not a
+    /// positive, finite ratio.
+    ///
+    /// Pure, so the dialog's validation can be asserted without a window: the bar does not guess, it
+    /// asks this, and a `nil` is a beep plus the old ratio kept (nothing is written). Zero, a negative
+    /// side, an empty field, a non-number and a ratio with either side at or below zero are all
+    /// rejections — 「非法输入拒绝且不改当前比例」.
+    public static func ratio(from text: String,
+                             limit: ClosedRange<Double> = 0.01...100) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let parts = trimmed.split(whereSeparator: { $0 == ":" || $0 == "/" })
+        var ratio: Double?
+        if parts.count == 2 {
+            // A `W:H` pair — both sides must parse as numbers on their own, so "-3:2" and "4:0" fail.
+            guard let w = strictNumber(String(parts[0])),
+                  let h = strictNumber(String(parts[1])),
+                  w > 0, h > 0 else { return nil }
+            ratio = w / h
+        } else if parts.count == 1 {
+            ratio = strictNumber(String(parts[0]))
+        }
+        guard let ratio, ratio.isFinite, ratio > 0, limit.contains(ratio) else { return nil }
+        return ratio
+    }
+
+    /// `Double(String)` says yes to `"1e5"`, `"inf"` and `"0x1p3"`; a ratio field should not.
+    private static func strictNumber(_ text: String) -> Double? {
+        let body = text.hasPrefix("-") || text.hasPrefix("+") ? String(text.dropFirst()) : text
+        let digits = body.filter { $0 != "." }
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              body.filter({ $0 == "." }).count <= 1 else { return nil }
+        return Double(text)
+    }
 }
 
 // MARK: - one drag, as a pure function
