@@ -1,51 +1,79 @@
 import AppKit
 
-/// 顶栏右端那一块状态文本：`45 张` → 间距 → `已选 4` → 间距 → `photons-demo dev`。
+/// 顶栏右端那一块状态文本 —— 一条线上的**四段**，从左到右：
 ///
-/// 用户 2026-10-27 的说法：右上角原来有三段文本，颜色/字重/高度各不相同（10 pt medium 的
-/// `secondaryLabelColor` 和 10 pt regular 的 `tertiaryLabelColor`），而且 `45 张` 落在检查器
-/// 列的左边。要的是**一块**：同字号同字重同颜色、右对齐、整块压在检查器列上方，三段之间是
-/// 一个常量间距（`Metrics.gap`）。这里就是那一块。
+///     `已选 4`  ·  `45 张`  ·  `photons-demo`  ·  `498331f`
 ///
-/// 三条设计约束，都是"数字"而不是形容词：
+/// 版本号永远在最右（用户 2026-10-27 的原话：顺序为「已选xxx，xxx张，库名称，构建号/版本号」，
+/// 右对齐、给库名一个宽度上限、**不要**强制固定锚点）。四段同字号、同字重、同颜色、同一基线。
 ///
-/// 1. **同一种字**。三段都用 `Metrics.font`（10 pt、medium、等宽数字）和
-///    `Metrics.textColor`（`secondaryLabelColor`），行高 `Metrics.lineHeight`，同一个 `minY`。
-///    等宽数字是为了让 `1 → 12 → 999` 不改变字宽（比例数字会让计数自己抽动）。
-/// 2. **边不动**。照片数和已选都左补 U+2007 FIGURE SPACE 到固定位数（`Metrics.countDigits` /
-///    `Metrics.selectionDigits`），所以它们的**框宽是常量**；库名那一栏的宽度由检查器列宽算出，
-///    也与计数无关。于是三段的六条边在计数变化时一个都不动，动的只有框里的字形。
-/// 3. **落在检查器列上方**。最右一段的右边缘钉在 `trailingInset`（= 顶栏右边距 16 pt），
-///    库名那一栏的可用宽度 = 检查器列宽 − `trailingInset` − 前两段的框宽 − 两个间距。放不下
-///    就**尾部省略**（省略号在库名之后、版本号之前，版本号始终可见），全名进 tooltip。
-///    极端窄的窗口（簇连"…+版本号"都放不下）时整块让位，留给顶栏的可交互控件——
-///    `width(limit:)` 返回 0，`TopBarView` 会把它藏起来，而不是压到按钮上。
+/// 四条设计约束，全是可测的数字：
+///
+/// 1. **同一套字**。四段都是 `Metrics.font`（10 pt medium，等宽数字）、`Metrics.textColor`
+///    （`secondaryLabelColor`）、`Metrics.lineHeight`（14 pt）行高、同一个 `minY`。
+///    等宽数字让 `1 → 12 → 999` 不改变字宽。
+/// 2. **从右往左按实际宽度排，没有写死的 x**。`layout()` 只有一个游标：从 `bounds.width` 起，
+///    每放一段就减去该段**当前文本**的宽度再减一个 `Metrics.gap`。段的位置是计算结果，
+///    不是常量表 —— 所以计数变化只影响那一段自己的宽度，右边缘（`bounds.width`）一寸不动。
+/// 3. **右边缘固定、库名有宽度上限**。整簇的右边缘钉在窗口右边 −16 pt（`trailingInset`，
+///    由 `WorkspaceRootView` 摆放）。库名那一带的预算：
+///
+///        nameBudget = min(Metrics.nameMaxWidth, 可用宽度 − 已选 − 张 − 版本号 − 3 × gap)
+///
+///    可用宽度 = `min(检查器列宽, 顶栏给的 limit) − trailingInset`，所以检查器 300 pt 时
+///    四段总宽 ≤ 300（实际 ≤ 284）**且没有任何一段被裁**。`nameMaxWidth = 180` 的理由：
+///    默认检查器 330 pt 下这条预算算出 184.2 pt，180 正好在它以内 —— 也就是说默认窗口里
+///    ≤180 pt（约 30 个半角字符）的库名一个字都不截，窄检查器再按比例收。
+/// 4. **只有库名会被截**，而且是**中间省略**（`photons…26-10-27`），全名进 tooltip；
+///    两个计数与版本号永远按自身实际宽度完整显示。极端窄的窗口（连 40 pt 库名都放不下）时
+///    整块让位：`width(limit:)` 返回 0，顶栏把它藏起来，而不是压到按钮上。
+///
+/// **"最右字符被吞"的成因（实测，不是猜）**：旧实现让末段的 frame 宽度**等于**文本 advance
+/// （`NSString.size(withAttributes:)`），而 `NSTextFieldCell` 右对齐绘制时把行宽按整点取整，
+/// 最后一个字形的墨迹于是落到 frame 之外、被 `.byClipping` 切掉。把 label 画进位图实测
+/// `498331f`：frame 43.3138 = 文本 43.3138 时，最右墨迹停在距框右边缘 8.63 device px 处
+/// （≈4.3 pt，整个 'f' 没了）；frame 加 1.69 pt 后墨迹顶到边缘、墨点数 593 → 657。
+/// 所以这里每段 frame = `ceil(advance) + textSlack(1 pt)`：多出来的那一点在**左边**（右对齐），
+/// 视觉右边缘不动，末字形完整。
 public final class TopBarStatusCluster: NSView {
 
     public enum Metrics {
         public static let fontSize: CGFloat = 10
         public static let fontWeight: NSFont.Weight = .medium
-        /// 三段共用的一行高度；`TopBarView` 把它居中在 36 pt 顶栏里（y = 11）。
+        /// 四段共用的一行高度；顶栏把它居中在 36 pt 里。
         public static let lineHeight: CGFloat = 14
-        /// 三段之间的固定间距（与顶栏其它间距同量级：按钮 10 pt、分隔线 11 pt）。
-        public static let gap: CGFloat = 16
-        /// 最右一段的右边缘到窗口右边的距离 = 顶栏右边距。
+        /// 段与段之间的固定间距。四段比旧的三段多一个 gap，所以从 16 收到 12：
+        /// 默认检查器 330 pt 下留出上面算的 184.2 pt 库名预算。
+        public static let gap: CGFloat = 12
+        /// 最右一段（版本号）的右边缘到窗口右边的距离 = 顶栏右边距。
         public static let trailingInset: CGFloat = 16
         /// 簇的左边缘与顶栏最后一个可交互控件之间至少留这么宽。
         public static let minimumGapFromControls: CGFloat = 16
-        /// 数字补到几位（`9999`）：比现实里的库多一位，框宽因此是常量。
+        /// 数字补到几位（`999`）：比现实里的库多一位，框宽因此与计数无关。
         public static let countDigits = 3
         public static let selectionDigits = 3
-        /// 库名那一栏的下限。低于这个宽度时整块状态让位（见 `width(limit:)`）。
-        public static let minimumIdentityWidth: CGFloat = 72
+        /// 库名那一段的宽度上限（见类型注释里 180 的由来）。
+        public static let nameMaxWidth: CGFloat = 180
+        /// 库名的下限：连它都放不下就整块让位（`width(limit:)` 返回 0）。
+        public static let minimumNameWidth: CGFloat = 40
+        /// 每段 frame 比文本 advance 多出来的那一点（见类型注释里"最右字符被吞"的实测）。
+        public static let textSlack: CGFloat = 1
 
         public static let font: NSFont = .monospacedDigitSystemFont(ofSize: fontSize, weight: fontWeight)
         public static let textColor: NSColor = .secondaryLabelColor
         /// U+2007 FIGURE SPACE — 与数字同宽的空白（SF 里实测 6.5682 pt，和 `0` 完全一致）。
         public static let figureSpace = "\u{2007}"
+        public static let ellipsis = "…"
 
+        /// 文本的 advance 宽度（`NSTextFieldCell` 排版用的同一个度量）。
         public static func width(_ text: String) -> CGFloat {
             (text as NSString).size(withAttributes: [.font: font]).width
+        }
+
+        /// 一段的 frame 宽度：整点向上取整 + `textSlack`。必须**严格大于** advance，
+        /// 否则右对齐的 cell 会把最后一个字形切掉（见类型注释）。
+        public static func frameWidth(for text: String) -> CGFloat {
+            ceil(width(text)) + textSlack
         }
 
         /// `45` → `  45` 之类，用 figure space 左补到 `digits` 位；位数已够就原样返回。
@@ -54,36 +82,68 @@ public final class TopBarStatusCluster: NSView {
             guard text.count < digits else { return text }
             return String(repeating: figureSpace, count: digits - text.count) + text
         }
+
+        /// 中间省略：`photons-demo.photonslibrary.backup-2026-10-27` + 96 pt →
+        /// `photons-demo.ph…up-2026-10-27`。放得下就原样返回；连一个省略号都放不下就返回空串。
+        public static func middleTruncated(_ text: String, maxWidth: CGFloat) -> String {
+            guard width(text) > maxWidth else { return text }
+            guard width(ellipsis) <= maxWidth else { return "" }
+            let chars = Array(text)
+            guard chars.count > 2 else { return ellipsis }
+            // 头尾各留一半，逐步少留一个字，直到放得下。
+            for keep in stride(from: chars.count - 1, through: 1, by: -1) {
+                let headCount = (keep + 1) / 2
+                let tailCount = keep - headCount
+                let candidate = String(chars[0..<headCount]) + ellipsis
+                    + String(chars[(chars.count - tailCount)...])
+                if width(candidate) <= maxWidth { return candidate }
+            }
+            return ellipsis
+        }
     }
 
-    public let countLabel: NSTextField
-    public let selectionLabel: NSTextField
-    public let identityLabel: NSTextField
+    /// 四段的框宽（`layout()` 与 `width(limit:)` 共用同一份计算）。
+    public struct SegmentWidths: Equatable {
+        public var selection: CGFloat = 0
+        public var count: CGFloat = 0
+        public var name: CGFloat = 0
+        public var revision: CGFloat = 0
+        /// 四段 + 三个 gap。
+        public var total: CGFloat {
+            guard selection > 0 else { return 0 }
+            return selection + count + name + revision + 3 * Metrics.gap
+        }
+    }
 
-    /// 检查器列的宽度 —— 库名那一栏的宽度预算是从这里推的。由 `WorkspaceRootView.layout()`
-    /// 从 `WorkspaceGeometry.inspector.width` 灌进来。
+    // 顺序即从左到右：已选 → 张数 → 库名 → 版本号。
+    public let selectionLabel: NSTextField
+    public let countLabel: NSTextField
+    public let nameLabel: NSTextField
+    public let revisionLabel: NSTextField
+
+    /// 检查器列的宽度 —— 库名预算的起点。由 `WorkspaceRootView.layout()` 从
+    /// `WorkspaceGeometry.inspector.width` 灌进来。
     public var columnWidth: CGFloat = 330 {
         didSet { if columnWidth != oldValue { needsLayout = true } }
     }
 
-    /// 簇允许占据的最大宽度（顶栏用它把簇挡在可交互控件右边）。默认不限。
+    /// 顶栏允许簇占据的最大宽度（把簇挡在可交互控件右边）。默认不限。
     public var widthLimit: CGFloat = .greatestFiniteMagnitude {
         didSet { if widthLimit != oldValue { needsLayout = true } }
     }
 
     private var libraryName: String?
     private var revision = BuildStamp.revision
-    /// 库名那一段**不省略**时的宽度；`0` 表示还没 `update` 过。
-    private var preferredIdentityWidth: CGFloat = 0
 
     public override var isFlipped: Bool { true }
 
     public init() {
-        countLabel = Self.makeLabel()
         selectionLabel = Self.makeLabel()
-        identityLabel = Self.makeLabel()
+        countLabel = Self.makeLabel()
+        nameLabel = Self.makeLabel()
+        revisionLabel = Self.makeLabel()
         super.init(frame: .zero)
-        for label in [countLabel, selectionLabel, identityLabel] {
+        for label in [selectionLabel, countLabel, nameLabel, revisionLabel] {
             addSubview(label)
         }
     }
@@ -102,91 +162,83 @@ public final class TopBarStatusCluster: NSView {
         label.drawsBackground = false
         label.isEditable = false
         label.isSelectable = false
+        label.cell?.truncatesLastVisibleLine = false
         return label
     }
 
     // MARK: content
 
-    /// 三段文案。库名只在最右一段出现（`已选 N` 不再夹库名：那是旧布局把三件事塞进两行 label
-    /// 的结果），全名永远在 tooltip 里。
+    /// 库名（未命名时为 `未打开库`）：只有它会被截断，全名永远在 tooltip 里。
+    public var fullName: String {
+        (libraryName?.isEmpty == false) ? libraryName! : "未打开库"
+    }
+
     public func update(assetCount: Int, selectionCount: Int, libraryName: String?) {
         self.libraryName = libraryName
         revision = BuildStamp.revision
-        countLabel.stringValue = "\(Metrics.padded(assetCount, digits: Metrics.countDigits)) 张"
         selectionLabel.stringValue = "已选 \(Metrics.padded(selectionCount, digits: Metrics.selectionDigits))"
-        preferredIdentityWidth = Metrics.width(Self.fullIdentityText(libraryName: libraryName,
-                                                                     revision: revision))
-        identityLabel.toolTip = Self.fullIdentityText(libraryName: libraryName, revision: revision)
+        countLabel.stringValue = "\(Metrics.padded(assetCount, digits: Metrics.countDigits)) 张"
+        revisionLabel.stringValue = revision
+        nameLabel.stringValue = fullName
+        nameLabel.toolTip = fullName
+        revisionLabel.toolTip = revision
         needsLayout = true
-    }
-
-    /// `photons-demo dev` / `未打开库 dev`。
-    public static func fullIdentityText(libraryName: String?, revision: String) -> String {
-        let name = (libraryName?.isEmpty == false) ? libraryName! : "未打开库"
-        return "\(name) \(revision)"
-    }
-
-    /// 在 `maxWidth` 内放得下的最右一段文本：放不下就截库名（尾部省略），版本号始终保留。
-    public static func identityText(libraryName: String?, revision: String, maxWidth: CGFloat) -> String {
-        let full = fullIdentityText(libraryName: libraryName, revision: revision)
-        guard Metrics.width(full) > maxWidth else { return full }
-
-        let name = (libraryName?.isEmpty == false) ? libraryName! : "未打开库"
-        let suffix = " " + revision
-        let ellipsis = "…"
-        let budget = maxWidth - Metrics.width(suffix) - Metrics.width(ellipsis)
-        guard budget > 0 else {
-            return Metrics.width(revision) <= maxWidth ? revision : ""
-        }
-        var trimmed = name
-        while !trimmed.isEmpty && Metrics.width(trimmed) > budget {
-            trimmed.removeLast()
-        }
-        let candidate = trimmed + ellipsis + suffix
-        if Metrics.width(candidate) <= maxWidth { return candidate }
-        return Metrics.width(revision) <= maxWidth ? revision : ""
     }
 
     // MARK: layout
 
-    /// 三段的框宽。`count` 与 `selection` 靠 figure space 补位，所以是常量；`identity` 是
-    /// `min(全名宽度, 检查器列预算, 顶栏上限)`。
-    private func parts(limit: CGFloat) -> (count: CGFloat, selection: CGFloat, identity: CGFloat) {
-        let count = Metrics.width(countLabel.stringValue)
-        let selection = Metrics.width(selectionLabel.stringValue)
-        let fixed = count + Metrics.gap + selection + Metrics.gap
-        let columnRoom = max(0, columnWidth - Metrics.trailingInset - fixed)
-        let limitRoom = limit.isFinite ? max(0, limit - fixed) : .greatestFiniteMagnitude
-        let room = min(columnRoom, limitRoom)
-        // 连"…+版本号"都塞不进去：整块让位（`TopBarView` 看到 0 就藏起来），而不是压到按钮上。
-        guard room >= Metrics.minimumIdentityWidth else { return (0, 0, 0) }
-        return (count, selection, max(0, min(preferredIdentityWidth, room)))
+    /// 四段的框宽。计数与版本号是自己的实际宽度；库名是
+    /// `min(nameMaxWidth, 预算)`，预算里已经扣掉另外三段与三个 gap。
+    public func segmentWidths(limit: CGFloat = .greatestFiniteMagnitude) -> SegmentWidths {
+        let selection = Metrics.frameWidth(for: selectionLabel.stringValue)
+        let count = Metrics.frameWidth(for: countLabel.stringValue)
+        let revision = Metrics.frameWidth(for: revisionLabel.stringValue)
+        let budget = nameWidthLimit(limit: limit)
+        // 连一个像样的库名都放不下：整块让位（顶栏看到宽度 0 就藏起来）。
+        guard budget >= Metrics.minimumNameWidth else { return SegmentWidths() }
+        let nameText = Metrics.middleTruncated(fullName, maxWidth: budget - Metrics.textSlack)
+        return SegmentWidths(selection: selection,
+                             count: count,
+                             name: min(budget, Metrics.frameWidth(for: nameText)),
+                             revision: revision)
     }
 
     /// 整块需要的宽度（`limit` 是顶栏给的硬上限）。
     public func width(limit: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
-        let p = parts(limit: limit)
-        guard p.count > 0 else { return 0 }
-        return p.count + Metrics.gap + p.selection + Metrics.gap + p.identity
+        segmentWidths(limit: limit).total
+    }
+
+    /// 库名那一段**这一次**的宽度上限：
+    /// `min(nameMaxWidth, 可用宽度 − 已选 − 张 − 版本号 − 3 × gap)`。
+    /// 验收里要跟"实际库名宽"并列，所以它是公开的。
+    public func nameWidthLimit(limit: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
+        let selection = Metrics.frameWidth(for: selectionLabel.stringValue)
+        let count = Metrics.frameWidth(for: countLabel.stringValue)
+        let revision = Metrics.frameWidth(for: revisionLabel.stringValue)
+        let available = min(columnWidth - Metrics.trailingInset,
+                            limit.isFinite ? limit : .greatestFiniteMagnitude)
+        let budget = min(Metrics.nameMaxWidth,
+                         available - (selection + count + revision + 3 * Metrics.gap))
+        return max(0, budget)
     }
 
     public override func layout() {
         super.layout()
-        let p = parts(limit: widthLimit)
-        guard p.count > 0 else { return }
+        let w = segmentWidths(limit: widthLimit)
+        guard w.selection > 0 else { return }
 
-        identityLabel.stringValue = Self.identityText(libraryName: libraryName,
-                                                      revision: revision,
-                                                      maxWidth: p.identity)
+        nameLabel.stringValue = Metrics.middleTruncated(fullName,
+                                                        maxWidth: w.name - Metrics.textSlack)
 
-        // 右对齐：最右一段钉在右边缘上，其余只向左生长，间距恒为 `Metrics.gap`。
-        let lineHeight = Metrics.lineHeight
-        let y = ((bounds.height - lineHeight) / 2).rounded()
+        // 从右往左，按各段**实际**宽度排。右边缘就是 `bounds.width`，
+        // 任何一个坐标都不是写死的常量。
+        let y = ((bounds.height - Metrics.lineHeight) / 2).rounded()
         var right = bounds.width
-        for (label, width) in [(identityLabel, p.identity),
-                               (selectionLabel, p.selection),
-                               (countLabel, p.count)] {
-            label.frame = NSRect(x: right - width, y: y, width: width, height: lineHeight)
+        for (label, width) in [(revisionLabel, w.revision),
+                               (nameLabel, w.name),
+                               (countLabel, w.count),
+                               (selectionLabel, w.selection)] {
+            label.frame = NSRect(x: right - width, y: y, width: width, height: Metrics.lineHeight)
             right -= width + Metrics.gap
         }
     }
