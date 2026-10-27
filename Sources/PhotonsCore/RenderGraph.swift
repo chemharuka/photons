@@ -464,6 +464,14 @@ private struct VignetteParams {
     var c: SIMD4<Float>   // identity, contentOrigin.x, contentOrigin.y, pad
 }
 
+/// Mirror of `Kernels/s3_7_grain.metal`, byte for byte — the same geometry convention as S3c's
+/// (`p.b`/`p.c` are shared verbatim), so grain is a property of the frame and not of the window.
+private struct GrainParams {
+    var a: SIMD4<Float>   // amount, size, roughness, seed
+    var b: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (the whole frame, in content pixels)
+    var c: SIMD4<Float>   // identity, contentOrigin.x, contentOrigin.y, pad
+}
+
 private struct DisplayParams {
     var m: simd_float4x4
     var a: SIMD4<Float>   // identityMatrix
@@ -2062,6 +2070,25 @@ public final class RenderGraph {
                 c: SIMD4(identity ? 1 : 0, plan.origin.x, plan.origin.y, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<VignetteParams>.stride, index: 0)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
+        case .grain:
+            // S3.7 — 颗粒 (2026-10-28). Encoded **only** for documents that have grain
+            // (`RenderStage.pipeline(hasGrain:)`), so a neutral document's frame is the pre-S3.7 frame
+            // by construction rather than by arithmetic: there is no pass to be neutral in.
+            let p = try kernels.pipeline(file: "s3_7_grain", function: "s3_7_grain")
+            let identity = edit.effects.grain <= 0
+            var params = GrainParams(
+                a: SIMD4(Float(edit.effects.grain), Float(edit.effects.grainSize),
+                         Float(edit.effects.grainRoughness),
+                         Float(edit.effects.grainSeedValue)),
+                // Frame-relative, exactly like S3c: a 1:1 window must show the same grain in the same
+                // physical place as the whole frame, and the letterbox is never grained.
+                b: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
+                c: SIMD4(identity ? 1 : 0, plan.origin.x, plan.origin.y, 0))
+            let enc = try encoder(cb, p, in: src, out: out)
+            enc.setBytes(&params, length: MemoryLayout<GrainParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 

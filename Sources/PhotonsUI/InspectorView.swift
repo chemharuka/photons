@@ -73,6 +73,14 @@ public struct InspectorView: View {
         /// 派单 051: 曲线. Directly under 细节, as 042 planned: the tone controls, then the decoder's
         /// amounts, then the curve that reprofiles what came out of both.
         case curve
+        /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
+        ///
+        /// After 曲线 and before 预设, and the position is the pipeline's own order rather than a
+        /// preference: Light → Color → 细节/解码 → 曲线 → 效果 are the render stages in execution
+        /// order, and the last two act on the finished picture (S1.7 bends the scene-linear signal,
+        /// S3c/S3.7 the display-referred frame). 预设 stays last because it is not a parameter card at
+        /// all — it writes the others.
+        case effects
         case presets
         /// 2026-10-27: 裁切 — the 变换 workspace's **first** card.
         ///
@@ -100,6 +108,7 @@ public struct InspectorView: View {
             case .hsl: return "HSL"
             case .detail: return "细节"
             case .curve: return "曲线"
+            case .effects: return "效果"
             case .presets: return "预设"
             case .crop: return "裁切"
             case .masks: return "蒙版"
@@ -277,6 +286,8 @@ public struct InspectorView: View {
             detailCard
         case .curve:
             curveCard
+        case .effects:
+            effectsCard
         case .presets:
             PresetPanel(session: session)
         case .crop:
@@ -696,6 +707,58 @@ public struct InspectorView: View {
         }
     }
 
+    /// 2026-10-28 — **效果**: 暗角 and 颗粒, the two halves of Lightroom's Effects card.
+    ///
+    /// ```text
+    /// 暗角        −100…100       S3c: negative darkens the corners
+    /// 暗角中点      0…100         where the falloff starts
+    /// 暗角羽化      0…100         how soft the transition is
+    /// 暗角圆度   −100…100         square → circular
+    /// ─────────────────────────
+    /// 颗粒数量      0…100         S3.7: the grain's standard deviation, 0 = no grain
+    /// 颗粒大小      0…100         the cell, in frame fractions
+    /// 颗粒粗糙度    0…100         how much of the finer octave is mixed in
+    /// 种子          0…999         the hash's only free variable
+    /// ```
+    ///
+    /// **One card, not two.** The two blocks are the pipeline's S3c and S3.7 and could have been split,
+    /// but the ask was Lightroom's Effects *card*, and the user resets the card as one thing — one
+    /// double-click on 「效果」 puts all eight numbers back in **one** snapshot. The `divider` between
+    /// the blocks is the only thing the split is worth: it says "two stages" without making the user
+    /// find a second card for a look that is one decision (frames are usually vignetted *and* grained).
+    ///
+    /// **The card stores nothing.** Every number comes from and goes to `effects` through
+    /// `effectsRows`' key paths — there is no second copy of a value here, no draft, no local mirror
+    /// of a default: the row range *is* the kernel's range and the row default *is*
+    /// `EditModel.neutral[keyPath:]`. A drag writes the document on every tick and commits one history
+    /// entry on release, like every other render card (`if !editing { session.commitEdit() }`).
+    private var effectsCard: some View {
+        card(Section.effects.title, reset: { resetGroup(.effects) }) {
+            ForEach(Self.vignetteRows, id: \.title) { row in
+                effectsSliderRow(row)
+            }
+            divider
+            ForEach(Self.grainRows, id: \.title) { row in
+                effectsSliderRow(row)
+            }
+        }
+    }
+
+    /// One 效果 row: the panel's own `sliderRow`, plus the frame probe the layout tests measure. The
+    /// probe is a background so it cannot change the row's size (`CropRowProbe`'s pattern).
+    private func effectsSliderRow(_ row: ToneRow) -> some View {
+        sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
+                  shape: row.shape,
+                  decimals: row.decimals,
+                  rounding: row.rounding,
+                  editable: row.editable,
+                  accessibilityID: "inspector.effects.\(row.title)",
+                  onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+            if !editing { session.commitEdit() }
+        }
+        .background(EffectsRowProbeHost(rowID: row.title))
+    }
+
     /// 派单 040: the card prints **nothing** under its sliders.
     ///
     /// The constant is the machine-readable form of that sentence (`nil` = no footer), and the panel
@@ -928,6 +991,49 @@ public struct InspectorView: View {
         ToneRow(title: "饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.color.saturation, decimals: 1),
     ]
+
+    /// 2026-10-28 — the 效果 card's 暗角 block: **S3c's four uniforms, in the kernel's own order**
+    /// (`s3_vignette.metal`: amount, midpoint, feather, roundness), with the kernel's own travels.
+    ///
+    /// Nothing is added that the shader does not read: 高光对比 / 颜色优先 / 样式 are Lightroom's
+    /// extra vignette keys and this kernel has no uniform for them, so no row exists for them — a
+    /// slider that writes a number nothing consumes is the defect `optics`' own comment warns about
+    /// (a parameter in a group `keyMaterial` does not branch on renders nothing, silently).
+    ///
+    /// All four are `.knob`: S3c runs in the display-referred domain on the already-decoded frame, so
+    /// 060's yellow would claim a decode parameter and 071's red a scene-linear one.
+    public static let vignetteRows: [ToneRow] = [
+        ToneRow(title: "暗角", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.vignetteAmount),
+        ToneRow(title: "暗角中点", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.vignetteMidpoint),
+        ToneRow(title: "暗角羽化", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.vignetteFeather),
+        ToneRow(title: "暗角圆度", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.vignetteRoundness),
+    ]
+
+    /// 2026-10-28 — the 效果 card's 颗粒 block: S3.7's four numbers (`s3_7_grain.metal`).
+    ///
+    /// 颗粒数量 is the pre-existing `effects.grain` field (Lightroom's `crs:GrainAmount`), which was
+    /// stored and not rendered until S3.7; the three beside it are the schema-7 fields. The seed is a
+    /// **whole-number grid** (`quantum: 1`) because the kernel hashes `grainSeedValue`, the rounded
+    /// integer — a document holding 3.7 hashes 4, and letting the field store 3.7 would be a number the
+    /// key and the pixels both silently disagree with.
+    public static let grainRows: [ToneRow] = [
+        ToneRow(title: "颗粒数量", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.grain),
+        ToneRow(title: "颗粒大小", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.grainSize),
+        ToneRow(title: "颗粒粗糙度", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.grainRoughness),
+        ToneRow(title: "种子", range: 0 ... 999, format: "%.0f", shape: .knob,
+                keyPath: \.effects.grainSeed, quantum: 1),
+    ]
+
+    /// The card's eight rows in draw order — the two blocks and the divider between them. One list,
+    /// so a test can hold 「八根滑杆」 and the card cannot draw a row the table does not have.
+    public static var effectsRows: [ToneRow] { vignetteRows + grainRows }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
     ///
@@ -1907,6 +2013,8 @@ public struct PanelResets {
         case light
         case color
         case detail
+        /// 2026-10-28: 效果 — 暗角 + 颗粒, eight numbers, one double-click.
+        case effects
 
         /// The card title this group is — the name the user double-clicked, and the undo label.
         public var title: String {
@@ -1915,6 +2023,7 @@ public struct PanelResets {
             case .light: return InspectorView.Section.light.title
             case .color: return InspectorView.Section.color.title
             case .detail: return InspectorView.Section.detail.title
+            case .effects: return InspectorView.Section.effects.title
             }
         }
     }
@@ -2125,6 +2234,16 @@ public struct PanelResets {
             let committed = session.commitEdit(label: group.title, coalesce: false)
             loupe?.endDetailAdjustment()
             return committed
+
+        case .effects:
+            // 2026-10-28: the whole card — 暗角's four numbers **and** 颗粒's four — back to
+            // `EffectsGroup.identity` in one snapshot. The card is one thing on screen, so one
+            // double-click is one ⌘Z; the reference is the group's own default initializer (grain
+            // amount 0, size 25, roughness 50, seed 0), never a literal, which is what keeps
+            // 「默认不是 0」 true for the three rows whose default is not.
+            guard session.edit.effects != EffectsGroup.identity else { return false }
+            session.applyEdit { $0.effects = .identity }
+            return session.commitEdit(label: group.title, coalesce: false)
         }
     }
 }
