@@ -2385,7 +2385,15 @@ public final class RenderGraph {
         let canvas = plan.canvas
 
         // 1 — the pointwise coverage of 005b/005c, unchanged: `opacity · combine · invert`.
-        let p = try kernels.pipeline(file: "s1_5_mask_atlas", function: "s1_5_mask_atlas")
+        //
+        // Two entry points, chosen by the same condition S0 uses (`s0Rotates`): the rotating
+        // instantiation turns the pixel offsets, the other has no `× frameSize` / `÷ frameSize` in it
+        // and therefore reproduces the recorded atlases bit for bit at `straighten == 0`. 派单 080:
+        // the atlas kept turning `uv − ½` after 073 moved S0 to pixels, so a 7° straighten on a
+        // 9504×6336 frame evaluated the mask 273 px away from the pixels it selected.
+        let atlasRotates = s0Rotates(edit)
+        let atlasFunction = atlasRotates ? "s1_5_mask_atlas_rot" : "s1_5_mask_atlas"
+        let p = try kernels.pipeline(file: "s1_5_mask_atlas", function: atlasFunction)
         var params = MaskAtlasParams(
             a: SIMD4(Float(canvas.width), Float(canvas.height), plan.origin.x, plan.origin.y),
             b: SIMD4(Float(plan.content.width), Float(plan.content.height),
@@ -2412,7 +2420,7 @@ public final class RenderGraph {
         enc.setBuffer(table.colourBuffer, offset: 0, index: 5)
         dispatch(enc, p, canvas)
         enc.endEncoding()
-        report.atlasPasses.append("s1_5_mask_atlas")
+        report.atlasPasses.append(atlasFunction)
 
         // 2 — mask-level feather: a separable box blur, edge-clamped, radius per slice (§3.4/§4.6).
         // Skipped entirely when no mask asks for it, which is what keeps `feather = 0` bit-identical

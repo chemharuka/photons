@@ -1165,6 +1165,13 @@ public struct MaskCanvasMapping: Sendable, Equatable {
     public var crop: CropRect
     public var cosTheta: Double
     public var sinTheta: Double
+    /// `straightenDegrees != 0`: whether this map has a turn in it at all.
+    ///
+    /// The same condition `RenderGraph` dispatches S0's `s0_geometry_rot` and the atlas's
+    /// `s1_5_mask_atlas_rot` on — and here, as there, the θ = 0 path must not contain the
+    /// `× frameSize` / `÷ frameSize` round trip, or a merely cropped document's bounds would land an
+    /// ulp (and then a whole tile) away from the ones every recorded dirty rectangle came from.
+    public var rotates: Bool
     public var flipH: Bool
     public var flipV: Bool
 
@@ -1180,6 +1187,7 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         let t = geometry.straightenDegrees * .pi / 180
         self.cosTheta = cos(t)
         self.sinTheta = sin(t)
+        self.rotates = geometry.straightenDegrees != 0
         self.flipH = geometry.flipHorizontal
         self.flipV = geometry.flipVertical
     }
@@ -1191,9 +1199,25 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         // source → position inside the crop (0…1), the inverse of `src = crop.xy + r·crop.zw`.
         let rx = (p.x - crop.left) / max(crop.width, 1e-9) - 0.5
         let ry = (p.y - crop.top) / max(crop.height, 1e-9) - 0.5
-        // Un-rotate: the kernel applies R(θ), so the forward direction applies R(−θ).
-        let ox = rx * cosTheta + ry * sinTheta
-        let oy = -rx * sinTheta + ry * cosTheta
+        // Un-rotate (`s0_geometry` applies `R(θ)`, so the forward direction applies `R(−θ)`).
+        //
+        // In **pixels**, about the frame's centre — the same turn `s0_geometry` and
+        // `s1_5_mask_atlas` compile from `frame_turn.metal`. Turning `(rx, ry)` directly is
+        // `rot ∘ aniso(W/H)`: a rotation of normalised coordinates is followed by the non-uniform
+        // scale back to pixels, which is a *shear* (073's bug, and until 派单 080 the mapping the
+        // atlas still used, so this map was shearing in step with it and agreeing with the wrong
+        // answer). A bounds test that agrees with a faulty kernel is worth nothing, so this is
+        // spelled the way the shader is.
+        let ox: Double, oy: Double
+        if rotates {
+            let fx = Double(content.width), fy = Double(content.height)
+            let px = rx * fx, py = ry * fy
+            ox = (px * cosTheta + py * sinTheta) / fx
+            oy = (-px * sinTheta + py * cosTheta) / fy
+        } else {
+            ox = rx * cosTheta + ry * sinTheta
+            oy = -rx * sinTheta + ry * cosTheta
+        }
         var u = ox + 0.5
         var v = oy + 0.5
         if flipH { u = 1 - u }

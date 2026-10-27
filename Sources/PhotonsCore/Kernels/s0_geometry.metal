@@ -1,6 +1,11 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// The turn itself is shared with `s1_5_mask_atlas` — see `frame_turn.metal` for why one function and
+// not two (派单 080: the atlas kept the normalised rotation one release after S0 dropped it, and the
+// mask ended up 273 px off the picture it selected at 7° / 9504×6336).
+#include "frame_turn.metal"
+
 // S0 — geometry: crop, straighten, flips, then the output window.
 //
 // Output is the *canvas*: the content rect sits inside it (letterboxed when the requested canvas
@@ -145,7 +150,7 @@ static inline void s0_body(texture2d<float, access::read> src,
         float2 o = (uv - 0.5) * p.f.xy;
         float cs = p.d.x;
         float sn = p.d.y;
-        float2 rotated = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs);
+        float2 rotated = frame_turn_pixels(o, cs, sn);
         r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
     } else {
         // NOT `r = uv`: the recorded pixels are not the ones `uv` produces, they are the ones

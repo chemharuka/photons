@@ -1,6 +1,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// The frame's turn, shared with `s0_geometry` (派单 080) — see `frame_turn.metal`.
+#include "frame_turn.metal"
+
 // S1.5 — mask atlas: one slice per enabled mask, R16F, at canvas resolution.
 //
 // This is the single predicate domain of the graph: a mask is evaluated once, in the frame the
@@ -17,6 +20,14 @@ using namespace metal;
 // kernel first walks S0's mapping backwards (canvas → content → crop → rotate → source) and then
 // measures distances in source pixels divided by min(W, H). That division is what makes one set of
 // parameters produce the same shape at thumbnail, fit, 1:1 and export scale.
+//
+// The turn in that walk is the same one S0 applies, in the same space — **frame pixels**, never
+// `uv − ½` (派单 080, `frame_turn.metal`). Until 080 this file rotated normalised coordinates while
+// S0 rotated pixels, which is `rotation ∘ anisotropic scale`: a 7° straighten on a 9504×6336 frame
+// slid the mask 273 px off the pixels it selects. Kept as two instantiations for the same reason S0
+// has two entry points: the `× frameSize` / `÷ frameSize` round trip is *not* the identity at θ = 0
+// in floating point, so the angle-zero atlas would have moved by an ulp and every recorded digest
+// with it. `<HAS_ROTATION>` false compiles the multiply and the divide out entirely.
 //
 // Shape maths (all public mathematics; nothing here is copied from ART/RapidTherapee/darktable
 // (GPL-3.0) or RapidRAW (AGPL-3.0), which §7 keeps read-only):
@@ -94,6 +105,12 @@ constant float kChromaInverseSpan = 1.0 / 0.4;
 /// mask's coefficients are properties of the photograph, so evaluating this against the visible
 /// window instead of the frame would slide the selection by the window's pan — and would make a 1:1
 /// render disagree with the fit render about where a gradient sits.
+///
+/// `<HAS_ROTATION>` is S0's split, for S0's reason: the rotating instantiation turns **pixels**
+/// (`frame_turn_pixels`, the one shared definition), the other has no `× frameSize` / `÷ frameSize`
+/// in it at all, so a document at `straighten == 0` maps `uv − ½` straight back and its atlas is
+/// bit-identical to the one every recorded digest was taken from.
+template <bool HAS_ROTATION>
 static inline float2 source_uv(float2 pixel, constant MaskAtlasParams &p) {
     float2 local = pixel + 0.5 - p.a.zw;
     float2 content = p.b.xy;
@@ -105,10 +122,23 @@ static inline float2 source_uv(float2 pixel, constant MaskAtlasParams &p) {
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 
-    float2 o = uv - 0.5;
     float cs = p.d.x;
     float sn = p.d.y;
-    float2 r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
+    float2 r;
+    if (HAS_ROTATION) {
+        // The turn, in **frame pixels** — `R(θ)` applied to `uv − ½` is `rot ∘ aniso(frameSize)`, a
+        // shear, and that is the 273 px the mask used to miss by. Same expression as S0's, from the
+        // same header, so the picture and the selection cannot be turned by different maths.
+        float2 o = (uv - 0.5) * max(p.f.xy, float2(1.0));
+        float2 rotated = frame_turn_pixels(o, cs, sn);
+        r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
+    } else {
+        // No rotation is compiled into this instantiation. At θ = 0 `R(θ)·o` is `o` exactly, so this
+        // is `o + ½` — the shape the recorded atlases contain, kept spelled as a turn so that the two
+        // instantiations differ in exactly one thing (where the anisotropy sits) and nothing else.
+        float2 o = uv - 0.5;
+        r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
+    }
     return p.c.xy + r * p.c.zw;
 }
 
@@ -276,23 +306,24 @@ static inline float semantic_alpha(float2 uv, MaskShapeDesc d,
     return smoothstep(lo, hi, raw);
 }
 
-kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
-                            texture2d_array<float, access::write> atlas [[texture(1)]],
-                            texture2d_array<float, access::sample> mattes [[texture(2)]],
-                            constant MaskAtlasParams &p [[buffer(0)]],
-                            constant MaskDesc *masks [[buffer(1)]],
-                            constant MaskShapeDesc *shapes [[buffer(2)]],
-                            constant MaskStrokeDesc *strokes [[buffer(3)]],
-                            constant float4 *points [[buffer(4)]],
-                            constant float4 *colours [[buffer(5)]],
-                            uint2 gid [[thread_position_in_grid]]) {
+template <bool HAS_ROTATION>
+static inline void atlas_body(texture2d<float, access::read> src,
+                              texture2d_array<float, access::write> atlas,
+                              texture2d_array<float, access::sample> mattes,
+                              constant MaskAtlasParams &p,
+                              constant MaskDesc *masks,
+                              constant MaskShapeDesc *shapes,
+                              constant MaskStrokeDesc *strokes,
+                              constant float4 *points,
+                              constant float4 *colours,
+                              uint2 gid) {
     int2 canvas = int2(p.a.xy);
     if (int(gid.x) >= canvas.x || int(gid.y) >= canvas.y) { return; }
 
     uint count = uint(max(p.e.x, 0));
     float2 srcSize = max(p.b.zw, float2(1.0));
     float minSide = min(srcSize.x, srcSize.y);
-    float2 uv = source_uv(float2(gid), p);
+    float2 uv = source_uv<HAS_ROTATION>(float2(gid), p);
     bool outside = uv.x < 0.0;
     float2 ppx = outside ? float2(0.0) : uv * srcSize;
     // Predicates that read the picture (colour range, luminance range) see the S1 output: the
@@ -333,4 +364,35 @@ kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
         }
         atlas.write(float4(a, a, a, 1.0), gid, s);
     }
+}
+
+// No rotation in the emitted code at all — the path every `straighten == 0` document takes, and the
+// one every recorded atlas digest was taken from.
+kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d_array<float, access::write> atlas [[texture(1)]],
+                            texture2d_array<float, access::sample> mattes [[texture(2)]],
+                            constant MaskAtlasParams &p [[buffer(0)]],
+                            constant MaskDesc *masks [[buffer(1)]],
+                            constant MaskShapeDesc *shapes [[buffer(2)]],
+                            constant MaskStrokeDesc *strokes [[buffer(3)]],
+                            constant float4 *points [[buffer(4)]],
+                            constant float4 *colours [[buffer(5)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    atlas_body<false>(src, atlas, mattes, p, masks, shapes, strokes, points, colours, gid);
+}
+
+// The same body with the pixel-space turn compiled in. `RenderGraph` picks this one only when the
+// document's straighten angle is non-zero — the same condition S0 uses for `s0_geometry_rot`, from
+// the same field, so the picture and the selection are always turned together.
+kernel void s1_5_mask_atlas_rot(texture2d<float, access::read> src [[texture(0)]],
+                                texture2d_array<float, access::write> atlas [[texture(1)]],
+                                texture2d_array<float, access::sample> mattes [[texture(2)]],
+                                constant MaskAtlasParams &p [[buffer(0)]],
+                                constant MaskDesc *masks [[buffer(1)]],
+                                constant MaskShapeDesc *shapes [[buffer(2)]],
+                                constant MaskStrokeDesc *strokes [[buffer(3)]],
+                                constant float4 *points [[buffer(4)]],
+                                constant float4 *colours [[buffer(5)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    atlas_body<true>(src, atlas, mattes, p, masks, shapes, strokes, points, colours, gid);
 }
