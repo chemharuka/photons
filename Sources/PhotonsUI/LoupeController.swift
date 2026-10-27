@@ -489,14 +489,17 @@ public final class LoupeController: NSViewController {
     /// no new source, so it cannot re-arm itself.
     public var frameSource: FrameSource? {
         didSet {
-            // 039: a different **photo** is a different picture, so the low-resolution backdrop is
-            // released here and rendered again by the next pointer entry. An edit keeps the identity
-            // (`contentHash|assetID`), so a slider never reaches this line — the digest half of the key
-            // moves and only marks the texture stale.
-            if frameSource?.identity != oldValue?.identity {
-                backdrop.invalidate()
-                fullPictureBox.store(nil)
-            }
+            // 039 / 065: a different **photo** is a different picture, so the low-resolution backdrop is
+            // released here (and, since 065b, the new photo's is asked for at once). An edit keeps the
+            // identity (`contentHash|assetID`), so a slider never reaches this line — the digest half of
+            // the key moves and only marks the texture stale.
+            //
+            // 065: releasing the texture was not enough. The same change also has to end whatever was
+            // still running for the old picture — a development, a zoom bridge carrying its frame, the
+            // frame that bridge is holding — which is exactly what `cancelPendingFrames` does, and it
+            // is the one path both spellings of "a different photo" (this one, and the session's
+            // anchor) go through.
+            notePhotoIdentity(backdropPhotoKey)
             guard detailGesturing,
                   frameSource?.edit.detailSettings != oldValue?.edit.detailSettings else { return }
             detailPreview = true
@@ -588,6 +591,14 @@ public final class LoupeController: NSViewController {
     private var presenter: CanvasPresenter?
     private var graph: RenderGraph?
     private var graphIdentity: String?
+    /// 065: the **photo** `graph` was built from (`contentHash|assetID`, or a frame source's identity).
+    ///
+    /// The graph is the frame path's, and it is only replaced when a frame of the new photo is
+    /// rendered — so between a photo switch and that first frame it still holds the previous picture's
+    /// decoded pixels. The backdrop renders through this graph, which meant a request that outlived its
+    /// photo could render **A's pixels through B's edit** and file the result under B's key: a backdrop
+    /// that claims to be the new photo and is the old one. `renderBackdrop` compares this with the key.
+    private var graphPhoto: String?
 
     /// 037 ② / 039 — the low-resolution **whole picture** the canvas draws outside a shrinking frame.
     ///
@@ -1076,6 +1087,12 @@ public final class LoupeController: NSViewController {
             _ = self.session?.editRevision
         }, { [weak self] in
             guard let self else { return }
+            // 065: the photo on screen first, because everything below assumes the work in flight
+            // belongs to it. In the app this is the **only** place a switch is noticed: `frameSource`
+            // is nil there, and `cancelPendingFrames` used to run on leaving the loupe only — so a
+            // switch from photo A to photo B kept A's backdrop, A's histogram snapshot and A's zoom
+            // bridge, which is `「背景用的低清渲染图还是上一张的」`.
+            self.notePhotoIdentity(self.backdropPhotoKey)
             // One observer, two jobs: a document change re-renders the current decode (cheap,
             // ~ms); a photo change needs a new decode (expensive, the 0.5 → 1.0 ladder).
             let revision = self.session?.editRevision ?? 0
@@ -1454,14 +1471,20 @@ public final class LoupeController: NSViewController {
         public let window: PresentWindow
         public let drawable: ImageSize
         public let canvas: ImageSize
+        /// 065: **which texture** the bridge sampled — the frame the canvas was holding when it was
+        /// armed. A bridge that outlives its photo keeps presenting that texture, so "no bridge frame
+        /// after a switch samples the previous photo's texture" is a question only identity answers.
+        public let source: ObjectIdentifier?
 
         public init(serial: Int, progress: Double, window: PresentWindow,
-                    drawable: ImageSize, canvas: ImageSize) {
+                    drawable: ImageSize, canvas: ImageSize,
+                    source: ObjectIdentifier? = nil) {
             self.serial = serial
             self.progress = progress
             self.window = window
             self.drawable = drawable
             self.canvas = canvas
+            self.source = source
         }
     }
     /// Every frame of every bridge, in the order it was presented — append-only, so a retarget adds
@@ -1593,7 +1616,8 @@ public final class LoupeController: NSViewController {
         // had reached, because that is what the eye is looking at.
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 0,
                                               window: bridge.window(atProgress: 0, textureSize: texture),
-                                              drawable: canvas, canvas: canvas))
+                                              drawable: canvas, canvas: canvas,
+                                              source: ObjectIdentifier(onCanvas.texture)))
         guard !reducesMotion, bridge.duration > 0 else {
             // Reduce Motion: no slide — one present at the stop's own geometry, then hand over.
             presentZoomBridgeFrame(progress: 1, bridge: bridge, texture: onCanvas.texture, serial: serial)
@@ -1657,7 +1681,8 @@ public final class LoupeController: NSViewController {
             recordBackdropPresent(window: target, backdropWindow: backdropWindow, drawn: drawn,
                                   placement: canvasPlacement, serial: serial)
             recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
-                                                  drawable: canvas, canvas: canvas))
+                                                  drawable: canvas, canvas: canvas,
+                                                  source: ObjectIdentifier(texture)))
         }
     }
 
@@ -1733,7 +1758,8 @@ public final class LoupeController: NSViewController {
         recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: drawn,
                               placement: placement, serial: serial)
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
-                                              drawable: canvas, canvas: canvas))
+                                              drawable: canvas, canvas: canvas,
+                                              source: ObjectIdentifier(texture)))
     }
 
     /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
@@ -3012,6 +3038,8 @@ public final class LoupeController: NSViewController {
         // more is dropped, an outcome already in flight is refused (its key can no longer be the
         // newest), and the measurement graph — one full-scale buffer — is released with the photo.
         picturePending = nil
+        // 065: a re-arm that was waiting for the previous photo's graph is not this photo's entry.
+        backdropWanted = false
         pictureLatestKey = nil
         pictureArmedKey = nil
         pictureGraph = nil
@@ -3023,6 +3051,44 @@ public final class LoupeController: NSViewController {
             ?? session?.anchorAsset.map({ currentRungIdentity($0) }) {
             decodeQueue.cancel(identity: identity)
         }
+    }
+
+    /// The photo every piece of the loupe's in-flight work belongs to, as `backdropPhotoKey` spells it
+    /// (`contentHash|assetID`, or a frame source's identity in the harness).
+    private var renderedPhoto: String?
+
+    /// 065: **the** photo-switch path, whichever way the photo is named — `frameSource` in the tests
+    /// and the bench, the session's anchored asset in the app.
+    ///
+    /// A different photo is not a different document: nothing made for the old picture may reach the
+    /// new one, and `cancelPendingFrames` is already the function that says so in one place — it bumps
+    /// the generation (a development or a frame in flight can no longer land), releases the
+    /// low-resolution backdrop **and the histogram's snapshot of it**, ends any zoom bridge, and throws
+    /// away the frame that bridge was holding.
+    ///
+    /// All three of those were reachable with the old picture still on screen, which is the user's
+    /// 「在放大视图切换照片，背景用的低清渲染图还是上一张的」:
+    ///
+    ///   · a running bridge keeps compositing the old frame texture (and, through it, the old
+    ///     backdrop) at whatever scale the eye was looking at, and `finishZoomBridge` presents the
+    ///     frame it was holding — the last photo, drawn after the switch;
+    ///   · the histogram's whole-picture snapshot is gated on a **digest of the `EditModel`** and the
+    ///     digest does not contain the photo, so an untouched document hands the histogram thread the
+    ///     previous picture's pixels the moment the photo changes;
+    ///   · a frame or development in flight lands because nothing moved the generation.
+    private func notePhotoIdentity(_ identity: String?) {
+        guard identity != renderedPhoto else { return }
+        renderedPhoto = identity
+        cancelPendingFrames()
+        // 065b: 「低清照片渲染在切换/打开照片的一瞬间就要完成并且换进来」. The ask is armed here, at the
+        // instant the photo changes, and **served by the first frame of that photo** — the render queue
+        // is serial, so nothing this asks for can be queued in front of the frame the user is waiting
+        // for. The old gate (a pointer entry once the document was dirty) survives for edits; it is no
+        // longer what decides whether an opened photo has a bottom image at all.
+        backdropWanted = true
+        let now = CACurrentMediaTime()
+        photoSwitchTime = now
+        backdropWantedAt = now
     }
 
     /// Developments the queue has run, requests it has folded into one, deliveries it made and
@@ -3163,6 +3229,43 @@ public final class LoupeController: NSViewController {
         return true
     }
 
+    /// 065: the diagnostics the photo switch is asserted from.
+    ///
+    /// `lastBackdropRenderedPhoto` is the photo whose pixels the last **adopted** generation actually
+    /// rendered — the frame graph's own photo, which is not the key's when a request outlived its
+    /// picture. It equals `backdrop.key?.photo` exactly when the flow is honest.
+    public private(set) var lastBackdropRenderedPhoto: String?
+    /// Generations refused because the frame graph still belonged to the previous photo (065, H2).
+    public private(set) var backdropStaleGraphRefusals = 0
+    /// A bottom image is wanted for the photo on screen and has not been made yet: armed by an
+    /// open/photo switch (065b) or by a refusal, served by the first frame that lands.
+    private var backdropWanted = false
+    /// 065b / 065, the two timings the "generate at the open, never instead of the first frame" rule is
+    /// accountable for: 切换/打开 → 首帧 on screen, and → 低清全图 available. Milliseconds, measured from
+    /// the instant the photo identity changed.
+    public private(set) var lastPhotoSwitchFirstFrameMilliseconds: Double = 0
+    public private(set) var lastPhotoSwitchBackdropMilliseconds: Double = 0
+    private var photoSwitchTime: CFTimeInterval?
+    private var backdropWantedAt: CFTimeInterval?
+
+    /// 065b: serve the request an open or a switch armed, **after** the frame that brings the graph for
+    /// that photo. Called from `present` — a landed frame is exactly the moment the render queue is free
+    /// and the graph is the current photo's, so the generation is enqueued behind the picture and in
+    /// front of nothing.
+    ///
+    /// It is not a render loop: the flag is set by an open/switch or by one refusal, and cleared as soon
+    /// as a request is started. A stop change, a pan and an edit still generate nothing (039's rule).
+    private func serveWantedBackdrop() {
+        guard backdropWanted else { return }
+        guard let key = backdropKey else { return }
+        guard backdrop.needsGeneration(for: key) else {
+            backdropWanted = false
+            return
+        }
+        guard ensureLowResFullFrame() else { return }
+        backdropWanted = false
+    }
+
     /// Render the whole picture at `BackdropScale` on the render queue and hand it to main.
     ///
     /// `useCache: false` on purpose. This is a one-off at a scale no frame uses, and the stage cache is
@@ -3170,9 +3273,30 @@ public final class LoupeController: NSViewController {
     /// reason `RenderGraph.measureHistogram` asks for a cold render). The pixels are the same either
     /// way — the cache is a cost knob, never a quality knob.
     private func renderBackdrop(key: BackdropCache.Key, serial: Int, job: RenderJob) {
+        // 065: 「可取消」. A switch has already bumped the serial, so this generation is nobody's: do not
+        // render it, and do not leave it queued in front of the new photo's bottom image.
+        guard backdrop.isCurrent(serial) else { return }
         guard let graph else {
             DispatchQueue.main.async { [weak self] in
                 self?.backdrop.fail(key, error: "no frame yet (nothing decoded)")
+            }
+            return
+        }
+        // 065 (H2): the graph is the **frame** path's, and it only moves to the new photo when a frame
+        // of it is rendered. A request that outlived its photo would otherwise render the previous
+        // picture through the new document's edit and be adopted under the new key — a backdrop that
+        // says B and is A's pixels, i.e. exactly 「背景还是上一张」 with a key that looks right.
+        // Refusing is the honest answer: no backdrop is 025's edge extrapolation, the old picture is
+        // not shown. The request is re-armed once this photo's own graph exists (see
+        // `retryBackdropAfterPhotoSwitch`), so the flow does finish without a second pointer entry.
+        let photo = graphPhoto ?? ""
+        guard photo == key.photo else {
+            let reason = "the frame graph is still \(photo.isEmpty ? "unset" : photo)"
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.backdrop.fail(key, error: "\(reason), not \(key.photo)")
+                self.backdropStaleGraphRefusals += 1
+                self.backdropWanted = true
             }
             return
         }
@@ -3211,6 +3335,11 @@ public final class LoupeController: NSViewController {
                 guard let self else { return }
                 let adopted = self.backdrop.finish(texture, key: key, content: content,
                                                    milliseconds: milliseconds, serial: serial)
+                if adopted { self.lastBackdropRenderedPhoto = photo }
+                if adopted, let at = self.backdropWantedAt {
+                    self.backdropWantedAt = nil
+                    self.lastPhotoSwitchBackdropMilliseconds = (CACurrentMediaTime() - at) * 1000
+                }
                 if !adopted {
                     // The photo moved on while this rendered: the texture is nobody's, so it goes back
                     // to the pool it came from instead of being drawn over the new picture.
@@ -3239,6 +3368,10 @@ public final class LoupeController: NSViewController {
     /// A new photo, a resize, fit ↔ 1:1, a new headroom: one frame from what the ladder has, plus a
     /// development request for what it does not.
     public func scheduleRender() {
+        // 065b: opening the loupe on a photo is an open like any other, and it may become known without
+        // a model change (a window created with the photo already anchored). Cheap and idempotent: it
+        // returns immediately unless the photo actually moved.
+        notePhotoIdentity(backdropPhotoKey)
         guard autoRenderEnabled else { return }
         guard var job = makeJob(kind: .scheduled) else { return }
         // A different photo: the old one's queued developments are waste, and finishing them would
@@ -3400,6 +3533,7 @@ public final class LoupeController: NSViewController {
             decodeMilliseconds = outcome.rung.milliseconds
             graph = nil                      // a new source needs a new graph
             graphIdentity = nil
+            graphPhoto = nil
         }
         decoded = image
         decodedScale = ds
@@ -3410,6 +3544,7 @@ public final class LoupeController: NSViewController {
         if graph == nil || graphIdentity != identity {
             graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url))
             graphIdentity = identity
+            graphPhoto = baseIdentity
             // A new photo (or a new rung of it): its key is a different picture, so the measurement
             // armed below is a fresh one — the card must not keep the previous picture's numbers.
             lastFrameState = nil
@@ -3505,6 +3640,13 @@ public final class LoupeController: NSViewController {
         public let backdropWindow: PresentWindow
         /// The backdrop's pixel size — `nil` when the pass was given none.
         public let backdrop: ImageSize?
+        /// 065: **which texture** the pass was given, not how big it was.
+        ///
+        /// The size cannot tell two photos apart: an untouched document's preview is the same
+        /// `min(longEdge / 2, 4096)` for every file, so 「A 的纹理 and B's」 compare equal by size — and
+        /// the bug this pins is a present carrying the **previous** photo's texture. Identity is the
+        /// only question that catches it, so every present records it.
+        public let backdropIdentity: ObjectIdentifier?
         /// Whether the window already reached every canvas pixel.
         public let coversCanvas: Bool
         /// Where the frame texture sat on the whole picture (058) — what `backdropWindow` was computed
@@ -3557,6 +3699,7 @@ public final class LoupeController: NSViewController {
         if size == nil { backdroplessDrawCount += 1 } else { backdropDrawCount += 1 }
         backdropPresents.append(BackdropPresent(serial: serial, window: window,
                                                 backdropWindow: backdropWindow, backdrop: size,
+                                                backdropIdentity: drawn.map(ObjectIdentifier.init),
                                                 coversCanvas: window.coversCanvas,
                                                 placement: placement))
         if backdropPresents.count > Self.backdropPresentLimit {
@@ -3579,6 +3722,14 @@ public final class LoupeController: NSViewController {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
+        }
+        // 065 (H2) / 065b: a frame landing is the frame graph moving on — the new photo's first frame,
+        // which is exactly when the bottom image this photo asked for at the open can be made. The
+        // request is answered here, behind that frame, never in front of it.
+        serveWantedBackdrop()
+        if let at = photoSwitchTime {
+            photoSwitchTime = nil
+            lastPhotoSwitchFirstFrameMilliseconds = (CACurrentMediaTime() - at) * 1000
         }
         // A frame that lands while the bridge is still moving is the right picture at the wrong
         // time. Presenting it now would cut the motion off at whatever scale the composite happens

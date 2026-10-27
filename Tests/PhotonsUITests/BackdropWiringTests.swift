@@ -152,22 +152,30 @@ final class BackdropWiringTests: XCTestCase {
                        4096.0 / 4500.0, accuracy: 0)
     }
 
-    // MARK: - ② one generation per dirty pointer entry
+    // MARK: - ② one generation per open, and none for a stop change
 
-    func testOneGenerationPerDirtyPointerEntryAndNoneForAStopChange() throws {
+    /// 065b changed what *makes* the first one. The user's rule used to be 「只在画面有调整且鼠标从调整区
+    /// 移开时才渲染」 (039), which left an opened photo without a bottom image until the mouse moved — and
+    /// a switched photo with the previous one's. It is now 「切换/打开照片的一瞬间就要完成」: the open (or
+    /// the switch) asks, the photo's first frame serves the request. Everything else about the gate is
+    /// unchanged and is what this test still pins: a pointer that arrives on a document that already has
+    /// its picture generates nothing, a stop change, a pan and an edit generate nothing, and an edit
+    /// plus a **later** pointer entry is one more generation.
+    func testOneGenerationPerOpenAndNoneForAStopChange() throws {
         let url = try rawFixture()
         let controller = makeController(url: url, identity: "backdrop-count")
 
-        // A frame is not an entry: nothing has been generated for a picture that was only opened.
-        XCTAssertEqual(controller.backdrop.generationCount, 0,
-                       "opening a photo must not render a backdrop")
+        // Opened → one, without a pointer anywhere near the canvas (065b).
+        XCTAssertTrue(waitFor { controller.backdrop.texture != nil },
+                      "opening a photo must make its bottom image")
+        XCTAssertEqual(controller.backdrop.generationCount, 1, "one open, one generation")
         var trace = ["opened=\(controller.backdrop.generationCount)"]
 
-        // ── dirty (nothing has been made for this document) + the pointer enters → exactly one.
+        // The pointer entering a document that already has its picture is not a second one.
         enter(controller)
         XCTAssertTrue(settleBackdrop(controller), "the backdrop render never finished")
-        XCTAssertEqual(controller.backdrop.generationCount, 1, "one entry, one generation")
-        trace.append("dirty+enter=\(controller.backdrop.generationCount)")
+        XCTAssertEqual(controller.backdrop.generationCount, 1, "a clean entry generates nothing")
+        trace.append("clean+enter=\(controller.backdrop.generationCount)")
         XCTAssertNotNil(controller.backdrop.texture)
         XCTAssertGreaterThan(controller.backdrop.lastGenerationMilliseconds, 0)
         let firstKey = try XCTUnwrap(controller.backdrop.key)
@@ -283,12 +291,21 @@ final class BackdropWiringTests: XCTestCase {
               + "\(covering) covering → nil")
     }
 
-    // MARK: - ④ no backdrop yet → 025's edge extrapolation, never a black band
+    // MARK: - ④ no backdrop on hand → 025's edge extrapolation, never a black band
 
-    func testShrinkBeforeAnyPointerEntryPresentsWithoutABackdrop() throws {
+    /// 065b removed the everyday way into this state (a photo used to *open* with no backdrop until the
+    /// pointer came in). The window still exists — between a release and the next generation — and what
+    /// this pins has not changed: with nothing on hand the pass is given `nil`, so 025's edge
+    /// extrapolation fills the canvas outside the frame. The pixel half of that claim is
+    /// `LoupeZoomShrinkCoverTests` (0 未渲染黑像素), which runs on exactly this state.
+    func testAShrinkWithoutABottomImagePresentsWithoutOne() throws {
         let url = try rawFixture()
         let controller = makeController(url: url, identity: "backdrop-absent")
-        XCTAssertNil(controller.backdrop.texture, "nothing generated without a pointer entry")
+        XCTAssertNotNil(controller.backdrop.texture, "the open made one (065b)")
+        // The state under test: the photo's picture is released and nothing re-arms it.
+        controller.cancelPendingFrames()
+        XCTAssertNil(controller.backdrop.texture)
+        pump(0.05)
 
         controller.zoomToActualSize(aroundView: CGPoint(x: 100, y: 120))
         XCTAssertTrue(settleZoom(controller, zoom: 1))
@@ -302,14 +319,13 @@ final class BackdropWiringTests: XCTestCase {
         let frames = controller.backdropPresents.dropFirst(before).filter { $0.serial > armed }
         // Display-rate dependent, like every bridge frame count: it proves a transition ran, nothing more.
         XCTAssertGreaterThanOrEqual(frames.count, 3)
-        XCTAssertTrue(frames.allSatisfy { $0.backdrop == nil },
+        XCTAssertTrue(frames.allSatisfy { $0.backdropIdentity == nil },
                       "with no backdrop every present must fall back to the edges")
         XCTAssertTrue(frames.contains { !$0.coversCanvas },
                       "the transition really did leave the canvas uncovered")
         // …and it did not quietly generate one on the way.
-        XCTAssertEqual(controller.backdrop.generationCount, 0)
-        // The pixel-level half of this claim is 025's own test (0 unrendered black pixels), which runs
-        // on exactly this state: no pointer entry, no backdrop, a full shrink.
+        XCTAssertEqual(controller.backdrop.generationCount, 1,
+                       "a transition never generates; the one generation is the open's")
         XCTAssertNotNil(controller.lastFrame)
     }
 
@@ -360,15 +376,14 @@ final class BackdropWiringTests: XCTestCase {
         let url = try rawFixture()
         let controller = makeController(url: url, identity: "backdrop-accessor")
 
-        // Nothing yet, and asking does not make one.
-        XCTAssertNil(controller.lowResFullFrame)
+        // The open made one (065b). **Reading** it, however often, still makes nothing.
+        XCTAssertTrue(waitFor { controller.lowResFullFrame != nil }, "the open's bottom image")
+        XCTAssertEqual(controller.backdrop.generationCount, 1)
         for _ in 0 ..< 200 { _ = controller.lowResFullFrame }
-        XCTAssertEqual(controller.backdrop.generationCount, 0,
+        XCTAssertEqual(controller.backdrop.generationCount, 1,
                        "reading the accessor must never generate a backdrop")
         XCTAssertTrue(controller.backdrop.isIdle, "reading the accessor must not start a render")
 
-        enter(controller)
-        XCTAssertTrue(settleBackdrop(controller))
         let source = try XCTUnwrap(controller.frameSource)
         let first = try XCTUnwrap(controller.lowResFullFrame)
         XCTAssertTrue(first.texture === controller.backdrop.texture)
@@ -420,12 +435,13 @@ final class BackdropWiringTests: XCTestCase {
                                    "the histogram's injection point must be wired, not left nil")
 
         let current = try XCTUnwrap(controller.frameSource).edit
-        XCTAssertNil(source(current), "no backdrop yet → nil, so 045 renders it itself")
-        XCTAssertEqual(controller.backdrop.generationCount, 0,
+        // The open made one (065b) — but the *asking* still makes nothing, which is the point here.
+        XCTAssertTrue(waitFor { controller.backdrop.texture != nil }, "the open's bottom image")
+        XCTAssertEqual(controller.backdrop.generationCount, 1)
+        for _ in 0 ..< 50 { _ = source(current) }
+        XCTAssertEqual(controller.backdrop.generationCount, 1,
                        "asking the source must not generate anything")
 
-        enter(controller)
-        XCTAssertTrue(settleBackdrop(controller))
         let handed = try XCTUnwrap(source(current), "the backdrop for this very document is handed over")
         XCTAssertTrue(handed.texture === controller.backdrop.texture,
                       "same texture, not a copy: one render serves both purposes")
@@ -447,16 +463,19 @@ final class BackdropWiringTests: XCTestCase {
 
     // MARK: - ⑧ a different photo is a different picture
 
-    /// 换图释放 (039 ④): the backdrop belongs to the photo it was rendered from. Switching photos must
-    /// release it — and, until the next entry makes a new one, a shrinking frame must fall back to 025's
-    /// edge extrapolation rather than show the **previous** photograph behind the new one.
+    /// 换图释放 (039 ④, tightened by 065): the backdrop belongs to the photo it was rendered from.
+    /// Switching photos releases it **and** (since 065b) makes the new photo's own one; until that
+    /// arrives, a shrinking frame falls back to 025's edge extrapolation rather than show the
+    /// **previous** photograph behind the new one. The judgement is by texture identity — the size of
+    /// two photos' previews is the same number.
     func testSwitchingPhotoReleasesTheBackdropAndNeverDrawsTheOldOne() throws {
         let url = try rawFixture()
         let controller = makeController(url: url, identity: "backdrop-photo-a")
         enter(controller)
         XCTAssertTrue(settleBackdrop(controller))
         XCTAssertEqual(controller.backdrop.generationCount, 1)
-        XCTAssertNotNil(controller.backdrop.texture)
+        let aTexture = try XCTUnwrap(controller.backdrop.texture)
+        let aID = ObjectIdentifier(aTexture)
 
         // Another photo: same file, a different photo identity — the half of the key the picture lives in.
         controller.frameSource = LoupeController.FrameSource(url: url, identity: "backdrop-photo-b",
@@ -464,10 +483,19 @@ final class BackdropWiringTests: XCTestCase {
         pump(0.05)
         XCTAssertNil(controller.backdrop.texture, "a photo switch releases the backdrop")
         XCTAssertNil(controller.lowResFullFrame)
-        XCTAssertEqual(controller.backdrop.generationCount, 1, "and does not render a new one")
 
-        // A shrink on the new photo: every frame of the transition must be drawn without a backdrop,
-        // because the only one on hand belongs to the picture that just left.
+        // 065b: the new photo's own bottom image, made at the switch (its first frame serves it) — the
+        // release above is not the end state any more, and it never was the right one.
+        controller.scheduleRender()
+        XCTAssertTrue(waitFor { controller.backdrop.texture != nil
+                        && controller.backdrop.key?.photo == "backdrop-photo-b" },
+                      "the switch must make the new photo's bottom image")
+        XCTAssertEqual(controller.backdrop.generationCount, 2)
+        let bID = ObjectIdentifier(try XCTUnwrap(controller.backdrop.texture))
+        XCTAssertNotEqual(bID, aID)
+
+        // A shrink on the new photo: every frame of the transition is drawn with the new photo's
+        // backdrop (or with none at all, if it had not arrived) — never with the one that just left.
         controller.zoomToActualSize(aroundView: CGPoint(x: 100, y: 120))
         XCTAssertTrue(settleZoom(controller, zoom: 1))
         controller.zoom(to: 2, aroundView: CGPoint(x: 100, y: 120))
@@ -479,10 +507,11 @@ final class BackdropWiringTests: XCTestCase {
 
         let frames = controller.backdropPresents.dropFirst(before).filter { $0.serial > armed }
         XCTAssertGreaterThanOrEqual(frames.count, 3)
-        XCTAssertTrue(frames.allSatisfy { $0.backdrop == nil },
-                      "the previous photo's backdrop must never be drawn behind the new one")
+        XCTAssertEqual(frames.filter { $0.backdropIdentity == aID }.count, 0,
+                       "the previous photo's backdrop must never be drawn behind the new one")
+        XCTAssertTrue(frames.allSatisfy { $0.backdropIdentity == nil || $0.backdropIdentity == bID })
         XCTAssertTrue(frames.contains { !$0.coversCanvas })
-        XCTAssertEqual(controller.backdrop.generationCount, 1, "a transition still generates nothing")
+        XCTAssertEqual(controller.backdrop.generationCount, 2, "a transition still generates nothing")
     }
 
     // MARK: - ⑥ cost (PHOTONS_BENCH=1)
