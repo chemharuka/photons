@@ -299,33 +299,42 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         }
         for _ in 0..<4 { frame() }                    // the first frames pay the pipeline's warm-up
 
-        var withoutPoll: [Double] = [], withPoll: [Double] = []
-        for index in 0..<24 {
-            if index % 2 == 0 {
-                let t0 = CFAbsoluteTimeGetCurrent()
-                frame()
-                withoutPoll.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            } else {
-                let t0 = CFAbsoluteTimeGetCurrent()
-                // The worst case the timer could ever impose: one poll **per frame** (the real timer
-                // asks twice a second, i.e. once per ~120 frames at 60 Hz).
-                card.refreshHeadroomIfNeeded()
-                frame()
-                withPoll.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            }
+        var withoutPoll: [Double] = [], withPoll: [Double] = [], paired: [Double] = []
+        for _ in 0..<30 {
+            // Paired on purpose: GPU submit cost drifts (queue depth, clock), so each round measures
+            // the same frame twice, back to back, and the *difference within a round* is the number the
+            // claim is about. The poll is the only thing that differs between the two halves.
+            let tOff = CFAbsoluteTimeGetCurrent()
+            frame()
+            let off = (CFAbsoluteTimeGetCurrent() - tOff) * 1000
+
+            let tOn = CFAbsoluteTimeGetCurrent()
+            // The worst case the timer could ever impose: one poll **per frame** (the real timer asks
+            // twice a second, i.e. once per ~120 frames at 60 Hz).
+            card.refreshHeadroomIfNeeded()
+            frame()
+            let on = (CFAbsoluteTimeGetCurrent() - tOn) * 1000
+
+            withoutPoll.append(off)
+            withPoll.append(on)
+            paired.append(on - off)
         }
-        let off = withoutPoll.sorted(), on = withPoll.sorted()
+        let off = withoutPoll.sorted(), on = withPoll.sorted(), deltas = paired.sorted()
         let offP50 = off[off.count / 2], onP50 = on[on.count / 2]
-        let offP95 = off[min(off.count - 1, Int(Double(off.count) * 0.95))]
-        let onP95 = on[min(on.count - 1, Int(Double(on.count) * 0.95))]
-        print(String(format: "4.096 Mpx 一帧（2560×1600，真实 present pass）：无轮询 p50 %.2f / p95 %.2f ms · "
-                     + "每帧一次轮询 p50 %.2f / p95 %.2f ms · Δp50 %+.3f / Δp95 %+.3f ms",
-                     offP50, offP95, onP50, onP95, onP50 - offP50, onP95 - offP95))
+        let deltaP50 = deltas[deltas.count / 2]
+        print(String(format: "4.096 Mpx 一帧（2560×1600，真实 present pass，30 对）：无轮询 p50 %.2f / min %.2f ms · "
+                     + "每帧一次轮询 p50 %.2f / min %.2f ms · 同回合差 中位 %+.3f ms（p95 %+.3f）",
+                     offP50, off.first ?? 0, onP50, on.first ?? 0,
+                     deltaP50, deltas[min(deltas.count - 1, Int(Double(deltas.count) * 0.95))]))
         XCTAssertEqual(card.headroomRedrawCount - redraws, 0,
                        "整段基准里 headroom 没变 — 一次重画都不该有（实际 \(card.headroomRedrawCount - redraws)）")
-        // The claim is "≈ 0": a poll is ~1 µs against a ~ms frame, i.e. < 0.2 %.
-        XCTAssertLessThan(abs(onP50 - offP50), max(0.5, offP50 * 0.05),
-                          "一次轮询不该进入 4.10 Mpx 一帧的关键路径")
+        // The claim is "≈ 0": one poll is ~1 µs (measured in the test above) against a ~1 ms frame, i.e.
+        // 0.1 %. The bounds are loose on purpose — this runs in a debug build on a shared machine — and
+        // the *paired median* is what keeps the drift between the arms out of the number.
+        XCTAssertLessThan(abs(deltaP50), 0.5,
+                          "一次轮询不该进入 4.10 Mpx 一帧的关键路径（同回合差 \(deltaP50) ms）")
+        XCTAssertLessThan(abs((on.first ?? 0) - (off.first ?? 0)), 0.5,
+                          "两臂的最快帧应该一样快（轮询不是帧的一部分）")
     }
 
     // MARK: - ④ 可见性：定时器只在卡片看得见时跑
