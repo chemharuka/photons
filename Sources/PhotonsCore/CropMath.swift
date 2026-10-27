@@ -348,6 +348,157 @@ public enum CropMath {
             && cy - halfY >= -0.5 && cy + halfY <= Double(source.height) + 0.5
     }
 
+    // MARK: the rotated picture's own bound (框 不许 出 照片)
+
+    /// The sensor's four corners **after** a straighten of `degrees`, in normalized frame
+    /// coordinates (0…1, y down), in source order: top-left, top-right, bottom-right, bottom-left.
+    ///
+    /// A straighten turns the picture *inside the frame*: the crop rect stays axis-aligned and the
+    /// sensor's quad turns under it, so at θ ≠ 0 the legal region for a crop is this quad and not
+    /// `0…1²`. Positive `degrees` turns the picture clockwise, the same sign S0 applies
+    /// (`s0_geometry.metal`), which on a y-down frame is the ordinary rotation matrix.
+    public static func rotatedFrameCorners(in source: ImageSize,
+                                           degrees: Double) -> [NormalizedPoint] {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let r = degrees * Double.pi / 180
+        let cosine = cos(r), sine = sin(r)
+        return [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner in
+            let dx = corner.0 * w - w / 2, dy = corner.1 * h - h / 2
+            let px = dx * cosine - dy * sine
+            let py = dx * sine + dy * cosine
+            return NormalizedPoint((px + w / 2) / w, (py + h / 2) / h)
+        }
+    }
+
+    /// The fraction σ ∈ 0…1 by which every side of `crop` must be multiplied — about the rect's own
+    /// centre, so the pixel aspect is untouched — for the rect to sit inside the sensor turned by
+    /// `degrees`. `1` means "it already fits"; `0` means "its centre is outside the picture and no
+    /// positive size fits there".
+    ///
+    /// Closed form, not a search. Writing the rect's half-extents as (a, b) in pixels and its centre
+    /// as (dx, dy) from the frame centre, rotating the *rect* by −θ into the sensor's own axes turns
+    /// containment into two linear inequalities on σ:
+    ///
+    ///     |x₀| + σ(a·|cos θ| + b·|sin θ|) ≤ W/2
+    ///     |y₀| + σ(a·|sin θ| + b·|cos θ|) ≤ H/2
+    ///
+    /// where (x₀, y₀) is the centre rotated by −θ. `|x₀| + σ·…` is the support function of a
+    /// rectangle along an axis, so the two lines are *exact* — no corner enumeration, and no
+    /// axis-aligned bounding box (which for a straightened frame is bigger than the picture, the
+    /// mistake that lets a frame sample the clamped edge).
+    public static func rotatedFrameScale(_ crop: CropRect,
+                                         in source: ImageSize,
+                                         degrees: Double) -> Double {
+        let c = crop.clamped()
+        guard c.width > 0, c.height > 0 else { return 1 }
+        let (a, b) = halves(c, in: source)
+        let (cosine, sine) = cosSin(degrees)
+        let centre = rotatedCentre(c, in: source, degrees: degrees)
+        return scale(dx: centre.x, dy: centre.y, a: a, b: b,
+                     cosine: cosine, sine: sine, in: source)
+    }
+
+    /// `crop` shrunk — **keeping its centre and its pixel aspect** — until it is fully inscribed in
+    /// the sensor turned by `degrees`: the auto-shrink a straighten needs.
+    ///
+    /// Properties the callers rely on, each asserted in `CropFrameInscribeTests`:
+    ///
+    ///   · **identity at 0°** — with no straighten the sensor *is* the frame, so a legal rect comes
+    ///     back bit for bit (and so does any rect `CropRect.clamped()` already bounded);
+    ///   · **idempotent** — the answer fits, so clamping it again returns it unchanged (bit for bit:
+    ///     a rect that fits by less than 1e-12 relative is returned as-is rather than shaved by a
+    ///     ULP on every pass);
+    ///   · **monotone** — the longer the straighten, the smaller the answer's sides, never bigger;
+    ///   · **back to the unclamped rect at 0°** — the stored rect is the user's intent; the shrink is
+    ///     derived, so reducing the angle gives the room back instead of ratcheting the frame smaller.
+    ///
+    /// The centre is kept because it is what the user aimed at. The single exception is a crop whose
+    /// centre is itself outside the turned picture (a 32 px frame in the very corner at a large
+    /// angle): no positive size can stay there, so the rect is re-centred on the frame centre — the
+    /// same rectangle `inscribedCrop` describes, which is the largest one that fits.
+    public static func clampedToRotatedFrame(_ crop: CropRect,
+                                             in source: ImageSize,
+                                             degrees: Double) -> CropRect {
+        let c = crop.clamped()
+        guard c.width > 0, c.height > 0 else { return c }
+        let (a, b) = halves(c, in: source)
+        let (cosine, sine) = cosSin(degrees)
+        let centre = rotatedCentre(c, in: source, degrees: degrees)
+        let sigma = scale(dx: centre.x, dy: centre.y, a: a, b: b,
+                          cosine: cosine, sine: sine, in: source)
+        if sigma >= 1 - 1e-12 { return c }
+        guard sigma > 0 else {
+            // Cornered: keep the rect's shape and put its centre back in the middle of the frame.
+            let middle = inscribedScale(width: c.width, height: c.height, in: source,
+                                        degrees: degrees)
+            let width = c.width * middle, height = c.height * middle
+            return CropRect(left: 0.5 - width / 2, top: 0.5 - height / 2,
+                            right: 0.5 + width / 2, bottom: 0.5 + height / 2)
+        }
+        let width = c.width * sigma, height = c.height * sigma
+        let cx = c.centerX, cy = c.centerY
+        return CropRect(left: cx - width / 2, top: cy - height / 2,
+                        right: cx + width / 2, bottom: cy + height / 2)
+    }
+
+    /// Does `crop`, straightened by `degrees`, sample only inside the sensor — with `tolerance`
+    /// **pixels** of slack on each side? The predicate form of `clampedToRotatedFrame`, for callers
+    /// that only need yes/no (a status line, a test that must not depend on the clamp's rounding).
+    public static func fitsInsideRotatedFrame(_ crop: CropRect,
+                                              in source: ImageSize,
+                                              degrees: Double,
+                                              tolerance: Double = 1e-6) -> Bool {
+        let c = crop.clamped()
+        let (a, b) = halves(c, in: source)
+        let (cosine, sine) = cosSin(degrees)
+        let centre = rotatedCentre(c, in: source, degrees: degrees)
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let halfX = a * cosine + b * sine
+        let halfY = a * sine + b * cosine
+        return abs(centre.x) + halfX <= w / 2 + tolerance
+            && abs(centre.y) + halfY <= h / 2 + tolerance
+    }
+
+    // MARK: the constraint's private arithmetic
+
+    /// Half-extents of a normalized rect, in pixels.
+    private static func halves(_ c: CropRect, in source: ImageSize) -> (a: Double, b: Double) {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        return (c.width * w / 2, c.height * h / 2)
+    }
+
+    /// The rect's centre, rotated by −θ about the frame centre and measured from it in pixels — the
+    /// coordinates the sensor's own axes use.
+    private static func rotatedCentre(_ c: CropRect, in source: ImageSize,
+                                      degrees: Double) -> (x: Double, y: Double) {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let dx = c.centerX * w - w / 2, dy = c.centerY * h - h / 2
+        let r = degrees * Double.pi / 180
+        let cosine = cos(r), sine = sin(r)
+        return (dx * cosine + dy * sine, -dx * sine + dy * cosine)
+    }
+
+    private static func scale(dx: Double, dy: Double, a: Double, b: Double,
+                              cosine: Double, sine: Double, in source: ImageSize) -> Double {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let denX = a * cosine + b * sine
+        let denY = a * sine + b * cosine
+        guard denX > 0, denY > 0 else { return 1 }
+        let s = min((w / 2 - abs(dx)) / denX, (h / 2 - abs(dy)) / denY)
+        guard s.isFinite else { return 0 }
+        return min(1, max(0, s))
+    }
+
+    /// σ for a rect centred on the frame — the `inscribedExtent` formula, spelled once here so the
+    /// cornered fallback and the closed form cannot disagree.
+    private static func inscribedScale(width: Double, height: Double, in source: ImageSize,
+                                       degrees: Double) -> Double {
+        let (cosine, sine) = cosSin(degrees)
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        return scale(dx: 0, dy: 0, a: width * w / 2, b: height * h / 2,
+                     cosine: cosine, sine: sine, in: source)
+    }
+
     // MARK: helpers
 
     /// |cos|, |sin| of an angle in degrees. Abs because a rectangle's extent is the same either
