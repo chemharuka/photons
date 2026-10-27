@@ -1013,12 +1013,37 @@ public struct CurvePoint: Sendable, Equatable, Codable, Hashable {
     }
 
     /// From the engine's `0…1` axis coordinate back to the card's `0…2`.
-    public init(u: Double, v: Double) { self.init(u * 2, v * 2) }
+    public init(u: Double, v: Double) {
+        self.init(CurvePoint.cardCoordinate(u), CurvePoint.cardCoordinate(v))
+    }
 
-    /// The axis coordinate the table, the shaper and the kernel speak: `x / 2`.
-    public var u: Double { x / 2 }
-    /// `y / 2`.
-    public var v: Double { y / 2 }
+    /// `x` on the card → `u` on the engine axis. The card is **two halves** and the axis keeps the
+    /// same split at any width (062/069): `0…sdrBoundary` fills `0…whiteU` and
+    /// `sdrBoundary…maximum` fills `whiteU…1`.
+    ///
+    /// On today's card (`0…2`, `whiteU = 0.5`) this is **bit-identically** `x / 2` — a widening of the
+    /// card must not move display white off the histogram's 50 %, which a bare `x / maximum` would do
+    /// as soon as `maximum` grows (`CurveCoordinateOutOfRange`'s own note names `2.25`); the split is
+    /// written down here once instead of as a `2` at each use site.
+    /// `CurveStorageTests.testTheAxisMapIsStillXOverTwoToday` pins the bit-identity over 20 001 samples.
+    public static func axisCoordinate(_ x: Double) -> Double {
+        let white = HDRCurveAxis.standard.whiteU
+        guard x > sdrBoundary else { return white * (x / sdrBoundary) }
+        return white + (1 - white) * ((x - sdrBoundary) / (maximum - sdrBoundary))
+    }
+
+    /// The inverse of `axisCoordinate`: `u` on the axis → `x` on the card.
+    public static func cardCoordinate(_ u: Double) -> Double {
+        let white = HDRCurveAxis.standard.whiteU
+        guard u > white else { return sdrBoundary * (u / white) }
+        return sdrBoundary + (maximum - sdrBoundary) * ((u - white) / (1 - white))
+    }
+
+    /// The axis coordinate the table, the shaper and the kernel speak: `x / 2` on today's card, i.e.
+    /// `CurvePoint.axisCoordinate(x)`.
+    public var u: Double { CurvePoint.axisCoordinate(x) }
+    /// The same for `y`.
+    public var v: Double { CurvePoint.axisCoordinate(y) }
 
     /// Display code of an SDR-side coordinate, `0…255` (rounded) — for the read-out and the ticks.
     public static func code(_ x: Double) -> Int {

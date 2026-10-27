@@ -118,6 +118,54 @@ public enum CurveLUT {
         }
     }
 
+    /// The coordinate's own **resolution**: `1e-9` of the axis width — the smallest difference two
+    /// `x` values can have and still mean different things to this file.
+    ///
+    /// 069 made `CurvePoint.x` a continuous `Double` on `0…CurvePoint.maximum`, so this has to be
+    /// measured against the axis rather than written down: `2e-9` on today's `0…2` card, `4e-9` on the
+    /// `0…4` (+8 EV) card `maximum`'s comment anticipates, with no code change between them. It is
+    /// ~7 orders of magnitude above what a `Double` can tell apart at this magnitude (`2.0.ulp` is
+    /// `4.4e-16`) and ~6 below the finest step the product can produce (one 8-bit display code is
+    /// `1/255 = 3.9e-3` of the axis; one pixel of the card's plot is `~5e-4` of it).
+    static func coordinateEpsilon(axis: Double = CurvePoint.maximum) -> Double { axis * 1e-9 }
+
+    /// The **de-duplication window**: `1e-6` of the axis width — two control points closer than this
+    /// are one point, and the newer one wins. `2e-6` on today's card, `4e-6` on a `0…4` card.
+    ///
+    /// Why `1e-6` of the axis: that is exactly the tolerance the pre-069 code used, as an absolute
+    /// number on the `0…1` engine axis. The engine's `u` is still the card divided by its width, so
+    /// expressing it as a fraction of the axis *restores* that window in the new `0…2` coordinate
+    /// (`2e-6` here = `1e-6` there) and keeps it the same window on any wider card. It is 1000×
+    /// `coordinateEpsilon` — the resolution is where storage stops distinguishing, the window is where
+    /// the *product* stops distinguishing, and the two must not be confused: a segment narrower than
+    /// one table sample (`1/(N−1) = 2.4e-4` in `u`) is what turns into a spike.
+    static func dedupeWindow(axis: Double = CurvePoint.maximum) -> Double { axis * 1e-6 }
+
+    /// Drop points whose `x` sits within `dedupeWindow(axis:)` of the previous kept one; the
+    /// **last** point written wins (the newest hand edit), exactly as the old `1e-6` window did.
+    ///
+    /// Why a window at all: keeping a pair `ε` apart gives the spline a segment far shorter than the
+    /// table's own sample spacing — `h → 0`, `delta = Δv/h → ∞`, and Fritsch–Carlson has to clamp a
+    /// tangent it cannot represent. The finished table then holds the whole rise in one sample: a
+    /// one-pixel spike in the curve, which is the artifact this function exists to prevent. Bit-exact
+    /// de-duplication (not a mere smoothing) is what `CurveStorageTests`' near-coincidence case pins.
+    ///
+    /// `axis` is a **parameter** so the rule can be exercised on the wider card of a future document
+    /// (the test does exactly that: extent `4.0`, a point at `x = 3`). Nothing in here knows the
+    /// extent is 2.
+    static func dedupe(_ sorted: [CurvePoint], axis: Double) -> [CurvePoint] {
+        let window = dedupeWindow(axis: axis)
+        var out: [CurvePoint] = []
+        for p in sorted {
+            if let last = out.last, abs(p.x - last.x) <= window {
+                out[out.count - 1] = p
+            } else {
+                out.append(p)
+            }
+        }
+        return out
+    }
+
     /// One table from control points: normalise, then Fritsch–Carlson, then **enforce** monotonicity.
     ///
     /// **The two ends are constants, not extrapolations (061).** A point list need not start at `x = 0`
@@ -144,25 +192,22 @@ public enum CurveLUT {
     public static func buildOne(_ rawPoints: [CurvePoint], size requested: Int? = nil) -> [Float] {
         let tableSize = max(2, requested ?? size)
         let identity = (0..<tableSize).map { Float($0) / Float(tableSize - 1) }
-        // Sort by x and drop duplicate x. 069: the coordinates are grid cells, so "the same x" is
-        // an integer equality rather than a tolerance, and the last point written at a cell wins
-        // (the newest hand edit) exactly as the old 1e-6 window did.
+        // Sort by x, then drop points the axis cannot tell apart. 069: the coordinate is continuous,
+        // so this is the axis-derived window `dedupeWindow`, not `==` (two points a few nanometres
+        // apart are one point, and a segment that short makes the spline spike — see `dedupe`). The
+        // last point written wins (the newest hand edit), as the old 1e-6 window did.
         var pts = rawPoints.sorted { $0.x < $1.x }
-        var deduped: [CurvePoint] = []
-        for p in pts {
-            if let last = deduped.last, last.x == p.x {
-                deduped[deduped.count - 1] = p
-            } else {
-                deduped.append(p)
-            }
-        }
-        pts = deduped
+        pts = dedupe(pts, axis: CurvePoint.maximum)
 
         guard pts.count >= 2 else { return identity }
 
         let n = pts.count
         let h = (0..<(n - 1)).map { pts[$0 + 1].u - pts[$0].u }
-        guard h.allSatisfy({ $0 > 1e-9 }) else { return identity }
+        // The same window in the engine's coordinate (`u = x / maximum`) — `1e-6`, independent of how
+        // wide the card is. After `dedupe` no surviving gap can be this small, so this is the identity
+        // fallback for input `dedupe` cannot order (a non-finite coordinate), not a live filter.
+        let uWindow = dedupeWindow() / CurvePoint.maximum
+        guard h.allSatisfy({ $0 > uWindow }) else { return identity }
         let delta = (0..<(n - 1)).map { (pts[$0 + 1].v - pts[$0].v) / h[$0] }
 
         // Fritsch–Carlson tangents.
