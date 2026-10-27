@@ -134,24 +134,37 @@ final class CropToolTests: XCTestCase {
     /// A straightened frame is still a frame: the quad turns with the picture and the grips stay on
     /// its corners.
     ///
-    /// The angle is **S0's**: it rotates in normalized (y-up) crop space, so a document angle θ
-    /// appears on a y-down canvas as `−atan(tan θ · H / W)`. Two facts follow, and both are pinned
-    /// here: the magnitude is not θ (12° in the document is 8.07° of screen rotation on a 3:2 frame),
-    /// and a positive document angle reads **counter-clockwise** on the canvas — which is why the
-    /// rotate gesture (`CropTool.straighten`) has to hand a clockwise drag a negative angle.
+    /// The angle is **S0's**, and S0 rotates in pixels: a document angle θ turns the picture by θ on a
+    /// y-down canvas (`−θ` of hand rotation), on a 3:2 frame exactly as on a square one. The frame
+    /// itself does not turn — it is the window the (rotated) picture is seen through.
+    /// The frame is a **window**, the photo turns under it.
+    ///
+    /// This test used to pin the opposite (and pinned the shear with it): it asserted that a 12°
+    /// straighten turned the *frame* by `−atan(tan 12° · H/W)` = −8.07°, because the frame was drawn
+    /// through the same anisotropic rotation the picture was. That is the bug the user reported as
+    /// 「框跟着转了」 and 「倾斜 + 旋转」: a crop rect lives in the **straightened frame**, so it stays an
+    /// axis-aligned rectangle and only the *picture* turns — by exactly the document's angle, now that
+    /// S0 rotates in pixel space.
     func testAStraightenedFrameTurnsWithThePicture() {
         let crop = CropRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6)
         let f = framing(source: landscape, straighten: 12)
         let layout = layout(crop, source: landscape, framing: f)
         let topLeft = layout.corners[0]
         let topRight = layout.corners[1]
-        let angle = atan2(Double(topRight.y - topLeft.y), Double(topRight.x - topLeft.x)) * 180 / .pi
-        let expected = -atan(tan(12 * Double.pi / 180)
-                             * Double(landscape.height) / Double(landscape.width)) * 180 / .pi
-        print(String(format: "035 straighten frame: 12° in the document is %.3f° on screen (want %.3f°)",
-                     angle, expected))
-        XCTAssertEqual(angle, expected, accuracy: 0.01, "the frame turns with the picture, S0's way")
-        XCTAssertGreaterThan(abs(angle - 12), 1, "the kernel rotates in normalized space, not on screen")
+        let frameAngle = atan2(Double(topRight.y - topLeft.y),
+                               Double(topRight.x - topLeft.x)) * 180 / .pi
+        print(String(format: "035 straighten: the frame's top edge is at %.3f° for a 12° straighten",
+                     frameAngle))
+        XCTAssertEqual(frameAngle, 0, accuracy: 1e-9, "the frame stays axis-aligned")
+        XCTAssertEqual(layout.corners[2].x, layout.corners[1].x, accuracy: 1e-9)
+        XCTAssertEqual(layout.corners[3].y, layout.corners[2].y, accuracy: 1e-9)
+
+        // The *picture* turns, by the document's own angle (a similarity, not a taper).
+        let m = f.mapping(of: .fit)
+        let o = m.sourcePoint(viewX: 0, viewY: 0), dx = m.sourcePoint(viewX: 1, viewY: 0)
+        let pictureAngle = atan2(dx.y - o.y, dx.x - o.x) * 180 / .pi
+        XCTAssertEqual(pictureAngle, 12, accuracy: 1e-6,
+                       "the photo turns by the document angle on screen")
         // And the quad is still hit-testable: its centre is inside it.
         XCTAssertTrue(CropTool.contains(layout.center, in: layout))
     }
@@ -184,26 +197,34 @@ final class CropToolTests: XCTestCase {
         XCTAssertEqual(edge.right, 0.7, accuracy: 1e-6)
     }
 
-    /// 框内拖动 = 平移画面: the kept region travels **against** the hand (the picture follows it), and
-    /// it stops at the frame's edge instead of leaving the source.
+    /// 框内拖动 = 移动取景框，方向和手**同号**（往左拖，框往左走）。
+    ///
+    /// It used to be the opposite (`base.left − dx`), i.e. hand left → frame right, which reads as
+    /// 「拖的是画布，方向反了」. Same sign, same magnitude, and it stops at the frame's edge instead of
+    /// leaving the source.
     func testDraggingInsidePansThePictureAndClampsAtTheEdge() {
         let crop = CropRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
         let source = landscape
         let drag = CropToolDrag(handle: .inside, crop: crop,
                                 grab: NormalizedPoint(0.5, 0.5))
-        // Hand moves +0.1 in x: the kept window moves −0.1, so the picture appears to move +0.1.
+        // Hand moves +0.1 in x: the kept window moves +0.1 as well — the frame follows the hand.
         let moved = drag.crop(at: NormalizedPoint(0.6, 0.5), source: source)
-        XCTAssertEqual(moved.left, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(moved.left, 0.4, accuracy: 1e-9)
         XCTAssertEqual(moved.width, 0.4, accuracy: 1e-9, "a pan never resizes the frame")
         XCTAssertEqual(moved.top, 0.3, accuracy: 1e-9)
 
-        // Dragged far past the left edge: it stops with the whole frame inside the source.
+        // Dragged far past the right/bottom edge: it stops with the whole frame inside the source.
         let clamped = drag.crop(at: NormalizedPoint(2.0, 2.0), source: source)
-        XCTAssertEqual(clamped.left, 0, accuracy: 1e-9)
-        XCTAssertEqual(clamped.top, 0, accuracy: 1e-9)
+        XCTAssertEqual(clamped.left, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(clamped.top, 0.6, accuracy: 1e-9)
         XCTAssertEqual(clamped.width, 0.4, accuracy: 1e-9)
         XCTAssertLessThanOrEqual(clamped.right, 1 + 1e-9)
         XCTAssertLessThanOrEqual(clamped.bottom, 1 + 1e-9)
+
+        // And the inverse direction: a left drag moves the frame left, exactly as far.
+        let back = drag.crop(at: NormalizedPoint(0.4, 0.5), source: source)
+        XCTAssertEqual(back.left, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(back.left - crop.left, -0.1, accuracy: 1e-12, "same sign, same distance")
     }
 
     /// 框外拖动 = 新建框: the two coordinates are ordered, so every drag direction builds a frame.
@@ -348,12 +369,11 @@ final class CropToolTests: XCTestCase {
         }
         let ten = CropTool.straighten(0, grab: onCircle(-10), to: onCircle(0),
                                       centre: centre, source: source)
-        // What that document angle puts on screen: the picture turns by −atan(tan θ · H / W).
-        let onScreen = -atan(tan(ten * Double.pi / 180) * Double(source.height)
-                             / Double(source.width)) * 180 / .pi
-        print(String(format: "035 straighten: hand swept 10° clockwise → document %.2f° → %.2f° on screen; quarter turn %.1f°",
-                     ten, onScreen, quarter))
-        XCTAssertEqual(onScreen, 10, accuracy: 0.2, "the picture follows the hand on screen")
+        // The document angle now **is** the screen angle (S0 rotates in pixels), so a 10° sweep of
+        // the hand is a 10° document angle — no `atan(tan θ·H/W)` correction any more.
+        print(String(format: "035 straighten: hand swept 10° clockwise → document %.2f°; quarter turn %.1f°",
+                     ten, quarter))
+        XCTAssertEqual(ten, -10, accuracy: 1e-6, "the picture follows the hand on screen, 1:1")
         XCTAssertLessThan(ten, 0, "and the document angle is negative, because it is a y-up angle")
 
         XCTAssertEqual(CropTool.clampStraighten(90), 45)

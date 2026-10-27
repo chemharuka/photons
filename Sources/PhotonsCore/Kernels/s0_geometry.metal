@@ -113,10 +113,19 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 
-    float2 o = uv - 0.5;
+    // ── the rotation, in **pixels** ──────────────────────────────────────────────────────────────
+    // Rotating `uv − ½` is a rotation of *normalised* coordinates: the x offset is divided by the
+    // frame's width and the y offset by its height, so `R(θ)` is followed by the non-uniform scale
+    // `× frameSize` and the result is rotation ∘ anisotropic scale — a shear whose factor is the
+    // frame's W/H (so a 3:2 frame shears by 1.5, and a portrait one by 0.667 the other way). Turning
+    // the pixel offsets instead is the similarity every crop tool means: the two basis vectors stay
+    // orthogonal and equal (pure rotation + uniform scale), and a straightened picture is only
+    // turned, never tapered.
+    float2 o = (uv - 0.5) * p.f.xy;
     float cs = p.d.x;
     float sn = p.d.y;
-    float2 r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
+    float2 rotated = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs);
+    float2 r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
 
     float2 px = (p.c.xy + r * p.c.zw) * float2(srcSize);
 

@@ -816,7 +816,9 @@ public struct LoupeFraming: Equatable, Sendable {
             cosT: cos(theta),
             sinT: sin(theta),
             flipH: flipH,
-            flipV: flipV)
+            flipV: flipV,
+            frameWidth: sourceWidth,
+            frameHeight: sourceHeight)
     }
 
     /// Where a canvas-sized frame texture sits on the **whole picture** (058) — the input the backdrop
@@ -962,10 +964,20 @@ public struct LoupeMapping: Equatable, Sendable {
     public let sinT: Double
     public let flipH: Bool
     public let flipV: Bool
+    /// The **upright frame** the rotation turns about, in source pixels. Zero falls back to the
+    /// window (`cropWidth`/`cropHeight`) for a caller that has no frame of its own.
+    ///
+    /// Load-bearing: the rotation has to be applied about *some* centre in *uniform* units, and
+    /// `s0_geometry` turns the whole frame about its centre in frame pixels. Applying it to
+    /// `(u − ½, v − ½)` — the normalised window — is what sheared the picture (the u axis is divided
+    /// by the width and the v axis by the height, so `R(θ)` is followed by a non-uniform scale).
+    public let frameWidth: Double
+    public let frameHeight: Double
 
     public init(viewport: ImageSize, contentWidth: Double, contentHeight: Double,
                 cropLeft: Double, cropTop: Double, cropWidth: Double, cropHeight: Double,
-                cosT: Double, sinT: Double, flipH: Bool, flipV: Bool) {
+                cosT: Double, sinT: Double, flipH: Bool, flipV: Bool,
+                frameWidth: Double = 0, frameHeight: Double = 0) {
         self.viewport = viewport
         self.contentWidth = contentWidth
         self.contentHeight = contentHeight
@@ -977,6 +989,8 @@ public struct LoupeMapping: Equatable, Sendable {
         self.sinT = sinT
         self.flipH = flipH
         self.flipV = flipV
+        self.frameWidth = frameWidth > 0 ? frameWidth : max(cropWidth, 1e-9)
+        self.frameHeight = frameHeight > 0 ? frameHeight : max(cropHeight, 1e-9)
     }
 
     public var originX: Double { (Double(viewport.width) - contentWidth) / 2 }
@@ -987,30 +1001,73 @@ public struct LoupeMapping: Equatable, Sendable {
     /// two cameras is the ratio of these (`LoupeZoomBridge.scale`).
     public var canvasPerSource: Double { contentWidth / max(cropWidth, 1e-9) }
 
+    // MARK: the two spaces a view point can mean
+    //
+    //   view  ──(axis-aligned zoom, no rotation)──▶  frame / display space  ──(R(θ), θ = 0 for the
+    //                                                                        crop tool)──▶  source
+    //
+    // The **crop rect lives in frame space**: `s0_geometry` crops the straightened frame, so a
+    // rectangle in that space is a rectangle on screen. Everything the crop tool draws (corners,
+    // grips, grid) and every drag it interprets therefore goes through `framePoint`/`frameView`, and
+    // the rotation never reaches the overlay — which is what keeps the eight grips axis-aligned.
+
+    /// Device pixel → the straightened frame, in source pixels. **No rotation** (that belongs to
+    /// `sourcePoint`, i.e. to the picture, not to the frame a crop is drawn in).
+    public func framePoint(viewX: Double, viewY: Double) -> (x: Double, y: Double) {
+        (cropLeft + (viewX - originX) * cropWidth / max(contentWidth, 1e-9),
+         cropTop + (viewY - originY) * cropHeight / max(contentHeight, 1e-9))
+    }
+
+    /// The straightened frame → device pixel; the inverse of `framePoint`, and the one the overlay
+    /// draws with.
+    public func frameView(frameX: Double, frameY: Double) -> (x: Double, y: Double) {
+        (originX + (frameX - cropLeft) * contentWidth / max(cropWidth, 1e-9),
+         originY + (frameY - cropTop) * contentHeight / max(cropHeight, 1e-9))
+    }
+
     /// Device pixel → source pixel.
+    ///
+    /// Two steps, and the split is the whole fix:
+    ///
+    ///   1. view → the frame, in pixels (`u` across the window, flips as before, then `cropLeft + u·cropWidth`);
+    ///   2. the frame → the source, by turning the **pixel offsets** about the frame's centre.
+    ///
+    /// Step 2 used to rotate `(u − ½, v − ½)` — coordinates normalised *per axis* — and then scale by
+    /// the crop's width and height, which is `R(θ)` followed by a non-uniform scale: the two basis
+    /// vectors come out unequal and non-orthogonal (a shear whose factor is the frame's W/H, so a
+    /// portrait file shears the other way). `s0_geometry.metal` now turns pixel offsets for the same
+    /// reason, so this really is the kernel's inverse and not merely a plausible-looking map.
     public func sourcePoint(viewX: Double, viewY: Double) -> (x: Double, y: Double) {
-        var u = (viewX - originX) / max(contentWidth, 1e-9)
-        var v = (viewY - originY) / max(contentHeight, 1e-9)
-        if flipH { u = 1 - u }
-        if flipV { v = 1 - v }
-        let ox = u - 0.5, oy = v - 0.5
-        let rx = ox * cosT - oy * sinT
-        let ry = ox * sinT + oy * cosT
-        return (cropLeft + (rx + 0.5) * cropWidth,
-                cropTop + (ry + 0.5) * cropHeight)
+        // 1. view → the frame, in pixels — axis-aligned, flips and all, about the **window's own**
+        //    centre. Same centre and same order as the projection this replaced, so pan/zoom anchoring
+        //    and flipped documents behave exactly as they did.
+        let cx = cropLeft + cropWidth / 2, cy = cropTop + cropHeight / 2
+        var fx = cropLeft + (viewX - originX) * cropWidth / max(contentWidth, 1e-9)
+        var fy = cropTop + (viewY - originY) * cropHeight / max(contentHeight, 1e-9)
+        if flipH { fx = 2 * cx - fx }
+        if flipV { fy = 2 * cy - fy }
+        // 2. the rotation — of **pixel** offsets, about that centre. This is the one line the shear
+        //    lived on: rotating `(u − ½, v − ½)` (u divided by the width, v by the height) and then
+        //    scaling by `cropWidth`/`cropHeight` is `R(θ)` followed by a non-uniform scale, so the basis
+        //    came out unequal (1.022 at 9° on 3:2, 1.5 at 45°) and non-orthogonal (cos −0.13). In pixels
+        //    the map is a similarity and `s0_geometry.metal` matches it.
+        let qx = fx - cx, qy = fy - cy
+        let rx = qx * cosT - qy * sinT
+        let ry = qx * sinT + qy * cosT
+        return (rx + cx, ry + cy)
     }
 
     /// Source pixel → device pixel (the inverse of the above; `sourcePoint(viewPoint(p)) == p`).
     public func viewPoint(sourceX: Double, sourceY: Double) -> (x: Double, y: Double) {
-        let rx = (sourceX - cropLeft) / max(cropWidth, 1e-9) - 0.5
-        let ry = (sourceY - cropTop) / max(cropHeight, 1e-9) - 0.5
-        // Kernel applies R(θ); the inverse applies R(−θ).
-        let ox = rx * cosT + ry * sinT
-        let oy = -rx * sinT + ry * cosT
-        var u = ox + 0.5
-        var v = oy + 0.5
-        if flipH { u = 1 - u }
-        if flipV { v = 1 - v }
-        return (originX + u * contentWidth, originY + v * contentHeight)
+        let cx = cropLeft + cropWidth / 2, cy = cropTop + cropHeight / 2
+        let qx = sourceX - cx, qy = sourceY - cy
+        // Kernel applies R(θ); the inverse applies R(−θ) — in pixels, so it is a pure rotation.
+        let rx = qx * cosT + qy * sinT
+        let ry = -qx * sinT + qy * cosT
+        var fx = rx + cx, fy = ry + cy
+        if flipH { fx = 2 * cx - fx }
+        if flipV { fy = 2 * cy - fy }
+        return (originX + (fx - cropLeft) * contentWidth / max(cropWidth, 1e-9),
+                originY + (fy - cropTop) * contentHeight / max(cropHeight, 1e-9))
     }
 }

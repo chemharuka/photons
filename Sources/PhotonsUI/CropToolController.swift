@@ -147,6 +147,8 @@ public final class CropToolController {
     /// 九宫格. View state, and the only toggle that does not touch the draft.
     public var showsGrid = true
     public private(set) var isDragging = false
+    /// True while a ⌘-drag is turning the picture rather than moving the frame.
+    public var isRotatingPicture: Bool { rotating }
 
     /// 应用 that actually grew the history — one per real apply, zero for an apply that changed
     /// nothing (`EditHistory.commit` is a no-op then, and a counter that lied about it would make
@@ -386,8 +388,12 @@ public final class CropToolController {
     static func normalized(_ point: CGPoint, mapping: LoupeMapping, source: ImageSize,
                            pointScale: Double) -> NormalizedPoint? {
         let scale = pointScale > 0 ? pointScale : 1
-        let p = mapping.sourcePoint(viewX: Double(point.x) * scale,
-                                    viewY: Double(point.y) * scale)
+        // **Frame space** (`framePoint`), not `sourcePoint`: the draft rect is a rect of the
+        // straightened frame, so a grip dragged on screen has to move the edge that is under the hand.
+        // Going through the rotating map turned every drag of a straightened picture into an arc
+        // (and, while the projection was anisotropic, into a skew).
+        let p = mapping.framePoint(viewX: Double(point.x) * scale,
+                                   viewY: Double(point.y) * scale)
         guard p.x.isFinite, p.y.isFinite else { return nil }
         return NormalizedPoint(p.x / Double(max(source.width, 1)),
                                p.y / Double(max(source.height, 1)))
