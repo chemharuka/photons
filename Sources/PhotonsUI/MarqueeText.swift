@@ -516,7 +516,7 @@ public enum InspectorPhotoInfo {
     }
 
     /// Four rows, first one is one line with three columns: `L100000.dng   60 MP   9000×6000` —
-    /// file name flush left, megapixels centred on the card's own centre, dimensions flush right.
+    /// file name flush left, megapixels right next to the dimensions, dimensions flush right.
     ///
     /// The three columns are placed by `SpecRowLayout` rather than by `Spacer()`s, because the
     /// leading cell is a marquee: `MarqueeText` asks for `maxWidth: .infinity`, so in a plain
@@ -524,6 +524,13 @@ public enum InspectorPhotoInfo {
     /// middle and trailing cells are placed at their measured size first, and the marquee gets
     /// exactly the room left before them — so the name stays left-aligned *and* truncates only
     /// when it really would collide with `60 MP`.
+    ///
+    /// The two values are **right-packed**, not centred: `9000×6000` ends on the card's right edge
+    /// and `60 MP` ends one `columnGap` before that cell's left edge. Both are bounded in width
+    /// (six-digit sides at the very most: `999999×999999`, i.e. `999998 MP`), so right-packing
+    /// them costs the file name at most one gap per column and buys back every point that centring
+    /// used to leave empty on the left of `60 MP` — the name column grows from ~113 pt to ~169 pt
+    /// at the default 330 pt panel.
     ///
     /// The two values carry an invisible AppKit probe in their background: SwiftUI draws text
     /// into layers, so a `Text` has no `NSView` to measure, and the alignment has to be proven on
@@ -533,7 +540,7 @@ public enum InspectorPhotoInfo {
         public static let fontSize: CGFloat = 10
         /// Fixed, whatever the values are: a missing `—` must not make the row shorter.
         public static let height: CGFloat = fontSize + 4
-        /// One gap between the name and the centred cell — the only air the row can spare.
+        /// One gap between the name and the value columns — the only air the row can spare.
         public static let columnGap: CGFloat = 8
 
         public let filename: String
@@ -566,9 +573,16 @@ public enum InspectorPhotoInfo {
         }
     }
 
-    /// Three columns: `[0]` takes the room left over on the left, `[1]` is centred on `bounds.midX`,
-    /// `[2]` ends on `bounds.maxX`. Centring on the bounds (not on the space between the other two
-    /// cells) is what keeps `60 MP` from moving when the file name gets longer.
+    /// Three columns: `[0]` takes the room left over on the left, `[1]` ends one `gap` before
+    /// `[2]`, and `[2]` ends on `bounds.maxX`.
+    ///
+    /// The middle cell used to be centred on `bounds.midX`, which held it still when the name got
+    /// longer but left every point to the left of `60 MP` empty — about 56 pt at the default panel,
+    /// spent on nothing. Right-packing it instead moves `60 MP` as close to `9000×6000` as the gap
+    /// allows, so the file name (a marquee, the only column that may elide) gets everything else.
+    /// Neither value is at risk of being elided: both are `Text.fixedSize()`, placed at their own
+    /// measured width, and the widest string either can print (`999999×999999`) still leaves the
+    /// name a real column even at the narrowest legal panel (300 pt → 244 pt of content: 82.6 pt).
     struct SpecRowLayout: Layout {
         let gap: CGFloat
 
@@ -581,10 +595,12 @@ public enum InspectorPhotoInfo {
             guard subviews.count == 3 else { return }
             let middle = subviews[1].sizeThatFits(.unspecified)
             let trailing = subviews[2].sizeThatFits(.unspecified)
-            let middleMinX = bounds.midX - middle.width / 2
+            // `9000×6000` flush right; `60 MP` flush against that cell, one gap away.
+            let trailingMinX = bounds.maxX - trailing.width
+            let middleMaxX = trailingMinX - gap
+            let middleMinX = middleMaxX - middle.width
 
-            subviews[2].place(at: CGPoint(x: bounds.maxX - trailing.width,
-                                          y: bounds.midY - trailing.height / 2),
+            subviews[2].place(at: CGPoint(x: trailingMinX, y: bounds.midY - trailing.height / 2),
                               proposal: ProposedViewSize(trailing))
             subviews[1].place(at: CGPoint(x: middleMinX, y: bounds.midY - middle.height / 2),
                               proposal: ProposedViewSize(middle))
