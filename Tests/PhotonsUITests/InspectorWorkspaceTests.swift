@@ -110,7 +110,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
         XCTAssertEqual(InspectorView.Section.allCases.count, 12)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
-        XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
+        // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
+        XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
     }
 
     // MARK: - 3. 切换器的位置：直方图下方、滚动区上方
