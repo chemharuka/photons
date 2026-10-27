@@ -90,11 +90,14 @@ final class DetailSectionTests: XCTestCase {
         // The bar is 16 pt tall, like every other row in the panel: no layout jump between shapes.
         XCTAssertEqual(SliderValueMap.rowHeight, 16)
         // **060 改了这里的两条断言**：055 量的是自绘气泡（`BubbleSliderCell.knobSize` 10 × 16 pt，
-        // 宽 < 行高）。气泡控件删掉了，改成钉「同一个 SwiftUI Slider，橙色只从 tint 来」——
-        // 形状不再是控件，颜色才是区分。
+        // 宽 < 行高）。气泡控件删掉了，改成钉「同一个 SwiftUI Slider，颜色只从 tint 来」——
+        // 形状不再是控件，颜色才是区分。**071 把颜色从橙改成黄**（raw/解码参数 = 黄）。
         let builderSource = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        XCTAssertTrue(builderSource.contains(".tint(shape == .bar ? Color.orange : nil)"),
-                      "060: 细节的四根是解 RAW 参数 → 橙色；圆形/长条的控件之分已经不存在")
+        XCTAssertTrue(builderSource.contains(".tint(shape.accent)"),
+                      "060/071: 细节的四根是解 RAW 参数 → 黄；圆形/长条的控件之分已经不存在")
+        let palette = try String(contentsOf: Self.sliderShapeSource, encoding: .utf8)
+        XCTAssertTrue(palette.contains("public static let rawAccent = Color.yellow"),
+                      "071: `.bar`（解 RAW 参数）的强调色是黄")
 
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         let tickedSlider = try NSRegularExpression(pattern: "Slider\\([^)]*step:")
@@ -192,6 +195,15 @@ final class DetailSectionTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
+
+    /// 071: 配色表的唯一定义（`SliderShape.accent` 后面那三个值）。
+    private static var sliderShapeSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/SliderShape.swift")
     }
 
     private static func host() -> NSHostingView<InspectorView> {

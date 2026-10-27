@@ -21,7 +21,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// so) and `light` gained the absolute `blackLevel`/`whiteLevel`. A schema-3 document's `rgb`
     /// key is read into `white` (`CurveGroup.init(from:)`), so the **shape** survives; only the name
     /// is new. Not released.
-    public static let currentSchemaVersion = 4
+    /// 5 = 派单 071: `light.blackOffset` — the additive linear black trim (±0.01, 1/1000 steps). The
+    /// key is **absent** from every document that never used the control (0 encodes to nothing, the
+    /// `temperature`/`tint`/`blackLevel` rule), so a schema-4 blob re-encodes byte for byte and only
+    /// the version number says the schema grew. Nothing migrates: an absent key reads as 0, which is
+    /// the value the old documents mean.
+    public static let currentSchemaVersion = 5
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -168,7 +173,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 || light.whites != old.light.whites
                 || light.blacks != old.light.blacks
                 || light.blackLevel != old.light.blackLevel
-                || light.whiteLevel != old.light.whiteLevel {
+                || light.whiteLevel != old.light.whiteLevel
+                || light.blackOffset != old.light.blackOffset {
                 s.insert(.sceneLinear)
             }
             if light.contrast != old.light.contrast
@@ -255,6 +261,11 @@ public struct EditModel: Sendable, Equatable, Codable {
                 + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
             if let bl = light.blackLevel { m += ";blL=\(k(bl))" }
             if let wh = light.whiteLevel { m += ";whL=\(k(wh))" }
+            // 071: appended **only when non-zero**, the `asp`/`car`/`blL` discipline. A document that
+            // never used the trim keeps the S1 material of every document written before 071 byte for
+            // byte — the pinned vectors in `WindowTests` / `MaskTests` and every recorded golden depend
+            // on it. `boff` is the clamped value, i.e. the number the kernel actually adds.
+            if light.blackOffset != 0 { m += ";boff=\(k(light.clampedBlackOffset))" }
             return m
 
         // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
@@ -459,7 +470,33 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// as `blackLevel`, with `white ≥ black + 1e-3` enforced on the pair.
     public var whiteLevel: Double?
 
+    /// 派单 071 — an **additive** black trim in scene-linear units: +0.01…−0.01, default 0.
+    ///
+    /// A third spelling of "where black is", and deliberately not a replacement for the other two:
+    /// `blacks` is a coarse level (±0.15, and it also moves the white point's span) and `blackLevel`
+    /// is an absolute dropper reading. This one is the fine trim the user asked for —「让 0 值变为
+    /// ±0.01」— with 1/1000 granularity, and it is the only control that can lift the decoder's own
+    /// negative samples back across zero without moving where 0 and 1 are:
+    ///
+    ///     v = (v − blk)/span + blackOffset        // S1, between the levels and the gain
+    ///
+    /// It is additive and it sits **before the exposure gain**, so the trim is scaled by the same
+    /// gain the negative samples are: +0.01 at +2 EV lifts +0.04. That is what makes `+` pull the
+    /// shadows out of the "the more exposure, the blacker they get" hole.
+    ///
+    /// The slider is an **integer** −10…+10 and the document stores `slider / 1000` (a Double, so
+    /// `0.002` is expressible without a second unit in the model). `LightGroup.blackOffset(slider:)`
+    /// and `sliderPosition` are the only mapping.
+    public var blackOffset: Double
+
     public static let identity = LightGroup()
+
+    /// The envelope of the additive trim, in scene-linear light. ±0.01 is what the user asked for
+    /// (「可选到 −10 和 +10，对应于让 0 值变为 −0.01 以及 +0.01」); it is also about as far as an
+    /// additive trim can go on a 0…1 scene before it turns black into grey.
+    public static let blackOffsetRange: ClosedRange<Double> = -0.01...0.01
+    /// The slider's travel: integers only, 0 in the middle (`slider / 1000` = the document value).
+    public static let blackOffsetSliderRange: ClosedRange<Double> = -10...10
 
     /// The envelope the level fields are clamped into (`§7.1`): a black sample below −3 EV is noise,
     /// and a white above +4 EV is past the far end of the curve's axis (the shaper keeps going at the
@@ -471,7 +508,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public init(exposure: Double = 0, contrast: Double = 0, highlights: Double = 0,
                 shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
                 temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0,
-                blackLevel: Double? = nil, whiteLevel: Double? = nil) {
+                blackLevel: Double? = nil, whiteLevel: Double? = nil,
+                blackOffset: Double = 0) {
         self.exposure = exposure
         self.contrast = contrast
         self.highlights = highlights
@@ -483,6 +521,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
         self.highlightRecovery = highlightRecovery
         self.blackLevel = blackLevel
         self.whiteLevel = whiteLevel
+        self.blackOffset = blackOffset
     }
 
     public init(from decoder: any Decoder) throws {
@@ -499,6 +538,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
         v.highlightRecovery = c.val("highlightRecovery", v.highlightRecovery)
         v.blackLevel = c.val("blackLevel", v.blackLevel)
         v.whiteLevel = c.val("whiteLevel", v.whiteLevel)
+        // 071: an absent key is 0 — the pre-071 document's meaning, and the identity of the trim.
+        v.blackOffset = c.val("blackOffset", v.blackOffset)
         self = v
     }
 
@@ -534,6 +575,11 @@ public struct LightGroup: Sendable, Equatable, Codable {
         // the pre-030 JSON (the `temperature`/`tint` rule again).
         try c.encodeIfPresent(blackLevel, forKey: AnyCodingKey("blackLevel"))
         try c.encodeIfPresent(whiteLevel, forKey: AnyCodingKey("whiteLevel"))
+        // 071: **absent at 0**, not `"blackOffset": 0` — a document that never touched the control
+        // re-encodes byte for byte (the `temperature`/`tint`/`blackLevel` rule). It is the same
+        // discipline the kernel follows: the default path is not "the old path plus zero", it is the
+        // old path.
+        if blackOffset != 0 { try c.encode(blackOffset, forKey: AnyCodingKey("blackOffset")) }
     }
 
     public var isIdentity: Bool { self == LightGroup.identity }
@@ -543,6 +589,35 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     /// The white level the `whites` slider asks for, `wht = 1 − whites/100·0.15`.
     public var sliderWhiteLevel: Double { 1 - whites / 100 * 0.15 }
+
+    // MARK: - 071: the additive linear trim's mapping
+
+    /// 071 — slider position → document value: **exactly** `position / 1000`, described on an integer
+    /// position (−10…+10).
+    ///
+    /// `Double(n) / 1000.0` rather than `n * 0.001`: the division is correctly rounded, so `10` gives
+    /// the double nearest 0.01 (i.e. the literal `0.01`) and every step is a 1/1000 tick of the same
+    /// value. A non-integer position is rounded to the nearest whole tick first — the panel has no
+    /// `step:` (SwiftUI would draw tick marks), so the quantization has to live here, exactly like
+    /// `DetailSettings.setPosition`.
+    public static func blackOffset(fromSlider position: Double) -> Double {
+        guard position.isFinite else { return 0 }
+        let tick = min(max(position.rounded(), blackOffsetSliderRange.lowerBound),
+                       blackOffsetSliderRange.upperBound)
+        return tick / 1000
+    }
+
+    /// The slider position this document asks for — the inverse of `blackOffset(fromSlider:)`, an
+    /// integer-valued Double (the slider centres on it without a rounding error to wobble around).
+    public var blackOffsetSliderPosition: Double { (blackOffset * 1000).rounded() }
+
+    /// The trim as the kernel gets it: clamped into the envelope, so a hand-edited document cannot
+    /// push the linear buffer around by more than ±0.01.
+    public var clampedBlackOffset: Double {
+        guard blackOffset.isFinite else { return 0 }
+        return min(max(blackOffset, LightGroup.blackOffsetRange.lowerBound),
+                   LightGroup.blackOffsetRange.upperBound)
+    }
 
     /// Where 0 and 1 are, after the absolute fields and the sliders are reconciled.
     ///
