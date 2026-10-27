@@ -1101,6 +1101,7 @@ public final class RenderGraph {
     ///
     /// `s1KeyIncludesRedGroup: false` (tests only) deletes the red half — the sliders, the two absolute
     /// levels and the trim — from the material, which is the refutation 073 asks for.
+    ///
     /// 081 — the key that lets a frame skip the walk: **everything the pipeline's stages are keyed by,
     /// in one string.**
     ///
@@ -1114,6 +1115,9 @@ public final class RenderGraph {
     ///
     /// The composite is the **last stage that owns a generic cache entry** — the stage whose output
     /// feeds S4. Its entry is the texture the pipeline already produced, so the resume costs no texture.
+    ///
+    /// (Separate from `s1Key` below, which is 073's slot key: this one composes that key *with* the
+    /// chain's last link; neither replaces the other.)
     private func compositeKey(_ edit: EditModel, _ plan: Plan, stage: RenderStage,
                               tilingSuffix: String, semanticSuffix: String) -> String {
         plan.keys.key(for: stage)
