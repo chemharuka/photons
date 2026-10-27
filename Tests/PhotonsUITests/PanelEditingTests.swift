@@ -19,8 +19,9 @@ import PhotonsCore
 ///      `TextField(value:format: .number.precision(.fractionLength(0)))`，会把 0.5 变成 1）。
 ///
 /// `swift test` 没有窗口会话：SwiftUI 不建 `NSTextField`，无障碍树也是空的（`DetailSectionTests` /
-/// `SliderStyleTests` 记过同一堵墙）。所以**按键到字段的接线**（↵ / Esc / 失焦，`NSSound.beep()`）
-/// 按源码钉（`testTheFieldWiresReturnEscapeAndBlur`），其余全部按值断言。
+/// `SliderStyleTests` 记过同一堵墙）。所以这里断言的是**规则**与**面板怎么装配这个字段**；
+/// 「按键 → 字段」的接线由 `NumberFieldTypingTests` 用真的 `NSWindow` + 真的 field editor 驱动
+/// （057：那条才是 052 漏掉的东西）。
 ///
 /// 派单 052 adds two contracts on top, and both are asserted where they can actually run:
 ///
@@ -208,11 +209,17 @@ final class PanelEditingTests: XCTestCase {
         XCTAssertTrue(source.contains("value.wrappedValue = typed"))
         XCTAssertTrue(source.contains("onEditingChanged(false)"))
 
-        // The field itself: three exits, and the beep only on a rejected string.
-        XCTAssertTrue(source.contains(".onSubmit { commit(); focused = false }"), "↵ 提交")
-        XCTAssertTrue(source.contains(".onExitCommand { cancel() }"), "Esc 取消")
-        XCTAssertTrue(source.contains("else if editing { commit() }"), "失焦提交")
-        XCTAssertTrue(source.contains("NSSound.beep()"), "非法输入 beep 一次")
+        // 057: the row still builds the same field (an `NSTextField` under SwiftUI now), and the three
+        // exits + the beep live in one place — `NumberField.swift`, pinned there rather than here.
+        XCTAssertTrue(source.contains("NumberFieldView(row: NumberFieldRow(value: value"),
+                      "SliderNumberField 必须把行数据交给 AppKit 那一层")
+        let fieldSource = try String(contentsOf: Self.numberFieldSource, encoding: .utf8)
+        XCTAssertTrue(fieldSource.contains("#selector(NSResponder.insertNewline(_:))"), "↵ 提交")
+        XCTAssertTrue(fieldSource.contains("#selector(NSResponder.cancelOperation(_:))"), "Esc 取消")
+        XCTAssertTrue(fieldSource.contains("func controlTextDidEndEditing("), "失焦提交")
+        XCTAssertTrue(fieldSource.contains("NSSound.beep()"), "非法输入 beep 一次")
+        XCTAssertTrue(fieldSource.contains("func textView(_ textView: NSTextView, shouldChangeTextInRanges ranges: [NSValue]"),
+                      "057: 规则挂在 field editor 真正会问的那一个回调上（复数形式）")
     }
 
     // MARK: - 5. 052：第一次按键先清空缓冲区
@@ -435,17 +442,29 @@ final class PanelEditingTests: XCTestCase {
         print("negative control: 曝光 1.4829 with .outward → 2.00 EV (wrong) · with .asIs → 1.48 EV")
     }
 
-    /// 052: the field is built on the state machine — a rule that lives only in a test is dead code.
+    /// 052/057: the field is built on the state machine — a rule that lives only in a test is dead code.
+    ///
+    /// After 057 the state machine is asked in two places, both pinned here: `judgeFirstEdit` from the
+    /// field editor's pre-change callback (the live decision), and `submission(in:)` from the exits.
     func testTheNumberFieldIsBuiltOnTheBufferStateMachine() throws {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        XCTAssertTrue(source.contains("@State private var state = NumberFieldState()"),
+        XCTAssertTrue(source.contains("mutating func judgeFirstEdit(affectedRange: NSRange, replacement: String) -> Bool"),
+                      "057: 判定就是「这个范围要改成整段吗」")
+        XCTAssertTrue(source.contains("mutating func record(_ buffer: String)"),
+                      "057: 缓冲区记的是字段 editor 真正持有的字符串")
+
+        let fieldSource = try String(contentsOf: Self.numberFieldSource, encoding: .utf8)
+        XCTAssertTrue(fieldSource.contains("private(set) var state = NumberFieldState()"),
                       "字段必须持有 NumberFieldState")
-        XCTAssertTrue(source.contains("state.typed(from: state.text, to: new)"),
-                      "TextField 的 binding 必须经过那条规则（这是唯一能拿到「前后两个字符串」的地方）")
-        XCTAssertTrue(source.contains("state.begin(SliderValueInput.editingText(value, decimals: decimals))"),
+        XCTAssertTrue(fieldSource.contains("state.judgeFirstEdit(affectedRange: range, replacement: replacement)"),
+                      "字符落地之前的那一个回调必须问规则")
+        XCTAssertTrue(fieldSource.contains("state.begin(row.editingText)"),
                       "聚焦即进入待输入，并按行的 decimals 取编辑态文本")
-        XCTAssertTrue(source.contains("switch state.submission(in: range)"),
+        XCTAssertTrue(fieldSource.contains("switch state.submission(in: row.range)"),
                       "↵/失焦的三种结果由 state 给出（含空缓冲 = 取消）")
+        XCTAssertTrue(fieldSource.contains("textView.textStorage?.replaceCharacters(in: whole, with: replacement)"),
+                      "057: 范围改成整段后由我们自己落地，AppKit 不能再按原范围插一次")
+
         XCTAssertTrue(source.contains("binding(row.keyPath, quantum: row.quantum)"),
                       "Light/Color 的滑杆按行的 quantum 写入文档")
         XCTAssertTrue(source.contains("Self.quantized(newValue, quantum: quantum)"))
@@ -463,5 +482,14 @@ final class PanelEditingTests: XCTestCase {
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // package root
             .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
+
+    /// 057: the AppKit half of the field — where the keystroke is intercepted.
+    private static var numberFieldSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/NumberField.swift")
     }
 }
