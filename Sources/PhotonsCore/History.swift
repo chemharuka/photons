@@ -16,6 +16,12 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
     case light
     case curve
     case color
+    /// 2026-10-28 (P0 色彩分级): 色彩分级's own nine numbers, on a stage of their own (S3.8).
+    ///
+    /// Its own group rather than a corner of `.color`: the card is its own card with its own
+    /// double-click reset, its own history wording (「色彩分级 阴影 色相」) and its own stage, and a
+    /// group is what makes "this panel has a default" and "one snapshot" two properties of one thing.
+    case colorGrading
     case detail
     case effects
     case geometry
@@ -27,6 +33,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .light: return "Light"
         case .curve: return "Curve"
         case .color: return "Color"
+        case .colorGrading: return "Color Grading"
         case .detail: return "Detail"
         case .effects: return "Effects"
         case .geometry: return "Geometry"
@@ -43,6 +50,8 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .light: return [.sceneLinear, .toneMap]
         case .curve: return [.curve]
         case .color: return [.color, .bw, .hsl]
+        // 2026-10-28 (P0 色彩分级): one stage — S3.8.
+        case .colorGrading: return [.grade]
         case .detail: return []
         // 2026-10-28: the Effects card is two stages — S3c (vignette) and S3.7 (grain).
         case .effects: return [.vignette, .grain]

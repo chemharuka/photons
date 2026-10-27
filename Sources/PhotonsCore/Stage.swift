@@ -57,6 +57,26 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// on linear light, which is the defect 079 结论 4 measured (HSL `l` = 0.5 for both pure blue and
     /// pure yellow, whose luminance differs by 6.9×); S3 keeps vibrance and saturation only.
     case hsl = "s3.6-hsl"
+    /// 2026-10-28 (P0 色彩分级) — **三向色彩分级**: 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
+    ///
+    /// Its own stage, not three more uniforms inside S3.6, for three reasons:
+    ///
+    ///  1. **A different partition.** S3.6 partitions by *hue* (eight bands, a partition of unity over
+    ///     the OKLCh hue circle); S3.8 partitions by *luminance* (three windows on `log2 luma`, the
+    ///     same ones S2's 阴影/高光 lift). Two partitions, two weight functions — one stage cannot be
+    ///     both without a branch that makes each half pay for the other's neutral test.
+    ///  2. **Independent links.** A band drag must miss S3.8 and a grade drag must miss S3.6 — the
+    ///     exact split 076 made when the bands left S3 (`changedStages`, `keyMaterial`). Two stages is
+    ///     that split done structurally instead of by a conditional inside one kernel.
+    ///  3. **Independent neutral.** `hasGrade` (nine zeros) and `hasHSL` (24 zeros) are different
+    ///     predicates; a document with bands but no grade must not encode a grade pass, and vice versa.
+    ///
+    /// Position — after S3.6 and before S3c (the vignette): it is a **display-referred** colour
+    /// operation like S3.6 (the windows are measured on the values the tone map produced, which is
+    /// what makes 「高光」 mean the same region as the 高光 slider), and it belongs on the finished
+    /// colour image, before the two effect stages darken/grain it. S3.4/S3.5/S3.6 stay before it, so a
+    /// grey from 黑白 carries `C = 0` and the grade's chroma maths is inert on it by construction.
+    case grade = "s3.8-grade"
     /// S3c — post-crop vignette, and the card's other half.
     case vignette = "s3-vignette"
     /// 2026-10-28 — **grain**, the Effects card's second stage.
@@ -89,7 +109,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
         [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .bw,
-         .localColor, .hsl, .vignette, .grain, .display]
+         .localColor, .hsl, .grade, .vignette, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -102,14 +122,15 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// every existing trace and key byte for byte.
     public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false,
                                 hasHSL: Bool = false, hasGrain: Bool = false,
-                                hasBW: Bool = false) -> [RenderStage] {
-        guard hasMasks || hasHSL || hasGrain || hasBW else { return allCases }
+                                hasBW: Bool = false, hasGrade: Bool = false) -> [RenderStage] {
+        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade else { return allCases }
         return order.filter { stage in
             switch stage {
             case .maskAtlas, .localApply: return hasMasks
             case .bw: return hasBW
             case .localColor: return hasMasks && hasLocalColor
             case .hsl: return hasHSL
+            case .grade: return hasGrade
             case .grain: return hasGrain
             default: return true
             }
@@ -134,6 +155,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .bw: return "s3.4"
         case .localColor: return "s3.5"
         case .hsl: return "s3.6"
+        case .grade: return "s3.8"
         case .vignette: return "s3-vignette"
         case .grain: return "s3.7"
         case .display: return "s4"
@@ -147,7 +169,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .sceneLinear, .toneMap: return "light"
         case .maskAtlas, .localApply, .localColor: return "masks"
         case .curve: return "curve"
-        case .color, .bw, .hsl: return "color"
+        case .color, .bw, .hsl, .grade: return "color"
         case .vignette, .grain: return "effects"
         case .display: return "output"
         }
@@ -339,6 +361,10 @@ public enum RenderKeyChain {
         /// value, in which case the stage does not exist for this render at all (派单 076) and
         /// `vignette` is seeded exactly as before.
         public var hsl: String?
+        /// `H(hsl-or-localColor-or-bw-or-color key | "grade" | gradeMaterial)`; `nil` when the grade
+        /// group is neutral, in which case S3.8 does not exist for this render at all (2026-10-28,
+        /// P0 色彩分级) and `vignette` is seeded exactly as before.
+        public var grade: String?
         public var vignette: String
         /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0, in which case
         /// S3.7 does not exist for this render at all (2026-10-28) and `display` is seeded by
@@ -350,6 +376,7 @@ public enum RenderKeyChain {
         public var hasBWStage: Bool { bw != nil }
         public var hasLocalColorStage: Bool { localColor != nil }
         public var hasHSLStage: Bool { hsl != nil }
+        public var hasGradeStage: Bool { grade != nil }
         public var hasGrainStage: Bool { grain != nil }
 
         /// The stages this link set describes — the same answer `StageKeys.pipeline` gives, available
@@ -357,7 +384,7 @@ public enum RenderKeyChain {
         public var pipeline: [RenderStage] {
             RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                                  hasHSL: hasHSLStage, hasGrain: hasGrainStage,
-                                 hasBW: hasBWStage)
+                                 hasBW: hasBWStage, hasGrade: hasGradeStage)
         }
     }
 
@@ -474,6 +501,20 @@ public enum RenderKeyChain {
             hsl = link
             vignetteSeed = link
         }
+        // 2026-10-28 (P0 色彩分级): S3.8 sits between S3.6 and the vignette and exists **only** when one
+        // of its nine numbers is non-zero. When the group is neutral the link is `nil` and the vignette
+        // is seeded by `hsl`/`localColor`/`bw`/`color` — so every document without a grade keeps its
+        // pre-S3.8 key chain byte for byte. This is the fifth stage to use the §3.2 discipline, and it
+        // is what makes 「中性文档：键不长新段」 a structural fact rather than a promise.
+        var grade: String?
+        if edit.hasGrade {
+            let link = KeyBuilder(KeyBuilder.digest(of: vignetteSeed))
+                .add("grade")
+                .add(mat(.grade))
+                .canonical
+            grade = link
+            vignetteSeed = link
+        }
         let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(mat(.vignette)).canonical
         // 2026-10-28: S3.7 sits between the vignette and the display transform and exists **only** when
         // the grain amount is above zero. When it does not, the link is `nil` and the display key is
@@ -500,7 +541,8 @@ public enum RenderKeyChain {
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply,
                      toneMap: toneMap, curve: curve, color: color, bw: bw, localColor: localColor,
-                     hsl: hsl, vignette: vignette, grain: grain, display: displayKey.canonical)
+                     hsl: hsl, grade: grade, vignette: vignette, grain: grain,
+                     display: displayKey.canonical)
     }
 
     public static func keys(_ links: Links, identity: String) -> StageKeys {
@@ -515,6 +557,7 @@ public enum RenderKeyChain {
                   bw: links.bw.map(KeyBuilder.digest(of:)),
                   localColor: links.localColor.map(KeyBuilder.digest(of:)),
                   hsl: links.hsl.map(KeyBuilder.digest(of:)),
+                  grade: links.grade.map(KeyBuilder.digest(of:)),
                   vignette: KeyBuilder.digest(of: links.vignette),
                   grain: links.grain.map(KeyBuilder.digest(of:)),
                   display: KeyBuilder.digest(of: links.display))
@@ -555,6 +598,9 @@ public struct StageKeys: Sendable, Equatable {
     /// `H(colorKey | "hsl" | hslBandMaterial)`; `nil` when no band carries a value (派单 076), in
     /// which case the stage does not exist for this render.
     public var hsl: String?
+    /// `H(hsl-or-localColor-or-bw-or-color key | "grade" | gradeMaterial)`; `nil` when the grade group
+    /// is neutral (2026-10-28, P0 色彩分级), in which case the stage does not exist for this render.
+    public var grade: String?
     public var vignette: String
     /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0 (2026-10-28), in
     /// which case the stage does not exist for this render.
@@ -566,6 +612,7 @@ public struct StageKeys: Sendable, Equatable {
                 toneMap: String, curve: String, color: String,
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
+                grade: String? = nil,
                 vignette: String, grain: String? = nil, display: String) {
         self.inputIdentity = inputIdentity
         self.geometry = geometry
@@ -578,6 +625,7 @@ public struct StageKeys: Sendable, Equatable {
         self.bw = bw
         self.localColor = localColor
         self.hsl = hsl
+        self.grade = grade
         self.vignette = vignette
         self.grain = grain
         self.display = display
@@ -587,6 +635,7 @@ public struct StageKeys: Sendable, Equatable {
     public var hasBWStage: Bool { bw != nil }
     public var hasLocalColorStage: Bool { localColor != nil }
     public var hasHSLStage: Bool { hsl != nil }
+    public var hasGradeStage: Bool { grade != nil }
     public var hasGrainStage: Bool { grain != nil }
 
     /// Key for a stage. The mask stages answer `""` when they do not exist for this render, which is
@@ -603,6 +652,7 @@ public struct StageKeys: Sendable, Equatable {
         case .bw: return bw ?? ""
         case .localColor: return localColor ?? ""
         case .hsl: return hsl ?? ""
+        case .grade: return grade ?? ""
         case .vignette: return vignette
         case .grain: return grain ?? ""
         case .display: return display
@@ -610,11 +660,12 @@ public struct StageKeys: Sendable, Equatable {
     }
 
     /// The stages this key set describes: seven, nine with masks, ten when a mask also carries local
-    /// colour (派单 056), eleven when the document also has HSL bands (派单 076), twelve when it also
-    /// has grain (2026-10-28) and thirteen when it is black-and-white (2026-10-28, P0-4).
+    /// colour (派单 056), eleven when the document also has HSL bands (派单 076), twelve when it has a
+    /// grade (2026-10-28), thirteen when it also has grain and fourteen when it is black-and-white.
     public var pipeline: [RenderStage] {
         RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
-                             hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage)
+                             hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage,
+                             hasGrade: hasGradeStage)
     }
 
     public var shortTrace: String {

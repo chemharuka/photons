@@ -54,7 +54,17 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// 0, `hasBW == false`, S3.4 not encoded, pixels unchanged. Like schema 7, the version is not
     /// stamped at decode time on a document that carries neither key — a document keeps the number its
     /// own file wrote, and only a document this build saves carries 8.
-    public static let currentSchemaVersion = 8
+    /// 9 = 2026-10-28 (P0 色彩分级): `colorGrading` — the three-way colour wheel, nine numbers
+    /// (`shadows`/`midtones`/`highlights`, each 色相/饱和/亮度, all default 0). S3.8 renders them.
+    ///
+    /// **Nothing migrates, and the encoding is additive** — the schema-7/8 rule, read a third time.
+    /// The group is written **only when it is not the neutral group** (all nine numbers 0), so every
+    /// document from before this version re-encodes byte for byte; an absent key decodes to zeros,
+    /// `hasGrade == false`, S3.8 is not encoded at all, and the frame is the pre-S3.8 frame by
+    /// construction rather than by arithmetic. No stored number changes *meaning*, so the version is
+    /// not stamped on decode — a document keeps the number its own file wrote, and only a document
+    /// this build saves carries 9.
+    public static let currentSchemaVersion = 9
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -71,6 +81,14 @@ public struct EditModel: Sendable, Equatable, Codable {
     public var light: LightGroup
     public var curve: CurveGroup
     public var color: ColorGroup
+    /// 2026-10-28 (P0 色彩分级) — **三向色彩分级**: 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
+    /// S3.8 renders it; the three regions are the **luminance windows S2's own 阴影/高光 use**
+    /// (`tone_shape.metal`'s `region_weights`), so 「阴影」 means one thing in the whole panel.
+    ///
+    /// Its own group, and its own `RenderGroup` (`colorGrading`), because it is neither the Color card
+    /// (`vibrance`/`saturation`) nor the HSL card (per-*hue* bands): a double-click on Color must not
+    /// undo work done here, and the timeline must be able to say 「色彩分级 阴影」.
+    public var colorGrading: ColorGradingGroup
     public var detail: DetailGroup
     /// 派单 031: the four **decode-side** detail amounts (降噪 / 色彩降噪 / 细节 / 锐化), assigned to
     /// `CIRAWFilter` before it produces pixels. Deliberately not `detail`: that name has held the
@@ -108,6 +126,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 light: LightGroup = .identity,
                 curve: CurveGroup = .identity,
                 color: ColorGroup = .identity,
+                colorGrading: ColorGradingGroup = .identity,
                 detail: DetailGroup = .identity,
                 detailSettings: DetailSettings = .identity,
                 decoderVersion: String? = nil,
@@ -121,6 +140,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.light = light
         self.curve = curve
         self.color = color
+        self.colorGrading = colorGrading
         self.detail = detail
         self.detailSettings = detailSettings
         self.decoderVersion = decoderVersion
@@ -164,6 +184,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.light = .identity
         v.curve = .identity
         v.color = .identity
+        v.colorGrading = .identity
         v.effects = .identity
         v.optics = .identity
         v.masks = []
@@ -187,6 +208,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// makes 「切回彩色」 bit-identical with the mixes still in the document).
     public var hasBlackAndWhite: Bool { color.blackAndWhite }
 
+    /// 2026-10-28 (P0 色彩分级): does S3.8 exist for this document? Judged **by value** — any of the
+    /// nine numbers non-zero — exactly the way `hasHSL`/`hasGrain` are judged. A stage present but
+    /// neutral would move the trace and the key chain for nothing, and a document that never touched
+    /// the card must keep the pre-S3.8 chain byte for byte.
+    public var hasGrade: Bool { !colorGrading.isIdentity }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = EditModel.neutral
@@ -208,6 +235,9 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
         }
         v.color = c.val("color", v.color)
+        // 2026-10-28 (P0 色彩分级): an absent key reads as the neutral group — nine zeros, i.e.
+        // `hasGrade == false` and no S3.8 link (schema 9's additive rule).
+        v.colorGrading = c.val("colorGrading", v.colorGrading)
         v.detail = c.val("detail", v.detail)
         v.detailSettings = c.val("detailSettings", v.detailSettings)
         v.decoderVersion = c.val("decoderVersion", v.decoderVersion)
@@ -241,6 +271,34 @@ public struct EditModel: Sendable, Equatable, Codable {
 
     public static func load(from url: URL) throws -> EditModel {
         try JSONDecoder().decode(EditModel.self, from: Data(contentsOf: url))
+    }
+
+    /// Written by hand for **one** reason, the `LightGroup`/`ColorGroup` rule at document scale:
+    /// `colorGrading` is **absent** from a neutral document, so a schema-8 blob re-encodes byte for
+    /// byte and the new key appears only in a document that actually uses the card.
+    ///
+    /// Everything else is written exactly as the synthesised conformance wrote it — every field, in
+    /// declaration order, optionals via `encodeIfPresent` and `masks` as an array (an empty `masks`
+    /// still encodes as `[]`). The encoder this build uses sorts keys, so the order below is not what a
+    /// reader sees; it is what keeps this function readable against the property list.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(schemaVersion, forKey: AnyCodingKey("schemaVersion"))
+        try c.encode(processVersion, forKey: AnyCodingKey("processVersion"))
+        try c.encode(geometry, forKey: AnyCodingKey("geometry"))
+        try c.encode(light, forKey: AnyCodingKey("light"))
+        try c.encode(curve, forKey: AnyCodingKey("curve"))
+        try c.encode(color, forKey: AnyCodingKey("color"))
+        if !colorGrading.isIdentity {
+            try c.encode(colorGrading, forKey: AnyCodingKey("colorGrading"))
+        }
+        try c.encode(detail, forKey: AnyCodingKey("detail"))
+        try c.encode(detailSettings, forKey: AnyCodingKey("detailSettings"))
+        try c.encodeIfPresent(decoderVersion, forKey: AnyCodingKey("decoderVersion"))
+        try c.encode(effects, forKey: AnyCodingKey("effects"))
+        try c.encode(optics, forKey: AnyCodingKey("optics"))
+        try c.encode(masks, forKey: AnyCodingKey("masks"))
+        try c.encodeIfPresent(showMaskID, forKey: AnyCodingKey("showMaskID"))
     }
 
     public func write(to url: URL) throws {
@@ -316,6 +374,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             let mixMoved = zip(color.bands, old.color.bands).contains { $0.mix != $1.mix }
             if color.blackAndWhite != old.color.blackAndWhite || mixMoved { s.insert(.bw) }
         }
+        // 2026-10-28 (P0 色彩分级): S3.8's own group. One stage reads all nine numbers, so the whole
+        // group is one dirty bit — and the split matters the same way 076's did: a grade drag must not
+        // report `.hsl` (S3.6 reads none of the nine) and a band drag must not report `.grade`.
+        if colorGrading != old.colorGrading { s.insert(.grade) }
         if effects != old.effects {
             // 2026-10-28: the card is two stages. A vignette drag must not miss a cached grain (S3.7
             // reads none of those four numbers) and a grain drag must not re-run S3c — the same split
@@ -494,6 +556,11 @@ public struct EditModel: Sendable, Equatable, Codable {
             // the kernel hashes). Same shape as `.hsl`/`.localColor`: a stage key that names the values
             // it reads cannot silently stop tracking them, and a seed change must move it.
             return effects.grainKeyString
+
+        case .grade:
+            // 2026-10-28 (P0 色彩分级): S3.8's own material — the nine numbers and nothing else. Same
+            // belt-and-braces shape as `.hsl`/`.bw`: a log line names what wrote the pixels.
+            return colorGrading.keyString
 
         case .display:
             return "primaries=\(displayKeyPrimaries)"
@@ -1452,6 +1519,145 @@ public struct HSLBand: Sendable, Equatable, Codable, Hashable {
 
     /// `m` — S3.4's key material for this band.
     public var mixKeyString: String { k(mix) }
+}
+
+/// 2026-10-28 (P0 色彩分级) — **one wheel**: 色相 + 饱和 + 亮度, the three axes a colour wheel has.
+///
+/// Travel is the panel's own ±100 on all three, and the units are the ones the rest of the app already
+/// speaks, so 「+30」 means the same thing in this card as in HSL:
+///
+/// | axis | ±100 means | the kernel's spelling |
+/// |---|---|---|
+/// | `hue` | ±30° of OKLCh hue (`ColorGrade.degreesPerUnit` = 0.3, the HSL card's own number) | `h += 0.3·hue` |
+/// | `saturation` | ×2 / ×0 of **chroma** (`C · (1 + s/100)`) | `C *= 1 + s/100` |
+/// | `lightness` | ±1 stop of **linear** light (`2^(l/100)`) — the unit 曝光 and 阴影 use | `rgb *= 2^(l/100)` |
+///
+/// ### Why a hue *offset* and not a wheel *angle*
+/// Lightroom stores an absolute wheel angle (0…360°) per region and darktable's `colorbalance rgb` does
+/// the same. This card stores an offset from the pixel's own hue, for three reasons:
+///
+///  1. the region cross-fade needs to interpolate the parameter, and an absolute angle needs circular
+///     interpolation (a 350° and a 10° wheel are 20° apart, not 340°) while an offset is just a number
+///     to lerp — the same reason `HSLBand.hue` is a shift;
+///  2. an absolute angle applied to a *region* (many hues at once) is ambiguous — 「shadows are orange」
+///     would have to mean "rotate every shadow pixel *to* orange", which destroys the picture's own
+///     colour variety; an offset tints the region without flattening it;
+///  3. 「中性 = 0」 then really is the neutral: with an absolute angle, 0° (red) would be a real setting
+///     and there would be no value a fresh document could hold that means "leave the hue alone".
+public struct GradeWheel: Sendable, Equatable, Codable, Hashable {
+    /// −100…100 → ±30° of OKLCh hue. Positive rotates the region's hue counter-clockwise on the
+    /// OKLCh hue circle, i.e. red → orange → yellow.
+    public var hue: Double
+    /// −100…100 → the region's **chroma** multiplied by `1 + saturation/100` (−100 = grey, +100 = twice
+    /// as colourful). Multiplicative, never additive: a grey pixel has `C = 0` and stays exactly grey,
+    /// which is what keeps a neutral ramp from being tinted (and what makes the hue slider inert on a
+    /// grey — there is no hue to rotate).
+    public var saturation: Double
+    /// −100…100 → the region's light multiplied by `2^(lightness/100)`: a pure gain, so `0` is the
+    /// identity exactly and the luma comes out scaled by exactly that factor.
+    public var lightness: Double
+
+    public static let travel: ClosedRange<Double> = -100...100
+
+    public init(hue: Double = 0, saturation: Double = 0, lightness: Double = 0) {
+        self.hue = hue
+        self.saturation = saturation
+        self.lightness = lightness
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = GradeWheel()
+        v.hue = c.val("hue", v.hue)
+        v.saturation = c.val("saturation", v.saturation)
+        v.lightness = c.val("lightness", v.lightness)
+        self = v
+    }
+
+    /// Written field by field (all three always), because `ColorGradingGroup` decides whether the
+    /// *group* is written at all — inside a group that exists there is no absent-key spelling to keep.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(hue, forKey: AnyCodingKey("hue"))
+        try c.encode(saturation, forKey: AnyCodingKey("saturation"))
+        try c.encode(lightness, forKey: AnyCodingKey("lightness"))
+    }
+
+    /// All three at 0 — "this region is left alone".
+    public var isIdentity: Bool { hue == 0 && saturation == 0 && lightness == 0 }
+
+    /// `h,s,l` in slider units — S3.8's key material, one wheel at a time.
+    public var keyString: String { "\(k(hue)),\(k(saturation)),\(k(lightness))" }
+}
+
+/// 2026-10-28 (P0 色彩分级) — **三向色彩分级**: 阴影 / 中间调 / 高光, one `GradeWheel` each.
+///
+/// ### The three regions are luminance windows, and they are S2's own
+/// Which pixels a wheel reaches is decided by `region_weights` in `Kernels/tone_shape.metal` — the
+/// function S2's 阴影 and 高光 sliders already call, on the same coordinate (`L = log2(luma)` in EV
+/// relative to display white, luma in the working primaries). **No second table of region boundaries
+/// exists in this app**: shadows are full weight at and below −5.9 EV and fade out at −3.9 EV,
+/// highlights fade in from −3.2 EV and are full at −1.2 EV, and the mid-tones are `1 − shadow −
+/// highlight`, i.e. everything the other two do not own. The three weights therefore form a partition
+/// of unity at every pixel (the two windows do not overlap: −3.9 < −3.2), which is what makes
+/// "a region's slider means the same thing wherever the pixel sits" true and lets the isolation claim
+/// be exact: a pixel in the highlight zone has `w = (0, 0, 1)` and a shadow-only document leaves it
+/// **bit-identical** (the kernel's early-out, not a tolerance).
+///
+/// The consequence to know about: 18 % grey (code 118) reads −2.44 EV, so it sits at
+/// `(0, 0.70, 0.30)` — the 中间调 wheel owns most of it and the 高光 wheel starts to reach it. That is
+/// the same overlap the 高光 slider has had since 074 R2, and it is deliberate: one table of "where
+/// the regions are" for the whole panel is worth more than a second, prettier one that disagrees.
+public struct ColorGradingGroup: Sendable, Equatable, Codable {
+    public var shadows: GradeWheel
+    public var midtones: GradeWheel
+    public var highlights: GradeWheel
+
+    public static let identity = ColorGradingGroup()
+
+    public init(shadows: GradeWheel = GradeWheel(), midtones: GradeWheel = GradeWheel(),
+                highlights: GradeWheel = GradeWheel()) {
+        self.shadows = shadows
+        self.midtones = midtones
+        self.highlights = highlights
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = ColorGradingGroup.identity
+        v.shadows = c.val("shadows", v.shadows)
+        v.midtones = c.val("midtones", v.midtones)
+        v.highlights = c.val("highlights", v.highlights)
+        self = v
+    }
+
+    /// Written by hand for one reason, the same one `ColorGroup.encode` has: the group is **absent**
+    /// when all nine numbers are 0, which is what keeps every pre-schema-9 document's JSON byte for
+    /// byte identical (§3.2 discipline, the `blackOffset` rule). Inside a group that exists, all three
+    /// wheels are written in panel order (阴影 → 中间调 → 高光), so a fixed key set and a fixed order
+    /// make "write, read, write" byte-identical.
+    public func encode(to encoder: any Encoder) throws {
+        guard !isIdentity else { return }
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(shadows, forKey: AnyCodingKey("shadows"))
+        try c.encode(midtones, forKey: AnyCodingKey("midtones"))
+        try c.encode(highlights, forKey: AnyCodingKey("highlights"))
+    }
+
+    /// All nine numbers 0 — "this card has nothing in it" (`EditModel.hasGrade`).
+    public var isIdentity: Bool {
+        shadows.isIdentity && midtones.isIdentity && highlights.isIdentity
+    }
+
+    /// The three wheels in panel order — the order the kernel's uniform carries and the order the key
+    /// spells them, so a log line reads the card top to bottom.
+    public var wheels: [GradeWheel] { [shadows, midtones, highlights] }
+
+    /// `grade=sh;mid;hi` — S3.8's material. All three, always: the link exists only when the group is
+    /// not neutral, so there is no default spelling to preserve inside it.
+    public var keyString: String {
+        "grade=" + wheels.map(\.keyString).joined(separator: ";")
+    }
 }
 
 /// Stored, not rendered: sharpening and noise reduction belong on `CIRAWFilter`
