@@ -226,6 +226,14 @@ public final class ThumbnailService: @unchecked Sendable {
         public var coalesced = 0
         /// Cache writes performed by this service.
         public var writes = 0
+        /// P1f — **graph** thumbnails generated *because the directory was upgraded*, i.e. written
+        /// under a different `StageAlgorithmVersion` set than the one this process runs.
+        ///
+        /// It is 0 in every process that found the cache already stamped with the current arithmetic,
+        /// which is what makes it a measurement instead of a coincidence: after one upgrade the number
+        /// equals the count of `graph` thumbnails on disk (every one of them contains S2, so every one
+        /// is rebuilt), and the next start reports 0 while serving the same pixels as hits.
+        public var rebuilt = 0
         /// Jobs cancelled after the producer had started (bytes dropped).
         public var cancelledInFlight = 0
         /// Requests refused because `isPaused` (§4 `isInteracting`).
@@ -606,7 +614,21 @@ public final class ThumbnailService: @unchecked Sendable {
             finish(job, origin: .failed, data: nil, payload: nil, error: error.localizedDescription)
             return
         }
-        lock.lock(); counters.writes += 1; lock.unlock()
+        // P1f: a `graph` thumbnail written by the process that migrated the directory is a rebuild.
+        //
+        // The definition is *process-scoped* on purpose, and the reason is arithmetic: the recipe
+        // digest contains the algorithm version, so an upgraded key can never equal the key of the file
+        // it replaces — the old file's name is not recoverable from the new one, and matching them is
+        // impossible in principle. What is exact is the *deletion* (`versionSweep.removedGraphFiles`)
+        // and this count of `graph` writes in the migrating process; when the grid is re-requested they
+        // are the same number, which is the acceptance this counter exists for. A document imported
+        // after the update in that same session would also be counted, and the sweep's own number is
+        // the one to read in that case.
+        let rebuilt = job.key.pipeline == .graph && cache.wasUpgradedByAlgorithmVersion
+        lock.lock()
+        counters.writes += 1
+        if rebuilt { counters.rebuilt += 1 }
+        lock.unlock()
 
         finish(job, origin: .generated, data: payload.data, payload: payload, error: nil)
     }
@@ -780,6 +802,8 @@ public struct ThumbServiceReport: Sendable, Codable {
     public var maxWaitMilliseconds: Double
     public var hitRatio: Double
     public var writes: Int
+    /// P1f: `graph` thumbnails rebuilt because the cache was upgraded (0 on every later start).
+    public var rebuilt: Int
 
     public init(_ s: ThumbnailService.Stats) {
         requests = s.requests
@@ -799,12 +823,13 @@ public struct ThumbServiceReport: Sendable, Codable {
         maxWaitMilliseconds = s.maxWaitMilliseconds
         hitRatio = s.hitRatio
         writes = s.writes
+        rebuilt = s.rebuilt
     }
 
     public var summaryLine: String {
         String(format: "service    req %d  coalesced %d  hits %d  gen %d  cancelled %d (inflight %d)"
-               + "  failed %d  write %d", requests, coalesced, hits, generated, cancelled,
-               cancelledInFlight, failed, writes)
+               + "  failed %d  write %d  rebuilt %d", requests, coalesced, hits, generated, cancelled,
+               cancelledInFlight, failed, writes, rebuilt)
     }
 
     public var queueLine: String {

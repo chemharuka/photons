@@ -246,6 +246,13 @@ struct ThumbsReport: Codable {
     /// Service-layer counters for the cold round: queueing, coalescing, cancellation.
     var service: ThumbServiceReport
     var hotService: ThumbServiceReport
+    /// P1f: the algorithm-version surface. `graphVersion` is the recipe the keys were built under,
+    /// `rebuilt` the number of `graph` thumbnails this run regenerated *because* the cache directory
+    /// was stamped with another generation (0 on a start that found it current — `service.rebuilt`
+    /// carries the same number for scripts that only read the service block).
+    var graphVersion: String
+    var rebuilt: Int
+    var sweep: String
 }
 
 // MARK: - args
@@ -506,7 +513,10 @@ func cmdThumbs(_ a: Args) throws {
         samples: samples,
         missedReasons: hotCacheStats.missReasons,
         service: ThumbServiceReport(coldStats),
-        hotService: ThumbServiceReport(hotStats))
+        hotService: ThumbServiceReport(hotStats),
+        graphVersion: ThumbRecipe.graphVersion,
+        rebuilt: coldStats.rebuilt,
+        sweep: cache.versionSweep.summary)
 
     if a.has("--json") {
         let enc = JSONEncoder()
@@ -516,6 +526,8 @@ func cmdThumbs(_ a: Args) throws {
         note("library    \(report.library)")
         note("tier       \(tier.rawValue) (\(tier.longEdge) px long edge)")
         note("strategy   \(strategy.label)")
+        // P1f: which arithmetic wrote the files, and whether this run had to replace them.
+        note("version    \(report.graphVersion)  \(report.sweep)")
         note("cache      \(cache.root.path)")
         note("assets     \(assets.count)  generated \(generated)  skipped \(skipped)"
              + "  cancelled \(cancelled)  missingFile \(missingFiles)"

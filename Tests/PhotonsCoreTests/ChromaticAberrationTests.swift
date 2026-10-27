@@ -157,18 +157,27 @@ final class ChromaticAberrationTests: XCTestCase {
         // pixels, so the process version bumped). Nothing about this material's *shape* changed —
         // the version is the only token that moved.
         let neutral = EditModel.neutral
+        // P1f: `params` is the material without the algorithm token (the pre-029/pre-P1f text — where
+        // "only non-zero is appended" is a claim about *parameters*), `material` is the live one.
+        let params = neutral.keyMaterial(.geometry, algorithmVersion: false)
+        XCTAssertEqual(params, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
         let material = neutral.keyMaterial(.geometry)
-        XCTAssertEqual(material, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
+        XCTAssertEqual(material, params + ";alg=1")
+        XCTAssertEqual(neutral.keyMaterial(.geometry, algorithmVersion: false), params,
+                       "the parameters are byte-identical to the pre-P1f material")
         XCTAssertFalse(material.contains("car="))
         XCTAssertFalse(material.contains("cab="))
 
         var redOnly = neutral
         redOnly.optics.caRed = 0.002
-        XCTAssertEqual(redOnly.keyMaterial(.geometry), material + ";car=0.00200")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=0.00200")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=0.00200;alg=1")
 
         var both = redOnly
         both.optics.caBlue = -0.0015
-        XCTAssertEqual(both.keyMaterial(.geometry), material + ";car=0.00200;cab=-0.00150")
+        XCTAssertEqual(both.keyMaterial(.geometry, algorithmVersion: false),
+                       params + ";car=0.00200;cab=-0.00150")
+        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=0.00200;cab=-0.00150;alg=1")
 
         // Only non-zero is appended: setting a slider back to zero is the old document again.
         var backToZero = both

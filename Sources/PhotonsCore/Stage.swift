@@ -361,17 +361,25 @@ public enum RenderKeyChain {
         }
     }
 
+    /// `materialWithoutAlgorithmVersion: true` drops every stage's `;alg=N` token, i.e. rebuilds the
+    /// pre-P1f chain byte for byte. **Never true in the app** — `CacheVersionTests` sets it to show
+    /// that a chain without the version reproduces the old keys exactly, which is the stale-thumbnail
+    /// bug 079 §2.7.1 is about.
     public static func links(identity: String, sourceSize: ImageSize, canvas: ImageSize,
                              content: ImageSize, edit: EditModel,
                              display: DisplayOptions,
                              outputWindow: ImageRect? = nil,
-                             orientation: ImageOrientation = .up) -> Links {
+                             orientation: ImageOrientation = .up,
+                             materialWithoutAlgorithmVersion: Bool = false) -> Links {
+        func mat(_ stage: RenderStage) -> String {
+            edit.keyMaterial(stage, algorithmVersion: !materialWithoutAlgorithmVersion)
+        }
         var geometryKey = KeyBuilder("photons-render-v1")
             .add(identity)
             .add(sourceSize)
             .add(canvas)
             .add(content)
-            .add(edit.keyMaterial(.geometry))
+            .add(mat(.geometry))
         // Orientation is a **file** fact, not an edit (docs/architecture-decisions.md §11.2): it is
         // deliberately absent from `EditModel`, so the key has to carry it here — otherwise two
         // renders over differently-oriented decodes of the same bytes could share cached geometry.
@@ -389,7 +397,7 @@ public enum RenderKeyChain {
         }
         let geometry = geometryKey.canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry))
-            .add(edit.keyMaterial(.sceneLinear))
+            .add(mat(.sceneLinear))
             .canonical
 
         var maskAtlas: String?
@@ -415,17 +423,17 @@ public enum RenderKeyChain {
             // curve drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6,
             // which is the whole reason the curve has its own stage instead of riding on S1's key
             // (§3.2 of 030).
-            curve = KeyBuilder(KeyBuilder.digest(of: local)).add(edit.keyMaterial(.curve)).canonical
-            toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(edit.keyMaterial(.toneMap)).canonical
+            curve = KeyBuilder(KeyBuilder.digest(of: local)).add(mat(.curve)).canonical
+            toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(mat(.toneMap)).canonical
         } else {
             curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
-                .add(edit.keyMaterial(.curve)).canonical
+                .add(mat(.curve)).canonical
             toneMap = KeyBuilder(KeyBuilder.digest(of: curve))
-                .add(edit.keyMaterial(.toneMap))
+                .add(mat(.toneMap))
                 .canonical
         }
 
-        let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(edit.keyMaterial(.color)).canonical
+        let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(mat(.color)).canonical
         // 2026-10-28 (P0-4): S3.4 sits between S3 and S3.5 and exists **only** when the 黑白 switch is
         // on. When it is not, the link is `nil` and the next link is seeded by `color` — so every
         // colour document keeps its pre-S3.4 key chain byte for byte, which is exactly the §3.2
@@ -435,7 +443,7 @@ public enum RenderKeyChain {
         if edit.hasBlackAndWhite {
             let link = KeyBuilder(KeyBuilder.digest(of: color))
                 .add("bw")
-                .add(edit.keyMaterial(.bw))
+                .add(mat(.bw))
                 .canonical
             bw = link
             nextSeed = link
@@ -449,7 +457,7 @@ public enum RenderKeyChain {
         if edit.hasLocalColor {
             let local = KeyBuilder(KeyBuilder.digest(of: nextSeed))
                 .add("localcolor")
-                .add(edit.keyMaterial(.localColor))
+                .add(mat(.localColor))
                 .canonical
             localColor = local
             vignetteSeed = local
@@ -461,12 +469,12 @@ public enum RenderKeyChain {
         if edit.hasHSL {
             let link = KeyBuilder(KeyBuilder.digest(of: vignetteSeed))
                 .add("hsl")
-                .add(edit.keyMaterial(.hsl))
+                .add(mat(.hsl))
                 .canonical
             hsl = link
             vignetteSeed = link
         }
-        let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(edit.keyMaterial(.vignette)).canonical
+        let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(mat(.vignette)).canonical
         // 2026-10-28: S3.7 sits between the vignette and the display transform and exists **only** when
         // the grain amount is above zero. When it does not, the link is `nil` and the display key is
         // seeded by `vignette` exactly as before — so a document without grain keeps its pre-S3.7 key
@@ -476,7 +484,7 @@ public enum RenderKeyChain {
         if edit.hasGrain {
             let link = KeyBuilder(KeyBuilder.digest(of: vignette))
                 .add("grain")
-                .add(edit.keyMaterial(.grain))
+                .add(mat(.grain))
                 .canonical
             grain = link
             displaySeed = link

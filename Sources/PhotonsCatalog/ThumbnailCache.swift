@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import CoreGraphics
 import ImageIO
+import PhotonsCore
 
 // MARK: - tiers
 
@@ -61,8 +62,17 @@ public enum ThumbPipeline: String, Sendable, CaseIterable, Codable {
 /// (006 §6.3, §8 #8).
 public enum ThumbRecipe {
     public static let decoderRecipe = "v8/boost0/gamutOff"
-    /// Kernel semantics version. Bump when a stage's maths changes; it is part of every `graph` key.
-    public static let graphVersion = "graph-v1"
+    /// Kernel semantics version. Part of every `graph` key.
+    ///
+    /// P1f (079 §2.7.1): **derived, never typed by hand.** It used to be the literal `"graph-v1"` with
+    /// a comment asking the next person to bump it when a stage's arithmetic changed. S2's contrast
+    /// (linear-light power → bounded log2-EV bend) and S1's blacks (affine level → hybrid EV/level
+    /// travel) changed, the literal did not, and every thumbnail that carried a contrast value was
+    /// therefore **stale but servable** — the grid drew the old curve and nothing said so. The value is
+    /// now `StageAlgorithmVersion.graphVersion` (`graph-v2@<16 hex>` over the per-stage versions), so a
+    /// bump in the stage it belongs to cannot miss this key, and there is no second literal to keep in
+    /// step with the kernels.
+    public static var graphVersion: String { StageAlgorithmVersion.graphVersion }
     /// A placeholder must survive an edit, so it has no recipe at all (§3).
     public static let placeholderDigest = "-"
 
@@ -112,6 +122,29 @@ public enum ThumbPolicy {
 
 // MARK: - key
 
+/// P1f — which *producer's arithmetic* a file belongs to, as an on-disk namespace.
+///
+/// A file name is `sha256(keyString)`, so nothing in the tree can answer "which of these files did an
+/// old algorithm write?" — the digest is opaque and the pipeline/recipe are not recoverable from it.
+/// The namespace makes the answer a directory:
+///
+///   · `p/` — placeholders. They are the camera's embedded JPEG (or a plain decode), independent of
+///     the render algorithm by construction, and §0 promises a placeholder survives an edit; an
+///     algorithm upgrade must not empty the grid's first frame.
+///   · `g-<fingerprint>/` — `graph` files, i.e. everything the kernel chain produced.
+///
+/// An upgrade therefore **deletes the superseded `g-…` directories** rather than leaving the files to
+/// the 30-day `staleAfter` grace: "invalidated and rebuilt" has to be a fact about the tree, not a
+/// promise about a key nobody can read off a file name (079 §2.7.1).
+public enum ThumbNamespace {
+    public static let preview = "p"
+    public static var graph: String { "g-" + StageAlgorithmVersion.fingerprint }
+    /// The namespaces a file written by *this* build may live in. Everything else under the cache root
+    /// is a superseded generation (including the pre-P1f layout, whose shard directories sat directly
+    /// under the root).
+    public static var current: Set<String> { [preview, graph] }
+}
+
 /// Identity of one thumbnail file: content-addressed, never asset-addressed, so a moved or renamed
 /// file (M2 `moved`) and a duplicate copy share one cached image (§3).
 public struct ThumbKey: Hashable, Sendable {
@@ -119,6 +152,11 @@ public struct ThumbKey: Hashable, Sendable {
     public let tier: ThumbTier
     public let pipeline: ThumbPipeline
     public let recipeDigest: String
+
+    /// `p` or `g-<fingerprint>`: the directory this key's file lives in (P1f).
+    public var namespace: String {
+        pipeline == .preview ? ThumbNamespace.preview : ThumbNamespace.graph
+    }
 
     /// `preview` keys always carry `-`: a placeholder must not be invalidated by an edit, or the
     /// first frame after a commit would have nothing to draw.
@@ -156,9 +194,10 @@ public struct ThumbKey: Hashable, Sendable {
         return String(s[start..<end])
     }
 
-    /// Path inside a cache root: `thumbs/xx/yy/<digest>.jpg` (§3).
+    /// Path inside a cache root: `thumbs/<namespace>/xx/yy/<digest>.jpg` (§3; the namespace is P1f).
     public func relativePath(in root: URL) -> URL {
-        root.appendingPathComponent(shard0, isDirectory: true)
+        root.appendingPathComponent(namespace, isDirectory: true)
+            .appendingPathComponent(shard0, isDirectory: true)
             .appendingPathComponent(shard1, isDirectory: true)
             .appendingPathComponent("\(digest).jpg", isDirectory: false)
     }
@@ -239,6 +278,11 @@ public final class ThumbnailCache {
 
     public let root: URL
     public var policy: TrimPolicy
+    /// P1f: what the migration in `init` found and did. Read by `ThumbnailService.Stats.rebuilt`.
+    public private(set) var versionSweep = VersionSweep(previous: nil, current: "", isUpgrade: false)
+    /// Shorthand for the one bit a caller outside the cache needs: this process upgraded the
+    /// directory, so every `graph` thumbnail it writes is a rebuild.
+    public var wasUpgradedByAlgorithmVersion: Bool { versionSweep.isUpgrade }
     private let fm = FileManager.default
     private let lock = NSLock()
     private var counters = Stats()
@@ -255,6 +299,113 @@ public final class ThumbnailCache {
         self.root = root.standardizedFileURL
         self.policy = policy
         try fm.createDirectory(at: self.root, withIntermediateDirectories: true)
+        // P1f: one migration on the way in, before a single key is looked up, so no read can ever be
+        // served from a directory written by another generation of the arithmetic (§2.7.1).
+        self.versionSweep = VersionSweep(previous: nil, current: StageAlgorithmVersion.fingerprint,
+                                         isUpgrade: false)
+        self.versionSweep = sweepSupersededNamespaces()
+    }
+
+    // MARK: - algorithm version (P1f)
+
+    /// What this process found when it compared the directory with the arithmetic it is running.
+    ///
+    /// Two facts live here, and they are the whole of 079 §2.7.1:
+    ///   · `previous != current` means the files on disk were written by another generation of the
+    ///     kernels — a different `StageAlgorithmVersion` set — and were **deleted**, not left to the
+    ///     30-day `staleAfter` grace. "Invalidated and rebuilt", not "unlimited stale".
+    ///   · `isUpgrade` is the flag `ThumbnailService.Stats.rebuilt` reads: in the process that
+    ///     performed the upgrade, every `graph` thumbnail it generates is a rebuild *because of the
+    ///     version change*; in every later process the flag is `false` and the count stays 0.
+    public struct VersionSweep: Sendable, Equatable {
+        /// The fingerprint the directory was stamped with. `nil` for a directory that has never been
+        /// stamped: a fresh install, or a cache written before P1f (which the sweep tells apart by
+        /// whether anything was on disk).
+        public var previous: String?
+        public var current: String
+        public var isUpgrade: Bool
+        /// `graph` files deleted under a superseded `g-…` namespace — the thumbnails the upgrade
+        /// invalidated.
+        public var removedGraphFiles = 0
+        /// Files deleted from anywhere else. The pre-P1f layout kept both pipelines in
+        /// `xx/yy/<digest>.jpg`, so its placeholders cannot be told from its `graph` files by path;
+        /// they are removed with the rest, once, and re-decoded from the embedded preview.
+        public var removedLegacyFiles = 0
+        public var removedDirectories = 0
+        public var removedTotal: Int { removedGraphFiles + removedLegacyFiles }
+
+        public var summary: String {
+            let from = previous ?? "unstamped"
+            return "thumbs \(from) → \(current): " + (isUpgrade
+                ? "removed \(removedGraphFiles) graph + \(removedLegacyFiles) legacy file(s) in "
+                    + "\(removedDirectories) director(ies)"
+                : "up to date")
+        }
+    }
+
+    /// The stamp that records which generation wrote the files in `root`.
+    public var versionMarkerURL: URL { root.appendingPathComponent(Self.versionMarkerName) }
+    private static let versionMarkerName = ".recipe-version"
+
+    /// Delete every directory under `root` that is not a namespace of *this* build, and stamp the root.
+    ///
+    /// The deletion is the point: a superseded `g-<fingerprint>` directory is pixels produced by
+    /// arithmetic that no longer exists, and while its keys can never be looked up again (the key
+    /// includes the version), leaving the files there would mean "stale until an LRU pass happens to
+    /// need the space" — the failure mode 079 §2.7.1 calls out. `p/` is kept: a placeholder is decoder
+    /// output, not render output, and the first frame after an update must still have something to
+    /// draw.
+    @discardableResult
+    public func sweepSupersededNamespaces() -> VersionSweep {
+        let current = StageAlgorithmVersion.fingerprint
+        let previous = (try? String(contentsOf: versionMarkerURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var sweep = VersionSweep(previous: previous, current: current, isUpgrade: false)
+
+        let keep = ThumbNamespace.current
+        let children = (try? fm.contentsOfDirectory(at: root,
+                                                    includingPropertiesForKeys: [.isDirectoryKey]))
+            ?? []
+        for child in children {
+            let name = child.lastPathComponent
+            if name == Self.versionMarkerName || keep.contains(name) { continue }
+            let (files, dirs) = Self.tally(in: child)
+            // `g-<other fingerprint>` is render output; anything else (the pre-P1f `xx/yy` shards, a
+            // stray file) is legacy and holds both pipelines.
+            if name.hasPrefix("g-") {
+                sweep.removedGraphFiles += files
+            } else {
+                sweep.removedLegacyFiles += files
+            }
+            sweep.removedDirectories += dirs
+            try? fm.removeItem(at: child)
+        }
+
+        // A stamped directory is an upgrade when the stamp moved. An unstamped one is an upgrade only
+        // if it had something in it: an empty root is a fresh install, not a migration.
+        sweep.isUpgrade = previous == current ? false
+            : (previous != nil || sweep.removedTotal > 0)
+
+        if previous != current {
+            try? Data(current.utf8).write(to: versionMarkerURL, options: .atomic)
+        }
+        return sweep
+    }
+
+    /// `.jpg` files and directories under one node (a node that is a file counts as one file).
+    private static func tally(in node: URL) -> (files: Int, dirs: Int) {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: node.path, isDirectory: &isDir) else { return (0, 0) }
+        guard isDir.boolValue else { return (node.pathExtension.lowercased() == "jpg" ? 1 : 0, 0) }
+        var files = 0, dirs = 0
+        guard let en = fm.enumerator(at: node, includingPropertiesForKeys: [.isDirectoryKey],
+                                     options: [.skipsHiddenFiles]) else { return (0, 0) }
+        for case let u as URL in en {
+            let d = (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if d { dirs += 1 } else if u.pathExtension.lowercased() == "jpg" { files += 1 }
+        }
+        return (files, dirs + 1)
     }
 
     // MARK: paths
