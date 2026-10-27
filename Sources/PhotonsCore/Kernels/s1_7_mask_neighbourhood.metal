@@ -48,12 +48,19 @@ using namespace metal;
 
 struct MaskBlurParams {
     int4 a;   // canvasW, canvasH, segment length, sliceCount
+    // 081 — the dispatch window, in absolute indices of the *unchanged* lattice: `x` is the first
+    // column (a segment index in the horizontal half, a column in the vertical half) and `y` the
+    // first row (a row in the horizontal half, a segment index in the vertical half). Only the
+    // window is skipped; the lattice and the running sums are the ones a full-canvas dispatch would
+    // have produced, which is what keeps the blurred atlas bit-identical.
+    int4 b;   // xFirst, yFirst, pad, pad
 };
 
 // Mirror of the mask table in s1_5_mask_atlas.metal / RenderGraph.swift (`MaskDescU`).
 struct MaskDesc {
-    int4   meta;   // firstComponent, componentCount, invert, pad
+    int4   meta;   // firstComponent, componentCount, invert, needsPicture
     float4 misc;   // opacity, featherRadiusPx, refine strength, guidedRadiusPx
+    int4   rect;   // 081 — the canvas box this slice can be non-zero in (half-open)
 };
 
 /// Horizontal box blur of one slice, edge-clamped (replicate), radius from the mask descriptor.
@@ -69,12 +76,32 @@ kernel void s1_7_mask_blur_h(texture2d_array<float, access::read> src [[texture(
                              uint3 gid [[thread_position_in_grid]]) {
     int w = p.a.x, h = p.a.y;
     int slice = int(gid.z);
-    int row = int(gid.y);
+    int row = int(gid.y) + p.b.y;
     if (slice >= p.a.w || row >= h) { return; }
-    int x0 = int(gid.x) * p.a.z;
+    int x0 = (int(gid.x) + p.b.x) * p.a.z;
     if (x0 >= w) { return; }
     int x1 = min(x0 + p.a.z, w);
     int r = int(clamp(masks[slice].misc.y, 0.0, 4096.0));
+
+    // 081 — this pass only has to produce the *input* the vertical half will read: the slice's box
+    // grown by the window radius (a box mean of zeros is zero, so nothing outside that box can be
+    // non-zero). A segment outside the box is skipped whole — never shortened — because the sliding
+    // sum starts at that segment's own `x0`: a segment that runs performs the same additions in the
+    // same order as before, which is what keeps the blurred atlas bit-identical.
+    //
+    // The **rows** have to be the ones the vertical half will actually walk, which is one segment of
+    // slack on each side of the box: that pass keeps its whole-segment loop (its running sum must not
+    // change either) and only confines its *stores* to the box, so it still reads `y ± r` outside the
+    // box — from rows this pass must therefore have written. A shorter row window here would leave
+    // stale texturing in `tmp`, and a running sum reads its stencil once per output, so the garbage
+    // would poison the accumulator for every row after it.
+    int4 box = masks[slice].rect;
+    int seg = max(p.a.z, 1);
+    int walkTop = (box.y / seg) * seg;                  // first vertical segment that can store
+    int walkEnd = min(h, ((max(box.w, box.y + 1) - 1) / seg + 1) * seg);
+    int bx0 = max(box.x - r, 0), by0 = max(walkTop - r, 0);
+    int bx1 = min(box.z + r, w), by1 = min(walkEnd + r, h);
+    if (row < by0 || row >= by1 || x1 <= bx0 || x0 >= bx1) { return; }
 
     if (r <= 0) {
         for (int x = x0; x < x1; ++x) {
@@ -106,15 +133,28 @@ kernel void s1_7_mask_blur_v(texture2d_array<float, access::read> src [[texture(
                              uint3 gid [[thread_position_in_grid]]) {
     int w = p.a.x, h = p.a.y;
     int slice = int(gid.z);
-    int col = int(gid.x);
+    int col = int(gid.x) + p.b.x;
     if (slice >= p.a.w || col >= w) { return; }
-    int y0 = int(gid.y) * p.a.z;
+    int y0 = (int(gid.y) + p.b.y) * p.a.z;
     if (y0 >= h) { return; }
     int y1 = min(y0 + p.a.z, h);
     int r = int(clamp(masks[slice].misc.y, 0.0, 4096.0));
 
+    // 081 — the output is only non-zero inside the slice's box, and the horizontal half wrote every
+    // row the window of a column inside that box can reach (`box` grown by `r`), so this pass can
+    // skip columns and segments outside the box and still read nothing stale.
+    //
+    // Only the **writes** are confined to the box: the sliding sum still starts at the segment's own
+    // `y0` and still steps through every row of the segment, because a shorter loop would be a
+    // different sequence of additions (and would read `tmp` rows the horizontal half never wrote).
+    // Compiling "the loop runs, the store is conditional" is what makes the box free of rounding
+    // changes and free of stale input at the same time.
+    int4 box = masks[slice].rect;
+    if (col < box.x || col >= box.z || y1 <= box.y || y0 >= box.w) { return; }
+    int wy0 = max(y0, box.y), wy1 = min(y1, box.w);
+
     if (r <= 0) {
-        for (int y = y0; y < y1; ++y) {
+        for (int y = wy0; y < wy1; ++y) {
             float v = src.read(uint2(col, y), slice).r;
             dst.write(float4(v, v, v, 1.0), uint2(col, y), slice);
         }
@@ -128,7 +168,9 @@ kernel void s1_7_mask_blur_v(texture2d_array<float, access::read> src [[texture(
     }
     for (int y = y0; y < y1; ++y) {
         float v = acc * inv;
-        dst.write(float4(v, v, v, 1.0), uint2(col, y), slice);
+        if (y >= wy0 && y < wy1) {
+            dst.write(float4(v, v, v, 1.0), uint2(col, y), slice);
+        }
         acc += src.read(uint2(col, clamp(y + r + 1, 0, h - 1)), slice).r
              - src.read(uint2(col, clamp(y - r, 0, h - 1)), slice).r;
     }

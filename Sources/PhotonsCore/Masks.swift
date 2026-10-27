@@ -1423,6 +1423,28 @@ public enum MaskBounds {
         return dirty.bounds
     }
 
+    /// 081 — the canvas box a mask's coverage can be **non-zero** in, per atlas slice.
+    ///
+    /// This is the rasterisation domain: the pointwise kernel evaluates nothing outside it, and both
+    /// blur halves skip whatever the window of that box cannot reach. Two things can take the answer
+    /// away from `canvasRect`:
+    ///
+    /// · **Inversion**, at either level. `canvasRect` bounds the *shape's support*, but an inverted
+    ///   mask covers everything outside that support (`1 − 0 = opacity`), so the honest box is the
+    ///   canvas. Same for an inverted component. (This is also why `canvasRect` alone is not usable
+    ///   as a tiling region for an inverted mask — a cost this function already refuses to pay.)
+    /// · **No bound at all** (`canvasRect == nil`: an unsupported kind, or a box entirely outside the
+    ///   canvas). `nil` means "nothing to say", not "nothing to draw", so it also answers the canvas.
+    ///
+    /// A box that is too large costs time; a box that is too small costs pixels. Every uncertain
+    /// branch here therefore answers the canvas.
+    public static func rasterRect(for mask: Mask, mapping: MaskCanvasMapping) -> MaskRect {
+        let full = MaskRect(0, 0, mapping.canvas.width, mapping.canvas.height)
+        guard mask.isEnabled, !mask.components.isEmpty else { return full }
+        if mask.invert || mask.components.contains(where: { $0.invert }) { return full }
+        return canvasRect(for: mask, mapping: mapping) ?? full
+    }
+
     /// `∪ bounds(m)` for a set of masks — the dirty rectangle of a stage (§3.4 step 2).
     public static func dirtySet(_ masks: [Mask], mapping: MaskCanvasMapping) -> RectSet {
         var set = RectSet()
