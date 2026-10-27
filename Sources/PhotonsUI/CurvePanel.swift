@@ -39,6 +39,21 @@ import PhotonsCore
 // card's footer row (`输入 233 输出 +1.22`), and the plot can zoom into one half of the axis
 // (`CurveViewMode`). `CurvePoint` is an integer grid cell (0…511 per axis) as of the same order, so
 // "where did the point land" has exactly one answer in the document, in the read-out and in the key.
+//
+// 070 fixes the two things the owner found in 069's card, and both are about what he *saw*:
+//
+//   · **The region switch is a row of its own at the top** (`regionRow`), not the last item of the tab
+//     row. There it was squeezed against 复位本通道 below and truncated to 「HDR…」, and he read it as
+//     a footer control — 「在下方，复位旁边」. The card is now 区域 行 → 通道 tabs → 绘图区 →
+//     读数/复位, 269 pt tall instead of 245, with the plot, the tabs and the footer rows the same
+//     heights they were.
+//   · **The curve is drawn on the card's axis.** The `0…2` migration moved `CurvePoint.maximum`,
+//     `xSpan`, the ticks and the read-out, but `draw` kept feeding the *table's* `0…1` numbers
+//     straight into `x(u:)`/`y(v:)`. Every curve was therefore drawn at half scale in the lower-left
+//     quadrant, and the SDR window (`0…1`) let the whole table through — so 「切到 SDR 后曲线没有重新
+//     绘制」: the layer was repainted, with a picture of the wrong region. `2·u` / `2·v` is the whole
+//     of the fix, plus `yRaw` + a clip so a sample above white leaves the frame instead of stacking on
+//     its top edge. `CurveRegionTests` holds all of it as pixels.
 
 // MARK: - the four channels
 
@@ -270,13 +285,26 @@ public struct CurvePlotGeometry: Equatable {
         return box.minX + CGFloat(t) * max(box.width, 0)
     }
 
-    /// The curve's value (0…1, 1 = brighter) → a y in the value box (y grows *down*).
+    /// The curve's value — **the card's `0…2` coordinate**, the same number as `CurvePoint.y` → a y in
+    /// the value box (y grows *down*). Clamped into the view's span, which is what a **drag** wants: a
+    /// pointer that leaves the box still lands on an edge.
     public func y(v: Double) -> CGFloat {
+        let span = xSpan
+        let value = v.isFinite ? v : span.lowerBound
+        return yRaw(v: min(max(value, span.lowerBound), span.upperBound))
+    }
+
+    /// The same mapping **without** the clamp, for the drawing.
+    ///
+    /// 070: the windowed view needs this. A sample whose *output* is above white (`v > 1`) belongs
+    /// above the SDR box; clamped — which is right for a hand — every such sample would pile onto
+    /// `box.minY` and the plot would carry a horizontal black line along its top edge that is not in
+    /// the table. Unclamped, the polyline leaves the frame and the clip in `draw` cuts it there.
+    public func yRaw(v: Double) -> CGFloat {
         let box = valueBox
         let span = xSpan
         let value = v.isFinite ? v : span.lowerBound
-        let t = (min(max(value, span.lowerBound), span.upperBound) - span.lowerBound)
-            / (span.upperBound - span.lowerBound)
+        let t = (value - span.lowerBound) / (span.upperBound - span.lowerBound)
         return box.maxY - CGFloat(t) * max(box.height, 0)
     }
 
@@ -685,6 +713,13 @@ public enum CurvePanelMetrics {
     public static let dragThreshold: CGFloat = 2
     public static let tickLabelSize: CGFloat = 8
     public static let tabHeight: CGFloat = 18
+    /// The region switch's own row (070) — 「区域」 + the two-state capsule, above the tabs.
+    ///
+    /// Same 18 pt as a tab row, so the card's height is a sum of two equal rows and one plot rather
+    /// than a number that drifts: 18 + 6 + 18 + 6 + `plotHeight` + 6 + `footerHeight` = 269 pt at 274 pt
+    /// of width. The row exists because the switch, sitting at the tail of the tab row, was read as a
+    /// footer control ("在下方，复位旁边") and had its label truncated to 「HDR…」.
+    public static let modeRowHeight: CGFloat = 18
     /// The footer row's height (069), and therefore the height of the coordinates line in **both**
     /// states: the row is the two buttons' height whether or not a point is under the hand, so
     /// 「行高不变、不许跳动」 is a constant here rather than a consequence of the text happening to be
@@ -831,7 +866,13 @@ public struct CurvePanel: View {
         }
         let mode = viewMode
         return VStack(alignment: .leading, spacing: 6) {
-            channelTabs(mode: mode)
+            // 070 — the region switch is the card's **first row**, above the four channel tabs and a
+            // whole plot away from the footer's 读数/复位 row. It used to sit at the end of the tab
+            // row, where 274 pt of card left it squeezed against 复位本通道 below and truncating its
+            // label to 「HDR…」; the owner read it as a footer control ("在下方，复位旁边"). One row of
+            // its own is the fix that cannot be misread: 区域 行 → 通道 tabs → 绘图区 → 读数/复位.
+            regionRow(mode: mode)
+            channelTabs()
             plot(points: points, table: table, mode: mode)
             CurvePanelFooter(reading: reading,
                              resetChannel: { model.resetChannel() },
@@ -842,9 +883,38 @@ public struct CurvePanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: the four tabs and the region switch
+    // MARK: the region switch — its own row (070)
 
-    private func channelTabs(mode: CurveViewMode) -> some View {
+    /// 「区域」 + the two-state capsule, on a line of its own.
+    ///
+    /// The caption is what makes the row read as *the plot's* switch rather than as another button in
+    /// the card's furniture; the capsule is right-aligned so the row's left half stays empty and the
+    /// eye lands on it as a header control. The height is `modeRowHeight`, a constant, so the row
+    /// cannot steal height from the plot or shift the footer's line.
+    private func regionRow(mode: CurveViewMode) -> some View {
+        HStack(spacing: 4) {
+            Text("区域")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("curve.region.label")
+            Spacer(minLength: 4)
+            // 069 — the label is the **next** state: 「SDR 区域」 in the whole view, 「HDR 区域」 in the
+            // SDR view (the owner's wording; pressing it there returns to the whole axis — see
+            // `CurveViewMode`). `.fixedSize` is not cosmetic: squeezed into the tab row the label
+            // truncated to 「HDR…」, which reads as a broken control.
+            CurvePanelButton(mode.buttonTitle, identifier: "curve.view") {
+                viewMode = viewMode.next
+            }
+            .fixedSize()
+            .help("区域：\(mode.title)。SDR 视图把 x 0…1（显示码 0–255）铺满绘图区，右半区按住 ⇧ 可以回到全部视图看 +0…+4 EV")
+            .accessibilityLabel("区域 \(mode.title)")
+        }
+        .frame(height: CurvePanelMetrics.modeRowHeight)
+    }
+
+    // MARK: the four channel tabs
+
+    private func channelTabs() -> some View {
         HStack(spacing: 4) {
             ForEach(CurveChannel.allCases) { candidate in
                 Button { channel = candidate } label: {
@@ -863,14 +933,6 @@ public struct CurvePanel: View {
                 .accessibilityIdentifier("curve.channel.\(candidate.rawValue)")
                 .accessibilityLabel(candidate.name)
             }
-            // 069 — 顶部的小按钮, the same capsule as the reset buttons. Its label is the **next**
-            // state: 「SDR 区域」 in the whole view, 「HDR 区域」 in the SDR view (the owner's wording;
-            // pressing it there returns to the whole axis — see `CurveViewMode`).
-            CurvePanelButton(mode.buttonTitle, identifier: "curve.view") {
-                viewMode = viewMode.next
-            }
-            .help("视图：\(viewMode.title)。SDR 视图把 x 0…1（显示码 0–255）铺满绘图区，右半区可以按住 ⇧ 回到全部视图看 +0…+4 EV")
-            .accessibilityLabel("视图 \(viewMode.title)")
         }
     }
 
@@ -928,8 +990,18 @@ public struct CurvePanel: View {
         context.stroke(diagonal, with: .color(Color.primary.opacity(0.22)),
                        style: StrokeStyle(lineWidth: 0.7, dash: [3, 3]))
 
-        // The curve: one polyline through the engine's 4096 samples. No smoothing here — the table is
-        // already smooth (monotone cubic), and a second smoother would round the clamped knees.
+        // 070 — the curve is drawn in the **card's** `0…2` coordinate, and the table is not.
+        //
+        // `CurveLUT.buildOne` samples the *engine's* axis: sample `i` sits at `u = i/(N−1)` and its
+        // value is `v`, both `0…1`, and the engine's axis is half the card's (`CurvePoint.u == x/2`).
+        // So a sample's card coordinate is **twice** its own number — `2·u` across, `2·v` up — and
+        // that factor is the whole of this loop's arithmetic. Leaving it out (which is what the
+        // `0…2` migration did) draws every curve at half scale into the lower-left quadrant: in the
+        // all view the identity curve stops halfway and leaves the dashed identity diagonal it is
+        // supposed to lie on, and in the SDR view the window (`xSpan` `0…1`) lets **every** sample
+        // through and squeezes the whole curve — the +0…+4 EV half included — into the SDR box. The
+        // region switch then repaints a picture of the wrong region, which is why 「切到 SDR 后曲线
+        // 没有重新绘制」: the layer *was* repainted, with the whole table in an SDR window.
         //
         // 061: the ends are why this needs no special case. The table's first entries are all
         // `first.y` and its last all `last.y` (`CurveLUT.buildOne`), so a moved endpoint draws as a
@@ -943,12 +1015,20 @@ public struct CurvePanel: View {
             var curve = Path()
             var started = false
             for i in 0..<table.count {
-                let u = Double(i) / Double(table.count - 1)
-                guard span.contains(u) else { continue }
-                let p = CGPoint(x: geometry.x(u: u), y: geometry.y(v: Double(table[i])))
+                let cardX = 2 * (Double(i) / Double(table.count - 1))
+                guard span.contains(cardX) else { continue }
+                let p = CGPoint(x: geometry.x(u: cardX), y: geometry.yRaw(v: 2 * Double(table[i])))
                 if started { curve.addLine(to: p) } else { curve.move(to: p); started = true }
             }
-            if started { context.stroke(curve, with: .color(tint), lineWidth: 1.4) }
+            if started {
+                // The window can cut the curve in y as well (an SDR point whose *output* is above
+                // white): clip to the value box so the line **leaves** the frame instead of being
+                // clamped onto its top edge, where it would read as a stretch of the table that does
+                // not exist. In the all view nothing is outside the box, so this changes no pixel.
+                var plotContext = context
+                plotContext.clip(to: Path(box))
+                plotContext.stroke(curve, with: .color(tint), lineWidth: 1.4)
+            }
         }
 
         // Control points: 3 pt filled dots; the one under the hand gets a ring. 069: a point outside
