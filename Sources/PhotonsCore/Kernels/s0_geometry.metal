@@ -59,10 +59,32 @@ static inline float4 sample_bilinear(texture2d<float, access::read> src,
     return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
 }
 
-kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
-                        texture2d<float, access::write> dst [[texture(1)]],
-                        constant S0Params &p [[buffer(0)]],
-                        uint2 gid [[thread_position_in_grid]]) {
+// Two entry points, like `s1_scene_linear` (071) and for the same reason — **byte identity on the
+// path that does not rotate**. Rotating in pixels (the cropfix) means the mapping is
+// `(uv − ½)·frameSize → R(θ) → ÷ frameSize + ½`, and at θ = 0 that round trip is *not* the identity
+// in floating point: `(uv − ½)·w / w + ½` lands 1 ulp away from `uv` for most of the canvas, so
+// every document that merely crops (`crop ≠ full`, no rotation) resampled one ulp off and every
+// recorded pixel hash moved. A branch alone cannot fix that — the `× f` / `÷ f` pair has to be
+// absent from the code the non-rotating path runs — so the body is one templated function and the
+// two instantiations are dispatched by the CPU: `RenderGraph` asks for `s0_geometry_rot` only when
+// `edit.geometry.straightenDegrees != 0` (the angle the cos/sin below come from), and the default
+// entry never sees a multiply or a divide by the frame size at all — it maps `o = uv − ½` straight
+// back to `o + ½`, the pre-cropfix machine-code shape (and *not* `r = uv`: see the branch below —
+// the recorded pixels contain the double rounding that `uv` does not).
+//
+// ── the rotation, in **pixels** ──────────────────────────────────────────────────────────────────
+// Rotating `uv − ½` is a rotation of *normalised* coordinates: the x offset is divided by the
+// frame's width and the y offset by its height, so `R(θ)` is followed by the non-uniform scale
+// `× frameSize` and the result is rotation ∘ anisotropic scale — a shear whose factor is the
+// frame's W/H (so a 3:2 frame shears by 1.5, and a portrait one by 0.667 the other way). Turning
+// the pixel offsets instead is the similarity every crop tool means: the two basis vectors stay
+// orthogonal and equal (pure rotation + uniform scale), and a straightened picture is only
+// turned, never tapered.
+template <bool HAS_ROTATION>
+static inline void s0_body(texture2d<float, access::read> src,
+                           texture2d<float, access::write> dst,
+                           constant S0Params &p,
+                           uint2 gid) {
     int2 canvas = int2(p.a.xy);
     if (int(gid.x) >= canvas.x || int(gid.y) >= canvas.y) { return; }
     int2 srcSize = int2(p.b.zw);
@@ -113,19 +135,30 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
     if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 
-    // ── the rotation, in **pixels** ──────────────────────────────────────────────────────────────
-    // Rotating `uv − ½` is a rotation of *normalised* coordinates: the x offset is divided by the
-    // frame's width and the y offset by its height, so `R(θ)` is followed by the non-uniform scale
-    // `× frameSize` and the result is rotation ∘ anisotropic scale — a shear whose factor is the
-    // frame's W/H (so a 3:2 frame shears by 1.5, and a portrait one by 0.667 the other way). Turning
-    // the pixel offsets instead is the similarity every crop tool means: the two basis vectors stay
-    // orthogonal and equal (pure rotation + uniform scale), and a straightened picture is only
-    // turned, never tapered.
-    float2 o = (uv - 0.5) * p.f.xy;
-    float cs = p.d.x;
-    float sn = p.d.y;
-    float2 rotated = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs);
-    float2 r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
+    // ── the rotation, in **pixels** (see the header) ────────────────────────────────────────────
+    // `HAS_ROTATION == false` is a compile-time constant, so the `× frameSize` / `÷ frameSize`
+    // round trip is not in the emitted code at all and the mapping is the pre-cropfix one — bit-exact,
+    // which is what every cropped-but-not-straightened document depends on. The rotation itself stays
+    // a pure pixel-space turn: same body, one instantiation.
+    float2 r;
+    if (HAS_ROTATION) {
+        float2 o = (uv - 0.5) * p.f.xy;
+        float cs = p.d.x;
+        float sn = p.d.y;
+        float2 rotated = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs);
+        r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
+    } else {
+        // NOT `r = uv`: the recorded pixels are not the ones `uv` produces, they are the ones
+        // `(uv − ½) + ½` produces — two roundings, not zero. Subtracting ½ rounds for |uv| < ¼ and
+        // adding it back does **not** recover the lost bits, so writing `r = uv` here moves every
+        // cropped pixel by an ulp just as surely as `× f / ÷ f` did (measured: pillarbox identity
+        // 0bd9fadc… instead of the recorded eab59159…). Spelling the `+ ½` as an `fma` keeps it a
+        // separate rounding — the compiler's fast-math kernel will happily reassociate `o + ½` back
+        // into `uv`, which is exactly the bug — while still keeping the *rotation* out of this
+        // instantiation: no `× frameSize`, no `÷ frameSize`, no cos/sin.
+        float2 o = uv - 0.5;
+        r = fma(o, float2(1.0), float2(0.5));
+    }
 
     float2 px = (p.c.xy + r * p.c.zw) * float2(srcSize);
 
@@ -150,4 +183,21 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
     float4 red = sample_bilinear(src, axis + d * (1.0 + p.g.x), srcSize);
     float4 blue = sample_bilinear(src, axis + d * (1.0 + p.g.y), srcSize);
     dst.write(float4(red.r, green.g, blue.b, green.a), gid);
+}
+
+// The default path — no rotation in the code at all, so the crop/scale/flip mapping is the one 029
+// and 048 recorded. `RenderGraph` picks this one unless `straightenDegrees != 0`.
+kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        constant S0Params &p [[buffer(0)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    s0_body<false>(src, dst, p, gid);
+}
+
+// The same body with the pixel-space turn compiled in. Picked only for a straightened document.
+kernel void s0_geometry_rot(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant S0Params &p [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    s0_body<true>(src, dst, p, gid);
 }
