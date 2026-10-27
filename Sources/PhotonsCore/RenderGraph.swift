@@ -725,12 +725,52 @@ public final class RenderGraph {
 
     private struct CacheEntry {
         let key: String
+        /// 081 — the **same texture**, addressable a second way: by the key of the *composite*, i.e. of
+        /// the last stage in the pipeline that owns a generic entry.
+        ///
+        /// The two keys answer two different questions. `key` is the per-stage key the walk consults
+        /// ("would this stage's output be the one this document asks for?"). `resumeKey` is the
+        /// question a frame with an unchanged document can ask in one go ("is the *whole chain* up to
+        /// here the same?"), and only the last stage stores one. See `compositeKey(_:_:…)`.
+        let resumeKey: String?
         let texture: MTLTexture
     }
 
     private var cache: [RenderStage: CacheEntry] = [:]
     private var cacheOrder: [RenderStage] = []
-    private var cacheBytes = 0
+    /// 081 — **the cache is asked the composite question, and its budget did not move.**
+    ///
+    /// `local/perf/perf-baseline-2026-10-28.md` §3.3 measured a 60.32 Mpx export frame whose document
+    /// was **untouched** at 59 ms against 85 ms with nothing reused: it re-ran **8 of the 11** stages
+    /// (`s0 s1.7 s2 s3-color s3.5 s3.6 s3-vignette s4`). The cause was not an algorithm but arithmetic:
+    /// the budget was the constant `1_500_000_000` bytes, one intermediate at this canvas is 483 MB, so
+    /// three fit while seven stages own an entry — and because a frame inserts as it walks, the three
+    /// that survived were the *last* three, with S0 always the first victim. At 4.10 Mpx the same code
+    /// is perfect (1.5 GB = forty-five 32.8 MB frames) and the hot frame is S4 alone, 0.38 ms.
+    ///
+    /// There are two ways to make 60 Mpx behave like that, and they are not equivalent:
+    ///
+    ///   · **raise the budget** to one frame per stage (3.38 GB at 60 Mpx). Measured: hot 5.47 ms, one
+    ///     stage — and **+1.93 GB of Metal** (4.0 more live 483 MB textures, 8.3 → 10.2 GB at the
+    ///     steady state), because a retained entry is a texture the pool can no longer hand to the next
+    ///     stage. It buys the number with memory at exactly the scale where memory is the constraint.
+    ///   · **make the cache answer once what it is about to be asked eight times.** The key chain is a
+    ///     hash chain (`RenderKeyChain.links`: each link is `H(digest(previous) | own material)`), so
+    ///     "the last stage's composite key is unchanged" *implies* "every upstream stage's key is
+    ///     unchanged". A frame can therefore check the composite **before walking**, and if it hits,
+    ///     start at S4. The composite entry is the last stage's own texture — no extra texture, no
+    ///     budget change, no change at 4.10 Mpx.
+    ///
+    /// This is the second one. The trade it makes: the win applies to the frame that changed *nothing*
+    /// (the one the user sees when they are not dragging: release-after-drag, zoom/pan, a re-paint, the
+    /// export's repeat frame), and a frame that changed one slider still runs its suffix — which is
+    /// correct, since its suffix genuinely has to be recomputed. It also means the cache can stay
+    /// 1.5 GB at every canvas size: nothing here claims a big canvas deserves a bigger cache.
+    public private(set) var cacheBytes = 0
+    public var cacheEntryCount: Int { cache.count }
+    /// How many frames started from the composite instead of walking the pipeline, over this graph's
+    /// life. The number the acceptance reads (it must be 1 per unchanged frame after the first).
+    public private(set) var compositeResumes = 0
 
     /// 073 — **S1's output has its own slot**, and it is keyed by S1's own inputs.
     ///
@@ -1061,6 +1101,34 @@ public final class RenderGraph {
     ///
     /// `s1KeyIncludesRedGroup: false` (tests only) deletes the red half — the sliders, the two absolute
     /// levels and the trim — from the material, which is the refutation 073 asks for.
+    /// 081 — the key that lets a frame skip the walk: **everything the pipeline's stages are keyed by,
+    /// in one string.**
+    ///
+    /// `RenderKeyChain.links` is a hash chain — each link is `H(digest(previous) | own material)` — so
+    /// the last link being equal already implies every earlier one is. This string is written out
+    /// explicitly rather than leaned on for two reasons: the walk's own keys are the link **plus** the
+    /// environment suffixes (`tilingSuffix`, `semanticSuffix`) that live outside the chain, and S1's slot
+    /// key is a *narrowing* of its link (`s1Key`, 073) which the chain cannot be trusted to imply when
+    /// the test hook strips the red group. Concatenating both is a few hundred bytes and removes the
+    /// question.
+    ///
+    /// The composite is the **last stage that owns a generic cache entry** — the stage whose output
+    /// feeds S4. Its entry is the texture the pipeline already produced, so the resume costs no texture.
+    private func compositeKey(_ edit: EditModel, _ plan: Plan, stage: RenderStage,
+                              tilingSuffix: String, semanticSuffix: String) -> String {
+        plan.keys.key(for: stage)
+            + (stage.isMaskStage ? tilingSuffix : "")
+            + (stage.index >= RenderStage.maskAtlas.index ? semanticSuffix : "")
+            + "|s1:" + s1Key(edit, plan)
+    }
+
+    /// Whether a stage keeps an entry in the **generic** cache: not S4 (its texture is handed to the
+    /// caller), not S1.5 (a side output in `atlasCache`), not S1 (`s1Entry`) and not S1.6 (`localEntry`),
+    /// which all have slots of their own.
+    private static func ownsGenericCacheEntry(_ stage: RenderStage) -> Bool {
+        stage != .display && stage != .sceneLinear && stage != .maskAtlas && stage != .localApply
+    }
+
     private func s1Key(_ edit: EditModel, _ plan: Plan) -> String {
         guard !s1KeyIncludesRedGroup else { return plan.keys.key(for: .sceneLinear) }
         var stripped = edit
@@ -1150,7 +1218,39 @@ public final class RenderGraph {
         // document's pipeline (seven, or nine-plus with masks); the decode is the two passes that
         // stand either side of every tone, colour and effect stage.
         let stages: [RenderStage] = decodeOnly ? [.geometry, .display] : plan.stages
-        for stage in stages {
+
+        // 081 — the frame that changed nothing asks the cache **one** question instead of eleven.
+        //
+        // The composite is the last stage with a generic entry (`s3-vignette` on a full document,
+        // `s3-color` without a vignette, `s0` on the decode path). If its `resumeKey` still matches, then
+        // every stage above it would have been a hit anyway — the chain is a hash chain and the resume
+        // key spells out the link, the environment suffixes and S1's own slot key (see `compositeKey`) —
+        // so the walk starts at S4 and the frame costs one pass instead of the 8 this canvas used to pay.
+        let compositeStage = stages.last { RenderGraph.ownsGenericCacheEntry($0) }
+        let compositeKey = compositeStage.map {
+            compositeKey(edit, plan, stage: $0, tilingSuffix: tilingSuffix, semanticSuffix: semanticSuffix)
+        }
+        var firstStage = 0
+        if options.useCache, let compositeStage, let compositeKey,
+           let entry = cache[compositeStage], entry.resumeKey == compositeKey,
+           entry.texture.width == plan.canvas.width, entry.texture.height == plan.canvas.height,
+           // `showMask` draws from the atlas S1.5 built; a resume would start after it.
+           edit.showMaskID == nil || atlasCache != nil {
+            let compositeIndex = stages.firstIndex(of: compositeStage) ?? (stages.count - 1)
+            for stage in stages[...compositeIndex] { trace.record(stage, executed: false) }
+            touchCache(compositeStage)
+            current = entry.texture
+            firstStage = compositeIndex + 1
+            compositeResumes += 1
+            // The all-hit walk leaves exactly this behind for the mask report: the local stage did not
+            // run, so there are no tiles — the same `TilePlan` the S1.6 hit branch records.
+            if report != nil {
+                report?.localPlan = TilePlan(tiles: [], pixelCount: 0,
+                                             canvasPixelCount: plan.canvas.pixelCount,
+                                             dependency: .pointwise, tiled: false)
+            }
+        }
+        for stage in stages[firstStage...] {
             // The environment suffix has to reach **every** stage the atlas feeds, not just the two
             // mask stages: the document's key chain cannot know that a matte appeared (it is not in
             // the document), so a downstream cache hit would otherwise hand back a frame computed
@@ -1276,6 +1376,7 @@ public final class RenderGraph {
             // be a texture the pool or the cache could later reuse.
             if stage != .display, options.useCache, let hit = cache[stage], hit.key == key {
                 trace.record(stage, executed: false)
+                touchCache(stage)
                 current = hit.texture
                 continue
             }
@@ -1293,7 +1394,8 @@ public final class RenderGraph {
             trace.record(stage, executed: true)
 
             if options.useCache && stage != .display {
-                insertCache(stage, key: key, texture: out)
+                insertCache(stage, key: key, texture: out,
+                            resumeKey: stage == compositeStage ? compositeKey : nil)
             } else if stage != .display {
                 transient.append(out)
             }
@@ -1855,13 +1957,28 @@ public final class RenderGraph {
         localEntry = nil
     }
 
-    private func insertCache(_ stage: RenderStage, key: String, texture: MTLTexture) {
+    /// Least-recently-**used**, not least-recently-inserted.
+    ///
+    /// The old policy was FIFO (`cacheOrder.removeFirst()`), and on a cache that cannot hold the whole
+    /// pipeline FIFO evicts exactly the wrong entry: a frame always walks S0 → S4, so insertion order
+    /// *is* pipeline order, and the oldest insertion is the most upstream — the one every downstream
+    /// stage is built from. A hit now moves the entry to the back, so what a budget squeeze throws
+    /// away is the stage nobody has asked for in the longest time.
+    private func touchCache(_ stage: RenderStage) {
+        guard let i = cacheOrder.lastIndex(of: stage), i != cacheOrder.count - 1 else { return }
+        cacheOrder.remove(at: i)
+        cacheOrder.append(stage)
+    }
+
+    private func insertCache(_ stage: RenderStage, key: String, texture: MTLTexture,
+                             resumeKey: String? = nil) {
         if let old = cache[stage] {
+            // 081: a stage that used to be the composite is no longer addressable that way.
             cacheBytes -= Int(old.texture.width * old.texture.height * 8)
             cacheOrder.removeAll { $0 == stage }
             pool.recycle(old.texture)
         }
-        cache[stage] = CacheEntry(key: key, texture: texture)
+        cache[stage] = CacheEntry(key: key, resumeKey: resumeKey, texture: texture)
         cacheOrder.append(stage)
         cacheBytes += Int(texture.width * texture.height * 8)
         while cacheBytes > cacheBudgetBytes, cacheOrder.count > 1 {
