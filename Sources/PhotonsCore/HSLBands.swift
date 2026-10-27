@@ -123,6 +123,14 @@ public enum OKLCh {
 /// rather than a hope, and it also covers a caller that hand-writes a document with NaN bands.
 public enum HSLBands {
 
+    /// The eight bands by the names the panel draws, in centre order: 红 / 橙 / 黄 / 绿 / 青 / 蓝 / 紫 / 品红.
+    ///
+    /// Here, in the core, and not only in `HSLAxis`: since 2026-10-28 the names are also *history
+    /// wording* — a 黑白混合 row reads 「黑白混合[红]」 (S3.4), which is `EditHistory.parameterName`'s
+    /// job, and that table lives in this module. Two tables would let the card say 红 while the
+    /// timeline said band 0.
+    public static let bandNames: [String] = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"]
+
     /// The eight band centres, in **OKLCh hue degrees**, as `Float` — the type the kernel is handed, so
     /// the CPU reference and the GPU see the same numbers bit for bit.
     public static let centresDegrees: [Float] = {

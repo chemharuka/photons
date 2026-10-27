@@ -58,9 +58,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
         })
-        // 2026-10-28: 效果 (暗角 + 颗粒) joined 调整, between 曲线 and 预设.
+        // 2026-10-28: 效果 (暗角 + 颗粒) joined 调整, between 曲线 and 预设; 黑白 (S3.4) after Color.
         XCTAssertEqual(titles[.adjust],
-                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "效果", "预设"])
+                       ["白平衡", "黑电平", "Light", "Color", "黑白", "细节", "曲线", "效果", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL），历史记录有卡片了（077 的时间线）。
         XCTAssertEqual(titles[.transform], ["裁切"])
@@ -108,9 +108,9 @@ final class InspectorWorkspaceTests: XCTestCase {
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
         // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张；
-        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张。
+        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张。
         // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 13)
+        XCTAssertEqual(InspectorView.Section.allCases.count, 14)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
@@ -212,7 +212,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(panel.cards.workspace, "adjust", "首次打开必须是调整")
         XCTAssertEqual(panel.cards.cardIDs, InspectorView.sections(in: .adjust).map(\.rawValue))
         XCTAssertEqual(panel.cards.cardTitles,
-                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "效果", "预设"])
+                       ["白平衡", "黑电平", "Light", "Color", "黑白", "细节", "曲线", "效果", "预设"])
         // 真的渲染出来了，不只是表里有：调整工作区里蒙版卡不在树上，白平衡的数值框在。
         XCTAssertTrue(panel.numberFields > 0, "调整工作区里应该有真的控件（数值框），实际 \(panel.numberFields)")
         XCTAssertEqual(panel.maskCards, 0, "调整工作区里不该有蒙版卡")
@@ -401,7 +401,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertLessThanOrEqual(inMasks, 200 + 0.5, "切到蒙版后偏移比原来还大")
 
         panel.state.select(.adjust)
-        _ = try waitFor(panel, until: { $0.cards.cardIDs.count == 8 })
+        _ = try waitFor(panel, until: { $0.cards.cardIDs.count == 9 })
         let back = scroll.contentView.bounds.origin.y
         XCTAssertGreaterThanOrEqual(back, 0, "切回调整后偏移越界（负）")
         XCTAssertLessThanOrEqual(back, maxOffset + 0.5, "切回调整后偏移超过了文档能滚的范围")

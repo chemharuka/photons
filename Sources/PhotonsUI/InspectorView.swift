@@ -60,6 +60,15 @@ public struct InspectorView: View {
         case blackLevel
         case light
         case color
+        /// 2026-10-28 — **黑白** (S3.4): the switch and the eight 黑白混合 rows.
+        ///
+        /// Directly after Color because that is where the stage runs: `RenderStage.order` is
+        /// `… .toneMap, .color, .bw, .localColor, .hsl …`, so the panel reads Color → 黑白 → HSL, the
+        /// pipeline's own order (Lightroom's too: B&W is the mixer *of* the colour image). It is its own
+        /// card rather than eight more rows under Color for 076's reason — one switch plus eight
+        /// dedicated rows is a panel of its own, and a double-click on Color must not undo work done
+        /// here.
+        case blackAndWhite
         /// 派单 076: **HSL** — the eight colour bands, on OKLCh, in the 色彩 workspace.
         ///
         /// Its own card rather than six more rows under Color: the bands are a *selector plus three
@@ -105,6 +114,7 @@ public struct InspectorView: View {
             case .light: return "Light"
             case .blackLevel: return "黑电平"
             case .color: return "Color"
+            case .blackAndWhite: return "黑白"
             case .hsl: return "HSL"
             case .detail: return "细节"
             case .curve: return "曲线"
@@ -280,6 +290,8 @@ public struct InspectorView: View {
             blackLevelCard
         case .color:
             colorCard
+        case .blackAndWhite:
+            blackAndWhiteCard
         case .hsl:
             hslCard
         case .detail:
@@ -529,6 +541,146 @@ public struct InspectorView: View {
                 }
             }
         }
+    }
+
+    // MARK: 黑白 (S3.4, 2026-10-28)
+
+    /// **黑白** — S3.4's two controls: the switch, and the eight 黑白混合 rows that decide how bright
+    /// each hue lands in the grey.
+    ///
+    /// ```text
+    /// ☑ 黑白                      S3.4's link exists only while this is on
+    /// 红     −100…100             how much light 红 deposits in the print
+    /// 橙 … 品红                   …one row per band, Lightroom's order
+    /// ```
+    ///
+    /// Three rules, all inherited rather than re-implemented — that is the point of the card being
+    /// built out of `sliderRow` and `bwRows`:
+    ///
+    ///   1. **关掉开关 = 八行置灰、不归零.** `enabled: on` is 细节's 解码模型 rule (`SliderRow`
+    ///      `.disabled` + 0.42 opacity): the rows stop taking input and say so, and **no value is
+    ///      written** — the mixes are inert while the switch is off (`HSLBand.mix` is rendered only
+    ///      under `ColorGroup.blackAndWhite`), so switching back restores exactly what the user set.
+    ///      Zeroing them here would make a toggle a destructive edit, and ⌘Z could not tell the two
+    ///      apart.
+    ///   2. **红 = 线性域.** The row's shape is `.linear` (`#FF375F`), because a mix is
+    ///      `grey · 2^(m/100)` — **±1 stop of linear light** (`HSLBands.mixStopsPerFull`, and the
+    ///      kernel's own note in `s3_4_bw.metal`), the number that says how much light a hue deposits
+    ///      in the print. That is 071's third class: arithmetic on **linear** light, the same domain
+    ///      黑电平's red names. It is *not* the HSL card's 亮度, which is ±1 stop of OKLab **perceptual**
+    ///      lightness (`L · 2^(m/100)`, 8× the light) and is therefore blue; and it is not 黄, because
+    ///      nothing here re-develops the RAW. One panel, two stops, two colours — the accent says which.
+    ///   3. **一根滑杆 = 一条历史.** The drag writes every tick (`applyEdit`) and commits once on
+    ///      release (`if !editing { session.commitEdit() }`); a typed number takes the same path; a
+    ///      double-click on a name is `PanelResets.blackAndWhiteField(_:)` (one snapshot).
+    ///
+    /// The switch itself is **not** a `SliderRow`: a flag is not a number, and a two-position slider is
+    /// a switch pretending to be a ruler. It is the panel's existing switch row (蒙版's 反转): a
+    /// `.checkbox` `Toggle`, mini, 10 pt label. One click = one snapshot (`coalesce: false`), so 开/关
+    /// cannot fold into the drag before it.
+    private var blackAndWhiteCard: some View {
+        let on = session.edit.color.blackAndWhite
+        return card(Section.blackAndWhite.title, reset: { resetGroup(.blackAndWhite) }) {
+            blackAndWhiteSwitchRow(isOn: on)
+            ForEach(Self.bwRows, id: \.index) { row in
+                sliderRow(row.title, bwMixBinding(row.index), row.range, row.format,
+                          shape: row.shape,
+                          decimals: row.decimals,
+                          rounding: row.rounding,
+                          editable: row.editable,
+                          enabled: on,
+                          accessibilityID: "inspector.blackAndWhite.\(row.title)",
+                          onReset: { resets.blackAndWhiteField(row.index) }) { editing in
+                    if !editing { session.commitEdit() }
+                }
+                .background(BlackAndWhiteProbeHost(rowID: row.title))
+            }
+        }
+        // The card's own frame, for the layout test at the three widths (`BlackAndWhiteProbe.cardID`) —
+        // a background, so it inherits the card's size and cannot change it.
+        .background(BlackAndWhiteProbeHost(rowID: BlackAndWhiteProbe.cardID))
+    }
+
+    /// The card's first row: 「黑白」, drawn like every other switch in the panel (蒙版's 反转).
+    ///
+    /// The label lives *inside* the `Toggle`, so the checkbox and the word are one control (and one
+    /// accessibility element) rather than a stray `Text` beside a box — 「点黑白」 means the switch,
+    /// not the checkbox alone. The row takes the card's full width so it lines up with the eight heads
+    /// below it; the layout test measures that frame at all three widths.
+    private func blackAndWhiteSwitchRow(isOn: Bool) -> some View {
+        Toggle(isOn: Binding(get: { session.edit.color.blackAndWhite },
+                             set: { on in _ = resets.blackAndWhite(on) })) {
+            Text(Section.blackAndWhite.title)
+                .font(.system(size: SliderRowStyle.standard.labelSize,
+                              weight: SliderRowStyle.standard.labelWeight))
+                .foregroundStyle(.secondary)
+        }
+        .toggleStyle(.checkbox)
+        .controlSize(.mini)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help("黑白：S3.4 把彩色转成单色。关掉只是停用下面的混合——八个值都留着，重新打开就回来")
+        .accessibilityIdentifier("inspector.blackAndWhite.switch")
+        .background(BlackAndWhiteProbeHost(rowID: BlackAndWhiteProbe.switchID, isOn: isOn))
+    }
+
+    /// One 黑白混合 row: which band it drives, and the numbers the row draws.
+    ///
+    /// A table for the same reason `ToneRow` is one: 「八根滑杆、每根 ±100、每根能输入、每根双击回 0」
+    /// is then a value a test can hold, and the card cannot grow a ninth row (or lose a band) without
+    /// the table saying so. The band `index` is here rather than a key path because the target is
+    /// `color.bands[index].mix`, and the index is table state.
+    public struct BWMixRow: Equatable {
+        /// `0…7`, Lightroom's order: 红 橙 黄 绿 青 蓝 紫 品红.
+        public var index: Int
+        /// The row's label — the band's own name (`HSLBands.bandNames`), and the undo label.
+        public var title: String
+        public var range: ClosedRange<Double> = BWMixRow.travel
+        /// The resting readout: whole units, like every other row that is not 曝光.
+        public var format: String = "%.0f"
+        /// 红 = 线性域 (see the card's note above): a mix is ±1 stop of **linear** light.
+        public var shape: SliderShape = .linear
+        /// 047: typeable, like every other row (no card opts out).
+        public var editable: Bool = true
+        /// 052: no decimals while editing — the number on screen is the number in the document.
+        public var decimals: Int = 0
+        /// 052: whole numbers, rounded away from zero, so a readout never reads smaller than the model.
+        public var rounding: SliderRounding = .outward
+        /// The document's grid: **1 unit**. The readout is an integer, so the stored mix is the number
+        /// the user read — nothing downstream wants a 0.37 of a stop it cannot show.
+        public var quantum: Double = 1
+
+        /// ±100 — Lightroom's B&W mixer travel, and the unit `HSLBands.mix` defines (±100 = ±1 stop).
+        public static let travel: ClosedRange<Double> = -100...100
+
+        /// The field's default, from the model rather than a literal: `HSLBand()` is all zeros, i.e.
+        /// "this hue deposits exactly its own lightness in the grey".
+        public var defaultValue: Double { HSLBand().mix }
+    }
+
+    /// The eight rows, in draw order — one per band of `ColorGroup.bands`, named by the same table the
+    /// HSL selector uses. `bwRows.count` is the card's slider count (the switch is the ninth row).
+    public static let bwRows: [BWMixRow] = (0..<ColorGroup.bandCount).map { i in
+        BWMixRow(index: i, title: HSLBands.bandNames[i])
+    }
+
+    /// The card's row count as one number: **1 switch + 8 mixes = 9**. Derived from the table, never a
+    /// second literal, so `LayoutContractTests`' expectation moves with the card or not at all.
+    public static var blackAndWhiteRowCount: Int { 1 + bwRows.count }
+
+    /// `color.bands[band].mix` as a slider binding — the HSL card's closure pattern, for the same
+    /// reason (`i` is table state, so there is no `WritableKeyPath`). The read side is the document's
+    /// own value, so the number on screen is the number S3.4 is handed.
+    private func bwMixBinding(_ band: Int) -> Binding<Double> {
+        Binding(get: {
+            guard session.edit.color.bands.indices.contains(band) else { return 0 }
+            return session.edit.color.bands[band].mix
+        }, set: { value in
+            let stored = Self.quantized(value, quantum: 1)
+            session.applyEdit { model in
+                guard model.color.bands.indices.contains(band) else { return }
+                model.color.bands[band].mix = stored
+            }
+        })
     }
 
     /// 派单 076 — **HSL**: eight band selectors, and the selected band's three sliders.
@@ -2015,6 +2167,8 @@ public struct PanelResets {
         case whiteBalance
         case light
         case color
+        /// 2026-10-28: 黑白 — S3.4's switch and its eight 黑白混合 numbers, one double-click.
+        case blackAndWhite
         case detail
         /// 2026-10-28: 效果 — 暗角 + 颗粒, eight numbers, one double-click.
         case effects
@@ -2025,6 +2179,7 @@ public struct PanelResets {
             case .whiteBalance: return InspectorView.Section.whiteBalance.title
             case .light: return InspectorView.Section.light.title
             case .color: return InspectorView.Section.color.title
+            case .blackAndWhite: return InspectorView.Section.blackAndWhite.title
             case .detail: return InspectorView.Section.detail.title
             case .effects: return InspectorView.Section.effects.title
             }
@@ -2105,6 +2260,50 @@ public struct PanelResets {
         let committed = session.commitEdit(label: axis.title, coalesce: false)
         loupe?.endDetailAdjustment()
         return committed
+    }
+
+    // MARK: 黑白 (S3.4, 2026-10-28)
+
+    /// The 黑白 switch, as **one** document edit and **one** history entry.
+    ///
+    /// `coalesce: false` for 077's reason (`decoderVersion`, the double-click resets): a switch is a
+    /// discrete command, so 开 → 关 → 开 must be three rows, not one folded into the drag before it.
+    /// Like those verbs it writes nothing when the document is already there, so a `Toggle` that
+    /// reports its own state cannot mint an empty snapshot.
+    ///
+    /// **It does not touch the eight mixes.** Switching back to colour leaves them in the document
+    /// (they encode nothing while the switch is off, and `EditModel.keyMaterial(.bw)` is what keeps a
+    /// cached colour frame unaware of them), which is exactly what makes 「关掉置灰、不归零，重新打开
+    /// 值就回来」 true.
+    @discardableResult
+    public func blackAndWhite(_ on: Bool) -> Bool {
+        guard session.edit.color.blackAndWhite != on else { return false }
+        session.applyEdit { $0.color.blackAndWhite = on }
+        return session.commitEdit(label: InspectorView.Section.blackAndWhite.title, coalesce: false)
+    }
+
+    /// Double-click on one 黑白混合 row's name: **that** band's mix back to 0, one snapshot.
+    ///
+    /// The band index is table state, so it is an argument here rather than something this type could
+    /// look up (the same rule as `hslField`): the row the user double-clicked is the row the panel drew.
+    /// 0 is the field's own default — `HSLBand()` is all zeros, i.e. "this hue deposits exactly its own
+    /// lightness", so the grey is the plain OKLab lightness again at that hue.
+    ///
+    /// This verb does **not** consult the switch. The card already makes an off row inert
+    /// (`SliderRow.enabled` → `.disabled`), so「能双击的标签」and「活着的滑杆」are the same set; a verb
+    /// that also refused while the switch is off would put the same rule in two places and let them
+    /// disagree after a change to either. What it does write is exactly one band's mix: the other seven
+    /// bands, the switch, and the three HSL axes keep what they hold.
+    @discardableResult
+    public func blackAndWhiteField(_ band: Int) -> Bool {
+        guard session.edit.color.bands.indices.contains(band),
+              session.edit.color.bands[band].mix != 0 else { return false }
+        session.applyEdit { model in
+            guard model.color.bands.indices.contains(band) else { return }
+            model.color.bands[band].mix = 0
+        }
+        // The undo label is the row's own title (the band's name), like every other card's row.
+        return session.commitEdit(label: HSLBands.bandNames[band], coalesce: false)
     }
 
     /// Double-click on 色温 or 色调: **that axis** back to as shot (`nil`). The other axis keeps whatever
@@ -2221,6 +2420,20 @@ public struct PanelResets {
                 model.color.saturation = 0
             }
             // 077: 双击复位是命令，不参与合并。
+            return session.commitEdit(label: group.title, coalesce: false)
+
+        case .blackAndWhite:
+            // 2026-10-28: the card's **own** two things — the switch and the eight mixes — back to
+            // `ColorGroup.identity` in one snapshot: 黑白 off, eight zeros. vibrance/saturation belong
+            // to Color and the three HSL axes to the HSL card, so a double-click here must not undo
+            // work done on either (076's rule for `.color`, read the other way round).
+            guard session.edit.color.blackAndWhite || session.edit.color.hasMix else { return false }
+            session.applyEdit { model in
+                model.color.blackAndWhite = false
+                for i in 0..<min(model.color.bands.count, ColorGroup.bandCount) {
+                    model.color.bands[i].mix = 0
+                }
+            }
             return session.commitEdit(label: group.title, coalesce: false)
 
         case .detail:

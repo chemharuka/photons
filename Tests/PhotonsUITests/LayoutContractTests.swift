@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import PhotonsCore
 import PhotonsUI
 
 /// The layout contract of the M3 shell (36 pt top bar, 212 pt sidebar, 122 pt filmstrip, 330 pt
@@ -155,6 +156,42 @@ final class LayoutContractTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tiny.canvas.width, 560 - 0.001)
         XCTAssertEqual(tiny.window.width, 1200, accuracy: 0.001)
         XCTAssertEqual(tiny.window.height, 780, accuracy: 0.001)
+    }
+
+    // MARK: the inspector's 黑白 card
+
+    /// **The card, as a layout contract** (2026-10-28): where 黑白 sits in the panel, how many rows it
+    /// draws (**9** = 1 switch + 8 mixes), and the card width that is `面板 − 2·12 − 2·16` at the three
+    /// allowed panel widths — **244 / 274 / 308**.
+    ///
+    /// The three numbers the acceptance names are the card's *content* widths, and this is why: the
+    /// inspector's `300 … 364` (`WorkspaceLayout.inspectorWidthMin … Max`) minus the column's 12 pt
+    /// padding on each side and the card's own 16 pt inset. Pinning the identity here means a card that
+    /// changed the panel's insets cannot quietly keep the old row geometry (the rendered proof is
+    /// `BlackAndWhiteCardTests`, which measures the rows at exactly these three widths).
+    func testTheBlackAndWhiteCardIsNineRowsAfterColorAtTheThreeContentWidths() throws {
+        let sections = InspectorView.sections(in: .adjust)
+        let color = try XCTUnwrap(sections.firstIndex(of: .color))
+        XCTAssertEqual(sections[color + 1], .blackAndWhite, "黑白紧跟 Color：\(sections)")
+        XCTAssertEqual(InspectorView.Section.blackAndWhite.title, "黑白")
+
+        // 1 switch + 8 mixes, derived from the card's own table.
+        XCTAssertEqual(InspectorView.bwRows.count, ColorGroup.bandCount)
+        XCTAssertEqual(InspectorView.blackAndWhiteRowCount, 9)
+        XCTAssertEqual(InspectorView.bwRows.map(\.title),
+                       ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"])
+
+        // The panel widths the resolver allows ↔ the card content widths the rows are measured at.
+        XCTAssertEqual(WorkspaceLayout.inspectorWidthMin, 300)
+        XCTAssertEqual(WorkspaceLayout.inspectorWidthMax, 364)
+        XCTAssertEqual(WorkspaceLayout.cardInsetH, 16)
+        let contentWidths = [WorkspaceLayout.inspectorWidthMin, 330, WorkspaceLayout.inspectorWidthMax]
+            .map { $0 - 2 * 12 - 2 * WorkspaceLayout.cardInsetH }
+        XCTAssertEqual(contentWidths, [244, 274, 308],
+                       "面板 300/330/364 → 卡内容 244/274/308（行按这三个宽度量）")
+        // The panel can never be narrower than the narrowest width this card was measured at.
+        XCTAssertGreaterThanOrEqual(WorkspaceLayout.inspectorWidthMin, 300,
+                                    "比实测更窄的面板会出现没有验证过的行宽")
     }
 
     // MARK: grid

@@ -395,6 +395,97 @@ final class PanelResetTests: XCTestCase {
                       "each HSL row's name must reset that row's own field")
     }
 
+    // MARK: - 5c. 黑白 (S3.4, 2026-10-28)
+
+    /// The switch is **one** command: press it, one row; press it twice, two rows. It must not fold
+    /// into the drag before it (`coalesce: false`), and it must not touch the eight mixes — that is
+    /// what makes 「关掉置灰、不归零」 possible at all.
+    func testTheSwitchIsOneSnapshotAndLeavesTheMixesAlone() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit {
+            $0.color.bands[0].mix = 40
+            $0.color.bands[3].mix = -20
+        }
+        XCTAssertTrue(session.commitEdit(label: "黑白混合"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.blackAndWhite(true), "开 = 一条")
+        XCTAssertEqual(session.edit.color.blackAndWhite, true)
+        XCTAssertEqual(session.edit.color.bands[0].mix, 40, "开关不动混合值")
+        XCTAssertEqual(session.history.count, before + 1)
+        XCTAssertEqual(session.history.currentSnapshot?.label, "黑白")
+        XCTAssertFalse(resets.blackAndWhite(true), "已经是开：不许写空快照")
+
+        XCTAssertTrue(resets.blackAndWhite(false), "关 = 一条，且不折进上一行")
+        XCTAssertEqual(session.history.count, before + 2, "开 → 关 是两行，不是一行")
+        XCTAssertEqual(session.edit.color.bands[0].mix, 40, "关掉之后值还在")
+        XCTAssertEqual(session.edit.color.bands[3].mix, -20)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.color.blackAndWhite, true, "⌘Z 只撤回开关这一下")
+        print("BW SWITCH · 开/关 = 2 条 · 混合 40/−20 原封不动 · history \(session.history.count)")
+    }
+
+    /// Double-click on one 黑白混合 row's name: that band's mix back to 0, one snapshot, and the other
+    /// seven bands + the switch + the three HSL axes are untouched.
+    func testOneBlackAndWhiteRowResetsOnlyThatBand() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.color.blackAndWhite = true
+            for i in 0..<ColorGroup.bandCount { model.color.bands[i].mix = Double((i + 1) * 10) }
+            model.color.bands[2].hue = 25          // another card's field: it must survive
+        }
+        XCTAssertTrue(session.commitEdit(label: "黑白混合"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.blackAndWhiteField(4), "绿（band 4）双击复位 = 一条")
+        XCTAssertEqual(session.edit.color.bands[4].mix, 0)
+        XCTAssertEqual(session.history.count, before + 1)
+        XCTAssertEqual(session.history.currentSnapshot?.label, "青", "撤销标签是行自己的名字")
+        // Everything else is where it was.
+        XCTAssertEqual(session.edit.color.bands.map(\.mix), [10, 20, 30, 40, 0, 60, 70, 80])
+        XCTAssertEqual(session.edit.color.bands[2].hue, 25)
+        XCTAssertEqual(session.edit.color.blackAndWhite, true)
+
+        XCTAssertFalse(resets.blackAndWhiteField(4), "已经是 0：不写")
+        XCTAssertFalse(resets.blackAndWhiteField(99), "没有这个色带：不写")
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.color.bands[4].mix, 50, "⌘Z 把那个色带带回来")
+        print("BW ROW RESET · band 4 → 0 · 其余 " + session.edit.color.bands.map(\.mix).description)
+    }
+
+    /// Double-click on 「黑白」: the card's own two things in **one** snapshot — the switch off and all
+    /// eight mixes to 0 — while Color's and HSL's numbers stay (they are other cards' work).
+    func testTheBlackAndWhiteCardResetsTheSwitchAndAllEightMixesInOneSnapshot() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.color.blackAndWhite = true
+            for i in 0..<ColorGroup.bandCount { model.color.bands[i].mix = Double(i * 5 - 10) }
+            model.color.vibrance = 30            // Color's
+            model.color.bands[1].hue = 12        // HSL's, on the same band
+        }
+        XCTAssertTrue(session.commitEdit(label: "黑白"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.blackAndWhite))
+        XCTAssertEqual(session.edit.color.blackAndWhite, false, "复位 = 关")
+        XCTAssertEqual(session.edit.color.bands.map(\.mix), Array(repeating: 0, count: 8), "八个混合归零")
+        XCTAssertEqual(session.edit.color.vibrance, 30, "Color 的数字不归这张卡")
+        XCTAssertEqual(session.edit.color.bands[1].hue, 12, "HSL 的色相不归这张卡")
+        XCTAssertEqual(session.history.count, before + 1, "整卡 = 一条")
+
+        XCTAssertFalse(resets.group(.blackAndWhite), "已经是默认就不许再写一条")
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.color.blackAndWhite, true)
+        XCTAssertEqual(session.edit.color.bands[7].mix, 25, "⌘Z 一步把开关和八个数全带回来")
+        print("BW CARD RESET · 开关 + 8 混合 → 1 条 · vibrance/hue 不动")
+    }
+
     // MARK: - 6. 没有变化就不写历史
 
     func testAResetOnAnAlreadyDefaultPanelWritesNothing() {
@@ -412,6 +503,10 @@ final class PanelResetTests: XCTestCase {
         // 076: the HSL card and its three rows, on a document that has no bands.
         XCTAssertFalse(resets.hsl())
         XCTAssertFalse(resets.hslField(0, .hue))
+        // 2026-10-28: 黑白 — the switch (already off), the eight rows (already 0), and the card.
+        XCTAssertFalse(resets.blackAndWhite(false), "已经是关：不许写空快照")
+        XCTAssertFalse(resets.blackAndWhiteField(0))
+        XCTAssertFalse(resets.group(.blackAndWhite))
         XCTAssertEqual(session.history.count, 0, "空双击不该长出一条空快照")
     }
 
@@ -435,17 +530,19 @@ final class PanelResetTests: XCTestCase {
         XCTAssertTrue(source.contains("card(Section.detail.title, reset: { resetGroup(.detail) })"))
         XCTAssertTrue(source.contains("card(Section.whiteBalance.title, reset: { resetWhiteBalance() })"))
 
-        // 分组清单就是那五张卡（2026-10-28 加效果：暗角 + 颗粒，八个数字一起复位）；蒙版是列表，
-        // 没有「整组默认」。
+        // 分组清单就是那六张卡（2026-10-28 加效果：暗角 + 颗粒，八个数字一起复位；再加黑白：开关 +
+        // 八个混合，一起复位）；蒙版是列表，没有「整组默认」。
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
-                       ["whiteBalance", "light", "color", "detail", "effects"])
+                       ["whiteBalance", "light", "color", "blackAndWhite", "detail", "effects"])
         XCTAssertEqual(PanelResets.Group.allCases.map(\.title),
                        [InspectorView.Section.whiteBalance.title, InspectorView.Section.light.title,
-                        InspectorView.Section.color.title, InspectorView.Section.detail.title,
-                        InspectorView.Section.effects.title],
+                        InspectorView.Section.color.title, InspectorView.Section.blackAndWhite.title,
+                        InspectorView.Section.detail.title, InspectorView.Section.effects.title],
                        "the undo label is the card the user double-clicked")
         XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
                       "效果卡也要能从标题复位")
+        XCTAssertTrue(source.contains("card(Section.blackAndWhite.title, reset: { resetGroup(.blackAndWhite) })"),
+                      "黑白卡也要能从标题复位")
 
         // 每一根滑杆都有复位：`sliderRow` 的 `onReset` 是必填参数，不是可选的。
         XCTAssertFalse(source.contains("onReset: (() -> Void)? = nil"),
