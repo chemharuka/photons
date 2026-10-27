@@ -374,12 +374,13 @@ public struct InspectorView: View {
     /// (「加一个黑电平滑块」), the row is what the number is. Printing 黑电平 twice in a one-row card
     /// is the only alternative, and it reads like a bug.
     public static let blackLevelRows: [ToneRow] = [
-        ToneRow(title: "偏移", range: LightGroup.blackOffsetSliderRange, format: "%.0f",
-                shape: .linear, keyPath: \.light.blackOffset, decimals: 1),
+        ToneRow(title: "偏移", range: LightGroup.blackOffsetSliderRange, format: "%.1f",
+                shape: .linear, keyPath: \.light.blackOffset, decimals: 1, rounding: .asIs),
     ]
 
-    /// 071: slider position ↔ document value. Position is an integer-valued Double (the model rounds
-    /// to a whole 1/1000 tick — there is no `step:`, 046), so a drag lands on `n/1000` exactly.
+    /// 071: slider position ↔ document value. Position lives on a **0.1** grid (−10.0…+10.0, so the
+    /// document's 1/1000 tick can be resolved to 1/10 000 of linear light — the owner's 「不是只能
+    /// 取整数」); there is no `step:` (046), so the model does the snapping.
     private func blackLevelBinding(_ row: ToneRow) -> Binding<Double> {
         Binding(get: { (session.edit[keyPath: row.keyPath] * 1000).rounded() },
                 set: { position in

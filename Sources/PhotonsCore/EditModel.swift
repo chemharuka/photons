@@ -592,24 +592,24 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     // MARK: - 071: the additive linear trim's mapping
 
-    /// 071 — slider position → document value: **exactly** `position / 1000`, described on an integer
-    /// position (−10…+10).
+    /// 071 — slider position → document value: **exactly** `position / 1000`, described on a
+    /// **0.1-step** position (−10.0…+10.0).
     ///
     /// `Double(n) / 1000.0` rather than `n * 0.001`: the division is correctly rounded, so `10` gives
     /// the double nearest 0.01 (i.e. the literal `0.01`) and every step is a 1/1000 tick of the same
-    /// value. A non-integer position is rounded to the nearest whole tick first — the panel has no
-    /// `step:` (SwiftUI would draw tick marks), so the quantization has to live here, exactly like
-    /// `DetailSettings.setPosition`.
+    /// value. The panel has no `step:` (SwiftUI would draw tick marks), so the quantization lives
+    /// here: the position is snapped to a tenth of a tick (`0.1`, i.e. a 1/10 000 of linear light),
+    /// which is what the owner asked for — 「取值范围是 −10 到 10，但不是只能取整数」.
     public static func blackOffset(fromSlider position: Double) -> Double {
         guard position.isFinite else { return 0 }
-        let tick = min(max(position.rounded(), blackOffsetSliderRange.lowerBound),
+        let tick = min(max((position * 10).rounded() / 10, blackOffsetSliderRange.lowerBound),
                        blackOffsetSliderRange.upperBound)
         return tick / 1000
     }
 
-    /// The slider position this document asks for — the inverse of `blackOffset(fromSlider:)`, an
-    /// integer-valued Double (the slider centres on it without a rounding error to wobble around).
-    public var blackOffsetSliderPosition: Double { (blackOffset * 1000).rounded() }
+    /// The slider position this document asks for — the inverse of `blackOffset(fromSlider:)`, on the
+    /// same 0.1-step grid so the knob does not wobble around a value the row cannot print.
+    public var blackOffsetSliderPosition: Double { (blackOffset * 1000 * 10).rounded() / 10 }
 
     /// The trim as the kernel gets it: clamped into the envelope, so a hand-edited document cannot
     /// push the linear buffer around by more than ±0.01.

@@ -30,7 +30,7 @@ final class BlackLevelTests: XCTestCase {
     /// 「精确」在这里是可断言的：`n/1000` 在实数里就是 n 个千分之一，`Double(n) / 1000.0` 是正确
     /// 舍入的除法，所以它必然等于 `0.01` / `0.007` 这样的字面量本身 —— 不是「差一点点」。
     func testSliderPositionMapsToExactlyOneThousandth() {
-        XCTAssertEqual(LightGroup.blackOffsetSliderRange, -10 ... 10, "滑杆行程是整数 −10…+10")
+        XCTAssertEqual(LightGroup.blackOffsetSliderRange, -10 ... 10, "滑杆行程 −10…+10（0.1 步）")
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: 10), 0.01, "+10 → +0.01")
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: -10), -0.01, "−10 → −0.01")
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: 0), 0, "0 → 0（默认居中）")
@@ -52,15 +52,19 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: .nan), 0)
         XCTAssertEqual(LightGroup.blackOffset(fromSlider: .infinity), 0)
 
-        // 面板没有 `step:`（046 不许刻度线），所以量化在模型层：非整数位置落到最近的 tick。
-        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.4), 0.002)
-        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.6), 0.003)
-        XCTAssertEqual(LightGroup.blackOffset(fromSlider: -6.6), -0.007)
+        // 面板没有 `step:`（046 不许刻度线），所以量化在模型层：位置吸到 **0.1** 的格子上
+        // （「取值范围是 −10 到 10，但不是只能取整数」），也就是线性域的 1/10 000。
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.4), 0.0024)
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.6), 0.0026)
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: -6.6), -0.0066)
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.44), 0.0024, "2.44 → 最近 0.1 格 = 2.4")
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 2.46), 0.0025, "2.46 → 最近 0.1 格 = 2.5")
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: -0.04), 0, "-0.04 → 最近的 0.1 格是 0")
         // 0.002 这类值必须能表达 —— 这正是模型里存 Double 而不是整数格值的原因。
         var light = LightGroup.identity
         light.blackOffset = 0.002
         XCTAssertEqual(light.blackOffset, 0.002)
-        XCTAssertEqual(light.blackOffsetSliderPosition, 2)
+        XCTAssertEqual(light.blackOffsetSliderPosition, 2, "0.002 → 2.0（0.1 格上）")
 
         // 信封：±0.01，内核拿到的永远是钳过的值。
         XCTAssertEqual(LightGroup.blackOffsetRange, -0.01 ... 0.01)

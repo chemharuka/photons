@@ -38,29 +38,32 @@ final class BlackLevelCardTests: XCTestCase {
     }
 
     /// 行表本身：一行、整数行程、整数读数、可键入、线性域形状、绑 `light.blackOffset`。
-    func testTheRowIsOneIntegerSliderOnTheLinearDomain() {
+    func testTheRowIsOneDecimalSliderOnTheLinearDomain() {
         let rows = InspectorView.blackLevelRows
         XCTAssertEqual(rows.count, 1, "一行")
         let row = rows[0]
         XCTAssertEqual(row.title, "偏移", "行标题是这条偏移自己的名字（卡标题已经是「黑电平」）")
-        XCTAssertEqual(row.range, -10 ... 10, "滑杆整数 −10…+10，0 在正中间")
+        XCTAssertEqual(row.range, -10 ... 10, "滑杆 −10…+10（0.1 步），0 在正中间")
         XCTAssertEqual(row.range.lowerBound, -row.range.upperBound, "两端对称，所以 0 落在中点")
-        XCTAssertEqual(row.format, "%.0f", "读数是整数（−7），不是 −0.007")
+        XCTAssertEqual(row.format, "%.1f", "读数带一位小数（−7.5），不是 −0.0075")
         XCTAssertEqual(row.shape, .linear, "线性域 → 红 #FF375F")
         XCTAssertTrue(row.editable, "047: 面板里每一行都能键入")
         XCTAssertEqual(row.defaultValue, 0, "默认 0（`EditModel.neutral`，不是字面量）")
-        XCTAssertEqual(row.decimals, 1, "编辑时显示干净的整数")
+        XCTAssertEqual(row.decimals, 1, "编辑时同样一位小数")
 
         // 读数文案：负号是 ASCII 的减号，负零不出现（面板的老规矩）。
-        XCTAssertEqual(InspectorView.sliderText(row.format, -7, rounding: row.rounding), "-7")
-        XCTAssertEqual(InspectorView.sliderText(row.format, 0, rounding: row.rounding), "0")
-        XCTAssertEqual(InspectorView.sliderText(row.format, 10, rounding: row.rounding), "10")
+        XCTAssertEqual(InspectorView.sliderText(row.format, -7, rounding: row.rounding), "-7.0")
+        XCTAssertEqual(InspectorView.sliderText(row.format, -7.5, rounding: row.rounding), "-7.5")
+        XCTAssertEqual(InspectorView.sliderText(row.format, 0, rounding: row.rounding), "0.0")
+        XCTAssertEqual(InspectorView.sliderText(row.format, 10, rounding: row.rounding), "10.0")
 
         // 表里 `keyPath` 就是文档那一个字段：滑杆位置与它之间只有 `LightGroup` 的映射。
         var edit = EditModel.neutral
-        edit[keyPath: row.keyPath] = LightGroup.blackOffset(fromSlider: -7)
-        XCTAssertEqual(edit.light.blackOffset, -0.007, "滑杆 −7 必须写进 −0.007")
-        XCTAssertEqual((edit[keyPath: row.keyPath] * 1000).rounded(), -7, "读回来还是 −7")
+        edit[keyPath: row.keyPath] = LightGroup.blackOffset(fromSlider: -7.5)
+        XCTAssertEqual(edit.light.blackOffset, -0.0075, "滑杆 −7.5 必须写进 −0.0075")
+        XCTAssertEqual((edit[keyPath: row.keyPath] * 10000).rounded() / 10, -7.5, "读回来还是 −7.5")
+        // 非整数位置落在 0.1 格上：这就是「不是只能取整数」。
+        XCTAssertEqual(LightGroup.blackOffset(fromSlider: 3.34), 0.0033, "3.34 → 3.3 格 → 0.0033")
     }
 
     // MARK: - 2. 写文档：一次拖动 = 一条历史，一条快照里就是那个值
