@@ -70,6 +70,22 @@ public struct DecodeInputs: Sendable, Hashable {
     /// The detail component — `dt=nr·,c30,s·,d·` — or `nil` for an untouched panel.
     public var detailComponent: String? { detail.decodeComponent }
 
+    /// The decoder-model component — `ver=9.dng` — or `nil` when the document asks for nothing.
+    ///
+    /// The same discipline as the white balance and the four detail amounts, for the same reason and
+    /// with the same consequence: **the default appends nothing**, so every rung identity, every
+    /// histogram key and every cache key written before this row existed is byte-identical and keeps
+    /// hitting. What is new is that a *non*-default version has to appear here at all.
+    ///
+    /// It did not, and that was the whole of 「选了 v9 画面不动，拖一下滑杆才重算」: the ladder key,
+    /// the queue key and `isCurrentPhoto` are all built by `appending(to:)`, so a v9 request landed
+    /// in the **same slot** as the resident v8 buffer — the edit frame found "its" rung already
+    /// resident, painted the old pixels, and the read-back in the 细节 card kept saying v8. The only
+    /// thing that ever moved the picture was an unrelated decode input (a detail slider, which adds
+    /// `dt=…`), which is exactly the workaround the user reported. `key` had `ver=` all along; the
+    /// identity did not.
+    public var versionComponent: String? { decoderVersion.map { "ver=\($0)" } }
+
     /// A stable, order-independent string for this development. Only decode inputs may enter it.
     public var key: String {
         var parts = ["recipe=\(recipe)",
@@ -80,13 +96,16 @@ public struct DecodeInputs: Sendable, Hashable {
         return parts.joined(separator: ";")
     }
 
-    /// `base` for as shot and an untouched detail panel, `base|wb=…|dt=…` otherwise — the one
+    /// `base` for as shot and an untouched detail panel, `base|ver=…|wb=…|dt=…` otherwise — the one
     /// spelling of a rung identity.
     ///
     /// Used by the loupe's `ladderIdentity` and by the histogram's cache key, so a buffer cannot be
-    /// named one way on the way in and another on the way out.
+    /// named one way on the way in and another on the way out. The version goes **first** because it
+    /// is the coarsest input there is: which decoder produced the buffer, before which balance or
+    /// which amount it was asked for.
     public func appending(to base: String) -> String {
         var out = base
+        if let ver = versionComponent { out += "|\(ver)" }
         if let wb = whiteBalanceComponent { out += "|\(wb)" }
         if let dt = detailComponent { out += "|\(dt)" }
         return out

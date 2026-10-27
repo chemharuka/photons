@@ -509,8 +509,11 @@ public struct InspectorView: View {
     ///     `CIRAWFilter.h:121/129/137/153`). On this machine's `9.dng` that is exactly **two** rows
     ///     inert — 色彩降噪 and 细节 (both move zero samples) — while 降噪 and 锐化 stay live (0.021 /
     ///     0.510 maxΔ). Before the first frame `DetailAxes.forDecoderVersion` stands in, so a v9
-    ///     document opens correctly and a v8 one is live. Greyed is **not zeroed**: the values are
-    ///     kept, so going back to another version restores exactly the amounts the document had.
+    ///     document opens correctly and a v8 one is live. Greyed is **not zeroed**: the *displayed*
+    ///     position of an inert row is still the document's number or the body's baseline — what
+    ///     changes under a version switch is the document itself, because
+    ///     `PanelResets.decoderVersion` puts all four back on their defaults as part of the same edit
+    ///     (a v9 document never carries a 色彩降噪 amount the new decoder cannot honour).
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
@@ -1816,21 +1819,39 @@ public struct PanelResets {
 
     // MARK: the decoder model (细节 card, owner 2026-10-27)
 
-    /// Pick one item of the file's own version list, as one document edit and one history entry.
+    /// Pick one item of the file's own version list, as **one** document edit and **one** history entry.
     ///
     /// `"8"` (when the file offers it) is stored as **`nil`** — "ask for nothing", which is the D2′
     /// default and the byte-identical pre-change decode; anything else is stored verbatim. That keeps
     /// "the default is v8" true without inventing an assignment that Apple's own default does not make.
     ///
-    /// This is a **decode** input (`EditModel.decodeInputs` carries it), so the rung identity and the
-    /// on-disk buffer both move and the next frame is a fresh development — the expected cost of the
-    /// switch. `false` when the value is already the document's, so a picker reporting its own state
-    /// cannot mint empty snapshots.
+    /// This is a **decode** input (`EditModel.decodeInputs` carries it, and — since the rung identity
+    /// gained its `ver=` component — the ladder, the queue and `isCurrentPhoto` all see it as a
+    /// different buffer), so the pick alone re-develops: no slider has to be touched afterwards.
+    ///
+    /// **The four amounts are forced back to this version's defaults** — `detailSettings = .identity`,
+    /// i.e. all four sliders at the body's own baseline, which assigns nothing to `CIRAWFilter`:
+    ///
+    ///   · a version change is the coarsest decode input, and `v9` does not honour 色彩降噪 / 细节 at
+    ///     all (`isColorNoiseReductionSupported` / `isDetailSupported` are false on that instance). The
+    ///     old behaviour carried the numbers across the switch and then relied on `applyDetail`'s veto
+    ///     to leave them unwritten — the panel showed 70 on a slider that could no longer do anything,
+    ///     and the first thing the user did with it was "why did my colour NR stop working";
+    ///   · the defaults are the *body's*, not zero (`nil` = 50 for colour NR on a Leica, 100 for
+    ///     sharpness on an R5), so "back to default" must be `.identity`, never a literal;
+    ///   · it is written in the **same** `applyEdit` as the version, so one ⌘Z takes back both halves.
+    ///
+    /// `false` when the version is already the document's, so a picker reporting its own state cannot
+    /// mint empty snapshots (and cannot silently reset four sliders either).
     @discardableResult
     public func decoderVersion(_ spelling: String, offered: [String]) -> Bool {
         let stored: String? = (spelling == "8" && (offered.isEmpty || offered.contains("8"))) ? nil : spelling
         guard stored != session.edit.decoderVersion else { return false }
-        session.applyEdit { $0.decoderVersion = stored }
+        session.applyEdit {
+            $0.decoderVersion = stored
+            // The same edit, not a second one: 版本 + 四轴 = 一条历史 (see the type's own note above).
+            $0.detailSettings = .identity
+        }
         return session.commitEdit(label: "解码模型")
     }
 
