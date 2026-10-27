@@ -387,16 +387,15 @@ struct S0Params {
 private struct S1Params {
     var a: SIMD4<Float>   // gain, wbR, wbG, wbB
     var b: SIMD4<Float>   // recovery, identity, blacks, whites
-    // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B), now in S1
-    // as well as S2: the black point is a level and levels live here, so a lifted `blacks` maps the
-    // matte's 0 to `−blk/(wht−blk) > 0` in *this* pass. Same convention as S0's `a`/`b` and S3c's `c`.
+    // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B), in S1
+    // because the dropper's level and 071's offset both move the matte's 0. Same convention as S0's
+    // `a`/`b` and S3c's `c`. (073B's knee keeps 0 at 0, but the other two spellings do not.)
     var c: SIMD4<Float>
-    // 030: blackLevel, whiteLevel, hasBlack, hasWhite. The absolute spelling of the same two levels;
-    // the flags are 0 unless a level dropper (or a document) set one, and then the slider is ignored.
+    // 030: blackLevel, whiteLevel, hasBlack, hasWhite. Read only by the `kLevels` entry point — the
+    // black/white *sliders* are an EV window now (073B) and never arrive here as a level.
     var d: SIMD4<Float>
-    // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between `d`'s levels and the
-    // gain. 0 for every document that never used the control, and then the kernel skips the addition
-    // (so those documents keep 019's arithmetic byte for byte).
+    // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between the level and the
+    // gain. 0 for every document that never used the control, and then the kernel's `kTrim` is false.
     var e: SIMD4<Float>
 }
 
@@ -1735,21 +1734,37 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .sceneLinear:
-            // 071: two entry points in one shader file. `s1_scene_linear` is 019's arithmetic; the
-            // `_trim` variant is the same templated body with `v += blackOffset` compiled in. The
-            // choice is `blackOffset != 0` — the same condition that decides whether `boff` enters the
-            // key material — and it is a *dispatch* choice rather than a branch inside the kernel
-            // because a branch alone moved 2980/12309 scene-linear samples of the push document by an
-            // ULP (see the shader header).
-            let p = try kernels.pipeline(file: "s1_scene_linear",
-                                         function: edit.light.blackOffset == 0
-                                             ? "s1_scene_linear" : "s1_scene_linear_trim")
-            // ── S1 is levels + exposure + highlight recovery (派单 019) ──────────────────────────
-            // Black/white are a **level** (where 0 and 1 are), so they normalise the scene-linear
-            // value *before* the gain: `(v − blk)/max(wht − blk, 1e−3)` then `·gain`. Applied after the
-            // gain instead (which is where blacks/whites used to be, in S2) a lift is absolute against
-            // a value the gain multiplies, so `blacks +` detail fell back under zero as exposure rose
-            // and S2 clamped it away — "the more exposure, the blacker the shadows".
+            // 073B: six entry points in one shader file, chosen on the CPU by the same conditions as
+            // the key material — see the shader header for the table and for why this is a *dispatch*
+            // choice rather than `if (blacks != 0)` inside one kernel (071 measured that spelling
+            // moving 2980/12309 samples of the push document by an ULP).
+            //
+            //   · no dropper level, `blacks == whites == 0` → 019's arithmetic without any new code;
+            //   · `blacks`/`whites` ≠ 0                     → the end-point (knee) model, 073B;
+            //   · a dropper level (`blackLevel`/`whiteLevel`) → 030's affine level, unchanged. The two
+            //     spellings never coexist in a document (`LightGroup.levels`), and the absolute one
+            //     wins if a hand-edited file somehow sets both — the pre-073 precedence.
+            //   · 071's trim is orthogonal: `_trim` for each of the three.
+            let hasLevels = edit.light.blackLevel != nil || edit.light.whiteLevel != nil
+            let knee = !hasLevels && (edit.light.blacks != 0 || edit.light.whites != 0)
+            let trim = edit.light.blackOffset != 0
+            let function: String
+            switch (hasLevels, knee, trim) {
+            case (true, _, false): function = "s1_scene_linear_levels"
+            case (true, _, true): function = "s1_scene_linear_levels_trim"
+            case (false, true, false): function = "s1_scene_linear_knee"
+            case (false, true, true): function = "s1_scene_linear_knee_trim"
+            case (false, false, false): function = "s1_scene_linear"
+            case (false, false, true): function = "s1_scene_linear_trim"
+            }
+            let p = try kernels.pipeline(file: "s1_scene_linear", function: function)
+            // ── S1 is end points + exposure + highlight recovery ────────────────────────────────
+            // 073B: the sliders are **not** a level any more. `blacks` is a pure multiplicative EV at
+            // the dark end (±3 EV, a 7 EV toe) and `whites` is EV (91 %) + a small level (9 %), both
+            // weighted by an EV window so the mid-tones are outside the knee. The affine span
+            // `(v − blk)/max(wht − blk, 1e−3)` that 019 put here is gone from the slider path — it
+            // changed the slope of the whole picture, which is not what the owner asked for — and
+            // survives only as 030's dropper level, where "this sample is black" *is* a level.
             //
             // White balance is a **decode** setting now: `light.temperature`/`tint` go to
             // `CIRAWFilter.neutralTemperature`/`neutralTint` and the RAW is developed again, so the

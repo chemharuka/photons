@@ -1,35 +1,73 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// S2 — tone map: parametric curve (Lightroom's Light panel), display-referred output in 0…1+.
+// S2 — tone map: parametric curve (Lightroom's Light panel), the two region lifts, final clamp.
 //
-// Order: contrast around the scene-linear mid-grey pivot (0.18) → region lifts for
-// shadows/highlights weighted by output luminance → the final clamp. This is a parameterisation of the
-// classic "light panel" behaviour, not a film emulation: it is monotone in every slider and exact
-// identity at all zeros, which is what M1 has to prove.
+// Order: contrast around the scene-linear mid-grey pivot (0.18) → region lifts for shadows/highlights
+// weighted by an **EV window** → the final clamp. It is monotone in every slider and exact identity at
+// all zeros, which is what M1 has to prove.
 //
-// **Blacks/whites are not here** (派单 019). They are a *level* — where 0 and 1 are — and a level is
-// scene-linear, so it belongs in S1 (`s1_scene_linear`), **before** the exposure gain. Kept here, after
-// the gain, the same lift was absolute while the value it lifted was multiplied, so raising exposure
-// pushed lifted detail back under zero and this kernel's `max(v, 0)` deleted it: the more exposure, the
-// blacker the shadows. What is left here is *how the range bends between 0 and 1* — contrast and the
-// two region lifts — which is the "normal colour grading" side of the same distinction.
+// **Blacks/whites are not here** (派单 019). They are the two end points, a scene-linear quantity, so
+// they live in S1 (`s1_scene_linear`, 073B). What is left here is *how the range bends between the end
+// points* — contrast and the two region lifts — which is the "normal colour grading" side of the same
+// distinction.
 //
-// Direction (派单 008 A): Lightroom's, i.e. **both region sliders brighten towards +**. The `whites` and
-// `blacks` directions that used to be checked here moved to S1 with them, unchanged:
-// `blk = −blacks/100·0.15`, `wht = 1 − whites/100·0.15`.
+// **074 R2 — the region weights are EV windows, not linear-luma thresholds.** The shipped weights were
+// `1 − smoothstep(0, 0.5, lum)` and `smoothstep(0.5, 1, lum)`, i.e. windows on *linear* luminance
+// between code 0.5 (v = 0.214) and 1.0. Two measured facts made that wrong:
+//
+//   1. **The shadow window was centred on mid-grey.** At lum = 0.18 the old weight is 0.705, so
+//      `shadows = +100` applied 70 % of its lift to the mid-tones: measured on the four reference
+//      frames it moved the *median* by +19…+24 display codes while p90 moved +12…+26 — a global
+//      brightness gain wearing the label "shadows" (074 §0, reproduced in `ToneMapTests`).
+//   2. **The highlight window was above most of the picture.** It starts at lum 0.5 (code 0.735);
+//      the frames' p99 sits at code 0.60…0.78, so `highlights ±100` moved them by 0…4 codes — a dead
+//      control on real photographs — and at `highlights = −100` the window's own slope folded the map:
+//      measured min d(log v′)/d(log v) = **−0.280** at code 0.895 (21 of 767 grid samples below 0.3),
+//      i.e. a stretch of the highlights *inverted*.
+//
+// The fix is the coordinate, not a gain tweak: the weights are now smoothsteps on
+// **L = log2(luma)** — EV relative to display white, the histogram card's own axis — with two 2 EV
+// windows placed by the measured percentiles:
+//
+//     shadows    1 at/below −5.9 EV  →  0 at −3.9 EV
+//     highlights 0 at/below −3.2 EV  →  1 at −1.2 EV and above
+//
+// Why those numbers (contract 073 §3 and `ToneMapTests`, measured on `L1030402/405/408/433`):
+// p50 ∈ [−4.36, −3.28], p20 ∈ [−5.35, −4.77], p5 ∈ [−6.69, −6.22], p70 ∈ [−3.47, −2.53], p95 ∈
+// [−2.48, −1.45], p99 ∈ [−1.68, −0.88]. The shadow boundary at −3.9 EV keeps **every** median at
+// 0…2 codes while p5…p20 still move +7…+12; the highlight boundary at −3.2 EV does the mirror at the
+// top (p95 moves −9…−35, the median 0). Both windows are 2 EV wide, which is the monotonicity budget:
+// slope = 1 + 0.8·Δ·w′(L) with max|w′| = 1.5/2.0, so min slope is 1 − 1.2/2.0 = **0.400** at ±100
+// (the old highlight window was 0.5 EV wide in luma and folded at −0.280).
+//
+// The two windows do not meet: between −3.9 and −3.2 EV neither slider acts, which is what keeps the
+// mid-shadow-to-mid-tone band free of both. An EV window also has the property the owner asked for —
+// the separation from the mid-tones does not depend on the exposure: adding +2 EV moves the *signal*
+// through a window whose width is fixed in stops, whereas the old luma threshold changed which part of
+// the picture counted as "shadow" as the linear values were multiplied.
+//
+// Direction (派单 008 A): Lightroom's, i.e. **both region sliders brighten towards +**. `highlights +`
+// therefore *brightens* the highlight zone (less recovery) and `highlights −` recovers it.
 //
 // Matte (派单 008 B): the canvas may be larger than the picture (letterbox) and everything outside the
-// content rect is 0. A shadow/highlight lift treats 0 as a picture pixel, which is how "drag shadows" used
-// to light up the viewport's background bars. Those pixels are written through untouched — an exact pixel
-// identity, not an epsilon — so a test can assert the matte is 0. 019 added the same two guards to S1,
-// where the black point now lives; they stay here because `shadows`/`highlights` still lift.
+// content rect is 0. A shadow/highlight lift treats 0 as a picture pixel, which is how "drag shadows"
+// used to light up the viewport's background bars. Those pixels are written through untouched — an exact
+// pixel identity, not an epsilon — so a test can assert the matte is 0.
 
 struct S2Params {
     float4 a;   // contrast, pivot, pad, pad
     float4 b;   // highlights, shadows, identity, pad
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
+
+// 074 R2 — the two windows, in EV relative to display white (±0 EV = the display white point).
+// Shadows: full weight at and below −5.9 EV, smoothly to 0 at −3.9 EV. Highlights: 0 at and below
+// −3.2 EV, full weight at −1.2 EV and above. Both 2 EV wide — see the header for why the numbers.
+constant float SHADOW_LO_EV = -5.9;
+constant float SHADOW_HI_EV = -3.9;
+constant float HIGHLIGHT_LO_EV = -3.2;
+constant float HIGHLIGHT_HI_EV = -1.2;
 
 kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
                         texture2d<float, access::write> dst [[texture(1)]],
@@ -63,8 +101,8 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // 1e-6). Those pixels are not dead — inside that band the 32×32 block means vary with σ 5.7e-4
     // against 2.5e-5 expected from noise, i.e. 23× more structure than noise, which is exactly the
     // detail Lightroom can lift and we could not. Clamping here deleted it before any slider saw it.
-    // (Since 019 the lift that reaches into that band is S1's black level; this stage must still not
-    // clamp it away before its own maths.)
+    // (Since 019 the lift that reaches into that band is S1's black end point; this stage must still
+    // not clamp it away before its own maths.)
     float3 v = c.rgb;
 
     float pivot = max(p.a.y, 1e-3);
@@ -79,9 +117,15 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // preserved. A pixel with mixed signs (one channel sub-black) would otherwise read a slightly
     // different luminance and the shadows/highlights lift would land a code off on its *positive*
     // channels — measured as 260 of 3.05 M pixels moving by 1 in the push fixture, with no benefit.
-    float lum = dot(max(v, 0.0), float3(0.2126, 0.7152, 0.0722));
-    float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
-    float wHighlight = smoothstep(0.5, 1.0, lum);
+    //
+    // The coordinate is L = log2(luma) — EV relative to display white, the histogram's own HDR axis —
+    // so the windows are exposure-invariant in width and can be read off the card. A pixel at or below
+    // zero lum reads a very negative L, which is the shadow end: exactly right for a sub-black sample
+    // that a lift has already pulled above zero.
+    float lum = max(dot(max(v, 0.0), float3(0.2126, 0.7152, 0.0722)), 1e-9);
+    float L = log2(lum);
+    float wShadow = 1.0 - smoothstep(SHADOW_LO_EV, SHADOW_HI_EV, L);
+    float wHighlight = smoothstep(HIGHLIGHT_LO_EV, HIGHLIGHT_HI_EV, L);
     // LR convention for both region sliders: a positive value lifts that region, a negative value
     // pulls it down. `highlights +` therefore *brightens* the highlight zone (less recovery) and
     // `highlights -` recovers it — the sign used to be flipped here, which made the panel read
@@ -91,10 +135,10 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     v *= liftShadow * liftHighlight;
 
     // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
-    // value that a lift (S1's black level, or these region lifts) has pulled above zero is real
-    // picture by now and must survive; whatever is still below zero is what the display would clip
-    // anyway, and clamping it here is what keeps every ordinary edit byte-identical to before.
-    // Measured: keeping the sign *through* the write instead moved 260 of 3.05 M pixels by one code in
-    // the push fixture — a real but pointless change in the wrong place.
+    // value that a lift (S1's black end point, or these region lifts) has pulled above zero is real
+    // picture by now and must survive; whatever is still below zero is what the display
+    // would clip anyway, and clamping it here is what keeps every ordinary edit byte-identical to
+    // before. Measured: keeping the sign *through* the write instead moved 260 of 3.05 M pixels by one
+    // code in the push fixture — a real but pointless change in the wrong place.
     dst.write(float4(max(v, 0.0), c.a), gid);
 }

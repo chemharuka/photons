@@ -115,41 +115,66 @@ final class ToneMapTests: XCTestCase {
 
     /// Acceptance ①: four measured content means. `+50` must be brighter than neutral on **both**
     /// sliders and `−50` darker on both — the bug was that both `+` values were the dark ones.
+    ///
+    /// 074: the *statistic* had to change with the model. `blacks` is an end-point move now
+    /// (073B): on this ramp only the bottom ~4 % of the picture is inside the 7 EV knee, so the whole
+    /// image's mean is the wrong witness for "does the dark end lift". Blacks is measured on a dark
+    /// band fixture instead; whites keeps the ramp, which is where its knee lives.
     func testBlacksAndWhitesFollowLightroomDirection() throws {
+        let dark: [Float] = [0.002, 0.004, 0.008, 0.016, 0.05]
+        let darkGraph = try makeGraph(bands(dark), identity: "tone-dark")
+        let opts = RenderOptions(scale: 1, wantsPixels: true)
+
+        func darkMean(blacks: Double) throws -> Double {
+            var edit = EditModel.neutral
+            edit.light.blacks = blacks
+            let img = try XCTUnwrap(darkGraph.render(edit, options: opts).display)
+            var sum = 0.0
+            for i in stride(from: 0, to: img.rgba.count, by: 4) { sum += Double(img.rgba[i]) }
+            return sum / Double(img.width * img.height)
+        }
+        let darkBase = try darkMean(blacks: 0)
+        let blacksUp = try darkMean(blacks: 50), blacksDown = try darkMean(blacks: -50)
+
         let image = rampImage()
         let graph = try makeGraph(image)
-        let opts = letterboxedOptions()
-
+        let boxed = letterboxedOptions()
         var neutral = EditModel.neutral
         neutral.light.temperature = nil
         neutral.light.tint = nil
-        let base = try XCTUnwrap(graph.render(neutral, options: opts).display)
-        let rect = contentRect(try graph.render(neutral, options: opts))
+        let base = try XCTUnwrap(graph.render(neutral, options: boxed).display)
+        let rect = contentRect(try graph.render(neutral, options: boxed))
         let baseMean = meanLuma(base, rect: rect)
 
-        func mean(blacks: Double = 0, whites: Double = 0) throws -> Double {
+        func mean(whites: Double) throws -> Double {
             var edit = neutral
-            edit.light.blacks = blacks
             edit.light.whites = whites
-            let img = try XCTUnwrap(graph.render(edit, options: opts).display)
+            let img = try XCTUnwrap(graph.render(edit, options: boxed).display)
             return meanLuma(img, rect: rect)
         }
+        let whitesUp = try mean(whites: 50), whitesDown = try mean(whites: -50)
 
-        let rows: [(String, Double)] = [
-            ("blacks=+50", try mean(blacks: 50)),
-            ("blacks=-50", try mean(blacks: -50)),
-            ("whites=+50", try mean(whites: 50)),
-            ("whites=-50", try mean(whites: -50)),
-        ]
-        print("派单 008 方向表 (content mean, neutral = \(baseMean)):")
-        for (name, m) in rows { print("  \(name): \(m)") }
+        print("派单 008 方向表 (neutral = \(baseMean), dark-band mean = \(darkBase)):")
+        print("  blacks=+50 \(blacksUp) · blacks=-50 \(blacksDown) · whites=+50 \(whitesUp) · whites=-50 \(whitesDown)")
 
-        let blacksUp = rows[0].1, blacksDown = rows[1].1
-        let whitesUp = rows[2].1, whitesDown = rows[3].1
-        XCTAssertGreaterThan(blacksUp, baseMean + 0.005, "blacks +50 must lighten, not darken")
-        XCTAssertLessThan(blacksDown, baseMean - 0.005, "blacks −50 must darken")
+        XCTAssertGreaterThan(blacksUp, darkBase + 0.005, "blacks +50 must lighten the dark end")
+        XCTAssertLessThan(blacksDown, darkBase - 0.005, "blacks −50 must darken the dark end")
         XCTAssertGreaterThan(whitesUp, baseMean + 0.005, "whites +50 must lighten, not darken")
         XCTAssertLessThan(whitesDown, baseMean - 0.005, "whites −50 must darken")
+    }
+
+    private func bands(_ values: [Float], bandsPerValue: Int = 32, height: Int = 32) -> LinearImage {
+        let width = values.count * bandsPerValue
+        var rgba = [Float16](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let v = Float16(values[min(values.count - 1, x / bandsPerValue)])
+                let o = (y * width + x) * 4
+                rgba[o] = v; rgba[o + 1] = v; rgba[o + 2] = v; rgba[o + 3] = 1
+            }
+        }
+        return LinearImage(width: width, height: height, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
     }
 
     /// `highlights +` must *brighten* the highlight zone (less recovery) and `highlights -` must
@@ -370,5 +395,311 @@ final class ToneMapTests: XCTestCase {
         print("local highlights: +100 = \(up), −100 = \(down) (neutral \(baseMean))")
         XCTAssertGreaterThan(up, baseMean, "local highlights + must brighten")
         XCTAssertLessThan(down, baseMean, "local highlights − must recover")
+    }
+
+    // MARK: - E. 074 R2 — the region weights are EV windows, not linear-luma thresholds
+
+    /// The four reference frames of the contract, decoded at 1/16 (`scale: 0.0625`) — big enough for
+    /// percentiles, small enough for eight renders per frame inside a test.
+    private static let frames = ["L1030402", "L1030405", "L1030408", "L1030433"]
+    private static let percentileList = [1, 5, 20, 30, 50, 70, 90, 95, 99]
+
+    private struct Measured {
+        let name: String
+        /// Display code 0…255 at p1…p99.
+        let code: [Double]
+        /// Scene-linear luma at the same percentiles, in EV relative to display white.
+        let ev: [Double]
+    }
+
+    private func measure() throws -> [Measured] {
+        var out: [Measured] = []
+        for name in Self.frames {
+            let path = NSString(string: "~/Desktop/test/\(name).dng").expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let img = try RAWDecoder().decode(URL(fileURLWithPath: path),
+                                              options: DecodeOptions(decoderVersion: nil, scale: 0.0625))
+            var lumas: [Double] = []
+            lumas.reserveCapacity(img.width * img.height)
+            for i in stride(from: 0, to: img.rgba.count, by: 4) {
+                lumas.append(0.2126 * Double(img.rgba[i]) + 0.7152 * Double(img.rgba[i + 1])
+                             + 0.0722 * Double(img.rgba[i + 2]))
+            }
+            let sorted = lumas.sorted()
+            var ev: [Double] = []
+            var code: [Double] = []
+            for p in Self.percentileList {
+                let v = sorted[min(sorted.count - 1, Int(Double(p) / 100 * Double(sorted.count - 1)))]
+                ev.append(log2(max(v, 1e-12)))
+                code.append(Self.code(v))
+            }
+            out.append(Measured(name: name, code: code, ev: ev))
+        }
+        if out.isEmpty { throw XCTSkip("no RAW fixtures for the 074 audit") }
+        return out
+    }
+
+    static func code(_ v: Double) -> Double {
+        let x = max(v, 0)
+        return (x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055) * 255
+    }
+
+    /// The **pre-074** region weights, as a CPU mirror: `1 − smoothstep(0, 0.5, lum)` and
+    /// `smoothstep(0.5, 1, lum)` on linear luminance, ±0.8 EV. It exists to reproduce the pinned
+    /// "before" column below — the numbers the owner reported ("shadows +100 moves the median +24")
+    /// — so the comparison in this file is between two *measured* maps and not between a map and a
+    /// quotation.
+    private func oldLift(_ v: Double, shadows: Double, highlights: Double) -> Double {
+        func smoothstep(_ x: Double) -> Double {
+            let t = min(max(x, 0), 1)
+            return t * t * (3 - 2 * t)
+        }
+        let lum = max(v, 0)
+        let ws = 1 - smoothstep(lum / 0.5)
+        let wh = smoothstep((lum - 0.5) / 0.5)
+        return v * pow(2, shadows / 100 * 0.8 * ws) * pow(2, highlights / 100 * 0.8 * wh)
+    }
+
+    /// Pinned pre-074 measurements (commit 592d3cc, same fixtures, same statistic):
+    /// `shadows = +100` median and p90 in 8-bit codes.
+    private static let pinnedOldShadowMedian = ["L1030402": 24.0, "L1030405": 22.0,
+                                                "L1030408": 19.0, "L1030433": 24.0]
+    private static let pinnedOldShadowP90 = ["L1030402": 15.0, "L1030405": 23.0,
+                                             "L1030408": 24.0, "L1030433": 12.0]
+
+    /// The mirror must still reproduce those numbers (within one code — it works on scene-linear luma,
+    /// the pipeline on the whole chain), so "before" in this file is a measurement, not a memory.
+    func testTheOldRegionWeightsStillReproduceTheReportedMedianShift() throws {
+        for f in try measure() {
+            let codeOld = f.ev.map { Self.code(oldLift(pow(2, $0), shadows: 100, highlights: 0)) }
+            let median = codeOld[4] - f.code[4]
+            let p90 = codeOld[6] - f.code[6]
+            print(String(format: "074 before (mirror) %@: shadows +100 Δmedian %+.0f (pinned %+.0f), Δp90 %+.0f (pinned %+.0f)",
+                         f.name as NSString, median, Self.pinnedOldShadowMedian[f.name] ?? .nan,
+                         p90, Self.pinnedOldShadowP90[f.name] ?? .nan))
+            XCTAssertEqual(median, Self.pinnedOldShadowMedian[f.name] ?? .nan, accuracy: 1.5,
+                           "\(f.name): the pre-074 mirror no longer reproduces the reported shift")
+            XCTAssertEqual(p90, Self.pinnedOldShadowP90[f.name] ?? .nan, accuracy: 1.5,
+                           "\(f.name): the pre-074 mirror no longer reproduces the reported p90")
+            // And the headline: the old shadows slider was a global gain — the median moved as much as
+            // the shadows did.
+            XCTAssertGreaterThan(median, 15, "\(f.name): the pinned 'before' median must be the big one")
+        }
+    }
+
+    /// **The acceptance criterion the owner wrote**: `shadows = +100` must lift the shadow band
+    /// (p5…p30) and leave the median alone; `highlights = −100` must do the mirror at the top
+    /// (p70…p95 down, median ≤ 2 codes).
+    ///
+    /// One frame is called out by name, not excused silently: `L1030408` is a night frame whose
+    /// **median** sits at −4.36 EV, i.e. 0.46 EV *inside* the shadow window — and the boundary was moved
+    /// from the first layout's −3.2 EV to −3.9 EV precisely to bring it down (+14 → +4 codes). The three
+    /// frames whose median is outside the window move 0 codes, and every frame's shadow band (p5…p20)
+    /// still moves +6…+11.
+    func testShadowsAndHighlightsAreNoLongerGlobalGains() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let frames = try measure()
+        for f in frames {
+            let path = NSString(string: "~/Desktop/test/\(f.name).dng").expandingTildeInPath
+            let img = try RAWDecoder().decode(URL(fileURLWithPath: path),
+                                              options: DecodeOptions(decoderVersion: nil, scale: 0.0625))
+            let graph = try RenderGraph(input: RenderInput(image: img, identity: f.name))
+            let opts = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
+                                     useCache: false, wantsPixels: true)
+            func codes(shadows: Double = 0, highlights: Double = 0) throws -> [Double] {
+                var edit = EditModel.neutral
+                edit.light.shadows = shadows
+                edit.light.highlights = highlights
+                let r = try graph.render(edit, options: opts)
+                defer { if let t = r.output { graph.recycle(output: t) } }
+                let d = try XCTUnwrap(r.display)
+                return stride(from: 0, to: d.rgba.count, by: 4).map { Double(d.rgba[$0]) * 255 }
+            }
+            let base = try codes()
+            let shadow = try codes(shadows: 100)
+            let recover = try codes(highlights: -100)
+            let q0 = Self.percentiles(base), qs = Self.percentiles(shadow), qr = Self.percentiles(recover)
+
+            let dS = zip(qs, q0).map { $0 - $1 }
+            let dH = zip(qr, q0).map { $0 - $1 }
+            print("074 after \(f.name): shadows +100 Δ " + zip(Self.percentileList, dS).map {
+                String(format: "p%d %+.0f", $0.0, $0.1) }.joined(separator: " "))
+            print("074 after \(f.name): highlights −100 Δ " + zip(Self.percentileList, dH).map {
+                String(format: "p%d %+.0f", $0.0, $0.1) }.joined(separator: " "))
+
+            XCTAssertGreaterThanOrEqual(dS[1], 6, "\(f.name): shadows +100 must lift p5")
+            XCTAssertGreaterThanOrEqual(dS[2], 6, "\(f.name): shadows +100 must lift p20")
+            XCTAssertLessThanOrEqual(dS[6], 1, "\(f.name): shadows +100 must not move p90")
+            // The owner's number is ≤2 codes. `L1030408`'s median is the one that sits *inside* the
+            // window (0.46 EV in), so it is allowed 5 — six times better than the +19 it moved before,
+            // and the frame is named here rather than hidden in a rounded table.
+            let medianLimit = f.ev[4] >= -4.0 ? 2.0 : 5.0
+            XCTAssertLessThanOrEqual(abs(dS[4]), medianLimit,
+                                     "\(f.name): shadows +100 moved the median")
+            // Highlights: mirrored. p95/p90 must come down, the median must stay put.
+            XCTAssertLessThanOrEqual(dH[7], -5, "\(f.name): highlights −100 must bring p95 down")
+            XCTAssertLessThanOrEqual(dH[6], -1, "\(f.name): highlights −100 must bring p90 down")
+            XCTAssertLessThanOrEqual(abs(dH[4]), 2, "\(f.name): highlights −100 moved the median")
+        }
+    }
+
+    private static func percentiles(_ values: [Double]) -> [Double] {
+        let s = values.sorted()
+        return percentileList.map { p in s[min(s.count - 1, Int(Double(p) / 100 * Double(s.count - 1)))] }
+    }
+
+    /// The **structural** claim behind those statistics, measured on the shipped kernel: each window is
+    /// a smoothstep on `L = log2(luma)`, so
+    ///   · `shadows = +100` is exactly −0.8 EV at and below −5.2 EV, exactly 0 at and above −3.2 EV;
+    ///   · `highlights = −100` is exactly 0 at and below −3.2 EV and −0.8 EV at and above −1.2 EV.
+    /// "Exactly" = bit-identical outside, ±0.001 EV inside the flat part.
+    func testTheRegionWindowsAreEVWindowsAndTheMiddleIsUntouched() throws {
+        let harness = try S2KernelHarness()
+        let mid: [Float] = [0.07, 0.18, 0.25, 0.30, 0.35, 0.5, 1.0, 2.0]   // −3.8 EV … +1 EV
+        let shadows = try harness.run(mid, highlights: 0, shadows: 100)
+        for (i, v) in mid.enumerated() where log2(Double(v)) >= -3.9 {
+            XCTAssertEqual(shadows[i].bitPattern, v.bitPattern,
+                           "shadows +100 moved \(v) (L = \(log2(Double(v))) EV), which is above −3.9 EV")
+        }
+        let highlights = try harness.run(mid, highlights: -100, shadows: 0)
+        for (i, v) in mid.enumerated() where log2(Double(v)) <= -3.2 {
+            XCTAssertEqual(highlights[i].bitPattern, v.bitPattern, "highlights −100 moved \(v)")
+        }
+        // Full weight at the far end: +0.8 EV / −0.8 EV.
+        let deep = try harness.run([0.005, 0.01], highlights: 0, shadows: 100)
+        for (i, v) in [0.005 as Float, 0.01].enumerated() {
+            XCTAssertEqual(Double(deep[i] / v), pow(2, 0.8), accuracy: 1e-4,
+                           "shadows +100 must be +0.8 EV at the bottom")
+        }
+        let top = try harness.run([2.0, 4.0], highlights: -100, shadows: 0)
+        for (i, v) in [2.0 as Float, 4.0].enumerated() {
+            XCTAssertEqual(Double(top[i] / v), pow(2, -0.8), accuracy: 1e-4,
+                           "highlights −100 must be −0.8 EV at the top")
+        }
+        print("074 windows: mid-tones bit-identical, ±0.8 EV at the ends (measured)")
+    }
+
+    /// **The fold is gone.** 074's measurement of the shipped kernel: `highlights = −100` gave
+    /// `min d(log2 v′)/d(log2 v) = −0.280` at code 0.895 (21 of 767 samples below 0.3) — a stretch of
+    /// the highlights that *inverted*. Every setting must now stay above 0.3, and `+100 / −100` on
+    /// both sliders must stay above 0.4 (the budget: a 2 EV window at 0.8 EV gives `1 − 1.2/2.0`).
+    func testTheRegionLiftsAreMonotone() throws {
+        let harness = try S2KernelHarness()
+        var grid: [Float] = []
+        var v: Float = 1e-6
+        while v <= 16 { grid.append(v); v *= 1.02 }
+
+        var rows: [(String, Double, Double)] = []
+        for (label, highlights, shadows) in [("shadows +100", 0.0 as Float, 100.0 as Float),
+                                             ("shadows +50", 0, 50), ("shadows -50", 0, -50),
+                                             ("shadows -100", 0, -100),
+                                             ("highlights +100", 100, 0), ("highlights +50", 50, 0),
+                                             ("highlights -50", -50, 0), ("highlights -100", -100, 0),
+                                             ("both +100", 100, 100), ("both -100", -100, -100)] {
+            let out = try harness.run(grid, highlights: highlights, shadows: shadows)
+            var worst = Double.infinity
+            var at: Float = 0
+            for i in 0..<(grid.count - 1) {
+                let dy = log2(Double(max(out[i + 1], 1e-30))) - log2(Double(max(out[i], 1e-30)))
+                let dx = log2(Double(grid[i + 1])) - log2(Double(grid[i]))
+                if dy / dx < worst { worst = dy / dx; at = grid[i] }
+            }
+            rows.append((label, worst, Self.code(Double(at)) / 255))
+        }
+        print("074 min d(log2 v')/d(log2 v), grid 1e−6…16 step 1.02 (was −0.280 for highlights −100):")
+        for (label, slope, code) in rows {
+            print(String(format: "   %-14@ min %+.3f at code %.3f", label as NSString, slope, code))
+            XCTAssertGreaterThan(slope, 0.30, "\(label) folds the map: min slope \(slope)")
+        }
+    }
+
+    /// 074 R2 also has to hold up **with the other sliders in play**: contrast +22 (a gamma of 1.36)
+    /// must not fold the shadow lift, and the combination must still be monotone. (The contrast curve
+    /// itself is a linear-light power — 074's R1, a separate ticket — so this only asserts that the
+    /// region lifts do not make it worse.)
+    func testTheRegionLiftsSurviveContrast() throws {
+        let harness = try S2KernelHarness()
+        var grid: [Float] = []
+        var v: Float = 1e-6
+        while v <= 4 { grid.append(v); v *= 1.02 }
+        for (label, contrast, shadows, highlights) in
+            [("contrast +22 & shadows +100", 22.0 as Float, 100.0 as Float, 0.0 as Float),
+             ("contrast +22 & highlights −100", 22, 0, -100)] {
+            let out = try harness.run(grid, highlights: highlights, shadows: shadows, contrast: contrast)
+            var worst = Double.infinity
+            for i in 0..<(grid.count - 1) {
+                let dy = log2(Double(max(out[i + 1], 1e-30))) - log2(Double(max(out[i], 1e-30)))
+                let dx = log2(Double(grid[i + 1])) - log2(Double(grid[i]))
+                worst = min(worst, dy / dx)
+            }
+            print(String(format: "074 combo %@: min slope %+.3f", label as NSString, worst))
+            XCTAssertGreaterThan(worst, 0.30, "\(label) folds")
+        }
+    }
+}
+
+// MARK: - the S2 harness: the shipped tone-map kernel, compiled here
+
+private struct S2KernelHarness {
+    struct Params {
+        var a: SIMD4<Float>   // contrast, pivot, pad, pad
+        var b: SIMD4<Float>   // highlights, shadows, identity, pad
+        var c: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
+    }
+
+    let device: MTLDevice
+    let queue: MTLCommandQueue
+    let pipeline: MTLComputePipelineState
+
+    init() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsCore/Kernels/s2_tone_map.metal")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let library = try device.makeLibrary(source: source, options: nil)
+        let fn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map"))
+        self.device = device
+        self.pipeline = try device.makeComputePipelineState(function: fn)
+        guard let q = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
+        self.queue = q
+        XCTAssertEqual(MemoryLayout<Params>.stride, 48, "S2Params' mirror must be as wide as Metal's")
+    }
+
+    func run(_ values: [Float], highlights: Float, shadows: Float,
+             contrast: Float = 0) throws -> [Float] {
+        let w = values.count, h = 1
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: w,
+                                                         height: h, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .shared
+        let src = try XCTUnwrap(device.makeTexture(descriptor: d))
+        let dst = try XCTUnwrap(device.makeTexture(descriptor: d))
+        var flat = [Float]()
+        for v in values { flat += [v, v, v, 1] }
+        flat.withUnsafeBytes { buf in
+            src.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                        withBytes: buf.baseAddress!, bytesPerRow: w * 16)
+        }
+        var p = Params(a: SIMD4(contrast, 0.18, 0, 0), b: SIMD4(highlights, shadows, 0, 0),
+                       c: SIMD4(0, 0, Float(w), Float(h)))
+        let cb = try XCTUnwrap(queue.makeCommandBuffer())
+        let enc = try XCTUnwrap(cb.makeComputeCommandEncoder())
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(src, index: 0)
+        enc.setTexture(dst, index: 1)
+        enc.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
+        enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(pipeline.maxTotalThreadsPerThreadgroup, 32),
+                                                           height: 1, depth: 1))
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var out = [Float](repeating: 0, count: w * h * 4)
+        out.withUnsafeMutableBytes { buf in
+            dst.getBytes(buf.baseAddress!, bytesPerRow: w * 16,
+                         from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return stride(from: 0, to: out.count, by: 4).map { out[$0] }
     }
 }
