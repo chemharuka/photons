@@ -39,13 +39,17 @@ final class CurvePanelTests: XCTestCase {
 
     // MARK: - 1. the axis ticks come from `HDRCurveAxis`
 
-    /// The seven positions are `u(0)`, `u(code 127)`, `u(code 255)`, `u(+1)`, `u(+2)`, `u(+3)`,
-    /// `u(+4)` — **exactly** as the axis computes them (062 pins the difference at zero, not "within a
+    /// The five positions are `u(0)`, `u(code 63)`, `u(code 127)`, `u(code 191)`, `u(code 255)` —
+    /// **exactly** as the axis computes them (062 pins the difference at zero, not "within a
     /// 069 — 五档 SDR 码值 `0 / 63 / 127 / 191 / 255`，位置 = `2·forward(displayCode(c))`（即 `c/255`），
-    /// 每个都是一次相等而不是容差。右半区**没有** stops 标记（`+1…+4` 全部取消）。
+    /// 每个都是一次相等而不是容差。
+    ///
+    /// 2026-10-27：stops（`+1…+4`）在 **HDR 视图**里回来了，但**不在这一组里** —— 这五档是码值刻度，
+    /// 两种视图都画，位置与文本一个都没动。stops 是另一组（`CurveAxisTicks.stops`），只进 HDR 视图，
+    /// 由 `CurveReadoutTests.testTheTicksAreFiveCodesInSdrAndNineMarksInHdr` 钉住。
     func testTheTicksAreTheAxisOwnPositionsAndNotNumbers() {
         let axis = HDRCurveAxis.standard
-        let ticks = CurveAxisTicks.ticks(axis)
+        let ticks = CurveAxisTicks.codes(axis)
 
         XCTAssertEqual(ticks.map(\.label), ["0", "63", "127", "191", "255"])
         let expected = [0.0, 63, 127, 191, 255].map { 2 * axis.forward(CurveAxisTicks.displayCode($0)) }
@@ -92,7 +96,10 @@ final class CurvePanelTests: XCTestCase {
                       "SDR 刻度必须是「显示码 → 线性 → axis」算出来的")
         XCTAssertTrue(source.contains("[0, 63, 127, 191, 255]"),
                       "五档码值就是这五个数（标签），位置仍由 axis 推出")
-        XCTAssertFalse(source.contains("axis.u(stops: 1)"), "069：stops 刻度取消")
+        // 2026-10-27: the stops are back **in the HDR view**, and their positions are the axis'
+        // `u(stops:)` — still derived, still no literal `1.25 / 1.5 / 1.75 / 2`.
+        XCTAssertTrue(source.contains("axis.u(stops: Double(stop))"),
+                      "stops 刻度必须由 axis.u(stops:) 推出（069 的取消已按用户 2026-10-27 收回）")
         XCTAssertTrue(source.contains("CurveLUT.buildOne(points)"),
                       "预览必须是引擎那张表，不是第二种插值")
         // 069: the bottom caption line is gone, and the read-out that replaced its space is derived from
@@ -828,7 +835,7 @@ final class CurvePanelTests: XCTestCase {
 
         // 刻度：位置仍由 axis 推出（差为 0），且标签仍在外框下方那一带（tickBand 没变）。
         // 071：默认视图是 SDR，`0…1` 铺满，所以 255 码（x = 1 = 白点）落在**右端**。
-        let ticks = CurveAxisTicks.ticks()
+        let ticks = CurveAxisTicks.codes()
         let axis = HDRCurveAxis.standard
         let expected = [0.0, 63, 127, 191, 255].map {
             2 * axis.forward(CurveAxisTicks.displayCode($0))
