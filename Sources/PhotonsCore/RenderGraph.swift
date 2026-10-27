@@ -1734,33 +1734,43 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .sceneLinear:
-            // 073B: six entry points in one shader file, chosen on the CPU by the same conditions as
-            // the key material — see the shader header for the table and for why this is a *dispatch*
-            // choice rather than `if (blacks != 0)` inside one kernel (071 measured that spelling
-            // moving 2980/12309 samples of the push document by an ULP).
+            // 073B/073C: eight entry points in one shader file, chosen on the CPU by the same
+            // conditions as the key material — see the shader header for the table and for why this
+            // is a *dispatch* choice rather than `if (blacks != 0)` inside one kernel (071 measured
+            // that spelling moving 2980/12309 samples of the push document by an ULP).
             //
             //   · no dropper level, `blacks == whites == 0` → 019's arithmetic without any new code;
-            //   · `blacks`/`whites` ≠ 0                     → the end-point (knee) model, 073B;
+            //   · `blacks`/`whites` ≠ 0, `|blacks| ≤ 50`        → the end-point (knee) model, 073B;
+            //   · `|blacks| > 50`                             → 073C: the same toe plus the black-point
+            //     level move. The threshold is exactly the zero of the blend factor `m(a)`, so the two
+            //     instantiations agree bit for bit where they meet — the switch is invisible in the
+            //     picture, and the whole first half of the travel keeps 073B's bytes;
             //   · a dropper level (`blackLevel`/`whiteLevel`) → 030's affine level, unchanged. The two
             //     spellings never coexist in a document (`LightGroup.levels`), and the absolute one
             //     wins if a hand-edited file somehow sets both — the pre-073 precedence.
             //   · 071's trim is orthogonal: `_trim` for each of the three.
             let hasLevels = edit.light.blackLevel != nil || edit.light.whiteLevel != nil
             let knee = !hasLevels && (edit.light.blacks != 0 || edit.light.whites != 0)
+            let hybrid = knee && abs(edit.light.blacks) > LightGroup.blacksEVToLevelSplit
             let trim = edit.light.blackOffset != 0
             let function: String
-            switch (hasLevels, knee, trim) {
-            case (true, _, false): function = "s1_scene_linear_levels"
-            case (true, _, true): function = "s1_scene_linear_levels_trim"
-            case (false, true, false): function = "s1_scene_linear_knee"
-            case (false, true, true): function = "s1_scene_linear_knee_trim"
-            case (false, false, false): function = "s1_scene_linear"
-            case (false, false, true): function = "s1_scene_linear_trim"
+            switch (hasLevels, knee, hybrid, trim) {
+            case (true, _, _, false): function = "s1_scene_linear_levels"
+            case (true, _, _, true): function = "s1_scene_linear_levels_trim"
+            case (false, false, _, false): function = "s1_scene_linear"
+            case (false, false, _, true): function = "s1_scene_linear_trim"
+            case (false, true, true, false): function = "s1_scene_linear_hybrid"
+            case (false, true, true, true): function = "s1_scene_linear_hybrid_trim"
+            case (false, true, false, false): function = "s1_scene_linear_knee"
+            case (false, true, false, true): function = "s1_scene_linear_knee_trim"
             }
             let p = try kernels.pipeline(file: "s1_scene_linear", function: function)
             // ── S1 is end points + exposure + highlight recovery ────────────────────────────────
-            // 073B: the sliders are **not** a level any more. `blacks` is a pure multiplicative EV at
-            // the dark end (±3 EV, a 7 EV toe) and `whites` is EV (91 %) + a small level (9 %), both
+            // 073B/073C: the sliders are **not** a level any more. `blacks` is a multiplicative EV at
+            // the dark end (±3 EV over a 7 EV toe) for the first half of its travel, and blends a
+            // black-point level move into the second half (073C, `B_LEV = 0.005` over its own 2.5 EV
+            // window) so that full travel can really move the black end — down to 0 on the crush side,
+            // up off the floor on the lift side. `whites` is EV (91 %) + a small level (9 %), both
             // weighted by an EV window so the mid-tones are outside the knee. The affine span
             // `(v − blk)/max(wht − blk, 1e−3)` that 019 put here is gone from the slider path — it
             // changed the slope of the whole picture, which is not what the owner asked for — and

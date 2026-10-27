@@ -8,7 +8,7 @@ using namespace metal;
 //   ① absolute levels (派单 030, dropper only)  v = (v − blk)/max(wht − blk, 1e−3)
 //   ①b linear black **offset** (071):          v = v + blackOffset          additive, linear units
 //   ② exposure gain + WB gains:                v *= gain · wb              multiplicative
-//   ③ blacks:  pure multiplicative EV, soft toe         ±3 EV at the very bottom, 0 above −4.2 EV
+//   ③ blacks:  EV (first half of the travel), then EV + **level** (second half, 073C)
 //   ④ whites:  EV (91 %) + level (9 %), soft shoulder   ±0.6 EV at display white, 0 below −2 EV
 //   ⑤ highlight recovery: the soft shoulder, unchanged
 //
@@ -41,6 +41,59 @@ using namespace metal;
 // 0.3. The two are a pair (contract §4.7's counter-example): raising B_EV without widening the knee is
 // how the first draft folded. The numbers are in `BwLevelsTests.testTheKneeIsMonotone…`.
 //
+// ── 073C: the hybrid travel (2026-10-27) ───────────────────────────────────────────────────────────
+//
+// The owner then asked for Lightroom's *black level* rather than only a dark-end exposure:
+//
+//   「blacks 的"最暗 5 %"，改成混合型，就是滑块开始为加减 EV，后面逐步变为修改电平」
+//
+// A pure multiplier cannot do the second half of that: `0 → 0` for every gain, so at full travel the
+// black end can never be *moved* — pushed down it stays a very dark grey (today: `blacks = −100`
+// leaves the darkest pixels at 1/8 of their value, never at 0), and pushed up it never floats the
+// black point off the floor. So the travel is two mechanisms, blended:
+//
+//     t = blacks/100                       a = |t|
+//     m = smoothstep(0.5, 1, a)            0 for the whole first half, 1 at the end
+//     EV:    v *= exp2(B_EV · t · (1 − ½m) · wb)      — `wb` is the existing 7 EV toe
+//     level: v  = toe(v + B_LEV · t · m · wl, LEV_KNEE),  wl = 1 − smoothstep(LEV_LO_EV, LEV_HI_EV, L)
+//
+// **A = B_EV is forced, not chosen.** The invariant "the first half of the travel is *bit-identical*
+// to 073B" means `exp2(A·t·(1 − ½·0)·wb)` must be `exp2(B_EV·t·wb)` for every |t| ≤ 0.5, i.e. A = 3.
+// There is no free parameter left there, and the budget it buys is: at a = 0.5 the p1 lift is exactly
+// today's (measured +0.85…+1.5 EV on the four frames), and at a = 1 the EV half is 1.5 EV, the rest
+// of the travel being the level move.
+//
+// **B_LEV = 0.005 is pinned by the monotonicity constraint, the same way B_EV was.** An additive level
+// term riding a window in L puts a negative `B·w′(L)/(v·ln2)` into the slope, and at the bottom of the
+// window `v` is small, so the constraint is
+//     B_LEV · 1.5/(d · ln2 · 2^(B_HI_EV − d)) < 1      (d = the window's width in EV)
+// i.e. B_LEV < 0.0126 · d · 2^−d. With d = 2.5 EV (LEV_LO_EV = −6.9) that is 0.0056; 0.005 leaves the
+// measured minimum slope at 0.354 (a = 1, in the middle of the level's foot) instead of cutting it
+// to 0. It is also the number that puts the black point where a raised black point belongs: linear
+// 0.005 is sRGB code 15.6 — the deepest shadow of `blacks = +100` sits at the code a print fade
+// sits at, which is the reading the owner asked for ("黑不再死").
+//
+// **Why the level gets its own window, and why it is in L.** Two hard invariants hold it down: the
+// median must not move (so the window's top sits 0.2 EV *below* the EV toe's, under the lowest p50 of
+// the four reference frames: "above −4.4 EV the level moves nothing", which is a fact and not a
+// tolerance) and the map must not fold.
+// The second one is what shapes the window: a *narrow* window keeps `w′` large where `v` is small and
+// folds; the window is 2.5 EV wide for that reason. Everything below LEV_LO_EV carries the full
+// offset, so a lift is a pure shift (slope 1) there and the crush is a pure shift down plus a clip.
+//
+// **The toe is the "soft knee" and the clip is the "level".** `s1_toe` is a C¹ rectifier: identity at
+// or above +LEV_KNEE, exactly 0 at or below −LEV_KNEE, quadratic in between (slope 0 → 1, so no step
+// and no fold). It is taken **only on the crush side**: a lift must not clip anything (invariant:
+// `t = +1` leaves zero pixels at 0), so `off ≥ 0` writes `v + off` untouched. The crush side really
+// does reach 0 — that is what "改电平" means — and the fraction of the frame that lands there is
+// measured (`BwLevelsTests.testTheHybrid…`).
+//
+// **The CPU switch is invisible.** `kHybrid` is a template flag, so the level arithmetic exists only
+// in the instantiations that can use it — no runtime `if`, which is 071's lesson. The dispatch
+// threshold (`|blacks| > 50`) is exactly the zero of `m`, so both instantiations agree bit for bit
+// where they meet: at |blacks| = 50 the level term is ±0 · B_LEV = 0 and the EV exponent is
+// `3·t·1·wb`, today's expression, unchanged in the source of the `kKnee` instantiation.
+//
 // **Whites** (contract §4.2, unchanged constants): full weight at display white (0 EV), fading down to
 // 0 at −2 EV (the shoulder on the dark side) and decaying as exp(−L/1 EV) above 0 (the shoulder on the
 // HDR side: +1 EV 0.368, +4 EV 0.018). The additive level term rides the *same* weight, so both terms
@@ -54,13 +107,15 @@ using namespace metal;
 // that spelling moving 2980/12309 samples of the push document by an ULP. So the body is one templated
 // function and the CPU picks an entry point:
 //
-//     kLevels  kKnee  kTrim   entry point                      dispatched when
-//     false    false  false   s1_scene_linear                   no levels, no sliders, no trim
-//     false    false  true    s1_scene_linear_trim              071's trim only
-//     true     false  false   s1_scene_linear_levels            030 dropper, no trim
-//     true     false  true    s1_scene_linear_levels_trim
-//     false    true   false   s1_scene_linear_knee               blacks/whites ≠ 0
-//     false    true   true    s1_scene_linear_knee_trim
+//     kLevels  kKnee  kHybrid  kTrim   entry point                      dispatched when
+//     false    false  false    false   s1_scene_linear                   no levels, no sliders, no trim
+//     false    false  false    true    s1_scene_linear_trim              071's trim only
+//     true     false  false    false   s1_scene_linear_levels            030 dropper, no trim
+//     true     false  false    true    s1_scene_linear_levels_trim
+//     false    true   false    false   s1_scene_linear_knee              sliders ≠ 0, |blacks| ≤ 50
+//     false    true   false    true    s1_scene_linear_knee_trim
+//     false    true   true     false   s1_scene_linear_hybrid            073C: |blacks| > 50
+//     false    true   true     true    s1_scene_linear_hybrid_trim
 //
 // `kLevels` is 030's dropper, and it stays affine on purpose: the dropper's whole meaning is "make
 // *this* sample black" (`blackLevel` → 0, `whiteLevel` → 1), which is a level and nothing else — the
@@ -101,15 +156,45 @@ constant float B_EV = 3.0;
 constant float B_LO_EV = -11.2;
 constant float B_HI_EV = -4.2;
 
+// 073C — the level half of the hybrid travel: the black point moves by up to ±B_LEV in scene-linear
+// light over its own window (LEV_LO_EV … LEV_HI_EV), with a C¹ knee of LEV_KNEE at 0 on the crush side.
+//
+// `LEV_HI_EV = −4.4` and not `B_HI_EV = −4.2`: the level's window has to end below the *lowest p50 of
+// the reference frames* (−4.36 EV, L1030408), or the level term itself would move a median and the
+// "the level only works on the dark end" invariant would be a tolerance instead of a fact. The EV
+// toe keeps its old −4.2 (073B, untouched); the level's top is 0.2 EV lower for that reason alone.
+// B_LEV is pinned by the monotonicity constraint (§ header): B_LEV < 1.5/(d·ln2·2^(LEV_HI−d)) = 0.0056
+// for the 2.5 EV window below. LEV_KNEE = 1e-3 is about one 8-bit code at the sRGB toe, i.e. the
+// clip's corner is rounded over ~1.5 code — visible as a knee, invisible as a step.
+constant float B_LEV = 0.005;
+constant float LEV_LO_EV = -6.9;
+constant float LEV_HI_EV = -4.4;
+constant float LEV_KNEE = 1e-3;
+
 // Whites (contract §4.2): ±0.6 EV, plus 0.06 of a linear level at full travel, over a 2 EV shoulder.
 constant float W_EV = 0.6;
 constant float W_LEV = 0.06;
 constant float W_BAND = 2.0;
 constant float W_TAU = 1.0;
 
-// One body, six instantiations. All three flags are compile-time constants, so an instantiation that
+// One body, seven instantiations. All four flags are compile-time constants, so an instantiation that
 // is not for them contains none of their arithmetic — not "the arithmetic with a zero in it".
-template <bool kLevels, bool kKnee, bool kTrim>
+//
+// 073C's `kHybrid` is the level half of the blacks travel. It is a separate flag rather than a
+// runtime test on `m` for the same reason 071 split the trim off: the dispatch threshold
+// (`|blacks| > 50`) is exactly where `m` is 0, so the two instantiations agree bit for bit at the
+// boundary and the untouched one keeps 073B's source verbatim.
+static inline float3 s1_toe(float3 x) {
+    // C¹ rectifier: identity at or above +LEV_KNEE, exactly 0 at or below −LEV_KNEE, quadratic in
+    // between (slope 0 → 1). The crush really does reach 0 — that is the "level" half — and the
+    // corner is rounded instead of stepped.
+    const float k = LEV_KNEE;
+    float3 kx = clamp(x + k, 0.0, 2.0 * k);
+    // `select(a, b, c)` is c ? b : a; a bool3 cannot be the condition of `?:` in Metal.
+    return select(x, kx * kx / (4.0 * k), x < k);
+}
+
+template <bool kLevels, bool kKnee, bool kHybrid, bool kTrim>
 static inline void s1_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S1Params &p,
@@ -171,7 +256,26 @@ static inline void s1_body(texture2d<float, access::read> src,
         // blacks: 1 below B_LO, 0 above B_HI, smoothstep between (C¹ at both ends, so the toe and the
         // knee have no seam). `0 → 0`: pure multiplication never lifts black into grey.
         float wb = 1.0 - smoothstep(B_LO_EV, B_HI_EV, L);
-        v *= exp2(B_EV * db * wb);
+        if (kHybrid) {
+            // 073C — the second half of the travel. `mb` is exactly 0 for |blacks| ≤ 50, and the CPU
+            // does not even pick this instantiation there, so the two paths agree at the join.
+            float mb = smoothstep(0.5, 1.0, abs(db));
+            v *= exp2(B_EV * db * (1.0 - 0.5 * mb) * wb);
+
+            // The level: the black point moves by `off` linear units over its own 2.5 EV window
+            // (−6.9 … −4.4 EV, the top deliberately under the EV toe's so no frame's median is inside
+            // it). The window is a weight in L, not a clip, so it is continuous at both ends; `wl = 0`
+            // makes `off` ±0 and the pixel bit-still.
+            float wl = 1.0 - smoothstep(LEV_LO_EV, LEV_HI_EV, L);
+            float off = B_LEV * db * mb * wl;
+            float3 x = v + off;
+            // A lift must not clip (invariant: t = +1 leaves no pixel at 0), so the toe is only taken
+            // on the crush side. → the darkest pixels really reach 0 when the slider is pushed down.
+            v = off < 0.0 ? s1_toe(x) : x;
+        } else {
+            // 073B, verbatim: the first half of the travel is this, bit for bit.
+            v *= exp2(B_EV * db * wb);
+        }
 
         // whites: full weight at display white, 0 at −2 EV, exp(−L/1 EV) above 0 (the HDR shoulder).
         // The level term is (Δw·|Δw|) — quadratic, so a small travel is nearly pure EV and only the
@@ -200,7 +304,7 @@ kernel void s1_scene_linear(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             constant S1Params &p [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, false>(src, dst, p, gid);
+    s1_body<false, false, false, false>(src, dst, p, gid);
 }
 
 // 071: the same body with the offset in it.
@@ -208,7 +312,7 @@ kernel void s1_scene_linear_trim(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, true>(src, dst, p, gid);
+    s1_body<false, false, false, true>(src, dst, p, gid);
 }
 
 // 030: the absolute level a dropper sampled. No knee: the two spellings never coexist.
@@ -216,14 +320,14 @@ kernel void s1_scene_linear_levels(texture2d<float, access::read> src [[texture(
                                    texture2d<float, access::write> dst [[texture(1)]],
                                    constant S1Params &p [[buffer(0)]],
                                    uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, false>(src, dst, p, gid);
+    s1_body<true, false, false, false>(src, dst, p, gid);
 }
 
 kernel void s1_scene_linear_levels_trim(texture2d<float, access::read> src [[texture(0)]],
                                         texture2d<float, access::write> dst [[texture(1)]],
                                         constant S1Params &p [[buffer(0)]],
                                         uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, true>(src, dst, p, gid);
+    s1_body<true, false, false, true>(src, dst, p, gid);
 }
 
 // 073B: the black/white end points. Picked only when `blacks != 0 || whites != 0`.
@@ -231,12 +335,29 @@ kernel void s1_scene_linear_knee(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, false>(src, dst, p, gid);
+    s1_body<false, true, false, false>(src, dst, p, gid);
 }
 
 kernel void s1_scene_linear_knee_trim(texture2d<float, access::read> src [[texture(0)]],
                                       texture2d<float, access::write> dst [[texture(1)]],
                                       constant S1Params &p [[buffer(0)]],
                                       uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, true>(src, dst, p, gid);
+    s1_body<false, true, false, true>(src, dst, p, gid);
+}
+
+// 073C: the second half of the blacks travel — the same EV toe plus the black-point level move.
+// Picked only when `|blacks| > 50` (i.e. where `m` can be non-zero); below that the level term is
+// exactly zero and `s1_scene_linear_knee` is the right instantiation, bit for bit.
+kernel void s1_scene_linear_hybrid(texture2d<float, access::read> src [[texture(0)]],
+                                   texture2d<float, access::write> dst [[texture(1)]],
+                                   constant S1Params &p [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+    s1_body<false, true, true, false>(src, dst, p, gid);
+}
+
+kernel void s1_scene_linear_hybrid_trim(texture2d<float, access::read> src [[texture(0)]],
+                                        texture2d<float, access::write> dst [[texture(1)]],
+                                        constant S1Params &p [[buffer(0)]],
+                                        uint2 gid [[thread_position_in_grid]]) {
+    s1_body<false, true, true, true>(src, dst, p, gid);
 }

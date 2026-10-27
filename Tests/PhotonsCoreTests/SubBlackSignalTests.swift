@@ -14,12 +14,16 @@ import PhotonsCore
 /// clamp in S4 still ends at the same pixels), and a strong lift can now resolve a staircase that
 /// lives entirely below zero.
 ///
-/// **073B changed which control is the lift.** `blacks` is a pure multiplier now (±3 EV at the dark
-/// end), and multiplying a negative keeps it negative — so the *only* additive operator that can pull
-/// sub-black data across zero is 071's `blackOffset`. The tests below therefore pin the staircase
-/// against `blackOffset` (which is what the owner asked for: 「可选到 −10 和 +10，对应于让 0 值变为
-/// ±0.01」), and pin the *negative* claim for `blacks`: with a multiplier the sub-black bands stay
-/// clamped, which is the price of "0 → 0" and the reason the affine level was never the right shape.
+/// **073B changed which control is the lift.** For the first half of its travel `blacks` is a pure
+/// multiplier (±3 EV at the dark end), and multiplying a negative keeps it negative: the *fine*
+/// additive control that can pull sub-black data across zero is 071's `blackOffset` (「可选到 −10 和
+/// +10，对应于让 0 值变为 ±0.01」), which the tests below still pin the staircase against.
+///
+/// **073C moved the black point in the second half.** `|blacks| > 50` blends in a level term
+/// (`+B_LEV`, applied after a 1.5 EV darkening), so `blacks = +100` — like Lightroom's black level —
+/// does recover the *shallow* sub-black bands while the deeper ones stay clamped at 0. That is the
+/// owner's 「后面逐步变为修改电平」, and it is pinned below band by band; the first half of the travel
+/// still has to keep every negative sample negative, which is 073B's claim and is still asserted.
 final class SubBlackSignalTests: XCTestCase {
 
     private func makeGraph(_ image: LinearImage) throws -> RenderGraph {
@@ -90,19 +94,43 @@ final class SubBlackSignalTests: XCTestCase {
                              "the staircase collapsed — the sub-black signal is still being clamped")
     }
 
-    /// **`blacks` cannot do that, and that is the point.** With a multiplier (`v·2^(3·Δ·w)`) the four
-    /// negative bands stay negative and S2/S4 clamp them to 0; only the positive band moves. The old
-    /// affine level did pull them up — by moving the *whole picture*, which is the complaint 073B
-    /// answers. `0 → 0` is a feature here: a black end point must not manufacture grey.
-    func testBlacksIsMultiplicativeSoTheSubBlackBandsStayClamped() throws {
+    /// **Where the multiplier stops and the level starts.** For `|blacks| ≤ 50` the four negative bands
+    /// stay negative and S2/S4 clamp them to 0 — `0 → 0`, which is 073B's claim and is still true.
+    ///
+    /// At `blacks = +100` (073C) the black point itself moves: `v′ = v·2^1.5 + 0.005`, so the black
+    /// point sits at `v = −0.0018` and the *shallow* sub-black bands (−0.001) come back while the
+    /// deeper ones (−0.002 … −0.004) stay under it. That is Lightroom's black level — the old affine
+    /// level did the same thing but by moving the *whole picture*, which is what 073B was fixing; here
+    /// it happens only inside the 2.5 EV level window and only past the middle of the travel.
+    func testTheLevelHalfMovesTheBlackPointAndTheEVHalfDoesNot() throws {
         let graph = try makeGraph(staircase())
+
+        // The first half: still a pure multiplier, every negative band stays clamped.
+        for blacks in [25.0, 50, -25, -50] {
+            var edit = EditModel.neutral
+            edit.light.blacks = blacks
+            let means = bandMeans(try render(graph, edit))
+            for i in 0..<5 {
+                XCTAssertEqual(means[i], 0, accuracy: 1e-4,
+                               "blacks \(blacks): band \(i) (a negative sample) was lifted — the "
+                               + "first half of the travel is a multiplier (\(means))")
+            }
+        }
+
+        // The second half: the black point moves, band by band.
         var edit = EditModel.neutral
         edit.light.blacks = 100
         let means = bandMeans(try render(graph, edit))
         print("sub-black staircase means (blacks +100):", means.map { String(format: "%.4f", $0) })
-        for i in 0..<5 {
+        XCTAssertGreaterThan(means[3], 0.01,
+                             "band 3 (−0.001) must come back: at +100 the black point moved to −0.0018")
+        for i in 0..<3 {
             XCTAssertEqual(means[i], 0, accuracy: 1e-4,
-                           "band \(i) (a negative sample) was lifted by a multiplier: \(means)")
+                           "band \(i) is deeper than −0.0018 and must stay under the black point: \(means)")
+        }
+        // Order is preserved: a deeper band never comes out brighter.
+        for i in 1..<means.count {
+            XCTAssertGreaterThan(means[i], means[i - 1] - 1e-4, "the staircase inverted: \(means)")
         }
         XCTAssertGreaterThan(means[5], 0.01, "the positive band must still be inside the toe")
     }
