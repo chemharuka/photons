@@ -55,6 +55,9 @@ public struct InspectorView: View {
         /// are the same panel in Lightroom, and below the tone controls because they act on the
         /// decoded pixels rather than on the render.
         case detail
+        /// 派单 051: 曲线. Directly under 细节, as 042 planned: the tone controls, then the decoder's
+        /// amounts, then the curve that reprofiles what came out of both.
+        case curve
         case presets
         case masks
         case decode
@@ -68,6 +71,7 @@ public struct InspectorView: View {
             case .light: return "Light"
             case .color: return "Color"
             case .detail: return "细节"
+            case .curve: return "曲线"
             case .presets: return "预设"
             case .masks: return "蒙版"
             case .decode: return "Decode"
@@ -175,6 +179,8 @@ public struct InspectorView: View {
             colorCard
         case .detail:
             detailCard
+        case .curve:
+            curveCard
         case .presets:
             PresetPanel(session: session)
         case .masks:
@@ -385,6 +391,20 @@ public struct InspectorView: View {
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
+        }
+    }
+
+    /// 派单 051: 曲线 — the S1.7 HDR curve, visible and draggable for the first time.
+    ///
+    /// The card is deliberately thin: `CurvePanel` owns every interaction and the arithmetic behind
+    /// it, and the two things the card adds are 047's conventions — **double-click the title = 全部复位
+    /// in one snapshot** (`PanelResets.curve()`), and the undo label is the card's own title.
+    ///
+    /// The two buttons in the panel's corner do the narrower of the same two verbs (`复位本通道` /
+    /// `全部复位`), so the title and the button cannot mean different things.
+    private var curveCard: some View {
+        card(Section.curve.title, reset: { resets.curve() }) {
+            CurvePanel(session: session)
         }
     }
 
@@ -1575,6 +1595,24 @@ public struct PanelResets {
     }
 
     // MARK: a whole card
+
+    /// 派单 051: 双击曲线卡标题 = **四张表一起**回恒等 — one snapshot.
+    ///
+    /// Not a `Group` case: `Group` is the enum `PanelResetTests` holds to exactly four cards
+    /// (白平衡/Light/Color/细节), and the curve is its own kind of default — "四张 4096 点表逐字节回到
+    /// `i/(N−1)`", which is what lets the kernel take its copy branch again (`CurveLUT.isIdentity`).
+    /// Adding a case there would change the meaning of an existing list to make room for a verb that
+    /// is not a field group.
+    ///
+    /// The guard is `CurveLUT.isIdentity` and not "已经等于 identity": a curve that is not literally
+    /// `CurvePoint.linear` but whose tables are the identity has nothing to write, and writing it would
+    /// put a snapshot in the history that ⌘Z would undo into the same picture.
+    @discardableResult
+    public func curve() -> Bool {
+        guard !CurveLUT.isIdentity(session.edit.curve) else { return false }
+        session.applyEdit { $0.curve = .identity }
+        return session.commitEdit(label: InspectorView.Section.curve.title)
+    }
 
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
     @discardableResult
