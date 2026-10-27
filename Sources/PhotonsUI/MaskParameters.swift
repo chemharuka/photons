@@ -174,8 +174,14 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
             return "相对白平衡 −100…100，按 6500 K + 30 K/单位映射到 M1-7 的 Planckian 近似（不是开尔文）"
         case .tint:
             return "−100…100，正值偏品红；与全局 LightGroup.tint 同一套映射"
-        case .contrast, .highlights, .shadows, .whites, .blacks, .hue, .saturation:
+        case .contrast, .highlights, .shadows, .whites, .blacks:
+            // 056: the tone half stayed in S1.6, where scene-linear is the right domain for them.
             return "−100…100；S1.6 按 /100 归一后作用在场景线性像素上（对比以 0.18 为枢轴）"
+        case .hue, .saturation:
+            // 056: colour moved to S3.5, **after** the tone map, so a local slider means what the
+            // global one means (same `color_hsl.metal`, same numbers — measured equal to 0 codes).
+            return "−100…100；在 tone map 之后的显示参考域施加，与全局同名滑杆同一份算法"
+
         }
     }
 }
