@@ -613,10 +613,10 @@ final class ToneMapTests: XCTestCase {
         }
     }
 
-    /// 074 R2 also has to hold up **with the other sliders in play**: contrast +22 (a gamma of 1.36)
-    /// must not fold the shadow lift, and the combination must still be monotone. (The contrast curve
-    /// itself is a linear-light power — 074's R1, a separate ticket — so this only asserts that the
-    /// region lifts do not make it worse.)
+    /// 074 R2 also has to hold up **with the other sliders in play**: contrast +22 (0.22 EV of bend
+    /// since 0107) must not fold the shadow lift, and the combination must still be monotone. (The
+    /// contrast curve itself was 074's R1 and moved to the log2 domain in 0107 —
+    /// `ContrastLogDomainTests` — so this only asserts that the region lifts do not make it worse.)
     func testTheRegionLiftsSurviveContrast() throws {
         let harness = try S2KernelHarness()
         var grid: [Float] = []
@@ -650,6 +650,10 @@ private struct S2KernelHarness {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLComputePipelineState
+    /// 0107: the entry point that contains the contrast bend. `s2_tone_map` has none of it (it is the
+    /// pass every `contrast == 0` document runs), so a test that wants contrast has to ask for this one
+    /// — the kernel picks the entry point, exactly as `RenderGraph` does.
+    let contrastPipeline: MTLComputePipelineState
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
@@ -662,8 +666,10 @@ private struct S2KernelHarness {
         let source = try KernelLibrary.expandingLocalIncludes(of: url)
         let library = try device.makeLibrary(source: source, options: nil)
         let fn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map"))
+        let cfn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map_contrast"))
         self.device = device
         self.pipeline = try device.makeComputePipelineState(function: fn)
+        self.contrastPipeline = try device.makeComputePipelineState(function: cfn)
         guard let q = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
         self.queue = q
         XCTAssertEqual(MemoryLayout<Params>.stride, 48, "S2Params' mirror must be as wide as Metal's")
@@ -671,6 +677,7 @@ private struct S2KernelHarness {
 
     func run(_ values: [Float], highlights: Float, shadows: Float,
              contrast: Float = 0) throws -> [Float] {
+        let pso = contrast == 0 ? pipeline : contrastPipeline
         let w = values.count, h = 1
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: w,
                                                          height: h, mipmapped: false)
@@ -684,16 +691,17 @@ private struct S2KernelHarness {
             src.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                         withBytes: buf.baseAddress!, bytesPerRow: w * 16)
         }
-        var p = Params(a: SIMD4(contrast, 0.18, 0, 0), b: SIMD4(highlights, shadows, 0, 0),
+        var p = Params(a: SIMD4(contrast, Float(S2Contrast.travelEV), 0, 0),
+                       b: SIMD4(highlights, shadows, 0, 0),
                        c: SIMD4(0, 0, Float(w), Float(h)))
         let cb = try XCTUnwrap(queue.makeCommandBuffer())
         let enc = try XCTUnwrap(cb.makeComputeCommandEncoder())
-        enc.setComputePipelineState(pipeline)
+        enc.setComputePipelineState(pso)
         enc.setTexture(src, index: 0)
         enc.setTexture(dst, index: 1)
         enc.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
         enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: min(pipeline.maxTotalThreadsPerThreadgroup, 32),
+                            threadsPerThreadgroup: MTLSize(width: min(pso.maxTotalThreadsPerThreadgroup, 32),
                                                            height: 1, depth: 1))
         enc.endEncoding()
         cb.commit()
