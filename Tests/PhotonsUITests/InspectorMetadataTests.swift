@@ -15,7 +15,13 @@ final class InspectorMetadataTests: XCTestCase {
 
     private let inspectorWidth: CGFloat = 330
     /// `330 − 2·12 (scroll inset) − 2·16 (card inset)`, the width every card's content gets.
-    private var cardContentWidth: CGFloat { inspectorWidth - 2 * 12 - 2 * WorkspaceLayout.cardInsetH }
+    private var cardContentWidth: CGFloat { cardContentWidth(forPanelWidth: inspectorWidth) }
+
+    /// The same subtraction for any inspector width (300…364 at run time; 330 / 274 / 244 are the
+    /// three the publicity shots use).
+    private func cardContentWidth(forPanelWidth width: CGFloat) -> CGFloat {
+        width - 2 * 12 - 2 * WorkspaceLayout.cardInsetH
+    }
 
     // MARK: format rules
 
@@ -231,48 +237,158 @@ final class InspectorMetadataTests: XCTestCase {
         }
     }
 
-    /// 第 1 行是一行三列, proven on the frames SwiftUI gave the three cells: the file name starts at
-    /// the card content's left edge, `54 MP` is centred on that same band, `9000×6000` ends on its
-    /// right edge — within 1 pt, not "looks centred".
+    /// 第 1 行是一行三列, but the two value columns are **right-packed**: `9000×6000` ends on the
+    /// content's right edge, `54 MP` ends exactly `columnGap` before that column's left edge, and
+    /// the file name gets everything that is left.
+    ///
+    /// This is the assertion that goes red when the middle column is centred again: centring puts
+    /// `54 MP`'s right edge near the content's mid-line instead of at `尺寸列左边缘 − gap`, and the
+    /// name's width follows it down (113 pt instead of 169 pt at 330).
+    ///
+    /// The values are bounded in width (六位数封顶: `999999×999999` = `999998 MP`), which is what
+    /// makes right-packing safe: the worst string either column can print still leaves the name a
+    /// real column at the narrowest legal panel. Nothing reserves that worst case in the layout —
+    /// reserving it would cost the name 56 pt, the exact amount centring wasted — so the guard is
+    /// asserted here instead, on the measured widths.
     @MainActor
-    func testFirstRowIsNameLeftPixelsCentreDimensionsRight() throws {
+    func testFirstRowHugsTheRightEdgeAndGivesTheRestToTheFileName() throws {
         let (session, asset) = try makeSession(width: 9000, height: 6000,
                                                make: "Leica Camera AG", model: "Leica SL3",
                                                lens: "Vario-Elmarit-SL 24-90")
-        let panel = try host(session)
-        defer { panel.window.contentView = nil }
+        let font = NSFont.systemFont(ofSize: InspectorPhotoInfo.PhotoSpecRow.fontSize)
+        let gap = InspectorPhotoInfo.PhotoSpecRow.columnGap
+        // The two worst strings either column can print, measured with the real font.
+        let worstCount = MarqueeLayout.width(of: "999998 MP", font: font)
+        let worstDims = MarqueeLayout.width(of: "999999×999999", font: font)
+        // 300 is `WorkspaceLayout.inspectorWidthMin` — the narrowest panel the app allows.
+        let narrowest = cardContentWidth(forPanelWidth: WorkspaceLayout.inspectorWidthMin)
+        XCTAssertGreaterThan(narrowest - worstCount - worstDims - 2 * gap, 60,
+                             "a 6×6 worst case leaves the file name almost nothing "
+                             + "(\(narrowest - worstCount - worstDims - 2 * gap) pt at the narrowest panel)")
 
-        // The four rows, in order: 文件名 / 54 MP / 9000×6000 (one line), 相机, 镜头, then the
-        // existing four-slot parameter row (pinned by `testParameterTokensAreUnpaddedAndOrdered`).
-        XCTAssertEqual(panel.marquees.map(\.text),
-                       [asset.filename, "Leica SL3", "Vario-Elmarit-SL 24-90"],
-                       "row 1 carries the file name, row 2 the camera, row 3 the lens")
-        XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue]?.text, "54 MP")
-        XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text, "9000×6000")
+        for panelWidth in [330.0, 274.0, 244.0] as [CGFloat] {
+            let panel = try host(session, width: panelWidth)
+            defer { panel.window.contentView = nil }
 
-        let contentMinX: CGFloat = 12 + WorkspaceLayout.cardInsetH
-        let contentMidX = contentMinX + cardContentWidth / 2
-        let contentMaxX = contentMinX + cardContentWidth
-        let name = panel.marquees[0].frame
-        let centre = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue])
-        let trailing = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue])
+            // The four rows, in order: 文件名 / 54 MP / 9000×6000 (one line), 相机, 镜头, then the
+            // existing four-slot parameter row (pinned by `testParameterTokensAreUnpaddedAndOrdered`).
+            XCTAssertEqual(panel.marquees.map(\.text),
+                           [asset.filename, "Leica SL3", "Vario-Elmarit-SL 24-90"],
+                           "row 1 carries the file name, row 2 the camera, row 3 the lens")
+            XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue]?.text, "54 MP")
+            XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text, "9000×6000")
 
-        XCTAssertEqual(name.minX, contentMinX, accuracy: 1,
-                       "file name minX \(name.minX) ≠ content minX \(contentMinX)")
-        XCTAssertEqual(centre.midX, contentMidX, accuracy: 1,
-                       "60 MP midX \(centre.midX) ≠ content midX \(contentMidX)")
-        XCTAssertEqual(trailing.maxX, contentMaxX, accuracy: 1,
-                       "9000×6000 maxX \(trailing.maxX) ≠ content maxX \(contentMaxX)")
-        // The name column stops before the centred value: no overlap on the line.
-        XCTAssertLessThan(name.maxX, centre.minX)
-        // No `·` in any of the four rows' visible text (派单 022).
-        for text in panel.marquees.map(\.text) + [centre.text, trailing.text] {
-            XCTAssertFalse(text.contains("·"), "「\(text)」 carries a separator")
+            let contentWidth = cardContentWidth(forPanelWidth: panelWidth)
+            let contentMinX: CGFloat = 12 + WorkspaceLayout.cardInsetH
+            let contentMaxX = contentMinX + contentWidth
+            let name = panel.marquees[0].frame
+            let count = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelCount.rawValue])
+            let dims = try XCTUnwrap(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue])
+
+            // 尺寸 flush right on the content edge, 像素数 one gap before that column's left edge.
+            XCTAssertEqual(dims.maxX, contentMaxX, accuracy: 0.5,
+                           "9000×6000 maxX \(dims.maxX) ≠ content maxX \(contentMaxX)")
+            XCTAssertEqual(count.maxX, dims.minX - gap, accuracy: 0.5,
+                           "60 MP maxX \(count.maxX) ≠ 尺寸's minX \(dims.minX) − gap \(gap)")
+            // It hugs the right instead of sitting in the middle: the old centring put maxX near
+            // the mid-line, which is where this assertion fails if anyone restores `bounds.midX`.
+            XCTAssertGreaterThan(count.maxX, contentMinX + contentWidth / 2 + gap,
+                                 "60 MP still sits in the middle of the row")
+            // The file name gets exactly the room left before 60 MP — this is the width claim, and
+            // it is absolute: `content − gap − 54 MP − gap − 9000×6000`, both values measured with
+            // the row's own font. Centring `54 MP` hands back 113.5 pt here instead of 168.5, so
+            // this is the assertion that fails if the middle column is ever centred again.
+            let expectedNameWidth = contentWidth - 2 * gap
+                - MarqueeLayout.width(of: "54 MP", font: font)
+                - MarqueeLayout.width(of: "9000×6000", font: font)
+            XCTAssertEqual(name.minX, contentMinX, accuracy: 0.5,
+                           "file name minX \(name.minX) ≠ content minX \(contentMinX)")
+            XCTAssertEqual(name.width, expectedNameWidth, accuracy: 1,
+                           "file name column \(name.width) pt ≠ the room left before 60 MP "
+                           + "(\(expectedNameWidth) pt) at panel \(panelWidth)")
+            // No overlap on the line: the marquee's own frame ends before the value columns.
+            XCTAssertLessThanOrEqual(name.maxX, count.minX - gap + 0.01,
+                                     "the name runs into 60 MP")
+            XCTAssertLessThanOrEqual(count.maxX, dims.minX - gap + 0.01,
+                                     "60 MP runs into 9000×6000")
+            // Neither value is elided: SwiftUI gave each its whole measured width.
+            XCTAssertEqual(count.width, MarqueeLayout.width(of: "54 MP", font: font), accuracy: 1,
+                           "54 MP is not drawn at its natural width (\(count.width) pt)")
+            XCTAssertEqual(dims.width, MarqueeLayout.width(of: "9000×6000", font: font), accuracy: 1,
+                           "9000×6000 is not drawn at its natural width (\(dims.width) pt)")
+            XCTAssertLessThanOrEqual(count.width, worstCount + 0.01,
+                                     "54 MP is wider than the 6-digit bound")
+            XCTAssertLessThanOrEqual(dims.width, worstDims + 0.01,
+                                     "9000×6000 is wider than the 6-digit bound")
+            // One baseline: the values sit on the name's line, not above or below it.
+            for cell in [count, dims] {
+                XCTAssertEqual(cell.minY, name.minY, accuracy: 1,
+                               "a value left the name's line (minY \(cell.minY) vs \(name.minY))")
+                XCTAssertEqual(cell.height, 12, accuracy: 1, "value cell height moved: \(cell.height)")
+            }
+            // No `·` in any of the four rows' visible text (派单 022).
+            for text in panel.marquees.map(\.text) + [count.text, dims.text] {
+                XCTAssertFalse(text.contains("·"), "「\(text)」 carries a separator")
+            }
+
+            print(String(format: "SPEC row1 @%.0f: content %.0f..%.0f (%.0f pt) · "
+                         + "name x%.1f w%.1f · count x%.1f w%.1f maxX%.1f · "
+                         + "dims x%.1f w%.1f maxX%.1f · y%.1f h%.1f",
+                         panelWidth, contentMinX, contentMaxX, contentWidth,
+                         name.minX, name.width,
+                         count.minX, count.width, count.maxX,
+                         dims.minX, dims.width, dims.maxX,
+                         name.minY, name.height))
+            print(String(format: "SPEC rows @%.0f: name y%.1f h%.1f · camera y%.1f h%.1f · "
+                         + "lens y%.1f h%.1f",
+                         panelWidth, panel.marquees[0].frame.minY, panel.marquees[0].frame.height,
+                         panel.marquees[1].frame.minY, panel.marquees[1].frame.height,
+                         panel.marquees[2].frame.minY, panel.marquees[2].frame.height))
         }
-        print(String(format: "SPEC row1: name minX %.1f (want %.1f) · 54 MP midX %.1f (want %.1f) · "
-                     + "dims maxX %.1f (want %.1f); name column %.1f pt",
-                     name.minX, contentMinX, centre.midX, contentMidX,
-                     trailing.maxX, contentMaxX, name.width))
+    }
+
+    /// How many characters the file name keeps at each inspector width — the number the change is
+    /// for. `L100000.dng` (11 characters) must fit whole; a 40-character name must keep more of
+    /// itself than it did when `54 MP` was centred (18 / 9 / 3 characters at 330 / 274 / 244).
+    @MainActor
+    func testFileNameKeepsMoreCharactersAtEveryWidth() throws {
+        let font = NSFont.systemFont(ofSize: InspectorPhotoInfo.PhotoSpecRow.fontSize)
+        let gap = InspectorPhotoInfo.PhotoSpecRow.columnGap
+        let long = "2026-10-27_L1000123_Leica_SL3_ISO100.dng"
+        XCTAssertEqual(long.count, 40, "the long case is meant to be a twice-the-column name")
+
+        // The name column the row hands the marquee: content − gap − 54 MP − gap − 9000×6000.
+        func nameColumn(_ panelWidth: CGFloat) -> CGFloat {
+            cardContentWidth(forPanelWidth: panelWidth) - 2 * gap
+                - MarqueeLayout.width(of: "54 MP", font: font)
+                - MarqueeLayout.width(of: "9000×6000", font: font)
+        }
+        // Baseline, measured before the change with the middle column centred: 18 / 9 / 3 of 40.
+        let baseline = [330.0: 18, 274.0: 9, 244.0: 3]
+
+        for panelWidth in [330.0, 274.0, 244.0] as [CGFloat] {
+            let width = nameColumn(panelWidth)
+            for text in ["L100000.dng", long] {
+                let row = MarqueeRowView(text: text, font: font, lineHeight: 14)
+                row.frame = NSRect(x: 0, y: 0, width: width, height: 14)
+                row.layout()
+                print(String(format: "SPEC trunc @%.0f: name column %.1f pt · textWidth %.1f · "
+                             + "overflow %.1f · keeps %d/%d chars → 「%@」",
+                             panelWidth, width, row.textWidth,
+                             row.textWidth - width, row.truncatedText.count, text.count,
+                             row.truncatedText))
+                if text == "L100000.dng" {
+                    XCTAssertFalse(row.isOverflowing, "L100000.dng does not fit in \(width) pt")
+                    XCTAssertEqual(row.truncatedText, text, "a short name was cut: \(row.truncatedText)")
+                } else {
+                    XCTAssertTrue(row.isOverflowing, "the 40-character name fits — nothing to test")
+                    XCTAssertTrue(row.truncatedText.hasSuffix("…"), "no tail ellipsis")
+                    XCTAssertGreaterThan(row.truncatedText.count, baseline[panelWidth] ?? 0,
+                                         "the name kept no more characters than when 60 MP was "
+                                         + "centred (\(baseline[panelWidth] ?? 0) of 40)")
+                }
+            }
+        }
     }
 
     /// 缺值不塌行: no width/height → `—`, no camera/lens → 未知相机 / 未知镜头, no photo → 未选择照片,
@@ -485,10 +601,10 @@ final class InspectorMetadataTests: XCTestCase {
     }
 
     @MainActor
-    private func host(_ session: CatalogSession) throws -> SpecPanel {
+    private func host(_ session: CatalogSession, width: CGFloat? = nil) throws -> SpecPanel {
         _ = NSApplication.shared
         let host = NSHostingView(rootView: InspectorView(session: session))
-        host.frame = NSRect(x: 0, y: 0, width: inspectorWidth, height: 800)
+        host.frame = NSRect(x: 0, y: 0, width: width ?? inspectorWidth, height: 800)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
