@@ -29,9 +29,10 @@ import PhotonsCore
 /// 派单 052 adds two facts about that number, and both are per-row data in `ToneRow` so no card can
 /// answer differently:
 ///
-///   · **the first keystroke after focus starts the buffer over** (`NumberFieldState.typed(from:to:)`)
-///     — clicking in and typing `1.5` must not land inside the `1.5` that was already there
-///     (`1.1.5`). A first keystroke that *replaces* a text selection is left alone: that is "改一位".
+///   · **the first keystroke after focus starts the buffer over** (`NumberFieldState.judgeFirstEdit`,
+///     asked from the field editor's pre-change callback in `NumberField.swift`) — clicking in and
+///     typing `1.5` must not land inside the `1.5` that was already there (`1.1.5`). A first keystroke
+///     that *replaces* a text selection is left alone: that is "改一位".
 ///   · **the readout is not the document.** 曝光 reads `%.2f EV` and stores on a 0.01 grid; the other
 ///     continuous rows read as integers rounded **away** from zero (`ceil` up, `floor` down — never
 ///     smaller than the truth) and store what was typed. `ToneRow.rounding` / `.decimals` / `.quantum`
@@ -1119,10 +1120,12 @@ private struct ResetOnDoubleClick: ViewModifier {
 /// What a row's number accepts, and what a typed value means.
 ///
 /// Kept out of the view for the same reason `SliderRowStyle` and `DetailCardContent` are values: the
-/// rules are the contract, and a rule a test can call is a rule that cannot rot silently. `swift test`
-/// has no window session (the accessibility tree is empty, SwiftUI makes no `NSTextField` to poke), so
-/// the keystroke *wiring* is pinned on `SliderNumberField`'s source in `PanelEditingTests` while
-/// everything below is asserted directly.
+/// rules are the contract, and a rule a test can call is a rule that cannot rot silently.
+///
+/// 057 changed what "cannot rot" means here: `swift test` *can* have a window session (a test builds a
+/// real `NSWindow`, focuses a real `NSTextField` and drives its field editor), so the keystroke
+/// **wiring** is no longer read off the source — `NumberFieldTypingTests` drives real AppKit callbacks
+/// through it. The rules below are still asserted directly, because they are still pure functions.
 enum SliderValueInput {
 
     /// The two outcomes a submitted string can have.
@@ -1235,9 +1238,16 @@ enum FirstKeystroke: Equatable {
 
 /// 052: a row's number while it is being typed — the buffer, and the one rule above.
 ///
-/// The view holds this, the tests hold this: `begin` is focus, `typed(from:to:)` is the field's
-/// binding being written, `end` is any of 047's three exits. Keeping the decision here (and not in
-/// the view) is what makes 「第一次按键先清空」 a test instead of a screenshot.
+/// The view holds this, the tests hold this: `begin` is focus, `end` is any of 047's three exits, and
+/// the buffer is whatever the field editor really holds (`record`). Keeping the decision here (and not
+/// in the view) is what makes 「第一次按键先清空」 a test instead of a screenshot.
+///
+/// 057 moved *where the decision is taken*, not what it decides: `judgeFirstEdit` is asked by the field
+/// editor, before the character lands. `typed(from:to:)` is 052's string-diff form of the same rule —
+/// it can only run after the change, and it is no longer the field's live path (a `TextField` binding
+/// cannot repaint the character it just accepted). It is kept, and still driven directly by
+/// `PanelEditingTests`, as the record of what 052 decided; the wiring is pinned by
+/// `NumberFieldTypingTests`, through AppKit.
 struct NumberFieldState: Equatable {
     /// What the field shows.
     private(set) var text: String = ""
@@ -1279,6 +1289,25 @@ struct NumberFieldState: Equatable {
         }
     }
 
+    /// 057: what the string-diff rule above cannot see, because it runs *after* the character has
+    /// landed — the range the field editor is about to change, and the text replacing it.
+    ///
+    /// `true` means the affected range must become **the whole buffer**: a first insertion into a
+    /// readout the user means to retype (`1.48` + `5` → `5`). `false` means the user's own range
+    /// stands: a chosen selection ("只想改一位"), or a Backspace. The rule is spent either way — it is
+    /// 「第一次按键」, not 「每一次按键」.
+    mutating func judgeFirstEdit(affectedRange: NSRange, replacement: String) -> Bool {
+        let armed = pendingClear
+        pendingClear = false
+        return armed && !replacement.isEmpty && affectedRange.length == 0
+    }
+
+    /// 057: the buffer the field editor actually holds, recorded after a change landed. This is what
+    /// `submission(in:)` judges, so a commit can never read a string the user is not looking at.
+    mutating func record(_ buffer: String) {
+        text = buffer
+    }
+
     /// One of the three exits: the field stops editing and shows `text` (the row's readout, or the
     /// old value after a cancel).
     mutating func end(_ text: String) {
@@ -1309,9 +1338,9 @@ struct NumberFieldState: Equatable {
     }
 }
 
-/// One row's number: a readout that turns into a text field (派单 047, 精度 052).
+/// One row's number: a readout that turns into a text field (派单 047, 精度 052, 接线 057).
 ///
-/// Always a `TextField` — a `Text` plus an `onTapGesture` would give the mouse an entry and the keyboard
+/// Always a real field — a `Text` plus an `onTapGesture` would give the mouse an entry and the keyboard
 /// none (`Tab` reaches a control, not a label). What changes on focus is the *text*: the row's own
 /// format while resting (`1.48 EV`), the clean number while editing (`1.48`), so the user types what
 /// the document will hold.
@@ -1320,9 +1349,10 @@ struct NumberFieldState: Equatable {
 /// focus commits. A rejected string beeps **and** restores — and because `onCommit` is never called, no
 /// `applyEdit` and no `commitEdit` happen, which is the "非法输入不写历史" contract.
 ///
-/// 052 adds the buffer rule (`NumberFieldState`): the first keystroke after focus replaces the whole
-/// buffer instead of landing inside it, and a buffer the user emptied and then `↵`'d is a **cancel** —
-/// `history.count` does not move.
+/// 057: the field itself is an `NSTextField` (`NumberFieldView` → `NumberTextField`), because
+/// 「第一次按键先清空」 has to rewrite the affected **range** before the character lands — see
+/// `NumberField.swift`. This view is only the row's data: value, travel, format, and the row's own
+/// write path.
 struct SliderNumberField: View {
     let value: Double
     let range: ClosedRange<Double>
@@ -1337,70 +1367,17 @@ struct SliderNumberField: View {
     /// Write + commit: the row's own path, so a typed value is one history entry exactly like a drag.
     let onCommit: (Double) -> Void
 
-    @State private var state = NumberFieldState()
-    @FocusState private var focused: Bool
-
-    /// `editing` is read as a property so the exits below stay one sentence each.
-    private var editing: Bool { state.editing }
-
-    private var display: String { InspectorView.sliderText(format, value, rounding: rounding) }
-
-    /// The field's own binding: a keystroke goes through `NumberFieldState`, which may hand back a
-    /// shorter buffer than the one SwiftUI just produced (`1.51` → `1`) — that is the whole feature.
-    private var buffer: Binding<String> {
-        Binding(get: { state.text },
-                set: { new in
-                    state.typed(from: state.text, to: new)
-                })
-    }
-
     var body: some View {
-        TextField("", text: buffer)
-            .textFieldStyle(.plain)
-            .multilineTextAlignment(.trailing)
-            .font(.system(size: fontSize, design: .monospaced))
-            .foregroundStyle(editing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
-            .frame(width: width)
-            .focused($focused)
-            .onAppear { state.end(display) }
-            .onChange(of: value) { _, _ in if !editing { state.end(display) } }
-            .onChange(of: focused) { _, isFocused in
-                if isFocused { begin() } else if editing { commit() }
-            }
-            .onSubmit { commit(); focused = false }
-            .onExitCommand { cancel() }
+        // 057: no `@State`, no `Binding`, no `@FocusState` — the text lives in the `NSTextField`, and
+        // the field editor is the only thing that knows where the caret is when a key arrives.
+        NumberFieldView(row: NumberFieldRow(value: value, range: range, format: format,
+                                            decimals: decimals, rounding: rounding),
+                        fontSize: fontSize,
+                        accessibilityID: accessibilityID,
+                        onCommit: onCommit)
+            .frame(width: width, height: fontSize + 4)
             .accessibilityIdentifier(accessibilityID ?? "")
             .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 失焦提交")
-    }
-
-    /// Focus gained: swap the formatted readout for the clean number, and arm the buffer rule.
-    private func begin() {
-        guard !editing else { return }
-        state.begin(SliderValueInput.editingText(value, decimals: decimals))
-    }
-
-    /// `↵` or blur: write it (which commits once), or beep and put the old number back.
-    ///
-    /// 052: an **empty** buffer is not junk — `↵` on a field the user retyped from scratch and then
-    /// abandoned is a cancel: no write, no history, no beep (the old `1.5` is still there).
-    private func commit() {
-        guard editing else { return }
-        switch state.submission(in: range) {
-        case .value(let typed):
-            state.end(InspectorView.sliderText(format, typed, rounding: rounding))  // what the model is about to hold
-            onCommit(typed)
-        case .cancelled:
-            cancel()
-        case .rejected:
-            NSSound.beep()
-            state.end(display)
-        }
-    }
-
-    /// `Esc` (or an empty buffer + `↵`): nothing written, not even a beep — the user asked to leave.
-    private func cancel() {
-        state.end(display)
-        focused = false
     }
 }
 
