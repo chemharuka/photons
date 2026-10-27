@@ -124,6 +124,28 @@ enum CropUITestSupport {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 
+    /// Open 裁切 mode, retrying across a few run-loop turns.
+    ///
+    /// `beginCropTool` refuses without an anchor and without `.loupe`, and both are published by an
+    /// observation bridge: on a loaded machine the first turn after `makeSession` can still see the
+    /// previous state, which would look like a failure of the thing under test. The retry is bounded
+    /// and the message carries the reason, so a genuine refusal still fails loudly.
+    @MainActor
+    @discardableResult
+    static func openCropTool(_ loupe: LoupeController, _ session: CatalogSession,
+                             timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if loupe.beginCropTool() { return true }
+            pump(0.01)
+        }
+        XCTFail("①: 裁切 mode did not open — mode=\(session.mode) "
+                + "anchor=\(String(describing: session.anchorID)) "
+                + "asset=\(String(describing: session.anchorAsset?.id)) "
+                + "active=\(loupe.cropTool.isActive)")
+        return false
+    }
+
     /// A mouse event in window coordinates, for the tests that drive AppKit's real dispatch.
     static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow,
                       clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {

@@ -389,6 +389,99 @@ public final class CropToolController {
                         showsGrid: showsGrid)
     }
 
+    // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
+
+    /// With this `false`, `clampToView` does nothing — ⑦'s anti-proof. A test flips it to show that
+    /// every containment criterion goes red without the clamp; nothing in the app touches it.
+    var clampsFrameToView = true
+
+    /// The largest rect the frame may occupy **right now**, in normalized frame coordinates.
+    ///
+    /// Three questions, and the answer is their intersection — each one was a separate report:
+    ///
+    ///   · **the canvas.** Pulling the viewport back through the mapping gives the part of the frame
+    ///     that is on screen. A crop whose edge is outside this rect is drawn *off the canvas* — the
+    ///     「裁切框会出画布边缘，进入左侧和上方」 the user saw after zooming in from a full frame.
+    ///   · **the photo.** `0…1²`: a crop rect is a rect of the frame, and a frame has no pixels
+    ///     outside itself, so a frame past it is a frame over blank canvas.
+    ///   · **the straightened photo.** At θ ≠ 0 the frame's own corners are turned *out* of the
+    ///     sensor, and `CropMath.inscribedCrop` is the largest rect that samples no background. This
+    ///     is the "框内不许出现空白" half of the same rule, and it is why the check is not a
+    ///     bounding-box test on the AABB of the rotated corners (which would be *bigger* than the
+    ///     photo, not smaller).
+    ///
+    /// `framePoint` is axis-aligned (S0's zoom plus an offset — the rotation belongs to the picture,
+    /// not to the frame the crop is drawn in), so two corners are enough for the pull-back, and the
+    /// result is exactly the rect whose four corners land on the canvas' four corners.
+    public func safeCropRect(mapping: LoupeMapping, source: ImageSize? = nil) -> CropRect {
+        let src = source ?? sourceSize
+        let w = Double(max(src.width, 1)), h = Double(max(src.height, 1))
+        let a = mapping.framePoint(viewX: 0, viewY: 0)
+        let b = mapping.framePoint(viewX: Double(mapping.viewport.width),
+                                   viewY: Double(mapping.viewport.height))
+        var left = min(a.x, b.x) / w, right = max(a.x, b.x) / w
+        var top = min(a.y, b.y) / h, bottom = max(a.y, b.y) / h
+
+        let photo = CropMath.inscribedCrop(of: src, degrees: draft.straighten)
+        left = max(left, photo.left); top = max(top, photo.top)
+        right = min(right, photo.right); bottom = min(bottom, photo.bottom)
+        guard right > left + 1e-9, bottom > top + 1e-9 else {
+            // Nothing of the frame is on screen (a degenerate projection): the photo's own safe area
+            // is the only answer that keeps the arithmetic finite.
+            return photo
+        }
+        return CropRect(left: left, top: top, right: right, bottom: bottom)
+    }
+
+    /// Pull the draft's rect into `safeCropRect` — the **model-layer** floor of ⑦.
+    ///
+    /// The overlay draws `draft.crop` and nothing else, so a clamp here is the only one that cannot
+    /// be bypassed: a view-level clamp would fix the drawing and leave the *committed* crop outside
+    /// the picture. Shrinking keeps the aspect lock (`CropTool.constrain`, anchor `.center`), moving
+    /// keeps the size; the shrink only happens when the frame genuinely has less room than its own
+    /// size (zoomed past the frame), and then the room wins — the frame stays on screen, which is
+    /// the whole point.
+    ///
+    /// Returns `true` when the draft moved, so a caller can tell "clamped" from "already legal".
+    @discardableResult
+    public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
+        guard isActive, clampsFrameToView else { return false }
+        // A canvas that has not been laid out yet (a zero-sized viewport in a headless test, or the
+        // first `layout` pass) is not an opinion about what fits: clamping against it would shrink the
+        // crop to a pixel. A real canvas is at least 560 pt wide by contract.
+        guard mapping.viewport.width > 64, mapping.viewport.height > 64 else { return false }
+        let src = source ?? sourceSize
+        let room = safeCropRect(mapping: mapping, source: src)
+        let before = draft.crop.clamped()
+
+        // Shrink **uniformly** — one scale for both axes — so the frame keeps its shape
+        // (⑦.5's 宽高比不变). The minimum span is a floor on that same scale, and only when the room
+        // is big enough to hold it; when it is not, the room wins and the frame is simply smaller.
+        let span = CropTool.minimumSpan(source: src)
+        var scale = min(1, min(room.width / max(before.width, 1e-9),
+                               room.height / max(before.height, 1e-9)))
+        if room.width >= span.width, room.height >= span.height {
+            let floor = min(1, max(span.width / max(before.width, 1e-9),
+                                   span.height / max(before.height, 1e-9)))
+            scale = max(scale, floor)
+        }
+        var candidate = CropRect(left: before.centerX - before.width * scale / 2,
+                                 top: before.centerY - before.height * scale / 2,
+                                 right: before.centerX + before.width * scale / 2,
+                                 bottom: before.centerY + before.height * scale / 2)
+        if draft.lock.ratio != nil {
+            candidate = CropTool.constrain(candidate, lock: draft.lock, source: src, anchor: .center)
+        }
+        // Move (never resize) into the room, so a crop that already fits keeps its exact size.
+        let fw = min(candidate.width, room.width), fh = min(candidate.height, room.height)
+        let left = min(max(candidate.left, room.left), max(room.left, room.right - fw))
+        let top = min(max(candidate.top, room.top), max(room.top, room.bottom - fh))
+        let next = CropRect(left: left, top: top, right: left + fw, bottom: top + fh)
+        guard next != before else { return false }
+        draft.crop = next
+        return true
+    }
+
     // MARK: the drag
 
     /// Take the gesture at `point` (view points, y down).

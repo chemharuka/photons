@@ -207,6 +207,37 @@ public final class ZoomGlassSlider: NSView {
         case visualEffect
     }
 
+    /// Which corner of the canvas the pill is pinned to.
+    ///
+    /// `bottomRight` is the placement every mode but 裁切 uses — and it is the **default**, so a
+    /// caller that has never heard of the crop tool gets exactly the rectangle it always had. While
+    /// the crop frame is up the bar is centred at the bottom of the canvas, so the pill moves to the
+    /// **top-right** (`LoupeController.layoutZoomSlider`): two chrome rectangles that must not
+    /// intersect are then in two different corners, and the bar's own layout contract (§D1's three
+    /// fixed-width fields) does not have to move a single point.
+    public enum Placement: Sendable, Equatable {
+        case bottomRight
+        case topRight
+
+        /// The pin, expressed as AppKit's flexible margins (the *opposite* of the corner held).
+        var autoresizingMask: NSView.AutoresizingMask {
+            switch self {
+            case .bottomRight: return [.minXMargin, .maxYMargin]
+            case .topRight: return [.minXMargin, .minYMargin]
+            }
+        }
+    }
+
+    /// The corner this pill is pinned to. Setting it re-pins the view and asks for a layout pass;
+    /// the geometry of the control itself (the track, the ticks, the thumb) is corner-independent.
+    public var placement: Placement = .bottomRight {
+        didSet {
+            guard placement != oldValue else { return }
+            autoresizingMask = placement.autoresizingMask
+            needsLayout = true
+        }
+    }
+
     public let geometry: ZoomGlassSliderGeometry
     public let backdropKind: Backdrop
 
@@ -314,13 +345,21 @@ public final class ZoomGlassSlider: NSView {
 
     // MARK: placement
 
-    /// Bottom-right of `bounds`, 16 pt in from each edge. Called by the controller on every layout
-    /// pass; the autoresizing mask then carries the pin across window resizes without it.
+    /// Bottom-right of `bounds`, 16 pt in from each edge — or the top-right corner in 裁切 mode
+    /// (`placement`). Called by the controller on every layout pass; the autoresizing mask then
+    /// carries the pin across window resizes without it.
     public func layout(in bounds: CGRect) {
         let size = CGSize(width: ZoomGlassSliderGeometry.Metrics.totalWidth,
                           height: ZoomGlassSliderGeometry.Metrics.pillHeight)
-        let origin = CGPoint(x: bounds.maxX - ZoomGlassSliderGeometry.Metrics.edgeInset - size.width,
-                             y: bounds.minY + ZoomGlassSliderGeometry.Metrics.edgeInset)
+        let inset = ZoomGlassSliderGeometry.Metrics.edgeInset
+        let origin: CGPoint
+        switch placement {
+        case .bottomRight:
+            origin = CGPoint(x: bounds.maxX - inset - size.width, y: bounds.minY + inset)
+        case .topRight:
+            // y-up: the top edge is `maxY`, so the pill's origin is one pill-height below it.
+            origin = CGPoint(x: bounds.maxX - inset - size.width, y: bounds.maxY - inset - size.height)
+        }
         let next = CGRect(origin: origin, size: size)
         if frame != next { frame = next }
         needsLayout = true
