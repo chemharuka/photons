@@ -1568,7 +1568,16 @@ public final class RenderGraph {
                         report: inout MaskStageReport?) throws {
         switch stage {
         case .geometry:
-            let p = try kernels.pipeline(file: "s0_geometry", function: "s0_geometry")
+            // Two entry points in one shader file (see the shader header): `s0_geometry` has no
+            // `× frameSize` / `÷ frameSize` round trip in it at all, so a cropped-but-not-rotated
+            // document maps `uv − ½` back to `+ ½` and its pixels are byte-identical to the
+            // pre-cropfix ones. The turn itself (pixel-space, the cropfix similarity) lives only in
+            // `s0_geometry_rot`.
+            // The choice is a *dispatch* choice, not a branch inside the kernel: `(uv−½)·f/f+½` is
+            // 1 ulp away from `uv`, and having the expression in the code is enough to move the
+            // pixels — exactly the lesson `s1_scene_linear` learned about its black offset.
+            let p = try kernels.pipeline(file: "s0_geometry",
+                                         function: s0Rotates(edit) ? "s0_geometry_rot" : "s0_geometry")
             // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
             // place, so the kernel's branch and the trace cannot disagree (029).
             let identity = plan.s0Identity
@@ -1784,6 +1793,15 @@ public final class RenderGraph {
 
     // S0 and the mask atlas must rotate by the same angle, so both read `straightenDegrees`
     // (the stored value clamped to the ±45 straighten range) instead of the raw field.
+    //
+    // `s0Rotates` is the *dispatch* condition for S0's two entry points and is deliberately derived
+    // from the same field as `costheta`/`sintheta`: at `straightenDegrees == 0` those are exactly
+    // (1, 0), so the turn is a no-op and `s0_geometry` (the one with no `× f / ÷ f` in it) is
+    // bit-exact. Any other value — including a 90° rotation or a clamped ±45 — takes `_rot`.
+    private func s0Rotates(_ edit: EditModel) -> Bool {
+        edit.geometry.straightenDegrees != 0
+    }
+
     private func costheta(_ edit: EditModel) -> Float {
         Float(cos(edit.geometry.straightenDegrees * .pi / 180))
     }
