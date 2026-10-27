@@ -435,13 +435,17 @@ final class PanelResetTests: XCTestCase {
         XCTAssertTrue(source.contains("card(Section.detail.title, reset: { resetGroup(.detail) })"))
         XCTAssertTrue(source.contains("card(Section.whiteBalance.title, reset: { resetWhiteBalance() })"))
 
-        // 分组清单就是那四张卡；蒙版是列表，没有「整组默认」。
+        // 分组清单就是那五张卡（2026-10-28 加效果：暗角 + 颗粒，八个数字一起复位）；蒙版是列表，
+        // 没有「整组默认」。
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
-                       ["whiteBalance", "light", "color", "detail"])
+                       ["whiteBalance", "light", "color", "detail", "effects"])
         XCTAssertEqual(PanelResets.Group.allCases.map(\.title),
                        [InspectorView.Section.whiteBalance.title, InspectorView.Section.light.title,
-                        InspectorView.Section.color.title, InspectorView.Section.detail.title],
+                        InspectorView.Section.color.title, InspectorView.Section.detail.title,
+                        InspectorView.Section.effects.title],
                        "the undo label is the card the user double-clicked")
+        XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
+                      "效果卡也要能从标题复位")
 
         // 每一根滑杆都有复位：`sliderRow` 的 `onReset` 是必填参数，不是可选的。
         XCTAssertFalse(source.contains("onReset: (() -> Void)? = nil"),
