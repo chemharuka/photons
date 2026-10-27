@@ -15,10 +15,11 @@ import PhotonsUI
 ///      asserted against a fixture with *known* counts (so "R 1284" is a number this test put
 ///      there), the font is the clipping numbers' own `numberFont` (an identity, not two literals),
 ///      and the colour is measured with the card's WCAG arithmetic in both appearances.
-///   ③ **The three groups do not move** (018/019). The row is split into thirds and group `i`'s letter
-///      starts at `i · rowWidth / 3`, so any count length — `0`, `1284`, `1987675` — produces the *same*
+///   ③ **The three groups do not move** (018/019, re-based on the grid 2026-10-27). Group `i`'s letter
+///      starts at the shared column `channelColumnStarts(in:)[i]` — the same x the clipping row's
+///      过白/削顶/削底 start on — so any count length — `0`, `1284`, `1987675` — produces the *same*
 ///      three letter `minX`, asserted exactly; the number sits **one space** behind its letter
-///      (「数字要靠近字母」) rather than at a field's right edge, and a long number runs past its group
+///      (「数字要靠近字母」) rather than at a field's right edge, and a long number runs past its column
 ///      instead of being truncated.
 ///
 /// The card is drawn offscreen, never in a window: nothing here can leave a window on screen.

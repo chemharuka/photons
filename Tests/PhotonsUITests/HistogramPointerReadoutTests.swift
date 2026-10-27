@@ -417,10 +417,12 @@ final class HistogramPointerReadoutTests: XCTestCase {
             XCTAssertEqual(letters[2][group], letters[0][group], accuracy: 0,
                            "长数字也不移动第 \(group) 组的字母")
         }
-        // …and they are the thirds of the row.
-        XCTAssertEqual(letters[0][0], 0, accuracy: 0.01)
-        XCTAssertEqual(letters[0][1], 244.0 / 3, accuracy: 0.01, "中间组的起点是 1/3 卡宽")
-        XCTAssertEqual(letters[0][2], 2 * 244.0 / 3, accuracy: 0.01, "最后一组的起点是 2/3 卡宽")
+        // …and they are the grid's three columns (2026-10-27: the letters were at thirds, and the
+        // clipping row above flowed, so nothing lined up. Both rows now share `channelColumnStarts`).
+        let columns = HistogramCardView.channelColumnStarts(in: 244)
+        XCTAssertEqual(letters[0][0], columns[0], accuracy: 0.01)
+        XCTAssertEqual(letters[0][1], columns[1], accuracy: 0.01, "中间组的起点是 colG")
+        XCTAssertEqual(letters[0][2], columns[2], accuracy: 0.01, "最后一组的起点是 colB")
         // The number hugs its letter: one space, not a right-aligned field edge.
         for gap in gaps.flatMap({ $0 }) {
             XCTAssertEqual(gap, spaceWidth, accuracy: 0.5, "数值与字母之间是一个空格 (\(spaceWidth) pt)")
@@ -464,8 +466,9 @@ final class HistogramPointerReadoutTests: XCTestCase {
         render(card)
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertFalse(card.readoutRowRect.isEmpty, "…and keeps its height")
-        XCTAssertEqual(card.channelRowText, "", "通道行同样清空")
-        XCTAssertTrue(card.channelLetterRects.isEmpty)
+        XCTAssertEqual(card.channelRowText, "", "通道行同样清空（数值）")
+        XCTAssertEqual(card.channelLetterRects.count, 3, "字母常驻：指针移开只是不画数值")
+        XCTAssertTrue(card.channelValueRects.isEmpty)
         XCTAssertEqual(card.channelRowRect.height, HistogramCardView.channelRowHeight, accuracy: 0,
                        "…通道行的高度也不变")
 

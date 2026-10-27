@@ -15,9 +15,12 @@ import PhotonsUI
 ///      (`code = round(v · 255)` for a channel at or below white, `log2(decode(v))` above it), which is
 ///      a different arithmetic from the card's `srgbDecode` → `srgbEncode` round trip;
 ///   ② **a channel above white prints `+x.x`** while its neighbours stay codes — one row, two forms;
-///   ③ **no pointer, no percentages**: blank row, unchanged height, and no `%` in any painted string;
-///   ④ **the letters do not float** — group starts are `i · rowWidth / 3`, asserted exactly across three
-///      value lengths, with long values allowed to run past their group instead of being truncated;
+///   ③ **no pointer, no numbers**: the letters stay (`R G B`), the values go, the height is unchanged,
+///      and no `%` appears in any painted string;
+///   ④ **the letters do not float** — each group's letter starts on the shared column
+///      (`HistogramCardView.channelColumnStarts`, the same x the clipping row's labels use), asserted
+///      exactly across three value lengths, with long values allowed to run past their column instead
+///      of being truncated;
 ///   ⑤ **the letters are coloured** — the colours read back from the paint, compared to
 ///      `HistogramCardView.channelNameColors` (red R, green G, blue B), and the value sits **one space**
 ///      behind its letter (「数字要靠近字母」), not at a field's right edge.
@@ -165,17 +168,24 @@ final class HistogramChannelRowTests: XCTestCase {
               + "\(String(format: "%.3f", reading.luma))")
     }
 
-    // MARK: - ③ no pointer / on the plot → blank, same height, no percentages
+    // MARK: - ③ no pointer / on the plot → letters without numbers, same height, no percentages
 
-    /// 「没有指针在画面上时通道行空白，且行高不变」 — and it is *blank*, not the percentages, not `—`.
-    func testTheRowIsBlankWithoutAPointerAndKeepsItsHeight() {
+    /// 「鼠标移开了只是不展示像素，还保留 RGB」 (2026-10-27).
+    ///
+    /// The row used to go **blank** when there was no pixel. It does not any more: the three letters are
+    /// painted at all times, in their channel colours, at the grid's columns — only the *values* need a
+    /// pointer. The slot, the height and the letters' frames never move.
+    func testTheRowKeepsItsLettersWithoutAPointerAndItsHeight() {
         let card = drawnCard(histogram: measuredHistogram())
         let blankSlot = card.channelRowRect
         let blankHeight = card.channelRowRect.height
-        XCTAssertFalse(blankSlot.isEmpty, "槽在，只是不画")
-        XCTAssertEqual(card.channelRowText, "")
-        XCTAssertTrue(card.channelLetterRects.isEmpty)
-        XCTAssertTrue(card.channelValueRects.isEmpty)
+        XCTAssertFalse(blankSlot.isEmpty, "槽在")
+        XCTAssertEqual(card.channelRowText, "", "没有像素 → 没有数值")
+        XCTAssertEqual(card.channelLetterRects.count, 3, "没有指针也保留 R/G/B 三个字母")
+        XCTAssertEqual(card.channelLetterColors, HistogramCardView.channelNameColors,
+                       "…而且是通道色")
+        XCTAssertTrue(card.channelValueRects.isEmpty, "…但没有数值（也没有 —）")
+        let blankLetterRects = card.channelLetterRects
 
         card.showPointerReadout(pixel(0.96, 0.50, 0.25))
         render(card)
@@ -184,23 +194,51 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(paintedSlot, blankSlot, "有指针与没指针是同一个槽（accuracy 0）")
         XCTAssertEqual(paintedSlot.height, blankHeight, accuracy: 0)
         XCTAssertEqual(paintedSlot.height, HistogramCardView.channelRowHeight, accuracy: 0)
+        XCTAssertEqual(card.channelLetterRects, blankLetterRects,
+                       "数值出现之后三个字母的 frame 逐字相同（位置不动）")
 
-        // Off the picture: blank again, same slot, same height.
+        // Off the picture: the numbers go, the letters stay, same slot, same height.
         card.clearPointerReadout()
         render(card)
         XCTAssertEqual(card.channelRowText, "")
+        XCTAssertTrue(card.channelValueRects.isEmpty, "数值 rect 数 == 0")
+        XCTAssertEqual(card.channelLetterRects.count, 3, "字母常驻")
+        XCTAssertEqual(card.channelLetterRects, blankLetterRects, "…frame 一个像素都没动")
         XCTAssertEqual(card.channelRowRect, blankSlot, "…还是同一个槽")
         XCTAssertEqual(card.channelRowRect.height, blankHeight, accuracy: 0)
 
-        // The pointer on the histogram: not a pixel → the pixel half stays blank, and the *same row*
-        // answers with the bin's counts (023: one row, two contents).
+        // The paint itself, not just the readback: three coloured glyphs, and not one neutral digit.
+        let rep = render(card)
+        for (index, rect) in card.channelLetterRects.enumerated() {
+            var coloured = 0
+            let x0 = max(0, Int((rect.minX * 2).rounded(.down)))
+            let x1 = min(rep.pixelsWide - 1, Int((rect.maxX * 2).rounded(.up)))
+            let y0 = max(0, Int(((cardHeight - rect.maxY) * 2).rounded(.down)))
+            let y1 = min(rep.pixelsHigh - 1, Int(((cardHeight - rect.minY) * 2).rounded(.up)))
+            guard x1 >= x0, y1 >= y0 else { return XCTFail("字母 \(index) 在卡片外") }
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    let r = Double(c.redComponent), g = Double(c.greenComponent),
+                        b = Double(c.blueComponent)
+                    if max(r, g, b) - min(r, g, b) > 0.10 { coloured += 1 }
+                }
+            }
+            XCTAssertGreaterThan(coloured, 0, "空闲态下第 \(index) 个字母仍然画在位图里")
+        }
+
+        // The pointer on the histogram: not a pixel → the pixel half stays blank (the counts half paints
+        // the letters), and the *same row* answers with the bin's counts (023: one row, two contents).
         card.showPointerReadout(pixel(0.96, 0.50, 0.25))
         if let axis = card.lastAxis {
             card.updateHoverReadout(at: CGPoint(x: axis.x(sdrBin: 128, of: 256), y: axis.plot.midY))
         }
         render(card)
-        XCTAssertEqual(card.channelRowText, "", "鼠标在直方图上 → 像素那半空白")
-        XCTAssertTrue(card.channelLetterRects.isEmpty)
+        XCTAssertEqual(card.channelRowText, "", "鼠标在直方图上 → 像素那半没有数值")
+        XCTAssertTrue(card.channelLetterRects.isEmpty, "…这一半也不画字母：计数那半画了同样的三个")
+        XCTAssertEqual(card.readoutLetterRects.count, 3, "计数那半的字母就在同一列上")
+        XCTAssertEqual(card.readoutLetterRects.map(\.minX), blankLetterRects.map(\.minX),
+                       "两条路径画出的字母列完全一致")
         XCTAssertEqual(card.channelRowRect, blankSlot)
         XCTAssertFalse(card.hoverCountText.isEmpty, "计数由同一行的另一半回答")
         XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
@@ -268,9 +306,21 @@ final class HistogramChannelRowTests: XCTestCase {
             XCTAssertEqual(starts[2][group], starts[0][group], accuracy: 0,
                            "`+3.0` 也不移动第 \(group) 组")
         }
-        XCTAssertEqual(starts[0][0], 0, accuracy: 0)
-        XCTAssertEqual(starts[0][1], cardWidth / 3, accuracy: 0.01)
-        XCTAssertEqual(starts[0][2], 2 * cardWidth / 3, accuracy: 0.01)
+        // **The columns, not thirds** (2026-10-27): both rows are laid out from
+        // `channelColumnStarts(in:)`, whose widths are the worst case of the two rows and whose gap is
+        // constant, so `R`/`G`/`B` are where the clipping row's 过白/削顶/削底 begin. The *independent*
+        // anchor for that claim is `testTheClippingLabelsAndTheLettersShareTheirColumns` (it compares the
+        // two rows' painted rects); here the absolute check is against the published grid.
+        let columns = HistogramCardView.channelColumnStarts(in: cardWidth)
+        XCTAssertEqual(columns.count, 3)
+        XCTAssertEqual(starts[0][0], columns[0], accuracy: 0)
+        XCTAssertEqual(starts[0][1], columns[1], accuracy: 0)
+        XCTAssertEqual(starts[0][2], columns[2], accuracy: 0)
+        XCTAssertEqual(starts[0][0], 0, accuracy: 0, "colR 仍是卡片内容左端")
+        XCTAssertGreaterThan(starts[0][1], starts[0][0] + 40, "colG 在 R 列之后")
+        XCTAssertGreaterThan(starts[0][2], starts[0][1] + 40, "colB 在 G 列之后")
+        XCTAssertLessThan(starts[0][2] + HistogramCardView.channelColumnWidths[2], cardWidth,
+                          "三列在 244 pt 卡内放得下")
 
         // A value much wider than anything a channel can print: the string is complete (nothing
         // truncated) and the group starts are unchanged. `grouped` is what the card serialises, so a
@@ -475,5 +525,168 @@ final class HistogramChannelRowTests: XCTestCase {
         }
         print("letters read back off the bitmap: " + report.joined(separator: " · ") + " · 差值 "
               + "\(String(format: "%.3f", max(0, 1)))")
+    }
+
+    // MARK: - ⑥ one grid for both rows (2026-10-27)
+
+    /// A measured histogram with chosen clipping shares, so the clipping row prints a chosen *width* of
+    /// number: `0.0%` (narrow), `1.2%` (five glyphs), `<0.1%` (the widest form `percent(_:)` can emit) and
+    /// `100%`.
+    private func gridHistogram(high: Double, ceiling: Double, low: Double,
+                              headroom: Double = 1) -> Histogram {
+        func channel(_ value: Int) -> HistogramChannel {
+            HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
+                             hdrBins: (0..<Histogram.hdrBinCount).map { $0 == 64 ? value : 0 },
+                             clippedHigh: high, clippedCeiling: ceiling, clippedLow: low)
+        }
+        let red = channel(1284)
+        return Histogram(binCount: 256, sampleCount: 898_432,
+                         canvas: ImageSize(width: 720, height: 420),
+                         roi: ImageRect(x: 0, y: 0, width: 720, height: 420),
+                         sampleSize: ImageSize(width: 720, height: 420),
+                         primaries: .sRGB, headroom: headroom,
+                         red: red, green: channel(1291), blue: channel(1206), luma: red)
+    }
+
+    /// The widths the inspector actually gives the card (250 is the QA grid's narrowest, 364 the widest).
+    private let gridWidths: [CGFloat] = [250, 300, 330, 364]
+
+    /// 「过白 削顶 削底 **去对齐 RGB**」 — the three clipping labels start on the three channel letters'
+    /// columns, at four card widths and with four different percentage widths.
+    ///
+    /// The comparison is between two *separately painted* rows (`clipLabelRects` from `drawClipRows`,
+    /// `channelLetterRects` from `drawPixelRow`), never against the arithmetic that placed them — so a
+    /// flow layout, where each label starts after the previous number, cannot pass by construction.
+    func testTheClippingLabelsAndTheLettersShareTheirColumns() {
+        let variants: [(name: String, histogram: Histogram)] = [
+            ("全部 0.0%", gridHistogram(high: 0, ceiling: 0, low: 0)),
+            ("1.2% / 4.6% / 0.0%", gridHistogram(high: 0.0123, ceiling: 0.0456, low: 0)),
+            ("<0.1%（最宽形态）", gridHistogram(high: 0.0002, ceiling: 0.0002, low: 0.0002)),
+            ("100%", gridHistogram(high: 1, ceiling: 1, low: 1)),
+        ]
+        var report: [String] = []
+        for width in gridWidths {
+            let columns = HistogramCardView.channelColumnStarts(in: width)
+            for (name, histogram) in variants {
+                let card = drawnCard(width: width, histogram: histogram)
+                XCTAssertEqual(card.clipLabelRects.count, 3, "三个削顶标签都画了")
+                XCTAssertEqual(card.channelLetterRects.count, 3, "三个字母常驻")
+                guard card.clipLabelRects.count == 3, card.channelLetterRects.count == 3 else {
+                    return XCTFail("\(Int(width)) pt / \(name)：两行没有各画三个（标签 "
+                                   + "\(card.clipLabelRects.count)，字母 \(card.channelLetterRects.count)）")
+                }
+                XCTAssertEqual(card.readoutColumnStarts, columns,
+                               "\(Int(width)) pt：卡片读回的列起点 == 网格")
+                for index in 0..<3 {
+                    XCTAssertEqual(card.clipLabelRects[index].minX, columns[index], accuracy: 0)
+                    XCTAssertEqual(card.channelLetterRects[index].minX, columns[index], accuracy: 0)
+                    // The owner's sentence, as one assertion.
+                    XCTAssertEqual(card.clipLabelRects[index].minX,
+                                   card.channelLetterRects[index].minX, accuracy: 0,
+                                   "\(Int(width)) pt / \(name)：第 \(index) 列 标签.minX != 字母.minX")
+                }
+                // …and the numbers stay inside their own column: nothing runs under the next label.
+                for index in 0..<2 {
+                    XCTAssertLessThanOrEqual(card.clipNumberRects[index].maxX,
+                                             card.clipLabelRects[index + 1].minX,
+                                             "\(name)：第 \(index) 列的百分比压到了下一列的标签上")
+                }
+                XCTAssertEqual(card.clipNumberRects[0].minX - card.clipLabelRects[0].minX,
+                               HistogramCardView.clipLabelSlot, accuracy: 0.01,
+                               "百分比从固定槽开始（与文字宽度无关）")
+                XCTAssertEqual(card.clipNumberRects[1].minX - card.clipLabelRects[1].minX,
+                               HistogramCardView.clipLabelSlot, accuracy: 0.01)
+                XCTAssertEqual(card.clipNumberRects[2].minX - card.clipLabelRects[2].minX,
+                               HistogramCardView.clipLabelSlot, accuracy: 0.01)
+                report.append(String(format: "%.0f pt · %@ · colR/colG/colB %.2f/%.2f/%.2f",
+                                     Double(width), name,
+                                     Double(columns[0]), Double(columns[1]), Double(columns[2])))
+            }
+        }
+        print("grid columns (both rows):\n        " + report.joined(separator: "\n        "))
+    }
+
+    /// 「RGB 位置不动」 as a measurement: the three letters' frames are **identical** across three
+    /// measurements — percentages `0.0%` vs `1.2% / 4.6% / 0.0%`, values `0` vs `+2.3`, pointer present
+    /// and absent — at all four widths.
+    func testTheLetterFramesAreIdenticalWhateverTheNumbersAre() {
+        var report: [String] = []
+        for width in gridWidths {
+            let card = drawnCard(width: width, histogram: gridHistogram(high: 0, ceiling: 0, low: 0))
+            let quietLetters = card.channelLetterRects
+            let quietLabels = card.clipLabelRects
+            guard quietLetters.count == 3 else {
+                return XCTFail("\(Int(width)) pt：没有指针时也必须有三个字母（实际 \(quietLetters.count)）")
+            }
+            XCTAssertTrue(card.channelValueRects.isEmpty, "没有指针 → 没有数值")
+
+            // ① the percentages change width (0.0% → 1.2% / 4.6% / 0.0%), still no pointer.
+            card.histogram = gridHistogram(high: 0.0123, ceiling: 0.0456, low: 0)
+            render(card)
+            XCTAssertEqual(card.clipHighText, "1.2%")
+            XCTAssertEqual(card.channelLetterRects, quietLetters, "\(Int(width)) pt：百分比变宽不移动字母")
+            XCTAssertEqual(card.clipLabelRects, quietLabels, "…也不移动标签")
+            XCTAssertTrue(card.channelValueRects.isEmpty)
+
+            // ② a pixel with `0` in all three channels.
+            let histogram = gridHistogram(high: 0.0123, ceiling: 0.0456, low: 0, headroom: 4)
+            card.histogram = histogram
+            card.showPointerReadout(PointerPixel(linearRed: 0, green: 0, blue: 0,
+                                                 histogram: histogram))
+            render(card)
+            XCTAssertEqual(card.channelRowValues, ["0", "0", "0"])
+            XCTAssertEqual(card.channelLetterRects, quietLetters, "\(Int(width)) pt：数值 `0` 不移动字母")
+
+            // ③ …and `+2.3`: the widest value this row prints, painted in the clipping ink.
+            card.showPointerReadout(PointerPixel(linearRed: 0.5, green: Float(pow(2.0, 2.3)),
+                                                 blue: 0.5, histogram: histogram))
+            render(card)
+            XCTAssertEqual(card.channelRowValues[1], "+2.3")
+            XCTAssertEqual(card.channelValueColors[1], HistogramCardView.overWhiteColor)
+            XCTAssertEqual(card.channelLetterRects, quietLetters, "\(Int(width)) pt：`+2.3` 不移动字母")
+            XCTAssertEqual(card.channelLetterRects.map(\.minX), quietLetters.map(\.minX))
+
+            // ④ pointer gone: the letters stay, the numbers go, the frames are the same objects' frames.
+            card.clearPointerReadout()
+            render(card)
+            XCTAssertTrue(card.channelValueRects.isEmpty, "数值 rect 数 == 0")
+            XCTAssertEqual(card.channelLetterRects.count, 3, "字母 rect 数 == 3")
+            XCTAssertEqual(card.channelLetterRects, quietLetters, "\(Int(width)) pt：移开鼠标字母一动不动")
+            XCTAssertEqual(card.channelRowRect.height, HistogramCardView.readoutRowHeight,
+                           accuracy: 0, "行高没变")
+            report.append(String(format: "%.0f pt · letters %.2f/%.2f/%.2f · 行高 %.1f",
+                                 Double(width), Double(quietLetters[0].minX),
+                                 Double(quietLetters[1].minX), Double(quietLetters[2].minX),
+                                 Double(card.channelRowRect.height)))
+        }
+        print("letter frames across three measurements:\n        " + report.joined(separator: "\n        "))
+    }
+
+    /// 反证, kept as a passing test: under the old **flow** layout 削顶's x is a function of 过白's
+    /// percentage width, so the alignment assertion above would be red. The two widths differ by exactly
+    /// the difference of the two strings, which is what 「列位置与百分比宽度无关」 refuses.
+    func testTheAlignmentAssertionWouldBeRedUnderTheOldFlowingLayout() {
+        let labelWidth = ("过白" as NSString)
+            .size(withAttributes: [.font: HistogramCardView.clipLabelFont]).width
+        let columns = HistogramCardView.channelColumnStarts(in: 250)
+        func flowedCeilingX(_ percentText: String) -> CGFloat {
+            let numberWidth = (percentText as NSString)
+                .size(withAttributes: [.font: HistogramCardView.numberFont]).width
+            return labelWidth + 3 + numberWidth + 12      // the row as it flowed before 2026-10-27
+        }
+        let narrow = flowedCeilingX("0.0%")
+        let wide = flowedCeilingX("<0.1%")
+        XCTAssertNotEqual(narrow, wide, accuracy: 0.01, "流水排版下 削顶 随 过白 的数字宽度漂移")
+        let stringDelta = ("<0.1%" as NSString)
+            .size(withAttributes: [.font: HistogramCardView.numberFont]).width
+            - ("0.0%" as NSString)
+            .size(withAttributes: [.font: HistogramCardView.numberFont]).width
+        XCTAssertEqual(wide - narrow, stringDelta, accuracy: 0.01)
+        XCTAssertNotEqual(narrow, columns[1], accuracy: 0.01,
+                          "…而网格里 削顶 永远在 colG，与百分比无关")
+        XCTAssertNotEqual(wide, columns[1], accuracy: 0.01)
+        print(String(format: "反证：流水排版 削顶 x = %.2f（0.0%%）/ %.2f（<0.1%%），相差 %.2f pt；"
+                     + "网格 colG = %.2f", Double(narrow), Double(wide), Double(wide - narrow),
+                     Double(columns[1])))
     }
 }

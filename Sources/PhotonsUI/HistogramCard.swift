@@ -18,7 +18,13 @@ import PhotonsCore
 //     0–255 at or below white, and `+x.x` stops for a channel above it, painted in the clipping colour
 //     (`ClippingMark`, `#FF00C7`) for that segment alone;
 //   · pointer on the **plot**    → `R 1284 G 1291 B 1206`, that bin's R/G/B sample counts;
-//   · anywhere else              → nothing painted, the same slot, the same height.
+//   · anywhere else              → `R G B` **without numbers** — the letters are permanently on screen
+//     (2026-10-27), only the values need a pointer. The same slot, the same height.
+//
+// **Both rows share one three-column grid** (2026-10-27). 过白 / 削顶 / 削底 no longer flow left to right:
+// each label starts at the x of the channel letter below it (`channelColumnStarts`), so the columns are a
+// function of the fonts and the card's width only — never of a percentage's width, a value's length or
+// where the pointer is.
 //
 // Both contents are laid out by the same `paintGroups` in the same face and colour (`numberFont` +
 // `HistogramCardReadability.readoutColor`), so the pixel reading and the counts indicator are the *same*
@@ -111,6 +117,15 @@ public final class HistogramCardView: NSView {
     /// Where 过白 was painted, in view coordinates — so a synthetic click can aim at it.
     public private(set) var clipHighHitRect: NSRect = .zero
     public private(set) var clipLowHitRect: NSRect = .zero
+    /// The clipping row's three labels (过白 / 削顶 / 削底) and three percentages, as painted.
+    ///
+    /// These exist because the two text rows are laid out from **one** grid (2026-10-27): a label's
+    /// `minX` and the channel letter under it are the same column start, and that is asserted off the
+    /// paint rather than off the arithmetic that produced it.
+    public private(set) var clipLabelRects: [NSRect] = []
+    public private(set) var clipNumberRects: [NSRect] = []
+    /// The three column starts (R, G, B) the last `draw` laid **both** rows out from.
+    public private(set) var readoutColumnStarts: [CGFloat] = []
 
     // MARK: the card's one number font (2026-10-26)
     //
@@ -232,6 +247,84 @@ public final class HistogramCardView: NSView {
     /// cap height, not their weight.
     public static let channelLetterFont = NSFont.monospacedDigitSystemFont(ofSize: readoutFontSize,
                                                                          weight: .bold)
+
+    // MARK: the readout grid — one set of columns for both text rows (2026-10-27)
+    //
+    // 过白 / 削顶 / 削底 used to **flow**: each label started 12 pt after the previous number's `maxX`,
+    // so every label's x was a function of the string before it («12.3%» is wider than «0.0%», so 削顶
+    // moved when 过白's share grew). The owner's ask:
+    //
+    // > 「过白 削顶 削底 去对齐 RGB」 / 「RGB 位置不动」 / 「列位置与百分比、数值宽度无关」
+    //
+    // So both text rows are now laid out from **one** three-column grid, and the grid is a function of
+    // the fonts and of the widest string each column can hold — never of today's numbers:
+    //
+    //     colR = 0                 colG = colR + wR + gap        colB = colG + wG + gap
+    //
+    // A column is as wide as the **wider of its two rows**, so neither row can push the other:
+    //
+    //     row 1:  过白 + [3 pt] + [dot 11 pt] + 12.3%     → label slot + widest percentage
+    //     row 2:  R + [1 space] + 245                     → letter + space + widest value
+    //
+    // The dot's 11 pt is reserved on every column whether or not the overlay paints it, so flicking the
+    // highlight warning on moves no digit. `HistogramChannelRowTests` asserts the alignment off the
+    // painted rects at four card widths, and that the letters' rects are byte-identical across three
+    // different measurements.
+
+    /// The clipping row's label face (9 pt medium). A constant because the column arithmetic has to
+    /// measure it, and the row's labels are the widest thing in a column.
+    public static let clipLabelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
+
+    /// The gap between two columns. It is compressed (never to less than 0) when a card is too narrow to
+    /// hold the grid at this spacing, so a narrow inspector keeps the column *order* instead of
+    /// overlapping two groups; at 244 pt — the shipped minimum — it stays 12.
+    public static let channelColumnGap: CGFloat = 12
+
+    /// The widest string `HistogramCardFormat.percent(_:)` can print. `<0.1%` and `99.9%` are both five
+    /// full-width glyphs, `100%` is four, `—` is one: this is the worst case, not today's value.
+    public static let widestPercentText = "<0.1%"
+
+    /// The widest channel value the pixel row prints: a three-digit code (`255`) or `+x.x` stops
+    /// (`+2.3`, four glyphs — `+` and `.` are full-width in this face).
+    public static let widestChannelValueText = "+2.3"
+
+    /// What a clipping label owns inside its column: the widest of the three labels, its 3 pt gap, and
+    /// the 11 pt the highlight-warning dot occupies (2 pt gap + 5 pt dot). The *percentage* starts here,
+    /// on every column, so a dash and a `100%` sit at the same x.
+    public static let clipLabelSlot: CGFloat = {
+        let widest = ["过白", "削顶", "削底"]
+            .map { ($0 as NSString).size(withAttributes: [.font: clipLabelFont]).width }
+            .max() ?? 0
+        return widest + 3 + 11
+    }()
+
+    /// One width per column, in R/G/B order — the worst case of the two rows that share it. Pure: the
+    /// fonts and two fixed strings, so no measurement of the document can change a column.
+    public static let channelColumnWidths: [CGFloat] = {
+        let space = (" " as NSString).size(withAttributes: [.font: numberFont]).width
+        let value = (widestChannelValueText as NSString)
+            .size(withAttributes: [.font: numberFont]).width
+        let percent = (widestPercentText as NSString)
+            .size(withAttributes: [.font: numberFont]).width
+        return channelLetters.map { letter in
+            let glyph = (letter as NSString).size(withAttributes: [.font: channelLetterFont]).width
+            return max(glyph + space + value, clipLabelSlot + percent)
+        }
+    }()
+
+    /// Where the three columns start on a card `width` wide — `colR` at the content's left edge, then one
+    /// column and one gap each. **The only place either text row gets an x from.**
+    public static func channelColumnStarts(in width: CGFloat) -> [CGFloat] {
+        let widths = channelColumnWidths
+        guard widths.count > 1 else { return [0] }
+        let slack = width - widths.reduce(0, +)
+        let gap = min(channelColumnGap, max(0, slack / CGFloat(widths.count - 1)))
+        var x: CGFloat = 0
+        return widths.map { columnWidth in
+            defer { x += columnWidth + gap }
+            return x
+        }
+    }
 
     /// Exactly the strings the **counts** half of the row painted. Empty when nothing is painted — that
     /// emptiness *is* "the row is idle", and it is also the state while the row shows the pixel's channels.
@@ -690,8 +783,12 @@ public final class HistogramCardView: NSView {
     /// measuring before S4 — so 削顶 is the one number that moves when the display does.
     private func drawClipRows(below plot: NSRect, histogram: Histogram?, in bounds: NSRect) {
         let y = plot.maxY + 5
-        let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
+        let labelFont = Self.clipLabelFont
         let numberFont = Self.numberFont
+        // The grid both text rows are laid out from (2026-10-27) — read back, so a test can compare the
+        // labels' `minX`s with the channel letters' without repeating the arithmetic.
+        let starts = Self.channelColumnStarts(in: bounds.width)
+        readoutColumnStarts = starts
 
         clipHighText = HistogramCardFormat.clipHigh(histogram, .luma)
         clipCeilingText = HistogramCardFormat.clipCeiling(histogram, .luma)
@@ -700,32 +797,39 @@ public final class HistogramCardView: NSView {
             HistogramCardFormat.clipHigh(histogram, $0)
         }
 
-        let highLabel = drawText("过白", at: CGPoint(x: 0, y: y), font: labelFont,
+        // **Aligned, not flowed.** 过白 starts in column R, 削顶 in column G, 削底 in column B — the same
+        // three x's the `R`/`G`/`B` letters below sit on, so the two rows read as one table and the
+        // numbers' widths cannot push anything sideways. Each percentage starts at
+        // `columnStart + clipLabelSlot`, a fixed slot, so a `—` and a `100%` land on the same pixel.
+        let highLabel = drawText("过白", at: CGPoint(x: starts[0], y: y), font: labelFont,
                                  color: .secondaryLabelColor)
-        let dotWidth: CGFloat = showsHighlightWarning ? 11 : 0
         if showsHighlightWarning {
             NSColor.systemOrange.setFill()
             NSBezierPath(ovalIn: NSRect(x: highLabel.maxX + 2, y: y + 2, width: 5, height: 5)).fill()
         }
-        let highNumber = drawText(clipHighText, at: CGPoint(x: highLabel.maxX + 3 + dotWidth, y: y),
+        let highNumber = drawText(clipHighText, at: CGPoint(x: starts[0] + Self.clipLabelSlot, y: y),
                                   font: numberFont,
                                   color: showsHighlightWarning ? .systemOrange : .labelColor)
         // The hit area is padded: a 9.5 pt number is a mean target, and a 14 pt box is not.
         clipHighHitRect = NSRect(x: highLabel.minX, y: y - 2,
                                  width: highNumber.maxX - highLabel.minX, height: 14)
 
-        let ceilLabel = drawText("削顶", at: CGPoint(x: highNumber.maxX + 12, y: y),
+        let ceilLabel = drawText("削顶", at: CGPoint(x: starts[1], y: y),
                                  font: labelFont, color: .secondaryLabelColor)
-        let ceilNumber = drawText(clipCeilingText, at: CGPoint(x: ceilLabel.maxX + 3, y: y),
+        let ceilNumber = drawText(clipCeilingText,
+                                  at: CGPoint(x: starts[1] + Self.clipLabelSlot, y: y),
                                   font: numberFont,
                                   color: clipCeilingText == "0.0%" ? .labelColor : .systemRed)
 
-        let lowLabel = drawText("削底", at: CGPoint(x: ceilNumber.maxX + 12, y: y),
+        let lowLabel = drawText("削底", at: CGPoint(x: starts[2], y: y),
                                 font: labelFont, color: .secondaryLabelColor)
-        let lowNumber = drawText(clipLowText, at: CGPoint(x: lowLabel.maxX + 3, y: y),
+        let lowNumber = drawText(clipLowText, at: CGPoint(x: starts[2] + Self.clipLabelSlot, y: y),
                                  font: numberFont, color: .labelColor)
         clipLowHitRect = NSRect(x: lowLabel.minX, y: y - 2,
                                 width: lowNumber.maxX - lowLabel.minX, height: 14)
+
+        clipLabelRects = [highLabel, ceilLabel, lowLabel]
+        clipNumberRects = [highNumber, ceilNumber, lowNumber]
 
         // **The percentages are not painted.** The per-channel 过白 shares used to live on the row
         // below this one; the owner replaced that row with the pixel under the pointer
@@ -738,12 +842,17 @@ public final class HistogramCardView: NSView {
 
     /// `R 245 G 128 B 64` — the three channels of the pixel the pointer is on.
     ///
-    /// Three rules, all of them the owner's:
+    /// Four rules, all of them the owner's:
     ///
-    ///   · **the row is blank when there is no pixel** under the pointer (no `—`, no percentages): the
-    ///     slot keeps its height and paints nothing;
+    ///   · **the three letters never go away** (2026-10-27): 「RGB 这三个字母一直保留，鼠标移开了只是不展示
+    ///     像素/亮度，还保留 RGB」. They are painted in their channel colours at the grid's columns on every
+    ///     draw, pointer or not, so the row is never a blank line and the clipping row above it always has
+    ///     something to line up with;
+    ///   · **the values need a pixel**: with none under the pointer the numbers are dropped (no `—`), and
+    ///     the slot keeps its height;
     ///   · **blank while the pointer is on the plot**, because a hover points at a *bin*, not at a pixel —
-    ///     the counts half of the same row answers there;
+    ///     the counts half of the same row answers there, and it paints the letters itself (one half
+    ///     paints the row, never both: two identical draws would composite the glyph edges twice);
     ///   · each channel is a code (`0…255`) or, above display white, `+x.x` stops — so one row can mix
     ///     (`R 255 G +0.8 B 120`), which is what a channel-clipped highlight actually looks like.
     ///
@@ -760,7 +869,16 @@ public final class HistogramCardView: NSView {
         channelValueColors = []
         channelOverWhite = []
 
-        guard let pixel = pointerPixel, hoverReading == nil else { return }
+        // The counts half owns the slot while the pointer is on the plot, letters included.
+        guard hoverReading == nil else { return }
+
+        guard let pixel = pointerPixel else {
+            // **Letters, no numbers.** The row's left half stays on screen (`R G B`, each in its channel
+            // colour, at the grid's three columns); only the values are gone.
+            channelLetterRects = paintChannelLetters(atY: row.minY)
+            channelLetterColors = Array(Self.channelNameColors.prefix(Self.channelLetters.count))
+            return
+        }
 
         let values = pixel.channelTexts
         // **Per channel, not per pixel** (2026-10-27): only the segment whose channel the picture holds
@@ -784,6 +902,20 @@ public final class HistogramCardView: NSView {
         channelValueFont = Self.numberFont
         channelValueColor = color
         if let last = painted.values.last { channelRowWidth = last.maxX - bounds.minX }
+    }
+
+    /// The three channel letters on the grid's columns — the row's constant half (2026-10-27).
+    ///
+    /// Same face, same colours, same x as `paintGroups` gives them when there *are* values: that is what
+    /// makes a letter's frame identical whether or not a pixel is under the pointer.
+    private func paintChannelLetters(atY y: CGFloat) -> [NSRect] {
+        let starts = Self.channelColumnStarts(in: bounds.width)
+        guard !starts.isEmpty else { return [] }
+        return Self.channelLetters.enumerated().map { index, letter in
+            drawText(letter, at: CGPoint(x: starts[index % starts.count], y: y),
+                     font: Self.channelLetterFont,
+                     color: Self.channelNameColors[index % Self.channelNameColors.count])
+        }
     }
 
     /// The ink the over-white segments are painted with — **the clipping colour, one constant**.
@@ -822,20 +954,22 @@ public final class HistogramCardView: NSView {
     /// 「RGB 三个字母要带颜色，数字要靠近字母，例如 `R 2      G 40      B 1023`」.
     ///
     ///   · **the letters are coloured** (`letterColors`: `R` red, `G` green, `B` blue), in both rows;
-    ///   · the row is split into three **equal** groups, and group `i`'s letter starts exactly at
-    ///     `i · rowWidth / 3` — so `R`, `G` and `B` sit at the same three x positions whatever the
-    ///     numbers are (the group *starts* are what 「三个字母位置恒定」 means);
+    ///   · each group's letter starts at the **grid's** column for it (`channelColumnStarts`) — not at a
+    ///     third of the row. The grid is what the clipping row above aligns to, so the letters' x is a
+    ///     function of the fonts and the card's width only: `R`, `G` and `B` sit at the same three x for
+    ///     every value, every count and every measurement (2026-10-27);
     ///   · the value is **one space** after its letter and left-aligned there — the number hugs the
     ///     letter instead of floating at a field's right edge (「数字要靠近字母」);
-    ///   · a value wider than its group **runs past the group's edge**: nothing is truncated and the
-    ///     font never shrinks. A count or a code that outgrows its third is allowed to overlap the next
-    ///     group (this is what replaced the five-character right-aligned field).
+    ///   · a value wider than its column **runs past the column's edge**: nothing is truncated and the
+    ///     font never shrinks. A count or a code that outgrows its column is allowed to reach into the
+    ///     next one (this is what replaced the five-character right-aligned field).
     private func paintGroups(_ values: [String], atY y: CGFloat,
                              letterFont: NSFont, letterColors: [NSColor],
                              valueFont: NSFont, valueColor: NSColor,
                              valueColors: [NSColor]? = nil) -> PaintedGroups {
         guard !values.isEmpty else { return PaintedGroups() }
-        let groupWidth = bounds.width / CGFloat(values.count)
+        let starts = Self.channelColumnStarts(in: bounds.width)
+        guard !starts.isEmpty else { return PaintedGroups() }
         let spaceWidth = (" " as NSString).size(withAttributes: [.font: valueFont]).width
         var painted = PaintedGroups()
         for (index, text) in values.enumerated() {
@@ -845,7 +979,7 @@ public final class HistogramCardView: NSView {
             // way, which is what keeps a magenta `+2.3` from moving its neighbours.
             let ink = (valueColors?.count == values.count) ? valueColors![index] : valueColor
             let letterRect = drawText(Self.channelLetters[index % Self.channelLetters.count],
-                                      at: CGPoint(x: bounds.minX + CGFloat(index) * groupWidth, y: y),
+                                      at: CGPoint(x: starts[index % starts.count], y: y),
                                       font: letterFont, color: color)
             let valueRect = drawText(text, at: CGPoint(x: letterRect.maxX + spaceWidth, y: y),
                                      font: valueFont, color: ink)
@@ -870,8 +1004,9 @@ public final class HistogramCardView: NSView {
     // edge): 「不需要亮度信息了，只要 RGB 值」. The pixel is still read — its *channels* are the other half
     // of this same row (`drawPixelRow`), in the same slot.
     //
-    // The counts are the same three groups as the pixel half (`paintGroups`): coloured letters at fixed
-    // thirds of the row, one space between a letter and its count, no truncation. The face is
+    // The counts are the same three groups as the pixel half (`paintGroups`): coloured letters **at the
+    // grid's three columns** (the same x as the clipping row's 过白/削顶/削底), one space between a letter
+    // and its count, no truncation. The face is
     // `Self.numberFont` — the same 9.5 pt semibold monospaced digits as 过白/削顶/削底, by the owner's
     // request; the colour is an opaque `HistogramCardReadability.readoutColor`, which is what makes
     // ≥ 4.5 : 1 a measured fact rather than a hope. **The pixel half paints in exactly this pair** — that
