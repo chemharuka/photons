@@ -39,6 +39,32 @@ static inline float srgb_decode_f(float v) {
     return v < 0.0 ? -d : d;
 }
 
+// 070 — the same stride read, out of the **scene-linear** texture instead of the display frame.
+//
+// This is the measurement the card shows. The frame's own S4 output is *display-referred*: S4 applies
+// `min(v, headroom)` (`s4_display.metal`), so on this machine (headroom 3.948× = +1.98 stop) every
+// texel above +1.98 stop is gone by the time this pass could read it, and the plot could not tell a
+// +2 EV highlight from a +5 EV one. Reading S4's *input* — the scene-linear RGB S3 wrote — keeps that
+// information: a texel may be 16, 32 or 1000× white and it arrives here as such.
+//
+// No encode, no luma: the CPU's `Histogram.compute(LinearSample)` takes linear RGB and derives both
+// the code axis (`srgbEncode`) and the luma series with Rec.709 weights applied to **linear** light,
+// so the alpha channel is simply 1. The extra `pow`s the display-referred sample had to compute here
+// (four per texel, in `histogram_sample`) do not exist on this path at all.
+kernel void histogram_sample_linear(texture2d<float, access::read> src [[texture(0)]],
+                                    texture2d<float, access::write> dst [[texture(1)]],
+                                    constant HistSampleParams &p [[buffer(0)]],
+                                    uint2 gid [[thread_position_in_grid]]) {
+    uint2 grid = uint2(p.b.z, p.b.w);
+    if (gid.x >= grid.x || gid.y >= grid.y) { return; }
+    float2 f = (float2(gid) + 0.5) * p.b.xy;
+    uint2 texel = uint2(floor(f));
+    uint2 last = uint2(p.a.zw) - 1u;
+    texel = min(texel, last) + uint2(p.a.xy);
+    float4 c = src.read(texel);
+    dst.write(float4(c.rgb, 1.0), gid);
+}
+
 kernel void histogram_sample(texture2d<float, access::read> src [[texture(0)]],
                              texture2d<float, access::write> dst [[texture(1)]],
                              constant HistSampleParams &p [[buffer(0)]],

@@ -774,7 +774,8 @@ public final class LoupeController: NSViewController {
     /// The texture it returns is read *after* the closure returns, on that same queue: do not hand over
     /// a texture another thread is writing at the time.
     public var fullPictureSource: ((EditModel) -> (texture: MTLTexture, content: ImageRect,
-                                                   digest: String)?)?
+                                                   digest: String,
+                                                   histogram: Histogram?)?)?
 
     /// The serial queue a windowed edit's whole-picture measurement runs on.
     ///
@@ -1009,7 +1010,7 @@ public final class LoupeController: NSViewController {
         // gated: measuring a frame rendered from another edit is worse than not updating at all.
         fullPictureSource = { [box = fullPictureBox] edit in
             guard let frame = box.current(), frame.digest == Histogram.editDigest(edit) else { return nil }
-            return (frame.texture, frame.content, frame.digest)
+            return (frame.texture, frame.content, frame.digest, frame.histogram)
         }
     }
 
@@ -3372,6 +3373,9 @@ public final class LoupeController: NSViewController {
         public let develop: String
         /// The photo half of the key (`contentHash|assetID` or a frame source's identity).
         public let photo: String
+        /// 070: the scene-linear measurement that came out of the same render (`nil` when it did not
+        /// measure one — the consumer then renders its own picture).
+        public let histogram: Histogram?
     }
 
     /// `nil` until a backdrop has been generated for the document on screen — and immediately after a
@@ -3380,7 +3384,8 @@ public final class LoupeController: NSViewController {
         guard let texture = backdrop.texture, let key = backdrop.key,
               let content = backdrop.content else { return nil }
         return LowResFullFrame(texture: texture, content: content, digest: key.digest,
-                               develop: key.develop, photo: key.photo)
+                               develop: key.develop, photo: key.photo,
+                               histogram: backdrop.histogram)
     }
 
     /// An **explicit** request for the whole picture at low resolution, for a caller that cannot wait
@@ -3494,11 +3499,18 @@ public final class LoupeController: NSViewController {
             let result = try graph.render(job.edit, options: RenderOptions(
                 scale: scale,
                 display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom),
-                useCache: false, wantsPixels: false))
+                useCache: false, wantsPixels: false,
+                // 070: the backdrop render is the whole picture, so it also produces the histogram
+                // the loupe needs when a **windowed** frame cannot measure one itself. The measurement
+                // is taken on this render's scene-linear texture — never on S4's clamped output — and
+                // costs one 256-grid stride pass plus a 0.29 MB readback, once per backdrop.
+                collectHistogram: true,
+                histogramSampleLongEdge: Histogram.frameSampleLongEdge))
             let milliseconds = (CFAbsoluteTimeGetCurrent() - t0) * 1000
             guard let texture = result.output else {
                 throw RenderError.executeFailed("the backdrop render produced no texture")
             }
+            let measured = result.histogram
             // No canvas was asked for, so the picture is the whole texture — but say it with the size
             // the render reported rather than with `texture.width`, so a letterbox can never be
             // silently described as picture.
@@ -3506,6 +3518,7 @@ public final class LoupeController: NSViewController {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let adopted = self.backdrop.finish(texture, key: key, content: content,
+                                                   histogram: measured,
                                                    milliseconds: milliseconds, serial: serial)
                 if adopted { self.lastBackdropRenderedPhoto = photo }
                 if adopted, let at = self.backdropWantedAt {
@@ -3742,20 +3755,32 @@ public final class LoupeController: NSViewController {
         // more: a key that moved is measured **from this frame's own texture**, once the render below
         // has produced it. `histogramStep` decides; `deliver` applies it on main.
         let coverage = pictureCoverage(projected, state: state)
+        // 070: **whether** to measure is decided before the render, because the measurement now rides
+        // the frame's own command buffer (one 256-grid stride pass + a 0.29 MB readback). A pan, a zoom
+        // or a resize changes the camera and not the picture's key, so those frames ask for nothing and
+        // pay nothing — the same rule 034 had, moved one step earlier.
+        let measureHistogram = wantsHistogramMeasurement(edit: model, identity: cacheIdentity,
+                                                        fallbackScale: decodeScale,
+                                                        coverage: coverage)
         let result = try graph.render(model, options: RenderOptions(
             canvas: viewport,
             scale: scale,
             outputWindow: outputWindow,
             display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
             useCache: true,
-            wantsPixels: false))
+            wantsPixels: false,
+            collectHistogram: measureHistogram,
+            histogramSampleLongEdge: measureHistogram ? Histogram.frameSampleLongEdge : 0))
         let renderMs = (CFAbsoluteTimeGetCurrent() - t1) * 1000
         guard let texture = result.output else { throw RenderError.executeFailed("loupe produced no texture") }
-        // The histogram, before the texture goes back to the pool: one stride-sampled readback of the
-        // frame that was just drawn (0.29 MB), billed to this frame and to no other.
-        deliver(histogramStep(for: model, from: texture, result: result, identity: cacheIdentity,
+        // The histogram, out of the same render: `result.histogram` is measured on the **scene-linear**
+        // texture S4 read (not on S4's clamped output, which stops at the panel's headroom — 070), so
+        // a picture with three stops of highlight above white plots three stops above white.
+        deliver(histogramStep(for: model, measured: result.histogram,
+                              milliseconds: result.histogramMilliseconds,
+                              identity: cacheIdentity,
                               coverage: coverage, primaries: primaries, ceiling: ceiling,
-                              fallbackScale: decodeScale, graph: graph, sourceURL: url,
+                              fallbackScale: decodeScale, sourceURL: url,
                               startedAt: t1))
         let hash = hashPixels ? LoupeController.hash(texture) : nil
         // The clipping warning's input. Only read while the warning is on: it is a UI aid, and a
@@ -4375,10 +4400,14 @@ public final class LoupeController: NSViewController {
     /// A step is returned for **every** frame, including the ones that publish nothing: `apply(_:)`
     /// is what counts them, and "the pan frames measured nothing" is a claim the cadence tests make
     /// out of that counter.
-    private func histogramStep(for edit: EditModel, from texture: MTLTexture,
-                               result: RenderResult, identity: String, coverage: Double,
+    ///
+    /// 070: the numbers arrive **already measured** (`RenderResult.histogram`), taken on the
+    /// scene-linear texture inside the frame's own command buffer. This function no longer takes a
+    /// texture at all, and nothing here reads pixels.
+    private func histogramStep(for edit: EditModel, measured: Histogram?, milliseconds: Double,
+                               identity: String, coverage: Double,
                                primaries: OutputPrimaries, ceiling: Double,
-                               fallbackScale: Float, graph: RenderGraph, sourceURL: URL,
+                               fallbackScale: Float, sourceURL: URL,
                                startedAt: CFAbsoluteTime) -> HistogramStep {
         // The card is off: this frame is a non-measurement, like every other.
         guard collectsHistogram else { return HistogramStep(key: "") }
@@ -4412,31 +4441,46 @@ public final class LoupeController: NSViewController {
             rememberMeasuredFrame(key)
             return HistogramStep(key: key, histogram: cached, latency: latency())
         }
-        do {
-            // The picture's own rect inside this frame's texture, as the **render laid it out**
-            // (`RenderResult.photoRect` is derived from S0's own origin/frame-origin — the numbers
-            // the kernel was handed), not `(canvas − content) / 2`: that guess assumes the picture is
-            // centred in the content rect, which stops being true the moment a window reaches past
-            // the frame (a 1:1 view of a picture smaller than the viewport). There the content rect
-            // is the window and the photograph sits inside it with background around it, so the
-            // guess measures the background — bin 0 filled with canvas, which is the bug 048 reports.
-            // Handing the drawn rect over also skips the engine's matte probe, which cannot tell a
-            // black band that belongs to the picture from a letterbox.
-            let content = result.drawnRect
-            let measurement = try graph.measureFrameHistogram(fromFrame: texture, edit: edit,
-                                                              bins: 256, content: content,
-                                                              primaries: primaries,
-                                                              headroom: ceiling)
-            store(histogram: measurement.histogram, for: key)
+        if let histogram = measured {
+            // The render measured this frame's picture, on the scene-linear texture S4 was about to
+            // read — the rect is `plan.drawnRect` (S0's own layout, so no matte probe and no
+            // background in bin 0) and the domain is light, not codes (070).
+            store(histogram: histogram, for: key)
             rememberMeasuredFrame(key)
-            return HistogramStep(key: key, histogram: measurement.histogram, measured: true,
-                                 milliseconds: measurement.cost.wallMilliseconds,
-                                 latency: latency())
-        } catch {
-            // Not remembered on purpose: a transient failure should not freeze the card until the
-            // edit changes. The next frame with this key tries again.
-            return HistogramStep(key: key, failure: "\(error)", latency: latency())
+            return HistogramStep(key: key, histogram: histogram, measured: true,
+                                 milliseconds: milliseconds, latency: latency())
         }
+        // `wantsHistogramMeasurement` asked this frame for numbers, so `nil` here means the graph
+        // could not produce a grid (a degenerate layout, a Metal failure). Answer it in the
+        // background — that path renders the picture itself — rather than leave the card on another
+        // document's numbers.
+        armPictureMeasurement(PictureRequest(edit: edit, key: key, identity: identity,
+                                             rungScale: histogramRungScale(identity: identity,
+                                                                           fallbackScale: fallbackScale),
+                                             sourceURL: sourceURL, primaries: primaries,
+                                             ceiling: ceiling, armedAt: startedAt))
+        return HistogramStep(key: key, failure: "no measurement", latency: latency())
+    }
+
+    /// Does this frame need to carry a histogram? — the **pre-render** half of `histogramStep`.
+    ///
+    /// 070 moved the measurement into the frame's own command buffer, so the decision has to be made
+    /// before `render` is called rather than after: a `collectHistogram` frame pays a 36 k-thread pass
+    /// and a 0.29 MB readback, and a pan or a zoom (which cannot change the picture's key) must not pay
+    /// either. The guards are exactly `histogramStep`'s, in the same order, so the two cannot disagree:
+    ///
+    ///   · the card's switch is off → no measurement (`collectsHistogram`);
+    ///   · the frame is a window into the picture → no measurement (a crop's numbers are the crop's);
+    ///   · this key was already measured, or its numbers are in the cache → no measurement (A → B → A
+    ///     publishes the cache and nothing needs re-counting).
+    private func wantsHistogramMeasurement(edit: EditModel, identity: String,
+                                           fallbackScale: Float, coverage: Double) -> Bool {
+        guard collectsHistogram else { return false }
+        guard coverage >= Self.histogramWholePictureCoverage else { return false }
+        let key = histogramKey(identity: identity, digest: cachedEditDigest(edit),
+                               fallbackScale: fallbackScale)
+        guard !frameAlreadyMeasured(key) else { return false }
+        return cachedHistogram(for: key) == nil
     }
 
     /// Hand a step to the main thread, where the counters, the cache and the card live.
@@ -4576,22 +4620,19 @@ public final class LoupeController: NSViewController {
             // whether it is the picture *of this edit* at all. A base rendered for another document is
             // never measured against this one.
             if let source = fullPictureSource?(request.edit),
-               source.digest == Histogram.editDigest(request.edit) {
-                do {
-                    let measurement = try graph.measureFrameHistogram(
-                        fromFrame: source.texture, edit: request.edit, bins: 256,
-                        content: source.content, primaries: request.primaries,
-                        headroom: request.ceiling)
-                    histogramLock.lock()
-                    pictureFrameUses += 1
-                    histogramLock.unlock()
-                    return PictureOutcome(key: request.key, histogram: measurement.histogram,
-                                          milliseconds: measurement.cost.wallMilliseconds,
-                                          latency: latency())
-                } catch {
-                    // A base this pass cannot read (a format this build does not sample, a texture
-                    // that went away): fall through to the render rather than publish nothing.
-                }
+               source.digest == Histogram.editDigest(request.edit),
+               let histogram = source.histogram,
+               abs(histogram.headroom - request.ceiling) < 1e-9 {
+                // 070: that render measured its **own** scene-linear sample (`collectHistogram` +
+                // `histogramSampleLongEdge`), so nothing is sampled here — no readback, no second
+                // render, and no S4 clamp. Its headroom is the screen's at the time it was made; a
+                // screen change would make the ceiling tick stale, so that case falls through to the
+                // render below rather than publishing a marker for the wrong panel.
+                histogramLock.lock()
+                pictureFrameUses += 1
+                histogramLock.unlock()
+                return PictureOutcome(key: request.key, histogram: histogram,
+                                      latency: latency())
             }
             let histogram = try graph.measureHistogram(request.edit, bins: 256,
                                                        headroom: request.ceiling)

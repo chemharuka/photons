@@ -433,6 +433,9 @@ final class HistogramBlacksWhitesTests: XCTestCase {
 
         let frameBefore = loupe.pictureFrameMeasurementCount
         let renderBefore = loupe.pictureRenderMeasurementCount
+        // The picture's own grid, as the card labels it (`canvas`) — read from the warm frame.
+        let pictureCanvas = try XCTUnwrap(loupe.lastHistogram).canvas
+        let ceiling = loupe.displayHeadroom.headroom
         let box = BaseBox()
         loupe.fullPictureSource = { box.offer($0) }
 
@@ -448,7 +451,13 @@ final class HistogramBlacksWhitesTests: XCTestCase {
             let base = try frame(loupe, url: url, state: .fit, edit: edit)
             loupe.collectsHistogram = true
             let content = contentRect(base)
-            box.add(base.texture, content: content, digest: Histogram.editDigest(edit))
+            // 070: a base now carries the numbers its own render measured, so the fixture hands over
+            // a marker measurement of the base's grid instead of pixels to be sampled. **+3.5 EV** on
+            // purpose: it is above this machine's +1.98 stop S4 headroom, so "the card shows the
+            // base's plot" and "the plot can hold light the screen cannot" are one assertion.
+            box.add(base.texture, content: content, digest: Histogram.editDigest(edit),
+                    histogram: Self.markerHistogram(sample: content, canvas: pictureCanvas,
+                                                    headroom: ceiling))
 
             let published = loupe.histogramPublishCount
             try frame(loupe, url: url, state: oneToOne(), edit: edit)
@@ -456,10 +465,12 @@ final class HistogramBlacksWhitesTests: XCTestCase {
                           "the injected base was never measured: black \(value) never reached "
                           + "the card")
             let plot = try XCTUnwrap(loupe.lastHistogram)
-            // The tell that the base was read: the sample grid is the *frame* grid (256 over the
-            // picture's rect inside the base), not the whole-picture render's 1024.
+            // The tell that the base's own numbers were published: the marker's bin holds the whole
+            // grid, at +3.3 stops — a value no S4 frame could have carried to this card.
             XCTAssertEqual(plot.sampleSize, Histogram.frameSampleSize(for: content),
                            "the card's numbers are not the injected base's sample")
+            XCTAssertEqual(plot.red.hdrBins[211], plot.sampleSize.pixelCount,
+                           "the card is not showing the base's own plot (+3.3 EV marker, bin 211)")
             XCTAssertEqual(plot.roi, ImageRect(x: 0, y: 0, width: plot.canvas.width,
                                               height: plot.canvas.height))
             XCTAssertGreaterThan(plot.canvas.width, 0)
@@ -522,8 +533,13 @@ final class HistogramBlacksWhitesTests: XCTestCase {
         loupe.fullPictureSource = { _ in
             offers.bump()
             // An honest digest — of the *older* edit. This is exactly what a stale backdrop returns,
-            // and the controller must not measure it for the edit it is asked about.
-            return (stale.texture, staleContent, staleDigest)
+            // and the controller must not measure it for the edit it is asked about. The numbers are
+            // real numbers too (not `nil`), so the **digest** is the only thing refusing the base.
+            return (stale.texture, staleContent, staleDigest,
+                    Self.markerHistogram(sample: staleContent,
+                                         canvas: ImageSize(width: staleContent.width,
+                                                           height: staleContent.height),
+                                         headroom: loupe.displayHeadroom.headroom))
         }
 
         let edit = blacks(40)
@@ -597,15 +613,38 @@ final class HistogramBlacksWhitesTests: XCTestCase {
         return sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * q).rounded()))]
     }
 
+    /// A measurement that **is** the injected base's numbers: a grid of `sample`'s size whose light is
+    /// uniform **+3.3 EV** above white (2^3.3 = 9.85×), labelled with the picture's own grid. Distinct
+    /// from every real plot by construction, and above the +1.98 stop headroom this machine's S4 clamps
+    /// at — which is the case 070 is about. 3.3 rather than 3.5 stops on purpose: 1/4-stop values are
+    /// bin *edges* on a 64-bins-per-stop axis (3.5 × 64 = 224.0), and a marker that sits on an edge can
+    /// land either side of it after `Float16` rounding.
+    private static func markerHistogram(sample: ImageRect, canvas: ImageSize,
+                                        headroom: Double) -> Histogram {
+        let grid = Histogram.frameSampleSize(for: sample)
+        let v = Float16(pow(2.0, 3.3))
+        var rgba = [Float16](repeating: v, count: grid.pixelCount * 4)
+        for i in stride(from: 3, to: rgba.count, by: 4) { rgba[i] = 1 }
+        let whole = ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+        return Histogram.compute(LinearSample(width: grid.width, height: grid.height, rgba: rgba),
+                                 headroom: headroom)
+            .relabelled(canvas: canvas, roi: whole)
+    }
+
     /// A box the background measurement can write to. `fullPictureSource` is called on the measurement
     /// queue, so a plain array in the test would be a data race on the very wiring under test.
     private final class BaseBox {
         private let lock = NSLock()
-        private var bases: [(texture: MTLTexture, content: ImageRect, digest: String)] = []
+        private var bases: [(texture: MTLTexture, content: ImageRect, digest: String,
+                             histogram: Histogram?)] = []
         private var asks: [String] = []
 
         /// The closure's body: record what was asked for, answer with the newest base of that document.
-        func offer(_ edit: EditModel) -> (texture: MTLTexture, content: ImageRect, digest: String)? {
+        ///
+        /// 070: a base now carries the histogram its own render measured (`collectHistogram` +
+        /// `histogramSampleLongEdge`), so the closure hands over numbers as well as pixels.
+        func offer(_ edit: EditModel) -> (texture: MTLTexture, content: ImageRect, digest: String,
+                                          histogram: Histogram?)? {
             let digest = Histogram.editDigest(edit)
             lock.lock()
             defer { lock.unlock() }
@@ -613,10 +652,11 @@ final class HistogramBlacksWhitesTests: XCTestCase {
             return bases.last { $0.digest == digest }
         }
 
-        func add(_ texture: MTLTexture, content: ImageRect, digest: String) {
+        func add(_ texture: MTLTexture, content: ImageRect, digest: String,
+                 histogram: Histogram?) {
             lock.lock()
             defer { lock.unlock() }
-            bases.append((texture, content, digest))
+            bases.append((texture, content, digest, histogram))
         }
 
         var askedDigests: [String] {

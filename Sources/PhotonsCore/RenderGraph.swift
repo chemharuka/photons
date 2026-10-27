@@ -82,6 +82,19 @@ public struct RenderOptions: Sendable {
     public var collectHistogram: Bool
     /// Bins per channel for `collectHistogram`; 256 is an 8-bit output's own resolution.
     public var histogramBins: Int
+    /// Long edge of the grid `collectHistogram` measures, or **0** for the whole-canvas readback.
+    ///
+    /// The whole-canvas readback is right when the canvas *is* the picture at thumbnail scale
+    /// (`measureHistogram`: 0.58 Mpx), and wrong for a frame: a 4.1 Mpx canvas is 33 MB of half float
+    /// per frame. With this set, the measurement is a **stride-sampled grid** of the pre-S4 texture
+    /// (long edge as asked, 256 = 36 k texels = 0.29 MB), read out of the same command buffer with
+    /// `histogram_sample_linear`. Same pixels policy as the frame-sample path: one texel per output
+    /// texel on a deterministic stride, over the picture's own rect, so the grid estimates the
+    /// distribution instead of averaging it flat (070).
+    ///
+    /// Only the *sampling* changes: the domain is the scene-linear texture in both cases, so a grid
+    /// measurement and a canvas measurement of the same render differ by sampling error and nothing else.
+    public var histogramSampleLongEdge: Int
 
     /// **Tests only.** Render S1.7 with the arithmetic path even when the tables are the identity.
     ///
@@ -103,6 +116,7 @@ public struct RenderOptions: Sendable {
                 maskTiling: MaskTiling = .auto,
                 collectHistogram: Bool = false,
                 histogramBins: Int = 256,
+                histogramSampleLongEdge: Int = 0,
                 forceCurveArithmetic: Bool = false) {
         self.canvas = canvas
         self.scale = scale
@@ -113,6 +127,7 @@ public struct RenderOptions: Sendable {
         self.maskTiling = maskTiling
         self.collectHistogram = collectHistogram
         self.histogramBins = histogramBins
+        self.histogramSampleLongEdge = histogramSampleLongEdge
         self.forceCurveArithmetic = forceCurveArithmetic
     }
 }
@@ -205,11 +220,15 @@ public final class RenderResult {
     /// output, with the clipping ratios and the ROI it was measured over. `nil` otherwise, so
     /// "nothing was measured" and "everything was black" cannot be confused.
     public let histogram: Histogram?
+    /// What the histogram cost inside this render: the reduced-grid readback plus the CPU binning
+    /// (070 — the GPU pass itself is part of the frame's own command buffer, so its milliseconds are
+    /// in `trace.gpuMilliseconds`, not here). 0 when nothing was measured.
+    public let histogramMilliseconds: Double
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, window: ImageRect,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
-         histogram: Histogram? = nil) {
+         histogram: Histogram? = nil, histogramMilliseconds: Double = 0) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -221,6 +240,7 @@ public final class RenderResult {
         self.maskReport = maskReport
         self.showsMask = showsMask
         self.histogram = histogram
+        self.histogramMilliseconds = histogramMilliseconds
     }
 }
 
@@ -1027,6 +1047,44 @@ public final class RenderGraph {
         // *surface* -- bin 0 collects every black bar, so 削底 reads 30 % on a photo with no blacks at
         // all. `plan.origin + plan.content` is the whole canvas exactly when there is no letterboxing.
 
+        // 070 — the measured grid, encoded **here** rather than read back afterwards.
+        //
+        // The pre-S4 texture is a transient: the commit below is the last moment anything can be
+        // sampled from it, and a frame is far too big to read back whole (33 MB of half float at
+        // 4.10 Mpx, per frame, inside a slider drag). So the stride read happens on the GPU in this
+        // frame's own command buffer, into a ≤ 256-long-edge grid, and the CPU counts that: one extra
+        // dispatch of 36 k threads and 0.29 MB of readback, which is what the card can afford on every
+        // frame that changes the picture.
+        var sampleGrid: (texture: MTLTexture, size: ImageSize)?
+        if options.collectHistogram, options.histogramSampleLongEdge > 0,
+           let source = histogramSource, !plan.drawnRect.isEmpty {
+            let picture = plan.drawnRect
+            let grid = Histogram.frameSampleSize(for: picture,
+                                                 longEdge: options.histogramSampleLongEdge)
+            let texture = try pool.obtain(grid)
+            let pipeline = try kernels.pipeline(file: "histogram_sample",
+                                                function: "histogram_sample_linear")
+            guard let enc = cb.makeComputeCommandEncoder() else {
+                pool.recycle(texture)
+                throw RenderError.commandBufferFailed
+            }
+            enc.setComputePipelineState(pipeline)
+            enc.setTexture(source, index: 0)
+            enc.setTexture(texture, index: 1)
+            // The same arithmetic `measureFrameHistogram` uses for its grid, so the two sample the
+            // same texel of the same rect: `(i + 0.5) · step`, origin added once.
+            var params = HistSampleParams(
+                a: SIMD4(Float(picture.x), Float(picture.y),
+                         Float(picture.width), Float(picture.height)),
+                b: SIMD4(Float(Double(picture.width) / Double(grid.width)),
+                         Float(Double(picture.height) / Double(grid.height)),
+                         Float(grid.width), Float(grid.height)))
+            enc.setBytes(&params, length: MemoryLayout<HistSampleParams>.stride, index: 0)
+            dispatch(enc, pipeline, grid)
+            enc.endEncoding()
+            sampleGrid = (texture, grid)
+        }
+
         let t0 = CFAbsoluteTimeGetCurrent()
         cb.commit()
         cb.waitUntilCompleted()
@@ -1044,15 +1102,35 @@ public final class RenderGraph {
         // hands out next. The CPU then counts its pixels: at the thumbnail scale `measureHistogram`
         // asks for, that is ~0.58 Mpx, not 4.10 M — let alone the 60 M of a full export.
         var histogramPayload: Histogram?
+        var histogramMilliseconds = 0.0
         if let source = histogramSource {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
             // The picture, from the layout S0 actually drew with — not the content rect, which holds
             // background around a window that reaches past the frame (048).
             let picture = plan.drawnRect
-            let sample = readSample(source)
-            histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
-                                                 headroom: options.display.headroom)
-                .relabelled(canvas: plan.canvas, roi: picture)
+            if let grid = sampleGrid {
+                // 070: the picture's own pixels, sampled off the scene-linear texture (not S4's
+                // clamped output, which cannot hold anything above the panel's headroom).
+                let tSample = CFAbsoluteTimeGetCurrent()
+                let sample = readSample(grid.texture)
+                pool.recycle(grid.texture)
+                // Labelled with the **picture's** own grid, exactly as `measureFrameHistogram` labels
+                // its numbers, so the card's canvas/ROI and 「采样 N px」 mean the same thing whichever
+                // path measured: the render's canvas is a viewport (or a backdrop's 4096), and neither
+                // is the picture.
+                let pixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
+                                                 in: sourceSize)
+                let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
+                histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
+                                                     headroom: options.display.headroom)
+                    .relabelled(canvas: pixels, roi: own)
+                histogramMilliseconds = (CFAbsoluteTimeGetCurrent() - tSample) * 1000
+            } else {
+                let sample = readSample(source)
+                histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
+                                                     headroom: options.display.headroom)
+                    .relabelled(canvas: plan.canvas, roi: picture)
+            }
         }
 
         for t in transient { pool.recycle(t) }
@@ -1067,13 +1145,15 @@ public final class RenderGraph {
                                 drawnRect: plan.drawnRect,
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
-                                showsMask: showsMask, histogram: histogramPayload)
+                                showsMask: showsMask, histogram: histogramPayload,
+                                histogramMilliseconds: histogramMilliseconds)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect,
                             window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
-                            showsMask: showsMask, histogram: histogramPayload)
+                            showsMask: showsMask, histogram: histogramPayload,
+                            histogramMilliseconds: histogramMilliseconds)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
