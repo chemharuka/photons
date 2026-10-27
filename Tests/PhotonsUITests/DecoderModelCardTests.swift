@@ -16,8 +16,10 @@ import PhotonsCore
 ///  1. **The list, the labels, the default.** `8` and `8 (DNG)` are distinguishable, `8` is the default
 ///     where offered, and the stored value is `nil` for it (the DNG-independent "ask for nothing" that
 ///     every pre-change document already is).
-///  2. **The document, not the view.** One switch = one field + one history entry; the four amounts
-///     keep their numbers (greyed is not zeroed); the switch is a decode input (the key moves).
+///  2. **The document, not the view.** One switch = the version **and** the four defaults
+///     (`detailSettings = .identity`, i.e. 四根都停在机身基线) in **one** history entry — 改版本必须
+///     强制覆盖降噪/细节，而不是把不被支持的旧值留在文档里。The switch is a decode input, so both the
+///     decode key *and* the rung identity move (`appending(to:)` carries `ver=`).
 ///  3. **The four rows follow `capabilities.detailAxes`** — Apple's per-instance `isSupported` flags,
 ///     read off the filter that made the pixels (`DetailAxes.supported(by:)`) and carried in
 ///     `DecoderCapabilities`. On this machine's `9.dng` exactly two are greyed (色彩降噪 + 细节) and the
@@ -59,49 +61,66 @@ final class DecoderModelCardTests: XCTestCase {
 
     // MARK: - 2. the document
 
-    func testPickingAVersionWritesOneFieldAndOneHistoryEntry() {
+    /// **One pick = the version + the four defaults, in one snapshot.**
+    ///
+    /// The owner's rule (2026-10-27): 改解码版本时把降噪/细节四根滑杆**强制覆盖**到该版本的默认值，
+    /// and the version change is the same undo step. Both halves are asserted, and so is the rung
+    /// identity — the version is a decode input, so it must appear in `appending(to:)` and not only in
+    /// `key` (that omission is why the canvas stood still until a slider moved).
+    func testPickingAVersionWritesTheVersionAndTheFourDefaultsInOneEntry() {
         let session = CatalogSession()
         let resets = PanelResets(session: session)
         let neutralKey = session.edit.decodeInputs.key
         XCTAssertTrue(neutralKey.contains("ver=auto"), "the default asks for nothing: \(neutralKey)")
         XCTAssertNil(session.edit.decoderVersion)
+        XCTAssertEqual(session.edit.decodeInputs.appending(to: "photo"), "photo",
+                       "the default document appends nothing to a rung identity")
 
-        session.applyEdit {
-            $0.detailSettings = DetailSettings(luminanceNR: 30, colorNR: 70, sharpness: 20, detail: 60)
-        }
+        let amounts = DetailSettings(luminanceNR: 30, colorNR: 70, sharpness: 20, detail: 60)
+        session.applyEdit { $0.detailSettings = amounts }
         XCTAssertTrue(session.commitEdit(label: "拖动"))
         let before = session.history.count
-        let amounts = session.edit.detailSettings
         let amountsKey = session.edit.decodeInputs.key
         XCTAssertNotEqual(amountsKey, neutralKey, "the amounts alone move the key")
+        XCTAssertEqual(session.edit.decodeInputs.appending(to: "photo"), "photo|dt=nr30,c70,s20,d60")
 
         XCTAssertTrue(resets.decoderVersion("9.dng", offered: Self.sl3))
         XCTAssertEqual(session.edit.decoderVersion, "9.dng")
-        XCTAssertEqual(session.edit.detailSettings, amounts, "picking a decoder must not zero anything")
-        XCTAssertEqual(session.history.count, before + 1, "one pick = one snapshot")
+        XCTAssertEqual(session.edit.detailSettings, .identity,
+                       "换版本必须把四轴强制回该版本的默认值（.identity = 四根都停在机身基线）")
+        XCTAssertEqual(session.history.count, before + 1, "one pick = one snapshot (版本 + 四轴)")
         XCTAssertEqual(session.history.currentSnapshot?.label, "解码模型")
         XCTAssertTrue(session.edit.decodeInputs.key.contains("ver=9.dng"),
                       session.edit.decodeInputs.key)
-        XCTAssertNotEqual(session.edit.decodeInputs.key, amountsKey)
+        XCTAssertEqual(session.edit.decodeInputs.appending(to: "photo"), "photo|ver=9.dng",
+                       "the rung identity must carry the requested decoder version")
+
+        // ⌘Z takes back **both** halves — one entry, not two.
+        XCTAssertTrue(session.undo())
+        XCTAssertNil(session.edit.decoderVersion, "undo restores the version …")
+        XCTAssertEqual(session.edit.detailSettings, amounts, "… and the four amounts, in the same step")
+        XCTAssertTrue(session.redo())
+        XCTAssertEqual(session.edit.decoderVersion, "9.dng")
+        XCTAssertTrue(session.edit.detailSettings.isIdentity)
 
         XCTAssertFalse(resets.decoderVersion("9.dng", offered: Self.sl3),
-                       "the same value again writes nothing — no empty snapshot")
+                       "the same value again writes nothing — no empty snapshot, no stealth reset")
         XCTAssertEqual(session.history.count, before + 1)
 
-        // `8` is the file's default: stored as `nil`, i.e. the untouched decode and the old key.
+        // `8` is the file's default: stored as `nil`, i.e. the untouched decode and the bare identity.
         XCTAssertTrue(resets.decoderVersion("8", offered: Self.sl3))
         XCTAssertNil(session.edit.decoderVersion, "the default is nil, not an assignment")
-        XCTAssertEqual(session.edit.decodeInputs.key, amountsKey)
-        XCTAssertEqual(session.edit.detailSettings, amounts, "the amounts come back untouched")
+        XCTAssertEqual(session.edit.decodeInputs.appending(to: "photo"), "photo")
+        XCTAssertTrue(session.edit.detailSettings.isIdentity)
 
         // `8.dng` is a *different* decode and is stored verbatim.
         XCTAssertTrue(resets.decoderVersion("8.dng", offered: Self.sl3))
         XCTAssertEqual(session.edit.decoderVersion, "8.dng")
-        XCTAssertTrue(session.edit.decodeInputs.key.contains("ver=8.dng"))
+        XCTAssertEqual(session.edit.decodeInputs.appending(to: "photo"), "photo|ver=8.dng")
 
         XCTAssertTrue(session.undo())
         XCTAssertNil(session.edit.decoderVersion)
-        print("MODEL neutral key: \(neutralKey)")
+        print("MODEL neutral key: \(neutralKey) · rung identity of the default document: photo")
     }
 
     func testTheCardResetAlsoGoesBackToTheDefault() {

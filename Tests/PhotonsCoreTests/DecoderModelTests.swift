@@ -214,6 +214,24 @@ final class DecoderModelTests: XCTestCase {
                        "the render must not see the decoder version: the buffer already has it")
         XCTAssertEqual(v9.renderInputs.key, EditModel.neutral.renderInputs.key)
 
+        // …and it must reach the **rung identity**, not only `key`. `appending(to:)` is the string the
+        // ladder, the decode queue and `isCurrentPhoto` compare, so a version missing from it is a
+        // version the canvas cannot see: measured 2026-10-27 — picking `9.dng` developed nothing (the
+        // resident v8 rung "matched"), the frames hashed identically, and the only way to move the
+        // picture was to drag a detail slider (which appends `dt=…`). 「选完画面不动，拖滑杆才重算」.
+        XCTAssertEqual(EditModel.neutral.decodeInputs.appending(to: "photo"), "photo",
+                       "the default document must still append nothing — every pre-change key is byte-identical")
+        XCTAssertEqual(v9.decodeInputs.appending(to: "photo"), "photo|ver=9.dng")
+        var v8dng = EditModel.neutral
+        v8dng.decoderVersion = "8.dng"
+        XCTAssertEqual(v8dng.decodeInputs.appending(to: "photo"), "photo|ver=8.dng",
+                       "8 and 8.dng are different decodes, so they must be different rungs")
+        var v9WithAmounts = v9
+        v9WithAmounts.detailSettings = DetailSettings(colorNR: 30)
+        XCTAssertEqual(v9WithAmounts.decodeInputs.appending(to: "photo"),
+                       "photo|ver=9.dng|dt=nr·,c30,s·,d·",
+                       "the version is the coarsest component and goes first")
+
         var both = v9
         both.detailSettings = DetailSettings(colorNR: 30)
         XCTAssertEqual(both.splitFrom(v9), .decode)
