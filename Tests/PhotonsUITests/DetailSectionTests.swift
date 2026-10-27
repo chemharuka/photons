@@ -110,8 +110,11 @@ final class DetailSectionTests: XCTestCase {
         print("DETAIL shapes: \(rows.map { "\($0.title)=\($0.shape.rawValue)" })")
     }
 
-    /// 040 requirement 4: **no** decoder prose under the sliders — no 「基线 0.50」, no 「解码参数」,
-    /// no 「v9」.
+    /// 040 requirement 4 — as amended by the 解码模型 row (owner, 2026-10-27): **no decoder arithmetic**
+    /// under the sliders. 「基线 0.50」, 「解码参数 · v9」 and 「develop」 stay banned; the one label the
+    /// card is allowed to print besides its four row titles is the model row itself (「解码模型」) and
+    /// the read-back line under it (`实际 v8`, …), which is the *version*, not a number the user is
+    /// expected to interpret.
     ///
     /// Asserted on everything the card is made of: the removed footer (a `nil` constant), the four row
     /// titles the view iterates, and — when this environment exposes an accessibility tree — every
@@ -122,14 +125,15 @@ final class DetailSectionTests: XCTestCase {
 
         let content = InspectorView.detailContent
         XCTAssertEqual(content.rows.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"],
-                       "the card's entire text is its four row labels plus one number per row")
+                       "the card's rows are the four amounts and nothing else")
         let texts = content.rows.map(\.title) + [InspectorView.detailFooterText].compactMap { $0 }
-        for banned in ["基线", "解码", "v9", "develop"] {
+        for banned in ["基线", "解码参数", "v9", "develop"] {
             XCTAssertFalse(texts.contains { $0.contains(banned) },
                            "the 细节 card still prints '\(banned)': \(texts)")
         }
 
-        // The rendered card, where the tree is available: no label may carry the words either.
+        // The rendered card, where the tree is available: no label may carry the banned prose. The
+        // model row and its read-back are checked for *presence* in `DecoderModelCardTests`.
         let host = Self.host()
         let nodes = Self.accessibility(in: host)
         guard let card = Self.subtree(of: "inspector.card.detail", in: nodes) else {
@@ -138,7 +142,7 @@ final class DetailSectionTests: XCTestCase {
         }
         let labels = card.flatMap { [$0.label, $0.value] }.filter { !$0.isEmpty }
         print("DETAIL card texts: \(labels)")
-        for banned in ["基线", "解码", "v9", "develop"] {
+        for banned in ["基线", "解码参数", "develop"] {
             XCTAssertFalse(labels.contains { $0.contains(banned) },
                            "the rendered 细节 card still prints '\(banned)': \(labels)")
         }

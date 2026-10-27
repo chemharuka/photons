@@ -138,6 +138,83 @@ public enum LinearColorSpace: String, Sendable, CaseIterable {
     }
 }
 
+/// 「版本 → 四轴可用性」 — **the seam** (owner, 2026-10-27; re-measured 2026-10-27 after the first
+/// pass of this task claimed "v9 = all four off", which the numbers below refute).
+///
+/// The 细节 card must not guess which of its four amounts survive a given decoder version: the answer
+/// is per **body and version**. Measured on this machine, `L1030433.dng`, **full size 9520×6336**,
+/// one axis at a time (slider 100, maxΔ of the decoded samples against the untouched decode):
+///
+/// ```
+/// version   luminance NR (降噪)   colour NR (色彩降噪)   detail (细节)   sharpness (锐化)
+/// v8        ≈0    (0.002) dead   0.026  ✓ live          0.004  dead     0.083  ✓ live
+/// v8.dng    0.33  ✓ live         0      dead            0.006  dead     0      dead (scale 0.25)
+/// v9.dng    0.021 ✓ live         0      dead            0      dead     0.510  ✓ live
+/// ```
+///
+/// **Conclusion this seam encodes: under v9 only 色彩降噪 and 细节 are gone; 降噪 and 锐化 still
+/// reach the pixels.** Two independent sources agree:
+///
+///   · the pixels above (`photonsctl detail`, full size) — cnr/detail move **0** samples under v9,
+///     nr moves 0.021 and sharpness 0.510;
+///   · Apple's own flags on the same `9.dng` filter — `isColorNoiseReductionSupported = false`,
+///     `isDetailSupported = false`, `isMoireReductionSupported = false`, while
+///     `isLuminanceNoiseReductionSupported = true` and `isSharpnessSupported = true`.
+///
+/// So: **色彩降噪 / 细节 = v9 不支持（Apple 口径 + 像素双重确认）；降噪 / 锐化 = v9 仍可用.**
+/// A four-grey v9 card would have been a lie in both directions — two live sliders disabled.
+///
+/// (Both columns are full-size decodes. At `scaleFactor 0.25` v8's sharpness moves **0** samples —
+/// the sharpen stage only runs at scale 1 — so a "dead axis" measured on a preview rung is not the
+/// same claim as one measured at full size. `DetailCapability` will have to carry the scale too.)
+///
+/// **REPLACEMENT POINT.** `DetailCapability` (Core, in flight, cached by `cameraKey + decoderVersion`)
+/// will answer this question with numbers instead of a version prefix. When it lands, replace the body
+/// of `forDecoderVersion(_:)` — and nothing else: the card, `RAWDecoder`'s per-axis suppression and the
+/// tests all read this one function. Until then: **v9 = `.v9` (nr + sharpness on), every other version
+/// = `.all`**, which is deliberately coarse (v8's own luminance NR / detail are ~dead, and v8.dng
+/// reshuffles the set) and must not be read as a capability claim.
+public struct DetailAxes: Sendable, Equatable {
+
+    public var nr: Bool
+    public var cnr: Bool
+    public var detail: Bool
+    public var sharpness: Bool
+
+    public init(nr: Bool, cnr: Bool, detail: Bool, sharpness: Bool) {
+        self.nr = nr; self.cnr = cnr; self.detail = detail; self.sharpness = sharpness
+    }
+
+    /// Every axis on — the placeholder for "no known reason to grey anything".
+    public static let all = DetailAxes(nr: true, cnr: true, detail: true, sharpness: true)
+
+    /// **v9** — Apple's `9.dng` decoder deadens colour NR and detail only; luminance NR and
+    /// sharpness still move pixels (table above, both sources). Never `.all` (that would leave two
+    /// dead sliders live) and never "everything off" (that would take two working sliders away).
+    ///
+    /// There is deliberately **no** all-off constant: no measured version deadens all four, and the
+    /// previous `.none` was returned for every `9*` spelling, which the measurements above refute.
+    public static let v9 = DetailAxes(nr: true, cnr: false, detail: false, sharpness: true)
+
+    /// **The seam.** `version` is the *effective* decoder version (`"8"`, `"8.dng"`, `"9.dng"`, …), the
+    /// one the read-back produced — never the request.
+    public static func forDecoderVersion(_ version: String) -> DetailAxes {
+        version.hasPrefix("9") ? .v9 : .all
+    }
+
+    public func isEnabled(_ axis: DetailAxis) -> Bool {
+        switch axis {
+        case .luminanceNR: return nr
+        case .colorNR: return cnr
+        case .detail: return detail
+        case .sharpness: return sharpness
+        }
+    }
+
+    /// True when at least one amount can still reach the pixels.
+    public var anyEnabled: Bool { nr || cnr || detail || sharpness }
+}
+
 public enum DecodeError: LocalizedError {
     case unsupportedFile(URL)
     case noMetalDevice
@@ -347,10 +424,19 @@ public final class RAWDecoder {
     /// Read-back tolerance is 1e-4 because the properties are `Float`: `Float(0.3)` reads back as
     /// 0.30000001192, which is the assignment landing, not a rejection.
     static func applyDetail(_ detail: DetailSettings, to filter: CIRAWFilter,
-                            baseline: DetailBaseline? = nil) throws -> DetailDecodeValues {
+                            baseline: DetailBaseline? = nil,
+                            axes: DetailAxes = .all) throws -> DetailDecodeValues {
         // The baseline of all four axes, **before** anything is assigned.
         let base = baseline ?? detailBaseline(of: filter)
-        let values = detail.clamped().decodeValues(baseline: base)
+        var values = detail.clamped().decodeValues(baseline: base)
+        // The seam's veto, **axis by axis**: an amount whose axis the effective decoder does not honour
+        // is never written, and reads back as `nil` in `detailApplied` — "we did not ask", not "we asked
+        // and nothing happened". Under v9 that is 色彩降噪 + 细节 only; 降噪 and 锐化 are still assigned
+        // (Apple's flags say supported and the pixels move — see `DetailAxes`).
+        if !axes.nr { values.luminanceNR = nil }
+        if !axes.cnr { values.colorNR = nil }
+        if !axes.detail { values.detail = nil }
+        if !axes.sharpness { values.sharpness = nil }
 
         func assign(_ name: String, _ wanted: Double?,
                     _ get: () -> Float, _ set: (Float) -> Void) throws {
@@ -453,10 +539,16 @@ public final class RAWDecoder {
         // (measurably: v9 on an SL3 stays v8), so the read-back — not the assignment — is the
         // truth. On a mismatch we pin the D2′ default and report `effectiveVersion`.
         var effective = filterDefault
+        let resolvedRequest = options.decoderVersion
         if let wanted = options.decoderVersion {
             guard DecoderCapabilities.knownVersions.contains(wanted) else {
                 throw DecodeError.unsupportedVersion(requested: wanted, available: offered)
             }
+            // The document holds one item of this file's own `supportedDecoderVersions`, assigned
+            // verbatim. A value this file does not offer (a document written on another body, or a bare
+            // `9` where only `9.dng` exists) is **not** rewritten into something that works: it is
+            // assigned, it reads back as whatever the filter kept, and both the inspector and
+            // `DecoderCapabilities.downgraded` report that fallback.
             filter.decoderVersion = CIRAWDecoderVersion(rawValue: wanted)
             effective = Self.versionString(filter.decoderVersion)
             if effective != wanted {
@@ -497,8 +589,17 @@ public final class RAWDecoder {
         // for a control parked at "no change". The baseline is read before any assignment.
         let detailBaseline = Self.detailBaseline(of: filter)
         var detailApplied = DetailDecodeValues()
-        if !options.detail.isIdentity {
-            detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline)
+        // 解码模型 (owner, 2026-10-27): the four amounts are assigned only when the **effective**
+        // decoder still honours that axis — `DetailAxes` is the seam that answers it, **per axis**.
+        // Under v9 Apple's ML stage takes 色彩降噪 and 细节 (both move zero samples and report
+        // `isColorNoiseReductionSupported`/`isDetailSupported` = false), while 降噪 and 锐化 stay live
+        // (`isLuminanceNoiseReductionSupported`/`isSharpnessSupported` = true, 0.021 / 0.510 maxΔ) — so
+        // a v9 develop assigns exactly two of the four. The document keeps its numbers either way;
+        // switching back to v8 assigns them again untouched.
+        let detailAxes = DetailAxes.forDecoderVersion(effective)
+        if !options.detail.isIdentity && detailAxes.anyEnabled {
+            detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline,
+                                                 axes: detailAxes)
         }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
@@ -557,9 +658,10 @@ public final class RAWDecoder {
         let image = LinearImage(width: w, height: h, rgba: rgba,
                                 colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
                                 orientation: .up)
-        let capabilities = DecoderCapabilities(requestedVersion: options.decoderVersion,
+        let capabilities = DecoderCapabilities(requestedVersion: resolvedRequest,
                                                effectiveVersion: effective,
                                                defaultVersion: filterDefault,
+                                               supportedVersions: offered,
                                                asShotTemperature: asShot.temperature,
                                                asShotTint: asShot.tint)
         return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot,

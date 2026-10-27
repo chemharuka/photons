@@ -18,6 +18,12 @@ public struct DecoderCapabilities: Sendable, Equatable {
     public let effectiveVersion: String
     /// The version the decoder was asked to use by default (v8 on every body tested so far).
     public let defaultVersion: String
+    /// The **file's** own version list, in the order `supportedDecoderVersions` handed it over
+    /// (`6.dng, 7, 7.dng, 8, 8.dng, 9.dng` on this machine's SL3 DNG). This is what the 解码模型 picker
+    /// offers: the document stores one item of it verbatim, so `8` and `8.dng` are different choices
+    /// with different pixels (measured: `08193a35…` vs `a15055fa…`) and must be distinguishable on
+    /// screen.
+    public let supportedVersions: [String]
 
     /// The request did not survive: the decoder handed back a different version.
     public var downgraded: Bool { requestedVersion.map { $0 != effectiveVersion } ?? false }
@@ -37,10 +43,12 @@ public struct DecoderCapabilities: Sendable, Equatable {
     public let asShotTint: Double?
 
     public init(requestedVersion: String?, effectiveVersion: String, defaultVersion: String,
+                supportedVersions: [String] = [],
                 asShotTemperature: Double? = nil, asShotTint: Double? = nil) {
         self.requestedVersion = requestedVersion
         self.effectiveVersion = effectiveVersion
         self.defaultVersion = defaultVersion
+        self.supportedVersions = supportedVersions
         let sliders = Self.sliders(for: effectiveVersion)
         self.supportsChromaNoiseReduction = sliders.chromaNR
         self.supportsDetail = sliders.detail

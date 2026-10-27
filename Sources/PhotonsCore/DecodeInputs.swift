@@ -112,6 +112,9 @@ public struct RenderInputs: Sendable, Equatable {
         // buffer already carries them. Leaving them here would make "did this change the render?"
         // answer yes for a change the render cannot see.
         e.detailSettings = .identity
+        // The decoder model (v8/v9) is the same kind of fact: it picks *which* decoder produced the
+        // buffer, and the buffer already carries the answer. A render-side question must not move.
+        e.decoderVersion = nil
         self.edit = e
     }
 
@@ -149,7 +152,7 @@ public extension EditModel {
     /// bullet); this property is the derivation, so there is no second stored copy to drift.
     var decodeInputs: DecodeInputs {
         DecodeInputs(whiteBalance: light.whiteBalance,
-                     decoderVersion: nil,
+                     decoderVersion: decoderVersion,
                      scale: 1,
                      recipe: DecodeRecipe.current,
                      detail: detailSettings)

@@ -35,6 +35,10 @@ extension EditHistory {
         // development is not a stage), but a document whose sliders moved is a document that
         // changed, and `commit` has to see it to keep an undo step.
         if !EditParameters.areEqual(before.detailSettings, after.detailSettings) { dirty.insert(.detail) }
+        // 解码模型 (owner, 2026-10-27): the decoder version lives on the same card and is the coarsest
+        // decode input there is — a switch must be one committable edit (and the loupe re-develops,
+        // because `decodeInputs` moves). It dirties no *stage*: a new development is not a render stage.
+        if before.decoderVersion != after.decoderVersion { dirty.insert(.detail) }
         if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
         if !EditParameters.areEqual(before.geometry, after.geometry) { dirty.insert(.geometry) }
         if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }

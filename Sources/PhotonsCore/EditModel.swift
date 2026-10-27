@@ -50,6 +50,16 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// which the render graph does not consume and which export still reads. One panel, two
     /// audiences — the decoder takes these, XMP keeps those.
     public var detailSettings: DetailSettings
+    /// 解码模型 (owner, 2026-10-27): the decoder version this document asks for, as **one item of the
+    /// file's own `supportedDecoderVersions` list** (`"8"`, `"8.dng"`, `"9.dng"`, …) — `nil` means "ask
+    /// for nothing", i.e. Apple's default, which is v8 today and is what every pre-change document gets.
+    ///
+    /// A spelling, not a family: this machine's SL3 DNG offers `8` **and** `8.dng`, and they are
+    /// different pictures (measured `photonsctl detail`, same frame: `8` → `08193a35…`, `8.dng` →
+    /// `a15055fa…`, `9.dng` → `f4d7e53b…`; bare `9` is not offered and silently reads back `8`).
+    /// `RAWDecoder` assigns the string verbatim and reads it back, so a document from another body that
+    /// this file cannot honour reports the fallback (`已退回 v8`) instead of pretending.
+    public var decoderVersion: String?
     public var effects: EffectsGroup
     /// Optics: lateral chromatic aberration (029). Its own group, **not** a field in `DetailGroup`:
     /// `keyMaterial` has no `.detail` branch, so a slider parked there would change no key and would
@@ -72,6 +82,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 color: ColorGroup = .identity,
                 detail: DetailGroup = .identity,
                 detailSettings: DetailSettings = .identity,
+                decoderVersion: String? = nil,
                 effects: EffectsGroup = .identity,
                 optics: OpticsGroup = .identity,
                 masks: [Mask] = [],
@@ -84,6 +95,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.color = color
         self.detail = detail
         self.detailSettings = detailSettings
+        self.decoderVersion = decoderVersion
         self.effects = effects
         self.optics = optics
         self.masks = masks
@@ -116,6 +128,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.color = c.val("color", v.color)
         v.detail = c.val("detail", v.detail)
         v.detailSettings = c.val("detailSettings", v.detailSettings)
+        v.decoderVersion = c.val("decoderVersion", v.decoderVersion)
         v.effects = c.val("effects", v.effects)
         v.optics = c.val("optics", v.optics)
         v.masks = c.val("masks", v.masks)

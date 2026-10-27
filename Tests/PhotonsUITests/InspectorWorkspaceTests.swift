@@ -9,7 +9,7 @@ import SwiftUI
 ///
 /// | # | 工作区 | 图标 | 卡片 |
 /// |---|---|---|---|
-/// | 1 | 调整（默认） | `slider.horizontal.3` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线（+ 既有 预设、Decode） |
+/// | 1 | 调整（默认） | `slider.horizontal.3` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设（Decode 卡已删除，解码模型移入细节卡） |
 /// | 2 | 变换 | `crop.rotate` | —（旋转 / 裁切 / 校正 现在都不是检查器卡片） |
 /// | 3 | 色彩 | `paintpalette` | —（HSL 未实现） |
 /// | 4 | 蒙版 | `circle.dashed` | 蒙版 |
@@ -56,7 +56,7 @@ final class InspectorWorkspaceTests: XCTestCase {
             ($0, InspectorView.cardTitles(in: $0))
         })
         XCTAssertEqual(titles[.adjust],
-                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设", "Decode"])
+                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 「如果功能没做好就先空着」：这三个是**空数组**，不是占位。
         XCTAssertEqual(titles[.transform], [])
@@ -103,8 +103,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片的枚举本身没动（10 张，直方图仍排第一）—— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 10)
+        // 卡片的枚举少了一张（Decode 卡删除，9 张，直方图仍排第一）—— 这张测试钉的是过滤，不是重排。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 9)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
     }
 
@@ -204,7 +204,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(panel.cards.workspace, "adjust", "首次打开必须是调整")
         XCTAssertEqual(panel.cards.cardIDs, InspectorView.sections(in: .adjust).map(\.rawValue))
         XCTAssertEqual(panel.cards.cardTitles,
-                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设", "Decode"])
+                       ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
         // 真的渲染出来了，不只是表里有：调整工作区里蒙版卡不在树上，白平衡的数值框在。
         XCTAssertTrue(panel.numberFields > 0, "调整工作区里应该有真的控件（数值框），实际 \(panel.numberFields)")
         XCTAssertEqual(panel.maskCards, 0, "调整工作区里不该有蒙版卡")
