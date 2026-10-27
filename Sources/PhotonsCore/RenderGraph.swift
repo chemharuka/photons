@@ -1230,7 +1230,12 @@ public final class RenderGraph {
         // every stage above it would have been a hit anyway — the chain is a hash chain and the resume
         // key spells out the link, the environment suffixes and S1's own slot key (see `compositeKey`) —
         // so the walk starts at S4 and the frame costs one pass instead of the 8 this canvas used to pay.
-        let compositeStage = stages.last { RenderGraph.ownsGenericCacheEntry($0) }
+        //
+        // Both halves are gated on `useCache`, so a cache-off frame runs exactly the code it ran before
+        // 081: not a comparison, not a concatenation. That is what keeps the cold number a number this
+        // change cannot move.
+        let compositeStage = options.useCache
+            ? stages.last { RenderGraph.ownsGenericCacheEntry($0) } : nil
         let compositeKey = compositeStage.map {
             compositeKey(edit, plan, stage: $0, tilingSuffix: tilingSuffix, semanticSuffix: semanticSuffix)
         }
