@@ -89,8 +89,8 @@ public final class TopBarView: NSView {
     private let modeControl = NSSegmentedControl(labels: ["网格", "单图"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let stripButton = ToolButton(title: "胶片条", symbol: "rectangle.split.1x2")
-    /// 右上角那一块状态文本（照片数 · 已选 · 库名+build），三段的字体/颜色/高度和对齐规则
-    /// 都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
+    /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
+    /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
     private var separators: [NSView] = []
 
@@ -152,9 +152,10 @@ public final class TopBarView: NSView {
         modeControl.selectedSegment = mode == .grid ? 0 : 1
         stripButton.isActive = filmstrip
         // 047: the corner carries the **build** revision, so a glance answers "is this the build with
-        // my merge?" without going back to a commit list. Since 2026-10-27 the three facts are one
-        // block of one type (`TopBarStatusCluster`): `45 张` · `已选 4` · `photons-demo 4a7c34b`.
-        // The library name lives only in the rightmost segment (full name in its tooltip).
+        // my merge?" without going back to a commit list. Since 2026-10-27 the four facts are one
+        // block of one type (`TopBarStatusCluster`), left to right:
+        // `已选 4` · `45 张` · `photons-demo` · `498331f` — the version is always rightmost.
+        // The library name is the only segment that truncates (middle ellipsis, full name in tooltip).
         statusCluster.update(assetCount: assetCount,
                              selectionCount: selectionCount,
                              libraryName: libraryName)
@@ -183,12 +184,13 @@ public final class TopBarView: NSView {
         x += 11
         place(stripButton, width: stripButton.intrinsicContentSize.width)
 
-        // 状态三连：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
+        // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
         // 两个约束，取更紧的那个：
         // ① 检查器列宽（`statusColumnWidth`）：让整块留在列上方，而不是横到画布上去；
         // ② 顶栏最后一个可交互控件的右边缘 + 16 pt：库名再长也不许压到按钮上。
-        // ①② 都塞不下"…+版本号"时 `width(limit:)` 返回 0，整块隐藏（退化到没有状态文本，
+        // 簇内部只截库名一段（中间省略），计数与版本号按自身实际宽度完整显示；
+        // ①② 都塞不下 40 pt 库名时 `width(limit:)` 返回 0，整块隐藏（退化到没有状态文本，
         // 而不是压住控件或画出一段被剪碎的省略号）。
         let rightEdge = bounds.width - TopBarStatusCluster.Metrics.trailingInset
         let controlLimit = controlsTrailingEdge + TopBarStatusCluster.Metrics.minimumGapFromControls
