@@ -6,8 +6,9 @@ import PhotonsCore
 /// 派单 030 — the HDR curve (S1.7), engine side.
 ///
 /// The curve used to run **after** the tone map on 0…1 display data (`s3_curve`). It now runs before
-/// S2, on unbounded scene-linear light, through the log1p shaper `u = log1p(x/x0)/K` on a 4 × 4096
-/// table. Four families of claim, in the order they matter:
+/// S2, on unbounded scene-linear light, through the histogram-aligned shaper of `HDRCurveAxis`
+/// (派单 062: `u = 0.5·sRGB(x)` over the SDR half, `u = 0.5 + 0.125·log2(x)` over the HDR half) on a
+/// 4 × 4096 table. Four families of claim, in the order they matter:
 ///
 ///   1. **Identity is the identity.** The table is `i/(N−1)` to 1.2e-7 and the kernel takes a copy
 ///      branch, so a document that never touched the curve renders the bytes it always did. Forced
@@ -136,61 +137,164 @@ final class HDRCurveTests: XCTestCase {
 
     // MARK: - ⓪ the axis itself, and the numbers the kernel documents
 
-    /// 派单 044 moved the right end of the axis from 030's +6 EV to **+4 EV** (`xHI = 16`), to land on
-    /// the histogram's own four-stop HDR tail (`Histogram.swift:189` `maxStops = 4`). Four positions
-    /// are pinned here because the docs, the kernel header and (later) the curve panel all quote them:
-    /// `u(0) = 0` exactly, `u(0.18) = 0.5955`, `u(1.0) = 0.7500`, `u(16) = 1` exactly.
+    /// 派单 062 — the axis is the histogram's own, in two halves: **SDR 50 % (display code 0–255)
+    /// and HDR 50 % (+0…+4 EV, 12.5 % of `u` per stop)**. 044's log1p axis put SDR white at
+    /// `u = 0.7500` (SDR = three quarters of the card); the five positions pinned here are what the
+    /// docs, the kernel header and the curve panel all quote:
     ///
-    /// The kernel writes **no** constant of its own — it reads `x0`/`K`/stops-per-u out of
+    /// | x | 0 | 0.18 | 1 | 2 | 4 | 16 | 64 |
+    /// | u | 0 | 0.23068 | 0.5000 | 0.6250 | 0.7500 | 1.0000 | 1.2500 |
+    ///
+    /// The kernel writes **no** axis constant of its own — it reads `whiteU`/`hdrPerStop` out of
     /// `HDRCurveParams`, so the two sides cannot disagree in the arithmetic. What *can* drift is the
     /// header comment, which is the documentation a reader (and the next task) trusts; so it is
     /// parsed and compared with `HDRCurveAxis` instead, the same discipline `ChromaticAberrationTests`
     /// applies to `S0Params`.
-    func testAxisIsFourStopsAndTheKernelHeaderAgrees() throws {
+    func testAxisIsHalfSDRHalfHDRAndTheKernelHeaderAgrees() throws {
         let axis = HDRCurve.axis
-        XCTAssertEqual(axis.x0, 1.0 / 4096.0)
+        XCTAssertEqual(axis.whiteU, 0.5, "062: SDR white is the middle of the card, i.e. 50 % SDR")
         XCTAssertEqual(axis.xHI, 16, "044: the right end is +4 EV, xHI = 2^+4")
-        XCTAssertEqual(axis.K, 11.0903701476, accuracy: 1e-9, "K = ln(1 + 16/x0) = ln(65537)")
-        XCTAssertEqual(axis.stops, 16.0000220, accuracy: 1e-6, "K/ln 2 — the stops the axis spans")
+        XCTAssertEqual(axis.hdrStops, 4, accuracy: 1e-12, "log2(16) — the stops the HDR half spans")
+        XCTAssertEqual(axis.hdrPerStop, 0.125, accuracy: 1e-12,
+                       "12.5 % of u per stop: the histogram-aligned tail")
 
-        // The four pinned positions.
+        // The five pinned positions, plus the black foot and the continuation.
         XCTAssertEqual(axis.forward(0), 0, "u(0) must be exactly 0, or the black end cannot bend to 0")
-        XCTAssertEqual(axis.forward(0.18), 0.5955, accuracy: 1e-4, "u(18 % grey)")
-        XCTAssertEqual(axis.forward(1.0), 0.7500, accuracy: 1e-4,
-                       "u(SDR white) — a quarter from the right end")
+        XCTAssertEqual(axis.forward(0.18), 0.2307, accuracy: 1e-4, "u(18 % grey)")
+        XCTAssertEqual(axis.forward(1.0), 0.5000, accuracy: 1e-9,
+                       "u(SDR white) — the middle, where the histogram's sdrFraction is")
+        XCTAssertEqual(axis.forward(2.0), 0.6250, accuracy: 1e-9, "u(+1 EV)")
+        XCTAssertEqual(axis.forward(4.0), 0.7500, accuracy: 1e-9, "u(+2 EV)")
         XCTAssertEqual(axis.forward(axis.xHI), 1.0, accuracy: 1e-9, "u(+4 EV) = 1 exactly")
         XCTAssertEqual(axis.u(stops: 4), 1.0, accuracy: 1e-9, "…the same statement in stops")
-        XCTAssertEqual(axis.u(stops: 0), 0.7500, accuracy: 1e-4, "SDR white is 0 EV")
-        XCTAssertEqual(axis.forward(1.0 / 4096.0), 0.0625, accuracy: 1e-6,
-                       "the black foot (0 … 2^-12) is 6.25 % of u")
+        XCTAssertEqual(axis.u(stops: 0), 0.5000, accuracy: 1e-9, "SDR white is 0 EV")
+        XCTAssertEqual(axis.u(stops: 2), 0.7500, accuracy: 1e-9)
+        XCTAssertEqual(axis.forward(1.0 / 4096.0), 0.0015771, accuracy: 1e-6,
+                       "the black foot (0 … 2^-12) is 0.16 % of u: display code ~0.4, as the histogram counts it")
         XCTAssertGreaterThan(axis.u(stops: 8), 1.0, "+8 EV is past u = 1 and still answers")
         XCTAssertEqual(axis.inverse(axis.forward(37.5)), 37.5, accuracy: 1e-9, "x → u → x")
 
-        // The `.metal` header, parsed: xHI, K, both tabulated u positions, and stops per u.
+        // 062 ④: past +4 EV the axis continues at +4 EV's own slope, never clamping.
+        let u64 = axis.forward(64)
+        XCTAssertGreaterThan(u64, 1.0, "u(64) must be past the right edge (2 stops: 1.25)")
+        XCTAssertEqual(u64, 1.25, accuracy: 1e-12)
+        // du/dx measured either side of +4 EV: one law, so the same number. `x < 16` is the last
+        // stretch of the log2 half and `x > 16` is the continuation — if the far side were clamped,
+        // the right-hand difference would be 0.
+        let eps = 1e-6
+        let left = (axis.forward(axis.xHI) - axis.forward(axis.xHI - eps)) / eps
+        let right = (axis.forward(axis.xHI + eps) - axis.forward(axis.xHI)) / eps
+        XCTAssertEqual(right, left, accuracy: 1e-3 * left, "x > 16 must keep the +4 EV slope")
+        XCTAssertEqual(left, axis.hdrPerStop / (axis.xHI * log(2)), accuracy: 1e-4 * left,
+                       "…which is the log2 law's own du/dx at +4 EV")
+        // …and it stays the same law at 64 (two stops out): 0.125/(x·ln 2), not a constant.
+        let at64 = (axis.forward(64 * (1 + 1e-9)) - u64) / (64 * 1e-9)
+        XCTAssertEqual(at64, axis.hdrPerStop / (64 * log(2)), accuracy: 1e-3 * at64,
+                       "the tail keeps the log2 slope instead of flattening")
+        XCTAssertEqual(axis.forward(128), 1.375, accuracy: 1e-12, "+8 EV: still answering")
+
+        // The `.metal` header, parsed: both halves, the split, the two positions and the end.
         let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("x0 = 2^-12"), "the kernel header must state x0")
-        let docXHI = try XCTUnwrap(try number("K = ln\\(1 \\+ ([0-9.]+)/x0\\)", in: source),
-                                   "the kernel header must state K = ln(1 + <xHI>/x0)")
+        let docWhite = try XCTUnwrap(try number("u\\(x\\) = ([0-9.]+) · sRGB", in: source),
+                                     "the kernel header must state u(x) = <whiteU> · sRGB(x)")
+        XCTAssertEqual(docWhite, axis.whiteU, "the kernel header's SDR width is not the axis's")
+        let docPerStop = try XCTUnwrap(try number("u\\(x\\) = 0\\.5 \\+ ([0-9.]+) · log2", in: source),
+                                       "the kernel header must state the per-stop width")
+        XCTAssertEqual(docPerStop, axis.hdrPerStop, accuracy: 1e-12)
+        let docXHI = try XCTUnwrap(try number("xHI = ([0-9.]+)", in: source),
+                                   "the kernel header must state xHI")
         XCTAssertEqual(docXHI, axis.xHI, "the kernel header's xHI is not the axis's")
-        let docK = try XCTUnwrap(try number("K = ln\\(1 \\+ [0-9.]+/x0\\) = ([0-9.]+)", in: source))
-        XCTAssertEqual(docK, axis.K, accuracy: 1e-6, "the kernel header's K is not the axis's")
         let docGrey = try XCTUnwrap(try number("u\\(0\\.18\\) = ([0-9.]+)", in: source))
         XCTAssertEqual(docGrey, axis.forward(0.18), accuracy: 1e-4)
-        let docWhite = try XCTUnwrap(try number("u\\(1\\.0\\) = ([0-9.]+)", in: source))
-        XCTAssertEqual(docWhite, axis.forward(1.0), accuracy: 1e-4)
-        let docEnd = try XCTUnwrap(try number("u = 1 ↔ \\+([0-9]+) EV", in: source))
-        XCTAssertEqual(docEnd, 4, "the kernel header still claims a different right end")
-        let docStops = try XCTUnwrap(try number("K/ln 2 = ([0-9.]+)", in: source))
-        XCTAssertEqual(docStops, axis.stops, accuracy: 1e-6, "stops per unit u")
+        let docWhiteU = try XCTUnwrap(try number("u\\(1\\.0\\) = ([0-9.]+)", in: source))
+        XCTAssertEqual(docWhiteU, axis.forward(1.0), accuracy: 1e-9, "…white must be the middle")
+        let docHalf = try XCTUnwrap(try number("code 0–255, ([0-9.]+) % of u", in: source))
+        XCTAssertEqual(docHalf, 100 * axis.whiteU, accuracy: 1e-9)
+        let docSDR = try XCTUnwrap(try number("([0-9.]+) % of u per stop", in: source))
+        XCTAssertEqual(docSDR / 100, axis.hdrPerStop, accuracy: 1e-12)
 
-        // …and no stale +6 EV number survives in the file.
-        for stale in ["0.5293", "0.6667", "12.4766531", "18.0000055", "64/x0"] {
-            XCTAssertFalse(source.contains(stale), "the kernel header still says \(stale)")
+        // …and no stale 044 (or 030) number survives in the file. `0.7500` is not in this list any
+        // more on purpose: it is now `u(+2 EV)`, not the white point.
+        for stale in ["0.5293", "0.6667", "0.5955", "12.4766531", "18.0000055", "64/x0",
+                      "11.0903701", "stops per unit u"] {
+            XCTAssertFalse(source.contains(stale), "the kernel header/shaper still says \(stale)")
         }
-        print(String(format: "044 axis: xHI=%.0f K=%.7f stops=%.7f, u(0.18)=%.4f u(1)=%.4f u(16)=%.9f",
-                     axis.xHI, axis.K, axis.stops, axis.forward(0.18), axis.forward(1.0),
-                     axis.forward(axis.xHI)))
+        print(String(format: "062 axis: whiteU=%.1f xHI=%.0f hdrPerStop=%.3f, "
+                     + "u(0.18)=%.4f u(1)=%.4f u(2)=%.4f u(4)=%.4f u(16)=%.9f u(64)=%.4f",
+                     axis.whiteU, axis.xHI, axis.hdrPerStop, axis.forward(0.18), axis.forward(1.0),
+                     axis.forward(2.0), axis.forward(4.0), axis.forward(axis.xHI), u64))
+    }
+
+    /// 062 ②: `u` and `x(u)` are strictly monotone over the whole axis, **including across the
+    /// sRGB transfer's break point** (`x = 0.0031308`, `u = 0.0016`), which is where a piecewise
+    /// shaper would break if the two branches disagreed by even one ulp.
+    func testTheAxisIsStrictlyMonotoneAcrossBothBranches() {
+        let axis = HDRCurve.axis
+
+        // 4000 samples per decade from 2^-40 to 2^10, i.e. a dense sweep of both halves and of the
+        // linear/power break.
+        var lastU = -Double.infinity
+        var lastX = -Double.infinity
+        var folds = 0
+        let n = 4096
+        for i in 0...n {
+            let x = pow(2.0, -40 + Double(i) / Double(n) * 50)
+            let u = axis.forward(x)
+            if u <= lastU { folds += 1 }
+            lastU = u
+            let back = axis.inverse(u)
+            if back <= lastX { folds += 1 }
+            lastX = back
+            XCTAssertEqual(back / x, 1, accuracy: 1e-9, "x → u → x at \(x)")
+        }
+        XCTAssertEqual(folds, 0, "the shaper folded at \(folds) of \(n + 1) samples")
+
+        // The knee, from both sides — at the shaper's solved knee *and* at the standard's printed
+        // 0.0031308, which S4/the histogram use and which is 2.85e-8 discontinuous. `u` may not step
+        // down at either: a fold on the axis is a curve that can invert two neighbouring tones.
+        for knee in [HDRCurveAxis.srgbKnee, 0.0031308] {
+            for d in [1e-12, 1e-9, 1e-7, 1e-5] {
+                XCTAssertGreaterThan(axis.forward(knee * (1 + d)), axis.forward(knee * (1 - d)),
+                                     "the shaper folds at \(knee) (d = \(d))")
+            }
+        }
+        // The price of that: at the printed knee the axis is 2.8e-8 of a display code away from S4's
+        // rounded encode (7e-6 of an 8-bit step) — inside the code's own noise, and nowhere else.
+        let printed = 0.5 * (1.055 * pow(0.0031308, 1.0 / 2.4) - 0.055)
+        XCTAssertLessThan(abs(axis.forward(0.0031308) - printed), 5e-7)
+        // …and the half boundary (x = 1) is where the two formulas meet, exactly on the white point.
+        XCTAssertEqual(axis.forward(1), axis.whiteU, "u(1) must be whiteU bit-exactly")
+        XCTAssertGreaterThan(axis.forward(1 + 1e-12), axis.forward(1 - 1e-12))
+        XCTAssertLessThan(axis.forward(1), axis.forward(2))
+
+        // x ≤ 0 is rule 3's plateau, not a fold: the shaper answers 0 for all of them.
+        for x in [-1, -0.039, -1e-9, 0] {
+            XCTAssertEqual(axis.forward(x), 0, "forward(\(x)) must be 0, not a negative u")
+            XCTAssertEqual(axis.inverse(0), 0)
+        }
+        print("062 monotonicity: \(n + 1) samples over 2^-40…2^10, 0 folds, break at u = "
+              + String(format: "%.6f", axis.forward(0.0031308)))
+    }
+
+    /// 062 ②: the inverse round trip, in `Double` and in the kernel's own `Float`. The `Double` half
+    /// is the 4096-sample claim the card states (relative error ≤ 1e-6); the `Float` half is what
+    /// the GPU actually computes, reported for the record.
+    func testInverseRoundTrip() {
+        let axis = HDRCurve.axis
+        var worstD = 0.0, worstDAt = 0.0
+        var worstF = 0.0, worstFAt = 0.0
+        for i in 0...4095 {
+            let x = pow(2.0, -20 + Double(i) / 4095 * 30)      // 1e-6 … 1e3
+            let d = abs(axis.inverse(axis.forward(x)) - x) / x
+            if d > worstD { worstD = d; worstDAt = x }
+            let f = Double(abs(axis.inverseFloat(axis.forwardFloat(Float(x))) - Float(x))) / x
+            if f > worstF { worstF = f; worstFAt = x }
+        }
+        print(String(format: "062 inverse round trip: Double max rel %.3e (at x = %.4g), "
+                     + "Float max rel %.3e (at x = %.4g)", worstD, worstDAt, worstF, worstFAt))
+        XCTAssertLessThanOrEqual(worstD, 1e-6, "inverse(forward(x)) must return x to 1e-6")
+        XCTAssertLessThanOrEqual(worstF, 1e-5, "…and in f32 to 1e-5 (gp16 stores 1e-3)")
     }
 
     // MARK: - ① the identity table and the identity pixels
@@ -355,8 +459,9 @@ final class HDRCurveTests: XCTestCase {
     // MARK: - ⑤ the ends
 
     /// Endpoint behaviour, measured where it is observable: `out(0) = 0` always (rule 3), the white
-    /// end at `0.86` puts 64 (u = 1.125, two stops past +4 EV) at `64·2^(-0.14·1.125·16) ≈ 11.2`,
-    /// and a black end pressed down still lets a 1e-4 pixel through (smaller than its input, but > 0).
+    /// end at `0.86` puts 64 (u = 1.25, two stops past +4 EV) at `x(0.86·1.25) ≈ 52.7` (it was 11.2
+    /// on 044's axis, where the same control points were worth different light), and a black end
+    /// pressed down still lets a 1e-4 pixel through (smaller than its input, but > 0).
     func testEndpointsBehave() throws {
         let values: [Float] = [1e-4, 0.18, 64]
         let graph = try makeGraph(bands(values))
@@ -378,17 +483,20 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(liftedOut[0], 0, "rule 3: an exact 0 cannot be lifted by the curve")
         XCTAssertGreaterThan(liftedOut[1], encode(1e-4), "but a 1e-4 pixel is lifted, and by a lot")
 
-        // White end rolled off to 0.86: out(64) = 64·2^(-0.14·18).
+        // White end rolled off to 0.86. 64 is +6 EV — **past** the axis's right end (u(64) = 1.25),
+        // so the roll-off continues on rule 4's slope: for `(0,0)…(1,1−r)` the map above u = 1 is
+        // `v = (1−r)·u`, i.e. a shift of `−r·u`, not `−r`. Only at u = 1 (x = xHI = 16) are the two
+        // the same. The W curve turns `v` back into light, so the claim is `out = x(v)` — which on
+        // this axis is the same statement as "an exposure offset of `log2(x(v)/x(u64))`".
         var rolled = EditModel.neutral
         rolled.curve.white = [CurvePoint(0, 0), CurvePoint(1, 0.86)]
         let rolledOut = bandValues(try render(graph, rolled, headroom: 64), count: 3)
-        // 64 is +6 EV — **past** the axis's right end (u(64) = 1.125), so the roll-off continues on
-        // rule 4's slope: for `(0,0)…(1,1−r)` the map above u = 1 is `v = (1−r)·u`, i.e. a shift of
-        // `−r·u`, not `−r`. Only at u = 1 (i.e. x = xHI = 16) are the two the same.
         let u64 = HDRCurve.axis.forward(64)
-        let expected = 64 * pow(2.0, -0.14 * u64 * HDRCurve.axis.stops)
-        print(String(format: "030 endpoints: roll-off (1,0.86): x=64 → %.4f (analytic %.4f)",
-                     Double(rolledOut[2]), expected))
+        let rampTable = table([CurvePoint(0, 0), CurvePoint(1, 0.86)])
+        let v64 = HDRCurve.lutValue(rampTable, slope: CurveLUT.slope(of: rampTable), u: u64)
+        let expected = HDRCurve.axis.inverse(v64)
+        print(String(format: "030 endpoints: roll-off (1,0.86): x=64 → %.4f (analytic %.4f, v=%.4f)",
+                     Double(rolledOut[2]), expected, v64))
         XCTAssertEqual(Double(rolledOut[2]), encodeD(expected), accuracy: 0.01 * encodeD(expected),
                        "the white end's roll-off must land where the shaper says")
 
@@ -427,18 +535,22 @@ final class HDRCurveTests: XCTestCase {
                                  "level \(ladder[i]) did not survive S4 at headroom 16")
         }
 
-        // The counter-example: a white end at 0.5 is a *user-drawn* ceiling — everything above
-        // u = 0.5 (x > 0.125) collapses onto one value, and that is correct behaviour.
+        // The counter-example: a white end at 0.5 is a *user-drawn* ceiling. On the 062 axis
+        // `u = 0.5` **is** SDR white, so everything at or above `x = 1` collapses onto one value
+        // (that is x(0.5) = 1) while the two SDR bands below it keep their own — which is what makes
+        // this a ceiling and not a clamp of the whole picture.
         let ceiling = [Float(0.2), 0.5, 1, 2, 4, 8, 16, 32, 64]
         let ceilGraph = try makeGraph(bands(ceiling), identity: "hdr-curve-ceiling")
         var ceilEdit = EditModel.neutral
         ceilEdit.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 0.5)]
         let ceilOut = bandValues(try render(ceilGraph, ceilEdit, headroom: 64), count: ceiling.count)
         print("030 ceiling curve (1,0.5): " + ceilOut.map { String(format: "%.4f", $0) }.joined(separator: " "))
-        for i in 2..<ceiling.count {
-            XCTAssertEqual(ceilOut[i], ceilOut[1], accuracy: 1e-4,
+        for i in 3..<ceiling.count {
+            XCTAssertEqual(ceilOut[i], ceilOut[2], accuracy: 1e-4,
                            "above the user's ceiling every level lands on the same value")
         }
+        XCTAssertLessThan(ceilOut[1], ceilOut[2],
+                          "the SDR bands under the ceiling keep their own value (0.2 and 0.5 ≠ 1.0)")
     }
 
     // MARK: - ⑦ beyond +4 EV
@@ -504,9 +616,10 @@ final class HDRCurveTests: XCTestCase {
 
     /// 061 ①：首端点右移到 `u = 0.2` → 表里 `u < 0.2` 是常量，渲染上整段暗部被压到**同一个**输出。
     ///
-    /// `u = 0.2` 是 `x = x0·expm1(0.2·K) ≈ 2.0e-3`，所以下面五个输入都在段内。三条通道给同一条曲线，
-    /// 灰色带因此整段变成同一个灰值 —— 相等是像素级的，不是"红通道大致相同"。
-    /// **反证**：同一条曲线把首点放回 0（051 只能画出的形状），同样的五个输入是斜坡，不是常量。
+    /// 段内的输入必须真的在 `u = 0.2` 之下：062 换了轴，`u = 0.2` 现在是
+    /// `x = axis.inverse(0.2) ≈ 0.133`（044 的 log1p 轴上它曾是 `x0·expm1(0.2K) ≈ 2.0e-3`），
+    /// 所以「段内」的 `below` 不动、而「段外」的 `above` 必须跟着轴抬到 0.133 之上 —— 否则比较的
+    /// 两个点都在常量段里，断言就成了空话（这正是 062 合进来时红掉的那一条）。
     func testRaisedBlackPointFlattensTheShadowFootToOneValueInPixels() throws {
         let axis = HDRCurve.axis
         let edge = axis.inverse(0.2)
@@ -514,7 +627,8 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertGreaterThan(edge, 1.5e-3, "1.5e-3 必须真的在 u = 0.2 以下")
 
         let below: [Float] = [8e-5, 2e-4, 5e-4, 1e-3, 1.5e-3]
-        let above: [Float] = [4e-3, 0.02, 0.18, 1.0]
+        // 段外：每一点都比 `edge`（新轴上 ≈ 0.133）亮。断言不看具体数值，只看「还在上升」。
+        let above: [Float] = [0.2, 0.35, 0.6, 1.0]
         let values = below + above
         let graph = try makeGraph(bands(values))
 
@@ -639,8 +753,19 @@ final class HDRCurveTests: XCTestCase {
         let ratioBG = (b.2 / b.1) / (a.2 / a.1)
         print(String(format: "030 W luma gain: r/g ratio %.6f, b/g ratio %.6f (both must be 1)",
                      ratioRG, ratioBG))
-        XCTAssertEqual(ratioRG, 1, accuracy: 2e-3, "the composite curve changed saturation")
-        XCTAssertEqual(ratioBG, 1, accuracy: 2e-3, "the composite curve changed saturation")
+        // The tolerance is the *measurement's* floor, not the operator's: these are fp16 display
+        // bytes read back through the encode, so 4.9e-4 of storage becomes ~1.2e-3 of ratio per
+        // channel (this render measures 1.0022 / 1.0005). The operator itself is exact — asserted
+        // below, in `Double`, where there is no half float in the way.
+        XCTAssertEqual(ratioRG, 1, accuracy: 4e-3, "the composite curve changed saturation")
+        XCTAssertEqual(ratioBG, 1, accuracy: 4e-3, "the composite curve changed saturation")
+
+        // The operator's own claim: W is a *scalar*, so `r/g` and `b/g` are invariant to the last
+        // bit — the ratio of the analytic pixel to the analytic input.
+        let analytic = HDRCurve.pixel((0.6, 0.2, 0.1), tables: CurveLUT.build(edit.curve))
+        XCTAssertEqual((analytic.0 / analytic.1) / (0.6 / 0.2), 1, accuracy: 1e-12,
+                       "HDRCurve.pixel must be a pure gain")
+        XCTAssertEqual((analytic.2 / analytic.1) / (0.1 / 0.2), 1, accuracy: 1e-12)
 
         // A grey pixel moves by the curve's own offset, read off the analytic reference.
         let grey = try makeGraph(solid((0.18, 0.18, 0.18)), identity: "hdr-curve-grey")
@@ -654,7 +779,34 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(gotLinear / expected, 1, accuracy: 5e-3)
     }
 
-    // MARK: - ⑩ R/G/B are separable
+    // MARK: - ⑨b what a fixed document's curve now does (062's appearance change, measured)
+
+    /// `Tests/Fixtures/edit-push.json`'s W curve — `(0,0) (0.22,0.17) (0.55,0.58) (1,1)` — through
+    /// grey levels spanning the whole axis. This is the *table* of the change: the same control
+    /// points no longer mean the same light, because the axis they are placed on changed. Pinned
+    /// against the analytic reference (so a kernel/CPU disagreement is caught) and printed as
+    /// display codes (so the appearance change is readable).
+    func testAFixedCurveOnTheNewAxisIsTheAnalyticReference() throws {
+        let push = [CurvePoint(0, 0), CurvePoint(0.22, 0.17), CurvePoint(0.55, 0.58), CurvePoint(1, 1)]
+        var edit = EditModel.neutral
+        edit.curve.white = push
+        let levels: [Float] = [0.02, 0.05, 0.18, 0.5, 1, 2, 4, 8, 16]
+        let graph = try makeGraph(bands(levels))
+        let out = bandValues(try render(graph, edit, headroom: 64), count: levels.count)
+
+        let tables = CurveLUT.build(edit.curve)
+        let slopes = CurveLUT.slopes(tables)
+        print("062 push curve (0,0)(0.22,0.17)(0.55,0.58)(1,1) on the new axis:")
+        for (i, x) in levels.enumerated() {
+            let analytic = HDRCurve.pixel((Double(x), Double(x), Double(x)), tables: tables,
+                                          slopes: slopes).0
+            print(String(format: "  x = %6.3f (u %.4f) → %6.3f linear, display code %.3f "
+                         + "(analytic code %.3f)", Double(x), HDRCurve.axis.forward(Double(x)),
+                         analytic, Double(out[i]), encodeD(analytic)))
+            XCTAssertEqual(Double(out[i]), encodeD(analytic), accuracy: 0.01,
+                           "the kernel and the analytic reference disagree at x = \(x)")
+        }
+    }
 
     /// A curve on R only: G and B come out of the curve stage untouched, so the display bytes for
     /// those channels are the ones the neutral render had.
@@ -812,13 +964,17 @@ final class HDRCurveTests: XCTestCase {
     ///
     /// `light.blackLevel` 是 S1 的线性电平（019），`first.x` 是曲线域的裁切（061）。S1 在 S1.7 之前
     /// （`RenderStage.order`），所以曲线看到的是**已经电平过的**值：黑电平 0.10 把 0.1011 压到 0.0012，
-    /// 而曲线黑点的裁切边是 `u = 0.2 ↔ x = 2.0e-3` —— 于是这一带正好被曲线裁成同一个值。
+    /// 而曲线黑点的裁切边落在 `x = 2.0e-3`（062 的轴上那是 `u = axis.forward(2e-3) ≈ 0.0129`；
+    /// 044 的 log1p 轴上同一个 x 曾是 `u = 0.2`，所以下面那个 u 由轴算出来、不再写死）—— 于是这一带
+    /// 正好被曲线裁成同一个值。
     /// **反证**：黑电平归零时同样的输入在裁切边之上，曲线一个都不裁。
     func testBlackLevelRunsBeforeTheCurveSoTheBlackPointSeesTheLevelledValue() throws {
         let values: [Float] = [0.1011, 0.1012, 0.105, 0.15, 0.5]
         let graph = try makeGraph(bands(values), identity: "curve-levels")
 
-        let lifted: [CurvePoint] = [CurvePoint(0.2, 0), CurvePoint(0.6, 0.45), CurvePoint(1, 1)]
+        // 裁切边钉在 x 上（2.0e-3），u 从轴取 —— 轴换了，这条断言的意义不变。
+        let lifted: [CurvePoint] = [CurvePoint(HDRCurve.axis.forward(2.0e-3), 0),
+                                    CurvePoint(0.6, 0.45), CurvePoint(1, 1)]
         var both = EditModel.neutral
         both.light.blackLevel = 0.10          // +10 % of white, in S1's linear units
         both.curve.red = lifted

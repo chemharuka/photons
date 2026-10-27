@@ -19,8 +19,9 @@ import PhotonsCore
 //
 //   2. **The axis labels are positions on `HDRCurveAxis`, never numbers in this file.** The five
 //      ticks are 0, 18 % grey, display white, +2 EV and +4 EV, and *where* each of them sits is the
-//      shaper's answer — SDR white is a quarter of the way from the right edge, 18 % grey is a little
-//      past the halfway point, and the last tick is the right edge itself. Typing any of those
+//      shaper's answer — since 062 the axis is the histogram's own: display white is the **middle**
+//      of the card (the histogram's `sdrFraction`), 18 % grey is a quarter of the way in, and the
+//      last tick is the right edge itself. Typing any of those
 //      positions here would be a second copy of the shaper's answer, and the day the axis moves the
 //      card would draw its ticks somewhere the curve does not bend. `CurveAxisTicks` *derives* all
 //      five from the axis; the test asserts equality to 1e-9 and greps this file for the literals.
@@ -120,7 +121,9 @@ public struct CurveAxisTick: Equatable, Sendable {
 ///
 /// `0` at the left edge (`u = 0` ↔ `x = 0`), 18 % grey, display white, and the two HDR stops the
 /// histogram measures (+2 EV, +4 EV at the right edge). There is no `+6 EV` tick: 044 fixed the axis
-/// at `xHI = 16`, and `u(stops: 4)` is exactly 1.
+/// at `xHI = 16`, and `u(stops: 4)` is exactly 1. Since 062 the positions are the histogram's own
+/// too — white at `u = 0.5` — without a single number moving into this file: they are still
+/// `forward`/`u(stops:)`, so the axis is the only source.
 public enum CurveAxisTicks {
 
     /// 18 % grey — the one input value the axis labels. It is the *input* the tick stands for (what
@@ -138,10 +141,13 @@ public enum CurveAxisTicks {
         ]
     }
 
-    /// The one grey line under the plot. The right end is read off the axis (`stops(at: 1)`) rather
-    /// than typed as `+4`, for the same reason the ticks are.
+    /// The one grey line under the plot — the card's statement of what the two halves are.
+    ///
+    /// Both numbers are the axis's: the SDR half's width is `whiteU` as a percentage, and the right
+    /// end is `stops(at: 1)`. Neither is typed here, for the same reason the ticks are not.
     public static func footnote(_ axis: HDRCurveAxis = .standard) -> String {
-        String(format: "横轴为曝光，右端 +%.0f EV", axis.stops(at: 1))
+        String(format: "横轴与直方图一致：左半 SDR（0–255）占 %.0f%%，右半 +0…+%.0f EV",
+               100 * axis.whiteU, axis.stops(at: 1))
     }
 }
 

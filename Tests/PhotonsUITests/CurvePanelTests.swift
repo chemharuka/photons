@@ -39,8 +39,10 @@ final class CurvePanelTests: XCTestCase {
 
     // MARK: - 1. the axis ticks come from `HDRCurveAxis`
 
-    /// The five positions are `u(0)`, `u(0.18)`, `u(1)`, `u(+2)`, `u(+4)` — to 1e-9 — and the labels
-    /// are exactly `0 / 0.18 / 1 / +2 / +4`. `+4` is the right edge and there is no `+6` (044).
+    /// The five positions are `u(0)`, `u(0.18)`, `u(1)`, `u(+2)`, `u(+4)` — **exactly** as the axis
+    /// computes them (062 pins the difference at zero, not "within a tolerance") — and the labels are
+    /// exactly `0 / 0.18 / 1 / +2 / +4`. `+4` is the right edge and there is no `+6` (044). Since 062
+    /// `u(1)` is the middle of the card, which is the histogram's `sdrFraction`.
     func testTheFiveTicksAreTheAxisOwnPositionsAndNotNumbers() {
         let axis = HDRCurveAxis.standard
         let ticks = CurveAxisTicks.ticks(axis)
@@ -54,14 +56,21 @@ final class CurvePanelTests: XCTestCase {
                         axis.u(stops: 4)]
         XCTAssertEqual(ticks.count, expected.count)
         for (tick, want) in zip(ticks, expected) {
-            XCTAssertEqual(tick.u, want, accuracy: 1e-9,
-                           "刻度 \(tick.label) 的位置必须由 axis 算出，不能写死")
+            // Equality, not an accuracy: the tick *is* the axis's answer, so any difference at all
+            // means a second copy of the shaper has appeared.
+            XCTAssertEqual(tick.u, want, "刻度 \(tick.label) 的位置必须是 axis 算出的那一个数")
         }
 
         // Monotone, and the last one *is* the right edge (that is what makes "+4 at the end" true).
         XCTAssertTrue(zip(ticks, ticks.dropFirst()).allSatisfy { $0.u < $1.u })
         XCTAssertEqual(ticks.last?.u ?? -1, 1, accuracy: 1e-12)
         XCTAssertEqual(axis.stops(at: 1), 4, accuracy: 1e-6, "右端 = +4 EV（044），不是 +6")
+
+        // 062: white is the middle, and the SDR half is half the card.
+        XCTAssertEqual(ticks[2].u, axis.whiteU, "白点必须在正中（SDR 占 50%）")
+        XCTAssertEqual(axis.whiteU, 0.5)
+        XCTAssertGreaterThan(ticks[1].u, 0.2, "18% 灰在左半的 46% 处（0.2307）")
+        XCTAssertLessThan(ticks[1].u, axis.whiteU)
 
         // And in points: the tick x is `u` across the plot, so the drawing cannot disagree either.
         let plot = CGRect(x: 0, y: 0, width: 274, height: 189)
@@ -81,11 +90,11 @@ final class CurvePanelTests: XCTestCase {
 
     /// 反证 for claim 1: the panel's source contains **no** axis position literal.
     ///
-    /// The ticks are derived, so `0.5955` / `0.7500` / `0.875` cannot appear — if someone pastes the
-    /// numbers back in, this turns red before the picture does.
+    /// The ticks are derived, so none of 044's positions and none of 062's can appear — if someone
+    /// pastes a number back in, this turns red before the picture does.
     func testThePanelSourceWritesNoAxisPositionLiterals() throws {
         let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
-        for literal in ["0.5955", "0.7500", "0.750", "0.875"] {
+        for literal in ["0.5955", "0.7500", "0.750", "0.875", "0.2307", "0.5000", "0.0016"] {
             XCTAssertFalse(source.contains(literal),
                            "CurvePanel.swift 里出现了 \(literal)：刻度必须是算出来的")
         }
@@ -95,6 +104,9 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertTrue(source.contains("axis.u(stops: 2)") && source.contains("axis.u(stops: 4)"))
         XCTAssertTrue(source.contains("CurveLUT.buildOne(points)"),
                       "预览必须是引擎那张表，不是第二种插值")
+        // The footnote's two numbers are the axis's too (062: the SDR half's width and the right end).
+        XCTAssertTrue(source.contains("axis.whiteU") && source.contains("axis.stops(at: 1)"),
+                      "底部说明里的 50% 与 +4 EV 必须来自 axis")
     }
 
     // MARK: - 2. insert

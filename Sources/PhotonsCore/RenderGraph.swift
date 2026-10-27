@@ -387,17 +387,19 @@ private struct S2Params {
 
 /// Mirror of `HDRCurveParams` in `s1_7_hdr_curve.metal`, byte for byte (派单 030).
 ///
-/// `x0` and `K` come from `HDRCurveAxis` — the kernel has no constants of its own, so the CPU
-/// reference and the GPU shaper cannot drift apart. The slopes are rule 4's continuation: the last
-/// segment of each table, so a curve keeps going above +4 EV instead of being clamped.
+/// `whiteU` / `hdrPerStop` come from `HDRCurveAxis` — the kernel has no axis constants of its own,
+/// so the CPU reference and the GPU shaper cannot drift apart. 062 replaced 044's `x0`/`K` with the
+/// two numbers of the histogram-aligned axis (SDR = display code over half of `u`, HDR = 12.5 % of
+/// `u` per stop). The slopes are rule 4's continuation: the last segment of each table, so a curve
+/// keeps going above +4 EV instead of being clamped.
 private struct HDRCurveParams {
-    var a: SIMD4<Float>   // identity, tableSize, x0, K
+    var a: SIMD4<Float>   // identity, tableSize, whiteU, hdrPerStop
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 C). A curve
     // with its black end lifted lifts the matte's 0 too, and the bars turn grey. Same convention as
     // S2's `c` and S3c's `c`.
     var b: SIMD4<Float>
     var c: SIMD4<Float>   // slopeW, slopeR, slopeG, slopeB
-    var d: SIMD4<Float>   // lumaR, lumaG, lumaB, stops per unit u
+    var d: SIMD4<Float>   // lumaR, lumaG, lumaB, identity mask (062: bit0 = W, 1 = R, 2 = G, 3 = B)
     // The black point (first control point's x) of each table, W/R/G/B — 派单 061. The kernel takes
     // rule 3's sub-black pass-through only where this is 0, because a raised black point is a clip and
     // the clip has to include the negatives (`s1_7_hdr_curve.metal` rule 3, `CurveLUT.blackPoints`).
@@ -1591,7 +1593,7 @@ public final class RenderGraph {
             let blackPoints = CurveLUT.blackPoints(edit.curve)
             var params = HDRCurveParams(
                 a: SIMD4(tables.isIdentity && !options.forceCurveArithmetic ? 1 : 0,
-                         Float(CurveLUT.size), Float(axis.x0), Float(axis.K)),
+                         Float(CurveLUT.size), Float(axis.whiteU), Float(axis.hdrPerStop)),
                 // The content rect, so the curve never runs on the matte (派单 008 C). Whole-canvas
                 // dispatch, one guard per pixel — the same shape as S2's, so the two passes cannot
                 // drift apart.
@@ -1599,9 +1601,13 @@ public final class RenderGraph {
                          Float(plan.content.width), Float(plan.content.height)),
                 c: SIMD4(tables.slopes[0], tables.slopes[1], tables.slopes[2], tables.slopes[3]),
                 // The luma weights are a parameter, not a constant: changing the working space (a
-                // future Rec2020 move) is one number here and one in `HDRCurve.lumaWeights`.
+                // future Rec2020 move) is one number here and one in `HDRCurve.lumaWeights`. `.w` is
+                // the identity mask (062): which of the four tables need the shaper at all. Forcing
+                // the arithmetic path (the tests' `forceCurveArithmetic`) clears it, so the identity
+                // really does go through the shaper.
                 d: SIMD4(Float(HDRCurve.lumaWeights.r), Float(HDRCurve.lumaWeights.g),
-                         Float(HDRCurve.lumaWeights.b), Float(axis.stops)),
+                         Float(HDRCurve.lumaWeights.b),
+                         Float(options.forceCurveArithmetic ? 0 : tables.identityMask)),
                 e: SIMD4(blackPoints[0], blackPoints[1], blackPoints[2], blackPoints[3]))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<HDRCurveParams>.stride, index: 0)
@@ -2507,6 +2513,7 @@ public final class RenderGraph {
         var slopes: [Float]
         var identity: [Bool]
         var allIdentity: Bool { identity.allSatisfy { $0 } }
+        var identityMask: Int { identity.enumerated().reduce(0) { $0 | ($1.element ? 1 << $1.offset : 0) } }
     }
 
     /// The S1.7 tables for `curve`, rebuilding only what moved.
@@ -2518,8 +2525,14 @@ public final class RenderGraph {
     /// is 2.4 ms / 8.9 ms, which is why the test's assertions are structural.
     ///
     /// The render path itself stays quiet: a per-frame `print` on a drag is one log line per frame.
+    /// The identity mask (062): bit 0 = W, 1 = R, 2 = G, 3 = B, set for every table that is the
+    /// identity. The kernel skips those tables outright — an identity step through the shaper would
+    /// come back within 5e-7 and flip one fp16 bit at a rounding boundary, which is exactly what
+    /// `HDRCurveTests` ⑩ measures. `forceCurveArithmetic` clears the mask, because the whole point of
+    /// forcing the arithmetic path is to run the identity *through* the shaper.
     private func hdrCurveTables(for curve: CurveGroup) throws -> (buffer: MTLBuffer, slopes: [Float],
-                                                                  isIdentity: Bool) {
+                                                                  isIdentity: Bool,
+                                                                  identityMask: Int) {
         let n = CurveLUT.size
         let sliceBytes = n * MemoryLayout<Float>.size
         let points = curve.tables
@@ -2535,7 +2548,7 @@ public final class RenderGraph {
                 cache.slopes[t] = CurveLUT.slope(of: table)
             }
             curveTablesCache = cache
-            return (cache.buffer, cache.slopes, cache.allIdentity)
+            return (cache.buffer, cache.slopes, cache.allIdentity, cache.identityMask)
         }
 
         let tables = CurveLUT.build(curve)
@@ -2550,7 +2563,7 @@ public final class RenderGraph {
         let cache = HDRCurveTableCache(buffer: b, keys: keys, slopes: CurveLUT.slopes(tables),
                                        identity: identity)
         curveTablesCache = cache
-        return (b, cache.slopes, cache.allIdentity)
+        return (b, cache.slopes, cache.allIdentity, cache.identityMask)
     }
 
     private func bandBuffer(for color: ColorGroup) throws -> LUTResource {
