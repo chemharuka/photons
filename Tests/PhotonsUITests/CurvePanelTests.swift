@@ -39,20 +39,23 @@ final class CurvePanelTests: XCTestCase {
 
     // MARK: - 1. the axis ticks come from `HDRCurveAxis`
 
-    /// The five positions are `u(0)`, `u(0.18)`, `u(1)`, `u(+2)`, `u(+4)` — **exactly** as the axis
-    /// computes them (062 pins the difference at zero, not "within a tolerance") — and the labels are
-    /// exactly `0 / 0.18 / 1 / +2 / +4`. `+4` is the right edge and there is no `+6` (044). Since 062
-    /// `u(1)` is the middle of the card, which is the histogram's `sdrFraction`.
-    func testTheFiveTicksAreTheAxisOwnPositionsAndNotNumbers() {
+    /// The seven positions are `u(0)`, `u(code 127)`, `u(code 255)`, `u(+1)`, `u(+2)`, `u(+3)`,
+    /// `u(+4)` — **exactly** as the axis computes them (062 pins the difference at zero, not "within a
+    /// tolerance") — and the labels are exactly `0 / 127 / 255 / +1 / +2 / +3 / +4`: the left half
+    /// speaks display codes (it *is* the histogram's SDR half), the right half speaks EV.
+    /// `+4` is the right edge and there is no `+6` (044). Since 062 `u(1)` is the middle of the card.
+    func testTheTicksAreTheAxisOwnPositionsAndNotNumbers() {
         let axis = HDRCurveAxis.standard
         let ticks = CurveAxisTicks.ticks(axis)
 
-        XCTAssertEqual(ticks.map(\.label), ["0", "0.18", "1", "+2", "+4"])
+        XCTAssertEqual(ticks.map(\.label), ["0", "127", "255", "+1", "+2", "+3", "+4"])
 
-        let expected = [axis.forward(0),                       // x = 0
-                        axis.forward(CurveAxisTicks.middleGrey), // 18 % grey
-                        axis.forward(1),                       // display white
+        let expected = [axis.forward(0),                                     // x = 0
+                        axis.forward(CurveAxisTicks.displayCode(127)),       // SDR code 127
+                        axis.forward(CurveAxisTicks.displayCode(255)),       // display white
+                        axis.u(stops: 1),
                         axis.u(stops: 2),
+                        axis.u(stops: 3),
                         axis.u(stops: 4)]
         XCTAssertEqual(ticks.count, expected.count)
         for (tick, want) in zip(ticks, expected) {
@@ -66,21 +69,24 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(ticks.last?.u ?? -1, 1, accuracy: 1e-12)
         XCTAssertEqual(axis.stops(at: 1), 4, accuracy: 1e-6, "右端 = +4 EV（044），不是 +6")
 
-        // 062: white is the middle, and the SDR half is half the card.
+        // 062: white is the middle, the SDR half is half the card, and a code is a *code* — 127 sits
+        // at exactly half of that half, which is the property that makes "127" an honest label.
         XCTAssertEqual(ticks[2].u, axis.whiteU, "白点必须在正中（SDR 占 50%）")
         XCTAssertEqual(axis.whiteU, 0.5)
-        XCTAssertGreaterThan(ticks[1].u, 0.2, "18% 灰在左半的 46% 处（0.2307）")
+        XCTAssertEqual(ticks[1].u, 0.5 * 127.0 / 255.0, accuracy: 1e-12, "127 码在左半的正中")
         XCTAssertLessThan(ticks[1].u, axis.whiteU)
 
-        // And in points: the tick x is `u` across the plot, so the drawing cannot disagree either.
+        // And in points: the tick x is `u` across the **value box** (064), so the drawing cannot
+        // disagree either.
         let plot = CGRect(x: 0, y: 0, width: 274, height: 189)
         let geometry = CurvePlotGeometry(plot: plot)
+        let box = geometry.valueBox
         let positions = geometry.tickPositions(ticks)
         for (position, want) in zip(positions, expected) {
-            XCTAssertEqual(position, plot.minX + CGFloat(want) * plot.width, accuracy: 1e-9)
+            XCTAssertEqual(position, box.minX + CGFloat(want) * box.width, accuracy: 1e-9)
         }
-        XCTAssertEqual(positions.first ?? -1, plot.minX, accuracy: 1e-9)
-        XCTAssertEqual(positions.last ?? -1, plot.maxX, accuracy: 1e-9)
+        XCTAssertEqual(positions.first ?? -1, box.minX, accuracy: 1e-9)
+        XCTAssertEqual(positions.last ?? -1, box.maxX, accuracy: 1e-9)
 
         print("ticks · " + zip(ticks, positions)
             .map { "\($0.label)@u=\(String(format: "%.6f", $0.u))→x=\(String(format: "%.3f", $1))" }
@@ -99,9 +105,12 @@ final class CurvePanelTests: XCTestCase {
                            "CurvePanel.swift 里出现了 \(literal)：刻度必须是算出来的")
         }
         // …because it does the derivation, through the two functions that own it.
-        XCTAssertTrue(source.contains("axis.forward(CurveAxisTicks.middleGrey)")
-                      || source.contains("axis.forward(middleGrey)"))
-        XCTAssertTrue(source.contains("axis.u(stops: 2)") && source.contains("axis.u(stops: 4)"))
+        XCTAssertTrue(source.contains("forward(displayCode(127))")
+                      && source.contains("forward(displayCode(255))"),
+                      "SDR 刻度必须是「显示码 → 线性 → axis」算出来的")
+        XCTAssertTrue(source.contains("axis.u(stops: 1)") && source.contains("axis.u(stops: 2)")
+                      && source.contains("axis.u(stops: 3)") && source.contains("axis.u(stops: 4)"),
+                      "HDR 四档刻度必须来自 axis.u(stops:)")
         XCTAssertTrue(source.contains("CurveLUT.buildOne(points)"),
                       "预览必须是引擎那张表，不是第二种插值")
         // The footnote's two numbers are the axis's too (062: the SDR half's width and the right end).
@@ -636,6 +645,172 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "detail"])
         print("layout · \(titles) · 曲线 index \(detail + 1)")
+    }
+
+    // MARK: - 11. 064: the value box is inset one radius, so every circle is whole
+
+    /// 边缘/角落的控制点圆必须整个画在绘图区里 —— 圆心到四边的距离 ≥ 半径，且圆的包围盒整个落在绘图区里。
+    /// 用几何算，不看截图。
+    ///
+    /// ⚠ 064 的验收原文写的是 `plot.insetBy(dx: r).contains(circleRect)`。这一条和"`inset = radius + 1`"
+    /// **互相矛盾**：`circleRect ⊆ plot.insetBy(r)` 要求圆心离每条边至少 **2r**，也就是 `inset ≥ 2r = 6`，
+    /// 而 `inset = r + 1 = 4`。所以这里钉的是那条断言真正想说的话 —— `plot.contains(circleRect)`
+    /// 加上"圆心到四边的距离 ≥ r"—— 并把原式的结果也钉住（在 4 pt 下为假，需要 6 pt 才为真），
+    /// 让这条矛盾在源码里可见，而不是被悄悄改弱。
+    ///
+    /// **反证**：同一个谓词跑 `inset = 0`（就是改动前的映射）—— `(0,0)` 那一项必须为假，所以第 1 条
+    /// 断言不是"永远绿"的空话。
+    func testEveryControlPointCircleAtACornerOrEdgeIsWholeInsideThePlot() {
+        let plot = CGRect(x: 0.5, y: 0.5, width: 274, height: 189)
+        let geometry = CurvePlotGeometry(plot: plot)
+        let r = CurvePanelMetrics.pointRadius
+        // "距四边 ≥ r" 的正确写法（也是 064 原式真正想说的话）：**圆心**落在 plot.insetBy(r) 里
+        // ⟺ 圆心离每条边 ≥ r ⟺ 半径 r 的圆整个落在 plot 里。原式把这个 insetBy(r) 用在了圆的包围盒上，
+        // 那要求的是 2r —— 见下面钉住的那条。
+        let centreRoom = plot.insetBy(dx: r, dy: r)
+
+        // 内缩量 == radius + 1，且换算严格相等（不是差一点）
+        XCTAssertEqual(geometry.inset, r + 1, accuracy: 1e-12, "inset 必须是 半径 + 1 pt 呼吸")
+        XCTAssertEqual(geometry.inset, CurvePanelMetrics.pointInset, accuracy: 1e-12)
+        XCTAssertEqual(geometry.x(u: 0), plot.minX + geometry.inset, "x(0) == inset")
+        XCTAssertEqual(geometry.x(u: 1), plot.maxX - geometry.inset, "x(1) == width − inset")
+        XCTAssertEqual(geometry.y(v: 1), plot.minY + geometry.inset, "y(1) == inset")
+        XCTAssertEqual(geometry.y(v: 0), plot.maxY - geometry.inset, "y(0) == height − inset")
+        XCTAssertEqual(geometry.x(u: 0), geometry.valueBox.minX)
+        XCTAssertEqual(geometry.x(u: 1), geometry.valueBox.maxX)
+        XCTAssertEqual(geometry.y(v: 1), geometry.valueBox.minY)
+        XCTAssertEqual(geometry.y(v: 0), geometry.valueBox.maxY)
+
+        // 四角 + 四边中点，都用 `point(_:)` 走一遍真正的绘制路径
+        let samples: [(String, CurvePoint)] = [
+            ("左下角 (0,0)", CurvePoint(0, 0)), ("右下角 (1,0)", CurvePoint(1, 0)),
+            ("左上角 (0,1)", CurvePoint(0, 1)), ("右上角 (1,1)", CurvePoint(1, 1)),
+            ("左边 (0,½)", CurvePoint(0, 0.5)), ("右边 (1,½)", CurvePoint(1, 0.5)),
+            ("下边 (½,0)", CurvePoint(0.5, 0)), ("上边 (½,1)", CurvePoint(0.5, 1)),
+        ]
+        var report: [String] = []
+        for (name, p) in samples {
+            let c = geometry.point(p)
+            let circle = CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)
+            XCTAssertTrue(centreRoom.contains(c),
+                          "\(name) 的圆心离某条边不到一个半径：圆心 \(c)，允许区 \(centreRoom)")
+            XCTAssertTrue(plot.contains(circle),
+                          "\(name) 的圆没整个落在绘图区里：圆 \(circle)，绘图区 \(plot)")
+            // 到绘图区四边的实测距离（四条，取最小那条和半径比）
+            let distances = [c.x - plot.minX, plot.maxX - c.x, c.y - plot.minY, plot.maxY - c.y]
+            XCTAssertGreaterThanOrEqual(distances.min() ?? -1, r,
+                                        "\(name) 到最近一条边不足一个半径：\(distances)")
+            // 呼吸恰好 1 pt：最近的一条边距 == inset == r + 1
+            XCTAssertEqual(distances.min() ?? -1, geometry.inset, accuracy: 1e-12,
+                           "\(name) 的呼吸不是 1 pt")
+            report.append("\(name) 边距 "
+                          + distances.map { String(format: "%.2f", $0) }.joined(separator: "/"))
+        }
+
+        // 064 原文式的实测结果（钉住这条矛盾本身）：4 pt 下为假，需 ≥ 2r = 6 pt 才为真。
+        let c00 = geometry.point(CurvePoint(0, 0))
+        let circle00 = CGRect(x: c00.x - r, y: c00.y - r, width: 2 * r, height: 2 * r)
+        XCTAssertFalse(plot.insetBy(dx: r, dy: r).contains(circle00),
+                       "原文式 `plot.insetBy(r).contains(circle)` 需要 inset ≥ 2r；若这里变真说明 inset 被悄悄加大"
+                       + "（当前 inset = \(geometry.inset)，2r = \(2 * r)）")
+
+        // 半径 3 / 3.5 / 4 都能整圆在内（inset 跟着半径走），供用户拍板"点大一点"时不用重算几何：
+        // 只要 inset == r + 1，四角的呼吸就还是 1 pt。
+        for radius in [CGFloat(3), 3.5, 4] {
+            let g = CurvePlotGeometry(plot: plot, inset: radius + 1)
+            for corner in [CurvePoint(0, 0), CurvePoint(1, 1), CurvePoint(0, 1), CurvePoint(1, 0)] {
+                let c = g.point(corner)
+                let circle = CGRect(x: c.x - radius, y: c.y - radius,
+                                    width: 2 * radius, height: 2 * radius)
+                XCTAssertTrue(plot.contains(circle), "半径 \(radius) 时 \(corner) 的圆出界")
+                XCTAssertEqual(g.inset, radius + 1, accuracy: 1e-12)
+            }
+        }
+
+        // 反证：inset 改回 0（改动前的映射）→ 同一个谓词必须红
+        let naive = CurvePlotGeometry(plot: plot, inset: 0)
+        for corner in [CurvePoint(0, 0), CurvePoint(1, 1), CurvePoint(0, 1), CurvePoint(1, 0)] {
+            let c = naive.point(corner)
+            let circle = CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)
+            XCTAssertFalse(centreRoom.contains(c),
+                           "反证失效：inset = 0 时 \(corner) 的圆心就在边上")
+            XCTAssertFalse(plot.contains(circle), "反证失效：inset = 0 时 \(corner) 的圆居然整个在区内")
+        }
+        XCTAssertEqual(naive.x(u: 0), plot.minX, "inset = 0 就是改动前：圆心贴在 x = 0 上")
+        XCTAssertFalse(plot.contains(CGRect(x: naive.x(u: 0) - r, y: naive.y(v: 0) - r,
+                                            width: 2 * r, height: 2 * r)),
+                       "反证：inset = 0 时左下角的圆只剩四分之一")
+
+        print("inset · \(String(format: "%.1f", geometry.inset)) pt（半径 \(r) + 1）· "
+              + report.joined(separator: " · ")
+              + " · 反证 inset=0 → 四角全部出界")
+    }
+
+    /// 网格、边框、y = x 参考线都画在**同一个内缩盒**上：最外两条网格线就是 `x(0)/x(1)/y(0)/y(1)`。
+    func testTheGridFrameAndDiagonalAllSitOnTheSameInsetValueBox() throws {
+        // The real layout rect at the inspector's 274 pt width — not a made-up box.
+        let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight))
+        XCTAssertEqual(plot, CGRect(x: 0.5, y: 0.5, width: 273, height: 188.5),
+                       "绘图区布局（含刻度带）不许因为内缩而改变")
+        let geometry = CurvePlotGeometry(plot: plot)
+        let box = geometry.valueBox
+        let grid = geometry.gridLines()
+
+        XCTAssertEqual(grid.vertical.count, CurvePanelMetrics.gridDivisions + 1)
+        XCTAssertEqual(grid.horizontal.count, CurvePanelMetrics.gridDivisions + 1)
+
+        // 网格的"边框"（最外两条线）与取值盒的坐标严格相等
+        XCTAssertEqual(grid.vertical.first!, geometry.x(u: 0), "左边框不在 x(0) 上")
+        XCTAssertEqual(grid.vertical.last!, geometry.x(u: 1), "右边框不在 x(1) 上")
+        XCTAssertEqual(grid.horizontal.first!, geometry.y(v: 1), "上边框不在 y(1) 上")
+        XCTAssertEqual(grid.horizontal.last!, geometry.y(v: 0), "下边框不在 y(0) 上")
+
+        let frame = CGRect(x: grid.vertical.first!, y: grid.horizontal.first!,
+                           width: grid.vertical.last! - grid.vertical.first!,
+                           height: grid.horizontal.last! - grid.horizontal.first!)
+        XCTAssertEqual(frame, box, "网格围出来的框必须 == 内缩盒")
+        XCTAssertEqual(box, plot.insetBy(dx: geometry.inset, dy: geometry.inset))
+        XCTAssertNotEqual(box, plot, "反证：内缩盒不能等于外框，否则圆又会出界")
+
+        // 对角线也在这只盒子里（端点就是盒的两个角）
+        XCTAssertEqual(geometry.x(u: 0), box.minX)
+        XCTAssertEqual(geometry.y(v: 0), box.maxY)
+        XCTAssertEqual(geometry.x(u: 1), box.maxX)
+        XCTAssertEqual(geometry.y(v: 1), box.minY)
+
+        // 刻度：位置仍由 `u(stops:)` 推出（差为 0），且标签仍在外框下方那一带（tickBand 没变）
+        let ticks = CurveAxisTicks.ticks()
+        let axis = HDRCurveAxis.standard
+        let expected = [axis.forward(0),
+                        axis.forward(CurveAxisTicks.displayCode(127)),
+                        axis.forward(CurveAxisTicks.displayCode(255)),
+                        axis.u(stops: 1), axis.u(stops: 2), axis.u(stops: 3), axis.u(stops: 4)]
+        let positions = geometry.tickPositions(ticks)
+        XCTAssertEqual(positions.first!, box.minX, accuracy: 1e-12)
+        XCTAssertEqual(positions.last!, box.maxX, accuracy: 1e-12)
+        for ((tick, want), position) in zip(zip(ticks, expected), positions) {
+            XCTAssertEqual(tick.u, want, accuracy: 1e-9, "刻度 \(tick.label) 的位置仍来自 HDRCurveAxis")
+            XCTAssertEqual(position - (box.minX + CGFloat(want) * box.width), 0, accuracy: 1e-12,
+                           "刻度 \(tick.label) 的位置差必须为 0")
+        }
+        // 外框（标签所在的那块）与取值盒的关系：只差一个 inset，布局没动
+        XCTAssertEqual(CurvePanelMetrics.tickBand, 11)
+
+        // 绘制代码用的确实是那只盒子（不是外框），否则"网格贴不贴边"只能靠眼睛
+        let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("let box = geometry.valueBox"),
+                      "draw 必须显式取内缩盒")
+        XCTAssertTrue(source.contains("gridPath.move(to: CGPoint(x: x, y: box.minY))")
+                      && source.contains("CGPoint(x: box.maxX, y: y)"),
+                      "网格线必须画在 box 上")
+        XCTAssertTrue(source.contains("diagonal.move(to: CGPoint(x: box.minX, y: box.maxY))"),
+                      "对角线也必须画在 box 上")
+
+        print("grid · vertical \(grid.vertical.map { String(format: "%.1f", $0) })"
+              + " · horizontal \(grid.horizontal.map { String(format: "%.1f", $0) })"
+              + " · 边框 == \(frame) · 刻度位置差 "
+              + String(format: "%.1e", zip(ticks, positions)
+                        .map { abs($1 - (box.minX + CGFloat($0.u) * box.width)) }.max() ?? 0))
     }
 
     // MARK: - helpers

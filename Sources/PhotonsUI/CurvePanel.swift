@@ -117,28 +117,32 @@ public struct CurveAxisTick: Equatable, Sendable {
     }
 }
 
-/// The five ticks, **derived** from `HDRCurveAxis` and from nothing else.
+/// The seven ticks, **derived** from `HDRCurveAxis` and from nothing else.
 ///
-/// `0` at the left edge (`u = 0` ↔ `x = 0`), 18 % grey, display white, and the two HDR stops the
-/// histogram measures (+2 EV, +4 EV at the right edge). There is no `+6 EV` tick: 044 fixed the axis
-/// at `xHI = 16`, and `u(stops: 4)` is exactly 1. Since 062 the positions are the histogram's own
-/// too — white at `u = 0.5` — without a single number moving into this file: they are still
-/// `forward`/`u(stops:)`, so the axis is the only source.
+/// The axis is the histogram's since 062: the left half is SDR *display codes* (0–255 across 50 % of
+/// the card) and the right half is +0…+4 EV at 12.5 % per stop. So the ticks read in that language
+/// too — `0`, `127`, `255` for the SDR half and `+1`, `+2`, `+3`, `+4` for the HDR half — and each
+/// one still sits at `forward`/`u(stops:)` of the value it prints, so this file holds no positions.
+///
+/// A display code `c` is the *encoded* value `c/255`; the axis takes **linear** input, so the code
+/// is decoded first. That is the same pair of functions the shader uses, not an approximation.
 public enum CurveAxisTicks {
-
-    /// 18 % grey — the one input value the axis labels. It is the *input* the tick stands for (what
-    /// the label prints); the position is `axis.forward` of it, which is what keeps this file free of
-    /// the shaper's answers.
-    public static let middleGrey = 0.18
 
     public static func ticks(_ axis: HDRCurveAxis = .standard) -> [CurveAxisTick] {
         [
             CurveAxisTick(u: axis.forward(0), label: "0"),
-            CurveAxisTick(u: axis.forward(middleGrey), label: "0.18"),
-            CurveAxisTick(u: axis.forward(1), label: "1"),
+            CurveAxisTick(u: axis.forward(displayCode(127)), label: "127"),
+            CurveAxisTick(u: axis.forward(displayCode(255)), label: "255"),
+            CurveAxisTick(u: axis.u(stops: 1), label: "+1"),
             CurveAxisTick(u: axis.u(stops: 2), label: "+2"),
+            CurveAxisTick(u: axis.u(stops: 3), label: "+3"),
             CurveAxisTick(u: axis.u(stops: 4), label: "+4"),
         ]
+    }
+
+    /// An 8-bit display code as scene-linear light — what the axis' `forward` expects.
+    public static func displayCode(_ code: Double) -> Double {
+        HDRCurveAxis.srgbDecode(code / 255)
     }
 
     /// The one grey line under the plot — the card's statement of what the two halves are.
@@ -160,32 +164,54 @@ public enum CurveAxisTicks {
 /// tests ask "where is the +2 tick, in points" without a window.
 public struct CurvePlotGeometry: Equatable {
 
+    /// The plot's own rect — the card's frame, the tick band's top. **Not** where the values land.
     public let plot: CGRect
 
-    public init(plot: CGRect) { self.plot = plot }
+    /// How far the *value box* is pulled in from `plot`: one point radius plus 1 pt of breathing room
+    /// (064). `u = 0/1` and `v = 0/1` land one radius inside `plot`, so the control point's circle is
+    /// drawn whole instead of half (on an edge) or a quarter (in a corner).
+    ///
+    /// This is the fix, and it is deliberately *not* "clamp the circle into the frame": clamping draws
+    /// a point at `u = 0` at `x = 4` while it still reads 0 — the picture and the number would disagree.
+    /// Insetting the box the values map into keeps the circle's centre **exactly** where the value is.
+    public let inset: CGFloat
 
-    /// A `u` in 0…1 → an x in the plot. Clamped: a drag that leaves the card still lands on an edge.
-    public func x(u: Double) -> CGFloat {
-        plot.minX + CGFloat(min(max(u.isFinite ? u : 0, 0), 1)) * plot.width
+    public init(plot: CGRect, inset: CGFloat = CurvePanelMetrics.pointInset) {
+        self.plot = plot
+        self.inset = max(inset, 0)
     }
 
-    /// The curve's value (0…1, 1 = brighter) → a y in the plot (y grows *down*).
+    /// The box the values live in: `plot` inset by `inset` on every side. The grid, the frame and the
+    /// y = x diagonal are all drawn on *this* box, so "the grid does not touch its frame" cannot happen.
+    public var valueBox: CGRect { plot.insetBy(dx: inset, dy: inset) }
+
+    /// A `u` in 0…1 → an x in the **value box**, so `x(0) == inset` and `x(1) == width − inset`.
+    /// Clamped: a drag that leaves the card still lands on an edge.
+    public func x(u: Double) -> CGFloat {
+        let box = valueBox
+        return box.minX + CGFloat(min(max(u.isFinite ? u : 0, 0), 1)) * max(box.width, 0)
+    }
+
+    /// The curve's value (0…1, 1 = brighter) → a y in the value box (y grows *down*).
     public func y(v: Double) -> CGFloat {
-        plot.maxY - CGFloat(min(max(v.isFinite ? v : 0, 0), 1)) * plot.height
+        let box = valueBox
+        return box.maxY - CGFloat(min(max(v.isFinite ? v : 0, 0), 1)) * max(box.height, 0)
     }
 
     public func point(_ p: CurvePoint) -> CGPoint { CGPoint(x: x(u: p.x), y: y(v: p.y)) }
 
-    /// Inverse of `x(u:)`. Outside the plot it answers 0 or 1, never a number off the axis.
+    /// Inverse of `x(u:)`. Outside the value box it answers 0 or 1, never a number off the axis.
     public func u(atX x: CGFloat) -> Double {
-        guard plot.width > 0 else { return 0 }
-        return Double(min(max((x - plot.minX) / plot.width, 0), 1))
+        let box = valueBox
+        guard box.width > 0 else { return 0 }
+        return Double(min(max((x - box.minX) / box.width, 0), 1))
     }
 
     /// Inverse of `y(v:)`.
     public func v(atY y: CGFloat) -> Double {
-        guard plot.height > 0 else { return 0 }
-        return Double(min(max((plot.maxY - y) / plot.height, 0), 1))
+        let box = valueBox
+        guard box.height > 0 else { return 0 }
+        return Double(min(max((box.maxY - y) / box.height, 0), 1))
     }
 
     /// Where each tick's line goes, in points — `x(u:)` of the axis-derived positions.
@@ -210,12 +236,14 @@ public struct CurvePlotGeometry: Equatable {
         return best?.index
     }
 
-    /// The 4 × 4 grid's lines (5 vertical + 5 horizontal, including the frame).
+    /// The 4 × 4 grid's lines (5 vertical + 5 horizontal, including the frame) — on the **value box**,
+    /// so the outermost lines are exactly the box the values map into.
     public func gridLines(divisions: Int = CurvePanelMetrics.gridDivisions)
         -> (vertical: [CGFloat], horizontal: [CGFloat]) {
         let n = max(divisions, 1)
-        let xs = (0...n).map { plot.minX + CGFloat($0) / CGFloat(n) * plot.width }
-        let ys = (0...n).map { plot.minY + CGFloat($0) / CGFloat(n) * plot.height }
+        let box = valueBox
+        let xs = (0...n).map { box.minX + CGFloat($0) / CGFloat(n) * max(box.width, 0) }
+        let ys = (0...n).map { box.minY + CGFloat($0) / CGFloat(n) * max(box.height, 0) }
         return (xs, ys)
     }
 }
@@ -479,6 +507,10 @@ public enum CurvePanelMetrics {
     /// A control point's radius (a filled dot) and the radius that counts as "on" it.
     public static let pointRadius: CGFloat = 3
     public static let hitRadius: CGFloat = 8
+    /// How far the value box is inset from the plot rect (064): one point radius plus 1 pt of air, so a
+    /// point sitting on `u = 0/1` or `v = 0/1` draws a **whole** circle inside the frame. Derived from
+    /// `pointRadius`, never typed as a number: raise the radius and the inset follows.
+    public static var pointInset: CGFloat { pointRadius + 1 }
     /// A press has to travel this far to be a drag rather than a click.
     public static let dragThreshold: CGFloat = 2
     public static let tickLabelSize: CGFloat = 8
@@ -599,29 +631,32 @@ public struct CurvePanel: View {
     private func draw(into context: inout GraphicsContext, geometry: CurvePlotGeometry,
                       points: [CurvePoint], table: [Float]) {
         let plot = geometry.plot
+        // 064: the values (grid, frame, diagonal, curve, points) live in the inset value box; only the
+        // tick labels still hang off the outer rect, at their old y.
+        let box = geometry.valueBox
         let tint = channel.tint
 
         // The plot's own field, so the grid reads as graph paper rather than as card background.
         context.fill(Path(roundedRect: plot, cornerRadius: 3),
                      with: .color(Color.primary.opacity(0.04)))
 
-        // 4 × 4 grid: 5 lines each way, the frame included (a curve needs its axes).
+        // 4 × 4 grid: 5 lines each way, the frame included (a curve needs its axes) — on the value box.
         let grid = geometry.gridLines()
         var gridPath = Path()
         for x in grid.vertical {
-            gridPath.move(to: CGPoint(x: x, y: plot.minY))
-            gridPath.addLine(to: CGPoint(x: x, y: plot.maxY))
+            gridPath.move(to: CGPoint(x: x, y: box.minY))
+            gridPath.addLine(to: CGPoint(x: x, y: box.maxY))
         }
         for y in grid.horizontal {
-            gridPath.move(to: CGPoint(x: plot.minX, y: y))
-            gridPath.addLine(to: CGPoint(x: plot.maxX, y: y))
+            gridPath.move(to: CGPoint(x: box.minX, y: y))
+            gridPath.addLine(to: CGPoint(x: box.maxX, y: y))
         }
         context.stroke(gridPath, with: .color(Color.primary.opacity(0.10)), lineWidth: 0.5)
 
         // y = x, dashed: the identity, so "did I change anything" is answerable by eye.
         var diagonal = Path()
-        diagonal.move(to: CGPoint(x: plot.minX, y: plot.maxY))
-        diagonal.addLine(to: CGPoint(x: plot.maxX, y: plot.minY))
+        diagonal.move(to: CGPoint(x: box.minX, y: box.maxY))
+        diagonal.addLine(to: CGPoint(x: box.maxX, y: box.minY))
         context.stroke(diagonal, with: .color(Color.primary.opacity(0.22)),
                        style: StrokeStyle(lineWidth: 0.7, dash: [3, 3]))
 
@@ -658,12 +693,15 @@ public struct CurvePanel: View {
             }
         }
 
-        // The five ticks, at the axis' own positions.
+        // The seven ticks, at the axis' own positions. The label stays under the **outer** rect (its
+        // old y); only the little tick line reaches up to the inset frame, so the 4 pt margin is
+        // bridged rather than left floating. The labels speak the histogram's language: display codes
+        // on the SDR half (`0 / 127 / 255`), EV on the HDR half (`+1 … +4`).
         let ticks = CurveAxisTicks.ticks()
         for (i, tick) in ticks.enumerated() {
             let x = geometry.x(u: tick.u)
             var line = Path()
-            line.move(to: CGPoint(x: x, y: plot.maxY))
+            line.move(to: CGPoint(x: x, y: box.maxY))
             line.addLine(to: CGPoint(x: x, y: plot.maxY + 3))
             context.stroke(line, with: .color(Color.primary.opacity(0.35)), lineWidth: 0.7)
 
