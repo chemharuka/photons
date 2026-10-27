@@ -145,11 +145,18 @@ public final class CatalogSession {
 
     /// Brush diameter in **short-edge units** (0.12 = 12 % of the short edge of the photo). Each
     /// stroke stores its own radius, so changing this never changes a stroke already painted.
-    public var brushSize: Double = 0.12
+    ///
+    /// The three defaults are named constants because the panel's double-click reset puts a brush row
+    /// back on them: a literal in the reset closure would be a second answer to 「画笔的默认是多少」.
+    public static let defaultBrushSize: Double = 0.12
     /// 0…1. A hard brush (`1`) has a 1 px edge; `0` is a fully feathered stamp.
-    public var brushHardness: Double = 0.5
+    public static let defaultBrushHardness: Double = 0.5
     /// 0…1 per-stroke alpha multiplier.
-    public var brushFlow: Double = 1.0
+    public static let defaultBrushFlow: Double = 1.0
+
+    public var brushSize: Double = CatalogSession.defaultBrushSize
+    public var brushHardness: Double = CatalogSession.defaultBrushHardness
+    public var brushFlow: Double = CatalogSession.defaultBrushFlow
 
     /// The **upright** pixel size of the photo on screen, as the renderer actually ingested it
     /// (`RenderGraph.sourceSize`, i.e. after EXIF orientation was applied — task 028).
