@@ -93,8 +93,34 @@ static inline float backdrop_weight(float2 canvasUV, constant PresentParams &p) 
     return saturate(min(inside.x / f.x, inside.y / f.y));
 }
 
+// The canvas colour outside the picture, display-encoded `#0F0F0F` (15/255) — the same value 054
+// paints around a fitted picture. Declared by 058 ahead of that merge; `CanvasMatte` in
+// `CanvasPresenter` is the CPU half and the two must agree (`CanvasMatteGreyTests` parses both once
+// 054 lands). Running it through `present_transfer` is what makes it the right number for either
+// drawable format: linear light for the 16-bit layer, the code itself for the 8-bit one.
+constant float3 kCanvasMatteDisplay = float3(15.0 / 255.0);
+
+// How far outside `[0, 1]` a backdrop UV may be and still count as inside, in picture-normalised
+// units: 1/100 000 of the picture — 0.04 px on a 4096-px whole-picture texture. Wide enough that the
+// last row/column of a picture that *does* fill the canvas is never mistaken for the outside (which
+// would ring a fitted picture with one line of matte), far below a texel so no real "outside" survives.
+constant float kPictureEdgeEpsilon = 1e-5;
+
 /// The shrink path with a backdrop: the main frame where it reaches, the low-res whole picture where
 /// it does not, cross-faded over the feather.
+///
+/// **058 — what is outside the picture is the matte, not the picture's edge.** 037–053 sampled the
+/// backdrop through `saturate(backdropUV)`, so every fragment whose UV had left `[0, 1]` got the
+/// nearest edge texel: one column of the photograph smeared across the whole band. That is only ever
+/// right when the picture continues past its own edge, which it never does — outside the picture there
+/// is canvas, and the canvas has a colour (`#0F0F0F`, 054's matte). So the fetch is kept (a GPU cannot
+/// predicate a texture read) and its result is *discarded* where the UV is outside, which is a select
+/// on the same two values, not a second sample: the cost of this fragment is unchanged.
+///
+/// The feather stays **inside** the picture, where its two pixels are: at a fragment outside the
+/// picture `backdrop_weight` is 0, so the matte is what is drawn; one feather-width into the picture
+/// the frame takes over. The photograph's own edge therefore still meets the frame over a ramp
+/// instead of a step, and the band around it is the canvas colour.
 fragment float4 present_fragment_backdrop(PresentOut in [[stage_in]],
                                           texture2d<float> src [[texture(0)]],
                                           texture2d<float> backdrop [[texture(1)]],
@@ -106,8 +132,15 @@ fragment float4 present_fragment_backdrop(PresentOut in [[stage_in]],
     // divisor is floored rather than trusted: a NaN canvas would paint the whole drawable black.
     float2 size = select(float2(1.0), p.b.zw, abs(p.b.zw) > float2(1e-9));
     float2 canvasUV = (in.uv - p.b.xy) / size;
+    // `p.c` is the whole picture's window (058 — the frame's window composed with where the frame
+    // texture sits on the picture), so this UV is in the picture's own coordinates and `[0, 1]` is the
+    // picture's edge.
     float2 backdropUV = p.c.xy + canvasUV * p.c.zw;
-    float4 far = backdrop.sample(smp, saturate(backdropUV));
+    float4 onPicture = backdrop.sample(smp, saturate(backdropUV));
+    // Outside by more than the tolerance on either axis ⇒ there is no picture here.
+    float2 outside = max(-backdropUV, backdropUV - 1.0);
+    bool beyondEdge = max(outside.x, outside.y) > kPictureEdgeEpsilon;
+    float4 far = beyondEdge ? float4(kCanvasMatteDisplay, 1.0) : onPicture;
     float4 near = src.sample(smp, in.uv);
     float4 c = mix(far, near, backdrop_weight(canvasUV, p));
     return float4(present_transfer(c.rgb, p), 1.0);

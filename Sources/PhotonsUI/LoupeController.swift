@@ -1446,9 +1446,11 @@ public final class LoupeController: NSViewController {
     public private(set) var zoomBridgeFrames: [ZoomBridgeFrame] = []
     private static let zoomBridgeFrameLimit = 512
 
-    /// The projection the pixels **on the canvas** were laid out with. A bridge always starts from
-    /// these pixels, whatever the camera has done since.
-    private var canvasContent: (mapping: LoupeMapping, content: ImageSize)?
+    /// The projection the pixels **on the canvas** were laid out with, and where those pixels sit on
+    /// the whole picture (058). A bridge always starts from these pixels, whatever the camera has done
+    /// since.
+    private var canvasContent: (mapping: LoupeMapping, content: ImageSize,
+                                placement: FramePlacement)?
     /// A frame that arrived while the bridge was still moving: kept, and presented the moment the
     /// geometry is at the target. Not a dropped frame — the generation gate upstream has already
     /// decided it is the current one.
@@ -1615,11 +1617,13 @@ public final class LoupeController: NSViewController {
         if !reached, let target, let texture, let presenter {
             let canvas = viewportPixels
             let drawn = backdropTexture(for: target)
+            let backdropWindow = target.onWholePicture(canvasPlacement)
             presenter.present(texture, in: canvasView.metalLayer,
                               wantsEDR: wantsExtendedDynamicRange,
                               drawableSize: canvas, window: target, backdrop: drawn,
-                              backdropWindow: target)
-            recordBackdropPresent(window: target, backdropWindow: target, drawn: drawn, serial: serial)
+                              backdropWindow: backdropWindow)
+            recordBackdropPresent(window: target, backdropWindow: backdropWindow, drawn: drawn,
+                                  placement: canvasPlacement, serial: serial)
             recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
                                                   drawable: canvas, canvas: canvas))
         }
@@ -1676,10 +1680,14 @@ public final class LoupeController: NSViewController {
         // A shrinking frame does not reach the canvas: this is the call the user's 「用低清预览做界面外
         // 背景」 is about. A growing one covers it, and gets `nil` instead.
         let drawn = backdropTexture(for: window)
+        // 058: the backdrop is the **whole picture**, the frame texture is one part of it — the frame's
+        // window has to be read in the picture's coordinates before the backdrop is sampled through it.
+        let placement = canvasPlacement
+        let backdropWindow = window.onWholePicture(placement)
         let ok = presenter.present(texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, window: window, backdrop: drawn,
-                                   backdropWindow: window) { [weak self] in
+                                   backdropWindow: backdropWindow) { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)
@@ -1689,7 +1697,8 @@ public final class LoupeController: NSViewController {
             zoomBridgePresentsInFlight = max(0, zoomBridgePresentsInFlight - 1)
             return
         }
-        recordBackdropPresent(window: window, backdropWindow: window, drawn: drawn, serial: serial)
+        recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: drawn,
+                              placement: placement, serial: serial)
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
                                               drawable: canvas, canvas: canvas))
     }
@@ -1719,11 +1728,14 @@ public final class LoupeController: NSViewController {
                   let presenter = self.presenter else { return }
             let window = PresentWindow.whole
             let drawn = self.backdropTexture(for: window)
+            let placement = self.canvasPlacement
+            let backdropWindow = window.onWholePicture(placement)
             presenter.present(stuck, in: self.canvasView.metalLayer,
                               wantsEDR: self.wantsExtendedDynamicRange,
                               drawableSize: self.viewportPixels, window: window, backdrop: drawn,
-                              backdropWindow: window)
-            self.recordBackdropPresent(window: window, backdropWindow: window, drawn: drawn, serial: 0)
+                              backdropWindow: backdropWindow)
+            self.recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: drawn,
+                                       placement: placement, serial: 0)
         }
     }
 
@@ -3443,21 +3455,32 @@ public final class LoupeController: NSViewController {
         /// The bridge that drew it (`zoomBridgeArmedCount`), or 0 for a settled frame or a teardown.
         public let serial: Int
         public let window: PresentWindow
-        /// The window the **low-resolution picture** was read through (053).
+        /// The window the **low-resolution picture** was read through.
         ///
-        /// Must be the same value as `window` at every call site: the backdrop is the *whole picture*,
-        /// so the frame's own mapping puts it in exactly the same place and it shrinks with the same
-        /// animation. Recorded here rather than assumed, because passing `.whole` instead (the default
-        /// this parameter used to get) spreads the whole picture over the canvas at every zoom level —
-        /// a static fit-sized picture, which is precisely the bug the user reported.
+        /// Since 058 this is the frame's window **composed with where the frame texture sits on the
+        /// whole picture** (`FramePlacement` / `PresentWindow.onWholePicture`), so it is a window in the
+        /// picture's coordinates. 053 used to pass `window` itself here, which is only the same number
+        /// when the texture *is* the picture — at 300 % it is a ninth of it, and reading the frame's
+        /// window as picture coordinates put the backdrop's UVs far outside `[0, 1]` and turned the
+        /// band into one column of the picture's edge. `windowsMatch` is the relationship, the pair of
+        /// fields is the evidence.
         public let backdropWindow: PresentWindow
         /// The backdrop's pixel size — `nil` when the pass was given none.
         public let backdrop: ImageSize?
         /// Whether the window already reached every canvas pixel.
         public let coversCanvas: Bool
+        /// Where the frame texture sat on the whole picture (058) — what `backdropWindow` was computed
+        /// from, recorded so the conversion can be checked field by field rather than trusted.
+        public let placement: FramePlacement
 
-        /// Do the picture and the backdrop read through one mapping? (053's rule, as a value.)
-        public var windowsMatch: Bool { window == backdropWindow }
+        /// Are the two textures read through one mapping? 053's claim, in the form that survives the
+        /// coordinate change: the backdrop's window is the frame's window *read on the picture*.
+        public var windowsMatch: Bool { window.onWholePicture(placement) == backdropWindow }
+
+        /// Are the two windows literally the same numbers? True exactly when the frame texture holds
+        /// the whole picture (适应 with no letterbox, a texture rendered without a canvas) — 053's
+        /// literal rule, kept as the special case it always was.
+        public var windowsAreIdentical: Bool { window == backdropWindow }
     }
 
     /// Every present, in order (capped; it is a log).
@@ -3490,15 +3513,27 @@ public final class LoupeController: NSViewController {
     }
 
     private func recordBackdropPresent(window: PresentWindow, backdropWindow: PresentWindow,
-                                       drawn: MTLTexture?, serial: Int) {
+                                       drawn: MTLTexture?, placement: FramePlacement,
+                                       serial: Int) {
         let size = drawn.map { ImageSize(width: $0.width, height: $0.height) }
         if size == nil { backdroplessDrawCount += 1 } else { backdropDrawCount += 1 }
         backdropPresents.append(BackdropPresent(serial: serial, window: window,
                                                 backdropWindow: backdropWindow, backdrop: size,
-                                                coversCanvas: window.coversCanvas))
+                                                coversCanvas: window.coversCanvas,
+                                                placement: placement))
         if backdropPresents.count > Self.backdropPresentLimit {
             backdropPresents.removeFirst(backdropPresents.count - Self.backdropPresentLimit)
         }
+    }
+
+    /// 058: where the pixels **on the canvas** sit on the whole picture.
+    ///
+    /// The backdrop is the whole picture; the frame texture is a canvas-sized render of one part of it
+    /// with the photograph letterboxed inside. Composing the frame's window with this is what makes
+    /// `backdropUV` a picture coordinate — `.whole` (identity) only while no frame has been presented,
+    /// which is also the only case where 053's rule would have been right.
+    private var canvasPlacement: FramePlacement {
+        canvasContent?.placement ?? .whole
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
@@ -3544,11 +3579,18 @@ public final class LoupeController: NSViewController {
         // A settled frame is the whole picture at the canvas size, so `window: .whole` covers the
         // canvas and the pass gets no backdrop — the rule is the window's, not this call site's.
         let settledWindow = PresentWindow.whole
+        // 058: which part of the picture this frame holds and where the photograph sits inside it —
+        // the camera's own mapping, the same one `canvasContent` stores below. Recorded even though a
+        // covering present draws no backdrop: the record must still say what a backdrop *would* have
+        // been read through, and the settled present is where `.whole` frame and picture windows coincide.
+        let settledPlacement = framing(viewport: frame.canvas)
+            .map { $0.framePlacement(of: $0.mapping(of: state)) } ?? .whole
+        let settledBackdropWindow = settledWindow.onWholePicture(settledPlacement)
         let drawn = backdropTexture(for: settledWindow)
         let ok = presenter.present(frame.texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, window: settledWindow,
-                                   backdrop: drawn, backdropWindow: settledWindow) { [weak self] in
+                                   backdrop: drawn, backdropWindow: settledBackdropWindow) { [weak self] in
             guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
@@ -3574,16 +3616,17 @@ public final class LoupeController: NSViewController {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)
-        recordBackdropPresent(window: settledWindow, backdropWindow: settledWindow,
-                              drawn: drawn, serial: 0)
+        recordBackdropPresent(window: settledWindow, backdropWindow: settledBackdropWindow,
+                              drawn: drawn, placement: settledPlacement, serial: 0)
         presentRetries = 0
         // A new frame is a new answer for whatever the pointer is over: the readback throttle is keyed
         // on this serial, so the next move re-reads instead of trusting the previous picture's texel.
         frameSerial += 1
         // These pixels are now what the canvas carries, and they were laid out for `state` — the
         // projection a later bridge has to start from.
-        if let mapping = framing(viewport: frame.canvas)?.mapping(of: state) {
-            canvasContent = (mapping, frame.content)
+        if let framing = framing(viewport: frame.canvas) {
+            let mapping = framing.mapping(of: state)
+            canvasContent = (mapping, frame.content, framing.framePlacement(of: mapping))
         }
         lastFrame = frame
         lastPresentError = nil

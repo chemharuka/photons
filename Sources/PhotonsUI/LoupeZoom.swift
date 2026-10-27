@@ -812,6 +812,38 @@ public struct LoupeFraming: Equatable, Sendable {
             flipV: flipV)
     }
 
+    /// Where a canvas-sized frame texture sits on the **whole picture** (058) — the input the backdrop
+    /// needs to convert the frame's window into the picture's coordinates
+    /// (`PresentWindow.onWholePicture`).
+    ///
+    /// `mapping` is the projection the texture was rendered for (`LoupeMapping`): its content rect is
+    /// where the photograph is inside the canvas, and its window is which part of the photograph the
+    /// texture holds. Both halves are needed and neither is the identity in general:
+    ///
+    ///     region = (cropLeft − cropOrigin) / cropSize  …  + cropWidth / cropSize     (source px)
+    ///     rect   = (originX, originY, contentWidth, contentHeight) / viewport         (device px)
+    ///
+    /// The region is expressed in the picture's own **display** order, so a flipped document mirrors
+    /// it (`u ↦ 1 − u`): the whole-picture texture is rendered with the same flip, and a window on the
+    /// left of the source is on the right of that texture. Straighten contributes nothing here, for
+    /// the reason `outputWindow(of:)` gives: the window lives in the frame, not in the source.
+    public func framePlacement(of mapping: LoupeMapping) -> FramePlacement {
+        let cw = max(cropWidthPixels, 1e-9), ch = max(cropHeightPixels, 1e-9)
+        var u0 = (mapping.cropLeft - cropOriginX) / cw
+        var u1 = u0 + mapping.cropWidth / cw
+        var v0 = (mapping.cropTop - cropOriginY) / ch
+        var v1 = v0 + mapping.cropHeight / ch
+        if mapping.flipH { (u0, u1) = (1 - u1, 1 - u0) }
+        if mapping.flipV { (v0, v1) = (1 - v1, 1 - v0) }
+        let vp = mapping.viewport
+        let w = Double(max(vp.width, 1)), h = Double(max(vp.height, 1))
+        let rect = PresentWindow(u0: Float(mapping.originX / w), v0: Float(mapping.originY / h),
+                                 du: Float(mapping.contentWidth / w),
+                                 dv: Float(mapping.contentHeight / h))
+        return FramePlacement(region: CropRect(x: u0, y: v0, width: u1 - u0, height: v1 - v0),
+                              rect: rect)
+    }
+
     /// View point (points, from `NSEvent`, y down) → source pixel.
     public func sourcePoint(of state: LoupeViewState, viewX: Double, viewY: Double,
                             backingScale: Double = 1) -> (x: Double, y: Double) {
