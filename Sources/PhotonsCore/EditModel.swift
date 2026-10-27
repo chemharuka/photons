@@ -648,8 +648,9 @@ public struct LevelPair: Sendable, Equatable {
 ///   · y is the same coordinate, i.e. the curve answers "map this u to that u".
 ///
 /// The point lists keep their shape and `CurvePoint.linear` — only the meaning of the y axis
-/// changed, which is exactly what `processVersion` 2 records (§10.1). (069 moved the *storage* to
-/// integer grid cells, `u = x/511`; the coordinate the table sees is still 0…1 and unchanged.) Old documents keep
+/// changed, which is exactly what `processVersion` 2 records (§10.1). (069 then moved the *storage* to
+/// doubles on `0…2` — `0…1` SDR, `1…2` HDR — and the table converts with `u = x/2`; the coordinate the
+/// table sees is still 0…1 and unchanged.) Old documents keep
 /// their control points and get a different rendering; that is the declared migration, not a bug.
 public struct CurveGroup: Sendable, Equatable, Codable {
     /// What the numbers in this group mean, written with every document (派单 069).
@@ -666,6 +667,11 @@ public struct CurveGroup: Sendable, Equatable, Codable {
     /// future reader would be entitled to re-interpret the same integers against an SDR axis — a silent
     /// change of rendering. `domain` is what makes that illegal: the numbers below are HDR-axis
     /// coordinates, and a reader that works in another domain must convert, not re-read.
+    ///
+    /// ```json
+    /// "curve": { "format": {"version":2,"type":"double","max":2,"domain":"hdr"},
+    ///            "white": [{"x":0,"y":0},{"x":0.44,"y":0.34},…], "red": …, "green": …, "blue": … }
+    /// ```
     ///
     /// **Migration rule (docs/architecture-decisions.md §069).** Any change to what `x`/`y` mean — the
     /// grid's size, the type, the axis' shape — bumps `version`. A reader that meets a version it does
