@@ -75,13 +75,14 @@ final class CurveReadoutTests: XCTestCase {
         XCTAssertFalse(source.contains("func text(for point: CurvePoint, view:"), "读数不许带视图参数")
 
         let point = CurvePoint(0.91, 1.31)
-        let all = CurvePlotGeometry(plot: CGRect(x: 0, y: 0, width: 274, height: 189), view: .all)
-        let sdr = CurvePlotGeometry(plot: CGRect(x: 0, y: 0, width: 274, height: 189), view: .sdr)
-        XCTAssertNotEqual(all.point(point), sdr.point(point), "同一个点在两个视图里位置不同")
+        let plot = CGRect(x: 0, y: 0, width: 274, height: 189)
+        let sdr = CurvePlotGeometry(plot: plot, view: .sdr)
+        let hdr = CurvePlotGeometry(plot: plot, view: .hdr)
+        XCTAssertNotEqual(sdr.point(point), hdr.point(point), "同一个点在两个视图里位置不同")
         XCTAssertEqual(CurvePointReadout.text(for: point), "输入 232 输出 +1.24")
-        print("same text · \(CurvePointReadout.text(for: point)) · 全部 x = "
-              + String(format: "%.1f", all.point(point).x)
-              + " · SDR x = " + String(format: "%.1f", sdr.point(point).x))
+        print("same text · \(CurvePointReadout.text(for: point)) · SDR x = "
+              + String(format: "%.1f", sdr.point(point).x)
+              + " · HDR x = " + String(format: "%.1f", hdr.point(point).x))
     }
 
     // MARK: - 2. the face is the histogram's
@@ -116,48 +117,60 @@ final class CurveReadoutTests: XCTestCase {
 
     // MARK: - 4. the two views
 
-    /// SDR 视图把 `x ∈ 0…1` 铺满：**1 单位坐标在屏幕上是 2.0 倍**，两端精确落在 valueBox 边上。
-    func testTheSdrViewDoublesTheAxis() {
+    /// 两个状态各自把**自己那一半**铺满：SDR 是 `0…1`、HDR 是 `1…2`，一个单位坐标 = 整个 box 宽
+    /// （也就是 069「全部」视图的 2 倍）。
+    func testEachViewFillsTheBoxWithItsOwnHalfOfTheAxis() {
         let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight))
-        let all = CurvePlotGeometry(plot: plot, view: .all)
         let sdr = CurvePlotGeometry(plot: plot, view: .sdr)
+        let hdr = CurvePlotGeometry(plot: plot, view: .hdr)
 
-        let allStep = all.x(u: 1) - all.x(u: 0)
-        let sdrStep = sdr.x(u: 1) - sdr.x(u: 0)
-        XCTAssertEqual(sdrStep / allStep, 2.0, accuracy: 1e-9, "SDR 视图必须正好是 2 倍")
-        XCTAssertEqual(allStep, all.valueBox.width / 2, accuracy: 1e-12, "全部视图跨 0…2")
+        // 1 单位坐标 = 整个 box（2 倍放大）。
+        XCTAssertEqual(sdr.x(u: 1) - sdr.x(u: 0), sdr.valueBox.width, accuracy: 1e-9)
+        XCTAssertEqual(hdr.x(u: 2) - hdr.x(u: 1), hdr.valueBox.width, accuracy: 1e-9)
 
-        for geometry in [all, sdr] {
-            XCTAssertEqual(geometry.x(u: 0), geometry.valueBox.minX, accuracy: 1e-9)
-            XCTAssertEqual(geometry.y(v: 0), geometry.valueBox.maxY, accuracy: 1e-9)
+        for g in [sdr, hdr] {
+            let span = g.span
+            XCTAssertEqual(g.x(u: span.lowerBound), g.valueBox.minX, accuracy: 1e-9)
+            XCTAssertEqual(g.x(u: span.upperBound), g.valueBox.maxX, accuracy: 1e-9)
+            XCTAssertEqual(g.y(v: span.lowerBound), g.valueBox.maxY, accuracy: 1e-9)
+            XCTAssertEqual(g.y(v: span.upperBound), g.valueBox.minY, accuracy: 1e-9)
         }
         XCTAssertEqual(sdr.x(u: 1), sdr.valueBox.maxX, accuracy: 1e-9, "SDR 视图右端是白点 x = 1")
-        XCTAssertEqual(all.x(u: 2), all.valueBox.maxX, accuracy: 1e-9, "全部视图右端是 +4 EV x = 2")
-        XCTAssertEqual(all.x(u: 1), all.valueBox.midX, accuracy: 1e-9, "白点在正中（062）")
+        XCTAssertEqual(hdr.x(u: 1), hdr.valueBox.minX, accuracy: 1e-9, "HDR 视图左端是白点 x = 1")
+        XCTAssertEqual(hdr.x(u: 2), hdr.valueBox.maxX, accuracy: 1e-9, "HDR 视图右端是 +4 EV x = 2")
 
-        for step in 0...100 {
-            let x = Double(step) / 100
-            XCTAssertEqual(sdr.u(atX: sdr.x(u: x)), x, accuracy: 1e-12, "双射 x = \(x)")
+        // 双射：每个视图在自己的 span 里 x ↔ 屏幕 互为反函数。
+        for g in [sdr, hdr] {
+            let span = g.span
+            for step in 0...100 {
+                let x = span.lowerBound + (span.upperBound - span.lowerBound) * Double(step) / 100
+                XCTAssertEqual(g.u(atX: g.x(u: x)), x, accuracy: 1e-12, "双射 x = \(x)")
+                XCTAssertEqual(g.v(atY: g.y(v: x)), x, accuracy: 1e-12, "双射 y = \(x)")
+            }
         }
 
-        // **反证**: reusing the full view's mapping for the SDR view gives 1.0× and the wrong right end.
-        XCTAssertNotEqual((all.x(u: 1) - all.x(u: 0)) / allStep, 2.0, accuracy: 1e-6)
-        XCTAssertNotEqual(all.x(u: 1), all.valueBox.maxX, accuracy: 1e-6,
-                          "反证：全部视图里 x = 1 在正中，不是右端")
-        print("views · step 全部 \(allStep) · SDR \(sdrStep) · 比值 "
-              + String(format: "%.9f", sdrStep / allStep))
+        // **反证**: 用 069「全部」视图的映射（`x/2` 跨全宽）—— `x = 1` 落在正中，不是右端。
+        let box = sdr.valueBox
+        XCTAssertNotEqual(sdr.x(u: 1), box.minX + box.width / 2, "反证：x = 1 不能在正中")
+        XCTAssertEqual(sdr.x(u: 1) - box.minX, 2 * (box.width / 2), accuracy: 1e-9,
+                       "SDR 视图的 1 个坐标单位是「全幅」视图的 2 倍")
+        print("views · step SDR \(sdr.x(u: 1) - sdr.x(u: 0)) · HDR \(hdr.x(u: 2) - hdr.x(u: 1))"
+              + " · box \(box.width)")
     }
 
-    /// 视图外的点：SDR 视图里 **x = 1.5 的点不画**、点不到，但它仍然改变曲线。
+    /// 视图外的点：SDR 视图里 **x = 1.2 的点不画**、点不到，但它仍然改变曲线；HDR 视图里反过来，
+    /// SDR 那一半的点不画。
     func testPointsOutsideTheViewAreInvisibleAndUnhittableButStillBendTheCurve() {
         let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight))
         let sdr = CurvePlotGeometry(plot: plot, view: .sdr)
+        let hdr = CurvePlotGeometry(plot: plot, view: .hdr)
         let inside = CurvePoint(0.8, 0.4)
         let outside = CurvePoint(1.2, 1.2)
 
         XCTAssertTrue(sdr.isVisible(inside))
         XCTAssertFalse(sdr.isVisible(outside), "x = 1.2 在 SDR 视图之外")
-        XCTAssertTrue(CurvePlotGeometry(plot: plot, view: .all).isVisible(outside))
+        XCTAssertTrue(hdr.isVisible(outside), "同一个点在 HDR 视图里")
+        XCTAssertFalse(hdr.isVisible(inside), "x = 0.8 在 HDR 视图之外")
 
         let points = [CurvePoint(0, 0), inside, outside]
         XCTAssertEqual(sdr.hitIndex(points, at: sdr.point(inside)), 1)
@@ -187,8 +200,8 @@ final class CurveReadoutTests: XCTestCase {
         let digest = session.edit.curve.keyString
 
         let plot = CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: 200))
-        _ = CurvePlotGeometry(plot: plot, view: .all)
         _ = CurvePlotGeometry(plot: plot, view: .sdr)
+        _ = CurvePlotGeometry(plot: plot, view: .hdr)
         XCTAssertEqual(session.edit.curve, curve)
         XCTAssertEqual(session.history.count, before)
         XCTAssertEqual(CurveLUT.build(session.edit.curve), table)
@@ -200,14 +213,17 @@ final class CurveReadoutTests: XCTestCase {
 
     // MARK: - 6. the ticks
 
-    /// 只有五档 SDR 码值；位置全部是 `2·forward(displayCode(c))`（等于 `c/255`）。
+    /// 只有五档 SDR 码值，且只有 **SDR 视图**有刻度：HDR 视图 `1…2` 里没有可标的数字（069 取消了
+    /// stops），所以它一条刻度都不画，只有网格 —— 071。
     func testTheTicksAreTheFiveSdrCodesAndNothingElse() throws {
         let axis = HDRCurveAxis.standard
-        let ticks = CurveAxisTicks.ticks(axis, view: .all)
+        let ticks = CurveAxisTicks.ticks(axis, view: .sdr)
         XCTAssertEqual(ticks.map(\.label), ["0", "63", "127", "191", "255"],
                        "stops 标记取消：轴上没有 +1/+2/+3/+4")
-        XCTAssertEqual(CurveAxisTicks.ticks(axis, view: .sdr).map(\.label), ticks.map(\.label),
-                       "两种视图同样的五档")
+        XCTAssertEqual(CurveAxisTicks.ticks(axis).map(\.label), ticks.map(\.label),
+                       "默认就是 SDR 视图那五档")
+        XCTAssertEqual(CurveAxisTicks.ticks(axis, view: .hdr), [],
+                       "HDR 视图没有可标的数字 → 不画刻度，只画网格")
 
         for (tick, code) in zip(ticks, [0.0, 63, 127, 191, 255]) {
             XCTAssertEqual(tick.x, 2 * axis.forward(CurveAxisTicks.displayCode(code)),
@@ -219,13 +235,14 @@ final class CurveReadoutTests: XCTestCase {
         XCTAssertEqual(ticks.last?.x, 1, "255 码落在 x = 1（白点）")
 
         let geometry = CurvePlotGeometry(
-            plot: CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: 200)), view: .all)
+            plot: CurvePanelMetrics.plotRect(in: CGSize(width: 274, height: 200)), view: .sdr)
         let positions = geometry.tickPositions(ticks)
         XCTAssertEqual(positions[0], geometry.valueBox.minX, accuracy: 1e-12)
-        XCTAssertEqual(positions[4], geometry.valueBox.midX, accuracy: 1e-12, "白点在正中")
+        XCTAssertEqual(positions[4], geometry.valueBox.maxX, accuracy: 1e-12,
+                       "SDR 视图里白点在右端（071：0…1 铺满）")
         for (position, tick) in zip(positions, ticks) {
             XCTAssertEqual(position - (geometry.valueBox.minX
-                                       + CGFloat(tick.x / 2) * geometry.valueBox.width), 0,
+                                       + CGFloat(tick.x) * geometry.valueBox.width), 0,
                            accuracy: 1e-12, "码 \(tick.label) 的 x 差必须为 0")
         }
         // 源码里不许有 stops 刻度、也不许出现 SDR/HDR 字样（069：「不需要 sdr/hdr 标示了」）。
@@ -236,14 +253,32 @@ final class CurveReadoutTests: XCTestCase {
               + positions.map { String(format: "%.2f", $0) }.joined(separator: ", "))
     }
 
-    /// 按钮两态：全部视图 → 「SDR 区域」；SDR 视图 → 「HDR 区域」（用户拍板的文案）。
-    func testTheViewButtonSaysSdrThenHdr() {
-        XCTAssertEqual(CurveViewMode.all.buttonTitle, "SDR 区域")
-        XCTAssertEqual(CurveViewMode.sdr.buttonTitle, "HDR 区域")
-        XCTAssertEqual(CurveViewMode.all.next, .sdr)
-        XCTAssertEqual(CurveViewMode.sdr.next, .all, "SDR 态的按钮回到全部视图")
-        XCTAssertEqual(CurveViewMode.allCases.count, 2)
-        print("button · 全部 →「\(CurveViewMode.all.buttonTitle)」· SDR →「\(CurveViewMode.sdr.buttonTitle)」")
+    /// 按钮两态：文字 = **当前状态**（`SDR` / `HDR`，没有「区域」二字），按下即互切 —— 071。
+    func testTheViewButtonSaysSdrThenHdr() throws {
+        XCTAssertEqual(CurveViewMode.sdr.buttonTitle, "SDR")
+        XCTAssertEqual(CurveViewMode.hdr.buttonTitle, "HDR")
+        XCTAssertEqual(CurveViewMode.sdr.next, .hdr)
+        XCTAssertEqual(CurveViewMode.hdr.next, .sdr, "两态互切")
+        XCTAssertEqual(CurveViewMode.sdr.next.next, .sdr, "按两次回到原处")
+        XCTAssertEqual(CurveViewMode.allCases.count, 2, "没有第三个「全部」状态")
+        XCTAssertEqual(CurveViewMode.allCases.map(\.buttonTitle), ["SDR", "HDR"])
+        for mode in CurveViewMode.allCases {
+            XCTAssertFalse(mode.buttonTitle.contains("区域"), "按钮上不许有「区域」二字")
+            XCTAssertFalse(mode.buttonTitle.contains("视图"), "按钮写的是状态，不是「视图」")
+        }
+        // 每个状态的 span 就是它显示的那一半：SDR 0…1、HDR 1…2。
+        XCTAssertEqual(CurveViewMode.sdr.span, 0...1)
+        XCTAssertEqual(CurveViewMode.hdr.span, 1...2)
+
+        // 旧文案（写的是「按下去会去哪」，而且把「全部」叫成 HDR）必须从源码里消失。
+        let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
+        XCTAssertFalse(source.contains("\"SDR 区域\"") || source.contains("\"HDR 区域\""),
+                       "「区域」二字的旧按钮文案必须删掉")
+        XCTAssertTrue(source.contains("CurvePanelButton(mode.buttonTitle, identifier: \"curve.view\")"),
+                      "按钮显示的就是当前状态的文案，不许在视图里再写一遍")
+        XCTAssertTrue(source.contains("@State private var viewMode: CurveViewMode = .sdr"),
+                      "卡片打开就是 SDR 视图")
+        print("button · SDR →「\(CurveViewMode.sdr.buttonTitle)」· HDR →「\(CurveViewMode.hdr.buttonTitle)」")
     }
 
     // MARK: - helpers

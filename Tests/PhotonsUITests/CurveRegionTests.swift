@@ -5,7 +5,7 @@ import CryptoKit
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 070 — the curve card's two owner-reported problems, held as pixels.
+/// 070/071 — the curve card's two owner-reported problems, held as pixels.
 ///
 /// Both complaints are about what the card *looks like*, so both are measured on a rendered
 /// `NSHostingView` rather than argued from constants:
@@ -17,22 +17,21 @@ import PhotonsCore
 ///      row, then asserts the order **and the gaps**: 区域 行 → tabs → 绘图区 → 读数/复位. Putting the
 ///      switch back at the tail of the tab row (as `b57c794` did) fails the gap, not a comment.
 ///
-///   2. **「切到 SDR 后曲线没有重新绘制」** — pressing the capsule must repaint the plot **as a 2×
-///      magnified SDR region**. The mechanism is pinned in `CurvePanel.draw`: the table samples the
-///      engine's axis (`CurvePoint.u == x/2`), so a sample's card coordinate is `2·u` across and `2·v`
-///      up; the `0…2` migration fed the raw numbers, so every curve was drawn at half scale in the
-///      lower-left quadrant, and in the SDR window (`xSpan` `0…1`) the gate then let the **whole**
-///      table through — the switch repainted a picture of the wrong region. One document with a
-///      control point at `(0.5, 0.8)` is rendered in both views and the point's own position is
-///      measured: a 6 pt dot at the quarter-width / 40 % height in `.all`, at the half-width / 80 %
-///      height in `.sdr` (the 2×), and only the 1.4 pt line at the other view's spot — so "same
-///      curve, stretched" cannot pass. `(2, 2)` (the +4 EV end) is a dot in `.all` and is not drawn
-///      at all in `.sdr`; all → sdr → all comes back byte-identical; and the switch writes nothing —
-///      same curve, same history, same `editRevision`, same encoded document bytes.
-///
-/// The presses are real: `NSHostingView` in a key window, `window.sendEvent(mouseDown/mouseUp)` at the
-/// capsule's measured centre. (`swift test` *can* deliver mouse events this way — the earlier note
-/// that it cannot was about accessibility, which does need a live AX session.)
+///   2. **「曲线/控制点的切换还没好」** (071) — the card has two states, `SDR` (`0…1`, magnified) and
+///      `HDR` (`1…2`, magnified), and the button names the state it is **in**. Three things are
+///      measured on the bitmaps, not on the geometry:
+///        · the **curve's ink bounding box inside the value box** must fill it in *both* states
+///          (≥ 90 % each way, edges on the box's edges). 069's third state — the whole `0…2` axis,
+///          labelled 「HDR 区域」 — is what the owner saw as 「HDR 模式下只占据左下 1/2」.
+///        · a known control point must sit at the **centre** of the box of its own half: `(0.5,0.5)`
+///          in SDR, `(1.5,1.5)` in HDR, and not at the 1/4 / 3/4 position 069's full-axis mapping
+///          gave them (measured as a 6 pt dot, i.e. a ≥ 5 pt dark run, at that pixel).
+///        · the **curve passes through those control points**: at three fractions of the box the ink
+///          is where `CurvePlotGeometry.y(v:)` says it is, so the line and the handles share one
+///          transform — the 069/070 bug was exactly that they did not.
+///      The press is real (`NSHostingView` in a key window, `sendEvent(mouseDown/mouseUp)` at the
+///      capsule's measured centre), the round trip must be byte-identical, and the switch writes
+///      nothing — same curve, same history, same `editRevision`, same encoded document bytes.
 @MainActor
 final class CurveRegionTests: XCTestCase {
 
@@ -86,86 +85,98 @@ final class CurveRegionTests: XCTestCase {
               + " · 胶囊→复位行 \(Self.f(gap)) pt · 卡片高 \(Self.f(card.host.fittingSize.height)) pt")
     }
 
-    // MARK: - ② switching really repaints: 2× magnified SDR region, document untouched
+    // MARK: - ② the two states are the two halves, and the curve fills the box in both
 
-    func testSwitchingToTheSdrViewRepaintsThePlotAsATwiceMagnifiedRegion() throws {
+    /// 071 — **曲线铺满、点落在自己那一半的正中**，两种状态各测一遍，全部以位图为准。
+    ///
+    /// One document, four probes chosen so the two states cannot pass with the same picture:
+    /// (0.5, 0.5) is the **centre** of the SDR box, (1.5, 1.5) the centre of the HDR box — under 069's
+    /// 「全部」 mapping (the state whose button used to say 「HDR 区域」) they sat at 25 %/75 % and
+    /// 75 %/25 %, which is the 「控制点在 SDR 下位置没变化」 the owner reported — and two off-diagonal
+    /// points, (0.4, 0.2) in the SDR half and (1.6, 1.8) in the HDR half, so "this view does not draw
+    /// the other half's points" is a pixel nobody else paints. `y` stays increasing throughout, so the
+    /// engine's monotone cubic round-trips them unchanged.
+    func testTheCurveFillsTheBoxAndThePointsSitOnTheirOwnHalfInBothViews() throws {
+        let points = [CurvePoint(0, 0), CurvePoint(0.4, 0.2), CurvePoint(0.5, 0.5),
+                      CurvePoint(1.5, 1.5), CurvePoint(1.6, 1.8), CurvePoint(2, 2)]
         let session = CatalogSession()
-        // Two control points the two views must disagree about: `(0.5, 0.8)` is inside both (and
-        // lands at two different places — that is the 2×), `(1.2, 1.2)` is in the HDR half and is
-        // therefore invisible in the SDR window. (1,1) is deliberately **not** a point: the white
-        // point would sit exactly on the SDR view's top-right corner and hide the crop.
-        session.applyEdit {
-            $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.8),
-                              CurvePoint(1.2, 1.2), CurvePoint(2, 2)]
-        }
+        session.applyEdit { $0.curve.white = points }
         session.commitEdit(label: "曲线")
 
         let card = Self.host(CurvePanel(session: session), width: 274)
-        let all = try XCTUnwrap(Self.snapshot(card.host))
-        let rows = all.bands(darkerThan: 250)
-        let plot = try XCTUnwrap(all.plotBand(rows), "没找到绘图区那一带")
-        // The GeometryReader's own origin: the plot band's first ink row is the frame 0.5 pt inside it.
-        let rowOffset = all.pt(plot.top) - CurvePanelMetrics.plotInset
+        let sdr = try XCTUnwrap(Self.snapshot(card.host))          // 071: the card opens in SDR
+        let rows = sdr.bands(darkerThan: 250)
+        let plot = try XCTUnwrap(sdr.plotBand(rows), "没找到绘图区那一带")
+        let rowOffset = sdr.pt(plot.top) - CurvePanelMetrics.plotInset
+        let capsule = try XCTUnwrap(Self.capsule(sdr))
 
         let curveBefore = session.edit.curve
         let historyBefore = session.history.count
         let revisionBefore = session.editRevision
         let bytesBefore = try Self.documentBytes(session)
 
-        // ── press the capsule we just measured ────────────────────────────────────────────
-        let capsule = try XCTUnwrap(Self.capsule(all))
-        Self.press(card, at: NSPoint(x: all.pt(capsule.midX), y: all.pt(capsule.midY)))
-        let sdr = try XCTUnwrap(Self.snapshot(card.host))
+        // ── ① SDR: the curve fills the value box, (0.5,0.5) is its centre ────────────────────
+        try Self.assertCurveFillsBox(sdr, view: .sdr, offset: rowOffset, label: "SDR")
+        // Note: the expectations below are **literal fractions of the box**, never `geometry.point` —
+        // otherwise a wrong span would move the expectation along with the picture and this test would
+        // pass with the bug in place (071's mutation check).
+        try Self.assertDot(at: sdr, fx: 0.5, fy: 0.5, offset: rowOffset,
+                           message: "SDR 视图：(0.5, 0.5) 必须落在 valueBox 正中（2 倍放大）")
+        try Self.assertDot(at: sdr, fx: 0.4, fy: 0.8, offset: rowOffset,
+                           message: "SDR 视图：(0.4, 0.2) 在 40 % 宽、80 % 高")
+        // 反证：069 的全幅映射把 (0.5,0.5) 放在 1/4 宽、3/4 高处，那颗点不许在那儿。
+        XCTAssertLessThanOrEqual(
+            Self.darkRun(sdr, at: Self.fullAxisPoint(CurvePoint(0.5, 0.5), offset: rowOffset)), 4,
+            "SDR 视图里不该有第二颗点落在「全幅」映射的位置上")
+        // 另一半的点不画、不可命中：查它在 HDR 视图里会占的那一格。
+        XCTAssertLessThanOrEqual(
+            Self.darkRun(sdr, at: Self.boxPoint(fx: 0.6, fy: 0.2, offset: rowOffset)), 4,
+            "SDR 视图里不该出现 HDR 那一半的点 (1.6,1.8)")
 
-        // ── ① the two bitmaps differ, and they differ *inside the plot* ───────────────────
-        let plotDiff = all.difference(sdr, rowsY: plot.top..<plot.bottom)
-        XCTAssertGreaterThan(plotDiff, 500, "按下区域后绘图区必须有像素变化，实际 \(plotDiff) px")
-        XCTAssertNotEqual(all.sha256, sdr.sha256, "两张位图整体必须不同")
+        // ── ② press → HDR: the HDR half, magnified, (1.5,1.5) in the centre ─────────────────
+        Self.press(card, at: NSPoint(x: sdr.pt(capsule.midX), y: sdr.pt(capsule.midY)))
+        let hdr = try XCTUnwrap(Self.snapshot(card.host))
+        XCTAssertNotEqual(sdr.sha256, hdr.sha256, "两个状态的位图必须不同")
+        try Self.assertCurveFillsBox(hdr, view: .hdr, offset: rowOffset, label: "HDR")
+        try Self.assertDot(at: hdr, fx: 0.5, fy: 0.5, offset: rowOffset,
+                           message: "HDR 视图：(1.5, 1.5) 必须落在 valueBox 正中（1…2 铺满）")
+        try Self.assertDot(at: hdr, fx: 0.6, fy: 0.2, offset: rowOffset,
+                           message: "HDR 视图：(1.6, 1.8) 在 60 % 宽、20 % 高")
+        XCTAssertLessThanOrEqual(
+            Self.darkRun(hdr, at: Self.boxPoint(fx: 0.4, fy: 0.8, offset: rowOffset)), 4,
+            "HDR 视图里不该出现 SDR 那一半的点 (0.4,0.2)")
+        // HDR 视图没有刻度（069 取消了 stops，1…2 里没有可标的数字）：绘图区下面那一带只有卡片底色。
+        let plotBottom = rowOffset + CurvePanelMetrics.plotRect(
+            in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight)).maxY
+        let tickTop = Int(plotBottom * sdr.scale)
+        let tickBottom = Int((plotBottom + CurvePanelMetrics.tickBand - 2) * sdr.scale)
+        let tickBandRows = tickTop..<tickBottom
+        XCTAssertNil(hdr.bbox(of: 0...250, in: tickBandRows), "HDR 视图不该画刻度（只画网格）")
+        // …而 SDR 视图里那一带**有**刻度（五档码值），否则上一条断言会因为「哪儿都没字」而空过。
+        XCTAssertNotNil(sdr.bbox(of: 0...250, in: tickBandRows), "SDR 视图必须有刻度")
 
-        // ── ② a point lands where the card says, in both views (the 2×, measured) ─────────
-        let probe = CurvePoint(0.5, 0.8)
-        try Self.assertDot(all, view: .all, card: probe, offset: rowOffset,
-                           message: "全部视图：(0.5, 0.8) 应在 1/4 宽、40 % 高")
-        try Self.assertDot(sdr, view: .sdr, card: probe, offset: rowOffset,
-                           message: "SDR 视图：(0.5, 0.8) 应在 1/2 宽、80 % 高（2 倍放大）")
-        // The other view's spot must carry no dot: a "zoom" that draws the same point twice is exactly
-        // the "curve did not redraw" the owner reported.
-        let probeAll = Self.screenPoint(probe, view: .all, offset: rowOffset)
-        let probeSdr = Self.screenPoint(probe, view: .sdr, offset: rowOffset)
-        XCTAssertLessThanOrEqual(Self.darkRun(sdr, at: probeAll), 4,
-                                 "SDR 视图里不该有第二颗点落在全部视图的位置上")
-        XCTAssertLessThanOrEqual(Self.darkRun(all, at: probeSdr), 4,
-                                 "全部视图里不该有第二颗点落在 SDR 视图的位置上")
+        // ── ③ 曲线经过自己的控制点：同一条变换的像素级证据 ─────────────────────────────────
+        // The curve's ink is measured at three fractions of the box against the *geometry's* own
+        // mapping (fed by the engine's table, the same numbers `draw` feeds it): a curve drawn with a
+        // different ratio than the dots would miss those rows.
+        try Self.assertCurveFollowsTheMapping(sdr, view: .sdr, points: points,
+                                              offset: rowOffset, label: "SDR")
+        try Self.assertCurveFollowsTheMapping(hdr, view: .hdr, points: points,
+                                              offset: rowOffset, label: "HDR")
 
-        // ── a point in the HDR half: a dot in `.all`, **not drawn** in `.sdr` ──────────────
-        //
-        // This is what "the SDR view is the SDR *region*" means as a picture: the +0.8 EV point is on
-        // the card in the all view and off the window in the SDR view, where only the curve's cropped
-        // line remains.
-        let hdr = CurvePoint(1.2, 1.2)
-        try Self.assertDot(all, view: .all, card: hdr, offset: rowOffset,
-                           message: "全部视图：(1.2, 1.2) 应在 60 % 宽、60 % 高处")
-        XCTAssertLessThanOrEqual(Self.darkRun(sdr, at: Self.screenPoint(hdr, view: .all, offset: rowOffset)), 4,
-                                 "SDR 视图：全部视图画 (1.2, 1.2) 的那个像素上没有点")
-        // …and the curve is cut at display white: the window's top-right corner carries the line's end,
-        // not a point.
-        let corner = Self.screenPoint(CurvePoint(2, 2), view: .sdr, offset: rowOffset)
-        XCTAssertLessThanOrEqual(Self.darkRun(sdr, at: corner), 4,
-                                 "SDR 视图：曲线在 x = 1（显示白）处被裁掉，右上角只有线尾")
-
-        // ── ③ all → sdr → all, byte for byte ─────────────────────────────────────────────
-        Self.press(card, at: NSPoint(x: all.pt(capsule.midX), y: all.pt(capsule.midY)))
+        // ── ④ press again → back to SDR, byte for byte ──────────────────────────────────────
+        Self.press(card, at: NSPoint(x: sdr.pt(capsule.midX), y: sdr.pt(capsule.midY)))
         let back = try XCTUnwrap(Self.snapshot(card.host))
-        XCTAssertEqual(all.sha256, back.sha256, "切回全部视图必须逐字节回到原图")
+        XCTAssertEqual(sdr.sha256, back.sha256, "按两次必须逐字节回到原图")
 
-        // ── the switch is view state: no document, no history, no sidecar ────────────────
-        XCTAssertEqual(session.edit.curve, curveBefore, "切区域不改文档")
-        XCTAssertEqual(session.history.count, historyBefore, "切区域不产生历史")
-        XCTAssertEqual(session.editRevision, revisionBefore, "切区域不 bump revision（画布不用重渲染）")
+        // ── ⑤ the switch is view state: no document, no history, no sidecar ────────────────
+        XCTAssertEqual(session.edit.curve, curveBefore, "切视图不改文档")
+        XCTAssertEqual(session.history.count, historyBefore, "切视图不产生历史")
+        XCTAssertEqual(session.editRevision, revisionBefore, "切视图不 bump revision")
         XCTAssertEqual(try Self.documentBytes(session), bytesBefore, "sidecar 里的曲线块一个字节都不变")
 
-        print("redraw · 绘图区变化 \(plotDiff) px · all \(all.sha256.prefix(12)) · sdr \(sdr.sha256.prefix(12))"
-              + " · 往返 " + (all.sha256 == back.sha256 ? "逐字节相同" : "不同")
+        print("redraw · sdr \(sdr.sha256.prefix(12)) · hdr \(hdr.sha256.prefix(12))"
+              + " · 往返 " + (sdr.sha256 == back.sha256 ? "逐字节相同" : "不同")
               + " · 历史 \(session.history.count) · revision \(session.editRevision)")
     }
 
@@ -184,28 +195,118 @@ final class CurveRegionTests: XCTestCase {
             in: CGSize(width: 274, height: CurvePanelMetrics.plotHeight)), view: view)
     }
 
+    /// The value box the card actually draws into at the default 274 pt width.
+    private static func valueBox() -> CGRect { geometry(.sdr).valueBox }
+
     /// A card coordinate → the bitmap point of the card at 274 pt of width.
     static func screenPoint(_ p: CurvePoint, view: CurveViewMode, offset: CGFloat) -> CGPoint {
         let inPlot = geometry(view).point(p)
         return CGPoint(x: inPlot.x, y: inPlot.y + offset)
     }
 
-    /// Assert a **dot** is drawn at `p` for `view`: the widest dark run near that row is at least 5 pt
-    /// (a 3 pt radius disc), centred on the position within 2.5 pt.
-    private static func assertDot(_ image: Bitmap, view: CurveViewMode, card: CurvePoint,
+    /// A **literal fraction of the value box** (fx across, fy down) — the expectation for a picture the
+    /// test is checking, so a wrong span cannot drag the expectation along with it.
+    static func boxPoint(fx: CGFloat, fy: CGFloat, offset: CGFloat) -> CGPoint {
+        let box = valueBox()
+        return CGPoint(x: box.minX + fx * box.width, y: box.minY + fy * box.height + offset)
+    }
+
+    /// **The 反证's mapping**: 069's full axis, `0…2` stretched across the box — what the views must
+    /// not be using any more (071).
+    static func fullAxisPoint(_ p: CurvePoint, offset: CGFloat) -> CGPoint {
+        let box = valueBox()
+        return CGPoint(x: box.minX + CGFloat(p.x / 2) * box.width,
+                       y: box.maxY - CGFloat(p.y / 2) * box.height + offset)
+    }
+
+    /// Assert a **dot** is drawn at `(fx, fy)` of the value box: the widest dark run near that row is at
+    /// least 5 pt (a 3 pt radius disc), centred on the position within 2.5 pt.
+    private static func assertDot(at image: Bitmap, fx: CGFloat, fy: CGFloat,
                                   offset: CGFloat, message: String) throws {
-        let point = screenPoint(card, view: view, offset: offset)
+        let point = boxPoint(fx: fx, fy: fy, offset: offset)
         let run = darkRunDetail(image, at: point)
         XCTAssertGreaterThanOrEqual(run.width, 5,
                                     message + " — 该处应是 6 pt 的点，实测最宽 \(run.width) pt")
         XCTAssertEqual(run.centerX, point.x, accuracy: 2.5,
                        message + " — 点的中心 x 应为 \(point.x) pt，实测 \(run.centerX)")
         XCTAssertEqual(run.centerY, point.y, accuracy: 2.5, message + " — y 同理")
+        print(String(format: "dot · %@: 实测 (%.1f, %.1f) · 期望 (%.1f, %.1f) · 宽 %.1f pt",
+                     message, run.centerX, run.centerY, point.x, point.y, run.width))
     }
 
     /// The widest contiguous run of dark pixels around `point`, in points.
     static func darkRun(_ image: Bitmap, at point: CGPoint) -> CGFloat {
         darkRunDetail(image, at: point).width
+    }
+
+    // MARK: - the curve's ink, measured against the value box (071)
+
+    /// The curve's ink bounding box inside the value box, as **pixels and as a percentage of the box**,
+    /// asserted to fill it. This is the owner's 「HDR 模式下只占据左下 1/2」 as a number: a curve drawn
+    /// at half scale in one corner fails `width ≥ 90 %` or `height ≥ 90 %`, and a curve that starts
+    /// one inset in fails the edge equalities.
+    ///
+    /// The 120 threshold is what isolates the **curve**: `primary` at full opacity is black, the 4 × 4
+    /// grid is 0.10 (≈ 229 on white), the dashed identity 0.22 (≈ 199), the plot's field 0.04 (≈ 245),
+    /// and the 8 pt tick labels live outside these rows.
+    static func assertCurveFillsBox(_ image: Bitmap, view: CurveViewMode, offset: CGFloat,
+                                    label: String) throws {
+        let box = valueBox()
+        let s = image.scale
+        let rows = Int(((offset + box.minY) * s).rounded())..<Int(((offset + box.maxY) * s).rounded())
+        let cols = Int((box.minX * s).rounded())..<Int((box.maxX * s).rounded())
+        let ink = try XCTUnwrap(image.inkBox(darkerThan: 120, cols: cols, rows: rows),
+                                "\(label) 视图：绘图区里没有曲线的墨迹")
+
+        let inkW = image.pt(ink.maxX - ink.minX + 1)
+        let inkH = image.pt(ink.bottom - ink.top + 1)
+        let widthPct = 100 * inkW / box.width
+        let heightPct = 100 * inkH / box.height
+        let maxY = image.pt(ink.bottom) - offset
+        XCTAssertGreaterThanOrEqual(widthPct, 90,
+                                    "\(label) 视图：曲线只占 box 宽的 \(String(format: "%.0f", widthPct))%")
+        XCTAssertGreaterThanOrEqual(heightPct, 90,
+                                    "\(label) 视图：曲线只占 box 高的 \(String(format: "%.0f", heightPct))%")
+        XCTAssertEqual(image.pt(ink.minX), box.minX, accuracy: 2, "\(label)：墨迹左边不在 box 左边")
+        XCTAssertEqual(image.pt(ink.maxX), box.maxX, accuracy: 2, "\(label)：墨迹右边不在 box 右边")
+        XCTAssertEqual(maxY, box.maxY, accuracy: 2, "\(label)：墨迹**底边**不在 box 底边（左下 1/2 的形态）")
+        XCTAssertEqual(image.pt(ink.top) - offset, box.minY, accuracy: 2, "\(label)：墨迹顶边不在 box 顶边")
+
+        print(String(format: "ink · %@: x %.1f…%.1f (%.1f pt = %.0f%% of %.1f)"
+                     + " · y %.1f…%.1f (%.1f pt = %.0f%% of %.1f)",
+                     label, image.pt(ink.minX), image.pt(ink.maxX), inkW, widthPct, box.width,
+                     image.pt(ink.top) - offset, maxY, inkH, heightPct, box.height))
+    }
+
+    /// The curve's ink is where the **geometry** says it is: at three fractions of the box, the dark
+    /// run's centre row equals `yRaw(v:)` of the card coordinate the *engine's table* holds there —
+    /// the same `2·u` / `2·v` pair `draw` feeds into the same two functions. Within 1.5 pt.
+    ///
+    /// Together with `assertDot` (the dots are drawn at `point(_:)`) this is the pixel-level form of
+    /// 「同一变换」: the line and the handles cannot be drawn by two different ratios, because both are
+    /// measured against the same function.
+    static func assertCurveFollowsTheMapping(_ image: Bitmap, view: CurveViewMode,
+                                             points: [CurvePoint], offset: CGFloat,
+                                             label: String) throws {
+        let box = valueBox()
+        let geometry = geometry(view)
+        let span = view.span
+        let table = CurveLUT.buildOne(points)
+        let last = table.count - 1
+        var rows: [String] = []
+        for fraction in [CGFloat(0.2), 0.5, 0.8] {
+            let cardX = span.lowerBound + Double(fraction) * (span.upperBound - span.lowerBound)
+            let sample = min(max(Int((cardX / 2 * Double(last)).rounded()), 0), last)
+            let want = geometry.yRaw(v: 2 * Double(table[sample])) + offset
+            let x = box.minX + fraction * box.width
+            let got = try XCTUnwrap(image.inkCentreY(nearX: x, aroundY: want, window: 10),
+                                    "\(label) 视图：x = \(String(format: "%.1f", x)) 处没有曲线的墨迹")
+            XCTAssertEqual(got, want, accuracy: 1.5,
+                           "\(label) 视图：曲线在 box 宽 \(Int(fraction * 100))% 处的高度是 "
+                           + "\(String(format: "%.1f", got)) pt，几何说 \(String(format: "%.1f", want)) pt")
+            rows.append(String(format: "%.0f%%→%.1f/%.1f", fraction * 100, got, want))
+        }
+        print("follows · \(label): " + rows.joined(separator: " · "))
     }
 
     struct Run { let width: CGFloat, centerX: CGFloat, centerY: CGFloat }
@@ -395,6 +496,42 @@ final class CurveRegionTests: XCTestCase {
             var maxX: Int { right }
             var midX: Int { (left + right) / 2 }
             var midY: Int { (top + bottom) / 2 }
+        }
+
+        /// The bounding box of the pixels **darker than `threshold`, inside `cols` × `rows`** — the
+        /// curve's ink inside the value box, with the grid, the field and the dashed diagonal excluded
+        /// by luminance alone (071).
+        func inkBox(darkerThan threshold: Int, cols: Range<Int>, rows: Range<Int>) -> Box? {
+            let rows = rows.clamped(to: 0..<height)
+            let cols = cols.clamped(to: 0..<width)
+            var left = Int.max, right = -1, top = Int.max, bottom = -1
+            for y in rows {
+                for x in cols where lum[y * width + x] < threshold {
+                    left = min(left, x); right = max(right, x)
+                    top = min(top, y); bottom = max(bottom, y)
+                }
+            }
+            guard right >= 0 else { return nil }
+            return Box(left: left, right: right, top: top, bottom: bottom)
+        }
+
+        /// The centre row of the dark ink in a narrow column around `x`, searched ±`window` points
+        /// around `aroundY`. `nil` when that column carries no curve.
+        func inkCentreY(nearX x: CGFloat, aroundY: CGFloat, window: CGFloat) -> CGFloat? {
+            let cx = Int((x * scale).rounded()), cy = Int((aroundY * scale).rounded())
+            let span = Int((window * scale).rounded())
+            var top = Int.max, bottom = -1
+            for y in max(cy - span, 0)...min(cy + span, height - 1) {
+                for dx in -Int(2 * scale)...Int(2 * scale) {
+                    let px = cx + dx
+                    guard px >= 0, px < width else { continue }
+                    if lum[y * width + px] < 120 {
+                        top = min(top, y); bottom = max(bottom, y)
+                    }
+                }
+            }
+            guard bottom >= 0 else { return nil }
+            return (CGFloat(top) + CGFloat(bottom)) / 2 / scale
         }
 
         /// How many pixels differ between two bitmaps, limited to `rowsY`.
