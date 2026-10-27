@@ -323,13 +323,13 @@ final class SortOrderUITests: XCTestCase {
         let harness = try makeHarness(library, store: makeStore())
         let undatedID = library.idOf[Self.undated]
 
-        for (order, view) in [("新→旧", harness.gridOrder)] {
-            XCTAssertEqual(order.count, 7, "\(view) 应有 7 项")
-            XCTAssertEqual(view.first, library.idOf["L1030408.dng"])
-            XCTAssertEqual(Array(view.dropLast()).last, library.idOf["L1030402.dng"], "有拍摄时间的最旧一张排第 6")
-            XCTAssertEqual(view.last, undatedID, "无拍摄时间的那张排在末尾")
-        }
-        let newestFirst = harness.names(harness.gridOrder)
+        let newestFirstIDs = harness.gridOrder
+        XCTAssertEqual(newestFirstIDs.count, 7, "网格应画出全部 7 项")
+        XCTAssertEqual(newestFirstIDs.first, library.idOf["L1030408.dng"])
+        XCTAssertEqual(Array(newestFirstIDs.dropLast()).last, library.idOf["L1030402.dng"],
+                       "有拍摄时间的最旧一张排第 6")
+        XCTAssertEqual(newestFirstIDs.last, undatedID, "无拍摄时间的那张排在末尾")
+        let newestFirst = harness.names(newestFirstIDs)
         XCTAssertEqual(newestFirst, Self.expectedNewestFirst(includingUndated: true))
 
         harness.session.toggleSortOrder()
