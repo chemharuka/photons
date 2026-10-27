@@ -50,12 +50,13 @@ public struct InspectorView: View {
         /// 白平衡 is its own section, between the histogram and Light (派单 009 A): it is a *decode*
         /// setting (006), not a tone control, and burying it under six sliders misrepresented that.
         case whiteBalance
-        case light
-        /// 派单 071: 黑电平 — the additive linear black trim. Its own card, directly under Light, and
-        /// **not** a seventh row of Light: it is the panel's only linear-domain parameter, and 046's
-        /// row-shape rule is per parameter class, so a card of its own is what lets it carry the red
-        /// accent without pretending the six tone sliders changed colour.
+        /// 派单 071: 黑电平 — the additive linear black trim. Its own card, **directly under 白平衡**
+        /// (owner's order, 2026-10-27: 「黑电平移动到白平衡下方」) and **not** a seventh row of Light:
+        /// it is the panel's only linear-domain parameter, and 046's row-shape rule is per parameter
+        /// class, so a card of its own is what lets it carry the red accent without pretending the six
+        /// tone sliders changed colour.
         case blackLevel
+        case light
         case color
         /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
         /// are the same panel in Lightroom, and below the tone controls because they act on the

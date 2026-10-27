@@ -264,7 +264,7 @@ final class InspectorPinnedHeaderTests: XCTestCase {
         XCTAssertEqual(InspectorView.scrollingSections,
                        InspectorView.Section.allCases.filter { $0 != .histogram })
         // The enum (and therefore the smoke's card order) is untouched: 直方图 still leads it.
-        XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "Light"])
+        XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         print("SECTIONS scrolling \(InspectorView.scrollingSections.map(\.title)) · "
               + "titles \(InspectorView.sectionTitles) · histogram cards in tree \(panel.histogramCards)")
     }

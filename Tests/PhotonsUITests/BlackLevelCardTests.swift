@@ -20,12 +20,17 @@ final class BlackLevelCardTests: XCTestCase {
 
     // MARK: - 1. 卡片存在、位置、名字
 
-    func testTheCardSitsDirectlyUnderLightAndAboveColor() {
+    func testTheCardSitsDirectlyUnderWhiteBalanceAndAboveLight() {
         let titles = InspectorView.sectionTitles
-        guard let light = titles.firstIndex(of: "Light") else {
-            return XCTFail("no Light card in \(titles)")
+        guard let wb = titles.firstIndex(of: "白平衡") else {
+            return XCTFail("no 白平衡 card in \(titles)")
         }
-        XCTAssertEqual(titles[light + 1], "黑电平", "黑电平必须紧跟 Light，实际 \(titles)")
+        // 用户 2026-10-27：「黑电平移动到白平衡下方」。
+        XCTAssertEqual(titles[wb + 1], "黑电平", "黑电平必须紧跟 白平衡，实际 \(titles)")
+        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "Light") else {
+            return XCTFail("missing 黑电平/Light in \(titles)")
+        }
+        XCTAssertEqual(black + 1, light, "黑电平在白平衡与 Light 之间，实际 \(titles)")
         XCTAssertEqual(titles.filter { $0 == "黑电平" }.count, 1, "一张黑电平卡，不是两张")
         XCTAssertEqual(InspectorView.Section.blackLevel.title, "黑电平", "标题 = 卡名 = 撤销标签")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.blackLevel), "它跟随滚动，不属于钉住区")
@@ -34,7 +39,7 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.lightRows.count, 6, "黑电平不是 Light 的第七根滑杆")
         XCTAssertFalse(InspectorView.lightRows.map(\.title).contains("黑电平"))
         // 预钉的头部没动。
-        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "Light"])
+        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "黑电平"])
     }
 
     /// 行表本身：一行、整数行程、整数读数、可键入、线性域形状、绑 `light.blackOffset`。

@@ -24,7 +24,7 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertEqual(titles.filter { $0 == "细节" }.count, 1, "one 细节 card, not two")
 
         // The pinned head is untouched, and the new card scrolls with the rest.
-        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "Light"])
+        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         XCTAssertTrue(InspectorView.scrollingSections.contains(.detail))
     }
 

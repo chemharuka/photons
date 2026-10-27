@@ -70,7 +70,7 @@ final class WhiteBalanceSectionTests: XCTestCase {
 
     func testSectionsRunHistogramThenWhiteBalanceThenLight() {
         let titles = InspectorView.sectionTitles
-        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "Light"],
+        XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "黑电平"],
                        "白平衡 must sit under the histogram and above Light; got \(titles)")
         XCTAssertEqual(titles.filter { $0 == "白平衡" }.count, 1, "one 白平衡 section, not two")
         // 色温/色调 left the Light card (派单 009 A): Light is tone only, every section is distinct.
