@@ -245,11 +245,21 @@ public struct LoupeZoomBridge: Equatable, Sendable {
     /// transition, not just at the two ends (025).
     public let anchor: LoupeZoomAnchor
 
+    /// 054b: where the photograph sits **inside the held texture**, in that texture's pixels.
+    ///
+    /// A letterboxed frame carries `float4(0)` outside the picture (S2/S4 write it), and only the
+    /// present pass can turn that into the canvas matte — which it does from this rect. Without it a
+    /// bridge frame drew those zeros as **black**, so the 054 grey appeared at rest and a black band
+    /// appeared the moment a zoom started (both directions). Optional because a frame that fills its
+    /// texture needs none: `nil` is "the picture is the whole texture".
+    public let pictureRect: ImageRect?
+
     public init(fromContent: ImageSize, toContent: ImageSize,
                 fromMapping: LoupeMapping, toMapping: LoupeMapping, canvas: ImageSize,
                 startScale: Double = 1, startOffsetX: Double = 0, startOffsetY: Double = 0,
                 layerAnchorPoint: CGPoint = .zero, layerIsFlipped: Bool = true,
                 anchor: LoupeZoomAnchor = .center,
+                pictureRect: ImageRect? = nil,
                 duration: CFTimeInterval = LoupeZoomBridge.defaultDuration) {
         self.fromContent = fromContent
         self.toContent = toContent
@@ -262,6 +272,7 @@ public struct LoupeZoomBridge: Equatable, Sendable {
         self.layerAnchorPoint = layerAnchorPoint
         self.layerIsFlipped = layerIsFlipped
         self.anchor = anchor
+        self.pictureRect = pictureRect
         self.duration = duration
     }
 

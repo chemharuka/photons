@@ -1560,7 +1560,10 @@ public final class LoupeController: NSViewController {
             startScale: start.scale, startOffsetX: start.x, startOffsetY: start.y,
             layerAnchorPoint: canvasView.metalLayer.anchorPoint,
             layerIsFlipped: canvasView.metalLayer.isGeometryFlipped,
-            anchor: anchor)
+            anchor: anchor,
+            // 054b: the held frame's own picture rect, so every bridge frame can paint the canvas
+            // matte outside the photograph instead of leaving S2/S4's zeros as a black band.
+            pictureRect: canvasPicture.flatMap { $0.canvas == texture ? $0.rect : nil })
         guard bridge.isVisible else {
             // Nothing geometric moved (fit and 100 % coincide on a small file, or the window was
             // clamped to the same rect): the arriving frame *is* the whole change.
@@ -1716,7 +1719,8 @@ public final class LoupeController: NSViewController {
         let ok = presenter.present(texture, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, window: window, backdrop: drawn,
-                                   backdropWindow: backdropWindow) { [weak self] in
+                                   backdropWindow: backdropWindow,
+                                   pictureRect: bridge.pictureRect) { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.zoomBridgePresentsInFlight = max(0, self.zoomBridgePresentsInFlight - 1)

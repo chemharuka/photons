@@ -103,6 +103,37 @@ final class CanvasMatteGreyTests: XCTestCase {
                       "the out-of-picture result must be replaced by the matte, not kept from the clamp")
     }
 
+    /// 054b — the black band during a zoom.
+    ///
+    /// The settled frame gets `pictureRect`, so the present pass paints `#0F0F0F` outside the
+    /// photograph. The **bridge** frames did not, so the same zeros S2/S4 wrote were drawn as pure
+    /// black the moment a zoom started — a black band in both directions, against a grey canvas.
+    /// The bridge now carries the held frame's rect; this pins that it does, and that it is the rect
+    /// the frame was presented with (not a second computation that could drift).
+    func testTheZoomBridgeCarriesTheHeldFramesPictureRect() throws {
+        let source = try String(contentsOf: Self.kernelURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("kCanvasMatteDisplay"))
+
+        let controller = try String(contentsOf: Self.loupeSource, encoding: .utf8)
+        guard let arm = controller.range(of: "let bridge = LoupeZoomBridge("),
+              let end = controller.range(of: "guard bridge.isVisible") else {
+            return XCTFail("the bridge is no longer armed in one place")
+        }
+        let call = String(controller[arm.lowerBound..<end.lowerBound])
+        XCTAssertTrue(call.contains("pictureRect: canvasPicture"),
+                      "the bridge must take the rect the frame on the canvas was presented with")
+        XCTAssertTrue(call.contains("$0.canvas == texture"),
+                      "…and only when that texture is the one the bridge holds")
+
+        guard let present = controller.range(of: "private func presentZoomBridgeFrame"),
+              let presentEnd = controller.range(of: "if !ok {", range: present.upperBound..<controller.endIndex) else {
+            return XCTFail("presentZoomBridgeFrame moved")
+        }
+        let body = String(controller[present.lowerBound..<presentEnd.lowerBound])
+        XCTAssertTrue(body.contains("pictureRect: bridge.pictureRect"),
+                      "every bridge frame must hand the matte its rect, or the band is black")
+    }
+
     /// The two layer backgrounds and the shader are one colour. `LoupeCanvasView` is built for real; the
     /// container layer is pinned where it is assigned (its controller needs a catalog session), so this
     /// test also fails if a literal creeps back in.
@@ -395,6 +426,17 @@ final class CanvasMatteGreyTests: XCTestCase {
     }
 
     // MARK: - fixtures
+
+    /// `LoupeController.swift` — source-level, because "every bridge frame hands the matte its
+    /// rect" is a wiring fact: a bridge present that forgot the argument still compiles and still
+    /// runs, it just draws black. No window is needed to read a file.
+    private static var loupeSource: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()          // PhotonsUITests
+            .deletingLastPathComponent()          // Tests
+            .deletingLastPathComponent()          // the package root
+            .appendingPathComponent("Sources/PhotonsUI/LoupeController.swift")
+    }
 
     private static var kernelURL: URL {
         URL(fileURLWithPath: #filePath)
