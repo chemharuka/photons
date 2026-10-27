@@ -28,13 +28,17 @@ final class HSLPanelTests: XCTestCase {
     // MARK: - structure
 
     func testTheColourWorkspaceIsTheHSLCardAndNothingElse() {
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl])
-        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["HSL"],
-                       "the colour workspace's first (and only) card is HSL")
+        // 2026-10-28 (P0 色彩分级): the workspace holds two cards now — HSL first, then 色彩分级 —
+        // and HSL is still the one this suite is about.
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading])
+        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["HSL", "色彩分级"],
+                       "the colour workspace's first card is HSL")
         XCTAssertEqual(InspectorView.Section.hsl.title, "HSL")
         XCTAssertTrue(InspectorWorkspace.colour.hasCards)
         XCTAssertFalse(InspectorWorkspace.colour.help.contains("尚未实现"),
                        "the tooltip must stop claiming the workspace is empty")
+        XCTAssertFalse(InspectorWorkspace.adjust.cards.contains(.colorGrading),
+                       "色彩分级 lives in 色彩 with HSL, not under 调整")
         XCTAssertFalse(InspectorWorkspace.adjust.cards.contains(.hsl),
                        "the bands get their own workspace, not a seventh row under Color")
         XCTAssertEqual(HSLAxis.allCases.map(\.title), ["色相", "饱和", "亮度"])
@@ -71,7 +75,8 @@ final class HSLPanelTests: XCTestCase {
     func testTheCardFitsAtEveryWidth() throws {
         for width in Self.widths {
             let panel = try host(width: width, state: .init(.colour))
-            XCTAssertEqual(panel.cardIDs, ["hsl"], "\(width) pt: the colour workspace shows the HSL card")
+            XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading"],
+                           "\(width) pt: the colour workspace shows HSL then 色彩分级")
 
             let probes = panel.bandProbes
             XCTAssertEqual(probes.count, 8, "\(width) pt: eight selectors")
@@ -91,7 +96,9 @@ final class HSLPanelTests: XCTestCase {
             }
 
             let fields = panel.numberFields
-            XCTAssertEqual(fields.count, 3, "\(width) pt: 色相/饱和/亮度 must each be typeable")
+            // 3 HSL rows + 9 色彩分级 rows: every number on this workspace's two cards is typeable.
+            XCTAssertEqual(fields.count, 3 + InspectorView.colorGradingRowCount,
+                           "\(width) pt: 色相/饱和/亮度 (+ the nine grade rows) must each be typeable")
             for f in panel.numberFieldFrames {
                 XCTAssertGreaterThanOrEqual(f.minX, -0.5, "\(width) pt: a row starts off-panel")
                 XCTAssertLessThanOrEqual(f.maxX, width + 0.5, "\(width) pt: a row runs past the panel")
@@ -143,7 +150,9 @@ final class HSLPanelTests: XCTestCase {
         panel.session.applyEdit { $0.color.bands[2] = seed }
         panel.session.commitEdit(label: "seed")
         panel.pump()
-        XCTAssertEqual(Set(panel.numberFields.map(\.stringValue)), ["-17", "23", "-8"],
+        // The three HSL rows print the selected band's own values; the nine 色彩分级 rows print their
+        // own zeros (they are a different card, and they must not be showing the band's numbers).
+        XCTAssertEqual(Set(panel.numberFields.map(\.stringValue)), ["-17", "23", "-8", "0"],
                        "the rows must print the selected band's own values")
 
         try panel.type("40", intoFieldShowing: "-17")     // 色相
@@ -245,7 +254,7 @@ final class HSLPanelTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.45))
         host.layoutSubtreeIfNeeded()
         let panel = Panel(host: host, window: window, session: session, state: state)
-        XCTAssertEqual(panel.cardIDs, ["hsl"], "the panel did not open on the HSL card")
+        XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading"], "the panel did not open on the HSL card")
         return panel
     }
 }
