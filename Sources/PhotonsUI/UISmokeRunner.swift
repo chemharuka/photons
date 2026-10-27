@@ -1867,14 +1867,16 @@ public final class UISmokeRunner {
               && card.lastDrawnHDRBins == histogram.hdrBinCount
               && card.histogram != nil)
 
-        // The axis itself: 30 pt per stop is a fixed reading scale, the tail is 4 stops wide, and the
-        // two segments add up to the card's width.
+        // The axis itself (068): the two halves are equal — SDR codes left, the 4-stop tail right — so
+        // they add up to the card's width and each stop is half of the plot split four ways.
         let sdrWidth = axis?.sdrWidth ?? -1
         let hdrWidth = axis?.hdrWidth ?? -1
-        check("轴是 SDR + 尾段：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(axis?.plot.width ?? -1)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.0f", axis?.stopWidth ?? 0)) pt/stop，每 stop 30 pt",
-              axis != nil && axis?.stopWidth == 30 && axis?.stops == Histogram.maxStops
-              && hdrWidth == 120
-              && abs((axis?.plot.width ?? 0) - sdrWidth - hdrWidth) < 1e-6)
+        let plotWidth = axis?.plot.width ?? -1
+        check("轴是 SDR 50 % / HDR 50 %：\(Int(sdrWidth)) pt + \(Int(hdrWidth)) pt = \(Int(plotWidth)) pt，尾段 \(axis?.stops ?? 0) stop × \(String(format: "%.1f", axis?.stopWidth ?? 0)) pt/stop（= 半区 / 4）",
+              axis != nil && axis?.stops == Histogram.maxStops
+              && abs(sdrWidth - hdrWidth) < 1e-9
+              && abs(sdrWidth - plotWidth / 2) < 1e-9
+              && abs(plotWidth - sdrWidth - hdrWidth) < 1e-6)
 
         // The display ceiling: log2(headroom) stops into the tail, from the frame's own headroom.
         let ceilingX = axis?.x(ceiling: histogram.headroom) ?? .nan

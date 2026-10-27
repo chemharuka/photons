@@ -24,10 +24,11 @@ import PhotonsCore
 // The percentages are still *measured* (`clipHighTextByChannel`) and still printed by the CLI and
 // `--ui-smoke`'s identity check — they are simply not painted and not spoken.
 //
-// **The plot has two segments** (2026-10-26): 0…1 on a linear code axis, then a fixed **30 pt per
-// stop** exponential tail of 4 stops (`HistogramAxis`, `Histogram.maxStops`) — 120 pt at the default
-// scale, which a 364 pt card and even the inspector's 244 pt minimum can hold (244 − 60 pt of SDR =
-// 184 pt of tail, so 30 pt/stop still fits; below that the stop scale shrinks, never the code axis).
+// **The plot has two segments** (2026-10-26, split 50/50 on 2026-10-27 / 068): 0…1 on a linear code
+// axis for the left **half**, then the **4-stop** exponential tail (`HistogramAxis`,
+// `Histogram.maxStops`) for the right half. The split is a proportion, not a fixed point width, so
+// every card width gets the same 50/50 — the owner's 「左侧 50% 是 sdr，右侧 50% 是 hdr」 — and the
+// tail's stops are `plot.width / 8` apart (50 pt on a 400 pt card, 30.5 pt on the inspector's 244 pt).
 // Everything right of the dashed orange tick is light this panel cannot show: the tick is the display
 // ceiling (`log2(headroom)` stops above white) and it comes from the *measurement's* own headroom, not
 // from whatever screen the window is on by the time the card redraws — so the plot and its ceiling

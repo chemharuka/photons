@@ -12,44 +12,44 @@ import PhotonsCore
 // Three numbers are policy, and they are here rather than in the card so `--ui-smoke` can assert
 // them without reading pixels:
 //
-//   · **30 pt per stop.** The tail is a *reading* scale: "+1 stop" must mean the same 30 points
-//     whether the inspector is 300 or 364 wide, otherwise the same picture's highlights would move
-//     when the window moves. Only when the card is too narrow to keep 60 pt of SDR does the stop
-//     scale shrink (the alternative — letting SDR collapse to nothing — is worse: the SDR segment is
-//     where 95 % of a photograph lives).
-//   · **4 stops**, i.e. a fixed 120 pt tail, from `Histogram.maxStops` — the owner's range rule
-//     (2^4 = 16× white). The precision bump lives inside those 4 stops (64 bins/stop instead of 8),
-//     not in a longer tail: at the inspector's 244 pt minimum, 120 pt of tail still leaves 124 pt of
-//     SDR, far above the 60 pt floor, so the default scale holds at every width the app ships.
+//   · **half and half (068).** The plot is split down the middle: SDR codes left, the 4-stop tail
+//     right. The owner asked for exactly this proportion (「左侧 50% 是 sdr，右侧 50% 是 hdr」), and it
+//     is the *same* yardstick the curve panel draws with (`HDRCurveAxis.whiteU = 0.5`), so the two
+//     plots' `+1…+4` ticks sit above one another. The split is the input now; `stopWidth` is derived
+//     from it (was: a fixed 30 pt/stop tail = 120 pt, i.e. 70/30 on a 400 pt card, which is what the
+//     owner rejected). Because both halves scale *with* the card, no width can starve the code
+//     segment — there is no floor to defend any more.
+//   · **4 stops** from `Histogram.maxStops` — the owner's range rule (2^4 = 16× white). The precision
+//     bump lives inside those 4 stops (64 bins/stop instead of 8), not in a longer tail.
 //   · **one peak for both segments.** End spikes are excluded together (the drawn path's first and
 //     last bin), which is what keeps a clipped highlight from flattening the whole plot.
 
 /// Where the SDR segment ends, where each stop of the tail lands, and where the display ceiling sits.
 public struct HistogramAxis: Equatable {
 
-    /// Points per stop of the exponential tail (owner's number, 2026-10-26).
-    public static let pointsPerStop: CGFloat = 30
-    /// The SDR segment never gets narrower than this; below it the stop scale shrinks instead.
-    public static let minimumSDRWidth: CGFloat = 60
+    /// Share of the plot the exponential tail gets: **half** (068), the same fraction as the curve
+    /// panel's `whiteU`, so display white is the middle of both plots. Write the ratio here once —
+    /// no literal `0.5` elsewhere in this file.
+    public static let hdrFraction: CGFloat = 0.5
+    /// Share of the plot the code segment gets — the other half, derived so the two always sum to 1.
+    public static let sdrFraction: CGFloat = 1 - hdrFraction
 
     public let plot: NSRect
-    /// Actual points per stop (30 unless the card is too narrow).
-    public let stopWidth: CGFloat
 
     public init(plot: NSRect) {
         self.plot = plot
-        let stops = CGFloat(max(Histogram.maxStops, 1))
-        let room = max(plot.width - Self.minimumSDRWidth, 0)
-        self.stopWidth = plot.width > 1 ? min(Self.pointsPerStop, room / stops) : Self.pointsPerStop
     }
 
     public var stops: Int { Histogram.maxStops }
     public var hdrBinCount: Int { Histogram.hdrBinCount }
-    /// Width of the exponential tail (4 × `stopWidth`, 120 pt at the default scale).
-    public var hdrWidth: CGFloat { stopWidth * CGFloat(stops) }
-    /// Width of the code segment (everything left of the tail).
-    public var sdrWidth: CGFloat { max(plot.width - hdrWidth, 0) }
-    /// The SDR / tail boundary: display white.
+    /// Width of the exponential tail: `hdrFraction` of the plot at every width.
+    public var hdrWidth: CGFloat { plot.width * Self.hdrFraction }
+    /// Width of the code segment: the other `sdrFraction` (the two halves add up to `plot.width`).
+    public var sdrWidth: CGFloat { plot.width * Self.sdrFraction }
+    /// Points per stop of the tail — **derived** from the split (`hdrWidth / stops`, 50 pt on a
+    /// 400 pt card, 30.5 pt on the 244 pt card). Before 068 this was the independent variable.
+    public var stopWidth: CGFloat { hdrWidth / CGFloat(max(stops, 1)) }
+    /// The SDR / tail boundary: display white, the middle of the plot.
     public var sdrMaxX: CGFloat { plot.minX + sdrWidth }
 
     /// Centre of an SDR bin (uniform in code, so uniform in x).

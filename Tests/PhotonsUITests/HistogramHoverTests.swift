@@ -30,6 +30,15 @@ final class HistogramHoverTests: XCTestCase {
     private let cardHeight: CGFloat = 104
     private let plot = NSRect(x: 0, y: 0, width: 300, height: 58)
 
+    /// Where code bin 128 lands on the shipped-minimum card. The card's plot spans its full width
+    /// (`HistogramCardView` lays it out at `bounds.width`), so since 068 the code half is 122 pt and
+    /// this bin's centre is 61.25 — derived here rather than typed, so a geometry change cannot leave
+    /// these hover tests aiming at the wrong bin.
+    private var code128X: CGFloat {
+        HistogramAxis(plot: NSRect(x: 0, y: 0, width: minimumCardWidth, height: 58))
+            .x(sdrBin: 128, of: 256)
+    }
+
     // MARK: - fixtures
 
     /// A histogram whose bins the test chose: `bins[128]` and three tail bins carry the counts the
@@ -119,7 +128,7 @@ final class HistogramHoverTests: XCTestCase {
     func testTheMiddleOfTheCodeSegmentIsBin128() {
         let axis = HistogramAxis(plot: plot)
         let middle = plot.minX + axis.sdrWidth * 0.5
-        XCTAssertEqual(axis.sdrWidth, 180, accuracy: 1e-9, "300 pt 卡：180 pt 码值 + 120 pt 尾段")
+        XCTAssertEqual(axis.sdrWidth, 150, accuracy: 1e-12, "300 pt 卡：左半 150 pt 码值 + 右半 150 pt 尾段（068）")
         let reading = axis.hoverReading(atX: middle)
         XCTAssertEqual(reading.segment, .code)
         XCTAssertEqual(reading.bin, 128)
@@ -214,7 +223,8 @@ final class HistogramHoverTests: XCTestCase {
     /// A card with no measurement still reads position ("this is code 128") and says the counts are
     /// unknown rather than inventing zeros.
     func testAnUnmeasuredCardReadsThePositionAndNoCounts() {
-        let reading = HistogramAxis(plot: plot).hoverReading(atX: 90)
+        let axis = HistogramAxis(plot: plot)
+        let reading = axis.hoverReading(atX: axis.x(sdrBin: 128, of: 256))
         XCTAssertEqual(HistogramCardFormat.hoverValue(reading), "128")
         XCTAssertEqual(HistogramCardFormat.hoverCounts(nil, reading), "—")
     }
@@ -277,8 +287,8 @@ final class HistogramHoverTests: XCTestCase {
         XCTAssertTrue(card.hoverReadoutRect.isEmpty)
         XCTAssertEqual(card.hoverPaintCount, 0)
 
-        // bin 128 of the 244 pt card: sdrWidth 124 pt, so the bin's centre is at x = 62.25.
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
+        // bin 128 of the 244 pt card: the code half is 122 pt (068), so the bin's centre is at x = 61.25.
+        card.updateHoverReadout(at: CGPoint(x: code128X, y: 20))
         render(card)
         XCTAssertEqual(card.readoutValueTexts.count, 3,
                        "直方图上只有三组计数，没有第二个「裸数字」亮度值（023 已删除亮度行）")
@@ -339,9 +349,9 @@ final class HistogramHoverTests: XCTestCase {
     /// A point on the 过白 row is *not* in the plot: hovering there must clear, not invent a bin.
     func testAPointBelowThePlotClearsTheReadout() {
         let card = drawnCard(histogram: knownCounts)
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
+        card.updateHoverReadout(at: CGPoint(x: code128X, y: 20))
         XCTAssertEqual(card.hoverReading?.bin, 128)
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 70))   // 过白 那一行
+        card.updateHoverReadout(at: CGPoint(x: code128X, y: 70))   // 过白 那一行
         render(card)
         XCTAssertNil(card.hoverReading)
         XCTAssertTrue(card.readoutValueTexts.isEmpty)
@@ -355,7 +365,7 @@ final class HistogramHoverTests: XCTestCase {
     /// real window exists. Nothing here fakes an event that cannot exist.
     func testTheExitIsDeliveredByTheTrackingAreaAndClears() {
         let card = drawnCard(histogram: knownCounts)
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
+        card.updateHoverReadout(at: CGPoint(x: code128X, y: 20))
         render(card)
         XCTAssertEqual(card.hoverCountText, "R 1284 G 1291 B 1206")
         card.updateTrackingAreas()
@@ -516,7 +526,7 @@ final class HistogramHoverTests: XCTestCase {
     /// under the pointer, and there is no pointer on the plot's half of the row.
     func testAnUnmeasuredCardHasNothingToSayAboutABin() {
         let card = drawnCard(histogram: nil)
-        card.updateHoverReadout(at: CGPoint(x: 62.25, y: 20))
+        card.updateHoverReadout(at: CGPoint(x: code128X, y: 20))
         render(card)
         XCTAssertEqual(card.hoverRowText, "R 0 G 0 B 0",
                        "没有测量就没有计数：三个组仍是三个 0")
