@@ -41,9 +41,11 @@ public struct InspectorView: View {
 
     /// The cards, in display order (派单 009 A).
     ///
-    /// `body` builds the stack from `allCases`, so this list **is** the view hierarchy — there is no
-    /// second, hand-maintained ordering to drift out of step with what is on screen. The tests assert
-    /// it (`InspectorView.sectionTitles`) and the rendered order of the card identifiers.
+    /// `body` builds the stack from `allCases` filtered by the selected **workspace** (派单 073:
+    /// `sections(in:)`), so this list **is** the view hierarchy — there is no second, hand-maintained
+    /// ordering to drift out of step with what is on screen. A workspace decides *membership*, never
+    /// order and never contents: a card that is not in this enum cannot be shown. The tests assert it
+    /// (`InspectorView.sectionTitles`, `cardTitles(in:)`) and the rendered order of the card identifiers.
     public enum Section: String, CaseIterable, Identifiable, Hashable {
         /// Histogram first: it is the read-out of the picture the rest of the panel edits.
         case histogram
@@ -94,7 +96,30 @@ public struct InspectorView: View {
     ///
     /// Still derived from `allCases` (one list, one order), so excluding a card here cannot silently
     /// disagree with the enum — and `.histogram` is rendered exactly once, from `pinnedColumn`.
+    ///
+    /// Since 派单 073 this is the **catalogue**, not the visible set: the scroll area shows
+    /// `sections(in: workspace)`, a filter of this list. `scrollingSections` stays the full list on
+    /// purpose — it answers 「哪些卡会滚动」 (all of them do, in the workspace that owns them), and the
+    /// tests that pin a card to the scrolling half (`LightCardTests`, `CurvePanelTests`, …) keep meaning
+    /// what they meant.
     public static var scrollingSections: [Section] { Section.allCases.filter { $0 != .histogram } }
+
+    /// **The cards one workspace renders, in panel order** (派单 073).
+    ///
+    /// `InspectorWorkspace.cards` is the only membership table; the order here is `allCases`', so a
+    /// workspace can include or drop a card but never move one. `.histogram` cannot enter this list at
+    /// all (`scrollingSections` does not contain it), which is what keeps the histogram pinned above
+    /// the switcher in every workspace, empty ones included.
+    public static func sections(in workspace: InspectorWorkspace) -> [Section] {
+        let included = Set(workspace.cards)
+        return scrollingSections.filter { included.contains($0) }
+    }
+
+    /// The titles `sections(in:)` draws — what a test can compare against a rendered panel. `[]` for a
+    /// workspace whose features do not exist yet (变换 / 色彩 / 历史记录), by design.
+    public static func cardTitles(in workspace: InspectorWorkspace) -> [String] {
+        sections(in: workspace).map(\.title)
+    }
 
     /// The pinned block's title. 「信息」, not 「调整」 — the block reports the photo (file name,
     /// shooting parameters, equipment); it is not a control, and calling it 调整 made the panel promise
@@ -126,23 +151,41 @@ public struct InspectorView: View {
     @State private var hint: String?
     @State private var eyedropperArmed = false
 
-    public init(session: CatalogSession, loupe: LoupeController? = nil) {
+    /// **Which cards are on screen** (派单 073).
+    ///
+    /// View state, like `hint`: the workspace is not a document fact, so it is not in `EditModel`, not in
+    /// `EditHistory`, and selecting one writes neither (`InspectorWorkspaceTests` asserts
+    /// `editRevision` and `history.count` do not move). Held as a tiny `@Observable` object rather than
+    /// a plain `@State` value so a hosted panel can be switched in a test — see `InspectorWorkspaceState`.
+    @State private var workspaces: InspectorWorkspaceState
+
+    public init(session: CatalogSession, loupe: LoupeController? = nil,
+                workspaces: InspectorWorkspaceState? = nil) {
         self.session = session
         self.loupe = loupe
+        // A caller may hand in the state (a test, or a host that wants to remember the workspace); the
+        // default is a fresh one, i.e. 调整.
+        _workspaces = State(initialValue: workspaces ?? InspectorWorkspaceState())
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             pinnedColumn
+            workspaceSwitcher
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(Self.scrollingSections) { section in
+                    ForEach(visibleSections) { section in
                         sectionView(section)
                             .accessibilityIdentifier("inspector.card.\(section.rawValue)")
                     }
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
+                // 派单 073: the readback seam and the scroll anchor in one — the probe *is* the
+                // document's bounds, so it also reports the card list the panel built.
+                .background(alignment: .topLeading) {
+                    InspectorCardsProbeHost(workspace: workspaces.selection, sections: visibleSections)
+                }
             }
             .frame(maxHeight: .infinity)
         }
@@ -150,6 +193,26 @@ public struct InspectorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .task(id: metadataKey) { reloadMetadata() }
+    }
+
+    /// The cards of the selected workspace, in panel order (派单 073).
+    ///
+    /// One filter over the one list — **not** an `if` wrapped around each card. A card that belongs to
+    /// no workspace would simply never appear, which is why `InspectorWorkspaceTests` asserts the union
+    /// of the table covers `scrollingSections` exactly.
+    private var visibleSections: [Section] { Self.sections(in: workspaces.selection) }
+
+    /// The icon row: immediately under the histogram card, immediately above the scroll area, outside it
+    /// (so it cannot be scrolled away, and so the histogram is never the last pinned thing on screen).
+    ///
+    /// 20 pt of buttons inside the panel's own 10 pt rhythm — the whole switcher costs 20 pt of panel,
+    /// and `layoutPriority(1)` + `fixedSize` keep it from being the thing a short window eats.
+    private var workspaceSwitcher: some View {
+        InspectorWorkspaceTabs(selection: Binding(get: { workspaces.selection },
+                                                 set: { workspaces.select($0) }))
+            .padding(.horizontal, 12)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
     }
 
     /// The top of the panel: 信息 + 直方图, outside the `ScrollView`, so neither can be dragged away.
