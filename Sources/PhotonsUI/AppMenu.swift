@@ -61,6 +61,25 @@ public enum MainMenu {
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         edit.addItem(.separator())
         edit.addItem(withTitle: "全选照片", action: #selector(EditorWindowController.selectAllAction(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        // 复制/粘贴设置 — 078 P0-7. One row per verb the ticket names, and each keeps the system
+        // clipboard when a text field owns the keyboard: `validateMenuItem` greys them, and the action
+        // itself hands ⌘C/⌘V back to `NSText` (see `EditorWindowController.copySettingsAction`), so a
+        // photo app never eats the shortcut of the text field the user is typing in.
+        edit.addItem(withTitle: "复制设置",
+                     action: #selector(EditorWindowController.copySettingsAction(_:)),
+                     keyEquivalent: "c")
+        edit.addItem(withTitle: "粘贴设置",
+                     action: #selector(EditorWindowController.pasteSettingsAction(_:)),
+                     keyEquivalent: "v")
+        let pasteChoices = edit.addItem(withTitle: "粘贴设置（选择组…）",
+                                        action: #selector(EditorWindowController.pasteSettingsWithChoicesAction(_:)),
+                                        keyEquivalent: "v")
+        pasteChoices.keyEquivalentModifierMask = [.command, .shift]
+        let chooseCopy = edit.addItem(withTitle: "选择要复制的设置…",
+                                      action: #selector(EditorWindowController.chooseCopySettingsAction(_:)),
+                                      keyEquivalent: "c")
+        chooseCopy.keyEquivalentModifierMask = [.command, .option]
 
         // Photo — rating / flag / colour label. Catalog metadata, not edits, so these live outside
         // the undo pair above. Bare digits and letters (no ⌘) because that is the convention every

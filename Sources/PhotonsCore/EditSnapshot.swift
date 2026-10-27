@@ -26,6 +26,159 @@ public enum EditSnapshotGroup: String, CaseIterable, Sendable, Hashable {
     case geometry, light, curve, color, detail, effects
 }
 
+// MARK: - sections (派单 078 P0-7: 选组)
+
+/// The **sections** a paste can be narrowed to — finer than `EditSnapshotGroup` on purpose.
+///
+/// `light` is split in two because white balance is not the Light panel in either implementation
+/// that matters: in Lightroom the 复制设置 checklist has `White Balance` **and** `Light` as separate
+/// rows, and here the two are also different *pipeline stages* — Kelvin/tint re-develop the buffer
+/// (`DecodeInputs.whiteBalance`), exposure/contrast/highlights/shadows/whites/blacks re-render it.
+/// One group for both would mean 「只粘曝光」 necessarily clobbering the destination's own balance,
+/// which is the exact complaint this ticket exists to answer.
+///
+/// `masks` is a section so the checklist is exhaustive and matches Lightroom's list, but it is
+/// **not copyable**: `isCopyable == false`. See `EditSnapshot`'s header — mask geometry is framed
+/// relative to the source photo and `EditSnapshot` structurally carries no masks (Q18,
+/// docs/xmp-mapping.md §1.8, and P1-5 is the separate ticket that would make it portable).
+public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codable {
+    /// 裁切/拉直/翻转/比例 — the crop rect's four edges are one section (a crop is one gesture).
+    case geometry
+    /// 色温/色调 — the only **decode-class** section a snapshot can carry.
+    case whiteBalance
+    /// 曝光/对比/高光/阴影/白/黑/高光恢复 — the Light panel minus white balance.
+    case light
+    case curve
+    case color
+    case detail
+    case effects
+    /// 蒙版 — listed for parity with Lightroom, never copied (P1-5).
+    case masks
+
+    /// The checklist order the dialog draws: the order Lightroom's own list uses.
+    public static let panelOrder: [EditSnapshotSection] = [
+        .whiteBalance, .light, .curve, .color, .detail, .effects, .geometry, .masks,
+    ]
+
+    /// Every section a paste can actually write. `masks` is the one exception.
+    public static var copyable: [EditSnapshotSection] { panelOrder.filter(\.isCopyable) }
+
+    public var isCopyable: Bool { self != .masks }
+
+    /// Does a paste of this section have to **develop again** (a new buffer), or only re-render?
+    ///
+    /// `whiteBalance` is `DecodeInputs.whiteBalance` and a Kelvin change is measured to move
+    /// 0.15–0.40 % of samples — a new rung, not a new S1 pass (派单 006/011). Everything else here
+    /// keys the render graph, and `detail` is *stored, not rendered* (`DetailGroup`'s header) so it
+    /// cannot move a buffer either. The decoder model (`decoderVersion`) is not a section at all:
+    /// `EditSnapshot` does not carry it (it is a per-file decoder fact, not a develop setting).
+    public var requiresDecode: Bool { self == .whiteBalance }
+
+    public var title: String {
+        switch self {
+        case .geometry: return "裁切"
+        case .whiteBalance: return "白平衡"
+        case .light: return "曝光"
+        case .curve: return "曲线"
+        case .color: return "颜色"
+        case .detail: return "细节"
+        case .effects: return "效果"
+        case .masks: return "蒙版"
+        }
+    }
+
+    /// Why a row is greyed. Only `masks` has one today.
+    public var unavailableReason: String? {
+        guard !isCopyable else { return nil }
+        return "蒙版形状按源照片的帧几何归一化，跨照片单独做（派单 P1-5）"
+    }
+}
+
+/// The checked rows of 「选择要复制的设置」.
+///
+/// A value type, not a view: the dialog draws it and the session stores it, and the three answers
+/// the ticket asks for — 全选 / 全不选 / 预设组合 — are `all`, `none` and `preset(_:)` here, so the
+/// buttons cannot disagree with what gets pasted.
+public struct CopySettingsSelection: Sendable, Equatable, Codable {
+
+    /// 预设组合. Deliberately few and named after what a photographer is carrying around, not after
+    /// the panel tree: "基本" is the tone+balance tripod, "颜色" is everything that decides colour,
+    /// "几何" is the crop.
+    public enum Preset: String, CaseIterable, Sendable, Hashable {
+        case all
+        case basic
+        case color
+        case geometry
+        case whiteBalance
+        case none
+
+        public var title: String {
+            switch self {
+            case .all: return "全部"
+            case .basic: return "基本：白平衡 + 曝光 + 曲线"
+            case .color: return "颜色：颜色 + 细节 + 效果"
+            case .geometry: return "几何：裁切"
+            case .whiteBalance: return "仅白平衡"
+            case .none: return "全不选"
+            }
+        }
+
+        public var sections: Set<EditSnapshotSection> {
+            switch self {
+            case .all: return Set(EditSnapshotSection.copyable)
+            case .basic: return [.whiteBalance, .light, .curve]
+            case .color: return [.color, .detail, .effects]
+            case .geometry: return [.geometry]
+            case .whiteBalance: return [.whiteBalance]
+            case .none: return []
+            }
+        }
+    }
+
+    /// Always a subset of `EditSnapshotSection.copyable`: 蒙版 can never be checked in.
+    public private(set) var sections: Set<EditSnapshotSection>
+
+    public init(sections: Set<EditSnapshotSection> = Set(EditSnapshotSection.copyable)) {
+        self.sections = sections.filter(\.isCopyable)
+    }
+
+    public init(_ preset: Preset) { self.init(sections: preset.sections) }
+
+    public static var all: CopySettingsSelection { CopySettingsSelection(.all) }
+    public static var none: CopySettingsSelection { CopySettingsSelection(.none) }
+
+    public var isEmpty: Bool { sections.isEmpty }
+
+    /// `.all` when every copyable row is checked, `.none` when none is, otherwise `nil` (自定义).
+    public var matchingPreset: Preset? {
+        let copyable = Set(EditSnapshotSection.copyable)
+        if sections.isEmpty { return .none }
+        if sections == copyable { return .all }
+        return Preset.allCases.first { $0.sections == sections && $0 != .all && $0 != .none }
+    }
+
+    public func contains(_ section: EditSnapshotSection) -> Bool { sections.contains(section) }
+
+    public mutating func set(_ section: EditSnapshotSection, _ on: Bool) {
+        guard section.isCopyable else { return }
+        if on { sections.insert(section) } else { sections.remove(section) }
+    }
+
+    public mutating func toggle(_ section: EditSnapshotSection) { set(section, !sections.contains(section)) }
+
+    public mutating func select(_ preset: Preset) { self = CopySettingsSelection(preset) }
+
+    public mutating func selectAll() { sections = Set(EditSnapshotSection.copyable) }
+    public mutating func selectNone() { sections = [] }
+
+    /// One line for the dialog's status label.
+    public var summary: String {
+        if sections.isEmpty { return "未选任何组：粘贴什么也不会发生" }
+        let names = EditSnapshotSection.panelOrder.filter { sections.contains($0) }.map(\.title)
+        return "将复制：\(names.joined(separator: " · "))"
+    }
+}
+
 // MARK: - patches
 
 /// Geometry, leaf by leaf. A crop rect is normally stored whole (capture sees four changed
@@ -296,6 +449,71 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if detail != nil { out.insert(.detail) }
         if effects != nil { out.insert(.effects) }
         return out
+    }
+
+    // MARK: sections (选组)
+
+    /// What this payload carries, in `EditSnapshotSection` terms — `light` appears twice
+    /// (`.whiteBalance` / `.light`) when the payload has both a Kelvin pin and a tone slider.
+    public var sections: Set<EditSnapshotSection> {
+        var out: Set<EditSnapshotSection> = []
+        if geometry != nil { out.insert(.geometry) }
+        if let l = light {
+            if l.temperature != nil || l.tint != nil { out.insert(.whiteBalance) }
+            if l.exposure != nil || l.contrast != nil || l.highlights != nil || l.shadows != nil
+                || l.whites != nil || l.blacks != nil || l.highlightRecovery != nil {
+                out.insert(.light)
+            }
+        }
+        if curve != nil { out.insert(.curve) }
+        if color != nil { out.insert(.color) }
+        if detail != nil { out.insert(.detail) }
+        if effects != nil { out.insert(.effects) }
+        return out
+    }
+
+    /// Would pasting this payload have to develop again? True only when it carries a white balance:
+    /// the Kelvin/tint pair is assigned inside `CIRAWFilter` (`DecodeInputs.whiteBalance`), so the
+    /// buffer itself is a different picture. Every other field is a GPU-stage change — and `detail`
+    /// is stored, not rendered, so a paste of it moves no pixels and no buffer.
+    public var requiresDecode: Bool { sections.contains(where: \.requiresDecode) }
+
+    /// The payload narrowed to `sections` — the whole point of 「选组」.
+    ///
+    /// Field-level, not group-level, for the one place it has to be: `light` and `.whiteBalance`
+    /// live in the *same* `LightPatch`, so narrowing to `.light` keeps the tone leaves and drops
+    /// `temperature`/`tint`. Dropping a section drops its leaves only: the destination's values for
+    /// it are never read, never written, so they cannot be reset.
+    public func filtered(to sections: Set<EditSnapshotSection>) -> EditSnapshot {
+        var out = EditSnapshot()
+        if sections.contains(.geometry) { out.geometry = geometry }
+        if let l = light {
+            var p = LightPatch()
+            if sections.contains(.whiteBalance) {
+                p.temperature = l.temperature
+                p.tint = l.tint
+            }
+            if sections.contains(.light) {
+                p.exposure = l.exposure
+                p.contrast = l.contrast
+                p.highlights = l.highlights
+                p.shadows = l.shadows
+                p.whites = l.whites
+                p.blacks = l.blacks
+                p.highlightRecovery = l.highlightRecovery
+            }
+            out.light = p.isEmpty ? nil : p
+        }
+        if sections.contains(.curve) { out.curve = curve }
+        if sections.contains(.color) { out.color = color }
+        if sections.contains(.detail) { out.detail = detail }
+        if sections.contains(.effects) { out.effects = effects }
+        return out
+    }
+
+    /// The payload narrowed by a checklist (蒙版 is already impossible in the selection).
+    public func filtered(to selection: CopySettingsSelection) -> EditSnapshot {
+        filtered(to: selection.sections)
     }
 
     /// Groups whose values are semantically identical between the payload and `target` (i.e. a
