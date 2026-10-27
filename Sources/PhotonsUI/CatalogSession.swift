@@ -1074,6 +1074,154 @@ public final class CatalogSession {
         }
     }
 
+    // MARK: settings clipboard — 复制/粘贴设置 (078 P0-7)
+    //
+    // ⌘C/⌘V for *settings*, which is a different verb from copying the document:
+    //
+    //   · the payload is `EditSnapshot` — **sparse** (non-default leaves only, Q18) and narrowed by
+    //     the checklist (`CopySettingsSelection`). A paste therefore writes only what the user
+    //     checked *and* only what the source actually changed; the destination's own white balance,
+    //     crop, colour and masks survive a paste that does not name them.
+    //   · it lives in this object, **not** on `NSPasteboard`. Develop settings are not text: putting
+    //     them on the system pasteboard would make ⌘V into an image editor a `photons.*` blob, and
+    //     would let a copied screenshot be "pasted" as settings. The menu item is ⌘C/⌘V and the
+    //     focus rule (a text field keeps the system clipboard) lives in the window controller.
+    //   · a paste is **one history row per photo** (`commitEdit(coalesce: false)` / `appendDevelop`),
+    //     so one ⌘Z takes the whole paste back — however many groups it carried.
+    //   · only a white balance paste re-develops (`EditSnapshotSection.requiresDecode`); tone, curve,
+    //     colour, crop and masks are GPU-stage changes and `detail` is stored-not-rendered.
+
+    /// What ⌘C captured (already narrowed). `nil` before the first copy.
+    public private(set) var copiedSettings: EditSnapshot?
+    /// Which photo it came from — the menu/paste messages name it, and the anchor's own paste goes
+    /// through the live document only when this is the photo on screen.
+    public private(set) var copiedSettingsSourceID: String?
+
+    /// The checklist ⌘C uses. Lives here so the dialog's last answer is what the next ⌘C copies
+    /// (Lightroom's behaviour: the Copy Settings checklist is sticky).
+    public var copySelection = CopySettingsSelection.all
+
+    /// Bumped after every copy/paste, for the status line and the menu titles.
+    public private(set) var settingsRevision = 0
+    /// Why the last copy/paste did nothing, or nil.
+    public private(set) var lastSettingsError: String?
+    /// The reports of the last paste, one per target photo.
+    public private(set) var lastPasteReports: [SettingsPasteReport] = []
+
+    public var canCopySettings: Bool { anchorAsset != nil }
+
+    public var canPasteSettings: Bool {
+        guard let payload = copiedSettings, !payload.isEmpty else { return false }
+        return !metadataTargetIDs.isEmpty
+    }
+
+    /// ⌘C — capture the anchor's non-default leaves, narrowed by `selection` (default: the sticky
+    /// checklist).
+    @discardableResult
+    public func copySettingsFromAnchor(selection: CopySettingsSelection? = nil) -> EditSnapshot? {
+        guard let asset = anchorAsset else {
+            lastSettingsError = "先选中一张照片"
+            return nil
+        }
+        let choice = selection ?? copySelection
+        let document = asset.id == loadedEditAssetID
+            ? MaskViewState.documentOnly(edit)
+            : (catalog.flatMap { try? $0.develop(forAsset: asset.id) } ?? .neutral)
+        let payload = EditSnapshot.capture(document).filtered(to: choice)
+        copiedSettings = payload
+        copiedSettingsSourceID = asset.id
+        if selection != nil { copySelection = choice }
+        lastSettingsError = payload.isEmpty
+            ? "这张照片在所选组里没有非默认设置：粘贴不会改动任何字段"
+            : nil
+        settingsRevision &+= 1
+        return payload
+    }
+
+    /// ⌘V — paste into the selection (or the anchor when nothing is selected).
+    ///
+    /// `sections` narrows the payload further at paste time (the 「粘贴设置（选择…）」 row); `nil`
+    /// keeps what ⌘C already narrowed. `ids` exists for the tests and for a future Sync command; the
+    /// menu passes neither.
+    @discardableResult
+    public func pasteSettings(sections: Set<EditSnapshotSection>? = nil,
+                              into ids: [String]? = nil) -> [SettingsPasteReport] {
+        let targets = ids ?? metadataTargetIDs
+        lastPasteReports = []
+        guard let copied = copiedSettings else {
+            lastSettingsError = "剪贴板里没有设置：先按 ⌘C 复制"
+            settingsRevision &+= 1
+            return []
+        }
+        let payload = sections.map { copied.filtered(to: $0) } ?? copied
+        guard !payload.isEmpty else {
+            lastSettingsError = "所选组里没有可粘贴的设置"
+            settingsRevision &+= 1
+            return []
+        }
+        guard !targets.isEmpty else {
+            lastSettingsError = "没有目标照片"
+            settingsRevision &+= 1
+            return []
+        }
+
+        var reports: [SettingsPasteReport] = []
+        var failures: [String] = []
+        for id in targets {
+            if id == loadedEditAssetID {
+                if let report = pasteIntoLiveDocument(payload) {
+                    reports.append(report)
+                } else {
+                    failures.append("当前照片在工具会话里：先应用或取消裁切/蒙版工具再粘贴")
+                }
+                continue
+            }
+            guard let catalog else { continue }
+            do {
+                let report = try catalog.pasteSettings(payload, intoAsset: id,
+                                                       sections: Set(EditSnapshotSection.copyable),
+                                                       label: "粘贴设置")
+                reports.append(report)
+            } catch {
+                failures.append("\(id.prefix(8))：\(error.localizedDescription)")
+            }
+        }
+        lastPasteReports = reports
+        lastSettingsError = failures.isEmpty
+            ? (reports.contains(where: \.changed) ? nil : "目标照片已经是这些值：没有改动")
+            : failures.joined(separator: "；")
+        settingsRevision &+= 1
+        return reports
+    }
+
+    /// The anchor's paste goes through the **live** document, so the pixels, the stack and the blob
+    /// travel the same path a slider does — and so the undo row is the session's own.
+    ///
+    /// `commitEdit(coalesce: false)`: a paste is a discrete command, never the continuation of the
+    /// drag that happened to precede it (EditHistory's merge rule is asked not to apply).
+    /// The mask overlay (`showMaskID`) is pasted back on top because it is view state, exactly as
+    /// `undo()` does.
+    private func pasteIntoLiveDocument(_ payload: EditSnapshot) -> SettingsPasteReport? {
+        // A tool session owns the next snapshot (`EditHistory.beginSession`): an edit made inside it
+        // records no row of its own, so a paste here would move the document with nothing to undo.
+        // Refused rather than folded into the tool's base.
+        guard !isToolSessionActive else { return nil }
+        let current = MaskViewState.documentOnly(edit)
+        let merged = payload.applied(to: current)
+        let fields = EditHistory.changedFields(between: current, and: merged)
+        guard !fields.isEmpty else {
+            return SettingsPasteReport(assetID: loadedEditAssetID ?? "",
+                                       changed: false, fields: [], sections: payload.sections,
+                                       requiresDecode: payload.requiresDecode, historyRows: nil)
+        }
+        applyEdit { $0 = MaskViewState.restoring(merged, keeping: $0.showMaskID) }
+        let committed = commitEdit(label: "粘贴设置", coalesce: false)
+        return SettingsPasteReport(assetID: loadedEditAssetID ?? "", changed: committed,
+                                   fields: fields, sections: payload.sections,
+                                   requiresDecode: payload.requiresDecode,
+                                   historyRows: committed ? history.count : nil)
+    }
+
     // MARK: missing originals (a reference root's file moved on disk)
 
     // The library stores references, so the Finder can move a photo out from under a row. Nothing

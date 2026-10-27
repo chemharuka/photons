@@ -246,6 +246,74 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func redoAction(_ sender: Any?) { redoEdit() }
 
+    // MARK: 复制/粘贴设置 (078 P0-7)
+    //
+    // Four verbs, one payload (`CatalogSession.copiedSettings`):
+    //
+    //   复制设置 (⌘C)                  capture the anchor's non-default leaves, narrowed by the
+    //                                 sticky checklist
+    //   选择要复制的设置… (⌥⌘C)         the checklist — 全选 / 全不选 / 预设组合 — then copy
+    //   粘贴设置 (⌘V)                   paste those groups onto the selection (or the anchor)
+    //   粘贴设置（选择组…） (⇧⌘V)        narrow the payload at paste time, then paste
+    //
+    // **The focus rule** is the interesting one. These items own ⌘C/⌘V, and the app also has text
+    // fields (the number fields, the preset name field, an export path). If a text field is being
+    // edited, ⌘C must copy *text*: `validateMenuItem` greys the four items (so AppKit's menu
+    // validation is right) **and** each action re-sends the event down the responder chain
+    // (`NSText.copy:` / `NSText.paste:`), so a key equivalent that AppKit routes to us anyway cannot
+    // eat the shortcut. That is the belt-and-braces version of 「焦点在文本域时 ⌘C 不被劫持」.
+
+    /// True while a text editor owns the keyboard (a field editor or any `NSTextView`).
+    var isTextEditing: Bool {
+        guard let responder = window?.firstResponder else { return false }
+        if let text = responder as? NSTextView { return text.isEditable || text.isFieldEditor }
+        return responder is NSTextField
+    }
+
+    /// Hand a ⌘C/⌘V the text editor asked for to that editor, and report whether it took it.
+    ///
+    /// Sent **to the first responder** rather than `to: nil`: a `nil` target resolves from the key
+    /// window, and a window that is not key (a sheet is up, the app is in the background, a test
+    /// process never activated) has no key window — the shortcut would then vanish silently instead
+    /// of reaching the field the user is typing in.
+    private func forwardTextCommand(_ selector: Selector, sender: Any?) -> Bool {
+        guard let responder = window?.firstResponder, responder.responds(to: selector) else {
+            return false
+        }
+        NSApp.sendAction(selector, to: responder, from: sender)
+        return true
+    }
+
+    @objc public func copySettingsAction(_ sender: Any?) {
+        if isTextEditing {
+            _ = forwardTextCommand(#selector(NSText.copy(_:)), sender: sender)
+            return
+        }
+        session.copySettingsFromAnchor()
+    }
+
+    @objc public func chooseCopySettingsAction(_ sender: Any?) {
+        guard !isTextEditing, session.canCopySettings else { return }
+        guard let selection = CopySettingsAccessoryView.run(selection: session.copySelection,
+                                                            purpose: .copy) else { return }
+        session.copySettingsFromAnchor(selection: selection)
+    }
+
+    @objc public func pasteSettingsAction(_ sender: Any?) {
+        if isTextEditing {
+            _ = forwardTextCommand(#selector(NSText.paste(_:)), sender: sender)
+            return
+        }
+        session.pasteSettings()
+    }
+
+    @objc public func pasteSettingsWithChoicesAction(_ sender: Any?) {
+        guard !isTextEditing, session.canPasteSettings else { return }
+        guard let selection = CopySettingsAccessoryView.run(selection: session.copySelection,
+                                                            purpose: .paste) else { return }
+        session.pasteSettings(sections: selection.sections)
+    }
+
     // MARK: 旋转/裁切 (task 035)
     //
     // The menu never touches the document: it asks the loupe's tool to enter, apply or cancel, and
@@ -325,6 +393,22 @@ public final class EditorWindowController: NSWindowController {
             return true
         case #selector(selectAllAction(_:)):
             return !session.assets.isEmpty
+        case #selector(copySettingsAction(_:)), #selector(chooseCopySettingsAction(_:)):
+            // Grey while a text field owns the keyboard (⌘C is the text field's) and with no photo.
+            guard !isTextEditing, session.canCopySettings else { return false }
+            if item.action == #selector(copySettingsAction(_:)) {
+                item.title = session.copiedSettings.map { "复制设置（\($0.fieldCount) 项）" } ?? "复制设置"
+            }
+            return true
+        case #selector(pasteSettingsAction(_:)), #selector(pasteSettingsWithChoicesAction(_:)):
+            guard !isTextEditing, session.canPasteSettings else { return false }
+            if item.action == #selector(pasteSettingsAction(_:)) {
+                // The count is the number of photos the paste will write, not the number selected:
+                // a photo that already holds these values still gets a report but no row.
+                let count = session.metadataTargetIDs.count
+                item.title = count > 1 ? "粘贴设置到 \(count) 张" : "粘贴设置"
+            }
+            return true
         case #selector(zoomFitAction(_:)):
             // Ticked when the camera shows the whole frame — the state Z returns to.
             item.state = rootView.loupeController.viewState.isActualSize ? .off : .on

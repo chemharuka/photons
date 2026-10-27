@@ -47,6 +47,42 @@ public struct PresetRecord: Sendable, Equatable {
     public var edit: EditModel { preset.edit }
 }
 
+/// What one 粘贴设置 actually did to one photo.
+///
+/// The report exists so the caller can say 「3 张：2 张改动、1 张本来就是这样」 and so a test can assert
+/// *which leaves* moved (`fields`, from the same `EditHistory.changedFields` the history panel
+/// draws) instead of comparing whole documents and guessing. `requiresDecode` is the payload's own
+/// answer — for the anchor photo it is what makes the loupe develop again
+/// (`EditModel.splitFrom(_:) == .decode`); for any other photo nothing is on screen to re-develop.
+public struct SettingsPasteReport: Sendable, Equatable {
+    public var assetID: String
+    /// False = nothing was written: the narrowed payload was empty, or the photo already had it.
+    public var changed: Bool
+    /// The leaves that moved, in `HistoryFields` order.
+    public var fields: [FieldChange]
+    /// The sections the narrowed payload carried (not the ones chosen — empty ones drop out).
+    public var sections: Set<EditSnapshotSection>
+    /// Would the destination need a new decode (white balance), or only a re-render?
+    public var requiresDecode: Bool
+    /// Rows in that asset's `asset_history` after the write, or nil when nothing was written.
+    public var historyRows: Int?
+
+    public init(assetID: String, changed: Bool, fields: [FieldChange],
+                sections: Set<EditSnapshotSection>, requiresDecode: Bool, historyRows: Int?) {
+        self.assetID = assetID
+        self.changed = changed
+        self.fields = fields
+        self.sections = sections
+        self.requiresDecode = requiresDecode
+        self.historyRows = historyRows
+    }
+
+    /// 「曝光 +2、对比 +10」 — the one line a test failure and a status bar can both read.
+    public var summary: String {
+        changed ? fields.map(\.summary).joined(separator: "、") : "无改动"
+    }
+}
+
 public enum PresetStoreError: LocalizedError {
     case noSuchPreset(String)
     /// A row whose blob is not a preset this build can read (empty, not JSON, or a version it does
@@ -282,6 +318,57 @@ extension Catalog {
         let merged = snapshot.applied(to: current)
         return try appendDevelop(merged, label: label, forAsset: id)
     }
+
+    /// 派单 078 P0-7 — paste **a chosen subset of sections**, reporting what moved.
+    ///
+    /// Same merge, one narrowing step in front of it: `snapshot.filtered(to:)` drops every leaf the
+    /// user did not check, and the merge then cannot read (or write) the sections it dropped. So
+    /// 「只粘曝光 + 曲线」 leaves the destination's white balance — and its crop, colour, masks —
+    /// bit for bit, which is what the field-by-field assertions check.
+    ///
+    /// `changed == false` covers three honest no-ops: the narrowed payload is empty, the destination
+    /// already held those values, or the blob was already canonical. None of them grows the stack.
+    @discardableResult
+    public func pasteSettings(_ snapshot: EditSnapshot,
+                              intoAsset id: String,
+                              sections: Set<EditSnapshotSection>,
+                              label: String = "粘贴设置") throws -> SettingsPasteReport {
+        let payload = snapshot.filtered(to: sections)
+        let current = try develop(forAsset: id)
+        guard !payload.isEmpty else {
+            return SettingsPasteReport(assetID: id, changed: false, fields: [],
+                                       sections: [], requiresDecode: false, historyRows: nil)
+        }
+        let merged = payload.applied(to: current)
+        let fields = EditHistory.changedFields(between: current, and: merged)
+        guard !fields.isEmpty else {
+            // Nothing moved: do not call `appendDevelop` at all, so a paste that equals what the
+            // photo already had cannot bump a version, a row or a seq.
+            return SettingsPasteReport(assetID: id, changed: false, fields: [],
+                                       sections: payload.sections,
+                                       requiresDecode: payload.requiresDecode, historyRows: nil)
+        }
+        let saved = try appendDevelop(merged, label: label, forAsset: id)
+        return SettingsPasteReport(assetID: id, changed: saved.changed, fields: fields,
+                                   sections: payload.sections,
+                                   requiresDecode: payload.requiresDecode,
+                                   historyRows: saved.historyRows)
+    }
+
+    /// Paste into several assets — **one history row per asset**, in that asset's own stack.
+    ///
+    /// Not one transaction for the batch: a paste onto three photos is three edits in three
+    /// timelines, and ⌘Z on photo B must take back photo B's paste only. A per-asset failure is
+    /// reported as a thrown error from that asset, and the assets before it keep their rows (a
+    /// half-applied batch is visible in the reports the caller already has).
+    @discardableResult
+    public func pasteSettings(_ snapshot: EditSnapshot,
+                              intoAssets ids: [String],
+                              sections: Set<EditSnapshotSection>,
+                              label: String = "粘贴设置") throws -> [SettingsPasteReport] {
+        try ids.map { try pasteSettings(snapshot, intoAsset: $0, sections: sections, label: label) }
+    }
+
 
     // MARK: rows
 
