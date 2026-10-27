@@ -244,8 +244,13 @@ final class MaskSliderRowTests: XCTestCase {
         let isTheField = responder === field
             || (responder as? NSTextView)?.delegate === field
         XCTAssertTrue(isTheField, "点数值之后，键盘的落点必须是这个数值框 / 它的 field editor")
+        // AppKit hands a focused `NSTextField` its shared field editor: `window.firstResponder` is that
+        // `NSTextView`, and its delegate is this very field — which is why both spellings are checked.
+        XCTAssertTrue(field.currentEditor() === responder || responder === field,
+                      "键盘的落点必须是这个数值框自己的 field editor")
         print("MASK typing · firstResponder = \(String(describing: type(of: responder)))"
               + " · 数值框 \(String(describing: type(of: field))) frame \(field.frame)"
+              + " · field.currentEditor() === firstResponder: \(field.currentEditor() === responder)"
               + " · firstResponder === field: \(responder === field)")
 
         // 0.35 + ↵
