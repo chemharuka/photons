@@ -339,9 +339,13 @@ public struct MaskSliderRow: Sendable, Identifiable, Equatable {
     /// only when the gesture ends" rule are the ones the mask panel already had.
     @MainActor
     @discardableResult
+    /// - Parameter coalesce: `false` when this write is a **command** (双击复位) rather than a drag
+    ///   release — 077: a command must not merge into the drag in front of it.
     public func write(_ displayValue: Double, into session: CatalogSession, maskID: String,
-                      commit: Bool) -> Bool {
-        session.writeMask(maskID, label: label, commit: commit) { apply(displayValue, to: &$0) }
+                      commit: Bool, coalesce: Bool = true) -> Bool {
+        session.writeMask(maskID, label: label, commit: commit, coalesce: coalesce) {
+            apply(displayValue, to: &$0)
+        }
     }
 
     // MARK: the shipped table
@@ -523,7 +527,10 @@ extension PanelResets {
     @discardableResult
     public func mask(_ row: MaskSliderRow, in mask: Mask) -> Bool {
         guard row.display(mask) != row.defaultValue else { return false }
-        return row.write(row.defaultValue, into: session, maskID: mask.id, commit: true)
+        // 077: 复位是**命令**，不参与"同参数连续拖动"的合并（否则它会折进前面那次拖动，
+        // 落回起点时两行一起消失，⌘Z 无从撤销）。
+        return row.write(row.defaultValue, into: session, maskID: mask.id, commit: true,
+                         coalesce: false)
     }
 
     /// Double-click on 中点 / 半径 / 角度 / 容差 / 下限 / 上限 / 软边: that one shape field back to the
@@ -535,7 +542,7 @@ extension PanelResets {
         guard row.read(current) != row.defaultValue else { return false }
         session.setMaskComponentShape(mask.id, component: component,
                                       shape: row.apply(current, row.defaultValue),
-                                      commit: true, label: row.label)
+                                      commit: true, label: row.label, coalesce: false)
         return true
     }
 
@@ -557,7 +564,7 @@ extension PanelResets {
         next.invert = Mask.fallback.invert
         guard next != mask else { return false }
         return session.writeMask(id, label: InspectorView.Section.masks.title, commit: false) { $0 = next }
-            && session.commitEdit(label: InspectorView.Section.masks.title)
+            && session.commitEdit(label: InspectorView.Section.masks.title, coalesce: false)
     }
 }
 
@@ -574,14 +581,18 @@ extension CatalogSession {
     ///
     /// Returns whether the document actually changed: a slider released where it started is not an
     /// edit, and the caller can tell the difference instead of guessing.
+    /// - Parameter coalesce: `false` for a **discrete command** (双击复位). Same rule as
+    ///   `commitEdit` (077): a reset must not fold into the drag that came before it — folding it in
+    ///   would either hide the reset inside that row or erase both when it lands on the drag's start.
     @discardableResult
     public func writeMask(_ id: String, label: String = "蒙版", commit: Bool = false,
+                          coalesce: Bool = true,
                           _ body: (inout Mask) -> Void) -> Bool {
         guard let index = edit.masks.firstIndex(where: { $0.id == id }) else { return false }
         let before = editRevision
         applyEdit { body(&$0.masks[index]) }
         let changed = editRevision != before
-        if commit { commitEdit(label: label) }
+        if commit { commitEdit(label: label, coalesce: coalesce) }
         return changed
     }
 

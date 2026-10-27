@@ -385,12 +385,15 @@ extension CatalogSession {
 
     /// Rewrite one component's shape. `commit == false` is the live-drag case (one snapshot per
     /// gesture, not per mouse move): the pixels follow the hand, the history does not.
+    /// - Parameter coalesce: `false` for a **command** (双击复位 on a shape row); a canvas drag release
+    ///   keeps the default so consecutive drags of the same handle are one row (077).
     public func setMaskComponentShape(_ maskID: String, component: Int,
-                                      shape: MaskShape, commit: Bool, label: String) {
+                                      shape: MaskShape, commit: Bool, label: String,
+                                      coalesce: Bool = true) {
         guard let maskIndex = edit.masks.firstIndex(where: { $0.id == maskID }),
               edit.masks[maskIndex].components.indices.contains(component) else { return }
         applyEdit { $0.masks[maskIndex].components[component].shape = shape }
-        if commit { commitEdit(label: label) }
+        if commit { commitEdit(label: label, coalesce: coalesce) }
     }
 
     /// The selected mask's adjustable component, when it has one — what a canvas drag adjusts.
