@@ -466,7 +466,12 @@ extension EditHistory {
         }
     }
 
-    /// `color.bands[2].hue` → 「HSL[2] 色相」.
+    /// `color.bands[2].hue` → 「HSL[2] 色相」; `color.bands[0].mix` → 「黑白混合[红]」.
+    ///
+    /// 黑白混合 (2026-10-28, S3.4) is named **the other way round** on purpose: the HSL axes are one
+    /// of three numbers on a band the user picked in a selector, so an index is the honest handle
+    /// (「HSL[2] 色相」); a 黑白混合 row is its own row on its own card, one per hue, so the hue's
+    /// *name* is — 「黑白混合[红] 0 → +50」 names the control the user double-clicked.
     private static func bandName(_ key: String) -> String? {
         let prefix = "color.bands["
         guard key.hasPrefix(prefix), let close = key.lastIndex(of: "]") else { return nil }
@@ -477,7 +482,9 @@ extension EditHistory {
         case "hue": name = "色相"
         case "saturation": name = "饱和"
         case "luminance": name = "明度"
-        case "mix": name = "黑白混合"
+        case "mix":
+            let i = Int(index).map { min(max($0, 0), HSLBands.bandNames.count - 1) } ?? 0
+            return "黑白混合[\(HSLBands.bandNames[i])]"
         default: name = String(axis)
         }
         return "HSL[\(index)] \(name)"

@@ -554,6 +554,63 @@ final class HistoryTests: XCTestCase {
         XCTAssertNil(mutableClamped.undo())
     }
 
+    // MARK: 黑白 (S3.4, 2026-10-28)
+
+    /// The two rows 黑白 writes, in the panel's own wording: 「黑白 关 → 开」 for the switch (a
+    /// structural flag, like 镜头校正) and 「黑白混合[红] 0 → +50」 for one band's mix.
+    ///
+    /// The names are the *contract* here, not decoration: the switch is the card's title (「黑白」), and
+    /// the mix is named by the **hue** it governs — the row the user double-clicked — rather than by an
+    /// index into an HSL selector that is not on screen (「HSL[0] 黑白混合」 would be a row about a card
+    /// the user is not looking at). `HSLBands.bandNames` is the one table behind that name.
+    func testTheBlackAndWhiteSwitchAndAMixReadAsTheirOwnRows() {
+        var h = history()
+        // The `edit` helper starts from `neutral` every time, so each step is built from the state the
+        // previous one produced — otherwise a later commit would "reset" the earlier band to 0 and the
+        // row would be about two bands instead of one.
+        var on = EditModel.neutral
+        on.color.blackAndWhite = true
+        h.commit(on, label: "黑白", now: t0)
+        XCTAssertEqual(h.changedFields(at: 1).map(\.field.key), ["color.blackAndWhite"])
+        XCTAssertEqual(h.rows.last?.summary, "黑白 关 → 开",
+                       "a flag reads 关/开, never 0/1")
+        XCTAssertEqual(h.rows.last?.label, "黑白")
+
+        var red = on
+        red.color.bands[0].mix = 50
+        h.commit(red, label: "红", now: t0)
+        XCTAssertEqual(h.changedFields(at: 2).map(\.field.key), ["color.bands[0].mix"])
+        XCTAssertEqual(h.rows.last?.summary, "黑白混合[红] 0 → +50")
+        XCTAssertEqual(h.rows.last?.changedCount, 1, "one band, one row")
+
+        // Each hue is named by its own band, and a negative value keeps its sign.
+        var cyan = red
+        cyan.color.bands[4].mix = -30
+        h.commit(cyan, label: "青", now: t0)
+        XCTAssertEqual(h.rows.last?.summary, "黑白混合[青] 0 → -30")
+        XCTAssertEqual(EditHistory.parameterName(for: "color.bands[7].mix"), "黑白混合[品红]")
+        print("BW HISTORY · \(h.rows.dropFirst().map(\.summary))")
+    }
+
+    /// Five commits of one band's mix are **one** row (an HSL drag's rule), and the switch does not
+    /// merge with it: they are two gesture classes.
+    func testAMixDragMergesButTheSwitchDoesNot() {
+        // The baseline already has the switch on, so the drag's row is the mix and nothing else.
+        var h = history(edit { $0.color.blackAndWhite = true })
+        for v in [10.0, 20, 30, 40, 50] {
+            h.commit(edit { $0.color.blackAndWhite = true; $0.color.bands[2].mix = v },
+                     label: "黄", now: t0)
+        }
+        XCTAssertEqual(h.count, 2, "baseline + one merged drag")
+        XCTAssertEqual(h.rows.last?.summary, "黑白混合[黄] 0 → +50")
+
+        h.commit(edit { $0.color.blackAndWhite = false; $0.color.bands[2].mix = 50 },
+                 label: "黑白", now: t0)
+        XCTAssertEqual(h.count, 3, "the switch is its own class")
+        XCTAssertEqual(h.rows.last?.summary, "黑白 开 → 关")
+        XCTAssertEqual(h.changedFields(at: 2).count, 1, "only the switch moved")
+    }
+
     func testInitFromRowsMatchesCursorSeq() {
         let a = edit { $0.light.exposure = 1 }
         let b = edit { $0.light.contrast = 20 }

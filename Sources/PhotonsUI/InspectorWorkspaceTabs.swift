@@ -18,7 +18,7 @@ import PhotonsCore
 ///
 /// | 工作区 | 卡片 | 状态 |
 /// |---|---|---|
-/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 效果 / 预设 | 既有卡片，全在这里（2026-10-28 加效果）|
+/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 黑白 / 细节 / 曲线 / 效果 / 预设 | 既有卡片，全在这里（2026-10-28 加效果、黑白）|
 /// | 变换 `transform` | 裁切 | 2026-10-27：裁切卡搬进了这个工作区（比例 / 角度 / 翻转 / 九宫格 / 应用取消） |
 /// | 色彩 `colour` | — | HSL **尚未实现**，空着 |
 /// | 蒙版 `masks` | 蒙版 | 既有的蒙版卡 |
@@ -82,7 +82,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // them here: 「以及既有的 预设 卡也留在这里」).
             // 2026-10-28: 效果 (暗角 + 颗粒) joined the workspace — the last editing card before
             // 预设, which stays last because it writes the other cards rather than adding a parameter.
-            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve, .effects, .presets]
+            // 2026-10-28: 黑白 (S3.4) joined it too, directly after Color — the stage order
+            // (`RenderStage.order` = … .color, .bw, .hsl …), which is also Lightroom's.
+            return [.whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .detail, .curve,
+                    .effects, .presets]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
             // card the workspace has today, and it is a `Section` like every other card, so the order

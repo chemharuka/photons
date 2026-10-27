@@ -31,8 +31,11 @@ public enum HSLAxis: String, CaseIterable, Sendable {
     /// is 0.3° of hue).
     public static let range: ClosedRange<Double> = -100...100
 
-    /// The eight bands, in Lightroom's order, with the names the selector draws.
-    public static let bandNames = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"]
+    /// The eight bands, in Lightroom's order, with the names the selector draws — read from the
+    /// **core** table (`HSLBands.bandNames`), because since 2026-10-28 the same eight names are also
+    /// the history wording of a 黑白混合 row (「黑白混合[红]」). One table, so the card and the timeline
+    /// cannot name the same band differently.
+    public static let bandNames = HSLBands.bandNames
 
     /// A band's own colour, for the selector dot: OKLCh at the band's **own centre** (the same number
     /// the stage weights against), a mid lightness and a chroma that survives being drawn 12 pt wide.

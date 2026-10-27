@@ -323,8 +323,8 @@ public final class UISmokeRunner {
               && !scrollTitles.contains(InspectorView.Section.histogram.title))
         let adjustTitles = InspectorView.cardTitles(in: .adjust)
         log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
-        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设，直方图与裁切都不在其中",
-              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 黑白 / 细节 / 曲线 / 效果 / 预设，直方图与裁切都不在其中",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "黑白", "细节", "曲线", "效果", "预设"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
