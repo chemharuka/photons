@@ -356,6 +356,17 @@ public struct MaskStageReport: Sendable {
     public var showMaskID: String?
     public var showMaskSlice: Int?
 
+    /// 081 — pixels the S1.5 kernels *evaluated*, summed over slices (`Σ w·h` of each mask's raster
+    /// box), next to what the same atlas would have evaluated with a full-canvas dispatch
+    /// (`canvas pixels × slices`). The gap is the saving; `testAtlasRasterIsConfinedToMaskBounds`
+    /// asserts on both numbers, so reverting the box to the whole canvas turns it red.
+    public var atlasRasterPixels: Int = 0
+    public var atlasCanvasPixels: Int = 0
+    /// Share of a full-canvas dispatch the atlas actually evaluated (0…1).
+    public var atlasRasterFraction: Double {
+        atlasCanvasPixels > 0 ? Double(atlasRasterPixels) / Double(atlasCanvasPixels) : 0
+    }
+
     public init() {}
 
     /// Total pixels the S1.6 pass wrote.
@@ -547,8 +558,11 @@ private struct MaskAtlasParams {
 }
 
 private struct MaskDescU {
-    var meta: SIMD4<Int32>   // firstComponent, componentCount, invert, pad
+    // `w` is 1 when any component reads the picture (kind 3/4) — the kernel's `needsPicture`.
+    var meta: SIMD4<Int32>   // firstComponent, componentCount, invert, needsPicture
     var misc: SIMD4<Float>   // opacity
+    // 081 — the canvas box this slice can be non-zero in, half-open (`x0, y0, x1, y1`).
+    var rect: SIMD4<Int32>
 }
 
 private struct MaskShapeDescU {
@@ -603,6 +617,8 @@ private struct ShowMaskParams {
 /// 005d — mirror of `MaskBlurParams` in `s1_7_mask_neighbourhood.metal`.
 private struct MaskBlurParams {
     var a: SIMD4<Int32>   // canvasW, canvasH, segment length, sliceCount
+    /// 081 — the dispatch window's origin inside the unchanged lattice (see the kernel).
+    var b: SIMD4<Int32>   // xFirst, yFirst, pad, pad
 }
 
 /// 005d — mirror of `RefineParams` in `s1_7_mask_neighbourhood.metal`.
@@ -1257,7 +1273,7 @@ public final class RenderGraph {
         // 080: the decode path has no mask stage at all, so it neither builds a table nor releases
         // the cached atlas — a `\` frame must leave every cache exactly as it found it, or leaving
         // 原图 would pay for an atlas rebuild it did not cause (`BeforeAfterUITests`).
-        let table = decodeOnly ? nil : try maskTable(for: edit, content: plan.frameInCanvas, semantics: semantics)
+        let table = decodeOnly ? nil : try maskTable(for: edit, plan: plan, semantics: semantics)
         if !decodeOnly, table == nil { atlasCache = nil }
 
         // 005d: the tiling material joins the two mask keys. A local-stage texture computed under a
@@ -1460,6 +1476,8 @@ public final class RenderGraph {
                     report?.refineMaskCount = stageReport.refineMaskCount
                     report?.atlasDependency = stageReport.atlasDependency
                     report?.bounds = stageReport.bounds
+                    report?.atlasRasterPixels = stageReport.atlasRasterPixels
+                    report?.atlasCanvasPixels = stageReport.atlasCanvasPixels
                 }
                 trace.record(stage, executed: true)
                 atlasCache = AtlasEntry(key: key, texture: atlas, ids: table.ids)
@@ -2717,10 +2735,12 @@ public final class RenderGraph {
 
     /// Descriptor tables for the enabled masks, in atlas order. Cached on the two key materials so a
     /// frame that only moves a slider reuses the buffers.
-    private func maskTable(for edit: EditModel, content: ImageSize,
+    private func maskTable(for edit: EditModel, plan: Plan,
                            semantics: SemanticResolution) throws -> MaskTable? {
         let active = edit.activeMasks
         guard !active.isEmpty else { return nil }
+        let content = plan.frameInCanvas
+        let mapping = canvasMapping(edit, plan)
 
         let selection = edit.maskSelectionMaterial
         let apply = edit.maskApplyMaterial
@@ -2728,8 +2748,12 @@ public final class RenderGraph {
         // lengths derived from it: the same document at thumbnail and at export must produce
         // different descriptors from the same selection key. 005e adds the semantic material for the
         // same reason: which slice a semantic component points at is not in the document.
+        // 081 adds the canvas and its two origins: each mask's raster box is a *canvas* rectangle, so
+        // a 1:1 window that pans keeps the selection fixed while moving the box that holds it.
         let cacheKey = selection + "##" + apply + "##" + content.keyString
             + "##" + semantics.keyMaterial
+            + "##" + plan.canvas.keyString
+            + "##" + "\(plan.origin.x),\(plan.origin.y),\(plan.frameOrigin.x),\(plan.frameOrigin.y)"
         if let hit = maskTables[cacheKey] { return hit }
 
         var masks: [MaskDescU] = []
@@ -2751,15 +2775,27 @@ public final class RenderGraph {
             let featherPx = Float(MaskRadius.featherPixels(m.feather, content: content))
             let guidedPx = Float(MaskRadius.guidedRadiusPixels(m.refine, content: content))
             dependency = dependency.widest(MaskRadius.atlasDependency(of: m, content: content))
-            masks.append(MaskDescU(meta: SIMD4(first, Int32(m.components.count), m.invert ? 1 : 0, 0),
+            // 081: the slice's raster box. `rasterRect` answers the whole canvas whenever the
+            // coverage is *not* provably 0 outside the shape (inverted masks, content predicates).
+            let raster = MaskBounds.rasterRect(for: m, mapping: mapping)
+            let needsPicture = m.components.contains { c in
+                switch c.shape {
+                case .colorRange, .luminanceRange: return true
+                default: return false
+                }
+            }
+            masks.append(MaskDescU(meta: SIMD4(first, Int32(m.components.count), m.invert ? 1 : 0,
+                                               needsPicture ? 1 : 0),
                                    misc: SIMD4(Float(min(max(m.opacity, 0), 1)), featherPx,
-                                               Float(min(max(m.refine, 0), 1)), guidedPx)))
+                                               Float(min(max(m.refine, 0), 1)), guidedPx),
+                                   rect: SIMD4(Int32(raster.x0), Int32(raster.y0),
+                                               Int32(raster.x1), Int32(raster.y1))))
             adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled))
             colorAdjust.append(colorAdjustDesc(m.adjustments, enabled: m.isEnabled))
         }
         // Metal requires a bound buffer even when the count is zero; one neutral entry keeps the
         // binding valid without inventing a mask.
-        if masks.isEmpty { masks.append(MaskDescU(meta: .zero, misc: .zero)) }
+        if masks.isEmpty { masks.append(MaskDescU(meta: .zero, misc: .zero, rect: .zero)) }
         if shapes.isEmpty { shapes.append(MaskShapeDescU(meta: .zero, p0: .zero, p1: .zero)) }
         if adjust.isEmpty { adjust.append(LocalAdjustU(a: SIMD4(1, 1, 1, 0), b: .zero, c: SIMD4(0, 0, 0, 0))) }
         if colorAdjust.isEmpty { colorAdjust.append(LocalColorU(a: .zero)) }
@@ -2997,22 +3033,58 @@ public final class RenderGraph {
             // A segment is at least as long as the window, so the warm-up cost never dominates the
             // sliding sum; 64 px granularity keeps the thread count a multiple of the SIMD width.
             let segment = max(256, ((2 * (radii.max() ?? 0) + 63) / 64) * 64)
+            // 081 — the window the two halves have to visit: the union of the slices' boxes, grown by
+            // the widest radius, snapped outward to the *existing* segment lattice (the kernels derive
+            // their segment from `gid`, so a lattice that moved would be a different running sum).
+            var boxX0 = canvas.width, boxY0 = canvas.height, boxX1 = 0, boxY1 = 0
+            var rMax = 0
+            for (i, m) in table.masks.prefix(count).enumerated() {
+                let r = radii[i]
+                guard r > 0 else { continue }
+                boxX0 = min(boxX0, Int(m.rect.x)); boxY0 = min(boxY0, Int(m.rect.y))
+                boxX1 = max(boxX1, Int(m.rect.z)); boxY1 = max(boxY1, Int(m.rect.w))
+                rMax = max(rMax, r)
+            }
+            // Nothing to blur (every mask has radius 0): the passes are already skipped above.
+            if boxX1 <= boxX0 { boxX1 = boxX0 + 1; boxY1 = boxY0 + 1 }
+            let hGroupX0 = max(0, (boxX0 - rMax) / segment)
+            let hGroupX1 = min((canvas.width + segment - 1) / segment,
+                               (boxX1 + rMax + segment - 1) / segment)
+            let vSegY0 = max(0, boxY0 / segment)
+            let vSegY1 = min((canvas.height + segment - 1) / segment,
+                             (boxY1 + segment - 1) / segment)
+            // Rows the horizontal half must produce: every row the vertical half will *walk*, which
+            // starts one segment below the box (the vertical pass keeps its whole-segment loop and
+            // only confines its stores).
+            var hRow0 = max(0, vSegY0 * segment - rMax)
+            let hRow1 = min(canvas.height, min(canvas.height, vSegY1 * segment) + rMax)
+            if hRow0 >= hRow1 { hRow0 = max(0, hRow1 - 1) }
+            let hGroups = MTLSize(width: max(1, hGroupX1 - hGroupX0),
+                                  height: max(1, (hRow1 - hRow0 + 31) / 32), depth: count)
+            let vGroups = MTLSize(width: max(1, (boxX1 - boxX0 + 31) / 32),
+                                  height: max(1, vSegY1 - vSegY0), depth: count)
             var bp = MaskBlurParams(a: SIMD4(Int32(canvas.width), Int32(canvas.height),
-                                             Int32(segment), Int32(count)))
-            let passes: [(String, MTLTexture, MTLTexture, MTLSize, MTLSize)] = [
-                ("s1_7_mask_blur_h", atlas, tmp,
-                 MTLSize(width: (canvas.width + segment - 1) / segment, height: (canvas.height + 31) / 32, depth: count),
-                 MTLSize(width: 1, height: 32, depth: 1)),
-                ("s1_7_mask_blur_v", tmp, atlas,
-                 MTLSize(width: (canvas.width + 31) / 32, height: (canvas.height + segment - 1) / segment, depth: count),
-                 MTLSize(width: 32, height: 1, depth: 1)),
+                                             Int32(segment), Int32(count)),
+                                    b: SIMD4(0, 0, 0, 0))
+            let passes: [(String, MTLTexture, MTLTexture, MTLSize, MTLSize, SIMD4<Int32>)] = [
+                ("s1_7_mask_blur_h", atlas, tmp, hGroups,
+                 MTLSize(width: 1, height: 32, depth: 1),
+                 SIMD4(Int32(hGroupX0), Int32(hRow0), 0, 0)),
+                ("s1_7_mask_blur_v", tmp, atlas, vGroups,
+                 MTLSize(width: 32, height: 1, depth: 1),
+                 SIMD4(Int32(boxX0), Int32(vSegY0), 0, 0)),
             ]
-            for (fn, source, destination, groups, threads) in passes {
+            for (fn, source, destination, groups, threads, origin) in passes {
                 let pipe = try kernels.pipeline(file: "s1_7_mask_neighbourhood", function: fn)
                 guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
                 e.setComputePipelineState(pipe)
                 e.setTexture(source, index: 0)
                 e.setTexture(destination, index: 1)
+                // The window's origin, in the pass's own lattice units (segment index for the axis
+                // that walks segments, pixel index for the other). The window is always a *subset*
+                // of the lattice — when the box is the whole canvas it degenerates to the old
+                // dispatch, with a zero origin.
+                bp.b = origin
                 e.setBytes(&bp, length: MemoryLayout<MaskBlurParams>.stride, index: 0)
                 e.setBuffer(table.maskBuffer, offset: 0, index: 1)
                 e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
@@ -3036,6 +3108,15 @@ public final class RenderGraph {
         for m in edit.activeMasks {
             if let r = MaskBounds.canvasRect(for: m, mapping: mapping) { report.bounds[m.id] = r }
         }
+        // 081 — how much of a full-canvas dispatch this atlas actually evaluated. Summed over the
+        // boxes the *kernel* was given (`table.masks`, not `report.bounds`): the number has to
+        // describe the dispatch, or it is not a receipt for the saving it claims.
+        report.atlasRasterPixels = table.masks.prefix(count).reduce(0) { acc, m in
+            let w = max(0, Int(m.rect.z) - Int(m.rect.x))
+            let h = max(0, Int(m.rect.w) - Int(m.rect.y))
+            return acc + w * h
+        }
+        report.atlasCanvasPixels = canvas.pixelCount * max(count, 1)
         report.atlasDependency = table.dependency
         return report
     }

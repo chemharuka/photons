@@ -66,8 +66,19 @@ struct MaskAtlasParams {
 };
 
 struct MaskDesc {
-    int4   meta;   // firstComponent, componentCount, invert, pad
+    // `meta.w` is 1 when any component of this mask reads the picture (kind 3/4), i.e. when the
+    // kernel has to fetch S1's texel at all. It is a *slice* flag rather than a per-shape one
+    // because the fetch is per pixel, not per shape.
+    int4   meta;   // firstComponent, componentCount, invert, needsPicture
     float4 misc;   // opacity, featherRadiusPx (005d), refine strength, guidedRadiusPx (005d)
+    // 081 — the canvas box (half-open `x0, y0, x1, y1`) this slice can be non-zero in: the mask's
+    // own extent grown by `featherRadius + guidedRadius` and clamped to the canvas, or the whole
+    // canvas when the extent cannot be bounded (inverted masks, colour/luminance/semantic
+    // components — see `MaskBounds.rasterRect`). Every component is exactly 0 outside it, so the
+    // coverage there *is* 0 and needs no evaluation. The slice is still **written** everywhere: the
+    // atlas texture is reused across rebuilds, and a stale texel outside the new box would be a
+    // previous frame's selection leaking into this one.
+    int4   rect;
 };
 
 // kind: 0 linear, 1 radial, 2 brush, 3 colour range, 4 luminance range, 5 semantic matte,
@@ -329,17 +340,39 @@ static inline void atlas_body(texture2d<float, access::read> src,
     uint count = uint(max(p.e.x, 0));
     float2 srcSize = max(p.b.zw, float2(1.0));
     float minSide = min(srcSize.x, srcSize.y);
-    float2 uv = source_uv<HAS_ROTATION>(float2(gid), p);
-    bool outside = uv.x < 0.0;
-    float2 ppx = outside ? float2(0.0) : uv * srcSize;
-    // Predicates that read the picture (colour range, luminance range) see the S1 output: the
-    // frame the editing stage will see, not the decoder's.
-    float3 linearRGB = outside ? float3(0.0) : src.read(gid).rgb;
+    int2 px = int2(gid);
+    // 081 — the geometry walk (S0's mapping backwards, one rotate, two divides) is only needed by a
+    // pixel that lies inside *some* slice's box; everything else writes +0.0 without ever knowing
+    // where in the source it would have been.
+    bool anyInside = false;
+    for (uint s = 0; s < count; ++s) {
+        int4 r = masks[s].rect;
+        if (px.x >= r.x && px.y >= r.y && px.x < r.z && px.y < r.w) { anyInside = true; break; }
+    }
+    float2 uv = float2(-1.0);
+    bool outside = true;
+    float2 ppx = float2(0.0);
+    if (anyInside) {
+        uv = source_uv<HAS_ROTATION>(float2(gid), p);
+        outside = uv.x < 0.0;
+        ppx = outside ? float2(0.0) : uv * srcSize;
+    }
 
     for (uint s = 0; s < count; ++s) {
         MaskDesc m = masks[s];
+        // 081 — evaluate only inside this mask's own box. Outside it every component is exactly 0
+        // (the box is the shape's support grown by both neighbourhood radii), so the coverage the
+        // old code computed there was `clamp(0 · opacity)` = +0.0, which is what gets written.
+        bool inside = !outside
+            && int(gid.x) >= m.rect.x && int(gid.y) >= m.rect.y
+            && int(gid.x) <  m.rect.z && int(gid.y) <  m.rect.w;
         float a = 0.0;
-        if (!outside) {
+        if (inside) {
+            // Predicates that read the picture (colour range, luminance range) see the S1 output: the
+            // frame the editing stage will see, not the decoder's. Only fetched when some component
+            // of *this* mask looks at it; before 081 every pixel of every mask paid for an rgba16f
+            // read that a geometry-only mask never used.
+            float3 linearRGB = m.meta.w != 0 ? src.read(gid).rgb : float3(0.0);
             float acc = 0.0;
             for (int i = 0; i < m.meta.y; ++i) {
                 MaskShapeDesc d = shapes[m.meta.x + i];

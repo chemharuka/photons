@@ -1863,6 +1863,118 @@ final class MaskTests: XCTestCase {
         XCTAssertLessThanOrEqual(bounds.x0, tight.x0)
     }
 
+    // MARK: - 081: the atlas evaluates only inside each mask's box
+
+    /// 081 — the pointwise kernel is still dispatched over the whole canvas (so a reused atlas
+    /// texture never keeps a previous frame's coverage) but *evaluates* only inside the mask's own
+    /// canvas box. This pins all three halves of that sentence:
+    ///
+    /// · every covered texel lies inside the box, so the box cannot be too small (the silent
+    ///   failure — a stripe of the mask stops being recomputed);
+    /// · every texel outside it is **exactly** +0.0, i.e. the untouched area is byte-identical to
+    ///   what the full-canvas pass used to write there;
+    /// · `atlasRasterPixels` is the box's pixel count, not the canvas's, so the saving is a receipt
+    ///   and not a claim. The counter-proof is one line: revert `MaskBounds.rasterRect` to the canvas
+    ///   and the last three assertions go red while nothing else in the suite moves.
+    func testAtlasRasterIsConfinedToMaskBounds() throws {
+        let image = rampImage(width: 320, height: 200)
+        var edit = maskDoc(.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.5, 0.5), radius: NormalizedPoint(0.2, 0.2))),
+            componentFeather: 0.4, maskFeather: 0.4,
+            adjustments: LocalAdjustments(exposure: 0.5), id: "m-box")
+        // A rotated, cropped frame: the box then goes through S0's mapping instead of measuring
+        // axis-aligned source pixels, which is where a too-small bound would hide.
+        edit.geometry = GeometryGroup(crop: NormalizedRect(x: 0.04, y: 0.03, width: 0.92, height: 0.9),
+                                     rotationDegrees: 4, flipHorizontal: false, flipVertical: false)
+
+        let result = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+            edit, options: RenderOptions(scale: 1)))
+        let box = try XCTUnwrap(result.report.bounds["m-box"])
+        let slice = result.dump.slices[0]
+        let w = result.dump.width
+
+        var covered = 0
+        var outsideNonZero = 0
+        for y in 0..<result.dump.height {
+            for x in 0..<w {
+                let v = slice[y * w + x]
+                let inside = box.x0 <= x && x < box.x1 && box.y0 <= y && y < box.y1
+                if v > 0 {
+                    covered += 1
+                    XCTAssertTrue(inside, "coverage at (\(x), \(y)) lies outside the box \(box.keyString)")
+                }
+                if !inside, v != 0 { outsideNonZero += 1 }
+            }
+        }
+        XCTAssertGreaterThan(covered, 2000)
+        XCTAssertEqual(outsideNonZero, 0, "every texel outside the box must be exactly +0.0")
+
+        // The dispatch receipt. `atlasRasterPixels` counts what the kernel evaluated, `atlasCanvasPixels`
+        // what a full-canvas dispatch would have cost; the ratio is the saving in one number.
+        XCTAssertEqual(result.report.atlasRasterPixels, box.pixelCount)
+        XCTAssertEqual(result.report.atlasCanvasPixels, w * result.dump.height)
+        XCTAssertLessThan(result.report.atlasRasterFraction, 0.5,
+                          "a 0.2-radius radial mask must not be evaluated over the whole canvas")
+        XCTAssertGreaterThan(result.report.atlasRasterFraction, 0.01,
+                             "…and the box must still be where the mask is")
+    }
+
+    /// The conservative branches, spelled out: an inverted mask covers everything *outside* its
+    /// shape, and the two content-dependent predicates have no parameter-only extent — both must
+    /// answer the whole canvas, or the box would silently drop coverage. A cheaper frame is worth
+    /// nothing next to a wrong pixel, so this is the test that keeps the bound honest.
+    func testAtlasRasterFallsBackToTheWholeCanvasWhenTheBoxCannotBeProved() throws {
+        let image = rampImage(width: 200, height: 140)
+        let circle = MaskShape.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.5, 0.5), radius: NormalizedPoint(0.15, 0.15)))
+        let cases: [(String, EditModel)] = [
+            ("inverted mask", maskDoc(circle, invert: true,
+                                      adjustments: LocalAdjustments(exposure: 0.4), id: "m-inv")),
+            ("colour range", maskDoc(.colorRange(ColorRangeShape(samples: [Self.leftColourSRGB],
+                                                                tolerance: 0.15)),
+                                     adjustments: LocalAdjustments(exposure: 0.4), id: "m-col")),
+        ]
+        for (label, edit) in cases {
+            let result = try XCTUnwrap(try makeGraph(image).maskAtlasWithReport(
+                edit, options: RenderOptions(scale: 1)))
+            XCTAssertEqual(result.report.atlasRasterFraction, 1.0, accuracy: 1e-9,
+                           "\(label): the box must be the whole canvas")
+        }
+    }
+
+    /// 081 — "no mask ⇒ the stage does not exist" has to survive the box work: S1.5 is not merely
+    /// cheap, it is absent (`hasActiveMasks` is the predicate), and an all-disabled mask set must be
+    /// the same frame byte for byte as no mask at all.
+    func testNoMaskDocumentDoesNotExecuteTheAtlas() throws {
+        let image = rampImage()
+        let neutral = try makeGraph(image).render(EditModel.neutral,
+                                                  options: RenderOptions(scale: 1, wantsPixels: true))
+        XCTAssertFalse(neutral.trace.executed.contains(.maskAtlas), "no masks: S1.5 must not run")
+        XCTAssertNil(neutral.maskReport)
+        XCTAssertNil(neutral.keys.maskAtlas)
+        let plain = try XCTUnwrap(neutral.display).sha256()
+
+        var disabled = maskDoc(.radialGradient(RadialGradientShape(
+            center: NormalizedPoint(0.5, 0.5), radius: NormalizedPoint(0.2, 0.2))),
+            componentFeather: 0.3, maskFeather: 0.4,
+            adjustments: LocalAdjustments(exposure: 0.8), id: "m-off")
+        disabled.masks[0].isEnabled = false
+        let off = try makeGraph(image).render(disabled,
+                                              options: RenderOptions(scale: 1, wantsPixels: true))
+        XCTAssertFalse(off.trace.executed.contains(.maskAtlas), "a disabled mask must not run S1.5")
+        XCTAssertNil(off.maskReport)
+        XCTAssertEqual(try XCTUnwrap(off.display).sha256(), plain,
+                       "a disabled mask must not move a single pixel")
+
+        // Sanity, so the assertions above are not vacuous: the same mask *enabled* does run it.
+        var on = disabled
+        on.masks[0].isEnabled = true
+        let live = try makeGraph(image).render(on,
+                                              options: RenderOptions(scale: 1, wantsPixels: true))
+        XCTAssertTrue(live.trace.executed.contains(.maskAtlas))
+        XCTAssertNotNil(live.maskReport)
+    }
+
     /// §3.4 step 4: the closure is `D ∪ descendants(D)` in Kahn order, and a cycle is reported instead
     /// of half-rendered. M4's own documents have no edges, which is why the chain is synthetic.
     func testMaskGraphClosureOrdersProducersBeforeConsumers() {
