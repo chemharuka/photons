@@ -152,6 +152,10 @@ public struct RenderInputs: Sendable, Equatable {
             // key **byte for byte** — without the filter every existing document's `renderInputs.key`
             // would grow a `s3.7-grain=gamt=0…` segment and miss every cached thumbnail once.
             .filter { $0 != .grain || edit.hasGrain }
+            // 2026-10-28 (P0-4): and S3.4 is the fourth. A colour document — including one that still
+            // carries mix values from a day it was black-and-white — keeps this key byte for byte:
+            // `bw=0;gray=…` is not a key segment any cached render was written against.
+            .filter { $0 != .bw || edit.hasBlackAndWhite }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }

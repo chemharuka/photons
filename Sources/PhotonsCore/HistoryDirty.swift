@@ -101,7 +101,7 @@ enum EditParameters {
     static func areEqual(_ a: [HSLBand], _ b: [HSLBand]) -> Bool {
         a.count == b.count && zip(a, b).allSatisfy {
             areEqual($0.hue, $1.hue) && areEqual($0.saturation, $1.saturation)
-                && areEqual($0.luminance, $1.luminance)
+                && areEqual($0.luminance, $1.luminance) && areEqual($0.mix, $1.mix)
         }
     }
 
@@ -146,7 +146,8 @@ enum EditParameters {
     }
 
     static func areEqual(_ a: ColorGroup, _ b: ColorGroup) -> Bool {
-        areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
+        a.blackAndWhite == b.blackAndWhite
+            && areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
             && areEqual(a.bands, b.bands)
     }
 

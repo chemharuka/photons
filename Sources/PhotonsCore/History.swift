@@ -42,7 +42,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         switch self {
         case .light: return [.sceneLinear, .toneMap]
         case .curve: return [.curve]
-        case .color: return [.color, .hsl]
+        case .color: return [.color, .bw, .hsl]
         case .detail: return []
         // 2026-10-28: the Effects card is two stages — S3c (vignette) and S3.7 (grain).
         case .effects: return [.vignette, .grain]

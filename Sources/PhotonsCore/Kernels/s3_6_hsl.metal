@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "oklch_bands.metal"
 using namespace metal;
 // S3.6 — **HSL: the eight colour bands, on OKLCh, in the display-referred domain.**
 //
@@ -8,8 +9,8 @@ using namespace metal;
 //     whatever numbers it is handed, so on linear light pure blue and pure yellow both read 0.5 while
 //     their luminance differs by 6.9× — one 亮度 slider, two meanings. darktable's `colorzones` uses
 //     Lab/LCh and its `colorbalancergb` Filmlight Ych; ART/Ansel are in Lab as well. None of them runs
-//     HSL in linear light, and neither do we: `OKLCh.fromLinear` (host) and `oklab_raw` below are the
-//     graph's own `OKLabMetric.lmsFold`, the Rec.2020 fold 075 derived.
+//     HSL in linear light, and neither do we: `OKLCh.fromLinear` (host) and `oklab_raw` in
+//     `oklch_bands.metal` are the graph's own `OKLabMetric.lmsFold`, the Rec.2020 fold 075 derived.
 //
 //  2. **The position is here**, i.e. after S2's tone map and after S3/S3.5, before the vignette —
 //     the same display-referred domain 056 put the mask's hue/saturation in. A band's 亮度 lift on a
@@ -26,66 +27,20 @@ using namespace metal;
 //
 // Tiling/identity: pixel-in, pixel-out, and a source pixel is written back untouched when the document
 // has no non-identity band (`p.a.w`), outside the content rect, where S0 wrote alpha 0 (the matte),
-// when the pixel is neutral (`oklch chroma` below the gate — exactly 0 there, so grey is bit-exact),
+// when the pixel is neutral (`hsl_chroma_gate` — exactly 0 there, so grey is bit-exact),
 // or when every weight is zero. `HSLTests` pins those four.
 //
 // The stage only exists for documents that need it (`RenderStage.pipeline(hasHSL:)`), so a document
 // with all 24 band values at 0 renders the pre-076 graph byte for byte.
 
-// The stage is self-contained on purpose: it shares **no** maths with `color_hsl.metal` (S3's global
-// vibrance/saturation and S3.5's mask hue/saturation), because those two are HSL in the display
-// domain and this one is OKLCh. The units are the one thing they do share: a hue unit is 0.3°.
+// The stage shares **no** maths with `color_hsl.metal` (S3's global vibrance/saturation and S3.5's
+// mask hue/saturation), because those two are HSL in the display domain and this one is OKLCh. It
+// does share the band *geometry* with S3.4 (黑白) — that is `oklch_bands.metal`, and it is shared on
+// purpose: two stages that name the same eight colours must measure them the same way.
 
 struct HSLParams {
     float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
-
-/// One band, as the host uploads it: `v` = (hue, saturation, luminance) in slider units and `e` =
-/// how far the band reaches towards its previous and next neighbour, in OKLCh degrees.
-struct HSLBandDesc {
-    float4 v;
-    float4 e;
-};
-
-/// Ottosson's OKLab from **linear working primaries**, raw axes (no `chromaSpan` division — a chroma
-/// here is the real OKLCh `C`, which the saturation slider multiplies).
-///
-/// 075 §2.2: the fold is `M1 · toXYZ(Rec.2020)` with its rows normalised to 1, the same nine literals
-/// `s1_5_mask_atlas.metal` carries.
-static inline float3 oklab_raw(float3 rgb) {
-    float3 c = max(rgb, 0.0);
-    float l = dot(c, float3(0.6167557877, 0.3601984026, 0.0230458097));
-    float m = dot(c, float3(0.2651330603, 0.6358393719, 0.0990275679));
-    float s = dot(c, float3(0.1001026312, 0.2039065206, 0.6959908482));
-    float3 lms = pow(max(float3(l, m, s), 0.0), float3(1.0 / 3.0));
-    return float3(dot(lms, float3(0.2104542553, 0.7936177850, -0.0040720468)),
-                  dot(lms, float3(1.9779984951, -2.4285922050, 0.4505937099)),
-                  dot(lms, float3(0.0259040371, 0.7827717662, -0.8086757660)));
-}
-
-/// OKLCh → linear working primaries: `M₂⁻¹`, cube, `fold⁻¹`. The same nine + nine literals as
-/// `OKLCh.toLinear` on the host (`HSLTests` pins the round trip on both sides).
-static inline float3 oklch_to_linear(float L, float C, float hueDeg) {
-    float h = hueDeg * (M_PI_F / 180.0);
-    float a = C * cos(h), b = C * sin(h);
-    float l_ = 0.9999999985 * L + 0.3963377922 * a + 0.2158037581 * b;
-    float m_ = 1.0000000089 * L - 0.1055613423 * a - 0.0638541748 * b;
-    float s_ = 1.0000000547 * L - 0.0894841821 * a - 1.2914855379 * b;
-    float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
-    return float3(2.1399067200 * l - 1.2463894955 * m + 0.1064827755 * s,
-                  -0.8847358342 * l + 2.1632309414 * m - 0.2784951073 * s,
-                  -0.0485737534 * l - 0.4545031404 * m + 1.5030768936 * s);
-}
-
-/// One band's weight at a signed hue offset from its centre. Reads 1 on the centre, falls to **exactly
-/// 0** on each neighbour's centre (`d >= reach`), and rises nowhere — the two bands sharing a gap sum
-/// to 1 by construction.
-static inline float hsl_band_weight(float delta, float reach) {
-    float d = fabs(delta);
-    if (d >= reach) { return 0.0; }
-    float t = d / reach;
-    return 1.0 - t * t * (3.0 - 2.0 * t);
-}
 
 kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
                      texture2d<float, access::write> dst [[texture(1)]],
@@ -115,7 +70,7 @@ kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
     // only sum to 1 to 1e-10 — so a mathematically neutral pixel arrives with C ≈ 1e-8 and an arbitrary
     // angle), 1 from 0.02 up, and a `smoothstep` in between so a near-neutral gradient fades in instead
     // of stepping at a threshold (079 §2.6.3).
-    float gate = chroma <= 1e-6 ? 0.0 : smoothstep(1e-6, 0.02, chroma);
+    float gate = hsl_chroma_gate(chroma);
     if (gate <= 0.0) {
         dst.write(c, gid);
         return;

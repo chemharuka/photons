@@ -1005,11 +1005,13 @@ final class MaskTests: XCTestCase {
         let result = try graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true))
         // 056: this document's mask carries no hue/saturation, so S3.5 does not exist for it — the
         // trace is the nine pre-056 stages, and the local-colour key stays `nil`.
-        // 076 also does not exist here (the document has no band value), and neither does S3.7
-        // (2026-10-28: the document has no grain), so the expected set drops all three conditional
-        // stages.
+        // 076 also does not exist here (the document has no band value), S3.7 not (2026-10-28: the
+        // document has no grain) and S3.4 not (2026-10-28: the document is not black-and-white), so the
+        // expected set drops all four conditional stages.
         XCTAssertEqual(Set(result.trace.executed),
-                       Set(RenderStage.order.filter { $0 != .localColor && $0 != .hsl && $0 != .grain }))
+                       Set(RenderStage.order.filter {
+                           $0 != .localColor && $0 != .hsl && $0 != .grain && $0 != .bw
+                       }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")
         XCTAssertEqual(result.keys.pipeline.count, 9)

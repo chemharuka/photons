@@ -403,7 +403,14 @@ public enum XMPWriter {
             try write(metadata, "crs:HueAdjustment\(name)", zeroOrNil(band.hue), &report)
             try write(metadata, "crs:SaturationAdjustment\(name)", zeroOrNil(band.saturation), &report)
             try write(metadata, "crs:LuminanceAdjustment\(name)", zeroOrNil(band.luminance), &report)
+            // 2026-10-28 (P0-4): 黑白混合 lives on Lightroom's **same** eight hues — `GrayMixerRed`…
+            // `GrayMixerMagenta` — and is written under its own names rather than folded into the HSL
+            // trio, because that is what a round trip through Lightroom needs. Absent at 0, like every
+            // other suppressed default, so a colour document's sidecar is byte-identical.
+            try write(metadata, "crs:GrayMixer\(name)", zeroOrNil(band.mix), &report)
         }
+        // The switch itself: `crs:ConvertToGrayscale` (Lightroom's own key), written only when on.
+        try write(metadata, "crs:ConvertToGrayscale", c.blackAndWhite ? number(1) : nil, &report)
 
         // MARK: 1.6 detail
 

@@ -465,6 +465,68 @@ final class RenderTests: XCTestCase {
         print("076 · banded: \(b.keys.shortTrace) · sha \(pb.sha256().prefix(12))…")
     }
 
+    // MARK: - 10. 黑白 (P0-4): a colour document is the pre-S3.4 graph, a monochrome one is not
+
+    /// **The hard acceptance for 2026-10-28 (P0-4)**, on the real decoder rather than a synthetic ramp:
+    /// a colour document — including one that still carries 黑白混合 values — must render the pre-S3.4
+    /// graph: no `s3.4` in the trace, no `bw` link in the key chain, and the same pixel hash as the
+    /// neutral document.
+    ///
+    /// (A synthetic version lives in `BlackAndWhiteTests`, where the *values* are also measured; this one
+    /// exists because "the stage is gone" has to be true of a real RAW, where the key chain carries an
+    /// orientation, a decoder version and a white balance.)
+    func testAColourDocumentDoesNotVisitTheBWStage() throws {
+        let (graph, _) = try makeGraph(scale: 0.125)
+        var plain = EditModel.neutral
+        plain.color.vibrance = 12           // the rest of the colour group is *not* the 黑白 card's
+        var mixes = plain
+        mixes.color.bands = (0..<8).map { HSLBand(mix: Double($0 * 12 - 40)) }
+
+        let options = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
+        let a = try graph.render(plain, options: options)
+        let b = try graph.render(mixes, options: options)
+        let pa = try XCTUnwrap(a.display), pb = try XCTUnwrap(b.display)
+
+        XCTAssertFalse(b.trace.executed.contains(.bw),
+                       "no 黑白 switch: S3.4 must not be in the pipeline")
+        XCTAssertNil(b.keys.bw, "no 黑白 switch: no bw link in the key chain")
+        XCTAssertFalse(b.keys.shortTrace.contains("s3.4"))
+        XCTAssertEqual(pa.sha256(), pb.sha256(),
+                       "mix values with the switch off must be byte-identical to no 黑白 at all")
+        XCTAssertFalse(RenderInputs(mixes).key.contains("s3.4-bw"))
+        print("P0-4 · colour: \(b.keys.shortTrace) · sha \(pb.sha256().prefix(12))…")
+    }
+
+    /// The other half: the switch on converts the real photograph, and the three channels come out
+    /// **equal** — the acceptance's `< 1e-4` max channel difference, measured over the whole frame.
+    func testABlackAndWhiteDocumentIsMonochrome() throws {
+        let (graph, _) = try makeGraph(scale: 0.125)
+        var edit = EditModel.neutral
+        edit.color.blackAndWhite = true
+        edit.color.bands[0].mix = 40        // 红 +40, a real drag
+        edit.color.bands[5].mix = -40       // 蓝 −40
+
+        let options = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
+        let result = try graph.render(edit, options: options)
+        let pixels = try XCTUnwrap(result.display)
+        XCTAssertTrue(result.trace.executed.contains(.bw), "the switch must run S3.4")
+        XCTAssertNotNil(result.keys.bw, "the switch must add a bw link")
+
+        var worst = 0.0
+        var brightest = 0.0
+        for i in 0..<(pixels.width * pixels.height) {
+            let r = Double(pixels.rgba[i * 4]), g = Double(pixels.rgba[i * 4 + 1])
+            let b = Double(pixels.rgba[i * 4 + 2])
+            worst = max(worst, max(abs(r - g), max(abs(g - b), abs(r - b))))
+            brightest = max(brightest, r)
+        }
+        print("P0-4 · monochrome: \(pixels.width * pixels.height) pixels,"
+              + " max |Δchannel| \(String(format: "%.2e", worst)),"
+              + " brightest grey \(String(format: "%.3f", brightest))"
+              + " · \(result.keys.shortTrace)")
+        XCTAssertLessThan(worst, 1e-4, "a monochrome photograph cannot carry a cast")
+    }
+
     // MARK: - 8. recorded golden images (L2 for the graph)
 
     /// Compares against `Tests/Golden/render-*.json`, which `make verify` records. Mirrors the CLI

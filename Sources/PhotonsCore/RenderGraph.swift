@@ -125,6 +125,17 @@ public struct RenderOptions: Sendable {
     /// assertion "the two differ" fails.
     public var originalRendersAsParametersCleared: Bool
 
+    /// **Tests only.** Compute S3.4's grey **once per channel** (`L` of `(r,r,r)`, of `(g,g,g)`, of
+    /// `(b,b,b)`) instead of once per pixel and writing it three times — the plausible mistake a
+    /// monochrome pass can make, and the one the acceptance's "the three channels are equal" assertion
+    /// exists for.
+    ///
+    /// `BlackAndWhiteTests.testTheRefutationTintsTheGrey` turns it on and shows the measured
+    /// max-channel-difference going from 0 to something a cast would need — i.e. the assertion is
+    /// load-bearing, not a tautology about a kernel that only ever had one number to write. Never set
+    /// by the app, never part of a key.
+    public var bwIndependentChannels: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -137,7 +148,8 @@ public struct RenderOptions: Sendable {
                 histogramSampleLongEdge: Int = 0,
                 forceCurveArithmetic: Bool = false,
                 source: RenderSource = .edited,
-                originalRendersAsParametersCleared: Bool = false) {
+                originalRendersAsParametersCleared: Bool = false,
+                bwIndependentChannels: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -151,6 +163,7 @@ public struct RenderOptions: Sendable {
         self.forceCurveArithmetic = forceCurveArithmetic
         self.source = source
         self.originalRendersAsParametersCleared = originalRendersAsParametersCleared
+        self.bwIndependentChannels = bwIndependentChannels
     }
 }
 
@@ -471,6 +484,13 @@ private struct ColorParams {
 /// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076).
 private struct HSLParamsU {
     var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+}
+
+/// Mirror of `Kernels/s3_4_bw.metal` (2026-10-28, P0-4). The band table is the **same**
+/// `HSLBandU` array S3.6 uploads — one band geometry, two consumers.
+private struct BWParamsU {
+    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var b: SIMD4<Float>   // perChannelGrey (tests only), stops per full mix, pad, pad
 }
 
 /// One band as the kernel reads it: the three slider values in units, and the reach towards the
@@ -804,6 +824,17 @@ public final class RenderGraph {
     /// cache nobody can trust.
     private let s1KeyIncludesRedGroup: Bool
 
+    /// Whether S3.4 is put into the pipeline **even for a colour document**. **Never true in the
+    /// app.**
+    ///
+    /// `BlackAndWhiteTests.testTheRefutationRunsTheKernelWithTheSwitchOff` sets it and shows what the
+    /// structural claim buys: the same colour document, with the pass encoded, comes back as a
+    /// different frame — so "the frame is byte-identical because the stage does not exist" is a fact
+    /// about the pipeline rather than a hope about the kernel's arithmetic. It forces the *key* to say
+    /// `bw=1` too (the stage has to exist for the trace, which is what the key set drives), which is
+    /// why the forced render also changes the chain: a stage that runs must be a stage that is keyed.
+    private let bwStageAlwaysRuns: Bool
+
     /// 073 — how many times each stage **ran**, and how many times its output came out of a cache,
     /// over the life of this graph. Merged from the frame's own trace at the end of `render`, so the
     /// counters cannot disagree with what the frame reported (`.sceneLinear` and `.localApply`
@@ -877,7 +908,8 @@ public final class RenderGraph {
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
                 semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider(),
                 textureRetention: TextureRetention = .oneFrame,
-                s1KeyIncludesRedGroup: Bool = true) throws {
+                s1KeyIncludesRedGroup: Bool = true,
+                bwStageAlwaysRuns: Bool = false) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
         guard let queue = device.makeCommandQueue() else { throw RenderError.noMetalDevice }
         self.device = device
@@ -887,6 +919,7 @@ public final class RenderGraph {
         self.input = input
         self.cacheBudgetBytes = cacheBudgetBytes
         self.s1KeyIncludesRedGroup = s1KeyIncludesRedGroup
+        self.bwStageAlwaysRuns = bwStageAlwaysRuns
         self.pool = TexturePool(device: device, retention: textureRetention)
         self.semanticProvider = semanticMatte
         self.semanticStore = SemanticMatteStore()
@@ -979,6 +1012,16 @@ public final class RenderGraph {
         }
     }
 
+    /// The document the key chain sees. Identical to `edit` except under `bwStageAlwaysRuns`, where it
+    /// is the same document with the 黑白 switch forced **on**, so S3.4 gets a link and therefore a
+    /// place in `Plan.stages` — the refutation described on that property.
+    private func keyEdit(_ edit: EditModel) -> EditModel {
+        guard bwStageAlwaysRuns, !edit.hasBlackAndWhite else { return edit }
+        var forced = edit
+        forced.color.blackAndWhite = true
+        return forced
+    }
+
     private func plan(_ edit: EditModel, _ options: RenderOptions) -> Plan {
         // The aspect lock and the ±45 straighten limit are resolved here, once: S0 receives a plain
         // normalized rect plus cos/sin, exactly the shape it always had.
@@ -1055,7 +1098,7 @@ public final class RenderGraph {
                                                             sourceSize: sourceSize,
                                                             canvas: canvas,
                                                             content: content,
-                                                            edit: edit,
+                                                            edit: keyEdit(edit),
                                                             display: options.display,
                                                             outputWindow: window,
                                                             orientation: orientation),
@@ -2372,6 +2415,24 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 
+        case .bw:
+            // S3.4 — 黑白 (2026-10-28, P0-4). Encoded **only** for documents whose 黑白 switch is on
+            // (`RenderStage.pipeline(hasBW:)`), so a colour document's frame is the pre-S3.4 frame by
+            // construction rather than by arithmetic: there is no pass to be neutral in. The mix table
+            // is the HSL stage's own eight bands, with `band.mix` in `.v.x`.
+            let p = try kernels.pipeline(file: "s3_4_bw", function: "s3_4_bw")
+            let bands = try bwBandBuffer(for: edit.color)
+            var params = BWParamsU(
+                a: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)),
+                b: SIMD4(options.bwIndependentChannels ? 1 : 0, Float(HSLBands.mixStopsPerFull),
+                         0, 0))
+            let enc = try encoder(cb, p, in: src, out: out)
+            enc.setBytes(&params, length: MemoryLayout<BWParamsU>.stride, index: 0)
+            enc.setBuffer(bands, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
         case .hsl:
             // 076 — the eight bands, in OKLCh, on display-referred data. One buffer: eight
             // `HSLBandU`s (values + the reach towards each neighbour). The centres come from
@@ -3399,6 +3460,27 @@ public final class RenderGraph {
                                         length: MemoryLayout<HSLBandU>.stride * words.count,
                                         options: .storageModeShared) else {
             throw RenderError.allocationFailed("HSL bands")
+        }
+        return b
+    }
+
+    /// The eight bands as S3.4 reads them (2026-10-28, P0-4): **the same table**, with the 黑白混合
+    /// value in `.v.x` where S3.6 puts the hue. The centres and reaches are `HSLBands`' constants, so
+    /// the two stages cannot act on two different wheels; nothing is cached, for the reason
+    /// `hslBandBuffer` gives (eight floats per frame is cheaper than a cache keyed by a dragging slider).
+    private func bwBandBuffer(for color: ColorGroup) throws -> MTLBuffer {
+        var words: [HSLBandU] = []
+        words.reserveCapacity(ColorGroup.bandCount)
+        for (i, band) in color.bands.prefix(ColorGroup.bandCount).enumerated() {
+            let centre = HSLBands.centresDegrees[min(i, HSLBands.centresDegrees.count - 1)]
+            let extent = HSLBands.extents[min(i, HSLBands.extents.count - 1)]
+            words.append(HSLBandU(v: SIMD4(Float(band.mix), 0, 0, centre),
+                                  e: SIMD4(extent.left, extent.right, 0, 0)))
+        }
+        guard let b = device.makeBuffer(bytes: words,
+                                        length: MemoryLayout<HSLBandU>.stride * words.count,
+                                        options: .storageModeShared) else {
+            throw RenderError.allocationFailed("B&W mix bands")
         }
         return b
     }

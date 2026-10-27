@@ -257,16 +257,20 @@ public struct HSLBandPatch: Sendable, Equatable, Codable {
     public var hue: Double?
     public var saturation: Double?
     public var luminance: Double?
+    /// 2026-10-28 (P0-4): 黑白混合, on the same band.
+    public var mix: Double?
 
-    public init(index: Int, hue: Double? = nil, saturation: Double? = nil, luminance: Double? = nil) {
+    public init(index: Int, hue: Double? = nil, saturation: Double? = nil, luminance: Double? = nil,
+                mix: Double? = nil) {
         self.index = index
         self.hue = hue
         self.saturation = saturation
         self.luminance = luminance
+        self.mix = mix
     }
 
     public var fieldCount: Int {
-        [hue != nil, saturation != nil, luminance != nil].filter { $0 }.count
+        [hue != nil, saturation != nil, luminance != nil, mix != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
@@ -277,16 +281,20 @@ public struct ColorPatch: Sendable, Equatable, Codable {
     public var saturation: Double?
     /// Only the bands that differ from `HSLBand()`; absent bands are the destination's.
     public var bands: [HSLBandPatch]?
+    /// 2026-10-28 (P0-4): the 黑白 switch. Copied as a field of its own so "paste onto a colour photo"
+    /// can carry the mode — a mix list without the switch is a look nobody asked for.
+    public var blackAndWhite: Bool?
 
     public init() {}
 
     public var fieldCount: Int {
-        [vibrance != nil, saturation != nil].filter { $0 }.count + (bands ?? []).reduce(0) { $0 + $1.fieldCount }
+        [vibrance != nil, saturation != nil, blackAndWhite != nil].filter { $0 }.count
+            + (bands ?? []).reduce(0) { $0 + $1.fieldCount }
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 2 + ColorGroup.bandCount * 3
+    public static let fullFieldCount = 3 + ColorGroup.bandCount * 4
 }
 
 public struct DetailPatch: Sendable, Equatable, Codable {
@@ -392,12 +400,16 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         var color = ColorPatch()
         if differs(edit.color.vibrance, 0) { color.vibrance = edit.color.vibrance }
         if differs(edit.color.saturation, 0) { color.saturation = edit.color.saturation }
+        // 2026-10-28 (P0-4): the switch is a value like any other, and `false` is the destination's
+        // default — so only "on" travels (「只带非默认字段」).
+        if edit.color.blackAndWhite { color.blackAndWhite = true }
         var bands: [HSLBandPatch] = []
         for (i, band) in ColorGroup.normalize(edit.color.bands).enumerated() {
             var patch = HSLBandPatch(index: i)
             if differs(band.hue, 0) { patch.hue = band.hue }
             if differs(band.saturation, 0) { patch.saturation = band.saturation }
             if differs(band.luminance, 0) { patch.luminance = band.luminance }
+            if differs(band.mix, 0) { patch.mix = band.mix }
             if !patch.isEmpty { bands.append(patch) }
         }
         if !bands.isEmpty { color.bands = bands }
@@ -564,6 +576,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if let p = color {
             if let v = p.vibrance { out.color.vibrance = v }
             if let v = p.saturation { out.color.saturation = v }
+            if let v = p.blackAndWhite { out.color.blackAndWhite = v }
             // Bands are indexed into the eight-band array; an out-of-range index cannot exist in a
             // payload this build wrote, and is ignored if a hand-written one carries it.
             for patch in p.bands ?? [] {
@@ -572,6 +585,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if let v = patch.hue { band.hue = v }
                 if let v = patch.saturation { band.saturation = v }
                 if let v = patch.luminance { band.luminance = v }
+                if let v = patch.mix { band.mix = v }
                 out.color.bands[patch.index] = band
             }
         }
