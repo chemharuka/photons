@@ -318,17 +318,20 @@ public final class LoupeCanvasView: NSView {
     /// Trackpads send two axes; a wheel sends mostly y. Both mean "move the camera", never "scale a
     /// layer" — the controller re-renders the window at the same zoom.
     ///
-    /// While 裁切 mode is on the wheel is **dead**: the picture has to stay where the frame is, or the
-    /// number on screen would disagree with the number that gets committed (task 035, 手势优先级).
+    /// ⑤/⑥ — the 裁切 gate that used to be here is gone. The camera is **view state**: a two-finger
+    /// scroll through this method is the same `scrollPan` the loupe mode gets (same deltas, same
+    /// anchor, same clamp), a wheel is the same event, and the frame over the picture is re-laid-out
+    /// by `setViewState` → `syncCropOverlay` in the same turn. Locking the picture down while the tool
+    /// was on never protected the document either: nothing here can write one.
     public override func scrollWheel(with event: NSEvent) {
-        guard controller?.isCropToolActive != true else { return }
         controller?.scrollPan(deltaX: event.scrollingDeltaX,
                              deltaY: event.scrollingDeltaY,
                              precise: event.hasPreciseScrollingDeltas)
     }
 
+    /// ⑥ — the pinch is the loupe's zoom, crop mode included (`magnify(by:at:)` is the same ladder and
+    /// the same pointer anchor the loupe mode uses).
     public override func magnify(with event: NSEvent) {
-        guard controller?.isCropToolActive != true else { return }
         controller?.magnify(by: 1 + event.magnification,
                             at: convert(event.locationInWindow, from: nil))
     }
@@ -1472,6 +1475,15 @@ public final class LoupeController: NSViewController {
             frameSource = source
         }
         updateStatusChip()
+        // ① — the **one** place a camera change reaches the crop overlay.
+        //
+        // `viewState` is written here and nowhere else (that is the invariant `updateStatusChip`
+        // already relies on), so a zoom from the pill, ⌘= / ⌘−, a double-click, a touchpad scroll or
+        // a pinch — and a pan from a two-finger scroll or a drag — all pass through this line. The
+        // frame is a rect of the *projection*, so it has to be re-laid-out in the same turn the
+        // projection changed: before this, `refreshCropTool()` only ran on draft changes and mode
+        // changes, and the overlay kept drawing the fit-time rectangle after a zoom.
+        if syncsCropOverlayOnCameraChange { syncCropOverlay() }
         view.window?.invalidateCursorRects(for: canvasView)
         // **Every** stop change is bridged — fit ↔ a numeric stop, and numeric stop ↔ numeric stop
         // (`25 ↔ 33.3 ↔ 50 ↔ 66.7 ↔ 100 ↔ 200 ↔ 300 ↔ 400`). The camera jumps here and the pixels
@@ -2038,7 +2050,10 @@ public final class LoupeController: NSViewController {
         CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY)
     }
 
-    private var backingScale: Double {
+    /// Canvas points → device pixels for this window. Internal because the projection is published in
+    /// device pixels (`LoupeMapping`) and a test that reads a screen rect back into points needs the
+    /// same divisor the controller used.
+    var backingScale: Double {
         Double(canvasView.window?.backingScaleFactor ?? 2)
     }
 
@@ -2698,6 +2713,13 @@ public final class LoupeController: NSViewController {
         return CropTool.hit(point, in: layout)
     }
 
+    /// The layout the overlay view is **drawing** at this instant (`nil` when the tool is off).
+    ///
+    /// ① is a claim about the view and the camera agreeing, so the number has to come from the view —
+    /// recomputing `cropToolLayout()` in the test would pass even if `syncCropOverlay` were never
+    /// called.
+    var cropOverlayLayoutForTesting: CropToolLayout? { cropOverlay.layout }
+
     /// Take the press. `true` means the canvas is dragging the frame and must not pan.
     @discardableResult
     public func beginCropDrag(atViewPoint point: CGPoint, rotate: Bool = false,
@@ -2759,15 +2781,52 @@ public final class LoupeController: NSViewController {
             publishedCropModeActive = active
             onCropModeChange?(active)
         }
+        // ② — the pill lives in a different corner while the frame is up (the bar is centred at the
+        // bottom of the canvas). Set **before** the `guard`, because leaving the tool is the case that
+        // has to put it back.
+        layoutZoomSlider()
         guard active else {
             cropOverlay.layout = nil
             cropOverlay.active = nil
             return
         }
-        cropOverlay.layout = cropToolLayout()
-        cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
+        syncCropOverlay()
         cropBar.sync()
         layoutCropBar()
+        // ④ — the draft's own geometry (拉直 / 裁切 / 翻转) is part of the document the low-resolution
+        // whole picture is made from, so a change to it retires the cached one.
+        noteBackdropKeyMoved()
+    }
+
+    /// ⑦ — the model-layer clamp, run before anything reads the layout (and after any gesture that
+    /// could have put the frame outside the canvas: a drag, a zoom, a pan, a straighten).
+    @discardableResult
+    private func clampCropFrameToCanvas() -> Bool {
+        guard cropTool.isActive, let framing = framing() else { return false }
+        return cropTool.clampToView(mapping: framing.mapping(of: viewState), source: cropSourceSize)
+    }
+
+    /// ① — the overlay from the **current** projection: the frame quad, the eight grips and the
+    /// nine-square grid, in one assignment, so nothing on screen can be half-updated.
+    ///
+    /// Called from `setViewState` (every zoom and pan), from `refreshCropTool` (every draft and mode
+    /// change) and from `viewDidLayout` (a resize is a new projection). One function, so "framing
+    /// changed → overlay follows" is a single place to look — the wheel, the pinch, the pill, ⌘=/⌘−,
+    /// the double-click and the two-finger scroll all end here.
+    private func syncCropOverlay() {
+        guard cropTool.isActive else {
+            if cropOverlay.layout != nil {
+                cropOverlay.layout = nil
+                cropOverlay.active = nil
+            }
+            return
+        }
+        // ⑦ first: a zoom or a pan is exactly what can put the frame outside the canvas, so the
+        // clamp belongs on this path and not only on the drag paths. When it moves the draft the bar's
+        // numbers move with it, or the readout would describe a rect that is no longer on screen.
+        if clampCropFrameToCanvas() { cropBar.sync() }
+        cropOverlay.layout = cropToolLayout()
+        cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
     }
 
     private func layoutCropBar() {
@@ -3373,10 +3432,37 @@ public final class LoupeController: NSViewController {
     /// picture on screen), a different `DecodeInputs.key` (white balance, detail, decoder version —
     /// the same rules the decode ladder uses), and a different `EditModel` (everything S1–S3 does,
     /// through `Histogram.editDigest`).
+    ///
+    /// ④ — **the edit is the one the canvas renders**, not the document: while 裁切 mode is on the
+    /// picture on screen carries the draft's straighten (`previewEdit`), so the whole-picture frame has
+    /// to be rendered from the same edit or the two disagree about the angle. Before this the key came
+    /// from `currentEdit` (the document) while the *pixels* came from `makeJob`'s preview edit — so a
+    /// 拉直 moved the sharp frame and left the low-resolution one at 0°, and zooming out showed the
+    /// picture straighten itself.
     private var backdropKey: BackdropCache.Key? {
-        guard let edit = currentEdit else { return nil }
+        guard let edit = effectiveEdit else { return nil }
         return backdropKey(edit: edit)
     }
+
+    /// The document the **canvas** renders: the crop tool's preview document while the frame is up
+    /// (whole frame + draft straighten + the document's flips), the document itself otherwise. One
+    /// property so the backdrop, its key and `makeJob` cannot disagree about which edit is on screen.
+    private var effectiveEdit: EditModel? {
+        guard let edit = currentEdit else { return nil }
+        guard backdropUsesEffectiveEdit, cropTool.isActive else { return edit }
+        return cropTool.previewEdit(from: edit)
+    }
+
+    // MARK: the anti-proof switches (tests only)
+
+    /// With this `false`, a camera change does **not** re-lay-out the crop overlay — the pre-①
+    /// behaviour. It exists so the follow tests can show their own assertion going red; nothing in
+    /// the app sets it.
+    var syncsCropOverlayOnCameraChange = true
+
+    /// With this `false`, the low-resolution whole picture is keyed on the **document** instead of the
+    /// edit on screen — the pre-④ behaviour (a 拉直 that never reached the backdrop). Same reason.
+    var backdropUsesEffectiveEdit = true
 
     private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
         guard let photo = backdropPhotoKey else { return nil }
@@ -3390,6 +3476,36 @@ public final class LoupeController: NSViewController {
         if let source = frameSource { return source.identity }
         guard let session, let asset = session.anchorAsset else { return nil }
         return ladderIdentity(asset)
+    }
+
+    /// The whole document in one string — what the cached low-resolution picture is filed under right
+    /// now. Internal: the ④ suite compares it with `editDigest` of the edit the sharp frame renders.
+    var backdropKeyIdentity: String? { backdropKey?.identity }
+
+    /// Just the digest half of the key (the document the low-resolution frame is of).
+    var backdropDigestForTesting: String? { backdropKey?.digest }
+
+    /// The whole key, for a test that has to file a texture under it.
+    var backdropKeyForTesting: BackdropCache.Key? { backdropKey }
+
+    /// The texture a present would draw behind `window` at this instant (④'s stale refusal is
+    /// measured through the shipped accessor, not a re-implementation of it).
+    func backdropTextureForTesting(for window: PresentWindow) -> MTLTexture? {
+        backdropTexture(for: window)
+    }
+
+    /// ④ — the low-resolution whole picture is made from the **effective** edit, so when that edit
+    /// moves (the draft's 拉直 / 裁切 / 翻转 in 裁切 mode) the cached texture is retired instead of
+    /// drawn at the old angle. `backdropWanted` hands the replacement to the next landed frame
+    /// (`serveWantedBackdrop`), which is the same path an open/photo switch already uses — one render,
+    /// not one per slider tick: `ensureLowResFullFrame` refuses while another generation is running and
+    /// the key comparison below is what makes a repeat call a no-op.
+    private func noteBackdropKeyMoved() {
+        guard presenter != nil else { return }
+        guard let key = backdropKey else { return }
+        guard let held = backdrop.key, held != key else { return }
+        backdrop.invalidate()
+        backdropWanted = true
     }
 
     /// The document on screen as this class sees it (a frame source names its own document).
@@ -3965,7 +4081,12 @@ public final class LoupeController: NSViewController {
         // show the old photograph's edge around the new one — a worse artefact than 025's extrapolation.
         // The key carries the photo (`contentHash|assetID`), so the check is the same one that makes the
         // next entry regenerate.
-        guard let key = backdrop.key, key.photo == backdropPhotoKey else { return nil }
+        //
+        // ④ — and it carries the **edit** too. A texture whose key is not the document on screen (a
+        // 拉直 in the crop draft, an edit applied while a low-resolution frame was cached) is refused
+        // here rather than drawn: a backdrop at another angle is the 「缩放时画面会变」, and no backdrop
+        // at all — 025's edge extrapolation — is the honest picture until the replacement lands.
+        guard let key = backdrop.key, key == backdropKey else { return nil }
         return backdrop.texture
     }
 
@@ -4885,6 +5006,11 @@ public final class LoupeController: NSViewController {
     // MARK: the fixed-stop zoom slider (canvas, bottom-right)
 
     private func layoutZoomSlider() {
+        // ② — 裁切 mode parks the pill in the **top-right** corner: the tool bar is centred at the
+        // bottom of the canvas, and the two chrome rectangles must not intersect. Every other mode
+        // keeps the bottom-right rectangle exactly as it was (`Placement.bottomRight` is the
+        // default), which is the regression the placement test pins.
+        zoomSlider.placement = cropTool.isActive ? .topRight : .bottomRight
         zoomSlider.layout(in: container.bounds)
     }
 

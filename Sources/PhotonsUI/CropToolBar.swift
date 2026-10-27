@@ -46,9 +46,9 @@ final class CropToolBar: NSView {
     private let angleField = CropInfoField(labelWithString: "0.0°")
     private let ratioField = CropInfoField(labelWithString: "")
     private let pixelField = CropInfoField(labelWithString: "")
-    private let flipHButton = NSButton(title: "水平", target: nil, action: nil)
-    private let flipVButton = NSButton(title: "垂直", target: nil, action: nil)
-    private let gridButton = NSButton(title: "九宫格", target: nil, action: nil)
+    private let flipHButton = CropToggleButton(title: "水平", target: nil, action: nil)
+    private let flipVButton = CropToggleButton(title: "垂直", target: nil, action: nil)
+    private let gridButton = CropToggleButton(title: "九宫格", target: nil, action: nil)
     private let applyButton = NSButton(title: "应用", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
 
@@ -156,6 +156,12 @@ final class CropToolBar: NSView {
             button.target = self
             button.action = action
             button.bezelStyle = .inline
+            // ③ — a `.toggle`, because `state` is the whole interface here (the two flips are the
+            // document's bits) and a *momentary* button does not keep it: AppKit normalises it back,
+            // and the chip then never draws. What AppKit's own "selected" rendering paints for
+            // `.inline` is a pale wash of the accent rather than the accent (measured (70,143,248)
+            // against (0,122,255)), which is why `CropToggleButton` draws the accent **after**
+            // `super.draw` — over that wash, not under it.
             button.setButtonType(.toggle)
             button.controlSize = .small
             button.font = .systemFont(ofSize: 11)
@@ -272,23 +278,50 @@ final class CropToolBar: NSView {
         if ratioPopup.indexOfSelectedItem != index { ratioPopup.selectItem(at: index) }
     }
 
-    /// 072 §D3 — **on = the system accent**, off = the button exactly as it was (both colour slots nil,
+    /// 072 §D3 — **on = the system accent, off = the button exactly as it was** (both colour slots nil,
     /// i.e. AppKit's own appearance, value for value).
+    ///
+    /// `bezelColor` alone does not paint anything here, and that is the whole of the 「看不出蓝」
+    /// report: `NSButton` honours `bezelColor` only for the bezel styles that own a filled bezel
+    /// (`.rounded`, `.regularSquare`, …). These three carry `.inline` so they sit inside the HUD pill
+    /// like the popup and the ⇄ button next to them, and AppKit ignores the colour for that style —
+    /// the slot could be read back while nothing on screen changed. So the accent is a **background
+    /// layer of our own**, which is inside the button's frame, survives the `.inline` hairline and is
+    /// pixel-measurable (`CropToggleAccentTests` samples the centre of the real bar, off vs on).
+    /// `bezelColor` stays set as well: it is the slot the §D1/D3 assertions read, and on a future
+    /// bezel style it would be the native answer.
     private func applyToggleStyle(_ button: NSButton, on: Bool) {
         button.state = on ? .on : .off
         button.bezelColor = on ? .controlAccentColor : nil
         button.contentTintColor = on ? .white : nil
+        button.needsDisplay = true
     }
 
     /// The style a toggle has right now, for the tests: (bezel, tint, state).
     func toggleStyle(_ which: String) -> (bezel: NSColor?, tint: NSColor?, on: Bool) {
-        let button: NSButton
-        switch which {
-        case "h": button = flipHButton
-        case "v": button = flipVButton
-        default: button = gridButton
-        }
+        let button = toggleButton(which)
         return (button.bezelColor, button.contentTintColor, button.state == .on)
+    }
+
+    /// The three switches by name ("h" / "v" / anything else = 九宫格) — one place, so the style
+    /// accessor and the pixel test cannot disagree about which rect belongs to which control.
+    func toggleButton(_ which: String) -> NSButton {
+        switch which {
+        case "h": return flipHButton
+        case "v": return flipVButton
+        default: return gridButton
+        }
+    }
+
+    /// The toggle's rect in this bar's own (flipped) coordinates — ③ samples the bitmap inside it.
+    ///
+    /// The buttons are arranged subviews of the stack, which lives in the pill: `button.frame` is in
+    /// the *stack's* space, not the bar's, so it has to be converted. (Sampling the raw frame reads
+    /// the pill's background instead of the control — the mistake that made this test report
+    /// (37, 37, 37) for every button.)
+    func frame(ofToggle which: String) -> NSRect {
+        let button = toggleButton(which)
+        return convert(button.bounds, from: button)
     }
 
     // MARK: actions (all of them are the controller's)
@@ -310,27 +343,56 @@ final class CropToolBar: NSView {
         onChange?()
     }
 
-    /// The 自定义比例 sheet. Kept out of the tests' way: the parse and the lock are
+    /// The 自定义比例 input. Kept out of the tests' way: the parse and the lock are
     /// `CropTool.ratio(from:)` + `setCustomRatio`, both driven directly there.
+    ///
+    /// ⑨ — it is a **centred panel of the window**, not a sheet and not a modal alert: `NSAlert
+    /// .runModal()` puts the box at the screen centre (the window may be anywhere, on any display),
+    /// and a sheet is placed under the title bar, never at the window's centre. A borderless
+    /// `CropRatioPrompt` placed from `window.frame` is the only one of the three that satisfies
+    /// "浮层中心 = 窗口中心 ±1 pt" for a window that has been moved or resized.
     private func promptForCustomRatio() {
         guard let controller else { return }
-        let alert = NSAlert()
-        alert.messageText = "自定义比例"
-        alert.informativeText = "输入宽:高，例如 4:3 或 16:9。"
-        alert.addButton(withTitle: "确定")
-        alert.addButton(withTitle: "取消")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 180, height: 24))
-        field.stringValue = Self.lastCustomRatioText
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard let ratio = CropTool.ratio(from: field.stringValue), controller.setCustomRatio(ratio) else {
-            NSSound.beep()                    // refused: nothing written, the old ratio stays
-            return
+        guard let window = window else { NSSound.beep(); return }
+        presentCustomRatioPrompt(in: window, initial: Self.lastCustomRatioText) { [weak self] text in
+            self?.commitCustomRatio(text)
         }
-        Self.lastCustomRatioText = field.stringValue
+    }
+
+    /// Parse `W:H` and lock it — the one thing the 自定义比例 prompt's commit does.
+    ///
+    /// One function so the panel's commit, the test that drives it, and the parse cannot disagree;
+    /// an invalid string is refused **before** anything is written (`CropTool.ratio(from:)`), so a
+    /// typo leaves the current ratio alone.
+    @discardableResult
+    func commitCustomRatio(_ text: String) -> Bool {
+        guard let controller, let ratio = CropTool.ratio(from: text),
+              controller.setCustomRatio(ratio) else {
+            NSSound.beep()                    // refused: nothing written, the old ratio stays
+            return false
+        }
+        Self.lastCustomRatioText = text
         sync()
         onChange?()
+        return true
+    }
+
+    /// The panel currently asking for `W:H`, if any — the handle ⑨'s test measures and cancels.
+    private(set) var customRatioPrompt: CropRatioPrompt?
+
+    /// Present the 自定义比例 panel centred on `window` (⑨). Internal so the test can drive the same
+    /// path the popup does, with the same initial value and the same commit closure.
+    func presentCustomRatioPrompt(in window: NSWindow, initial: String,
+                                  onCommit: @escaping (String) -> Void) {
+        customRatioPrompt?.close()
+        let prompt = CropRatioPrompt(initial: initial)
+        prompt.onCommit = { [weak self] text in
+            self?.customRatioPrompt = nil
+            onCommit(text)
+        }
+        prompt.onCancel = { [weak self] in self?.customRatioPrompt = nil }
+        customRatioPrompt = prompt
+        prompt.present(centredOn: window)
     }
 
     @objc private func swapTapped(_ sender: NSButton) {
@@ -375,6 +437,205 @@ final class CropToolBar: NSView {
     @objc private func applyTapped(_ sender: NSButton) { onApply?() }
 
     @objc private func cancelTapped(_ sender: NSButton) { onCancel?() }
+}
+
+// MARK: - ③ the accent-filled toggle
+
+/// A toggle that **fills its own face** with the system accent while it is on.
+///
+/// Why a subclass instead of a colour slot: `NSButton` paints `bezelColor` only for the bezel styles
+/// that own a filled bezel (`.rounded`, `.regularSquare`, …). These three are `.inline`, so they sit
+/// in the HUD pill like the popup next to them — and for `.inline` the colour is **ignored**. That was
+/// measured before this existed: with only `bezelColor` set, the centre row of 水平 stayed (37, 37, 37)
+/// while the accent is (0, 122, 255) (see `CropToggleAccentTests`, which now samples the shipped
+/// pixels and requires ≤24/255 on every channel).
+///
+/// Drawing the fill here — and using a *momentary* button type, so AppKit does not also paint its own
+/// pale "selected" wash — is the whole fix: one rounded rect in the accent, then the cell's own title
+/// (`contentTintColor = .white`) on top of it. Off draws exactly what it drew before.
+final class CropToggleButton: NSButton {
+
+    /// The bar is `isFlipped`, so the buttons are too: a fill in `bounds` needs no conversion either
+    /// way, but the flag has to agree with the parent or the title would sit upside down.
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Off: exactly the drawing that shipped before (`super` and nothing else).
+        super.draw(dirtyRect)
+        guard state == .on else { return }
+        // On: the accent **over** the cell's own face. It has to be after `super.draw` — the `.inline`
+        // bezel paints its own background inside `draw`, so a fill painted before it is covered
+        // (measured: the centre row stayed (37, 37, 37) with the fill first).
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 1), xRadius: 5, yRadius: 5).fill()
+        // …and the title again, because the fill just covered the one the cell drew.
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.white,
+        ]
+        let text = attributedTitle.string.isEmpty ? title : attributedTitle.string
+        let size = (text as NSString).size(withAttributes: attrs)
+        (text as NSString).draw(at: NSPoint(x: (bounds.width - size.width) / 2,
+                                            y: (bounds.height - size.height) / 2),
+                                withAttributes: attrs)
+    }
+}
+
+// MARK: - ⑨ the centred 自定义比例 panel
+
+/// The `W:H` input as a **borderless panel centred on the app window**.
+///
+/// Why a panel and not a sheet: AppKit places a sheet under the window's title bar, so a sheet's
+/// centre is never the window's centre, and the ask is "浮层中心 = 窗口中心 (±1 pt)". Why not
+/// `NSAlert.runModal()`: an alert is centred on the **screen**, which is not the window once the
+/// window has been moved or is on a second display — and it blocks the run loop, so the crop
+/// interaction behind it cannot be asserted.
+///
+/// So: a child window (`parent.addChildWindow`) placed from `parent.frame` at open time. A child
+/// window travels with its parent (the offset is preserved), which is the "挪到副屏再打开仍居中"
+/// answer: the centre is recomputed from `parent.frame` every time it is presented.
+///
+/// Keys: focus lands in the field with the current text selected (typing replaces it), `↵` commits,
+/// `Esc` cancels, and **a click outside does not commit** — the panel is not a sheet and only the two
+/// buttons (or the two keys) finish it.
+final class CropRatioPrompt: NSPanel {
+
+    var onCommit: ((String) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private let field = CropRatioField()
+    private let okay = NSButton(title: "确定", target: nil, action: nil)
+    private let cancel = NSButton(title: "取消", target: nil, action: nil)
+    private let backdrop = NSVisualEffectView()
+
+    /// The pill's style constants, reused (no new colours, no new sizes): the bar's own font and the
+    /// HUD material its pill is made of.
+    private static let font = NSFont.systemFont(ofSize: 11)
+    private static let promptSize = NSSize(width: 264, height: 104)
+
+    init(initial: String) {
+        super.init(contentRect: NSRect(origin: .zero, size: Self.promptSize),
+                   styleMask: [.borderless], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        isMovableByWindowBackground = false
+        hasShadow = true
+        backgroundColor = .clear
+        isOpaque = false
+
+        backdrop.material = .hudWindow
+        backdrop.blendingMode = .withinWindow
+        backdrop.state = .active
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = 10
+        backdrop.layer?.masksToBounds = true
+        backdrop.frame = NSRect(origin: .zero, size: Self.promptSize)
+        backdrop.autoresizingMask = [.width, .height]
+
+        let title = NSTextField(labelWithString: "自定义比例")
+        title.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 14, y: Self.promptSize.height - 30, width: 236, height: 16)
+
+        let hint = NSTextField(labelWithString: "宽:高，例如 4:3 或 16:9")
+        hint.font = Self.font
+        hint.textColor = .secondaryLabelColor
+        hint.frame = NSRect(x: 14, y: Self.promptSize.height - 48, width: 236, height: 15)
+
+        field.font = Self.font
+        field.stringValue = initial
+        field.frame = NSRect(x: 14, y: Self.promptSize.height - 78, width: 236, height: 22)
+        field.delegate = field
+        field.target = self
+        field.action = #selector(commit)
+
+        okay.target = self
+        okay.action = #selector(commit)
+        okay.bezelStyle = .rounded
+        okay.controlSize = .small
+        okay.font = Self.font
+        okay.keyEquivalent = "\r"
+        okay.frame = NSRect(x: 152, y: 12, width: 98, height: 22)
+
+        cancel.target = self
+        cancel.action = #selector(cancelOut)
+        cancel.bezelStyle = .rounded
+        cancel.controlSize = .small
+        cancel.font = Self.font
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.frame = NSRect(x: 64, y: 12, width: 80, height: 22)
+
+        let content = NSView(frame: NSRect(origin: .zero, size: Self.promptSize))
+        content.addSubview(backdrop)
+        for v in [title, hint, field, okay, cancel] as [NSView] { content.addSubview(v) }
+        contentView = content
+
+        field.onCommit = { [weak self] in self?.commit() }
+        field.onCancel = { [weak self] in self?.cancelOut() }
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    /// Borderless panels are not key by default; this one has to be, or the field never sees a key.
+    override var canBecomeKey: Bool { true }
+
+    /// Place the panel at the **centre of `parent`** (screen coordinates, both rectangles) and show
+    /// it as a child so it follows the window if the window is dragged while it is up.
+    func present(centredOn parent: NSWindow) {
+        let parentFrame = parent.frame
+        setFrameOrigin(NSPoint(x: (parentFrame.midX - frame.width / 2).rounded(),
+                               y: (parentFrame.midY - frame.height / 2).rounded()))
+        parent.addChildWindow(self, ordered: .above)
+        makeKeyAndOrderFront(nil)
+        makeFirstResponder(field)
+        field.selectText(nil)
+    }
+
+    /// The text the user has typed — the panel's own business, read by the ⑨ test.
+    var text: String { field.stringValue }
+
+    /// `↵`'s effect, for the ⑨ test: the real path is the 确定 button's key equivalent or the field
+    /// editor's `doCommandBy` (`CropRatioField`), neither of which can be synthesised from a test
+    /// without an event loop.
+    func performCommitForTesting() { commit() }
+
+    @objc private func commit() {
+        let text = field.stringValue
+        finish(committed: text)
+    }
+
+    @objc private func cancelOut() {
+        finish(committed: nil)
+    }
+
+    /// `↵` while the field editor is first responder never reaches the button, so the field's
+    /// `doCommandBy` calls back here (`CropRatioField`). `Esc` arrives the same way.
+    private func finish(committed: String?) {
+        parent?.removeChildWindow(self)
+        orderOut(nil)
+        if let committed { onCommit?(committed) } else { onCancel?() }
+    }
+
+    override func cancelOperation(_ sender: Any?) { cancelOut() }
+}
+
+/// The prompt's field editor hook: `↵` and `Esc` are **commands**, not characters — the only place
+/// both are visible is `control(_:textView:doCommandBy:)`.
+final class CropRatioField: NSTextField, NSTextFieldDelegate {
+
+    var onCommit: (() -> Void)?
+    var onCancel: (() -> Void)?
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if selector == #selector(NSResponder.insertNewline(_:)) {
+            onCommit?()
+            return true
+        }
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
+            onCancel?()
+            return true
+        }
+        return false
+    }
 }
 
 // MARK: - one readout field
