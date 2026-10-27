@@ -224,13 +224,20 @@ public struct DisplayImage: Sendable {
 /// grid (0.29 MB at 256 long edge, a `.shared` texture — memcpy speed, ~0.03 ms and not movable);
 /// `binning` is `Histogram.compute`'s counting loop, which is where the 1.4–1.8 ms used to live.
 public struct HistogramCost: Sendable, Equatable {
+    /// The sample grid's own dispatch: `pool.obtain` + pipeline lookup + one compute encoder + the
+    /// 36 k-thread encode. Small, but it is inside the caller's wall and it is not the binning.
+    public var encodeNanoseconds: Int = 0
+    /// `getBytes` of the sampled grid.
     public var readbackNanoseconds: Int = 0
+    /// `Histogram.compute`'s counting sweep.
     public var binningNanoseconds: Int = 0
     public var totalMilliseconds: Double {
-        Double(readbackNanoseconds + binningNanoseconds) / 1e6
+        Double(encodeNanoseconds + readbackNanoseconds + binningNanoseconds) / 1e6
     }
     public static let zero = HistogramCost()
-    public init(readbackNanoseconds: Int = 0, binningNanoseconds: Int = 0) {
+    public init(encodeNanoseconds: Int = 0, readbackNanoseconds: Int = 0,
+                binningNanoseconds: Int = 0) {
+        self.encodeNanoseconds = encodeNanoseconds
         self.readbackNanoseconds = readbackNanoseconds
         self.binningNanoseconds = binningNanoseconds
     }
@@ -1666,6 +1673,8 @@ public final class RenderGraph {
         // dispatch of 36 k threads and 0.29 MB of readback, which is what the card can afford on every
         // frame that changes the picture.
         var sampleGrid: (texture: MTLTexture, size: ImageSize)?
+        var histogramCost = HistogramCost.zero
+        let gridEncodeStart = DispatchTime.now().uptimeNanoseconds
         if options.histogramSampleLongEdge > 0,
            let source = histogramSource, !plan.drawnRect.isEmpty {
             let picture = plan.drawnRect
@@ -1693,6 +1702,7 @@ public final class RenderGraph {
             dispatch(enc, pipeline, grid)
             enc.endEncoding()
             sampleGrid = (texture, grid)
+            histogramCost.encodeNanoseconds = Int(DispatchTime.now().uptimeNanoseconds - gridEncodeStart)
         }
 
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -1730,7 +1740,6 @@ public final class RenderGraph {
         /// the cursor (2026-10-27). 0.29 MB for a 256-long-edge grid — the frame texture beside it is
         /// 33 MB, so this is the cheap half of a frame.
         var histogramSample: LinearSample?
-        var histogramCost = HistogramCost.zero
         if let source = histogramSource {
             let bins = min(max(options.histogramBins, 2), 1 << 16)
             // The picture, from the layout S0 actually drew with — not the content rect, which holds
@@ -1740,12 +1749,11 @@ public final class RenderGraph {
                 // The readback happens even for a frame nothing measures: a pan changes the camera and
                 // not the picture, so no key moves and no plot is updated — but the pixels under the
                 // pointer did move, and the readout has to follow them.
-                let tSample = CFAbsoluteTimeGetCurrent()
                 let rbStart = DispatchTime.now().uptimeNanoseconds
                 let sample = readSample(grid.texture)
                 let rbEnd = DispatchTime.now().uptimeNanoseconds
                 histogramSample = sample
-                histogramCost = HistogramCost(readbackNanoseconds: Int(rbEnd - rbStart))
+                histogramCost.readbackNanoseconds = Int(rbEnd - rbStart)
                 if options.collectHistogram {
                     // 070: the picture's own pixels, sampled off the scene-linear texture (not S4's
                     // clamped output, which cannot hold anything above the panel's headroom).
@@ -1762,7 +1770,7 @@ public final class RenderGraph {
                         .relabelled(canvas: pixels, roi: own)
                     histogramCost.binningNanoseconds =
                         Int(DispatchTime.now().uptimeNanoseconds - binStart)
-                    histogramMilliseconds = (CFAbsoluteTimeGetCurrent() - tSample) * 1000
+                    histogramMilliseconds = histogramCost.totalMilliseconds
                 }
                 pool.recycle(grid.texture)
             } else if options.collectHistogram {
@@ -2301,12 +2309,17 @@ public final class RenderGraph {
     /// work on a buffer that is already in the right format.
     private func readSample(_ texture: MTLTexture) -> LinearSample {
         let w = texture.width, h = texture.height
-        var rgba = [Float16](repeating: 0, count: w * h * 4)
-        rgba.withUnsafeMutableBytes { buf in
-            texture.getBytes(buf.baseAddress!,
+        let count = w * h * 4
+        // P1d — `unsafeUninitializedCapacity` instead of `repeating: 0`: `getBytes` writes every byte of
+        // the buffer below, so zeroing 0.35 MB first is a memset (and a page fault) this path pays for
+        // nothing, once per measured frame. `initializedCount` is only raised after the copy, so a
+        // buffer that was not fully written can never be handed out as a sample.
+        let rgba: [Float16] = Array(unsafeUninitializedCapacity: count) { buffer, initializedCount in
+            texture.getBytes(buffer.baseAddress!,
                              bytesPerRow: w * 4 * MemoryLayout<Float16>.size,
                              from: MTLRegionMake2D(0, 0, w, h),
                              mipmapLevel: 0)
+            initializedCount = count
         }
         return LinearSample(width: w, height: h, rgba: rgba)
     }

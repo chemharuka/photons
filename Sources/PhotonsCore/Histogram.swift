@@ -530,7 +530,7 @@ extension Histogram {
         //
         // `Histogram.countWorkers` keeps a small sample on one core: the dispatch costs ~30–60 µs and
         // below ~16 k pixels the threads would earn less than they spend.
-        var counts = [Int](repeating: 0, count: blockInts)
+        var counts = [UInt32](repeating: 0, count: blockInts)
         let rows = rect.height
         let sweep = workers ?? Histogram.countWorkers(width: rect.width, height: rows)
 
@@ -555,10 +555,9 @@ extension Histogram {
                 // threads free up, which is what balances the unequal blocks against this machine's
                 // two efficiency cores — a contiguous split eight ways leaves the block that lands on
                 // an E core to finish the sweep on its own.
-                let mult = Int(ProcessInfo.processInfo.environment["PH_HIST_MULT"] ?? "2") ?? 2
-                let chunks = min(rows, max(sweep, sweep * mult))
+                let chunks = min(rows, max(sweep, sweep * 2))
                 let per = (rows + chunks - 1) / chunks
-                var scratch = [Int](repeating: 0, count: blockInts * chunks)
+                var scratch = [UInt32](repeating: 0, count: blockInts * chunks)
                 scratch.withUnsafeMutableBufferPointer { s in
                     guard let raw = s.baseAddress else { return }
                     DispatchQueue.concurrentPerform(iterations: chunks) { k in
@@ -578,22 +577,22 @@ extension Histogram {
                 for i in 0..<blockInts { dst[i] = scratch[i] }
                 for k in 1..<chunks {
                     let off = k * blockInts
-                    for i in 0..<blockInts { dst[i] += scratch[off + i] }
+                    for i in 0..<blockInts { dst[i] &+= scratch[off + i] }
                 }
             }
         }
 
         // The sample's pixel count is the red series' own total: one invariant instead of a second
         // counter that could (silently) disagree with the bins.
-        let counted = counts[0..<stride].reduce(0, +)
+        let counted = counts[0..<stride].reduce(0) { $0 + Int($1) }
         let n = Double(max(counted, 1))
         func channel(_ offset: Int, _ hiIndex: Int, _ ceilIndex: Int,
                      _ loIndex: Int) -> HistogramChannel {
-            HistogramChannel(bins: Array(counts[offset..<(offset + binCount)]),
-                             hdrBins: Array(counts[(offset + binCount)..<(offset + stride)]),
-                             clippedHigh: Double(counts[hiIndex]) / n,
-                             clippedCeiling: Double(counts[ceilIndex]) / n,
-                             clippedLow: Double(counts[loIndex]) / n)
+            HistogramChannel(bins: counts[offset..<(offset + binCount)].map(Int.init),
+                             hdrBins: counts[(offset + binCount)..<(offset + stride)].map(Int.init),
+                             clippedHigh: Double(Int(counts[hiIndex])) / n,
+                             clippedCeiling: Double(Int(counts[ceilIndex])) / n,
+                             clippedLow: Double(Int(counts[loIndex])) / n)
         }
         return Histogram(binCount: binCount, sampleCount: counted, canvas: frame,
                          roi: rect, sampleSize: frame, primaries: .sRGB,
@@ -612,7 +611,7 @@ extension Histogram {
     /// — one `srgbEncode` per channel, the same `binIndex` comparisons, the same twelve scalars.
     @inline(__always)
     private static func countRows(_ px: UnsafeBufferPointer<Float16>,
-                                  into base: UnsafeMutablePointer<Int>, statsBase: Int,
+                                  into base: UnsafeMutablePointer<UInt32>, statsBase: Int,
                                   frameWidth: Int, x0: Int, width: Int, y0: Int, rows: Int,
                                   sdrBins: Int, scale: Float, encoded: Bool,
                                   m00: Float, m01: Float, m02: Float,
@@ -663,18 +662,18 @@ extension Histogram {
                 if lv < low { loL += 1 }
             }
         }
-        base[statsBase] = hiR
-        base[statsBase + 1] = hiG
-        base[statsBase + 2] = hiB
-        base[statsBase + 3] = hiL
-        base[statsBase + 4] = ceR
-        base[statsBase + 5] = ceG
-        base[statsBase + 6] = ceB
-        base[statsBase + 7] = ceL
-        base[statsBase + 8] = loR
-        base[statsBase + 9] = loG
-        base[statsBase + 10] = loB
-        base[statsBase + 11] = loL
+        base[statsBase] = UInt32(hiR)
+        base[statsBase + 1] = UInt32(hiG)
+        base[statsBase + 2] = UInt32(hiB)
+        base[statsBase + 3] = UInt32(hiL)
+        base[statsBase + 4] = UInt32(ceR)
+        base[statsBase + 5] = UInt32(ceG)
+        base[statsBase + 6] = UInt32(ceB)
+        base[statsBase + 7] = UInt32(ceL)
+        base[statsBase + 8] = UInt32(loR)
+        base[statsBase + 9] = UInt32(loG)
+        base[statsBase + 10] = UInt32(loB)
+        base[statsBase + 11] = UInt32(loL)
     }
 
     /// How many row blocks the sweep is split into.
