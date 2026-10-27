@@ -464,7 +464,20 @@ private struct LocalParamsU {
 private struct LocalAdjustU {
     var a: SIMD4<Float>   // gainR, gainG, gainB, amountScale
     var b: SIMD4<Float>   // contrast, highlights, shadows, whites
-    var c: SIMD4<Float>   // blacks, hueDegrees, saturation, enabled
+    var c: SIMD4<Float>   // blacks, pad, pad, enabled
+}
+
+/// 056 — the mirror of `LocalColorDesc` in `s3_5_local_color.metal`. Its own buffer rather than a
+/// reuse of `LocalAdjustU`: S1.6 no longer carries hue/saturation, and a stage that reads two
+/// numbers should be handed those two numbers, not a struct it has to interpret.
+private struct LocalColorU {
+    var a: SIMD4<Float>   // hue (units), saturation (units), amountScale (0…1), enabled
+}
+
+/// 056 — mirror of `LocalColorParams` in `s3_5_local_color.metal`.
+private struct LocalColorParamsU {
+    var a: SIMD4<Int32>   // anyActive, maskCount, pad, pad
+    var b: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 }
 
 /// 005e — mirror of `ShowMaskParams` in `s4_show_mask.metal`.
@@ -493,6 +506,8 @@ private struct MaskTable {
     let masks: [MaskDescU]
     let shapes: [MaskShapeDescU]
     let adjust: [LocalAdjustU]
+    /// 056 — S3.5's per-mask descriptors, same atlas order as `adjust`.
+    let colorAdjust: [LocalColorU]
     let strokes: [MaskStrokeDescU]
     let points: [SIMD4<Float>]
     let colours: [SIMD4<Float>]
@@ -501,6 +516,7 @@ private struct MaskTable {
     let maskBuffer: MTLBuffer
     let shapeBuffer: MTLBuffer
     let adjustBuffer: MTLBuffer
+    let colorAdjustBuffer: MTLBuffer
     let strokeBuffer: MTLBuffer
     let pointBuffer: MTLBuffer
     let colourBuffer: MTLBuffer
@@ -1598,6 +1614,31 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 
+        case .localColor:
+            // 056 — a mask's hue/saturation, on display-referred data. Reads the pipeline image S3
+            // produced and the **same atlas slice** S1.6 read (canvas coordinates, coverage from
+            // S1.5), so a full-canvas mask at saturation +40 is the global slider's own arithmetic.
+            guard let table, let atlas = atlasCache?.texture else {
+                throw RenderError.executeFailed("local colour stage without an atlas")
+            }
+            let p = try kernels.pipeline(file: "s3_5_local_color", function: "s3_5_local_color")
+            var params = LocalColorParamsU(
+                a: SIMD4(table.colorAdjust.contains { $0.a.w > 0.5 } ? 1 : 0,
+                         Int32(table.colorAdjust.count), 0, 0),
+                // The content rect, so the letterbox stays exactly 0 (派单 008 C's rule, the one S2,
+                // S1.7 and S3 already carry).
+                b: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)))
+            guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            enc.setComputePipelineState(p)
+            enc.setTexture(src, index: 0)
+            enc.setTexture(atlas, index: 1)
+            enc.setTexture(out, index: 2)
+            enc.setBytes(&params, length: MemoryLayout<LocalColorParamsU>.stride, index: 0)
+            enc.setBuffer(table.colorAdjustBuffer, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
         case .vignette:
             let p = try kernels.pipeline(file: "s3_vignette", function: "s3_vignette")
             let identity = edit.effects.vignetteAmount == 0
@@ -1827,6 +1868,7 @@ public final class RenderGraph {
         var masks: [MaskDescU] = []
         var shapes: [MaskShapeDescU] = []
         var adjust: [LocalAdjustU] = []
+        var colorAdjust: [LocalColorU] = []
         var strokes: [MaskStrokeDescU] = []
         var points: [SIMD4<Float>] = []
         var colours: [SIMD4<Float>] = []
@@ -1846,12 +1888,14 @@ public final class RenderGraph {
                                    misc: SIMD4(Float(min(max(m.opacity, 0), 1)), featherPx,
                                                Float(min(max(m.refine, 0), 1)), guidedPx)))
             adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled))
+            colorAdjust.append(colorAdjustDesc(m.adjustments, enabled: m.isEnabled))
         }
         // Metal requires a bound buffer even when the count is zero; one neutral entry keeps the
         // binding valid without inventing a mask.
         if masks.isEmpty { masks.append(MaskDescU(meta: .zero, misc: .zero)) }
         if shapes.isEmpty { shapes.append(MaskShapeDescU(meta: .zero, p0: .zero, p1: .zero)) }
         if adjust.isEmpty { adjust.append(LocalAdjustU(a: SIMD4(1, 1, 1, 0), b: .zero, c: SIMD4(0, 0, 0, 0))) }
+        if colorAdjust.isEmpty { colorAdjust.append(LocalColorU(a: .zero)) }
         if strokes.isEmpty {
             strokes.append(MaskStrokeDescU(meta: .zero, misc: .zero, bmin: .zero, bmax: .zero))
         }
@@ -1860,11 +1904,13 @@ public final class RenderGraph {
 
         let table = MaskTable(ids: active.map(\.id),
                               masks: masks, shapes: shapes, adjust: adjust,
+                              colorAdjust: colorAdjust,
                               strokes: strokes, points: points, colours: colours,
                               dependency: dependency,
                               maskBuffer: try buffer(masks, "mask descs"),
                               shapeBuffer: try buffer(shapes, "mask shapes"),
                               adjustBuffer: try buffer(adjust, "mask adjustments"),
+                              colorAdjustBuffer: try buffer(colorAdjust, "mask local colour"),
                               strokeBuffer: try buffer(strokes, "mask strokes"),
                               pointBuffer: try buffer(points, "mask brush points"),
                               colourBuffer: try buffer(colours, "mask colour samples"))
@@ -1972,11 +2018,22 @@ public final class RenderGraph {
 
     private func adjustDesc(_ a: LocalAdjustments, enabled: Bool) -> LocalAdjustU {
         let gain = a.gain
-        let active = enabled && !a.isIdentity
+        // 056: `hasSceneLinearWork`, not `!isIdentity` — a mask whose only sliders are hue/saturation
+        // has nothing for S1.6 to do, and sending it through `local_adjust` would round pixels at the
+        // neutral settings instead of copying them.
+        let active = enabled && a.hasSceneLinearWork
         return LocalAdjustU(
             a: SIMD4(gain.r, gain.g, gain.b, Float(min(max(a.amount, 0), 100) / 100)),
             b: SIMD4(Float(a.contrast), Float(a.highlights), Float(a.shadows), Float(a.whites)),
-            c: SIMD4(Float(a.blacks), Float(a.hue), Float(a.saturation), active ? 1 : 0))
+            c: SIMD4(Float(a.blacks), 0, 0, active ? 1 : 0))
+    }
+
+    /// 056 — S3.5's descriptor. `enabled` is false for a mask with no hue/saturation, so the kernel
+    /// skips it before reading the atlas: a mask with only exposure costs nothing in that pass.
+    private func colorAdjustDesc(_ a: LocalAdjustments, enabled: Bool) -> LocalColorU {
+        let active = enabled && a.amount > 0 && a.contributesLocalColor
+        return LocalColorU(a: SIMD4(Float(a.hue), Float(a.saturation),
+                                    Float(min(max(a.amount, 0), 100) / 100), active ? 1 : 0))
     }
 
     private func buffer<T>(_ values: [T], _ label: String) throws -> MTLBuffer {

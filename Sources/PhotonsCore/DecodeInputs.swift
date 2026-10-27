@@ -118,8 +118,13 @@ public struct RenderInputs: Sendable, Equatable {
     /// A stable text over every stage material, in execution order (mask stages included: a mask is
     /// a render input). `n/a` for the display primaries, because those are a property of the surface,
     /// not of the document.
+    ///
+    /// 056: S3.5 joins the list only when the document actually has local colour, so a document
+    /// without it keeps this key byte for byte — the same discipline the mask stages would need if
+    /// they were ever conditional.
     public var key: String {
         RenderStage.order
+            .filter { $0 != .localColor || edit.hasLocalColor }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }

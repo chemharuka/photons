@@ -1,11 +1,11 @@
 {
   "atlasSHA256" : "b95ad7528daf5a0ee76f504391303d658e1bf4af0187cf1b7c2e1fd8524eefab",
-  "displaySHA256" : "b376eecc316840ec9649d53af1c50cbaa1bc75405475a993a8e2b5f0a215b777",
+  "displaySHA256" : "442f34496f3f763d787c9c6aa68f17ead9ed02761b1dde19686d8ec51251777d",
   "maskIDs" : [
     "m-br",
     "m-cr"
   ],
-  "note" : "Recorded by MaskTests on the synthetic 96×65 ramp image; masks m-br (brush: 3-point paint stroke + erase stroke, +0.5 EV) and m-cr (colour range over the two ramp ends, tolerance 0.15 \/ smoothness 0.6, amount 60, −0.8 EV, +20 sat). 8-bit quantised digests so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended.",
+  "note" : "Recorded by MaskTests on the synthetic 96×65 ramp image; masks m-br (brush: 3-point paint stroke + erase stroke, +0.5 EV) and m-cr (colour range over the two ramp ends, tolerance 0.15 \/ smoothness 0.6, amount 60, −0.8 EV, +20 sat). 8-bit quantised digests so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended. Re-recorded once for 派单 056: m-cr's +20 saturation now runs in S3.5, display-referred and from the same color_hsl.metal include the global slider compiles — so the *frame* is meant to differ while the atlas digest and the six coverage samples stay exactly as recorded.",
   "sampleX" : [
     6,
     24,

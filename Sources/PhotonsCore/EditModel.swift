@@ -190,6 +190,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             for o in old.masks where !newIDs.contains(o.id) {
                 s.insert(.maskAtlas); s.insert(.localApply)
             }
+            // 056: hue/saturation are S3.5's parameters now, so a move of one of them dirties that
+            // stage. Reported only when the *local colour* material actually moved, so an exposure
+            // drag still reports `.localApply` alone.
+            if localColorMaterial != old.localColorMaterial { s.insert(.localColor) }
         }
         // `detail` (the XMP-facing `DetailGroup`) is stored but not rendered by the graph. 派单 031
         // put the real controls next to it: `detailSettings` is a **decode** input and was answered
@@ -248,6 +252,13 @@ public struct EditModel: Sendable, Equatable, Codable {
 
         case .localApply:
             return "local=\(maskApplyMaterial)"
+
+        case .localColor:
+            // 056: S3.5's own material. Redundant with the chain above it on purpose — the chain
+            // already carries `maskApplyMaterial`, so a selection change moves this key too — but a
+            // stage key that names the values it reads cannot silently stop tracking them if the
+            // S1.6 material is ever narrowed.
+            return "localcolor=\(localColorMaterial)"
 
         case .toneMap:
             // Contrast and the two region lifts only — the whites/blacks levels moved into the

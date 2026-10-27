@@ -21,6 +21,11 @@ using namespace metal;
 // Real identity branch (M1-6): if no mask has an active adjustment, or a given mask's adjustments
 // are neutral (or `amount == 0`, or its coverage is 0), the source pixel is written unchanged.
 // That is what makes "a mask with no adjustments" bit-exact against "no mask at all".
+//
+// 派单 056: this pass no longer carries **hue or saturation** — they are display-referred operations
+// and run in S3.5, from the same `color_hsl.metal` include S3 uses. A mask whose only sliders are
+// hue/saturation is therefore *inactive here* (its `enabled` flag is 0), which is what keeps it
+// bit-exact against no mask rather than shipping it through neutral arithmetic.
 
 struct LocalParams {
     int4 a;   // anyActive, maskCount, originX, originY (canvas pixels)
@@ -29,17 +34,8 @@ struct LocalParams {
 struct LocalAdjustDesc {
     float4 a;   // gainR, gainG, gainB, amountScale (0…1, already includes adjustments.amount)
     float4 b;   // contrast, highlights, shadows, whites
-    float4 c;   // blacks, hueDegrees, saturation, enabled
+    float4 c;   // blacks, pad, pad, enabled
 };
-
-static inline float3 rotate_about_grey(float3 v, float degrees) {
-    // Rodrigues rotation around the neutral axis (1,1,1)/√3: chroma rotates, luma is preserved.
-    const float3 n = float3(0.5773502691896258);
-    float ang = degrees * M_PI_F / 180.0;
-    float cs = cos(ang);
-    float sn = sin(ang);
-    return v * cs + cross(n, v) * sn + n * dot(n, v) * (1.0 - cs);
-}
 
 static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     // 1. Scene-linear gains: exposure and the Planckian white-balance approximation.
@@ -63,12 +59,10 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     v *= exp2(d.b.z / 100.0 * 0.8 * wShadow);           // shadows (+ lifts)
     v *= exp2(d.b.y / 100.0 * 0.8 * wHighlight);        // highlights (+ lifts, LR convention)
 
-    // 3. Hue and saturation.
-    if (d.c.y != 0.0) { v = rotate_about_grey(v, d.c.y); }
-    if (d.c.z != 0.0) {
-        float grey = dot(v, float3(0.2126, 0.7152, 0.0722));
-        v = mix(float3(grey), v, 1.0 + d.c.z / 100.0);
-    }
+    // 3. Hue and saturation: **not here** any more (派单 056). They are display-referred operations
+    //    and run in S3.5, from the same include S3 uses; a rotation of linear RGB about its luma is
+    //    not the same picture as a rotation in the display-referred domain, and only one of the two
+    //    can agree with the global sliders.
     return max(v, 0.0);
 }
 
