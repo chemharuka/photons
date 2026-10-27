@@ -322,44 +322,68 @@ final class ToneMapTests: XCTestCase {
 
     // MARK: - D. local adjustments use the same convention
 
-    /// 派单 008 A also demands that a *local* whites/blacks adjustment is not left inverted: the
-    /// panel and a mask must agree. Same picture, same sign, both brighter than neutral.
-    func testLocalWhitesAndBlacksMatchTheGlobalConvention() throws {
-        let image: LinearImage = {
-            // Flat mid-grey: a lift on either control is unambiguous, and coverage is 1 everywhere.
+    /// **079 §2.1.2 — the mask's blacks/whites are 073B/073C's end points, not 019's affine level.**
+    ///
+    /// This test used to pin the opposite: a flat 0.35 mid-grey had to move for `blacks ±100`, which is
+    /// what 019's `(v − blk)/max(wht − blk, 1e−3)` does — it changes the *slope of the whole picture*, so
+    /// a 50 % grey moved +25 codes and every pixel with it. 073B replaced that globally (the knee is a
+    /// window below −4.2 EV, so a mid-tone is outside it and does not move at all), and 079 §2.1.2 says
+    /// the mask must follow the global convention rather than keep a second one.
+    ///
+    /// So the conventions are pinned where each one is visible:
+    ///   · a 0.35 mid-grey is **untouched** by `blacks ±100` (outside the knee), and
+    ///   · a 0.02 deep shadow **is** lifted/crushed by `blacks ±100`, which is the toe the slider names;
+    ///   · a 0.98 near-white follows `whites ±100` (the white point is where that slider lives).
+    ///
+    /// `LocalToneTests` goes further and asserts the masked slider produces the *same pixels* as the
+    /// global one, on real frames, for all four sliders at ±100.
+    func testLocalBlacksAndWhitesAreTheGlobalEndPoints() throws {
+        func flat(_ v: Float) -> LinearImage {
             let w = 64, h = 64
             var rgba = [Float16](repeating: 0, count: w * h * 4)
             for i in stride(from: 0, to: rgba.count, by: 4) {
-                rgba[i] = Float16(0.35); rgba[i + 1] = Float16(0.35)
-                rgba[i + 2] = Float16(0.35); rgba[i + 3] = 1
+                rgba[i] = Float16(v); rgba[i + 1] = Float16(v)
+                rgba[i + 2] = Float16(v); rgba[i + 3] = 1
             }
             return LinearImage(width: w, height: h, rgba: rgba,
                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
-        }()
-        let graph = try makeGraph(image)
+        }
         let opts = RenderOptions(scale: 1, wantsPixels: true)
-        let base = try XCTUnwrap(graph.render(EditModel.neutral, options: opts).display)
-        let rect = (0, 0, base.width, base.height)
-        let baseMean = meanLuma(base, rect: rect)
 
-        func localMean(blacks: Double = 0, whites: Double = 0) throws -> Double {
+        /// A crisp disc: coverage is exactly 1 at the centre, so the probe below is arithmetic and not
+        /// a mix with the uncovered frame.
+        func probe(_ image: LinearImage, blacks: Double = 0, whites: Double = 0) throws -> Float {
+            let graph = try makeGraph(image, identity: "tone-local-\(blacks)-\(whites)")
             var edit = EditModel.neutral
             edit.masks = [Mask(id: "m",
-                               components: [MaskComponent(id: "c",
-                                                          shape: .linearGradient(.default))],
+                               components: [MaskComponent(id: "c", feather: 0,
+                                                          shape: .radialGradient(RadialGradientShape(
+                                                            center: NormalizedPoint(0.5, 0.5),
+                                                            radius: NormalizedPoint(0.45, 0.45))))],
                                adjustments: LocalAdjustments(whites: whites, blacks: blacks))]
             let img = try XCTUnwrap(graph.render(edit, options: opts).display)
-            return meanLuma(img, rect: rect)
+            let o = ((img.height / 2) * img.width + img.width / 2) * 4
+            return (Float(img.rgba[o]) + Float(img.rgba[o + 1]) + Float(img.rgba[o + 2])) / 3
         }
 
-        let up = try localMean(whites: 100), down = try localMean(whites: -100)
-        let blackUp = try localMean(blacks: 100), blackDown = try localMean(blacks: -100)
-        print("派单 008 局部: whites +100 = \(up), whites −100 = \(down), "
-              + "blacks +100 = \(blackUp), blacks −100 = \(blackDown) (neutral \(baseMean))")
-        XCTAssertGreaterThan(up, baseMean, "local whites + must brighten")
-        XCTAssertLessThan(down, baseMean, "local whites − must darken")
-        XCTAssertGreaterThan(blackUp, baseMean, "local blacks + must brighten")
-        XCTAssertLessThan(blackDown, baseMean, "local blacks − must darken")
+        let mid = flat(0.35), toe = flat(0.02), bright = flat(0.98)
+        let midBase = try probe(mid), toeBase = try probe(toe), brightBase = try probe(bright)
+        let midUp = try probe(mid, blacks: 100), midDown = try probe(mid, blacks: -100)
+        let toeUp = try probe(toe, blacks: 100), toeDown = try probe(toe, blacks: -100)
+        let whiteUp = try probe(bright, whites: 100), whiteDown = try probe(bright, whites: -100)
+        print("079 局部 blacks/whites: mid 0.35 → +\(midUp) −\(midDown) (neutral \(midBase)); "
+              + "toe 0.02 → +\(toeUp) −\(toeDown) (neutral \(toeBase)); "
+              + "white 0.98 → +\(whiteUp) −\(whiteDown) (neutral \(brightBase))")
+
+        // 073B: the knee ends at −4.2 EV and 0.35 is −1.5 EV, so a mid-tone is outside it — exactly.
+        XCTAssertEqual(midUp, midBase, accuracy: 1e-6, "blacks + must not move a mid-tone")
+        XCTAssertEqual(midDown, midBase, accuracy: 1e-6, "blacks − must not move a mid-tone")
+        // The toe is what the slider names: + opens it, − crushes it.
+        XCTAssertGreaterThan(toeUp, toeBase, "local blacks + must open the toe")
+        XCTAssertLessThan(toeDown, toeBase, "local blacks − must crush the toe")
+        // Whites is the other end (派单 008 A's direction, unchanged by 073B).
+        XCTAssertGreaterThan(whiteUp, brightBase, "local whites + must brighten")
+        XCTAssertLessThan(whiteDown, brightBase, "local whites − must darken")
     }
 
     /// The same agreement for `highlights`: a bright flat patch (luma 0.75, inside the highlight

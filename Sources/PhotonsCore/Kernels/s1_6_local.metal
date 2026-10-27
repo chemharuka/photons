@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 #include "primaries.metal"
+#include "tone_shape.metal"
 using namespace metal;
 
 // S1.6 — local adjustments, between S1 (scene linear) and S2 (tone map).
@@ -9,6 +10,34 @@ using namespace metal;
 // curve could not come back. The predicate is still evaluated upstream in S1.5 so it sees the
 // globally exposed frame; this pass only reads, per pixel, the atlas coverage and the mask's own
 // slider set.
+//
+// **派单 079 §2.1.2 — the tone sliders are the global ones now.** Until this change the mask carried
+// 019's arithmetic: an affine ±0.15 level for blacks/whites, a linear-light power for contrast, and
+// the linear-luma windows `1 − smoothstep(0, 0.5, lum)` / `smoothstep(0.5, 1, lum)` for the two region
+// lifts. Three of those four had already been replaced globally (073B/073C moved the end points to EV
+// knees, 074 R2 moved the region lifts to EV windows, 0107 replaces the contrast power) — so the same
+// `shadows = +100` lifted **the whole masked picture** (70 % of its weight landed on the mid-tones)
+// while the global slider of the same name left the median alone. darktable cannot have that bug: a
+// module runs one `process()` whether it is masked or not and the mask only decides alpha
+// (`blend.c:833-859`).
+//
+// The fix is not new local numbers — it is that this pass now calls **the same functions** the global
+// stages call, in the global order (`tone_shape.metal` is the one body per control):
+//
+//     S1               exposure · WB gain, then blacks/whites        (s1_end_points, 073B/073C)
+//     S2               contrast, then shadows/highlights             (tone_contrast, region_*)
+//     S1.6 (this file) the four tone sliders, same order, same bodies, blended by coverage
+//
+// What that buys, measured (`LocalToneTests`): a mask with `shadows = +100` no longer moves the
+// masked picture's median (±1 code, p5 lifts +8…+12 codes); `contrast = +100` puts **0.00 %** of the
+// masked samples on the display ceiling instead of 14.4 %; and a mask covering the whole frame with
+// one slider at +100 is **bit-identical** to the global slider at +100.
+//
+// The clamp moved to the exit (item ④ of the派单): the old `max(v, 0)` at the top of this function
+// deleted the decoder's sub-black samples before the black end point could reach into them, and the
+// `max(v, 1e-6)` inside the power ate them a second time. `local_adjust` is now arithmetic only; the
+// single `max(v, 0)` at the write is the same "the clamp stays at the end of the stage" rule S2
+// follows.
 //
 // Pointwise by construction: every stage in this kernel reads exactly the pixel it writes, which is
 // what keeps 005d's tile recomputation honest (no halo).
@@ -35,36 +64,44 @@ struct LocalParams {
 struct LocalAdjustDesc {
     float4 a;   // gainR, gainG, gainB, amountScale (0…1, already includes adjustments.amount)
     float4 b;   // contrast, highlights, shadows, whites
-    float4 c;   // blacks, pad, pad, enabled
+    // blacks, contrast travel (EV of bend at |contrast| = 100 — `S2Contrast.travel`'s derivation, the
+    // axis' own end points), pad, enabled. The travel rides a uniform rather than a kernel constant
+    // for the same reason S2 takes it from the CPU: the axis may move (an HDR white), and then both
+    // stages follow instead of the mask silently changing meaning.
+    float4 c;
 };
 
 static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
-    // 1. Scene-linear gains: exposure and the Planckian white-balance approximation.
-    v = max(v, 0.0) * d.a.xyz;
+    // ① Scene-linear gains: exposure and the Planckian white-balance approximation. First, as in S1,
+    //    and **without** a clamp: the decoder's sub-black samples are picture (S2's header measures
+    //    0.039 below zero with 23× more structure than noise), and the old `max(v, 0)` here deleted
+    //    them before any end point could reach into that band.
+    v = v * d.a.xyz;
 
-    // 2. Tone shaping, the same parameterisation S2 uses (blacks/whites remap → contrast around the
-    //    0.18 scene pivot → shadow/highlight lifts), applied before the tone curve by design — and
-    //    with the same **signs**: 派单 008 A fixed S2 to Lightroom's direction (both sliders brighten
-    //    towards +) and the panel must not be inverted for a local adjustment. `blk`/`wht` are input
-    //    points, so they move opposite to the sliders.
-    float blk = -d.c.x / 100.0 * 0.15;                  // blacks
-    float wht = 1.0 - d.b.w / 100.0 * 0.15;             // whites
-    v = max((v - blk) / max(wht - blk, 1e-3), 0.0);
+    // ② blacks/whites — S1's end points, the *same* function (073B/073C). `kHybrid = true` because a
+    //    mask has no per-mask instantiation to spend; the level term's `m` is exactly 0 for
+    //    `|blacks| ≤ 50`, so this agrees with S1's 073B entry bit for bit in that whole range. Signs
+    //    are the global ones (派单 008 A): `blacks +` opens the shadows, `whites +` moves the white
+    //    point up. The old affine ±0.15 level here is gone: it changed the *slope* of the whole masked
+    //    picture, so `blacks +100` moved a 50 % grey by +25 codes instead of leaving it alone.
+    v = s1_end_points<true>(v, d.c.x, d.b.w);
 
-    float gamma = exp2(d.b.x / 100.0 * 2.0);            // contrast
-    v = 0.18 * pow(max(v, 1e-6) / 0.18, gamma);
+    // ③ contrast — S2's seam (`tone_shape.metal#tone_contrast`). A displacement in EV with a held band
+    //    around the measured median and a shoulder that lands on display white, so it cannot clip:
+    //    the masked highlights used to go white at `+100` (14.4 % of a frame on the ceiling).
+    v = tone_contrast(v, d.b.x, d.c.y);
 
-    float lum = dot(v, kWorkingLumaWeights);
-    float wShadow = 1.0 - smoothstep(0.0, 0.5, lum);
-    float wHighlight = smoothstep(0.5, 1.0, lum);
-    v *= exp2(d.b.z / 100.0 * 0.8 * wShadow);           // shadows (+ lifts)
-    v *= exp2(d.b.y / 100.0 * 0.8 * wHighlight);        // highlights (+ lifts, LR convention)
+    // ④ shadows/highlights — S2's EV windows, both weights from the same `region_weights`. Two EV wide
+    //    each, placed under the measured percentiles, so a mask's `shadows +100` lifts the p5 and
+    //    leaves the median where it was — which is what the *global* slider of that name has done
+    //    since 074 R2 and what "the same slider means the same thing" has to mean.
+    v *= region_gain(region_weights(v), d.b.z, d.b.y);
 
-    // 3. Hue and saturation: **not here** any more (派单 056). They are display-referred operations
-    //    and run in S3.5, from the same include S3 uses; a rotation of linear RGB about its luma is
-    //    not the same picture as a rotation in the display-referred domain, and only one of the two
-    //    can agree with the global sliders.
-    return max(v, 0.0);
+    // ⑤ Nothing else. Hue and saturation are **not here** any more (派单 056): they are
+    //    display-referred and run in S3.5 from the same include S3 uses; a rotation of linear RGB
+    //    about its luma is not the same picture as a rotation in the display-referred domain, and only
+    //    one of the two can agree with the global sliders.
+    return v;
 }
 
 kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
@@ -95,5 +132,8 @@ kernel void s1_6_local(texture2d<float, access::read> src [[texture(0)]],
         if (w <= 0.0) { continue; }
         v = mix(v, local_adjust(v, d), w);
     }
-    dst.write(float4(v, c.a), px);
+    // The one clamp, at the exit — S2's rule, and now this stage's too: a sub-black value that the
+    // end points pulled above zero is real picture by now and has to survive; whatever is still below
+    // zero is what the display would clip anyway.
+    dst.write(float4(max(v, 0.0), c.a), px);
 }

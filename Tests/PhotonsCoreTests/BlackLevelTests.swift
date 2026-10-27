@@ -1,6 +1,6 @@
 import XCTest
 import Metal
-import PhotonsCore
+@testable import PhotonsCore
 
 /// 派单 071 — 黑电平校正：S1 线性域里一个**加性**的细粒度黑电平微调。
 ///
@@ -370,7 +370,8 @@ final class BlackLevelTests: XCTestCase {
             self.device = device
             let url = Self.repoRoot
                 .appendingPathComponent("Sources/PhotonsCore/Kernels/s1_scene_linear.metal")
-            let source = try String(contentsOf: url, encoding: .utf8)
+            // 079 §2.1.2: the end points live in `tone_shape.metal` now; inline it like the app does.
+            let source = try KernelLibrary.expandingLocalIncludes(of: url)
             let library = try device.makeLibrary(source: source, options: nil)
             // 071 有**两个**入口：默认的 `s1_scene_linear`（019 的算术）和 `s1_scene_linear_trim`。
             // 生产路径按 `blackOffset != 0` 选，这个 harness 照抄同一条规则 —— 否则「offset 生效了

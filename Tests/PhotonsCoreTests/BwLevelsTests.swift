@@ -1,7 +1,7 @@
 import XCTest
 import Metal
 import CryptoKit
-import PhotonsCore
+@testable import PhotonsCore
 
 /// 派单 073B — blacks/whites are **end points**, not levels: a pure multiplicative EV at the dark end
 /// (±3 EV, a 7 EV toe) and EV + a small level at the white end, both weighted by an EV window so the
@@ -795,7 +795,10 @@ struct MetalKernelHarness {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
         self.device = device
         let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s1_scene_linear.metal")
-        let source = try String(contentsOf: url, encoding: .utf8)
+        // 079 §2.1.2: the end points moved into `tone_shape.metal`, so the harness has to inline the
+        // includes the way the app's `KernelLibrary` does — otherwise it would compile a kernel that
+        // is not the one that ships.
+        let source = try KernelLibrary.expandingLocalIncludes(of: url)
         let library = try device.makeLibrary(source: source, options: nil)
         for name in ["s1_scene_linear", "s1_scene_linear_knee", "s1_scene_linear_trim",
                      "s1_scene_linear_knee_trim", "s1_scene_linear_hybrid",

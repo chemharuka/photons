@@ -343,7 +343,7 @@ public enum ColorPrimaries: String, Sendable, Hashable, CaseIterable, Codable {
     ///
     /// ```
     /// Kernels/s2_tone_map.metal:82
-    /// Kernels/s1_6_local.metal:56
+    /// Kernels/tone_shape.metal（`kEndPointLumaWeights`，073B/073C 的端点取样；079 §2.1.2 起 S1 与 S1.6 共用）
     /// Kernels/histogram_sample.metal:90-92
     /// Kernels/s1_7_hdr_curve.metal:99            （注释；kernel 从 p.d.xyz 读）
     /// HDRCurve.swift:163                         （lumaWeights）

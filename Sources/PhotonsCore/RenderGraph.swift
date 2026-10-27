@@ -556,7 +556,9 @@ private struct LocalParamsU {
 private struct LocalAdjustU {
     var a: SIMD4<Float>   // gainR, gainG, gainB, amountScale
     var b: SIMD4<Float>   // contrast, highlights, shadows, whites
-    var c: SIMD4<Float>   // blacks, pad, pad, enabled
+    // blacks, contrast travel (079 §2.1.2: the EV of bend at |contrast| = 100, `S2Contrast.travel`'s
+    // derivation — was a pad until the masked contrast became 0107's bounded bend), pad, enabled.
+    var c: SIMD4<Float>
 }
 
 /// 056 — the mirror of `LocalColorDesc` in `s3_5_local_color.metal`. Its own buffer rather than a
@@ -2829,8 +2831,18 @@ public final class RenderGraph {
         return LocalAdjustU(
             a: SIMD4(gain.r, gain.g, gain.b, Float(min(max(a.amount, 0), 100) / 100)),
             b: SIMD4(Float(a.contrast), Float(a.highlights), Float(a.shadows), Float(a.whites)),
-            c: SIMD4(Float(a.blacks), 0, 0, active ? 1 : 0))
+            // `.y` is the contrast travel: the EV of bend at `|contrast| = 100`, derived from the
+            // axis' own end points exactly as 0107's `S2Contrast.travel` does (8 EV of tone map over
+            // display white 0 EV and the black end −8 EV ⇒ 1.0 EV). Passed, not baked into the kernel,
+            // for the same reason S2 takes it from the CPU: an axis that moves must move both stages.
+            c: SIMD4(Float(a.blacks), Float(Self.localContrastTravelEV), 0, active ? 1 : 0))
     }
+
+    /// 079 §2.1.2 — `S2Contrast.travel`'s derivation (`8/(whiteEV − blackEV)`, feat/contrast-0107
+    /// commit `06c5a6b`), repeated here only because that type does not exist on this branch yet. The
+    /// masked contrast and S2's contrast have to be the *same* bend; when 0107 merges this becomes a
+    /// reference to `S2Contrast.travel` and nothing else changes.
+    static let localContrastTravelEV: Double = 8.0 / (0.0 - (-8.0))
 
     /// 056 — S3.5's descriptor. `enabled` is false for a mask with no hue/saturation, so the kernel
     /// skips it before reading the atlas: a mask with only exposure costs nothing in that pass.

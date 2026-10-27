@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 #include "primaries.metal"
+#include "tone_shape.metal"
 using namespace metal;
 
 // S2 — tone map: the contrast bend (a bounded S in log2 EV, 0107), the two region lifts, final clamp.
@@ -34,6 +35,13 @@ using namespace metal;
 // end points of the axis (darktable's `contrast *= 8/(white_ev − black_ev)` normalisation), not
 // chosen. The numbers live in `S2Contrast` (Swift) and in the `CT_*` block below; a test parses this
 // file and asserts the two copies are equal.
+//
+// **079 §2.1.2 — the mask already runs this stage's replacement.** `s1_6_local` takes its contrast
+// from `tone_shape.metal#tone_contrast` (0107's bounded log2 bend) and its region lifts from the same
+// `region_weights`/`region_gain` this kernel calls, so "the same slider means the same thing inside and
+// outside a mask" is a property of the code rather than a promise. The one slider whose *global* body
+// is still the old linear-light power is contrast — 0107 is its own派单 — and when that lands here the
+// power below is replaced by a call to the very function the masked path already uses.
 //
 // **Blacks/whites are not here** (派单 019). They are the two end points, a scene-linear quantity, so
 // they live in S1 (`s1_scene_linear`, 073B). What is left here is *how the range bends between the end
@@ -92,13 +100,10 @@ struct S2Params {
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
 
-// 074 R2 — the two windows, in EV relative to display white (±0 EV = the display white point).
-// Shadows: full weight at and below −5.9 EV, smoothly to 0 at −3.9 EV. Highlights: 0 at and below
-// −3.2 EV, full weight at −1.2 EV and above. Both 2 EV wide — see the header for why the numbers.
-constant float SHADOW_LO_EV = -5.9;
-constant float SHADOW_HI_EV = -3.9;
-constant float HIGHLIGHT_LO_EV = -3.2;
-constant float HIGHLIGHT_HI_EV = -1.2;
+// 074 R2 — the two windows live in `tone_shape.metal` now (079 §2.1.2): S1.6's masked lifts have to be
+// the *same* windows, and a mask reading a second copy of `−5.9/−3.9/−3.2/−1.2` is a second meaning
+// waiting to happen. `region_weights`/`region_gain` are the same two lines this kernel used to spell
+// out; the extraction is bit-identical (same expressions, same order — `ToneMapTests` pins it).
 
 // ── 0107 — the contrast bend's axis constants (the `.metal` copy of `S2Contrast`) ──────────────
 //
@@ -205,18 +210,14 @@ static inline void s2_body(texture2d<float, access::read> src,
     // The coordinate is L = log2(luma) — EV relative to display white, the histogram's own HDR axis —
     // so the windows are exposure-invariant in width and can be read off the card. A pixel at or below
     // zero lum reads a very negative L, which is the shadow end: exactly right for a sub-black sample
-    // that a lift has already pulled above zero.
-    float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
-    float L = log2(lum);
-    float wShadow = 1.0 - smoothstep(SHADOW_LO_EV, SHADOW_HI_EV, L);
-    float wHighlight = smoothstep(HIGHLIGHT_LO_EV, HIGHLIGHT_HI_EV, L);
+    // that a lift has already pulled above zero. Both weights come from the shared include, which is
+    // the one place the numbers live (`tone_shape.metal`).
+    float2 w = region_weights(v);
     // LR convention for both region sliders: a positive value lifts that region, a negative value
     // pulls it down. `highlights +` therefore *brightens* the highlight zone (less recovery) and
     // `highlights -` recovers it — the sign used to be flipped here, which made the panel read
     // backwards against Lightroom for the same gesture.
-    float liftShadow = exp2(p.b.y / 100.0 * 0.8 * wShadow);
-    float liftHighlight = exp2(p.b.x / 100.0 * 0.8 * wHighlight);
-    v *= liftShadow * liftHighlight;
+    v *= region_gain(w, p.b.y, p.b.x);
 
     // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
     // value that a lift (S1's black end point, or these region lifts) has pulled above zero is real

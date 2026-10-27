@@ -1,4 +1,6 @@
 #include <metal_stdlib>
+#include "primaries.metal"
+#include "tone_shape.metal"
 using namespace metal;
 
 // S1 — scene linear: black/white **end points**, the linear black offset, exposure gain, white-balance
@@ -149,33 +151,11 @@ struct S1Params {
     float4 e;
 };
 
-// The two ends of the blacks knee, in EV relative to display white, and the travel at the very bottom.
-// -11.2 EV is far below anything the decoder produces as picture (the frames' p1 sits at −8…−15 EV);
-// -4.2 EV (code 0.29) is below every measured p30, so the mid-tones are outside the window.
-constant float B_EV = 3.0;
-constant float B_LO_EV = -11.2;
-constant float B_HI_EV = -4.2;
-
-// 073C — the level half of the hybrid travel: the black point moves by up to ±B_LEV in scene-linear
-// light over its own window (LEV_LO_EV … LEV_HI_EV), with a C¹ knee of LEV_KNEE at 0 on the crush side.
-//
-// `LEV_HI_EV = −4.4` and not `B_HI_EV = −4.2`: the level's window has to end below the *lowest p50 of
-// the reference frames* (−4.36 EV, L1030408), or the level term itself would move a median and the
-// "the level only works on the dark end" invariant would be a tolerance instead of a fact. The EV
-// toe keeps its old −4.2 (073B, untouched); the level's top is 0.2 EV lower for that reason alone.
-// B_LEV is pinned by the monotonicity constraint (§ header): B_LEV < 1.5/(d·ln2·2^(LEV_HI−d)) = 0.0056
-// for the 2.5 EV window below. LEV_KNEE = 1e-3 is about one 8-bit code at the sRGB toe, i.e. the
-// clip's corner is rounded over ~1.5 code — visible as a knee, invisible as a step.
-constant float B_LEV = 0.005;
-constant float LEV_LO_EV = -6.9;
-constant float LEV_HI_EV = -4.4;
-constant float LEV_KNEE = 1e-3;
-
-// Whites (contract §4.2): ±0.6 EV, plus 0.06 of a linear level at full travel, over a 2 EV shoulder.
-constant float W_EV = 0.6;
-constant float W_LEV = 0.06;
-constant float W_BAND = 2.0;
-constant float W_TAU = 1.0;
+// The two ends of the blacks knee (`B_EV/B_LO_EV/B_HI_EV`), 073C's level half
+// (`B_LEV/LEV_LO_EV/LEV_HI_EV/LEV_KNEE`), the whites travel (`W_*`) and the C¹ toe used to live here.
+// They live in `tone_shape.metal` now (079 §2.1.2): S1.6's masked end points have to be the *same*
+// numbers, and a second copy of a constant is a second meaning waiting to happen. Nothing about this
+// kernel's arithmetic changed when they moved.
 
 // One body, seven instantiations. All four flags are compile-time constants, so an instantiation that
 // is not for them contains none of their arithmetic — not "the arithmetic with a zero in it".
@@ -184,15 +164,6 @@ constant float W_TAU = 1.0;
 // runtime test on `m` for the same reason 071 split the trim off: the dispatch threshold
 // (`|blacks| > 50`) is exactly where `m` is 0, so the two instantiations agree bit for bit at the
 // boundary and the untouched one keeps 073B's source verbatim.
-static inline float3 s1_toe(float3 x) {
-    // C¹ rectifier: identity at or above +LEV_KNEE, exactly 0 at or below −LEV_KNEE, quadratic in
-    // between (slope 0 → 1). The crush really does reach 0 — that is the "level" half — and the
-    // corner is rounded instead of stepped.
-    const float k = LEV_KNEE;
-    float3 kx = clamp(x + k, 0.0, 2.0 * k);
-    // `select(a, b, c)` is c ? b : a; a bool3 cannot be the condition of `?:` in Metal.
-    return select(x, kx * kx / (4.0 * k), x < k);
-}
 
 template <bool kLevels, bool kKnee, bool kHybrid, bool kTrim>
 static inline void s1_body(texture2d<float, access::read> src,
@@ -245,44 +216,12 @@ static inline void s1_body(texture2d<float, access::read> src,
     //    light. Both sliders are clamped to their travel in one place, so a hand-edited document cannot
     //    ask the kernel for 30 EV.
     if (kKnee) {
-        float db = clamp(p.b.z, -100.0, 100.0) / 100.0;
-        float dw = clamp(p.b.w, -100.0, 100.0) / 100.0;
-
-        // One weight per pixel, from the pixel's luminance: applying a per-channel weight would move
-        // each channel by a different EV and shift hue in the lifted toe.
-        float luma = dot(v, float3(0.2126, 0.7152, 0.0722));
-        float L = log2(max(luma, 1e-9));
-
-        // blacks: 1 below B_LO, 0 above B_HI, smoothstep between (C¹ at both ends, so the toe and the
-        // knee have no seam). `0 → 0`: pure multiplication never lifts black into grey.
-        float wb = 1.0 - smoothstep(B_LO_EV, B_HI_EV, L);
-        if (kHybrid) {
-            // 073C — the second half of the travel. `mb` is exactly 0 for |blacks| ≤ 50, and the CPU
-            // does not even pick this instantiation there, so the two paths agree at the join.
-            float mb = smoothstep(0.5, 1.0, abs(db));
-            v *= exp2(B_EV * db * (1.0 - 0.5 * mb) * wb);
-
-            // The level: the black point moves by `off` linear units over its own 2.5 EV window
-            // (−6.9 … −4.4 EV, the top deliberately under the EV toe's so no frame's median is inside
-            // it). The window is a weight in L, not a clip, so it is continuous at both ends; `wl = 0`
-            // makes `off` ±0 and the pixel bit-still.
-            float wl = 1.0 - smoothstep(LEV_LO_EV, LEV_HI_EV, L);
-            float off = B_LEV * db * mb * wl;
-            float3 x = v + off;
-            // A lift must not clip (invariant: t = +1 leaves no pixel at 0), so the toe is only taken
-            // on the crush side. → the darkest pixels really reach 0 when the slider is pushed down.
-            v = off < 0.0 ? s1_toe(x) : x;
-        } else {
-            // 073B, verbatim: the first half of the travel is this, bit for bit.
-            v *= exp2(B_EV * db * wb);
-        }
-
-        // whites: full weight at display white, 0 at −2 EV, exp(−L/1 EV) above 0 (the HDR shoulder).
-        // The level term is (Δw·|Δw|) — quadratic, so a small travel is nearly pure EV and only the
-        // end of the travel actually moves the white point (contract §4.2). It rides `ww`, so it is
-        // continuous at both ends of the window and does not touch the mid-tones.
-        float ww = L <= 0.0 ? smoothstep(-W_BAND, 0.0, L) : exp(-L / W_TAU);
-        v = v * exp2(W_EV * dw * ww) + float3(W_LEV * dw * abs(dw) * ww);
+        // ③④ 073B/073C — the end points, from the include both this kernel and S1.6 call
+        //    (`tone_shape.metal#s1_end_points`): the **weight** is read off the encoded domain's log
+        //    coordinate L, the **gain and the level** are applied in scene-linear light. Both sliders
+        //    are clamped to their travel inside that function, so a hand-edited document cannot ask the
+        //    kernel for 30 EV, and a mask asking for the same numbers gets the same picture.
+        v = s1_end_points<kHybrid>(v, p.b.z, p.b.w);
     }
 
     // ⑤ The shoulder, untouched, and always last.
