@@ -44,10 +44,12 @@ public struct ZoomGlassSliderGeometry: Equatable, Sendable {
     }
 
     /// The number of rungs on the ladder — `LoupeViewState.zoomStops.count`, asserted in the tests.
-    public static let tickCount = 8
+    /// Derived, not written out: 2026-10-27 用户要求加 12.5% 档 turned eight rungs into nine, and a
+    /// second literal here would have been a tick nobody drew.
+    public static var tickCount: Int { LoupeViewState.zoomStops.count }
 
-    /// The stop values, ascending. `0.25, 1/3, 0.5, 2/3, 1, 2, 3, 4` — the thirds are the ladder's
-    /// own exact doubles, never 0.333/0.667.
+    /// The stop values, ascending. `0.125, 0.25, 1/3, 0.5, 2/3, 1, 2, 3, 4` — the thirds are the
+    /// ladder's own exact doubles, never 0.333/0.667.
     public let levels: [Double]
 
     /// The track's width in points (the slider pill's width, not the whole control's).
@@ -71,7 +73,8 @@ public struct ZoomGlassSliderGeometry: Equatable, Sendable {
     /// test-sized table cannot index out of bounds through this type.
     public var lastIndex: Int { max(0, min(Self.tickCount, levels.count) - 1) }
 
-    /// `x(i) = padding + i · usable / 7` — equal steps by **index**.
+    /// `x(i) = padding + i · usable / lastIndex` — equal steps by **index**, so a rung added to the
+    /// ladder narrows every gap without moving the two ends.
     public func x(forIndex index: Int) -> CGFloat {
         let i = min(max(index, 0), lastIndex)
         let usable = usableWidth
@@ -181,8 +184,8 @@ public struct ZoomGlassSliderGeometry: Equatable, Sendable {
 
 // MARK: - the control
 
-/// The canvas' zoom control: `[适应|25%] [ eight rungs ]` — two liquid-glass pills in the
-/// bottom-right corner of the canvas.
+/// The canvas' zoom control: `[适应|12.5%] [ nine rungs ]` — two liquid-glass pills in the
+/// **top-right** corner of the canvas (both modes, since 2026-10-27).
 ///
 /// The left pill is a **state chip**: 适应 in fit, the percentage on a rung, and clicking it enters
 /// fit (`zoomToFit()`). The right pill is the slider, and its thumb can only ever come to rest on
@@ -209,12 +212,14 @@ public final class ZoomGlassSlider: NSView {
 
     /// Which corner of the canvas the pill is pinned to.
     ///
-    /// `bottomRight` is the placement every mode but 裁切 uses — and it is the **default**, so a
-    /// caller that has never heard of the crop tool gets exactly the rectangle it always had. While
-    /// the crop frame is up the bar is centred at the bottom of the canvas, so the pill moves to the
-    /// **top-right** (`LoupeController.layoutZoomSlider`): two chrome rectangles that must not
-    /// intersect are then in two different corners, and the bar's own layout contract (§D1's three
-    /// fixed-width fields) does not have to move a single point.
+    /// **`topRight` is the placement in every mode** (2026-10-27 用户要求普通模式也放上方): the crop
+    /// bar is centred at the bottom of the canvas, so the bottom-right corner is where two chrome
+    /// rectangles overlap; putting the pill in the top-right in both modes removes that overlap
+    /// without the bar's own layout contract (§D1's three fixed-width fields) moving a single point.
+    ///
+    /// `bottomRight` stays in the type because it is the corner the control *used* to occupy, and the
+    /// regression tests still measure it to show the overlap the move removes. Nothing in the app
+    /// selects it, and it is not the default any more.
     public enum Placement: Sendable, Equatable {
         case bottomRight
         case topRight
@@ -230,7 +235,7 @@ public final class ZoomGlassSlider: NSView {
 
     /// The corner this pill is pinned to. Setting it re-pins the view and asks for a layout pass;
     /// the geometry of the control itself (the track, the ticks, the thumb) is corner-independent.
-    public var placement: Placement = .bottomRight {
+    public var placement: Placement = .topRight {
         didSet {
             guard placement != oldValue else { return }
             autoresizingMask = placement.autoresizingMask
@@ -284,9 +289,9 @@ public final class ZoomGlassSlider: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        // Pinned to the bottom-right of whatever contains it: a resized window moves the canvas,
-        // not this control.
-        autoresizingMask = [.minXMargin, .maxYMargin]
+        // Pinned to the top-right of whatever contains it: a resized window moves the canvas, not
+        // this control. The mask comes from `placement`, so the two can never name different corners.
+        autoresizingMask = placement.autoresizingMask
 
         track.geometry = geometry
         track.tickCount = geometry.lastIndex + 1
@@ -345,9 +350,9 @@ public final class ZoomGlassSlider: NSView {
 
     // MARK: placement
 
-    /// Bottom-right of `bounds`, 16 pt in from each edge — or the top-right corner in 裁切 mode
-    /// (`placement`). Called by the controller on every layout pass; the autoresizing mask then
-    /// carries the pin across window resizes without it.
+    /// Bottom-right of `bounds`, 16 pt in from each edge — or, what the app uses in **every** mode,
+    /// the top-right corner (`placement`). Called by the controller on every layout pass; the
+    /// autoresizing mask then carries the pin across window resizes without it.
     public func layout(in bounds: CGRect) {
         let size = CGSize(width: ZoomGlassSliderGeometry.Metrics.totalWidth,
                           height: ZoomGlassSliderGeometry.Metrics.pillHeight)

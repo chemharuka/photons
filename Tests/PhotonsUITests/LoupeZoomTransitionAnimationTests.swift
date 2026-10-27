@@ -389,9 +389,9 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
             assertOnAStop("menu \(LoupeViewState.percentLabel(of: stop))")
         }
 
-        // ⌘− all the way down: 8 stops → fit, every step parked on a stop on the way.
+        // ⌘− all the way down: 9 stops → fit, every step parked on a stop on the way.
         var seen: [String] = []
-        for _ in 0..<9 {
+        for _ in 0..<10 {
             controller.zoomOut()
             if controller.viewState.isActualSize {
                 seen.append(LoupeViewState.percentLabel(of: controller.viewState.zoom))
@@ -400,8 +400,9 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
             }
             assertOnAStop("⌘−")
         }
-        XCTAssertEqual(seen, ["300%", "200%", "100%", "66.7%", "50%", "33.3%", "25%", "fit", "fit"],
-                       "⌘− walks the eight stops in order and then reaches fit")
+        // 2026-10-27 用户要求加 12.5% 档: the walk now passes 12.5 % before it leaves the ladder.
+        XCTAssertEqual(seen, ["300%", "200%", "100%", "66.7%", "50%", "33.3%", "25%", "12.5%", "fit", "fit"],
+                       "⌘− walks the nine stops in order and then reaches fit")
 
         // ⌘= back up: fit → 100 % (full size first), then 200 → 300 → 400.
         var up: [String] = []
