@@ -29,12 +29,19 @@ public struct LoupeViewState: Equatable, Sendable {
     /// The stop ceiling. Above 4:1 a 60 MP frame is being shown through sixteen canvas pixels per
     /// source pixel — there is no information left to reveal, only interpolation to admire.
     public static let maximumZoom: Double = 4
-    /// The stop floor: a quarter of 1:1. Below it there is nothing left to see (the whole frame is
-    /// `mode == .fit`, a separate entry, not a number), and 25 % is the widest *numeric* stop.
-    public static let minimumZoom: Double = 0.25
+    /// The stop floor: an eighth of 1:1. Below it there is nothing left to see (the whole frame is
+    /// `mode == .fit`, a separate entry, not a number), and 12.5 % is the widest *numeric* stop.
+    ///
+    /// 2026-10-27 用户要求加 12.5% 档 — the floor moved with the ladder, from 25 % to 12.5 %; the
+    /// 1:1 base (§A0: one source pixel per device pixel) is untouched, because a stop is only ever a
+    /// ratio against that same base.
+    public static let minimumZoom: Double = 0.125
 
-    /// The eight numeric stops, ascending — the whole ladder, and the only values a stop change can
+    /// The nine numeric stops, ascending — the whole ladder, and the only values a stop change can
     /// name.
+    ///
+    /// 2026-10-27 用户要求加 12.5% 档: `0.125` sits below 25 %, and every existing pair keeps its
+    /// relative order (`fit` is still not a rung).
     ///
     /// `fit` (适应窗口) is deliberately **not** in here. It is a mode, not a rung, and where it belongs
     /// in the UI is a decision the user has not made yet (see `LoupeController.zoomFitEntryPoint`).
@@ -46,7 +53,7 @@ public struct LoupeViewState: Equatable, Sendable {
     /// The thirds are **exact** (`1.0/3.0`, `2.0/3.0`), not 0.333/0.667: they are real zoom factors
     /// used by the anchor arithmetic, the bridge ratio and the menu's identity, and only their *label*
     /// is rounded to one decimal (`33.3%`, `66.7%`). Written as divisions so they cannot drift.
-    public static let zoomStops: [Double] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
+    public static let zoomStops: [Double] = [0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
 
     /// Index of `zoom` in `zoomStops` when it is exactly on a stop, `nil` between stops.
     ///
@@ -72,11 +79,11 @@ public struct LoupeViewState: Equatable, Sendable {
 
     public var isActualSize: Bool { mode == .actual }
 
-    /// 0.25…4, the interactive domain (fit is a separate mode, not a zoom value).
+    /// 0.125…4, the interactive domain (fit is a separate mode, not a zoom value).
     ///
     /// The ends clamp rather than wrap, and a non-finite value goes to the end it names: `+∞` is
-    /// "past 400 %" → 400 %, `−∞` → 25 %, `NaN` → the floor (a number that is not a number cannot ask
-    /// for magnification).
+    /// "past 400 %" → 400 %, `−∞` → 12.5 %, `NaN` → the floor (a number that is not a number cannot
+    /// ask for magnification).
     public static func clampZoom(_ zoom: Double) -> Double {
         if zoom.isNaN { return minimumZoom }
         return min(max(zoom, minimumZoom), maximumZoom)
@@ -94,11 +101,13 @@ public struct LoupeViewState: Equatable, Sendable {
         }
     }
 
-    /// `0.25 → "25%"`, `1 → "100%"`, `1/3 → "33.3%"`, `2/3 → "66.7%"`, `3 → "300%"`.
+    /// `0.125 → "12.5%"`, `0.25 → "25%"`, `1 → "100%"`, `1/3 → "33.3%"`, `2/3 → "66.7%"`, `3 → "300%"`.
     ///
-    /// Whole percent for the stops that are whole percentages, **one decimal** for the thirds — and
-    /// only in the *label*: `33.3%` is `1.0/3.0` internally, and rounding it to 33 % here would make
-    /// the readout disagree with the stop it names.
+    /// Whole percent for the stops that are whole percentages, **one decimal** for the thirds and for
+    /// 12.5 % — and only in the *label*: `33.3%` is `1.0/3.0` internally, and rounding it to 33 % here
+    /// would make the readout disagree with the stop it names. 12.5 % never prints as `13%`: the
+    /// one-decimal branch is what keeps a half-percent stop readable (`12.5%`), and it is the same
+    /// branch the thirds already used.
     public static func percentLabel(of zoom: Double) -> String {
         let z = zoom.isFinite ? zoom : 1
         let percent = z * 100
@@ -112,13 +121,13 @@ public struct LoupeViewState: Equatable, Sendable {
 
 /// One rung of the zoom ladder: a numeric stop and nothing else.
 ///
-/// The ladder is the eight values of `LoupeViewState.zoomStops`, ascending, and it is a *constant* —
+/// The ladder is the nine values of `LoupeViewState.zoomStops`, ascending, and it is a *constant* —
 /// `fit` is not in it (and never was a value: it is a mode, entered through its own menu item /
 /// shortcut, `LoupeController.zoomFitEntryPoint`), so nothing here depends on the window, the crop or
 /// the fit ratio.
 public struct LoupeZoomLevel: Equatable, Sendable, Comparable {
 
-    /// Canvas pixels per source pixel: 0.25, 1/3, 0.5, 2/3, 1, 2, 3, 4.
+    /// Canvas pixels per source pixel: 0.125, 0.25, 1/3, 0.5, 2/3, 1, 2, 3, 4.
     public let zoom: Double
 
     public init(zoom: Double) {
@@ -137,16 +146,16 @@ public struct LoupeZoomLevel: Equatable, Sendable, Comparable {
 
 extension LoupeViewState {
 
-    /// The ladder: the eight numeric stops, ascending, de-duplicated. No arguments — nothing about it
+    /// The ladder: the nine numeric stops, ascending, de-duplicated. No arguments — nothing about it
     /// depends on the frame any more.
     public static let levels: [LoupeZoomLevel] = zoomStops.map { LoupeZoomLevel(zoom: $0) }
 
     /// The rung a raw zoom value lands on: **the largest rung not above it** — "自动往下走一级".
     ///
     /// A floor, not a nearest-value round: a pinch to 0.9 lands on 66.7 %, never on 100 %; a pinch to
-    /// 0.34 lands on 33.3 %. Below the lowest rung (25 %) the answer is 25 %: the ladder's floor is a
-    /// stop, and going further out is `fit`, which is an explicit action (`zoomToFit()`), not a snap.
-    /// The comparison uses the table's exact values, so `1.0/3.0` is reachable and nothing hides
+    /// 0.34 lands on 33.3 %. Below the lowest rung (12.5 %) the answer is 12.5 %: the ladder's floor
+    /// is a stop, and going further out is `fit`, which is an explicit action (`zoomToFit()`), not a
+    /// snap. The comparison uses the table's exact values, so `1.0/3.0` is reachable and nothing hides
     /// between the rungs.
     public static func snappedLevel(for target: Double) -> LoupeZoomLevel {
         let t = target.isFinite ? target : 1

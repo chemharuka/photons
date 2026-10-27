@@ -23,8 +23,10 @@ import PhotonsCore
 ///   2. the anti-proof: with `syncsCropOverlayOnCameraChange = false` the same check goes red;
 ///   3. ⑤/⑥: a scroll and a pinch reach the camera while the tool is on, the frame follows, and
 ///      `editRevision` / `history.count` / `cropRect` do not move;
-///   4. ②: in 裁切 mode the zoom pill is in the top-right corner — clear of the bottom bar, the top
-///      bar and the inspector — and in every other mode it is byte-identically where it was.
+///   4. ②: in **both** modes (裁切 and ordinary) the zoom pill is in the top-right corner of the canvas
+///      — clear of the crop bar, the top bar, the inspector and the filmstrip. 2026-10-27 用户要求普通
+///      模式也放上方; the bottom-right rectangle it used to occupy is still measured, as the overlap
+///      the move removes.
 @MainActor
 final class CropOverlayFollowTests: XCTestCase {
 
@@ -346,9 +348,11 @@ final class CropOverlayFollowTests: XCTestCase {
         return (editor, editor.rootView, window)
     }
 
-    /// One line of evidence per size: where the pill is, where the bar is, and the two intersections
-    /// that must both be empty.
-    private func reportPlacement(_ root: WorkspaceRootView, _ window: NSWindow, size: String) throws {
+    /// One line of evidence per size: where the pill is, where the bar is, and the intersections that
+    /// must all be empty. `expectsBar` is `false` in ordinary mode, where the bar is hidden and has no
+    /// rectangle of its own to clear.
+    private func reportPlacement(_ root: WorkspaceRootView, _ window: NSWindow, size: String,
+                                 expectsBar: Bool = true) throws {
         let loupe = root.loupeController
         // The bar is placed from the canvas' bounds by `refreshCropTool` — the app's own layout path.
         // Driving it here means a measurement never depends on whether AppKit chose to send
@@ -360,19 +364,24 @@ final class CropOverlayFollowTests: XCTestCase {
         let geometry = root.geometry
         let topBar = geometry.topBar
         let inspector = geometry.inspector
+        let filmstrip = geometry.filmstrip ?? .zero
 
         print("② \(size) · slider \(NSStringFromRect(slider)) · bar \(NSStringFromRect(bar)) · "
               + "canvas \(NSStringFromRect(canvas)) · topBar \(NSStringFromRect(topBar)) · "
-              + "inspector \(NSStringFromRect(inspector))")
+              + "inspector \(NSStringFromRect(inspector)) · filmstrip \(NSStringFromRect(filmstrip))")
         print("② \(size) · ∩bar \(NSStringFromRect(slider.intersection(bar))) · "
               + "∩topBar \(NSStringFromRect(slider.intersection(topBar))) · "
               + "∩inspector \(NSStringFromRect(slider.intersection(inspector))) · "
-              + "right gap \(canvas.maxX - slider.maxX) pt · top gap \(canvas.maxY - slider.minY) pt")
+              + "∩filmstrip \(NSStringFromRect(slider.intersection(filmstrip))) · "
+              + "right gap \(canvas.maxX - slider.maxX) pt · top gap \(slider.minY - canvas.minY) pt")
 
-        XCTAssertTrue(slider.intersection(bar).isEmpty,
-                      "② \(size): the pill must not overlap the crop bar")
+        if expectsBar {
+            XCTAssertTrue(slider.intersection(bar).isEmpty,
+                          "② \(size): the pill must not overlap the crop bar")
+        }
         XCTAssertTrue(slider.intersection(topBar).isEmpty, "② \(size): …nor the top bar")
         XCTAssertTrue(slider.intersection(inspector).isEmpty, "② \(size): …nor the inspector")
+        XCTAssertTrue(slider.intersection(filmstrip).isEmpty, "② \(size): …nor the filmstrip")
         XCTAssertGreaterThanOrEqual(canvas.maxX - slider.maxX, 8, "② \(size): right margin")
         XCTAssertGreaterThanOrEqual(slider.minY - canvas.minY, 8, "② \(size): the pill is inside the top")
         XCTAssertLessThanOrEqual(slider.maxY, canvas.maxY + 0.5, "② \(size): and not clipped by the top")
@@ -382,8 +391,10 @@ final class CropOverlayFollowTests: XCTestCase {
         // the pill** (they are in two different corners at every width).
         // Root-view coordinates are flipped (y grows downwards), so "the bar is below the pill" is
         // `bar.minY >= slider.maxY`.
-        XCTAssertGreaterThanOrEqual(bar.minY, slider.maxY,
-                                    "② \(size): the bar must be entirely below the pill")
+        if expectsBar {
+            XCTAssertGreaterThanOrEqual(bar.minY, slider.maxY,
+                                        "② \(size): the bar must be entirely below the pill")
+        }
     }
 
     /// ② — 裁切 mode moves the pill to the top-right corner; the bar keeps its own rectangle.
@@ -432,17 +443,53 @@ final class CropOverlayFollowTests: XCTestCase {
         loupe.view.layoutSubtreeIfNeeded()
         try reportPlacement(root, window, size: "1200×780 (minimum)")
 
-        // Leaving the tool puts it back, value for value.
+        // Leaving the tool changes nothing about where the pill is: one corner in every mode
+        // (2026-10-27 用户要求普通模式也放上方), so entering and leaving 裁切 no longer moves it at all.
         loupe.cancelCropTool()
         CropUITestSupport.pump(0.02)
         root.layoutSubtreeIfNeeded()
-        XCTAssertEqual(loupe.zoomSlider.placement, .bottomRight, "②: normal mode keeps the old corner")
+        XCTAssertEqual(loupe.zoomSlider.placement, .topRight,
+                       "②: ordinary mode keeps the same top-right corner (2026-10-27)")
         window.setContentSize(NSSize(width: 1600, height: 940))
         window.contentView?.layoutSubtreeIfNeeded()
         root.needsLayout = true
         root.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)
         XCTAssertEqual(loupe.zoomSlider.frame, restingFrame,
-                       "②: the normal-mode rectangle is back, value for value")
+                       "②: the pill never moved — same rectangle in 裁切 and out of it, value for value")
+    }
+
+    /// ② — **ordinary mode**, at both window sizes the task names: the pill is in the canvas'
+    /// top-right corner (16 pt in from the canvas' top and right edges, i.e. the same margins as in
+    /// 裁切 mode) and intersects none of the chrome. 2026-10-27 用户要求普通模式也放上方.
+    func testTheZoomPillSitsInTheTopRightCornerInNormalModeToo() throws {
+        let (_, root, window) = try makeEditor(size: NSSize(width: 1600, height: 940))
+        defer { window.orderOut(nil) }
+        let loupe = root.loupeController
+
+        XCTAssertFalse(loupe.cropTool.isActive, "this is ordinary mode — no crop tool")
+        XCTAssertEqual(loupe.zoomSlider.placement, .topRight, "②: 普通模式 parks the pill top-right")
+        XCTAssertFalse(loupe.cropBar.isHidden == false, "the crop bar is not up")
+        try reportPlacement(root, window, size: "1600×940 普通模式", expectsBar: false)
+        // The rectangle is the canvas' corner, not the window's: 16 pt in from both edges.
+        let canvas = loupe.view.convert(loupe.view.bounds, to: root)
+        let slider = loupe.zoomSlider.convert(loupe.zoomSlider.bounds, to: root)
+        XCTAssertEqual(canvas.maxX - slider.maxX, 16, accuracy: 0.5,
+                       "②: the right margin is the control's own 16 pt")
+        XCTAssertEqual(slider.minY - canvas.minY, 16, accuracy: 0.5,
+                       "②: and so is the top margin")
+
+        window.setContentSize(WorkspaceLayout.minimumWindowSize)
+        window.contentView?.layoutSubtreeIfNeeded()
+        root.needsLayout = true
+        root.layoutSubtreeIfNeeded()
+        CropUITestSupport.pump(0.05)
+        root.layoutSubtreeIfNeeded()
+        loupe.view.layoutSubtreeIfNeeded()
+        try reportPlacement(root, window, size: "1200×780 最小 普通模式", expectsBar: false)
+        let smallCanvas = loupe.view.convert(loupe.view.bounds, to: root)
+        let smallSlider = loupe.zoomSlider.convert(loupe.zoomSlider.bounds, to: root)
+        XCTAssertEqual(smallCanvas.maxX - smallSlider.maxX, 16, accuracy: 0.5)
+        XCTAssertEqual(smallSlider.minY - smallCanvas.minY, 16, accuracy: 0.5)
     }
 }

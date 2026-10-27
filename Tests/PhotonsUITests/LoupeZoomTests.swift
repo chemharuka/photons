@@ -113,15 +113,16 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(f.renderScale(of: .fit, decodeScale: 0.5), 0.8, accuracy: 1e-12)
     }
 
-    // MARK: 3. zoom clamp 25 % … 400 %
+    // MARK: 3. zoom clamp 12.5 % … 400 %   (2026-10-27 用户要求加 12.5% 档)
 
-    func testZoomIsClampedToAQuarterThroughFour() {
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.1).zoom, 0.25, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.25, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.25, accuracy: 1e-12)
+    func testZoomIsClampedToAnEighthThroughFour() {
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.1).zoom, 0.125, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0).zoom, 0.125, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: -3).zoom, 0.125, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 0.125).zoom, 0.125, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 4).zoom, 4, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState(mode: .actual, zoom: 64).zoom, 4, accuracy: 1e-12)
-        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(LoupeViewState(mode: .actual, zoom: .nan).zoom, 0.125, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState.clampZoom(12), 4, accuracy: 1e-12)
         XCTAssertEqual(LoupeViewState.clampZoom(1.0 / 3.0), 1.0 / 3.0, accuracy: 1e-12)
 
@@ -131,7 +132,7 @@ final class LoupeZoomTests: XCTestCase {
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 2, aroundView: CGPoint(x: 100, y: 100)) }
         XCTAssertEqual(state.zoom, 4, accuracy: 1e-12)
         for _ in 0..<12 { state = f.zooming(state, to: state.zoom * 0.5, aroundView: CGPoint(x: 100, y: 100)) }
-        XCTAssertEqual(state.zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 0.125, accuracy: 1e-12)
     }
 
     /// The eight stops, as percentages. 1:1 is 100 %; the thirds print one decimal and stay exact, and

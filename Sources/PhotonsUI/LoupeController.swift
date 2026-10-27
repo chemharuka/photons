@@ -1288,12 +1288,12 @@ public final class LoupeController: NSViewController {
 
     // MARK: the zoom ladder (显示 ▸ 倍率)
 
-    /// The eight numeric stops, in order — `LoupeViewState.zoomStops`, `0.25 … 4` with the thirds
+    /// The nine numeric stops, in order — `LoupeViewState.zoomStops`, `0.125 … 4` with the thirds
     /// exact (`1.0/3.0`, `2.0/3.0`). `fit` is **not** one of them; it is a mode with its own entry
     /// point (`zoomFitEntryPoint`).
     public static let zoomStops: [Double] = LoupeViewState.zoomStops
 
-    /// What the 倍率 menu can name: the same eight stops, at the same indices.
+    /// What the 倍率 menu can name: the same nine stops, at the same indices.
     ///
     /// The menu item's **tag is the index into this array**, not a percentage. That is the only
     /// identity that survives `1/3 → "33.3%" → 0.333` intact: a hundredths tag would round the third
@@ -1301,7 +1301,7 @@ public final class LoupeController: NSViewController {
     /// reads `menuZoomStops[item.tag]`, so the value is exact and the label is only a label.
     public static let menuZoomStops: [Double] = LoupeViewState.zoomStops
 
-    /// The ladder the menu and the readout print: eight numeric stops, ascending, no fit rung.
+    /// The ladder the menu and the readout print: nine numeric stops, ascending, no fit rung.
     public var zoomLevels: [LoupeZoomLevel] { LoupeViewState.levels }
 
     /// Where 适应窗口 is reachable from — **the single switch point** for `fit`.
@@ -1390,9 +1390,9 @@ public final class LoupeController: NSViewController {
         zoom(to: next)
     }
 
-    /// ⌘−: the next stop down — 100 % → 66.7 % → 50 % → 33.3 % → 25 %. Below the lowest **numeric**
-    /// stop the whole frame is the next step out; `fit` is outside the ladder and is reached here
-    /// rather than by a snap, so one more ⌘− from 25 % always gives the same picture.
+    /// ⌘−: the next stop down — 100 % → 66.7 % → 50 % → 33.3 % → 25 % → 12.5 %. Below the lowest
+    /// **numeric** stop the whole frame is the next step out; `fit` is outside the ladder and is reached
+    /// here rather than by a snap, so one more ⌘− from 12.5 % always gives the same picture.
     public func zoomOut() {
         guard viewState.isActualSize else { return }
         let current = LoupeViewState.clampZoom(viewState.zoom)
@@ -1483,10 +1483,16 @@ public final class LoupeController: NSViewController {
         // frame is a rect of the *projection*, so it has to be re-laid-out in the same turn the
         // projection changed: before this, `refreshCropTool()` only ran on draft changes and mode
         // changes, and the overlay kept drawing the fit-time rectangle after a zoom.
-        if syncsCropOverlayOnCameraChange { syncCropOverlay() }
+        //
+        // ② (2026-10-27) — **unless a stop change is about to animate**. Then the picture is still the
+        // old one for the next 180 ms, and the frame must travel with it instead of jumping to the
+        // target on this line; the bridge's own tick lays it out (see `presentZoomBridgeFrame`), and
+        // the call here only puts it on frame 0 of that same animation. The arm therefore runs first:
+        // whether a bridge exists is what decides between "follow the animation" and "the cut is the
+        // change".
         view.window?.invalidateCursorRects(for: canvasView)
         // **Every** stop change is bridged — fit ↔ a numeric stop, and numeric stop ↔ numeric stop
-        // (`25 ↔ 33.3 ↔ 50 ↔ 66.7 ↔ 100 ↔ 200 ↔ 300 ↔ 400`). The camera jumps here and the pixels
+        // (`12.5 ↔ 25 ↔ 33.3 ↔ 50 ↔ 66.7 ↔ 100 ↔ 200 ↔ 300 ↔ 400`). The camera jumps here and the pixels
         // follow when they are rendered; between the two the canvas still holds the old picture, so
         // without the bridge the change is a cut at whatever ratio the two stops differ by.
         //
@@ -1497,9 +1503,15 @@ public final class LoupeController: NSViewController {
         //
         // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
         // animating a drag would leave the picture behind the hand.
+        var bridging = false
         if let framing = framing(),
            forceAnimation || movesScale(from: previous, to: next, framing: framing) {
-            armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
+            bridging = armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
+        }
+        if syncsCropOverlayOnCameraChange {
+            // A bridge owns the next 180 ms: the frame is drawn at its frame 0 here, which is the
+            // picture that is on screen right now. With no bridge the target geometry *is* the picture.
+            syncCropOverlay(progress: bridging ? 0 : nil)
         }
         requestViewportRender()
     }
@@ -1624,9 +1636,13 @@ public final class LoupeController: NSViewController {
     ///
     /// Retargeting: a second ⌘= starts from the map the eye is currently looking at (read off the
     /// running bridge, not off a presentation tree), so nothing jumps back and nothing is added twice.
+    ///
+    /// Returns whether a bridge is **running** after the call — that is what tells `setViewState`
+    /// whether the crop overlay must follow an animation or may cut straight to the target geometry.
+    @discardableResult
     private func armZoomBridge(from old: LoupeViewState, to new: LoupeViewState,
-                               framing: LoupeFraming, anchor: LoupeZoomAnchor) {
-        guard lastFrame != nil, let onCanvas = canvasTexture else { return }  // nothing to carry
+                               framing: LoupeFraming, anchor: LoupeZoomAnchor) -> Bool {
+        guard lastFrame != nil, let onCanvas = canvasTexture else { return false }  // nothing to carry
         let canvas = viewportPixels
         let texture = ImageSize(width: onCanvas.texture.width, height: onCanvas.texture.height)
         let fromMapping = canvasContent?.mapping ?? framing.mapping(of: old)
@@ -1658,7 +1674,7 @@ public final class LoupeController: NSViewController {
             zoomBridgeSerial += 1
             zoomBridge = nil
             stopZoomBridgeTicker()
-            return
+            return false
         }
         if wasBridging { zoomBridgeRetargets += 1 }
         // A held frame for a camera we are no longer going to belongs nowhere: recycle it and let the
@@ -1687,7 +1703,7 @@ public final class LoupeController: NSViewController {
             // Reduce Motion: no slide — one present at the stop's own geometry, then hand over.
             presentZoomBridgeFrame(progress: 1, bridge: bridge, texture: onCanvas.texture, serial: serial)
             finishZoomBridge()
-            return
+            return true
         }
         startZoomBridgeTicker()
         let armSerial = zoomBridgeSerial
@@ -1695,12 +1711,42 @@ public final class LoupeController: NSViewController {
             guard let self, self.zoomBridgeSerial == armSerial else { return }
             self.finishZoomBridge()
         }
+        return true
     }
 
     private func recordZoomBridgeFrame(_ frame: ZoomBridgeFrame) {
         zoomBridgeFrames.append(frame)
         if zoomBridgeFrames.count > Self.zoomBridgeFrameLimit {
             zoomBridgeFrames.removeFirst(zoomBridgeFrames.count - Self.zoomBridgeFrameLimit)
+        }
+    }
+
+    // MARK: what the crop overlay drew, frame by frame (②, 2026-10-27)
+
+    /// The overlay as it was **drawn** after one bridge frame: which bridge, at what progress, and the
+    /// whole layout (quad, eight grips, nine-square grid) the view was left holding.
+    ///
+    /// Recorded by the present tick itself (not reconstructed in a test), because the claim is about
+    /// what the eye saw: the same tick, the same progress, the same curve.
+    public struct CropOverlayFollowFrame: Equatable, Sendable {
+        public let serial: Int
+        public let progress: Double
+        public let layout: CropToolLayout?
+    }
+
+    /// Every bridge frame's overlay, in order, append-only and capped like the frame log.
+    public private(set) var cropOverlayFollowFrames: [CropOverlayFollowFrame] = []
+    private static let cropOverlayFollowFrameLimit = 512
+
+    /// The overlay as it was drawn for the bridge frame that just went up: recorded by the tick itself,
+    /// because the claim (②) is about what the eye saw, at that frame's progress.
+    private func recordCropOverlayFollowFrame(serial: Int, progress: Double) {
+        guard cropTool.isActive else { return }
+        cropOverlayFollowFrames.append(CropOverlayFollowFrame(serial: serial, progress: progress,
+                                                              layout: cropOverlay.layout))
+        if cropOverlayFollowFrames.count > Self.cropOverlayFollowFrameLimit {
+            cropOverlayFollowFrames
+                .removeFirst(cropOverlayFollowFrames.count - Self.cropOverlayFollowFrameLimit)
         }
     }
 
@@ -1727,6 +1773,10 @@ public final class LoupeController: NSViewController {
         zoomBridge = nil
         guard wasBridging else { return }
         zoomBridgeCompletedCount += 1
+        // ② (2026-10-27) — the picture on the canvas is the stop's own geometry now, so the overlay
+        // lands on the same projection in the same call. At rest the error is exactly zero, because
+        // this is the non-animating path's own layout function (`cropToolLayout()`).
+        defer { syncCropOverlay() }
         if let pending = pendingFrame {
             pendingFrame = nil
             present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
@@ -1833,6 +1883,14 @@ public final class LoupeController: NSViewController {
         recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: progress, window: window,
                                               drawable: canvas, canvas: canvas,
                                               source: ObjectIdentifier(texture)))
+        // ② (2026-10-27) — the overlay moves on the **same tick, the same progress, the same curve** as
+        // the pixels that just went up. Not a second timer and not a poll of `viewState`: `progress`
+        // here is the value this present was drawn at, so the frame, its eight grips and its grid are
+        // laid out on the picture the eye is looking at, not on where the picture will be in 180 ms.
+        if followsCropOverlayDuringBridge {
+            syncCropOverlay(progress: progress)
+        }
+        recordCropOverlayFollowFrame(serial: serial, progress: progress)
     }
 
     /// A new canvas (resize, a new window, a new screen): the pixels are re-rendered for a different
@@ -1852,8 +1910,14 @@ public final class LoupeController: NSViewController {
         pendingFrame = nil
         zoomBridgeSerial += 1
         stopZoomBridgeTicker()
+        let wasBridging = zoomBridge != nil
         zoomBridge = nil
         zoomBridgeCanvas = nil
+        // ② (2026-10-27) — a torn-down bridge (resize, photo switch, leaving the tool) leaves the
+        // overlay at a mid-transition rect nobody is going to animate away. Put it back on the current
+        // camera's projection in the same turn, so a switch can never leave the old photo's frame on
+        // screen: the same gate that ends the pixels ends the overlay.
+        if wasBridging { syncCropOverlay() }
         // The canvas still holds the old picture seen through whatever window the bridge had reached:
         // put it back at the geometry it was drawn with, or a resize would leave the picture stuck at a
         // mid-transition scale until the next frame lands. Deferred — this is called from
@@ -2687,23 +2751,42 @@ public final class LoupeController: NSViewController {
                                backingScale scaleOverride: Double? = nil) -> CropToolLayout? {
         guard cropTool.isActive else { return nil }
         let scale = scaleOverride ?? backingScale
-        let mapping: LoupeMapping
-        if let framing = framing(viewport: viewport) {
-            mapping = framing.mapping(of: viewState)
-        } else {
-            // No projection yet (no photo at all): draw the frame against the session's own upright
-            // frame same as everything else, rather than return nothing. Same authority, same maths.
-            let size = viewport ?? viewportPixels
-            let frame = cropSourceSize
-            mapping = LoupeFraming(viewport: size,
-                                   sourceWidth: Double(frame.width),
-                                   sourceHeight: Double(frame.height),
-                                   crop: .full,
-                                   straightenDegrees: cropTool.draft.straighten,
-                                   flipH: isFlippedHorizontally,
-                                   flipV: isFlippedVertically).mapping(of: viewState)
-        }
+        guard let mapping = cropMapping(viewport: viewport) else { return nil }
         return cropTool.layout(mapping: mapping, source: cropSourceSize, pointScale: scale)
+    }
+
+    /// The projection the crop layout is built from at the current camera.
+    private func cropMapping(viewport: ImageSize? = nil) -> LoupeMapping? {
+        if let framing = framing(viewport: viewport) {
+            return framing.mapping(of: viewState)
+        }
+        // No projection yet (no photo at all): draw the frame against the session's own upright
+        // frame same as everything else, rather than return nothing. Same authority, same maths.
+        let size = viewport ?? viewportPixels
+        let frame = cropSourceSize
+        return LoupeFraming(viewport: size,
+                            sourceWidth: Double(frame.width),
+                            sourceHeight: Double(frame.height),
+                            crop: .full,
+                            straightenDegrees: cropTool.draft.straighten,
+                            flipH: isFlippedHorizontally,
+                            flipV: isFlippedVertically).mapping(of: viewState)
+    }
+
+    /// The layout the **pixels on the canvas** are drawn at, `progress` of the way through a stop
+    /// change (2026-10-27 ②: 「裁切框在缩放动画中不跟着动」).
+    ///
+    /// A bridge frame is not a camera: the pixels are the *previous* projection's picture carried by
+    /// one similarity (`LoupeZoomBridge.map(atProgress:)`). So the frame is projected by the very
+    /// mapping those pixels were laid out with (`bridge.fromMapping`) and then carried by that same
+    /// map — one transform, the same one the present pass drew with, in the same tick. At `progress 0`
+    /// the carry is the identity (the frame does not move on the first frame); at `progress 1` it is
+    /// the target camera's, value for value.
+    private func cropToolLayout(bridge: LoupeZoomBridge, progress: Double) -> CropToolLayout? {
+        guard cropTool.isActive else { return nil }
+        return cropTool.layout(mapping: bridge.fromMapping, source: cropSourceSize,
+                               pointScale: backingScale,
+                               carry: CropCarry(bridge.map(atProgress: progress)))
     }
 
     /// The grip under `point` (view points): corner, edge, `.inside` or `.outside`. `nil` only when
@@ -2813,12 +2896,27 @@ public final class LoupeController: NSViewController {
     /// change) and from `viewDidLayout` (a resize is a new projection). One function, so "framing
     /// changed → overlay follows" is a single place to look — the wheel, the pinch, the pill, ⌘=/⌘−,
     /// the double-click and the two-finger scroll all end here.
-    private func syncCropOverlay() {
+    private func syncCropOverlay(progress: Double? = nil) {
         guard cropTool.isActive else {
             if cropOverlay.layout != nil {
                 cropOverlay.layout = nil
                 cropOverlay.active = nil
             }
+            return
+        }
+        // ② (2026-10-27) — mid-animation the frame is a rect of the *picture on the canvas*, not of the
+        // camera: project it with the bridge's own mapping and carry it by that frame's own similarity.
+        // No clamp and no bar sync here: the draft is already lawful (it was clamped when the stop
+        // change started, against the target geometry) and the bar's numbers describe the draft, not
+        // the transient picture. The one assignment keeps quad, eight grips and grid on one projection.
+        //
+        // `progress` names the frame explicitly; left out, a running bridge is read at the progress it
+        // has reached right now — so a draft change or a mode refresh during a transition cannot jump
+        // the frame to the target either.
+        if let bridge = zoomBridge {
+            cropOverlay.layout = cropToolLayout(bridge: bridge,
+                                                progress: progress ?? zoomBridgeProgress())
+            cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
             return
         }
         // ⑦ first: a zoom or a pan is exactly what can put the frame outside the canvas, so the
@@ -3459,6 +3557,12 @@ public final class LoupeController: NSViewController {
     /// behaviour. It exists so the follow tests can show their own assertion going red; nothing in
     /// the app sets it.
     var syncsCropOverlayOnCameraChange = true
+
+    /// With this `false`, the crop overlay is laid out on **frame 0 and at rest only** — the pre-②
+    /// behaviour, where an animating stop change left the frame where it was until the target frame
+    /// landed. It exists so the follow tests can show their own per-frame assertion going red; nothing
+    /// in the app sets it.
+    var followsCropOverlayDuringBridge = true
 
     /// With this `false`, the low-resolution whole picture is keyed on the **document** instead of the
     /// edit on screen — the pre-④ behaviour (a 拉直 that never reached the backdrop). Same reason.
@@ -5003,14 +5107,15 @@ public final class LoupeController: NSViewController {
         statusChip.layout(in: container.bounds)
     }
 
-    // MARK: the fixed-stop zoom slider (canvas, bottom-right)
+    // MARK: the fixed-stop zoom slider (canvas, top-right)
 
     private func layoutZoomSlider() {
-        // ② — 裁切 mode parks the pill in the **top-right** corner: the tool bar is centred at the
-        // bottom of the canvas, and the two chrome rectangles must not intersect. Every other mode
-        // keeps the bottom-right rectangle exactly as it was (`Placement.bottomRight` is the
-        // default), which is the regression the placement test pins.
-        zoomSlider.placement = cropTool.isActive ? .topRight : .bottomRight
+        // 2026-10-27 用户要求普通模式也放上方: the pill is in the **top-right** corner in *both*
+        // modes — ordinary and 裁切. The branch that used to send ordinary mode to the bottom-right is
+        // gone, and so is the reason it existed: the crop bar is centred at the bottom of the canvas,
+        // so the bottom-right corner is exactly where two chrome rectangles overlap. One corner for
+        // every mode means the reader never has to look for the control after entering the tool.
+        zoomSlider.placement = .topRight
         zoomSlider.layout(in: container.bounds)
     }
 

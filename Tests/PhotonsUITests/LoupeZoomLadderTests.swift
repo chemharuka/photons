@@ -6,51 +6,59 @@ import PhotonsUI
 ///
 /// The non-negotiables, all of them decided by the user:
 ///
-///   · **eight numeric stops**, `25 % · 33.3 % · 50 % · 66.7 % · 100 % · 200 % · 300 % · 400 %`, and
-///     the thirds are the exact doubles `1.0/3.0` and `2.0/3.0` — only their label is 33.3 % / 66.7 %;
+///   · **nine numeric stops**, `12.5 % · 25 % · 33.3 % · 50 % · 66.7 % · 100 % · 200 % · 300 % · 400 %`,
+///     and the thirds are the exact doubles `1.0/3.0` and `2.0/3.0` — only their label is 33.3 % / 66.7 %;
+///     (2026-10-27 用户要求加 12.5% 档 — the ninth stop, everything else in the same order.)
 ///   · **`fit` is not a rung.** 适应窗口 is a mode whose ratio is a property of the window (it can be
 ///     0.31, 0.72, 0.88 or above 1), entered by its own action, so it is not in the table and nothing
 ///     here depends on it;
 ///   · **the snap is a floor**: a raw value lands on the largest rung *not above* it ("自动往下走一
-///     级"), and below 25 % it stops at 25 % — `fit` is a separate step out, not a snap.
+///     级"), and below 12.5 % it stops at 12.5 % — `fit` is a separate step out, not a snap.
 final class LoupeZoomLadderTests: XCTestCase {
 
-    private let decimals: [Double] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
-    private let labels = ["25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
+    private let decimals: [Double] = [0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
+    private let labels = ["12.5%", "25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
 
     // MARK: 1. the table itself
 
-    /// Eight stops, ascending, and the thirds are divisions — not 0.333 / 0.667.
-    func testTheTableIsEightExactStops() {
+    /// Nine stops, ascending, and the thirds are divisions — not 0.333 / 0.667.
+    func testTheTableIsNineExactStops() {
         XCTAssertEqual(LoupeViewState.zoomStops, decimals)
-        XCTAssertEqual(LoupeViewState.zoomStops.count, 8)
-        XCTAssertEqual(LoupeViewState.zoomStops[1], 1.0 / 3.0, "33.3 % is exactly one third")
-        XCTAssertEqual(LoupeViewState.zoomStops[3], 2.0 / 3.0, "66.7 % is exactly two thirds")
+        XCTAssertEqual(LoupeViewState.zoomStops.count, 9)
+        XCTAssertEqual(LoupeViewState.zoomStops[0], 0.125, "2026-10-27: the new 12.5 % rung is first")
+        XCTAssertEqual(LoupeViewState.zoomStops[2], 1.0 / 3.0, "33.3 % is exactly one third")
+        XCTAssertEqual(LoupeViewState.zoomStops[4], 2.0 / 3.0, "66.7 % is exactly two thirds")
         // The whole point of writing them as divisions: they are *not* the rounded decimals.
-        XCTAssertNotEqual(LoupeViewState.zoomStops[1], 0.333)
-        XCTAssertNotEqual(LoupeViewState.zoomStops[3], 0.667)
+        XCTAssertNotEqual(LoupeViewState.zoomStops[2], 0.333)
+        XCTAssertNotEqual(LoupeViewState.zoomStops[4], 0.667)
         for (a, b) in zip(LoupeViewState.zoomStops, LoupeViewState.zoomStops.dropFirst()) {
             XCTAssertLessThan(a, b, "the ladder must ascend")
         }
-        XCTAssertEqual(LoupeViewState.minimumZoom, 0.25)
+        // Adding a rung must not reorder the ones that were already there.
+        XCTAssertEqual(Array(LoupeViewState.zoomStops.dropFirst()),
+                       [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4].sorted(),
+                       "the eight original stops keep their order")
+        XCTAssertEqual(LoupeViewState.minimumZoom, 0.125)
         XCTAssertEqual(LoupeViewState.maximumZoom, 4)
+        // 1:1 is still a value in the table, and still the same value (§A0's base).
+        XCTAssertEqual(LoupeViewState.zoomStops[5], 1)
     }
 
-    /// `levels` is the same eight stops and carries **no fit rung** — whatever the window does.
-    func testLevelsAreTheEightStopsAndNothingElse() {
+    /// `levels` is the same nine stops and carries **no fit rung** — whatever the window does.
+    func testLevelsAreTheNineStopsAndNothingElse() {
         let ladder = LoupeViewState.levels
         XCTAssertEqual(ladder.map(\.zoom), decimals)
         XCTAssertEqual(ladder.map(\.label), labels)
         // "Which rung is fit on?" has no answer any more, and the type cannot even ask: a rung is a
         // zoom value and a percent label, nothing else.
-        XCTAssertEqual(Set(ladder.map(\.label)).count, 8)
+        XCTAssertEqual(Set(ladder.map(\.label)).count, 9)
         for level in ladder {
             XCTAssertNotNil(LoupeViewState.stopIndex(of: level.zoom))
             XCTAssertTrue(level.label.hasSuffix("%"))
         }
     }
 
-    /// The menu names the same eight stops, and its item tag is the **index** — the identity that
+    /// The menu names the same nine stops, and its item tag is the **index** — the identity that
     /// keeps `1/3` from collapsing into `0.33`.
     func testMenuStopsAreIndexedToTheExactValues() {
         XCTAssertEqual(LoupeController.menuZoomStops, decimals)
@@ -58,17 +66,21 @@ final class LoupeZoomLadderTests: XCTestCase {
             let stop = LoupeController.menuZoomStops[index]
             XCTAssertEqual(LoupeViewState.stopIndex(of: stop), index, "index \(index) must be a stop")
         }
-        XCTAssertEqual(LoupeController.menuZoomStops[1], 1.0 / 3.0)
-        XCTAssertEqual(LoupeController.menuZoomStops[3], 2.0 / 3.0)
+        XCTAssertEqual(LoupeController.menuZoomStops[2], 1.0 / 3.0)
+        XCTAssertEqual(LoupeController.menuZoomStops[4], 2.0 / 3.0)
+        XCTAssertEqual(LoupeController.menuZoomStops[0], 0.125, "the menu can name 12.5 %")
     }
 
     // MARK: 2. the snap table (the acceptance rows)
 
     /// The user's rule in one table: **the largest rung not above the requested value**, including the
-    /// thirds, and the floor at 25 %.
+    /// thirds, and the floor at 12.5 %.
     func testSnapIsTheLargestRungNotAboveTheTarget() {
         let rows: [(raw: Double, zoom: Double, why: String)] = [
-            (0.24, 0.25, "below the floor → 25 %"),
+            (0.10, 0.125, "below the floor → 12.5 %"),
+            (0.124, 0.125, "just below the new rung → still 12.5 %"),
+            (0.18, 0.125, "above 12.5 %, below 25 %"),
+            (0.24, 0.125, "below 25 % → the 12.5 % rung, not 25 %"),
             (0.26, 0.25, "above 25 %, below 33.3 %"),
             (0.33, 0.25, "0.33 is below 1/3 (0.3333…) — the exact value decides, not the printed label"),
             (1.0 / 3.0, 1.0 / 3.0, "exactly the third"),
@@ -94,21 +106,22 @@ final class LoupeZoomLadderTests: XCTestCase {
         }
     }
 
-    /// The clamp is the same story at the ends: 0.25 … 4, never outside.
-    func testZoomIsClampedToAQuarterThroughFour() {
-        XCTAssertEqual(LoupeViewState.clampZoom(0.01), 0.25)
+    /// The clamp is the same story at the ends: 0.125 … 4, never outside.
+    func testZoomIsClampedToAnEighthThroughFour() {
+        XCTAssertEqual(LoupeViewState.clampZoom(0.01), 0.125)
+        XCTAssertEqual(LoupeViewState.clampZoom(0.125), 0.125)
         XCTAssertEqual(LoupeViewState.clampZoom(0.25), 0.25)
         XCTAssertEqual(LoupeViewState.clampZoom(1.0 / 3.0), 1.0 / 3.0)
         XCTAssertEqual(LoupeViewState.clampZoom(4), 4)
         XCTAssertEqual(LoupeViewState.clampZoom(9), 4)
-        XCTAssertEqual(LoupeViewState.clampZoom(.nan), 0.25)
+        XCTAssertEqual(LoupeViewState.clampZoom(.nan), 0.125)
         XCTAssertEqual(LoupeViewState.clampZoom(.infinity), 4)
     }
 
     // MARK: 3. labels
 
-    /// Whole percent for the whole stops, **one decimal** for the thirds — and only the label: the
-    /// value behind `33.3%` is still `1.0/3.0`.
+    /// Whole percent for the whole stops, **one decimal** for the thirds and for 12.5 % — and only the
+    /// label: the value behind `33.3%` is still `1.0/3.0`, and the value behind `12.5%` is `0.125`.
     func testLabels() {
         XCTAssertEqual(LoupeViewState.levels.map(\.label), labels)
         for (stop, label) in zip(decimals, labels) {
@@ -119,6 +132,11 @@ final class LoupeZoomLadderTests: XCTestCase {
         // The label is not the value: rounding it back would land on a different stop.
         XCTAssertNotEqual(LoupeViewState.percentLabel(of: 1.0 / 3.0), "33%")
         XCTAssertNotEqual(LoupeViewState.percentLabel(of: 2.0 / 3.0), "67%")
+        // 2026-10-27 用户要求加 12.5% 档 — the label keeps its one decimal: not `13%`, not `0.125`.
+        XCTAssertEqual(LoupeViewState.percentLabel(of: 0.125), "12.5%")
+        XCTAssertNotEqual(LoupeViewState.percentLabel(of: 0.125), "13%")
+        XCTAssertNotEqual(LoupeViewState.percentLabel(of: 0.125), "0.125")
+        XCTAssertEqual(LoupeZoomLevel(zoom: 0.125).label, "12.5%", "the rung's own label")
     }
 
     // MARK: 4. the bridge geometry

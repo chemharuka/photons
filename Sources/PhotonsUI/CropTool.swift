@@ -167,6 +167,41 @@ public struct CropToolLayout: Sendable, Equatable {
     }
 }
 
+// MARK: - the picture's screen transform, mid-animation
+
+/// `p ↦ scale·p + offset`, in **device pixels, y down** — the screen transform the zoom bridge draws
+/// the picture with while a stop change is travelling.
+///
+/// It exists because a bridge frame is not a camera: the pixels on the canvas are the previous
+/// projection's, carried by a similarity (`LoupeZoomBridge.map(atProgress:)`). Projecting the crop
+/// rect through that same similarity is what makes the frame, its eight grips and its grid sit on the
+/// picture *the eye is looking at* on every frame of the transition, instead of jumping to the target
+/// geometry on the first one (2026-10-27: 「裁切框在缩放动画中不跟着动」).
+///
+/// `.identity` is the no-animation case, and it is exactly the old arithmetic.
+public struct CropCarry: Sendable, Equatable {
+    public var scale: Double
+    public var offsetX: Double
+    public var offsetY: Double
+
+    public init(scale: Double = 1, offsetX: Double = 0, offsetY: Double = 0) {
+        self.scale = scale
+        self.offsetX = offsetX
+        self.offsetY = offsetY
+    }
+
+    public static let identity = CropCarry()
+
+    public func applyX(_ x: Double) -> Double { scale * x + offsetX }
+    public func applyY(_ y: Double) -> Double { scale * y + offsetY }
+
+    /// The carry one bridge frame is drawn with, read off the bridge's own map — the value the present
+    /// pass used for that same frame, not a second interpolation of our own.
+    public init(_ map: (scale: Double, x: Double, y: Double)) {
+        self.init(scale: map.scale, offsetX: map.x, offsetY: map.y)
+    }
+}
+
 // MARK: - the tool
 
 public enum CropTool {
@@ -199,11 +234,19 @@ public enum CropTool {
     /// `pointScale` is the backing scale (device pixels per point) and is only ever a divisor: the
     /// mapping produces device pixels because the renderer works in them, and everything a hand
     /// touches is in points.
+    ///
+    /// `carry` is the **picture's own screen transform** — `p ↦ scale·p + offset` in device pixels,
+    /// applied after the projection (2026-10-27, the overlay-follows-the-zoom-animation fix). During a
+    /// stop change the pixels on the canvas are the *old* picture carried by `LoupeZoomBridge`'s
+    /// similarity, and a bridge frame is not any camera, so no `LoupeMapping` describes it: the frame
+    /// has to be projected by the old mapping and then carried. Identity (the default, and every
+    /// non-animating call) leaves the arithmetic exactly as it was — `1·p + 0` is `p`.
     public static func layout(crop: CropRect,
                               source: ImageSize,
                               mapping: LoupeMapping,
                               pointScale: Double = 1,
-                              showsGrid: Bool = true) -> CropToolLayout {
+                              showsGrid: Bool = true,
+                              carry: CropCarry = .identity) -> CropToolLayout {
         let scale = pointScale > 0 ? pointScale : 1
         let c = crop.clamped()
         func view(_ u: Double, _ v: Double) -> CGPoint {
@@ -213,7 +256,7 @@ public enum CropTool {
             // rotate the frame with the picture (and, before the projection was made uniform, shear it).
             let p = mapping.frameView(frameX: u * Double(source.width),
                                       frameY: v * Double(source.height))
-            return CGPoint(x: p.x / scale, y: p.y / scale)
+            return CGPoint(x: carry.applyX(p.x) / scale, y: carry.applyY(p.y) / scale)
         }
 
         let corners = [view(c.left, c.top), view(c.right, c.top),

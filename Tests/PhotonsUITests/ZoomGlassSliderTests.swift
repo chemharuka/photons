@@ -22,8 +22,9 @@ import PhotonsUI
 @MainActor
 final class ZoomGlassSliderTests: XCTestCase {
 
-    private let stops: [Double] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
-    private let labels = ["25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
+    // 2026-10-27 用户要求加 12.5% 档: nine stops, `0.125` first, everything else in the same order.
+    private let stops: [Double] = [0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 2, 3, 4]
+    private let labels = ["12.5%", "25%", "33.3%", "50%", "66.7%", "100%", "200%", "300%", "400%"]
     private let viewport = ImageSize(width: 2560, height: 1600)
     private var windows: [NSWindow] = []
 
@@ -65,39 +66,39 @@ final class ZoomGlassSliderTests: XCTestCase {
 
     // MARK: - 1. geometry
 
-    /// Eight ticks, evenly spaced **by index** — `25 → 400 %` over seven equal gaps, not a linear
+    /// Nine ticks, evenly spaced **by index** — `12.5 → 400 %` over eight equal gaps, not a linear
     /// scale of the ratios (which would put 200 % twice as far from 100 % as 100 % is from 50 %).
     func testTicksAreEvenlySpacedByIndex() {
         let g = ZoomGlassSliderGeometry()
-        XCTAssertEqual(g.levels, stops, "the ladder is the controller's eight exact stops")
-        XCTAssertEqual(g.lastIndex, 7)
-        XCTAssertEqual(g.edges.count, 8)
+        XCTAssertEqual(g.levels, stops, "the ladder is the controller's nine exact stops")
+        XCTAssertEqual(g.lastIndex, 8)
+        XCTAssertEqual(g.edges.count, 9)
         // `[适应 54] [gap 8] [track 148]` → 10 pt of air at each end → 128 pt of travel.
         XCTAssertEqual(g.width, 148, accuracy: 1e-9)
         XCTAssertEqual(g.usableWidth, 128, accuracy: 1e-9)
         XCTAssertEqual(g.x(forIndex: 0), 10, accuracy: 1e-9)
-        XCTAssertEqual(g.x(forIndex: 7), 138, accuracy: 1e-9)
-        for index in 1...7 {
-            XCTAssertEqual(g.x(forIndex: index) - g.x(forIndex: index - 1), 128.0 / 7.0,
+        XCTAssertEqual(g.x(forIndex: 8), 138, accuracy: 1e-9)
+        for index in 1...8 {
+            XCTAssertEqual(g.x(forIndex: index) - g.x(forIndex: index - 1), 128.0 / 8.0,
                            accuracy: 1e-9, "every gap is one step")
         }
-        // Eight rungs and nothing after them: the track ends past 400 %, it does not continue to fit.
+        // Nine rungs and nothing after them: the track ends past 400 %, it does not continue to fit.
         XCTAssertEqual(g.edges.first, g.x(forIndex: 0))
-        XCTAssertEqual(g.edges.last, g.x(forIndex: 7))
+        XCTAssertEqual(g.edges.last, g.x(forIndex: 8))
     }
 
     /// `x(forIndex:)` and `index(forX:)` are inverse, including at both clamps.
     func testXAndIndexRoundTripIncludingClamps() {
         let g = ZoomGlassSliderGeometry()
-        for index in 0...7 {
+        for index in 0...8 {
             XCTAssertEqual(g.index(forX: g.x(forIndex: index)), index,
                            "x → index must return the tick it came from (\(index))")
         }
-        XCTAssertEqual(g.index(forX: -10_000), 0, "left of the track clamps to 25 %, never to fit")
-        XCTAssertEqual(g.index(forX: 10_000), 7, "right of the track clamps to 400 %")
+        XCTAssertEqual(g.index(forX: -10_000), 0, "left of the track clamps to 12.5 %, never to fit")
+        XCTAssertEqual(g.index(forX: 10_000), 8, "right of the track clamps to 400 %")
         // And the x side clamps too, so `point(forIndex:)` cannot be handed an out-of-range index.
         XCTAssertEqual(g.x(forIndex: -3), g.x(forIndex: 0))
-        XCTAssertEqual(g.x(forIndex: 99), g.x(forIndex: 7))
+        XCTAssertEqual(g.x(forIndex: 99), g.x(forIndex: 8))
     }
 
     /// Halfway between two ticks is a tie, and the tie goes to the **lower** index: the thumb does
@@ -105,7 +106,7 @@ final class ZoomGlassSliderTests: XCTestCase {
     /// rung you are already on, not as the next one).
     func testTieBreaksToTheLowerIndex() {
         let g = ZoomGlassSliderGeometry()
-        for lower in 0..<7 {
+        for lower in 0..<8 {
             let mid = (g.x(forIndex: lower) + g.x(forIndex: lower + 1)) / 2
             XCTAssertEqual(g.index(forX: mid), lower,
                            "the midpoint between \(lower) and \(lower + 1) is a tie → lower index")
@@ -113,7 +114,7 @@ final class ZoomGlassSliderTests: XCTestCase {
             XCTAssertEqual(g.index(forX: mid + 0.01), lower + 1)
         }
         // The same rule for a ratio tie: 1.5 is equidistant from 100 % and 200 %.
-        XCTAssertEqual(g.nearestIndex(forZoom: 1.5), 4)
+        XCTAssertEqual(g.nearestIndex(forZoom: 1.5), 5)
     }
 
     /// A degenerate track (1 pt wide, or NaN) must not crash and must still be monotone: a view can
@@ -122,15 +123,15 @@ final class ZoomGlassSliderTests: XCTestCase {
         for width in [CGFloat(1), CGFloat(0), CGFloat(-40), CGFloat.nan, CGFloat.infinity] {
             let g = ZoomGlassSliderGeometry(width: width)
             let edges = g.edges
-            XCTAssertEqual(edges.count, 8)
+            XCTAssertEqual(edges.count, 9)
             for edge in edges {
                 XCTAssertTrue(edge.isFinite, "width \(width) produced a non-finite edge")
             }
             for (a, b) in zip(edges, edges.dropFirst()) {
                 XCTAssertLessThanOrEqual(a, b, "width \(width) put the ticks out of order")
             }
-            for index in 0...7 {
-                XCTAssertTrue((0...7).contains(g.index(forX: g.x(forIndex: index))),
+            for index in 0...8 {
+                XCTAssertTrue((0...8).contains(g.index(forX: g.x(forIndex: index))),
                               "width \(width) produced an out-of-range index")
             }
             XCTAssertEqual(g.index(forX: .nan), 0)
@@ -146,49 +147,51 @@ final class ZoomGlassSliderTests: XCTestCase {
     /// nearest rung — the thirds at their exact values (`1.0/3.0`, not 0.333).
     func testAnOffTableNumericZoomSnapsToTheNearestRung() {
         let g = ZoomGlassSliderGeometry()
-        XCTAssertEqual(g.nearestIndex(forZoom: 0.26), 0)          // 25 %
-        XCTAssertEqual(g.nearestIndex(forZoom: 0.31), 1)          // 33.3 %
-        XCTAssertEqual(g.nearestIndex(forZoom: 0.45), 2)          // 50 %
-        XCTAssertEqual(g.nearestIndex(forZoom: 0.66), 3)          // 66.7 %
-        XCTAssertEqual(g.nearestIndex(forZoom: 0.72), 3)          // 66.7 % again
-        XCTAssertEqual(g.nearestIndex(forZoom: 3.9), 7)           // 400 %
-        XCTAssertEqual(g.nearestIndex(forZoom: .nan), 4)          // a NaN ratio reads as 1:1 → 100 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.15), 0)          // 12.5 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.26), 1)          // 25 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.31), 2)          // 33.3 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.45), 3)          // 50 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.66), 4)          // 66.7 %
+        XCTAssertEqual(g.nearestIndex(forZoom: 0.72), 4)          // 66.7 % again
+        XCTAssertEqual(g.nearestIndex(forZoom: 3.9), 8)           // 400 %
+        XCTAssertEqual(g.nearestIndex(forZoom: .nan), 5)          // a NaN ratio reads as 1:1 → 100 %
         XCTAssertEqual(g.levels[g.nearestIndex(forZoom: 1.0 / 3.0)], 1.0 / 3.0)
     }
 
     /// The fit display: log interpolation between the two rungs the ratio sits between, and the
-    /// track's **ends** (not the first/last rung) outside 25–400 %.
+    /// track's **ends** (not the first/last rung) outside 12.5–400 %.
     func testFitDisplayIsLogInterpolatedAndClampsToTheTrackEnds() {
         let g = ZoomGlassSliderGeometry()
         XCTAssertEqual(g.thumbLeftLimit, 7, accuracy: 1e-9, "half a thumb in from the left edge")
         XCTAssertEqual(g.thumbRightLimit, 141, accuracy: 1e-9)
 
-        // 18 % is below the ladder: the thumb's left edge is the track's left edge.
-        XCTAssertEqual(g.fitThumbCenter(forZoom: 0.18), g.thumbLeftLimit, accuracy: 1e-12)
+        // 10 % is below the ladder: the thumb's left edge is the track's left edge.
+        XCTAssertEqual(g.fitThumbCenter(forZoom: 0.10), g.thumbLeftLimit, accuracy: 1e-12)
         // 620 % is above it: the right end.
         XCTAssertEqual(g.fitThumbCenter(forZoom: 6.2), g.thumbRightLimit, accuracy: 1e-12)
         // Ends, not rungs — the ends are outside the first/last tick.
         XCTAssertLessThan(g.thumbLeftLimit, g.x(forIndex: 0))
-        XCTAssertGreaterThan(g.thumbRightLimit, g.x(forIndex: 7))
+        XCTAssertGreaterThan(g.thumbRightLimit, g.x(forIndex: 8))
 
-        // 31 % sits between 25 % and 33.3 %: strictly inside the first gap, at the log position.
+        // 31 % sits between 25 % (index 1) and 33.3 % (index 2): strictly inside that gap, at the log
+        // position. (It used to be the *first* gap; 12.5 % shifted every index, not the arithmetic.)
         let x = g.fitThumbCenter(forZoom: 0.31)
-        XCTAssertGreaterThan(x, g.x(forIndex: 0))
-        XCTAssertLessThan(x, g.x(forIndex: 1))
+        XCTAssertGreaterThan(x, g.x(forIndex: 1))
+        XCTAssertLessThan(x, g.x(forIndex: 2))
         let t = log(0.31 / 0.25) / log((1.0 / 3.0) / 0.25)
-        let expected = g.x(forIndex: 0) + CGFloat(t) * (g.x(forIndex: 1) - g.x(forIndex: 0))
+        let expected = g.x(forIndex: 1) + CGFloat(t) * (g.x(forIndex: 2) - g.x(forIndex: 1))
         XCTAssertEqual(x, expected, accuracy: 0.01)
-        XCTAssertEqual(x, 23.67, accuracy: 0.5, "log-interpolated, not linear in the ratio")
+        XCTAssertEqual(x, 37.96, accuracy: 0.5, "log-interpolated, not linear in the ratio")
 
         // The log rule is measurable inside a gap whose ratios spread: 150 % sits at
-        // log(1.5)/log(2) = 58.5 % of the 100 %→200 % gap, ~1.6 pt right of its linear midpoint.
+        // log(1.5)/log(2) = 58.5 % of the 100 %→200 % gap, ~1.4 pt right of its linear midpoint.
         let mid = g.fitThumbCenter(forZoom: 1.5)
-        XCTAssertGreaterThan(mid, g.x(forIndex: 4))
-        XCTAssertLessThan(mid, g.x(forIndex: 5))
+        XCTAssertGreaterThan(mid, g.x(forIndex: 5))
+        XCTAssertLessThan(mid, g.x(forIndex: 6))
         let t15 = log(1.5) / log(2.0)
-        XCTAssertEqual(mid, g.x(forIndex: 4) + CGFloat(t15) * (g.x(forIndex: 5) - g.x(forIndex: 4)),
+        XCTAssertEqual(mid, g.x(forIndex: 5) + CGFloat(t15) * (g.x(forIndex: 6) - g.x(forIndex: 5)),
                        accuracy: 0.01)
-        let linearMid = g.x(forIndex: 4) + 0.5 * (g.x(forIndex: 5) - g.x(forIndex: 4))
+        let linearMid = g.x(forIndex: 5) + 0.5 * (g.x(forIndex: 6) - g.x(forIndex: 5))
         XCTAssertGreaterThan(mid - linearMid, 1.0, "log, not linear in the ratio")
     }
 
@@ -198,7 +201,7 @@ final class ZoomGlassSliderTests: XCTestCase {
     func testTheControlIsAChipAndATrackOnOneRow() {
         let slider = makeSlider()
         XCTAssertEqual(slider.frame.size, CGSize(width: 210, height: 30))
-        XCTAssertEqual(slider.geometry.edges.count, 8)
+        XCTAssertEqual(slider.geometry.edges.count, 9)
         XCTAssertEqual(slider.chipFrame, CGRect(x: 0, y: 0, width: 54, height: 30))
         XCTAssertEqual(slider.trackFrame.minX, 62, accuracy: 0.01, "chip + 8 pt gap")
         XCTAssertEqual(slider.trackFrame.width, 148, accuracy: 0.01)
@@ -210,18 +213,18 @@ final class ZoomGlassSliderTests: XCTestCase {
         XCTAssertTrue(slider.backdropKind == .glass || slider.backdropKind == .visualEffect)
     }
 
-    /// **The drag test.** Left tick to right tick in 120 small steps: the emit list must be ≤ 7
+    /// **The drag test.** Left tick to right tick in 120 small steps: the emit list must be ≤ 8
     /// long, every value in it a table value, no repeats, and the thumb on a tick after every single
     /// event — never once between two.
     func testDragFromLeftToRightEmitsAtMostSevenValuesAllOnTheLadder() {
         let slider = makeSlider()
         var emitted: [Double] = []
         slider.onZoom = { emitted.append($0) }
-        slider.update(zoomStop: 0.25, fitZoom: nil)
+        slider.update(zoomStop: 0.125, fitZoom: nil)
         XCTAssertEqual(emitted, [], "adopting the camera's stop is not a stop change")
 
         let start = slider.point(forIndex: 0)
-        let end = slider.point(forIndex: 7)
+        let end = slider.point(forIndex: 8)
         slider.pointerDown(at: start)
 
         var thumbXs: [CGFloat] = [slider.thumbCenterX]
@@ -235,16 +238,16 @@ final class ZoomGlassSliderTests: XCTestCase {
         thumbXs.append(slider.thumbCenterX)
         slider.pointerUp()
 
-        XCTAssertLessThanOrEqual(emitted.count, 7,
-                                 "a 128 pt drag crosses seven gaps → at most seven stop changes, got \(emitted)")
-        XCTAssertEqual(emitted.count, 7, "…and it does cross all seven: \(emitted)")
+        XCTAssertLessThanOrEqual(emitted.count, 8,
+                                 "a 128 pt drag crosses eight gaps → at most eight stop changes, got \(emitted)")
+        XCTAssertEqual(emitted.count, 8, "…and it does cross all eight: \(emitted)")
         for value in emitted {
             XCTAssertTrue(stops.contains { abs($0 - value) < 1e-12 },
                           "\(value) is not a rung — the control must never name an intermediate zoom")
         }
         XCTAssertEqual(emitted, Array(stops.dropFirst()), "the emitted sequence is the ladder itself")
-        XCTAssertEqual(slider.currentIndex, 7)
-        XCTAssertEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 7))
+        XCTAssertEqual(slider.currentIndex, 8)
+        XCTAssertEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 8))
 
         // The hard invariant, sampled at every event: the thumb is *on* a tick.
         let edges = slider.geometry.edges
@@ -262,27 +265,27 @@ final class ZoomGlassSliderTests: XCTestCase {
         var emitted: [Double] = []
         slider.onZoom = { emitted.append($0) }
         slider.update(zoomStop: 4, fitZoom: nil)
-        XCTAssertEqual(slider.currentIndex, 7)
+        XCTAssertEqual(slider.currentIndex, 8)
         XCTAssertEqual(slider.labelText, "400%")
 
         // Wiggle inside the last gap: no emission.
-        let inside = slider.geometry.x(forIndex: 7) - slider.geometry.usableWidth / 7 / 4
-        slider.pointerDown(at: slider.point(forIndex: 7))
+        let inside = slider.geometry.x(forIndex: 8) - slider.geometry.usableWidth / 8 / 4
+        slider.pointerDown(at: slider.point(forIndex: 8))
         for offset in stride(from: CGFloat(0), through: 3, by: 0.5) {
             slider.pointerDragged(at: CGPoint(x: slider.trackFrame.minX + inside - offset, y: 15))
         }
         XCTAssertEqual(emitted, [], "a drag that never crosses a midpoint is not a stop change")
 
-        // Then all the way down to 25 %: seven steps, each a rung.
-        for index in stride(from: 7, through: 0, by: -1) {
+        // Then all the way down to 12.5 %: eight steps, each a rung.
+        for index in stride(from: 8, through: 0, by: -1) {
             slider.pointerDragged(at: slider.point(forIndex: index))
         }
         slider.pointerUp()
         // 400 % was adopted, not emitted (the press landed on the rung it was already on), so the
-        // walk down is the seven changes below it.
+        // walk down is the eight changes below it.
         XCTAssertEqual(emitted, Array(stops.reversed().dropFirst()),
                        "the reverse walk is the ladder, rung by rung")
-        XCTAssertEqual(slider.labelText, "25%")
+        XCTAssertEqual(slider.labelText, "12.5%")
     }
 
     /// A single click on a tick: exactly one call, with that tick's value. Clicking the tick it is
@@ -295,14 +298,14 @@ final class ZoomGlassSliderTests: XCTestCase {
         slider.onFit = { fitRequests += 1 }
         slider.update(zoomStop: 0.25, fitZoom: nil)
 
-        slider.pointerDown(at: slider.point(forIndex: 4))
+        slider.pointerDown(at: slider.point(forIndex: 5))
         slider.pointerUp()
-        XCTAssertEqual(emitted, [stops[4]], "one click → one call → the tick it landed on (100 %)")
+        XCTAssertEqual(emitted, [stops[5]], "one click → one call → the tick it landed on (100 %)")
         XCTAssertEqual(slider.labelText, "100%")
-        XCTAssertEqual(slider.accentedTickCount, 5, "the rung and everything left of it")
+        XCTAssertEqual(slider.accentedTickCount, 6, "the rung and everything left of it")
 
         // Same tick again: no change, no call.
-        slider.pointerDown(at: slider.point(forIndex: 4))
+        slider.pointerDown(at: slider.point(forIndex: 5))
         slider.pointerUp()
         XCTAssertEqual(emitted.count, 1)
 
@@ -313,20 +316,20 @@ final class ZoomGlassSliderTests: XCTestCase {
     }
 
     /// **The chip + the continuous fit thumb.** In fit the chip reads 适应, no tick is accented, and
-    /// the thumb is drawn at the fit ratio's log position (track ends outside 25–400 %). None of
+    /// the thumb is drawn at the fit ratio's log position (track ends outside 12.5–400 %). None of
     /// that is a stop: `thumbIndex` is nil.
     func testFitChipAndContinuousThumb() {
         let slider = makeSlider()
         var emitted: [Double] = []
         slider.onZoom = { emitted.append($0) }
 
-        slider.update(zoomStop: nil, fitZoom: 0.18)
+        slider.update(zoomStop: nil, fitZoom: 0.10)
         XCTAssertNil(slider.zoomStop)
         XCTAssertTrue(slider.showingFit)
         XCTAssertEqual(slider.labelText, "适应")
         XCTAssertEqual(slider.accentedTickCount, 0, "fit marks no rung")
         XCTAssertNil(slider.thumbIndex, "the fit thumb is not on a rung")
-        XCTAssertEqual(slider.thumbRect.minX, 0, accuracy: 0.01, "18 % → the track's left end")
+        XCTAssertEqual(slider.thumbRect.minX, 0, accuracy: 0.01, "10 % → the track's left end")
 
         slider.update(zoomStop: nil, fitZoom: 6.2)
         XCTAssertEqual(slider.thumbRect.maxX, slider.geometry.width, accuracy: 0.01,
@@ -334,9 +337,9 @@ final class ZoomGlassSliderTests: XCTestCase {
         XCTAssertEqual(slider.labelText, "适应")
 
         slider.update(zoomStop: nil, fitZoom: 0.31)
-        XCTAssertGreaterThan(slider.thumbCenterX, slider.geometry.x(forIndex: 0))
-        XCTAssertLessThan(slider.thumbCenterX, slider.geometry.x(forIndex: 1))
-        XCTAssertEqual(slider.thumbCenterX, 23.67, accuracy: 0.5)
+        XCTAssertGreaterThan(slider.thumbCenterX, slider.geometry.x(forIndex: 1))
+        XCTAssertLessThan(slider.thumbCenterX, slider.geometry.x(forIndex: 2))
+        XCTAssertEqual(slider.thumbCenterX, 37.96, accuracy: 0.5)
         XCTAssertEqual(emitted, [], "displaying fit is not a stop change")
     }
 
@@ -362,7 +365,7 @@ final class ZoomGlassSliderTests: XCTestCase {
         XCTAssertEqual(slider.labelText, LoupeViewState.percentLabel(of: emitted[0]))
 
         // Every rung is reachable in one press from fit.
-        for index in 0...7 {
+        for index in 0...8 {
             let fresh = makeSlider()
             var out: [Double] = []
             fresh.onZoom = { out.append($0) }
@@ -375,7 +378,7 @@ final class ZoomGlassSliderTests: XCTestCase {
             XCTAssertEqual(fresh.accentedTickCount, index + 1)
         }
 
-        // Dragged past the left end: 25 %, still numeric, never fit.
+        // Dragged past the left end: 12.5 %, still numeric, never fit.
         let edge = makeSlider()
         var out: [Double] = []
         edge.onZoom = { out.append($0) }
@@ -385,9 +388,9 @@ final class ZoomGlassSliderTests: XCTestCase {
             edge.pointerDragged(at: CGPoint(x: edge.trackFrame.minX + target, y: 15))
         }
         edge.pointerUp()
-        XCTAssertEqual(out.last, 0.25, "the far left of the track is 25 %, never 适应")
+        XCTAssertEqual(out.last, 0.125, "the far left of the track is 12.5 %, never 适应")
         XCTAssertEqual(edge.zoomStop, LoupeViewState.minimumZoom)
-        XCTAssertEqual(edge.labelText, "25%")
+        XCTAssertEqual(edge.labelText, "12.5%")
 
         // …and past the right end: 400 %.
         let right = makeSlider()
@@ -414,20 +417,20 @@ final class ZoomGlassSliderTests: XCTestCase {
         }
         slider.update(zoomStop: 2, fitZoom: nil)
         XCTAssertEqual(slider.labelText, "200%")
-        XCTAssertEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 5))
-        XCTAssertEqual(slider.accentedTickCount, 6)
+        XCTAssertEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 6))
+        XCTAssertEqual(slider.accentedTickCount, 7)
 
         slider.activateChip()
         XCTAssertEqual(fitRequests, 1)
         XCTAssertEqual(slider.labelText, "适应")
         XCTAssertNil(slider.thumbIndex, "back to a display, not a rung")
-        XCTAssertEqual(slider.thumbCenterX, 23.67, accuracy: 0.5,
+        XCTAssertEqual(slider.thumbCenterX, 37.96, accuracy: 0.5,
                        "the fit thumb returns to the ratio's continuous position")
         XCTAssertEqual(slider.accentedTickCount, 0)
-        XCTAssertGreaterThan(slider.thumbCenterX, slider.geometry.x(forIndex: 0),
-                             "…inside the first gap, not on a tick")
-        XCTAssertLessThan(slider.thumbCenterX, slider.geometry.x(forIndex: 1))
-        XCTAssertNotEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 0),
+        XCTAssertGreaterThan(slider.thumbCenterX, slider.geometry.x(forIndex: 1),
+                             "…inside the 25 %—33.3 % gap, not on a tick")
+        XCTAssertLessThan(slider.thumbCenterX, slider.geometry.x(forIndex: 2))
+        XCTAssertNotEqual(slider.thumbCenterX, slider.geometry.x(forIndex: 1),
                           "the fit position must not collapse onto 25 %")
     }
 
@@ -446,7 +449,7 @@ final class ZoomGlassSliderTests: XCTestCase {
             XCTAssertEqual(slider.thumbCenterX, slider.geometry.x(forIndex: index))
             XCTAssertEqual(slider.accentedTickCount, index + 1)
         }
-        for index in stride(from: 7, through: 0, by: -1) {
+        for index in stride(from: 8, through: 0, by: -1) {
             slider.update(zoomStop: stops[index], fitZoom: nil)
             XCTAssertEqual(slider.currentIndex, index)
             XCTAssertEqual(slider.labelText, labels[index])
@@ -484,8 +487,9 @@ final class ZoomGlassSliderTests: XCTestCase {
     // MARK: - 3. the controller wiring
 
     /// The control exists, is the topmost subview of the canvas, and is pinned 16 pt into the
-    /// bottom-right corner with the autoresizing mask that keeps it there.
-    func testTheControlIsPinnedToTheCanvasBottomRight() {
+    /// **top-right** corner with the autoresizing mask that keeps it there — in ordinary mode, with no
+    /// crop tool anywhere near it (2026-10-27 用户要求普通模式也放上方).
+    func testTheControlIsPinnedToTheCanvasTopRight() {
         let controller = LoupeController(session: CatalogSession())
         let root = controller.view
         root.frame = NSRect(x: 0, y: 0, width: 1000, height: 800)
@@ -499,10 +503,14 @@ final class ZoomGlassSliderTests: XCTestCase {
         XCTAssertEqual(slider.frame.width, 210, accuracy: 0.01)
         XCTAssertEqual(slider.frame.height, 30, accuracy: 0.01)
         XCTAssertEqual(slider.frame.maxX, 1000 - 16, accuracy: 0.01)
-        XCTAssertEqual(slider.frame.minY, 16, accuracy: 0.01)
+        // y-up: the canvas' top edge is `maxY`, so the pill's origin is one pill-height below it.
+        XCTAssertEqual(slider.frame.maxY, 800 - 16, accuracy: 0.01)
+        XCTAssertEqual(slider.frame.minY, 800 - 16 - 30, accuracy: 0.01)
         XCTAssertTrue(slider.autoresizingMask.contains(.minXMargin))
-        XCTAssertTrue(slider.autoresizingMask.contains(.maxYMargin))
+        XCTAssertTrue(slider.autoresizingMask.contains(.minYMargin), "pinned to the top")
+        XCTAssertFalse(slider.autoresizingMask.contains(.maxYMargin), "and not to the bottom any more")
         XCTAssertFalse(slider.autoresizingMask.contains(.width), "a resized canvas must not stretch it")
+        XCTAssertEqual(slider.placement, .topRight, "the default placement is the top-right corner")
     }
 
     /// Both gestures are wired at load (`onZoom` → `zoomFromSlider`, `onFit` → `zoomToFit`), the

@@ -380,13 +380,17 @@ public final class CropToolController {
     // MARK: layout
 
     /// The frame in view points, for the overlay and for the hit test.
+    /// `carry` is the picture's own screen transform (device pixels) for a frame that is being drawn
+    /// mid-animation — see `CropCarry`. Identity everywhere except a zoom bridge's tick.
     public func layout(mapping: LoupeMapping, source: ImageSize? = nil,
-                       pointScale: Double = 1) -> CropToolLayout {
+                       pointScale: Double = 1,
+                       carry: CropCarry = .identity) -> CropToolLayout {
         CropTool.layout(crop: draft.crop,
                         source: source ?? sourceSize,
                         mapping: mapping,
                         pointScale: pointScale,
-                        showsGrid: showsGrid)
+                        showsGrid: showsGrid,
+                        carry: carry)
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
