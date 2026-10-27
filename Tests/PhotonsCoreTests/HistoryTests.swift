@@ -312,6 +312,22 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.exposure = tol }), [])
         XCTAssertEqual(EditHistory.dirtyGroups(from: base, to: edit { $0.light.exposure = tol * 2 }), [.light])
 
+        // The curve uses that **same** window, and not "any move at all". This is the assertion that
+        // separates the two answers for 069's `==` on the coordinate: it made a sub-tolerance point
+        // move dirty (the jitter case above), and it would make the two lines below fail in the
+        // opposite direction. Measured in card units, where `dirtyTolerance` lives — `CurvePoint(_:_:)`
+        // is the `0…2` card pair, `CurvePoint(u:v:)` is the engine's `0…1` axis and doubles it.
+        // The nudge starts from 0 on purpose: `1e-6` and `2e-6` are exact doubles, `2 + 1e-6` is not,
+        // and a boundary test that is one ulp off the tolerance tests the wrong thing.
+        XCTAssertEqual(EditHistory.dirtyGroups(
+            from: base,
+            to: edit { $0.curve.white = [CurvePoint(0, tol), CurvePoint(2, 2)] }
+        ), [], "exactly at the tolerance the curve is the same document")
+        XCTAssertEqual(EditHistory.dirtyGroups(
+            from: base,
+            to: edit { $0.curve.white = [CurvePoint(0, tol * 2), CurvePoint(2, 2)] }
+        ), [.curve], "past the tolerance it is an edit")
+
         // and a jitter does not grow the stack
         var h = history()
         h.commit(edit { $0.light.exposure = 1 }, label: "Exposure", now: t0)
