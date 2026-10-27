@@ -266,9 +266,10 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(EditHistory.dirtyStages(for: [.geometry]), [.geometry])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.effects]), [.vignette])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.detail]), [])   // stored, not rendered
-        XCTAssertEqual(EditHistory.dirtyStages(for: [.masks]), [.maskAtlas, .localApply])
+        // 056: the masks group feeds S3.5 as well — a mask's hue/saturation moved there.
+        XCTAssertEqual(EditHistory.dirtyStages(for: [.masks]), [.maskAtlas, .localApply, .localColor])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.light, .masks]),
-                       [.sceneLinear, .toneMap, .maskAtlas, .localApply])
+                       [.sceneLinear, .toneMap, .maskAtlas, .localApply, .localColor])
         XCTAssertFalse(RenderGroup.detail.affectsRender)
         XCTAssertTrue(RenderGroup.curve.affectsRender)
         XCTAssertTrue(RenderGroup.masks.affectsRender)

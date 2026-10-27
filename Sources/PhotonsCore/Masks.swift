@@ -26,8 +26,13 @@ public enum CombineOp: String, Codable, Sendable, CaseIterable {
 
 // MARK: - local adjustments
 
-/// The eleven local sliders plus `amount`. Parameter-only; applied in S1.6, **never** in S1.5, so a
-/// mask's atlas layer does not depend on its own adjustments (§3.3 item 4).
+/// The eleven local sliders plus `amount`. Parameter-only; applied in S1.6 and S3.5, **never** in
+/// S1.5, so a mask's atlas layer does not depend on its own adjustments (§3.3 item 4).
+///
+/// 派单 056 split the two stages by **domain**: exposure, temperature/tint and the tone shaping are
+/// scene-linear gains and stay in S1.6 (before the curve and the tone map); `hue` and `saturation`
+/// are display-referred operations and moved to S3.5, where they run the same `color_hsl.metal`
+/// include the global S3 slider does. The stored fields did not move — only which stage reads them.
 public struct LocalAdjustments: Sendable, Equatable, Codable {
     /// 0…100. The whole adjustment is lerped by this (100 = full).
     public var amount: Double
@@ -89,6 +94,20 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
         amount <= 0 || (exposure == 0 && temperature == 0 && tint == 0 && contrast == 0
                         && highlights == 0 && shadows == 0 && whites == 0 && blacks == 0
                         && hue == 0 && saturation == 0)
+    }
+
+    /// True when a mask carries a hue or a saturation value — the **only** predicate that makes the
+    /// S3.5 stage exist for a render (派单 056 §验收 7: by value, not by "there is a mask").
+    public var contributesLocalColor: Bool { hue != 0 || saturation != 0 }
+
+    /// True when **S1.6** has real work: the scene-linear gain and the tone shaping, minus hue and
+    /// saturation, which moved to S3.5. A mask whose only sliders are hue/saturation must leave
+    /// S1.6's identity branch alone — running it through `local_adjust`'s neutral arithmetic would
+    /// round the pixel (`0.18 · pow(v / 0.18, 1)`) for a stage with nothing to do, and "a mask with
+    /// no S1.6 adjustment is bit-exact against no mask" is a contract (§3.3 item 3).
+    public var hasSceneLinearWork: Bool {
+        amount > 0 && (exposure != 0 || temperature != 0 || tint != 0 || contrast != 0
+                       || highlights != 0 || shadows != 0 || whites != 0 || blacks != 0)
     }
 
     /// Scene-linear RGB gain from exposure plus the M1-7 white-balance approximation.
@@ -743,6 +762,23 @@ extension EditModel {
     /// `applyKey` material of the local stage: all enabled masks' adjustment keys, id sorted.
     public var maskApplyMaterial: String {
         activeMasks.map(\.applyKey).joined(separator: "#")
+    }
+
+    /// True when at least one **enabled** mask carries a hue or a saturation value — the judgement
+    /// 派单 056 makes by value, never by "there is a mask".
+    public var hasLocalColor: Bool {
+        masks.contains { $0.isEnabled && $0.adjustments.contributesLocalColor }
+    }
+
+    /// The `localColor=` material of S3.5: only the masks that actually contribute colour, only the
+    /// values that stage consumes. `amount` is in it because it is the lerp weight; a mask that is
+    /// disabled or switched to 0/0 leaves the list, which is what makes the key move when the stage
+    /// stops existing for the document.
+    public var localColorMaterial: String {
+        activeMasks.filter { $0.adjustments.contributesLocalColor }
+            .map { "m=\($0.id);hue=\(k($0.adjustments.hue));sat=\(k($0.adjustments.saturation))"
+                   + ";amt=\(k($0.adjustments.amount))" }
+            .joined(separator: "#")
     }
 }
 

@@ -8,12 +8,14 @@ import CryptoKit
 /// `RenderStage` is the unit of both the cache-key chain (D6) and group-level dirty tracking (D10).
 /// Every stage boundary is a key: re-running S3 must not re-run S0/S1.
 ///
-/// M4 adds two **conditional** stages between S1 and S2 (`s1.5-mask-atlas`, `s1.6-local`). They are
-/// cases of this enum — so the trace, the dirty set and the key chain all speak the same language —
-/// but they are deliberately *not* in `allCases`, because `allCases` means "the passes every
-/// document renders". A document with no masks must produce exactly the M1 trace and the M1 keys:
-/// with `masks` empty the two mask-keyed links are dropped whole rather than made neutral, so the
-/// key bytes stay the M1 ones; see `pipeline`.
+/// M4 adds two **conditional** stages between S1 and S2 (`s1.5-mask-atlas`, `s1.6-local`), and 056
+/// adds a third one between S3 and the vignette (`s3.5-local-color`). They are cases of this enum —
+/// so the trace, the dirty set and the key chain all speak the same language — but they are
+/// deliberately *not* in `allCases`, because `allCases` means "the passes every document renders".
+/// A document with no masks must produce exactly the M1 trace and the M1 keys: with `masks` empty
+/// the two mask-keyed links are dropped whole rather than made neutral, so the key bytes stay the
+/// M1 ones; a document whose masks carry no hue or saturation drops the S3.5 link the same way.
+/// See `pipeline`.
 public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case geometry = "s0-geometry"
     case sceneLinear = "s1-scene-linear"
@@ -29,6 +31,16 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case curve = "s1.7-hdr-curve"
     case toneMap = "s2-tone-map"
     case color = "s3-color"
+    /// 派单 056 — a mask's **hue and saturation**, in the display-referred domain: after S2 and after
+    /// S3, before the vignette.
+    ///
+    /// They used to ride in S1.6, i.e. in scene-linear light before the curve and the tone map, while
+    /// the *global* hue/saturation live in S3 — so the same "+40" was two different operations
+    /// depending on whether it came from a slider or from a mask, and a full-canvas mask refused to
+    /// equal the global control. It is a **conditional** stage like S1.5/S1.6: it exists only when a
+    /// mask actually carries a hue or a saturation value, so a document without local colour keeps
+    /// its trace, its key chain and its pixels byte for byte.
+    case localColor = "s3.5-local-color"
     case vignette = "s3-vignette"
     case display = "s4-display"
 
@@ -43,14 +55,24 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     }
 
     /// Execution order including the conditional stages.
+    ///
+    /// S3.5 (`localColor`) is in this list because it *is* a stage — index, trace and the key chain
+    /// speak one language — but `pipeline(hasMasks:hasLocalColor:)` is what decides whether a render
+    /// visits it. A document whose masks carry neither hue nor saturation never does.
     public static var order: [RenderStage] {
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .vignette,
-         .display]
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .localColor,
+         .vignette, .display]
     }
 
     /// The stages one render actually visits.
-    public static func pipeline(hasMasks: Bool) -> [RenderStage] {
-        hasMasks ? order : allCases
+    ///
+    /// Two conditional families, two predicates: the mask stages appear when *any* mask is enabled,
+    /// S3.5 only when a mask actually carries a hue or a saturation value (派单 056 §验收 7 — the
+    /// judgement is by value, not by "there is a mask"). With no local colour the answer is exactly
+    /// the pre-056 list, which is what keeps every existing trace and key byte for byte.
+    public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false) -> [RenderStage] {
+        guard hasMasks else { return allCases }
+        return hasLocalColor ? order : order.filter { $0 != .localColor }
     }
 
     public var isMaskStage: Bool { self == .maskAtlas || self == .localApply }
@@ -68,6 +90,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .curve: return "s1.7"
         case .toneMap: return "s2"
         case .color: return "s3-color"
+        case .localColor: return "s3.5"
         case .vignette: return "s3-vignette"
         case .display: return "s4"
         }
@@ -78,7 +101,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         switch self {
         case .geometry: return "geometry"
         case .sceneLinear, .toneMap: return "light"
-        case .maskAtlas, .localApply: return "masks"
+        case .maskAtlas, .localApply, .localColor: return "masks"
         case .curve: return "curve"
         case .color: return "color"
         case .vignette: return "effects"
@@ -260,10 +283,21 @@ public enum RenderKeyChain {
         public var toneMap: String
         public var curve: String
         public var color: String
+        /// `H(colorKey | "localcolor" | localColorMaterial)`; `nil` when no enabled mask carries a
+        /// hue or saturation value, in which case the stage does not exist for this render at all
+        /// (派单 056) and `vignette` is seeded by `color` exactly as before.
+        public var localColor: String?
         public var vignette: String
         public var display: String
 
         public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
+        public var hasLocalColorStage: Bool { localColor != nil }
+
+        /// The stages this link set describes — the same answer `StageKeys.pipeline` gives, available
+        /// without a GPU so a test can pin "the stage exists" and "the stage does not exist" as text.
+        public var pipeline: [RenderStage] {
+            RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage)
+        }
     }
 
     public static func links(identity: String, sourceSize: ImageSize, canvas: ImageSize,
@@ -331,7 +365,21 @@ public enum RenderKeyChain {
         }
 
         let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(edit.keyMaterial(.color)).canonical
-        let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(edit.keyMaterial(.vignette)).canonical
+        // 056: S3.5 sits between S3 and the vignette and exists **only** when a mask carries a hue or
+        // a saturation value. When it does not, the link is `nil` and the vignette is seeded by
+        // `color` — so every document without local colour keeps its pre-056 key chain byte for byte,
+        // which is exactly the §3.2 discipline the mask stages follow.
+        var localColor: String?
+        var vignetteSeed = color
+        if edit.hasLocalColor {
+            let local = KeyBuilder(KeyBuilder.digest(of: color))
+                .add("localcolor")
+                .add(edit.keyMaterial(.localColor))
+                .canonical
+            localColor = local
+            vignetteSeed = local
+        }
+        let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(edit.keyMaterial(.vignette)).canonical
         var displayKey = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(display.keyString)
             .add(canvas)
@@ -342,7 +390,7 @@ public enum RenderKeyChain {
 
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply,
-                     toneMap: toneMap, curve: curve, color: color,
+                     toneMap: toneMap, curve: curve, color: color, localColor: localColor,
                      vignette: vignette, display: displayKey.canonical)
     }
 
@@ -355,6 +403,7 @@ public enum RenderKeyChain {
                   toneMap: KeyBuilder.digest(of: links.toneMap),
                   curve: KeyBuilder.digest(of: links.curve),
                   color: KeyBuilder.digest(of: links.color),
+                  localColor: links.localColor.map(KeyBuilder.digest(of:)),
                   vignette: KeyBuilder.digest(of: links.vignette),
                   display: KeyBuilder.digest(of: links.display))
     }
@@ -362,10 +411,12 @@ public enum RenderKeyChain {
 
 /// The key chain for one render: each stage's output key, computed before anything runs.
 ///
-/// Seven links for a document without masks (exactly M1), nine when masks are active:
-/// `geo → lin → [maskAtlas → localApply →] curve → toneMap → color → vignette → display`. The two
-/// mask keys are `nil` for the M1 chain — that is the explicit exception of §3.2, and `pipeline` is
-/// what makes the stages disappear instead of merely being skipped.
+/// Seven links for a document without masks (exactly M1), nine when masks are active, ten when a
+/// mask also carries local colour:
+/// `geo → lin → [maskAtlas → localApply →] curve → toneMap → color → [localColor →] vignette → display`.
+/// The two mask keys are `nil` for the M1 chain and `localColor` is `nil` without local colour —
+/// that is the explicit exception of §3.2, and `pipeline` is what makes the stages disappear instead
+/// of merely being skipped.
 ///
 /// 派单 030 swapped `curve` and `toneMap`: the curve runs *before* the tone map now, so S2's key is
 /// seeded by the curve's and the curve's by S1.6 (or S1). The **order of the fields in this struct**
@@ -381,12 +432,16 @@ public struct StageKeys: Sendable, Equatable {
     public var toneMap: String
     public var curve: String
     public var color: String
+    /// `H(colorKey | "localcolor" | localColorMaterial)`; `nil` when the document has no local
+    /// hue/saturation (派单 056), in which case the stage does not exist for this render.
+    public var localColor: String?
     public var vignette: String
     public var display: String
 
     public init(inputIdentity: String, geometry: String, sceneLinear: String,
                 maskAtlas: String? = nil, localApply: String? = nil,
-                toneMap: String, curve: String, color: String, vignette: String, display: String) {
+                toneMap: String, curve: String, color: String, localColor: String? = nil,
+                vignette: String, display: String) {
         self.inputIdentity = inputIdentity
         self.geometry = geometry
         self.sceneLinear = sceneLinear
@@ -395,11 +450,13 @@ public struct StageKeys: Sendable, Equatable {
         self.toneMap = toneMap
         self.curve = curve
         self.color = color
+        self.localColor = localColor
         self.vignette = vignette
         self.display = display
     }
 
     public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
+    public var hasLocalColorStage: Bool { localColor != nil }
 
     /// Key for a stage. The mask stages answer `""` when they do not exist for this render, which is
     /// only reachable by asking for a stage the pipeline does not visit.
@@ -412,13 +469,17 @@ public struct StageKeys: Sendable, Equatable {
         case .toneMap: return toneMap
         case .curve: return curve
         case .color: return color
+        case .localColor: return localColor ?? ""
         case .vignette: return vignette
         case .display: return display
         }
     }
 
-    /// The stages this key set describes: seven, or nine with masks.
-    public var pipeline: [RenderStage] { RenderStage.pipeline(hasMasks: hasMaskStages) }
+    /// The stages this key set describes: seven, nine with masks, ten when a mask also carries local
+    /// colour (派单 056).
+    public var pipeline: [RenderStage] {
+        RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage)
+    }
 
     public var shortTrace: String {
         pipeline.map { "\($0.short)=\(key(for: $0).prefix(8))" }.joined(separator: " ")

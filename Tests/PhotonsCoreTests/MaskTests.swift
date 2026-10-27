@@ -907,8 +907,13 @@ final class MaskTests: XCTestCase {
                            components: [MaskComponent(id: "c", shape: .linearGradient(.default))],
                            adjustments: LocalAdjustments(exposure: 0.5))]
         let result = try graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true))
-        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.order))
+        // 056: this document's mask carries no hue/saturation, so S3.5 does not exist for it — the
+        // trace is the nine pre-056 stages, and the local-colour key stays `nil`.
+        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.order.filter { $0 != .localColor }))
+        XCTAssertFalse(result.trace.executed.contains(.localColor),
+                       "a mask with only an exposure must not add a colour stage")
         XCTAssertEqual(result.keys.pipeline.count, 9)
+        XCTAssertNil(result.keys.localColor)
         XCTAssertNotNil(result.keys.maskAtlas)
         XCTAssertNotNil(result.keys.localApply)
 
@@ -2139,7 +2144,10 @@ final class MaskTests: XCTestCase {
                 + "3-point paint stroke + erase stroke, +0.5 EV) and m-cr (colour range over the two "
                 + "ramp ends, tolerance 0.15 / smoothness 0.6, amount 60, −0.8 EV, +20 sat). 8-bit "
                 + "quantised digests so a GPU family change does not invalidate the frame; re-record "
-                + "only when a kernel change is intended.",
+                + "only when a kernel change is intended. Re-recorded once for 派单 056: m-cr\'s +20 "
+                + "saturation now runs in S3.5, display-referred and from the same color_hsl.metal "
+                + "include the global slider compiles — so the *frame* is meant to differ while the "
+                + "atlas digest and the six coverage samples stay exactly as recorded.",
             sourceWidth: image.width,
             sourceHeight: image.height,
             maskIDs: dump.maskIDs,

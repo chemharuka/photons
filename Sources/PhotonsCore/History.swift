@@ -46,7 +46,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .detail: return []
         case .effects: return [.vignette]
         case .geometry: return [.geometry]
-        case .masks: return [.maskAtlas, .localApply]
+        case .masks: return [.maskAtlas, .localApply, .localColor]
         }
     }
 

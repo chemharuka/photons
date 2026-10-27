@@ -89,7 +89,7 @@ final class KernelLibrary {
         guard let url = Self.kernelSourceURL(file) else {
             throw RenderError.missingKernelSource(file)
         }
-        let source = try String(contentsOf: url, encoding: .utf8)
+        let source = try Self.expandingLocalIncludes(of: url)
         do {
             let l = try device.makeLibrary(source: source, options: nil)
             libraries[file] = l
@@ -97,6 +97,45 @@ final class KernelLibrary {
         } catch {
             throw RenderError.kernelCompileFailed(file, error.localizedDescription)
         }
+    }
+
+    /// The kernel's text with every `#include "x.metal"` replaced by that file's text.
+    ///
+    /// 派单 056 put the HSL maths in one shared source (`color_hsl.metal`) so `s3_color` and
+    /// `s3_5_local_color` compile the *same* functions instead of two copies. Metal's runtime
+    /// compiler cannot do that on its own: `makeLibrary(source:)` has no include search path (it
+    /// fails with "file not found"), and `makeLibrary(URL:)` wants a prebuilt metallib, not a source
+    /// file. So the loader inlines the include, from the directory the kernel itself came from.
+    ///
+    /// Deliberately narrow: only `#include "…"` (quoted) is expanded, one level deep per file with a
+    /// visited set against a cycle, and `<…>` system includes are left for the compiler. A shared
+    /// header that a kernel asks for must exist next to it — a missing one is an error, not a no-op.
+    static func expandingLocalIncludes(of url: URL, visited: Set<String> = []) throws -> String {
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let name = url.lastPathComponent
+        guard !visited.contains(name) else {
+            throw RenderError.kernelCompileFailed(name, "include cycle at \(name)")
+        }
+        var visited = visited
+        visited.insert(name)
+        var out: [String] = []
+        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#include \""), trimmed.hasSuffix("\"") else {
+                out.append(String(line))
+                continue
+            }
+            let start = trimmed.index(trimmed.startIndex, offsetBy: 10)
+            let includeName = String(trimmed[start..<trimmed.index(before: trimmed.endIndex)])
+            let sibling = url.deletingLastPathComponent().appendingPathComponent(includeName)
+            guard FileManager.default.fileExists(atPath: sibling.path) else {
+                throw RenderError.missingKernelSource(includeName)
+            }
+            out.append("// ── inlined from \(includeName) ──")
+            out.append(try expandingLocalIncludes(of: sibling, visited: visited))
+            out.append("// ── end \(includeName) ──")
+        }
+        return out.joined(separator: "\n")
     }
 
     /// Kernels are declared as a copied resource directory (`Kernels/`), so they land untouched in
