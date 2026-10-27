@@ -107,6 +107,24 @@ public struct RenderOptions: Sendable {
     /// document would otherwise be reused across the two paths, which compare equal in every key.
     public var forceCurveArithmetic: Bool
 
+    /// 080 — **which pixels this render is of**: the document (`edited`, the default) or the decode
+    /// (`decoded`, i.e. 「显示原图」).
+    ///
+    /// `.decoded` shortens the pipeline to `S0 → S4` with an **identity geometry**, so the output is
+    /// `OETF(M_working→out · M_decoded→working · decode)` — the decode, display-encoded, and nothing
+    /// else. It changes no cache key and writes no document; the two sources are two renders over one
+    /// resident buffer, which is why showing the original costs a pass and never a decode.
+    public var source: RenderSource
+
+    /// **Tests only.** Make `.decoded` render the **parameters-cleared** document through the whole
+    /// pipeline instead — the spelling 「参数清零后的渲染」 that `\` must not be.
+    ///
+    /// It exists so the acceptance's first assertion can be shown to be load-bearing rather than
+    /// claimed: `BeforeAfterTests.testTheRefutationTurnsTheFirstAssertionRed` renders both spellings
+    /// and prints that the decode and this one are the *same bytes* when the flag is on, i.e. the
+    /// assertion "the two differ" fails.
+    public var originalRendersAsParametersCleared: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -117,7 +135,9 @@ public struct RenderOptions: Sendable {
                 collectHistogram: Bool = false,
                 histogramBins: Int = 256,
                 histogramSampleLongEdge: Int = 0,
-                forceCurveArithmetic: Bool = false) {
+                forceCurveArithmetic: Bool = false,
+                source: RenderSource = .edited,
+                originalRendersAsParametersCleared: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -129,6 +149,8 @@ public struct RenderOptions: Sendable {
         self.histogramBins = histogramBins
         self.histogramSampleLongEdge = histogramSampleLongEdge
         self.forceCurveArithmetic = forceCurveArithmetic
+        self.source = source
+        self.originalRendersAsParametersCleared = originalRendersAsParametersCleared
     }
 }
 
@@ -474,6 +496,15 @@ private struct DisplayParams {
 private struct HistSampleParams {
     var a: SIMD4<Float>   // origin.xy, size.xy
     var b: SIMD4<Float>   // step.xy, dstSize.xy
+}
+
+/// 080 — mirror of `CompareParams` in `s5_before_after.metal`, byte for byte.
+///
+/// The boundary arrives as a **pixel index**, not a fraction: `CompareSplit.dividerPixel(canvas:)`
+/// is the one derivation, so the composite cannot put a pixel on the other side of the line than
+/// `CompareSplit.side(x:y:canvas:)` says owns it.
+private struct CompareParams {
+    var a: SIMD4<Float>   // divider index, axis (0 vertical / 1 horizontal), line width, pad
 }
 
 // MARK: - mask uniforms (mirror of s1_5_mask_atlas.metal / s1_6_local.metal, byte for byte)
@@ -1040,7 +1071,36 @@ public final class RenderGraph {
 
     // MARK: render
 
+    /// Render the document, or — with `options.source == .decoded` — the **decode** it was developed
+    /// from (080: 「显示原图」, see `RenderSource`).
+    ///
+    /// The two sources are one function on purpose: everything downstream (the pool, the stage cache,
+    /// the readback, the histogram plumbing) is the same machinery, and the only difference is which
+    /// document reaches the plan and which stages the plan visits. `.decoded` resolves the document to
+    /// `disregardingGeometry` — so S0 crops nothing, turns nothing and flips nothing — and visits
+    /// `[.geometry, .display]`, i.e. the decode, display-encoded.
+    ///
+    /// Nothing here can write to `edit`: the resolution is a copy.
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
+        let document: EditModel
+        switch (options.source, options.originalRendersAsParametersCleared) {
+        case (.decoded, false):
+            // The shipped spelling: the decode, i.e. the document with no geometry at all.
+            document = edit.disregardingGeometry
+        case (.decoded, true):
+            // The refutation's spelling: 「参数清零后的渲染」 — geometry kept, every parameter zeroed.
+            document = edit.disregardingParameters
+        case (.edited, _):
+            document = edit
+        }
+        return try renderResolved(document, options: options)
+    }
+
+    private func renderResolved(_ edit: EditModel, options: RenderOptions) throws -> RenderResult {
+        // 080: the decode path. `true` for the shipped spelling; the test hook
+        // (`originalRendersAsParametersCleared`) turns it off and renders the whole pipeline of the
+        // parameters-cleared document instead, which is the refutation.
+        let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
         var trace = RenderTrace()
         trace.s0PureCA = plan.s0PureCA
@@ -1050,8 +1110,12 @@ public final class RenderGraph {
         let semantics = resolveSemantics(edit)
         // The radii normalize to the frame, not to the visible window: a feather is 10 % of the
         // *picture's* short edge, so 1:1 must not soften differently from fit (§4.6).
-        let table = try maskTable(for: edit, content: plan.frameInCanvas, semantics: semantics)
-        if table == nil { atlasCache = nil }
+        //
+        // 080: the decode path has no mask stage at all, so it neither builds a table nor releases
+        // the cached atlas — a `\` frame must leave every cache exactly as it found it, or leaving
+        // 原图 would pay for an atlas rebuild it did not cause (`BeforeAfterUITests`).
+        let table = decodeOnly ? nil : try maskTable(for: edit, content: plan.frameInCanvas, semantics: semantics)
+        if !decodeOnly, table == nil { atlasCache = nil }
 
         // 005d: the tiling material joins the two mask keys. A local-stage texture computed under a
         // different tile lattice (or with a different declared halo) must never be reused as this
@@ -1074,7 +1138,11 @@ public final class RenderGraph {
         /// Set when `collectHistogram` asks: the texture S4 read, i.e. the scene-linear picture.
         var histogramSource: MTLTexture?
 
-        for stage in plan.stages {
+        // 080: the decode path visits S0 and S4 and nothing between them. `plan.stages` is the
+        // document's pipeline (seven, or nine-plus with masks); the decode is the two passes that
+        // stand either side of every tone, colour and effect stage.
+        let stages: [RenderStage] = decodeOnly ? [.geometry, .display] : plan.stages
+        for stage in stages {
             // The environment suffix has to reach **every** stage the atlas feeds, not just the two
             // mask stages: the document's key chain cannot know that a matte appeared (it is not in
             // the document), so a downstream cache hit would otherwise hand back a frame computed
@@ -1229,7 +1297,7 @@ public final class RenderGraph {
         // frame, reading the slice S1.6 consumed. When no id is set — or the id names no enabled mask
         // — nothing is encoded and `finish` is the frame the document produced, byte for byte.
         var showsMask = false
-        if let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
+        if !decodeOnly, let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
            let slice = atlas.ids.firstIndex(of: wanted) {
             let overlay = try pool.obtain(plan.canvas)
             let p = try kernels.pipeline(file: "s4_show_mask", function: "s4_show_mask")
@@ -1399,6 +1467,56 @@ public final class RenderGraph {
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
     public func recycle(output: MTLTexture) {
         pool.recycle(output)
+    }
+
+    // MARK: - 080: the 前后对比 composite
+
+    /// Two display-encoded frames, one canvas, split at a draggable line.
+    ///
+    /// - Parameters:
+    ///   - original: the decode (`RenderSource.decoded`) — left / top of the line.
+    ///   - edited: the document (`RenderSource.edited`) — right / bottom.
+    ///   - split: where the line is and which way it runs. Its `dividerPixel(canvas:)` is what the
+    ///     kernel receives, so a pixel's owner is the same answer here and in
+    ///     `CompareSplit.side(x:y:canvas:)`.
+    ///
+    /// The result is a texture of the **same canvas**, from the same pool every frame comes from, so
+    /// the loupe presents it through the one present path it already has. Nothing is cached, nothing
+    /// is keyed, and no document is read: this pass runs *after* both renders exist, which is the
+    /// whole reason entering, dragging and leaving 对比 cannot move a stage key or a history row.
+    ///
+    /// Hand the result back with `recycle(output:)` like any other frame.
+    public func composite(original: MTLTexture, edited: MTLTexture,
+                          split: CompareSplit) throws -> MTLTexture {
+        guard original.width == edited.width, original.height == edited.height else {
+            throw RenderError.executeFailed(
+                "compare needs two frames of one canvas, got "
+                + "\(original.width)×\(original.height) and \(edited.width)×\(edited.height)")
+        }
+        let canvas = ImageSize(width: edited.width, height: edited.height)
+        let out = try pool.obtain(canvas)
+        do {
+            guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
+            let pipeline = try kernels.pipeline(file: "s5_before_after", function: "s5_before_after")
+            guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            enc.setComputePipelineState(pipeline)
+            enc.setTexture(original, index: 0)
+            enc.setTexture(edited, index: 1)
+            enc.setTexture(out, index: 2)
+            let numbers = split.compareParams(canvas: canvas)
+            var params = CompareParams(a: SIMD4<Float>(numbers.divider, numbers.axis,
+                                                       numbers.lineWidth, 0))
+            enc.setBytes(&params, length: MemoryLayout<CompareParams>.stride, index: 0)
+            dispatch(enc, pipeline, canvas)
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            if let error = cb.error { throw RenderError.executeFailed(error.localizedDescription) }
+            return out
+        } catch {
+            pool.recycle(out)
+            throw error
+        }
     }
 
     /// The histogram of the **whole picture**, independent of the camera and of the panel.
