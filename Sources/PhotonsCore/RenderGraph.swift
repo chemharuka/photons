@@ -834,6 +834,7 @@ public final class RenderGraph {
 
     public init(input: RenderInput, cacheBudgetBytes: Int = 1_500_000_000,
                 semanticMatte: SemanticMatteProvider = SystemSemanticMatteProvider(),
+                textureRetention: TextureRetention = .oneFrame,
                 s1KeyIncludesRedGroup: Bool = true) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noMetalDevice }
         guard let queue = device.makeCommandQueue() else { throw RenderError.noMetalDevice }
@@ -844,7 +845,7 @@ public final class RenderGraph {
         self.input = input
         self.cacheBudgetBytes = cacheBudgetBytes
         self.s1KeyIncludesRedGroup = s1KeyIncludesRedGroup
-        self.pool = TexturePool(device: device)
+        self.pool = TexturePool(device: device, retention: textureRetention)
         self.semanticProvider = semanticMatte
         self.semanticStore = SemanticMatteStore()
         // Orientation is applied here, once, before S0 sees a pixel (§11.2). `oriented()` is
@@ -1105,11 +1106,28 @@ public final class RenderGraph {
     }
 
     private func renderResolved(_ edit: EditModel, options: RenderOptions) throws -> RenderResult {
+        // P1b: a graph that retains nothing (`textureRetention: .none`) keeps its idle list only for
+        // the duration of one frame — that list is the frame reusing itself (see `oneShotChurn`), not
+        // a cache for the next one. Released here, on every exit, including a throw.
+        defer { if pool.retainsNothing { pool.releaseIdle() } }
+        // P1b — whether a stage's input may go back to the pool as soon as the next stage has been
+        // encoded. Two cases want it, for the same reason: nothing else is holding the texture, so
+        // leaving it in the frame's `transient` list until the commit is what makes a frame hold
+        // eleven intermediates instead of two.
+        //
+        //   · `.none` retention — the export's pool, which keeps nothing past the frame;
+        //   · a cacheless frame **whose textures are big enough for it to pay** — see
+        //     `TexturePool.eagerRecycleFloorBytes`. At 60 Mpx it is worth 41 % of the frame
+        //     (p05 151 → 89 ms: without it every stage pays a 483 MB `makeTexture`); at 4.10 Mpx it
+        //     is not, because a 32.8 MB allocation is cheaper than the barrier that reusing the
+        //     texture forces between two passes (p50 8–13 ms vs 6.2 ms cold, p05 equal).
         // 080: the decode path. `true` for the shipped spelling; the test hook
         // (`originalRendersAsParametersCleared`) turns it off and renders the whole pipeline of the
         // parameters-cleared document instead, which is the refutation.
         let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
+        let recyclesEachStage = pool.retainsNothing
+            || (!options.useCache && plan.canvas.pixelCount * 8 >= TexturePool.eagerRecycleFloorBytes)
         var trace = RenderTrace()
         trace.s0PureCA = plan.s0PureCA
         // 005e: the semantic mattes are resolved before the table is built, because a semantic
@@ -1142,6 +1160,13 @@ public final class RenderGraph {
 
         var current = sourceTexture
         var transient: [MTLTexture] = []
+        /// P1b — the one-shot recycle chute. When the pool retains nothing (an export), a stage's
+        /// input goes back to the pool **the moment the next stage has been encoded**, instead of at
+        /// the end of the frame: a 60 Mpx export then holds two 483 MB frame textures rather than
+        /// eleven (5.3 GB). Reuse inside one command buffer is already what the cache-eviction path
+        /// does on this canvas — Metal's tracked hazards order the write after the read — so this
+        /// changes which texture object holds a stage's result, never the arithmetic that produced it.
+        var currentIsTransient = false
         var finish: MTLTexture?
         /// Set when `collectHistogram` asks: the texture S4 read, i.e. the scene-linear picture.
         var histogramSource: MTLTexture?
@@ -1169,19 +1194,27 @@ public final class RenderGraph {
                    e.texture.width == plan.canvas.width, e.texture.height == plan.canvas.height {
                     trace.record(stage, executed: false)
                     current = e.texture
+                    currentIsTransient = false
                     continue
                 }
                 let out = try pool.obtain(plan.canvas)
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
                 try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
                            options: options, table: table, report: &report)
                 trace.record(stage, executed: true)
+                // P1b: S1's input is consumed — a one-shot graph gives it back before the next
+                // `obtain`, so the export's frame textures do not accumulate.
+                if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
                 if options.useCache {
                     // The old texture goes back **after** the new one is in hand, so a failed
                     // allocation cannot leave the slot pointing at a recycled texture.
                     if let old = s1Entry, old.texture !== out { pool.recycle(old.texture) }
                     s1Entry = S1Entry(key: s1Key, texture: out)
+                    currentIsTransient = false
                 } else {
-                    transient.append(out)
+                    if !recyclesEachStage { transient.append(out) }
+                    currentIsTransient = true
                 }
                 current = out
                 continue
@@ -1207,6 +1240,7 @@ public final class RenderGraph {
                                                      dependency: .pointwise, tiled: false)
                     }
                     current = e.texture
+                    currentIsTransient = false
                     continue
                 }
 
@@ -1225,23 +1259,29 @@ public final class RenderGraph {
                     localEntry = LocalEntry(atlasKey: atlasKey, applyKeys: applyKeys, key: localKey,
                                             texture: e.texture, bounds: incremental.bounds)
                     current = e.texture
+                    currentIsTransient = false
                     continue
                 }
 
                 // (c) cold: a full pass, or a tiled pass over a fresh texture with the source copied
                 // in first (the `.load` that makes the untouched pixels right).
                 let out = try pool.obtain(plan.canvas)
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
                 let tilePlan = localTilePlan(edit: edit, plan: plan, options: options)
                 try encodeLocal(cb: cb, into: out, from: current, atlas: atlas.texture,
                                 table: table, tilePlan: tilePlan, blitSource: tilePlan.tiled)
                 trace.record(stage, executed: true)
                 if report != nil { report?.localPlan = tilePlan }
+                if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
                 if options.useCache {
                     if let old = localEntry, old.texture !== out { pool.recycle(old.texture) }
                     localEntry = LocalEntry(atlasKey: atlasKey, applyKeys: applyKeys, key: localKey,
                                             texture: out, bounds: localBounds(edit: edit, plan: plan))
+                    currentIsTransient = false
                 } else {
-                    transient.append(out)
+                    if !recyclesEachStage { transient.append(out) }
+                    currentIsTransient = true
                 }
                 current = out
                 continue
@@ -1277,6 +1317,7 @@ public final class RenderGraph {
             if stage != .display, options.useCache, let hit = cache[stage], hit.key == key {
                 trace.record(stage, executed: false)
                 current = hit.texture
+                currentIsTransient = false
                 continue
             }
 
@@ -1288,14 +1329,25 @@ public final class RenderGraph {
             }
 
             let out = try pool.obtain(plan.canvas)
+            let consumed = current
+            let consumedIsTransient = currentIsTransient
             try encode(stage, cb: cb, into: out, from: current, edit: edit, plan: plan,
                        options: options, table: table, report: &report)
             trace.record(stage, executed: true)
+            // `histogramSource` is read **after** the commit, so the texture S4 read cannot go back to
+            // the pool yet: the mask overlay below is the same canvas and an `obtain` would hand this
+            // very texture back to be overwritten (which would measure the overlay, not the picture).
+            let readAfterCommit = histogramSource.map { $0 === consumed } ?? false
+            if recyclesEachStage, consumedIsTransient, !readAfterCommit { pool.recycle(consumed) }
 
             if options.useCache && stage != .display {
                 insertCache(stage, key: key, texture: out)
+                currentIsTransient = false
             } else if stage != .display {
-                transient.append(out)
+                if !recyclesEachStage { transient.append(out) }
+                currentIsTransient = true
+            } else {
+                currentIsTransient = false
             }
             current = out
             if stage == .display { finish = out }
@@ -1853,6 +1905,57 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
+    }
+
+    // MARK: - 2026-10-28 (P1b): what this graph is holding, and how to give it back
+
+    /// Bytes of frame texture this graph keeps **for a later frame**: the stage cache, S1's and S1.6's
+    /// slots and the mask atlas. A document that is open but idle costs this.
+    public var heldTextureBytes: Int {
+        var bytes = cacheBytes + s1CacheBytes
+        if let e = localEntry { bytes += e.texture.width * e.texture.height * 8 }
+        if let a = atlasPool {
+            bytes += a.texture.width * a.texture.height * 2 * a.texture.arrayLength
+        }
+        return bytes
+    }
+
+    /// Bytes the texture pool is holding **idle** — recycled, waiting for the next frame. Bounded by
+    /// `TextureRetention` (`oneFrame` = one canvas, `none` = zero).
+    public var idleTextureBytes: Int { pool.idleBytes }
+    /// How many idle textures that is, and the budget they are held against.
+    public var idleTextureCount: Int { pool.idleCount }
+    public var idleTextureBudgetBytes: Int { pool.budgetBytes }
+    /// Every `makeTexture` this graph has paid for, and how many `obtain`s the idle list served. The
+    /// ratio is what a retention allowance buys, and it is what `TexturePoolTests` asserts on.
+    public var textureAllocations: Int { pool.allocations }
+    public var textureReuses: Int { pool.reuses }
+    /// Bytes the pool has released instead of keeping (budget overflow, or `none` retention).
+    public var textureBytesDropped: Int { pool.droppedBytes }
+
+    /// Give the idle textures back to the device **now**, and report the bytes that released.
+    ///
+    /// The three moments this is right (`local/perf/perf-baseline-2026-10-28.md` §5): an export has
+    /// finished, the loupe switches rung/photo, and the document is closed. They all mean "no frame
+    /// is coming for this canvas", which is the only thing the idle list exists for. A frame's cache
+    /// is untouched — that is `invalidateCache`'s business, and dropping it would cost the next frame
+    /// its hits.
+    @discardableResult
+    public func releaseIdleTextures() -> Int {
+        pool.releaseIdle()
+    }
+
+    /// Give **everything** back: the stage cache, the S1/S1.6 slots, the atlas and the idle list. The
+    /// graph stays usable — the next frame recomputes what it needs — but it holds no frame textures.
+    ///
+    /// This is the export path's end (`RenderGraph` built with `textureRetention: .none`), where a
+    /// 60 Mpx export's eleven intermediates are 5.3 GB and nothing will ever ask for them again.
+    @discardableResult
+    public func releaseAllTextures() -> Int {
+        let held = heldTextureBytes
+        invalidateCache()
+        atlasPool = nil
+        return held + pool.releaseIdle()
     }
 
     private func insertCache(_ stage: RenderStage, key: String, texture: MTLTexture) {
@@ -3208,20 +3311,111 @@ public final class RenderGraph {
 
 // MARK: - texture pool
 
+/// How much texture memory a `RenderGraph` holds **between** frames.
+///
+/// 2026-10-28 (P1b) — the pool is bounded now, and this is the knob. It used to be append-only:
+/// `recycle` grew a dictionary and nothing ever took a texture back, so a graph's footprint was the
+/// high-water mark of every canvas it had ever rendered. On a 60 Mpx export one frame leaves eleven
+/// 483 MB intermediates behind and the pool kept them for the life of the document (measured 10.6 GB
+/// of Metal for a six-frame export — `local/perf/perf-baseline-2026-10-28.md` §5,
+/// 「纹理池只增不减」).
+///
+/// Retention is capped in **bytes**, not in textures, because what a texture costs is its canvas and
+/// a count-based cap is a different number at every zoom level: four 4.10 Mpx frames are 131 MB, four
+/// 60 Mpx frames are 1.9 GB. The unit is therefore the pool's own `frameBytes` — the largest canvas
+/// it has handed out — so one allowance means the same thing on every picture.
+public enum TextureRetention: Sendable, Equatable {
+    /// Keep at most `TexturePool.frameAllowance` canvases' worth of idle textures: enough for the
+    /// next frame of the same canvas to be allocation-free, which is the only reuse a hot path can
+    /// spend. The interactive default.
+    case oneFrame
+    /// Keep nothing **between** frames: every recycled texture is released when the frame ends, so an
+    /// export's bytes are back before the next picture decodes. Inside one frame the pool still hands
+    /// textures back (see `TexturePool.oneShotChurn`) — that is the frame reusing itself, not
+    /// retention, and without it a 60 Mpx export pays ten `makeTexture` calls of 483 MB.
+    case none
+    /// Keep at most `bytes` — the explicit knob, used by `TexturePoolTests` to show what an
+    /// unbounded pool does.
+    case bytes(Int)
+}
+
 /// Frame-time work must not pay for `makeTexture`. Textures are recycled per (size) instead, which
 /// is what makes a second identical render measurably cheaper than the first.
+///
+/// The allowance is **1**: at 60 Mpx keeping two extra 483 MB intermediates changed the hot frame by
+/// nothing (p05 56.1 ms with three cache entries and an empty idle list vs 56.7 ms with one and one),
+/// so the constant holds the *cheapest* configuration that does not pay `makeTexture` again, not the
+/// largest one that fits.
 final class TexturePool {
-    private let device: MTLDevice
-    private var free: [String: [MTLTexture]] = [:]
 
-    init(device: MTLDevice) {
+    /// Canvases' worth of idle texture the pool keeps for the next frame: **two**, because a frame
+    /// that recycles as it goes (see `recyclesEachStage`) has one texture being read and one being
+    /// written when it commits, and both are what the next frame asks for first. Measured at 60 Mpx
+    /// with one allowance: p05 89 ms and two `makeTexture` calls per frame; with two, the same two
+    /// allocations and no retained texture is ever wasted.
+    static let frameAllowance = 2
+    /// A one-shot frame's **in-flight** churn: with `render` recycling each stage's input as soon as
+    /// the next stage has been encoded, two textures are alive at once (the one being read, the one
+    /// being written). That is not retention — it is the frame reusing itself — so `Retention.none`
+    /// allows exactly this much and releases the rest when the frame ends.
+    static let oneShotChurn = 2
+    /// A cacheless frame reuses its own textures in place only when one is at least this big
+    /// (**128 MB** = 16.8 Mpx rgba16f). Both sides of it are measured:
+    ///
+    ///   · 60.3 Mpx (483 MB): p05 **151 → 89 ms**, 109 → 24 `makeTexture` calls. The allocation is the
+    ///     cost, and 483 MB of fresh pages per stage is far more than the barrier reusing one forces;
+    ///   · 4.10 Mpx (32.8 MB): p05 unchanged, but p50 6.2 → 8–13 ms. Here the allocation is cheap and
+    ///     the per-pass barrier is not, so the reuse is a pessimisation.
+    ///
+    /// 128 MB sits between the two measured sizes; nothing was measured in between, and the number is
+    /// a floor on "the allocation dominates", not a tuned optimum.
+    static let eagerRecycleFloorBytes = 128_000_000
+
+    private let device: MTLDevice
+    private let retention: TextureRetention
+    /// Idle textures, keyed by size, newest last within a key.
+    private var free: [String: [MTLTexture]] = [:]
+    /// The order textures were recycled in, oldest first — the eviction order when over budget.
+    private var freeOrder: [String] = []
+
+    /// Bytes currently held idle. This is the number the budget is expressed against.
+    private(set) var idleBytes = 0
+    /// The largest canvas this pool has handed out — the unit `Retention.oneFrame` counts in.
+    private(set) var frameBytes = 0
+    /// `makeTexture` calls, `obtain`s served from the idle list, and bytes released instead of kept.
+    private(set) var allocations = 0
+    private(set) var reuses = 0
+    private(set) var droppedBytes = 0
+
+    init(device: MTLDevice, retention: TextureRetention = .oneFrame) {
         self.device = device
+        self.retention = retention
     }
+
+    /// Whether the pool keeps nothing — the one-shot export policy. `render` reads this to decide
+    /// whether a stage's input may go back to the pool the moment it has been consumed.
+    var retainsNothing: Bool { retention == .none }
+
+    /// The byte budget idle textures are held against, for the current `frameBytes`.
+    var budgetBytes: Int {
+        switch retention {
+        case .none: return frameBytes * TexturePool.oneShotChurn
+        case .bytes(let b): return b
+        case .oneFrame: return frameBytes * TexturePool.frameAllowance
+        }
+    }
+
+    var idleCount: Int { free.values.reduce(0) { $0 + $1.count } }
 
     func obtain(_ size: ImageSize) throws -> MTLTexture {
         let key = size.keyString
+        let bytes = size.width * size.height * 8
+        if bytes > frameBytes { frameBytes = bytes }
         if var list = free[key], let t = list.popLast() {
-            free[key] = list
+            if list.isEmpty { free[key] = nil } else { free[key] = list }
+            idleBytes -= bytes
+            if let i = freeOrder.lastIndex(of: key) { freeOrder.remove(at: i) }
+            reuses += 1
             return t
         }
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
@@ -3233,11 +3427,40 @@ final class TexturePool {
         guard let t = device.makeTexture(descriptor: desc) else {
             throw RenderError.allocationFailed(key)
         }
+        allocations += 1
         return t
     }
 
     func recycle(_ texture: MTLTexture) {
         let key = "\(texture.width)x\(texture.height)"
+        let bytes = texture.width * texture.height * 8
+        idleBytes += bytes
         free[key, default: []].append(texture)
+        freeOrder.append(key)
+        trim()
+    }
+
+    /// Release the oldest idle textures until the budget holds. Oldest first (FIFO) rather than
+    /// biggest first: the texture a frame is about to ask for is the one that was recycled last.
+    private func trim() {
+        while idleBytes > budgetBytes, let key = freeOrder.first {
+            freeOrder.removeFirst()
+            guard var list = free[key], !list.isEmpty else { continue }
+            let dropped = list.removeFirst()
+            if list.isEmpty { free[key] = nil } else { free[key] = list }
+            let bytes = dropped.width * dropped.height * 8
+            idleBytes -= bytes
+            droppedBytes += bytes
+        }
+    }
+
+    /// Hand every idle texture back to the device now, and report the bytes that released.
+    @discardableResult
+    func releaseIdle() -> Int {
+        let bytes = idleBytes
+        free.removeAll()
+        freeOrder.removeAll()
+        idleBytes = 0
+        return bytes
     }
 }

@@ -4037,6 +4037,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// with it and cannot be aborted.
     public func cancelPendingFrames() {
         generation += 1
+        // P1b — the document this graph was feeding is going away (leaving the loupe, another module,
+        // another photo), so its idle textures are for a canvas no frame will ask for. Trimmed on the
+        // render queue because the pool belongs to that queue; a queued frame still runs unchanged.
+        reclaimIdleTextures()
         // 037 ②: the low-resolution whole picture belongs to the photo going away. Released here (and
         // not re-rendered) — the next pointer entry on the new photo generates its own. The histogram's
         // snapshot goes with it, so a background measurement can never read the old photo's picture.
@@ -4081,6 +4085,33 @@ public final class LoupeController: NSViewController, HeadroomSource {
             decodeQueue.cancel(identity: identity)
         }
     }
+
+    /// P1b — give this graph's **idle** textures back to the device.
+    ///
+    /// The idle list exists for one reason: the next frame of the same canvas reuses a texture instead
+    /// of paying `makeTexture`. When the picture is going away (leaving the loupe, another module,
+    /// another photo, the document closed) there is no next frame, so the list is pure footprint — a
+    /// 60 Mpx canvas makes each entry 483 MB.
+    ///
+    /// On the render queue, because the pool is that queue's (`TexturePool` is a plain dictionary; see
+    /// the note above `pictureMeasurementGraph`). Trimming only drops idle textures, so a frame that
+    /// is already queued renders exactly as it would have.
+    ///
+    /// `completion` runs on main **after** the trim (a test's handle on "it has happened"; the app
+    /// passes nothing).
+    public func reclaimIdleTextures(completion: (() -> Void)? = nil) {
+        queue.async { [weak self] in
+            let bytes = self?.graph?.releaseIdleTextures() ?? 0
+            guard let self else { return }
+            if bytes > 0 { self.reclaimedIdleTextureBytes += bytes }
+            if let completion { DispatchQueue.main.async(execute: completion) }
+        }
+    }
+
+    /// Bytes `reclaimIdleTextures()` has handed back over this controller's life — the number
+    /// `LoupeTextureReclaimTests` reads, so "the pool is empty after the photo went away" is an
+    /// assertion and not a claim.
+    public private(set) var reclaimedIdleTextureBytes = 0
 
     /// The photo every piece of the loupe's in-flight work belongs to, as `backdropPhotoKey` spells it
     /// (`contentHash|assetID`, or a frame source's identity in the harness).
@@ -4637,6 +4668,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let usedCache = outcome.cached
         if !outcome.cached {
             decodeMilliseconds = outcome.rung.milliseconds
+            // P1b: a different rung of this picture (or another picture) means the graph's idle
+            // textures are for a canvas nobody will ask for again. Hand them back *before* the new
+            // source is built, not at the same moment as its 483 MB source texture.
+            graph?.releaseIdleTextures()
             graph = nil                      // a new source needs a new graph
             graphIdentity = nil
             graphPhoto = nil
