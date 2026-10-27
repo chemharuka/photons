@@ -2893,6 +2893,22 @@ public final class LoupeController: NSViewController {
     /// called.
     var cropOverlayLayoutForTesting: CropToolLayout? { cropOverlay.layout }
 
+    /// **Is the frame really on screen?** — the 2026-10-27 card's acceptance.
+    ///
+    /// `isCropToolActive` is a fact about the tool; it says nothing about the overlay the user is
+    /// supposed to see. This asks the view itself: it is not hidden, it is in a parent, that parent has
+    /// a window, it has a laid-out rect, and it is drawing a frame (`layout != nil`). A tool that went
+    /// active while the overlay stayed hidden fails here, which is exactly the failure a "点图标就进入
+    /// 裁切模式" claim can hide.
+    var isCropOverlayOnScreenForTesting: Bool {
+        !cropOverlay.isHidden
+            && cropOverlay.superview != nil
+            && cropOverlay.window != nil
+            && cropOverlay.layout != nil
+            && cropOverlay.frame.width > 1
+            && cropOverlay.frame.height > 1
+    }
+
     /// Take the press. `true` means the canvas is dragging the frame and must not pan.
     @discardableResult
     public func beginCropDrag(atViewPoint point: CGPoint, rotate: Bool = false,

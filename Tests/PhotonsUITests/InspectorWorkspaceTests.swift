@@ -10,7 +10,7 @@ import SwiftUI
 /// | # | 工作区 | 图标 | 卡片 |
 /// |---|---|---|---|
 /// | 1 | 调整（默认） | `slider.horizontal.3` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设（Decode 卡已删除，解码模型移入细节卡） |
-/// | 2 | 变换 | `crop.rotate` | —（旋转 / 裁切 / 校正 现在都不是检查器卡片） |
+/// | 2 | 变换 | `crop.rotate` | 裁切（2026-10-27：比例 / 角度 / 翻转 / 九宫格 / 应用取消） |
 /// | 3 | 色彩 | `paintpalette` | —（HSL 未实现） |
 /// | 4 | 蒙版 | `circle.dashed` | 蒙版 |
 /// | 5 | 历史记录 | `clock.arrow.circlepath` | —（未实现） |
@@ -48,9 +48,10 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         // 默认打开的是「调整」——这是用户的第一条要求。
         XCTAssertEqual(InspectorWorkspaceState().selection, .adjust, "首次打开必须是调整")
+        // 调整 = 既有面板的卡片：蒙版交给它自己的工作区，裁切交给「变换」（2026-10-27）。
         XCTAssertEqual(InspectorView.sections(in: .adjust),
-                       InspectorView.scrollingSections.filter { $0 != .masks },
-                       "调整 = 既有面板的卡片，只把蒙版交给它自己的工作区")
+                       InspectorView.scrollingSections.filter { $0 != .masks && $0 != .crop },
+                       "调整 = 既有面板的卡片，只把蒙版和裁切交给各自的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -58,8 +59,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.adjust],
                        ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "预设"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
-        // 「如果功能没做好就先空着」：这三个是**空数组**，不是占位。
-        XCTAssertEqual(titles[.transform], [])
+        // 变换 有卡片了（2026-10-27：裁切搬进来，它是这个工作区的第一张卡）。
+        XCTAssertEqual(titles[.transform], ["裁切"])
+        // 「如果功能没做好就先空着」：这两个是**空数组**，不是占位。
         XCTAssertEqual(titles[.colour], [])
         XCTAssertEqual(titles[.history], [])
 
@@ -103,9 +105,10 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片的枚举少了一张（Decode 卡删除，9 张，直方图仍排第一）—— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 9)
+        // 卡片的枚举多了一张（2026-10-27：裁切，10 张，直方图仍排第一、蒙版仍排最后）。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 10)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
+        XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
     }
 
     // MARK: - 3. 切换器的位置：直方图下方、滚动区上方
@@ -245,7 +248,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         defer { panel.window.contentView = nil }
         let plot = panel.histogramPlot
 
-        for workspace in [InspectorWorkspace.transform, .colour, .history] {
+        // 变换 不再是空的（2026-10-27：它有一张裁切卡），所以剩下两个。
+        for workspace in [InspectorWorkspace.colour, .history] {
             panel.state.select(workspace)
             try waitFor(panel, until: { $0.cards.workspace == workspace.rawValue })
 
@@ -419,8 +423,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         let tabs = try String(contentsOf: Self.tabsSource, encoding: .utf8)
         XCTAssertTrue(tabs.contains("public var cards: [InspectorView.Section]"),
                       "唯一一张「工作区 → 卡片」表在 InspectorWorkspace.cards")
-        XCTAssertTrue(tabs.contains("case .transform:\n            return []"),
-                      "变换还没实现：空表，不是占位")
+        XCTAssertTrue(tabs.contains("case .transform:\n            // 2026-10-27 — 裁切."),
+                      "变换 认领裁切卡（2026-10-27：卡片从菜单/浮动栏搬进了工作区）")
+        XCTAssertTrue(tabs.contains("return [.crop]"), "变换工作区的第一张卡 = 裁切")
     }
 
     // MARK: - harness

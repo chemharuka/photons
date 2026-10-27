@@ -4,14 +4,21 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 072 §F — 顶层「变换」菜单，翻转 = 文档级几何动作.
+/// 变换 ▸ 裁切的快捷方式，以及「翻转是一份文档字段」这件事。
 ///
-/// The menu was re-cut, not re-skinned: 裁切三项 moved **out of 显影** (where they claimed to be a look)
-/// into a new 变换 that sits before it, 水平/垂直翻转 became document actions with one history entry
-/// each, and 梯形/四边形校正 have **no row at all** until they have a field and a stage.
+/// 072 §F 立了这张菜单（裁切三项 + 两个翻转），并让翻转成为**文档级几何动作**。
 ///
-/// Measured here: the printed structure, the enabled table with and without a photo, one flip = one
-/// ⌘Z (hash before/after), and that the bar's two switches and the menu's two ticks are the same bit.
+/// 2026-10-27 重新切了一刀：用户要「将裁切下拉菜单中的相关功能，移动到右侧第二栏「变换」」，
+/// 所以 应用裁切 / 取消裁切 / 水平翻转 / 垂直翻转 四行**从菜单里删掉了** —— 它们是检查器 裁切卡里的
+/// 行（以及画布上的 ↵ / Esc），菜单不再镜像面板。留下的是**快捷方式本身**：⌘R 必须仍能进/出裁切。
+///
+/// 这里仍然钉四件事，而且都钉在真实对象上：
+///
+///   1. 变换子菜单只有一行（⌘R），显影没有裁切行，梯形/四边形校正仍然一行都没有；
+///   2. 有照片 / 没照片的 enabled 表，以及裁切模式下那一行的勾；
+///   3. 一次翻转 = 一条历史 + 一次 ⌘Z（hash 前后相同）；
+///   4. 一份字段、三个入口：菜单（现在只有 ⌘R）、裁切浮动栏的两个开关、裁切卡的翻转片 ——
+///      `GeometryGroup.flipHorizontal/Vertical` 是唯一的一份，没有草稿副本。
 @MainActor
 final class TransformMenuTests: XCTestCase {
 
@@ -45,39 +52,35 @@ final class TransformMenuTests: XCTestCase {
 
     // MARK: - structure
 
-    func testTheTransformMenuSitsBeforeDevelopAndOwnsTheCropItems() {
+    func testTheTransformMenuSitsBeforeDevelopAndKeepsOnlyTheCropShortcut() throws {
         _ = NSApplication.shared
         let menu = MainMenu.build()
         let titles = topLevel(menu)
         print("F · top level: \(titles)")
 
-        let transformIndex = try! XCTUnwrap(titles.firstIndex(of: "变换"))
-        let developIndex = try! XCTUnwrap(titles.firstIndex(of: "显影"))
+        let transformIndex = try XCTUnwrap(titles.firstIndex(of: "变换"))
+        let developIndex = try XCTUnwrap(titles.firstIndex(of: "显影"))
         XCTAssertLessThan(transformIndex, developIndex, "§F: 变换 before 显影")
 
-        let transform = try! XCTUnwrap(menu.items[transformIndex].submenu)
-        XCTAssertEqual(transform.items.map(\.title),
-                       ["裁切与旋转", "应用裁切", "取消裁切", "", "水平翻转", "垂直翻转", ""],
-                       "§F: the three crop verbs, then the two flips (empty titles are separators)")
+        let transform = try XCTUnwrap(menu.items[transformIndex].submenu)
+        XCTAssertEqual(transform.items.map(\.title), ["裁切"],
+                       "菜单里搬走的功能都删掉了：只剩 ⌘R 那一行")
+        XCTAssertFalse(transform.items.contains { $0.isSeparatorItem }, "一行菜单不该带分隔符")
         print("F · 变换: \(transform.items.map { $0.isSeparatorItem ? "─" : $0.title })")
 
-        let develop = try! XCTUnwrap(menu.items[developIndex].submenu)
+        let develop = try XCTUnwrap(menu.items[developIndex].submenu)
         XCTAssertEqual(develop.items.map(\.title), ["预设"], "§F: 显影 keeps the presets and nothing else")
-        for gone in ["裁切与旋转", "应用裁切", "取消裁切"] {
-            XCTAssertNil(find(gone, in: develop), "\(gone) must be gone from 显影")
+
+        // 搬走的四行：一个大标题都不许留。
+        for gone in ["裁切与旋转", "应用裁切", "取消裁切", "水平翻转", "垂直翻转"] {
+            XCTAssertNil(find(gone, in: menu), "\(gone) 已经搬进检查器的裁切卡了，菜单里不许再有一行")
         }
 
-        // The shortcuts: ⌘R / ⌘⏎ / ⌘. / ⌥⌘H / ⌥⌘V.
-        let keys = [("裁切与旋转", "r", NSEvent.ModifierFlags.command),
-                    ("应用裁切", "\r", .command),
-                    ("取消裁切", ".", .command),
-                    ("水平翻转", "h", [.command, .option]),
-                    ("垂直翻转", "v", [.command, .option])]
-        for (title, key, mask) in keys {
-            let item = try! XCTUnwrap(find(title, in: transform))
-            XCTAssertEqual(item.keyEquivalent, key, "\(title) key")
-            XCTAssertEqual(item.keyEquivalentModifierMask, mask, "\(title) modifiers")
-        }
+        // ⌘R —— 用户点名要留的那一个快捷方式。
+        let crop = try XCTUnwrap(find("裁切", in: transform))
+        XCTAssertEqual(crop.keyEquivalent, "r", "⌘R 必须仍能进/出裁切")
+        XCTAssertEqual(crop.keyEquivalentModifierMask, .command)
+        XCTAssertEqual(crop.action, #selector(EditorWindowController.toggleCropAction(_:)))
 
         // No dead rows for 梯形/四边形校正.
         for reserved in ["梯形校正", "四边形校正", "透视", "梯形", "四边形"] {
@@ -91,37 +94,29 @@ final class TransformMenuTests: XCTestCase {
         _ = NSApplication.shared
         let empty = EditorWindowController()
         let menu = MainMenu.build()
-        let cropTitles = ["裁切与旋转", "应用裁切", "取消裁切", "水平翻转", "垂直翻转"]
+        let crop = try XCTUnwrap(find("裁切", in: menu))
+        XCTAssertFalse(empty.validateMenuItem(crop), "没照片时 ⌘R 是灰的（没有东西可裁）")
+        print("F · no photo: 裁切=\(empty.validateMenuItem(crop))")
 
-        var table: [(String, Bool, Bool)] = []
-        for title in cropTitles {
-            let item = try XCTUnwrap(find(title, in: menu))
-            table.append((title, empty.validateMenuItem(item), false))
-        }
-        print("F · no photo: " + table.map { "\($0.0)=\($0.1)" }.joined(separator: ", "))
-        for (title, enabled, _) in table {
-            XCTAssertFalse(enabled, "\(title) must be grey without a photo")
-        }
-
-        // Now a real photo, in 单图.
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         editor.window?.orderFront(nil)
         defer { editor.window?.orderOut(nil) }
-        var withPhoto: [(String, Bool)] = []
-        for title in cropTitles {
-            let item = try XCTUnwrap(find(title, in: MainMenu.build()))
-            withPhoto.append((title, editor.validateMenuItem(item)))
-        }
-        print("F · with photo: " + withPhoto.map { "\($0.0)=\($0.1)" }.joined(separator: ", "))
-        XCTAssertTrue(withPhoto[0].1, "裁切与旋转 is live with a photo")
-        XCTAssertFalse(withPhoto[1].1, "§D4: 应用裁切 stays grey until the tool is on")
-        XCTAssertFalse(withPhoto[2].1, "§D4: 取消裁切 stays grey until the tool is on")
-        XCTAssertTrue(withPhoto[3].1, "水平翻转 is live with a photo")
-        XCTAssertTrue(withPhoto[4].1, "垂直翻转 is live with a photo")
+        let item = try XCTUnwrap(find("裁切", in: MainMenu.build()))
+        XCTAssertTrue(editor.validateMenuItem(item), "有照片时 ⌘R 是活的")
+        XCTAssertEqual(item.state, .off, "没进裁切时不该有勾")
+
+        XCTAssertTrue(editor.rootView.loupeController.beginCropTool())
+        CropUITestSupport.pump(0.05)
+        XCTAssertTrue(editor.validateMenuItem(item), "裁切模式下仍可点")
+        XCTAssertEqual(item.state, .on, "裁切模式下那一行要打勾")
+        print("F · with photo: 裁切=\(editor.validateMenuItem(item)) · tick=\(item.state == .on)")
+        editor.rootView.loupeController.cancelCropTool()
     }
 
     // MARK: - one flip = one ⌘Z
 
+    /// 翻转是**文档动作**，动词是 `LoupeController.flipHorizontal/Vertical` —— 裁切卡的两片开关和
+    /// 裁切浮动栏的两个开关调的就是它。一次翻转一条历史，一次 ⌘Z 回得去。
     func testAFlipIsOneHistoryEntryAndUndoRestoresTheDocument() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.orderOut(nil) }
@@ -132,7 +127,7 @@ final class TransformMenuTests: XCTestCase {
         let historyBefore = session.history.snapshots.count
         let revisionBefore = session.editRevision
 
-        editor.flipHorizontalAction(nil)
+        loupe.flipHorizontal()
         let afterFlip = CropUITestSupport.documentBytes(session)
         print("F · flip: history \(historyBefore) → \(session.history.snapshots.count), "
               + "revision \(revisionBefore) → \(session.editRevision), "
@@ -142,7 +137,7 @@ final class TransformMenuTests: XCTestCase {
         XCTAssertNotEqual(afterFlip, before)
 
         // A second flip is a *second* entry (it is a real change), and ⌘Z takes it back one at a time.
-        editor.flipVerticalAction(nil)
+        loupe.flipVertical()
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 2)
         XCTAssertTrue(session.edit.geometry.flipVertical)
 
@@ -151,21 +146,16 @@ final class TransformMenuTests: XCTestCase {
         XCTAssertTrue(session.edit.geometry.flipHorizontal)
         XCTAssertTrue(editor.undoEdit())
         XCTAssertEqual(CropUITestSupport.documentBytes(session), before, "§F: ⌘Z 回原 hash")
-        XCTAssertEqual(session.history.snapshots.count, historyBefore + 2, "undo moves the cursor, not the log")
-
-        // The menu ticks the document's bit.
-        let item = try XCTUnwrap(find("水平翻转", in: MainMenu.build()))
-        XCTAssertTrue(editor.validateMenuItem(item), "live: there is a photo")
-        XCTAssertEqual(item.state, .off, "and unticked, because ⌘Z took the flip back")
-        editor.flipHorizontalAction(nil)
-        XCTAssertTrue(editor.validateMenuItem(item), "the tick follows the document")
-        XCTAssertTrue(loupe.isFlippedHorizontally)
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 2,
+                       "undo moves the cursor, not the log")
+        XCTAssertFalse(loupe.isFlippedHorizontally)
     }
 
-    // MARK: - one field, two controls
+    // MARK: - one field, three doors
 
-    /// The bar's switches and the menu read/write the **same** `GeometryGroup` bits — no draft copy.
-    func testTheCropBarAndTheMenuDriveOneField() throws {
+    /// The crop bar's switches, the 裁切 card's two chips and the tool's own verbs read/write the
+    /// **same** `GeometryGroup` bits — no draft copy exists to disagree with them.
+    func testTheCropBarTheCardAndTheToolDriveOneField() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
@@ -177,13 +167,13 @@ final class TransformMenuTests: XCTestCase {
         bar.sync()
         XCTAssertFalse(bar.toggleStyle("h").on)
 
-        // Menu path → the bar's switch follows.
+        // Tool path (what the card's chip calls through the loupe) → the bar's switch follows.
         loupe.flipHorizontal()
         bar.sync()
-        XCTAssertTrue(session.edit.geometry.flipHorizontal, "the menu wrote the document")
+        XCTAssertTrue(session.edit.geometry.flipHorizontal, "the tool wrote the document")
         XCTAssertTrue(bar.toggleStyle("h").on, "§F: the bar reads the document's bit, so it moved too")
 
-        // Bar path → the document follows, and so does the menu's tick (`isFlippedHorizontally`).
+        // Bar path → the document follows, and so does the card's read (`isFlippedHorizontally`).
         loupe.cropTool.toggleFlipHorizontal()
         bar.sync()
         XCTAssertFalse(session.edit.geometry.flipHorizontal)
@@ -210,7 +200,7 @@ final class TransformMenuTests: XCTestCase {
         loupe.cropTool.toggleFlipVertical()
         let geometry = loupe.cropTool.draft.geometry(flipsOf: session.edit.geometry)
         XCTAssertTrue(geometry.flipVertical, "§F: 应用 carries the document's flip, it does not overwrite it")
-        print("F · bar/menu one field: document flipH=\(session.edit.geometry.flipHorizontal) "
+        print("F · bar/card one field: document flipH=\(session.edit.geometry.flipHorizontal) "
               + "flipV=\(session.edit.geometry.flipVertical), draft has no flip fields")
         loupe.cancelCropTool()
     }

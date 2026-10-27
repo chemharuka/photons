@@ -68,6 +68,14 @@ public struct InspectorView: View {
         /// amounts, then the curve that reprofiles what came out of both.
         case curve
         case presets
+        /// 2026-10-27: 裁切 — the 变换 workspace's **first** card.
+        ///
+        /// It is a `Section` like every other card (「`Section` 仍然是唯一的卡片清单」), and it is the
+        /// only one the 变换 workspace claims. Its position in `allCases` is after 预设 and before 蒙版
+        /// for one reason: 蒙版 has to stay the last card of the enum (`DecoderModelCardTests` holds
+        /// that, and the panel's own order says the same), while 裁切 belongs to a workspace of its own
+        /// and is therefore invisible in 调整 either way.
+        case crop
         case masks
 
         public var id: String { rawValue }
@@ -82,6 +90,7 @@ public struct InspectorView: View {
             case .detail: return "细节"
             case .curve: return "曲线"
             case .presets: return "预设"
+            case .crop: return "裁切"
             case .masks: return "蒙版"
             }
         }
@@ -254,6 +263,10 @@ public struct InspectorView: View {
             curveCard
         case .presets:
             PresetPanel(session: session)
+        case .crop:
+            // 2026-10-27: 变换工作区的第一张卡 —— 比例 / 角度 / 翻转 / 九宫格 / 应用取消，卡头一个直角尺
+            // 按钮进出裁切模式。卡本身在 `TransformPanel.swift`（同一套行样式，`sliderRow` 一字未改）。
+            cropTransformCard
         case .masks:
             MaskListPanel(session: session)
         }
@@ -739,26 +752,16 @@ public struct InspectorView: View {
     /// `reset` is 派单 047's group verb: when it is given, **double-clicking the title** puts the whole
     /// card back to its defaults in one snapshot (`PanelResets.group(_:)`). `nil` leaves the title a
     /// plain title — the histogram, 信息, 预设 and 蒙版 cards have no "default" to go back to.
+    ///
+    /// The chrome itself lives in `InspectorCardShell`, because one card (裁切, `TransformPanel.swift`)
+    /// carries an **accessory in its header** — the ruler button that enters 裁切 mode — and a second
+    /// copy of the glass/hairline/inset chain is exactly how two cards start to look different.
     private func card<Content: View>(_ title: String,
                                      reset: (() -> Void)? = nil,
-                                     @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.primary)
-                .modifier(ResetOnDoubleClick(action: reset, help: Self.resetGroupHelp))
+                                     @ViewBuilder _ content: @escaping () -> Content) -> some View {
+        InspectorCardShell(title: title, reset: reset, accessory: { EmptyView() }) {
             content()
         }
-        .padding(.horizontal, WorkspaceLayout.cardInsetH)
-        .padding(.vertical, WorkspaceLayout.cardInsetV)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Small widget container: glass here, matte everywhere else (§2b item 5).
-        .background(.regularMaterial,
-                    in: RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 
     /// A **render** row (曝光 / 对比 / 自然饱和 …): what 046 calls a `.knob` parameter, because a tone
@@ -918,19 +921,23 @@ public struct InspectorView: View {
     /// There is deliberately **no `step:` parameter**. SwiftUI's `Slider` draws tick marks the moment
     /// it is handed one, and 046 forbids ticks on every slider; any quantization belongs to the model
     /// (`DetailSettings.setPosition` rounds to 1 unit).
-    private func sliderRow(_ title: String,
-                           _ value: Binding<Double>,
-                           _ range: ClosedRange<Double>,
-                           _ format: String,
-                           shape: SliderShape = .knob,
-                           style: SliderRowStyle = .standard,
-                           decimals: Int = 0,
-                           rounding: SliderRounding = .asIs,
-                           editable: Bool = true,
-                           enabled: Bool = true,
-                           accessibilityID: String? = nil,
-                           onReset: @escaping () -> Void,
-                           onEditingChanged: @escaping (Bool) -> Void) -> some View {
+    ///
+    /// `internal`, not `private`: the 裁切 card (`TransformPanel.swift`) is the panel's second caller
+    /// and must draw the **same** row — a card that built its own label/number/slider chain is exactly
+    /// the 040 bug (「细节卡的样式和其他不一致」) coming back under a new name.
+    func sliderRow(_ title: String,
+                   _ value: Binding<Double>,
+                   _ range: ClosedRange<Double>,
+                   _ format: String,
+                   shape: SliderShape = .knob,
+                   style: SliderRowStyle = .standard,
+                   decimals: Int = 0,
+                   rounding: SliderRounding = .asIs,
+                   editable: Bool = true,
+                   enabled: Bool = true,
+                   accessibilityID: String? = nil,
+                   onReset: @escaping () -> Void,
+                   onEditingChanged: @escaping (Bool) -> Void) -> some View {
         VStack(alignment: .leading, spacing: style.rowSpacing) {
             HStack(spacing: style.headSpacing) {
                 Text(title)
@@ -1313,7 +1320,10 @@ public struct InspectorView: View {
     private var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
 
     private static let resetParameterHelp = "双击复位此参数"
-    private static let resetGroupHelp = "双击整组复位"
+    /// 047's group verb's tooltip. `internal` (not `private`) because `InspectorCardShell` — the card
+    /// chrome every card is built with — lives at file scope (the 裁切 card's header accessory needs the
+    /// same title row), and one string is better than two that can drift.
+    static let resetGroupHelp = "双击整组复位"
 
     /// Double-click on a card's title: the whole card back to its defaults, in one snapshot.
     private func resetGroup(_ group: PanelResets.Group) {
@@ -1380,6 +1390,58 @@ public struct DetailCardContent: Equatable, Sendable {
             Row(axis: $0, title: $0.title, range: $0.range,
                 format: $0.format, step: $0.step, shape: .bar)
         })
+}
+
+/// The panel's **card chrome**: glass, hairline, insets, and a title row with an optional accessory.
+///
+/// One definition, used by both `InspectorView.card(_:reset:_:)` (accessory = `EmptyView`) and the
+/// 裁切 card (`TransformPanel.swift`), whose header carries the 直角尺 button that enters 裁切 mode.
+/// A second copy of this chain — the four paddings, the material, the 9 pt corner, the 8 % hairline —
+/// is how two cards in the same column start to look like two different panels.
+///
+/// The title keeps 047's double-click verb (`ResetOnDoubleClick`) when a `reset` is given, so a card
+/// with an accessory cannot accidentally lose the group reset.
+struct InspectorCardShell<Accessory: View, Content: View>: View {
+
+    let title: String
+    var reset: (() -> Void)?
+
+    private let accessory: () -> Accessory
+    private let content: () -> Content
+
+    init(title: String,
+         reset: (() -> Void)? = nil,
+         @ViewBuilder accessory: @escaping () -> Accessory,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.reset = reset
+        self.accessory = accessory
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))
+                Spacer(minLength: 0)
+                accessory()
+            }
+            content()
+        }
+        .padding(.horizontal, WorkspaceLayout.cardInsetH)
+        .padding(.vertical, WorkspaceLayout.cardInsetV)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Small widget container: glass here, matte everywhere else (§2b item 5).
+        .background(.regularMaterial,
+                    in: RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
 }
 
 /// Double-click on a row's label = back to that slider's default (派单 040 / 047).
@@ -1971,6 +2033,11 @@ public struct PanelResets {
 ///
 /// 缩放控制条 is **not** in here: it lives on the canvas (`ZoomGlassSlider`), which is why §E4 can keep
 /// it live without weakening §E1.
+///
+/// 2026-10-27 — the *decision* of when to gate moved to `WorkspaceRootView.updateInspectorGate()`,
+/// because it now has two inputs: the crop mode and the workspace. 变换 is exempt (that card **is** the
+/// crop tool's controls — the 直角尺 button, 比例, 角度, 应用/取消), every other workspace is gated
+/// exactly as §E1 measured. This class only implements one bool.
 public final class InspectorHostingView: NSHostingView<InspectorView> {
 
     /// True while 裁切 mode is on. Set from the workspace, which owns both halves.

@@ -17,8 +17,8 @@ import SwiftUI
 ///
 /// | 工作区 | 卡片 | 状态 |
 /// |---|---|---|
-/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设 / Decode | 既有卡片，全在这里 |
-/// | 变换 `transform` | — | 旋转 / 裁切 / 校正 **还不是检查器卡片**，空着 |
+/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 预设 | 既有卡片，全在这里 |
+/// | 变换 `transform` | 裁切 | 2026-10-27：裁切卡搬进了这个工作区（比例 / 角度 / 翻转 / 九宫格 / 应用取消） |
 /// | 色彩 `colour` | — | HSL **尚未实现**，空着 |
 /// | 蒙版 `masks` | 蒙版 | 既有的蒙版卡 |
 /// | 历史记录 `history` | — | **尚未实现**，空着 |
@@ -29,7 +29,8 @@ import SwiftUI
 public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Sendable {
     /// 调整 — the default, and the panel as it has always been.
     case adjust
-    /// 变换 — 旋转 / 裁切 / 校正. Empty: those three are canvas tools today, not cards.
+    /// 变换 — 裁切（2026-10-27）. The crop card is the workspace's first and only card: 旋转 is the
+    /// draft's 角度 row inside it, 校正 still does not exist (no field, no stage, no row).
     case transform
     /// 色彩 — HSL. Empty: not implemented yet.
     case colour
@@ -80,7 +81,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // them here: 「以及既有的 预设 卡也留在这里」).
             return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve, .presets]
         case .transform:
-            return []
+            // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
+            // card the workspace has today, and it is a `Section` like every other card, so the order
+            // still comes from `Section.allCases` and this table only decides membership.
+            return [.crop]
         case .colour:
             return []
         case .masks:
@@ -94,12 +98,15 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     /// 「先空着」, and the view draws no cards, no placeholder and no message.
     public var hasCards: Bool { !cards.isEmpty }
 
-    /// What the empty workspaces are *for* — the controls that will live there once they exist. Used
+    /// What an empty workspace is *for* — the controls that will live there once they exist. Used
     /// only for the tooltip/accessibility label (a tooltip is not a placeholder on screen), so the
-    /// button can say 「变换：旋转、裁切、校正（尚未实现）」 instead of a bare icon with no story.
+    /// button can say 「色彩：HSL（尚未实现）」 instead of a bare icon with no story.
+    ///
+    /// 变换 是空的：2026-10-27 起它有卡片（裁切），所以这里不再列「旋转 / 裁切 / 校正」——那三个里
+    /// 旋转已经是裁切卡的「角度」行，校正仍不存在，但**工作区本身不空了**。
     public var plannedControls: [String] {
         switch self {
-        case .transform: return ["旋转", "裁切", "校正"]
+        case .transform: return []
         case .colour: return ["HSL"]
         case .history: return ["历史记录"]
         case .adjust, .masks: return []
@@ -131,6 +138,14 @@ public final class InspectorWorkspaceState {
     /// The workspace the panel is showing. **View state**: never in the document, never in history.
     public var selection: InspectorWorkspace
 
+    /// Called **after** `selection` changes, with the new workspace.
+    ///
+    /// One listener exists, and it is not about the panel's contents: `WorkspaceRootView` re-decides
+    /// the 裁切 event gate with it. 072 §E1 makes the panel inert while the crop frame owns the canvas,
+    /// **except** in 变换 — that workspace *is* the crop tool's own panel (the ruler button, 应用/取消),
+    /// so it has to stay live while the tool is on, and the gate therefore depends on both facts.
+    public var onSelectionChange: ((InspectorWorkspace) -> Void)?
+
     public init(_ selection: InspectorWorkspace = .adjust) {
         self.selection = selection
     }
@@ -138,6 +153,7 @@ public final class InspectorWorkspaceState {
     /// The button's action. One assignment, nothing else — no `applyEdit`, no `commitEdit`.
     public func select(_ workspace: InspectorWorkspace) {
         selection = workspace
+        onSelectionChange?(workspace)
     }
 }
 
