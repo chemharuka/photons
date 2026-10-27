@@ -19,8 +19,11 @@ final class DetailSectionTests: XCTestCase {
         guard let detail = titles.firstIndex(of: "细节") else {
             return XCTFail("no 细节 card in \(titles)")
         }
-        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 1 }, detail,
-                       "细节 belongs directly under Color; got \(titles)")
+        // 076: HSL sits between Color and 细节 (it is the 色彩 workspace's card, declared next to
+        // Color), so 细节 is now two rows under Color rather than one.
+        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 1 }, detail,
+                       "细节 belongs directly under HSL, which belongs under Color; got \(titles)")
+        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 2 }, detail)
         XCTAssertEqual(titles.filter { $0 == "细节" }.count, 1, "one 细节 card, not two")
 
         // The pinned head is untouched, and the new card scrolls with the rest.

@@ -60,6 +60,12 @@ public struct InspectorView: View {
         case blackLevel
         case light
         case color
+        /// 派单 076: **HSL** — the eight colour bands, on OKLCh, in the 色彩 workspace.
+        ///
+        /// Its own card rather than six more rows under Color: the bands are a *selector plus three
+        /// sliders*, not a list of independent parameters, and the 色彩 workspace (073) exists to give
+        /// them a home of their own. It is the same 24 document numbers Lightroom's HSL panel writes.
+        case hsl
         /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
         /// are the same panel in Lightroom, and below the tone controls because they act on the
         /// decoded pixels rather than on the render.
@@ -79,6 +85,7 @@ public struct InspectorView: View {
             case .light: return "Light"
             case .blackLevel: return "黑电平"
             case .color: return "Color"
+            case .hsl: return "HSL"
             case .detail: return "细节"
             case .curve: return "曲线"
             case .presets: return "预设"
@@ -248,6 +255,8 @@ public struct InspectorView: View {
             blackLevelCard
         case .color:
             colorCard
+        case .hsl:
+            hslCard
         case .detail:
             detailCard
         case .curve:
@@ -485,6 +494,66 @@ public struct InspectorView: View {
                 }
             }
         }
+    }
+
+    /// 派单 076 — **HSL**: eight band selectors, and the selected band's three sliders.
+    ///
+    /// The card is one idea in two rows: *which colour am I talking about* (the eight buttons, each
+    /// drawn in the colour it names), and *what should happen to it* (色相 / 饱和 / 亮度, in the
+    /// `HSLAxis` table). Everything about a row — typeable number, blue knob, double-click reset — is
+    /// 047's contract, inherited from `sliderRow` rather than re-implemented here; the only thing this
+    /// card adds is that a row's *target* is `color.bands[selected]`.
+    ///
+    /// **Blue** on purpose: `.knob` is the panel's "acts on the already-decoded render" class (060),
+    /// which is exactly what S3.6 does — it runs in the display-referred domain, after the tone map.
+    /// Yellow would claim a decode parameter and red a scene-linear one; neither is true.
+    ///
+    /// Selection is **view state** (`InspectorWorkspaceState.hslBand`): picking 绿 writes no document,
+    /// takes no snapshot and moves no revision. The three sliders write through `applyEdit` on drag and
+    /// commit once on release, like every other row.
+    private var hslCard: some View {
+        let band = min(max(workspaces.hslBand, 0), ColorGroup.bandCount - 1)
+        return card(Section.hsl.title, reset: { resets.hsl() }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HSLBandStrip(selection: band) { workspaces.selectBand($0) }
+                ForEach(HSLAxis.allCases, id: \.rawValue) { axis in
+                    sliderRow(axis.title, hslBinding(axis, band: band), HSLAxis.range, "%.0f",
+                              shape: .knob,
+                              decimals: 0,
+                              rounding: .outward,
+                              editable: true,
+                              accessibilityID: "inspector.hsl.\(axis.rawValue)",
+                              onReset: { resets.hslField(band, axis) }) { editing in
+                        if !editing { session.commitEdit() }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `color.bands[band].hue/saturation/luminance` as a slider binding.
+    ///
+    /// A closure, not a key path: the band index is view state, and `\EditModel.color.bands[i].hue`
+    /// cannot be written as a `WritableKeyPath`. The read side is the document's own value (no draft
+    /// copy), so the number on screen is the number the kernel is handed.
+    private func hslBinding(_ axis: HSLAxis, band: Int) -> Binding<Double> {
+        Binding(get: {
+            guard session.edit.color.bands.indices.contains(band) else { return 0 }
+            switch axis {
+            case .hue: return session.edit.color.bands[band].hue
+            case .saturation: return session.edit.color.bands[band].saturation
+            case .luminance: return session.edit.color.bands[band].luminance
+            }
+        }, set: { value in
+            session.applyEdit { model in
+                guard model.color.bands.indices.contains(band) else { return }
+                switch axis {
+                case .hue: model.color.bands[band].hue = value
+                case .saturation: model.color.bands[band].saturation = value
+                case .luminance: model.color.bands[band].luminance = value
+                }
+            }
+        })
     }
 
     /// 派单 031 / 040 + 解码模型 (owner, 2026-10-27): 降噪 / 色彩降噪 / 细节 / 锐化, all four assigned to
@@ -1904,6 +1973,41 @@ public struct PanelResets {
 
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
     @discardableResult
+    public func hsl() -> Bool {
+        guard session.edit.color.hasBands else { return false }
+        session.applyEdit { $0.color.bands = ColorGroup.identityBands }
+        return session.commitEdit(label: InspectorView.Section.hsl.title)
+    }
+
+    /// Double-click on one of the HSL card's three rows: **that** band's field back to 0 (its own
+    /// default — `HSLBand()` is all zeros, which is "this band does nothing"), one snapshot.
+    ///
+    /// The band index is view state, so it is an argument here rather than something this type could
+    /// look up: the row the user double-clicked is the row the panel drew.
+    @discardableResult
+    public func hslField(_ band: Int, _ axis: HSLAxis) -> Bool {
+        guard session.edit.color.bands.indices.contains(band) else { return false }
+        let current = session.edit.color.bands[band]
+        let already: Bool
+        switch axis {
+        case .hue: already = current.hue == 0
+        case .saturation: already = current.saturation == 0
+        case .luminance: already = current.luminance == 0
+        }
+        guard !already else { return false }
+        session.applyEdit { model in
+            guard model.color.bands.indices.contains(band) else { return }
+            switch axis {
+            case .hue: model.color.bands[band].hue = 0
+            case .saturation: model.color.bands[band].saturation = 0
+            case .luminance: model.color.bands[band].luminance = 0
+            }
+        }
+        return session.commitEdit(label: axis.title)
+    }
+
+    /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
+    @discardableResult
     public func group(_ group: Group) -> Bool {
         switch group {
         case .whiteBalance:
@@ -1934,8 +2038,16 @@ public struct PanelResets {
             return session.commitEdit(label: group.title)
 
         case .color:
-            guard session.edit.color != ColorGroup.identity else { return false }
-            session.applyEdit { $0.color = .identity }
+            // 076: **vibrance and saturation only.** The eight bands are the HSL card's (S3.6), with
+            // their own title reset (`resets.hsl()`); letting this verb write them would make a
+            // double-click on Color undo work done on another card.
+            guard session.edit.color.vibrance != 0 || session.edit.color.saturation != 0 else {
+                return false
+            }
+            session.applyEdit { model in
+                model.color.vibrance = 0
+                model.color.saturation = 0
+            }
             return session.commitEdit(label: group.title)
 
         case .detail:

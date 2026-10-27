@@ -128,6 +128,7 @@ public struct RenderInputs: Sendable, Equatable {
     public var key: String {
         RenderStage.order
             .filter { $0 != .localColor || edit.hasLocalColor }
+            .filter { $0 != .hsl || edit.hasHSL }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }

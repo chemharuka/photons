@@ -80,31 +80,7 @@ static inline float3 hsl_scale_saturation(float3 hsl, float units) {
     return hsl;
 }
 
-/// The eight overlapping hue-band weights, summed into one (hue, saturation, luminance) shift in
-/// **slider units**.
-///
-/// Each band's weight is a smooth tent of ±45° around its centre, so moving one band cannot produce
-/// a seam against its neighbour; overlapping weights are renormalised when they sum past 1, so a
-/// pixel between two centres gets a blend rather than double the shift. `bands[i]` is
-/// (hue, saturation, luminance, centreDegrees).
-///
-/// A grey pixel (`saturation ≤ 1e-4`) has no hue to speak of, so it gets no shift at all — the loop
-/// is skipped rather than weighted to zero, because `hueDeg` of a neutral pixel is meaningless.
-static inline float3 hsl_band_shift(float hueDeg, float saturation, constant float4 *bands) {
-    float3 shift = float3(0.0);
-    float weightSum = 0.0;
-    if (saturation > 1e-4) {
-        for (int i = 0; i < 8; ++i) {
-            float centre = bands[i].w;
-            float d = abs(hueDeg - centre);
-            d = min(d, 360.0 - d);
-            float w = 1.0 - smoothstep(0.0, 45.0, d);
-            shift += w * bands[i].xyz;
-            weightSum += w;
-        }
-        if (weightSum > 1.0) {
-            shift /= weightSum;
-        }
-    }
-    return shift;
-}
+// **The eight hue bands left this include in 派单 076.** They are S3.6's (`s3_6_hsl.metal`), they run
+// in OKLCh on display-referred data, and their weights are a partition of unity — three things this
+// file's HSL cannot express. What remains here is exactly what S3 and S3.5 share: one RGB↔HSL pair
+// and the two slider mappings, so a full-canvas mask still equals the global control.

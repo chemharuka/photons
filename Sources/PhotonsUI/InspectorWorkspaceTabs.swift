@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import PhotonsCore
 
 // MARK: - 派单 073: the inspector's workspaces
 
@@ -31,7 +32,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     case adjust
     /// 变换 — 旋转 / 裁切 / 校正. Empty: those three are canvas tools today, not cards.
     case transform
-    /// 色彩 — HSL. Empty: not implemented yet.
+    /// 色彩 — HSL. 076: the eight bands, on OKLCh.
     case colour
     /// 蒙版 — the existing mask card, on its own.
     case masks
@@ -82,7 +83,8 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         case .transform:
             return []
         case .colour:
-            return []
+            // 076: HSL — the one card this workspace exists for.
+            return [.hsl]
         case .masks:
             return [.masks]
         case .history:
@@ -100,7 +102,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     public var plannedControls: [String] {
         switch self {
         case .transform: return ["旋转", "裁切", "校正"]
-        case .colour: return ["HSL"]
+        case .colour: return []
         case .history: return ["历史记录"]
         case .adjust, .masks: return []
         }
@@ -131,13 +133,27 @@ public final class InspectorWorkspaceState {
     /// The workspace the panel is showing. **View state**: never in the document, never in history.
     public var selection: InspectorWorkspace
 
-    public init(_ selection: InspectorWorkspace = .adjust) {
+    /// Which of the eight HSL bands the 色彩 card's three sliders are editing (派单 076).
+    ///
+    /// View state for the same reason the workspace is: "I am working on the greens" is not a fact
+    /// about the photograph, so it is not in `EditModel`, not in `EditHistory`, and switching bands
+    /// writes nothing. It lives here (rather than in `@State` inside the view) so a hosted panel can be
+    /// driven — otherwise 「选第 4 个色带后三根滑杆写的是第 4 个」 would be unfalsifiable.
+    public var hslBand: Int = 0
+
+    public init(_ selection: InspectorWorkspace = .adjust, hslBand: Int = 0) {
         self.selection = selection
+        self.hslBand = hslBand
     }
 
     /// The button's action. One assignment, nothing else — no `applyEdit`, no `commitEdit`.
     public func select(_ workspace: InspectorWorkspace) {
         selection = workspace
+    }
+
+    /// The band selector's action. Clamped, and — like `select` — never a document write.
+    public func selectBand(_ index: Int) {
+        hslBand = min(max(index, 0), ColorGroup.bandCount - 1)
     }
 }
 
