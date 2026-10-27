@@ -105,9 +105,9 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(claimed, claimable,
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
-        // 卡片枚举：Decode 删除后 9 张；裁切（变换）与 HSL（色彩）各加一张 → 10 张。
+        // 卡片枚举：Decode 删除后 9 张；裁切（变换）与 HSL（色彩）各加一张 → 11 张。
         // 直方图仍排第一、蒙版仍排最后 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 10)
+        XCTAssertEqual(InspectorView.Section.allCases.count, 11)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         XCTAssertEqual(InspectorView.sectionTitles.last, "蒙版")
     }
