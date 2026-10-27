@@ -113,7 +113,7 @@ public enum CurveLUT {
     /// the identity.
     public static func blackPoints(_ group: CurveGroup) -> [Float] {
         group.tables.map { points in
-            let xs = points.map { min(max($0.x, 0), 1) }
+            let xs = points.map(\.u)
             return Float(xs.min() ?? 0)
         }
     }
@@ -144,13 +144,13 @@ public enum CurveLUT {
     public static func buildOne(_ rawPoints: [CurvePoint], size requested: Int? = nil) -> [Float] {
         let tableSize = max(2, requested ?? size)
         let identity = (0..<tableSize).map { Float($0) / Float(tableSize - 1) }
-        // Normalize: clamp into the unit square, sort by x, drop duplicate x.
-        var pts = rawPoints
-            .map { CurvePoint(min(max($0.x, 0), 1), min(max($0.y, 0), 1)) }
-            .sorted { $0.x < $1.x }
+        // Sort by x and drop duplicate x. 069: the coordinates are grid cells, so "the same x" is
+        // an integer equality rather than a tolerance, and the last point written at a cell wins
+        // (the newest hand edit) exactly as the old 1e-6 window did.
+        var pts = rawPoints.sorted { $0.x < $1.x }
         var deduped: [CurvePoint] = []
         for p in pts {
-            if let last = deduped.last, abs(last.x - p.x) < 1e-6 {
+            if let last = deduped.last, last.x == p.x {
                 deduped[deduped.count - 1] = p
             } else {
                 deduped.append(p)
@@ -161,9 +161,9 @@ public enum CurveLUT {
         guard pts.count >= 2 else { return identity }
 
         let n = pts.count
-        let h = (0..<(n - 1)).map { pts[$0 + 1].x - pts[$0].x }
+        let h = (0..<(n - 1)).map { pts[$0 + 1].u - pts[$0].u }
         guard h.allSatisfy({ $0 > 1e-9 }) else { return identity }
-        let delta = (0..<(n - 1)).map { (pts[$0 + 1].y - pts[$0].y) / h[$0] }
+        let delta = (0..<(n - 1)).map { (pts[$0 + 1].v - pts[$0].v) / h[$0] }
 
         // Fritsch–Carlson tangents.
         var m = [Double](repeating: 0, count: n)
@@ -193,16 +193,16 @@ public enum CurveLUT {
         var seg = 0
         for i in 0..<tableSize {
             let x = Double(i) / Double(tableSize - 1)
-            if x <= pts[0].x {
-                out[i] = Float(pts[0].y)
+            if x <= pts[0].u {
+                out[i] = Float(pts[0].v)
                 continue
             }
-            if x >= pts[n - 1].x {
-                out[i] = Float(pts[n - 1].y)
+            if x >= pts[n - 1].u {
+                out[i] = Float(pts[n - 1].v)
                 continue
             }
-            while seg < n - 2 && x > pts[seg + 1].x { seg += 1 }
-            let t = (x - pts[seg].x) / h[seg]
+            while seg < n - 2 && x > pts[seg + 1].u { seg += 1 }
+            let t = (x - pts[seg].u) / h[seg]
             let t2 = t * t
             let t3 = t2 * t
             let h00 = 2 * t3 - 3 * t2 + 1
@@ -211,8 +211,8 @@ public enum CurveLUT {
             let h11 = t3 - t2
             // Split into two sums: one expression of six products is past what the type checker
             // will do in reasonable time.
-            let a = h00 * pts[seg].y + h10 * h[seg] * m[seg]
-            let b = h01 * pts[seg + 1].y + h11 * h[seg] * m[seg + 1]
+            let a = h00 * pts[seg].v + h10 * h[seg] * m[seg]
+            let b = h01 * pts[seg + 1].v + h11 * h[seg] * m[seg + 1]
             let y = a + b
             out[i] = Float(min(max(y, 0), 1))
         }

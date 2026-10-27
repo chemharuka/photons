@@ -696,7 +696,7 @@ final class LocalColorStageTests: XCTestCase {
         let graph = try makeGraph(image, identity: "056-hash-probe")
         var edit = EditModel.neutral
         edit.light.contrast = 20
-        edit.curve.white = [CurvePoint(0, 0), CurvePoint(0.4, 0.45), CurvePoint(1, 1)]
+        edit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.4, v: 0.45), CurvePoint(u: 1, v: 1)]
         edit.color.saturation = 12
         edit.effects.vignetteAmount = -30
         edit.masks = [fullCanvasMask(LocalAdjustments(amount: 100, exposure: 0.6, contrast: 10))]

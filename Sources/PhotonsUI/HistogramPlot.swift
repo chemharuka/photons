@@ -81,7 +81,7 @@ public struct HistogramAxis: Equatable {
 
 // MARK: - the pointer's reading (x → bin), and its text
 //
-// 派单 010: the footnote the owner deleted is replaced by a **hover readout** — what the x under the
+// 派单 010: the grey caption line the owner deleted is replaced by a **hover readout** — what the x under the
 // cursor means, and how many pixels are in that bin. The two halves are separate on purpose:
 //
 //   · **`hoverReading(atX:)` is geometry and nothing else.** It turns a point into

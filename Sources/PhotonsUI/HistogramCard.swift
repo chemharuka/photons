@@ -54,7 +54,7 @@ import PhotonsCore
 //   · **The region is the picture, always.** There is no ROI any more: the measurement renders the
 //     whole picture at its own thumbnail scale, so a `fit` frame's matte bars cannot reach bin 0 and a
 //     1:1 window cannot measure only the window.
-//   · **The deleted footnote is now the pointer's reading** (010, 2026-10-26). The owner removed the
+//   · **The deleted caption line is now the pointer's reading** (010, 2026-10-26). The owner removed the
 //     painted 「采样 N px · 直方图 256+256 档」 line; the space it left carries a hover readout instead
 //     — the code (0–255) or the tail's stop (`+1.00 档 (2.0×)`, per "＋1 档 = 2×") on the left, and
 //     that bin's R/G/B counts on the right, in the *same* 9.5 pt semibold digits as 过白/削顶. It is
@@ -269,7 +269,7 @@ public final class HistogramCardView: NSView {
         updateAccessibilityHelp()
     }
 
-    /// VoiceOver still hears how the x axis is binned. The painted footnote that used to carry this
+    /// VoiceOver still hears how the x axis is binned. The painted caption that used to carry this
     /// sentence was removed at the owner's request (2026-10-26) — it was "采样 N px · 直方图 256+N 档",
     /// and the owner does not want that line on screen — so the binning is now spoken, not painted.
     ///
@@ -788,7 +788,7 @@ public final class HistogramCardView: NSView {
 
     // MARK: the row's counts half (018 → 023: one slot, two contents, one height)
     //
-    // This is the space the owner deleted as a footnote (「采样 N px · 直方图 256+256 档」), and it is now
+    // This is the space the owner deleted as a grey caption line (「采样 N px · 直方图 256+256 档」), and it is now
     // the pointer's reading — one line, and a height that is the *same* number in every state
     // (「保留这行的高度不要乱动」):
     //
@@ -873,13 +873,13 @@ extension HistogramCardView: PointerReadoutTarget {}
 // MARK: - the two labels that had to become readable
 //
 // The complaint (2026-10-26): the per-channel percentages were "grey, not obvious" and the
-// sample/bin footnote "even blacker, invisible". Both were *semantic* label colours, and those are
+// sample/bin caption "even blacker, invisible". Both were *semantic* label colours, and those are
 // alpha tints of black/white — 26 % and 10 % — so they read as texture, not as text:
 //
 // | | aqua (over #ECECEC) | darkAqua (over #1E1E1E) |
 // |---|---|---|
 // | `.tertiaryLabelColor` (percentages) | **1.86 : 1** | **2.26 : 1** |
-// | `.quaternaryLabelColor` (footnote)  | **1.24 : 1** | **1.34 : 1** |
+// | `.quaternaryLabelColor` (caption)   | **1.24 : 1** | **1.34 : 1** |
 //
 // WCAG 2.1 SC 1.4.3 wants 4.5 : 1 for text this size, so neither was near it. The fix is a pair of
 // **opaque** colours resolved per appearance, and the arithmetic that proves them is here rather

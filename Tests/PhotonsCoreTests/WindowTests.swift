@@ -71,7 +71,7 @@ final class WindowTests: XCTestCase {
         edit.light = LightGroup(exposure: 0.75, contrast: 20, highlights: -30, shadows: 15,
                                 whites: 10, blacks: -5, temperature: 5200, tint: 12,
                                 highlightRecovery: 0.4)
-        edit.curve = CurveGroup(white: [CurvePoint(0, 0), CurvePoint(0.3, 0.25), CurvePoint(1, 1)])
+        edit.curve = CurveGroup(white: [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.3, v: 0.25), CurvePoint(u: 1, v: 1)])
         edit.color = ColorGroup(vibrance: 15, saturation: -10, bands: ColorGroup.identityBands)
         edit.color.bands[3].hue = 20
         edit.effects = EffectsGroup(vignetteAmount: -40, vignetteMidpoint: 45,

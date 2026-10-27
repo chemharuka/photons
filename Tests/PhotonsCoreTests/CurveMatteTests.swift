@@ -144,7 +144,7 @@ final class CurveMatteTests: XCTestCase {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    /// `CurvePoint(0, 0.3) → (1, 1)`: the drag that would light the bars up, if nothing guarded them.
+    /// `CurvePoint(u: 0, v: 0.3) → (1, 1)`: the drag that would light the bars up, if nothing guarded them.
     ///
     /// 030 turned the y axis into the axis coordinate `u` (`HDRCurveAxis`), so the lift has to be
     /// expressed in `u`, not in linear light: since 062 the left half of `u` is the display encoding,
@@ -153,7 +153,7 @@ final class CurveMatteTests: XCTestCase {
     /// visible on the letterbox than the old `f(0) = 0.1` was, which is why the guards are still the
     /// point of this file.
     private var liftedBlackCurve: CurveGroup {
-        CurveGroup(white: [CurvePoint(0, 0.3), CurvePoint(1, 1)])
+        CurveGroup(white: [CurvePoint(u: 0, v: 0.3), CurvePoint(u: 1, v: 1)])
     }
 
     // MARK: - the matte
@@ -330,7 +330,7 @@ final class CurveMatteTests: XCTestCase {
     // to S1.7) is invisible to them — that is the strongest pixel claim in this file, and it holds.
     //
     // The two curve hashes were re-recorded for 030 because the fixture curve is now expressed in the
-    // axis coordinate (`CurvePoint(0, 0.3)`, see `liftedBlackCurve`): the *same* control points no
+    // axis coordinate (`CurvePoint(u: 0, v: 0.3)`, see `liftedBlackCurve`): the *same* control points no
     // longer mean the same lift, which is exactly what `processVersion` 2 declares. They moved again
     // for 044 (the axis's right end went +6 → +4 EV) and again for 062 (the axis became the
     // histogram's: SDR white at u = 0.5000 instead of 0.7500, so `(0, 0.3)` is display code 0.60 —

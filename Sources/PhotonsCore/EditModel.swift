@@ -95,7 +95,19 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.processVersion = c.val("processVersion", v.processVersion)
         v.geometry = c.val("geometry", v.geometry)
         v.light = c.val("light", v.light)
-        v.curve = c.val("curve", v.curve)
+        // 069: the curve is the one group whose decode can **throw** (a coordinate outside `0…2`), so it
+        // is not read through `val(...)` — that helper swallows errors and would turn "this file says
+        // x = 2.5" into "this file has no curve". A range error propagates; any other malformed curve
+        // still falls back to the identity, as every other group does.
+        if c.contains(AnyCodingKey("curve")) {
+            do {
+                v.curve = try c.decode(CurveGroup.self, forKey: AnyCodingKey("curve"))
+            } catch let error as CurveCoordinateOutOfRange {
+                throw error
+            } catch {
+                v.curve = .identity
+            }
+        }
         v.color = c.val("color", v.color)
         v.detail = c.val("detail", v.detail)
         v.detailSettings = c.val("detailSettings", v.detailSettings)
@@ -635,10 +647,70 @@ public struct LevelPair: Sendable, Equatable {
 ///     SDR white) and the right half is +0…+4 EV (`u = 1`);
 ///   · y is the same coordinate, i.e. the curve answers "map this u to that u".
 ///
-/// The point lists keep their shape, their 0…1 range and `CurvePoint.linear` — only the meaning of
-/// the y axis changed, which is exactly what `processVersion` 2 records (§10.1). Old documents keep
+/// The point lists keep their shape and `CurvePoint.linear` — only the meaning of the y axis
+/// changed, which is exactly what `processVersion` 2 records (§10.1). (069 moved the *storage* to
+/// integer grid cells, `u = x/511`; the coordinate the table sees is still 0…1 and unchanged.) Old documents keep
 /// their control points and get a different rendering; that is the declared migration, not a bug.
 public struct CurveGroup: Sendable, Equatable, Codable {
+    /// What the numbers in this group mean, written with every document (派单 069).
+    ///
+    /// ```json
+    /// "curve": { "format": {"version":1,"type":"int","max":511,"domain":"hdr"},
+    ///            "white": [{"x":0,"y":0},{"x":112,"y":87},…], "red": …, "green": …, "blue": … }
+    /// ```
+    ///
+    /// **Why `domain: "hdr"` matters more than the other three fields.** A curve point is a coordinate
+    /// on the *axis*, not a display value: since 030 the axis is `HDRCurveAxis` (log-light, +0…+4 EV
+    /// above display white, half the card each) and the table it feeds runs at S1.7 on **scene-linear
+    /// HDR** data. A file that said only "0…255" would be describing a display-referred curve and a
+    /// future reader would be entitled to re-interpret the same integers against an SDR axis — a silent
+    /// change of rendering. `domain` is what makes that illegal: the numbers below are HDR-axis
+    /// coordinates, and a reader that works in another domain must convert, not re-read.
+    ///
+    /// **Migration rule (docs/architecture-decisions.md §069).** Any change to what `x`/`y` mean — the
+    /// grid's size, the type, the axis' shape — bumps `version`. A reader that meets a version it does
+    /// not know must not guess (see `CurveGroup.init(from:)`); a reader that meets a known version with
+    /// a different `max` rescales instead of truncating.
+    ///
+    public struct CurveFormat: Sendable, Equatable, Codable {
+        /// `"double"` — the only type version 2 has.
+        public static let doubleType = "double"
+        /// `"hdr"` — the axis the coordinates live on (see the note above).
+        public static let hdrDomain = "hdr"
+
+        /// 2 = `0…2` doubles, `0…1` SDR (code) and `1…2` HDR (EV). 1 = the transient integer grid
+        /// (`0…max` cells) that existed inside this order and never shipped.
+        public var version: Int
+        /// `"double"`. Version 1 wrote `"int"`.
+        public var type: String
+        /// The coordinate's upper bound: `2` for version 2, `511` for version 1.
+        ///
+        /// `max` is **this implementation's** bound, not a property of the formula: `EV = (x − 1)·4`
+        /// keeps working above 2 (2.25 *is* +5 EV), so the day the axis grows to +5 EV the value here
+        /// becomes `2.25` **and `version` goes to 3** — a reader of version 2 may keep assuming a
+        /// two-stop-wide HDR half, and a reader that meets 3 must convert rather than clamp.
+        public var max: Double
+        /// `"hdr"` — the working domain, not a display domain.
+        public var domain: String
+
+        public init(version: Int = 2, type: String = CurveFormat.doubleType,
+                    max: Double = CurvePoint.maximum, domain: String = CurveFormat.hdrDomain) {
+            self.version = version
+            self.type = type
+            self.max = max
+            self.domain = domain
+        }
+
+        /// What this build writes.
+        public static let current = CurveFormat()
+    }
+
+    /// Diagnostics from decoding this group (069): a rescale, a refused future `version`, a `type` that
+    /// is not `int`. **Not** part of the document and not part of `==` — it says how the value arrived,
+    /// not what it is. `EditModel.load` leaves it on the loaded model, so a test, the CLI or a future
+    /// "this file was migrated" notice can read it without a second parse.
+    public var decodeWarnings: [String] = []
+
     /// The luminance curve. Was called `rgb` — and was *not* the composite-per-channel curve that
     /// name suggests: it is a gain on the pixel's luma, which keeps hue and saturation. The old name
     /// is kept as a deprecated alias so the ~12 call sites in tests and export keep compiling, but
@@ -679,22 +751,90 @@ public struct CurveGroup: Sendable, Equatable, Codable {
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = CurveGroup.identity
+        var warnings: [String] = []
+        // 069: the self-describing format block. A document without one predates it, and then the
+        // points are the old `0…1` axis coordinates (`x·2` gets them onto this card).
+        let format = (try? c.decodeIfPresent(CurveFormat.self, forKey: AnyCodingKey("format"))) ?? nil
+        /// One number as it arrived, and what it means.
+        enum Unit {
+            /// Version 2: the coordinate itself, `0…2`.
+            case coordinate
+            /// Version 1 (transient, never shipped): an integer cell `0…max` on a `0…511` grid, which
+            /// was the *axis*, i.e. `0…1`. `x_new = 2·cell/max`.
+            case cells(max: Double)
+            /// No block at all: the pre-069 `0…1` axis coordinate. `x_new = 2·v`.
+            case legacyAxis
+        }
+        var unit = Unit.legacyAxis
+        if let format {
+            if format.version > CurveFormat.current.version {
+                // A future version is **not** guessed at: the curve is dropped to the identity (which
+                // renders, it is just neutral) and the rest of the document loads normally. Refusing
+                // the whole photo because one group cannot be read would be a worse failure.
+                v.decodeWarnings = ["curve.format version \(format.version) > \(CurveFormat.current.version): "
+                                    + "曲线未加载（保持恒等），其余字段照常"]
+                self = v
+                return
+            }
+            unit = format.version <= 1 ? .cells(max: Swift.max(format.max, 1.0)) : .coordinate
+            if format.version >= 2, format.type != CurveFormat.doubleType {
+                warnings.append("curve.format type \"\(format.type)\" 不是 \"double\": 按 0…2 坐标读")
+            }
+            if format.version >= 2, format.max != CurvePoint.maximum {
+                warnings.append("curve.format max \(format.max) ≠ \(CurvePoint.maximum): 按比例换算")
+            }
+        }
+        /// One point as it arrived.
+        struct RawPoint: Decodable {
+            let x: Double
+            let y: Double
+            init(from decoder: any Decoder) throws {
+                let d = try decoder.container(keyedBy: AnyCodingKey.self)
+                x = d.val("x", 0)
+                y = d.val("y", 0)
+            }
+        }
+        func list(_ key: String) throws -> [CurvePoint]? {
+            guard let raw = (try? c.decodeIfPresent([RawPoint].self, forKey: AnyCodingKey(key))) ?? nil else {
+                return nil
+            }
+            let scale: Double
+            switch unit {
+            case .coordinate: scale = 1
+            case .cells(let max): scale = CurvePoint.maximum / Swift.max(max, 1)
+            case .legacyAxis: scale = CurvePoint.maximum
+            }
+            return try raw.map { try CurvePoint(validating: $0.x * scale, $0.y * scale) }
+        }
         // 派单 030 / schema 4: `white` is the stored name; a schema-3 document says `rgb`. One line,
         // and the shape of the point list survives the rename untouched.
-        v.white = c.val("white", c.val("rgb", v.white))
-        v.red = c.val("red", v.red)
-        v.green = c.val("green", v.green)
-        v.blue = c.val("blue", v.blue)
+        v.white = try (list("white") ?? list("rgb")) ?? v.white
+        v.red = try list("red") ?? v.red
+        v.green = try list("green") ?? v.green
+        v.blue = try list("blue") ?? v.blue
+        v.decodeWarnings = warnings
         self = v
     }
 
     /// Only `white` is written: a document must not be able to carry both names.
+    ///
+    /// 069: the `format` block goes first and is written **every** time, so a file always says what its
+    /// numbers mean. The four point lists follow in a fixed order — a fixed order and a fixed key set
+    /// is what makes "write, read, write" byte-identical (`testTheCurveFormatBlockRoundTripsByteForByte`).
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(CurveFormat.current, forKey: AnyCodingKey("format"))
         try c.encode(white, forKey: AnyCodingKey("white"))
         try c.encode(red, forKey: AnyCodingKey("red"))
         try c.encode(green, forKey: AnyCodingKey("green"))
         try c.encode(blue, forKey: AnyCodingKey("blue"))
+    }
+
+    /// Equality is over the four point lists — **not** over `decodeWarnings`, which is a diagnostic of
+    /// how this value arrived, not part of the document. Two documents with the same curve are equal
+    /// whether or not one of them was migrated on the way in.
+    public static func == (a: CurveGroup, b: CurveGroup) -> Bool {
+        a.white == b.white && a.red == b.red && a.green == b.green && a.blue == b.blue
     }
 
     /// The four point lists in table order — W, R, G, B — which is the order the GPU buffer has.
@@ -713,15 +853,100 @@ public struct CurveGroup: Sendable, Equatable, Codable {
     }
 }
 
+/// A curve coordinate outside the card (`0…2`) — thrown, never clamped, on the paths that read a
+/// document or take an API value (派单 069).
+///
+/// The distinction is deliberate and load-bearing:
+///
+///   · **the interaction** clamps (`CurvePoint.clamped`), because a pointer cannot leave the plot;
+///   · **a document or a caller** is told it is wrong, because silently moving a point and silently
+///     dropping it are both ways to render a photo the file does not describe. `2.25` is the case this
+///     exists for: it will mean **+5 EV** when the axis grows (the formula is `EV = (x − 1)·4`, not
+///     "0…2 normalised to 0…4"), and today it is out of range rather than wrong.
+public struct CurveCoordinateOutOfRange: Error, Equatable, CustomStringConvertible {
+    public let value: Double
+    /// `"x"` or `"y"`.
+    public let axis: String
+
+    public init(value: Double, axis: String) {
+        self.value = value
+        self.axis = axis
+    }
+
+    public var description: String {
+        "曲线坐标 \(axis) = \(value) 超出 0…\(CurvePoint.maximum)"
+            + "（当前只支持到 +4 EV；将来支持 +5 EV 时把最大值改成 2.25 并升 curve.format version）"
+    }
+}
+
 public struct CurvePoint: Sendable, Equatable, Codable, Hashable {
+    /// `x = 1` — display white. Below it the coordinate is a display code, above it an EV.
+    public static let sdrBoundary = 1.0
+    /// `x = 2` — +4 EV (the histogram's own tail, `HDRCurveAxis` 062). Fixed, never the display's
+    /// headroom: the axis ends at +4 EV whatever the panel can show.
+    public static let maximum = 2.0
+
+    /// The input coordinate, `0…2`: **`0…1` is SDR** (`code = x·255`, `1` = display white) and
+    /// **`1…2` is HDR** (`EV = (x − 1)·4`, `2` = +4 EV). 派单 069.
+    ///
+    /// Why two units in one number: the card's axis is the histogram's own (062) and the histogram's
+    /// left half is display codes while its right half is stops. Splitting the field at `x = 1` makes
+    /// the number readable on its own — `0.5` *is* code 128, `1.5` *is* +2 EV — so the panel needs no
+    /// "SDR/HDR" label to say which half it is drawing, and the read-out is a multiplication rather
+    /// than a table lookup.
+    ///
+    /// **The engine's coordinate is `u = x / 2`** (`CurveLUT`, `HDRCurveAxis`, the kernel): the axis
+    /// has always been `0…1` with display white at `0.5` (062), so this is exactly twice it and the
+    /// maths downstream is untouched (`CurveStorageTests.testTheNewCoordinateIsTwiceTheAxis` recomputes
+    /// it for four points).
     public var x: Double
+    /// The output coordinate, `0…2`, same split as `x`.
     public var y: Double
 
-    public init(_ x: Double, _ y: Double) { self.x = x; self.y = y }
+    /// The pair as the card means it, **clamped** into `0…2`. This is the interaction's space: the
+    /// plot cannot hand a drag a coordinate it does not have, and a ⇧ lock can combine two in-box
+    /// numbers into another in-box number, so clamping here cannot hide a mistake.
+    ///
+    /// A document or an API caller uses `init(validating:_:)`, which throws instead.
+    public init(_ x: Double, _ y: Double) {
+        self.x = min(max(x.isFinite ? x : 0, 0), CurvePoint.maximum)
+        self.y = min(max(y.isFinite ? y : 0, 0), CurvePoint.maximum)
+    }
 
-    public static let linear: [CurvePoint] = [CurvePoint(0, 0), CurvePoint(1, 1)]
+    /// The pair from a **file or a caller**: out of range is an error, never a clamp (069).
+    public init(validating x: Double, _ y: Double) throws {
+        guard x.isFinite, x >= 0, x <= CurvePoint.maximum else {
+            throw CurveCoordinateOutOfRange(value: x, axis: "x")
+        }
+        guard y.isFinite, y >= 0, y <= CurvePoint.maximum else {
+            throw CurveCoordinateOutOfRange(value: y, axis: "y")
+        }
+        self.x = x
+        self.y = y
+    }
 
-    public var keyString: String { String(format: "%.4f,%.4f", x, y) }
+    /// From the engine's `0…1` axis coordinate back to the card's `0…2`.
+    public init(u: Double, v: Double) { self.init(u * 2, v * 2) }
+
+    /// The axis coordinate the table, the shaper and the kernel speak: `x / 2`.
+    public var u: Double { x / 2 }
+    /// `y / 2`.
+    public var v: Double { y / 2 }
+
+    /// Display code of an SDR-side coordinate, `0…255` (rounded) — for the read-out and the ticks.
+    public static func code(_ x: Double) -> Int {
+        min(max(Int((x * 255).rounded()), 0), 255)
+    }
+
+    /// A display code as a `0…1` coordinate.
+    public static func from(code: Int) -> Double { Double(min(max(code, 0), 255)) / 255 }
+
+    /// The black and white ends: no curve at all. `(0,0) … (2,2)` — zero light in, +4 EV out.
+    public static let linear: [CurvePoint] = [CurvePoint(0, 0), CurvePoint(maximum, maximum)]
+
+    /// The cache key's per-point spelling. Six decimals: the coordinate is continuous, and the key only
+    /// has to answer "did the curve move".
+    public var keyString: String { String(format: "%.6f,%.6f", x, y) }
 }
 
 /// Lightroom's Color panel: global saturation, vibrance, and the eight HSL bands.

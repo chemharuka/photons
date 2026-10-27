@@ -402,7 +402,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
 
     static func same(_ a: [CurvePoint], _ b: [CurvePoint]) -> Bool {
         guard a.count == b.count else { return false }
-        for (x, y) in zip(a, b) where differs(x.x, y.x) || differs(x.y, y.y) { return false }
+        // 069: integer cells — exact, for the same reason `HistoryDirty.areEqual` is.
+        for (x, y) in zip(a, b) where x != y { return false }
         return true
     }
 }

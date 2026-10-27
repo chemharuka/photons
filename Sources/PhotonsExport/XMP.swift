@@ -238,7 +238,8 @@ public enum XMPCurve {
 
     public static func normalize(_ raw: [CurvePoint], limit: Int = 16) -> Normalized {
         // Sort by x, then collapse quantised duplicates (last y wins: the newest hand edit).
-        let sorted = raw.map { (x: clamp01($0.x), y: clamp01($0.y)) }.sorted { $0.x < $1.x }
+        // 069: `u`/`v` are the 0…1 coordinates (the point is a grid cell); XMP's own curve is 0…255.
+        let sorted = raw.map { (x: clamp01($0.u), y: clamp01($0.v)) }.sorted { $0.x < $1.x }
         var grid: [(x: Int, y: Int)] = []
         for p in sorted {
             let qx = Int((p.x * 255).rounded())

@@ -125,7 +125,7 @@ final class XMPTests: XCTestCase {
         explicit.light.exposure = 0.0
         explicit.effects.vignetteAmount = 0.0
         explicit.detail.sharpening = 0
-        explicit.curve.white = [CurvePoint(0, 0), CurvePoint(1, 1)]
+        explicit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 1)]
 
         let neutralPacket = try XMPWriter.packet(for: .neutral).data
         let explicitPacket = try XMPWriter.packet(for: explicit).data
@@ -212,7 +212,7 @@ final class XMPTests: XCTestCase {
         var points: [CurvePoint] = []
         for i in 0..<16 {
             let x = Double(i) / 15.0
-            points.append(CurvePoint(x, pow(x, 1.25)))
+            points.append(CurvePoint(u: x, v: pow(x, 1.25)))
         }
         edit.curve.white = points
 
@@ -227,8 +227,8 @@ final class XMPTests: XCTestCase {
         }
         for (i, p) in parsed.enumerated() {
             let expected = points[i]
-            XCTAssertLessThanOrEqual(abs(p.0 - expected.x * 255), 0.5 + 1e-9, "x[\(i)]")
-            XCTAssertLessThanOrEqual(abs(p.1 - expected.y * 255), 0.5 + 1e-9, "y[\(i)]")
+            XCTAssertLessThanOrEqual(abs(p.0 - expected.u * 255), 0.5 + 1e-9, "x[\(i)]")
+            XCTAssertLessThanOrEqual(abs(p.1 - expected.v * 255), 0.5 + 1e-9, "y[\(i)]")
         }
         XCTAssertEqual(parsed.first!.0, 0)
         XCTAssertEqual(parsed.last!.0, 255)
@@ -242,8 +242,8 @@ final class XMPTests: XCTestCase {
     func testX06CurveNormalisationSortsDedupesAndThins() throws {
         // Unsorted, duplicated x, and 20 points: LR could not read this back, so we must repair it.
         var raw: [CurvePoint] = []
-        for i in (0..<20).reversed() { raw.append(CurvePoint(Double(i) / 19.0, Double(i) / 19.0)) }
-        raw.insert(CurvePoint(0.5, 0.9), at: 3)     // duplicate x, different y
+        for i in (0..<20).reversed() { raw.append(CurvePoint(u: Double(i) / 19.0, v: Double(i) / 19.0)) }
+        raw.insert(CurvePoint(u: 0.5, v: 0.9), at: 3)     // duplicate x, different y
 
         let normalized = XMPCurve.normalize(raw)
         XCTAssertLessThanOrEqual(normalized.points.count, 16)
@@ -255,8 +255,8 @@ final class XMPTests: XCTestCase {
         XCTAssertEqual(normalized.points.last?.x, 255)
 
         // Duplicate x collapses to one control point, and the later one wins (the newest edit).
-        let dup = XMPCurve.normalize([CurvePoint(0, 0), CurvePoint(0.5, 0.2),
-                                      CurvePoint(0.5, 0.9), CurvePoint(1, 1)])
+        let dup = XMPCurve.normalize([CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.2),
+                                      CurvePoint(u: 0.5, v: 0.9), CurvePoint(u: 1, v: 1)])
         XCTAssertEqual(dup.points.map(\.x), [0, 128, 255])
         XCTAssertEqual(dup.points[1].y, 230)
         XCTAssertEqual(dup.dropped, 1)
@@ -430,7 +430,7 @@ final class XMPTests: XCTestCase {
         edit.light.contrast = 30
         edit.effects.vignetteAmount = 40
         edit.detail.sharpening = 80
-        edit.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.6), CurvePoint(1, 1)]
+        edit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         let (first, _) = try XMPWriter.makeMetadata(for: edit)
         let mutable = try XMPWriter.mutableCopy(of: first)
@@ -485,8 +485,8 @@ final class XMPTests: XCTestCase {
     func testX15LargeSettingsBlobRoundTripsAndWarnsAboutEmbedding() throws {
         var edit = EditModel.neutral
         // Thousands of control points survive in photons:settings even though crs: keeps only 16.
-        edit.curve.white = (0..<3000).map { CurvePoint(Double($0) / 2999.0, pow(Double($0) / 2999.0, 1.3)) }
-        edit.curve.red = (0..<3000).map { CurvePoint(Double($0) / 2999.0, Double($0) / 2999.0 * 0.9) }
+        edit.curve.white = (0..<3000).map { CurvePoint(u: Double($0) / 2999.0, v: pow(Double($0) / 2999.0, 1.3)) }
+        edit.curve.red = (0..<3000).map { CurvePoint(u: Double($0) / 2999.0, v: Double($0) / 2999.0 * 0.9) }
 
         let blob = try XMPWriter.settingsBlob(edit)
         XCTAssertGreaterThan(blob.count, 8 * 1024, "this is meant to be a large payload")

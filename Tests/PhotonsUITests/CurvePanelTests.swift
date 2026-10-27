@@ -41,57 +41,38 @@ final class CurvePanelTests: XCTestCase {
 
     /// The seven positions are `u(0)`, `u(code 127)`, `u(code 255)`, `u(+1)`, `u(+2)`, `u(+3)`,
     /// `u(+4)` — **exactly** as the axis computes them (062 pins the difference at zero, not "within a
-    /// tolerance") — and the labels are exactly `0 / 127 / 255 / +1 / +2 / +3 / +4`: the left half
-    /// speaks display codes (it *is* the histogram's SDR half), the right half speaks EV.
-    /// `+4` is the right edge and there is no `+6` (044). Since 062 `u(1)` is the middle of the card.
+    /// 069 — 五档 SDR 码值 `0 / 63 / 127 / 191 / 255`，位置 = `2·forward(displayCode(c))`（即 `c/255`），
+    /// 每个都是一次相等而不是容差。右半区**没有** stops 标记（`+1…+4` 全部取消）。
     func testTheTicksAreTheAxisOwnPositionsAndNotNumbers() {
         let axis = HDRCurveAxis.standard
         let ticks = CurveAxisTicks.ticks(axis)
 
-        XCTAssertEqual(ticks.map(\.label), ["0", "127", "255", "+1", "+2", "+3", "+4"])
-
-        let expected = [axis.forward(0),                                     // x = 0
-                        axis.forward(CurveAxisTicks.displayCode(127)),       // SDR code 127
-                        axis.forward(CurveAxisTicks.displayCode(255)),       // display white
-                        axis.u(stops: 1),
-                        axis.u(stops: 2),
-                        axis.u(stops: 3),
-                        axis.u(stops: 4)]
+        XCTAssertEqual(ticks.map(\.label), ["0", "63", "127", "191", "255"])
+        let expected = [0.0, 63, 127, 191, 255].map { 2 * axis.forward(CurveAxisTicks.displayCode($0)) }
         XCTAssertEqual(ticks.count, expected.count)
         for (tick, want) in zip(ticks, expected) {
-            // Equality, not an accuracy: the tick *is* the axis's answer, so any difference at all
-            // means a second copy of the shaper has appeared.
-            XCTAssertEqual(tick.u, want, "刻度 \(tick.label) 的位置必须是 axis 算出的那一个数")
+            XCTAssertEqual(tick.x, want, "刻度 \(tick.label) 的位置必须是 axis 算出的那一个数")
+            XCTAssertEqual(tick.x, Double(Int(tick.label)!) / 255, accuracy: 1e-15,
+                           "码 \(tick.label) 落在自己的码值坐标上")
         }
+        XCTAssertTrue(zip(ticks, ticks.dropFirst()).allSatisfy { $0.x < $1.x })
+        XCTAssertEqual(ticks.last?.x ?? -1, 1, accuracy: 1e-12, "255 码 = 白点 x = 1")
+        XCTAssertEqual(axis.stops(at: ticks.last!.x / 2), 0, accuracy: 1e-12, "白点就是 +0 EV")
 
-        // Monotone, and the last one *is* the right edge (that is what makes "+4 at the end" true).
-        XCTAssertTrue(zip(ticks, ticks.dropFirst()).allSatisfy { $0.u < $1.u })
-        XCTAssertEqual(ticks.last?.u ?? -1, 1, accuracy: 1e-12)
-        XCTAssertEqual(axis.stops(at: 1), 4, accuracy: 1e-6, "右端 = +4 EV（044），不是 +6")
-
-        // 062: white is the middle, the SDR half is half the card, and a code is a *code* — 127 sits
-        // at exactly half of that half, which is the property that makes "127" an honest label.
-        XCTAssertEqual(ticks[2].u, axis.whiteU, "白点必须在正中（SDR 占 50%）")
-        XCTAssertEqual(axis.whiteU, 0.5)
-        XCTAssertEqual(ticks[1].u, 0.5 * 127.0 / 255.0, accuracy: 1e-12, "127 码在左半的正中")
-        XCTAssertLessThan(ticks[1].u, axis.whiteU)
-
-        // And in points: the tick x is `u` across the **value box** (064), so the drawing cannot
-        // disagree either.
+        // In points: the tick x is `x/2` of the way across the **value box** (064 / 069).
         let plot = CGRect(x: 0, y: 0, width: 274, height: 189)
         let geometry = CurvePlotGeometry(plot: plot)
         let box = geometry.valueBox
         let positions = geometry.tickPositions(ticks)
         for (position, want) in zip(positions, expected) {
-            XCTAssertEqual(position, box.minX + CGFloat(want) * box.width, accuracy: 1e-9)
+            XCTAssertEqual(position, box.minX + CGFloat(want / 2) * box.width, accuracy: 1e-9)
         }
-        XCTAssertEqual(positions.first ?? -1, box.minX, accuracy: 1e-9)
-        XCTAssertEqual(positions.last ?? -1, box.maxX, accuracy: 1e-9)
+        XCTAssertEqual(positions[0], box.minX, accuracy: 1e-9)
+        XCTAssertEqual(positions[positions.count - 1], box.midX, accuracy: 1e-9, "白点在正中")
 
         print("ticks · " + zip(ticks, positions)
-            .map { "\($0.label)@u=\(String(format: "%.6f", $0.u))→x=\(String(format: "%.3f", $1))" }
-            .joined(separator: " · ")
-            + " · 最大误差 \(zip(ticks, expected).map { abs($0.u - $1) }.max() ?? 0)")
+            .map { "\($0.label)@x=\(String(format: "%.6f", $0.x))→\(String(format: "%.3f", $1))" }
+            .joined(separator: " · "))
     }
 
     /// 反证 for claim 1: the panel's source contains **no** axis position literal.
@@ -105,17 +86,22 @@ final class CurvePanelTests: XCTestCase {
                            "CurvePanel.swift 里出现了 \(literal)：刻度必须是算出来的")
         }
         // …because it does the derivation, through the two functions that own it.
-        XCTAssertTrue(source.contains("forward(displayCode(127))")
-                      && source.contains("forward(displayCode(255))"),
+        XCTAssertTrue(source.contains("axis.forward(displayCode(Double(code)))"),
                       "SDR 刻度必须是「显示码 → 线性 → axis」算出来的")
-        XCTAssertTrue(source.contains("axis.u(stops: 1)") && source.contains("axis.u(stops: 2)")
-                      && source.contains("axis.u(stops: 3)") && source.contains("axis.u(stops: 4)"),
-                      "HDR 四档刻度必须来自 axis.u(stops:)")
+        XCTAssertTrue(source.contains("[0, 63, 127, 191, 255]"),
+                      "五档码值就是这五个数（标签），位置仍由 axis 推出")
+        XCTAssertFalse(source.contains("axis.u(stops: 1)"), "069：stops 刻度取消")
         XCTAssertTrue(source.contains("CurveLUT.buildOne(points)"),
                       "预览必须是引擎那张表，不是第二种插值")
-        // The footnote's two numbers are the axis's too (062: the SDR half's width and the right end).
-        XCTAssertTrue(source.contains("axis.whiteU") && source.contains("axis.stops(at: 1)"),
-                      "底部说明里的 50% 与 +4 EV 必须来自 axis")
+        // 069: the bottom caption line is gone, and the read-out that replaced its space is derived from
+        // the axis the same way — `axis.whiteU` is where the SDR half ends and `axis.stops(at:)` is what
+        // a coordinate means in EV. No number in this file is allowed to be its own copy.
+        XCTAssertFalse(source.contains("横轴与直方图一致"), "底部说明必须删掉")
+        // The read-out is arithmetic on the coordinate, not a second axis: the split is
+        // `CurvePoint.sdrBoundary` and the EV side is `(x − 1)·4`, written once, in `CurvePointReadout`.
+        XCTAssertTrue(source.contains("CurvePoint.sdrBoundary") && source.contains("* 4"))
+        XCTAssertFalse(source.contains("label: \"SDR\"") || source.contains("label: \"HDR\""),
+                       "轴上不许出现 SDR/HDR 字样（069）")
     }
 
     // MARK: - 2. insert
@@ -123,134 +109,113 @@ final class CurvePanelTests: XCTestCase {
     /// 单击空白 = 在该 x 插一个点，**y 取当前曲线在该 x 的值**（不是 0，也不是 x）。
     ///
     /// Two curves, because "y = the curve's value" and "y = the identity's value" differ on the second:
-    /// a 0 → 0.5 ramp is 0.25 at the midpoint, and a panel that wrote `x` would write 0.5.
+    /// a 0 → 1 ramp is 0.5 at the midpoint, and a panel that wrote `x` would write 1.
+    ///
+    /// 069: the coordinates are the card's `0…2` — no grid, no quantisation: `x = 0.6` stays `0.6`.
     func testClickingEmptySpaceInsertsAPointAtTheCurvesOwnValue() {
         let identity = CatalogSession()
         let identityModel = CurveEditorModel(session: identity, channel: .white)
-        XCTAssertNotNil(identityModel.insert(atU: 0.3))
+        XCTAssertNotNil(identityModel.insert(atX: 0.6))
         let onIdentity = identity.edit.curve.white
         XCTAssertEqual(onIdentity.count, 3)
-        XCTAssertEqual(onIdentity[1].x, 0.3, accuracy: 1.0 / Double(CurveLUT.size))
-        XCTAssertEqual(onIdentity[1].y, 0.3, accuracy: 1.0 / Double(CurveLUT.size),
-                       "恒等曲线上 y == x")
+        XCTAssertEqual(onIdentity[1].x, 0.6, accuracy: 1e-12, "插入的坐标就是点下的坐标")
+        XCTAssertEqual(onIdentity[1].y, 0.6, accuracy: 0.01, "恒等曲线上 y == x")
         XCTAssertTrue(CurveEditor.isOrdered(onIdentity))
         XCTAssertEqual(identity.history.count, 1, "插入 = 一次动作 = 一条历史")
 
-        // A ramp whose midpoint is 0.25: the new point must land on the *curve*, not at 0 or at x.
+        // A ramp whose midpoint is 1.0: the new point must land on the *curve*, not at 0 and not at x.
         let ramp = CatalogSession()
-        ramp.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(1, 0.5)] }
+        ramp.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(2, 1)] }
         ramp.commitEdit(label: "ramp")
         let rampModel = CurveEditorModel(session: ramp, channel: .white)
-        XCTAssertNotNil(rampModel.insert(atU: 0.5))
+        XCTAssertNotNil(rampModel.insert(atX: 1.0))
         let inserted = ramp.edit.curve.white
         XCTAssertEqual(inserted.count, 3)
-        XCTAssertEqual(inserted[1].y, 0.25, accuracy: 0.01,
-                       "y 取曲线在该 x 的值（0.25），不是 0，也不是 x（0.5）")
+        XCTAssertEqual(inserted[1].y, 0.5, accuracy: 0.01,
+                       "y 取曲线在该 x 的值（0.5），不是 0，也不是 x（1.0）")
         XCTAssertNotEqual(inserted[1].y, 0, accuracy: 1e-6, "反证：y 不能是 0")
-        XCTAssertNotEqual(inserted[1].y, 0.5, accuracy: 0.01, "反证：y 不能是 x")
+        XCTAssertNotEqual(inserted[1].y, 1.0, accuracy: 0.01, "反证：y 不能是 x")
 
-        print("insert · identity 插入后 x = \(onIdentity.map(\.x)) · "
-              + "ramp 中点 y = \(String(format: "%.4f", inserted[1].y))（0.25，不是 0 / 0.5）")
+        print("insert · identity 插入后 \(onIdentity.map { "($0.x,$0.y)" != "" ? "(\($0.x),\($0.y))" : "" }) · "
+              + "ramp 中点 y = \(String(format: "%.4f", inserted[1].y))")
     }
 
     // MARK: - 3. the clamp
 
-    /// 把中间点拖到最左 → x 被夹在左邻点 + 1e-3；点数不变，`points` 仍严格递增。
+    /// 把中间点拖到最左 → x 被夹在左邻点右边 `minimumGap`；点数不变，`points` 仍严格递增。
     ///
     /// **反证**：同一目标点不夹取地写进去，列表就不递增 —— 所以"夹取生效"不是空话。
-    func testDraggingAPointPastItsNeighbourIsClampedToOneMilliMetreGap() {
-        let start = [CurvePoint(0, 0), CurvePoint(0.3, 0.2), CurvePoint(0.8, 0.9), CurvePoint(1, 1)]
+    func testDraggingAPointPastItsNeighbourIsClampedToTheGap() {
+        let gap = CurveEditor.minimumGap
+        let start = [CurvePoint(0, 0), CurvePoint(0.6, 0.4), CurvePoint(1.6, 1.8), CurvePoint(2, 2)]
 
-        // (a) 拖到最左：左邻点是 0.3 → 0.3 + 1e-3
-        let left = CurveEditor.movedPoint(CurvePoint(-5, 0.4), index: 1, in: start,
+        let left = CurveEditor.movedPoint(CurvePoint(-5, 0.8), index: 1, in: start,
                                           from: start[1], lock: .free)
-        XCTAssertEqual(left.x, start[0].x + CurveEditor.minimumGap, accuracy: 1e-12,
-                       "夹在左邻点 + 1e-3")
-        XCTAssertEqual(left.y, 0.4, accuracy: 1e-12, "y 不受夹取影响")
+        XCTAssertEqual(left.x, start[0].x + gap, accuracy: 1e-12, "夹在左邻点右边一个 gap")
+        XCTAssertEqual(left.y, 0.8, accuracy: 1e-12, "y 不受夹取影响")
 
-        // (b) 拖到最右：右邻点是 0.8 → 0.8 − 1e-3
-        let right = CurveEditor.movedPoint(CurvePoint(5, 0.4), index: 1, in: start,
+        let right = CurveEditor.movedPoint(CurvePoint(5, 0.8), index: 1, in: start,
                                            from: start[1], lock: .free)
-        XCTAssertEqual(right.x, start[2].x - CurveEditor.minimumGap, accuracy: 1e-12)
+        XCTAssertEqual(right.x, start[2].x - gap, accuracy: 1e-12)
 
-        // (c) 拖到零点几的邻点之间：0.3 / 0.8 之间的目标 0.6 原样通过（夹取不是"永远贴边"）
-        let middle = CurveEditor.movedPoint(CurvePoint(0.6, 0.4), index: 1, in: start,
+        let middle = CurveEditor.movedPoint(CurvePoint(1.2, 0.8), index: 1, in: start,
                                             from: start[1], lock: .free)
-        XCTAssertEqual(middle.x, 0.6, accuracy: 1e-12)
+        XCTAssertEqual(middle.x, 1.2, accuracy: 1e-12, "区间内原样通过（不是永远贴边）")
 
-        // (d) 左邻是**内部点**：index 2 的左边是 0.3 → 拖到最左停在 0.301，右边 1 不动
-        let againstInterior = CurveEditor.movedPoint(CurvePoint(-5, 0.9), index: 2, in: start,
+        let againstInterior = CurveEditor.movedPoint(CurvePoint(-5, 1.8), index: 2, in: start,
                                                      from: start[2], lock: .free)
-        XCTAssertEqual(againstInterior.x, 0.3 + CurveEditor.minimumGap, accuracy: 1e-12,
-                       "夹取对着**当前**的左邻点算，不是按下时的那个")
+        XCTAssertEqual(againstInterior.x, start[1].x + gap, accuracy: 1e-12,
+                       "夹取对着**当前**的左邻点算")
 
-        // (e) **061**: 端点可以在 x 上移动 —— 右移左端点就是调黑点，左移右端点就是调白点
-        let first = CurveEditor.movedPoint(CurvePoint(0.2, 0.9), index: 0, in: start,
-                                           from: start[0], lock: .free)
-        XCTAssertEqual(first.x, 0.2, accuracy: 1e-12, "首点必须能在 x 上移动（051 曾钉在 0）")
-        XCTAssertEqual(first.y, 0.9, accuracy: 1e-12)
-        let last = CurveEditor.movedPoint(CurvePoint(0.9, 0.1), index: 3, in: start,
+        // 061: 端点可以在 x 上移动 —— 右移左端点就是调黑点，左移右端点就是调白点
+        let first = CurveEditor.movedPoint(CurvePoint(0.4, 1.8), index: 0, in: start,
+                                          from: start[0], lock: .free)
+        XCTAssertEqual(first.x, 0.4, accuracy: 1e-12, "首点必须能在 x 上移动（051 曾钉在 0）")
+        let last = CurveEditor.movedPoint(CurvePoint(1.8, 0.2), index: 3, in: start,
                                           from: start[3], lock: .free)
-        XCTAssertEqual(last.x, 0.9, accuracy: 1e-12, "末点必须能在 x 上移动（051 曾钉在 1）")
-        XCTAssertEqual(last.y, 0.1, accuracy: 1e-12)
+        XCTAssertEqual(last.x, 1.8, accuracy: 1e-12, "末点必须能在 x 上移动（051 曾钉在 1）")
 
-        // …但只在区间里：首点 ∈ [0, 次点 − 1e-3]，末点 ∈ [邻点 + 1e-3, 1]，x 仍严格递增
-        XCTAssertEqual(CurveEditor.clampX(5, index: 0, in: start),
-                       start[1].x - CurveEditor.minimumGap, accuracy: 1e-12,
-                       "右移的首点停在次点左边 1e-3 处（不许越过）")
-        XCTAssertEqual(CurveEditor.clampX(-5, index: 0, in: start), 0, accuracy: 1e-12,
-                       "左边界仍是表的 0")
-        XCTAssertEqual(CurveEditor.clampX(-5, index: 3, in: start),
-                       start[2].x + CurveEditor.minimumGap, accuracy: 1e-12)
-        XCTAssertEqual(CurveEditor.clampX(5, index: 3, in: start), 1, accuracy: 1e-12)
-        XCTAssertEqual(CurveEditor.clampX(0.2, index: 0, in: start), 0.2, accuracy: 1e-12,
-                       "区间内原样通过（不是\"永远贴边\"）")
-        for target in [-5.0, 0.0, 0.2, 0.29, 5.0] {
-            let p = CurveEditor.movedPoint(CurvePoint(target, 0.5), index: 0, in: start,
+        XCTAssertEqual(CurveEditor.clampX(5, index: 0, in: start), start[1].x - gap, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditor.clampX(-5, index: 0, in: start), 0, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditor.clampX(-5, index: 3, in: start), start[2].x + gap, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditor.clampX(5, index: 3, in: start), 2, accuracy: 1e-12)
+        for target in [-5.0, 0.0, 0.4, 0.59, 5.0] {
+            let p = CurveEditor.movedPoint(CurvePoint(target, 1), index: 0, in: start,
                                           from: start[0], lock: .free)
             XCTAssertTrue(CurveEditor.isOrdered([p] + start.dropFirst()), "首点拖到 \(target) 后仍须递增")
         }
-
-        // **反证**: 钉死端点的那条规则会让上面每一条都红 —— 两种写法都留着，看得见差别
         XCTAssertNotEqual(first.x, 0, "反证：061 之前的 return 0 会得到 0")
-        XCTAssertNotEqual(last.x, 1, "反证：061 之前的 return 1 会得到 1")
+        XCTAssertNotEqual(last.x, 2, "反证：061 之前的 return 2 会得到 2")
 
-        // (f) ⇧ 的两种锁：只改 x / 只改 y
-        let onlyX = CurveEditor.movedPoint(CurvePoint(0.5, 0.9), index: 1, in: start,
+        // ⇧ 的两种锁
+        let onlyX = CurveEditor.movedPoint(CurvePoint(1, 1.8), index: 1, in: start,
                                            from: start[1], lock: .x)
-        XCTAssertEqual(onlyX, CurvePoint(0.5, 0.2), "⇧ 横向：只改 x，y 留在按下时的值")
-        let onlyY = CurveEditor.movedPoint(CurvePoint(0.5, 0.9), index: 1, in: start,
+        XCTAssertEqual(onlyX, CurvePoint(1, 0.4), "⇧ 横向：只改 x，y 留在按下时的值")
+        let onlyY = CurveEditor.movedPoint(CurvePoint(1, 1.8), index: 1, in: start,
                                            from: start[1], lock: .y)
-        XCTAssertEqual(onlyY, CurvePoint(0.3, 0.9), "⇧ 纵向：只改 y")
+        XCTAssertEqual(onlyY, CurvePoint(0.6, 1.8), "⇧ 纵向：只改 y")
 
-        // (g) 通过面板实际写两次：第一次把 index 1 顶到 0.001，第二次的 index 2 于是贴着**新的**
-        //     左邻（0.001）停在 0.002 —— 夹取永远对着文档里现在的邻点，所以不会越过它。
+        // 通过面板实际写两次：索引 1 顶到 gap，索引 2 于是贴着**新的**左邻停在 2·gap
         let session = CatalogSession()
         session.applyEdit { $0.curve.white = start }
         session.commitEdit(label: "起点")
         let model = CurveEditorModel(session: session, channel: .white)
-        model.drag(index: 1, to: CurvePoint(-5, 0.4), from: start[1], lock: .free)
+        model.drag(index: 1, to: CurvePoint(-5, 0.8), from: start[1], lock: .free)
         var written = session.edit.curve.white
         XCTAssertTrue(CurveEditor.isOrdered(written), "写回后必须严格递增：\(written)")
-        XCTAssertEqual(written[1].x, 0.001, accuracy: 1e-12, "左邻是端点 0 → 0 + 1e-3")
+        XCTAssertEqual(written[1].x, gap, accuracy: 1e-12, "左邻是端点 0 → gap")
         XCTAssertEqual(written[0].x, 0, accuracy: 1e-12, "端点不动")
 
-        model.drag(index: 2, to: CurvePoint(-5, 0.9), from: start[2], lock: .free)
+        model.drag(index: 2, to: CurvePoint(-5, 1.8), from: start[2], lock: .free)
         written = session.edit.curve.white
         XCTAssertTrue(CurveEditor.isOrdered(written), "写回后必须严格递增：\(written)")
-        XCTAssertEqual(written[2].x, 0.001 + CurveEditor.minimumGap, accuracy: 1e-12,
-                       "贴着**当前**左邻 0.001 → 0.002")
-        XCTAssertEqual(written[3].x, 1, accuracy: 1e-12)
+        XCTAssertEqual(written[2].x, gap + gap, accuracy: 1e-12, "贴着**当前**左邻 gap → 2·gap")
+        XCTAssertEqual(written[3].x, 2, accuracy: 1e-12)
 
-        // **反证**: the same write without the clamp is out of order — this is what (g) guards.
         var naive = start
-        naive[1] = CurvePoint(-5, 0.4)
-        XCTAssertFalse(CurveEditor.isOrdered(naive),
-                       "不夹取就是乱序 —— 夹取这一条断言因此不是空的")
-
-        print("clamp · 左邻端点 −5 → \(String(format: "%.4f", written[1].x))；"
-              + "再拖 index 2 → \(String(format: "%.4f", written[2].x))（贴 0.001）· "
-              + "不夹取 → \(naive.map(\.x)) 乱序")
+        naive[1] = CurvePoint(-5, 0.8)
+        XCTAssertFalse(CurveEditor.isOrdered(naive), "不夹取就是乱序 —— 夹取这一条断言因此不是空的")
+        print("clamp · \(written.map { String(format: "%.4f", $0.x) })")
     }
 
     // MARK: - 4. delete, and the endpoints that refuse
@@ -258,7 +223,7 @@ final class CurvePanelTests: XCTestCase {
     /// 双击内部的点 → 删掉，一条历史；双击两个端点 → 点数不变、没有历史、不报错。
     func testDoubleClickDeletesAnInteriorPointAndTheEndpointsRefuseSilently() {
         let session = CatalogSession()
-        session.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.7), CurvePoint(1, 1)] }
+        session.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.7), CurvePoint(u: 1, v: 1)] }
         session.commitEdit(label: "起点")
         let model = CurveEditorModel(session: session, channel: .white)
         let before = session.history.count
@@ -291,9 +256,14 @@ final class CurvePanelTests: XCTestCase {
         let whiteBefore = CurveLUT.buildOne(session.edit.curve.white)
         let redBefore = CurveLUT.buildOne(session.edit.curve.red)
 
+        // 069: inserting on the identity curve lands *on* the identity (the new point takes the curve's
+        // own value), so the table would not move — the shape comes from dragging one point down.
         let red = CurveEditorModel(session: session, channel: .red)
-        XCTAssertNotNil(red.insert(atU: 0.4), "R 通道插入一个点")
-        XCTAssertNotNil(red.insert(atU: 0.7))
+        XCTAssertNotNil(red.insert(atX: 0.8), "R 通道插入一个点")
+        XCTAssertNotNil(red.insert(atX: 1.4))
+        let origin = red.beginDrag(at: 1)!
+        XCTAssertTrue(red.drag(index: 1, to: CurvePoint(0.8, 0.4), from: origin, lock: .free))
+        XCTAssertTrue(red.endDrag())
 
         XCTAssertEqual(CurveLUT.buildOne(session.edit.curve.white), whiteBefore,
                        "改 R 不许动 W 的表（逐字节）")
@@ -318,31 +288,32 @@ final class CurvePanelTests: XCTestCase {
     /// **反证**：每个 tick 各提交一次就是 10 条 —— 两条路径都跑，1 和 10 必须可分辨。
     func testOneDragIsOneHistoryEntryWhileThePerTickRouteWouldBeTen() {
         let session = CatalogSession()
-        session.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)] }
+        session.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 1)] }
         session.commitEdit(label: "起点")
         let model = CurveEditorModel(session: session, channel: .white)
         let base = session.history.count
 
         let origin = model.beginDrag(at: 1)
-        XCTAssertEqual(origin, CurvePoint(0.5, 0.5))
+        XCTAssertEqual(origin, CurvePoint(u: 0.5, v: 0.5))
         for step in 1...10 {
             model.drag(index: 1,
-                       to: CurvePoint(0.5 + 0.02 * Double(step), 0.5 + 0.03 * Double(step)),
+                       to: CurvePoint(u: 0.5 + 0.02 * Double(step), v: 0.5 + 0.03 * Double(step)),
                        from: origin!, lock: .free)
             XCTAssertEqual(session.history.count, base, "拖动过程不写历史（step \(step)）")
         }
-        XCTAssertEqual(session.edit.curve.white[1].x, 0.7, accuracy: 1e-9, "中间态已经写进文档")
+        XCTAssertEqual(session.edit.curve.white[1].x, 2 * (0.5 + 0.02 * 10), accuracy: 1e-12,
+                       "中间态已经写进文档（无量化，坐标就是 1.4）")
         XCTAssertTrue(model.endDrag(), "抬起 = 一条快照")
         XCTAssertEqual(session.history.count, base + 1)
         XCTAssertEqual(session.history.currentSnapshot?.label, "曲线")
 
         // 反证：每个 tick 都 commit 的那条路
         let noisy = CatalogSession()
-        noisy.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)] }
+        noisy.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 1)] }
         noisy.commitEdit(label: "起点")
         let noisyBase = noisy.history.count
         for step in 1...10 {
-            noisy.applyEdit { $0.curve.white[1] = CurvePoint(0.5 + 0.02 * Double(step), 0.5) }
+            noisy.applyEdit { $0.curve.white[1] = CurvePoint(u: 0.5 + 0.02 * Double(step), v: 0.5) }
             noisy.commitEdit(label: "曲线")
         }
         XCTAssertEqual(noisy.history.count - noisyBase, 10,
@@ -350,7 +321,7 @@ final class CurvePanelTests: XCTestCase {
 
         // ⌘Z 一步回到拖动前
         XCTAssertTrue(session.undo())
-        XCTAssertEqual(session.edit.curve.white[1], CurvePoint(0.5, 0.5))
+        XCTAssertEqual(session.edit.curve.white[1], CurvePoint(u: 0.5, v: 0.5))
 
         print("drag · shipped \(base + 1 - base) 条（10 步）· per-tick 10 条 · ⌘Z → "
               + "\(session.edit.curve.white[1])")
@@ -363,10 +334,10 @@ final class CurvePanelTests: XCTestCase {
     func testResetChannelClearsOnlyThatChannelAndResetAllReturnsTheIdentityBytes() {
         let session = CatalogSession()
         session.applyEdit { model in
-            model.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.62), CurvePoint(1, 1)]
-            model.curve.red = [CurvePoint(0, 0), CurvePoint(0.5, 0.4), CurvePoint(1, 1)]
-            model.curve.green = [CurvePoint(0, 0), CurvePoint(0.5, 0.55), CurvePoint(1, 1)]
-            model.curve.blue = [CurvePoint(0, 0), CurvePoint(0.5, 0.45), CurvePoint(1, 1)]
+            model.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.62), CurvePoint(u: 1, v: 1)]
+            model.curve.red = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.4), CurvePoint(u: 1, v: 1)]
+            model.curve.green = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.55), CurvePoint(u: 1, v: 1)]
+            model.curve.blue = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.45), CurvePoint(u: 1, v: 1)]
         }
         session.commitEdit(label: "四条曲线")
         XCTAssertFalse(CurveLUT.isIdentity(session.edit.curve))
@@ -422,8 +393,8 @@ final class CurvePanelTests: XCTestCase {
     func testThePreviewIsTheEnginesOwnTableAndNotASecondInterpolation() {
         let session = CatalogSession()
         session.applyEdit {
-            $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.25, 0.35), CurvePoint(0.6, 0.62),
-                              CurvePoint(1, 0.95)]
+            $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.25, v: 0.35), CurvePoint(u: 0.6, v: 0.62),
+                              CurvePoint(u: 1, v: 0.95)]
         }
         session.commitEdit(label: "手工曲线")
 
@@ -451,16 +422,16 @@ final class CurvePanelTests: XCTestCase {
     /// 没有这一半，「裁切生效」在表恰好因为别的原因变平时也会绿。
     func testMovingTheFirstEndpointRightClipsTheWholeSegmentBelowItToOneValue() throws {
         let session = CatalogSession()
-        session.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.45), CurvePoint(1, 1)] }
+        session.applyEdit { $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.45), CurvePoint(u: 1, v: 1)] }
         session.commitEdit(label: "起点")
         let model = CurveEditorModel(session: session, channel: .white)
         let base = session.history.count
 
         let origin = model.beginDrag(at: 0)
-        XCTAssertEqual(origin, CurvePoint(0, 0))
-        XCTAssertTrue(model.drag(index: 0, to: CurvePoint(0.2, 0), from: origin!, lock: .free))
-        XCTAssertEqual(session.edit.curve.white[0].x, 0.2, accuracy: 1e-12, "右移首点 = 抬黑点")
-        XCTAssertEqual(session.edit.curve.white[0].y, 0, accuracy: 1e-12, "y 不动")
+        XCTAssertEqual(origin, CurvePoint(u: 0, v: 0))
+        XCTAssertTrue(model.drag(index: 0, to: CurvePoint(u: 0.2, v: 0), from: origin!, lock: .free))
+        XCTAssertEqual(session.edit.curve.white[0].x, 0.4, accuracy: 1e-12, "右移首点 = 抬黑点")
+        XCTAssertEqual(session.edit.curve.white[0].y, 0, "y 不动")
         XCTAssertEqual(session.history.count, base, "拖动中不写历史")
         XCTAssertTrue(model.endDrag())
         XCTAssertEqual(session.history.count, base + 1, "一次拖动 = 一条历史")
@@ -469,10 +440,12 @@ final class CurvePanelTests: XCTestCase {
         let t = model.preview
         XCTAssertEqual(t, CurveLUT.buildOne(model.points), "预览仍是引擎那张表")
 
-        // u < 0.2 的 100 个抽样（4096 点的表上 u = 0.2 大约落在第 819 个采样）
-        let ids = (0..<100).map { Int((0.2 * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded()) }
+        // `u < 首点` 的 100 个抽样（069：首点吸附到格 102，u = 102/511 = 0.19961…，所以边界取它的
+        // 自身坐标，不是写死的 0.2）
+        let blackU = session.edit.curve.white[0].u
+        let ids = (0..<100).map { Int((blackU * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded()) }
         let below = Set(ids.map { t[$0] })
-        XCTAssertEqual(below.count, 1, "u < 0.2 必须全部相等，实际 \(below.sorted())")
+        XCTAssertEqual(below.count, 1, "u < 首点 必须全部相等，实际 \(below.sorted())")
         XCTAssertEqual(ids.map { t[$0] }.max() ?? -1, 0, accuracy: 1e-7, "first.y = 0 → 裁到 0")
 
         // …而且不是整张表都平了：0.2 之上仍在上升，整表单调不减
@@ -482,7 +455,7 @@ final class CurvePanelTests: XCTestCase {
         }
 
         // **反证**：051 的夹取（首点恒 0）用同一个拖动目标重建 → 同样 100 个采样点各不相同
-        let pinned = CurveLUT.buildOne([CurvePoint(0, 0), CurvePoint(0.5, 0.45), CurvePoint(1, 1)])
+        let pinned = CurveLUT.buildOne([CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.45), CurvePoint(u: 1, v: 1)])
         let pinnedBelow = ids.map { pinned[$0] }
         XCTAssertGreaterThan(Set(pinnedBelow).count, 1, "钉死的端点：采样点必须各不相同")
         XCTAssertGreaterThan((pinnedBelow.max() ?? 0) - (pinnedBelow.min() ?? 0), 0.05,
@@ -498,15 +471,15 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(CurveLUT.buildOne(session.edit.curve.white), CurveLUT.identityTable())
         XCTAssertTrue(CurveLUT.tablesAreIdentity(CurveLUT.build(session.edit.curve)))
 
-        print("black point · first.x 0 → \(session.edit.curve.white[0].x)（复位后）· "
-              + "u<0.2 的 100 点：搬过去 \(below.count) 个值，钉死则 "
+        print("black point · first.x → 格 \(session.edit.curve.white[0].x)（复位后）· "
+              + "u<首点 的 100 点：搬过去 \(below.count) 个值，钉死则 "
               + "\(Set(pinnedBelow).count) 个值（跨度 \(String(format: "%.3f", (pinnedBelow.max() ?? 0) - (pinnedBelow.min() ?? 0))))")
     }
 
     /// 061 ②：把**末端点左移到 u = 0.8** —— `u > 0.8` 全部同一个输出（白点裁切），最后一段斜率 0，
     /// 所以 +4 EV 之上也停在那里；表仍单调，一次拖动一条历史。
     func testMovingTheLastEndpointLeftClipsTheHighlightsToOneValue() {
-        let start = [CurvePoint(0, 0), CurvePoint(0.5, 0.5), CurvePoint(1, 1)]
+        let start = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 1)]
         let session = CatalogSession()
         session.applyEdit { $0.curve.white = start }
         session.commitEdit(label: "起点")
@@ -514,9 +487,9 @@ final class CurvePanelTests: XCTestCase {
         let base = session.history.count
 
         let origin = model.beginDrag(at: 2)
-        XCTAssertTrue(model.drag(index: 2, to: CurvePoint(0.8, 0.9), from: origin!, lock: .free))
-        XCTAssertEqual(session.edit.curve.white[2].x, 0.8, accuracy: 1e-12, "左移末点 = 降白点")
-        XCTAssertEqual(session.edit.curve.white[2].y, 0.9, accuracy: 1e-10)
+        XCTAssertTrue(model.drag(index: 2, to: CurvePoint(u: 0.8, v: 0.9), from: origin!, lock: .free))
+        XCTAssertEqual(session.edit.curve.white[2].x, 1.6, accuracy: 1e-12, "左移末点 = 降白点")
+        XCTAssertEqual(session.edit.curve.white[2].y, 1.8, accuracy: 1e-12)
         XCTAssertEqual(session.history.count, base, "拖动中不写历史")
         XCTAssertTrue(model.endDrag())
         XCTAssertEqual(session.history.count, base + 1)
@@ -529,7 +502,8 @@ final class CurvePanelTests: XCTestCase {
         }
         let above = Set(ids.map { t[$0] })
         XCTAssertEqual(above.count, 1, "u > 0.8 必须全部相等，实际 \(above.sorted())")
-        XCTAssertEqual(ids.map { t[$0] }.max() ?? -1, 0.9, accuracy: 1e-6, "last.y = 0.9")
+        let lastY = ids.map { Double(t[$0]) }.max() ?? -1
+        XCTAssertEqual(lastY, 0.9, accuracy: 1e-6, "last.y = 0.9（即 v = 0.9）")
         XCTAssertEqual(CurveLUT.slope(of: t), 0, accuracy: 1e-6,
                        "平的最后一段 → 斜率 0：+4 EV 之上不再上升（rule 4）")
         for i in 1..<t.count {
@@ -548,31 +522,36 @@ final class CurvePanelTests: XCTestCase {
     ///
     /// 两种情况的输出**必须不同**——否则"裁切"与"直通"就只是同一句话的两种说法。
     func testTheSubBlackRuleFollowsTheBlackPointAndNotTheMoodOfTheDay() {
-        let atZero = CurveLUT.buildOne([CurvePoint(0, 0.4), CurvePoint(1, 1)])
+        let atZero = CurveLUT.buildOne([CurvePoint(u: 0, v: 0.4), CurvePoint(u: 1, v: 1)])
         let zeroSlope = CurveLUT.slope(of: atZero)
         for x in [-0.039, -0.004, -1e-9, 0.0] {
             XCTAssertEqual(HDRCurve.channel(x, table: atZero, slope: zeroSlope, blackPoint: 0), x,
                            "first.x == 0：\(x) 必须原样穿过（018 的符号保真）")
         }
 
-        let raised = CurveLUT.buildOne([CurvePoint(0.2, 0.3), CurvePoint(1, 1)])
+        // 069: the black point is a cell — the kernel gets `x/511` through `CurveLUT.blackPoints`, so
+        // the constant is asked for at the same number.
+        let raisedPoint = CurvePoint(u: 0.2, v: 0.3)
+        let raised = CurveLUT.buildOne([raisedPoint, CurvePoint(u: 1, v: 1)])
         let raisedSlope = CurveLUT.slope(of: raised)
-        let clip = HDRCurve.channel(0, table: raised, slope: raisedSlope, blackPoint: 0.2)
+        let clip = HDRCurve.channel(0, table: raised, slope: raisedSlope, blackPoint: raisedPoint.u)
         XCTAssertGreaterThan(clip, 1e-3, "first.y = 0.3 → 裁到的常量是 0.3 对应的线性值")
         for x in [-0.039, -0.004, -1e-9, 0.0, 1e-5, 1e-4, 5e-4] {
-            XCTAssertEqual(HDRCurve.channel(x, table: raised, slope: raisedSlope, blackPoint: 0.2),
+            XCTAssertEqual(HDRCurve.channel(x, table: raised, slope: raisedSlope, blackPoint: raisedPoint.u),
                            clip, accuracy: 1e-12, "\(x) 必须与 u = 0 的常量相等（裁切没有洞）")
         }
         XCTAssertNotEqual(HDRCurve.channel(-0.039, table: raised, slope: raisedSlope, blackPoint: 0),
                           clip, "反证：按 first.x == 0 走同一条负值会穿过去 —— 两条路必须不同")
 
-        // 表自己的那一半：u < 0.2 是常量（与 HDRCurve 的 u = 0 项同一个数）
-        let ids = (0..<100).map { Int((0.2 * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded()) }
+        // 表自己的那一半：u < 首点 是常量（与 HDRCurve 的 u = 0 项同一个数）
+        let ids = (0..<100).map {
+            Int((raisedPoint.u * Double($0) / 100 * Double(CurveLUT.size - 1)).rounded())
+        }
         XCTAssertEqual(Set(ids.map { raised[$0] }).count, 1)
-        XCTAssertEqual(Double(raised[0]), 0.3, accuracy: 1e-6)
+        XCTAssertEqual(Double(raised[0]), raisedPoint.v, accuracy: 1e-6, "first.y = 格 \(raisedPoint.y)")
         XCTAssertEqual(HDRCurve.axis.inverse(Double(raised[0])), clip, accuracy: 1e-12)
 
-        print("sub-black · first.x=0 → 直通；first.x=0.2 → 常量 "
+        print("sub-black · first.x=0 → 直通；first.x=格 \(raisedPoint.x) → 常量 "
               + "\(String(format: "%.6f", clip)) linear（表项 \(raised[0])）")
     }
 
@@ -588,9 +567,9 @@ final class CurvePanelTests: XCTestCase {
 
         let edited = CatalogSession()
         edited.applyEdit {
-            $0.curve.white = [CurvePoint(0, 0), CurvePoint(0.2, 0.3), CurvePoint(0.55, 0.5),
-                              CurvePoint(0.8, 0.9), CurvePoint(1, 1)]
-            $0.curve.red = [CurvePoint(0, 0), CurvePoint(0.5, 0.4), CurvePoint(1, 1)]
+            $0.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.2, v: 0.3), CurvePoint(u: 0.55, v: 0.5),
+                              CurvePoint(u: 0.8, v: 0.9), CurvePoint(u: 1, v: 1)]
+            $0.curve.red = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.4), CurvePoint(u: 1, v: 1)]
         }
         edited.commitEdit(label: "曲线")
         let busy = Self.fittingSize(CurvePanel(session: edited), width: 274)
@@ -673,20 +652,20 @@ final class CurvePanelTests: XCTestCase {
         XCTAssertEqual(geometry.inset, r + 1, accuracy: 1e-12, "inset 必须是 半径 + 1 pt 呼吸")
         XCTAssertEqual(geometry.inset, CurvePanelMetrics.pointInset, accuracy: 1e-12)
         XCTAssertEqual(geometry.x(u: 0), plot.minX + geometry.inset, "x(0) == inset")
-        XCTAssertEqual(geometry.x(u: 1), plot.maxX - geometry.inset, "x(1) == width − inset")
-        XCTAssertEqual(geometry.y(v: 1), plot.minY + geometry.inset, "y(1) == inset")
+        XCTAssertEqual(geometry.x(u: 2), plot.maxX - geometry.inset, "x(2) == width − inset")
+        XCTAssertEqual(geometry.y(v: 2), plot.minY + geometry.inset, "y(2) == inset")
         XCTAssertEqual(geometry.y(v: 0), plot.maxY - geometry.inset, "y(0) == height − inset")
         XCTAssertEqual(geometry.x(u: 0), geometry.valueBox.minX)
-        XCTAssertEqual(geometry.x(u: 1), geometry.valueBox.maxX)
-        XCTAssertEqual(geometry.y(v: 1), geometry.valueBox.minY)
+        XCTAssertEqual(geometry.x(u: 2), geometry.valueBox.maxX)
+        XCTAssertEqual(geometry.y(v: 2), geometry.valueBox.minY)
         XCTAssertEqual(geometry.y(v: 0), geometry.valueBox.maxY)
 
         // 四角 + 四边中点，都用 `point(_:)` 走一遍真正的绘制路径
         let samples: [(String, CurvePoint)] = [
-            ("左下角 (0,0)", CurvePoint(0, 0)), ("右下角 (1,0)", CurvePoint(1, 0)),
-            ("左上角 (0,1)", CurvePoint(0, 1)), ("右上角 (1,1)", CurvePoint(1, 1)),
-            ("左边 (0,½)", CurvePoint(0, 0.5)), ("右边 (1,½)", CurvePoint(1, 0.5)),
-            ("下边 (½,0)", CurvePoint(0.5, 0)), ("上边 (½,1)", CurvePoint(0.5, 1)),
+            ("左下角 (0,0)", CurvePoint(u: 0, v: 0)), ("右下角 (1,0)", CurvePoint(u: 1, v: 0)),
+            ("左上角 (0,1)", CurvePoint(u: 0, v: 1)), ("右上角 (1,1)", CurvePoint(u: 1, v: 1)),
+            ("左边 (0,½)", CurvePoint(u: 0, v: 0.5)), ("右边 (1,½)", CurvePoint(u: 1, v: 0.5)),
+            ("下边 (½,0)", CurvePoint(u: 0.5, v: 0)), ("上边 (½,1)", CurvePoint(u: 0.5, v: 1)),
         ]
         var report: [String] = []
         for (name, p) in samples {
@@ -708,7 +687,7 @@ final class CurvePanelTests: XCTestCase {
         }
 
         // 064 原文式的实测结果（钉住这条矛盾本身）：4 pt 下为假，需 ≥ 2r = 6 pt 才为真。
-        let c00 = geometry.point(CurvePoint(0, 0))
+        let c00 = geometry.point(CurvePoint(u: 0, v: 0))
         let circle00 = CGRect(x: c00.x - r, y: c00.y - r, width: 2 * r, height: 2 * r)
         XCTAssertFalse(plot.insetBy(dx: r, dy: r).contains(circle00),
                        "原文式 `plot.insetBy(r).contains(circle)` 需要 inset ≥ 2r；若这里变真说明 inset 被悄悄加大"
@@ -718,7 +697,7 @@ final class CurvePanelTests: XCTestCase {
         // 只要 inset == r + 1，四角的呼吸就还是 1 pt。
         for radius in [CGFloat(3), 3.5, 4] {
             let g = CurvePlotGeometry(plot: plot, inset: radius + 1)
-            for corner in [CurvePoint(0, 0), CurvePoint(1, 1), CurvePoint(0, 1), CurvePoint(1, 0)] {
+            for corner in [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 1), CurvePoint(u: 0, v: 1), CurvePoint(u: 1, v: 0)] {
                 let c = g.point(corner)
                 let circle = CGRect(x: c.x - radius, y: c.y - radius,
                                     width: 2 * radius, height: 2 * radius)
@@ -729,7 +708,7 @@ final class CurvePanelTests: XCTestCase {
 
         // 反证：inset 改回 0（改动前的映射）→ 同一个谓词必须红
         let naive = CurvePlotGeometry(plot: plot, inset: 0)
-        for corner in [CurvePoint(0, 0), CurvePoint(1, 1), CurvePoint(0, 1), CurvePoint(1, 0)] {
+        for corner in [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 1), CurvePoint(u: 0, v: 1), CurvePoint(u: 1, v: 0)] {
             let c = naive.point(corner)
             let circle = CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)
             XCTAssertFalse(centreRoom.contains(c),
@@ -761,8 +740,8 @@ final class CurvePanelTests: XCTestCase {
 
         // 网格的"边框"（最外两条线）与取值盒的坐标严格相等
         XCTAssertEqual(grid.vertical.first!, geometry.x(u: 0), "左边框不在 x(0) 上")
-        XCTAssertEqual(grid.vertical.last!, geometry.x(u: 1), "右边框不在 x(1) 上")
-        XCTAssertEqual(grid.horizontal.first!, geometry.y(v: 1), "上边框不在 y(1) 上")
+        XCTAssertEqual(grid.vertical.last!, geometry.x(u: 2), "右边框不在 x(2) 上")
+        XCTAssertEqual(grid.horizontal.first!, geometry.y(v: 2), "上边框不在 y(2) 上")
         XCTAssertEqual(grid.horizontal.last!, geometry.y(v: 0), "下边框不在 y(0) 上")
 
         let frame = CGRect(x: grid.vertical.first!, y: grid.horizontal.first!,
@@ -775,22 +754,22 @@ final class CurvePanelTests: XCTestCase {
         // 对角线也在这只盒子里（端点就是盒的两个角）
         XCTAssertEqual(geometry.x(u: 0), box.minX)
         XCTAssertEqual(geometry.y(v: 0), box.maxY)
-        XCTAssertEqual(geometry.x(u: 1), box.maxX)
-        XCTAssertEqual(geometry.y(v: 1), box.minY)
+        XCTAssertEqual(geometry.x(u: 2), box.maxX)
+        XCTAssertEqual(geometry.y(v: 2), box.minY)
 
-        // 刻度：位置仍由 `u(stops:)` 推出（差为 0），且标签仍在外框下方那一带（tickBand 没变）
+        // 刻度：位置仍由 axis 推出（差为 0），且标签仍在外框下方那一带（tickBand 没变）。
+        // 069：五档码值，全部视图里 255 码落在正中（x = 1 = 白点）。
         let ticks = CurveAxisTicks.ticks()
         let axis = HDRCurveAxis.standard
-        let expected = [axis.forward(0),
-                        axis.forward(CurveAxisTicks.displayCode(127)),
-                        axis.forward(CurveAxisTicks.displayCode(255)),
-                        axis.u(stops: 1), axis.u(stops: 2), axis.u(stops: 3), axis.u(stops: 4)]
+        let expected = [0.0, 63, 127, 191, 255].map {
+            2 * axis.forward(CurveAxisTicks.displayCode($0))
+        }
         let positions = geometry.tickPositions(ticks)
-        XCTAssertEqual(positions.first!, box.minX, accuracy: 1e-12)
-        XCTAssertEqual(positions.last!, box.maxX, accuracy: 1e-12)
+        XCTAssertEqual(positions[0], box.minX, accuracy: 1e-12)
+        XCTAssertEqual(positions[positions.count - 1], box.midX, accuracy: 1e-12, "白点在正中")
         for ((tick, want), position) in zip(zip(ticks, expected), positions) {
-            XCTAssertEqual(tick.u, want, accuracy: 1e-9, "刻度 \(tick.label) 的位置仍来自 HDRCurveAxis")
-            XCTAssertEqual(position - (box.minX + CGFloat(want) * box.width), 0, accuracy: 1e-12,
+            XCTAssertEqual(tick.x, want, accuracy: 0, "刻度 \(tick.label) 的位置来自 HDRCurveAxis")
+            XCTAssertEqual(position - (box.minX + CGFloat(want / 2) * box.width), 0, accuracy: 1e-12,
                            "刻度 \(tick.label) 的位置差必须为 0")
         }
         // 外框（标签所在的那块）与取值盒的关系：只差一个 inset，布局没动
@@ -809,11 +788,20 @@ final class CurvePanelTests: XCTestCase {
         print("grid · vertical \(grid.vertical.map { String(format: "%.1f", $0) })"
               + " · horizontal \(grid.horizontal.map { String(format: "%.1f", $0) })"
               + " · 边框 == \(frame) · 刻度位置差 "
-              + String(format: "%.1e", zip(ticks, positions)
-                        .map { abs($1 - (box.minX + CGFloat($0.u) * box.width)) }.max() ?? 0))
+              + String(format: "%.1e", tickError(ticks, positions, box)))
     }
 
     // MARK: - helpers
+
+    /// The largest |tick − (box.minX + x/2·width)|, computed in one place so the print statement does
+    /// not become a type-checker puzzle.
+    private func tickError(_ ticks: [CurveAxisTick], _ positions: [CGFloat], _ box: CGRect) -> CGFloat {
+        var worst: CGFloat = 0
+        for (tick, position) in zip(ticks, positions) {
+            worst = max(worst, abs(position - (box.minX + CGFloat(tick.x / 2) * box.width)))
+        }
+        return worst
+    }
 
     private static var repoRoot: URL {
         URL(fileURLWithPath: #filePath)

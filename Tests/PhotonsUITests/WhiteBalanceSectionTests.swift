@@ -397,7 +397,7 @@ final class WhiteBalanceSectionTests: XCTestCase {
         var render = session.edit
         render.light.exposure = 1.2
         render.light.contrast = 35
-        render.curve.white = [CurvePoint(0, 0), CurvePoint(0.5, 0.62), CurvePoint(1, 1)]
+        render.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.62), CurvePoint(u: 1, v: 1)]
         render.color.vibrance = 25
         let rendered = try develop(loupe, url, render)
         XCTAssertTrue(rendered.usedCachedDecode,
