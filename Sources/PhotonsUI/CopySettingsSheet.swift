@@ -101,7 +101,6 @@ final class CopySettingsAccessoryView: NSView {
     private(set) var presetPopUp: NSPopUpButton!
     private(set) var selectAllButton: NSButton!
     private(set) var selectNoneButton: NSButton!
-    private(set) var savePresetButton: NSButton!
     private(set) var statusLabel: NSTextField!
 
     /// `presetPopUp` index → preset. 自定义 is index 0 and is never selectable by the user directly.
@@ -171,12 +170,6 @@ final class CopySettingsAccessoryView: NSView {
         selectNoneButton = NSButton(title: "全不选", target: self, action: #selector(chooseNone(_:)))
         selectNoneButton.bezelStyle = .rounded
 
-        let tools = NSStackView(views: [presetPopUp, selectAllButton, selectNoneButton])
-        tools.orientation = .horizontal
-        tools.spacing = 6
-        root.addArrangedSubview(tools)
-        root.addArrangedSubview(separator())
-
         // The rows. A card is a bold-ish checkbox with its tooltip; a parameter row is indented by a
         // spacer so the eye reads 「this belongs to the card above」.
         rows = Self.rows(showsChildren: showsChildren)
@@ -213,14 +206,13 @@ final class CopySettingsAccessoryView: NSView {
         statusLabel.textColor = .secondaryLabelColor
         root.addArrangedSubview(statusLabel)
 
-        if purpose == .copy {
-            savePresetButton = NSButton(title: "保存为预设…", target: self,
-                                        action: #selector(saveAsPreset(_:)))
-            savePresetButton.bezelStyle = .rounded
-            savePresetButton.controlSize = .small
-            savePresetButton.toolTip = "把当前勾选的卡片在这张照片上的数值存成一个预设"
-            root.addArrangedSubview(savePresetButton)
-        }
+        // 081 §1: 全选 / 全不选 / 组合预设 are the sheet's **footer**, under the rows — the checklist is
+        // the subject, the shortcuts are not. The primary button (复制（记住本次选择）) and
+        // 保存为预设… are the alert's own, at the bottom right where a sheet's buttons belong.
+        let tools = NSStackView(views: [presetPopUp, selectAllButton, selectNoneButton])
+        tools.orientation = .horizontal
+        tools.spacing = 6
+        root.addArrangedSubview(tools)
     }
 
     private func separator() -> NSBox {
@@ -260,18 +252,6 @@ final class CopySettingsAccessoryView: NSView {
         guard Self.popUpPresets.indices.contains(index), let preset = Self.popUpPresets[index] else { return }
         selection.select(preset)
         refreshControls()
-    }
-
-    /// 保存为预设… — the sheet closes as if 复制 had been pressed, and the window controller puts the
-    /// question 「叫什么名字」 (the app's existing preset prompt) before writing the row.
-    ///
-    /// Answers the alert through `NSApp.stopModal(withCode:)` — the supported way to end a modal
-    /// `NSAlert` from a control inside its accessory view, since the accessory's buttons are not the
-    /// alert's own.
-    private(set) var pendingOutcome: Outcome?
-    @objc private func saveAsPreset(_ sender: Any?) {
-        pendingOutcome = .savePreset(selection)
-        NSApp.stopModal(withCode: .alertSecondButtonReturn)
     }
 
     /// Push the model into the controls — after any change, so the popup reads 自定义 the moment a
@@ -325,18 +305,13 @@ final class CopySettingsAccessoryView: NSView {
         if purpose == .copy { alert.addButton(withTitle: "保存为预设…") }
         alert.addButton(withTitle: "取消")
         alert.accessoryView = accessory
-        let response = alert.runModal()
-        // 保存为预设… answers through `NSApp.stopModal(withCode: .alertSecondButtonReturn)`, i.e. the
-        // same code the alert's own second button returns — so the *intent* is what distinguishes the
-        // two, and the button's action has already recorded it.
-        switch response {
+        switch alert.runModal() {
         case .alertFirstButtonReturn:
             return .confirm(accessory.selection)
         case .alertSecondButtonReturn where purpose == .copy:
-            return .savePreset(accessory.pendingOutcome.flatMap { outcome -> CopySettingsSelection? in
-                if case .savePreset(let s) = outcome { return s }
-                return nil
-            } ?? accessory.selection)
+            // 081 §4: 保存为预设… — the checked cards on the anchor, under the app's preset name prompt
+            // (`EditorWindowController.askPresetName`), so both doors name a preset the same way.
+            return .savePreset(accessory.selection)
         default:
             return nil
         }

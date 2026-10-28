@@ -60,8 +60,10 @@ final class TransformMenuTests: XCTestCase {
         print("F · top level: \(titles)")
 
         let transformIndex = try XCTUnwrap(titles.firstIndex(of: "变换"))
-        let developIndex = try XCTUnwrap(titles.firstIndex(of: "显影"))
-        XCTAssertLessThan(transformIndex, developIndex, "§F: 变换 before 显影")
+        // 081 (2026-10-28): 预设 is a top-level menu where 显影 used to be (its only row was the preset
+        // list), so 变换 still sits before it — the §F ordering claim survives the move.
+        let developIndex = try XCTUnwrap(titles.firstIndex(of: "预设"), "顶部菜单里应有 预设：\(titles)")
+        XCTAssertLessThan(transformIndex, developIndex, "§F: 变换 before 预设")
 
         let transform = try XCTUnwrap(menu.items[transformIndex].submenu)
         XCTAssertEqual(transform.items.map(\.title),
@@ -71,7 +73,10 @@ final class TransformMenuTests: XCTestCase {
         print("F · 变换: \(transform.items.map { $0.isSeparatorItem ? "─" : $0.title })")
 
         let develop = try XCTUnwrap(menu.items[developIndex].submenu)
-        XCTAssertEqual(develop.items.map(\.title), ["预设"], "§F: 显影 keeps the presets and nothing else")
+        XCTAssertEqual(develop.title, "预设", "081: 顶级 预设 菜单")
+        (develop as? PresetMenu)?.menuNeedsUpdate(develop)
+        XCTAssertFalse(develop.items.contains { $0.title.contains("裁切") },
+                       "§F: 预设 菜单里没有裁切行")
 
         // 搬走的四行：一个大标题都不许留。
         for gone in ["裁切与旋转", "应用裁切", "取消裁切", "水平翻转", "垂直翻转"] {

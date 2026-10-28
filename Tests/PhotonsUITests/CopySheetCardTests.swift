@@ -205,6 +205,11 @@ final class CopySheetCardTests: XCTestCase {
         XCTAssertEqual(payload.sections, [.whiteBalance, .blackLevel, .light])
         XCTAssertEqual(payload.fieldCount, 5, "色温 + 色调 + 黑电平 + 曝光 + 对比")
 
+        // ⑧ 复制不写历史、不改文档.
+        XCTAssertEqual(try catalog.editHistory(forAsset: b).count, 1, "复制没有给 B 加历史")
+        XCTAssertEqual(try Catalog.encode(session.edit), try Catalog.encode(documentA()),
+                       "复制没有改文档")
+
         let before = try catalog.develop(forAsset: b)
         session.selectOnly(b)
         let reports = session.pasteSettings(selection: choice)
@@ -344,6 +349,9 @@ final class CopySheetCardTests: XCTestCase {
         print("081 preset T081: sections=\(record.preset.sections.map { $0.map(\.rawValue).sorted() } ?? [])"
               + " groups=\(PresetGroup.ordered(record.groups).map(\.rawValue))")
         XCTAssertEqual(record.preset.sections, [.curve, .effects])
+        // 菜单与面板读的是同一份缓存：保存完就刷新，不用重启。
+        XCTAssertTrue(live.presetRecords.contains { $0.name == "T081" },
+                      "保存后 session.presetRecords 里就有它（菜单下次打开就在）")
 
         // 只含那两张卡的字段: nothing outside curve/effects moved away from neutral.
         let storedKeys = changedKeys(.neutral, record.edit)
