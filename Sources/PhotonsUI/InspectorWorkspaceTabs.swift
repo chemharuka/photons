@@ -84,7 +84,9 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // 预设, which stays last because it writes the other cards rather than adding a parameter.
             // 2026-10-28: 黑白 (S3.4) **left** this workspace — the user moved it into 色彩 with HSL
             // and 色彩分级 («黑白移动到色彩栏，不放在调整中»), which is also where its subject lives.
-            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve,
+            // Membership is listed in the panel's own render order (`Section.allCases`), because
+            // `UISmokeWorkspaceSwitchTests` compares the panel's reported titles to this array.
+            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail,
                     .effects, .presets]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
