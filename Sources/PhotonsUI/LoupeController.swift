@@ -3500,6 +3500,39 @@ public final class LoupeController: NSViewController, HeadroomSource {
         "\(GeometryGroup.normalizedQuarterTurns(turns) * 90)°"
     }
 
+    // MARK: 自动黑电平 (2026-10-28)
+
+    /// 自动黑电平：把解码缓冲的最小通道值拉到 0（一次文档写、一条历史）。返回写进去的值；没有解码图时 nil。
+    ///
+    /// The buffer is the **decoded** scene-linear one (`LinearImage.rgba`), not the rendered frame:
+    /// S1's `blackOffset` is added before the gain, so this is the one place the shift is still
+    /// additive on the samples. `−min` is rounded **up** to the document's 1/1000 grid — a half tick
+    /// down would leave the darkest sample negative, which is exactly what the user asked to remove.
+    /// A value already at zero (or any buffer that is already non-negative) is a no-op.
+    @discardableResult
+    public func autoBlackOffset() -> Double? {
+        guard let session, session.mode == .loupe, let image = decoded else { return nil }
+        let min = image.minChannel(sampleStride: 5)
+        let raw = min >= 0 ? 0 : -Double(min)
+        let offset = Self.autoBlackOffset(for: min)
+        if raw < LightGroup.blackOffsetRange.lowerBound || raw > LightGroup.blackOffsetRange.upperBound {
+            print("AUTO BLACK · min \(min) → offset 钳到 ±0.01")
+        }
+        guard abs(offset - session.edit.light.blackOffset) >= 1e-9 else { return nil }
+        session.applyEdit { $0.light.blackOffset = offset }
+        requestEditRender()
+        session.commitEdit(label: "黑电平 · 自动", coalesce: false)
+        return offset
+    }
+
+    /// The value `autoBlackOffset()` writes, as a pure function (the tests ask it without a decode).
+    static func autoBlackOffset(for minChannel: Float) -> Double {
+        let raw = minChannel >= 0 ? 0 : -Double(minChannel)
+        let stepped = (raw * 1000).rounded(.up) / 1000
+        return Swift.min(Swift.max(stepped, LightGroup.blackOffsetRange.lowerBound),
+                         LightGroup.blackOffsetRange.upperBound)
+    }
+
     /// The document's flips — what the menu ticks and the bar's two switches show.
 
     /// The crop frame's layout in view points, for the overlay and for the tests.

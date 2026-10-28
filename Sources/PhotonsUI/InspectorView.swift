@@ -203,6 +203,9 @@ public struct InspectorView: View {
     /// One line under the sliders: what the dropper did, or why it did nothing.
     @State private var hint: String?
     @State private var eyedropperArmed = false
+    /// The 自动黑电平 icon's hover state: the only thing about it that changes on pointer-over
+    /// (no frame, no fill — see `autoBlackLevelButton`).
+    @State private var autoBlackHovered = false
 
     /// **Which cards are on screen** (派单 073).
     ///
@@ -483,8 +486,9 @@ public struct InspectorView: View {
     /// functions are what it translates with — so the number on screen, the number in the key
     /// material and the number the kernel adds are one value.
     private var blackLevelCard: some View {
-        card(Section.blackLevel.title,
-             reset: { resets.field(\.light.blackOffset, label: Section.blackLevel.title) }) {
+        InspectorCardShell(title: Section.blackLevel.title,
+                           reset: { resets.field(\.light.blackOffset, label: Section.blackLevel.title) },
+                           accessory: { autoBlackLevelButton }) {
             ForEach(Self.blackLevelRows, id: \.title) { row in
                 sliderRow(row.title, blackLevelBinding(row), row.range, row.format,
                           shape: row.shape,
@@ -498,6 +502,31 @@ public struct InspectorView: View {
                 }
             }
         }
+    }
+
+    /// 「黑电平」标题行右侧的自动按钮（同一个无框族）：14 pt 的裸 `wand.and.stars`，没有底、没有边、
+    /// 没有胶囊，hover 只把图标从 secondary 提到 primary。它落在数值框的正上方、与数值框右缘对齐 ——
+    /// 卡头本身就在数值行上方，`Spacer` 把它推到这个卡的右缘。命中区 ≥ 18×18；`−2` 的尾距抵掉
+    /// `NSTextField` 单元格向两侧各溢出的 2 pt，让图标的右缘与「数值框」的实际右缘落在同一条线上。
+    private var autoBlackLevelButton: some View {
+        Button {
+            // The action writes through the session and asks for its own development; the row's
+            // observed value follows the document, so there is no `@State` copy to update here.
+            _ = loupe?.autoBlackOffset()
+        } label: {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 14))
+                .foregroundStyle(autoBlackHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+                .background(BlackLevelAutoProbeHost())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, -2)
+        .onHover { autoBlackHovered = $0 }
+        .help("自动黑电平：把解码后的线性数据拉到非负")
+        .accessibilityLabel("自动黑电平")
+        .accessibilityIdentifier("inspector.blackLevel.auto")
     }
 
     /// 071: the 黑电平 card's one row, as data like every other row table.
@@ -2869,6 +2898,48 @@ public final class InspectorHostingView: NSHostingView<InspectorView> {
         guard !isEditingGated else { return nil }
         return super.hitTest(point)
     }
+}
+
+// MARK: - the 自动黑电平 icon's frame probe
+
+/// The frame of the 黑电平 card's auto button, and whether any chrome drew around it.
+///
+/// SwiftUI's plain `Button` has no AppKit control to measure, so the probe hangs off the button with
+/// `.background(…)`: a background is sized by its content, which makes this exactly the hit area the
+/// 20×18 frame gives the button (the width includes the 2 pt cell overhang it aligns to). `hasBorder`
+/// walks a few ancestors for a layer border or a bordered
+/// `NSButton`; a `.background`/`stroke`/capsule added to the icon is the regression it is here to catch.
+final class BlackLevelAutoProbe: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("BlackLevelAutoProbe is created in code") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+
+    var hasBorder: Bool {
+        var view: NSView? = self
+        var depth = 0
+        while let current = view, depth < 4 {
+            if let layer = current.layer,
+               layer.borderWidth > 0 || (layer.backgroundColor.map { $0.alpha > 0.001 } ?? false) {
+                return true
+            }
+            if let button = current as? NSButton, button.isBordered { return true }
+            view = current.superview
+            depth += 1
+        }
+        return false
+    }
+}
+
+struct BlackLevelAutoProbeHost: NSViewRepresentable {
+    func makeNSView(context: Context) -> BlackLevelAutoProbe { BlackLevelAutoProbe() }
+    func updateNSView(_ probe: BlackLevelAutoProbe, context: Context) {}
 }
 
 // MARK: - the enabled read-back probe
