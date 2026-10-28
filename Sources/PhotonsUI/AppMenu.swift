@@ -155,16 +155,18 @@ public enum MainMenu {
                           keyEquivalent: "]")
         // Reserved: 梯形校正 / 四边形校正 go here (see the comment above — no dead rows).
 
-        // Develop — presets. The list is the library's, so the menu is rebuilt every time it opens
-        // (`PresetMenu.menuNeedsUpdate`): a preset created in the inspector card shows up here
-        // without a relaunch, and a deleted one cannot be applied from a stale item.
-        let developItem = NSMenuItem()
-        main.addItem(developItem)
-        let develop = NSMenu(title: "显影")
-        developItem.submenu = develop
+        // 预设 — a **top-level menu** as of 081 (§4: 「预设卡片删掉，系统顶部菜单栏出现预设」).
+        //
+        // It takes 显影's place rather than sitting inside it: 显影's only row *was* the preset list, so
+        // moving the list out and leaving 显影 behind would leave a title that opens nothing. One verb,
+        // one home — the same rule 072 §F used to cut the 变换 menu down.
+        //
+        // The list is the library's, so the menu is rebuilt every time it opens
+        // (`PresetMenu.menuNeedsUpdate`): a preset created in the copy sheet shows up here without a
+        // relaunch, and a deleted one cannot be applied from a stale item.
         let presetItem = NSMenuItem(title: "预设", action: nil, keyEquivalent: "")
         presetItem.submenu = PresetMenu(kind: .apply)
-        develop.addItem(presetItem)
+        main.addItem(presetItem)
 
         // View
         let viewItem = NSMenuItem()

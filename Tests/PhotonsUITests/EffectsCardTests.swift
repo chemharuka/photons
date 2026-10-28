@@ -31,16 +31,17 @@ final class EffectsCardTests: XCTestCase {
 
     // MARK: - 1. 卡片清单与位置
 
-    func testTheEffectsCardSitsBetweenTheCurveAndThePresets() throws {
+    func testTheEffectsCardIsTheLastCardOfTheAdjustWorkspace() throws {
         let titles = InspectorView.cardTitles(in: .adjust)
         XCTAssertTrue(titles.contains("效果"), "调整工作区必须有「效果」卡（\(titles)）")
 
         let sections = InspectorView.sections(in: .adjust)
         let curve = try XCTUnwrap(sections.firstIndex(of: .curve))
         let effects = try XCTUnwrap(sections.firstIndex(of: .effects))
-        let presets = try XCTUnwrap(sections.firstIndex(of: .presets))
         XCTAssertEqual(effects, curve + 1, "效果紧跟在曲线之后")
-        XCTAssertEqual(presets, effects + 1, "预设仍然最后（它写别的卡，不是一个参数卡）")
+        // 081 (2026-10-28): 预设 卡已删，所以 效果 就是调整工作区的最后一张卡。
+        XCTAssertEqual(effects, sections.count - 1, "效果是调整工作区的最后一张卡（预设卡已删）")
+        XCTAssertFalse(titles.contains("预设"), "预设 不再是卡片：它搬到了顶部菜单与复制对话框")
 
         // One card, three blocks: the four vignette rows, the Presence triple (S3.8), then the four
         // grain rows, in that order.

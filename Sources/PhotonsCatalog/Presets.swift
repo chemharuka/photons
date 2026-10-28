@@ -178,8 +178,10 @@ extension Catalog {
         guard !value.groups.isEmpty else { throw PresetError.noGroups }
         // Re-project through the public initializer so `record.edit` is exactly what the blob
         // carries. A caller that mutated `groups` after capturing would otherwise hand back an
-        // edit whose values the encoder silently drops.
-        value = Preset(name: value.name, groups: value.groups, edit: value.edit)
+        // edit whose values the encoder silently drops. `sections` (081) travels through: it is what
+        // makes a card-scoped preset apply field-by-field instead of replacing a whole group.
+        value = Preset(name: value.name, groups: value.groups, edit: value.edit,
+                       sections: value.sections)
         let blob = try Self.encodePreset(value)
         let stamp = ISO8601.now()
 

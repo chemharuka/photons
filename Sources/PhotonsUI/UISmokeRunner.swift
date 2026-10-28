@@ -318,13 +318,14 @@ public final class UISmokeRunner {
         // 白平衡下面之后就已经对不上了 —— 它红在黑电平上，不是红在工作区上。
         let scrollTitles = InspectorView.scrollingSections.map(\.title)
         log("  scroll cards        \(scrollTitles.joined(separator: " → "))")
-        check("滚动区段顺序是 白平衡 → 黑电平 → Light → Color → 细节 → 曲线 → 预设 → Decode（直方图钉在顶上，不在滚动区里）",
+        check("滚动区段顺序是 白平衡 → 黑电平 → Light → Color → 细节 → 曲线 → 效果 → 裁切 → 蒙版 → 历史记录（直方图钉在顶上，不在滚动区里；081 删掉预设卡）",
               Array(scrollTitles.prefix(3)) == ["白平衡", "黑电平", "Light"]
-              && !scrollTitles.contains(InspectorView.Section.histogram.title))
+              && !scrollTitles.contains(InspectorView.Section.histogram.title)
+              && !scrollTitles.contains("预设"))
         let adjustTitles = InspectorView.cardTitles(in: .adjust)
         log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
-        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 黑白 / 细节 / 曲线 / 效果 / 预设，直方图与裁切都不在其中",
-              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "黑白", "细节", "曲线", "效果", "预设"])
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 效果，直方图与裁切都不在其中（081 预设卡已删）",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "效果"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
@@ -695,20 +696,20 @@ public final class UISmokeRunner {
               created != nil && session.presetRecords.contains { $0.name == "Smoke Punch" }
               && session.presetRecords.contains { $0.name == "Smoke Punch" && $0.preset.groups == [.light] })
 
-        // The Develop menu rebuilds from the same cache — the card and the menu cannot disagree.
-        if let develop = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "显影" }),
-           let presetItem = develop.items.first(where: { $0.submenu is PresetMenu }),
-           let presetMenu = presetItem.submenu as? PresetMenu {
+        // 081: 预设 is a **top-level menu** now (「预设卡片删掉，系统顶部菜单栏出现预设」). It rebuilds
+        // from the same cache the sheet reads, so the two cannot disagree.
+        if let presetMenu = NSApp.mainMenu?.items.compactMap(\.submenu)
+            .first(where: { $0.title == "预设" }) as? PresetMenu {
             presetMenu.menuNeedsUpdate(presetMenu)
             let titles = presetMenu.items.map(\.title)
             let applied = presetMenu.items.first { $0.title == "Smoke Punch" }
             log("preset menu             \(titles.prefix(6).joined(separator: " · "))")
-            check("显影 ▸ 预设 从库里重建，带出“Smoke Punch”并指向应用动作（\(titles.prefix(4).joined(separator: "、"))…）",
+            check("顶级 预设 菜单从库里重建，带出“Smoke Punch”并指向应用动作（\(titles.prefix(4).joined(separator: "、"))…）",
                   applied?.action == #selector(EditorWindowController.applyPresetAction(_:))
                   && (applied?.representedObject as? String) == "Smoke Punch"
                   && presetMenu.items.contains { $0.action == #selector(EditorWindowController.newPresetFromCurrentAction(_:)) })
         } else {
-            fail("主菜单里没有 显影 ▸ 预设")
+            fail("主菜单里没有顶级 预设 菜单")
         }
 
         session.applyEdit { $0.light.exposure = 0 }

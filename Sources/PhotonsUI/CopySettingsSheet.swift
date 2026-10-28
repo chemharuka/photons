@@ -1,21 +1,44 @@
 import AppKit
 import PhotonsCore
 
-/// 编辑 ▸ 选择要复制的设置… / 粘贴设置（选择组…） — the checklist.
+/// 编辑 ▸ 复制设置… / 粘贴设置（选择…） — the card-level checklist of 081.
 ///
-/// One view, two purposes (`copy` / `paste`): the rows are the same rows Lightroom's Copy Settings
-/// dialog has, and the answer is the same value type the session stores (`CopySettingsSelection`),
-/// so the dialog cannot invent a combination the paste path does not understand.
+/// One view, two purposes (`copy` / `paste`): the rows are the **inspector's cards**, in the
+/// inspector's order (`InspectorView` renders `Section.allCases`; `EditSnapshotSection.panelOrder`
+/// mirrors it), and the answer is the value type the session stores (`CopySettingsSelection`), so the
+/// dialog cannot invent a combination the paste path does not understand.
+///
+/// What changed from 078, and why:
+///
+///   · ⌘C no longer copies — it opens this sheet (081 §1). 复制 is a decision about *what*, so it is
+///     asked before it happens, not after.
+///   · the rows are cards, not `RenderGroup`s: 白平衡 / 黑电平 / Light / Color / 黑白 / HSL / 色彩分级 /
+///     细节 / 曲线 / 效果 / 裁切 / 蒙版 — the user's own words are 「按卡片选择」.
+///   · `showsChildren` (default `false`) decides whether each card's **parameters** are drawn under
+///     it. 081 §2 asks for them to exist but not be shown: 「只是不展示出来，不要写死」. So the rows
+///     are built from `EditSnapshotChild` either way, and a test opens the switch to prove the child
+///     rows draw *and* that checking one narrows the payload to that one leaf.
+///   · the sheet can **save the selection as a preset** (081 §4): same rows, same answer, one button —
+///     the naming dialog is the app's existing preset prompt.
 ///
 /// The three answers the ticket asks for live on the **model** (`CopySettingsSelection`:
-/// `selectAll()` / `selectNone()` / `select(.basic)`), and this view only drives them — `all` /
-/// `none` buttons, a 预设组合 popup, and eight checkboxes. 蒙版 is a row like any other since P1-5
-/// (it used to be drawn disabled with the reason in its tooltip); its tooltip now explains what a
-/// mask copy does, and its title carries no "（暂不支持）" suffix.
+/// `selectAll()` / `selectNone()` / `select(.basic)`), and this view only drives them — `全选` /
+/// `全不选` buttons, a 组合 popup, and the card checkboxes.
+enum CopySettingsSheet {
+
+    /// Draw each card's parameter rows under it. **A constant, not a comment** (081 §2): the default is
+    /// 「不展示」, and the day the owner asks for them this one line is the whole change.
+    ///
+    /// The structure behind it is always there — `EditSnapshotSection.children` is typed and
+    /// enumerable, and `EditSnapshot.filtered(to: selection)` honours the child set — so turning this
+    /// on cannot half-work.
+    static let showsChildren = false
+}
+
 @MainActor
 final class CopySettingsAccessoryView: NSView {
 
-    enum Purpose {
+    enum Purpose: Equatable {
         case copy
         case paste
 
@@ -26,22 +49,59 @@ final class CopySettingsAccessoryView: NSView {
             }
         }
 
+        /// The primary button. 081 §1 spells the copy one out: **`复制（记住本次选择）`** — the promise
+        /// that the checklist comes back next time.
         var confirmTitle: String {
             switch self {
-            case .copy: return "复制"
+            case .copy: return "复制（记住本次选择）"
             case .paste: return "粘贴"
+            }
+        }
+
+        var informativeText: String {
+            switch self {
+            case .copy:
+                return "勾选要复制的卡片。只复制所选卡片里**非默认**的字段；目标照片没被点名的卡片一个字段都不会动。"
+            case .paste:
+                return "勾选要粘贴的卡片。目标照片里没被点名的卡片一个字段都不会动。"
             }
         }
     }
 
+    /// What the user did with the sheet.
+    enum Outcome {
+        case confirm(CopySettingsSelection)
+        case savePreset(CopySettingsSelection)
+    }
+
+    /// One drawn row — a card, or (with `showsChildren`) one of its parameters.
+    enum Row: Equatable {
+        case card(EditSnapshotSection)
+        case child(EditSnapshotChild, card: EditSnapshotSection)
+
+        var title: String {
+            switch self {
+            case .card(let section): return section.title
+            case .child(let child, _): return child.title
+            }
+        }
+
+        var isCard: Bool { if case .card = self { return true }; return false }
+    }
+
     private(set) var selection: CopySettingsSelection
     let purpose: Purpose
+    /// Whether the parameter rows are drawn — see `CopySettingsSheet.showsChildren`.
+    let showsChildren: Bool
 
     // Exposed for the tests: they drive the real controls, not a parallel model.
+    private(set) var rows: [Row] = []
     private(set) var checkboxes: [EditSnapshotSection: NSButton] = [:]
+    private(set) var childCheckboxes: [EditSnapshotChild: NSButton] = [:]
     private(set) var presetPopUp: NSPopUpButton!
     private(set) var selectAllButton: NSButton!
     private(set) var selectNoneButton: NSButton!
+    private(set) var savePresetButton: NSButton!
     private(set) var statusLabel: NSTextField!
 
     /// `presetPopUp` index → preset. 自定义 is index 0 and is never selectable by the user directly.
@@ -54,10 +114,25 @@ final class CopySettingsAccessoryView: NSView {
         popUpPresets.firstIndex(where: { $0 == preset }) ?? 0
     }
 
-    init(selection: CopySettingsSelection, purpose: Purpose) {
+    /// The rows a sheet with this switch would draw — pure, so the count in a test is the count the
+    /// layout uses (081 §2's 「行数 12 + 全部子项数」 is this function's output).
+    static func rows(showsChildren: Bool) -> [Row] {
+        var out: [Row] = []
+        for section in EditSnapshotSection.panelOrder {
+            out.append(.card(section))
+            if showsChildren {
+                out.append(contentsOf: section.children.map { .child($0, card: section) })
+            }
+        }
+        return out
+    }
+
+    init(selection: CopySettingsSelection, purpose: Purpose,
+         showsChildren: Bool = CopySettingsSheet.showsChildren) {
         self.selection = selection
         self.purpose = purpose
-        super.init(frame: NSRect(x: 0, y: 0, width: 380, height: 0))
+        self.showsChildren = showsChildren
+        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 0))
         build()
         refreshControls()
     }
@@ -70,7 +145,7 @@ final class CopySettingsAccessoryView: NSView {
         let root = NSStackView()
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 8
+        root.spacing = 6
         root.translatesAutoresizingMaskIntoConstraints = false
         addSubview(root)
         NSLayoutConstraint.activate([
@@ -78,10 +153,10 @@ final class CopySettingsAccessoryView: NSView {
             root.trailingAnchor.constraint(equalTo: trailingAnchor),
             root.topAnchor.constraint(equalTo: topAnchor),
             root.bottomAnchor.constraint(equalTo: bottomAnchor),
-            root.widthAnchor.constraint(equalToConstant: 380),
+            root.widthAnchor.constraint(equalToConstant: 400),
         ])
 
-        // 预设组合 + 全选 / 全不选 — the three answers, in one row so none of them is hidden behind a
+        // 组合 + 全选 / 全不选 — the three answers, in one row so none of them is hidden behind a
         // popup the user has to discover.
         presetPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
         presetPopUp.addItem(withTitle: "组合：自定义")
@@ -100,30 +175,73 @@ final class CopySettingsAccessoryView: NSView {
         tools.orientation = .horizontal
         tools.spacing = 6
         root.addArrangedSubview(tools)
+        root.addArrangedSubview(separator())
 
-        for section in EditSnapshotSection.panelOrder {
-            let box = NSButton(checkboxWithTitle: section.title,
-                               target: self, action: #selector(toggled(_:)))
-            box.tag = EditSnapshotSection.panelOrder.firstIndex(of: section) ?? 0
-            box.state = selection.contains(section) ? .on : .off
-            box.isEnabled = section.isCopyable
-            if let help = section.help { box.toolTip = help }
-            checkboxes[section] = box
-            root.addArrangedSubview(box)
+        // The rows. A card is a bold-ish checkbox with its tooltip; a parameter row is indented by a
+        // spacer so the eye reads 「this belongs to the card above」.
+        rows = Self.rows(showsChildren: showsChildren)
+        for (index, row) in rows.enumerated() {
+            switch row {
+            case .card(let section):
+                let box = NSButton(checkboxWithTitle: section.title,
+                                   target: self, action: #selector(toggledCard(_:)))
+                box.tag = index
+                box.state = selection.contains(section) ? .on : .off
+                box.isEnabled = section.isCopyable
+                if let help = section.help { box.toolTip = help }
+                checkboxes[section] = box
+                root.addArrangedSubview(box)
+            case .child(let child, _):
+                let box = NSButton(checkboxWithTitle: child.title,
+                                   target: self, action: #selector(toggledChild(_:)))
+                box.tag = index
+                box.state = selection.contains(child) ? .on : .off
+                box.controlSize = .small
+                box.toolTip = "\(child.title)：只复制这一个参数（\(child.section.title) 卡）"
+                childCheckboxes[child] = box
+                let spacer = NSView(frame: NSRect(x: 0, y: 0, width: 18, height: 1))
+                let line = NSStackView(views: [spacer, box])
+                line.orientation = .horizontal
+                line.spacing = 0
+                root.addArrangedSubview(line)
+            }
         }
 
+        root.addArrangedSubview(separator())
         statusLabel = NSTextField(labelWithString: "")
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLabel.textColor = .secondaryLabelColor
         root.addArrangedSubview(statusLabel)
+
+        if purpose == .copy {
+            savePresetButton = NSButton(title: "保存为预设…", target: self,
+                                        action: #selector(saveAsPreset(_:)))
+            savePresetButton.bezelStyle = .rounded
+            savePresetButton.controlSize = .small
+            savePresetButton.toolTip = "把当前勾选的卡片在这张照片上的数值存成一个预设"
+            root.addArrangedSubview(savePresetButton)
+        }
+    }
+
+    private func separator() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        return box
     }
 
     // MARK: actions
 
-    @objc private func toggled(_ sender: NSButton) {
-        let sections = EditSnapshotSection.panelOrder
-        guard sections.indices.contains(sender.tag) else { return }
-        selection.set(sections[sender.tag], sender.state == .on)
+    @objc private func toggledCard(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag), case .card(let section) = rows[sender.tag] else { return }
+        selection.set(section, sender.state == .on)
+        refreshControls()
+    }
+
+    @objc private func toggledChild(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag), case .child(let child, _) = rows[sender.tag] else { return }
+        selection.set(child, sender.state == .on)
         refreshControls()
     }
 
@@ -144,12 +262,27 @@ final class CopySettingsAccessoryView: NSView {
         refreshControls()
     }
 
+    /// 保存为预设… — the sheet closes as if 复制 had been pressed, and the window controller puts the
+    /// question 「叫什么名字」 (the app's existing preset prompt) before writing the row.
+    ///
+    /// Answers the alert through `NSApp.stopModal(withCode:)` — the supported way to end a modal
+    /// `NSAlert` from a control inside its accessory view, since the accessory's buttons are not the
+    /// alert's own.
+    private(set) var pendingOutcome: Outcome?
+    @objc private func saveAsPreset(_ sender: Any?) {
+        pendingOutcome = .savePreset(selection)
+        NSApp.stopModal(withCode: .alertSecondButtonReturn)
+    }
+
     /// Push the model into the controls — after any change, so the popup reads 自定义 the moment a
     /// checkbox makes the set one no preset names (a popup that keeps saying 基本 while the boxes
     /// disagree is the classic two-sources-of-truth bug).
     func refreshControls() {
         for (section, box) in checkboxes {
             box.state = selection.contains(section) ? .on : .off
+        }
+        for (child, box) in childCheckboxes {
+            box.state = selection.contains(child) ? .on : .off
         }
         if let preset = selection.matchingPreset,
            let index = Self.popUpPresets.firstIndex(where: { $0 == preset }) {
@@ -160,32 +293,52 @@ final class CopySettingsAccessoryView: NSView {
         statusLabel.stringValue = selection.summary
     }
 
-    /// Programmatic equivalent of clicking every checkbox that names `section` — used by the tests to
-    /// prove the disabled 蒙版 row cannot be checked in even by hand.
+    /// Programmatic equivalent of clicking a card's checkbox — used by the tests.
     func click(_ section: EditSnapshotSection) {
         guard let box = checkboxes[section] else { return }
         box.state = box.state == .on ? .off : .on
-        toggled(box)
+        toggledCard(box)
+    }
+
+    /// Programmatic equivalent of clicking a parameter's checkbox.
+    func click(_ child: EditSnapshotChild) {
+        guard let box = childCheckboxes[child] else { return }
+        box.state = box.state == .on ? .off : .on
+        toggledChild(box)
     }
 
     // MARK: presenting
 
     /// Run the sheet and return the answer, or nil when cancelled.
-    static func run(selection: CopySettingsSelection, purpose: Purpose) -> CopySettingsSelection? {
-        let accessory = CopySettingsAccessoryView(selection: selection, purpose: purpose)
+    static func run(selection: CopySettingsSelection, purpose: Purpose,
+                    showsChildren: Bool = CopySettingsSheet.showsChildren) -> Outcome? {
+        let accessory = CopySettingsAccessoryView(selection: selection, purpose: purpose,
+                                                  showsChildren: showsChildren)
         accessory.layoutSubtreeIfNeeded()
         let height = max(accessory.fittingSize.height, 240)
-        accessory.frame = NSRect(x: 0, y: 0, width: 380, height: height)
+        accessory.frame = NSRect(x: 0, y: 0, width: 400, height: height)
 
         let alert = NSAlert()
         alert.messageText = purpose.title
-        alert.informativeText = "只复制所选组里**非默认**的字段；目标照片没被点名的组一个字段都不会动。"
+        alert.informativeText = purpose.informativeText
         alert.addButton(withTitle: purpose.confirmTitle)
+        if purpose == .copy { alert.addButton(withTitle: "保存为预设…") }
         alert.addButton(withTitle: "取消")
         alert.accessoryView = accessory
-        // The alert's own first responder would be its default button; the checklist wants the
-        // keyboard so ⌘/space do not silently confirm an unexpected combination.
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return accessory.selection
+        let response = alert.runModal()
+        // 保存为预设… answers through `NSApp.stopModal(withCode: .alertSecondButtonReturn)`, i.e. the
+        // same code the alert's own second button returns — so the *intent* is what distinguishes the
+        // two, and the button's action has already recorded it.
+        switch response {
+        case .alertFirstButtonReturn:
+            return .confirm(accessory.selection)
+        case .alertSecondButtonReturn where purpose == .copy:
+            return .savePreset(accessory.pendingOutcome.flatMap { outcome -> CopySettingsSelection? in
+                if case .savePreset(let s) = outcome { return s }
+                return nil
+            } ?? accessory.selection)
+        default:
+            return nil
+        }
     }
 }

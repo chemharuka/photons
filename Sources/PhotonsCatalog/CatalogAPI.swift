@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import PhotonsCore
 
 // MARK: - request / report types
 
@@ -532,6 +533,25 @@ extension Catalog {
                 try db.execute(sql: "UPDATE assets SET checked_at = ? WHERE id = ?", arguments: [stamp, id])
             }
         }
+    }
+
+    // MARK: settings (081 §3: 选择记在库里)
+
+    /// The 复制设置 checklist this library last used, with **本库** as the scope.
+    ///
+    /// Not `UserDefaults` (081 §3): one machine holds several libraries, and the checklist belongs to
+    /// the library whose photos it describes — 「A 库选 3 项、B 库选 7 项」 must survive reopening both.
+    /// The row lives in `settings` (`Database.setting(_:)` / `writeSettings`), whose table has existed
+    /// since v1. Every read failure is 全部 (`CopySettingsSelection.init(storageValue:)`), because an
+    /// empty checklist would make the next ⌘C carry nothing.
+    public func copySelection() throws -> CopySettingsSelection {
+        CopySettingsSelection(storageValue: try setting(CopySettingsSelection.storageKey))
+    }
+
+    /// Remember the checklist. Called on every 复制 — the same moment `assets` rows would be written
+    /// if this were an edit, which it is not: a selection is a preference about the *next* copy.
+    public func storeCopySelection(_ selection: CopySettingsSelection) throws {
+        try writeSettings([CopySettingsSelection.storageKey: selection.storageValue])
     }
 
     // MARK: stats

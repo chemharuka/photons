@@ -59,10 +59,11 @@ final class InspectorWorkspaceTests: XCTestCase {
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
         })
-        // 2026-10-28: 效果 (暗角 + 颗粒) joined 调整, between 曲线 and 预设. 黑白 (S3.4) moved **out**
-        // of 调整 into 色彩 (user: 「黑白移动到色彩栏，不放在调整中」).
+        // 2026-10-28: 效果 (暗角 + 颗粒) joined 调整. 黑白 (S3.4) moved **out** of 调整 into 色彩
+        // (user: 「黑白移动到色彩栏，不放在调整中」). 081 (2026-10-28): 预设 left the panel entirely —
+        // 「预设卡片删掉，系统顶部菜单栏出现预设」 — so 调整 ends at 效果.
         XCTAssertEqual(titles[.adjust],
-                       ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果", "预设"])
+                       ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
         XCTAssertEqual(titles[.transform], ["裁切"])
@@ -111,9 +112,9 @@ final class InspectorWorkspaceTests: XCTestCase {
                        "有卡片不属于任何工作区（永远看不见）：\(claimable.subtracting(claimed))")
 
         // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张；
-        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张，色彩分级（S3.8）→ 15 张。
-        // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 15)
+        // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张，色彩分级（S3.8）→ 15 张；
+        // 081 (2026-10-28) 删掉 预设 卡 → 14 张。直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 14)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
@@ -214,9 +215,10 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         XCTAssertEqual(panel.cards.workspace, "adjust", "首次打开必须是调整")
         XCTAssertEqual(panel.cards.cardIDs, InspectorView.sections(in: .adjust).map(\.rawValue))
-        // 2026-10-28 (user): 黑白 moved to the 色彩 workspace, so 调整 has eight cards now.
+        // 2026-10-28 (user): 黑白 moved to the 色彩 workspace. 081: 预设 card deleted, so 调整 has
+        // seven cards and the panel's last card is 效果.
         XCTAssertEqual(panel.cards.cardTitles,
-                       ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果", "预设"])
+                       ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果"])
         // 真的渲染出来了，不只是表里有：调整工作区里蒙版卡不在树上，白平衡的数值框在。
         XCTAssertTrue(panel.numberFields > 0, "调整工作区里应该有真的控件（数值框），实际 \(panel.numberFields)")
         XCTAssertEqual(panel.maskCards, 0, "调整工作区里不该有蒙版卡")

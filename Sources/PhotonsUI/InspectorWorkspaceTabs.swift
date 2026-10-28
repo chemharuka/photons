@@ -18,7 +18,7 @@ import PhotonsCore
 ///
 /// | 工作区 | 卡片 | 状态 |
 /// |---|---|---|
-/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 黑白 / 细节 / 曲线 / 效果 / 预设 | 既有卡片，全在这里（2026-10-28 加效果、黑白）|
+/// | 调整 `adjust` | 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 效果 | 既有卡片（2026-10-28 加效果、黑白；081 删掉预设卡）|
 /// | 变换 `transform` | 裁切 | 2026-10-27：裁切卡搬进了这个工作区（比例 / 角度 / 翻转 / 九宫格 / 应用取消） |
 /// | 色彩 `colour` | — | HSL **尚未实现**，空着 |
 /// | 蒙版 `masks` | 蒙版 | 既有的蒙版卡 |
@@ -78,16 +78,16 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     public var cards: [InspectorView.Section] {
         switch self {
         case .adjust:
-            // Everything the panel had before this workspace existed — presets included (the ask kept
-            // them here: 「以及既有的 预设 卡也留在这里」).
-            // 2026-10-28: 效果 (暗角 + 颗粒) joined the workspace — the last editing card before
-            // 预设, which stays last because it writes the other cards rather than adding a parameter.
+            // Everything the panel had before this workspace existed.
+            // 2026-10-28: 效果 (暗角 + 颗粒) joined the workspace — the last editing card.
             // 2026-10-28: 黑白 (S3.4) **left** this workspace — the user moved it into 色彩 with HSL
             // and 色彩分级 («黑白移动到色彩栏，不放在调整中»), which is also where its subject lives.
-            // Membership is listed in the panel's own render order (`Section.allCases`), because
-            // `UISmokeWorkspaceSwitchTests` compares the panel's reported titles to this array.
-            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail,
-                    .effects, .presets]
+            // 081 (2026-10-28): 预设 **left the panel entirely** — 「预设卡片删掉，系统顶部菜单栏出现预设」.
+            // The card wrote the other cards rather than adding a parameter, so it is now a top-level
+            // menu (`MainMenu`) plus the copy sheet's 保存为预设…, and 调整 ends at 效果.
+            // Membership is listed in the panel's own render order (`Section.allCases`: 曲线 above
+            // 细节 since 2026-10-28), because `UISmokeWorkspaceSwitchTests` compares titles to this.
+            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail, .effects]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
             // card the workspace has today, and it is a `Section` like every other card, so the order
