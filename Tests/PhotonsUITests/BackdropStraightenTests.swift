@@ -64,34 +64,30 @@ final class BackdropStraightenTests: XCTestCase {
         defer { window?.orderOut(nil) }
         CropUITestSupport.openCropTool(loupe, session)
 
-        // 0°: the draft adds nothing, so the two spellings agree — the control.
         loupe.cropTool.setStraighten(0)
         loupe.refreshCropTool()
         let neutral = try XCTUnwrap(loupe.backdropDigestForTesting)
         XCTAssertEqual(neutral, Histogram.editDigest(session.edit),
-                       "④: at 0° the draft's edit is the document")
+                       "④: at 0° the document is the edit on screen")
 
-        // 9°: the key has to be the **preview** edit, not the document.
+        // 088: a held slider is a **draft** write only, so the low-resolution picture keeps the
+        // document's angle until the release.
         loupe.cropTool.setStraighten(Self.angle)
         loupe.refreshCropTool()
-        let straightened = try XCTUnwrap(loupe.backdropDigestForTesting)
-        let preview = loupe.cropTool.previewEdit(from: session.edit)
-        print("④ key · 0° \(neutral) · 9° \(straightened) · digest(document) "
-              + "\(Histogram.editDigest(session.edit)) · digest(preview) \(Histogram.editDigest(preview))")
-        XCTAssertEqual(straightened, Histogram.editDigest(preview),
-                       "④: the low-resolution frame is filed under the edit the canvas renders")
-        XCTAssertNotEqual(straightened, Histogram.editDigest(session.edit),
-                          "④: and that is *not* the document while a straighten is in the draft")
-        XCTAssertEqual(preview.geometry.straightenDegrees, Self.angle, accuracy: 1e-12)
+        XCTAssertEqual(loupe.backdropDigestForTesting, neutral,
+                       "088: a draft tick does not re-key the whole picture")
 
-        // The anti-proof: keyed on the document again, the 9° key collapses onto the 0° one.
-        loupe.backdropUsesEffectiveEdit = false
+        // The release writes the document once: the key follows it, and the low-res frame is filed
+        // under exactly the edit the sharp frame renders.
+        XCTAssertTrue(loupe.cropTool.commitStraighten())
         loupe.refreshCropTool()
-        let oldStyle = try XCTUnwrap(loupe.backdropDigestForTesting)
-        print("④ anti-proof · keyed on the document: \(oldStyle) (equal to the 0° key: "
-              + "\(oldStyle == neutral))")
-        XCTAssertEqual(oldStyle, neutral, "④ anti-proof: the pre-④ key cannot see the 拉直")
-        XCTAssertNotEqual(oldStyle, straightened)
+        let straightened = try XCTUnwrap(loupe.backdropDigestForTesting)
+        let document = Histogram.editDigest(session.edit)
+        print("④ key · 0° \(neutral) · released 9° \(straightened) · digest(document) \(document)")
+        XCTAssertEqual(straightened, document,
+                       "④: the low-resolution frame is filed under the edit the canvas renders")
+        XCTAssertNotEqual(straightened, neutral)
+        XCTAssertEqual(session.edit.geometry.straightenDegrees, Self.angle, accuracy: 1e-12)
     }
 
     /// A texture filed under another edit is **refused** rather than drawn (no backdrop beats a
@@ -102,6 +98,7 @@ final class BackdropStraightenTests: XCTestCase {
         defer { window?.orderOut(nil) }
         CropUITestSupport.openCropTool(loupe, session)
         loupe.cropTool.setStraighten(Self.angle)
+        XCTAssertTrue(loupe.cropTool.commitStraighten())
         loupe.refreshCropTool()
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
@@ -122,8 +119,9 @@ final class BackdropStraightenTests: XCTestCase {
                                             histogram: nil, milliseconds: 0, serial: serial))
         XCTAssertNotNil(loupe.backdropTextureForTesting(for: window))
 
-        // The draft moves: the texture is another angle now.
+        // The document moves (a released 转动): the texture is another angle now.
         loupe.cropTool.setStraighten(Self.angle + 4)
+        XCTAssertTrue(loupe.cropTool.commitStraighten())
         loupe.refreshCropTool()
         print("④ stale · after the second 拉直 the texture is drawn: "
               + "\(loupe.backdropTextureForTesting(for: window) != nil) · held key "

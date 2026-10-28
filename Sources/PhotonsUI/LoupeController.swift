@@ -1329,8 +1329,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // is asked for (a straighten moves the picture).
         cropTool.onDraftChange = { [weak self] in
             guard let self else { return }
+            // 088: a draft change moves the **frame**, not the picture. Rendering follows the
+            // document (a released 转动 writes it), so this must not request a frame per tick.
             self.refreshCropTool()
-            self.requestEditRender()
         }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
@@ -2540,14 +2541,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The projection for the *current* decode buffer (or the asset's own size before the first
     /// decode lands). Hit-testing must work before the first frame: a double-click queues one.
     ///
-    /// While 裁切 mode is on, the projection is built from the tool's **preview** document — the whole
-    /// frame with the draft's straighten and flips — so the frame on screen, the crop box drawn on it
-    /// and every hit test are one geometry (task 035). Nothing is written: `previewEdit` is a value
-    /// derived from the draft for as long as the tool is on.
+    /// The projection is always the **document's** — 088 made a 转动 tick a draft-only write, so the
+    /// picture (and this framing) keep the released angle while the crop quad turns on its own. The
+    /// frame on screen, the crop box drawn on it and every hit test are still one geometry (task 035).
     public func framing(viewport: ImageSize? = nil) -> LoupeFraming? {
         let size = viewport ?? viewportPixels
-        var edit = session?.edit ?? .neutral
-        if cropTool.isActive { edit = cropTool.previewEdit(from: edit) }
+        // 088: the canvas always shows the **document** while 裁切 is on — a 转动 tick is a draft-only
+        // write and must not re-render (or re-frame) the picture. The frame quad is what turns.
+        let edit = session?.edit ?? .neutral
         if let image = decoded {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
@@ -3226,10 +3227,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     //     portrait file, a straightened frame and a flipped one are the same code path;
     //   · the **hit test** is `CropTool.hit`, in view points (the same size on screen at every zoom);
     //   · the **draft** lives in `CropToolController` — view state, never written to the document
-    //     until 应用 (one `applyEdit`, one `commitEdit`, so one ⌘Z);
-    //   · the **preview** is `CropToolController.previewEdit`, which `framing()` and `makeJob` already
-    //     read: while the tool is on, the canvas shows the whole frame with the draft's straighten and
-    //     flips, which is what makes 「进入时显示完整图像」 true without touching the document.
+    //     until 应用 (one `applyEdit`, one `commitEdit`, so one ⌘Z); a released 转动 is the one draft
+    //     field that writes immediately (§088);
+    //   · the **canvas** renders the document while the tool is on — the draft angle never reaches
+    //     pixels, only `CropTool.layout`'s quad — which is what makes 「进入时显示完整图像」 true without
+    //     touching the document.
     //
     // The frame is `session.maskSourceSize` — the upright frame the renderer ingested (task 028) —
     // and never `asset.width/height`, which are the *stored* dimensions and are transposed for
@@ -3555,13 +3557,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         // No projection yet (no photo at all): draw the frame against the session's own upright
         // frame same as everything else, rather than return nothing. Same authority, same maths.
+        // 088: the angle here is the **document's**, not the draft's — drawing the frame is the only
+        // thing the draft angle moves while the slider is held.
         let size = viewport ?? viewportPixels
         let frame = cropSourceSize
         return LoupeFraming(viewport: size,
                             sourceWidth: Double(frame.width),
                             sourceHeight: Double(frame.height),
                             crop: .full,
-                            straightenDegrees: cropTool.draft.straighten,
+                            straightenDegrees: session?.edit.geometry.straightenDegrees ?? 0,
                             flipH: isFlippedHorizontally,
                             flipV: isFlippedVertically).mapping(of: viewState)
     }
@@ -3637,25 +3641,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return
         }
         let scale = scaleOverride ?? backingScale
-        let before = cropTool.draft.straighten
+        // 088: a tick changes the draft only — the frame turns, the picture does not re-render.
         cropTool.continueDrag(atViewPoint: point, mapping: framing.mapping(of: viewState),
                               source: cropSourceSize, pointScale: scale)
         refreshCropTool()
-        if cropTool.draft.straighten != before { requestEditRender() }
     }
 
-    /// Mouse-up: the draft stays, the document is still untouched.
+    /// Mouse-up: the draft stays; a 转动 gesture writes its angle **once** (one history row and one
+    /// frame), a crop gesture writes nothing (the draft still waits for 应用).
     public func endCropDrag() {
+        let angle = cropTool.draft.straighten
+        let committed = session?.edit.geometry.straightenDegrees ?? angle
         cropTool.endDrag()
+        if cropTool.isActive, angle != CropTool.clampStraighten(committed) {
+            _ = cropTool.commitStraighten()
+        }
         refreshCropTool()
     }
 
     /// Escape mid-drag.
     public func cancelCropDrag() {
-        let before = cropTool.draft.straighten
         cropTool.cancelDrag()
         refreshCropTool()
-        if cropTool.draft.straighten != before { requestEditRender() }
     }
 
     /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.
@@ -4108,10 +4115,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
               let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return nil }
         guard let viewport = jobViewport() else { return nil }
         canvasSizeBox.store(viewport)
-        // 裁切 mode renders the tool's preview document (whole frame + draft straighten/flips), so
-        // the picture under the frame is the picture the frame is measured against. Geometry is not
-        // a decode input, so this costs a render and never a development (task 035).
-        let edit = cropTool.isActive ? cropTool.previewEdit(from: session.edit) : session.edit
+        // 088: 裁切 mode renders the **document**. A 转动 tick only turns the frame quad, so the
+        // pixels stay exactly the ones the drag started on; the release writes the angle once and
+        // this line is what makes that write the one frame it costs.
+        let edit = session.edit
         var job = RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                             edit: edit, state: viewState, target: target, generation: gen,
                             changedAt: changedAt)
@@ -4456,24 +4463,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the same rules the decode ladder uses), and a different `EditModel` (everything S1–S3 does,
     /// through `Histogram.editDigest`).
     ///
-    /// ④ — **the edit is the one the canvas renders**, not the document: while 裁切 mode is on the
-    /// picture on screen carries the draft's straighten (`previewEdit`), so the whole-picture frame has
-    /// to be rendered from the same edit or the two disagree about the angle. Before this the key came
-    /// from `currentEdit` (the document) while the *pixels* came from `makeJob`'s preview edit — so a
-    /// 拉直 moved the sharp frame and left the low-resolution one at 0°, and zooming out showed the
-    /// picture straighten itself.
+    /// ④ — **the edit is the one the canvas renders.** Since 088 that is the document even while 裁切
+    /// mode is on: a held 转动 slider only turns the crop quad, so the low-resolution whole picture and
+    /// its key must keep the released angle too (and follow it on the release, when the document is
+    /// written once and `makeJob` re-renders).
     private var backdropKey: BackdropCache.Key? {
         guard let edit = effectiveEdit else { return nil }
         return backdropKey(edit: edit)
     }
 
-    /// The document the **canvas** renders: the crop tool's preview document while the frame is up
-    /// (whole frame + draft straighten + the document's flips), the document itself otherwise. One
+    /// The document the **canvas** renders — the document itself, in and out of 裁切 mode. One
     /// property so the backdrop, its key and `makeJob` cannot disagree about which edit is on screen.
     private var effectiveEdit: EditModel? {
-        guard let edit = currentEdit else { return nil }
-        guard backdropUsesEffectiveEdit, cropTool.isActive else { return edit }
-        return cropTool.previewEdit(from: edit)
+        // 088: the low-resolution whole picture is made from the **document** too. The draft angle
+        // never reaches pixels any more (a drag re-renders nothing), so carrying the draft here would
+        // show a straightening the sharp frame does not have.
+        currentEdit
     }
 
     // MARK: the anti-proof switches (tests only)
@@ -4488,10 +4493,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// landed. It exists so the follow tests can show their own per-frame assertion going red; nothing
     /// in the app sets it.
     var followsCropOverlayDuringBridge = true
-
-    /// With this `false`, the low-resolution whole picture is keyed on the **document** instead of the
-    /// edit on screen — the pre-④ behaviour (a 拉直 that never reached the backdrop). Same reason.
-    var backdropUsesEffectiveEdit = true
 
     private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
         guard let photo = backdropPhotoKey else { return nil }

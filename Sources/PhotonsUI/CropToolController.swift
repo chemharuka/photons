@@ -342,28 +342,39 @@ public final class CropToolController {
     }
 
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
+    ///
+    /// 088 — a tick is a **draft** write only: the canvas keeps the document's pixels (and its
+    /// framing) and only the frame quad turns (`layout`'s `quadRotationDegrees`). The document gets
+    /// the angle once, in `commitStraighten()`, on mouse-up / return.
     public func setStraighten(_ degrees: Double) {
         draft.straighten = CropTool.clampStraighten(degrees)
         draftChanged()
     }
 
-    /// 087 — 转动 is live: every tick writes the document, no history.
-    ///
-    /// The crop frame keeps 086's draft semantics, so only `straightenDegrees` is written here. The
-    /// open tool session swallows the commit; `commitStraighten()` is the one release action that
-    /// leaves exactly one row.
+    /// 087's spelling, kept for the callers that still say 「live」: since 088 it is the same draft
+    /// write as `setStraighten` — no document write happens per tick.
     public func setStraightenLive(_ degrees: Double) {
         setStraighten(degrees)
-        guard isActive, let session else { return }
-        let angle = draft.straighten
-        session.applyEdit { $0.geometry.rotationDegrees = angle }
     }
 
-    /// End of one 转动 gesture: close the crop session around exactly one row, then reopen it so the
-    /// crop draft still waits for 应用 (086).
+    /// The angle still to be shown on top of the document: `θ − θ₀`, in degrees. 0 at rest and right
+    /// after a release, and up to ±90 at the slider's extremes when the document already carries ±45
+    /// (so it is *not* clamped again — the quad has to turn by the whole difference).
+    public var straightenDelta: Double {
+        let committed = CropTool.clampStraighten(session?.edit.geometry.straightenDegrees ?? 0)
+        return draft.straighten - committed
+    }
+
+    /// End of one 转动 gesture: write the draft angle **once** (`applyEdit`), close the crop session
+    /// around exactly one row, then reopen it so the crop draft still waits for 应用 (086).
+    ///
+    /// Order matters: the document write is what asks the loupe for the one re-render; ending the
+    /// session before it would make `endToolSession` see no movement and add no row.
     @discardableResult
     public func commitStraighten() -> Bool {
         guard isActive, let session else { return false }
+        let angle = CropTool.clampStraighten(draft.straighten)
+        session.applyEdit { $0.geometry.rotationDegrees = angle }
         let inSession = session.isToolSessionActive
         let committed: Bool
         if inSession {
@@ -563,7 +574,8 @@ public final class CropToolController {
                         mapping: mapping,
                         pointScale: pointScale,
                         showsGrid: showsGrid,
-                        carry: carry)
+                        carry: carry,
+                        quadRotationDegrees: straightenDelta)
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
@@ -687,7 +699,8 @@ public final class CropToolController {
         lastHandle = handle
 
         let normalized = CropToolController.normalized(point, mapping: mapping, source: source,
-                                                       pointScale: scale)
+                                                       pointScale: scale,
+                                                       rotationDegrees: straightenDelta)
         guard let normalized else { return true }
 
         rotating = rotate && (handle == .outside || handle == .inside)
@@ -710,7 +723,8 @@ public final class CropToolController {
         let source = source ?? sourceSize
         let scale = pointScale > 0 ? pointScale : 1
         guard let normalized = CropToolController.normalized(point, mapping: mapping,
-                                                             source: source, pointScale: scale)
+                                                             source: source, pointScale: scale,
+                                                             rotationDegrees: straightenDelta)
         else { return }
 
         if rotating {
@@ -751,8 +765,13 @@ public final class CropToolController {
 
     /// View point (points, y down) → normalized upright source point. `nil` when the mapping is
     /// degenerate (a zero-sized canvas), so a drag during layout cannot write a NaN rect.
+    ///
+    /// 088 — the inverse of `CropTool.layout`'s composite: view → image space through the document
+    /// framing (`framePoint`, which is what the pixels on screen are laid out with), then turn the
+    /// point back by `+θ − θ₀` about the image centre, and only then compare it with `rect`.
     static func normalized(_ point: CGPoint, mapping: LoupeMapping, source: ImageSize,
-                           pointScale: Double) -> NormalizedPoint? {
+                           pointScale: Double,
+                           rotationDegrees: Double = 0) -> NormalizedPoint? {
         let scale = pointScale > 0 ? pointScale : 1
         // **Frame space** (`framePoint`), not `sourcePoint`: the draft rect is a rect of the
         // straightened frame, so a grip dragged on screen has to move the edge that is under the hand.
@@ -761,8 +780,17 @@ public final class CropToolController {
         let p = mapping.framePoint(viewX: Double(point.x) * scale,
                                    viewY: Double(point.y) * scale)
         guard p.x.isFinite, p.y.isFinite else { return nil }
-        return NormalizedPoint(p.x / Double(max(source.width, 1)),
-                               p.y / Double(max(source.height, 1)))
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        guard rotationDegrees.isFinite, rotationDegrees != 0 else {
+            return NormalizedPoint(p.x / w, p.y / h)
+        }
+        let theta = rotationDegrees * .pi / 180
+        let cosT = cos(theta), sinT = sin(theta)
+        let dx = p.x - w / 2, dy = p.y - h / 2
+        // R(+θ), the inverse of the layout's R(−θ).
+        let x = w / 2 + dx * cosT - dy * sinT
+        let y = h / 2 + dx * sinT + dy * cosT
+        return NormalizedPoint(x / w, y / h)
     }
 
     // MARK: the readout
