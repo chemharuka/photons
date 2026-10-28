@@ -7,7 +7,8 @@ import Metal
 ///
 /// What this file pins, in the order the task states them:
 ///
-///   · the uniform block the Swift side writes is the one the `.metal` side reads (7 × float4 = 112);
+///   · the uniform block the Swift side writes is the one the `.metal` side reads
+///     (7 × float4 + float4x4 = 176; 097 added the per-plane lens matrix);
 ///   · α = 0 is byte-identical to the pre-029 graph — the hashes below were recorded **before** the
 ///     CA code existed, so they are evidence, not a self-fulfilling recording;
 ///   · the pure-CA path is the identity copy with red and blue resampled: green's channel hash is
@@ -112,10 +113,10 @@ final class ChromaticAberrationTests: XCTestCase {
     /// it reads the wrong uniform — so the number is asserted on both sides, and the `.metal` file is
     /// parsed rather than trusted.
     func testS0ParamsIsSevenFloat4OnBothSides() throws {
-        XCTAssertEqual(MemoryLayout<S0Params>.stride, 112, "S0Params must stay 7 × float4 (was 96)")
-        XCTAssertEqual(MemoryLayout<S0Params>.size, 112)
+        XCTAssertEqual(MemoryLayout<S0Params>.stride, 176, "S0Params must be 7 × float4 + float4x4 (097)")
+        XCTAssertEqual(MemoryLayout<S0Params>.size, 176)
         XCTAssertEqual(MemoryLayout<S0Params>.alignment, 16)
-        XCTAssertEqual(MemoryLayout<S0Params>.stride / MemoryLayout<SIMD4<Float>>.stride, 7)
+        XCTAssertEqual(MemoryLayout<S0Params>.stride / MemoryLayout<SIMD4<Float>>.stride, 11)
         // Field offsets, in the order the `.metal` struct declares them: `g` (the CA ratios) last.
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.a), 0)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.b), 16)
@@ -124,17 +125,19 @@ final class ChromaticAberrationTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.e), 64)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.f), 80)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.g), 96)
+        XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.lens), 112)
 
         let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s0_geometry.metal")
         let source = try String(contentsOf: url, encoding: .utf8)
         let start = try XCTUnwrap(source.range(of: "struct S0Params {"))
         let end = try XCTUnwrap(source.range(of: "};", range: start.upperBound..<source.endIndex))
         let block = String(source[start.lowerBound..<end.lowerBound])
-        XCTAssertEqual(block.components(separatedBy: "float4").count - 1, 7,
-                       "the kernel struct must declare 7 float4 fields:\n\(block)")
+        XCTAssertEqual(block.components(separatedBy: "float4").count - 1, 8,
+                       "the kernel struct must declare 7 float4 fields and one float4x4:\n\(block)")
         XCTAssertTrue(block.contains("float4 g;"), "the CA field is missing from the kernel")
+        XCTAssertTrue(block.contains("float4x4 lens;"), "the 097 lens field is missing from the kernel")
         XCTAssertTrue(block.contains("pureCA"), "e.z must be documented as pureCA in the kernel")
-        XCTAssertTrue(source.contains("112"), "the kernel must state the shared stride (112 = 7 × 16)")
+        XCTAssertTrue(source.contains("176"), "the kernel must state the shared stride (176 = 7×16 + 64)")
     }
 
     // MARK: - α = 0 changes nothing

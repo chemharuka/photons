@@ -35,12 +35,19 @@ public struct DecodeCacheKey: Sendable, Hashable {
     /// existed keeps hitting byte for byte.
     public let detail: DetailSettings
     public let decodeRecipe: String
+    /// 097: `lens=ours:…` / `lens=apple` when the file carries a `WarpRectilinear` opcode, `nil` when
+    /// it carries none. A file whose three planes differ is now decoded with Apple's correction
+    /// **off** and corrected in S0, so a buffer written before this field existed is a different
+    /// picture and must not be served. `nil` appends nothing — every non-DNG / no-opcode key stays
+    /// byte-identical.
+    public let lens: String?
 
     public init(fileSHA256: String, decoderVersion: String, exposureEV: Float = 0,
                 scale: Float = 1, draft: Bool = false, colorSpace: String = "extendedLinearSRGB",
                 whiteBalance: WhiteBalance = .asShot,
                 detail: DetailSettings = .identity,
-                decodeRecipe: String = DecodeRecipe.current) {
+                decodeRecipe: String = DecodeRecipe.current,
+                lens: String? = nil) {
         self.fileSHA256 = fileSHA256
         self.decoderVersion = decoderVersion
         self.exposureEV = exposureEV
@@ -50,6 +57,7 @@ public struct DecodeCacheKey: Sendable, Hashable {
         self.whiteBalance = whiteBalance
         self.detail = detail
         self.decodeRecipe = decodeRecipe
+        self.lens = lens
     }
 
     /// The exact text the digest is taken over: `file|version|ev|scale|draft|colour|recipe[|wb=…][|dt=…]`.
@@ -61,6 +69,9 @@ public struct DecodeCacheKey: Sendable, Hashable {
         var parts = [fileSHA256, decoderVersion, String(format: "%.4f", exposureEV),
                      String(format: "%.4f", scale), draft ? "draft" : "full", colorSpace,
                      decodeRecipe]
+        // 097: the lens profile is file-derived, but it decides *which* pipeline corrected the
+        // pixels (Apple's one warp vs our three), so it is a decode input like the recipe itself.
+        if let lens { parts.append(lens) }
         // 派单 011: the white-balance component comes from `DecodeInputs`' spelling, so the on-disk
         // buffer name and the loupe's rung identity are the same text — and as shot appends nothing
         // at all, which is what keeps every pre-006 buffer on disk hitting.

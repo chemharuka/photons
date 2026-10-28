@@ -4872,7 +4872,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return DecodeRung(scale: scale, image: developed.image,
                           capabilities: developed.capabilities,
                           milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000,
-                          detailBaseline: developed.detailBaseline)
+                          detailBaseline: developed.detailBaseline,
+                          lensProfile: developed.lensProfile)
     }
 
     /// The whole GPU path for one frame, callable synchronously (ui-smoke uses this).
@@ -4962,7 +4963,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
         if graph == nil || graphIdentity != identity {
-            graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url))
+            graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url,
+                                                      lensProfile: outcome.rung.lensProfile))
             graphIdentity = identity
             graphPhoto = baseIdentity
             // A new photo (or a new rung of it): its key is a different picture, so the measurement

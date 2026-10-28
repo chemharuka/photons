@@ -435,6 +435,7 @@ public enum RenderKeyChain {
                              display: DisplayOptions,
                              outputWindow: ImageRect? = nil,
                              orientation: ImageOrientation = .up,
+                             lens: String? = nil,
                              materialWithoutAlgorithmVersion: Bool = false) -> Links {
         func mat(_ stage: RenderStage) -> String {
             edit.keyMaterial(stage, algorithmVersion: !materialWithoutAlgorithmVersion)
@@ -459,6 +460,11 @@ public enum RenderKeyChain {
         // render: fit, thumbnails, export) appends nothing, so those keys stay byte-identical.
         if let window = outputWindow {
             geometryKey = geometryKey.add("win=" + window.windowKeyString)
+        }
+        // 097: only a file whose S0 warp we apply appends this, so every pre-097 document and every
+        // Apple-corrected file keeps its geometry key byte for byte.
+        if let lens {
+            geometryKey = geometryKey.add(lens)
         }
         let geometry = geometryKey.canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry))

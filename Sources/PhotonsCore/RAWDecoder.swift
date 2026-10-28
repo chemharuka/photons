@@ -578,16 +578,22 @@ public final class RAWDecoder {
         public let detailBaseline: DetailBaseline
         /// The four filter values this development actually assigned; all `nil` for a default document.
         public let detailApplied: DetailDecodeValues
+        /// 097: the file's `WarpRectilinear` profile, when it has one. `RAWDecoder` reads it once,
+        /// uses `hasPerPlaneDifference` to decide whether Apple's own lens correction stays on, and
+        /// hands it to the frame so S0 can apply the per-channel warp when Apple's was turned off.
+        public let lensProfile: LensProfile?
 
         public init(image: LinearImage, capabilities: DecoderCapabilities,
                     asShotWhiteBalance: WhiteBalance = .asShot,
                     detailBaseline: DetailBaseline = .measured,
-                    detailApplied: DetailDecodeValues = DetailDecodeValues()) {
+                    detailApplied: DetailDecodeValues = DetailDecodeValues(),
+                    lensProfile: LensProfile? = nil) {
             self.image = image
             self.capabilities = capabilities
             self.asShotWhiteBalance = asShotWhiteBalance
             self.detailBaseline = detailBaseline
             self.detailApplied = detailApplied
+            self.lensProfile = lensProfile
         }
     }
 
@@ -604,6 +610,18 @@ public final class RAWDecoder {
 
     public func decodeDetailed(_ url: URL, options: DecodeOptions = DecodeOptions()) throws -> DecodeOutcome {
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
+
+        // ── 097: whose lens correction runs ───────────────────────────────────────────────────
+        // `CIRAWFilter.isLensCorrectionEnabled` applies **plane 1 (green)** of the file's
+        // `OpcodeList3 / WarpRectilinear` to all three channels. When the file carries three
+        // *different* planes (every Leica SL3 DNG measured here), that is both double-corrected
+        // green and an uncorrected red/blue lateral CA. So: keep Apple's switch for a single-plane
+        // file, and turn it off — assignments below are the only truth, not the flag — when the
+        // file has a per-plane warp. `S0` then applies the three planes itself (097).
+        let lensProfile = LensProfile.read(from: url)
+        if lensProfile?.hasPerPlaneDifference == true {
+            filter.isLensCorrectionEnabled = false
+        }
 
         let offered = filter.supportedDecoderVersions.map { Self.versionString($0) }
         let filterDefault = Self.versionString(filter.decoderVersion)
@@ -751,7 +769,8 @@ public final class RAWDecoder {
                                 colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
                                 orientation: .up)
         return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot,
-                             detailBaseline: detailBaseline, detailApplied: detailApplied)
+                             detailBaseline: detailBaseline, detailApplied: detailApplied,
+                             lensProfile: lensProfile)
     }
 
     /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).
@@ -901,14 +920,19 @@ public struct DecodeRung: Sendable {
     /// assigned. The inspector prints it as the baseline the 0 position means, so the number under a
     /// slider is relative to *this body's* default rather than to a nominal zero.
     public let detailBaseline: DetailBaseline
+    /// 097: the file's `WarpRectilinear` profile (nil when it has none). Carried so a frame can hand
+    /// it to `RenderInput` without re-reading the file.
+    public let lensProfile: LensProfile?
 
     public init(scale: Float, image: LinearImage, capabilities: DecoderCapabilities,
-                milliseconds: Double, detailBaseline: DetailBaseline = .measured) {
+                milliseconds: Double, detailBaseline: DetailBaseline = .measured,
+                lensProfile: LensProfile? = nil) {
         self.scale = scale
         self.image = image
         self.capabilities = capabilities
         self.milliseconds = milliseconds
         self.detailBaseline = detailBaseline
+        self.lensProfile = lensProfile
     }
 }
 
