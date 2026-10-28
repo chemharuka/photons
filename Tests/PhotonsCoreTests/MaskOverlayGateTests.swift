@@ -194,4 +194,43 @@ final class MaskOverlayGateTests: XCTestCase {
                            "round \(i): the reused frame is not the frame that was painted")
         }
     }
+
+    /// The same invariant through the path that actually broke it: `maskAtlas` renders a frame with the
+    /// overlay in it and then returns that frame to the pool **itself**, so the caller never sees the
+    /// texture and `recycle(output:)`'s guard never runs. A pool that accepts it hands the next frame's
+    /// S4 that very texture, S4 writes the plain display frame into it, and the slot's "nothing moved"
+    /// hit then presents a picture with no overlay — which is how the 005e golden frame came back equal
+    /// to `plainDisplaySHA256` (`3e0f8a1f` → `6db557e0`) while the atlas and plain digests stayed put.
+    ///
+    /// The refutation is one line: make `TexturePool.recycle` pool an owned texture again and the third
+    /// frame below comes back with the plain picture's hash.
+    func testAnAtlasReadCannotPoolTheSlotsTexture() throws {
+        let graph = try makeGraph()
+        let doc = document(showing: "m-a")
+        let still = RenderOptions(canvas: canvas, scale: 1,
+                                  display: DisplayOptions(primaries: .sRGB, bitDepth: 8, headroom: 1),
+                                  useCache: true, wantsPixels: false)
+        try render(graph, document())                        // warm
+        let painted = try graph.render(doc, options: still)  // the pass runs; the slot takes the texture
+        let slot = try XCTUnwrap(painted.output)
+        let reference = try render(graph, doc)               // the pixels the overlay must keep showing
+        XCTAssertTrue(reference.painted || reference.reused)
+
+        // The atlas read renders the same document, so its frame is the slot's texture — and it gives
+        // that frame back on the caller's behalf.
+        let dump = try XCTUnwrap(try graph.maskAtlas(doc, options: RenderOptions(canvas: canvas, scale: 1)))
+        XCTAssertEqual(dump.maskIDs, ["m-a", "m-b"])
+
+        // Every later frame still presents the pixels that were painted, not the picture underneath.
+        for i in 0..<3 {
+            let again = try render(graph, doc)
+            XCTAssertEqual(again.hash, reference.hash,
+                           "frame \(i) after an atlas read is not the frame that was painted")
+            XCTAssertTrue(again.shows)
+        }
+        // And handing the frame back the ordinary way is still a no-op rather than a leak.
+        graph.recycle(output: slot)
+        let afterReturn = try render(graph, doc)
+        XCTAssertEqual(afterReturn.hash, reference.hash)
+    }
 }
