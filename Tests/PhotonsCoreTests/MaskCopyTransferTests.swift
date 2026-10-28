@@ -339,7 +339,14 @@ final class MaskCopyTransferTests: XCTestCase {
         var a = documentA()
         a.showMaskID = "m-a1"
         let payload = EditSnapshot.capture(a, frameAspect: aspectA).filtered(to: [.masks])
-        XCTAssertEqual(payload.schemaVersion, 2, "the payload's shape changed: 1 → 2 (P1-5)")
+        // The envelope's own version, not a literal: it went 1 → 2 with P1-5 (masks in the clipboard)
+        // and 2 → 3 with 081 (`⌘C` card-level copy added optional keys such as `light.blackOffset`,
+        // which an older reader would silently drop — the same reason masks bumped it). What this
+        // test guards is that the payload is **versioned at all** and that the document's own schema
+        // version is untouched, so it reads the constant.
+        XCTAssertEqual(payload.schemaVersion, EditSnapshot.currentSchemaVersion)
+        XCTAssertGreaterThanOrEqual(payload.schemaVersion, 2,
+                                    "the clipboard's shape has changed at least once since 1 (P1-5)")
         XCTAssertEqual(EditModel.neutral.schemaVersion, EditModel.currentSchemaVersion,
                        "the document's own schema version is untouched: masks already existed there")
 
