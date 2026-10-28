@@ -1,6 +1,6 @@
 {
-  "atlasSHA256" : "a845753546120b511a1968366d1752a69d08bbfa1233161c83461d764b92060f",
-  "displaySHA256" : "dc02afe90ee98724c5ceb7e8e15524197f45c0ddd5f56951365f93f2a2d9e442",
+  "atlasSHA256" : "d0e77b090dfdbc8bb55393e2cf652aa3eeb8ac9589e3edcd75a82a5d25b2e327",
+  "displaySHA256" : "9c1009359e777efe6cd470a43f044731fdabbc5d73ee89736cbe5e889baf5603",
   "maskIDs" : [
     "m-fe",
     "m-rf"
@@ -28,7 +28,7 @@
       0
     ],
     [
-      0.258056640625,
+      0.6083984375,
       0
     ],
     [

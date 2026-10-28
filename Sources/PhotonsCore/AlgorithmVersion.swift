@@ -45,8 +45,11 @@ public enum StageAlgorithmVersion {
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
     public static let sceneLinear = 2
-    /// Unchanged.
-    public static let maskAtlas = 1
+    /// **2** — 079 A4: a shape's `feather` is a **short-edge percentage spent outside the rim**
+    /// (interior 1.0, quadratic falloff beyond), not a fraction of the shape spent inside it. Same
+    /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
+    /// old expression verbatim and does not.
+    public static let maskAtlas = 2
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
     public static let localApply = 3

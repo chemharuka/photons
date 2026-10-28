@@ -682,7 +682,10 @@ public struct MaskComponent: Sendable, Equatable, Codable {
     public var op: CombineOp
     /// Applied to this component's coverage before combining (§3.3: invert is per component).
     public var invert: Bool
-    /// The shape's own transition width, short-edge normalised (0…0.1 expected, 1 = the whole ramp).
+    /// The shape's feather radius as a **percentage of the short edge** (0…1 ⇒ 0…10 %), spent
+    /// *outside* the shape: the interior stays 1.0 and the coverage decays quadratically to 0 across
+    /// this radius beyond the rim (079 A4 — darktable's drawn-mask rule). `0` = a hard edge, and the
+    /// pre-A4 arithmetic verbatim.
     public var feather: Double
     public var shape: MaskShape
 
@@ -890,6 +893,8 @@ public enum JSONValue: Sendable, Equatable, Codable {
 // The patch-recompute geometry, made a value layer so it is testable without a GPU:
 //
 //     bounds(mask)  = AABB(components) ⊕ featherRadius ⊕ guidedRadius     (canvas pixels)
+//                     — where AABB(component) now already contains the **shape's own** feather,
+//                       because since 079 A4 a shape's feather sits outside its rim (§3.4)
 //     dirtyRect(s)  = ∪ bounds(m ∈ dirty(s))
 //     tile          = 128 px (scale < 1) | 256 px (export), 8 px aligned
 //     closure(D)    = D ∪ descendants(D)      (Kahn topological order)
@@ -1301,6 +1306,11 @@ public enum MaskRadius {
     /// documented span and `feather = 0.1` is the usual small softening. Normalising to the *content*
     /// short edge (canvas pixels) keeps one parameter identical at thumbnail, fit, 1:1 and export
     /// scale — the same rule as every other distance in §4.
+    ///
+    /// 079 A4 — the **shape's own** `MaskComponent.feather` is this same number (same unit, same
+    /// clamp), read in the atlas kernel as `f · 0.1 · min(srcSize)` and spent *outside* the shape.
+    /// The two radii are therefore one quantity with two operators, and `MaskBounds.sourceExtent`
+    /// uses this function to grow a shape by its own feather.
     public static func featherPixels(_ feather: Double, content: ImageSize) -> Double {
         min(max(feather, 0), 1) * 0.1 * Double(min(content.width, content.height))
     }
@@ -1355,10 +1365,16 @@ public enum MaskBounds {
         let minSide = min(w, h)
         switch component.shape {
         case .linearGradient(let g):
-            // `alpha > 0` above the line where `t' = lo`. `t' = t^(log ½ / log m)`, so
-            // `t_cut = lo^(log m / log ½)` — the exact inverse of the kernel's midpoint remap.
-            let f = min(max(component.feather, 0), 1)
-            let lo = 0.5 - 0.5 * f
+            // `alpha > 0` past the line where `t' = lo`. 079 A4: the rim is `t' = ½` and the feather
+            // is spent **outside** it (`0.5 − w … 0.5`, `w` = feather radius / span, in `t'` units),
+            // so `lo` is no longer a fraction of the ramp — it is where the quadratic falloff reaches
+            // 0. `t' = t^(log ½ / log m)`, so `t_cut = lo^(log m / log ½)` — the exact inverse of the
+            // kernel's midpoint remap.
+            let fpx = MaskRadius.featherPixels(component.feather, content: source)
+            let span = ((g.end.x - g.start.x) * w * (g.end.x - g.start.x) * w
+                        + (g.end.y - g.start.y) * h * (g.end.y - g.start.y) * h).squareRoot()
+            let fw = span > 1e-6 ? fpx / span : 1.0      // ≥ 1 ⇒ the falloff reaches past the start
+            let lo = max(0.5 - fw, 0)
             let m = min(max(g.midpoint, 0.02), 0.98)
             let exponent = log(0.5) / log(m)
             let tCut = lo <= 0 ? 0 : pow(lo, 1 / exponent)
@@ -1386,11 +1402,15 @@ public enum MaskBounds {
             let ry = max(abs(g.radius.y), 0) * minSide
             let t = g.angle * .pi / 180
             let cs = abs(cos(t)), sn = abs(sin(t))
-            // Support function of a rotated ellipse: exact half-extents, not the circle's radius.
-            let hx = (rx * cs * rx * cs + ry * sn * ry * sn).squareRoot()
-            let hy = (rx * sn * rx * sn + ry * cs * ry * cs).squareRoot()
-            // The kernel's rim sits at r = 1 and coverage is zero beyond it (feather narrows the
-            // window *inside* the rim), so the rim is the bound — no growth by the feather.
+            // 079 A4 — the feather is spent **outside** the rim: the support is the ellipse scaled by
+            // `1 + g` (`g` = feather radius / min(rx, ry)), which is the kernel's `r_out`. A box that
+            // stopped at the rim would cut the falloff (and `rasterRect` would be a bound that hides
+            // pixels). `max(·, 1e-4)` is the kernel's own floor for a zero radius.
+            let radx = max(rx, 1e-4), rady = max(ry, 1e-4)
+            let g0 = MaskRadius.featherPixels(component.feather, content: source) / min(radx, rady)
+            let k = 1 + g0
+            let hx = (rx * k * cs * rx * k * cs + ry * k * sn * ry * k * sn).squareRoot()
+            let hy = (rx * k * sn * rx * k * sn + ry * k * cs * ry * k * cs).squareRoot()
             let cx = g.center.x * w, cy = g.center.y * h
             return MaskRect.aabb(of: [(cx - hx, cy - hy), (cx + hx, cy + hy)])
         case .brush(let b):
