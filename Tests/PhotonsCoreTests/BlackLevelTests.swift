@@ -168,6 +168,8 @@ final class BlackLevelTests: XCTestCase {
 
         // 新文档：schemaVersion 9（2026-10-28 加了 colorGrading 的九个数；8 是黑白 的 switch 与八段
         // mix），而且**仍然**不写 blackOffset 这个键。
+        // 新文档：schemaVersion 9（2026-10-28 加了 纹理/清晰度/去雾），而且**仍然**不写
+        // blackOffset 这个键。
         XCTAssertEqual(EditModel.currentSchemaVersion, 9)
         XCTAssertEqual(EditModel.neutral.schemaVersion, 9)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
@@ -176,6 +178,11 @@ final class BlackLevelTests: XCTestCase {
         // 2026-10-28: 黑白 的两个新键同样在默认值上缺席，所以 schema-7 的 blob 也能逐字节重编码。
         XCTAssertFalse(fresh.contains("blackAndWhite"))
         XCTAssertFalse(fresh.contains("\"mix\""))
+        // 2026-10-28 (P0-6): and the three S3.8 numbers are absent at 0 too, so a schema-8 blob also
+        // re-encodes byte for byte.
+        XCTAssertFalse(fresh.contains("\"texture\""))
+        XCTAssertFalse(fresh.contains("\"clarity\""))
+        XCTAssertFalse(fresh.contains("\"dehaze\""))
 
         // 用过控件的文档才写键，而且读回来还是同一个数。
         var used = EditModel.neutral

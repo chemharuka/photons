@@ -214,8 +214,12 @@ final class LayoutContractTests: XCTestCase {
         let hsl = try XCTUnwrap(order.firstIndex(of: .hsl))
         let grade = try XCTUnwrap(order.firstIndex(of: .grade))
         let vignette = try XCTUnwrap(order.firstIndex(of: .vignette))
-        XCTAssertEqual(grade, hsl + 1, "S3.8 紧跟 S3.6：\(order.map(\.short))")
-        XCTAssertEqual(grade + 1, vignette, "…且在暗角之前")
+        // 2026-10-28: S3.9（纹理/清晰度/去雾）merged after the grade, so the grade is no longer
+        // adjacent to the vignette — the invariant is the *order*, not adjacency.
+        let detail = try XCTUnwrap(order.firstIndex(of: .detailFX))
+        XCTAssertEqual(detail, grade + 1, "S3.9 紧跟 S3.8：\(order.map(\.short))")
+        XCTAssertEqual(detail + 1, vignette, "…且在暗角之前")
+        XCTAssertLessThan(hsl, grade)
 
         // 3 wheels × 3 axes, derived from the card's own table.
         XCTAssertEqual(InspectorView.gradeRows.count, GradeRegion.allCases.count * GradeAxis.allCases.count)

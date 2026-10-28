@@ -438,6 +438,13 @@ public enum XMPWriter {
         try write(metadata, "crs:GrainSize", e.grainSize == 25 ? nil : number(e.grainSize), &report)
         try write(metadata, "crs:GrainFrequency", e.grainRoughness == 50 ? nil : number(e.grainRoughness), &report)
         try write(metadata, "crs:GrainAmount", zeroOrNil(e.grain), &report)
+        // 2026-10-28 (P0-6): Lightroom's Presence triple — `crs:Texture` / `crs:Clarity` /
+        // `crs:Dehaze` are the same −100…100 travels this document stores, so the mapping is the
+        // number itself. Absent at 0, like every other default, so a document that never used them
+        // writes exactly the keys it wrote before.
+        try write(metadata, "crs:Texture", zeroOrNil(e.texture), &report)
+        try write(metadata, "crs:Clarity", zeroOrNil(e.clarity), &report)
+        try write(metadata, "crs:Dehaze", zeroOrNil(e.dehaze), &report)
 
         // MARK: 1.8 masks — nothing maps; allocate for M4 and count the leaves we dropped.
 

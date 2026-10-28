@@ -554,7 +554,9 @@ final class XMPTests: XCTestCase {
         let existing = try XCTUnwrap(CGImageSourceCopyMetadataAtIndex(source, 0, nil))
         let seeded = try XCTUnwrap(CGImageMetadataCreateMutableCopy(existing))
         try XMPWriter.registerNamespaces(seeded)
-        XCTAssertTrue(CGImageMetadataSetValueWithPath(seeded, nil, "crs:Texture" as CFString,
+        // 2026-10-28 (P0-6): `crs:Texture` used to be the foreign key here; S3.8 now writes it, so the
+        // "somebody else's key" has to be one this document has no field for.
+        XCTAssertTrue(CGImageMetadataSetValueWithPath(seeded, nil, "crs:DefringeGreenHue" as CFString,
                                                       NSNumber(value: 17)))
         XCTAssertTrue(CGImageMetadataSetValueWithPath(seeded, nil, "crs:SplitToningShadowHue" as CFString,
                                                       NSNumber(value: 33)))
@@ -574,10 +576,38 @@ final class XMPTests: XCTestCase {
 
         try XMPWriter.embed(edit, into: url)
         let back = try XCTUnwrap(XMPReadback.metadata(of: url))
-        assertClose(XMPReadback.double(back, "crs:Texture"), 17, "crs:Texture survived")
+        assertClose(XMPReadback.double(back, "crs:DefringeGreenHue"), 17, "crs:DefringeGreenHue survived")
         assertClose(XMPReadback.double(back, "crs:SplitToningShadowHue"), 33, "split toning survived")
         XCTAssertEqual(XMPReadback.string(back, "xmpMM:History"), "kept")
         assertClose(XMPReadback.double(back, "crs:Exposure2012"), 0.75, "our key landed")
+    }
+
+    /// 2026-10-28 (P0-6): S3.8's three numbers are Lightroom's own `crs:` keys with the same travel,
+    /// so the mapping is the number — and, like every other default, absent at 0.
+    func testPresenceTripleMapsToItsOwnCrsKeys() throws {
+        var edit = EditModel.neutral
+        let neutralKeys = try capturedCrsKeys(edit)
+        XCTAssertNil(XMPReadback.tag(neutralKeys, "crs:Texture"), "0 不写键")
+        XCTAssertNil(XMPReadback.tag(neutralKeys, "crs:Clarity"))
+        XCTAssertNil(XMPReadback.tag(neutralKeys, "crs:Dehaze"))
+
+        edit.effects.texture = 35
+        edit.effects.clarity = -20
+        edit.effects.dehaze = 70
+        let keys = try capturedCrsKeys(edit)
+        assertClose(XMPReadback.double(keys, "crs:Texture"), 35, "纹理 → crs:Texture")
+        assertClose(XMPReadback.double(keys, "crs:Clarity"), -20, "清晰度 → crs:Clarity")
+        assertClose(XMPReadback.double(keys, "crs:Dehaze"), 70, "去雾 → crs:Dehaze")
+        // …and the lossless half still round-trips the document.
+        let back = try XCTUnwrap(XMPReadback.settings(keys))
+        XCTAssertEqual(back.effects.texture, 35)
+        XCTAssertEqual(back.effects.clarity, -20)
+        XCTAssertEqual(back.effects.dehaze, 70)
+    }
+
+    /// The XMP metadata the writer produces for a document, as a `CGImageMetadata`.
+    private func capturedCrsKeys(_ edit: EditModel) throws -> CGImageMetadata {
+        try XMPWriter.makeMetadata(for: edit).metadata
     }
 
     // MARK: - sidecar file
@@ -603,7 +633,7 @@ final class XMPTests: XCTestCase {
         // Merging keeps foreign keys: we only ever touch paths we own.
         var metadata = CGImageMetadataCreateMutable()
         try XMPWriter.registerNamespaces(metadata)
-        XCTAssertTrue(CGImageMetadataSetValueWithPath(metadata, nil, "crs:Texture" as CFString,
+        XCTAssertTrue(CGImageMetadataSetValueWithPath(metadata, nil, "crs:DefringeGreenHue" as CFString,
                                                       NSNumber(value: 12)))
         XCTAssertTrue(CGImageMetadataSetValueWithPath(metadata, nil, "photons:futureKey" as CFString,
                                                       "keep me" as CFString))
@@ -613,7 +643,7 @@ final class XMPTests: XCTestCase {
 
         try XMPWriter.writeSidecar(for: .neutral, to: seededURL)
         let merged = try XCTUnwrap(XMPReadback.metadata(fromXMP: seededURL))
-        assertClose(XMPReadback.double(merged, "crs:Texture"), 12, "others' crs: keys survive")
+        assertClose(XMPReadback.double(merged, "crs:DefringeGreenHue"), 12, "others' crs: keys survive")
         XCTAssertEqual(XMPReadback.string(merged, "photons:futureKey"), "keep me")
         // 派单 006: `photons:temperature` is absent for as shot, so "our key landed" is asked of a
         // key that always exists.

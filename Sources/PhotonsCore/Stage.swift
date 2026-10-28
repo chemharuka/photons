@@ -77,6 +77,15 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// colour image, before the two effect stages darken/grain it. S3.4/S3.5/S3.6 stay before it, so a
     /// grey from 黑白 carries `C = 0` and the grade's chroma maths is inert on it by construction.
     case grade = "s3.8-grade"
+    /// 2026-10-28 (P0-6) — **纹理 / 清晰度 / 去雾**: the three detail numbers of the 效果 card.
+    ///
+    /// Sits after the grade and **before** the vignette: dehaze removes the veil from the picture and
+    /// texture/clarity shape its detail, all of which the vignette then darkens at the edges — putting
+    /// it after S3c would let the vignette's own falloff be read as "detail" by the guided filter.
+    /// **Conditional** like S3.4/S3.5/S3.6/S3.7: it exists only when at least one of the three numbers
+    /// is non-zero, so a document with all three at 0 keeps its pre-S3.9 trace, key chain and pixels
+    /// byte for byte. Numbered after S3.8 (the grade) — merge order: grade took the 8.
+    case detailFX = "s3.9-detail-fx"
     /// S3c — post-crop vignette, and the card's other half.
     case vignette = "s3-vignette"
     /// 2026-10-28 — **grain**, the Effects card's second stage.
@@ -109,7 +118,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
         [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .bw,
-         .localColor, .hsl, .grade, .vignette, .grain, .display]
+         .localColor, .hsl, .grade, .detailFX, .vignette, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -122,8 +131,9 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// every existing trace and key byte for byte.
     public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false,
                                 hasHSL: Bool = false, hasGrain: Bool = false,
-                                hasBW: Bool = false, hasGrade: Bool = false) -> [RenderStage] {
-        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade else { return allCases }
+                                hasBW: Bool = false, hasGrade: Bool = false,
+                                hasDetailFX: Bool = false) -> [RenderStage] {
+        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX else { return allCases }
         return order.filter { stage in
             switch stage {
             case .maskAtlas, .localApply: return hasMasks
@@ -131,6 +141,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
             case .localColor: return hasMasks && hasLocalColor
             case .hsl: return hasHSL
             case .grade: return hasGrade
+            case .detailFX: return hasDetailFX
             case .grain: return hasGrain
             default: return true
             }
@@ -156,6 +167,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .localColor: return "s3.5"
         case .hsl: return "s3.6"
         case .grade: return "s3.8"
+        case .detailFX: return "s3.9"
         case .vignette: return "s3-vignette"
         case .grain: return "s3.7"
         case .display: return "s4"
@@ -170,7 +182,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .maskAtlas, .localApply, .localColor: return "masks"
         case .curve: return "curve"
         case .color, .bw, .hsl, .grade: return "color"
-        case .vignette, .grain: return "effects"
+        case .vignette, .grain, .detailFX: return "effects"
         case .display: return "output"
         }
     }
@@ -365,6 +377,10 @@ public enum RenderKeyChain {
         /// group is neutral, in which case S3.8 does not exist for this render at all (2026-10-28,
         /// P0 色彩分级) and `vignette` is seeded exactly as before.
         public var grade: String?
+        /// `H(grade-or-hsl-or-localColor-or-bw-or-color key | "detailfx" | detailFXMaterial)`; `nil`
+        /// when all three detail numbers are 0, in which case S3.9 does not exist for this render at all
+        /// (2026-10-28, P0-6) and `vignette` is seeded exactly as before.
+        public var detailFX: String?
         public var vignette: String
         /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0, in which case
         /// S3.7 does not exist for this render at all (2026-10-28) and `display` is seeded by
@@ -377,6 +393,7 @@ public enum RenderKeyChain {
         public var hasLocalColorStage: Bool { localColor != nil }
         public var hasHSLStage: Bool { hsl != nil }
         public var hasGradeStage: Bool { grade != nil }
+        public var hasDetailFXStage: Bool { detailFX != nil }
         public var hasGrainStage: Bool { grain != nil }
 
         /// The stages this link set describes — the same answer `StageKeys.pipeline` gives, available
@@ -384,7 +401,8 @@ public enum RenderKeyChain {
         public var pipeline: [RenderStage] {
             RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                                  hasHSL: hasHSLStage, hasGrain: hasGrainStage,
-                                 hasBW: hasBWStage, hasGrade: hasGradeStage)
+                                 hasBW: hasBWStage, hasGrade: hasGradeStage,
+                                 hasDetailFX: hasDetailFXStage)
         }
     }
 
@@ -515,6 +533,19 @@ public enum RenderKeyChain {
             grade = link
             vignetteSeed = link
         }
+        // 2026-10-28 (P0-6): S3.9 (纹理/清晰度/去雾) sits between the grade and the vignette and exists
+        // **only** when one of the three numbers is non-zero. Neutral ⇒ the link is `nil` and the
+        // vignette is seeded exactly as before, so a document without detail keeps its chain byte for
+        // byte (the sixth stage to use the §3.2 discipline).
+        var detailFX: String?
+        if edit.hasDetailFX {
+            let link = KeyBuilder(KeyBuilder.digest(of: vignetteSeed))
+                .add("detailfx")
+                .add(mat(.detailFX))
+                .canonical
+            detailFX = link
+            vignetteSeed = link
+        }
         let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(mat(.vignette)).canonical
         // 2026-10-28: S3.7 sits between the vignette and the display transform and exists **only** when
         // the grain amount is above zero. When it does not, the link is `nil` and the display key is
@@ -541,7 +572,7 @@ public enum RenderKeyChain {
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply,
                      toneMap: toneMap, curve: curve, color: color, bw: bw, localColor: localColor,
-                     hsl: hsl, grade: grade, vignette: vignette, grain: grain,
+                     hsl: hsl, grade: grade, detailFX: detailFX, vignette: vignette, grain: grain,
                      display: displayKey.canonical)
     }
 
@@ -558,6 +589,7 @@ public enum RenderKeyChain {
                   localColor: links.localColor.map(KeyBuilder.digest(of:)),
                   hsl: links.hsl.map(KeyBuilder.digest(of:)),
                   grade: links.grade.map(KeyBuilder.digest(of:)),
+                  detailFX: links.detailFX.map(KeyBuilder.digest(of:)),
                   vignette: KeyBuilder.digest(of: links.vignette),
                   grain: links.grain.map(KeyBuilder.digest(of:)),
                   display: KeyBuilder.digest(of: links.display))
@@ -601,6 +633,9 @@ public struct StageKeys: Sendable, Equatable {
     /// `H(hsl-or-localColor-or-bw-or-color key | "grade" | gradeMaterial)`; `nil` when the grade group
     /// is neutral (2026-10-28, P0 色彩分级), in which case the stage does not exist for this render.
     public var grade: String?
+    /// `H(grade-or-hsl-or-localColor-or-bw-or-color key | "detailfx" | detailFXMaterial)`; `nil` when
+    /// all three detail numbers are 0 (2026-10-28, P0-6), in which case the stage does not exist.
+    public var detailFX: String?
     public var vignette: String
     /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0 (2026-10-28), in
     /// which case the stage does not exist for this render.
@@ -612,7 +647,7 @@ public struct StageKeys: Sendable, Equatable {
                 toneMap: String, curve: String, color: String,
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
-                grade: String? = nil,
+                grade: String? = nil, detailFX: String? = nil,
                 vignette: String, grain: String? = nil, display: String) {
         self.inputIdentity = inputIdentity
         self.geometry = geometry
@@ -626,6 +661,7 @@ public struct StageKeys: Sendable, Equatable {
         self.localColor = localColor
         self.hsl = hsl
         self.grade = grade
+        self.detailFX = detailFX
         self.vignette = vignette
         self.grain = grain
         self.display = display
@@ -636,6 +672,7 @@ public struct StageKeys: Sendable, Equatable {
     public var hasLocalColorStage: Bool { localColor != nil }
     public var hasHSLStage: Bool { hsl != nil }
     public var hasGradeStage: Bool { grade != nil }
+    public var hasDetailFXStage: Bool { detailFX != nil }
     public var hasGrainStage: Bool { grain != nil }
 
     /// Key for a stage. The mask stages answer `""` when they do not exist for this render, which is
@@ -653,6 +690,7 @@ public struct StageKeys: Sendable, Equatable {
         case .localColor: return localColor ?? ""
         case .hsl: return hsl ?? ""
         case .grade: return grade ?? ""
+        case .detailFX: return detailFX ?? ""
         case .vignette: return vignette
         case .grain: return grain ?? ""
         case .display: return display
@@ -665,7 +703,7 @@ public struct StageKeys: Sendable, Equatable {
     public var pipeline: [RenderStage] {
         RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                              hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage,
-                             hasGrade: hasGradeStage)
+                             hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage)
     }
 
     public var shortTrace: String {

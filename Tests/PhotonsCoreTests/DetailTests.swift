@@ -482,6 +482,8 @@ final class DetailTests: XCTestCase {
         // 2026-10-28: the current version is 9 (色彩分级's nine numbers, on top of 黑白's switch and
         // mixes); the migration still divides a schema-5 position by ten and stamps the **current**
         // version.
+        // 2026-10-28: the current version is 9 (纹理/清晰度/去雾); the migration still divides a
+        // schema-5 position by ten and stamps the **current** version.
         XCTAssertEqual(EditModel.currentSchemaVersion, 9)
 
         // Old 50 → amount 0.5 → new position 5.

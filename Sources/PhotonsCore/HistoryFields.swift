@@ -294,6 +294,11 @@ extension EditHistory {
         num("effects.vignetteRoundness", .effects,
             before.effects.vignetteRoundness, after.effects.vignetteRoundness)
         num("effects.grain", .effects, before.effects.grain, after.effects.grain)
+        // 2026-10-28 (P0-6) — S3.8's three numbers, so a 清晰度 drag reads as 「清晰度 +40」 in the
+        // history panel rather than as a nameless 效果 row.
+        num("effects.texture", .effects, before.effects.texture, after.effects.texture)
+        num("effects.clarity", .effects, before.effects.clarity, after.effects.clarity)
+        num("effects.dehaze", .effects, before.effects.dehaze, after.effects.dehaze)
         // 2026-10-28 — S3.7's shape and seed. The seed is reported as the integer the kernel
         // hashes, so a row can never claim a change the pixels cannot see.
         num("effects.grainSize", .effects, before.effects.grainSize, after.effects.grainSize)
@@ -460,6 +465,9 @@ extension EditHistory {
         "effects.grainSize": "颗粒大小",
         "effects.grainRoughness": "颗粒粗糙度",
         "effects.grainSeed": "颗粒种子",
+        "effects.texture": "纹理",
+        "effects.clarity": "清晰度",
+        "effects.dehaze": "去雾",
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
         "masks.order": "蒙版顺序",

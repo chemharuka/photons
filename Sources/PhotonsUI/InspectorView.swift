@@ -972,7 +972,8 @@ public struct InspectorView: View {
         }
     }
 
-    /// 2026-10-28 — **效果**: 暗角 and 颗粒, the two halves of Lightroom's Effects card.
+    /// 2026-10-28 — **效果**: 暗角, 纹理 / 清晰度 / 去雾 and 颗粒 — Lightroom's Effects card, and the
+    /// Presence triple 078 P0-6 was missing.
     ///
     /// ```text
     /// 暗角        −100…100       S3c: negative darkens the corners
@@ -980,17 +981,22 @@ public struct InspectorView: View {
     /// 暗角羽化      0…100         how soft the transition is
     /// 暗角圆度   −100…100         square → circular
     /// ─────────────────────────
+    /// 纹理       −100…100       S3.8: the guided-filter residual in the 2…8 px band
+    /// 清晰度     −100…100       S3.8: the same residual at a few percent of the frame
+    /// 去雾       −100…100       S3.8: dark channel prior; negative adds the veil back
+    /// ─────────────────────────
     /// 颗粒数量      0…100         S3.7: the grain's standard deviation, 0 = no grain
     /// 颗粒大小      0…100         the cell, in frame fractions
     /// 颗粒粗糙度    0…100         how much of the finer octave is mixed in
     /// 种子          0…999         the hash's only free variable
     /// ```
     ///
-    /// **One card, not two.** The two blocks are the pipeline's S3c and S3.7 and could have been split,
-    /// but the ask was Lightroom's Effects *card*, and the user resets the card as one thing — one
-    /// double-click on 「效果」 puts all eight numbers back in **one** snapshot. The `divider` between
-    /// the blocks is the only thing the split is worth: it says "two stages" without making the user
-    /// find a second card for a look that is one decision (frames are usually vignetted *and* grained).
+    /// **One card, not two.** The three blocks are the pipeline's S3c, S3.8 and S3.7 and could have
+    /// been split, but the ask was Lightroom's Effects *card*, and the user resets the card as one
+    /// thing — one double-click on 「效果」 puts all eleven numbers back in **one** snapshot. The
+    /// `divider`s between the blocks are the only thing the split is worth: they say "three stages"
+    /// without making the user find a second card for a look that is one decision (frames are usually
+    /// vignetted, their detail shaped *and* grained).
     ///
     /// **The card stores nothing.** Every number comes from and goes to `effects` through
     /// `effectsRows`' key paths — there is no second copy of a value here, no draft, no local mirror
@@ -1000,6 +1006,10 @@ public struct InspectorView: View {
     private var effectsCard: some View {
         card(Section.effects.title, reset: { resetGroup(.effects) }) {
             ForEach(Self.vignetteRows, id: \.title) { row in
+                effectsSliderRow(row)
+            }
+            divider
+            ForEach(Self.detailFXRows, id: \.title) { row in
                 effectsSliderRow(row)
             }
             divider
@@ -1299,9 +1309,25 @@ public struct InspectorView: View {
                 keyPath: \.effects.grainSeed, quantum: 1),
     ]
 
-    /// The card's eight rows in draw order — the two blocks and the divider between them. One list,
-    /// so a test can hold 「八根滑杆」 and the card cannot draw a row the table does not have.
-    public static var effectsRows: [ToneRow] { vignetteRows + grainRows }
+    /// 2026-10-28 (P0-6) — the 效果 card's **纹理 / 清晰度 / 去雾** block: S3.8's three numbers
+    /// (`s3_8_detail_fx.metal`), Lightroom's Presence triple, in the panel's order.
+    ///
+    /// The travels are the kernel's: −100…100 for all three. 0 means the band is not touched — and when
+    /// all three are 0 the stage is not encoded at all, so the frame is the pre-S3.8 frame byte for
+    /// byte. `effects.detailFXRows` is what the card iterates, so a row that is drawn but not in the
+    /// table (or the reverse) cannot exist.
+    public static let detailFXRows: [ToneRow] = [
+        ToneRow(title: "纹理", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.texture),
+        ToneRow(title: "清晰度", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.clarity),
+        ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.dehaze),
+    ]
+
+    /// The card's eleven rows in draw order — the three blocks and the dividers between them. One
+    /// list, so a test can hold 「十一根滑杆」 and the card cannot draw a row the table does not have.
+    public static var effectsRows: [ToneRow] { vignetteRows + detailFXRows + grainRows }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
     ///

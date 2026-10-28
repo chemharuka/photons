@@ -42,16 +42,21 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(effects, curve + 1, "效果紧跟在曲线之后")
         XCTAssertEqual(presets, effects + 1, "预设仍然最后（它写别的卡，不是一个参数卡）")
 
-        // One card, two blocks: the four vignette rows then the four grain rows, in that order.
+        // One card, three blocks: the four vignette rows, the Presence triple (S3.8), then the four
+        // grain rows, in that order.
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
                        ["暗角", "暗角中点", "暗角羽化", "暗角圆度",
+                        "纹理", "清晰度", "去雾",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
         XCTAssertEqual(InspectorView.vignetteRows.count, 4)
+        XCTAssertEqual(InspectorView.detailFXRows.count, 3)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
 
         // Every row's travel is the kernel's own (a slider the shader cannot honour lies):
         XCTAssertEqual(InspectorView.vignetteRows.map(\.range),
                        [-100 ... 100, 0 ... 100, 0 ... 100, -100 ... 100])
+        XCTAssertEqual(InspectorView.detailFXRows.map(\.range),
+                       [-100 ... 100, -100 ... 100, -100 ... 100])
         XCTAssertEqual(InspectorView.grainRows.map(\.range),
                        [0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
 
@@ -71,7 +76,7 @@ final class EffectsCardTests: XCTestCase {
     /// Every row inside the card, in order, not overlapping, and wide enough for its own label plus a
     /// number field. 「不截断」 on this panel is a **width** claim: all eight rows are label + number +
     /// slider, so the thing that would truncate is the label, and the widest of the eight is 颗粒粗糙度.
-    func testAllEightRowsFitAtThreeHundredThreeThirtyAndThreeSixtyFour() throws {
+    func testAllRowsFitAtThreeHundredThreeThirtyAndThreeSixtyFour() throws {
         // The widest label, measured at the panel's own label font — this is the constraint the narrow
         // width has to survive. 70 pt is what the row gives its readout (a 3-digit number at 10 pt
         // monospaced plus the 4–6 pt gap the row's `headSpacing` asks for).
@@ -91,7 +96,8 @@ final class EffectsCardTests: XCTestCase {
             let rows = InspectorView.effectsRows.compactMap { row in
                 panel.rowFrame(row.title).map { (row.title, $0) }
             }
-            XCTAssertEqual(rows.count, 8, "\(Int(width)) pt：只画出了 \(rows.map(\.0))")
+            XCTAssertEqual(rows.count, InspectorView.effectsRows.count,
+                           "\(Int(width)) pt：只画出了 \(rows.map(\.0))")
 
             for (title, frame) in rows {
                 XCTAssertGreaterThan(frame.width, 60, "\(Int(width)) pt：「\(title)」只剩 \(frame.width) pt")
@@ -175,6 +181,9 @@ final class EffectsCardTests: XCTestCase {
             $0.effects.grainSize = 80
             $0.effects.grainRoughness = 20
             $0.effects.grainSeed = 12
+            $0.effects.texture = 55
+            $0.effects.clarity = -60
+            $0.effects.dehaze = 70
         }
         XCTAssertTrue(session.commitEdit(label: "拖动"))
         let before = session.history.count
@@ -184,6 +193,9 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(session.edit.effects.grainSize, 25, "颗粒大小回 25，不是 0")
         XCTAssertEqual(session.edit.effects.grainRoughness, 50, "粗糙度回 50，不是 0")
         XCTAssertEqual(session.edit.effects.vignetteMidpoint, 50, "暗角中点回 50")
+        XCTAssertEqual(session.edit.effects.texture, 0, "纹理回 0")
+        XCTAssertEqual(session.edit.effects.clarity, 0, "清晰度回 0")
+        XCTAssertEqual(session.edit.effects.dehaze, 0, "去雾回 0")
         XCTAssertEqual(session.history.count, before + 1, "整卡 = 一条历史")
         XCTAssertEqual(session.history.currentSnapshot?.label, "效果")
 
@@ -216,13 +228,15 @@ final class EffectsCardTests: XCTestCase {
     // MARK: - 5. 接线（源码，因为 `swift test` 没有无障碍树）
 
     /// The card gets its reset from `card(_:reset:)` — the same shell every other card uses — and its
-    /// rows come from the table, so 「八根滑杆」 cannot drift into a ninth hand-written row.
+    /// rows come from the table, so 「十一根滑杆」 cannot drift into a twelfth hand-written row.
     func testTheCardIsWiredThroughThePanelOneRowBuilder() throws {
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
                       "效果卡的标题必须挂整卡复位")
         XCTAssertTrue(source.contains("ForEach(Self.vignetteRows, id: \\.title)"),
                       "暗角四行来自表")
+        XCTAssertTrue(source.contains("ForEach(Self.detailFXRows, id: \\.title)"),
+                      "纹理/清晰度/去雾三行来自表")
         XCTAssertTrue(source.contains("ForEach(Self.grainRows, id: \\.title)"),
                       "颗粒四行来自表")
         XCTAssertTrue(source.contains("private func effectsSliderRow(_ row: ToneRow) -> some View"),

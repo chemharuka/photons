@@ -156,6 +156,10 @@ public struct RenderInputs: Sendable, Equatable {
             // carries mix values from a day it was black-and-white — keeps this key byte for byte:
             // `bw=0;gray=…` is not a key segment any cached render was written against.
             .filter { $0 != .bw || edit.hasBlackAndWhite }
+            // 2026-10-28 (P0-6): and S3.8 is the fifth. A document with 纹理/清晰度/去雾 all at 0 keeps
+            // this key **byte for byte** — `s3.8-detail-fx=tx=0…` is not a key segment any cached
+            // render was written against.
+            .filter { $0 != .detailFX || edit.hasDetailFX }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }

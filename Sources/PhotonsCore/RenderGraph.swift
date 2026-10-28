@@ -595,6 +595,18 @@ private struct GrainParams {
     var c: SIMD4<Float>   // identity, contentOrigin.x, contentOrigin.y, pad
 }
 
+/// Mirror of `Kernels/s3_8_detail_fx.metal`, byte for byte. One struct for every pass of the stage:
+/// each kernel reads the two or three fields it needs and ignores the rest, so the CPU side has one
+/// object to keep in step with one header.
+private struct DetailFXParamsU {
+    var a: SIMD4<Float>    // texture, clarity, dehaze amounts (−1…1 = the document's −100…100 /100)
+    var luma: SIMD4<Float> // Rec.709 luma weights, pad
+    var d: SIMD4<Float>    // epsilon (this chain's), unread, ω (dehaze), t0 (dehaze)
+    var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
+    var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
+    var c: SIMD4<Int32>    // qW, qH, segment length, pad
+}
+
 private struct DisplayParams {
     var m: simd_float4x4
     var a: SIMD4<Float>   // identityMatrix
@@ -2688,6 +2700,17 @@ public final class RenderGraph {
             enc.setBytes(&params, length: MemoryLayout<GradeParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
+        case .detailFX:
+            // S3.8 — 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6). Encoded **only** for documents whose three
+            // numbers are not all 0 (`RenderStage.pipeline(hasDetailFX:)`), so a neutral document's
+            // frame is the pre-S3.8 frame by construction: there is no pass to be neutral in.
+            //
+            // The three operators are chained in the order the panel names them (dehaze → texture →
+            // clarity), each writing the next texture: dehaze first because it changes what the detail
+            // operators should read (a veil is a low-frequency offset that would otherwise be part of
+            // the guided filter's base), texture before clarity because the fine band is a subset of
+            // the mid one.
+            try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan)
 
         case .vignette:
             let p = try kernels.pipeline(file: "s3_vignette", function: "s3_vignette")
@@ -2739,6 +2762,224 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
         }
+    }
+
+    // MARK: - S3.8 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6)
+    //
+    // The statistics block. `4` is not a knob: at 4×4 averaging a 2…8 px pattern is gone from the
+    // regression while a step edge is not, which is the whole reason the guided filter's gate follows
+    // *structure* and not merely variance. It also makes the three chains one sixteenth / one half of
+    // the frame instead of three full ones.
+    private static let detailFXBlock = 4
+
+    /// The stage: up to three chains, in the panel's order (去雾 → 纹理 → 清晰度).
+    ///
+    /// Each chain reads the previous chain's texture, so only the first sees `src` and only the last
+    /// writes `out`. A document with one number set pays one chain, not three.
+    private func encodeDetailFX(cb: MTLCommandBuffer, into out: MTLTexture,
+                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let q = RenderGraph.detailFXBlock
+        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+
+        // Radii are **frame fractions**, not canvas pixels: a 1:1 window, a fit preview and an export
+        // must show the same band in the same physical place (S3c's and S3.7's rule). Expressed in the
+        // 1/q domain, where the filter actually runs, with a floor of one texel so the chain always has
+        // a window and a cap so a 60 Mpx export cannot ask for a radius the band has no use for.
+        let frameShort = Double(min(plan.frameSize.x, plan.frameSize.y))
+        func radiusQ(_ fraction: Double, cap capQ: Int32) -> Int32 {
+            let texels = (fraction * frameShort / Double(q)).rounded()
+            return min(max(Int32(texels), 1), capQ)
+        }
+        let textureRadius = radiusQ(0.0015, cap: 4)      // ≈ 4 px at a 2731 px frame
+        let clarityRadius = radiusQ(0.02, cap: 24)       // ≈ 55 px at a 2731 px frame
+        let darkRadius = radiusQ(0.003, cap: 4)          // ≈ 8 px (a 15 px window, He's own)
+
+        let textureAmount = Float(edit.effects.texture) / 100
+        let clarityAmount = Float(edit.effects.clarity) / 100
+        let dehazeAmount = Float(edit.effects.dehaze) / 100
+
+        var params = DetailFXParamsU(
+            a: SIMD4(textureAmount, clarityAmount, dehazeAmount, 0),
+            luma: SIMD4(0.2126, 0.7152, 0.0722, 0),
+            // 0.95 = He's ω (the transmission keeps 5 % of the veil, so the result has air in it rather
+            // than the plastic look of a full removal); 0.1 = He's t0 floor.
+            d: SIMD4(0.0, 0, 0.95, 0.1),
+            // The gate's knee, in **luma per 1/q texel**: a 0.44 step is 0.11 per 4 px texel, a 0.1
+            // step is 0.025, a sky gradient over 100 px is 0.001. 0.015…0.06 therefore passes every
+            // gradual transition and stops every step — which is where an unsharp mask draws its halo.
+            e: SIMD4(0.015, 0.06, 0, 0),
+            b: SIMD4(Int32(w), Int32(h), Int32(q), 0),
+            c: SIMD4(Int32(qW), Int32(qH), 32, 0))
+
+        // The two chains' destinations: the **last** one writes the stage's output texture, an earlier
+        // one writes a scratch the next chain reads. (Writing a scratch for the last chain and
+        // forgetting to copy it into `out` is exactly the bug that made a texture-only document render
+        // black — the frame was correct in the scratch and never reached the pipeline.)
+        let bandsActive = textureAmount != 0 || clarityAmount != 0
+        var current = src
+
+        // 1. 去雾 — dark channel prior. Four passes, three of them at 1/16 of the frame.
+        if dehazeAmount != 0 {
+            let dark = try scratch("detailfx-dark", width: qW, height: qH, format: .rgba16Float)
+            let darkTmp = try scratch("detailfx-dark-tmp", width: qW, height: qH, format: .rgba16Float)
+            let trans = try scratch("detailfx-trans", width: qW, height: qH, format: .rgba16Float)
+            params.b.w = darkRadius
+
+            let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dark_pack")
+            let enc = try encoder(cb, pack, in: current, out: dark)
+            enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(enc, pack, ImageSize(width: qW, height: qH))
+            enc.endEncoding()
+
+            try detailFXMin(cb: cb, from: dark, tmp: darkTmp, to: dark, params: &params,
+                            qW: qW, qH: qH)
+
+            let transPipe = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dark_trans")
+            let enc2 = try encoder(cb, transPipe, in: dark, out: trans)
+            enc2.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(enc2, transPipe, ImageSize(width: qW, height: qH))
+            enc2.endEncoding()
+
+            let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dehaze_apply")
+            let next = bandsActive
+                ? try scratch("detailfx-img-0", width: w, height: h, format: .rgba16Float)
+                : out
+            guard let enc3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            enc3.setComputePipelineState(apply)
+            enc3.setTexture(current, index: 0)
+            enc3.setTexture(trans, index: 1)
+            enc3.setTexture(next, index: 2)
+            enc3.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(enc3, apply, plan.canvas)
+            enc3.endEncoding()
+            current = next
+        }
+
+        // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
+        // apply. One statistics pack (the 4×4 block means), one separable box per band (the two
+        // radii differ), one coefficient map per band, then a single apply that adds both residuals.
+        // Splitting the apply in two would read the frame a second time for nothing — measured at
+        // 4.10 Mpx, that second read was ~1.2 ms of the frame.
+        if bandsActive {
+            params.a.x = textureAmount
+            // Full deflection is 0.8 × the residual, not 1.0: at 1.0 the additive boost shifts the
+            // frame's mean by ~1.1 % (measured on the fixture's dark/bright step), which is a
+            // brightness change on a control that promises none. 0.8 keeps the +100 high-pass gain at
+            // ~+67 % (the acceptance asks for +30 %) and the mean inside 1 %.
+            params.a.y = clarityAmount * 0.8
+            try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
+                              textureRadius: textureRadius, clarityRadius: clarityRadius)
+            current = out
+        }
+
+        // No amount was non-zero: the pipeline would not have encoded this stage at all, but a caller
+        // that asked for it anyway gets a copy rather than an uninitialised texture.
+        if current === src {
+            guard let blit = cb.makeBlitCommandEncoder() else { throw RenderError.commandBufferFailed }
+            blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: w, height: h, depth: 1),
+                      to: out, destinationSlice: 0, destinationLevel: 0,
+                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            blit.endEncoding()
+        }
+    }
+
+    /// The two guided bands: one pack, one box pair + one coefficient map per **active** band, one
+    /// apply.
+    ///
+    /// Statistics are `rgba32Float` (a half-float `mean II` cannot resolve the 1e-4 variance a texture
+    /// has — the gate would be quantisation noise); the coefficient maps are `rgba16Float` because they
+    /// are the textures the apply pass **samples linearly**, and Metal does not filter 32-bit formats.
+    ///
+    /// ε is per band (`p.d.x`), and so is the radius (`p.b.w`); the gradient gate (`p.e`) is shared,
+    /// because "a step edge" is the same test at both scales.
+    private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
+                               params: inout DetailFXParamsU, qW: Int, qH: Int,
+                               textureRadius: Int32, clarityRadius: Int32) throws {
+        let base = try scratch("detailfx-stats", width: qW, height: qH, format: .rgba32Float)
+        let tmp = try scratch("detailfx-stats-tmp", width: qW, height: qH, format: .rgba32Float)
+
+        let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_pack")
+        let e0 = try encoder(cb, pack, in: source, out: base)
+        e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+        dispatch(e0, pack, ImageSize(width: qW, height: qH))
+        e0.endEncoding()
+
+        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2).
+        var coeffTex: MTLTexture?
+        var coeffCla: MTLTexture?
+        for band in [0, 1] {
+            let active = band == 0 ? params.a.x != 0 : params.a.y != 0
+            if !active { continue }
+            let stats = try scratch("detailfx-stats-\(band)", width: qW, height: qH,
+                                    format: .rgba32Float)
+            params.b.w = band == 0 ? textureRadius : clarityRadius
+            params.d.x = band == 0 ? 0.004 : 0.01
+            try detailFXBox(cb: cb, from: base, tmp: tmp, to: stats, params: &params, qW: qW, qH: qH,
+                            horizontal: "s3_8_guide_box_h", vertical: "s3_8_guide_box_v")
+
+            let coeff = try scratch("detailfx-coeff-\(band)", width: qW, height: qH,
+                                    format: .rgba16Float)
+            let cp = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_coeff")
+            let e1 = try encoder(cb, cp, in: stats, out: coeff)
+            e1.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(e1, cp, ImageSize(width: qW, height: qH))
+            e1.endEncoding()
+            if band == 0 { coeffTex = coeff } else { coeffCla = coeff }
+        }
+
+        let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_apply")
+        let fallback = coeffTex ?? coeffCla
+        guard let enc = cb.makeComputeCommandEncoder(), let first = fallback else {
+            throw RenderError.commandBufferFailed
+        }
+        enc.setComputePipelineState(apply)
+        enc.setTexture(source, index: 0)
+        enc.setTexture(coeffTex ?? first, index: 1)
+        enc.setTexture(coeffCla ?? first, index: 2)
+        enc.setTexture(destination, index: 3)
+        enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+        dispatch(enc, apply, ImageSize(width: Int(params.b.x), height: Int(params.b.y)))
+        enc.endEncoding()
+    }
+
+    /// The separable box mean of the statistics: `from → tmp → to`.
+    private func detailFXBox(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture, to: MTLTexture,
+                             params: inout DetailFXParamsU, qW: Int, qH: Int,
+                             horizontal: String, vertical: String) throws {
+        let h = try kernels.pipeline(file: "s3_8_detail_fx", function: horizontal)
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(h)
+        e0.setTexture(from, index: 0)
+        e0.setTexture(tmp, index: 1)
+        e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+        dispatchSegments(e0, qW: qW, qH: qH)
+        e0.endEncoding()
+
+        let v = try kernels.pipeline(file: "s3_8_detail_fx", function: vertical)
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(v)
+        e1.setTexture(tmp, index: 0)
+        e1.setTexture(to, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+        dispatchSegments(e1, qW: qW, qH: qH)
+        e1.endEncoding()
+    }
+
+    /// The separable running minimum of the dark channel: `from → tmp → to`.
+    private func detailFXMin(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture, to: MTLTexture,
+                             params: inout DetailFXParamsU, qW: Int, qH: Int) throws {
+        try detailFXBox(cb: cb, from: from, tmp: tmp, to: to, params: &params, qW: qW, qH: qH,
+                        horizontal: "s3_8_dark_min_h", vertical: "s3_8_dark_min_v")
+    }
+
+    /// One thread per 32-texel segment, 32 threads per group — the `s1_7_mask_neighbourhood` dispatch,
+    /// which is what lets a running sum/min walk a segment instead of a pixel.
+    private func dispatchSegments(_ enc: MTLComputeCommandEncoder, qW: Int, qH: Int) {
+        enc.dispatchThreadgroups(MTLSize(width: max(1, (qW + 31) / 32), height: max(1, qH), depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
     }
 
     // S0 and the mask atlas must rotate by the same angle, so both read `straightenDegrees`

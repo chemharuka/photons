@@ -1082,6 +1082,7 @@ final class HDRCurveTests: XCTestCase {
     func testCurveModelNamingAndVersion() throws {
         // 2026-10-28: 9 (色彩分级's nine numbers, on top of 黑白's switch/mixes and 颗粒's three). The
         // curve's own shape did not move.
+        // 2026-10-28: 9 (纹理/清晰度/去雾, on top of 黑白 and 颗粒). The curve's own shape did not move.
         XCTAssertEqual(EditModel.currentSchemaVersion, 9)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 

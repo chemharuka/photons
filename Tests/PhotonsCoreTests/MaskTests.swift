@@ -1021,7 +1021,7 @@ final class MaskTests: XCTestCase {
         XCTAssertEqual(Set(result.trace.executed),
                        Set(RenderStage.order.filter {
                            $0 != .localColor && $0 != .hsl && $0 != .grain && $0 != .bw
-                               && $0 != .grade
+                               && $0 != .grade && $0 != .detailFX
                        }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")
