@@ -334,6 +334,34 @@ public final class CropToolController {
         draftChanged()
     }
 
+    /// 087 — 转动 is live: every tick writes the document, no history.
+    ///
+    /// The crop frame keeps 086's draft semantics, so only `straightenDegrees` is written here. The
+    /// open tool session swallows the commit; `commitStraighten()` is the one release action that
+    /// leaves exactly one row.
+    public func setStraightenLive(_ degrees: Double) {
+        setStraighten(degrees)
+        guard isActive, let session else { return }
+        let angle = draft.straighten
+        session.applyEdit { $0.geometry.rotationDegrees = angle }
+    }
+
+    /// End of one 转动 gesture: close the crop session around exactly one row, then reopen it so the
+    /// crop draft still waits for 应用 (086).
+    @discardableResult
+    public func commitStraighten() -> Bool {
+        guard isActive, let session else { return false }
+        let inSession = session.isToolSessionActive
+        let committed: Bool
+        if inSession {
+            committed = session.endToolSession(label: "转动")
+        } else {
+            committed = session.commitEdit(label: "转动", coalesce: false)
+        }
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        return committed
+    }
+
     /// A ratio preset. The rect is reshaped **now** rather than at apply time, because the frame on
     /// screen has to be the frame that will be committed.
     public func setAspect(_ preset: CropAspectPreset, source: ImageSize? = nil) {
@@ -381,7 +409,9 @@ public final class CropToolController {
             else { model.geometry.flipVertical.toggle() }
         }
         let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
-        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        // A flip is discrete (072 §F): never fold it into the drag before it, and two flips are two
+        // rows even when no tool session was open to bracket them.
+        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转", coalesce: false)
         if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before

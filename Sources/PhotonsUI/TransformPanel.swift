@@ -56,24 +56,37 @@ import SwiftUI
 
 extension InspectorView {
 
-    /// 「变换」的第一张卡（今天是唯一一张）：宽高比 / 角度 / 旋转 / 镜像 + 底部三件。
+    /// 「变换」的第一张卡：宽高比 + 底部三件（087 把转动 / 旋转 / 镜像搬到第二张卡）。
     var cropTransformCard: some View {
         let tool = loupe?.cropTool
-        let geometry = session.edit.geometry
         return InspectorCardShell(title: Section.crop.title,
                                   reset: { resets.cropGeometry() },
                                   accessory: { EmptyView() }) {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
                 cropAspectSection(tool)
-                cropAngleSection(tool)
-                cropRotationSection(geometry: geometry, tool: tool)
-                cropMirrorSection(geometry: geometry, tool: tool)
                 cropBottomRow(tool)
             }
         }
         // The card's own frame (「卡片清单第一张 = 裁切」 is measured on it) — behind the chrome, so the
         // number is the card's, not its content's.
         .background(CropRowProbeHost(rowID: CropCardID.card))
+    }
+
+    /// 「变换」的第二张卡（087）：转动 / 旋转 / 镜像。没有整卡复位，也没有应用 / 取消 ——
+    /// 转动松手即写、旋转与镜像是一次文档动作，Esc 才是回退。
+    var angleTransformCard: some View {
+        let tool = loupe?.cropTool
+        let geometry = session.edit.geometry
+        return InspectorCardShell(title: Section.angle.title,
+                                  reset: nil,
+                                  accessory: { EmptyView() }) {
+            VStack(alignment: .leading, spacing: Self.cropSectionGap) {
+                cropAngleSection(tool)
+                cropRotationSection(geometry: geometry, tool: tool)
+                cropMirrorSection(geometry: geometry, tool: tool)
+            }
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.angleCard))
     }
 
     /// 分区之间 12 pt（082 的「拉开间距」）。
@@ -114,30 +127,34 @@ extension InspectorView {
 
     // MARK: 角度
 
-    /// 角度 — 滑块角度（行）+ 实际角度（只读）。
+    /// 转动 — 滑杆（行）+ 实际角度（只读）。
     ///
-    /// The row is the panel's own `sliderRow` (typing, double-click-to-reset, one input = one draft
-    /// tick) with the label 「滑块角度」 — the user's two words, spelled out rather than abbreviated.
-    /// The read-out under it is a real AppKit label (`CropAngleReadoutLabel`) so a test can read the
-    /// string the panel drew, not a string the test computed.
+    /// 087: the value is **live** — every tick writes the document, release commits one row
+    /// (`onEditingChanged(false)`), so there is nothing left for 应用 to do. The crop frame keeps 086's
+    /// draft semantics: only the straighten is written here.
     @ViewBuilder
     private func cropAngleSection(_ tool: CropToolController?) -> some View {
         let straighten = Binding<Double>(get: { tool?.draft.straighten ?? 0 },
-                                         set: { tool?.setStraighten($0) })
+                                         set: { tool?.setStraightenLive($0) })
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.angle.title, isFirst: false,
                               reset: { resets.cropSection(.angle) })
             VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-                sliderRow("滑块角度",
+                sliderRow("转动",
                           straighten,
                           -CropTool.straightenLimit ... CropTool.straightenLimit,
                           "%+.1f°",
                           decimals: 1,
                           enabled: true,
                           accessibilityID: "inspector.crop.angle",
-                          onReset: { tool?.setStraighten(0) },
-                          // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
-                          onEditingChanged: { _ in })
+                          onReset: {
+                              tool?.setStraightenLive(0)
+                              _ = tool?.commitStraighten()
+                          },
+                          onEditingChanged: { editing in
+                              guard !editing else { return }
+                              _ = tool?.commitStraighten()
+                          })
                 CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
                                      slider: tool?.sliderAngleText() ?? "—")
             }
@@ -193,12 +210,16 @@ extension InspectorView {
 
     /// 水平 / 垂直翻转 — **文档动作**，和 072 §F 的菜单项、裁切栏的两个开关同一个位。
     private func flip(horizontal: Bool, tool: CropToolController?) {
-        if let loupe {
-            if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
+        // 087: inside the transform workspace a crop session is open, and `CropToolController.flip`
+        // is the door that closes/reopens it around its own row — `LoupeController.flip` would leave
+        // the change uncommitted until 应用.
+        if let tool {
+            if horizontal { tool.toggleFlipHorizontal() } else { tool.toggleFlipVertical() }
             return
         }
-        guard let tool else { return }
-        if horizontal { tool.toggleFlipHorizontal() } else { tool.toggleFlipVertical() }
+        if let loupe {
+            if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
+        }
     }
 }
 
@@ -216,14 +237,17 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         // 086: the first section's small title is the user's new word. The *card* title (「裁切」) is
         // `InspectorView.Section.crop.title` and is not this enum, so it does not move with this.
         case .crop: return "宽高比"
-        case .angle: return "角度"
+        case .angle: return "转动"
         case .rotation: return "旋转"
         case .mirror: return "镜像"
         }
     }
 
-    /// The order they are stacked in, top to bottom.
+    /// The order they are stacked in, top to bottom (all four, across both cards).
     public static var displayOrder: [CropSection] { [.crop, .angle, .rotation, .mirror] }
+
+    /// 087: the second card's three sections, in the user's order.
+    public static var angleCardOrder: [CropSection] { [.angle, .rotation, .mirror] }
 
     /// The accessibility / probe id of the section's small title.
     public var headerID: String { "inspector.crop.section.\(rawValue)" }
@@ -368,7 +392,7 @@ struct CropAspectRow: View {
     }
 }
 
-/// 镜像：水平 / 垂直两片（082 — 九宫格搬到「裁切」区，这里只剩镜像）。
+/// 镜像：水平 / 垂直两个裸图标（087）。开着时图标用强调色，关着时是普通文字色。
 struct CropMirrorRow: View {
 
     let horizontal: Bool
@@ -377,13 +401,17 @@ struct CropMirrorRow: View {
     let onVertical: () -> Void
 
     static let probeID = "mirror"
+    static let horizontalID = "inspector.crop.mirror.horizontal"
+    static let verticalID = "inspector.crop.mirror.vertical"
 
     var body: some View {
         HStack(spacing: 6) {
-            CropChip(title: "水平", on: horizontal, help: "水平翻转（文档动作，一次 ⌘Z）",
-                     action: onHorizontal)
-            CropChip(title: "垂直", on: vertical, help: "垂直翻转（文档动作，一次 ⌘Z）",
-                     action: onVertical)
+            MirrorButtonHost(symbol: "flip.horizontal", title: "水平翻转", isOn: horizontal,
+                             identifierID: Self.horizontalID, action: onHorizontal)
+                .fixedSize()
+            MirrorButtonHost(symbol: "flip.vertical", title: "垂直翻转", isOn: vertical,
+                             identifierID: Self.verticalID, action: onVertical)
+                .fixedSize()
             Spacer(minLength: 4)
         }
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
@@ -434,42 +462,106 @@ struct CropTurnRow: View {
     }
 }
 
-/// 一个 90° 旋转按钮：SF Symbol `rotate.left` / `rotate.right`，和工作区标签的 `crop.rotate`
-/// 同一族，同一个理由做成真 `NSButton`（见 `CropTurnRow` 的头注释）。
-final class TurnButton: NSButton {
+/// 一个裸图标按钮：固定方形、无边框，只有 hover 时才出现浅底。
+///
+/// 087: the shape the card header's old ruler button used before 086 removed it — the two turn
+/// icons and the two mirror icons are the same leaf. `contentTintColor` is the one colour decision:
+/// the rotation icons stay in label colour, the mirror icons turn accent while on.
+///
+/// It is a real `NSButton` for the reason every leaf in this card is AppKit: the panel acceptance
+/// clicks it through `performClick(_:)` and reads `isBordered` / `contentTintColor`.
+class BareIconButton: NSButton {
 
-    static let size = NSSize(width: 22, height: 18)
-    static let cornerRadius: CGFloat = CropChip.cornerRadius
+    static let size = NSSize(width: 20, height: 20)
+    static let glyphPointSize: CGFloat = 11
+    static let cornerRadius: CGFloat = 5
 
     let symbol: String
     let titleText: String
+    /// Mirror: on = accent. Rotation leaves it `false` and the tint never changes.
+    var accentWhenOn = false
+    var isOn = false { didSet { if isOn != oldValue { refresh() } } }
 
-    init(symbol: String, title: String) {
+    private var hovering = false
+    private var trackingArea: NSTrackingArea?
+
+    init(symbol: String, title: String, accentWhenOn: Bool = false) {
         self.symbol = symbol
         self.titleText = title
-        super.init(frame: NSRect(origin: .zero, size: TurnButton.size))
+        self.accentWhenOn = accentWhenOn
+        super.init(frame: NSRect(origin: .zero, size: Self.size))
         isBordered = false
         bezelStyle = .inline
         setButtonType(.momentaryChange)
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        contentTintColor = .labelColor
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: Self.glyphPointSize,
+                                                                 weight: .regular))
         toolTip = title + "（一次 ⌘Z）"
         setAccessibilityLabel(title)
-        setAccessibilityIdentifier(title)
         wantsLayer = true
         layer?.cornerRadius = Self.cornerRadius
         layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        refresh()
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 
-    override var intrinsicContentSize: NSSize { TurnButton.size }
+    override var intrinsicContentSize: NSSize { Self.size }
     override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        refresh()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        refresh()
+    }
+
+    func refresh() {
+        contentTintColor = accentWhenOn && isOn ? .controlAccentColor : .labelColor
+        layer?.backgroundColor = hovering
+            ? NSColor.labelColor.withAlphaComponent(0.06).cgColor
+            : NSColor.clear.cgColor
+        layer?.borderWidth = 0
+        needsDisplay = true
+    }
+}
+
+/// A 90° turn button — `rotate.left` / `rotate.right`, never accent (087).
+final class TurnButton: BareIconButton {
+
+    init(symbol: String, title: String) {
+        super.init(symbol: symbol, title: title, accentWhenOn: false)
+        setAccessibilityIdentifier(title)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+}
+
+/// A mirror button — `flip.horizontal` / `flip.vertical`, accent while on (087).
+final class MirrorButton: BareIconButton {
+
+    init(symbol: String, title: String, isOn: Bool) {
+        super.init(symbol: symbol, title: title, accentWhenOn: true)
+        self.isOn = isOn
+        setAccessibilityIdentifier(title)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 }
 
 /// `TurnButton` in SwiftUI: the three inputs and the one verb behind it.
@@ -496,6 +588,38 @@ struct TurnButtonHost: NSViewRepresentable {
     func updateNSView(_ button: TurnButton, context: Context) {
         context.coordinator.action = action
         button.isEnabled = isEnabled
+        button.setAccessibilityIdentifier(identifierID)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
+/// `MirrorButton` in SwiftUI: the two inputs (on/off) and the one verb behind it.
+struct MirrorButtonHost: NSViewRepresentable {
+
+    let symbol: String
+    let title: String
+    let isOn: Bool
+    let identifierID: String
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> MirrorButton {
+        let button = MirrorButton(symbol: symbol, title: title, isOn: isOn)
+        button.setAccessibilityIdentifier(identifierID)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        return button
+    }
+
+    func updateNSView(_ button: MirrorButton, context: Context) {
+        context.coordinator.action = action
+        button.isOn = isOn
         button.setAccessibilityIdentifier(identifierID)
     }
 
@@ -761,8 +885,10 @@ final class CropRatioPanels {
 ///
 /// Strings, not an enum, because they are also the accessibility ids: one spelling everywhere.
 enum CropCardID {
-    /// The whole card — 「卡片清单第一张 = 裁切」 is measured on this frame.
+    /// The whole 裁切 card — 「卡片清单第一张 = 裁切」 is measured on this frame.
     static let card = "card"
+    /// 087: the 角度 card's own frame (the second card of the workspace).
+    static let angleCard = "angle.card"
     static let aspect = CropAspectRow.probeID
     static let angle = "angle"
     static let turn = CropTurnRow.probeID

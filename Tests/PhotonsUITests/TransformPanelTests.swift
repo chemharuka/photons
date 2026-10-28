@@ -43,13 +43,14 @@ final class TransformPanelTests: XCTestCase {
     // MARK: - 1. 一张表：变换的卡片清单，第一张是裁切
 
     func testTheTransformWorkspaceShowsTheCropCardFirst() throws {
-        XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop],
-                       "变换工作区只认领裁切卡（唯一一张「工作区 → 卡片」表）")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切"],
-                       "卡片清单的第一张（今天也是唯一一张）必须是裁切")
-        XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop"])
+        XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop, .angle],
+                       "变换工作区认领裁切 + 角度两张卡（唯一一张「工作区 → 卡片」表）")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "角度"],
+                       "卡片清单的第一张必须是裁切，第二张是角度")
+        XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop", "angle"])
         // 调整工作区不受影响：裁切是它自己的工作区的卡片。
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("裁切"))
+        XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("角度"))
         // 077（2026-10-28）：历史记录排在枚举末尾；蒙版仍是它前面最后一张参数卡
         // （`DecoderModelCardTests` 也钉这一条）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
@@ -57,15 +58,18 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        XCTAssertEqual(panel.cards.cardTitles, ["裁切"])
+        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "角度"])
         let card = try XCTUnwrap(panel.row(CropCardID.card), "裁切卡自己没有 frame")
+        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "角度卡自己没有 frame")
         print(String(format: "CARD · 变换第一张 = %@ · frame (%.1f, %.1f, %.1f×%.1f)",
                      panel.cards.cardTitles.first ?? "-",
                      card.minX, card.minY, card.width, card.height))
         XCTAssertGreaterThan(card.width, 200, "卡片比面板还窄")
-        XCTAssertGreaterThan(card.height, 90, "四行卡片不该只有 \(card.height) pt")
+        XCTAssertGreaterThan(card.height, 60, "裁切卡（宽高比 + 底部行）不该只有 \(card.height) pt")
+        XCTAssertGreaterThan(angleCard.height, 100, "角度卡（三节）不该只有 \(angleCard.height) pt")
+        XCTAssertGreaterThan(angleCard.minY, card.maxY, "角度卡必须在裁切卡之后")
         // 卡在滚动内容里、在直方图下方 —— 它是一张普通的卡。
         XCTAssertLessThan(panel.histogramPlot.maxY, card.minY)
     }
@@ -225,6 +229,7 @@ final class TransformPanelTests: XCTestCase {
         // 082: 切到「变换」就已经进了裁切模式，不需要再点一次。
         XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
         pump(0.2)
+        let historyBefore = session.history.snapshots.count
 
         let inspector = editor.rootView.inspectorHost
         let field = try XCTUnwrap(Self.views(of: "NumberTextField", in: inspector)
@@ -242,31 +247,31 @@ final class TransformPanelTests: XCTestCase {
 
         XCTAssertEqual(loupe.cropTool.draft.straighten, 1.5, accuracy: 1e-9,
                        "敲进去的 1.5 没有进草稿")
-        XCTAssertEqual(session.edit.geometry.rotationDegrees, 0, "草稿的角度不许直接写文档")
-
-        XCTAssertTrue(loupe.applyCropTool())
-        pump(0.1)
+        // 087: 转动 is live — one typed value writes the document and commits one row.
         XCTAssertEqual(session.edit.geometry.rotationDegrees, 1.5, accuracy: 1e-9,
-                       "应用后文档的角度不是 1.5：\(session.edit.geometry.rotationDegrees)")
-        print("ANGLE · typed 1.5 → draft → document rotationDegrees "
-              + "\(session.edit.geometry.rotationDegrees)")
+                       "转动已经实时，文档的角度也该是 1.5：\(session.edit.geometry.rotationDegrees)")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
+                       "一次输入 = 一条历史（松手 / 回车）")
+        print("ANGLE · typed 1.5 → live document rotationDegrees "
+              + "\(session.edit.geometry.rotationDegrees) · history +\(session.history.snapshots.count - historyBefore)")
     }
 
-    // MARK: - 5. 三片开关颜色；五个控件永不置灰
+    // MARK: - 5. 九宫格开关颜色；五个控件永不置灰
 
-    func testTheThreeSwitchesTurnAccentBlueAndTheFiveControlsStayEnabled() throws {
+    func testTheGridSwitchTurnsAccentBlueAndTheControlsStayEnabled() throws {
         // 结构那一半：颜色只有一个出口（`CropChip.fill(on:)`），而且是系统强调色。
         let source = try String(contentsOf: Self.source("TransformPanel.swift"), encoding: .utf8)
         XCTAssertTrue(source.contains("static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }"),
                       "开关的颜色只能来自 CropChip.fill(on:)，而且只能是 Color.accentColor")
 
-        // 像素那一半：渲染**这三个控件本身**再采中心点（060 的老办法）。
+        // 像素那一半：渲染**这个开关本身**再采中心点（060 的老办法）。087 起水平/垂直是裸图标，
+        // 它们的 accent 语义由 `CropPanelTests` 的镜像用例钉住。
         let accent = Self.systemAccent
         guard accent.b >= accent.r else {
             throw XCTSkip("系统强调色不是蓝的（\(accent)）—— 跟随系统，非蓝主题下这条无法断言")
         }
         var table: [String] = []
-        for title in ["水平", "垂直", "九宫格"] {
+        for title in ["九宫格"] {
             guard let onPixels = Self.render(CropChip(title: title, on: true) {}) else {
                 throw XCTSkip("ImageRenderer 拿不到 CGImage（本机没有可用的离屏图形上下文）")
             }
@@ -289,9 +294,9 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
         try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe) != nil }
-        let keys = ["宽高比", "滑块角度", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
+        let keys = ["宽高比", "转动", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
         for key in keys {
             _ = try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(key) != nil }
         }
@@ -318,12 +323,13 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         // 086: the second 「裁切」 is now 「宽高比」; the card title itself is untouched.
         XCTAssertEqual(CropSection.crop.title, "宽高比")
         XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
         let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
@@ -365,9 +371,11 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
+        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard))
+        XCTAssertGreaterThan(angleCard.minY, card.maxY, "087: 角度卡在裁切卡之后")
         let grid = try XCTUnwrap(panel.row(CropCardID.grid), "九宫格没有画出来")
         let apply = try XCTUnwrap(panel.row(CropCardID.apply), "应用 / 取消没有画出来")
         XCTAssertLessThanOrEqual(abs(grid.midY - apply.midY), 1,
@@ -380,8 +388,12 @@ final class TransformPanelTests: XCTestCase {
         // chips) are measured against each other above, so they are excluded here — including them made
         // this assertion compare the row with itself.
         let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply]
-        let rows = panel.probes.filter { $0.rowID != CropCardID.card && !bottomIDs.contains($0.rowID) }
+        let rows = panel.probes
+            .filter { $0.rowID != CropCardID.card && $0.rowID != CropCardID.angleCard }
+            .filter { !bottomIDs.contains($0.rowID) }
             .map { ($0.rowID, $0.convert($0.bounds, to: panel.host)) }
+            // 087: only the crop card — the angle card legitimately sits below this one.
+            .filter { $0.1.minY >= card.minY - 1 && $0.1.maxY <= card.maxY + 1 }
         let bottomTop = min(grid.minY, apply.minY)
         let below = rows.filter { $0.1.minY > bottomTop + 0.5 }
         XCTAssertTrue(below.isEmpty,
@@ -410,37 +422,45 @@ final class TransformPanelTests: XCTestCase {
             let panel = try host(width: width, session: session, loupe: loupe)
             defer { panel.window.contentView = nil }
             panel.state.select(.transform)
-            try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+            try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
             let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")
-            // 082: four sections → five probe rows (裁切 / 角度 / 旋转 / 镜像 / 应用+取消). The section
-            // titles have their own probes (`section.<title>`) and are measured in
-            // `CropCardSectionsTests`; here it is the rows inside them.
-            let rows = [CropCardID.aspect, CropCardID.angle, CropCardID.turn,
-                        CropCardID.mirror, CropCardID.apply]
-                .compactMap { id in panel.row(id).map { (id, $0) } }
-            XCTAssertEqual(rows.count, 5, "\(width) pt：五行里少了（\(rows.map(\.0))）")
+            let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "\(width) pt：没有角度卡 frame")
+            // 087: the two cards own two row sets. The crop card is 宽高比 + 底部行; the angle card is
+            // 转动 / 旋转 / 镜像.
+            let cardRows: [(String, CGRect, CGRect)] = [
+                (CropCardID.aspect, card),
+                (CropCardID.apply, card),
+                (CropCardID.angle, angleCard),
+                (CropCardID.turn, angleCard),
+                (CropCardID.mirror, angleCard),
+            ].compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
+            XCTAssertEqual(cardRows.count, 5, "\(width) pt：五行里少了（\(cardRows.map(\.0))）")
+            XCTAssertGreaterThan(angleCard.minY, card.maxY,
+                                 "\(width) pt：角度卡必须在裁切卡之后")
 
-            // 每行都在卡片里，而且有宽度。
-            for (id, frame) in rows {
+            // 每行都在自己的卡片里，而且有宽度。
+            for (id, frame, owner) in cardRows {
                 XCTAssertGreaterThan(frame.width, 60, "\(width) pt：\(id) 只剩 \(frame.width) pt")
-                XCTAssertGreaterThanOrEqual(frame.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5,
-                                            "\(width) pt：\(id) 出了卡片左边（\(frame.minX) vs \(card.minX)）")
-                XCTAssertLessThanOrEqual(frame.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
-                                         "\(width) pt：\(id) 出了卡片右边（\(frame.maxX) vs \(card.maxX)）")
+                XCTAssertGreaterThanOrEqual(frame.minX, owner.minX + WorkspaceLayout.cardInsetH - 0.5,
+                                            "\(width) pt：\(id) 出了卡片左边（\(frame.minX) vs \(owner.minX)）")
+                XCTAssertLessThanOrEqual(frame.maxX, owner.maxX - WorkspaceLayout.cardInsetH + 0.5,
+                                         "\(width) pt：\(id) 出了卡片右边（\(frame.maxX) vs \(owner.maxX)）")
             }
-            // 不重叠：按 y 排好之后，上面那一行的底不能压到下面那一行的顶。
-            let ordered = rows.sorted { $0.1.minY < $1.1.minY }
-            for (a, b) in zip(ordered, ordered.dropFirst()) {
-                XCTAssertLessThanOrEqual(a.1.maxY, b.1.minY + 0.5,
-                                         "\(width) pt：\(a.0) 与 \(b.0) 重叠（\(a.1) / \(b.1)）")
+            // 不重叠：同一张卡内按 y 排好之后，上面那一行的底不能压到下面那一行的顶。
+            for owner in [card, angleCard] {
+                let ordered = cardRows.filter { $0.2 == owner }.sorted { $0.1.minY < $1.1.minY }
+                for (a, b) in zip(ordered, ordered.dropFirst()) {
+                    XCTAssertLessThanOrEqual(a.1.maxY, b.1.minY + 0.5,
+                                             "\(width) pt：\(a.0) 与 \(b.0) 重叠（\(a.1) / \(b.1)）")
+                }
+                let first = try XCTUnwrap(ordered.first?.1), last = try XCTUnwrap(ordered.last?.1)
+                XCTAssertLessThanOrEqual(last.maxY, owner.maxY - WorkspaceLayout.cardInsetV + 0.5,
+                                         "\(width) pt：最后一行出了卡片底边")
+                XCTAssertGreaterThan(first.minY, owner.minY)
             }
-            // 四行加起来必须还在卡片里（卡片高度够）。
-            let first = try XCTUnwrap(ordered.first?.1), last = try XCTUnwrap(ordered.last?.1)
-            XCTAssertLessThanOrEqual(last.maxY, card.maxY - WorkspaceLayout.cardInsetV + 0.5,
-                                     "\(width) pt：最后一行出了卡片底边")
-            XCTAssertGreaterThan(first.minY, card.minY)
 
+            let rows = cardRows.map { ($0.0, $0.1) }
             let frames = rows
                 .map { String(format: "%@(%.1f, %.1f, %.1f×%.1f)",
                               $0.0, $0.1.minX, $0.1.minY, $0.1.width, $0.1.height) }

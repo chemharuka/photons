@@ -51,11 +51,12 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         // The enum is the one spelling, and its order is the stacked order.
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "rotation", "mirror"])
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
 
         // …and the panel really drew four headers, in that order, top to bottom.
         var drawn: [(title: String, rect: CGRect)] = []
@@ -68,7 +69,7 @@ final class CropCardSectionsTests: XCTestCase {
             drawn.append((section.title, rect))
             print("082 §4 · 小标题「\(section.title)」 \(NSStringFromRect(rect))")
         }
-        XCTAssertEqual(drawn.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(drawn.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
         for (a, b) in zip(drawn, drawn.dropFirst()) {
             XCTAssertGreaterThan(b.rect.minY, a.rect.minY,
                                  "082 §4: 「\(b.title)」必须在「\(a.title)」下面")
@@ -92,74 +93,84 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        let card = try XCTUnwrap(panel.row(CropCardID.card))
-        let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
-        print("082 §4 · panel 300 pt → card \(String(format: "%.1f×%.1f", card.width, card.height)) "
-              + "· 内容宽 \(String(format: "%.1f", contentWidth)) pt")
-        XCTAssertGreaterThanOrEqual(contentWidth, 244 - 0.5, "082 §4: 244 pt 内容宽是这张卡的验收宽度")
+        let cropCard = try XCTUnwrap(panel.row(CropCardID.card))
+        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard))
+        print("082 §4 · panel 300 pt → 裁切卡 \(String(format: "%.1f×%.1f", cropCard.width, cropCard.height)) "
+              + "· 角度卡 \(String(format: "%.1f×%.1f", angleCard.width, angleCard.height))")
+        XCTAssertGreaterThan(angleCard.minY, cropCard.maxY, "087: 角度卡在裁切卡之后")
 
-        let rowIDs = [CropCardID.aspect, CropCardID.angle, CropCardID.turn,
-                      CropCardID.mirror, CropCardID.apply]
-        var rows: [(id: String, rect: CGRect)] = []
-        for id in rowIDs {
-            let rect = try XCTUnwrap(panel.row(id), "082 §4: 行 \(id) 没有画出来")
-            rows.append((id, rect))
-            XCTAssertGreaterThan(rect.width, 60, "082 §4: \(id) 只剩 \(rect.width) pt 宽")
-            XCTAssertLessThanOrEqual(rect.width, contentWidth + 0.5,
-                                     "082 §4: \(id) 比内容宽还宽（\(rect.width) > \(contentWidth)）—— 会换行")
-            XCTAssertGreaterThanOrEqual(rect.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5,
-                                        "082 §4: \(id) 出了卡片左边")
-            XCTAssertLessThanOrEqual(rect.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
-                                     "082 §4: \(id) 出了卡片右边")
-            print("082 §4 · \(id) \(NSStringFromRect(rect))")
-        }
-
-        // No two rows intersect — the corpus-wide rule this card must not break.
-        for i in 0..<rows.count {
-            for j in (i + 1)..<rows.count {
-                XCTAssertFalse(rows[i].rect.intersects(rows[j].rect),
-                               "082 §4: \(rows[i].id) 与 \(rows[j].id) 相交 "
-                               + "(\(NSStringFromRect(rows[i].rect)) / \(NSStringFromRect(rows[j].rect)))")
-            }
-        }
-        // And the four headers do not intersect the rows either.
-        var headers: [(id: String, rect: CGRect)] = []
-        for section in CropSection.displayOrder {
-            let rect = try XCTUnwrap(panel.row("section.\(section.title)"))
-            headers.append((section.title, rect))
-        }
-        for header in headers {
-            for row in rows {
-                XCTAssertFalse(header.rect.intersects(row.rect),
-                               "082 §4: 小标题「\(header.id)」压到了 \(row.id)")
-            }
-        }
-
-        // Gaps: 6 pt from a title to its own content, ≥ 12 pt from a section's last row to the next
-        // section's title. Both numbers are measured, not assumed.
-        let ordered = (rows + headers).sorted { $0.rect.minY < $1.rect.minY }
+        // 087: the rows belong to two cards. Each one is measured against the card that owns it.
+        let owners: [(CGRect, [String], [CropSection])] = [
+            (cropCard, [CropCardID.aspect, CropCardID.apply], [.crop]),
+            (angleCard, [CropCardID.angle, CropCardID.turn, CropCardID.mirror],
+             [.angle, .rotation, .mirror]),
+        ]
         var gaps: [String] = []
-        for section in CropSection.displayOrder {
-            let header = try XCTUnwrap(headers.first { $0.id == section.title }).rect
-            guard let firstBelow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
-            let insideGap = firstBelow.rect.minY - header.maxY
-            gaps.append("「\(section.title)」→\(firstBelow.id) \(String(format: "%.2f", insideGap)) pt")
-            XCTAssertGreaterThanOrEqual(insideGap, 5.5,
-                                        "082 §4: 小标题与内容之间应 6 pt，实测 \(insideGap)")
-        }
-        for (a, b) in zip(headers, headers.dropFirst()) {
-            let above = ordered.filter { $0.rect.maxY <= b.rect.minY + 0.5 }
-            guard let last = above.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
-            let gap = b.rect.minY - last.rect.maxY
-            gaps.append("\(last.id)→「\(b.id)」 \(String(format: "%.2f", gap)) pt")
-            XCTAssertGreaterThanOrEqual(gap, 11.5, "082 §4: 分区之间应 ≥12 pt，实测 \(gap) pt")
+        for (card, rowIDs, sections) in owners {
+            let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
+            XCTAssertGreaterThanOrEqual(contentWidth, 244 - 0.5,
+                                        "082 §4: 244 pt 内容宽是这张卡的验收宽度")
+            var rows: [(id: String, rect: CGRect)] = []
+            for id in rowIDs {
+                let rect = try XCTUnwrap(panel.row(id), "082 §4: 行 \(id) 没有画出来")
+                rows.append((id, rect))
+                XCTAssertGreaterThan(rect.width, 60, "082 §4: \(id) 只剩 \(rect.width) pt 宽")
+                XCTAssertLessThanOrEqual(rect.width, contentWidth + 0.5,
+                                         "082 §4: \(id) 比内容宽还宽（\(rect.width) > \(contentWidth)）—— 会换行")
+                XCTAssertGreaterThanOrEqual(rect.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5,
+                                            "082 §4: \(id) 出了卡片左边")
+                XCTAssertLessThanOrEqual(rect.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
+                                         "082 §4: \(id) 出了卡片右边")
+                print("082 §4 · \(id) \(NSStringFromRect(rect))")
+            }
+
+            var headers: [(id: String, rect: CGRect)] = []
+            for section in sections {
+                let rect = try XCTUnwrap(panel.row("section.\(section.title)"))
+                headers.append((section.title, rect))
+            }
+            // No two rows intersect — the corpus-wide rule these cards must not break.
+            for i in 0..<rows.count {
+                for j in (i + 1)..<rows.count {
+                    XCTAssertFalse(rows[i].rect.intersects(rows[j].rect),
+                                   "082 §4: \(rows[i].id) 与 \(rows[j].id) 相交 "
+                                   + "(\(NSStringFromRect(rows[i].rect)) / \(NSStringFromRect(rows[j].rect)))")
+                }
+            }
+            // Headers do not intersect rows either.
+            for header in headers {
+                for row in rows {
+                    XCTAssertFalse(header.rect.intersects(row.rect),
+                                   "082 §4: 小标题「\(header.id)」压到了 \(row.id)")
+                }
+            }
+
+            // Gaps: 6 pt from a title to its own content, ≥ 12 pt between sections.
+            let ordered = (rows + headers).sorted { $0.rect.minY < $1.rect.minY }
+            for section in sections {
+                let header = try XCTUnwrap(headers.first { $0.id == section.title }).rect
+                guard let firstBelow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
+                let insideGap = firstBelow.rect.minY - header.maxY
+                gaps.append("「\(section.title)」→\(firstBelow.id) \(String(format: "%.2f", insideGap)) pt")
+                XCTAssertGreaterThanOrEqual(insideGap, 5.5,
+                                            "082 §4: 小标题与内容之间应 6 pt，实测 \(insideGap)")
+            }
+            for (a, b) in zip(headers, headers.dropFirst()) {
+                let above = ordered.filter { $0.rect.maxY <= b.rect.minY + 0.5 }
+                guard let last = above.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
+                let gap = b.rect.minY - last.rect.maxY
+                gaps.append("\(last.id)→「\(b.id)」 \(String(format: "%.2f", gap)) pt")
+                XCTAssertGreaterThanOrEqual(gap, 11.5, "082 §4: 分区之间应 ≥12 pt，实测 \(gap) pt")
+            }
+
+            let orderedRows = rows.sorted { $0.rect.minY < $1.rect.minY }
+            XCTAssertLessThanOrEqual(orderedRows.last!.rect.maxY,
+                                     card.maxY - WorkspaceLayout.cardInsetV + 0.5,
+                                     "082 §4: 最后一区出了卡片底边")
         }
         print("082 §4 · 间距 " + gaps.joined(separator: " · "))
-
-        XCTAssertLessThanOrEqual(ordered.last!.rect.maxY, card.maxY - WorkspaceLayout.cardInsetV + 0.5,
-                                 "082 §4: 最后一区出了卡片底边")
     }
 
     // MARK: - 3. 两个角度
@@ -177,7 +188,7 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         /// Poll until the panel has redrawn the readout (SwiftUI updates the AppKit leaf on the next
         /// layout pass), then return what it prints.
