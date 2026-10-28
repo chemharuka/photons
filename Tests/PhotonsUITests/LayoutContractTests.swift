@@ -238,6 +238,40 @@ final class LayoutContractTests: XCTestCase {
         XCTAssertEqual(contentWidths, [244, 274, 308])
     }
 
+    // MARK: the inspector's 色差 rows
+
+    /// **The two rows, as a layout contract** (2026-10-28, 078 B8): which card holds 色差 (细节, the
+    /// panel's pixel-level card), how many rows it adds (**2**), which document fields they own, and the
+    /// panel-width identity every row is measured at — **244 / 274 / 308** pt of card content, i.e. the
+    /// inspector's `300 … 364` minus the column's 12 pt padding and the card's own 16 pt inset.
+    ///
+    /// The rendered proof is `ChromaticAberrationCardTests`, which hosts the panel and measures the two
+    /// rows at exactly these three widths.
+    func testTheChromaticAberrationRowsAreTwoInTheDetailCardAtTheThreeContentWidths() throws {
+        XCTAssertEqual(InspectorView.Section.detail.title, "细节")
+        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.detail), "色差 在「调整」的细节卡里")
+        let sections = InspectorView.sections(in: .adjust)
+        XCTAssertTrue(sections.contains(.detail), "调整 工作区里画细节卡：\(sections)")
+
+        // 2 rows, in the card's own table, and nothing else grew.
+        XCTAssertEqual(InspectorView.caRows.count, 2)
+        XCTAssertEqual(InspectorView.caRows.map(\.title), ["色差 R", "色差 B"])
+        XCTAssertEqual(InspectorView.detailContent.rows.count, 4, "四根解码行没变")
+        for row in InspectorView.caRows {
+            XCTAssertEqual(row.range, -100 ... 100, "\(row.title)：滑杆单位，整数")
+            XCTAssertEqual(row.shape, .linear, "\(row.title)：线性域 → 红")
+            XCTAssertEqual(row.format, "%.0f")
+        }
+        // 029's two fields, not a second set: one unit is `5e-5` of α and 100 is the full scale.
+        XCTAssertEqual(OpticsGroup.sliderRange, -100 ... 100)
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 100), OpticsGroup.fullScale, accuracy: 1e-15)
+
+        // The panel widths `WorkspaceLayout` allows ↔ the card content widths the rows are measured at.
+        let contentWidths = [WorkspaceLayout.inspectorWidthMin, 330, WorkspaceLayout.inspectorWidthMax]
+            .map { $0 - 2 * 12 - 2 * WorkspaceLayout.cardInsetH }
+        XCTAssertEqual(contentWidths, [244, 274, 308])
+    }
+
     // MARK: grid
 
     func testGridColumnsFollowThePureFunctionAtThreeWidths() {
