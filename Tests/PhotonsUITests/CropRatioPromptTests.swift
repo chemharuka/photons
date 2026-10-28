@@ -42,7 +42,8 @@ final class CropRatioPromptTests: XCTestCase {
         let lockBefore = tool.draft.lock
         let chipBefore = Self.chip(in: inspector)?.title
         let documentBefore = CropUITestSupport.documentHash(session)
-        let windowsBefore = NSApp.windows.count
+        let visibleBefore = NSApp.windows.filter(\.isVisible).count
+        let panelsBefore = NSApp.windows.filter { $0 is NSPanel }.count
 
         // The pencil is the inline door — no menu, no panel.
         let pencil = try XCTUnwrap(Self.iconButton(CropAspectRow.editID, in: inspector),
@@ -54,7 +55,13 @@ final class CropRatioPromptTests: XCTestCase {
         let field = try XCTUnwrap(Self.inlineField(in: inspector), "104: chip 没有就地变成输入框")
         XCTAssertTrue(field.isEditable, "104: 内联字段必须可键入")
         XCTAssertNil(CropRatioPanels.shared.prompt, "104: 键入比例不许创建面板")
-        XCTAssertEqual(NSApp.windows.count, windowsBefore, "104: 打开内联字段不许新建窗口")
+        // AppKit/SwiftUI 在 text field 成为第一响应者时会建一个不可见的 `TUINSWindow`（500×500，
+        // `isVisible == false`）作为文本输入宿主 —— 实测过（104 复核）。它不是一个「弹框」，
+        // 所以这里断言的是**可见窗口**没有增加，以及没有 NSPanel。
+        XCTAssertEqual(NSApp.windows.filter(\.isVisible).count, visibleBefore,
+                       "104: 打开内联字段不许新建可见窗口")
+        XCTAssertEqual(NSApp.windows.filter { $0 is NSPanel }.count, panelsBefore,
+                       "104: 打开内联字段不许新建面板")
 
         field.stringValue = "5:x"
         field.commitForTesting()
@@ -68,9 +75,10 @@ final class CropRatioPromptTests: XCTestCase {
                        "⑨/104: chip 要回到原来的文本")
         XCTAssertNil(Self.inlineField(in: inspector), "104: 提交后内联字段收回去")
         XCTAssertNil(CropRatioPanels.shared.prompt, "104: 全程没有面板")
-        XCTAssertEqual(NSApp.windows.count, windowsBefore, "104: 提交路径没有创建任何窗口")
+        XCTAssertEqual(NSApp.windows.filter(\.isVisible).count, visibleBefore,
+                       "104: 提交路径没有创建可见窗口")
         print("104 invalid · lock \(lockBefore.code) → \(tool.draft.lock.code)"
-              + " · chip \(chipBefore ?? "nil") · windows \(windowsBefore) → \(NSApp.windows.count)")
+              + " · chip \(chipBefore ?? "nil") · visible \(visibleBefore) → \(NSApp.windows.filter(\.isVisible).count)")
     }
 
     /// `Esc` cancels: the field goes away and the ratio is untouched (the old panel's cancel rule).
