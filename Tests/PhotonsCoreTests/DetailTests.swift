@@ -479,9 +479,9 @@ final class DetailTests: XCTestCase {
         XCTAssertEqual(old.detailSettings.luminanceNR, 30)
         XCTAssertEqual(old.detailSettings.colorNR, 40)
         XCTAssertEqual(old.detailSettings.sharpness, 60)
-        // 2026-10-28: the current version is 8 (黑白 的 switch 与八段 mix); the migration still divides
-        // a schema-5 position by ten and stamps the **current** version.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 8)
+        // 2026-10-28: the current version is 9 (纹理/清晰度/去雾); the migration still divides a
+        // schema-5 position by ten and stamps the **current** version.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 9)
 
         // Old 50 → amount 0.5 → new position 5.
         let half = try migrate(#"""

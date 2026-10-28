@@ -63,6 +63,8 @@ public enum StageAlgorithmVersion {
     public static let localColor = 1
     /// Unchanged (S3.6's OKLCh bands).
     public static let hsl = 1
+    /// New stage (S3.8, 2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
+    public static let detailFX = 1
     /// Unchanged.
     public static let vignette = 1
     /// Unchanged.
@@ -84,6 +86,7 @@ public enum StageAlgorithmVersion {
         case .bw: return bw
         case .localColor: return localColor
         case .hsl: return hsl
+        case .detailFX: return detailFX
         case .vignette: return vignette
         case .grain: return grain
         case .display: return display

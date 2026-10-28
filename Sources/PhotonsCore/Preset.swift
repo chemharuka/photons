@@ -56,7 +56,9 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
         case "hsl", "colour": self = .color
         case "crop", "transform": self = .geometry
         case "sharpening", "noise", "lens": self = .detail
-        case "vignette", "grain": self = .effects
+        // 2026-10-28 (P0-6): the Effects group is the 效果 card, so its three new controls answer to
+        // the card's own names as well as to the two older ones.
+        case "vignette", "grain", "texture", "clarity", "dehaze", "detailfx": self = .effects
         default: return nil
         }
     }

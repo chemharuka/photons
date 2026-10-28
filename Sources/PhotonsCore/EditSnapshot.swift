@@ -322,17 +322,23 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     public var vignetteFeather: Double?
     public var vignetteRoundness: Double?
     public var grain: Double?
+    /// 2026-10-28 (P0-6): S3.8's three numbers. Sparse like every other leaf — a copy of a
+    /// vignette-only look carries no `texture`, so pasting it leaves the target's 纹理 alone.
+    public var texture: Double?
+    public var clarity: Double?
+    public var dehaze: Double?
 
     public init() {}
 
     public var fieldCount: Int {
         [vignetteAmount != nil, vignetteMidpoint != nil, vignetteFeather != nil,
-         vignetteRoundness != nil, grain != nil].filter { $0 }.count
+         vignetteRoundness != nil, grain != nil,
+         texture != nil, clarity != nil, dehaze != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 5
+    public static let fullFieldCount = 8
 }
 
 // MARK: - the snapshot
@@ -429,6 +435,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.effects.vignetteFeather, 50) { effects.vignetteFeather = edit.effects.vignetteFeather }
         if differs(edit.effects.vignetteRoundness, 0) { effects.vignetteRoundness = edit.effects.vignetteRoundness }
         if differs(edit.effects.grain, 0) { effects.grain = edit.effects.grain }
+        if differs(edit.effects.texture, 0) { effects.texture = edit.effects.texture }
+        if differs(edit.effects.clarity, 0) { effects.clarity = edit.effects.clarity }
+        if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
         s.effects = effects.isEmpty ? nil : effects
 
         return s
@@ -437,7 +446,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     // MARK: reading the payload
 
     /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (57).
+    /// from is `fullDocumentFieldCount` (69).
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (detail?.fieldCount ?? 0) + (effects?.fieldCount ?? 0)
@@ -604,6 +613,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.vignetteFeather { out.effects.vignetteFeather = v }
             if let v = p.vignetteRoundness { out.effects.vignetteRoundness = v }
             if let v = p.grain { out.effects.grain = v }
+            if let v = p.texture { out.effects.texture = v }
+            if let v = p.clarity { out.effects.clarity = v }
+            if let v = p.dehaze { out.effects.dehaze = v }
         }
 
         return out

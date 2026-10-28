@@ -54,7 +54,17 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// 0, `hasBW == false`, S3.4 not encoded, pixels unchanged. Like schema 7, the version is not
     /// stamped at decode time on a document that carries neither key — a document keeps the number its
     /// own file wrote, and only a document this build saves carries 8.
-    public static let currentSchemaVersion = 8
+    /// 9 = 2026-10-28 (P0-6): 纹理 / 清晰度 / 去雾 — `effects.texture`, `effects.clarity` and
+    /// `effects.dehaze` (−100…100, default 0), the Effects card's missing third block. S3.8 renders all
+    /// three (`Kernels/s3_8_detail_fx.metal`); before this version none of them existed.
+    ///
+    /// **Nothing migrates, and the encoding is additive.** Each of the three is written only when it is
+    /// non-zero (the `blackOffset`/`blackAndWhite` rule), so a schema-8 document re-encodes **byte for
+    /// byte** and an absent key reads as its default: 0, so `hasDetailFX == false`, S3.8 is not encoded
+    /// for it, and its pixels are byte-identical. Like schemas 7 and 8, the version is not stamped at
+    /// decode time on a document that carries none of the three keys — a document keeps the number its
+    /// own file wrote, and only a document this build saves carries 9.
+    public static let currentSchemaVersion = 9
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -180,6 +190,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// zero), exactly the way `hasHSL` judges S3.6 — a stage present but neutral would move the trace
     /// and the key chain for nothing.
     public var hasGrain: Bool { effects.hasGrain }
+
+    /// 2026-10-28 (P0-6): does S3.8 exist for this document? Judged **by value** — any of the three
+    /// numbers non-zero — exactly the way `hasGrain` judges S3.7. A document whose three are 0 keeps the
+    /// pre-S3.8 stage list, key chain and pixels byte for byte: the pass is not encoded at all.
+    public var hasDetailFX: Bool { effects.hasDetailFX }
 
     /// 2026-10-28 (P0-4): does S3.4 exist for this document? Judged **by value** — the 黑白 switch,
     /// not "the color group exists" and not "a mix is non-zero": a mix with the switch off is a value
@@ -331,6 +346,13 @@ public struct EditModel: Sendable, Equatable, Codable {
                 || effects.grainRoughness != old.effects.grainRoughness
                 || effects.grainSeedValue != old.effects.grainSeedValue {
                 s.insert(.grain)
+            }
+            // 2026-10-28 (P0-6): the card's third block is a third stage — S3.8 reads the three detail
+            // numbers and none of the vignette/grain ones, so a clarity drag must dirty S3.8 alone.
+            if effects.texture != old.effects.texture
+                || effects.clarity != old.effects.clarity
+                || effects.dehaze != old.effects.dehaze {
+                s.insert(.detailFX)
             }
         }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
@@ -494,6 +516,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             // the kernel hashes). Same shape as `.hsl`/`.localColor`: a stage key that names the values
             // it reads cannot silently stop tracking them, and a seed change must move it.
             return effects.grainKeyString
+
+        case .detailFX:
+            // 2026-10-28 (P0-6): S3.8's own material — the three numbers and nothing else.
+            return effects.detailFXKeyString
 
         case .display:
             return "primaries=\(displayKeyPrimaries)"
@@ -1501,7 +1527,11 @@ public struct DetailGroup: Sendable, Equatable, Codable {
 ///     encoded at all;
 ///   · `grainSize` 0…100 — the cell, in frame fractions;
 ///   · `grainRoughness` 0…100 — the weight of the finer octave;
-///   · `grainSeed` 0…999 — the hash's only free variable (see `grainSeedValue`).
+///   · `grainSeed` 0…999 — the hash's only free variable (see `grainSeedValue`);
+///   · `texture` −100…100 — S3.8's fine band (2…8 px), the guided filter's residual at a small radius;
+///   · `clarity` −100…100 — S3.8's mid band (a few percent of the frame), the same residual at a radius
+///     the kernel derives from the frame — local contrast without the halo a plain unsharp draws;
+///   · `dehaze` −100…100 — S3.8's dark channel prior; negative adds a 0.4 veil back.
 ///
 /// Nothing here is a second copy of a value the shader also holds: the defaults are the shader's
 /// neutral, and `keyString`/`grainKeyString` are built from these fields only.
@@ -1520,6 +1550,18 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// 颗粒种子 (0…999, default 0). Stored as `Double` like every other number in the document; the
     /// kernel reads `grainSeedValue`, so the shader and the key cannot disagree about what was hashed.
     public var grainSeed: Double
+    /// 纹理 (−100…100, default 0) — the **fine** detail band (2…8 px at the render's own scale):
+    /// `s3_8_detail_fx.metal`'s guided-filter residual at a small radius. 0 = the band is not touched
+    /// and, when the other two are 0 too, S3.8 does not exist for the document at all.
+    public var texture: Double
+    /// 清晰度 (−100…100, default 0) — the **mid** band (a few percent of the frame): the same
+    /// guided-filter residual at a radius the kernel derives from the frame, i.e. local contrast
+    /// without the halo a plain unsharp mask draws at a step edge (`DetailFXTests` measures the
+    /// overshoot, and the same test measures the unsharp alternative failing that bound).
+    public var clarity: Double
+    /// 去雾 (−100…100, default 0) — dark-channel-prior haze removal (He/Sun/Tang 2010, simplified:
+    /// airlight `A = 1`, transmission from a `1/q` dark channel). Negative **adds** the veil back.
+    public var dehaze: Double
 
     public static let identity = EffectsGroup()
 
@@ -1535,10 +1577,22 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
     public var hasGrain: Bool { grain > 0 }
 
+    /// Does S3.8 exist for this document? Judged **by value**: any of the three numbers non-zero. A
+    /// document with all three at 0 keeps the pre-S3.8 chain byte for byte — the strongest form of
+    /// 「中性零变化」, the pass is not encoded rather than encoded and multiplied by zero.
+    public var hasDetailFX: Bool { texture != 0 || clarity != 0 || dehaze != 0 }
+
+    /// S3.8's material — the three numbers and nothing else. A clarity drag must not miss a cached
+    /// vignette (S3c reads none of them) and a vignette drag must not re-run S3.8.
+    public var detailFXKeyString: String {
+        "tx=\(k(texture));cl=\(k(clarity));dz=\(k(dehaze))"
+    }
+
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,
                 vignetteFeather: Double = 50, vignetteRoundness: Double = 0,
                 grain: Double = 0, grainSize: Double = 25,
-                grainRoughness: Double = 50, grainSeed: Double = 0) {
+                grainRoughness: Double = 50, grainSeed: Double = 0,
+                texture: Double = 0, clarity: Double = 0, dehaze: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
@@ -1547,6 +1601,9 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         self.grainSize = grainSize
         self.grainRoughness = grainRoughness
         self.grainSeed = grainSeed
+        self.texture = texture
+        self.clarity = clarity
+        self.dehaze = dehaze
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1560,7 +1617,29 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.grainSize = c.val("grainSize", v.grainSize)
         v.grainRoughness = c.val("grainRoughness", v.grainRoughness)
         v.grainSeed = c.val("grainSeed", v.grainSeed)
+        v.texture = c.val("texture", v.texture)
+        v.clarity = c.val("clarity", v.clarity)
+        v.dehaze = c.val("dehaze", v.dehaze)
         self = v
+    }
+
+    /// Hand-written for the same reason `ColorGroup.encode` is: the three schema-9 keys are **absent**
+    /// when they are 0, so a schema-8 document re-encodes byte for byte (§3.2 discipline, the
+    /// `blackOffset` rule). The eight older keys are written unconditionally, exactly as the synthesized
+    /// encoder wrote them, so no pre-existing document's JSON moves.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(vignetteAmount, forKey: AnyCodingKey("vignetteAmount"))
+        try c.encode(vignetteMidpoint, forKey: AnyCodingKey("vignetteMidpoint"))
+        try c.encode(vignetteFeather, forKey: AnyCodingKey("vignetteFeather"))
+        try c.encode(vignetteRoundness, forKey: AnyCodingKey("vignetteRoundness"))
+        try c.encode(grain, forKey: AnyCodingKey("grain"))
+        try c.encode(grainSize, forKey: AnyCodingKey("grainSize"))
+        try c.encode(grainRoughness, forKey: AnyCodingKey("grainRoughness"))
+        try c.encode(grainSeed, forKey: AnyCodingKey("grainSeed"))
+        if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
+        if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
+        if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
     }
 
     /// S3c's material — the four vignette numbers and nothing else. A grain drag must not miss a
