@@ -3212,7 +3212,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The one frame the crop tool measures with. Same authority as the mask drag maths, so a portrait
     /// file's frame lands on its picture (task 028) and a review of this file can grep one call site.
-    public var cropSourceSize: ImageSize { session?.maskSourceSize ?? ImageSize(width: 1, height: 1) }
+    ///
+    /// 2026-10-28 (P0-10): this is the frame **in the document's direction** — the crop tool's rect is
+    /// measured in the turned frame (schema 9), so a 90° turn swaps the two numbers here and every
+    /// consumer of this property (layout, `effectiveCrop`, the pixel readout, the clamp) is measuring
+    /// the frame the user sees. At `quarterTurns == 0` it is `maskSourceSize` unchanged.
+    public var cropSourceSize: ImageSize {
+        let stored = session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
+        return (session?.edit.geometry ?? .identity).orientedSource(stored)
+    }
 
     /// 显影 ▸ 裁切与旋转 (⌘R): enter, or — if it is already on — 应用 and leave.
     ///
@@ -3333,6 +3341,61 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The document's flips — what the menu ticks and the bar's two switches show.
     public var isFlippedHorizontally: Bool { session?.edit.geometry.flipHorizontal ?? false }
     public var isFlippedVertically: Bool { session?.edit.geometry.flipVertical ?? false }
+
+    // MARK: 变换 ▸ 顺时针/逆时针旋转 90° (P0-10)
+
+    /// 顺时针旋转 90° (⌘]) — the card's 右 button, the menu row and the shortcut, **one** verb.
+    ///
+    /// The document's geometry is the whole state: `quarterTurns` (0…3) turns the frame, the crop
+    /// rect turns with it (`GeometryGroup.turn` → `CropMath.turnedClockwise`), and the straighten
+    /// angle and the flips keep their numbers because they are measured in the frame the user sees.
+    /// One `applyEdit` + one `commitEdit(coalesce: false)`, so ⌘Z takes a turn back in one press —
+    /// a turn is a **discrete command**, never the continuation of whatever slider was last dragged.
+    ///
+    /// Four presses are the identity: the rect's edge arithmetic is exact (`1 − x` and a
+    /// permutation), so turn 4 hands the renderer the same document it had at turn 0, and the frame
+    /// comes back byte for byte (`QuarterTurnTests.testFourTurnsReturnTheSameFrame`).
+    @discardableResult
+    public func rotateQuarterClockwise() -> Bool { rotateQuarter(clockwise: true) }
+
+    /// 逆时针旋转 90° (⌘[).
+    @discardableResult
+    public func rotateQuarterCounterClockwise() -> Bool { rotateQuarter(clockwise: false) }
+
+    @discardableResult
+    public func rotateQuarter(clockwise: Bool) -> Bool {
+        guard let session, session.mode == .loupe, session.anchorID != nil else {
+            NSSound.beep()      // nothing to turn: say so instead of a silent no-op
+            return false
+        }
+        // 077/072's rule for a discrete geometry action inside a crop session: close the session
+        // first (it commits the crop-so-far as its own row, or nothing when the rect did not move),
+        // write the turn, then reopen a fresh one — the draft is re-seeded from the turned document,
+        // so the frame on screen keeps covering the pixels it covered before the press.
+        let inSession = session.isToolSessionActive
+        if inSession { session.endToolSession(label: "裁切与旋转") }
+        var turned = false
+        session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        guard turned else { return false }
+        let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
+                                          coalesce: false)
+        if cropTool.isActive { refreshCropTool() }
+        requestEditRender()
+        return committed
+    }
+
+    /// The document's quarter turn and the badge the 变换 card prints for it.
+    public var quarterTurns: Int { session?.edit.geometry.quarterTurns ?? 0 }
+    public var quarterTurnBadge: String { Self.quarterTurnBadge(for: quarterTurns) }
+
+    /// `0°` / `90°` / `180°` / `270°` — clockwise, the number the badge shows and the one
+    /// `tiff:Orientation` is derived from (`XMPOrientation`), so the panel and the sidecar agree.
+    public static func quarterTurnBadge(for turns: Int) -> String {
+        "\(GeometryGroup.normalizedQuarterTurns(turns) * 90)°"
+    }
+
+    /// The document's flips — what the menu ticks and the bar's two switches show.
 
     /// The crop frame's layout in view points, for the overlay and for the tests.
     ///
@@ -4428,7 +4491,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return
         }
         let source = graph.sourceSize
-        let cropPixels = CropMath.outputSize(job.edit.geometry.renderCrop(source: source), in: source)
+        let cropPixels = job.edit.geometry.outputPixels(in: source)
         // Two pixel grids are in play, and confusing them is a half-resolution bug: the graph renders
         // from the **decoded rung** (`graph.sourceSize` is that buffer's size), while the rule is
         // written against the **original** (`min(imageLongEdge / 2, 4096)`). The rung's scale is what

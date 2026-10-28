@@ -74,8 +74,9 @@ final class PresetSnapshotTests: XCTestCase {
         // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 69 leaves.
         print("sparse snapshot: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
               + "  groups \(snapshot.groups.map(\.rawValue).sorted())")
-        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 69,
-                       "8 geometry + 9 light + 4 curve + 35 color (2 + switch + 8 bands × 4)"
+        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 70,
+                       "9 geometry (4 crop edges + angle + 2 flips + lock + quarterTurns)"
+                       + " + 9 light + 4 curve + 35 color (2 + switch + 8 bands × 4)"
                        + " + 5 detail + 8 effects (暗角 4 + 颗粒 1 + 纹理/清晰度/去雾 3)")
         XCTAssertEqual(snapshot.fieldCount, 22,
                        "crop 4 + straighten 1 + aspect 1 + light 9 + rgb curve 1 + saturation 1"

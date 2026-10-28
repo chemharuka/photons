@@ -1213,6 +1213,10 @@ public struct MaskCanvasMapping: Sendable, Equatable {
     public var rotates: Bool
     public var flipH: Bool
     public var flipV: Bool
+    /// 2026-10-28 (P0-10): the document's 90° turn. Mask shapes live in the **file's** frame, so a
+    /// turn does not move them relative to the photograph; this field is what puts them on the
+    /// canvas of the *turned* picture. Zero (the default) is the pre-9 map, bit for bit.
+    public var quarterTurns: Int
 
     public init(geometry: GeometryGroup, source: ImageSize, content: ImageSize,
                 canvas: ImageSize, origin: (x: Double, y: Double)) {
@@ -1229,12 +1233,18 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         self.rotates = geometry.straightenDegrees != 0
         self.flipH = geometry.flipHorizontal
         self.flipV = geometry.flipVertical
+        self.quarterTurns = geometry.quarterTurns
     }
 
     /// Continuous canvas pixel centre-space position of a normalised source point. Points outside
     /// the crop map outside the content rectangle (they are clipped later, not clamped — clamping
     /// here would fold a mask that lives entirely outside the crop onto the visible frame).
     public func canvasPoint(_ p: NormalizedPoint) -> (x: Double, y: Double) {
+        // 2026-10-28 (P0-10): the file's frame → the turned frame, before anything else. The crop
+        // rect is measured in the turned frame and the masks are not, so this is what makes the two
+        // meet — the host-side copy of the turn `s0_geometry` and `s1_5_mask_atlas` share
+        // (`frame_unturn_uv` is this map's inverse). Skipped at 0, so the pre-9 numbers are exact.
+        let p = quarterTurns == 0 ? p : CropMath.turned(p, quarterTurns: quarterTurns)
         // source → position inside the crop (0…1), the inverse of `src = crop.xy + r·crop.zw`.
         let rx = (p.x - crop.left) / max(crop.width, 1e-9) - 0.5
         let ry = (p.y - crop.top) / max(crop.height, 1e-9) - 0.5

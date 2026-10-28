@@ -340,6 +340,23 @@ public final class EditorWindowController: NSWindowController {
         rootView.loupeController.cancelCropTool()
     }
 
+    // MARK: 变换 ▸ 顺时针/逆时针旋转 90° (P0-10)
+    //
+    // 072 §F cut the 变换 submenu down to the verbs that have no panel, and these two are the
+    // exception that proves the rule: the card has the two buttons, and the **keyboard** has ⌘[ / ⌘]
+    // because that is where a rotate lives in every photo app. Both doors call the same
+    // `LoupeController.rotateQuarter`, which is the same document write either way.
+
+    /// 变换 ▸ 顺时针旋转 90° (⌘]).
+    @objc public func rotateClockwiseAction(_ sender: Any?) {
+        rootView.loupeController.rotateQuarterClockwise()
+    }
+
+    /// 变换 ▸ 逆时针旋转 90° (⌘[).
+    @objc public func rotateCounterClockwiseAction(_ sender: Any?) {
+        rootView.loupeController.rotateQuarterCounterClockwise()
+    }
+
     // MARK: 080 · 原图 / 前后对比
     //
     // Three verbs, no document. Each one asks the loupe to change what its next frame is *of*; the
@@ -392,6 +409,10 @@ public final class EditorWindowController: NSWindowController {
         case #selector(toggleCropAction(_:)):
             // Ticked while the frame is up, and enabled only where there is a photo to crop.
             item.state = rootView.loupeController.isCropToolActive ? .on : .off
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(rotateClockwiseAction(_:)), #selector(rotateCounterClockwiseAction(_:)):
+            // Enabled only where there is a photo to turn — the same rule as 裁切. Not ticked: a
+            // rotation is a command, not a mode, and the card's badge is where the angle is read.
             return session.mode == .loupe && session.anchorID != nil
         case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
             // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or

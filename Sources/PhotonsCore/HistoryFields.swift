@@ -188,6 +188,13 @@ extension EditHistory {
              before.geometry.flipHorizontal, after.geometry.flipHorizontal)
         flag("geometry.flipVertical", .geometry,
              before.geometry.flipVertical, after.geometry.flipVertical)
+        // 2026-10-28 (P0-10): the 90° turn is a number, not a flag — "旋转 90° ×2" is a step a user
+        // wants to see named, and the history row reads its label from here.
+        if before.geometry.quarterTurns != after.geometry.quarterTurns {
+            add("geometry.quarterTurns", .geometry,
+                .number(Double(before.geometry.quarterTurns)),
+                .number(Double(after.geometry.quarterTurns)))
+        }
         if before.geometry.aspectLock != after.geometry.aspectLock {
             add("geometry.aspectLock", .geometry,
                 .text(before.geometry.aspectLock.code), .text(after.geometry.aspectLock.code))
@@ -422,6 +429,7 @@ extension EditHistory {
         "geometry.rotationDegrees": "角度",
         "geometry.flipHorizontal": "水平翻转",
         "geometry.flipVertical": "垂直翻转",
+        "geometry.quarterTurns": "旋转 90°",
         "geometry.aspectLock": "比例",
         "light.exposure": "曝光",
         "light.contrast": "对比",

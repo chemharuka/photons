@@ -170,6 +170,8 @@ final class BlackLevelTests: XCTestCase {
         // mix），而且**仍然**不写 blackOffset 这个键。
         // 新文档：schemaVersion 9（2026-10-28 加了 纹理/清晰度/去雾），而且**仍然**不写
         // blackOffset 这个键。
+        // 新文档：schemaVersion 9（2026-10-28 加了 `geometry.quarterTurns`，P0-10 的 90° 旋转），
+        // 而且**仍然**不写 blackOffset 这个键。
         XCTAssertEqual(EditModel.currentSchemaVersion, 9)
         XCTAssertEqual(EditModel.neutral.schemaVersion, 9)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
@@ -183,6 +185,8 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertFalse(fresh.contains("\"texture\""))
         XCTAssertFalse(fresh.contains("\"clarity\""))
         XCTAssertFalse(fresh.contains("\"dehaze\""))
+        // schema 9 的 quarterTurns 一样：默认 0 就是缺席，所以 schema-8 的 blob 逐字节重编码。
+        XCTAssertFalse(fresh.contains("quarterTurns"))
 
         // 用过控件的文档才写键，而且读回来还是同一个数。
         var used = EditModel.neutral

@@ -123,13 +123,17 @@ public final class CropToolController {
             self.lock = lock
         }
 
-        /// The draft as a document group, carrying `document`'s flips (the one field, §F).
+        /// The draft as a document group, carrying `document`'s flips (the one field, §F) **and its
+        /// quarter turn** (P0-10): the draft's rect is measured in the turned frame, so a group built
+        /// without the turn would write that rect into an un-turned frame — every 应用 would silently
+        /// undo the rotation.
         public func geometry(flipsOf document: GeometryGroup) -> GeometryGroup {
             GeometryGroup(crop: crop.clamped().normalizedRect,
                           rotationDegrees: CropTool.clampStraighten(straighten),
                           flipHorizontal: document.flipHorizontal,
                           flipVertical: document.flipVertical,
-                          aspectLock: lock)
+                          aspectLock: lock,
+                          quarterTurns: document.quarterTurns)
         }
 
         public init(geometry: GeometryGroup) {
@@ -187,7 +191,16 @@ public final class CropToolController {
     /// The session's own upright frame — the only frame the crop tool measures with. A computed
     /// property (not a stored copy) so a photo switch cannot leave the tool measuring the previous
     /// picture's aspect.
-    public var sourceSize: ImageSize { session?.maskSourceSize ?? ImageSize(width: 1, height: 1) }
+    /// 2026-10-28 (P0-10): the frame the tool measures with, **in the document's direction**.
+    ///
+    /// The draft's rect is measured in the turned frame (schema 9), so every metric below — the
+    /// ratio lock's fit, `effectiveCrop`'s inscribed quad, the pixel readout, the drag maths — has to
+    /// use the turned dimensions: a rotated document is 4032×6048, not 6048×4032. At
+    /// `quarterTurns == 0` this is `maskSourceSize` unchanged, which is why no pre-9 number moves.
+    public var sourceSize: ImageSize {
+        let stored = session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
+        return (session?.edit.geometry ?? GeometryGroup.identity).orientedSource(stored)
+    }
 
     // MARK: the draft's rect, as the turned picture allows it
 
@@ -350,6 +363,30 @@ public final class CropToolController {
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before
     }
+
+    /// 顺时针 / 逆时针旋转 90° — **the document's field** (P0-10), the same `EditModel.turn` the
+    /// menu row, the shortcut and the card's two buttons call. One `applyEdit` + one
+    /// `commitEdit(coalesce: false)`, so ⌘Z takes a turn back in one press.
+    ///
+    /// A turn inside a crop session closes it first and reopens a fresh one (072's rule for a
+    /// discrete geometry action, the same as `flip`): the draft's rect is measured in the turned
+    /// frame, so it has to be re-seeded from the document or the next 应用 would commit a rect in the
+    /// old direction.
+    @discardableResult
+    public func rotateQuarter(clockwise: Bool) -> Bool {
+        guard let session else { return false }
+        let inSession = session.isToolSessionActive
+        if inSession { session.endToolSession(label: "裁切与旋转") }
+        var turned = false
+        session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        guard turned else { return false }
+        session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
+        return true
+    }
+
+    /// The document's quarter turn — what the card's badge prints.
+    public var quarterTurns: Int { session?.edit.geometry.quarterTurns ?? 0 }
 
     /// The document's flips — what the bar's two switches show (§F: no draft copy).
     public var flipHorizontal: Bool { session?.edit.geometry.flipHorizontal ?? false }

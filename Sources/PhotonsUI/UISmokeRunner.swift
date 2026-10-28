@@ -533,7 +533,7 @@ public final class UISmokeRunner {
             guard let w = asset.width, let h = asset.height, w > 0, h > 0,
                   let edit = session.exportItems(for: [asset]).first?.edit else { return nil }
             let native = ImageSize(width: w, height: h)
-            let content = CropMath.outputSize(edit.geometry.renderCrop(source: native), in: native)
+            let content = edit.geometry.outputPixels(in: native)
             return ExportSizing.outputSize(content: content,
                                            scale: preset.renderScale(content: content))
         }

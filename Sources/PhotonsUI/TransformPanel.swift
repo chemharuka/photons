@@ -60,6 +60,10 @@ extension InspectorView {
             VStack(alignment: .leading, spacing: 8) {
                 CropAspectRow(tool: tool)
                 angleRow(tool)
+                CropTurnRow(turns: loupe?.quarterTurns ?? tool?.quarterTurns ?? 0,
+                            isEnabled: loupe != nil || tool != nil,
+                            onCounterClockwise: { turn(clockwise: false, tool: tool) },
+                            onClockwise: { turn(clockwise: true, tool: tool) })
                 CropSwitchesRow(horizontal: geometry.flipHorizontal,
                                 vertical: geometry.flipVertical,
                                 grid: tool?.showsGrid ?? true,
@@ -102,6 +106,18 @@ extension InspectorView {
     ///
     /// 有 loupe 时走它（它会顺手刷新裁切框并要一帧）；没有 loupe（面板在测试/预览里单独宿主、
     /// 或画布还没起来）时直接问工具，写的是同一份文档。
+    /// 逆时针 / 顺时针旋转 90° — **文档动作** (P0-10), the same shape as `flip` above: with a loupe the
+    /// verb goes through it (one document write, one history row, one render); without one (the panel
+    /// hosted on its own, or a canvas that has not come up) it writes the same document through the
+    /// tool's session. Never a second state: `quarterTurns` is `GeometryGroup`'s field.
+    private func turn(clockwise: Bool, tool: CropToolController?) {
+        if let loupe {
+            _ = loupe.rotateQuarter(clockwise: clockwise)
+            return
+        }
+        _ = tool?.rotateQuarter(clockwise: clockwise)
+    }
+
     private func flip(horizontal: Bool, tool: CropToolController?) {
         if let loupe {
             if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
@@ -211,6 +227,183 @@ struct CropSwitchesRow: View {
         }
         .background(CropRowProbeHost(rowID: Self.probeID))
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
+    }
+}
+
+/// 旋转 90°：左 / 右两个按钮，中间是**当前方向的徽标**（P0-10）。
+///
+/// 三个值，一份真相：`turns` 是文档的 `GeometryGroup.quarterTurns`（0…3 顺时针），两个按钮只调
+/// `LoupeController.rotateQuarter(clockwise:)` —— 和菜单的 ⌘[ / ⌘] 同一个动词，所以按钮、快捷键、
+/// 徽标、`tiff:Orientation` 不会各说一套。
+///
+/// 与「角度」行不同，这一行**不需要进入裁切模式**：旋转和两个翻转一样是文档动作，裁切框关着的时候
+/// 一样能转（徽标照样读文档）。
+///
+/// 两个按钮和徽标都是 **AppKit** 叶子（`TurnButton` / `TurnBadgeLabel`），原因和直角尺一样：验收是
+/// 「点按钮 → 文档转 90°、徽标跟着变」，量的是宿主出来的真面板，而 SwiftUI `Button` 在这个 app 的
+/// 测试进程里没有 AppKit 叶子，点不到；`Text` 也一样，读不到字。
+struct CropTurnRow: View {
+
+    let turns: Int
+    let isEnabled: Bool
+    let onCounterClockwise: () -> Void
+    let onClockwise: () -> Void
+
+    static let probeID = "turn"
+    static let badgeID = "inspector.crop.turn.badge"
+    static let counterClockwiseID = "inspector.crop.turn.ccw"
+    static let clockwiseID = "inspector.crop.turn.cw"
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("旋转")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            // `.fixedSize()`: the three leaves are `NSView`s, and without it SwiftUI proposes the
+            // row's width and AppKit stretches them (measured: two 88 pt buttons in a 308 pt card).
+            TurnButtonHost(symbol: "rotate.left", title: "逆时针旋转 90°",
+                           identifierID: Self.counterClockwiseID,
+                           isEnabled: isEnabled, action: onCounterClockwise)
+                .fixedSize()
+            TurnBadgeHost(text: LoupeController.quarterTurnBadge(for: turns),
+                          isTurned: GeometryGroup.normalizedQuarterTurns(turns) != 0)
+                .fixedSize()
+            TurnButtonHost(symbol: "rotate.right", title: "顺时针旋转 90°",
+                           identifierID: Self.clockwiseID,
+                           isEnabled: isEnabled, action: onClockwise)
+                .fixedSize()
+        }
+        .background(CropRowProbeHost(rowID: Self.probeID))
+        .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
+    }
+}
+
+/// 一个 90° 旋转按钮：SF Symbol `rotate.left` / `rotate.right`，和裁切卡的直角尺按钮同一族，
+/// 同一个理由做成真 `NSButton`（见 `CropTurnRow` 的头注释）。
+final class TurnButton: NSButton {
+
+    static let size = NSSize(width: 22, height: 18)
+    static let cornerRadius: CGFloat = CropChip.cornerRadius
+
+    let symbol: String
+    let titleText: String
+
+    init(symbol: String, title: String) {
+        self.symbol = symbol
+        self.titleText = title
+        super.init(frame: NSRect(origin: .zero, size: TurnButton.size))
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.momentaryChange)
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        contentTintColor = .labelColor
+        toolTip = title + "（一次 ⌘Z）"
+        setAccessibilityLabel(title)
+        setAccessibilityIdentifier(title)
+        wantsLayer = true
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize { TurnButton.size }
+    override var isFlipped: Bool { true }
+}
+
+/// `TurnButton` in SwiftUI: the three inputs and the one verb behind it.
+struct TurnButtonHost: NSViewRepresentable {
+
+    let symbol: String
+    let title: String
+    /// The accessibility id the test looks the button up by (one spelling everywhere).
+    let identifierID: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> TurnButton {
+        let button = TurnButton(symbol: symbol, title: title)
+        button.setAccessibilityIdentifier(identifierID)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.isEnabled = isEnabled
+        return button
+    }
+
+    func updateNSView(_ button: TurnButton, context: Context) {
+        context.coordinator.action = action
+        button.isEnabled = isEnabled
+        button.setAccessibilityIdentifier(identifierID)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
+/// 当前方向的徽标 —— `0° 90° 180° 270°`（顺时针），读文档，不做第二份状态。
+///
+/// 一个 `NSTextField` 而不是 SwiftUI `Text`：面板验收要**读**这个字（见 `CropTurnRow`）。
+final class TurnBadgeLabel: NSTextField {
+
+    static let height: CGFloat = CropChip.height
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        drawsBackground = false
+        alignment = .center
+        font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        setAccessibilityIdentifier(CropTurnRow.badgeID)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: max(super.intrinsicContentSize.width + 10, 34), height: TurnBadgeLabel.height)
+    }
+    override var isFlipped: Bool { true }
+
+    /// `turns % 4 == 0` is the neutral direction: secondary ink, like the switch labels. Anything
+    /// else is a document that has been turned, and it speaks in the accent colour.
+    func refresh(_ text: String, isTurned: Bool) {
+        stringValue = text
+        textColor = isTurned ? .controlAccentColor : .secondaryLabelColor
+        toolTip = "当前方向：顺时针 \(text)（4 次回到原位，逐字节相同）"
+        setAccessibilityValue(text)
+        invalidateIntrinsicContentSize()
+    }
+}
+
+struct TurnBadgeHost: NSViewRepresentable {
+
+    let text: String
+    let isTurned: Bool
+
+    func makeNSView(context: Context) -> TurnBadgeLabel {
+        let label = TurnBadgeLabel()
+        label.refresh(text, isTurned: isTurned)
+        return label
+    }
+
+    func updateNSView(_ label: TurnBadgeLabel, context: Context) {
+        label.refresh(text, isTurned: isTurned)
     }
 }
 
@@ -445,6 +638,7 @@ enum CropCardID {
     static let card = "card"
     static let aspect = CropAspectRow.probeID
     static let angle = "angle"
+    static let turn = CropTurnRow.probeID
     static let switches = CropSwitchesRow.probeID
     static let apply = CropApplyRow.probeID
 }

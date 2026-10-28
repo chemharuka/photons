@@ -33,3 +33,26 @@ using namespace metal;
 static inline float2 frame_turn_pixels(float2 offsetPx, float cs, float sn) {
     return float2(offsetPx.x * cs - offsetPx.y * sn, offsetPx.x * sn + offsetPx.y * cs);
 }
+
+// ── 2026-10-28 (P0-10): the 90° turn, one definition, both stages ──────────────────────────────
+//
+// The document's `quarterTurns` is a rotation of the **frame the user sees** relative to the file's
+// pixels, clockwise. Every kernel that walks backwards from a canvas pixel to a source position has
+// to undo it in the same place, or (the 080 lesson, again) the picture and the selection turn by
+// different maths and nobody notices until a mask sits 273 px off.
+//
+// So: the *inverse* turn, normalized position in the turned frame → normalized position in the
+// file's frame. Both `s0_geometry` and `s1_5_mask_atlas` include this file.
+//
+// It is an **exact** map for a quarter turn: `1 − u` is exact for `u ∈ [0, 1]` in binary floating
+// point and the components are only swapped, so at `turns == 0` (skipped by the caller) and at
+// every quarter turn the arithmetic introduces no error at all. That is what lets a 90° rotation be
+// a permutation of texels rather than a resample — see the `p.e.w` fast path in `s0_geometry`.
+static inline float2 frame_unturn_uv(float2 uv, int turns) {
+    switch (((turns % 4) + 4) % 4) {
+        case 1:  return float2(uv.y, 1.0 - uv.x);   // frame turned 90° CW
+        case 2:  return float2(1.0 - uv.x, 1.0 - uv.y);
+        case 3:  return float2(1.0 - uv.y, uv.x);
+        default: return uv;
+    }
+}

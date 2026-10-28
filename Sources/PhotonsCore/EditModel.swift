@@ -75,6 +75,20 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// for it, and its pixels are byte-identical. Like schemas 7 and 8, the version is not stamped at
     /// decode time on a document that carries none of the three keys — a document keeps the number its
     /// own file wrote, and only a document this build saves carries 9.
+    ///
+    /// 9 (also) = 2026-10-28 (P0-10): 90° 旋转 — `geometry.quarterTurns` (0…3 clockwise, default 0).
+    ///
+    /// **Nothing migrates, and the migration is a guard, not a rewrite.** A pre-9 document cannot
+    /// carry a turn (`init(from:)` reads the key as 0 below 9 — a hand-edited `quarterTurns: 1` in a
+    /// schema-8 file is ignored, because v8 does not *have* the field and honouring it would rotate a
+    /// picture its author never turned), and at 0 the crop rect means exactly what it meant before:
+    /// the rect is measured in the turned frame, and the un-turned frame *is* the file's frame. So the
+    /// stored rect, the pixels and the key of a schema-8 document are untouched, and the version is
+    /// not stamped at decode time (schema 7/8's rule).
+    ///
+    /// What *does* change meaning is the crop rect of a document that **is** turned: schema 9 defines
+    /// `crop` in the turned frame, so `EditModel.turn(clockwise:)` rewrites it (`CropMath.turned*`)
+    /// and stamps the document 9 — a turn is the one edit that makes a v9 file out of a v8 one.
     public static let currentSchemaVersion = 9
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
@@ -183,6 +197,45 @@ public struct EditModel: Sendable, Equatable, Codable {
         return v
     }
 
+    /// 2026-10-28 (P0-10): does the document carry a 90° turn? Judged **by value** — the same way
+    /// `hasHSL`/`hasGrain` are — because a turn of 0 must leave the render path (and the key) exactly
+    /// as it was.
+    public var hasQuarterTurn: Bool { geometry.quarterTurns != 0 }
+
+    /// One 90° turn of the whole document: the **one** mutation the editor's ⌘[ / ⌘] and a preset's
+    /// 「导出时再转」 both apply, so they cannot disagree about the crop or about the version stamp.
+    ///
+    /// Touches three things and nothing else:
+    ///   · `geometry` — the frame turns and the crop turns with it (`GeometryGroup.turn`);
+    ///   · `schemaVersion` — a v8 document has no turn, so the first turn is what makes it v9 (the
+    ///     crop rect's meaning just changed). Already-9 documents are left alone;
+    ///   · nothing else: no parameter moves, and a straighten angle or a flip keeps its value (it is
+    ///     measured in the frame the user sees, which is the frame that just turned).
+    ///
+    /// Returns `false` when there was nothing to do, so a history row is never minted for a no-op.
+    @discardableResult
+    public mutating func turn(clockwise: Bool) -> Bool {
+        let before = geometry
+        geometry.turn(clockwise: clockwise)
+        guard geometry != before else { return false }
+        if schemaVersion < EditModel.currentSchemaVersion {
+            schemaVersion = EditModel.currentSchemaVersion
+        }
+        return true
+    }
+
+    /// `turn(clockwise:)` `count` times.
+    ///
+    /// The export side's door to the same mutation: an exporter renders the document it is handed, so
+    /// "the editor turned it once" and "the document arrived with `quarterTurns = 1`" are one document
+    /// and one code path — `QuarterTurnTests.testTheExportIsTheSameTurnAsTheEditor` exports both and
+    /// compares the files byte for byte.
+    public func turned(by count: Int) -> EditModel {
+        var v = self
+        for _ in 0..<GeometryGroup.normalizedQuarterTurns(count) { v.turn(clockwise: true) }
+        return v
+    }
+
     /// The document with every **parameter** group zeroed and its geometry kept.
     ///
     /// This is the spelling 「参数清零后的渲染」, i.e. exactly what `\` must *not* be: it still crops,
@@ -282,6 +335,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             v.schemaVersion = EditModel.currentSchemaVersion
         }
         v.detailSettings = v.detailSettings.clamped()
+        // 派单 078/P0-10 (schema 9): `quarterTurns` does not exist below 9, and its default (0) is
+        // the identity — so there is nothing to convert, and the stored crop rect keeps its meaning
+        // (at 0 the turned frame *is* the file's frame). A hand-edited `quarterTurns` in a schema-8
+        // blob is ignored on purpose: v8 documents were written by code that could not turn a
+        // picture, and honouring the key would rotate a photograph its author never turned. The
+        // version is not stamped — schema 7/8's rule — so a v8 document re-encodes byte for byte.
+        if v.schemaVersion < 9 { v.geometry.quarterTurns = 0 }
         self = v
     }
 
@@ -495,6 +555,12 @@ public struct EditModel: Sendable, Equatable, Codable {
             if geometry.aspectLock.ratio != nil {
                 s += ";asp=\(geometry.aspectLock.code)"
             }
+            // 2026-10-28 (P0-10): the 90° turn. Appended **only when non-zero**, the `asp`/`car`
+            // discipline: every document that has never been turned keeps the pre-9 geometry
+            // material byte for byte, so the pinned keys and the recorded goldens hold. When it is
+            // non-zero the *frame* changes shape, which is why this is in the geometry link and not
+            // a side channel — every stage after S0 has different pixels.
+            if geometry.quarterTurns != 0 { s += ";q=\(geometry.quarterTurns)" }
             // 029: lateral CA. Appended **only when non-zero**, exactly like `asp`, so every document
             // that has never touched the CA sliders keeps the pre-029 geometry material byte for
             // byte — the seven pinned keys and every recorded golden depend on that.
@@ -620,22 +686,52 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// Ratio the crop is constrained to. `.original` (the default) means "no constraint": the stored
     /// rect is the frame, which is what keeps pre-existing documents pixel-identical.
     public var aspectLock: AspectLock
+    /// 90° rotation: **how many clockwise quarter turns the picture has been turned**, 0…3.
+    ///
+    /// This is the whole feature and it is one field, not two: the export already describes a
+    /// picture's orientation as `XMPOrientation(quarterTurns:mirrored:)` (§ orientation algebra,
+    /// `XMP.swift`), and that same `quarterTurns` is what `tiff:Orientation` is written from. A
+    /// second "rotation for the editor" would let the editor and the sidecar disagree about which
+    /// way is clockwise, so there is exactly one number and both sides read it.
+    ///
+    /// Semantics, in the order the user thinks:
+    ///   · the **frame** turns clockwise by `quarterTurns · 90°` — the output's width and height
+    ///     swap when it is odd (`orientedSource(_:)`, `outputPixels(in:)`);
+    ///   · `crop` is measured **in the turned frame** — the picture the user sees and crops — so
+    ///     `turn(clockwise:)` rewrites it (`CropMath.turnedClockwise`), and the crop keeps covering
+    ///     the same pixels of the photograph;
+    ///   · `flipHorizontal/flipVertical` and `rotationDegrees` act *inside* that frame (a flip flips
+    ///     what you see; a straighten straightens the horizon you see);
+    ///   · the **kernel** un-turns the position on its way to the source, between the straighten and
+    ///     the crop affine (`s0_geometry.metal`): the crop rect is a rectangle of the turned picture,
+    ///     and the file's pixels are not turned.
+    ///
+    /// Always 0…3 — `init(from:)` and `turn(clockwise:)` normalise it, so the key material, the
+    /// migration and `tiff:Orientation` never have to think about 4 or −1. A document with 0 keeps
+    /// the pre-9 bytes, the pre-9 key and the pre-9 pixels (schema 9's only data change is this
+    /// field, and its default is the identity).
+    public var quarterTurns: Int
 
     public static let identity = GeometryGroup(crop: .full, rotationDegrees: 0,
                                                flipHorizontal: false, flipVertical: false,
-                                               aspectLock: .original)
+                                               aspectLock: .original, quarterTurns: 0)
 
     public init(crop: NormalizedRect = .full,
                 rotationDegrees: Double = 0,
                 flipHorizontal: Bool = false,
                 flipVertical: Bool = false,
-                aspectLock: AspectLock = .original) {
+                aspectLock: AspectLock = .original,
+                quarterTurns: Int = 0) {
         self.crop = crop
         self.rotationDegrees = rotationDegrees
         self.flipHorizontal = flipHorizontal
         self.flipVertical = flipVertical
         self.aspectLock = aspectLock
+        self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
     }
+
+    /// `n % 4` into `0…3` — the one place a turn count is made legal.
+    public static func normalizedQuarterTurns(_ n: Int) -> Int { ((n % 4) + 4) % 4 }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
@@ -651,10 +747,89 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         v.flipHorizontal = c.val("flipHorizontal", v.flipHorizontal)
         v.flipVertical = c.val("flipVertical", v.flipVertical)
         v.aspectLock = c.val("aspectLock", v.aspectLock)
+        v.quarterTurns = GeometryGroup.normalizedQuarterTurns(
+            c.val("quarterTurns", v.quarterTurns))
         self = v
     }
 
+    /// Written key by key for one reason: **`quarterTurns: 0` must not appear in the blob.**
+    ///
+    /// The synthesized encoder would write every stored property, and that would break the rule this
+    /// file is built on (`blackOffset`, `temperature`, `blackAndWhite` all follow it): a document
+    /// written before schema 9 has to re-encode **byte for byte**, and every neutral document would
+    /// otherwise grow a `"quarterTurns" : 0` key the moment this build saved it. So the key is
+    /// written only when the document is actually turned — the same discipline as the geometry key
+    /// material's `;q=`, which is what keeps the pixels, the bytes and the cache in one story.
+    /// `BlackLevelTests.testAPreBlackOffsetDocumentReadsAsZeroAndReEncodesByteForByte` pins it.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(crop, forKey: AnyCodingKey("crop"))
+        try c.encode(rotationDegrees, forKey: AnyCodingKey("rotationDegrees"))
+        try c.encode(flipHorizontal, forKey: AnyCodingKey("flipHorizontal"))
+        try c.encode(flipVertical, forKey: AnyCodingKey("flipVertical"))
+        try c.encode(aspectLock, forKey: AnyCodingKey("aspectLock"))
+        if quarterTurns != 0 { try c.encode(quarterTurns, forKey: AnyCodingKey("quarterTurns")) }
+    }
+
     // MARK: explicit crop / straighten semantics
+
+    /// The source's pixel dimensions **as the turned frame sees them**: swapped when the quarter
+    /// turn is odd.
+    ///
+    /// Everything that measures the picture in its own grid — the aspect lock's ratio, the crop's
+    /// pixel size, the fit zoom — has to use this and not the decode's size, or a 3:2 crop of a
+    /// turned frame would be fitted to 3:2 *of the portrait frame* and reshaped.
+    public func orientedSource(_ source: ImageSize) -> ImageSize {
+        quarterTurns % 2 == 1
+            ? ImageSize(width: source.height, height: source.width)
+            : source
+    }
+
+    /// The cropped picture's pixel size in the **turned** frame — 「裁剪后尺寸」, and the frame the
+    /// renderer allocates.
+    ///
+    /// One call site per consumer: `CropMath.outputSize(renderCrop(source:), in: source)` is the
+    /// pre-9 spelling and is *wrong* for an odd turn (the rect is measured in the turned frame, so
+    /// its width is a fraction of the turned width). This is the same two calls with the turned
+    /// size in the second one, kept in one place so no caller can forget the swap.
+    public func outputPixels(in source: ImageSize) -> ImageSize {
+        CropMath.outputSize(renderCrop(source: source), in: orientedSource(source))
+    }
+
+    /// One quarter turn, as a mutation of the document's geometry: the frame turns and the crop
+    /// turns with it (`CropMath.turnedClockwise`), so the crop keeps covering the same pixels of the
+    /// photograph.
+    ///
+    /// The aspect lock is inverted, not dropped: its ratio is in **pixels**, and the pixels have
+    /// just swapped axes, so a 3:2 crop of a turned frame is a 2:3 rectangle (`AspectLock.matching`
+    /// names it — 3:2 → `custom 0.667`, 1:1 → 1:1, `.original` → no constraint). Leaving the lock at
+    /// 3:2 would let `renderCrop` reshape the rect and the "same pixels" promise would be gone at
+    /// the very next render, which is the same bug class as not turning the rect at all.
+    public mutating func turn(clockwise: Bool) {
+        quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns + (clockwise ? 1 : 3))
+        let turned = clockwise ? CropMath.turnedClockwise(cropRect)
+                                : CropMath.turnedCounterClockwise(cropRect)
+        crop = turned.normalizedRect
+        if let ratio = aspectLock.ratio {
+            aspectLock = AspectLock.matching(ratio: 1 / ratio)
+        }
+    }
+
+    /// `turn(clockwise:)` `quarterTurns` times, clockwise — the export side's door to the same
+    /// mutation, so a turn requested at export and a turn requested in the editor are the same code
+    /// path and cannot disagree about the crop.
+    public func turned(by count: Int) -> GeometryGroup {
+        var g = self
+        for _ in 0..<GeometryGroup.normalizedQuarterTurns(count) { g.turn(clockwise: true) }
+        return g
+    }
+
+    /// The crop in the **file's own** (pre-turn) frame — what `crs:Crop*` is written from, because
+    /// `tiff:Orientation` already carries the turn (see `XMP.swift` 1.2). The inverse of the map
+    /// `turn(clockwise:)` applies, so reading a sidecar back gives the same picture.
+    public var sourceCrop: CropRect {
+        CropMath.sourceRect(cropRect, quarterTurns: quarterTurns)
+    }
 
     /// The crop as four edges in normalized source coordinates (0…1). `right`/`bottom` are
     /// boundaries, so `cropRect.full` is `(0, 0, 1, 1)` and not `(0, 0, 0, 0)`.
@@ -680,8 +855,12 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
 
     /// The rect the renderer feeds to S0: the stored crop, re-shaped by `aspectLock` when the lock
     /// names a ratio (the lock wins over a rect that disagrees with it), then clamped.
+    ///
+    /// Measured in the **turned** frame (schema 9): the lock's ratio is a pixel ratio, so it is
+    /// fitted against `orientedSource`, and the rect stays a rectangle of the picture the user sees.
+    /// At `quarterTurns == 0` this is byte for byte the pre-9 call.
     public func renderCrop(source: ImageSize) -> CropRect {
-        CropMath.lockedCrop(aspectLock, in: cropRect, source: source).clamped()
+        CropMath.lockedCrop(aspectLock, in: cropRect, source: orientedSource(source)).clamped()
     }
 
     /// `renderCrop` in the stored `NormalizedRect` form.

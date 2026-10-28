@@ -61,7 +61,7 @@ struct MaskAtlasParams {
     float4 b;   // contentSize.xy, sourceSize.xy
     float4 c;   // crop rect (x, y, w, h) normalised
     float4 d;   // cos, sin, flipH, flipV
-    int4   e;   // maskCount, pad, pad, pad
+    int4   e;   // maskCount, quarterTurns (P0-10), pad, pad
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
 };
 
@@ -150,7 +150,16 @@ static inline float2 source_uv(float2 pixel, constant MaskAtlasParams &p) {
         float2 o = uv - 0.5;
         r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
     }
-    return p.c.xy + r * p.c.zw;
+    // 2026-10-28 (P0-10): the document's 90° turn, in the same place and the same shape as S0's
+    // (`s0_geometry.metal`): the crop rect `p.c` is measured in the **turned** frame, so the
+    // position inside it is turned back before it names a source position. Runtime branch, not a
+    // third instantiation: the coordinate permutation adds no arithmetic of its own, so `turns == 0`
+    // is bit-identical to the atlas every recorded digest was taken from. `p.e.y` is the document's
+    // `quarterTurns` — the same number, written by the same `RenderGraph.plan`.
+    float2 cropped = p.c.xy + r * p.c.zw;
+    int turns = p.e.y;
+    if (turns != 0) { cropped = frame_unturn_uv(cropped, turns); }
+    return cropped;
 }
 
 static inline float linear_alpha(float2 p, MaskShapeDesc d, float2 srcSize) {

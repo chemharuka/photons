@@ -60,7 +60,7 @@ public enum UIExportRenderer {
             source = ImageSize(width: probe.nativeWidth, height: probe.nativeHeight)
         }
 
-        let content = CropMath.outputSize(edit.geometry.renderCrop(source: source), in: source)
+        let content = edit.geometry.outputPixels(in: source)
         let scale = preset.renderScale(content: content)
         let decodeScale = decodeScaleLadder(scale)
         let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale))

@@ -115,6 +115,7 @@ enum EditParameters {
             && areEqual(a.rotationDegrees, b.rotationDegrees)
             && areEqual(a.flipHorizontal, b.flipHorizontal)
             && areEqual(a.flipVertical, b.flipVertical)
+            && a.quarterTurns == b.quarterTurns
     }
 
     static func areEqual(_ a: LightGroup, _ b: LightGroup) -> Bool {
