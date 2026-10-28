@@ -21,6 +21,16 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case sceneLinear = "s1-scene-linear"
     case maskAtlas = "s1.5-mask-atlas"
     case localApply = "s1.6-local"
+    /// 2026-10-28 (078 P0-1 / B9) — **修复 / 克隆**: the spot list of the 修复画笔.
+    ///
+    /// Placed between S1.6 (the mask adjustments) and S1.7 (the curve), for three reasons that are
+    /// spelled out where the arithmetic is (`Kernels/s1_9_heal.metal`): it is a repair of the picture
+    /// and not a look (so it goes before the curve/tone map/colour), it needs the pixels S1.6 wrote
+    /// (so it goes after the local stage, and its 「源点」 is the texture the user is looking at), and
+    /// it has to work on the canvas grid S0 produced (so a disk is a disk at every scale and in every
+    /// loupe window). **Conditional** like the mask stages: it exists only when the document carries a
+    /// spot, so a document without one keeps its pre-S1.9 trace, key chain and pixels byte for byte.
+    case heal = "s1.9-heal"
     /// 派单 030: **the** tone curve, in the HDR (scene-linear, log1p-shaped) domain.
     ///
     /// It used to be `s3-curve`, after the tone map, on 0…1 data S2 had already compressed — so the
@@ -117,7 +127,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// saturation never visits S3.5, one whose bands are all 0 never visits S3.6, and one whose grain
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .toneMap, .color, .bw,
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .toneMap, .color, .bw,
          .localColor, .hsl, .grade, .detailFX, .vignette, .grain, .display]
     }
 
@@ -132,11 +142,14 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false,
                                 hasHSL: Bool = false, hasGrain: Bool = false,
                                 hasBW: Bool = false, hasGrade: Bool = false,
-                                hasDetailFX: Bool = false) -> [RenderStage] {
-        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX else { return allCases }
+                                hasDetailFX: Bool = false, hasHeal: Bool = false) -> [RenderStage] {
+        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX || hasHeal else {
+            return allCases
+        }
         return order.filter { stage in
             switch stage {
             case .maskAtlas, .localApply: return hasMasks
+            case .heal: return hasHeal
             case .bw: return hasBW
             case .localColor: return hasMasks && hasLocalColor
             case .hsl: return hasHSL
@@ -160,6 +173,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .sceneLinear: return "s1"
         case .maskAtlas: return "s1.5"
         case .localApply: return "s1.6"
+        case .heal: return "s1.9"
         case .curve: return "s1.7"
         case .toneMap: return "s2"
         case .color: return "s3-color"
@@ -180,6 +194,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .geometry: return "geometry"
         case .sceneLinear, .toneMap: return "light"
         case .maskAtlas, .localApply, .localColor: return "masks"
+        case .heal: return "heal"
         case .curve: return "curve"
         case .color, .bw, .hsl, .grade: return "color"
         case .vignette, .grain, .detailFX: return "effects"
@@ -358,6 +373,10 @@ public enum RenderKeyChain {
         public var maskAtlas: String?
         /// `H(maskAtlasKey | "local" | applyKey…)`.
         public var localApply: String?
+        /// `H(localApply-or-sceneLinear key | "heal" | healMaterial)`; `nil` when the document carries
+        /// no spot, in which case S1.9 does not exist for this render at all (2026-10-28, 078 P0-1)
+        /// and the curve is seeded exactly as before.
+        public var heal: String?
         public var toneMap: String
         public var curve: String
         public var color: String
@@ -389,6 +408,7 @@ public enum RenderKeyChain {
         public var display: String
 
         public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
+        public var hasHealStage: Bool { heal != nil }
         public var hasBWStage: Bool { bw != nil }
         public var hasLocalColorStage: Bool { localColor != nil }
         public var hasHSLStage: Bool { hsl != nil }
@@ -402,7 +422,7 @@ public enum RenderKeyChain {
             RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                                  hasHSL: hasHSLStage, hasGrain: hasGrainStage,
                                  hasBW: hasBWStage, hasGrade: hasGradeStage,
-                                 hasDetailFX: hasDetailFXStage)
+                                 hasDetailFX: hasDetailFXStage, hasHeal: hasHealStage)
         }
     }
 
@@ -449,6 +469,13 @@ public enum RenderKeyChain {
         var localApply: String?
         var toneMap: String
         var curve: String
+        // 2026-10-28 (078 P0-1): **the S1.9 link**, and the reason it is computed here rather than in
+        // the two branches below: S1.9 sits between S1.6 and S1.7, so the curve's seed is either the
+        // local link, S1's own, or — when the document carries a spot — the heal link. With no spot
+        // the link does not exist at all and the curve is seeded exactly as before, which is what
+        // keeps every pre-S1.9 key byte for byte (§3.2 discipline, the sixth stage to use it).
+        var heal: String?
+        var curveSeed: String
         if edit.hasActiveMasks {
             // The explicit exception of §3.2: with masks the chain is nine links, and every link
             // below the atlas moves. Without masks the two lines below simply do not run and
@@ -464,19 +491,27 @@ public enum RenderKeyChain {
                 .canonical
             maskAtlas = atlas
             localApply = local
-            // 030: the curve reads whatever the mask stages produced, and S2 reads the curve. A
-            // curve drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6,
-            // which is the whole reason the curve has its own stage instead of riding on S1's key
-            // (§3.2 of 030).
-            curve = KeyBuilder(KeyBuilder.digest(of: local)).add(mat(.curve)).canonical
-            toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(mat(.toneMap)).canonical
+            curveSeed = local
         } else {
-            curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
-                .add(mat(.curve)).canonical
-            toneMap = KeyBuilder(KeyBuilder.digest(of: curve))
-                .add(mat(.toneMap))
-                .canonical
+            curveSeed = sceneLinear
         }
+        // 2026-10-28 (078 P0-1): S1.9 exists **only** when the document carries a spot. When it does
+        // not, the link is `nil` and the curve is seeded by the local link (or S1's) exactly as
+        // before — so a document that has never used the 修复画笔 keeps its whole key chain byte for
+        // byte.
+        if edit.hasHeal {
+            let link = KeyBuilder(KeyBuilder.digest(of: curveSeed))
+                .add("heal")
+                .add(mat(.heal))
+                .canonical
+            heal = link
+            curveSeed = link
+        }
+        // 030: the curve reads whatever the stage above produced, and S2 reads the curve. A curve
+        // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6/S1.9, which
+        // is the whole reason the curve has its own stage instead of riding on S1's key (§3.2 of 030).
+        curve = KeyBuilder(KeyBuilder.digest(of: curveSeed)).add(mat(.curve)).canonical
+        toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(mat(.toneMap)).canonical
 
         let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(mat(.color)).canonical
         // 2026-10-28 (P0-4): S3.4 sits between S3 and S3.5 and exists **only** when the 黑白 switch is
@@ -570,7 +605,7 @@ public enum RenderKeyChain {
         if let shown = edit.showMaskID { displayKey = displayKey.add("show=" + shown) }
 
         return Links(geometry: geometry, sceneLinear: sceneLinear,
-                     maskAtlas: maskAtlas, localApply: localApply,
+                     maskAtlas: maskAtlas, localApply: localApply, heal: heal,
                      toneMap: toneMap, curve: curve, color: color, bw: bw, localColor: localColor,
                      hsl: hsl, grade: grade, detailFX: detailFX, vignette: vignette, grain: grain,
                      display: displayKey.canonical)
@@ -582,6 +617,7 @@ public enum RenderKeyChain {
                   sceneLinear: KeyBuilder.digest(of: links.sceneLinear),
                   maskAtlas: links.maskAtlas.map(KeyBuilder.digest(of:)),
                   localApply: links.localApply.map(KeyBuilder.digest(of:)),
+                  heal: links.heal.map(KeyBuilder.digest(of:)),
                   toneMap: KeyBuilder.digest(of: links.toneMap),
                   curve: KeyBuilder.digest(of: links.curve),
                   color: KeyBuilder.digest(of: links.color),
@@ -618,6 +654,9 @@ public struct StageKeys: Sendable, Equatable {
     public var maskAtlas: String?
     /// `H(maskAtlasKey | "local" | applyKey…)`; `nil` when no mask is enabled.
     public var localApply: String?
+    /// `H(localApply-or-sceneLinear key | "heal" | healMaterial)`; `nil` when the document carries no
+    /// spot (2026-10-28, 078 P0-1), in which case S1.9 does not exist for this render.
+    public var heal: String?
     public var toneMap: String
     public var curve: String
     public var color: String
@@ -643,7 +682,7 @@ public struct StageKeys: Sendable, Equatable {
     public var display: String
 
     public init(inputIdentity: String, geometry: String, sceneLinear: String,
-                maskAtlas: String? = nil, localApply: String? = nil,
+                maskAtlas: String? = nil, localApply: String? = nil, heal: String? = nil,
                 toneMap: String, curve: String, color: String,
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
@@ -654,6 +693,7 @@ public struct StageKeys: Sendable, Equatable {
         self.sceneLinear = sceneLinear
         self.maskAtlas = maskAtlas
         self.localApply = localApply
+        self.heal = heal
         self.toneMap = toneMap
         self.curve = curve
         self.color = color
@@ -668,6 +708,7 @@ public struct StageKeys: Sendable, Equatable {
     }
 
     public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
+    public var hasHealStage: Bool { heal != nil }
     public var hasBWStage: Bool { bw != nil }
     public var hasLocalColorStage: Bool { localColor != nil }
     public var hasHSLStage: Bool { hsl != nil }
@@ -683,6 +724,7 @@ public struct StageKeys: Sendable, Equatable {
         case .sceneLinear: return sceneLinear
         case .maskAtlas: return maskAtlas ?? ""
         case .localApply: return localApply ?? ""
+        case .heal: return heal ?? ""
         case .toneMap: return toneMap
         case .curve: return curve
         case .color: return color
@@ -703,7 +745,8 @@ public struct StageKeys: Sendable, Equatable {
     public var pipeline: [RenderStage] {
         RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                              hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage,
-                             hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage)
+                             hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage,
+                             hasHeal: hasHealStage)
     }
 
     public var shortTrace: String {

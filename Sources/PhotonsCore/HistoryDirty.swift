@@ -59,6 +59,11 @@ extension EditHistory {
         // S0 down" — the same treatment `;car=` gets in `keyMaterial(.geometry)`.
         if !EditParameters.areEqual(before.optics, after.optics) { dirty.insert(.geometry) }
         if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }
+        // 2026-10-28 (078 P0-1): 修复画笔. One group, one stage (S1.9): a spot's centre, radius,
+        // source offset, mode, feather or opacity all move it, and adding/removing a spot moves it
+        // too — the list *is* the material. `HealSpot.keyString` is the resolution (the same 1e-5 the
+        // canonical formatter writes), so a JSON round trip is not an edit and a slider step is.
+        if !EditParameters.areEqual(before.healSpots, after.healSpots) { dirty.insert(.heal) }
         return dirty
     }
 
@@ -250,5 +255,19 @@ enum EditParameters {
     /// history, only to the renderer — see `isSemanticallyIdentical`.
     static func areEqual(_ a: Mask, _ b: Mask) -> Bool {
         a.selectionKey == b.selectionKey && a.applyKey == b.applyKey
+    }
+
+    /// Do two spot lists contribute the same render material?
+    ///
+    /// Empty and absent are the same thing (an absent `healSpots` key decodes to `[]`), array order is
+    /// composition order so it is part of the answer, and a spot is compared at its `keyString` — the
+    /// quantised text S1.9 is keyed by, so "the document moved" and "the key moved" cannot disagree.
+    /// The `id` is deliberately absent from that text: a spot has no atlas slice, so its id is a
+    /// document handle and not arithmetic (the same distinction `Mask.selectionKey` makes the other
+    /// way round, because a mask's id *does* name a slice).
+    static func areEqual(_ a: [HealSpot], _ b: [HealSpot]) -> Bool {
+        guard !a.isEmpty || !b.isEmpty else { return true }
+        guard a.count == b.count else { return false }
+        return zip(a, b).allSatisfy { $0.keyString == $1.keyString }
     }
 }

@@ -172,6 +172,25 @@ public final class CatalogSession {
     public var brushHardness: Double = CatalogSession.defaultBrushHardness
     public var brushFlow: Double = CatalogSession.defaultBrushFlow
 
+    // MARK: view state — 修复画笔 (078 P0-1)
+    //
+    // View state, all four: arming the tool, which spot the panel points at, the radius the *next*
+    // click will use and the mode it will use. Nothing here is in the document, in a cache key or in
+    // a snapshot — the spots themselves are (`EditModel.healSpots`).
+
+    /// The canvas click adds a spot instead of panning. Disarms the mask tools and vice versa: two
+    /// canvas gestures that both claim the first click cannot both be armed.
+    public var healTool: Bool = false
+
+    /// The spot the panel's rows are about.
+    public var selectedHealSpotID: String?
+
+    /// Radius of the next spot, in short-edge units of the frame.
+    public var healRadius: Double = HealSpot.defaultRadius
+
+    /// Mode of the next spot.
+    public var healMode: HealMode = .heal
+
     /// The **upright** pixel size of the photo on screen, as the renderer actually ingested it
     /// (`RenderGraph.sourceSize`, i.e. after EXIF orientation was applied — task 028).
     ///

@@ -49,6 +49,7 @@ public struct MaskListPanel: View {
             list
             divider
             tools
+            healSection
             if let mask = selectedMask {
                 maskSection(mask)
                 adjustmentsSection(mask)
@@ -534,6 +535,95 @@ public struct MaskListPanel: View {
         }
     }
 
+    // MARK: 修复画笔 (078 P0-1)
+
+    /// The tool button, the list, and two numbers per spot — nothing else.
+    ///
+    /// What is deliberately **not** here, so the next reader does not go looking: a drag handle on the
+    /// canvas, a hand-placed source point, and a "remove" (content-aware) mode. Spot removal's first
+    /// version is clone + heal with the default source one radius to the right; the kernel and the
+    /// model already carry the fields the rest would need (`HealSpot.sourceOffset` is editable in the
+    /// document, just not by a handle yet).
+    private var healSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Button {
+                    session.healTool.toggle()
+                    // One canvas gesture at a time: arming the spot tool disarms the brush.
+                    if session.healTool { session.maskTool = .off }
+                } label: {
+                    Label("修复", systemImage: "bandage")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .tint(session.healTool ? Color.accentColor : Color.secondary)
+                .accessibilityIdentifier("inspector.heal.tool")
+                .help("点画布 = 在点击处加一个修复点；源点自动取右边一个半径")
+
+                Text("\(session.edit.healSpots.count)/\(HealSpot.maxCount)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 4)
+                Picker("", selection: healModeBinding) {
+                    ForEach(HealMode.allCases, id: \.rawValue) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .labelsHidden()
+                .frame(width: 86)
+            }
+            ForEach(session.edit.healSpots) { spot in
+                healRow(spot)
+            }
+        }
+    }
+
+    private func healRow(_ spot: HealSpot) -> some View {
+        HStack(spacing: 6) {
+            Text(spot.mode.label)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, alignment: .leading)
+            Slider(value: Binding(get: { spot.radius },
+                                  set: { session.setHealRadius($0, for: spot.id, commit: false) }),
+                   in: 0.002 ... 0.2,
+                   onEditingChanged: { editing in
+                       if !editing { session.commitEdit(label: "修复 半径") }
+                   })
+            .controlSize(.mini)
+            Text(String(format: "%.3f", spot.radius))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+            Button {
+                session.deleteHealSpot(spot.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.mini)
+            .accessibilityIdentifier("inspector.heal.delete.\(spot.id)")
+            .help("删除这个修复点")
+        }
+        .accessibilityIdentifier("inspector.heal.row.\(spot.id)")
+    }
+
+    private var healModeBinding: Binding<HealMode> {
+        Binding(get: { session.healMode },
+                set: { mode in
+                    session.healMode = mode
+                    // A mode picked in the panel applies to the spot the panel is pointed at too —
+                    // otherwise the segmented control would look like it did nothing on an existing
+                    // spot.
+                    if let id = session.selectedHealSpotID ?? session.edit.healSpots.last?.id {
+                        session.setHealMode(mode, for: id)
+                    }
+                })
+    }
+
     private var dividers: some View {
         VStack(alignment: .leading, spacing: 4) {
             brushRow("大小", value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f",
@@ -548,7 +638,12 @@ public struct MaskListPanel: View {
     // MARK: bindings (every one writes through the session)
 
     private var toolBinding: Binding<MaskTool> {
-        Binding(get: { session.maskTool }, set: { session.maskTool = $0 })
+        Binding(get: { session.maskTool },
+                set: { tool in
+                    session.maskTool = tool
+                    // Arming a brush disarms the spot tool — one canvas gesture at a time.
+                    if tool.isPainting { session.healTool = false }
+                })
     }
 
     private var showBinding: Binding<Bool> {

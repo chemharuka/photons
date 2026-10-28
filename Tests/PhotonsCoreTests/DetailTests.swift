@@ -484,10 +484,10 @@ final class DetailTests: XCTestCase {
         // version.
         // 2026-10-28: the current version is 9 (纹理/清晰度/去雾); the migration still divides a
         // schema-5 position by ten and stamps the **current** version.
-        // 2026-10-28: the current version is 9 (黑白 的 switch 与八段 mix 是 8，90° 旋转的
-        // `geometry.quarterTurns` 是 9); the migration still divides a schema-5 position by ten and
-        // stamps the **current** version.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 9)
+        // 2026-10-28: the current version is 10 (黑白 的 switch 与八段 mix 是 8，90° 旋转的
+        // `geometry.quarterTurns` 是 9，修复画笔的 `healSpots` 是 10); the migration still divides a
+        // schema-5 position by ten and stamps the **current** version.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
 
         // Old 50 → amount 0.5 → new position 5.
         let half = try migrate(#"""

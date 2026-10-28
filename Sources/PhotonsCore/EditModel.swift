@@ -89,7 +89,17 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// What *does* change meaning is the crop rect of a document that **is** turned: schema 9 defines
     /// `crop` in the turned frame, so `EditModel.turn(clockwise:)` rewrites it (`CropMath.turned*`)
     /// and stamps the document 9 — a turn is the one edit that makes a v9 file out of a v8 one.
-    public static let currentSchemaVersion = 9
+    /// 10 = 2026-10-28 (078 P0-1 / B9): 修复画笔 — `healSpots`, the spot list of S1.9 (heal / clone,
+    /// each `HealSpot` a disk on the frame with a source offset). S1.9 renders them; before this
+    /// version the tool did not exist.
+    ///
+    /// **Nothing migrates, and the encoding is additive** — the schema-7/8/9 rule, read a fourth
+    /// time. The key is written **only when the list is non-empty**, so every document from before
+    /// this version re-encodes byte for byte; an absent key decodes to `[]`, `hasHeal == false`, S1.9
+    /// is not encoded at all, and the frame is the pre-S1.9 frame by construction rather than by
+    /// arithmetic. No stored number changes *meaning*, so the version is not stamped on decode — a
+    /// document keeps the number its own file wrote, and only a document this build saves carries 10.
+    public static let currentSchemaVersion = 10
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -144,6 +154,17 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// predicate. `nil` (the default) is the pre-005e frame, pixel for pixel: the field is not part
     /// of the display key while it is nil, and no overlay pass is encoded.
     public var showMaskID: String?
+    /// 2026-10-28 (078 P0-1 / B9) — **修复画笔**: the spot list S1.9 renders (heal / clone).
+    ///
+    /// Empty = the graph has no S1.9 at all: the key chain stays the pre-S1.9 seven-link chain (plus
+    /// whatever the other conditional stages add) and the pixels are byte-identical, which is the
+    /// same structural rule `masks` follows — the pass is *absent*, not neutral.
+    ///
+    /// Array order is **composition order** (a later spot may overwrite an earlier one), so it is part
+    /// of the material. The spots themselves live in `HealSpot` (frame-normalised centre, short-edge
+    /// radius and source offset — see that file for why heal is frame-anchored where a mask is
+    /// source-anchored).
+    public var healSpots: [HealSpot]
 
     public init(schemaVersion: Int = EditModel.currentSchemaVersion,
                 processVersion: Int = EditModel.currentProcessVersion,
@@ -158,7 +179,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 effects: EffectsGroup = .identity,
                 optics: OpticsGroup = .identity,
                 masks: [Mask] = [],
-                showMaskID: String? = nil) {
+                showMaskID: String? = nil,
+                healSpots: [HealSpot] = []) {
         self.schemaVersion = schemaVersion
         self.processVersion = processVersion
         self.geometry = geometry
@@ -173,6 +195,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.optics = optics
         self.masks = masks
         self.showMaskID = showMaskID
+        self.healSpots = healSpots
     }
 
     /// The all-defaults document: renders as "decode → display encode", nothing else.
@@ -253,6 +276,8 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.optics = .identity
         v.masks = []
         v.showMaskID = nil
+        // 2026-10-28 (078 P0-1): a repair is an edit like any other, so 「参数清零」 clears it too.
+        v.healSpots = []
         return v
     }
 
@@ -342,6 +367,12 @@ public struct EditModel: Sendable, Equatable, Codable {
         // picture, and honouring the key would rotate a photograph its author never turned. The
         // version is not stamped — schema 7/8's rule — so a v8 document re-encodes byte for byte.
         if v.schemaVersion < 9 { v.geometry.quarterTurns = 0 }
+        // 2026-10-28 (078 P0-1): `healSpots` is additive (schema 7/8/9's rule): an absent key reads
+        // as `[]`, which is `hasHeal == false` and no S1.9 — so there is nothing to convert and the
+        // version is not stamped. A spot read back from disk is clamped for the same reason
+        // `detailSettings` is: a hand-edited `radius: 9` must not draw a disk the kernels cannot
+        // express.
+        v.healSpots = c.val("healSpots", v.healSpots).map(\.clamped)
         self = v
     }
 
@@ -375,6 +406,11 @@ public struct EditModel: Sendable, Equatable, Codable {
         try c.encode(optics, forKey: AnyCodingKey("optics"))
         try c.encode(masks, forKey: AnyCodingKey("masks"))
         try c.encodeIfPresent(showMaskID, forKey: AnyCodingKey("showMaskID"))
+        // 2026-10-28 (078 P0-1): written **only when non-empty** (the `colorGrading` rule), so a
+        // document without a spot re-encodes byte for byte.
+        if !healSpots.isEmpty {
+            try c.encode(healSpots, forKey: AnyCodingKey("healSpots"))
+        }
     }
 
     public func write(to url: URL) throws {
@@ -511,6 +547,11 @@ public struct EditModel: Sendable, Equatable, Codable {
         // 005e: showing a different mask changes only the last pass (the overlay reads the atlas the
         // mask stages already produced), so it dirties nothing but `.display`.
         if showMaskID != old.showMaskID { s.insert(.display) }
+        // 2026-10-28 (078 P0-1): S1.9 reads the spot list and nothing else, so one group is one dirty
+        // bit. A spot's centre, radius, source offset, mode, feather or opacity all move it — and
+        // adding or deleting a spot moves it too, because the list *is* the material. `HealSpot`
+        // compares at the key-material resolution (see `EditParameters.areEqual(_:_:)` for the list).
+        if healSpots != old.healSpots { s.insert(.heal) }
         return s
     }
 
@@ -600,6 +641,13 @@ public struct EditModel: Sendable, Equatable, Codable {
 
         case .localApply:
             return "local=\(maskApplyMaterial)"
+
+        case .heal:
+            // 2026-10-28 (078 P0-1): S1.9's own material — every spot's geometry and mode, in
+            // composition order, and nothing else. Same belt-and-braces shape as `.hsl`/`.bw`: a log
+            // line names what wrote the pixels, and a spot's radius or source offset moving must move
+            // this key (and, through the chain, every key below it).
+            return "heal=[\(healSpots.map(\.keyString).joined(separator: "@"))]"
 
         case .localColor:
             // 056: S3.5's own material. Redundant with the chain above it on purpose — the chain

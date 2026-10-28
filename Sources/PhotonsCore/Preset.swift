@@ -16,9 +16,12 @@ import Foundation
 // `schemaVersion` is the preset envelope's own version, not the document's: a preset written by a
 // newer build is refused instead of being applied with fields silently dropped.
 
-/// The groups a preset can carry. Deliberately **not** `RenderGroup`: `masks` is a group of the
-/// document but cannot be a group of a preset (masks are per-photo geometry, docs/xmp-mapping.md
-/// §1.8), so reusing `RenderGroup` would invite exactly the mistake this type prevents.
+/// The groups a preset can carry. Deliberately **not** `RenderGroup`: two of its cases are groups of
+/// the document that cannot be groups of a preset — `masks` (per-photo geometry, docs/xmp-mapping.md
+/// §1.8) and `heal` (2026-10-28, 078 P0-1: a spot is a repair of *this* picture's blemishes at *these*
+/// coordinates; a preset that carried one into another photograph would paint a disk of somebody
+/// else's pixels on it, which is why Lightroom's presets do not carry spot removal either) — so
+/// reusing `RenderGroup` would invite exactly the mistake this type prevents.
 public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
     case geometry
     case light
