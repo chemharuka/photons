@@ -196,6 +196,35 @@ public struct LinearImage: Sendable {
         public let overUnityRatio: Double
     }
 
+    /// The smallest channel in the decoded linear buffer (sampled). Negative values are what 「自动黑电平」
+    /// pulls back to 0; `sampleStride` keeps it O(n/stride²) on a 60 MP buffer.
+    ///
+    /// **Why min, not the mean or a percentile.** The user's ask is literally 「调整到非负」: no sample
+    /// may stay below zero, so the answer is an extreme, not an average — a mean hides the few darkest
+    /// pixels that are exactly the ones `max(v, 0)` would delete, and any percentile below 100 leaves
+    /// some of them negative. Adding `−min` is the smallest shift that makes the whole buffer ≥ 0.
+    public func minChannel(sampleStride: Int = 5) -> Float {
+        let step = Swift.max(1, sampleStride)
+        guard width > 0, height > 0 else { return 0 }
+        var minV = Float.infinity
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let o = (y * width + x) * 4
+                let c = 0..<3                       // R/G/B; alpha is coverage, not light
+                for i in c {
+                    let v = Float(rgba[o + i])
+                    if v.isNaN { continue }
+                    if v < minV { minV = v }        // +∞ never wins; −∞ still does
+                }
+                x += step
+            }
+            y += step
+        }
+        return minV == .infinity ? 0 : minV
+    }
+
     public func statistics(sampleStride: Int = 7) -> Statistics {
         var maxV: Float = 0
         var sum: Double = 0

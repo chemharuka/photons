@@ -337,6 +337,44 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertGreaterThan(rows[2].shadow, rows[1].shadow, "暗部均值必须往上走：\(rows.map(\.shadow))")
     }
 
+    // MARK: - ⑤ 自动黑电平的输入（089）
+
+    /// 解码缓冲的最小通道：R/G/B 都看，alpha 不看；空缓冲是 0；NaN 与 +∞ 不参与。
+    func testMinChannelFindsTheDarkestSampleAndIgnoresAlphaNaNAndPositiveInfinity() {
+        // 2×2，最小在 B 通道 −0.0027；alpha 故意放一个更负的数，证明跳过了 alpha。
+        let image = Self.linear(width: 2, height: 2, pixels: [
+            [0.1, 0.2, -0.0027, -9],
+            [0.3, 0.4, 0.5, 1],
+            [.nan, .infinity, 0.25, 1],
+            [0.05, 0.06, 0.07, 1],
+        ])
+        XCTAssertEqual(Double(image.minChannel(sampleStride: 1)), -0.0027, accuracy: 1e-6,
+                       "最小通道 = −0.0027（Float16 精度内）")
+
+        // 已经非负：返回的正是最暗的正样本，而不是 0。
+        let positive = Self.linear(width: 2, height: 1, pixels: [
+            [0.4, 0.2, 0.3, 1],
+            [0.5, 0.6, 0.7, 1],
+        ])
+        XCTAssertEqual(Double(positive.minChannel(sampleStride: 1)), 0.2, accuracy: 1e-4)
+
+        // 采样点：最小落在 (0, 0)，stride 5 也看得见。
+        var grid = [[Float16]](repeating: [0.5, 0.5, 0.5, 1], count: 10 * 10)
+        grid[0] = [-0.0014, 0.5, 0.5, 1]
+        let sampled = Self.linear(width: 10, height: 10, pixels: grid)
+        XCTAssertEqual(Double(sampled.minChannel(sampleStride: 5)), -0.0014, accuracy: 1e-6)
+
+        // 空缓冲：0，不是 −∞。
+        let empty = LinearImage(width: 0, height: 0, rgba: [], colorSpace: "linear",
+                                decoderVersion: "test")
+        XCTAssertEqual(empty.minChannel(), 0)
+    }
+
+    private static func linear(width: Int, height: Int, pixels: [[Float16]]) -> LinearImage {
+        LinearImage(width: width, height: height,
+                    rgba: pixels.flatMap { $0 }, colorSpace: "linear", decoderVersion: "test")
+    }
+
     // MARK: - fixtures
 
     private static var rawFixture: URL? {

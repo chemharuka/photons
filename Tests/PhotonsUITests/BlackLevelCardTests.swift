@@ -170,7 +170,136 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertFalse(card.lowercased().contains("nsslider"), "不是 AppKit 控件")
     }
 
+    // MARK: - 4. 089 自动黑电平：取整方向、钳位、幂等、一条历史
+
+    /// `−0.0014 → 0.002`（向上取整到 1/1000），不是 `0.001`；已经非负时自动值是 0；
+    /// 超出 ±0.01 时写满量程。对求出来的偏移再把最小值抬一次，结果必须 ≥ 0。
+    func testAutoOffsetRoundsUpToTheThousandthAndClampsToTheRange() throws {
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: -0.0014), 0.002,
+                       "向上取整：0.0014 → 0.002，不是 0.001")
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: 0), 0)
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: 0.4), 0, "已经非负：自动值 = 0")
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: -0.05), 0.01, "−0.05 → 钳到 +0.01")
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: 0.05), 0, "0.05 不是负值，仍是 0")
+
+        // 钳位不许静默：动作里有一行日志，说明它被写满了量程。
+        let source = try String(contentsOf: Self.loupeSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("AUTO BLACK · min"), "越界时必须有日志，不许静默")
+
+        for min: Float in [-0.0014, -0.0027, -0.01] {
+            let offset = LoupeController.autoBlackOffset(for: min)
+            XCTAssertGreaterThanOrEqual(Double(min) + offset, 0,
+                                        "min \(min) + auto \(offset) 必须非负")
+            XCTAssertLessThanOrEqual(offset, LightGroup.blackOffsetRange.upperBound)
+            XCTAssertGreaterThanOrEqual(offset, LightGroup.blackOffsetRange.lowerBound)
+        }
+        // 超量程是「写满量程」而不是「假装非负」：−0.05 只能抬到 +0.01。
+        let clamped = LoupeController.autoBlackOffset(for: -0.05)
+        XCTAssertEqual(clamped, LightGroup.blackOffsetRange.upperBound)
+    }
+
+    /// 图标在数值框的正上方、右缘对齐、命中区 ≥ 18×18，自身没有底色/边框。
+    func testAutoIconSitsAboveTheValueRightAlignedAndWithoutChrome() throws {
+        let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))
+        host.frame = NSRect(x: 0, y: 0, width: 330, height: 2400)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: true)
+        window.contentView = host
+        defer { window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        host.layoutSubtreeIfNeeded()
+
+        let field = try XCTUnwrap(Self.firstView(in: host) {
+            $0.accessibilityIdentifier() == "inspector.blackLevel.offset"
+        }, "数值框没有渲染出来")
+        let probe = try XCTUnwrap(Self.firstView(in: host) { $0 is BlackLevelAutoProbe }
+                                      as? BlackLevelAutoProbe,
+                                  "自动图标没有渲染出来")
+        let value = field.convert(field.bounds, to: host)
+        let icon = probe.convert(probe.bounds, to: host)
+        print(String(format: "AUTO · icon (%.1f, %.1f, %.1f×%.1f) · value (%.1f, %.1f, %.1f×%.1f)",
+                     icon.minX, icon.minY, icon.width, icon.height,
+                     value.minX, value.minY, value.width, value.height))
+
+        XCTAssertLessThan(icon.midY, value.midY, "图标必须在数值行的上方")
+        XCTAssertEqual(icon.maxX, value.maxX, accuracy: 1, "图标右缘与数值框右缘对齐")
+        XCTAssertGreaterThanOrEqual(icon.width, 18, "命中区 ≥ 18 pt 宽")
+        XCTAssertGreaterThanOrEqual(icon.height, 18, "命中区 ≥ 18 pt 高")
+        XCTAssertFalse(probe.hasBorder, "裸图标：没有底、没有边、没有胶囊")
+    }
+
+    /// 真 RAW：一次点击 = 一个偏移 + 一条「黑电平 · 自动」历史；再点一次是 no-op；⌘Z 回到原值；
+    /// 其他字段逐位不变。
+    func testAutoBlackOffsetWritesOneHistoryIsIdempotentAndUndoes() throws {
+        let url = try rawFixture()
+        let session = CatalogSession()
+        session.mode = .loupe
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        _ = loupe.view
+        _ = try loupe.makeFrame(url: url, viewport: ImageSize(width: 800, height: 600),
+                                decodeScale: 0.125, edit: session.edit)
+        // A real session opens with a baseline snapshot; seed one so ⌘Z has somewhere to go back to.
+        session.applyEdit { $0.light.exposure = 0.1 }
+        XCTAssertTrue(session.commitEdit(label: "原照"))
+
+        let before = session.edit
+        let historyBefore = session.history.count
+        let offset = try XCTUnwrap(loupe.autoBlackOffset(), "有解码缓冲时必须返回写入值")
+        XCTAssertGreaterThan(offset, 0, "解码缓冲有负样本，自动值必须抬起来")
+        XCTAssertLessThanOrEqual(offset, LightGroup.blackOffsetRange.upperBound)
+        XCTAssertEqual((offset * 1000).rounded(), offset * 1000, accuracy: 1e-9,
+                       "落在 1/1000 的格子上")
+        var expected = before
+        expected.light.blackOffset = offset
+        XCTAssertEqual(session.edit, expected, "除了 blackOffset，其他字段全部不动")
+        XCTAssertEqual(session.history.count, historyBefore + 1, "一次点击 = 一条历史")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "黑电平 · 自动")
+
+        XCTAssertNil(loupe.autoBlackOffset(), "第二次点击是 no-op")
+        XCTAssertEqual(session.history.count, historyBefore + 1, "no-op 不加历史")
+        XCTAssertEqual(session.edit.light.blackOffset, offset)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.light.blackOffset, before.light.blackOffset, "⌘Z 回到原值")
+    }
+
+    /// 没有解码缓冲（浏览器模式 / 还在加载）：返回 nil，不写文档、不加历史。
+    func testAutoBlackOffsetReturnsNilWithoutADecodedBuffer() {
+        let session = CatalogSession()
+        session.mode = .loupe
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        _ = loupe.view
+        XCTAssertNil(loupe.autoBlackOffset())
+        XCTAssertEqual(session.edit.light.blackOffset, 0)
+        XCTAssertEqual(session.history.count, 0)
+
+        session.mode = .grid
+        XCTAssertNil(loupe.autoBlackOffset(), "浏览器模式同样 nil")
+    }
+
     // MARK: - helpers
+
+    private func rawFixture() throws -> URL {
+        let candidates = [
+            ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"],
+            NSString(string: "~/Desktop/test/L1030433.dng").expandingTildeInPath,
+        ].compactMap { $0 }
+        for c in candidates where FileManager.default.isReadableFile(atPath: c) {
+            return URL(fileURLWithPath: c)
+        }
+        throw XCTSkip("no RAW fixture; set PHOTONS_TEST_RAW")
+    }
+
+    private static func firstView(in root: NSView, where match: (NSView) -> Bool) -> NSView? {
+        if match(root) { return root }
+        for child in root.subviews {
+            if let found = firstView(in: child, where: match) { return found }
+        }
+        return nil
+    }
 
     private static var repoRoot: URL {
         URL(fileURLWithPath: #filePath)
@@ -181,6 +310,10 @@ final class BlackLevelCardTests: XCTestCase {
 
     private static var inspectorSource: URL {
         repoRoot.appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
+
+    private static var loupeSource: URL {
+        repoRoot.appendingPathComponent("Sources/PhotonsUI/LoupeController.swift")
     }
 
     private static func body(of signature: String, upTo endMarker: String,
