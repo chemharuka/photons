@@ -241,21 +241,41 @@ public enum CropTool {
     /// similarity, and a bridge frame is not any camera, so no `LoupeMapping` describes it: the frame
     /// has to be projected by the old mapping and then carried. Identity (the default, and every
     /// non-animating call) leaves the arithmetic exactly as it was — `1·p + 0` is `p`.
+    ///
+    /// `quadRotationDegrees` is 088's 「图不转、框转」: while the 转动 slider is being dragged the
+    /// canvas still holds the document's pixels (`mapping` is the document's framing, no draft angle),
+    /// so the crop rect — which lives axis-aligned in the **rotated image space** — is turned by
+    /// `−(θ − θ₀)` about the image centre *before* it reaches `frameView`. The four corners, the eight
+    /// grips and the grid all go through this one function, so they cannot disagree. At the committed
+    /// angle the delta is 0 and the arithmetic is the old, axis-aligned one.
     public static func layout(crop: CropRect,
                               source: ImageSize,
                               mapping: LoupeMapping,
                               pointScale: Double = 1,
                               showsGrid: Bool = true,
-                              carry: CropCarry = .identity) -> CropToolLayout {
+                              carry: CropCarry = .identity,
+                              quadRotationDegrees: Double = 0) -> CropToolLayout {
         let scale = pointScale > 0 ? pointScale : 1
         let c = crop.clamped()
+        let centreX = Double(max(source.width, 1)) / 2
+        let centreY = Double(max(source.height, 1)) / 2
+        let theta = quadRotationDegrees.isFinite ? quadRotationDegrees * .pi / 180 : 0
+        let cosT = cos(theta), sinT = sin(theta)
+        func imagePoint(_ u: Double, _ v: Double) -> (x: Double, y: Double) {
+            let dx = u * Double(source.width) - centreX
+            let dy = v * Double(source.height) - centreY
+            // R(−θ): the image is shown un-turned, so the rectangle (axis-aligned in the turned space)
+            // reads as a quad turned the other way. Same y-down pixel-space convention as `CropMath`.
+            return (centreX + dx * cosT + dy * sinT,
+                    centreY - dx * sinT + dy * cosT)
+        }
         func view(_ u: Double, _ v: Double) -> CGPoint {
             // **Frame space, not source space** (see `LoupeMapping.frameView`): the crop rect is a
             // rectangle of the *straightened* frame, so its four sides stay axis-aligned on screen and
-            // a straightened picture turns under a still frame. Going through `viewPoint` here would
-            // rotate the frame with the picture (and, before the projection was made uniform, shear it).
-            let p = mapping.frameView(frameX: u * Double(source.width),
-                                      frameY: v * Double(source.height))
+            // a straightened picture turns under a still frame. The quad is turned in image space
+            // first (088), then projected by the document's framing — never re-fitted per angle.
+            let q = imagePoint(u, v)
+            let p = mapping.frameView(frameX: q.x, frameY: q.y)
             return CGPoint(x: carry.applyX(p.x) / scale, y: carry.applyY(p.y) / scale)
         }
 

@@ -163,9 +163,9 @@ final class CropPanelTests: XCTestCase {
               + " · history +\(session.history.snapshots.count - historyBefore)")
     }
 
-    // MARK: - 5. 转动：拖动中不写历史，松手写一条
+    // MARK: - 5. 转动：拖动中只改草稿，松手写一条（088）
 
-    func testStraightenWritesLiveAndCommitsOneRowOnRelease() throws {
+    func testStraightenCommitsOnlyOnRelease() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.orderOut(nil) }
         let session = editor.session
@@ -179,10 +179,13 @@ final class CropPanelTests: XCTestCase {
         // One drag: onEditingChanged(true) → several ticks → onEditingChanged(false).
         for value in [1.25, 2.5, 3.75, 5.0] {
             tool.setStraightenLive(value)
-            XCTAssertEqual(session.edit.geometry.straightenDegrees, value, accuracy: 1e-9,
-                           "087 §5: 拖动中每一 tick 都应实时写文档")
+            XCTAssertEqual(tool.draft.straighten, value, accuracy: 1e-9,
+                           "088 §5: 拖动中每一 tick 只改草稿")
+            XCTAssertEqual(session.edit.geometry.straightenDegrees, straightenBefore,
+                           accuracy: 1e-9,
+                           "088 §5: 拖动中不许写文档")
             XCTAssertEqual(session.history.snapshots.count, historyBefore,
-                           "087 §5: 拖动过程中历史不许动")
+                           "088 §5: 拖动过程中历史不许动")
         }
         XCTAssertEqual(session.history.snapshots.count, historyBefore)
 
@@ -193,7 +196,7 @@ final class CropPanelTests: XCTestCase {
                        "松手 = 一条历史")
         XCTAssertEqual(session.history.snapshots.last?.label, "转动")
         XCTAssertNotEqual(straightenBefore, 5.0)
-        print("087 §5 · straighten \(session.edit.geometry.straightenDegrees)"
+        print("088 §5 · straighten \(session.edit.geometry.straightenDegrees)"
               + " · history \(historyBefore) → \(session.history.snapshots.count)")
     }
 
@@ -212,7 +215,10 @@ final class CropPanelTests: XCTestCase {
         XCTAssertTrue(loupe.isCropToolActive)
 
         loupe.cropTool.setStraightenLive(5.0)
-        XCTAssertEqual(session.edit.geometry.straightenDegrees, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(loupe.cropTool.draft.straighten, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(session.edit.geometry.straightenDegrees, straightenBefore,
+                       accuracy: 1e-9,
+                       "088 §6: 松手前角度只在草稿里")
         XCTAssertEqual(session.history.snapshots.count, historyBefore,
                        "松手前不许有历史")
 
