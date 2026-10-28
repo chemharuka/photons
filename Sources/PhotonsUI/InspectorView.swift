@@ -60,15 +60,6 @@ public struct InspectorView: View {
         case blackLevel
         case light
         case color
-        /// 2026-10-28 — **黑白** (S3.4): the switch and the eight 黑白混合 rows.
-        ///
-        /// Directly after Color because that is where the stage runs: `RenderStage.order` is
-        /// `… .toneMap, .color, .bw, .localColor, .hsl …`, so the panel reads Color → 黑白 → HSL, the
-        /// pipeline's own order (Lightroom's too: B&W is the mixer *of* the colour image). It is its own
-        /// card rather than eight more rows under Color for 076's reason — one switch plus eight
-        /// dedicated rows is a panel of its own, and a double-click on Color must not undo work done
-        /// here.
-        case blackAndWhite
         /// 派单 076: **HSL** — the eight colour bands, on OKLCh, in the 色彩 workspace.
         ///
         /// Its own card rather than six more rows under Color: the bands are a *selector plus three
@@ -83,9 +74,16 @@ public struct InspectorView: View {
         /// reason: it is a different partition of the picture (luminance, not hue), its own stage, its
         /// own group and its own double-click — a reset here must not undo a band drag and vice versa.
         ///
-        /// It lives in the **色彩** workspace (with HSL), because 色彩 and 分级 are one workspace's
-        /// subject and the 调整 panel is already nine cards long.
         case colorGrading
+        /// 2026-10-28 — **黑白** (S3.4): the switch and the eight 黑白混合 rows.
+        ///
+        /// The user put it **below 色彩分级** in the 色彩 workspace («黑白卡片放在颜色分级下方»), so the
+        /// workspace reads HSL → 色彩分级 → 黑白: the two colour-partition cards first, then the switch
+        /// that throws the colour away. It is its own card rather than eight more rows under Color for
+        /// 076's reason — one switch plus eight dedicated rows is a panel of its own, and a double-click
+        /// on Color must not undo work done here. (`RenderStage.order` still runs S3.4 before S3.6/3.8;
+        /// the panel's reading order and the pipeline's execution order are separate facts.)
+        case blackAndWhite
         /// 派单 051: 曲线 — **above 细节** (2026-10-28, user: 「曲线移动到在细节上方」). The tone controls
         /// shape the picture, so they come before the decoder's amounts; the order inside the panel is
         /// the user's, and the pipeline's own order is a separate fact (`RenderStage.order`).

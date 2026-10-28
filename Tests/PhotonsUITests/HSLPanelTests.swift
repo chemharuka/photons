@@ -28,10 +28,10 @@ final class HSLPanelTests: XCTestCase {
     // MARK: - structure
 
     func testTheColourWorkspaceIsTheHSLCardAndNothingElse() {
-        // 2026-10-28: the workspace holds three cards — 黑白 (moved here), HSL, then 色彩分级 — and HSL
-        // is still the one this suite is about.
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading])
-        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["黑白", "HSL", "色彩分级"],
+        // 2026-10-28: the workspace holds three cards — HSL, 色彩分级, then 黑白 (the user put it below
+        // the grading card) — and HSL is still the one this suite is about.
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading, .blackAndWhite])
+        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["HSL", "色彩分级", "黑白"],
                        "the colour workspace: 黑白, then HSL, then 色彩分级")
         XCTAssertEqual(InspectorView.Section.hsl.title, "HSL")
         XCTAssertTrue(InspectorWorkspace.colour.hasCards)
@@ -75,7 +75,7 @@ final class HSLPanelTests: XCTestCase {
     func testTheCardFitsAtEveryWidth() throws {
         for width in Self.widths {
             let panel = try host(width: width, state: .init(.colour))
-            XCTAssertEqual(panel.cardIDs, ["blackAndWhite", "hsl", "colorGrading"],
+            XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading", "blackAndWhite"],
                            "\(width) pt: the colour workspace shows HSL then 色彩分级")
 
             let probes = panel.bandProbes
@@ -256,7 +256,7 @@ final class HSLPanelTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.45))
         host.layoutSubtreeIfNeeded()
         let panel = Panel(host: host, window: window, session: session, state: state)
-        XCTAssertEqual(panel.cardIDs, ["blackAndWhite", "hsl", "colorGrading"], "the panel did not open on the HSL card")
+        XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading", "blackAndWhite"], "the panel did not open on the HSL card")
         return panel
     }
 }

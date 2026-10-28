@@ -33,15 +33,17 @@ final class BlackAndWhiteCardTests: XCTestCase {
 
     // MARK: - 1. 卡片清单、位置、行的表
 
-    /// One card, after Color, with a required group reset — and its two blocks as data.
-    func testTheCardSitsDirectlyAfterColorWithOneSwitchAndEightMixRows() throws {
-        let titles = InspectorView.sectionTitles
-        let color = try XCTUnwrap(titles.firstIndex(of: "Color"))
-        XCTAssertEqual(titles[color + 1], "黑白", "黑白必须紧跟 Color，实际 \(titles)")
-        // …and the pipeline says the same: the stage order is … .color, .bw, .localColor, .hsl …
+    /// One card, **last in the 色彩 workspace** (below 色彩分级), with a required group reset — and its
+    /// two blocks as data.
+    func testTheCardIsTheLastColourCardWithOneSwitchAndEightMixRows() throws {
+        let sections = InspectorView.sections(in: .colour)
+        XCTAssertEqual(sections, [.hsl, .colorGrading, .blackAndWhite],
+                       "色彩工作区：HSL → 色彩分级 → 黑白，实际 \(sections)")
+        // The *pipeline* still runs S3.4 before S3.6/S3.8 — the panel's reading order is the user's,
+        // the execution order is the renderer's.
         XCTAssertEqual(RenderStage.order.firstIndex(of: .bw),
                        RenderStage.order.firstIndex(of: .color).map { $0 + 1 },
-                       "S3.4 runs directly after S3 — that is where the card sits")
+                       "S3.4 runs directly after S3 in the pipeline")
         XCTAssertLessThan(try XCTUnwrap(RenderStage.order.firstIndex(of: .bw)),
                           try XCTUnwrap(RenderStage.order.firstIndex(of: .hsl)),
                           "黑白 precedes the HSL stage (a grey has no chroma left to shift)")

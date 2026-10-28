@@ -172,9 +172,9 @@ final class LayoutContractTests: XCTestCase {
     func testTheBlackAndWhiteCardIsNineRowsInTheColourWorkspaceAtTheThreeContentWidths() throws {
         // 2026-10-28 (user): 黑白 moved out of 调整 into 色彩 — it is a colour partition (a luminance
         // switch), so it sits with HSL's hue bands and 色彩分级's luminance wheels.
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading])
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading, .blackAndWhite])
         let sections = InspectorView.sections(in: .colour)
-        XCTAssertEqual(sections.first, .blackAndWhite, "黑白是色彩工作区的第一张卡：\(sections)")
+        XCTAssertEqual(sections.last, .blackAndWhite, "黑白是色彩工作区的最后一张卡：\(sections)")
         XCTAssertFalse(InspectorView.sections(in: .adjust).contains(.blackAndWhite),
                        "调整里不许再有黑白卡")
         XCTAssertEqual(InspectorView.Section.blackAndWhite.title, "黑白")
@@ -208,10 +208,10 @@ final class LayoutContractTests: XCTestCase {
     /// exactly 244 / 274 / 308 pt of card content.
     func testTheColorGradingCardIsNineRowsAfterHSLInTheColourWorkspace() throws {
         XCTAssertEqual(InspectorView.Section.colorGrading.title, "色彩分级")
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading],
-                       "色彩工作区的三张卡：黑白 / HSL / 色彩分级")
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading, .blackAndWhite],
+                       "色彩工作区的三张卡：HSL / 色彩分级 / 黑白")
         let sections = InspectorView.sections(in: .colour)
-        XCTAssertEqual(sections, [.blackAndWhite, .hsl, .colorGrading],
+        XCTAssertEqual(sections, [.hsl, .colorGrading, .blackAndWhite],
                        "渲染顺序来自 Section.allCases：\(sections)")
 
         // The pipeline says the same: S3.8 runs directly after S3.6 and before the vignette.

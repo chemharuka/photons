@@ -67,8 +67,8 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
         XCTAssertEqual(titles[.transform], ["裁切"])
-        XCTAssertEqual(titles[.colour], ["黑白", "HSL", "色彩分级"],
-                       "色彩工作区：黑白 / HSL / 色彩分级（Section.allCases 的顺序 = 管线的顺序）")
+        XCTAssertEqual(titles[.colour], ["HSL", "色彩分级", "黑白"],
+                       "色彩工作区：HSL → 色彩分级 → 黑白（用户：黑白放在色彩分级下方）")
         XCTAssertEqual(titles[.history], ["历史记录"])
 
         // 图标必须有名字可念（.help 与 accessibilityLabel 都用它），空工作区的 tooltip 说明「尚未实现」。

@@ -99,7 +99,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // nine cards long. 2026-10-28 (user): 黑白 moved here from 调整 as well, so the three
             // colour-partition cards — luminance switch (S3.4), hue bands (S3.6), luminance wheels
             // (S3.8) — sit together. Order still comes from `Section.allCases`.
-            return [.blackAndWhite, .hsl, .colorGrading]
+            return [.hsl, .colorGrading, .blackAndWhite]
         case .masks:
             return [.masks]
         case .history:
