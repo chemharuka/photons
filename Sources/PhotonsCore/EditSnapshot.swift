@@ -16,10 +16,20 @@ import Foundation
 //     destination's other values survive, which is the whole point of "paste settings".
 //  3. Copying a *neutral* document carries nothing, and pasting nothing is a no-op.
 //
-// Masks are **not** in this type at all: mask geometry is normalised to the source frame and is
-// meaningless on another photo (docs/xmp-mapping.md §1.8, docs/architecture-decisions.md D11), so
-// paste never touches `masks` or `showMaskID`. That is a structural guarantee, not a rule the
-// merge code has to remember.
+// Masks are in this type as of P1-5 (2026-10-28), and only as a **list plus the aspect ratio of the
+// frame they were measured in**. They used to be structurally absent, because a mask's geometry is
+// normalised to *its own* frame and meant nothing on another photo (docs/xmp-mapping.md §1.8, D11).
+// What changed is not that claim but the answer to it: `MaskFrameTransfer` re-anchors every point on
+// the target's short edge, so the shape keeps its size and its relationship to the picture, and a
+// paste re-identifies each mask so the destination's ids stay unique. Two consequences worth stating
+// here because they are the ones a reader will look for:
+//
+//  · `masks` is a *patch* like every other section — absent means "the destination keeps its own
+//    list", and a paste **appends** rather than replaces, so pasting two masks onto a photo that has
+//    one leaves three. Replacing would be the one merge in this file that can delete something the
+//    user never named.
+//  · `showMaskID` is still never carried: it is view state (005e), and `MaskViewState` keeps it out
+//    of snapshots on the write side too.
 //
 // **Known gap (2026-10-28, recorded rather than implied):** 色彩分级 (`EditModel.colorGrading`, S3.8)
 // has no `ColorGradingPatch` yet, so 「复制设置」 does not carry it — a paste of 全部 leaves the
@@ -45,10 +55,12 @@ public enum EditSnapshotGroup: String, CaseIterable, Sendable, Hashable {
 /// One group for both would mean 「只粘曝光」 necessarily clobbering the destination's own balance,
 /// which is the exact complaint this ticket exists to answer.
 ///
-/// `masks` is a section so the checklist is exhaustive and matches Lightroom's list, but it is
-/// **not copyable**: `isCopyable == false`. See `EditSnapshot`'s header — mask geometry is framed
-/// relative to the source photo and `EditSnapshot` structurally carries no masks (Q18,
-/// docs/xmp-mapping.md §1.8, and P1-5 is the separate ticket that would make it portable).
+/// `masks` is a section like every other one as of P1-5 (2026-10-28). It used to be listed for
+/// parity with Lightroom and refused (`isCopyable == false`) because mask geometry is framed relative
+/// to the source photo. It is copyable now because `MaskFrameTransfer` re-anchors each mask on the
+/// target frame's short edge — the geometry is carried *as a shape relative to the picture*, which is
+/// the only portable meaning those coordinates have (the reasoning, with the numbers, is in that
+/// file's header). Nothing about the copy touches the destination's own masks: a paste appends.
 public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codable {
     /// 裁切/拉直/翻转/比例 — the crop rect's four edges are one section (a crop is one gesture).
     case geometry
@@ -60,7 +72,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     case color
     case detail
     case effects
-    /// 蒙版 — listed for parity with Lightroom, never copied (P1-5).
+    /// 蒙版 — the mask list, re-identified and re-anchored on paste (P1-5).
     case masks
 
     /// The checklist order the dialog draws: the order Lightroom's own list uses.
@@ -68,10 +80,10 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
         .whiteBalance, .light, .curve, .color, .detail, .effects, .geometry, .masks,
     ]
 
-    /// Every section a paste can actually write. `masks` is the one exception.
+    /// Every section a paste can write — all of them, masks included since P1-5.
     public static var copyable: [EditSnapshotSection] { panelOrder.filter(\.isCopyable) }
 
-    public var isCopyable: Bool { self != .masks }
+    public var isCopyable: Bool { true }
 
     /// Does a paste of this section have to **develop again** (a new buffer), or only re-render?
     ///
@@ -95,10 +107,13 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
         }
     }
 
-    /// Why a row is greyed. Only `masks` has one today.
-    public var unavailableReason: String? {
-        guard !isCopyable else { return nil }
-        return "蒙版形状按源照片的帧几何归一化，跨照片单独做（派单 P1-5）"
+    /// The tooltip a row may carry. Every row is selectable since P1-5; 蒙版 gets a sentence that
+    /// says what a mask copy actually does, because "carried across photos" alone would hide both of
+    /// its non-obvious properties (new ids, short-edge anchoring).
+    public var help: String? {
+        self == .masks
+            ? "蒙版按目标照片的短边重新锚定，粘贴时生成新的蒙版 id（目标照片自己的蒙版保留）"
+            : nil
     }
 }
 
@@ -143,7 +158,9 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
         }
     }
 
-    /// Always a subset of `EditSnapshotSection.copyable`: 蒙版 can never be checked in.
+    /// Always a subset of `EditSnapshotSection.copyable` — every row is selectable since P1-5, so the
+    /// filter in `init` is a guard rather than a rule: a section that is ever made unavailable again
+    /// cannot leak into a paste through a hand-made set.
     public private(set) var sections: Set<EditSnapshotSection>
 
     public init(sections: Set<EditSnapshotSection> = Set(EditSnapshotSection.copyable)) {
@@ -355,11 +372,47 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
 
 // MARK: - the snapshot
 
+/// The mask list, plus the one number that makes it portable.
+///
+/// `frameAspect` is `W/H` of the **uncropped source frame** the mask coordinates were measured in
+/// (after EXIF orientation — `MaskSourceFrame`'s upright frame). A document does not store its own
+/// pixel size, so the clipboard payload carries the ratio itself: without it a paste cannot know
+/// whether a 4:3-shaped mask is landing on a 3:2 picture, and `MaskFrameTransfer` would have to fall
+/// back to copying raw fractions. `nil` means "the caller did not know the frame" and is the honest
+/// fallback, not an error.
+///
+/// Every mask travels whole — name, enable flag, opacity, invert, feather, refine, components and
+/// all eleven `LocalAdjustments` — because a mask without its adjustment is a shape with no purpose,
+/// and a mask without its feather is a different picture. Only identity (ids) is replaced, at paste.
+public struct MasksPatch: Sendable, Equatable, Codable {
+    public var frameAspect: Double?
+    public var masks: [Mask]
+
+    public init(frameAspect: Double? = nil, masks: [Mask] = []) {
+        self.frameAspect = frameAspect
+        self.masks = masks
+    }
+
+    public var isEmpty: Bool { masks.isEmpty }
+
+    /// One mask per entry — a mask is a nested document, not a slider, so it is not counted in
+    /// `EditSnapshot.fieldCount` (whose job is the sparse-leaf arithmetic: 1 slider = 1 field).
+    public var fieldCount: Int { masks.count }
+}
+
 /// A sparse, transferable set of develop settings: the clipboard payload of "copy settings".
 public struct EditSnapshot: Sendable, Equatable, Codable {
     /// Bumped when the sparse shape changes. Independent of `EditModel.currentSchemaVersion`; a
     /// snapshot is a message, not a document.
-    public static let currentSchemaVersion = 1
+    ///
+    /// **1 → 2 (P1-5, 2026-10-28): the `masks` key.** Not because a decoder would break — every
+    /// field here is read with a default, so a v1 payload still decodes (as "no masks") and a v2
+    /// payload read by a v1 build simply loses its masks. It is bumped because the *shape* is what
+    /// this number names, and the difference is not cosmetic in one direction: a v1 payload can only
+    /// ever mean "mask list unknown/absent", while a v2 payload may carry one, and a reader that
+    /// silently drops masks would report a paste as complete when it was not. `EditModel`'s own
+    /// `schemaVersion` is untouched — masks already exist in the document; only the clipboard grew.
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var geometry: GeometryPatch?
@@ -368,6 +421,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public var color: ColorPatch?
     public var detail: DetailPatch?
     public var effects: EffectsPatch?
+    public var masks: MasksPatch?
 
     public init() {
         self.schemaVersion = EditSnapshot.currentSchemaVersion
@@ -375,10 +429,15 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
 
     // MARK: capture
 
-    /// Everything in `edit` that differs from the neutral document. `masks` / `showMaskID` are
-    /// absent by construction.
-    public static func capture(_ edit: EditModel) -> EditSnapshot {
+    /// Everything in `edit` that differs from the neutral document.
+    ///
+    /// `frameAspect` is passed through into `masks`: the document knows its masks but not the size of
+    /// the picture they were drawn on, so only the caller (the loupe's ingested frame, or a catalog
+    /// row) can supply it. Capture never drops a mask for want of it — the mask is still the user's
+    /// setting; only the cross-photo anchoring degrades to "copy the fractions".
+    public static func capture(_ edit: EditModel, frameAspect: Double? = nil) -> EditSnapshot {
         var s = EditSnapshot()
+
 
         var geometry = GeometryPatch()
         if differs(edit.geometry.crop.x, NormalizedRect.full.x) { geometry.cropX = edit.geometry.crop.x }
@@ -453,19 +512,30 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
         s.effects = effects.isEmpty ? nil : effects
 
+        // Masks: present when the document has any. `showMaskID` is view state and stays out (see
+        // `MaskViewState`), and an empty list is "nothing to copy", not "paste an empty list".
+        if !edit.masks.isEmpty {
+            s.masks = MasksPatch(frameAspect: frameAspect, masks: edit.masks)
+        }
+
         return s
     }
 
     // MARK: reading the payload
 
     /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (70).
+    /// from is `fullDocumentFieldCount` (70). Masks are counted separately (`maskCount`): a mask is a
+    /// nested document, and folding it into this arithmetic would make "1 slider + 1 mask" read as
+    /// 2 leaves of 70 — a fraction that means nothing.
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (detail?.fieldCount ?? 0) + (effects?.fieldCount ?? 0)
     }
 
-    public var isEmpty: Bool { fieldCount == 0 }
+    /// How many masks the payload carries. 0 = a paste leaves the destination's list alone.
+    public var maskCount: Int { masks?.masks.count ?? 0 }
+
+    public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 }
 
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 9
@@ -483,6 +553,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if color != nil { out.insert(.color) }
         if detail != nil { out.insert(.detail) }
         if effects != nil { out.insert(.effects) }
+        if maskCount > 0 { out.insert(.masks) }
         return out
     }
 
@@ -504,6 +575,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if color != nil { out.insert(.color) }
         if detail != nil { out.insert(.detail) }
         if effects != nil { out.insert(.effects) }
+        if maskCount > 0 { out.insert(.masks) }
         return out
     }
 
@@ -543,10 +615,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if sections.contains(.color) { out.color = color }
         if sections.contains(.detail) { out.detail = detail }
         if sections.contains(.effects) { out.effects = effects }
+        if sections.contains(.masks) { out.masks = masks }
         return out
     }
 
-    /// The payload narrowed by a checklist (蒙版 is already impossible in the selection).
+    /// The payload narrowed by a checklist.
     public func filtered(to selection: CopySettingsSelection) -> EditSnapshot {
         filtered(to: selection.sections)
     }
@@ -561,9 +634,18 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     // MARK: pasting
 
     /// `target` with the payload's fields written over it. Fields the payload does not carry keep
-    /// the destination's value; `masks`, `showMaskID`, `schemaVersion` and `processVersion` are
-    /// always the destination's.
-    public func applied(to target: EditModel) -> EditModel {
+    /// the destination's value; `showMaskID`, `schemaVersion` and `processVersion` are always the
+    /// destination's.
+    ///
+    /// **Masks are appended, not written over.** `masks` names a *list*, and the destination's list
+    /// is the user's own work — a paste that dropped it would be the one destructive merge in this
+    /// type. So the payload's masks are added after the destination's (`target.masks + copies`),
+    /// each re-identified against the ids already in use and re-anchored by `MaskFrameTransfer`:
+    /// `destinationAspect` is `W/H` of *this* photo's source frame, and `nil` (unknown) copies the
+    /// normalised fractions verbatim. `Mask.maxCount` is respected — a paste onto a document with
+    /// eleven masks takes one, and the rest are dropped rather than producing an unrenderable
+    /// document (§7's cap is what the atlas layer budget is built on).
+    public func applied(to target: EditModel, destinationAspect: Double? = nil) -> EditModel {
         var out = target
 
         if let p = geometry {
@@ -646,6 +728,21 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.dehaze { out.effects.dehaze = v }
         }
 
+        if let p = masks, !p.masks.isEmpty {
+            var taken = Set(out.masks.map(\.id))
+            var added: [Mask] = []
+            for source in p.masks {
+                guard out.masks.count + added.count < Mask.maxCount else { break }
+                let copy = MaskFrameTransfer.copied(source,
+                                                    from: p.frameAspect,
+                                                    to: destinationAspect,
+                                                    takenIDs: taken)
+                taken.insert(copy.id)
+                added.append(copy)
+            }
+            out.masks.append(contentsOf: added)
+        }
+
         return out
     }
 
@@ -660,6 +757,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         self.color = c.val("color", ColorPatch?.none)
         self.detail = c.val("detail", DetailPatch?.none)
         self.effects = c.val("effects", EffectsPatch?.none)
+        // P1-5: absent in every v1 payload, and absent means "the destination keeps its own masks".
+        self.masks = c.val("masks", MasksPatch?.none)
     }
 
     // MARK: tolerant comparison

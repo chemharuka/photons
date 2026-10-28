@@ -9,8 +9,9 @@ import PhotonsCore
 ///
 /// The three answers the ticket asks for live on the **model** (`CopySettingsSelection`:
 /// `selectAll()` / `selectNone()` / `select(.basic)`), and this view only drives them — `all` /
-/// `none` buttons, a 预设组合 popup, and eight checkboxes. 蒙版 is drawn but disabled with the reason
-/// in its tooltip: Lightroom's list has it, `EditSnapshot` cannot carry it (P1-5).
+/// `none` buttons, a 预设组合 popup, and eight checkboxes. 蒙版 is a row like any other since P1-5
+/// (it used to be drawn disabled with the reason in its tooltip); its tooltip now explains what a
+/// mask copy does, and its title carries no "（暂不支持）" suffix.
 @MainActor
 final class CopySettingsAccessoryView: NSView {
 
@@ -106,10 +107,7 @@ final class CopySettingsAccessoryView: NSView {
             box.tag = EditSnapshotSection.panelOrder.firstIndex(of: section) ?? 0
             box.state = selection.contains(section) ? .on : .off
             box.isEnabled = section.isCopyable
-            if let why = section.unavailableReason {
-                box.toolTip = why
-                box.title = "\(section.title)（暂不支持）"
-            }
+            if let help = section.help { box.toolTip = help }
             checkboxes[section] = box
             root.addArrangedSubview(box)
         }
