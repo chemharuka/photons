@@ -1164,12 +1164,14 @@ public struct LightGroup: Sendable, Equatable, Codable {
 
     /// S1 white-balance gains, normalized so that 6500 K / tint 0 is exactly (1, 1, 1).
     ///
-    /// **The global white balance no longer uses this.** Since 派单 006 the document's Kelvin/tint go
+    /// **Nothing in the shipping pipeline uses this.** Since 派单 006 the document's Kelvin/tint go
     /// to `CIRAWFilter` and `RenderGraph`'s S1 pass runs with (1, 1, 1), because the decode has
-    /// already balanced the pixels; multiplying again would apply the correction twice. What is left
-    /// is the local-adjustment approximation (`MaskAdjustment.gain`), where a ±100 WB slider is a
-    /// cheap scene-linear nudge on a masked region rather than a second development. As shot
-    /// (`nil`) is the neutral of *that* fit, i.e. (1, 1, 1).
+    /// already balanced the pixels; multiplying again would apply the correction twice. It was also
+    /// the mask's fit until 079 A3 — and that is why it is still here: it is the **encoded** body (it
+    /// divides the 0…255 gamma-encoded black-body colour), the one that is 2.2× too weak in linear
+    /// light, and `LocalWhiteBalanceTests` uses it as the counter-proof that the R/B parity assertion
+    /// is falsifiable. The mask's WB is `WhiteBalanceSolver.localGain` now — the same `gain` the
+    /// global solver predicts with.
     public var whiteBalanceGains: (r: Float, g: Float, b: Float) {
         let reference = Self.planckianRGB(6500)
         let current = Self.planckianRGB(min(max(temperature ?? 6500, 2000), 12000))

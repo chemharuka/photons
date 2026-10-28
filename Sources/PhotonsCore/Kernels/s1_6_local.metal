@@ -72,10 +72,18 @@ struct LocalAdjustDesc {
 };
 
 static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
-    // ① Scene-linear gains: exposure and the Planckian white-balance approximation. First, as in S1,
-    //    and **without** a clamp: the decoder's sub-black samples are picture (S2's header measures
+    // ① Scene-linear gains: exposure and **the global white-balance gain**. First, as in S1, and
+    //    **without** a clamp: the decoder's sub-black samples are picture (S2's header measures
     //    0.039 below zero with 23× more structure than noise), and the old `max(v, 0)` here deleted
     //    them before any end point could reach into that band.
+    //
+    //    The triple is `WhiteBalanceSolver.localGain` (079 A3), i.e. `WhiteBalanceSolver.gain` — the
+    //    same linear-light Planckian fit the global card's Kelvin/tint are predicted with — times the
+    //    exposure EV. It arrives already converted (the mask's ±100 units → `6500 K + 30 K/unit` →
+    //    linear gain), so this line is exactly S1's `v *= p.a.x * p.a.yzw` and there is **no second
+    //    fit in a kernel**: the mask used to ship `LightGroup.whiteBalanceGains`, which divides the
+    //    display-encoded black-body colour and is 2.2× too weak, so the same temperature meant two
+    //    different casts inside and outside a mask.
     v = v * d.a.xyz;
 
     // ② blacks/whites — S1's end points, the *same* function (073B/073C). `kHybrid = true` because a

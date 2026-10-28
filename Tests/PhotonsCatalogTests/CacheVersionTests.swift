@@ -159,7 +159,8 @@ final class CacheVersionTests: XCTestCase {
         // The three stages whose arithmetic moved after `graph-v1` was set.
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 2, "0107: the contrast bend")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 2, "073C: the blacks travel")
-        XCTAssertEqual(StageAlgorithmVersion.localApply, 2, "0107: S1.6's contrast is the same function")
+        XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
+                       "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
         // …and the ones that did not, so a bump stays a statement about one stage.
         for stage in [RenderStage.geometry, .curve, .color, .vignette, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,

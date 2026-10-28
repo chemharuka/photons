@@ -171,9 +171,9 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
         case .exposure:
             return "场景线性的 EV 增益（−4…4），在 S2 之前施加；显示侧增益救不回 S2 已压掉的高光"
         case .temperature:
-            return "相对白平衡 −100…100，按 6500 K + 30 K/单位映射到 M1-7 的 Planckian 近似（不是开尔文）"
+            return "相对白平衡 −100…100，按 6500 K + 30 K/单位换算后走全局同一个 WhiteBalanceSolver.gain（不是开尔文，也不再有第二套算法）"
         case .tint:
-            return "−100…100，正值偏品红；与全局 LightGroup.tint 同一套映射"
+            return "−100…100，正值偏品红；与全局色温/色调同一个坐标系（1 单位 = 文档 tint 1），同一份 WhiteBalanceSolver.gain"
         case .contrast, .highlights, .shadows, .whites, .blacks:
             // 056: the tone half stayed in S1.6, where scene-linear is the right domain for them.
             return "−100…100；S1.6 按 /100 归一后作用在场景线性像素上（对比以 0.18 为枢轴）"

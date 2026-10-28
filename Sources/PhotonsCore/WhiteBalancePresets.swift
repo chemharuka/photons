@@ -260,6 +260,67 @@ public enum WhiteBalanceSolver {
         return (r * comp, g / s, b * comp)
     }
 
+    // MARK: the mask's relative coordinate — one body, so one cast
+
+    /// **079 A3 — the mask's `temperature`/`tint` are read in this solver's coordinates.**
+    ///
+    /// The defect: `LocalAdjustments.gain` multiplied `LightGroup.whiteBalanceGains`, which divides
+    /// the 0…255 *display-encoded* black-body colour. That fit is ~2.2–2.4× too weak as a model of a
+    /// linear-light gain (this type's header has the same measurement: 0.86× predicted where the
+    /// decoder delivered 0.63×), so the mask and the global control disagreed about what a number
+    /// means — `+30` in a mask moved R/B by 12 % where the global request of the same Kelvin moves it
+    /// by 30 %. darktable cannot have that bug: `process()` runs once whether the module is masked or
+    /// not and the mask only decides alpha (`blend.c:833-859`). Here the equivalent is that a masked
+    /// slider calls the **same** `gain` the global path calls, with the same reference.
+    ///
+    /// The two coordinates, and why these are the numbers:
+    ///
+    ///   · **temperature** — the mask's slider is *relative*, not Kelvin (the global Light card owns
+    ///     absolute Kelvin, 派单 009 A). Its mapping has been `6500 K + 30 K/unit` since M1-7 and is
+    ///     kept: `+30` asks for 7400 K. What changes is only that the answer now comes from `gain`
+    ///     (linear light) instead of from the encoded fit, i.e. the mask applies the cast a global
+    ///     request for 7400 K predicts.
+    ///   · **tint** — 1:1 in `WhiteBalance.tint` units, which is the coordinate the document's tint is
+    ///     written in; the old path multiplied the mask's ±100 straight into `LightGroup.tint`, and
+    ///     that fit's encoded tint term is the linear one with `Δtint = 2·tint`, i.e. a *different*
+    ///     number for the same slider. 1:1 is the only mapping under which "same value → same cast"
+    ///     is a statement about one coordinate rather than two. The visible consequence is small by
+    ///     luck — `√(1 + t/300)` and `1 + t/600` are within 3 % of each other in R/G at ±100 — so an
+    ///     existing document's tint keeps its strength; only its definition moves (pinned in
+    ///     `LocalWhiteBalanceTests.testMaskedTintIsTheGlobalSolverTint`).
+    ///   · **reference** — the nominal 6500 K / 0 this fit is centred on, which is also what
+    ///     `Reference` defaults to. A mask's nudge is applied to a buffer the decoder has **already
+    ///     balanced**, so the model's origin is the neutral of the model, not the file's as-shot pair;
+    ///     the value layer has no decode pair to pass, and inventing one would make the mask's pixels
+    ///     depend on a setting the mask's own key does not carry. Callers that do have the decode pair
+    ///     (the eyedropper, `apply`) pass their own `reference` to the same function.
+    ///
+    /// The result is normalized on green exactly as `gain` is, and there is **no extra brightness
+    /// compensation** — the mask has never had one, and adding one now would make a masked +30 a
+    /// different *level* change from a global one (the global decode does not preserve luma either).
+    public static let localAnchorKelvin = 6500.0
+    /// The mask's kelvin step per slider unit (M1-7's mapping, unchanged).
+    public static let localKelvinPerUnit = 30.0
+    /// The reference the mask's relative units are measured from.
+    public static let localReference = Reference(temperature: localAnchorKelvin, tint: 0)
+
+    /// The mask's `temperature` units as Kelvin, clamped to the slider's own ±100 (a hand-edited
+    /// document cannot ask for 30000 K; `gain` clamps the pair to 2000…12000 as well).
+    public static func localKelvin(_ units: Double) -> Double {
+        localAnchorKelvin + min(max(units, -100), 100) * localKelvinPerUnit
+    }
+
+    /// Scene-linear RGB gain for a mask's `temperature`/`tint` sliders — **`gain` itself**, called with
+    /// the mask's units converted into its coordinates. One body: a second copy of this arithmetic is
+    /// how the two sides drifted apart in the first place.
+    public static func localGain(temperature: Double, tint: Double,
+                                 reference: Reference = localReference)
+        -> (r: Double, g: Double, b: Double) {
+        gain(temperature: localKelvin(temperature),
+             tint: min(max(tint, -100), 100),
+             reference: reference)
+    }
+
     /// `nil` for a sample that carries no colour information (black, or a channel at zero), where
     /// "make this neutral" has no meaning and any Kelvin would be a guess.
     public static func neutral(for sample: RGBSample,

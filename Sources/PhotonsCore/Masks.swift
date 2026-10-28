@@ -39,9 +39,12 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
     /// −4…4 EV, applied in scene-linear light before S2 (a display-side gain cannot recover
     /// highlights S2 already compressed).
     public var exposure: Double
-    /// −100…100 relative shift, mapped onto the M1-7 Planckian approximation (`6500 K + 30 K/unit`).
+    /// −100…100 relative shift, mapped by `WhiteBalanceSolver.localKelvin` (`6500 K + 30 K/unit`) and
+    /// then read in *that* solver's coordinates, `WhiteBalanceSolver.gain`.
     public var temperature: Double
-    /// −100…100, positive = magenta. Same mapping as `LightGroup.tint`.
+    /// −100…100, positive = magenta. **1:1 in `WhiteBalance.tint` units** — the coordinate the
+    /// document's own tint is written in (079 A3; the old path multiplied it into a display-encoded
+    /// fit, which is `Δtint = 2·tint` in linear light — a second meaning for one slider).
     public var tint: Double
     public var contrast: Double
     public var highlights: Double
@@ -110,13 +113,27 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
                        || highlights != 0 || shadows != 0 || whites != 0 || blacks != 0)
     }
 
-    /// Scene-linear RGB gain from exposure plus the M1-7 white-balance approximation.
-    /// Reusing `LightGroup` keeps one Planckian fit in the codebase instead of two that drift.
+    /// Scene-linear RGB gain from `exposure` plus the white-balance sliders.
+    ///
+    /// **079 A3 — the WB half is the global solver's own body.** It used to be
+    /// `LightGroup.whiteBalanceGains`, a fit that divides the 0…255 *display-encoded* black-body
+    /// colour; that is ~2.2× too weak in linear light, so a mask's `temperature = +30` applied a
+    /// cast the global control would have delivered at roughly `+13` — the same slider meaning two
+    /// different things depending on whether a mask was drawn. Both sides now call
+    /// `WhiteBalanceSolver.gain` (the mask through `localGain`, which only converts the slider's
+    /// `6500 K + 30 K/unit` units), so the cast is **one function of one number**, and `0 / 0`
+    /// returns exactly `(1, 1, 1)` — the neutral mask stays bit-exact.
+    ///
+    /// **No extra brightness compensation, before or after.** The mask's WB has never carried one: S1.6's
+    /// ① is a bare `v *= gain` (`s1_6_local.metal`), the three numbers are normalized on green by the
+    /// solver, and that is exactly what a decoder's gain does. So nothing is removed and nothing is
+    /// added — a masked `+30` moves the level by the same amount a global `7400 K` request does (green
+    /// is the pivot), which is the "same number → same cast" rule stated in numbers rather than in
+    /// intent.
     public var gain: (r: Float, g: Float, b: Float) {
         let ev = Float(pow(2.0, min(max(exposure, -4), 4)))
-        let kelvin = 6500 + min(max(temperature, -100), 100) * 30
-        let wb = LightGroup(temperature: kelvin, tint: min(max(tint, -100), 100)).whiteBalanceGains
-        return (ev * wb.r, ev * wb.g, ev * wb.b)
+        let wb = WhiteBalanceSolver.localGain(temperature: temperature, tint: tint)
+        return (ev * Float(wb.r), ev * Float(wb.g), ev * Float(wb.b))
     }
 
     public var keyString: String {
