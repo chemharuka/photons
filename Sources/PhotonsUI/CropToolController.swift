@@ -393,6 +393,7 @@ public final class CropToolController {
         let lock = preset.lock(source: source)
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        if preset != .free { rememberLocked(preset: preset) }
         draftChanged()
     }
 
@@ -402,6 +403,61 @@ public final class CropToolController {
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
         draftChanged()
+    }
+
+    // MARK: 104 — the ratio chip's cycle and the lock's toggle
+
+    /// 104: the last **locked** ratio the user chose, remembered for the 🔒 button. Process memory
+    /// only — a UI preference like `CropToolBar.lastCustomRatioText`, never a document field. The
+    /// default is 原始, so the first click on 🔓 brings the sensor's own ratio back.
+    private var lastLockedPreset: CropAspectPreset = .original
+    private var lastLockedCustom: Double?
+
+    /// `true` only when the document's spelling is `AspectLock.original` — that is 自由. 原始 is a
+    /// real constraint (`.matching(source:)`, i.e. `.custom` on a non-3:2 sensor), so it reads 🔒.
+    public var isAspectFree: Bool { draft.lock.ratio == nil }
+
+    /// 104 — one click on the ratio chip advances the fixed cycle
+    /// `原始 → 1:1 → 4:3 → 3:2 → 16:9 → 自由 → 原始`; `backward` is ⇧-click and steps the other way.
+    ///
+    /// It ends in `setAspect`, the same verb the old menu called, so the chip, the menu (gone) and the
+    /// tests cannot drift into two write paths. A custom lock has no slot of its own; `aspectPreset()`
+    /// folds it to 自由, so a click on a typed `5:4` goes on to 原始 like the table says.
+    public func cycleAspect(backward: Bool = false) {
+        let presets = CropAspectPreset.allCases
+        guard let index = presets.firstIndex(of: aspectPreset()) else { return }
+        let step = backward ? -1 : 1
+        let next = presets[(index + step + presets.count) % presets.count]
+        setAspect(next)
+    }
+
+    /// 104 — the 🔒 / 🔓 button: 自由 ⇄ the last locked ratio (default 原始).
+    public func toggleAspectLock() {
+        if isAspectFree {
+            if let ratio = lastLockedCustom, ratio.isFinite, ratio > 0 {
+                _ = setCustomRatio(ratio)
+            } else {
+                setAspect(lastLockedPreset)
+            }
+            return
+        }
+        rememberCurrentLock()
+        setAspect(.free)
+    }
+
+    private func rememberLocked(preset: CropAspectPreset) {
+        lastLockedPreset = preset
+        lastLockedCustom = nil
+    }
+
+    private func rememberCurrentLock() {
+        if aspectPreset() == .free, case .custom(let ratio) = draft.lock,
+           ratio.isFinite, ratio > 0 {
+            lastLockedCustom = ratio
+        } else {
+            lastLockedPreset = aspectPreset()
+            lastLockedCustom = nil
+        }
     }
 
     /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
@@ -518,6 +574,8 @@ public final class CropToolController {
     public func setCustomRatio(_ ratio: Double, source: ImageSize? = nil) -> Bool {
         guard ratio.isFinite, ratio > 0 else { return false }
         applyRatio(ratio, lock: .custom(ratio), source: source ?? sourceSize)
+        // 104: a typed ratio is a lock too — 🔓 must bring it back, not only the named presets.
+        lastLockedCustom = ratio
         return true
     }
 
