@@ -70,10 +70,9 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertLessThan(panel.histogramPlot.maxY, card.minY)
     }
 
-    // MARK: - 2. 直角尺：点一下进裁切（overlay 上屏），再点出去
+    // MARK: - 2. 进变换就有裁切框；卡头右边没有按钮
 
-    func testTheRulerButtonEntersAndLeavesCropModeWithTheOverlayOnScreen() throws {
-        // A real editor: the real `InspectorHostingView`, the real canvas, the real overlay mount.
+    func testEnteringTransformProvidesTheCropFrameAndTheCardHeaderHasNoButton() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
         window.orderFront(nil)
@@ -81,64 +80,45 @@ final class TransformPanelTests: XCTestCase {
         let root = editor.rootView!
         let loupe = root.loupeController
         let inspector = root.inspectorHost
+
         root.inspectorWorkspaces.select(.transform)
         pump(0.2)
 
-        let button = try XCTUnwrap(Self.cropModeButton(in: inspector),
-                                  "卡头没有直角尺按钮（CropModeButton 不在树上）")
-        XCTAssertTrue(button.isEnabled, "有照片时直角尺必须是活的")
-        XCTAssertNotNil(button.image, "直角尺的 SF Symbol 在本机解析不出来")
-        // 082 (用户口径): 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框」——切到「变换」**就是**
-        // 进了裁切模式，所以直角尺这时已经是激活态，选框已经在屏上。
-        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
-        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "082: 自动进入后选框在屏上")
-        XCTAssertTrue(button.isOn, "082: 自动进入后直角尺是激活态")
+        // 086: the workspace is the entry — no ruler button to press first.
+        XCTAssertTrue(loupe.isCropToolActive, "086: 切到「变换」= 进入裁切模式")
+        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "086: 进入后选框在屏上")
         XCTAssertFalse(inspector.isEditingGated, "「变换」工作区里侧栏必须还是活的")
 
-        // ① 再点一下直角尺 = 退出（显式开关保留），再点一下 = 重新进入并**框真的在屏幕上**。
-        button.performClick(nil)
-        pump(0.3)
-        XCTAssertFalse(loupe.isCropToolActive, "082: 直角尺仍是「再点一次退出」的开关")
-        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "退出后 overlay 不该还在屏幕上")
-        DetailRowEnabledLog.shared.reset()
-        button.performClick(nil)
-        pump(0.3)
-        XCTAssertTrue(loupe.isCropToolActive, "点直角尺没有进入裁切模式")
-        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting,
-                      "裁切模式进了，但 overlay 没有上屏（isHidden/superview/window/layout 有一样不成立）")
-        let layout = try XCTUnwrap(loupe.cropOverlayLayoutForTesting)
-        XCTAssertEqual(layout.corners.count, 4)
-        XCTAssertTrue(button.isOn, "裁切模式下直角尺要有激活态")
-        XCTAssertEqual(button.layer?.backgroundColor, NSColor.controlAccentColor.cgColor,
-                       "激活态的底色 = 系统强调色")
-        XCTAssertFalse(inspector.isEditingGated, "在「变换」里，裁切模式的侧栏必须还是活的")
-        XCTAssertTrue(waitUntil { DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe) == true },
-                      "裁切模式下「应用」必须是活的（草稿在现场）")
-        XCTAssertTrue(waitUntil { DetailRowEnabledLog.shared.value(CropApplyRow.cancelProbe) == true },
-                      "裁切模式下「取消」必须是活的")
-        print(String(format: "RULER on · active=%@ · overlay on screen=%@ · frame %@ · gated=%@",
-                     "\(loupe.isCropToolActive)", "\(loupe.isCropOverlayOnScreenForTesting)",
-                     NSStringFromRect(Self.frameRect(layout)), "\(inspector.isEditingGated)"))
+        // The card title's accessory is gone: no CropModeButton anywhere, and the source has no host.
+        XCTAssertTrue(Self.views(of: "CropModeButton", in: inspector).isEmpty,
+                      "086: 卡片名右边不许再有直角尺按钮")
+        let source = try String(contentsOf: Self.source("TransformPanel.swift"), encoding: .utf8)
+        XCTAssertFalse(source.contains("CropModeButtonHost"),
+                       "086: CropModeButtonHost / CropModeButton 应从 TransformPanel 删除")
+        // No button in the card's title band either (the card probe gives the card's real frame).
+        let card = try XCTUnwrap(Self.rowProbe(CropCardID.card, in: inspector),
+                                 "裁切卡自己没有 frame")
+        let cardRect = card.convert(card.bounds, to: inspector)
+        let titleBand = NSRect(x: cardRect.minX, y: cardRect.minY,
+                               width: cardRect.width, height: 26)
+        let buttonsInTitle = Self.allButtons(in: inspector)
+            .filter { titleBand.intersects($0.convert($0.bounds, to: inspector)) }
+        XCTAssertTrue(buttonsInTitle.isEmpty,
+                      "086: 卡片名那一行右边不该有任何按钮（\(buttonsInTitle.count) 个）")
 
-        // ② 再点一下 = 出去（等同 ⌘R：应用并离开）。
-        button.performClick(nil)
-        pump(0.3)
-        XCTAssertFalse(loupe.isCropToolActive, "再点一次没有退出裁切模式")
-        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "退出后 overlay 还在屏幕上")
-        XCTAssertFalse(button.isOn, "退出后直角尺不能还是激活态")
-        print("RULER off · active=\(loupe.isCropToolActive) · overlay on screen="
-              + "\(loupe.isCropOverlayOnScreenForTesting)")
-
-        // ③ §E1 没有被这张卡削掉：换回「调整」，裁切模式下侧栏整块闸住。
-        root.inspectorWorkspaces.select(.adjust)
-        pump(0.1)
-        XCTAssertFalse(inspector.isEditingGated, "裁切没开，任何工作区都不该被闸")
-        XCTAssertTrue(loupe.beginCropTool())
-        pump(0.1)
-        XCTAssertTrue(inspector.isEditingGated, "§E1：调整工作区在裁切模式下仍然整块闸住")
-        loupe.cancelCropTool()
-        pump(0.1)
-        XCTAssertFalse(inspector.isEditingGated)
+        // 082 keeps its leaving half: switching away from 变换 cancels the draft and takes the frame
+        // with it; switching back re-enters idempotently (no double toggle).
+        for round in 1...2 {
+            root.inspectorWorkspaces.select(.adjust)
+            pump(0.1)
+            XCTAssertFalse(loupe.isCropToolActive, "086/082: 第 \(round) 次切出变换 = 退出裁切模式")
+            root.inspectorWorkspaces.select(.transform)
+            pump(0.1)
+            XCTAssertTrue(loupe.isCropToolActive, "086: 第 \(round) 次切回仍是裁切模式（幂等）")
+            XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "086: 第 \(round) 次切回选框在屏上")
+            XCTAssertFalse(loupe.enterCropToolIfNeeded(), "086: 已经 active 时幂等入口不做任何事")
+        }
+        XCTAssertTrue(loupe.isCropToolActive)
     }
 
     /// ⌘R 仍然是那个动词：菜单里只剩一行，但它进/出裁切的路径和卡头的直角尺是**同一个**。
@@ -272,9 +252,9 @@ final class TransformPanelTests: XCTestCase {
               + "\(session.edit.geometry.rotationDegrees)")
     }
 
-    // MARK: - 5. 三片开关：激活色 = 系统强调色；应用/取消在非裁切下置灰
+    // MARK: - 5. 三片开关颜色；五个控件永不置灰
 
-    func testTheThreeSwitchesTurnAccentBlueAndApplyCancelAreGreyWithoutTheTool() throws {
+    func testTheThreeSwitchesTurnAccentBlueAndTheFiveControlsStayEnabled() throws {
         // 结构那一半：颜色只有一个出口（`CropChip.fill(on:)`），而且是系统强调色。
         let source = try String(contentsOf: Self.source("TransformPanel.swift"), encoding: .utf8)
         XCTAssertTrue(source.contains("static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }"),
@@ -303,23 +283,115 @@ final class TransformPanelTests: XCTestCase {
         }
         print("CHIP colour · accent \(accent) · " + table.joined(separator: " · "))
 
-        // 非裁切下：比例/角度置灰，应用/取消 `isEnabled == false`，而且面板里没有草稿可写。
+        // 086: even with **no loupe at all** (the worst case: `tool == nil`) the five controls are not
+        // greyed out. The probe reads SwiftUI's resolved `isEnabled`, so a stray `.disabled` goes red.
         DetailRowEnabledLog.shared.reset()
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
         try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
         try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe) != nil }
+        let keys = ["宽高比", "滑块角度", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
+        for key in keys {
+            _ = try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(key) != nil }
+        }
+        for key in keys {
+            XCTAssertEqual(DetailRowEnabledLog.shared.value(key), true,
+                           "086: 「\(key)」不许变灰（tool == nil 时也一样）")
+        }
+        XCTAssertNil(panel.host.rootView.loupe, "这个宿主没有 loupe —— 正好是「tool == nil」那一档")
+        print("ENABLED · " + keys.map {
+            "\($0)=\(String(describing: DetailRowEnabledLog.shared.value($0)))"
+        }.joined(separator: " · "))
+    }
 
-        XCTAssertEqual(DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe), false,
-                       "裁切没开时「应用」必须是灰的")
-        XCTAssertEqual(DetailRowEnabledLog.shared.value(CropApplyRow.cancelProbe), false,
-                       "裁切没开时「取消」必须是灰的")
-        XCTAssertNil(panel.host.rootView.loupe, "这个宿主没有 loupe：卡里的控件一律置灰")
+    // MARK: - 4. 宽高比：标题 · 选单 · ⇄ 同一行
 
-        // 九宫格是纯视图态，随时可以按：它不跟着裁切模式置灰。
-        print("GREY · apply=\(String(describing: DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe)))"
-              + " · cancel=\(String(describing: DetailRowEnabledLog.shared.value(CropApplyRow.cancelProbe)))")
+    func testTheAspectTitlePickerAndSwapShareOneLineAt244Points() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        loupe.collectsHistogram = false
+        _ = loupe.view
+        XCTAssertTrue(loupe.beginCropTool())
+
+        let panel = try host(width: 300, session: session, loupe: loupe)
+        defer { panel.window.contentView = nil }
+        panel.state.select(.transform)
+        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+
+        // 086: the second 「裁切」 is now 「宽高比」; the card title itself is untouched.
+        XCTAssertEqual(CropSection.crop.title, "宽高比")
+        XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+
+        let card = try XCTUnwrap(panel.row(CropCardID.card))
+        let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
+        XCTAssertGreaterThanOrEqual(contentWidth, 244 - 0.5, "244 pt 内容宽是这张卡的验收宽度")
+        let title = try XCTUnwrap(panel.row(CropCardID.section(.crop)),
+                                  "「宽高比」小标题没有画出来")
+        let menu = try XCTUnwrap(panel.row(CropAspectRow.menuProbeID), "比例选单没有画出来")
+        let swap = try XCTUnwrap(panel.row(CropAspectRow.swapProbeID), "⇄ 交换没有画出来")
+
+        for (name, rect) in [("选单", menu), ("⇄", swap)] {
+            XCTAssertLessThanOrEqual(abs(rect.midY - title.midY), 1,
+                                     "086: 「\(name)」必须和「宽高比」同一行（Δy \(rect.midY - title.midY)）")
+            XCTAssertGreaterThan(rect.minX, title.minX, "086: 「\(name)」在标题右侧")
+            XCTAssertGreaterThanOrEqual(rect.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5)
+            XCTAssertLessThanOrEqual(rect.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
+                                     "086: 「\(name)」出了卡片右边")
+        }
+        XCTAssertGreaterThanOrEqual(swap.width, CropAspectRow.swapHitSize - 0.5,
+                                    "086: ⇄ 的命中区至少 18 pt 宽（实测 \(swap.width)）")
+        XCTAssertGreaterThanOrEqual(swap.height, CropAspectRow.swapHitSize - 0.5,
+                                    "086: ⇄ 的命中区至少 18 pt 高（实测 \(swap.height)）")
+
+        let source = try String(contentsOf: Self.source("TransformPanel.swift"), encoding: .utf8)
+        XCTAssertFalse(source.contains("Text(\"比例\")"), "086: 这一行不再出现「比例」这个词")
+        print(String(format: "ASPECT ROW · title %@ · menu %@ · swap %@ · content %.1f pt",
+                     NSStringFromRect(title), NSStringFromRect(menu), NSStringFromRect(swap), contentWidth))
+    }
+
+    // MARK: - 5. 九宫格 / 应用 / 取消 = 卡片最后一行
+
+    func testTheGridApplyCancelRowIsTheCardsLastRowAndApplyCancelAreRightAligned() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        loupe.collectsHistogram = false
+        _ = loupe.view
+        XCTAssertTrue(loupe.beginCropTool())
+
+        let panel = try host(width: 330, session: session, loupe: loupe)
+        defer { panel.window.contentView = nil }
+        panel.state.select(.transform)
+        try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
+
+        let card = try XCTUnwrap(panel.row(CropCardID.card))
+        let grid = try XCTUnwrap(panel.row(CropCardID.grid), "九宫格没有画出来")
+        let apply = try XCTUnwrap(panel.row(CropCardID.apply), "应用 / 取消没有画出来")
+        XCTAssertLessThanOrEqual(abs(grid.midY - apply.midY), 1,
+                                 "086: 九宫格与应用/取消必须同一行（Δy \(grid.midY - apply.midY)）")
+        XCTAssertGreaterThan(apply.minX, grid.maxX, "086: 应用/取消在九宫格右边")
+        XCTAssertLessThanOrEqual(abs(apply.maxX - (card.maxX - WorkspaceLayout.cardInsetH)), 1,
+                                 "086: 应用/取消右对齐到卡片内容右边")
+
+        // Nothing is drawn below the bottom row. The bottom row's own probes (grid + the apply/cancel
+        // chips) are measured against each other above, so they are excluded here — including them made
+        // this assertion compare the row with itself.
+        let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply]
+        let rows = panel.probes.filter { $0.rowID != CropCardID.card && !bottomIDs.contains($0.rowID) }
+            .map { ($0.rowID, $0.convert($0.bounds, to: panel.host)) }
+        let bottomTop = min(grid.minY, apply.minY)
+        let below = rows.filter { $0.1.minY > bottomTop + 0.5 }
+        XCTAssertTrue(below.isEmpty,
+                      "086: 底部行之下还有控件（\(below.map(\.0))）")
+        let bottomMax = max(grid.maxY, apply.maxY)
+        let lowestOther = rows.map(\.1.maxY).max() ?? 0
+        XCTAssertLessThanOrEqual(lowestOther, bottomMax + 1,
+                                 "086: 最后一行就是九宫格/应用/取消（其它内容最低 \(lowestOther) vs 底部行 \(bottomMax)）")
+        print(String(format: "BOTTOM ROW · grid %@ · apply %@ · card %@",
+                     NSStringFromRect(grid), NSStringFromRect(apply), NSStringFromRect(card)))
     }
 
     // MARK: - 6. 三个宽度：每行都不重叠、不出卡片
@@ -397,12 +469,14 @@ final class TransformPanelTests: XCTestCase {
                 .map { $0.convert($0.bounds, to: host) } ?? .null
         }
 
+        /// Every crop-card probe currently in the tree.
+        var probes: [CropRowProbe] {
+            Self.views(of: "CropRowProbe", in: host).compactMap { $0 as? CropRowProbe }
+        }
+
         /// One row's frame, in the panel's coordinates (every probe is reported by the row it backs).
         func row(_ id: String) -> CGRect? {
-            Self.views(of: "CropRowProbe", in: host)
-                .compactMap { $0 as? CropRowProbe }
-                .first { $0.rowID == id }
-                .map { $0.convert($0.bounds, to: host) }
+            probes.first { $0.rowID == id }.map { $0.convert($0.bounds, to: host) }
         }
 
         static func views(of className: String, in root: NSView) -> [NSView] {
@@ -461,10 +535,22 @@ final class TransformPanelTests: XCTestCase {
 
     // MARK: - finding the shipped controls
 
-    private static func cropModeButton(in root: NSView) -> CropModeButton? {
-        var found: CropModeButton?
+    /// The probe a row reports itself through (the card's own frame included).
+    private static func rowProbe(_ id: String, in root: NSView) -> CropRowProbe? {
+        var found: CropRowProbe?
         func walk(_ view: NSView) {
-            if let button = view as? CropModeButton { found = button }
+            if let probe = view as? CropRowProbe, probe.rowID == id { found = probe }
+            for sub in view.subviews { walk(sub) }
+        }
+        walk(root)
+        return found
+    }
+
+    /// All `NSButton` leaves (used for 「卡片名右边没有按钮」: no exact class name filter).
+    private static func allButtons(in root: NSView) -> [NSButton] {
+        var found: [NSButton] = []
+        func walk(_ view: NSView) {
+            if let button = view as? NSButton { found.append(button) }
             for sub in view.subviews { walk(sub) }
         }
         walk(root)

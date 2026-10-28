@@ -430,9 +430,9 @@ public final class WorkspaceRootView: NSView {
         // flicker it), wired here because this view owns both halves.
         //
         // 2026-10-27 — the gate now depends on **two** facts: the mode and the workspace. 变换 *is* the
-        // crop tool's own panel (its header is the 直角尺 button that exits the mode, its last row is
-        // 应用/取消), so gating it would leave the user with a frame they cannot apply from the panel
-        // they just opened. Every other workspace stays inert exactly as §E1 measured it.
+        // crop tool's own panel (its rows are 宽高比 / 角度 / 应用取消), so gating it would leave the
+        // user with a frame they cannot apply from the panel they just opened. Every other workspace
+        // stays inert exactly as §E1 measured it while the frame is up.
         loupeController.onCropModeChange = { [weak self] _ in self?.updateInspectorGate() }
         workspaces.onSelectionChange = { [weak self] _ in self?.updateInspectorGate() }
 
@@ -442,9 +442,9 @@ public final class WorkspaceRootView: NSView {
         // the panel is already showing 调节. The initial value is pushed too: the app opens on `.adjust`.
         inspectorWorkspaces.onChange = { [weak self] workspace in
             self?.loupeController.setMasksWorkspaceActive(workspace == .masks)
-            // 082 — 「点开裁切卡就进裁切模式，切走工作区就退出」. The same synchronous switch the mask
-            // chrome rides: the frame is up before the panel has finished redrawing, and a hidden
-            // overlay never lingers for a turn.
+            // 082/086 — entering 变换 opens the frame, leaving it cancels the draft (082). The same
+            // synchronous switch the mask chrome rides: the frame is up before the panel has finished
+            // redrawing, and a hidden overlay never lingers for a turn.
             self?.loupeController.setCropWorkspaceActive(workspace.showsCropCard)
         }
         loupeController.setMasksWorkspaceActive(inspectorWorkspaces.selection == .masks)
@@ -465,8 +465,8 @@ public final class WorkspaceRootView: NSView {
     /// 072 §E1's event gate, re-decided from its two inputs: the crop mode and the workspace.
     ///
     /// The panel goes inert (`hitTest → nil`) while 裁切 mode owns the canvas, **except** in 变换, where
-    /// the panel *is* the crop tool's own controls (2026-10-27: the 直角尺 button, 比例, 角度 and the
-    /// 应用/取消 pair all live in that card). Both callers — `onCropModeChange` and
+    /// the panel *is* the crop tool's own controls (086: 宽高比, 角度 and the 应用/取消 pair all live in
+    /// that card). Both callers — `onCropModeChange` and
     /// `InspectorWorkspaceState.onSelectionChange` — land here, so the two facts cannot be applied
     /// one without the other, and a workspace switch while the frame is up hands the panel over
     /// (or away) exactly once.

@@ -3322,27 +3322,33 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// show that 「切到变换 → 选框出现」 goes red without the hook; nothing in the app touches it.
     var workspaceDrivesCropMode = true
 
-    /// 082 — the **workspace** drives the mode: seeing the 裁切 card (变换) *is* being in 裁切 mode;
-    /// leaving that workspace (or clicking another card) ends it.
-    ///
-    /// The user's words: 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框。离开裁切模式也退出裁切选框」.
-    /// So the two entry points the mode always had (the 直角尺 icon, ⌘R) are kept — they are the explicit
-    /// "same mode, again" shortcuts — and this adds the third one: the card being on screen.
-    ///
-    /// It is still **view state**: `beginCropTool` / `cancelCropTool` write neither the document nor
-    /// the history (the acceptance asserts `documentHash` / `history.count` / `editRevision`), and
-    /// leaving 变换 *cancels* rather than applies — a workspace switch is not the user saying 「应用」.
+    /// 086 — the **idempotent** entry the workspace switch uses: entering 变换 with the frame already
+    /// up does nothing (the old `toggle` would have closed it). No document write, no history row and
+    /// no camera change when it is already active.
     ///
     /// Silently does nothing when there is nothing to crop (no anchor, not in 单图 mode): a workspace
-    /// click must not beep because the library is still loading.
+    /// click must not beep because the library is still loading. `workspaceDrivesCropMode` stays the
+    /// 082 anti-proof switch.
+    @discardableResult
+    public func enterCropToolIfNeeded() -> Bool {
+        guard workspaceDrivesCropMode else { return false }
+        guard !cropTool.isActive else { return false }
+        guard let session, session.mode == .loupe, session.anchorAsset != nil else { return false }
+        return beginCropTool()
+    }
+
+    /// 082 — the **workspace** drives the mode: seeing the 裁切 card (变换) *is* being in 裁切 mode.
+    ///
+    /// 086 changed the leaving half: the user only asked for the frame to be there when 变换 is on and
+    /// explicitly said not to add behaviour on the way out, so this no longer cancels the draft and
+    /// leaving 变换 leaves the mode as it was. Still **view state**: entering writes neither the
+    /// document nor the history.
     @discardableResult
     public func setCropWorkspaceActive(_ active: Bool) -> Bool {
         guard workspaceDrivesCropMode else { return false }
-        if active {
-            guard !cropTool.isActive else { return false }
-            guard let session, session.mode == .loupe, session.anchorAsset != nil else { return false }
-            return beginCropTool()
-        }
+        if active { return enterCropToolIfNeeded() }
+        // 086 keeps 082's leaving half: a workspace switch is not 「应用」, so it cancels the draft
+        // rather than committing it, and the frame goes away with the card.
         guard cropTool.isActive else { return false }
         cancelCropTool()
         return true
