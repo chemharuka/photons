@@ -107,6 +107,15 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         }
     }
 
+    /// **Does this workspace put the 裁切 card on screen?** — 082: that is what decides whether 裁切
+    /// mode is on (「点开裁切菜单后自动进入裁切模式」，切走就退出).
+    ///
+    /// Derived from `cards` and not a second table: if the crop card ever moves to another workspace,
+    /// the mode follows it, and a workspace without it cannot accidentally open the frame. It reads
+    /// `cards.contains(.crop)` rather than naming `.transform` so the one membership table stays the
+    /// only place that knows where the card lives.
+    public var showsCropCard: Bool { cards.contains(.crop) }
+
     /// True when this workspace has something to show. `false` is not an error state: the ask says
     /// 「先空着」, and the view draws no cards, no placeholder and no message.
     public var hasCards: Bool { !cards.isEmpty }

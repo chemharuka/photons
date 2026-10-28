@@ -445,10 +445,10 @@ public final class WorkspaceRootView: NSView {
             // 082 — 「点开裁切卡就进裁切模式，切走工作区就退出」. The same synchronous switch the mask
             // chrome rides: the frame is up before the panel has finished redrawing, and a hidden
             // overlay never lingers for a turn.
-            self?.loupeController.setCropWorkspaceActive(workspace == .transform)
+            self?.loupeController.setCropWorkspaceActive(workspace.showsCropCard)
         }
         loupeController.setMasksWorkspaceActive(inspectorWorkspaces.selection == .masks)
-        loupeController.setCropWorkspaceActive(inspectorWorkspaces.selection == .transform)
+        loupeController.setCropWorkspaceActive(inspectorWorkspaces.selection.showsCropCard)
 
         showModule(for: session.mode)
         applyBrowserMode()

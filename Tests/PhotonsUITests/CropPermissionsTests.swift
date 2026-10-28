@@ -199,17 +199,26 @@ final class CropPermissionsTests: XCTestCase {
         XCTAssertNotNil(pill.hitTest(NSPoint(x: pill.frame.midX, y: pill.frame.midY)),
                         "and it is still a hit target inside its own pill")
 
+        // 082 (追加) — the pill still moves the camera, but a crop session's ceiling is
+        // 「裁切框恰好内接于画布」: a full-frame crop in this window stops at the fit level, so the
+        // numbers below are the *clamped* ones. That is a spec change, not a regression: §E4 said the
+        // pill must stay usable, and it is (mode moves to `.actual`, the readout is the real value).
+        let ceiling = try XCTUnwrap(loupe.cropZoomLimit(), "082: 裁切模式没有上限？")
         let before = loupe.viewState
         loupe.zoomFromSlider(to: 1)
         let after = loupe.viewState
         print("E4 · zoom pill in 裁切 mode: \(before.zoomLabel) → \(after.zoomLabel) "
-              + "(mode \(after.mode.rawValue), zoom \(after.zoom))")
+              + "(mode \(after.mode.rawValue), zoom \(after.zoom)) · 上限 \(ceiling)")
         XCTAssertEqual(after.mode, .actual, "the pill really moved the camera")
-        XCTAssertEqual(after.zoom, 1, accuracy: 1e-12)
+        XCTAssertEqual(after.zoom, min(1, ceiling), accuracy: 1e-12,
+                       "082: 100% 的请求被钳在「框内接于画布」那一级")
 
         // A 25 % stop through the same door, so it is not a one-off.
         loupe.zoomFromSlider(to: 0.25)
-        XCTAssertEqual(loupe.viewState.zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(loupe.viewState.zoom, min(0.25, ceiling), accuracy: 1e-12)
+        // …and the readout is the value the camera actually holds.
+        XCTAssertEqual(loupe.zoomSlider.labelText,
+                       LoupeViewState.percentLabel(of: loupe.viewState.zoom))
         loupe.cancelCropTool()
     }
 

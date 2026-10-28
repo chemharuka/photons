@@ -1324,6 +1324,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // controls (and the draft's own write paths) live in the 裁切 card, so there is nothing for
         // the canvas to wire back beyond the controller it reads.
         cropBar.controller = cropTool
+        // 082: the card is the control surface now, so a draft edit it makes has to reach the canvas —
+        // the overlay's frame and the bar's three readouts are redrawn on the same tick, and one render
+        // is asked for (a straighten moves the picture).
+        cropTool.onDraftChange = { [weak self] in
+            guard let self else { return }
+            self.refreshCropTool()
+            self.requestEditRender()
+        }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
         // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).

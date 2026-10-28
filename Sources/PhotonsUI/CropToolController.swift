@@ -157,7 +157,17 @@ public final class CropToolController {
         didSet { if draft != oldValue { publishDraft() } }
     }
     /// 九宫格. View state, and the only toggle that does not touch the draft.
-    public var showsGrid = true
+    public var showsGrid = true {
+        didSet { if showsGrid != oldValue { draftChanged() } }
+    }
+
+    /// 082 — the canvas half of one draft edit, wired by `LoupeController`: the card writes the draft,
+    /// the loupe re-lays the overlay and the bar's readout and asks for one render. A callback and not a
+    /// `didSet` on `draft` on purpose: `refreshCropTool` → `clampToView` can write the draft back, and a
+    /// notification there would be a loop.
+    var onDraftChange: (() -> Void)?
+
+    private func draftChanged() { onDraftChange?() }
     public private(set) var isDragging = false
     /// True while a ⌘-drag is turning the picture rather than moving the frame.
     public var isRotatingPicture: Bool { rotating }
@@ -321,6 +331,7 @@ public final class CropToolController {
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
     public func setStraighten(_ degrees: Double) {
         draft.straighten = CropTool.clampStraighten(degrees)
+        draftChanged()
     }
 
     /// A ratio preset. The rect is reshaped **now** rather than at apply time, because the frame on
@@ -330,6 +341,7 @@ public final class CropToolController {
         let lock = preset.lock(source: source)
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        draftChanged()
     }
 
     /// Direct lock write (the tests' door, and what `setAspect` ends in).
@@ -337,6 +349,7 @@ public final class CropToolController {
         let source = source ?? sourceSize
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        draftChanged()
     }
 
     /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
@@ -460,6 +473,7 @@ public final class CropToolController {
         let top = min(max(c.centerY - height / 2, 0), 1 - height)
         draft.lock = lock
         draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
+        draftChanged()
     }
 
     /// The current ratio, as the popup shows it.

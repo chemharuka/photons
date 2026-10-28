@@ -253,9 +253,9 @@ public struct InspectorView: View {
         // a `false` and does nothing), so the workspace root's own wiring and this one cannot fight.
         // No document write either way: entering is a view-state switch, leaving *cancels* the draft
         // rather than applying it.
-        .task { loupe?.setCropWorkspaceActive(workspaces.selection == .transform) }
+        .task { loupe?.setCropWorkspaceActive(workspaces.selection.showsCropCard) }
         .onChange(of: workspaces.selection) { _, workspace in
-            loupe?.setCropWorkspaceActive(workspace == .transform)
+            loupe?.setCropWorkspaceActive(workspace.showsCropCard)
         }
     }
 
@@ -2767,7 +2767,10 @@ public struct PanelResets {
             let turns = GeometryGroup.normalizedQuarterTurns(session.edit.geometry.quarterTurns)
             guard turns != 0 else { return false }
             return cropGeometryVerb(label: section.title) { geometry in
-                for _ in 0..<GeometryGroup.normalizedQuarterTurns(4 - turns) {
+                // `turn(clockwise: false)` steps the count back by one (it is `+3 mod 4`), so one
+                // counter-clockwise turn per turn taken lands on 0 — not `4 − turns` of them, which
+                // would land on `2·turns` mod 4 (measured: 1 turn → 2).
+                for _ in 0..<turns {
                     geometry.turn(clockwise: false)
                 }
                 return true

@@ -98,7 +98,6 @@ extension InspectorView {
                              onCancel: { loupe?.cancelCropTool() })
             }
         }
-        .background(CropRowProbeHost(rowID: CropCardID.aspect))
     }
 
     // MARK: 角度
@@ -116,20 +115,22 @@ extension InspectorView {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.angle.title, isFirst: false,
                               reset: { resets.cropSection(.angle) })
-            sliderRow("滑块角度",
-                      straighten,
-                      -CropTool.straightenLimit ... CropTool.straightenLimit,
-                      "%+.1f°",
-                      decimals: 1,
-                      enabled: tool?.isActive ?? false,
-                      accessibilityID: "inspector.crop.angle",
-                      onReset: { tool?.setStraighten(0) },
-                      // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
-                      onEditingChanged: { _ in })
-            CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
-                                 slider: tool?.sliderAngleText() ?? "—")
+            VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+                sliderRow("滑块角度",
+                          straighten,
+                          -CropTool.straightenLimit ... CropTool.straightenLimit,
+                          "%+.1f°",
+                          decimals: 1,
+                          enabled: tool?.isActive ?? false,
+                          accessibilityID: "inspector.crop.angle",
+                          onReset: { tool?.setStraighten(0) },
+                          // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
+                          onEditingChanged: { _ in })
+                CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
+                                     slider: tool?.sliderAngleText() ?? "—")
+            }
+            .background(CropRowProbeHost(rowID: CropCardID.angle))
         }
-        .background(CropRowProbeHost(rowID: CropCardID.angle))
     }
 
     // MARK: 旋转
@@ -144,8 +145,8 @@ extension InspectorView {
                         isEnabled: loupe != nil || tool != nil,
                         onCounterClockwise: { turn(clockwise: false, tool: tool) },
                         onClockwise: { turn(clockwise: true, tool: tool) })
+                .background(CropRowProbeHost(rowID: CropCardID.turn))
         }
-        .background(CropRowProbeHost(rowID: CropCardID.turn))
     }
 
     // MARK: 镜像
@@ -160,8 +161,8 @@ extension InspectorView {
                           vertical: geometry.flipVertical,
                           onHorizontal: { flip(horizontal: true, tool: tool) },
                           onVertical: { flip(horizontal: false, tool: tool) })
+                .background(CropRowProbeHost(rowID: CropCardID.mirror))
         }
-        .background(CropRowProbeHost(rowID: CropCardID.mirror))
     }
 
     // MARK: the two document verbs
@@ -309,6 +310,7 @@ struct CropAspectRow: View {
             .accessibilityLabel("交换长宽")
             .accessibilityIdentifier("inspector.crop.swap")
         }
+        .background(CropRowProbeHost(rowID: Self.probeID))
         .disabled(!(tool?.isActive ?? false))
         .opacity(tool?.isActive == true ? 1 : 0.42)
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
@@ -557,6 +559,7 @@ struct CropApplyRow: View {
                 .help("放弃这次裁切，文档一个字节都不动")
                 .accessibilityIdentifier("inspector.crop.cancel")
         }
+        .background(CropRowProbeHost(rowID: Self.probeID))
         .disabled(!active)
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
     }

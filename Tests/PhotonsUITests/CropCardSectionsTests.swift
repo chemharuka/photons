@@ -137,26 +137,26 @@ final class CropCardSectionsTests: XCTestCase {
             }
         }
 
-        // Gaps: ≥ 12 pt between one section's content and the next title, 6 pt inside a section.
+        // Gaps: 6 pt from a title to its own content, ≥ 12 pt from a section's last row to the next
+        // section's title. Both numbers are measured, not assumed.
         let ordered = (rows + headers).sorted { $0.rect.minY < $1.rect.minY }
         var gaps: [String] = []
         for section in CropSection.displayOrder {
             let header = try XCTUnwrap(headers.first { $0.id == section.title }).rect
-            guard let firstRow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
-            let insideGap = firstRow.rect.minY - header.maxY
-            print("082 §4 · 「\(section.title)」标题与 \(firstRow.id) 之间 \(String(format: "%.2f", insideGap)) pt")
+            guard let firstBelow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
+            let insideGap = firstBelow.rect.minY - header.maxY
+            gaps.append("「\(section.title)」→\(firstBelow.id) \(String(format: "%.2f", insideGap)) pt")
             XCTAssertGreaterThanOrEqual(insideGap, 5.5,
                                         "082 §4: 小标题与内容之间应 6 pt，实测 \(insideGap)")
         }
         for (a, b) in zip(headers, headers.dropFirst()) {
-            // The previous section's last row → the next section's title.
-            let previousRows = rows.filter { $0.rect.maxY <= a.rect.maxY + 0.5 }
-            guard let last = previousRows.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
+            let above = ordered.filter { $0.rect.maxY <= b.rect.minY + 0.5 }
+            guard let last = above.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
             let gap = b.rect.minY - last.rect.maxY
-            gaps.append("\(a.id)→\(b.id) \(String(format: "%.2f", gap)) pt")
+            gaps.append("\(last.id)→「\(b.id)」 \(String(format: "%.2f", gap)) pt")
             XCTAssertGreaterThanOrEqual(gap, 11.5, "082 §4: 分区之间应 ≥12 pt，实测 \(gap) pt")
         }
-        print("082 §4 · 分区间距 " + gaps.joined(separator: " · "))
+        print("082 §4 · 间距 " + gaps.joined(separator: " · "))
 
         XCTAssertLessThanOrEqual(ordered.last!.rect.maxY, card.maxY - WorkspaceLayout.cardInsetV + 0.5,
                                  "082 §4: 最后一区出了卡片底边")
@@ -179,16 +179,27 @@ final class CropCardSectionsTests: XCTestCase {
         panel.state.select(.transform)
         _ = waitFor(panel) { $0.cards.cardIDs == ["crop"] }
 
-        func readout() throws -> String {
-            let label = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first,
-                                      "082 §3: 卡片上没有「实际角度 / 滑块角度」读数")
-            _ = waitFor(panel) { _ in true }
-            return label.stringValue
+        /// Poll until the panel has redrawn the readout (SwiftUI updates the AppKit leaf on the next
+        /// layout pass), then return what it prints.
+        func readout(expecting needle: String) throws -> String {
+            let deadline = Date().addingTimeInterval(3)
+            var text = ""
+            while Date() < deadline {
+                panel.host.layoutSubtreeIfNeeded()
+                if let label = panel.views(ofType: CropAngleReadoutLabel.self).first {
+                    text = label.stringValue
+                    if text.contains(needle) { return text }
+                }
+                CropUITestSupport.pump(0.02)
+            }
+            _ = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first,
+                              "082 §3: 卡片上没有「实际角度 / 滑块角度」读数")
+            return text
         }
 
         // ① turns 0, slider +2.5 → 2.5°
         tool.setStraighten(2.5)
-        var text = try readout()
+        var text = try readout(expecting: "实际角度 2.5°")
         print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
         XCTAssertTrue(text.contains("实际角度 2.5°"), text)
         XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
@@ -196,8 +207,12 @@ final class CropCardSectionsTests: XCTestCase {
         XCTAssertEqual(tool.actualAngle, 2.5, accuracy: 1e-12)
 
         // ② turns 1, slider +2.5 → 92.5°
-        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
-        text = try readout()
+        // (The verb answers `false` while a crop session is open: `commitEdit` returns nil inside a tool
+        // session by design — 072/077's rule — and the row lands at 应用. So the turn is measured on the
+        // document, not on the return value.)
+        loupe.rotateQuarter(clockwise: true)
+        XCTAssertEqual(tool.quarterTurns, 1)
+        text = try readout(expecting: "实际角度 92.5°")
         print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
         XCTAssertTrue(text.contains("实际角度 92.5°"), text)
         XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
@@ -205,10 +220,11 @@ final class CropCardSectionsTests: XCTestCase {
         XCTAssertEqual(loupe.cropBar.readoutText.angle, "92.5°")
 
         // ③ turns 3, slider −4 → 266°
-        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
-        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
+        loupe.rotateQuarter(clockwise: true)
+        loupe.rotateQuarter(clockwise: true)
+        XCTAssertEqual(tool.quarterTurns, 3)
         tool.setStraighten(-4)
-        text = try readout()
+        text = try readout(expecting: "实际角度 266.0°")
         print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
         XCTAssertTrue(text.contains("实际角度 266.0°"), text)
         XCTAssertTrue(text.contains("滑块角度 -4.0°"), text)
@@ -219,7 +235,7 @@ final class CropCardSectionsTests: XCTestCase {
         let label = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first)
         XCTAssertFalse(label.isEditable, "082 §3: 读数是只读的")
         XCTAssertFalse(label.isSelectable)
-        XCTAssertEqual(label.identifier?.rawValue, CropAngleReadoutLabel.identifier)
+        XCTAssertEqual(label.accessibilityIdentifier(), CropAngleReadoutLabel.identifier)
         XCTAssertTrue(label.stringValue.contains("实际角度"))
         XCTAssertTrue(label.stringValue.contains("滑块角度"))
         // …and it is a *number*, not a second source of truth: it is derived from the tool.
@@ -239,21 +255,23 @@ final class CropCardSectionsTests: XCTestCase {
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
         _ = loupe.view
-        XCTAssertTrue(loupe.beginCropTool())
-        let resets = PanelResets(session: session, loupe: loupe)
 
-        // A document with something in every section: crop, angle, turn, flip.
-        loupe.rotateQuarter(clockwise: true)                  // turns 1
+        // A document with something in every section: crop, angle, turn, flip. Written **before** the
+        // tool opens, so the tool session's base *is* this document — that is what makes 「一次双击 =
+        // 一条历史」 measurable (a reset closes the session first, and a pending document change would
+        // become its own row, as it must: 072/077's rule).
+        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))   // turns 1
         XCTAssertTrue(loupe.flipHorizontal())                 // mirror
-        loupe.cropTool.setStraighten(7.5)                     // slider angle (draft)
-        session.applyEdit { $0.geometry.rotationDegrees = 7.5 }
-        session.commitEdit(label: "角度", coalesce: false)
         session.applyEdit { model in
+            model.geometry.rotationDegrees = 7.5
             model.geometry.cropRect = CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9)
             model.geometry.aspectLock = .square
         }
         session.commitEdit(label: "比例", coalesce: false)
-        loupe.cropTool.reseedDraftFromDocument()
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
+        let resets = PanelResets(session: session, loupe: loupe)
+        XCTAssertEqual(loupe.cropTool.draft.straighten, 7.5, accuracy: 1e-12,
+                       "草稿从文档播种：滑块角度 7.5°")
 
         let turnsBefore = session.edit.geometry.quarterTurns
         let flipBefore = session.edit.geometry.flipHorizontal
@@ -293,8 +311,14 @@ final class CropCardSectionsTests: XCTestCase {
         geometry = session.edit.geometry
         XCTAssertEqual(geometry.quarterTurns, 0, "082 §5: 旋转回 0°")
         XCTAssertEqual(geometry.straightenDegrees, angleBefore, accuracy: 1e-12, "082 §5: 旋转不动角度")
-        XCTAssertEqual(geometry.cropRect, CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9),
-                       "082 §5: 转回来的是同一块像素（rect 跟着转回去）")
+        let turnedBack = CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9)
+        for (lhs, rhs) in [(geometry.cropRect.left, turnedBack.left),
+                           (geometry.cropRect.top, turnedBack.top),
+                           (geometry.cropRect.right, turnedBack.right),
+                           (geometry.cropRect.bottom, turnedBack.bottom)] {
+            XCTAssertEqual(lhs, rhs, accuracy: 1e-9,
+                           "082 §5: 转回来的是同一块像素（rect 跟着转回去）\(geometry.cropRect)")
+        }
         XCTAssertEqual(session.history.snapshots.count, afterAngle + 2)
         XCTAssertFalse(resets.cropSection(.rotation), "已经 0° 就不写")
 
@@ -311,6 +335,11 @@ final class CropCardSectionsTests: XCTestCase {
         session.commitEdit(label: "角度", coalesce: false)
         _ = loupe.flipVertical()
         _ = loupe.rotateQuarter(clockwise: true)
+        // Flush the tool session's pending row first: a discrete geometry action inside a session
+        // closes it, so the *next* reset would otherwise commit two rows (the pending one + its own).
+        // That is 072/077's rule working as designed, not the reset's arithmetic.
+        session.endToolSession(label: "裁切与旋转")
+        session.beginToolSession("裁切", label: "裁切与旋转")
         let beforeTitle = session.history.snapshots.count
         XCTAssertTrue(resets.cropGeometry(), "082 §7: 双击卡标题 = 整卡复位")
         XCTAssertEqual(session.edit.geometry, .identity, "082 §7: 整卡回 identity")
@@ -383,11 +412,12 @@ final class CropCardSectionsTests: XCTestCase {
     /// actual angle after a quarter turn.
     func testTheRealBarIsReadOnlyAndShowsTheActualAngle() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
-        let loupe = editor.rootView.loupeController
+        let loupe = try XCTUnwrap(editor.rootView).loupeController
         defer { editor.window?.orderOut(nil) }
-        XCTAssertTrue(loupe.beginCropTool())
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, editor.session))
         loupe.cropTool.setStraighten(1.5)
-        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
+        loupe.rotateQuarter(clockwise: true)
+        XCTAssertEqual(loupe.quarterTurns, 1)
 
         let bar = loupe.cropBar
         bar.sync()
@@ -405,31 +435,46 @@ final class CropCardSectionsTests: XCTestCase {
     // MARK: - 7. 旧快捷键
 
     /// ⌘[ / ⌘] still turn the picture by 90° (one snapshot each), and the card's badge follows.
+    ///
+    /// The two keys are **menu key equivalents** (`AppMenu` 变换 ▸ 逆时针/顺时针旋转 90°), so the
+    /// honest measurement is the shipped row: its `keyEquivalent`, the target AppKit dispatches to
+    /// (`EditorWindowController.rotateClockwiseAction`), and the document afterwards. A synthesised
+    /// `keyDown` on the canvas would prove nothing — that is not where the key is handled.
     func testTheQuarterTurnShortcutsStillWork() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
-        let loupe = editor.rootView.loupeController
+        let loupe = try XCTUnwrap(editor.rootView).loupeController
         let session = editor.session
-        let canvas = loupe.canvasView
         defer { editor.window?.orderOut(nil) }
         _ = loupe.view
         let historyBefore = session.history.snapshots.count
 
-        func press(_ characters: String) {
-            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command],
-                                         timestamp: 0, windowNumber: canvas.window?.windowNumber ?? 0,
-                                         context: nil, characters: characters,
-                                         charactersIgnoringModifiers: characters,
-                                         isARepeat: false, keyCode: 0)!
-            canvas.keyDown(with: event)
+        func menuItem(_ title: String) -> NSMenuItem? {
+            var found: NSMenuItem?
+            func walk(_ menu: NSMenu) {
+                for item in menu.items {
+                    if item.title == title { found = item }
+                    if let sub = item.submenu { walk(sub) }
+                }
+            }
+            walk(MainMenu.build())
+            return found
         }
 
-        press("]")
+        let clockwise = try XCTUnwrap(menuItem("顺时针旋转 90°"), "082 §7: ⌘] 的菜单行不见了")
+        let counter = try XCTUnwrap(menuItem("逆时针旋转 90°"), "082 §7: ⌘[ 的菜单行不见了")
+        XCTAssertEqual(clockwise.keyEquivalent, "]", "082 §7: 顺时针 = ⌘]")
+        XCTAssertEqual(counter.keyEquivalent, "[", "082 §7: 逆时针 = ⌘[")
+        XCTAssertTrue(clockwise.keyEquivalentModifierMask.contains(.command))
+        XCTAssertTrue(counter.keyEquivalentModifierMask.contains(.command))
+        XCTAssertTrue(editor.validateMenuItem(clockwise), "有照片时 ⌘] 可用")
+
+        editor.rotateClockwiseAction(nil)
         print("082 §7 · ⌘] → quarterTurns \(session.edit.geometry.quarterTurns) · 徽标 "
               + "\(LoupeController.quarterTurnBadge(for: session.edit.geometry.quarterTurns))")
         XCTAssertEqual(session.edit.geometry.quarterTurns, 1, "082 §7: ⌘] = 顺时针 90°")
         XCTAssertEqual(LoupeController.quarterTurnBadge(for: session.edit.geometry.quarterTurns), "90°")
 
-        press("[")
+        editor.rotateCounterClockwiseAction(nil)
         XCTAssertEqual(session.edit.geometry.quarterTurns, 0, "082 §7: ⌘[ 转回来")
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 2, "每一步一条历史")
         print("082 §7 · history \(historyBefore) → \(session.history.snapshots.count)")

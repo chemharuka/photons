@@ -132,7 +132,10 @@ final class CropBarLayoutTests: XCTestCase {
     /// **The bar has no controls at all** — the acceptance is 「悬浮栏视图树里可交互控件数 = 0」, and the
     /// three readouts are still there with real text.
     func testTheBarHasNoInteractiveControlsAndStillPrintsTheThreeSegments() throws {
-        let (bar, controller, _, window) = try makeBar()
+        // The session is **held**: `CropToolController.session` is `weak`, and a released session makes
+        // `begin()` answer `false` (the same trap `CropToggleAccentTests` records).
+        let (bar, controller, session, window) = try makeBar()
+        _ = session
         defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
         layOut(bar)
@@ -174,7 +177,8 @@ final class CropBarLayoutTests: XCTestCase {
 
     /// The bar's 角度 段 is `straighten + 90 × quarterTurns`, in three groups of numbers.
     func testTheAngleSegmentIsTheActualAngle() throws {
-        let (bar, controller, _, window) = try makeBar()
+        let (bar, controller, session, window) = try makeBar()
+        _ = session
         defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
 
@@ -191,25 +195,30 @@ final class CropBarLayoutTests: XCTestCase {
         XCTAssertEqual(bar.readoutText.angle, "0.0°")
 
         // ① turns = 1, straighten = 2.5 → 92.5°
-        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        // (Inside a tool session the verb answers `false` — `commitEdit` returns nil there by design —
+        // so the turn is measured on the document.)
+        controller.rotateQuarter(clockwise: true)
+        XCTAssertEqual(controller.quarterTurns, 1)
         controller.setStraighten(2.5)
         record("turns 1 · slider +2.5")
         XCTAssertEqual(bar.readoutText.angle, "92.5°", "实际 = 2.5 + 90")
 
         // ② turns = 3, straighten = −4 → 266°
-        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
-        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        controller.rotateQuarter(clockwise: true)
+        controller.rotateQuarter(clockwise: true)
+        XCTAssertEqual(controller.quarterTurns, 3)
         controller.setStraighten(-4)
         record("turns 3 · slider −4")
         XCTAssertEqual(bar.readoutText.angle, "266.0°", "实际 = −4 + 270")
 
         // ③ turns = 4 (back to 0), straighten = 0 → 0°
-        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        controller.rotateQuarter(clockwise: true)
+        XCTAssertEqual(controller.quarterTurns, 0)
         controller.setStraighten(0)
         record("turns 4 · slider 0")
         XCTAssertEqual(bar.readoutText.angle, "0.0°", "四圈回到 0°")
 
-        XCTAssertEqual(seen.count, 5)
+        XCTAssertEqual(seen.count, 4)
         // The document's own field is the same number the bar prints, so the two cannot drift.
         XCTAssertEqual(controller.quarterTurns, 0)
     }
@@ -271,9 +280,10 @@ final class CropBarLayoutTests: XCTestCase {
 
         // With the tool on, the card's pair comes alive (`DetailRowEnabledLog` is the card's seam) —
         // which is what makes the greying above a gate, not a bug.
-        let (bar, controller, _, window) = try makeBar()
+        let (bar, controller, session, window) = try makeBar()
         defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
+        _ = session
         bar.sync()
         XCTAssertEqual(bar.readoutText.pixels.contains("×"), true,
                        "应用可用时栏里照样只有读数 —— 按钮在卡里")
