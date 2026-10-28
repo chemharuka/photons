@@ -321,6 +321,64 @@ final class CropCanvasClampTests: XCTestCase {
         XCTAssertTrue(CropCanvasClamp.contains(on.2, in: canvasRect, tolerance: 0.5))
     }
 
+    /// **The anti-proof**: with the clamp switched off, the same two requests go through — the zoom
+    /// runs past the ceiling and the frame ends up outside the canvas. The numbers are the failure the
+    /// user reported, measured.
+    func testWithoutTheClampTheZoomPassesTheCeilingAndTheFrameLeavesTheCanvas() throws {
+        let (loupe, session, window) = try makeLoupe()
+        defer { window.orderOut(nil) }
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
+        _ = session
+        loupe.cropTool.draft = CropToolController.Draft(
+            crop: CropRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5), straighten: 0, lock: .original)
+        let limit = try XCTUnwrap(loupe.cropZoomLimit())
+        loupe.zoomToFit()
+
+        let cropBefore = loupe.cropTool.draft.crop
+
+        // ① With the clamp: 400 % stops at the ceiling, the frame stays inside, and the **crop the user
+        //    drew is untouched** (that is the whole point — the camera gives way, not the frame).
+        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
+        let clamped = try frameOnScreen(loupe)
+        XCTAssertEqual(loupe.viewState.zoom, limit, accuracy: 1e-9)
+        XCTAssertTrue(CropCanvasClamp.contains(clamped, in: canvas(loupe), tolerance: 0.5))
+        XCTAssertEqual(loupe.cropTool.draft.crop.keyString, cropBefore.keyString,
+                       "082: 缩放不许偷偷改裁切框")
+
+        // ② Camera clamp off, ⑦ (the older 「框太大就缩小框」 clamp) still on: the zoom runs to 400 % and
+        //    the frame is kept on the canvas by **shrinking the crop** — the silent re-crop the user
+        //    reported as 「框自己变小了」. Numbers: the draft rect before → after.
+        loupe.clampsCropCamera = false
+        loupe.zoomToFit()
+        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
+        let shrunk = loupe.cropTool.draft.crop
+        print("082 anti-proof · 只关相机钳位（⑦ 还在）：请求 400% → 实际 \(loupe.viewState.zoomLabel) "
+              + "· 草稿框 \(cropBefore.keyString) → \(shrunk.keyString)")
+        XCTAssertEqual(loupe.viewState.zoom, 4, accuracy: 1e-9, "082 反证：没有上限，请求原样通过")
+        XCTAssertNotEqual(shrunk.keyString, cropBefore.keyString,
+                          "082 反证：没有相机钳位时是**裁切框**被迫缩小（不是相机让路）")
+
+        // ③ Both clamps off: nothing keeps the frame on the canvas any more — the failure the invariant
+        //    forbids, in pixels.
+        loupe.cropTool.clampsFrameToView = false
+        loupe.zoomToFit()
+        loupe.cropTool.draft = CropToolController.Draft(crop: cropBefore, straighten: 0, lock: .original)
+        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
+        let unclamped = try frameOnScreen(loupe)
+        let canvasRect = canvas(loupe)
+        let over = max(canvasRect.minX - unclamped.minX,
+                       max(unclamped.maxX - canvasRect.maxX,
+                           max(canvasRect.minY - unclamped.minY, unclamped.maxY - canvasRect.maxY)))
+        print("082 anti-proof · 两个钳位都关：请求 400% → 实际 \(loupe.viewState.zoomLabel) · 框 "
+              + "\(NSStringFromRect(unclamped)) vs 画布 \(NSStringFromRect(canvasRect)) · "
+              + "每边最多出界 \(String(format: "%.1f", over)) px")
+        XCTAssertFalse(CropCanvasClamp.contains(unclamped, in: canvasRect, tolerance: 0.5),
+                       "082 反证：两个钳位都没有时，框必须跑出画布 —— 这正是被修掉的那一版")
+        XCTAssertGreaterThan(over, 100, "082 反证：出界要量得出来（现在 \(over) px）")
+        loupe.cropTool.clampsFrameToView = true
+        loupe.clampsCropCamera = true
+    }
+
     /// Outside 裁切 mode the same gestures are unlimited again — the clamp belongs to the tool.
     func testLeavingCropModeRestoresFreeZoomAndPan() throws {
         let (loupe, session, window) = try makeLoupe()

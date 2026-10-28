@@ -645,7 +645,7 @@ index 772199c..ae77500 100644
  
      var onDoubleClick: (() -> Void)?
 diff --git a/Sources/PhotonsUI/CropToolController.swift b/Sources/PhotonsUI/CropToolController.swift
-index b780538..1e0323f 100644
+index b780538..a81a118 100644
 --- a/Sources/PhotonsUI/CropToolController.swift
 +++ b/Sources/PhotonsUI/CropToolController.swift
 @@ -157,7 +157,17 @@ public final class CropToolController {
@@ -704,7 +704,25 @@ index b780538..1e0323f 100644
      }
  
      /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
-@@ -450,6 +473,7 @@ public final class CropToolController {
+@@ -379,9 +402,15 @@ public final class CropToolController {
+         if inSession { session.endToolSession(label: "裁切与旋转") }
+         var turned = false
+         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
+-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+-        guard turned else { return false }
++        guard turned else {
++            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
++            return false
++        }
++        // The row first, then reopen: inside a tool session `commitEdit` answers `nil` (077 — the session
++        // owns the next snapshot), so committing after the reopen wrote nothing at all (082 measured it
++        // on the shipped path: one press left `quarterTurns` at 0 and added no row).
+         session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
++        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+         return true
+     }
+ 
+@@ -450,6 +479,7 @@ public final class CropToolController {
          let top = min(max(c.centerY - height / 2, 0), 1 - height)
          draft.lock = lock
          draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
@@ -712,7 +730,7 @@ index b780538..1e0323f 100644
      }
  
      /// The current ratio, as the popup shows it.
-@@ -699,7 +723,38 @@ public final class CropToolController {
+@@ -699,7 +729,38 @@ public final class CropToolController {
      /// the pixel size, glued together by dots in one label — so the bar's width changed with the
      /// document and the numbers slid around as they were edited. Here each segment is its own string,
      /// and `CropToolBar` measures the worst case of each once and never lets it grow.
@@ -752,7 +770,7 @@ index b780538..1e0323f 100644
  
      /// `+2.5°` / `-45.0°` — the `%+.1f` form the slider has always printed (a leading `+` says
      /// "turned clockwise" without a legend).
-@@ -731,8 +786,11 @@ public final class CropToolController {
+@@ -731,8 +792,11 @@ public final class CropToolController {
      /// its fixed-width fields, and `CropBarLayoutTests` asserts that four extreme drafts produce the
      /// same `frame(x, width)` — so the constant lives next to the formatter that produces it.
      public enum WorstCase {
@@ -933,7 +951,7 @@ index de873c3..46977f2 100644
      /// 「先空着」, and the view draws no cards, no placeholder and no message.
      public var hasCards: Bool { !cards.isEmpty }
 diff --git a/Sources/PhotonsUI/LoupeController.swift b/Sources/PhotonsUI/LoupeController.swift
-index d2e0946..5117b2a 100644
+index d2e0946..d7ae7bb 100644
 --- a/Sources/PhotonsUI/LoupeController.swift
 +++ b/Sources/PhotonsUI/LoupeController.swift
 @@ -1320,12 +1320,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
@@ -1055,7 +1073,30 @@ index d2e0946..5117b2a 100644
      /// ↵ (and 双击框内): the draft becomes the document, once.
      @discardableResult
      public func applyCropTool() -> Bool {
-@@ -3584,6 +3642,70 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -3408,10 +3466,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
+         if inSession { session.endToolSession(label: "裁切与旋转") }
+         var turned = false
+         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
+-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+-        guard turned else { return false }
++        guard turned else {
++            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
++            return false
++        }
++        // **The row is committed before the crop session is reopened.** `commitEdit` answers `nil`
++        // inside a tool session (077: the session owns the next snapshot), so committing after the
++        // reopen wrote nothing — and the turn then lived only in memory until 应用, which is the
++        // 「点了一下没反应」 a crop session showed (082 measured it: `quarterTurns` stayed 0 and the
++        // history gained no row). Writing the row first is also what P0-10 promised: one press,
++        // one snapshot, with or without the frame up.
+         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
+-                                          coalesce: false)
++                                           coalesce: false)
++        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+         if cropTool.isActive { refreshCropTool() }
+         requestEditRender()
+         return committed
+@@ -3584,6 +3651,70 @@ public final class LoupeController: NSViewController, HeadroomSource {
          noteBackdropKeyMoved()
      }
  
@@ -1126,7 +1167,7 @@ index d2e0946..5117b2a 100644
      /// ⑦ — the model-layer clamp, run before anything reads the layout (and after any gesture that
      /// could have put the frame outside the canvas: a drag, a zoom, a pan, a straighten).
      @discardableResult
-@@ -6100,7 +6222,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -6100,7 +6231,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
      private func syncZoomSlider() {
          // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
          // *displayed* at its continuous position — it is never a snap target.
@@ -3011,6 +3052,24 @@ index 0000000..881559f
 +        return predicate(panel)
 +    }
 +}
+diff --git a/Tests/PhotonsUITests/CropOverlayFollowTests.swift b/Tests/PhotonsUITests/CropOverlayFollowTests.swift
+index fef3a41..7cd70f4 100644
+--- a/Tests/PhotonsUITests/CropOverlayFollowTests.swift
++++ b/Tests/PhotonsUITests/CropOverlayFollowTests.swift
+@@ -428,6 +428,13 @@ final class CropOverlayFollowTests: XCTestCase {
+ 
+         // Before/after for the report: put the pill back where it used to live (the bottom-right
+         // corner) and measure the same two rectangles. This is the overlap the move removes.
++        //
++        // 082: the bar lost its controls and is much narrower (three readouts, 320 pt), so at 1600 pt
++        // the old corner no longer meets it. The overlap the ② note is about is measured where it still
++        // happens — the narrowest window this harness can lay out — so the assertion keeps failing if
++        // the bar ever grows back into that corner.
++        window.setContentSize(NSSize(width: 1000, height: 700))
++        root.layoutSubtreeIfNeeded()
+         loupe.zoomSlider.placement = .bottomRight
+         loupe.zoomSlider.layout(in: loupe.view.bounds)
+         let oldPill = loupe.zoomSlider.convert(loupe.zoomSlider.bounds, to: root)
 diff --git a/Tests/PhotonsUITests/CropPermissionsTests.swift b/Tests/PhotonsUITests/CropPermissionsTests.swift
 index 372564d..5e13d7e 100644
 --- a/Tests/PhotonsUITests/CropPermissionsTests.swift
@@ -3346,10 +3405,45 @@ index 9949a9c..df1b45d 100644
  
          // 源码级证据: both doors write the same two bits through the same call, and nothing in the
 diff --git a/Tests/PhotonsUITests/TransformPanelTests.swift b/Tests/PhotonsUITests/TransformPanelTests.swift
-index de12fdd..3d3d68f 100644
+index de12fdd..9bf47a4 100644
 --- a/Tests/PhotonsUITests/TransformPanelTests.swift
 +++ b/Tests/PhotonsUITests/TransformPanelTests.swift
-@@ -334,9 +334,13 @@ final class TransformPanelTests: XCTestCase {
+@@ -88,12 +88,18 @@ final class TransformPanelTests: XCTestCase {
+                                   "卡头没有直角尺按钮（CropModeButton 不在树上）")
+         XCTAssertTrue(button.isEnabled, "有照片时直角尺必须是活的")
+         XCTAssertNotNil(button.image, "直角尺的 SF Symbol 在本机解析不出来")
+-        XCTAssertFalse(loupe.isCropToolActive, "切到「变换」**不**自动进裁切")
+-        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "还没进裁切，overlay 不该在屏幕上")
+-        XCTAssertFalse(inspector.isEditingGated,
+-                       "「变换」工作区是裁切自己的面板：进裁切前不该被闸住")
+-
+-        // ① 点一下 = 进裁切模式，并且**框真的在屏幕上**。
++        // 082 (用户口径): 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框」——切到「变换」**就是**
++        // 进了裁切模式，所以直角尺这时已经是激活态，选框已经在屏上。
++        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
++        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "082: 自动进入后选框在屏上")
++        XCTAssertTrue(button.isOn, "082: 自动进入后直角尺是激活态")
++        XCTAssertFalse(inspector.isEditingGated, "「变换」工作区里侧栏必须还是活的")
++
++        // ① 再点一下直角尺 = 退出（显式开关保留），再点一下 = 重新进入并**框真的在屏幕上**。
++        button.performClick(nil)
++        pump(0.3)
++        XCTAssertFalse(loupe.isCropToolActive, "082: 直角尺仍是「再点一次退出」的开关")
++        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "退出后 overlay 不该还在屏幕上")
+         DetailRowEnabledLog.shared.reset()
+         button.performClick(nil)
+         pump(0.3)
+@@ -236,7 +242,8 @@ final class TransformPanelTests: XCTestCase {
+         let loupe = editor.rootView.loupeController
+         editor.rootView.inspectorWorkspaces.select(.transform)
+         pump(0.2)
+-        XCTAssertTrue(loupe.beginCropTool())
++        // 082: 切到「变换」就已经进了裁切模式，不需要再点一次。
++        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
+         pump(0.2)
+ 
+         let inspector = editor.rootView.inspectorHost
+@@ -334,9 +341,13 @@ final class TransformPanelTests: XCTestCase {
              try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
  
              let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")

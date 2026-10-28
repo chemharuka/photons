@@ -3666,6 +3666,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // 框**不动**：被挪的是画面（相机的 centre）。这与 ⑦ `clampToView` 不同，⑦ 是「框太大→缩小框」的
     // 兜底（拖手柄仍需要它），这里是把相机挡在「框刚好内接于画布」那一级之前。
 
+    /// With this `false`, the crop session's camera clamp does nothing — 082 (追加)'s anti-proof. A test
+    /// flips it to show that 「框 ⊆ 画布」 and 「钳位后不再变化」 go red without it; the app never does.
+    var clampsCropCamera = true
+
     /// The crop frame in **source pixels** — the four edges the draft is drawing right now.
     public func cropFrameRect(source: ImageSize? = nil) -> CGRect? {
         guard cropTool.isActive else { return nil }
@@ -3681,6 +3685,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// anchored pan and a dragged handle all move it. `nil` when there is no frame to measure (the
     /// tool is off) or the projection is degenerate.
     public func cropZoomLimit(viewport: ImageSize? = nil) -> Double? {
+        guard clampsCropCamera else { return nil }
         guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
@@ -3697,7 +3702,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 「退出裁切后缩放/平移恢复自由」 true without a second rule.
     public func clampedToCropCanvas(_ state: LoupeViewState,
                                     viewport: ImageSize? = nil) -> LoupeViewState {
-        guard cropTool.isActive, state.mode == .actual,
+        guard clampsCropCamera, cropTool.isActive, state.mode == .actual,
               let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return state }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
