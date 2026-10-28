@@ -185,6 +185,8 @@ public final class CropToolController {
     public private(set) var lastHandle: CropToolHandle?
 
     private weak var session: CatalogSession?
+    /// 087 — the geometry the tool was entered with (Esc's target, see `cancel()`).
+    private var entryGeometry: GeometryGroup?
     private var drag: CropToolDrag?
     private var rotating = false
     private var rotateStart: Double = 0
@@ -257,6 +259,11 @@ public final class CropToolController {
     public func begin() -> Bool {
         guard !isActive, let session else { return false }
         draft = Draft(geometry: session.edit.geometry)
+        // 087 — the state Esc has to come back to. `转动` writes the document on every tick, and a
+        // released drag closes/reopens the tool session (one row per gesture), so by the time Esc
+        // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
+        // this tool was entered with is what makes 「除非 esc 取消回退」 true after several drags.
+        entryGeometry = session.edit.geometry
         isActive = true
         isDragging = false
         drag = nil
@@ -300,6 +307,12 @@ public final class CropToolController {
         // 077: zero rows, and (for a tool whose bar can write mid-session, e.g. the flips) the
         // document goes back to the state the session started from.
         session?.cancelToolSession()
+        // 087: rows a released 转动 gesture already wrote are outside that session; put the geometry
+        // back to what it was when the tool was entered, as one undoable row.
+        if let session, let entry = entryGeometry, session.edit.geometry != entry {
+            session.applyEdit { $0.geometry = entry }
+            _ = session.commitEdit(label: "变换 · 取消", coalesce: false)
+        }
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         cancelledCount += 1
     }

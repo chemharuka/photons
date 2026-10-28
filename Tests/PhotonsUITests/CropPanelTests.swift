@@ -227,6 +227,39 @@ final class CropPanelTests: XCTestCase {
               + " · history \(session.history.snapshots.count)")
     }
 
+    /// 087 §6 (the half `转动` made necessary): once a drag has been **released**, its row is already
+    /// in the history and the tool session that owned it has been closed and reopened. Esc must still
+    /// put the geometry back to what it was when 变换 was entered — as one undoable row, because the
+    /// earlier row is history and history is not rewritten.
+    func testEscapeRevertsAfterAReleasedTurnDrag() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let session = editor.session
+        let loupe = editor.rootView.loupeController
+        let straightenBefore = session.edit.geometry.straightenDegrees
+        let historyBefore = session.history.snapshots.count
+
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        CropUITestSupport.pump(0.2)
+        XCTAssertTrue(loupe.isCropToolActive)
+
+        loupe.cropTool.setStraightenLive(5.0)
+        XCTAssertTrue(loupe.cropTool.commitStraighten(), "松手提交一行")
+        XCTAssertEqual(session.edit.geometry.straightenDegrees, 5.0, accuracy: 1e-9)
+        XCTAssertGreaterThan(session.history.snapshots.count, historyBefore)
+
+        loupe.cancelCropTool()
+        CropUITestSupport.pump(0.2)
+        XCTAssertEqual(session.edit.geometry.straightenDegrees, straightenBefore, accuracy: 1e-9,
+                       "Esc 必须在松手之后也回到进入前的角度")
+        XCTAssertEqual(session.history.snapshots.last?.label, "变换 · 取消",
+                       "回退本身是一条可撤销的记录，旧记录不被改写")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 2,
+                       "一条是那次转动，一条是这次回退")
+        print("087 §6b · straighten \(session.edit.geometry.straightenDegrees)"
+              + " · history \(session.history.snapshots.count)")
+    }
+
     // MARK: - finding the shipped views
 
     private static func probe(_ rowID: String, in root: NSView) -> CropRowProbe? {
