@@ -30,6 +30,8 @@ public enum ExportPresetError: LocalizedError {
     case badQuality(Double)
     case badBitDepth(Int)
     case badLongEdge(Int)
+    case hdrRequiresHEIC(String)
+    case badHDRHeadroom(Double)
     case emptyNameTemplate
     case unreadable(URL, String)
 
@@ -43,10 +45,85 @@ public enum ExportPresetError: LocalizedError {
             return "bit depth must be 8 or 16, got \(b)"
         case .badLongEdge(let px):
             return "longEdge must be a positive pixel count, got \(px)"
+        case .hdrRequiresHEIC(let f):
+            return "HDR export needs HEIC (gain maps live in the HEIF container), got \(f)"
+        case .badHDRHeadroom(let h):
+            return "HDR manual headroom must be ≥ 1.05, got \(h)"
         case .emptyNameTemplate:
             return "nameTemplate is empty — the files would all be called '.jpg'"
         case .unreadable(let url, let why):
             return "could not read the preset at \(url.path): \(why)"
+        }
+    }
+}
+
+// MARK: - HDR export (100)
+
+/// HDR export = a normal SDR HEIC plus a **gain map** auxiliary image that lets a reader reconstruct
+/// the extended-range picture. Only HEIC can carry one, so `ExportPreset.validated()` rejects it on
+/// every other format instead of silently writing an SDR file.
+///
+/// The structure mirrors the two working spellings of ISO 21496-1 / Apple's HDR gain map:
+/// ISO RGB (per-channel ratio, `HDRToneMap/1.0` XMP inside `ISOGainMap`) and Apple monochrome
+/// (`HDRGainMap/1.0` + MakerNote 33/48). `mono` is the ISO single-channel spelling. The reason there
+/// are three and not one is that a reader's decoder is chosen by the auxiliary type and the
+/// metadata namespace, not by preference.
+public struct HDRExport: Sendable, Codable, Equatable {
+
+    public enum GainMap: String, Sendable, Codable, CaseIterable {
+        /// ISO 21496-1 RGB ratio (ImageIO writes it as `ISOGainMap` + `HDRToneMap/1.0` XMP).
+        case iso
+        /// Apple's `HDRGainMap` namespace + MakerNote 33/48 (a Rec.709-shaped monochrome ratio,
+        /// exactly what toGainMapHDR's `-g` writes).
+        case apple
+        /// ISO single-channel luminance ratio (`L8`).
+        case mono
+
+        public var displayName: String {
+            switch self {
+            case .iso: return "ISO RGB"
+            case .apple: return "Apple"
+            case .mono: return "ISO mono"
+            }
+        }
+    }
+
+    /// `auto` measures the picture; `manual` fixes the ratio the map is normalized by (1.05…64).
+    public enum Headroom: Sendable, Equatable {
+        case auto
+        case manual(Double)
+    }
+
+    public var enabled: Bool
+    public var gainMap: GainMap
+    /// Half-size gain map (`-H` in toGainMapHDR). The SDR base is never resized.
+    public var halfSize: Bool
+    public var headroom: Headroom
+
+    public init(enabled: Bool = true, gainMap: GainMap = .iso, halfSize: Bool = false,
+                headroom: Headroom = .auto) {
+        self.enabled = enabled
+        self.gainMap = gainMap
+        self.halfSize = halfSize
+        self.headroom = headroom
+    }
+}
+
+extension HDRExport.Headroom: Codable {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self), s.lowercased() == "auto" {
+            self = .auto
+            return
+        }
+        self = .manual(try c.decode(Double.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .auto: try c.encode("auto")
+        case .manual(let value): try c.encode(value)
         }
     }
 }
@@ -73,6 +150,8 @@ public struct ExportPreset: Sendable, Equatable {
     /// 8 or 16 bits per channel. Coerced to 8 for formats that cannot carry 16 (JPEG, AVIF).
     public var bitDepth: Int
     public var colorSpace: OutputPrimaries
+    /// 100 — HEIC + gain map. `nil`/disabled = the exact pre-HDR export path.
+    public var hdr: HDRExport?
     /// Embed `crs:`/`photons:` XMP into the exported copy (a sidecar when the container cannot
     /// carry it). Off by default: a JPEG for the web should not carry a 4 KB metadata blob unless
     /// the user asked for it.
@@ -88,6 +167,7 @@ public struct ExportPreset: Sendable, Equatable {
                 quality: Double = 0.92,
                 bitDepth: Int = 8,
                 colorSpace: OutputPrimaries = .sRGB,
+                hdr: HDRExport? = nil,
                 writeXMP: Bool = false,
                 sharpen: OutputSharpening? = nil,
                 nameTemplate: String = "{name}") {
@@ -97,6 +177,7 @@ public struct ExportPreset: Sendable, Equatable {
         self.quality = quality
         self.bitDepth = bitDepth
         self.colorSpace = colorSpace
+        self.hdr = hdr
         self.writeXMP = writeXMP
         self.sharpen = sharpen
         self.nameTemplate = nameTemplate
@@ -112,8 +193,12 @@ public struct ExportPreset: Sendable, Equatable {
     }
 
     public var exportOptions: ExportOptions {
-        ExportOptions(format: format, quality: quality, bitDepth: effectiveBitDepth)
+        ExportOptions(format: format, quality: quality, bitDepth: effectiveBitDepth,
+                      hdr: hdr?.enabled == true ? hdr : nil)
     }
+
+    /// True when this preset asks for the HDR path (HEIC + gain map).
+    public var isHDR: Bool { hdr?.enabled == true && format == .heic }
 
     /// Scale to render at so the content's long edge becomes `longEdge` (never above 1).
     public func renderScale(content: ImageSize) -> Double {
@@ -126,6 +211,9 @@ public struct ExportPreset: Sendable, Equatable {
                      colorSpace.displayName,
                      "\(effectiveBitDepth)-bit"]
         if format.supportsQuality { parts.append(String(format: "q%.2f", quality)) }
+        if let hdr, hdr.enabled, format == .heic {
+            parts.append("hdr " + hdr.gainMap.rawValue + (hdr.halfSize ? " half" : ""))
+        }
         if writeXMP { parts.append("xmp") }
         if let sharpen, sharpen.isEnabled {
             parts.append(String(format: "sharpen %.2f/%.1fpx", sharpen.amount, sharpen.radius))
@@ -142,6 +230,14 @@ public struct ExportPreset: Sendable, Equatable {
             throw ExportPresetError.emptyNameTemplate
         }
         if let longEdge, longEdge <= 0 { throw ExportPresetError.badLongEdge(longEdge) }
+        if let hdr, hdr.enabled {
+            guard format == .heic else {
+                throw ExportPresetError.hdrRequiresHEIC(format.rawValue)
+            }
+            if case .manual(let h) = hdr.headroom, h < 1.05 {
+                throw ExportPresetError.badHDRHeadroom(h)
+            }
+        }
         return self
     }
 
@@ -179,7 +275,7 @@ public struct ExportPreset: Sendable, Equatable {
 extension ExportPreset: Codable {
 
     enum CodingKeys: String, CodingKey {
-        case name, format, longEdge, quality, bitDepth, colorSpace, writeXMP, sharpen, nameTemplate
+        case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +292,7 @@ extension ExportPreset: Codable {
         self.quality = try c.decodeIfPresent(Double.self, forKey: .quality) ?? 0.92
         self.bitDepth = try c.decodeIfPresent(Int.self, forKey: .bitDepth) ?? 8
         self.colorSpace = OutputPrimaries(presetName: rawSpace) ?? .sRGB
+        self.hdr = try c.decodeIfPresent(HDRExport.self, forKey: .hdr)
         self.writeXMP = try c.decodeIfPresent(Bool.self, forKey: .writeXMP) ?? false
         self.sharpen = try c.decodeIfPresent(OutputSharpening.self, forKey: .sharpen)
         self.nameTemplate = try c.decodeIfPresent(String.self, forKey: .nameTemplate) ?? "{name}"
@@ -209,6 +306,9 @@ extension ExportPreset: Codable {
         try c.encode(quality, forKey: .quality)
         try c.encode(bitDepth, forKey: .bitDepth)
         try c.encode(colorSpace.rawValue, forKey: .colorSpace)
+        // Encoded only when present, so a preset written before 100 is byte-identical (`git diff`
+        // clean in tests that round-trip the old fixture).
+        try c.encodeIfPresent(hdr, forKey: .hdr)
         try c.encode(writeXMP, forKey: .writeXMP)
         try c.encodeIfPresent(sharpen, forKey: .sharpen)
         try c.encode(nameTemplate, forKey: .nameTemplate)

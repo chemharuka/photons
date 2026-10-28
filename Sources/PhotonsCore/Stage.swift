@@ -290,17 +290,29 @@ public struct DisplayOptions: Sendable, Equatable {
     /// one number, not a change to S4, S2, the key chain and every golden
     /// (docs/architecture-decisions.md §11.8, item 3).
     public var headroom: Double
+    /// **HDR export only.** Ask S4 for the linear picture instead of the display encoding: the
+    /// primaries matrix still runs, but the sRGB OETF and the `min(v, headroom)` clamp do not.
+    ///
+    /// `false` is the shipped path and is byte-identical to the pre-HDR output (`keyString` keeps its
+    /// exact old spelling, so every recorded golden and cache key is untouched). `true` is only set
+    /// by `GainMapHEIC`'s caller, which needs extended-range linear pixels to compute a gain map; the
+    /// readback is therefore a linear `DisplayImage` whose values may exceed 1.
+    public var linearOutput: Bool
 
-    public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8, headroom: Double = 1) {
+    public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8, headroom: Double = 1,
+                linearOutput: Bool = false) {
         self.primaries = primaries
         self.bitDepth = bitDepth
         self.headroom = headroom
+        self.linearOutput = linearOutput
     }
 
     public var keyString: String {
         // Headroom changes the pixels, so it must change the key; "%.3f" keeps 1.0 == "1.000"
-        // across processes and avoids 1 vs 1.0000000001 style churn.
-        String(format: "%@;bits=%d;headroom=%.3f", primaries.rawValue, bitDepth, headroom)
+        // across processes and avoids 1 vs 1.0000000001 style churn. The linear suffix is appended
+        // **only** when the flag is on, so the default key text is byte-identical to before 100.
+        let base = String(format: "%@;bits=%d;headroom=%.3f", primaries.rawValue, bitDepth, headroom)
+        return linearOutput ? base + ";linear=true" : base
     }
 }
 
