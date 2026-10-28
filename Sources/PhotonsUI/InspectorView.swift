@@ -764,7 +764,8 @@ public struct InspectorView: View {
     /// takes no snapshot and moves no revision. The three sliders write through `applyEdit` on drag and
     /// commit once on release, like every other row.
     private var hslCard: some View {
-        let band = min(max(workspaces.hslBand, 0), ColorGroup.bandCount - 1)
+        // 101: the ninth cell (全局) is index `ColorGroup.bandCount`; the eight bands keep 0…7.
+        let band = min(max(workspaces.hslBand, 0), ColorGroup.bandCount)
         return card(Section.hsl.title, reset: { resets.hsl() }) {
             VStack(alignment: .leading, spacing: 6) {
                 HSLBandStrip(selection: band) { workspaces.selectBand($0) }
@@ -783,21 +784,37 @@ public struct InspectorView: View {
         }
     }
 
-    /// `color.bands[band].hue/saturation/luminance` as a slider binding.
+    /// `color.bands[band].hue/saturation/luminance` as a slider binding; band 8 is `color.global`
+    /// (101, 「全局」), the same three axes across every hue.
     ///
     /// A closure, not a key path: the band index is view state, and `\EditModel.color.bands[i].hue`
     /// cannot be written as a `WritableKeyPath`. The read side is the document's own value (no draft
     /// copy), so the number on screen is the number the kernel is handed.
     private func hslBinding(_ axis: HSLAxis, band: Int) -> Binding<Double> {
         Binding(get: {
-            guard session.edit.color.bands.indices.contains(band) else { return 0 }
+            let value: HSLBand?
+            if band == ColorGroup.bandCount {
+                value = session.edit.color.global
+            } else if session.edit.color.bands.indices.contains(band) {
+                value = session.edit.color.bands[band]
+            } else {
+                value = nil
+            }
             switch axis {
-            case .hue: return session.edit.color.bands[band].hue
-            case .saturation: return session.edit.color.bands[band].saturation
-            case .luminance: return session.edit.color.bands[band].luminance
+            case .hue: return value?.hue ?? 0
+            case .saturation: return value?.saturation ?? 0
+            case .luminance: return value?.luminance ?? 0
             }
         }, set: { value in
             session.applyEdit { model in
+                if band == ColorGroup.bandCount {
+                    switch axis {
+                    case .hue: model.color.global.hue = value
+                    case .saturation: model.color.global.saturation = value
+                    case .luminance: model.color.global.luminance = value
+                    }
+                    return
+                }
                 guard model.color.bands.indices.contains(band) else { return }
                 switch axis {
                 case .hue: model.color.bands[band].hue = value
@@ -2638,20 +2655,25 @@ public struct PanelResets {
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
     @discardableResult
     public func hsl() -> Bool {
-        guard session.edit.color.hasBands else { return false }
-        session.applyEdit { $0.color.bands = ColorGroup.identityBands }
+        guard session.edit.color.hasBands || session.edit.color.hasGlobal else { return false }
+        session.applyEdit {
+            $0.color.bands = ColorGroup.identityBands
+            $0.color.global = HSLBand()
+        }
         return session.commitEdit(label: InspectorView.Section.hsl.title)
     }
 
     /// Double-click on one of the HSL card's three rows: **that** band's field back to 0 (its own
-    /// default — `HSLBand()` is all zeros, which is "this band does nothing"), one snapshot.
+    /// default — `HSLBand()` is all zeros, which is "this band does nothing"), one snapshot. Band 8 is
+    /// 全局 (101), the same three fields on `color.global`.
     ///
     /// The band index is view state, so it is an argument here rather than something this type could
     /// look up: the row the user double-clicked is the row the panel drew.
     @discardableResult
     public func hslField(_ band: Int, _ axis: HSLAxis) -> Bool {
-        guard session.edit.color.bands.indices.contains(band) else { return false }
-        let current = session.edit.color.bands[band]
+        let isGlobal = band == ColorGroup.bandCount
+        guard isGlobal || session.edit.color.bands.indices.contains(band) else { return false }
+        let current = isGlobal ? session.edit.color.global : session.edit.color.bands[band]
         let already: Bool
         switch axis {
         case .hue: already = current.hue == 0
@@ -2660,6 +2682,14 @@ public struct PanelResets {
         }
         guard !already else { return false }
         session.applyEdit { model in
+            if isGlobal {
+                switch axis {
+                case .hue: model.color.global.hue = 0
+                case .saturation: model.color.global.saturation = 0
+                case .luminance: model.color.global.luminance = 0
+                }
+                return
+            }
             guard model.color.bands.indices.contains(band) else { return }
             switch axis {
             case .hue: model.color.bands[band].hue = 0

@@ -45,19 +45,20 @@ final class HSLPanelTests: XCTestCase {
         XCTAssertEqual(HSLAxis.range, -100...100)
     }
 
-    func testTheEightSelectorsAreOnScreenInTheirOwnColours() throws {
+    func testTheNineSelectorsAreOnScreenInTheirOwnColours() throws {
         let panel = try host(width: 330, state: .init(.colour, hslBand: 4))
         defer { panel.close() }
         let probes = panel.bandProbes
-        XCTAssertEqual(probes.count, 8, "eight bands, or the selector is not a selector")
-        XCTAssertEqual(probes.map(\.title), HSLAxis.bandNames)
-        XCTAssertEqual(probes.map(\.band), Array(0..<8))
+        XCTAssertEqual(probes.count, 9, "eight bands + 全局, or the selector is not a selector")
+        XCTAssertEqual(probes.map(\.title), HSLAxis.bandNames + [HSLAxis.globalName])
+        XCTAssertEqual(probes.map(\.band), Array(0..<9))
         XCTAssertEqual(probes.filter(\.isSelected).map(\.band), [4],
                        "exactly the selected band is drawn as selected")
 
-        func rgb(_ c: NSColor) -> (Double, Double, Double) {
+        func rgb(_ c: NSColor) -> (Double, Double, Double, Double) {
             let s = c.usingColorSpace(.sRGB) ?? c
-            return (Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent))
+            return (Double(s.redComponent), Double(s.greenComponent),
+                    Double(s.blueComponent), Double(s.alphaComponent))
         }
         let red = rgb(probes[0].swatch), green = rgb(probes[3].swatch), blue = rgb(probes[5].swatch)
         print("HSL SWATCH · 红 \(red) · 绿 \(green) · 蓝 \(blue)")
@@ -67,6 +68,15 @@ final class HSLPanelTests: XCTestCase {
         XCTAssertGreaterThan(green.1, green.2 + 0.10)
         XCTAssertGreaterThan(blue.2, blue.0 + 0.10, "the blue dot must read blue")
         XCTAssertGreaterThan(blue.2, blue.1 + 0.10)
+
+        // 101: the ninth cell's **background** is pure white — RGBA exactly (1, 1, 1, 1).
+        let white = rgb(probes[8].backgroundColor)
+        XCTAssertEqual(white.0, 1, accuracy: 1e-9, "全局 must be white")
+        XCTAssertEqual(white.1, 1, accuracy: 1e-9)
+        XCTAssertEqual(white.2, 1, accuracy: 1e-9)
+        XCTAssertEqual(white.3, 1, accuracy: 1e-9)
+        XCTAssertEqual(probes[8].title, "全局")
+        XCTAssertEqual(probes[8].band, 8)
     }
 
     /// **The three widths.** Each of the eight cells keeps a real, non-degenerate frame, they sit on one
@@ -79,7 +89,7 @@ final class HSLPanelTests: XCTestCase {
                            "\(width) pt: the colour workspace shows HSL then 色彩分级")
 
             let probes = panel.bandProbes
-            XCTAssertEqual(probes.count, 8, "\(width) pt: eight selectors")
+            XCTAssertEqual(probes.count, 9, "\(width) pt: nine selectors")
             let frames = panel.bandFrames
             let widths = frames.map(\.width)
             let narrowest = widths.min() ?? 0
@@ -89,7 +99,7 @@ final class HSLPanelTests: XCTestCase {
             XCTAssertEqual(tallest, HSLBandStrip.height, accuracy: 0.5,
                            "\(width) pt: the strip must keep its \(HSLBandStrip.height) pt height")
             let tops = Set(frames.map { ($0.maxY * 10).rounded() })
-            XCTAssertEqual(tops.count, 1, "\(width) pt: the eight cells must sit on one row")
+            XCTAssertEqual(tops.count, 1, "\(width) pt: the nine cells must sit on one row")
             for f in frames {
                 XCTAssertGreaterThanOrEqual(f.minX, -0.5, "\(width) pt: a cell starts off-panel")
                 XCTAssertLessThanOrEqual(f.maxX, width + 0.5, "\(width) pt: a cell runs past the panel")
@@ -134,7 +144,7 @@ final class HSLPanelTests: XCTestCase {
         XCTAssertEqual(panel.session.editRevision, revision)
         XCTAssertEqual(panel.session.history.count, snapshots)
         panel.state.selectBand(99)
-        XCTAssertEqual(panel.state.hslBand, 7, "out of range clamps instead of crashing")
+        XCTAssertEqual(panel.state.hslBand, 8, "out of range clamps to 全局 instead of crashing")
         panel.state.selectBand(-3)
         XCTAssertEqual(panel.state.hslBand, 0)
     }
@@ -174,8 +184,34 @@ final class HSLPanelTests: XCTestCase {
               + " · other seven identity · history \(panel.session.history.count) snapshots")
     }
 
-    // MARK: - harness
+    /// 101 — selecting the ninth cell binds the same three rows to `color.global`, and a keystroke
+    /// writes that triplet — not band 7 and not any of the eight bands.
+    func testSelectingGlobalBindsTheThreeRowsToTheGlobalTriplet() throws {
+        let panel = try host(width: 330, state: .init(.colour, hslBand: 8))
+        defer { panel.close() }
+        XCTAssertEqual(panel.bandProbes.filter(\.isSelected).map(\.band), [8])
 
+        let seed = HSLBand(hue: -17, saturation: 23, luminance: -8)
+        panel.session.applyEdit { $0.color.global = seed }
+        panel.session.commitEdit(label: "seed")
+        panel.pump()
+        XCTAssertTrue(Set(panel.numberFields.map(\.stringValue)).isSuperset(of: ["-17", "23", "-8"]),
+                      "the rows must print the global triplet")
+
+        try panel.type("40", intoFieldShowing: "-17")     // 全局 色相
+        XCTAssertEqual(panel.session.edit.color.global.hue, 40)
+        try panel.type("55", intoFieldShowing: "23")      // 全局 饱和
+        XCTAssertEqual(panel.session.edit.color.global.saturation, 55)
+        try panel.type("-30", intoFieldShowing: "-8")     // 全局 亮度
+        XCTAssertEqual(panel.session.edit.color.global.luminance, -30)
+        for i in 0..<ColorGroup.bandCount {
+            XCTAssertEqual(panel.session.edit.color.bands[i], HSLBand(),
+                           "band \(i) must not have moved from a 全局 edit")
+        }
+        print("HSL GLOBAL ROWS · " + panel.session.edit.color.global.keyString)
+    }
+
+    // MARK: - harness
     private struct Panel {
         let host: NSHostingView<InspectorView>
         let window: NSWindow
