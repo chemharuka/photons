@@ -1320,12 +1320,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // topmost chrome), and hidden until 裁切 mode is on.
         container.addSubview(cropBar)
         cropBar.isHidden = true
+        // 082: the bar is **three read-only numbers** now — no apply/cancel, no slider, no flips. The
+        // controls (and the draft's own write paths) live in the 裁切 card, so there is nothing for
+        // the canvas to wire back beyond the controller it reads.
         cropBar.controller = cropTool
-        cropBar.onApply = { [weak self] in self?.applyCropTool() }
-        cropBar.onCancel = { [weak self] in self?.cancelCropTool() }
-        cropBar.onChange = { [weak self] in
-            self?.refreshCropTool()
-            self?.requestEditRender()
+        // 082: the card is the control surface now, so a draft edit it makes has to reach the canvas —
+        // the overlay's frame and the bar's three readouts are redrawn on the same tick, and one render
+        // is asked for (a straighten moves the picture).
+        cropTool.onDraftChange = { [weak self] in
+            guard let self else { return }
+            self.refreshCropTool()
+            self.requestEditRender()
         }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
@@ -1582,8 +1587,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func zoomToActualSize(aroundView point: CGPoint?) {
         guard let framing = framing() else { return }
         pinchZoom = nil
+        // 082: 1:1 is a *stop* like any other — a crop session whose frame is smaller than the canvas
+        // at 1:1 stops at the frame-inscribed level instead.
+        let target = min(1, cropZoomLimit() ?? Double.infinity)
         let anchor = point ?? canvasCentrePoint()
-        setViewState(framing.zooming(viewState, to: 1, aroundView: anchor, backingScale: backingScale),
+        setViewState(framing.zooming(viewState, to: target, aroundView: anchor, backingScale: backingScale),
                      anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
     }
 
@@ -1685,7 +1693,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func zoom(to stop: Double, aroundView point: CGPoint?) {
         guard let framing = framing() else { return }
         pinchZoom = nil
-        let target = LoupeViewState.snappedLevel(for: LoupeViewState.clampZoom(stop)).zoom
+        // 082: a crop session's ceiling is 「框恰好内接于画布」 — clamped **before** the anchor maths,
+        // so the pixel under the cursor is kept for the zoom that actually lands.
+        let ladder = LoupeViewState.snappedLevel(for: LoupeViewState.clampZoom(stop)).zoom
+        let target = min(ladder, cropZoomLimit() ?? Double.infinity)
         let anchor = point ?? canvasCentrePoint()
         setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
                                      backingScale: backingScale),
@@ -1782,14 +1793,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The floor of the ladder is 25 %, and 25 % is where a pinch out stops: `fit` is a different
         // mode, entered by its own action, so a gesture cannot slide the camera into it by accident.
         let level = LoupeViewState.snappedLevel(for: raw)
-        let target = level.zoom
+        // 082: a crop session's pinch stops at 「框恰好内接于画布」 (the accumulator keeps running, so a
+        // pinch back in leaves on the next event).
+        let target = min(level.zoom, cropZoomLimit() ?? Double.infinity)
         let next = framing.zooming(viewState, to: target, aroundView: point, backingScale: backingScale)
         pinchZoom = raw
         setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale))
     }
 
-    private func setViewState(_ next: LoupeViewState, anchor: LoupeZoomAnchor = .center,
+    private func setViewState(_ requested: LoupeViewState, anchor: LoupeZoomAnchor = .center,
                               forceAnimation: Bool = false) {
+        // 082 — **the** one gate: every camera change (wheel, pinch, pill, ⌘=/⌘−, double-click, drag
+        // pan, two-finger scroll, the crop entry's own `zoomToFit`) is written on the two lines below,
+        // so a crop session's 「裁切框 ⊆ 画布」 is decided here and nowhere else. Outside 裁切 mode, and
+        // for `.fit`, this is the identity — which is what makes the clamp belong to the tool only.
+        let next = clampedToCropCanvas(requested)
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
@@ -3290,6 +3308,46 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return true
     }
 
+    /// 082 — the card's section resets (and its title) write the document; the frame on screen is the
+    /// draft, so it is re-seeded from the new document and re-laid-out in the same turn.
+    public func afterCropGeometryReset() {
+        cropTool.reseedDraftFromDocument()
+        if cropTool.isActive {
+            refreshCropTool()
+            requestEditRender()
+        }
+    }
+
+    /// With this `false`, the workspace stops driving the mode — 082's anti-proof. A test flips it to
+    /// show that 「切到变换 → 选框出现」 goes red without the hook; nothing in the app touches it.
+    var workspaceDrivesCropMode = true
+
+    /// 082 — the **workspace** drives the mode: seeing the 裁切 card (变换) *is* being in 裁切 mode;
+    /// leaving that workspace (or clicking another card) ends it.
+    ///
+    /// The user's words: 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框。离开裁切模式也退出裁切选框」.
+    /// So the two entry points the mode always had (the 直角尺 icon, ⌘R) are kept — they are the explicit
+    /// "same mode, again" shortcuts — and this adds the third one: the card being on screen.
+    ///
+    /// It is still **view state**: `beginCropTool` / `cancelCropTool` write neither the document nor
+    /// the history (the acceptance asserts `documentHash` / `history.count` / `editRevision`), and
+    /// leaving 变换 *cancels* rather than applies — a workspace switch is not the user saying 「应用」.
+    ///
+    /// Silently does nothing when there is nothing to crop (no anchor, not in 单图 mode): a workspace
+    /// click must not beep because the library is still loading.
+    @discardableResult
+    public func setCropWorkspaceActive(_ active: Bool) -> Bool {
+        guard workspaceDrivesCropMode else { return false }
+        if active {
+            guard !cropTool.isActive else { return false }
+            guard let session, session.mode == .loupe, session.anchorAsset != nil else { return false }
+            return beginCropTool()
+        }
+        guard cropTool.isActive else { return false }
+        cancelCropTool()
+        return true
+    }
+
     /// ↵ (and 双击框内): the draft becomes the document, once.
     @discardableResult
     public func applyCropTool() -> Bool {
@@ -3408,10 +3466,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if inSession { session.endToolSession(label: "裁切与旋转") }
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-        guard turned else { return false }
+        guard turned else {
+            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+            return false
+        }
+        // **The row is committed before the crop session is reopened.** `commitEdit` answers `nil`
+        // inside a tool session (077: the session owns the next snapshot), so committing after the
+        // reopen wrote nothing — and the turn then lived only in memory until 应用, which is the
+        // 「点了一下没反应」 a crop session showed (082 measured it: `quarterTurns` stayed 0 and the
+        // history gained no row). Writing the row first is also what P0-10 promised: one press,
+        // one snapshot, with or without the frame up.
         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
-                                          coalesce: false)
+                                           coalesce: false)
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
         return committed
@@ -3582,6 +3649,75 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // ④ — the draft's own geometry (拉直 / 裁切 / 翻转) is part of the document the low-resolution
         // whole picture is made from, so a change to it retires the cached one.
         noteBackdropKeyMoved()
+    }
+
+    // MARK: 082 (追加) — 裁切模式的相机边界：任何时候「裁切框 ⊆ 画布」
+    //
+    // 用户 2026-10-28 的两条追加要求合成一条不变式：裁切模式下缩放不许把裁切框放大到画布之外，平移
+    // 不许把裁切框推出画布；越界的请求不是被弹回、不是被惯性吃掉，而是**钳住**（缩放停在
+    // `maxZoom`，平移停在框贴边的那一格）。几何全部在 `CropCanvasClamp` 里，这里只做三件事：
+    //
+    //   · 把草稿的四条边（源像素）交给它 —— `cropFrameRect`；
+    //   · 在相机写入的唯一入口（`setViewState`）套用它 —— 滚轮、捏合、pill、⌘=/⌘−、双击、拖拽平移、
+    //     两指滚动全都经过那一行，所以没有第二条路径能绕过；
+    //   · 在**算锚点之前**先把请求的 zoom 钳住（`zoom(to:)` / `zoomToActualSize` / `magnify`），否则
+    //     指针锚定算的是用户请求的那个级别，落地却是另一个。
+    //
+    // 框**不动**：被挪的是画面（相机的 centre）。这与 ⑦ `clampToView` 不同，⑦ 是「框太大→缩小框」的
+    // 兜底（拖手柄仍需要它），这里是把相机挡在「框刚好内接于画布」那一级之前。
+
+    /// With this `false`, the crop session's camera clamp does nothing — 082 (追加)'s anti-proof. A test
+    /// flips it to show that 「框 ⊆ 画布」 and 「钳位后不再变化」 go red without it; the app never does.
+    var clampsCropCamera = true
+
+    /// The crop frame in **source pixels** — the four edges the draft is drawing right now.
+    public func cropFrameRect(source: ImageSize? = nil) -> CGRect? {
+        guard cropTool.isActive else { return nil }
+        let src = source ?? cropSourceSize
+        let w = Double(max(src.width, 1)), h = Double(max(src.height, 1))
+        let c = cropTool.effectiveCrop(source: src)
+        return CGRect(x: c.left * w, y: c.top * h, width: c.width * w, height: c.height * h)
+    }
+
+    /// 「框恰好内接于画布」那一级 —— 裁切模式允许的最大缩放（canvas px per source px）。
+    ///
+    /// Not a constant: the canvas' size and the frame's size both enter, so a resized window, an
+    /// anchored pan and a dragged handle all move it. `nil` when there is no frame to measure (the
+    /// tool is off) or the projection is degenerate.
+    public func cropZoomLimit(viewport: ImageSize? = nil) -> Double? {
+        guard clampsCropCamera else { return nil }
+        guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
+        let canvas = CGSize(width: Double(framing.viewport.width),
+                            height: Double(framing.viewport.height))
+        let limit = CropCanvasClamp.maxZoom(canvas: canvas, frame: frame)
+        guard limit > 0 else { return nil }
+        return min(limit, LoupeViewState.maximumZoom)
+    }
+
+    /// A requested camera, as the crop session allows it: zoom clamped to `cropZoomLimit`, then the
+    /// window centre moved (never the frame) until the frame is back inside the canvas.
+    ///
+    /// The identity outside 裁切 mode, and the identity for `.fit` (at fit the whole frame is
+    /// inscribed in the viewport by construction, so there is nothing to clamp). That is what makes
+    /// 「退出裁切后缩放/平移恢复自由」 true without a second rule.
+    public func clampedToCropCanvas(_ state: LoupeViewState,
+                                    viewport: ImageSize? = nil) -> LoupeViewState {
+        guard clampsCropCamera, cropTool.isActive, state.mode == .actual,
+              let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return state }
+        let canvas = CGSize(width: Double(framing.viewport.width),
+                            height: Double(framing.viewport.height))
+        let limit = min(CropCanvasClamp.maxZoom(canvas: canvas, frame: frame),
+                        LoupeViewState.maximumZoom)
+        guard limit > 0 else { return state }
+        var next = state
+        next.zoom = limit < LoupeViewState.minimumZoom
+            ? limit
+            : min(LoupeViewState.clampZoom(state.zoom), limit)
+        let centre = CropCanvasClamp.clampCenter(x: state.centerX, y: state.centerY,
+                                                 canvas: canvas, frame: frame, zoom: next.zoom)
+        next.centerX = centre.x
+        next.centerY = centre.y
+        return next
     }
 
     /// ⑦ — the model-layer clamp, run before anything reads the layout (and after any gesture that
@@ -6100,7 +6236,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func syncZoomSlider() {
         // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
         // *displayed* at its continuous position — it is never a snap target.
-        zoomSlider.update(zoomStop: currentZoomStop, fitZoom: framing()?.fitZoom)
+        //
+        // 082: `zoom` is the camera's own number, so a crop session's frame-inscribed ceiling (which is
+        // not a rung) prints as itself on the chip instead of the neighbouring stop's label.
+        zoomSlider.update(zoomStop: currentZoomStop, fitZoom: framing()?.fitZoom,
+                          zoom: viewState.isActualSize ? viewState.zoom : nil)
     }
 
     /// Slider-originated zoom: **always around the canvas centre**.

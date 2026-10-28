@@ -172,19 +172,22 @@ final class TransformMenuTests: XCTestCase {
 
         let bar = loupe.cropBar
         bar.sync()
-        XCTAssertFalse(bar.toggleStyle("h").on)
+        // 082: the bar is three read-only numbers now — the flips live in the card's 镜像 section (and
+        // in the menu), and both read the document's own bits. So the "one field" chain is asserted on
+        // the document, the tool's verb and the loupe's readback that the card draws from.
+        XCTAssertFalse(loupe.isFlippedHorizontally)
+        XCTAssertEqual(bar.interactiveControlCount, 0, "082: 悬浮栏没有开关可读，只有三段信息")
 
-        // Tool path (what the card's chip calls through the loupe) → the bar's switch follows.
+        // Menu / card path (what the 镜像 chip calls through the loupe) → one document bit.
         loupe.flipHorizontal()
         bar.sync()
         XCTAssertTrue(session.edit.geometry.flipHorizontal, "the tool wrote the document")
-        XCTAssertTrue(bar.toggleStyle("h").on, "§F: the bar reads the document's bit, so it moved too")
+        XCTAssertTrue(loupe.isFlippedHorizontally, "§F: 镜像 chip reads the document's bit, so it moved too")
 
-        // Bar path → the document follows, and so does the card's read (`isFlippedHorizontally`).
+        // Tool path → the document follows, and so does the card's read.
         loupe.cropTool.toggleFlipHorizontal()
         bar.sync()
         XCTAssertFalse(session.edit.geometry.flipHorizontal)
-        XCTAssertFalse(bar.toggleStyle("h").on)
         XCTAssertFalse(loupe.isFlippedHorizontally)
 
         // 源码级证据: both doors write the same two bits through the same call, and nothing in the

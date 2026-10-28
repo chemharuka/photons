@@ -157,7 +157,17 @@ public final class CropToolController {
         didSet { if draft != oldValue { publishDraft() } }
     }
     /// 九宫格. View state, and the only toggle that does not touch the draft.
-    public var showsGrid = true
+    public var showsGrid = true {
+        didSet { if showsGrid != oldValue { draftChanged() } }
+    }
+
+    /// 082 — the canvas half of one draft edit, wired by `LoupeController`: the card writes the draft,
+    /// the loupe re-lays the overlay and the bar's readout and asks for one render. A callback and not a
+    /// `didSet` on `draft` on purpose: `refreshCropTool` → `clampToView` can write the draft back, and a
+    /// notification there would be a loop.
+    var onDraftChange: (() -> Void)?
+
+    private func draftChanged() { onDraftChange?() }
     public private(set) var isDragging = false
     /// True while a ⌘-drag is turning the picture rather than moving the frame.
     public var isRotatingPicture: Bool { rotating }
@@ -308,9 +318,20 @@ public final class CropToolController {
 
     // MARK: the draft's commands (never touch the document)
 
+    /// 082 — a section reset (or the card's title) wrote the **document** under an open tool: the draft
+    /// is a copy of that geometry, so it is re-seeded from the document and the frame on screen is the
+    /// frame that was just written (not the one the reset replaced).
+    ///
+    /// Not a write: the draft is still only the draft, and 应用 is still the only commit.
+    public func reseedDraftFromDocument() {
+        guard isActive, let session else { return }
+        draft = Draft(geometry: session.edit.geometry)
+    }
+
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
     public func setStraighten(_ degrees: Double) {
         draft.straighten = CropTool.clampStraighten(degrees)
+        draftChanged()
     }
 
     /// A ratio preset. The rect is reshaped **now** rather than at apply time, because the frame on
@@ -320,6 +341,7 @@ public final class CropToolController {
         let lock = preset.lock(source: source)
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        draftChanged()
     }
 
     /// Direct lock write (the tests' door, and what `setAspect` ends in).
@@ -327,6 +349,7 @@ public final class CropToolController {
         let source = source ?? sourceSize
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        draftChanged()
     }
 
     /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
@@ -379,9 +402,15 @@ public final class CropToolController {
         if inSession { session.endToolSession(label: "裁切与旋转") }
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-        guard turned else { return false }
+        guard turned else {
+            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+            return false
+        }
+        // The row first, then reopen: inside a tool session `commitEdit` answers `nil` (077 — the session
+        // owns the next snapshot), so committing after the reopen wrote nothing at all (082 measured it
+        // on the shipped path: one press left `quarterTurns` at 0 and added no row).
         session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         return true
     }
 
@@ -450,6 +479,7 @@ public final class CropToolController {
         let top = min(max(c.centerY - height / 2, 0), 1 - height)
         draft.lock = lock
         draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
+        draftChanged()
     }
 
     /// The current ratio, as the popup shows it.
@@ -699,7 +729,38 @@ public final class CropToolController {
     /// the pixel size, glued together by dots in one label — so the bar's width changed with the
     /// document and the numbers slid around as they were edited. Here each segment is its own string,
     /// and `CropToolBar` measures the worst case of each once and never lets it grow.
-    public func angleText() -> String { CropToolController.angleText(draft.straighten) }
+    /// 082 — **实际角度** = 滑块角度 + 90 × quarterTurns. What the bar's 角度 段 prints and what the card
+    /// calls 「实际角度」; the slider's own number is 「滑块角度」.
+    ///
+    /// The two are different facts and the user says so explicitly: 「注意角度有两个，一个是实际角度，
+    /// 一个是滑块角度。实际角度等于滑块角度 + 90 旋转两个之和」. A picture turned 90° clockwise has been
+    /// rotated by 90° whether or not the straighten slider was touched, so 0.0° on the slider and 90.0°
+    /// on the picture is not a contradiction — it is two numbers that add up.
+    ///
+    /// `quarterTurns` is the **document's** field (P0-10, the same one `tiff:Orientation` is written
+    /// from), so the readout follows ⌘[ / ⌘] / the card's two buttons with no second state.
+    public var sliderAngle: Double { draft.straighten }
+
+    /// 「实际角度」 in degrees: `straightenAngle + 90 × quarterTurns`, normalized turns only (0…3), so
+    /// four turns read as 0° again and the number never wanders off the 0…270 + ±45 domain.
+    public var actualAngle: Double {
+        draft.straighten + 90 * Double(GeometryGroup.normalizedQuarterTurns(quarterTurns))
+    }
+
+    /// The bar's 角度 段 — the **actual** angle (`+2.5°` on the slider, one 90° turn → `92.5°`).
+    public func angleText() -> String { Self.actualAngleText(draft.straighten, quarterTurns: quarterTurns) }
+
+    /// The card's 「滑块角度」 readout — the slider's own value, in the form the slider prints.
+    public func sliderAngleText() -> String { Self.angleText(draft.straighten) }
+
+    /// `92.5°` / `266.0°` / `-4.0°` — no leading `+`: an *actual* angle is a direction on a circle, and
+    /// a sign in front of 266° reads like an arithmetic term instead of a heading. The slider keeps its
+    /// `%+.1f°` form (it is a signed offset from zero).
+    public static func actualAngleText(_ straighten: Double, quarterTurns: Int) -> String {
+        let angle = CropTool.clampStraighten(straighten)
+            + 90 * Double(GeometryGroup.normalizedQuarterTurns(quarterTurns))
+        return String(format: "%.1f°", angle)
+    }
 
     /// `+2.5°` / `-45.0°` — the `%+.1f` form the slider has always printed (a leading `+` says
     /// "turned clockwise" without a legend).
@@ -731,8 +792,11 @@ public final class CropToolController {
     /// its fixed-width fields, and `CropBarLayoutTests` asserts that four extreme drafts produce the
     /// same `frame(x, width)` — so the constant lives next to the formatter that produces it.
     public enum WorstCase {
-        /// `-45.0°` — 6 characters, and the minus is the wide one of the two signs.
-        public static let angle = "-45.0°"
+        /// `315.0°` — 082: the field prints the **actual** angle, whose domain is
+        /// `straighten ±45` plus `0…270` of quarter turns, i.e. `-45.0°` … `315.0°`. Three digits (and
+        /// the minus end, `-45.0°`) are both six glyphs; the three-digit form is the wider one in the
+        /// monospaced-digit font the bar uses.
+        public static let angle = "315.0°"
         /// The widest `%.2f` a ratio can print: four integer digits and two decimals.
         public static let ratio = "9999.99"
         /// `9999×9999` — four digits per side and the multiplication sign.

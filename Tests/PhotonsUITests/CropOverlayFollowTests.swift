@@ -428,6 +428,13 @@ final class CropOverlayFollowTests: XCTestCase {
 
         // Before/after for the report: put the pill back where it used to live (the bottom-right
         // corner) and measure the same two rectangles. This is the overlap the move removes.
+        //
+        // 082: the bar lost its controls and is much narrower (three readouts, 320 pt), so at 1600 pt
+        // the old corner no longer meets it. The overlap the ② note is about is measured where it still
+        // happens — the narrowest window this harness can lay out — so the assertion keeps failing if
+        // the bar ever grows back into that corner.
+        window.setContentSize(NSSize(width: 1000, height: 700))
+        root.layoutSubtreeIfNeeded()
         loupe.zoomSlider.placement = .bottomRight
         loupe.zoomSlider.layout(in: loupe.view.bounds)
         let oldPill = loupe.zoomSlider.convert(loupe.zoomSlider.bounds, to: root)

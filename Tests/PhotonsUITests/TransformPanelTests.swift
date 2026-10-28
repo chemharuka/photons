@@ -88,12 +88,18 @@ final class TransformPanelTests: XCTestCase {
                                   "卡头没有直角尺按钮（CropModeButton 不在树上）")
         XCTAssertTrue(button.isEnabled, "有照片时直角尺必须是活的")
         XCTAssertNotNil(button.image, "直角尺的 SF Symbol 在本机解析不出来")
-        XCTAssertFalse(loupe.isCropToolActive, "切到「变换」**不**自动进裁切")
-        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "还没进裁切，overlay 不该在屏幕上")
-        XCTAssertFalse(inspector.isEditingGated,
-                       "「变换」工作区是裁切自己的面板：进裁切前不该被闸住")
+        // 082 (用户口径): 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框」——切到「变换」**就是**
+        // 进了裁切模式，所以直角尺这时已经是激活态，选框已经在屏上。
+        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
+        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "082: 自动进入后选框在屏上")
+        XCTAssertTrue(button.isOn, "082: 自动进入后直角尺是激活态")
+        XCTAssertFalse(inspector.isEditingGated, "「变换」工作区里侧栏必须还是活的")
 
-        // ① 点一下 = 进裁切模式，并且**框真的在屏幕上**。
+        // ① 再点一下直角尺 = 退出（显式开关保留），再点一下 = 重新进入并**框真的在屏幕上**。
+        button.performClick(nil)
+        pump(0.3)
+        XCTAssertFalse(loupe.isCropToolActive, "082: 直角尺仍是「再点一次退出」的开关")
+        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "退出后 overlay 不该还在屏幕上")
         DetailRowEnabledLog.shared.reset()
         button.performClick(nil)
         pump(0.3)
@@ -236,7 +242,8 @@ final class TransformPanelTests: XCTestCase {
         let loupe = editor.rootView.loupeController
         editor.rootView.inspectorWorkspaces.select(.transform)
         pump(0.2)
-        XCTAssertTrue(loupe.beginCropTool())
+        // 082: 切到「变换」就已经进了裁切模式，不需要再点一次。
+        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 自动进入裁切")
         pump(0.2)
 
         let inspector = editor.rootView.inspectorHost
@@ -334,9 +341,13 @@ final class TransformPanelTests: XCTestCase {
             try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
 
             let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")
-            let rows = [CropCardID.aspect, CropCardID.angle, CropCardID.switches, CropCardID.apply]
+            // 082: four sections → five probe rows (裁切 / 角度 / 旋转 / 镜像 / 应用+取消). The section
+            // titles have their own probes (`section.<title>`) and are measured in
+            // `CropCardSectionsTests`; here it is the rows inside them.
+            let rows = [CropCardID.aspect, CropCardID.angle, CropCardID.turn,
+                        CropCardID.mirror, CropCardID.apply]
                 .compactMap { id in panel.row(id).map { (id, $0) } }
-            XCTAssertEqual(rows.count, 4, "\(width) pt：四行里少了（\(rows.map(\.0))）")
+            XCTAssertEqual(rows.count, 5, "\(width) pt：五行里少了（\(rows.map(\.0))）")
 
             // 每行都在卡片里，而且有宽度。
             for (id, frame) in rows {

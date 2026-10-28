@@ -248,6 +248,17 @@ public struct InspectorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .task(id: metadataKey) { reloadMetadata() }
+        // 082 — 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框。离开裁切模式也退出裁切选框」.
+        //
+        // The workspace is what decides whether the 裁切 card is on screen, so it is what decides the
+        // mode — one fact, one place. Idempotent (`setCropWorkspaceActive` answers "already there" with
+        // a `false` and does nothing), so the workspace root's own wiring and this one cannot fight.
+        // No document write either way: entering is a view-state switch, leaving *cancels* the draft
+        // rather than applying it.
+        .task { loupe?.setCropWorkspaceActive(workspaces.selection.showsCropCard) }
+        .onChange(of: workspaces.selection) { _, workspace in
+            loupe?.setCropWorkspaceActive(workspace.showsCropCard)
+        }
     }
 
     /// The cards of the selected workspace, in panel order (派单 073).
@@ -1841,7 +1852,10 @@ public struct InspectorView: View {
 
     /// The panel's reset verbs, as one value (the `WhiteBalanceCommands` pattern): the view calls them
     /// on a double-click, the tests call them directly — the same code either way.
-    private var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
+    /// The panel's reset verbs (047), reachable from the crop card's four sections as well as from
+    /// this file's own cards: one implementation, so 「双击复位」 cannot mean two things.
+    var resets: PanelResets { PanelResets(session: session, loupe: loupe) }
+
 
     /// The two tooltips: `SliderRow`、蒙版与 `InspectorCardShell` 都用它们，所以是面板的，不是某张卡的。
     /// `internal`（不是 `private`）：`InspectorCardShell` 在文件作用域，裁切卡的头部件要用同一套标题行。
@@ -2708,6 +2722,100 @@ public struct PanelResets {
             session.applyEdit { $0.colorGrading = .identity }
             return session.commitEdit(label: group.title, coalesce: false)
         }
+    }
+
+    // MARK: 082 — 裁切卡的四个分区复位
+
+    /// One **section** of the 裁切 card back to its default: **one** document edit, **one** history
+    /// row, and the crop tool's draft re-seeded so the frame on screen is the frame just written.
+    ///
+    /// The user asked for exactly this shape: 「每个分区小标题双击 = 该分区复位（比例/角度/旋转/镜像
+    /// 各一条历史）」. The four sections are not four kinds of state: 角度 and 旋转 read/write the
+    /// **document's** geometry (`rotationDegrees`, `quarterTurns`) while the slider's live value is the
+    /// draft's copy, so a reset that only touched the draft would show 0° and leave the picture
+    /// straight — the wrong half. It is written once and the draft follows it.
+    ///
+    /// `nil` (no change) writes nothing, so a double-click on a section that is already at its default
+    /// cannot mint an empty snapshot or truncate the redo branch.
+    @discardableResult
+    public func cropSection(_ section: CropSection) -> Bool {
+        switch section {
+        case .crop:
+            // 比例 / 裁切框: the whole frame, no constraint. The draft's lock follows (`setLock`), so
+            // the popup and the frame agree the moment the row redraws.
+            return cropGeometryVerb(label: section.title) { geometry in
+                guard geometry.cropRect != .full || geometry.aspectLock != .original else { return false }
+                geometry.cropRect = .full
+                geometry.aspectLock = .original
+                return true
+            }
+
+        case .angle:
+            // 滑块角度 / 实际角度: the straighten back to 0. `quarterTurns` and both flips keep what
+            // they hold — 旋转 and 镜像 are their own sections (076's rule, read here).
+            return cropGeometryVerb(label: section.title) { geometry in
+                guard geometry.straightenDegrees != 0 else { return false }
+                geometry.rotationDegrees = 0
+                return true
+            }
+
+        case .rotation:
+            // 旋转: back to 0° **by turning the rect back with it** — `GeometryGroup.turn` is the only
+            // place that knows a quarter turn also rewrites the crop rect and inverts the lock, so
+            // this verb calls it instead of assigning `quarterTurns = 0` (which would silently re-crop
+            // the picture). All of it inside the one `applyEdit` = one row.
+            let turns = GeometryGroup.normalizedQuarterTurns(session.edit.geometry.quarterTurns)
+            guard turns != 0 else { return false }
+            return cropGeometryVerb(label: section.title) { geometry in
+                // `turn(clockwise: false)` steps the count back by one (it is `+3 mod 4`), so one
+                // counter-clockwise turn per turn taken lands on 0 — not `4 − turns` of them, which
+                // would land on `2·turns` mod 4 (measured: 1 turn → 2).
+                for _ in 0..<turns {
+                    geometry.turn(clockwise: false)
+                }
+                return true
+            }
+
+        case .mirror:
+            return cropGeometryVerb(label: section.title) { geometry in
+                guard geometry.flipHorizontal || geometry.flipVertical else { return false }
+                geometry.flipHorizontal = false
+                geometry.flipVertical = false
+                return true
+            }
+        }
+    }
+
+    /// 双击卡标题 = **整卡复位**: 裁切 / 角度 / 旋转 / 镜像 一起回默认，**一条**历史（·⌘Z 一次）。
+    ///
+    /// Not a `Group` case: `Group` is the parameter cards' enum, and this verb's default is a whole
+    /// `GeometryGroup` — crop full, angle 0, no turn, no flips — which is `GeometryGroup.identity`
+    /// itself, the document's own default initializer and never a literal.
+    @discardableResult
+    public func cropGeometry() -> Bool {
+        guard session.edit.geometry != .identity else { return false }
+        return cropGeometryVerb(label: InspectorView.Section.crop.title) { geometry in
+            let changed = geometry != .identity
+            geometry = .identity
+            return changed
+        }
+    }
+
+    /// The one writer both crop resets go through: close the tool session (072/077's rule for a
+    /// discrete geometry action inside a crop session), write, commit **one** row, reopen, and hand
+    /// the new document back to the draft.
+    private func cropGeometryVerb(label: String,
+                                  _ mutate: (inout GeometryGroup) -> Bool) -> Bool {
+        let inSession = session.isToolSessionActive
+        if inSession { session.endToolSession(label: "裁切与旋转") }
+        var changed = false
+        session.applyEdit { model in changed = mutate(&model.geometry) }
+        let committed = changed ? session.commitEdit(label: label, coalesce: false) : false
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        if changed {
+            loupe?.afterCropGeometryReset()
+        }
+        return committed
     }
 
     // MARK: 色彩分级 (S3.8, 2026-10-28)
