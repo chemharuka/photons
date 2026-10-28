@@ -54,6 +54,8 @@ final class CropCardSectionsTests: XCTestCase {
         _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         // The enum is the one spelling, and its order is the stacked order.
+        XCTAssertEqual(InspectorView.Section.angle.title, "变换", "093: 第二张卡的卡名是「变换」")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "变换"])
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "rotation", "mirror"])
         XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
         XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
@@ -173,9 +175,10 @@ final class CropCardSectionsTests: XCTestCase {
         print("082 §4 · 间距 " + gaps.joined(separator: " · "))
     }
 
-    // MARK: - 3. 两个角度
+    // MARK: - 3. 两个角度（卡上不再印读数，悬浮栏仍旧）
 
-    /// 实际 = 滑块 + 90 × quarterTurns, in three groups of numbers, and the readout is **read-only**.
+    /// 093: the card no longer prints the 「实际角度 / 滑块角度」 readout. The floating bar keeps printing
+    /// the actual angle, and the number still adds up in all three groups: 实际 = 滑块 + 90 × turns.
     func testTheCardPrintsBothAnglesAndTheyAddUp() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let loupe = LoupeController(session: session)
@@ -190,31 +193,23 @@ final class CropCardSectionsTests: XCTestCase {
         panel.state.select(.transform)
         _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        /// Poll until the panel has redrawn the readout (SwiftUI updates the AppKit leaf on the next
-        /// layout pass), then return what it prints.
-        func readout(expecting needle: String) throws -> String {
-            let deadline = Date().addingTimeInterval(3)
-            var text = ""
-            while Date() < deadline {
-                panel.host.layoutSubtreeIfNeeded()
-                if let label = panel.views(ofType: CropAngleReadoutLabel.self).first {
-                    text = label.stringValue
-                    if text.contains(needle) { return text }
-                }
-                CropUITestSupport.pump(0.02)
+        /// 093 §2: the readout that used to spell both angles out is gone from the card.
+        func assertNoCardReadout() {
+            let leaks = panel.views(ofType: NSTextField.self).filter {
+                $0.stringValue.contains("实际角度") || $0.stringValue.contains("滑块角度")
             }
-            _ = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first,
-                              "082 §3: 卡片上没有「实际角度 / 滑块角度」读数")
-            return text
+            XCTAssertTrue(leaks.isEmpty,
+                          "093 §2: 卡片上不该再有「实际角度 / 滑块角度」读数：\(leaks.map(\.stringValue))")
         }
 
         // ① turns 0, slider +2.5 → 2.5°
         tool.setStraighten(2.5)
-        var text = try readout(expecting: "实际角度 2.5°")
-        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
-        XCTAssertTrue(text.contains("实际角度 2.5°"), text)
-        XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
-        XCTAssertEqual(loupe.cropBar.readoutText.angle, "2.5°", "悬浮栏印的是同一个实际角度")
+        CropUITestSupport.pump(0.1)
+        loupe.cropBar.sync()
+        assertNoCardReadout()
+        print("093 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · bar "
+              + "\(loupe.cropBar.readoutText.angle)")
+        XCTAssertEqual(loupe.cropBar.readoutText.angle, "2.5°", "悬浮栏印的是实际角度")
         XCTAssertEqual(tool.actualAngle, 2.5, accuracy: 1e-12)
 
         // ② turns 1, slider +2.5 → 92.5°
@@ -223,10 +218,11 @@ final class CropCardSectionsTests: XCTestCase {
         // document, not on the return value.)
         loupe.rotateQuarter(clockwise: true)
         XCTAssertEqual(tool.quarterTurns, 1)
-        text = try readout(expecting: "实际角度 92.5°")
-        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
-        XCTAssertTrue(text.contains("实际角度 92.5°"), text)
-        XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
+        CropUITestSupport.pump(0.1)
+        loupe.cropBar.sync()
+        assertNoCardReadout()
+        print("093 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · bar "
+              + "\(loupe.cropBar.readoutText.angle)")
         XCTAssertEqual(tool.actualAngle, 92.5, accuracy: 1e-12)
         XCTAssertEqual(loupe.cropBar.readoutText.angle, "92.5°")
 
@@ -235,23 +231,169 @@ final class CropCardSectionsTests: XCTestCase {
         loupe.rotateQuarter(clockwise: true)
         XCTAssertEqual(tool.quarterTurns, 3)
         tool.setStraighten(-4)
-        text = try readout(expecting: "实际角度 266.0°")
-        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
-        XCTAssertTrue(text.contains("实际角度 266.0°"), text)
-        XCTAssertTrue(text.contains("滑块角度 -4.0°"), text)
+        CropUITestSupport.pump(0.1)
+        loupe.cropBar.sync()
+        assertNoCardReadout()
+        print("093 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · bar "
+              + "\(loupe.cropBar.readoutText.angle)")
         XCTAssertEqual(tool.actualAngle, 266, accuracy: 1e-12)
         XCTAssertEqual(loupe.cropBar.readoutText.angle, "266.0°")
+    }
 
-        // The readout is a **label**, not an input: nothing here can be typed into or selected.
-        let label = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first)
-        XCTAssertFalse(label.isEditable, "082 §3: 读数是只读的")
-        XCTAssertFalse(label.isSelectable)
-        XCTAssertEqual(label.accessibilityIdentifier(), CropAngleReadoutLabel.identifier)
-        XCTAssertTrue(label.stringValue.contains("实际角度"))
-        XCTAssertTrue(label.stringValue.contains("滑块角度"))
-        // …and it is a *number*, not a second source of truth: it is derived from the tool.
-        XCTAssertEqual(text, CropAngleReadoutLabel.text(actual: tool.angleText(),
-                                                        slider: tool.sliderAngleText()))
+    // MARK: - 093 §2: 转动小节没有第一条发丝线，滑块行叫「角度」
+
+    /// A section header with `isFirst: false` is 1 pt hairline + 6 pt gap + ~14 pt title ≈ 21 pt; with
+    /// `isFirst: true` it is just the title (~14 pt). The card's first section (转动) must be the latter,
+    /// while 旋转 / 镜像 keep their lines.
+    func testTheStraightenSectionHasNoHairlineAndItsRowSaysAngle() throws {
+        DetailRowEnabledLog.shared.reset()
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        loupe.collectsHistogram = false
+        _ = loupe.view
+        XCTAssertTrue(loupe.beginCropTool())
+
+        let panel = try host(width: 300, session: session, loupe: loupe)
+        defer { panel.window.contentView = nil }
+        panel.state.select(.transform)
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+
+        let angleHeader = try XCTUnwrap(panel.row("section.\(CropSection.angle.title)"),
+                                        "转动小标题没有画出来")
+        let rotationHeader = try XCTUnwrap(panel.row("section.\(CropSection.rotation.title)"),
+                                           "旋转小标题没有画出来")
+        let mirrorHeader = try XCTUnwrap(panel.row("section.\(CropSection.mirror.title)"),
+                                         "镜像小标题没有画出来")
+        print("093 §2 · 转动 header \(NSStringFromRect(angleHeader))"
+              + " · 旋转 \(NSStringFromRect(rotationHeader)) · 镜像 \(NSStringFromRect(mirrorHeader))")
+        XCTAssertLessThan(angleHeader.height, 20,
+                          "093 §2: 转动小节的第一条分割线必须去掉（header 只剩标题，实测 \(angleHeader.height) pt）")
+        XCTAssertGreaterThanOrEqual(rotationHeader.height, 20,
+                                    "093 §2: 旋转小节仍要有发丝线（实测 \(rotationHeader.height) pt）")
+        XCTAssertGreaterThanOrEqual(mirrorHeader.height, 20,
+                                    "093 §2: 镜像小节仍要有发丝线（实测 \(mirrorHeader.height) pt）")
+        XCTAssertLessThan(angleHeader.maxY, rotationHeader.minY, "093 §2: 三节顺序不变")
+
+        _ = waitFor(panel) { _ in DetailRowEnabledLog.shared.value("角度") != nil }
+        XCTAssertEqual(DetailRowEnabledLog.shared.value("角度"), true,
+                       "093 §2: 滑块行的标签必须是「角度」（行探针读回 \(String(describing: DetailRowEnabledLog.shared.value("角度")))）")
+        XCTAssertNil(DetailRowEnabledLog.shared.value("转动"),
+                     "093 §2: 「转动」已不再是滑块行的标签")
+
+        let source = try Self.source("TransformPanel.swift")
+        XCTAssertFalse(source.contains("CropAngleReadout"),
+                       "093 §2: 卡片读数（CropAngleReadoutLabel / Host）应删除")
+    }
+
+    // MARK: - 093 §3: 旋转 = 左旋 · 右旋 · 最右角度（无背景块）
+
+    func testTheRotationRowIsTwoIconsThenTheAngleAtTheFarRight() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        loupe.collectsHistogram = false
+        _ = loupe.view
+        XCTAssertTrue(loupe.beginCropTool())
+
+        let panel = try host(width: 330, session: session, loupe: loupe)
+        defer { panel.window.contentView = nil }
+        panel.state.select(.transform)
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+
+        let row = try XCTUnwrap(panel.row(CropCardID.turn), "旋转行没有画出来")
+        let ccw = try XCTUnwrap(panel.view(TurnButton.self, identifier: CropTurnRow.counterClockwiseID),
+                                "左旋图标不在树上")
+        let cw = try XCTUnwrap(panel.view(TurnButton.self, identifier: CropTurnRow.clockwiseID),
+                               "右旋图标不在树上")
+        let badge = try XCTUnwrap(panel.view(TurnBadgeLabel.self, identifier: CropTurnRow.badgeID),
+                                  "角度文本不在树上")
+        let ccwRect = ccw.convert(ccw.bounds, to: panel.host)
+        let cwRect = cw.convert(cw.bounds, to: panel.host)
+        let badgeRect = badge.convert(badge.bounds, to: panel.host)
+        print("093 §3 · row \(NSStringFromRect(row)) · ccw \(NSStringFromRect(ccwRect))"
+              + " · cw \(NSStringFromRect(cwRect)) · angle \(NSStringFromRect(badgeRect))")
+
+        XCTAssertLessThan(ccwRect.maxX, cwRect.minX, "093 §3: 左旋在右旋左边")
+        XCTAssertLessThanOrEqual(cwRect.minX - ccwRect.maxX, 8,
+                                 "093 §3: 两个图标相邻，中间不许夹角度")
+        XCTAssertGreaterThan(badgeRect.minX, cwRect.maxX,
+                             "093 §3: 角度必须在两个图标的右边")
+        XCTAssertGreaterThanOrEqual(badgeRect.maxX, ccwRect.maxX,
+                                    "093 §3: 角度的 maxX 必须 ≥ 左旋的 maxX")
+        XCTAssertGreaterThanOrEqual(badgeRect.maxX, cwRect.maxX,
+                                    "093 §3: 角度的 maxX 必须 ≥ 右旋的 maxX")
+        // The AppKit leaves report a couple of points of cell padding beyond SwiftUI's row frame
+        // (icons: 22 pt wide in a 20 pt slot), so "right aligned" means "at the row's trailing edge,
+        // within that same padding".
+        XCTAssertLessThanOrEqual(abs(badgeRect.maxX - row.maxX), 3,
+                                 "093 §3: 角度右对齐到行尾（badge \(badgeRect.maxX) vs row \(row.maxX)）")
+        XCTAssertEqual(badge.stringValue, "0°", "干净文档的角度是 0°")
+
+        // No background block: no fill, no border, no bezel, no rounded capsule.
+        XCTAssertFalse(badge.drawsBackground, "093 §3: 角度文本不许有底色")
+        XCTAssertFalse(badge.isBordered, "093 §3: 角度文本不许有描边")
+        XCTAssertFalse(badge.isBezeled, "093 §3: 角度文本不许有 bezel")
+        XCTAssertEqual(badge.layer?.cornerRadius ?? 0, 0, "093 §3: 角度文本不许有圆角块")
+        XCTAssertNil(badge.layer?.backgroundColor, "093 §3: 角度文本背后不许有填充视图")
+
+        let source = try Self.source("TransformPanel.swift")
+        XCTAssertFalse(source.contains("Text(\"方向\")"), "093 §3: 「方向」文本应删除")
+        XCTAssertFalse(panel.views(ofType: NSTextField.self).contains { $0.stringValue == "方向" },
+                       "093 §3: 旋转行里不许再有「方向」文本")
+    }
+
+    // MARK: - 093 §4: 镜像两个按钮都在，各写一次文档 / 一条历史
+
+    func testBothMirrorButtonsAreHitAndFlipTheDocument() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        loupe.collectsHistogram = false
+        _ = loupe.view
+        XCTAssertTrue(loupe.beginCropTool())
+
+        let panel = try host(width: 300, session: session, loupe: loupe)
+        defer { panel.window.contentView = nil }
+        panel.state.select(.transform)
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+
+        let horizontal = try XCTUnwrap(panel.view(MirrorButton.self,
+                                                  identifier: CropMirrorRow.horizontalID),
+                                       "水平镜像按钮不在树上")
+        let vertical = try XCTUnwrap(panel.view(MirrorButton.self,
+                                                identifier: CropMirrorRow.verticalID),
+                                     "垂直镜像按钮不在树上")
+        let horizontalRect = horizontal.convert(horizontal.bounds, to: panel.host)
+        let verticalRect = vertical.convert(vertical.bounds, to: panel.host)
+        print("093 §4 · mirror H \(NSStringFromRect(horizontalRect)) \(horizontalRect.width) pt"
+              + " · V \(NSStringFromRect(verticalRect)) \(verticalRect.width) pt"
+              + " · images H=\(horizontal.image != nil) V=\(vertical.image != nil)")
+        XCTAssertGreaterThan(horizontalRect.width, 0, "093 §4: 水平按钮的命中区宽必须 > 0")
+        XCTAssertGreaterThan(verticalRect.width, 0,
+                             "093 §4: 垂直按钮的命中区宽必须 > 0（实测 \(verticalRect.width) pt）")
+        XCTAssertGreaterThan(horizontalRect.height, 0)
+        XCTAssertGreaterThan(verticalRect.height, 0)
+        XCTAssertNotNil(horizontal.image, "093 §4: 水平图标解析不出来")
+        XCTAssertNotNil(vertical.image,
+                        "093 §4: 垂直图标解析不出来（曾用 flip.vertical，本机 NSImage 返回 nil）")
+        XCTAssertLessThan(horizontalRect.maxX, verticalRect.minX, "093 §4: 水平在垂直左边")
+
+        let historyBefore = session.history.snapshots.count
+        horizontal.performClick(nil)
+        CropUITestSupport.pump(0.2)
+        panel.host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(session.edit.geometry.flipHorizontal, "093 §4: 点水平没有翻转文档")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
+                       "093 §4: 一次水平翻转 = 一条历史")
+
+        vertical.performClick(nil)
+        CropUITestSupport.pump(0.2)
+        panel.host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(session.edit.geometry.flipVertical, "093 §4: 点垂直没有翻转文档")
+        XCTAssertTrue(session.edit.geometry.flipHorizontal, "093 §4: 垂直翻转不该碰水平")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 2,
+                       "093 §4: 一次垂直翻转 = 一条历史")
     }
 
     // MARK: - 5. 各分区复位
@@ -499,6 +641,16 @@ final class CropCardSectionsTests: XCTestCase {
 
     // MARK: - harness
 
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    private static func source(_ name: String) throws -> String {
+        try String(contentsOf: repoRoot.appendingPathComponent("Sources/PhotonsUI/\(name)"),
+                   encoding: .utf8)
+    }
+
     private struct Panel {
         let host: NSHostingView<InspectorView>
         let window: NSWindow
@@ -514,6 +666,11 @@ final class CropCardSectionsTests: XCTestCase {
         /// One row's frame, in the panel's coordinates.
         func row(_ id: String) -> CGRect? {
             probes.first { $0.rowID == id }.map { $0.convert($0.bounds, to: host) }
+        }
+
+        /// The one AppKit leaf with this accessibility id (turn / mirror buttons, the angle label).
+        func view<T: NSView>(_ type: T.Type, identifier: String) -> T? {
+            views(ofType: type).first { $0.accessibilityIdentifier() == identifier }
         }
 
         func views<T: NSView>(ofType: T.Type) -> [T] {

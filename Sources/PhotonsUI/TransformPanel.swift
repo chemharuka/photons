@@ -21,8 +21,8 @@ import SwiftUI
 // 于是这张卡是裁切工具的**全部**控件，四段，每段一条分隔线 + 11 pt 次级小标题：
 //
 //     宽高比   标题 · 比例选单 · ⇄ 交换（同一行）
-//     角度     滑块角度（−45…+45 的行）+ 实际角度（只读读数）
-//     旋转     逆时针 90° / 方向徽标 / 顺时针 90°（⌘[ / ⌘]，同一个动词）
+//     角度     滑块角度（−45…+45 的行，行标签「角度」）
+//     旋转     左旋 · 右旋 · 最右角度（⌘[ / ⌘]，同一个动词）
 //     镜像     水平 / 垂直
 //     底部     九宫格（左）· 应用 取消（右，卡片最后一行）
 //
@@ -51,8 +51,8 @@ import SwiftUI
 // ## 两个角度
 //
 // 「滑块角度」是 `draft.straighten`（−45…+45，行的滑杆）；「实际角度」= 滑块角度 + 90 × quarterTurns
-// （`CropToolController.actualAngle`）。只读读数印在一行里，两个词都写全：`实际角度 92.5° · 滑块角度
-// +2.5°`。悬浮栏的 `角度` 段印的是**同一个实际角度**，所以栏和卡永远说同一个数。
+// （`CropToolController.actualAngle`）。093 起卡片上不再印只读读数 —— 滑块行自身只显示滑块角度，
+// 悬浮栏的 `角度` 段仍印**实际角度**。
 
 extension InspectorView {
 
@@ -127,7 +127,7 @@ extension InspectorView {
 
     // MARK: 角度
 
-    /// 转动 — 滑杆（行）+ 实际角度（只读）。
+    /// 转动 — 只有滑杆；行标签是「角度」，卡片上不印只读读数。
     ///
     /// 087: the value is **live** — every tick writes the document, release commits one row
     /// (`onEditingChanged(false)`), so there is nothing left for 应用 to do. The crop frame keeps 086's
@@ -137,10 +137,10 @@ extension InspectorView {
         let straighten = Binding<Double>(get: { tool?.draft.straighten ?? 0 },
                                          set: { tool?.setStraightenLive($0) })
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-            CropSectionHeader(title: CropSection.angle.title, isFirst: false,
+            CropSectionHeader(title: CropSection.angle.title, isFirst: true,
                               reset: { resets.cropSection(.angle) })
             VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-                sliderRow("转动",
+                sliderRow("角度",
                           straighten,
                           -CropTool.straightenLimit ... CropTool.straightenLimit,
                           "%+.1f°",
@@ -155,8 +155,6 @@ extension InspectorView {
                               guard !editing else { return }
                               _ = tool?.commitStraighten()
                           })
-                CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
-                                     slider: tool?.sliderAngleText() ?? "—")
             }
             .background(CropRowProbeHost(rowID: CropCardID.angle))
         }
@@ -164,7 +162,7 @@ extension InspectorView {
 
     // MARK: 旋转
 
-    /// 旋转 — 逆时针 / 徽标 / 顺时针。文档动作，⌘[ / ⌘] 同一个动词。
+    /// 旋转 — 左旋 / 右旋 / 最右的角度。文档动作，⌘[ / ⌘] 同一个动词。
     @ViewBuilder
     private func cropRotationSection(geometry: GeometryGroup, tool: CropToolController?) -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
@@ -409,7 +407,8 @@ struct CropMirrorRow: View {
             MirrorButtonHost(symbol: "flip.horizontal", title: "水平翻转", isOn: horizontal,
                              identifierID: Self.horizontalID, action: onHorizontal)
                 .fixedSize()
-            MirrorButtonHost(symbol: "flip.vertical", title: "垂直翻转", isOn: vertical,
+            MirrorButtonHost(symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                             title: "垂直翻转", isOn: vertical,
                              identifierID: Self.verticalID, action: onVertical)
                 .fixedSize()
             Spacer(minLength: 4)
@@ -418,11 +417,11 @@ struct CropMirrorRow: View {
     }
 }
 
-/// 旋转 90°：左 / 右两个按钮，中间是**当前方向的徽标**（P0-10）。
+/// 旋转 90°：左旋、右旋两个按钮，**最右侧**是当前角度（P0-10；093 挪到右边、去掉背景块）。
 ///
 /// 三个值，一份真相：`turns` 是文档的 `GeometryGroup.quarterTurns`（0…3 顺时针），两个按钮只调
 /// `LoupeController.rotateQuarter(clockwise:)` —— 和菜单的 ⌘[ / ⌘] 同一个动词，所以按钮、快捷键、
-/// 徽标、`tiff:Orientation` 不会各说一套。
+/// 角度、`tiff:Orientation` 不会各说一套。
 ///
 /// 与「角度」区不同，这一区**不需要进入裁切模式**：旋转和两个翻转一样是文档动作，裁切框关着的时候
 /// 一样能转（徽标照样读文档）。
@@ -440,22 +439,19 @@ struct CropTurnRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text("方向")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
-            // `.fixedSize()`: the three leaves are `NSView`s, and without it SwiftUI proposes the
-            // row's width and AppKit stretches them (measured: two 88 pt buttons in a 308 pt card).
+            // `.fixedSize()`: the leaves are `NSView`s, and without it SwiftUI proposes the row's
+            // width and AppKit stretches them (measured: two 88 pt buttons in a 308 pt card).
             TurnButtonHost(symbol: "rotate.left", title: "逆时针旋转 90°",
                            identifierID: Self.counterClockwiseID,
                            isEnabled: isEnabled, action: onCounterClockwise)
                 .fixedSize()
-            TurnBadgeHost(text: LoupeController.quarterTurnBadge(for: turns),
-                          isTurned: GeometryGroup.normalizedQuarterTurns(turns) != 0)
-                .fixedSize()
             TurnButtonHost(symbol: "rotate.right", title: "顺时针旋转 90°",
                            identifierID: Self.clockwiseID,
                            isEnabled: isEnabled, action: onClockwise)
+                .fixedSize()
+            Spacer(minLength: 4)
+            TurnBadgeHost(text: LoupeController.quarterTurnBadge(for: turns),
+                          isTurned: GeometryGroup.normalizedQuarterTurns(turns) != 0)
                 .fixedSize()
         }
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
@@ -552,7 +548,9 @@ final class TurnButton: BareIconButton {
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 }
 
-/// A mirror button — `flip.horizontal` / `flip.vertical`, accent while on (087).
+/// A mirror button — horizontal (`flip.horizontal`) / vertical (`arrow.up.and.down.righttriangle…`),
+/// accent while on (087). 093: `flip.vertical` has no glyph on this SDK, so the vertical leaf uses
+/// its long-form counterpart.
 final class MirrorButton: BareIconButton {
 
     init(symbol: String, title: String, isOn: Bool) {
@@ -643,19 +641,16 @@ final class TurnBadgeLabel: NSTextField {
         isSelectable = false
         isBordered = false
         drawsBackground = false
+        isBezeled = false
         alignment = .center
         font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
-        wantsLayer = true
-        layer?.cornerRadius = 4
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
         setAccessibilityIdentifier(CropTurnRow.badgeID)
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: max(super.intrinsicContentSize.width + 10, 34), height: TurnBadgeLabel.height)
+        NSSize(width: super.intrinsicContentSize.width, height: TurnBadgeLabel.height)
     }
     override var isFlipped: Bool { true }
 
@@ -755,69 +750,6 @@ struct CropChip: View {
     /// **The one colour decision of the switches**: on = the system accent, off = nothing (the card's
     /// own material shows through, exactly like the bar's unfilled `.inline` bezel used to).
     static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }
-}
-
-// MARK: - 082: the two-angle readout (read-only)
-
-/// 「实际角度 92.5° · 滑块角度 +2.5°」 — one line, both words spelled out, **read-only**.
-///
-/// An `NSTextField` label and not a SwiftUI `Text` for the reason every leaf in this card is AppKit:
-/// the acceptance reads the string the panel *drew* (and the accessibility tree is empty under
-/// `swift test`). It carries no gesture: 082's angle reset belongs to the section title and the row's
-/// own label, so a stray click on a number can never write anything.
-final class CropAngleReadoutLabel: NSTextField {
-
-    static let identifier = "inspector.crop.angle.readout"
-    static let fontSize: CGFloat = 10
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        isEditable = false
-        isSelectable = false
-        isBordered = false
-        drawsBackground = false
-        alignment = .left
-        font = .monospacedDigitSystemFont(ofSize: Self.fontSize, weight: .regular)
-        textColor = .secondaryLabelColor
-        lineBreakMode = .byTruncatingTail
-        setAccessibilityIdentifier(Self.identifier)
-    }
-
-    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
-
-    override var isFlipped: Bool { true }
-
-    /// The one formatter both numbers go through: 「实际角度 90.0° · 滑块角度 +0.0°」.
-    static func text(actual: String, slider: String) -> String {
-        "实际角度 \(actual) · 滑块角度 \(slider)"
-    }
-
-    func refresh(actual: String, slider: String) {
-        stringValue = Self.text(actual: actual, slider: slider)
-        toolTip = "实际角度 = 滑块角度 + 90 × 旋转圈数"
-        setAccessibilityValue(stringValue)
-    }
-
-    override var intrinsicContentSize: NSSize {
-        let size = super.intrinsicContentSize
-        return NSSize(width: size.width, height: max(size.height, 14))
-    }
-}
-
-struct CropAngleReadoutHost: NSViewRepresentable {
-
-    let actual: String
-    let slider: String
-
-    func makeNSView(context: Context) -> CropAngleReadoutLabel {
-        let label = CropAngleReadoutLabel()
-        label.refresh(actual: actual, slider: slider)
-        return label
-    }
-
-    func updateNSView(_ label: CropAngleReadoutLabel, context: Context) {
-        label.refresh(actual: actual, slider: slider)
-    }
 }
 
 // MARK: - 自定义比例：⑨ 的那个居中面板，卡里的这扇门

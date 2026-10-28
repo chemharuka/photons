@@ -24,7 +24,7 @@ final class CropPanelTests: XCTestCase {
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
     }
 
-    // MARK: - 1. 第二张卡，标题「角度」，位置在裁切卡之后
+    // MARK: - 1. 第二张卡，标题「变换」，位置在裁切卡之后
 
     func testTheAngleCardIsTheSecondCardAfterCrop() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
@@ -37,7 +37,7 @@ final class CropPanelTests: XCTestCase {
         let cards = try XCTUnwrap(Self.find(InspectorCardsProbe.self, in: inspector),
                                   "面板没有报卡片清单")
         XCTAssertEqual(cards.cardIDs, ["crop", "angle"])
-        XCTAssertEqual(cards.cardTitles, ["裁切", "角度"])
+        XCTAssertEqual(cards.cardTitles, ["裁切", "变换"])
 
         let crop = try XCTUnwrap(Self.probe(CropCardID.card, in: inspector))
         let angle = try XCTUnwrap(Self.probe(CropCardID.angleCard, in: inspector))

@@ -112,7 +112,8 @@ public struct InspectorView: View {
         /// the panel's own order says the same), while 裁切 belongs to a workspace of its own and is
         /// therefore invisible in 调整 either way.
         case crop
-        /// 087: 角度 — the 变换 workspace's second card (转动 / 旋转 / 镜像), after 裁切.
+        /// 087: 变换 — the 变换 workspace's second card (转动 / 旋转 / 镜像), after 裁切.
+        /// 093: the card title is 「变换」; `CropSection.angle` keeps its `angle` rawValue.
         case angle
         case masks
         /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
@@ -136,7 +137,7 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
-            case .angle: return "角度"
+            case .angle: return "变换"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
