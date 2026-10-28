@@ -32,9 +32,11 @@ using namespace metal;
 // Shape maths (all public mathematics; nothing here is copied from ART/RapidTherapee/darktable
 // (GPL-3.0) or RapidRAW (AGPL-3.0), which §7 keeps read-only):
 //   linear  t = dot(p − a, d) / dot(d, d), t' = t^(log ½ / log m)  (m = midpoint, ½ ⇒ identity)
-//           alpha = smoothstep(½ − f/2, ½ + f/2, t')               (§4.2)
+//           alpha = 1 outside the half-plane t' ≥ ½, squared falloff over `f·0.1·shortEdge` px
+//                   before it: `clamp(1 − (d/w)²)²`                    (079 A4, was §4.2)
 //   radial  q = R(−angle)·(p − centre) / radius, r = |q|
-//           alpha = 1 − smoothstep(1 − f, 1, r)                    (§4.3)
+//           alpha = 1 for r ≤ 1; `clamp((r_out² − r²)/(r_out² − 1))²` for 1 < r < r_out,
+//                   r_out = 1 + `f·0.1·shortEdge` / min(rx, ry)         (079 A4, was §4.3)
 //   brush   alpha = 1 − smoothstep(r(1−f), r, distToSegment(p, a, b))   (§4.1)
 //           one stroke = a capsule chain, `max` inside the chain (a joint is a union, not a
 //           double exposure); across strokes paint = `src + dst·(1−src)`, erase = `dst·(1−src)`.
@@ -43,6 +45,16 @@ using namespace metal;
 //   luma    L = OKLab L of clamp(p, 0, 1)
 //           alpha = smoothstep(lo − loF, lo + loF, L) · (1 − smoothstep(hi − hiF, hi + hiF, L))
 //                                                                   (§4.5)
+//
+// 079 A4 — **feather lives outside the shape.** Until A4 both gradients spent `feather` *inside*
+// their shape (`1 − smoothstep(1−f, 1, r)`, `smoothstep(½−f/2, ½+f/2, t')`), so `feather = 0.5`
+// meant "the fully covered region is half the radius". darktable's drawn masks do the opposite
+// (`masks/ellipse.c:1502-1534`, comment: "ratio = 0.0 at the outer border, >= 1.0 within the
+// ellipse"): the shape stays solid to its rim, the feather is a **quadratic** falloff outside it.
+// This is that rule, with `feather` read as a percentage of the **short edge** — the same unit as
+// the mask-level `featherPixels` — instead of a percentage of the shape. `feather = 0` keeps the
+// pre-A4 expression verbatim (both branches are still in the two functions), because a document
+// with no feather must not move a single byte.
 //
 // Since 005d the atlas is a two-part stage: this kernel writes the *pointwise* coverage
 // (`opacity · combine · invert`), then `s1_7_mask_neighbourhood.metal` applies the two
@@ -176,11 +188,31 @@ static inline float linear_alpha(float2 p, MaskShapeDesc d, float2 srcSize) {
         tp = pow(t, log(0.5) / log(m));
     }
 
-    // Feather narrows the transition window around t' = 0.5; 1 = the full ramp, 0 = a hard edge.
     float f = clamp(d.p1.y, 0.0, 1.0);
-    float lo = 0.5 - 0.5 * f;
-    float hi = max(0.5 + 0.5 * f, lo + 1e-5);
-    return smoothstep(lo, hi, tp);
+    // 079 A4 — the feather is a **short-edge percentage** spent *outside* the rim (darktable's
+    // drawn-mask rule, `masks/ellipse.c:1502-1534`), not a fraction of the shape spent inside it.
+    // Same unit as `MaskRadius.featherPixels` on the host: one number, one meaning, at thumbnail,
+    // fit, 1:1 and export scale.
+    float featherPx = f * 0.1 * min(srcSize.x, srcSize.y);
+    float span = length(dir);
+
+    if (featherPx <= 0.0 || span < 1e-6) {
+        // f == 0 (or a zero-length gradient, which has no rim to feather): the pre-079 arithmetic,
+        // verbatim. Every document that carries `feather = 0` must stay **bit-identical** — the
+        // recorded atlases and every digest taken from them were produced by this expression.
+        float lo = 0.5 - 0.5 * f;
+        float hi = max(0.5 + 0.5 * f, lo + 1e-5);
+        return smoothstep(lo, hi, tp);
+    }
+
+    // The rim is the half-way line `t' = ½`: coverage is **1** everywhere past it and decays to 0
+    // over `featherPx` *before* it, squared — `ratio = 1 − (d/featherPx)²`, out = ratio². The width
+    // is measured in `t'` units by dividing by the gradient's own length in source pixels, so a
+    // short gradient and a long one feather by the same number of pixels.
+    float w = featherPx / span;                       // feather width in t' units
+    float outside = max(0.5 - tp, 0.0) / w;           // 0 at the rim, 1 at the outer edge
+    float ratio = clamp(1.0 - outside * outside, 0.0, 1.0);
+    return ratio * ratio;
 }
 
 static inline float radial_alpha(float2 p, MaskShapeDesc d, float2 srcSize, float minSide) {
@@ -194,9 +226,25 @@ static inline float radial_alpha(float2 p, MaskShapeDesc d, float2 srcSize, floa
     float cs = d.p1.x;
     float sn = d.p1.y;
     float2 q = float2(dv.x * cs + dv.y * sn, -dv.x * sn + dv.y * cs) / rad;
+    float r = length(q);
 
-    float f = clamp(d.p1.z, 0.0, 0.999);
-    return 1.0 - smoothstep(1.0 - f, 1.0, length(q));
+    float f = clamp(d.p1.z, 0.0, 1.0);
+    // 079 A4 — `1 − smoothstep(1 − f, 1, r)` ate the inside of the shape: at f = ½ the fully covered
+    // region was half the radius. darktable's ellipse instead keeps `r ≤ 1` at exactly 1 and spends
+    // the feather **outside** the rim (`ellipse.c:1502-1534`: `ratio = (r_out² − r²)/(r_out² − r_in²)`,
+    // clipped, then squared), so a feather never shrinks the shape's own solid area.
+    float featherPx = f * 0.1 * minSide;              // short-edge percentage, as in `linear_alpha`
+    if (featherPx <= 0.0) {
+        // f == 0: the pre-079 arithmetic, verbatim, for bit-identical documents (see `linear_alpha`).
+        return 1.0 - smoothstep(1.0 - f, 1.0, r);
+    }
+    // The same radius in **ellipse-radius units**: the outer rim is `r_out = 1 + g`, i.e. the ellipse
+    // scaled by `1 + g` about its centre. `min(rad)` (not the radius along the ray) keeps the offset
+    // in pixels at the short axis exact and at least `featherPx` everywhere else.
+    float g = featherPx / min(rad.x, rad.y);
+    float rOut = 1.0 + g;
+    float ratio = clamp((rOut * rOut - r * r) / (rOut * rOut - 1.0), 0.0, 1.0);
+    return ratio * ratio;
 }
 
 /// §4.1 — distance from `p` to the segment `a…b`, turned into coverage by the same smoothstep the

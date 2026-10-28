@@ -321,6 +321,28 @@ M3 时记录的"`L1030433.dng` 渲染成 180°，因为文件里读不到 orient
 残留：`LoupeMapping`（命中测试/捏合锚点）仍是窗口形状，9° 拉直下与渲染投影差 ≤0.29%（7.5 px @2560），
 属于 hit-testing 的近似，不在渲染路径上。
 
+### 11.11 形状羽化在**形状之外**，且半径是短边百分比（079 A4，2026-10-28）
+
+旧写法把羽化花在形状**内部**：`radial: 1 − smoothstep(1−f, 1, r)`、`linear: smoothstep(½−f/2, ½+f/2, t')`。
+后果是"羽化 50%"等于"选区缩一半"：`radial r = 0.25·短边、f = 0.5` 时覆盖率 1.0 的半径只有 **0.125·短边**
+（实测 37.5 px @ 300 px 短边），面积被吃掉 4 倍。darktable 的椭圆相反（`masks/ellipse.c:1502-1534`，
+注释原话 "ratio = 0.0 at the outer border, >= 1.0 within the ellipse"）：内部恒 1，羽化在**外面**平方衰减。
+
+现在的定义（`s1_5_mask_atlas.metal` `radial_alpha` / `linear_alpha`）：
+
+- `f` 是**短边百分比**（0…1 ⇒ 0…10 %），与蒙版级 `MaskRadius.featherPixels` 同一单位；半径 `fp = f·0.1·minSide` 像素。
+- radial：`r ≤ 1` 恒 1；`1 < r < r_out` 时 `ratio = (r_out² − r²)/(r_out² − 1)`、`alpha = clamp(ratio)²`，
+  `r_out = 1 + fp/min(rx, ry)`。同一文档 f = 0.5 的 100 % 区半径回到 **0.25·短边**（74.5 px）。
+- linear：`t' ≥ ½` 恒 1；`t' ∈ [½ − w, ½]` 平方衰减，`w = fp / |end − start|`（像素跨度）。
+- **`feather = 0` 保留旧表达式逐字**（两条分支都在），所以不带形状羽化的老文档逐字节不变：
+  `7adba4e5…`（radial）/ `8d63b920…`（linear），在主分支 `c9aa22e` 上录下、改后复现。
+- 包围盒必须按**外扩后**的半径算，否则羽化被 `MaskBounds.rasterRect` 切断：`sourceExtent` 现在用同一个
+  `1 + fp/min(rx, ry)` 放大径向支撑，线性的 `t_cut` 也改到 `½ − w`。
+- 进键：`StageAlgorithmVersion.maskAtlas` 1 → **2**（参数不变、像素变）。
+
+判据（`MaskFeatherShapeTests`）：100 % 半径 0.125 → 0.2483·短边；中心→1.2R 的 11 点剖面内部恒 1.000000、
+外部与 `clamp(ratio)²` 逐点 ≤ 1 码；盒边缘像素的覆盖值 = 解析值 ≤ 1 码且盒外为 +0；`feather = 0` 帧 sha 不变。
+
 ## 12. UI 架构（M3 定案，2026-10-25/26 落地）
 
 **起点：AppKit 外壳 + SwiftUI 叶子。** 依据是读码而非偏好（`local/research/ui-stack.md`）：走到 LR Classic 规模的
