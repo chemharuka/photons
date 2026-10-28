@@ -17,7 +17,7 @@ public struct RenderInput: Sendable {
     /// route, not a requirement.
     public let sourceURL: URL?
 
-    /// The file's DNG `OpcodeList3 / WarpRectilinear` planes, when it has them (097).
+    /// The file's lens profile, when it has one (097 DNG / 103 Panasonic RW2).
     ///
     /// A **decode-time file fact**, carried on the same path as `identity`/`sourceURL` rather than
     /// inside `EditModel`: it describes how the raw pixels must be sampled, not what the user asked
@@ -25,8 +25,9 @@ public struct RenderInput: Sendable {
     /// every caller that already hands us a URL (loupe, export, CLI) therefore gets the correction
     /// without a second plumbing path. A caller with a synthetic image can pass it explicitly.
     ///
-    /// Only three *different* planes are used by S0 (`hasPerPlaneDifference`); a single plane means
-    /// Apple's own correction already ran and the graph must not warp twice.
+    /// S0 uses it only when `requiresOwnWarp`: three *different* DNG planes, or any usable Panasonic
+    /// warp. A single DNG plane means Apple's own correction already ran and the graph must not warp
+    /// twice.
     public let lensProfile: LensProfile?
 
     public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
@@ -34,12 +35,15 @@ public struct RenderInput: Sendable {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
-        self.lensProfile = lensProfile ?? sourceURL.flatMap { LensProfile.read(from: $0) }
+        self.lensProfile = lensProfile ?? sourceURL.flatMap {
+            LensProfile.read(from: $0) ?? LensProfile.readPanasonic(from: $0)
+        }
     }
 
-    /// Does S0 apply the file's per-channel warp? Exactly when the file carries three distinct
-    /// planes — the case `RAWDecoder` turned Apple's correction off for.
-    public var hasPerPlaneLensWarp: Bool { lensProfile?.hasPerPlaneDifference == true }
+    /// Does S0 apply the file's own lens warp? DNG: exactly when it carries three distinct planes;
+    /// RW2: whenever a usable Panasonic profile was parsed. Both cases are the ones `RAWDecoder`
+    /// turned Apple's correction off for.
+    public var hasPerPlaneLensWarp: Bool { lensProfile?.requiresOwnWarp == true }
 }
 
 public struct RenderOptions: Sendable {
@@ -1174,8 +1178,9 @@ public final class RenderGraph {
         /// CA, 1:1, no window), so S0's map is a permutation of the source's texels and the kernel
         /// may index them in integers. `s0_geometry.metal`'s `p.e.w`.
         let s0PureTurn: Bool
-        /// 097: this frame must run a per-channel DNG warp. It turns the three fast paths off,
-        /// because each of them is a sampling shortcut that would bypass the warp.
+        /// 097 / 103: this frame must run the file's own lens warp (DNG per-plane or Panasonic). It
+        /// turns the three fast paths off, because each of them is a sampling shortcut that would
+        /// bypass the warp.
         let s0LensWarp: Bool
         /// Where the photograph ended up **inside the canvas**, in canvas pixels, origin top-left
         /// (row 0 = texture row 0). One derivation, from the same `origin`/`frameOrigin`/`frameSize`
@@ -4303,9 +4308,11 @@ public final class RenderGraph {
 
     /// 097 — the per-plane DNG warp as a column-major uniform: columns 0/1/2 are the R/G/B
     /// `(kr0, kr1, kr2, kr3)`, column 3 is the normalized centre `(x, y, 0, 0)`. `nil` (or a profile
-    /// without a per-plane difference) returns the identity, which the default entries never read.
+    /// that does not need our own warp) returns the identity, which the default entries never read.
+    /// An RW2 profile fills all three columns with the same fitted inverse (Panasonic has no
+    /// per-channel distortion data), so the same `s0_geometry_lens` entry point consumes it.
     static func lensMatrix(_ profile: LensProfile?) -> simd_float4x4 {
-        guard let profile, profile.hasPerPlaneDifference, profile.planes.count >= 3 else {
+        guard let profile, profile.requiresOwnWarp, profile.planes.count >= 3 else {
             return identityMatrix
         }
         func column(_ plane: LensWarpPlane) -> SIMD4<Float> {

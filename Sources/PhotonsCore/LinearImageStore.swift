@@ -10,8 +10,11 @@ import CryptoKit
 /// so every buffer written by v1 was vertically mirrored (the bug behind the "`L1030433.dng` renders
 /// 180°" report — it was never an orientation tag; every file was affected). v2 flips rows at
 /// ingest, so v1 buffers on disk must never be reused.
+/// `v3-lens` = 103: a Panasonic RW2's `0x0119` distortion now turns Apple's lens correction off and
+/// is applied by S0 like a DNG warp. The decoded pixels therefore differ for every RW2, and old
+/// buffers must not be reused; the profile's own `lens=panasonic:…` also enters the key.
 public enum DecodeRecipe {
-    public static let current = "v2-topdown-rows"
+    public static let current = "v3-lens"
 }
 
 /// Identity of a decode result: everything that can change the pixels.
