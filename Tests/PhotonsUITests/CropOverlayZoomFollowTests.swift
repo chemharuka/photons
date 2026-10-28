@@ -132,16 +132,17 @@ final class CropOverlayZoomFollowTests: XCTestCase {
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session), "裁切 mode did not open")
         XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "the entry zoom never finished")
         XCTAssertEqual(loupe.viewState.mode, .fit, "entering 裁切 goes to fit")
-        loupe.zoom(to: 1, aroundView: CGPoint(x: 160, y: 100))
-        XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "the 1:1 landing never finished")
-        // ⑦'s clamp is switched off **for this measurement only**: the harness decodes the fixture at a
-        // preview rung, and `maskSourceSize` reports the ingested size while `framing()` reports the
-        // full one, so the clamp's "room" is computed in a source space the mapping does not use — its
-        // own suite (`CropFrameClampTests`) pins the behaviour, and ② is about the similarity.
+        // 091 (diagnosed 2026-10-28): the frame goes in **before** the camera moves. With the draft
+        // still `.full`, 082's `cropZoomLimit()` caps the camera at `min(640/4760, 400/3168)` =
+        // 0.12626, so `zoom(to: 1)` silently landed at 0.12626 and the "zoom-out" the tests below
+        // measure started from there — i.e. it was a 4× zoom-*in* and the frame legitimately grew.
+        // Product code is right; this prelude was the bug.
         loupe.cropTool.clampsFrameToView = false
         loupe.cropTool.draft = CropToolController.Draft(crop: Self.crop)
         loupe.refreshCropTool()
         pump(0.05)
+        loupe.zoom(to: 1, aroundView: CGPoint(x: 160, y: 100))
+        XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "the 1:1 landing never finished")
         XCTAssertEqual(loupe.viewState.zoom, 1, accuracy: 1e-12)
         XCTAssertEqual(loupe.cropTool.draft.crop, Self.crop, "the harness' frame is the one under test")
     }
