@@ -69,8 +69,8 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
 //
 // Two complementary smoothstep chains, all on `L = log2(luma)` in EV relative to display white:
 //
-//     a = smoothstep(−5.0, −3.2, L)   shadow → mid
-//     b = smoothstep(−2.6, −1.0, L)   mid → high
+//     a = smoothstep(−5.4, −3.9, L)   shadow → mid
+//     b = smoothstep(−2.4, −0.9, L)   mid → high
 //     c = smoothstep(−1.2,  0.0, L)   high → white (closes the top)
 //
 //     shadow = 1 − a,  mid = a(1 − b),  high = b(1 − c)
@@ -79,10 +79,10 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
 // −3.9…−3.2 EV gap, which is exactly where the reference frames' medians sat. Above display white
 // `c = 1` makes `high = 0`, so the gain is exactly 1 and HDR samples pass through unchanged.
 // The CPU owns the travel and its monotonicity gate (`S2Regions`); these functions take **EV**.
-constant float REGION3_SHADOW_LO_EV = -5.0;
-constant float REGION3_SHADOW_HI_EV = -3.2;
-constant float REGION3_MID_LO_EV = -2.6;
-constant float REGION3_MID_HI_EV = -1.0;
+constant float REGION3_SHADOW_LO_EV = -5.4;
+constant float REGION3_SHADOW_HI_EV = -3.9;
+constant float REGION3_MID_LO_EV = -2.4;
+constant float REGION3_MID_HI_EV = -0.9;
 constant float REGION3_HIGH_LO_EV = -1.2;
 constant float REGION3_HIGH_HI_EV = 0.0;
 

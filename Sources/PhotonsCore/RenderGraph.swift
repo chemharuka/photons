@@ -706,7 +706,8 @@ private struct LocalParamsU {
 
 private struct LocalAdjustU {
     var a: SIMD4<Float>   // gainR, gainG, gainB, amountScale
-    var b: SIMD4<Float>   // contrast, highlights, shadows, whites
+    var b: SIMD4<Float>   // contrast, **dHighlight EV**, **dShadow EV**, whites (085: the two lifts
+                          // arrive as gated EV displacements, exactly like S2's `b`)
     // blacks, contrast travel (079 §2.1.2: the EV of bend at |contrast| = 100, `S2Contrast.travel`'s
     // derivation — was a pad until the masked contrast became 0107's bounded bend), pad, enabled.
     var c: SIMD4<Float>
@@ -3568,9 +3569,13 @@ public final class RenderGraph {
         // has nothing for S1.6 to do, and sending it through `local_adjust` would round pixels at the
         // neutral settings instead of copying them.
         let active = enabled && a.hasSceneLinearWork
+        // 085 — the local lifts take the same gated EV travels as the global ones (中间调 pinned at 0:
+        // a local adjustment has no midtone slider yet). Same windows + same travel + same gate is what
+        // makes "the masked slider is the global slider" a measurement rather than a hope.
+        let d = S2Regions.travelEV(shadows: a.shadows, midtones: 0, highlights: a.highlights)
         return LocalAdjustU(
             a: SIMD4(gain.r, gain.g, gain.b, Float(min(max(a.amount, 0), 100) / 100)),
-            b: SIMD4(Float(a.contrast), Float(a.highlights), Float(a.shadows), Float(a.whites)),
+            b: SIMD4(Float(a.contrast), Float(d.high), Float(d.shadow), Float(a.whites)),
             // `.y` is the contrast travel: the EV of bend at `|contrast| = 100`, derived from the
             // axis' own end points exactly as 0107's `S2Contrast.travel` does (8 EV of tone map over
             // display white 0 EV and the black end −8 EV ⇒ 1.0 EV). Passed, not baked into the kernel,

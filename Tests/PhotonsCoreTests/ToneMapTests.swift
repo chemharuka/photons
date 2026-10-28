@@ -584,9 +584,12 @@ final class ToneMapTests: XCTestCase {
             table("midtones +100", dM)
             table("highlights +100", dH)
 
-            // Shadow: the dark end (p5/p20) moves, the top of the picture (p90) does not.
+            // Shadow: the dark end (p5/p20) moves, the top of the picture (p90) does not. The bar is 5
+            // codes at p20, not 6: the seam was moved down to −5.4…−3.9 EV so that 阴影 leaves the
+            // median to 中间调 (`LocalToneTests` measures ≤4 codes there), which costs p20 about one
+            // code of reach — measured 5.4–5.5 on L1030402/433 with 0.90 EV of travel.
             XCTAssertGreaterThanOrEqual(dS[1], 6, "\(f.name): shadows +100 must lift p5")
-            XCTAssertGreaterThanOrEqual(dS[2], 6, "\(f.name): shadows +100 must lift p20")
+            XCTAssertGreaterThanOrEqual(dS[2], 5, "\(f.name): shadows +100 must lift p20")
             XCTAssertLessThanOrEqual(abs(dS[6]), 1, "\(f.name): shadows +100 moved p90")
             // Mid: p50 is inside the window the old layout left dead; p5 (deep shadow) is not.
             // The window runs to −1 EV, so p70…p90 respond too — that is the band the slider names,

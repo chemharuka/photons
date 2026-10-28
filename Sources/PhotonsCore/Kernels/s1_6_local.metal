@@ -99,11 +99,12 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     //    the masked highlights used to go white at `+100` (14.4 % of a frame on the ceiling).
     v = tone_contrast(v, d.b.x, d.c.y);
 
-    // ④ shadows/highlights — S2's EV windows, both weights from the same `region_weights`. Two EV wide
-    //    each, placed under the measured percentiles, so a mask's `shadows +100` lifts the p5 and
-    //    leaves the median where it was — which is what the *global* slider of that name has done
-    //    since 074 R2 and what "the same slider means the same thing" has to mean.
-    v *= region_gain(region_weights(v), d.b.z, d.b.y);
+    // ④ shadows/highlights — S2's **three-window** chain (085), with 中间调 pinned at 0 because a
+    //    local adjustment has no midtone slider yet. Same windows, same travel, same monotonicity
+    //    gate as the global sliders (the CPU already ran `S2Regions.travelEV`), so a mask's
+    //    `shadows +100` is the global `shadows +100` inside the mask and nothing else — which is the
+    //    property `LocalToneTests` measures as "one curve".
+    v *= region_gain3(region_weights3(v), float3(d.b.z, 0.0, d.b.y));
 
     // ⑤ Nothing else. Hue and saturation are **not here** any more (派单 056): they are
     //    display-referred and run in S3.5 from the same include S3 uses; a rotation of linear RGB

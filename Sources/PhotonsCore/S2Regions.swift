@@ -7,8 +7,8 @@ import Foundation
 /// The three windows are two complementary smoothstep chains on `L = log2(luma)` (EV relative to
 /// display white):
 ///
-///     a = smoothstep(−5.0, −3.2, L)    // shadow → mid
-///     b = smoothstep(−2.6, −1.0, L)    // mid → high
+///     a = smoothstep(−5.4, −3.9, L)    // shadow → mid
+///     b = smoothstep(−2.4, −0.9, L)    // mid → high
 ///     c = smoothstep(−1.2,  0.0, L)    // high → white (closes the top)
 ///
 ///     w_shadow = 1 − a
@@ -18,6 +18,9 @@ import Foundation
 /// The two rises do not overlap (`a` is 1 before `b` starts), so every luminance through the
 /// shadow→high run has a full-weight owner: there is **no dead band** between the sliders (the old
 /// layout had −3.9…−3.2 EV where neither acted, which is where the reference frames' median lives).
+/// The shadow seam sits **below** the reference frames' median (p50 ∈ [−4.36, −3.28] EV) on purpose:
+/// at the median `w_shadow` is only ≈0.13, so 阴影 ±100 moves a median by a few codes while the
+/// 中间调 slider owns it — the same separation the old two-window layout had, without the gap.
 /// Above white `c = 1` ⇒ `w_high = 0` and the other two are already 0, so the gain is exactly 1 and
 /// HDR samples pass through bit for bit.
 ///
@@ -50,8 +53,8 @@ public enum S2Regions {
 
     /// The three weights of one luminance, `(shadow, mid, high)`, each 0…1.
     public static func weights(L: Double) -> (shadow: Double, mid: Double, high: Double) {
-        let a = smoothstep(-5.0, -3.2, L)
-        let b = smoothstep(-2.6, -1.0, L)
+        let a = smoothstep(-5.4, -3.9, L)
+        let b = smoothstep(-2.4, -0.9, L)
         let c = smoothstep(-1.2, 0.0, L)
         return (1 - a, a * (1 - b), b * (1 - c))
     }
@@ -67,9 +70,9 @@ public enum S2Regions {
             // `1.5/width` is the upper bound of a Hermite smoothstep's derivative, so each term is
             // the worst-case fold that seam can contribute. The highest one sets the scale.
             let deficit = max(
-                (1.5 / 1.8) * abs(dm - ds),
-                (1.5 / 1.6) * abs(dh - dm),
-                (1.5 / 1.2) * abs(dh))
+                (1.5 / 1.5) * abs(dm - ds),      // shadow↔mid seam is 1.5 EV wide
+                (1.5 / 1.5) * abs(dh - dm),      // mid↔high seam is 1.5 EV wide
+                (1.5 / 1.2) * abs(dh))           // the high release is 1.2 EV wide
             // `deficit` is the worst-case fall of the local slope (`1 − deficit`), so the gate is
             // "keep the slope at or above `minSlope`".
             if deficit > 1 - minSlope {
