@@ -163,14 +163,36 @@ final class NumberFieldController: NSObject, NSTextFieldDelegate {
 
     /// Losing focus commits (047's third exit). A `↵`/`Esc` that already ended the edit is not
     /// committed twice: `commit()` is guarded by `state.editing`.
+    /// The field stopped editing — and **why** decides the outcome (2026-10-28, user):
+    ///
+    ///   * `↵` (`reason == .return`) → **commit**: typing a number and pressing return is a write.
+    ///   * losing focus by clicking anywhere else (`reason == .other`) → **cancel**: 「点击其他地方就
+    ///     取消点击输入，并退回之前的值」. The buffer is dropped, the document is not touched, and the
+    ///     readout goes back to the resting value — an accidental click in the canvas must not write a
+    ///     half-typed number.
+    ///
+    /// `Esc` never reaches here (it ends editing through `cancel()`), so the three exits are: return →
+    /// write, click-away → revert, Esc → revert.
     func controlTextDidEndEditing(_ notification: Notification) {
-        commit()
+        // macOS spells this as the `NSTextMovement` key on the end-editing notification
+        // (`NSTextMovementUserInfoKey`): 0x10 = return, 0x11 = tab, 0x12 = backtab, 0 = "other"
+        // (a click somewhere else). There is no `.return` reason enum on this platform.
+        let movement = (notification.userInfo?["NSTextMovement"] as? Int) ?? 0
+        let keyboardConfirm = movement == 0x10 || movement == 0x11 || movement == 0x12
+        if keyboardConfirm {
+            commit()
+        } else {
+            // A field that was never being edited has nothing to revert, and `cancel()` would bump the
+            // display for no reason.
+            if state.editing { cancel() }
+        }
         refreshDisplay()
     }
 
     // MARK: - the exits themselves
 
-    /// `↵` or blur: write it (which commits once), or beep and put the old number back.
+    /// `↵` / Tab: write it (which commits once), or beep and put the old number back. Losing focus by
+    /// clicking elsewhere never reaches here — it cancels (see `controlTextDidEndEditing`).
     ///
     /// 052: an **empty** buffer is not junk — `↵` on a field the user emptied and then abandoned is
     /// a cancel: no write, no history, no beep (the old number is still there).

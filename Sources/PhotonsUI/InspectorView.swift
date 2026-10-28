@@ -2273,7 +2273,7 @@ struct SliderNumberField: View {
                         onCommit: onCommit)
             .frame(width: width, height: fontSize + 4)
             .accessibilityIdentifier(accessibilityID ?? "")
-            .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 失焦提交")
+            .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 点别处取消并退回原值")
     }
 }
 

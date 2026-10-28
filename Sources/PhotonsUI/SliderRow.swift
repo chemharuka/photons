@@ -15,7 +15,9 @@ import SwiftUI
 ///   · **the name** — double-click = that parameter's default (`onReset`, **required**; a row cannot
 ///     be built without the thing a double-click on its name should do). The card's job is to say
 ///     *what* the default is, `PanelResets`' job to write it.
-///   · **the number** — a `SliderNumberField`: click it, type, `↵`/blur commits, `Esc` cancels, junk
+///   · **the number** — a `SliderNumberField`: click it, type, `↵`/Tab commits, `Esc` **or a click
+///     elsewhere cancels and restores the old value** (2026-10-28: a stray click must not write a
+///     half-typed number), junk
 ///     beeps and writes nothing. A typed value takes the *drag's* path (the binding write, then
 ///     `onEditingChanged(false)`), so one input is one history entry, exactly like one drag.
 ///   · **the slider** — `InspectorView.shapeSlider`, the panel's only `Slider`: 16 pt high, `.mini`,

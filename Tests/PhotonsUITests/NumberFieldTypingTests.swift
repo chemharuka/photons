@@ -161,8 +161,11 @@ final class NumberFieldTypingTests: XCTestCase {
         print("057 · exits: 空缓冲 ↵ / Esc → 不写 · abc → beep 一次 + 恢复")
     }
 
-    /// 失焦（`controlTextDidEndEditing`）→ 提交，一条历史。
-    func testLosingFocusCommitsExactlyOneHistoryEntry() throws {
+    /// **失焦 = 取消**（2026-10-28，用户）：「点击输入滑块值时，点击其他地方就取消点击输入，并退回之前的值」。
+    ///
+    /// 这条曾经是"失焦即提交"，用户为了不再出现"手滑点了画布，半截数字被写进文档"把它反过来了。
+    /// 键盘确认（↵ / Tab）仍然提交 —— 见下一个用例。
+    func testLosingFocusCancelsAndRestoresTheOldValue() throws {
         let session = session(holding: 1.48)
         let before = session.history.count
         var commits: [Double] = []
@@ -180,22 +183,71 @@ final class NumberFieldTypingTests: XCTestCase {
             h.window.makeFirstResponder(nil)          // 点到别处
             pump()
 
-            XCTAssertEqual(commits, [2], "失焦提交一次，值就是缓冲里的")
-            XCTAssertEqual(session.edit.light.exposure, 2)
-            XCTAssertEqual(session.history.count, before + 1, "一次输入 = 一条历史")
-            XCTAssertEqual(h.field.stringValue, "2.00 EV", "读数换成新值")
+            XCTAssertEqual(commits, [], "失焦不许写入")
+            XCTAssertEqual(session.edit.light.exposure, 1.48, "文档退回之前的值")
+            XCTAssertEqual(session.history.count, before, "一条历史都不许多")
+            XCTAssertEqual(h.field.stringValue, "1.48 EV", "读数退回之前的值")
             XCTAssertFalse(h.controller.state.editing)
         }
-        print("057 · blur: 2 → 文档 2.0 · history +1")
+        print("057 · blur cancels: 2 → 文档仍是 1.48 · history +0")
     }
 
-    // MARK: - 4. 反证
+    /// 键盘确认（`↵`）照旧提交：一次输入 = 一条历史。
+    func testReturnCommitsExactlyOneHistoryEntry() throws {
+        let session = session(holding: 1.48)
+        let before = session.history.count
+        var commits: [Double] = []
 
-    /// **反证**：同一台机器、同一套 field editor，只把范围改写拿掉（这里用没有规则的普通
-    /// `NSTextField` 代表 052 那条路）→ 同一个按键得到 `51.48`。
-    ///
-    /// 也就是说：上面第 1 条的 `XCTAssertEqual(editor.string, "5")` 断言的是**接线**，规则本身
-    /// 证明不了它 —— 去掉 `NumberTextField` 里那次范围改写，那条测试就会红。
+        try withRow(exposureRow(1.48), onCommit: { typed in
+            commits.append(typed)
+            session.applyEdit { $0.light.exposure = typed }
+            session.commitEdit(label: "曝光")
+        }) { h in
+            let editor = try focus(h)
+            editor.setSelectedRange(NSRange(location: 0, length: 0))
+            editor.insertText("2", replacementRange: editor.selectedRange())
+            editor.insertNewline(nil)                                // what ↵ does in a field editor
+            pump()
+
+            XCTAssertEqual(commits, [2], "↵ 提交一次，值就是缓冲里的")
+            XCTAssertEqual(session.edit.light.exposure, 2)
+            XCTAssertEqual(session.history.count, before + 1, "一次输入 = 一条历史")
+            XCTAssertEqual(h.field.stringValue, "2.00 EV")
+        }
+        print("057 · return commits: 2 → 文档 2.0 · history +1")
+    }
+
+    /// 直接点滑块：退出输入、**不写缓冲区**，然后滑块的新值生效（用户的原话：这条是防 bug 的）。
+    func testClickingTheSliderEndsTextEntryWithoutWritingTheBuffer() throws {
+        let session = session(holding: 1.48)
+        let before = session.history.count
+        var commits: [Double] = []
+
+        try withRow(exposureRow(1.48), onCommit: { typed in
+            commits.append(typed)
+            session.applyEdit { $0.light.exposure = typed }
+            session.commitEdit(label: "曝光")
+        }) { h in
+            let editor = try focus(h)
+            editor.setSelectedRange(NSRange(location: 0, length: 0))
+            editor.insertText("9", replacementRange: editor.selectedRange())
+
+            // What clicking the slider does first: the field editor loses first responder.
+            h.window.makeFirstResponder(nil)
+            pump()
+            // …then the drag writes through the normal path.
+            session.applyEdit { $0.light.exposure = 0.25 }
+            session.commitEdit(label: "曝光")
+
+            XCTAssertEqual(commits, [], "缓冲区里的 9 不许被写进去")
+            XCTAssertEqual(session.edit.light.exposure, 0.25, "滑块的值才是最新的")
+            XCTAssertEqual(session.history.count, before + 1, "只留滑块那一条历史")
+            // The readout itself is refreshed by SwiftUI re-rendering the row (`update(row:)`), which
+            // this harness does not pump — the two facts that matter are above.
+        }
+        print("057 · click slider: 缓冲区丢弃 · 滑块值 0.25 生效 · history +1")
+    }
+
     func testWithoutTheRangeRewriteTheSameKeystrokeStaysInsideTheReadout() throws {
         let window = makeWindow()
         let plain = NSTextField(frame: NSRect(x: 10, y: 10, width: 120, height: 18))
