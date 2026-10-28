@@ -275,18 +275,26 @@ final class LayoutContractTests: XCTestCase {
 
     // MARK: the inspector's 色差 rows
 
-    /// **The two rows, as a layout contract** (2026-10-28, 078 B8): which card holds 色差 (细节, the
-    /// panel's pixel-level card), how many rows it adds (**2**), which document fields they own, and the
-    /// panel-width identity every row is measured at — **244 / 274 / 308** pt of card content, i.e. the
+    /// **The two rows, as a layout contract** (2026-10-28, 078 B8 / 096): 色差 lives on its own 校正
+    /// card, which sits directly between 细节 and 效果. The card adds **2** rows, owns the same two
+    /// document fields, and every row is measured at — **244 / 274 / 308** pt of card content, i.e. the
     /// inspector's `300 … 364` minus the column's 12 pt padding and the card's own 16 pt inset.
     ///
     /// The rendered proof is `ChromaticAberrationCardTests`, which hosts the panel and measures the two
     /// rows at exactly these three widths.
-    func testTheChromaticAberrationRowsAreTwoInTheDetailCardAtTheThreeContentWidths() throws {
+    func testTheChromaticAberrationRowsAreTwoInTheCorrectionCardAtTheThreeContentWidths() throws {
         XCTAssertEqual(InspectorView.Section.detail.title, "细节")
-        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.detail), "色差 在「调整」的细节卡里")
+        XCTAssertEqual(InspectorView.Section.correction.title, "校正")
+        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.correction), "色差 在「调整」的校正卡里")
         let sections = InspectorView.sections(in: .adjust)
-        XCTAssertTrue(sections.contains(.detail), "调整 工作区里画细节卡：\(sections)")
+        XCTAssertTrue(sections.contains(.correction), "调整 工作区里画校正卡：\(sections)")
+
+        // 096: 细节 → 校正 → 效果, adjacent and in that order.
+        let detail = try XCTUnwrap(sections.firstIndex(of: .detail))
+        let correction = try XCTUnwrap(sections.firstIndex(of: .correction))
+        let effects = try XCTUnwrap(sections.firstIndex(of: .effects))
+        XCTAssertEqual(correction, detail + 1, "校正 紧跟在细节之后：\(sections)")
+        XCTAssertEqual(effects, correction + 1, "效果 紧跟在校正之后：\(sections)")
 
         // 2 rows, in the card's own table, and nothing else grew.
         XCTAssertEqual(InspectorView.caRows.count, 2)

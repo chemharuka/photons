@@ -92,6 +92,11 @@ public struct InspectorView: View {
         /// are the same panel in Lightroom, and below the curve because they act on the decoded pixels
         /// the curve then reprofiles.
         case detail
+        /// 2026-10-28 (096): **校正** — 色差 R / 色差 B, moved out of 细节 and placed between
+        /// 细节 and 效果 (the user's ask: 「色散从细节中移出，单独放置到校正卡片中，校正卡片目前放在
+        /// 「细节」「效果」的中间」). The rows are S0 render parameters, not decoder amounts, so they read
+        /// as their own card rather than as a tail of 细节.
+        case correction
         /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
         ///
         /// After 曲线, and the position is the pipeline's own order rather than a preference:
@@ -134,6 +139,7 @@ public struct InspectorView: View {
             case .hsl: return "HSL"
             case .colorGrading: return "色彩分级"
             case .detail: return "细节"
+            case .correction: return "校正"
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
@@ -325,6 +331,8 @@ public struct InspectorView: View {
             colorGradingCard
         case .detail:
             detailCard
+        case .correction:
+            correctionCard
         case .curve:
             curveCard
         case .effects:
@@ -929,10 +937,8 @@ public struct InspectorView: View {
     ///     `PanelResets.decoderVersion` puts all four back on their defaults as part of the same edit
     ///     (a v9 document never carries a 色彩降噪 amount the new decoder cannot honour).
     ///
-    /// **2026-10-28 (078 B8) — the card ends with two render rows.** 色差 R / 色差 B are not decoder
-    /// rows: `caRows`' own doc has the reasoning, and the behaviour is the difference — they are never
-    /// greyed by `axes`, they take the `.linear` (red) accent instead of the decoder yellow, and they
-    /// commit on release as one history row instead of going through the preview rung.
+    /// **096 (2026-10-28): the card no longer ends with the two 色差 rows.** They moved to their own
+    /// 校正 card, between this card and 效果 (the user's ask); the decoder rows above are unchanged.
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
@@ -957,39 +963,46 @@ public struct InspectorView: View {
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
-            divider
+        }
+        // 096: the 色差 rows moved to `correctionCard`; this frame probe is the negative control for
+        // the CA layout test (「两根行不在这张卡里」), not the rows' own card anchor.
+        .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.detailCardID))
+    }
+
+    /// 2026-10-28 (096) — **校正**: the two 色差 rows on their own card, between 细节 and 效果.
+    ///
+    /// Nothing but the two rows: no divider, no sub-heading (the user's ask is 「校正卡片包括 色差 R、
+    /// 色差 B」). The rows themselves are unchanged — `caRows` / `caSliderRow` are moved here verbatim,
+    /// so the slider travel, the `.linear` accent, one history row on release and the S0 re-render all
+    /// stay as they were on 细节.
+    private var correctionCard: some View {
+        card(Section.correction.title, reset: { resetGroup(.correction) }) {
             ForEach(Self.caRows, id: \.title) { row in
                 caSliderRow(row)
             }
         }
-        // The card's own frame, for the layout test at 244 / 274 / 308 pt — a background, so it
-        // inherits the card's size and cannot change it.
         .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID))
     }
 
-    /// 2026-10-28 (078 B8) — **色差**: the two lateral-CA rows, in the 细节 card.
+    /// 2026-10-28 (078 B8 / 096) — **色差**: the two lateral-CA rows, now in the 校正 card.
     ///
     /// ```text
     /// 色差 R   −100…100   S0: red's radial ratio α_R (> 0 = the red image is larger, pull it in)
     /// 色差 B   −100…100   S0: blue's, the same convention
     /// ```
     ///
-    /// **Why this card and not a new 光学 one.** 029 put CA in S0 and left it with no UI at all; the
-    /// question is only where a user looks for it. 细节 is the card that already owns *「像素级、镜头/
-    /// 机身前面的活」*: the four decoder sliders (降噪 / 锐化) are per-channel pixel work whose numbers
-    /// mean the same thing on every frame, and CA is that same class one stage earlier — it corrects
-    /// what the lens did to the pixels before any tone or colour control sees them. A card of its own
-    /// would be a one-card workspace for two numbers, and Lightroom's own Optics panel is where 去边
-    /// lives *beside* the lens corrections we do not have (profile, vignette, distortion) — none of
-    /// which exist here, so a 光学 card would be mostly empty promises.
+    /// **Why they have a card of their own (096).** 029 put CA in S0 and left it with no UI at all;
+    /// 078 B8 drew the two rows at the end of 细节. The user then moved them out: 「色散从细节中移出，
+    /// 单独放置到校正卡片中，校正卡片目前放在「细节」「效果」的中间」. The rows are S0 render work
+    /// rather than decoder amounts, so 校正 is the card's only content.
     ///
     /// **The two rows are not decoder rows, and the card says so by behaviour, not by a note:** they
     /// commit on release like every render row (`if !editing { session.commitEdit(…) }`), they are
     /// never greyed by `axes`, and their travel is the slider's −100…+100 rather than α's ±0.005 —
     /// the number on screen is `OpticsGroup.sliderPosition(forAlpha:)` and the document holds
     /// `OpticsGroup.alpha(fromSlider:)`, one conversion in one place (the 071 黑电平 rule). A tick
-    /// re-runs S0 and everything below it, which is why they sit last: the four rows above them are a
-    /// re-*develop*, the two below are a re-*render*, and the divider is where the cost changes.
+    /// re-runs S0 and everything below it; that is why the card has no decoder rows above them — the
+    /// 校正 card is a re-*render* only.
     ///
     /// The colour is `.linear` (red `#FF375F`) — 071's third class, "arithmetic on the scene-linear
     /// buffer". S0 samples the decoded linear image radially; it is the same class as the 黑电平 trim
@@ -1170,7 +1183,8 @@ public struct InspectorView: View {
     /// 040's「下面解码参数什么的不用展示」is the reason this is a list of rows and not a view that also
     /// knows how to print a note: the card's decoder half is these four titles plus a number per row,
     /// so a test can hold the whole surface (`DetailSectionTests.testTheCardPrintsNoDecoderProse`).
-    /// Since 078 B8 the card also draws `caRows` (色差 R / 色差 B) — two titles more, still no prose.
+    /// Since 096 `caRows` (色差 R / 色差 B) no longer belong to this card; they have their own 校正
+    /// card and are still not part of this table.
     public static let detailContent = DetailCardContent.standard
 
     /// **Which item is on screen.** The document's own spelling, else the file's default choice
@@ -1930,10 +1944,9 @@ public struct InspectorView: View {
 /// 0 = 系统默认」) and a second label per row (「基线 0.50」). Both are gone, and making the rows data
 /// is what lets a test hold the card's entire text surface instead of a screenshot.
 ///
-/// 2026-10-28 (078 B8): the card has two more rows — 色差 R / 色差 B — but they are **not** in this
-/// table and must not be: these four are a re-*develop* (`DetailAxis`, `CIRAWFilter`, greyed per
-/// decoder version), while 色差 is a re-*render* on S0. They are `InspectorView.caRows`, drawn after
-/// the divider, and their own doc says why they live on this card.
+/// 2026-10-28 (078 B8 / 096): 色差 R / 色差 B are **not** in this table and must not be: these four
+/// are a re-*develop* (`DetailAxis`, `CIRAWFilter`, greyed per decoder version), while 色差 is a
+/// re-*render* on S0. Since 096 they live on their own 校正 card (`InspectorView.caRows`).
 public struct DetailCardContent: Equatable, Sendable {
 
     public struct Row: Equatable, Sendable {
@@ -2444,6 +2457,8 @@ public struct PanelResets {
         /// 2026-10-28: 黑白 — S3.4's switch and its eight 黑白混合 numbers, one double-click.
         case blackAndWhite
         case detail
+        /// 2026-10-28 (096): 校正 — 色差 R / 色差 B, one double-click.
+        case correction
         /// 2026-10-28: 效果 — 暗角 + 颗粒, eight numbers, one double-click.
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
@@ -2457,6 +2472,7 @@ public struct PanelResets {
             case .color: return InspectorView.Section.color.title
             case .blackAndWhite: return InspectorView.Section.blackAndWhite.title
             case .detail: return InspectorView.Section.detail.title
+            case .correction: return InspectorView.Section.correction.title
             case .effects: return InspectorView.Section.effects.title
             case .colorGrading: return InspectorView.Section.colorGrading.title
             }
@@ -2719,23 +2735,24 @@ public struct PanelResets {
             // 解码模型, so the same double-click also takes it back to **V8** (the default): a reset
             // that left the card on V9 would restore four sliders and then grey them out again.
             //
-            // 2026-10-28 (078 B8): the card also holds 色差 R / 色差 B now, so the title takes them
-            // back to `OpticsGroup.identity` in the **same** snapshot. The number is 0 on both
-            // sides of the mapping (position 0 ⇔ α 0), which is what lets one guard cover both:
-            // a card whose title reset six rows to five is the bug the effects card's note warns
-            // about ("the card is one thing on screen").
-            let ca = session.edit.optics
+            // 2026-10-28 (096): 色差已搬到校正卡 — this card's title no longer touches `optics`.
             let changed = !session.edit.detailSettings.isIdentity || session.edit.decoderVersion != nil
-                || !ca.isIdentity
             guard changed else { return false }
             session.applyEdit {
                 $0.detailSettings = .identity
                 $0.decoderVersion = nil
-                $0.optics = .identity
             }
             let committed = session.commitEdit(label: group.title, coalesce: false)
             loupe?.endDetailAdjustment()
             return committed
+
+        case .correction:
+            // 096: 色差 R / 色差 B back to `OpticsGroup.identity` in **one** snapshot — the card is one
+            // thing on screen, so one double-click is one ⌘Z. `false` when both are already 0, so a
+            // stray double-click cannot mint an empty snapshot (or truncate the redo branch).
+            guard !session.edit.optics.isIdentity else { return false }
+            session.applyEdit { $0.optics = .identity }
+            return session.commitEdit(label: group.title, coalesce: false)
 
         case .effects:
             // 2026-10-28: the whole card — 暗角's four numbers **and** 颗粒's four — back to

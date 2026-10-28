@@ -14,8 +14,11 @@ import SwiftUI
 /// Inert in production (nothing is drawn, `hitTest` answers `nil`).
 final class ChromaticAberrationProbe: NSView {
 
-    /// The card's own frame, probed from the card's `.background` so the layout test can say 「行在卡里」.
-    static let cardID = "细节卡"
+    /// The 校正 card's own frame, probed from the card's `.background` so the layout test can say
+    /// 「行在卡里」 (096: the rows moved here from 细节).
+    static let cardID = "校正卡"
+    /// The 细节 card's frame — the negative control: the two rows must be **outside** it.
+    static let detailCardID = "细节卡"
 
     private(set) var rowID: String = ""
 
