@@ -461,6 +461,7 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
             if light.contrast != old.light.contrast
                 || light.highlights != old.light.highlights
+                || light.midtones != old.light.midtones
                 || light.shadows != old.light.shadows {
                 s.insert(.toneMap)
             }
@@ -663,10 +664,15 @@ public struct EditModel: Sendable, Equatable, Codable {
             return "localcolor=\(localColorMaterial)"
 
         case .toneMap:
-            // Contrast and the two region lifts only — the whites/blacks levels moved into the
+            // Contrast and the three region lifts only — the whites/blacks levels moved into the
             // `.sceneLinear` material with the maths (派单 019), so a level change must not be able to
             // miss a cached S1 output by landing in this key instead.
-            return "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
+            //
+            // 085: `md` is appended **only when non-zero**, the `asp`/`car`/`q` discipline, so a
+            // document that never touched 中间调 keeps its pre-085 tone-map material byte for byte.
+            var m = "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
+            if light.midtones != 0 { m += ";md=\(k(light.midtones))" }
+            return m
 
         case .curve:
             return curve.keyString
@@ -962,6 +968,10 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public var exposure: Double          // -5…+5,  default 0
     public var contrast: Double          // -100…100, default 0
     public var highlights: Double        // -100…100, default 0
+    /// 085 — the middle zone of S2's three-window lift, between `shadows` and `highlights`.
+    /// Same envelope and direction as the other two (`+` brightens, `−` pulls down); unlike the old
+    /// two-window layout there is no band between the sliders where none of them acts.
+    public var midtones: Double          // -100…100, default 0
     public var shadows: Double           // -100…100, default 0
     /// 073B — the **white end point**: ±0.6 EV plus a small additive level (0.06 at full travel,
     /// quadratic so a short travel is nearly pure EV), over a 2 EV window that ends at display white
@@ -1063,13 +1073,14 @@ public struct LightGroup: Sendable, Equatable, Codable {
     public static let whiteLevelRange: ClosedRange<Double> = 0.05...64
 
     public init(exposure: Double = 0, contrast: Double = 0, highlights: Double = 0,
-                shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
+                midtones: Double = 0, shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
                 temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0,
                 blackLevel: Double? = nil, whiteLevel: Double? = nil,
                 blackOffset: Double = 0) {
         self.exposure = exposure
         self.contrast = contrast
         self.highlights = highlights
+        self.midtones = midtones
         self.shadows = shadows
         self.whites = whites
         self.blacks = blacks
@@ -1087,6 +1098,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
         v.exposure = c.val("exposure", v.exposure)
         v.contrast = c.val("contrast", v.contrast)
         v.highlights = c.val("highlights", v.highlights)
+        v.midtones = c.val("midtones", v.midtones)
         v.shadows = c.val("shadows", v.shadows)
         v.whites = c.val("whites", v.whites)
         v.blacks = c.val("blacks", v.blacks)
@@ -1122,6 +1134,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
         try c.encode(exposure, forKey: AnyCodingKey("exposure"))
         try c.encode(contrast, forKey: AnyCodingKey("contrast"))
         try c.encode(highlights, forKey: AnyCodingKey("highlights"))
+        try c.encode(midtones, forKey: AnyCodingKey("midtones"))
         try c.encode(shadows, forKey: AnyCodingKey("shadows"))
         try c.encode(whites, forKey: AnyCodingKey("whites"))
         try c.encode(blacks, forKey: AnyCodingKey("blacks"))

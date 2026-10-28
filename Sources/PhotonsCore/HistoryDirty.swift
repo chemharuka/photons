@@ -139,6 +139,7 @@ enum EditParameters {
         areEqual(a.exposure, b.exposure)
             && areEqual(a.contrast, b.contrast)
             && areEqual(a.highlights, b.highlights)
+            && areEqual(a.midtones, b.midtones)
             && areEqual(a.shadows, b.shadows)
             && areEqual(a.whites, b.whites)
             && areEqual(a.blacks, b.blacks)

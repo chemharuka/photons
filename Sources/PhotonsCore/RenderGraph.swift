@@ -527,11 +527,12 @@ private struct S1Params {
 }
 
 private struct S2Params {
-    var a: SIMD4<Float>   // contrast, pivot, pad, pad
-    var b: SIMD4<Float>   // highlights, shadows, identity
+    var a: SIMD4<Float>   // contrast, travel, pad, pad
+    // 085 — dShadow, dMid, dHighlight (all EV, already gated by `S2Regions.travelEV`), identity.
+    var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
-    // it the shadows/highlights lifts treat the matte's 0 as a picture pixel and the viewport's
-    // background bars light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
+    // it the region lifts treat the matte's 0 as a picture pixel and the viewport's background bars
+    // light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
     var c: SIMD4<Float>
 }
 
@@ -2746,16 +2747,21 @@ public final class RenderGraph {
             // pass it always was (see the `kContrast` note in the kernel).
             let toneFunction = edit.light.contrast == 0 ? "s2_tone_map" : "s2_tone_map_contrast"
             let p = try kernels.pipeline(file: "s2_tone_map", function: toneFunction)
-            // Only what bends the 0…1 range: contrast and the two region lifts. Blacks/whites are a
+            // Only what bends the 0…1 range: contrast and the three region lifts. Blacks/whites are a
             // level and moved to S1 (派单 019), so they no longer appear here — neither in the identity
             // test nor in `keyMaterial(.toneMap)`.
             let identity = edit.light.contrast == 0 && edit.light.highlights == 0
-                && edit.light.shadows == 0
+                && edit.light.midtones == 0 && edit.light.shadows == 0
+            // 085: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
+            // kernel only weights and exponentiates.
+            let d = S2Regions.travelEV(shadows: edit.light.shadows,
+                                       midtones: edit.light.midtones,
+                                       highlights: edit.light.highlights)
             var params = S2Params(
                 // `.y` is the bend's full-scale travel in EV — 8/(white − black) of the axis, the
                 // derived replacement for the old hard-coded `2.0` (0107, `S2Contrast.travelEV`).
                 a: SIMD4(Float(edit.light.contrast), Float(S2Contrast.travelEV), 0, 0),
-                b: SIMD4(Float(edit.light.highlights), Float(edit.light.shadows), identity ? 1 : 0, 0),
+                b: SIMD4(Float(d.shadow), Float(d.mid), Float(d.high), identity ? 1 : 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
                 // encoder, and the guard is what makes "shadows" leave the letterbox alone.
