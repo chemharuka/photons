@@ -157,7 +157,7 @@ final class CacheVersionTests: XCTestCase {
 
     func testTheVersionIsDerivedFromTheStagesAndTheBumpIsScoped() throws {
         // The three stages whose arithmetic moved after `graph-v1` was set.
-        XCTAssertEqual(StageAlgorithmVersion.toneMap, 2, "0107: the contrast bend")
+        XCTAssertEqual(StageAlgorithmVersion.toneMap, 3, "085: the three-window region lift")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 2, "073C: the blacks travel")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
@@ -531,7 +531,7 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(edit.keyMaterial(.toneMap),
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
-        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=2"))
+        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=3"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=2"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
     }

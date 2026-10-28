@@ -3,11 +3,11 @@
 #include "tone_shape.metal"
 using namespace metal;
 
-// S2 — tone map: the contrast bend (a bounded S in log2 EV, 0107), the two region lifts, final clamp.
+// S2 — tone map: the contrast bend (a bounded S in log2 EV, 0107), the three region lifts, final clamp.
 //
-// Order: **contrast as an EV displacement** → region lifts for shadows/highlights weighted by an
-// **EV window** → the final clamp. It is monotone in every slider and exact identity at all zeros,
-// which is what M1 has to prove.
+// Order: **contrast as an EV displacement** → region lifts for 阴影/中间调/高光 weighted by the
+// **three-window EV chain** (085) → the final clamp. It is monotone in every slider and exact identity
+// at all zeros, which is what M1 has to prove.
 //
 // **0107 replaced the contrast curve.** It used to be a linear-light power around a 0.18 pivot
 // (`v = sign(v)·0.18·(|v|/0.18)^(2^(contrast/100·2))`): one exponent over the whole range (a 4×
@@ -45,7 +45,7 @@ using namespace metal;
 //
 // **Blacks/whites are not here** (派单 019). They are the two end points, a scene-linear quantity, so
 // they live in S1 (`s1_scene_linear`, 073B). What is left here is *how the range bends between the end
-// points* — contrast and the two region lifts — which is the "normal colour grading" side of the same
+// points* — contrast and the three region lifts — which is the "normal colour grading" side of the same
 // distinction.
 //
 // **074 R2 — the region weights are EV windows, not linear-luma thresholds.** The shipped weights were
@@ -62,29 +62,29 @@ using namespace metal;
 //      measured min d(log v′)/d(log v) = **−0.280** at code 0.895 (21 of 767 grid samples below 0.3),
 //      i.e. a stretch of the highlights *inverted*.
 //
-// The fix is the coordinate, not a gain tweak: the weights are now smoothsteps on
-// **L = log2(luma)** — EV relative to display white, the histogram card's own axis — with two 2 EV
-// windows placed by the measured percentiles:
+// The fix was the coordinate, not a gain tweak: the weights became smoothsteps on
+// **L = log2(luma)** — EV relative to display white, the histogram card's own axis — placed by the
+// measured percentiles (`L1030402/405/408/433`: p5 ∈ [−6.69, −6.22], p20 ∈ [−5.35, −4.77],
+// p50 ∈ [−4.36, −3.28], p70 ∈ [−3.47, −2.53], p95 ∈ [−2.48, −1.45], p99 ∈ [−1.68, −0.88]).
 //
-//     shadows    1 at/below −5.9 EV  →  0 at −3.9 EV
-//     highlights 0 at/below −3.2 EV  →  1 at −1.2 EV and above
+// **085 replaced the two-window layout with three complementary windows.** The old shadow window
+// ended at −3.9 EV and the highlight window began at −3.2 EV, so −3.9…−3.2 EV was a dead band where
+// *neither* slider acted — and that is where the reference frames' medians live. The new chain is
 //
-// Why those numbers (contract 073 §3 and `ToneMapTests`, measured on `L1030402/405/408/433`):
-// p50 ∈ [−4.36, −3.28], p20 ∈ [−5.35, −4.77], p5 ∈ [−6.69, −6.22], p70 ∈ [−3.47, −2.53], p95 ∈
-// [−2.48, −1.45], p99 ∈ [−1.68, −0.88]. The shadow boundary at −3.9 EV keeps **every** median at
-// 0…2 codes while p5…p20 still move +7…+12; the highlight boundary at −3.2 EV does the mirror at the
-// top (p95 moves −9…−35, the median 0). Both windows are 2 EV wide, which is the monotonicity budget:
-// slope = 1 + 0.8·Δ·w′(L) with max|w′| = 1.5/2.0, so min slope is 1 − 1.2/2.0 = **0.400** at ±100
-// (the old highlight window was 0.5 EV wide in luma and folded at −0.280).
+//     shadow  1 − a,  a = smoothstep(−5.0, −3.2, L)     (deep shadow → mid)
+//     mid     a(1 − b), b = smoothstep(−2.6, −1.0, L)  (mid → high)
+//     high    b(1 − c), c = smoothstep(−1.2, 0.0, L)   (high → display white, closing the top)
 //
-// The two windows do not meet: between −3.9 and −3.2 EV neither slider acts, which is what keeps the
-// mid-shadow-to-mid-tone band free of both. An EV window also has the property the owner asked for —
-// the separation from the mid-tones does not depend on the exposure: adding +2 EV moves the *signal*
-// through a window whose width is fixed in stops, whereas the old luma threshold changed which part of
-// the picture counted as "shadow" as the linear values were multiplied.
+// Because `a` reaches 1 before `b` starts, the three weights sum to 1 over the whole shadow→high run:
+// every luminance has a full-weight owner and there is no gap. Above white `c = 1` makes `high = 0`
+// and the gain is exactly 1, so HDR samples pass through bit for bit (079 §4: S2 has no upper clamp).
 //
-// Direction (派单 008 A): Lightroom's, i.e. **both region sliders brighten towards +**. `highlights +`
-// therefore *brightens* the highlight zone (less recovery) and `highlights −` recovers it.
+// Travel and its monotonicity gate are **CPU-side** (`S2Regions.travelEV`): 0.90 / 0.70 / 0.60 EV at
+// full slider, compressed by one common factor when opposite-sign combinations would push the
+// derivative below 0.5. The kernel receives EV directly (`S2Params.b.xyz`) and only weights and
+// exponentiates; it no longer multiplies slider values by a per-window travel.
+//
+// Direction (派单 008 A): Lightroom's, i.e. **all three region sliders brighten towards +**.
 //
 // Matte (派单 008 B): the canvas may be larger than the picture (letterbox) and everything outside the
 // content rect is 0. A shadow/highlight lift treats 0 as a picture pixel, which is how "drag shadows"
@@ -96,14 +96,18 @@ struct S2Params {
     // `.y` used to carry the pivot (0.18) for the linear-light power; that power is gone (0107) and
     // the slot now carries the number that replaced its constant `2.0` — see the header.
     float4 a;
-    float4 b;   // highlights, shadows, identity, pad
+    // 085 — **EV displacements**, not slider positions: dShadow, dMid, dHighlight, identity.
+    // `S2Regions.travelEV` has already multiplied by the travel and applied the monotonicity gate;
+    // the kernel only weights and takes one `exp2` (the old `.x/.y` were −100…100 slider values that
+    // the kernel scaled itself).
+    float4 b;
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 };
 
 // 074 R2 — the two windows live in `tone_shape.metal` now (079 §2.1.2): S1.6's masked lifts have to be
 // the *same* windows, and a mask reading a second copy of `−5.9/−3.9/−3.2/−1.2` is a second meaning
-// waiting to happen. `region_weights`/`region_gain` are the same two lines this kernel used to spell
-// out; the extraction is bit-identical (same expressions, same order — `ToneMapTests` pins it).
+// waiting to happen. `region_weights`/`region_gain` are kept for that local path (085 did not migrate
+// S1.6; 086 will); S2 uses the new `region_weights3`/`region_gain3`.
 
 // ── 0107 — the contrast bend's axis constants (the `.metal` copy of `S2Contrast`) ──────────────
 //
@@ -141,7 +145,7 @@ static inline void s2_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S2Params &p, uint2 gid) {
     float4 c = src.read(gid);
-    if (p.b.z > 0.5) {
+    if (p.b.w > 0.5) {
         dst.write(c, gid);
         return;
     }
@@ -186,20 +190,17 @@ static inline void s2_body(texture2d<float, access::read> src,
 
     // The **region weights** are computed from the non-negative part, exactly as before the sign was
     // preserved. A pixel with mixed signs (one channel sub-black) would otherwise read a slightly
-    // different luminance and the shadows/highlights lift would land a code off on its *positive*
-    // channels — measured as 260 of 3.05 M pixels moving by 1 in the push fixture, with no benefit.
+    // different luminance and the region lift would land a code off on its *positive* channels —
+    // measured as 260 of 3.05 M pixels moving by 1 in the push fixture, with no benefit.
     //
-    // The coordinate is L = log2(luma) — EV relative to display white, the histogram's own HDR axis —
-    // so the windows are exposure-invariant in width and can be read off the card. A pixel at or below
-    // zero lum reads a very negative L, which is the shadow end: exactly right for a sub-black sample
-    // that a lift has already pulled above zero. Both weights come from the shared include, which is
-    // the one place the numbers live (`tone_shape.metal`).
-    float2 w = region_weights(v);
-    // LR convention for both region sliders: a positive value lifts that region, a negative value
-    // pulls it down. `highlights +` therefore *brightens* the highlight zone (less recovery) and
-    // `highlights -` recovers it — the sign used to be flipped here, which made the panel read
-    // backwards against Lightroom for the same gesture.
-    v *= region_gain(w, p.b.y, p.b.x);
+    // 085: three complementary windows (`tone_shape.metal#region_weights3`), all on
+    // `L = log2(luma)` — EV relative to display white, the histogram's own HDR axis — so a window's
+    // width is exposure-invariant. Every luminance has a full-weight owner, and above white the high
+    // window closes, so HDR samples pass through with gain exactly 1. `p.b.xyz` is the gated EV travel
+    // from `S2Regions`; the kernel does not scale slider values any more.
+    float3 w = region_weights3(v);
+    // LR convention (派单 008 A): `+` brightens the named zone, `−` pulls it down.
+    v *= region_gain3(w, p.b.xyz);
 
     // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
     // value that a lift (S1's black end point, or these region lifts) has pulled above zero is real

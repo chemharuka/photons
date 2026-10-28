@@ -26,6 +26,11 @@ using namespace metal;
 //
 // This file is a **sibling of `primaries.metal`, not a client of it**: the including kernel must
 // `#include "primaries.metal"` first (a kernel may not include the same header twice).
+//
+// **085**: S2's global 阴影/中间调/高光 uses the three-window chain below (`region_weights3`). The
+// local pass (`s1_6_local`) still reads the 074 two-window `region_weights`/`region_gain`; that is
+// deliberately unsynchronised until the local pass is unified (a later task), so both bodies stay
+// here and neither is removed.
 
 // ── 074 R2 — the two region windows, in EV relative to display white ──────────────────────────────
 //
@@ -58,6 +63,42 @@ static inline float2 region_weights(float3 v) {
 /// down, so `highlights +` brightens the highlight zone (less recovery). ±0.8 EV at full travel.
 static inline float region_gain(float2 w, float shadows, float highlights) {
     return exp2(shadows / 100.0 * 0.8 * w.x) * exp2(highlights / 100.0 * 0.8 * w.y);
+}
+
+// ── 085 — the three region windows (S2's global 阴影/中间调/高光) ────────────────────────────────
+//
+// Two complementary smoothstep chains, all on `L = log2(luma)` in EV relative to display white:
+//
+//     a = smoothstep(−5.0, −3.2, L)   shadow → mid
+//     b = smoothstep(−2.6, −1.0, L)   mid → high
+//     c = smoothstep(−1.2,  0.0, L)   high → white (closes the top)
+//
+//     shadow = 1 − a,  mid = a(1 − b),  high = b(1 − c)
+//
+// `a` reaches 1 before `b` starts, so there is no band where all three are 0 — the defect of the old
+// −3.9…−3.2 EV gap, which is exactly where the reference frames' medians sat. Above display white
+// `c = 1` makes `high = 0`, so the gain is exactly 1 and HDR samples pass through unchanged.
+// The CPU owns the travel and its monotonicity gate (`S2Regions`); these functions take **EV**.
+constant float REGION3_SHADOW_LO_EV = -5.0;
+constant float REGION3_SHADOW_HI_EV = -3.2;
+constant float REGION3_MID_LO_EV = -2.6;
+constant float REGION3_MID_HI_EV = -1.0;
+constant float REGION3_HIGH_LO_EV = -1.2;
+constant float REGION3_HIGH_HI_EV = 0.0;
+
+/// `(shadow, mid, high)` for one pixel, each 0…1.
+static inline float3 region_weights3(float3 v) {
+    float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
+    float L = log2(lum);
+    float a = smoothstep(REGION3_SHADOW_LO_EV, REGION3_SHADOW_HI_EV, L);
+    float b = smoothstep(REGION3_MID_LO_EV, REGION3_MID_HI_EV, L);
+    float c = smoothstep(REGION3_HIGH_LO_EV, REGION3_HIGH_HI_EV, L);
+    return float3(1.0 - a, a * (1.0 - b), b * (1.0 - c));
+}
+
+/// The one gain of the three lifts: `exp2(shadow·Δs + mid·Δm + high·Δh)`, `dEV` already in EV.
+static inline float region_gain3(float3 w, float3 dEV) {
+    return exp2(dot(w, dEV));
 }
 
 // ── 073B / 073C — the end points: blacks and whites ──────────────────────────────────────────────

@@ -55,9 +55,13 @@ public enum StageAlgorithmVersion {
     public static let localApply = 3
     /// Unchanged (030's HDR curve).
     public static let curve = 1
+    /// **3** — 085: the two-window shadows/highlights lift became the three-window
+    /// shadow/mid/high chain with a gated EV travel (`S2Regions`); the pixels of a document with a
+    /// non-zero region slider change even though its stored numbers do not.
+    ///
     /// **2** — 0107: contrast became a displacement in log2 EV over a held core with a bounded shoulder
     /// and a toe shift (no upper asymptote, no 4× slope); 074 R2 moved the region lifts to EV windows.
-    public static let toneMap = 2
+    public static let toneMap = 3
     /// Unchanged (vibrance/saturation only, since 076).
     public static let color = 1
     /// Unchanged (S3.4's eight-band grey mix).
