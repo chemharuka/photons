@@ -66,7 +66,7 @@ final class InspectorWorkspaceTests: XCTestCase {
                        ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "校正", "效果"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
-        XCTAssertEqual(titles[.transform], ["裁切", "角度"])
+        XCTAssertEqual(titles[.transform], ["裁切", "变换"])
         XCTAssertEqual(titles[.colour], ["HSL", "色彩分级", "黑白"],
                        "色彩工作区：HSL → 色彩分级 → 黑白（用户：黑白放在色彩分级下方）")
         XCTAssertEqual(titles[.history], ["历史记录"])
