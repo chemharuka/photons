@@ -96,20 +96,23 @@ public struct InspectorView: View {
         case detail
         /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
         ///
-        /// After 曲线 and before 预设, and the position is the pipeline's own order rather than a
-        /// preference: Light → Color → 细节/解码 → 曲线 → 效果 are the render stages in execution
-        /// order, and the last two act on the finished picture (S1.7 bends the scene-linear signal,
-        /// S3c/S3.7 the display-referred frame). 预设 stays last because it is not a parameter card at
-        /// all — it writes the others.
+        /// After 曲线, and the position is the pipeline's own order rather than a preference:
+        /// Light → Color → 细节/解码 → 曲线 → 效果 are the render stages in execution order, and the last
+        /// two act on the finished picture (S1.7 bends the scene-linear signal, S3c/S3.7 the
+        /// display-referred frame).
+        ///
+        /// **081 (2026-10-28): the 预设 card is gone.** It was never a parameter card — it wrote the
+        /// others — and the user replaced it with a top-level 预设 menu plus the copy sheet's
+        /// 保存为预设… (「预设卡片删掉，系统顶部菜单栏出现预设」). Deleting the case rather than hiding it
+        /// keeps `Section` the single card list: a card that cannot be shown does not exist.
         case effects
-        case presets
         /// 2026-10-27: 裁切 — the 变换 workspace's **first** card.
         ///
         /// It is a `Section` like every other card (「`Section` 仍然是唯一的卡片清单」), and it is the
-        /// only one the 变换 workspace claims. Its position in `allCases` is after 预设 and before 蒙版
-        /// for one reason: 蒙版 has to stay the last card of the enum (`DecoderModelCardTests` holds
-        /// that, and the panel's own order says the same), while 裁切 belongs to a workspace of its own
-        /// and is therefore invisible in 调整 either way.
+        /// only one the 变换 workspace claims. Its position in `allCases` is before 蒙版 for one
+        /// reason: 蒙版 has to stay the last card of the enum (`DecoderModelCardTests` holds that, and
+        /// the panel's own order says the same), while 裁切 belongs to a workspace of its own and is
+        /// therefore invisible in 调整 either way.
         case crop
         case masks
         /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
@@ -132,7 +135,6 @@ public struct InspectorView: View {
             case .detail: return "细节"
             case .curve: return "曲线"
             case .effects: return "效果"
-            case .presets: return "预设"
             case .crop: return "裁切"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
@@ -315,8 +317,6 @@ public struct InspectorView: View {
             curveCard
         case .effects:
             effectsCard
-        case .presets:
-            PresetPanel(session: session)
         case .crop:
             // 2026-10-27: 变换工作区的第一张卡 —— 比例 / 角度 / 翻转 / 九宫格 / 应用取消，卡头一个直角尺
             // 按钮进出裁切模式。卡本身在 `TransformPanel.swift`（同一套行样式，`sliderRow` 一字未改）。
@@ -1254,7 +1254,7 @@ public struct InspectorView: View {
     ///
     /// `reset` is 派单 047's group verb: when it is given, **double-clicking the title** puts the whole
     /// card back to its defaults in one snapshot (`PanelResets.group(_:)`). `nil` leaves the title a
-    /// plain title — the histogram, 信息, 预设 and 蒙版 cards have no "default" to go back to.
+    /// plain title — the histogram, 信息 and 蒙版 cards have no "default" to go back to.
     ///
     /// The chrome itself lives in `InspectorCardShell`, because one card (裁切, `TransformPanel.swift`)
     /// carries an **accessory in its header** — the ruler button that enters 裁切 mode — and a second

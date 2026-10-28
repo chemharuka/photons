@@ -694,7 +694,7 @@ final class CurvePanelTests: XCTestCase {
 
     // MARK: - 10. where the card sits
 
-    /// 曲线卡在「细节」之后、预设之前；其它卡的相对位置一条没动；标题双击接的是 `PanelResets.curve()`。
+    /// 曲线卡在「细节」之后；其它卡的相对位置一条没动；标题双击接的是 `PanelResets.curve()`。
     func testTheCurveCardSitsDirectlyUnderDetailAndLeavesEveryOtherCardInPlace() throws {
         let titles = InspectorView.sectionTitles
         let detail = try XCTUnwrap(titles.firstIndex(of: "细节"))
@@ -705,9 +705,10 @@ final class CurvePanelTests: XCTestCase {
         // 076 把 HSL 插在 Color 之后（它属于「色彩」工作区），077 把历史记录放在最后，2026-10-28
         // 把效果插在曲线之后（暗角 + 颗粒是最后两段渲染），同一天又把黑白插在 Color 之后（S3.4 紧跟
         // S3）—— 其它卡的相对顺序一条都没动。
+        // 081 (2026-10-28): 预设 卡已删（搬成顶级菜单），所以列表里不再有它。
         XCTAssertEqual(titles.filter { $0 != "曲线" },
                        ["直方图", "白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
-                        "细节", "效果", "预设", "裁切", "蒙版", "历史记录"],
+                        "细节", "效果", "裁切", "蒙版", "历史记录"],
                        "插入一张卡，其它卡的相对顺序一条都不许变")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.curve), "曲线跟随滚动，不属于钉住区")
         XCTAssertFalse(InspectorView.scrollingSections.contains(.histogram))

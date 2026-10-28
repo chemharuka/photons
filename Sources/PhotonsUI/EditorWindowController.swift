@@ -1,5 +1,6 @@
 import AppKit
 import PhotonsCatalog
+import PhotonsCore
 
 /// One editor window: titlebar contract, the workspace, and the commands the menu dispatches.
 ///
@@ -123,9 +124,19 @@ public final class EditorWindowController: NSWindowController {
     }
 
     /// 从当前照片新建预设… — one name, then the capture. No group picker: "the whole look" is what
-    /// the menu command means, and the panel is where a narrower save belongs.
+    /// the menu command means, and the sheet's 保存为预设… is where a narrower save belongs (081 §4).
     @objc public func newPresetFromCurrentAction(_ sender: Any?) {
         guard session.anchorAsset != nil else { return }
+        guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+        session.createPresetFromCurrent(named: name)
+    }
+
+    /// The app's one preset-naming dialog — the menu's 新建 and the copy sheet's 保存为预设… both go
+    /// through it, so a preset is named the same way whichever door the user came in by.
+    ///
+    /// A closure property so a test can answer it without a modal (the same seam as
+    /// `presentCopySheet`); the shipped value is the alert.
+    public var askPresetName: (String) -> String? = { defaultName in
         let alert = NSAlert()
         alert.messageText = "新建预设"
         alert.informativeText = "当前照片的外观会保存为预设（不含蒙版）。"
@@ -133,11 +144,12 @@ public final class EditorWindowController: NSWindowController {
         alert.addButton(withTitle: "取消")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.placeholderString = "预设名称"
-        field.stringValue = "预设 \(session.presetRecords.count + 1)"
+        field.stringValue = defaultName
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        session.createPresetFromCurrent(named: field.stringValue)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     @objc public func deletePresetAction(_ sender: Any?) {
@@ -284,19 +296,39 @@ public final class EditorWindowController: NSWindowController {
         return true
     }
 
+    /// 编辑 ▸ 复制设置 (⌘C) — **opens the card sheet first** (081 §1). ⌘C is a question about *what*
+    /// to copy, so the sheet is where the answer lives; the menu item's title carries the last
+    /// payload's size so the previous answer is still visible at a glance.
+    ///
+    /// The modal is behind `presentCopySheet` so a test can answer it without one — the same seam
+    /// `askPresetName` gives the naming dialog.
+    var presentCopySheet: (CopySettingsAccessoryView.Purpose, CopySettingsSelection)
+        -> CopySettingsAccessoryView.Outcome? = { purpose, selection in
+            CopySettingsAccessoryView.run(selection: selection, purpose: purpose)
+        }
+
     @objc public func copySettingsAction(_ sender: Any?) {
         if isTextEditing {
             _ = forwardTextCommand(#selector(NSText.copy(_:)), sender: sender)
             return
         }
-        session.copySettingsFromAnchor()
+        guard session.canCopySettings else { return }
+        guard let outcome = presentCopySheet(.copy, session.copySelection) else { return }
+        switch outcome {
+        case .confirm(let selection):
+            session.copySettingsFromAnchor(selection: selection)
+        case .savePreset(let selection):
+            // 081 §4: the sheet's 保存为预设… — the checked cards on the anchor, stored as a preset.
+            guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+            session.createPresetFromCurrent(named: name, sections: selection.sections)
+        }
     }
 
+    /// 选择要复制的设置… (⌥⌘C) — the same sheet as ⌘C now that ⌘C asks first. Kept as a separate
+    /// action because it is the responder-chain verb the old menu row and `--ui-smoke` call by name.
     @objc public func chooseCopySettingsAction(_ sender: Any?) {
         guard !isTextEditing, session.canCopySettings else { return }
-        guard let selection = CopySettingsAccessoryView.run(selection: session.copySelection,
-                                                            purpose: .copy) else { return }
-        session.copySettingsFromAnchor(selection: selection)
+        copySettingsAction(sender)
     }
 
     @objc public func pasteSettingsAction(_ sender: Any?) {
@@ -307,11 +339,12 @@ public final class EditorWindowController: NSWindowController {
         session.pasteSettings()
     }
 
+    /// 粘贴设置（选择…） (⇧⌘V) — the same sheet, and the same answer type, as 复制: narrowing at paste
+    /// time uses the selection's cards **and** parameter rows.
     @objc public func pasteSettingsWithChoicesAction(_ sender: Any?) {
         guard !isTextEditing, session.canPasteSettings else { return }
-        guard let selection = CopySettingsAccessoryView.run(selection: session.copySelection,
-                                                            purpose: .paste) else { return }
-        session.pasteSettings(sections: selection.sections)
+        guard case .confirm(let selection)? = presentCopySheet(.paste, session.copySelection) else { return }
+        session.pasteSettings(selection: selection)
     }
 
     // MARK: 旋转/裁切 (task 035)

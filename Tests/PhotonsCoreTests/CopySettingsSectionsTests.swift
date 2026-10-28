@@ -228,15 +228,18 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(selection.matchingPreset, .all)
         // P1-5: 蒙版 is a row like any other — 全部 carries it, and the summary says so.
         XCTAssertTrue(selection.contains(.masks))
-        XCTAssertEqual(selection.summary, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切 · 蒙版")
+        // 081: the summary names the twelve **cards**, in the panel's order.
+        XCTAssertEqual(selection.summary,
+                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 效果 · 裁切 · 蒙版")
 
         selection.selectNone()
         XCTAssertTrue(selection.isEmpty)
         XCTAssertEqual(selection.matchingPreset, .none)
         XCTAssertEqual(selection.summary, "未选任何组：粘贴什么也不会发生")
 
+        // 081: 黑电平 joined 基本 (see `CopySettingsSelection.Preset.basic`).
         selection.select(.basic)
-        XCTAssertEqual(selection.sections, [.whiteBalance, .light, .curve])
+        XCTAssertEqual(selection.sections, [.whiteBalance, .blackLevel, .light, .curve])
         XCTAssertEqual(selection.matchingPreset, .basic)
 
         // 蒙版 can be switched on, by a checkbox or by hand, and off again.
@@ -293,5 +296,77 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(merged.masks.count, 2)
         XCTAssertEqual(merged.masks.first?.id, b.masks.first?.id)
         XCTAssertEqual(naive.masks.count, 1, "反证: a whole-document paste has one mask, not two")
+    }
+
+    // MARK: - 兼容 (081): a pre-081 payload still decodes and pastes the same document
+
+    /// A payload written by the **previous** build: `light` holds balance + tone in one patch, `color`
+    /// holds the HSL bands and the 黑白 switch, and neither `colorGrading` nor `light.blackOffset`
+    /// exists. 081 kept every key name, so this decodes into the new struct untouched and the twelve
+    /// cards fall out of the *fields*: 白平衡 + Light out of `light`, Color + 黑白 + HSL out of `color`.
+    func testALegacySchema2PayloadExpandsToTheCardsAndPastesTheSameDocument() throws {
+        let legacy = """
+        {"schemaVersion":2,
+         "light":{"temperature":5500,"tint":10,"exposure":1.2,"contrast":15},
+         "color":{"vibrance":20,"saturation":25,"blackAndWhite":true,
+                  "bands":[{"index":2,"hue":12,"saturation":-8,"luminance":4,"mix":30}]}}
+        """
+        let payload = try JSONDecoder().decode(EditSnapshot.self, from: Data(legacy.utf8))
+        print("COMPAT v2 → sections \(EditSnapshotSection.panelOrder.filter { payload.sections.contains($0) }.map(\.title))"
+              + " fields=\(payload.fieldCount) version=\(payload.schemaVersion)")
+        XCTAssertEqual(payload.schemaVersion, 2, "旧信封的版本号原样保留，不被改写")
+        XCTAssertEqual(payload.sections,
+                       [.whiteBalance, .light, .color, .blackAndWhite, .hsl],
+                       "light → 白平衡 + Light；color → Color + 黑白 + HSL（等价展开）")
+
+        // The same values written by today's code paste the **same document**.
+        var equivalent = EditModel.neutral
+        equivalent.light.temperature = 5500
+        equivalent.light.tint = 10
+        equivalent.light.exposure = 1.2
+        equivalent.light.contrast = 15
+        equivalent.color.vibrance = 20
+        equivalent.color.saturation = 25
+        equivalent.color.blackAndWhite = true
+        equivalent.color.bands[2] = HSLBand(hue: 12, saturation: -8, luminance: 4, mix: 30)
+
+        let b = documentB()
+        let viaLegacy = payload.applied(to: b)
+        let viaToday = EditSnapshot.capture(equivalent).filtered(to: payload.sections).applied(to: b)
+        XCTAssertEqual(viaLegacy, viaToday, "旧载荷与今天的等价载荷粘贴出逐字节相同的文档")
+        XCTAssertEqual(viaLegacy.color.bands[2].mix, 30)
+        XCTAssertEqual(viaLegacy.light.exposure, 1.2)
+        XCTAssertEqual(viaLegacy.effects, b.effects, "旧载荷里没有的卡一个字段都没动")
+
+        // 不写空段: re-encoding the old payload invents neither new key.
+        let text = String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
+        XCTAssertFalse(text.contains("colorGrading"), "旧载荷重新编码不写空段：\(text)")
+        XCTAssertFalse(text.contains("blackOffset"), "旧载荷重新编码不写空段：\(text)")
+    }
+
+    /// The golden shape of 「今天的载荷减去 081 的两个新键」: strip them from a real capture, re-read it
+    /// as v2, and the paste is field-for-field the one the unstripped capture produces.
+    func testStrippingTheTwoNewKeysGivesAPayloadThatStillPastesIdentically() throws {
+        // No masks: a pasted mask is re-identified with a fresh id on purpose (P1-5), so two pastes of
+        // the same payload differ by exactly that UUID — an identity, not a develop value.
+        var a = documentA()
+        a.masks = []
+        var b = documentB()
+        b.masks = []
+        let today = EditSnapshot.capture(a)
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(today))
+            as? [String: Any])
+        object["schemaVersion"] = 2
+        object.removeValue(forKey: "colorGrading")
+        if var light = object["light"] as? [String: Any] {
+            light.removeValue(forKey: "blackOffset")
+            object["light"] = light
+        }
+        let stripped = try JSONDecoder().decode(EditSnapshot.self,
+                                               from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(stripped.fieldCount, today.fieldCount, "documentA 没有这两项，删掉不掉字段")
+        XCTAssertEqual(stripped.applied(to: b), today.applied(to: b),
+                       "golden: 旧载荷的粘贴结果与今天逐字节相同")
+        XCTAssertEqual(stripped.sections, today.sections)
     }
 }

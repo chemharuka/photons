@@ -377,8 +377,21 @@ final class CopyPasteSettingsTests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(controller.rootView))
         XCTAssertFalse(controller.isTextEditing)
         XCTAssertTrue(controller.validateMenuItem(item))
+        // 081 §1: ⌘C asks **before** it copies, so the sheet is what the action opens. The modal is a
+        // closure (`presentCopySheet`), so this test answers it the way a click on 复制 would.
+        var asked: [(CopySettingsAccessoryView.Purpose, CopySettingsSelection)] = []
+        controller.presentCopySheet = { purpose, selection in
+            asked.append((purpose, selection))
+            return .confirm(selection)
+        }
         controller.copySettingsAction(nil)
+        XCTAssertEqual(asked.count, 1, "⌘C opened the card sheet exactly once")
+        XCTAssertEqual(asked.first?.0, .copy)
         XCTAssertEqual(session.copiedSettings?.fieldCount, 2)
+        // Cancelling the sheet copies nothing (the 反证 of 「⌘C 直接复制」: it now depends on the answer).
+        controller.presentCopySheet = { _, _ in nil }
+        controller.copySettingsAction(nil)
+        XCTAssertEqual(session.copiedSettings?.fieldCount, 2, "a cancelled sheet leaves the clipboard as it was")
     }
 
     // MARK: - 选组对话框的三个答案
@@ -387,7 +400,8 @@ final class CopyPasteSettingsTests: XCTestCase {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.selection.sections, Set(EditSnapshotSection.copyable))
-        XCTAssertEqual(view.statusLabel.stringValue, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切 · 蒙版")
+        XCTAssertEqual(view.statusLabel.stringValue,
+                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 效果 · 裁切 · 蒙版")
         XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 1, "全部 is the first preset row")
 
         // 全不选 / 全选 buttons.
@@ -403,7 +417,7 @@ final class CopyPasteSettingsTests: XCTestCase {
         let basicIndex = CopySettingsAccessoryView.popUpIndex(of: .basic)
         view.presetPopUp.selectItem(at: basicIndex)
         view.presetPopUp.sendAction(view.presetPopUp.action, to: view.presetPopUp.target)
-        XCTAssertEqual(view.selection.sections, [.whiteBalance, .light, .curve])
+        XCTAssertEqual(view.selection.sections, [.whiteBalance, .blackLevel, .light, .curve])
         XCTAssertEqual(view.checkboxes[.curve]?.state, .on)
         XCTAssertEqual(view.checkboxes[.color]?.state, .off)
 

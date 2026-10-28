@@ -301,9 +301,12 @@ public final class CatalogSession {
         } else {
             reload()
         }
-        // The preset card and the Develop menu read this cache; fill it as soon as the library is
+        // The preset list and the Develop menu read this cache; fill it as soon as the library is
         // open instead of waiting for the panel's first `onAppear`.
         reloadPresets()
+        // 081 §3: the 复制设置 checklist is remembered **per library**, so it is read here and not
+        // from `UserDefaults`. A library that never stored one answers 全部.
+        copySelection = (try? c.copySelection()) ?? .all
     }
 
     /// Where this library's filter archive lives. The path is the library *directory*; the hash of it
@@ -1170,7 +1173,8 @@ public final class CatalogSession {
     /// preset can only carry what it claims to.
     @discardableResult
     public func createPresetFromCurrent(named name: String,
-                                        groups: Set<PresetGroup> = Set(PresetGroup.allCases))
+                                        groups: Set<PresetGroup> = Set(PresetGroup.allCases),
+                                        sections: Set<EditSnapshotSection>? = nil)
         -> PresetRecord? {
         guard let catalog else {
             lastPresetError = "未打开库"
@@ -1186,7 +1190,15 @@ public final class CatalogSession {
             return nil
         }
         do {
-            let preset = Preset(name: trimmed, from: MaskViewState.documentOnly(edit), groups: groups)
+            // 081 §4: a preset saved from the copy sheet carries **the cards that were checked**, and
+            // nothing else — the fragment is those cards' current values over a neutral document, so
+            // a later apply moves those leaves and only those. `groups` is the old door (「从当前照片
+            // 新建预设」, the whole look).
+            let preset: Preset = if let sections, !sections.isEmpty {
+                Preset(name: trimmed, fromSections: sections, of: MaskViewState.documentOnly(edit))
+            } else {
+                Preset(name: trimmed, from: MaskViewState.documentOnly(edit), groups: groups)
+            }
             let record = try catalog.savePreset(preset)
             lastPresetError = nil
             reloadPresets()
@@ -1285,7 +1297,11 @@ public final class CatalogSession {
             .filtered(to: choice)
         copiedSettings = payload
         copiedSettingsSourceID = asset.id
-        if selection != nil { copySelection = choice }
+        copySelection = choice
+        // 081 §3: every 复制 writes the checklist once, into **this** library's `settings` row. Failure
+        // is silent on purpose — a read-only library must still be able to copy settings, and the
+        // selection then simply comes back as 全部 next time.
+        if let catalog { try? catalog.storeCopySelection(choice) }
         lastSettingsError = payload.isEmpty
             ? "这张照片在所选组里没有非默认设置：粘贴不会改动任何字段"
             : nil
@@ -1301,6 +1317,20 @@ public final class CatalogSession {
     @discardableResult
     public func pasteSettings(sections: Set<EditSnapshotSection>? = nil,
                               into ids: [String]? = nil) -> [SettingsPasteReport] {
+        let narrowed = sections.flatMap { checked in copiedSettings.map { $0.filtered(to: checked) } }
+        return pasteSettings(narrowed: narrowed, into: ids)
+    }
+
+    /// ⇧⌘V — narrow the payload by **the sheet's whole answer**, cards *and* parameter rows, so the
+    /// paste writes exactly what the checkboxes said (081 §2/§3).
+    @discardableResult
+    public func pasteSettings(selection: CopySettingsSelection,
+                              into ids: [String]? = nil) -> [SettingsPasteReport] {
+        let narrowed = copiedSettings.map { $0.filtered(to: selection) }
+        return pasteSettings(narrowed: narrowed, into: ids)
+    }
+
+    private func pasteSettings(narrowed: EditSnapshot?, into ids: [String]?) -> [SettingsPasteReport] {
         let targets = ids ?? metadataTargetIDs
         lastPasteReports = []
         guard let copied = copiedSettings else {
@@ -1308,7 +1338,7 @@ public final class CatalogSession {
             settingsRevision &+= 1
             return []
         }
-        let payload = sections.map { copied.filtered(to: $0) } ?? copied
+        let payload = narrowed ?? copied
         guard !payload.isEmpty else {
             lastSettingsError = "所选组里没有可粘贴的设置"
             settingsRevision &+= 1

@@ -108,6 +108,11 @@ public enum PresetError: LocalizedError, Equatable {
 public struct Preset: Sendable, Equatable, Codable {
     /// Bumped when the *envelope* changes shape. Compare with `EditModel.currentSchemaVersion`:
     /// they are different numbers with different meanings.
+    ///
+    /// **Stays 1 at 081.** The `sections` key below is additive and optional, so a v1 envelope still
+    /// decodes (as "whole groups") and a v1 *build* reading a new envelope ignores the key and applies
+    /// the groups — the same presets it always did, only coarser. Bumping here would refuse every old
+    /// preset for a widening no reader has to care about.
     public static let currentSchemaVersion = 1
 
     public var schemaVersion: Int
@@ -119,13 +124,28 @@ public struct Preset: Sendable, Equatable, Codable {
     /// `showMaskID` always nil, at construction and after every decode.
     public var edit: EditModel
 
+    /// **081: the cards the preset was saved from, when it was saved from the copy sheet.**
+    ///
+    /// `groups` is the storage unit and stays the authority for the *fragment* — but a group is
+    /// coarser than a card (`.light` covers 白平衡, 黑电平 and Light), and 「把当前选中的项目数值为预设」
+    /// means a preset that carries exactly those cards. So a section-scoped preset also narrows
+    /// **application**: `apply(to:)` merges its fields through `EditSnapshot` instead of replacing the
+    /// group, and a 白平衡-only preset no longer resets the destination's 曝光.
+    ///
+    /// `nil` is every preset written before 081, and means "the whole groups" — that is what keeps old
+    /// rows byte-identical and behaviourally unchanged. A build that does not know the key still
+    /// applies the groups, which is the coarse answer, never a wrong one.
+    public var sections: Set<EditSnapshotSection>?
+
     public init(name: String,
                 groups: Set<PresetGroup> = Set(PresetGroup.allCases),
                 edit: EditModel = .neutral,
+                sections: Set<EditSnapshotSection>? = nil,
                 schemaVersion: Int = Preset.currentSchemaVersion) {
         self.schemaVersion = schemaVersion
         self.name = name
         self.groups = groups
+        self.sections = sections
         // Only the subset survives: reading `preset.edit.color` on a Light preset must show what
         // would actually be applied (neutral), never a value that is silently dropped on encode.
         self.edit = Preset.project(edit, onto: groups)
@@ -134,6 +154,31 @@ public struct Preset: Sendable, Equatable, Codable {
     /// Capture a preset from a document: same groups, values as they stand (masks dropped).
     public init(name: String, from edit: EditModel, groups: Set<PresetGroup> = Set(PresetGroup.allCases)) {
         self.init(name: name, groups: groups, edit: edit)
+    }
+
+    /// Capture **the cards the user checked** from a document (081 §4: the sheet's 保存为预设).
+    ///
+    /// The fragment is the checked cards' *current* values over a neutral document
+    /// (`EditSnapshot.capture` → `filtered` → `applied(to: .neutral)`), so nothing the user did not
+    /// check is in the blob — a 白平衡-only preset does not secretly carry an exposure. 蒙版 is never
+    /// in a preset (a mask is this picture's blemish), so the section is dropped here rather than
+    /// stored and ignored later.
+    public init(name: String, fromSections sections: Set<EditSnapshotSection>, of edit: EditModel) {
+        let kept = sections.subtracting([.masks])
+        let narrow = EditSnapshot.capture(edit).filtered(to: kept)
+        let groups = Set(kept.flatMap { section -> [PresetGroup] in
+            switch section {
+            case .geometry: return [.geometry]
+            case .whiteBalance, .blackLevel, .light: return [.light]
+            case .curve: return [.curve]
+            case .color, .blackAndWhite, .hsl: return [.color]
+            case .colorGrading: return [.colorGrading]
+            case .detail: return [.detail]
+            case .effects: return [.effects]
+            case .masks: return []
+            }
+        })
+        self.init(name: name, groups: groups, edit: narrow.applied(to: .neutral), sections: kept)
     }
 
     /// `edit` with everything outside `groups` reset to the document default, and masks /
@@ -162,7 +207,15 @@ public struct Preset: Sendable, Equatable, Codable {
 
     /// `target` with the preset's groups replaced. `masks`, `showMaskID`, `schemaVersion` and
     /// `processVersion` are always the target's own.
+    ///
+    /// When `sections` is set (081) the merge is **field-level** instead: the fragment is re-read as a
+    /// sparse snapshot narrowed to those cards, so a 白平衡-only preset writes the Kelvin pair and
+    /// leaves the destination's 曝光, 黑电平 and 曲线 alone. `groups` still says which keys the blob
+    /// carries; it is the fragment that decides which leaves land.
     public func apply(to target: EditModel) -> EditModel {
+        if let sections, !sections.isEmpty {
+            return EditSnapshot.capture(edit).filtered(to: sections).applied(to: target)
+        }
         var out = target
         for group in PresetGroup.ordered(groups) {
             switch group {
@@ -195,6 +248,7 @@ public struct Preset: Sendable, Equatable, Codable {
         static let schemaVersion = AnyCodingKey("schemaVersion")
         static let name = AnyCodingKey("name")
         static let groups = AnyCodingKey("groups")
+        static let sections = AnyCodingKey("sections")
         static let fragment = AnyCodingKey("fragment")
     }
 
@@ -203,6 +257,14 @@ public struct Preset: Sendable, Equatable, Codable {
         try c.encode(schemaVersion, forKey: Key.schemaVersion)
         try c.encode(name, forKey: Key.name)
         try c.encode(PresetGroup.ordered(groups).map(\.rawValue), forKey: Key.groups)
+        // 081: only when the preset was saved from the copy sheet's cards. **Absent** for every other
+        // preset, which is what keeps their bytes — and their old behaviour — identical.
+        if let sections {
+            try c.encode(EditSnapshotSection.panelOrder
+                            .filter { sections.contains($0) }
+                            .map(\.rawValue),
+                         forKey: Key.sections)
+        }
         var fragment = c.nestedContainer(keyedBy: AnyCodingKey.self, forKey: Key.fragment)
         for group in PresetGroup.ordered(groups) {
             switch group {
@@ -251,6 +313,15 @@ public struct Preset: Sendable, Equatable, Codable {
         }
         // Masks are never read back into a preset, even if a hand-written file carries them.
         self.edit = Preset.project(edit, onto: groups)
+
+        // 081: optional. An unknown name is dropped rather than fatal (the same rule the stored
+        // checklist uses), and an empty result stays `nil` — "the whole groups", never "nothing".
+        if let raw: [String] = c.val("sections", [String]?.none) {
+            let known = Set(raw.compactMap(EditSnapshotSection.init(rawValue:)))
+            self.sections = known.isEmpty ? nil : known
+        } else {
+            self.sections = nil
+        }
     }
 
     // MARK: convenience
