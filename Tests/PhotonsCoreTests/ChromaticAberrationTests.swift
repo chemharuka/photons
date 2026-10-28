@@ -170,14 +170,15 @@ final class ChromaticAberrationTests: XCTestCase {
 
         var redOnly = neutral
         redOnly.optics.caRed = 0.002
-        XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=0.00200")
-        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=0.00200;alg=1")
+        // 084: the token is integer tenths of a slider unit, not `k()`: 0.002 = position 40 = 400.
+        XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=400")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=1")
 
         var both = redOnly
         both.optics.caBlue = -0.0015
         XCTAssertEqual(both.keyMaterial(.geometry, algorithmVersion: false),
-                       params + ";car=0.00200;cab=-0.00150")
-        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=0.00200;cab=-0.00150;alg=1")
+                       params + ";car=400;cab=-300")
+        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=1")
 
         // Only non-zero is appended: setting a slider back to zero is the old document again.
         var backToZero = both
@@ -185,6 +186,32 @@ final class ChromaticAberrationTests: XCTestCase {
         XCTAssertEqual(backToZero.keyMaterial(.geometry), material)
         XCTAssertEqual(both.changedStages(from: neutral), [.geometry])
         XCTAssertEqual(neutral.changedStages(from: neutral), [])
+    }
+
+    /// **084's counter-proof**: on a 0.1 grid two adjacent positions are 5e-6 apart, and `k()`'s
+    /// `%.5f` prints both as `0.00001`. The key must still tell them apart, or one position serves
+    /// the other's cached geometry; and a document at zero must still carry no `car=` token.
+    func testAdjacentTenthStepsGetDifferentGeometryKeysAndZeroAppendsNone() throws {
+        var oneStep = EditModel.neutral
+        oneStep.optics.caRed = OpticsGroup.alpha(fromSlider: 0.1)
+        var twoSteps = EditModel.neutral
+        twoSteps.optics.caRed = OpticsGroup.alpha(fromSlider: 0.2)
+
+        // The old `k()` would have collided; the integer-tenths token does not.
+        XCTAssertEqual(k(oneStep.optics.caRed), k(twoSteps.optics.caRed),
+                       "前提：%.5f 分不开这两步（0.000005 / 0.000010）")
+        XCTAssertNotEqual(oneStep.keyMaterial(.geometry), twoSteps.keyMaterial(.geometry))
+        XCTAssertTrue(oneStep.keyMaterial(.geometry).contains(";car=1"),
+                      "0.1 = 1 个十分位：\(oneStep.keyMaterial(.geometry))")
+        XCTAssertTrue(twoSteps.keyMaterial(.geometry).contains(";car=2"),
+                      "0.2 = 2 个十分位：\(twoSteps.keyMaterial(.geometry))")
+
+        let neutral = EditModel.neutral.keyMaterial(.geometry)
+        XCTAssertFalse(neutral.contains("car="))
+        XCTAssertFalse(neutral.contains("cab="))
+        var backToZero = twoSteps
+        backToZero.optics = .identity
+        XCTAssertEqual(backToZero.keyMaterial(.geometry), neutral)
     }
 
     /// An older document has no `optics` key at all; it must read as "no correction" and keep the
