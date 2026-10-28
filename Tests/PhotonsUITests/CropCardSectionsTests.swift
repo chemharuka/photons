@@ -55,7 +55,7 @@ final class CropCardSectionsTests: XCTestCase {
 
         // The enum is the one spelling, and its order is the stacked order.
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "rotation", "mirror"])
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["裁切", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
 
         // …and the panel really drew four headers, in that order, top to bottom.
         var drawn: [(title: String, rect: CGRect)] = []
@@ -68,7 +68,7 @@ final class CropCardSectionsTests: XCTestCase {
             drawn.append((section.title, rect))
             print("082 §4 · 小标题「\(section.title)」 \(NSStringFromRect(rect))")
         }
-        XCTAssertEqual(drawn.map(\.title), ["裁切", "角度", "旋转", "镜像"])
+        XCTAssertEqual(drawn.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
         for (a, b) in zip(drawn, drawn.dropFirst()) {
             XCTAssertGreaterThan(b.rect.minY, a.rect.minY,
                                  "082 §4: 「\(b.title)」必须在「\(a.title)」下面")
@@ -348,12 +348,12 @@ final class CropCardSectionsTests: XCTestCase {
               + "\(session.history.snapshots.count)（角度 1 · 镜像 1 · 旋转 1 · 裁切 1 · 整卡 1）")
     }
 
-    // MARK: - 1 + 6. 进卡即进模式，且不改文档
+    // MARK: - 1 + 6. 进变换即进模式，且不改文档
 
-    /// Switching to 变换 opens the tool (overlay on screen); switching away closes it — and **nothing**
-    /// about the document, the revision or the history moves. Anti-proof: the same switch with the hook
-    /// off leaves the tool closed.
-    func testTheWorkspaceEntersAndLeavesCropModeWithoutTouchingTheDocument() throws {
+    /// Switching to 变换 opens the tool (overlay on screen); 086 says switching away must **not** force
+    /// it closed, and nothing about the document, the revision or the history moves either way.
+    /// Anti-proof: the same switch with the hook off leaves the tool closed.
+    func testTheWorkspaceEntersCropModeAndDoesNotForceItClosedWithoutTouchingTheDocument() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let root = try XCTUnwrap(editor.rootView)
         let loupe = root.loupeController
@@ -368,30 +368,36 @@ final class CropCardSectionsTests: XCTestCase {
         // → 变换
         root.inspectorWorkspaces.select(.transform)
         CropUITestSupport.pump(0.1)
-        print("082 §1 · 切到变换：isCropToolActive \(loupe.isCropToolActive) · overlay 在屏 "
+        print("086 §1 · 切到变换：isCropToolActive \(loupe.isCropToolActive) · overlay 在屏 "
               + "\(loupe.isCropOverlayOnScreenForTesting) · bar 可见 \(!loupe.cropBar.isHidden)")
-        XCTAssertTrue(loupe.isCropToolActive, "082 §1: 进变换 = 进裁切模式")
-        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "082 §1: 选框真的在屏上")
-        XCTAssertFalse(loupe.cropBar.isHidden, "082 §1: 悬浮栏跟着出现")
+        XCTAssertTrue(loupe.isCropToolActive, "086 §1: 进变换 = 进裁切模式")
+        XCTAssertTrue(loupe.isCropOverlayOnScreenForTesting, "086 §1: 选框真的在屏上")
+        XCTAssertFalse(loupe.cropBar.isHidden, "086 §1: 悬浮栏跟着出现")
         // 6. no document write on the way in.
         XCTAssertEqual(CropUITestSupport.documentBytes(session), bytesBefore, "082 §6: 进模式不写文档")
         XCTAssertEqual(session.history.snapshots.count, historyBefore, "082 §6: 不产生历史")
         XCTAssertEqual(session.editRevision, revisionBefore, "082 §6: revision 不变")
 
-        // → 调整
+        // → 调整 (082's leaving half is kept: the frame goes away with the card, and the draft is
+        // cancelled rather than applied — a workspace switch is not 「应用」)
         root.inspectorWorkspaces.select(.adjust)
         CropUITestSupport.pump(0.1)
-        print("082 §1 · 切回调整：isCropToolActive \(loupe.isCropToolActive) · overlay 在屏 "
+        print("086 §1 · 切回调整：isCropToolActive \(loupe.isCropToolActive) · overlay 在屏 "
               + "\(loupe.isCropOverlayOnScreenForTesting) · bar 可见 \(!loupe.cropBar.isHidden)")
-        XCTAssertFalse(loupe.isCropToolActive, "082 §1: 切走工作区 = 退出裁切模式")
-        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "082 §1: 选框消失")
+        XCTAssertFalse(loupe.isCropToolActive, "082: 切走工作区 = 退出裁切模式")
+        XCTAssertFalse(loupe.isCropOverlayOnScreenForTesting, "082: 选框随卡片一起消失")
         XCTAssertTrue(loupe.cropBar.isHidden)
-        XCTAssertEqual(CropUITestSupport.documentBytes(session), bytesBefore, "082 §6: 退出也不写文档")
+        XCTAssertEqual(CropUITestSupport.documentBytes(session), bytesBefore, "082 §6: 切走也不写文档")
         XCTAssertEqual(session.history.snapshots.count, historyBefore)
         XCTAssertEqual(session.editRevision, revisionBefore)
 
-        // The 直角尺 button is still an explicit switch (it is no longer the only way in).
-        XCTAssertTrue(loupe.beginCropTool(), "082 §1: 直角尺 / ⌘R 仍能进")
+        // The explicit entries still work, and the workspace entry is idempotent.
+        XCTAssertTrue(loupe.beginCropTool(), "082 §1: 回到变换再进模式")
+        XCTAssertFalse(loupe.enterCropToolIfNeeded(), "086: 已经在裁切模式时重复进入必须什么都不做")
+        XCTAssertTrue(loupe.isCropToolActive)
+        loupe.cancelCropTool()
+        XCTAssertFalse(loupe.isCropToolActive)
+        XCTAssertTrue(loupe.beginCropTool(), "082 §1: ⌘R / 菜单仍能进")
         XCTAssertTrue(loupe.isCropToolActive)
         loupe.cancelCropTool()
 

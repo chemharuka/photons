@@ -246,13 +246,9 @@ public struct InspectorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .task(id: metadataKey) { reloadMetadata() }
-        // 082 — 「点击右侧裁切菜单后，自动进入裁切模式出现裁切选框。离开裁切模式也退出裁切选框」.
-        //
-        // The workspace is what decides whether the 裁切 card is on screen, so it is what decides the
-        // mode — one fact, one place. Idempotent (`setCropWorkspaceActive` answers "already there" with
-        // a `false` and does nothing), so the workspace root's own wiring and this one cannot fight.
-        // No document write either way: entering is a view-state switch, leaving *cancels* the draft
-        // rather than applying it.
+        // 082/086 — entering 变换 opens 裁切 mode (the frame is part of the workspace, not a button),
+        // and leaving it cancels the draft (082). Idempotent, so the workspace root's own wiring and
+        // this one cannot fight.
         .task { loupe?.setCropWorkspaceActive(workspaces.selection.showsCropCard) }
         .onChange(of: workspaces.selection) { _, workspace in
             loupe?.setCropWorkspaceActive(workspace.showsCropCard)
@@ -327,8 +323,9 @@ public struct InspectorView: View {
         case .effects:
             effectsCard
         case .crop:
-            // 2026-10-27: 变换工作区的第一张卡 —— 比例 / 角度 / 翻转 / 九宫格 / 应用取消，卡头一个直角尺
-            // 按钮进出裁切模式。卡本身在 `TransformPanel.swift`（同一套行样式，`sliderRow` 一字未改）。
+            // 2026-10-27 / 086: 变换工作区的第一张卡 —— 宽高比 / 角度 / 旋转 / 镜像，底部九宫格 +
+            // 应用取消；进入工作区即进入裁切模式，卡头没有按钮。卡本身在 `TransformPanel.swift`
+            // （同一套行样式，`sliderRow` 一字未改）。
             cropTransformCard
         case .masks:
             MaskListPanel(session: session)
@@ -1935,7 +1932,7 @@ public struct DetailCardContent: Equatable, Sendable {
 /// The panel's **card chrome**: glass, hairline, insets, and a title row with an optional accessory.
 ///
 /// One definition, used by both `InspectorView.card(_:reset:_:)` (accessory = `EmptyView`) and the
-/// 裁切 card (`TransformPanel.swift`), whose header carries the 直角尺 button that enters 裁切 mode.
+/// 裁切 card (`TransformPanel.swift`, also `EmptyView` since 086 removed its header button).
 /// A second copy of this chain — the four paddings, the material, the 9 pt corner, the 8 % hairline —
 /// is how two cards in the same column start to look like two different panels.
 ///
@@ -2851,7 +2848,7 @@ public struct PanelResets {
 ///
 /// 2026-10-27 — the *decision* of when to gate moved to `WorkspaceRootView.updateInspectorGate()`,
 /// because it now has two inputs: the crop mode and the workspace. 变换 is exempt (that card **is** the
-/// crop tool's controls — the 直角尺 button, 比例, 角度, 应用/取消), every other workspace is gated
+/// crop tool's controls — 宽高比, 角度, 应用/取消), every other workspace is gated
 /// exactly as §E1 measured. This class only implements one bool.
 public final class InspectorHostingView: NSHostingView<InspectorView> {
 
