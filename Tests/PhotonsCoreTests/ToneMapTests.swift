@@ -344,6 +344,32 @@ final class ToneMapTests: XCTestCase {
         XCTAssertEqual(matteStatistics(boxed, rect: rect).maxValue, 0)
     }
 
+    /// 090 acceptance: dragging 中间调 to +40 moves the display signal, measured with this file's own
+    /// p50 convention (the same percentile table `testEachZoneMovesItsOwnBand` uses on real frames).
+    /// The UI test owns "the document is 40 and releasing is one history row"; this owns the pixels.
+    func testMidtonesPlusFortyMovesTheDisplayMedianUp() throws {
+        let image = rampImage()
+        let graph = try makeGraph(image, identity: "tone-midtones")
+        let opts = RenderOptions(scale: 1, wantsPixels: true)
+
+        func p50(midtones: Double) throws -> Double {
+            var edit = EditModel.neutral
+            edit.light.midtones = midtones
+            let result = try graph.render(edit, options: opts)
+            defer { if let output = result.output { graph.recycle(output: output) } }
+            let display = try XCTUnwrap(result.display)
+            let codes = stride(from: 0, to: display.rgba.count, by: 4)
+                .map { Double(Float(display.rgba[$0])) * 255 }
+            return Self.percentiles(codes)[4]          // 4 == p50 in `percentileList`
+        }
+
+        let base = try p50(midtones: 0)
+        let lifted = try p50(midtones: 40)
+        print("090 中间调 +40: p50 \(String(format: "%.1f", base)) → "
+              + "\(String(format: "%.1f", lifted)) codes")
+        XCTAssertGreaterThan(lifted, base + 0.5, "中间调 +40 必须把 p50 往前推（中灰变亮）")
+    }
+
     // MARK: - D. local adjustments use the same convention
 
     /// **079 §2.1.2 — the mask's blacks/whites are 073B/073C's end points, not 019's affine level.**

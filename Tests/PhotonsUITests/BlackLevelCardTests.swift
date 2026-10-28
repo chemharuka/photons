@@ -13,8 +13,8 @@ import PhotonsCore
 ///   1. **类别**：`.linear` —— 面板里的第一个线性域参数，红 `#FF375F`（`SliderStyleTests` 量像素）。
 ///   2. **单位**：滑杆是整数 −10…+10，文档是 `n/1000` 的 Double。行显示整数，模型存小数，翻译只在
 ///      `LightGroup` 的两个映射函数里发生一次。
-///   3. **位置**：Light 之后、Color 之前 —— 它是线性域的色调修整，紧挨着 Light 的六根滑杆，
-///      但**不是**它们的第七根（`lightRows` 仍是六行，Lex 的复位语义因此不变）。
+///   3. **位置**：Light 之后、Color 之前 —— 它是线性域的色调修整，紧挨着 Light 的七根滑杆，
+///      但**不是**它们的第八根（`lightRows` 是七行，Lex 的复位语义因此不变）。
 @MainActor
 final class BlackLevelCardTests: XCTestCase {
 
@@ -35,8 +35,8 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.Section.blackLevel.title, "黑电平", "标题 = 卡名 = 撤销标签")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.blackLevel), "它跟随滚动，不属于钉住区")
 
-        // Light 仍是六行：071 没有往那张表里加第七行。
-        XCTAssertEqual(InspectorView.lightRows.count, 6, "黑电平不是 Light 的第七根滑杆")
+        // Light 现在是七行（085 的中间调），但黑电平仍不在这张表里。
+        XCTAssertEqual(InspectorView.lightRows.count, 7, "黑电平不是 Light 的第八根滑杆")
         XCTAssertFalse(InspectorView.lightRows.map(\.title).contains("黑电平"))
         // 预钉的头部没动。
         XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "黑电平"])

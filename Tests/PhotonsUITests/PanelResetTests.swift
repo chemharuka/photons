@@ -9,10 +9,10 @@ import PhotonsCore
 ///
 /// What is pinned, and why each assertion is the one that matters:
 ///
-///   1. **一条 = 一次 ⌘Z**。双击「Light」把六根滑杆 + 两个绝对电平写回默认，历史只 +1；⌘Z 一步全部
-///      回来（逐字段断言）。写错成「每字段各提交一次」会得到 6 条 —— 下面 `testTheGroupResetIsOne
-///      EntryWhileThePerFieldPathWouldBeSix` 就是这个错误实现的常驻反证：它把两条路径都跑一遍，
-///      一条是 1，另一条是 6。
+///   1. **一条 = 一次 ⌘Z**。双击「Light」把七根滑杆 + 两个绝对电平写回默认，历史只 +1；⌘Z 一步全部
+///      回来（逐字段断言）。写错成「每字段各提交一次」会得到 7 条 —— 下面 `testTheGroupResetIsOne
+///      EntryWhileThePerFieldPathWouldBeSeven` 就是这个错误实现的常驻反证：它把两条路径都跑一遍，
+///      一条是 1，另一条是 7。
 ///   2. **默认不是字面 0**。参考值是 `EditModel.neutral`（各组自己的默认构造）与 `DetailAxis` 的机身
 ///      基线 —— 细节是 `0/50/0/50`（Leica），白平衡是 `nil`（原照）。硬编码 0 会让这条红。
 ///   3. **白平衡 = 原照设定 = 重新解码**：`decodeInputs.key` 必须移动过去再回来（这正是「会重新
@@ -91,7 +91,7 @@ final class PanelResetTests: XCTestCase {
 
     // MARK: - 2. 双击分区名
 
-    /// Light 里六个滑杆 + 两个绝对电平各设非默认值 → 双击「Light」→ 全部回默认，历史**只 +1**。
+    /// Light 里七个滑杆 + 两个绝对电平各设非默认值 → 双击「Light」→ 全部回默认，历史**只 +1**。
     func testDoubleClickingLightPutsEveryFieldBackInOneSnapshot() {
         let session = CatalogSession()
         let resets = PanelResets(session: session)
@@ -100,6 +100,7 @@ final class PanelResetTests: XCTestCase {
             model.light.exposure = 2
             model.light.contrast = 40
             model.light.highlights = -30
+            model.light.midtones = 18
             model.light.shadows = 25
             model.light.whites = 15
             model.light.blacks = -10
@@ -114,11 +115,12 @@ final class PanelResetTests: XCTestCase {
 
         XCTAssertTrue(resets.group(.light), "a changed card must reset")
 
-        // 逐字段：六个滑杆回自己字段的默认，两个电平回 nil。
+        // 逐字段：七个滑杆回自己字段的默认，两个电平回 nil。
         let neutral = EditModel.neutral.light
         XCTAssertEqual(session.edit.light.exposure, neutral.exposure, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.contrast, neutral.contrast, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.highlights, neutral.highlights, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.light.midtones, neutral.midtones, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.shadows, neutral.shadows, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.whites, neutral.whites, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.blacks, neutral.blacks, accuracy: 1e-12)
@@ -136,7 +138,7 @@ final class PanelResetTests: XCTestCase {
                        "the undo label is the card the user double-clicked")
         print("Light reset: history +\(session.history.count - before) · "
               + "\(session.edit.light.exposure)/\(session.edit.light.contrast)/"
-              + "\(session.edit.light.highlights)/\(session.edit.light.shadows)/"
+              + "\(session.edit.light.highlights)/\(session.edit.light.midtones)/\(session.edit.light.shadows)/"
               + "\(session.edit.light.whites)/\(session.edit.light.blacks) · "
               + "levels \(String(describing: session.edit.light.blackLevel))/"
               + "\(String(describing: session.edit.light.whiteLevel))")
@@ -150,6 +152,7 @@ final class PanelResetTests: XCTestCase {
             model.light.exposure = 1.5
             model.light.contrast = 22
             model.light.highlights = -11
+            model.light.midtones = 17
             model.light.shadows = 33
             model.light.whites = 44
             model.light.blacks = -55
@@ -169,15 +172,16 @@ final class PanelResetTests: XCTestCase {
 
     /// **反证（常驻）**：把整组复位写成「每字段各提交一次」就是 N 条历史。
     ///
-    /// 这里把两条路径都跑一遍：`group(.light)` 是 1，逐字段循环是 6。前者一旦被改成后者，第一条
+    /// 这里把两条路径都跑一遍：`group(.light)` 是 1，逐字段循环是 7。前者一旦被改成后者，第一条
     /// 断言立刻红 —— 这就是规格第 7 条要的反证，不需要改代码再手动跑一次。
-    func testTheGroupResetIsOneEntryWhileThePerFieldPathWouldBeSix() {
+    func testTheGroupResetIsOneEntryWhileThePerFieldPathWouldBeSeven() {
         func configured() -> CatalogSession {
             let session = CatalogSession()
             session.applyEdit { model in
                 model.light.exposure = 2
                 model.light.contrast = 40
                 model.light.highlights = -30
+                model.light.midtones = 18
                 model.light.shadows = 25
                 model.light.whites = 15
                 model.light.blacks = -10
@@ -206,6 +210,30 @@ final class PanelResetTests: XCTestCase {
         XCTAssertEqual(manyDelta, InspectorView.lightRows.count,
                        "the per-field route is what this test guards against: it is N, not 1")
         XCTAssertNotEqual(oneDelta, manyDelta, "一条和 N 条必须是可分辨的，否则这条断言没有意义")
+    }
+
+    /// 090: 双击「中间调」→ 回 0，一条历史；⌘Z 回到拖动值。字段复位走的是同一张 `ToneRow` 表。
+    func testDoubleClickingMidtonesResetsOnlyThatRow() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.light.midtones = 40
+            model.light.shadows = 25
+        }
+        XCTAssertTrue(session.commitEdit(label: "拖动"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.field(\.light.midtones, label: "中间调"))
+        XCTAssertEqual(session.edit.light.midtones, 0, "中间调回 0")
+        XCTAssertEqual(session.edit.light.shadows, 25, "只清这一根")
+        XCTAssertEqual(session.history.count, before + 1, "双击参数名 = 一条历史")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "中间调")
+
+        XCTAssertFalse(resets.field(\.light.midtones, label: "中间调"), "已在默认值上，不许造空快照")
+        XCTAssertEqual(session.history.count, before + 1)
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.light.midtones, 40, "⌘Z 回到 40")
     }
 
     // MARK: - 3. 白平衡 = 原照设定

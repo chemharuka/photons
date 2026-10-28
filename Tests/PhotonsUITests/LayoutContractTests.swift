@@ -198,6 +198,36 @@ final class LayoutContractTests: XCTestCase {
                                     "比实测更窄的面板会出现没有验证过的行宽")
     }
 
+    // MARK: the inspector's Light card
+
+    /// **The Light card's seven rows, in the user's order** (085/090): 曝光 → 对比 → 高光 → 中间调 →
+    /// 阴影 → 白色 → 黑色. The card is content-derived (046/052), so adding 中间调 changes the row count,
+    /// not a pinned height; the three content widths the rows are measured at are the same
+    /// **244 / 274 / 308** pt identity every other card uses.
+    func testTheLightCardIsSevenRowsWithMidtonesBetweenHighlightsAndShadows() throws {
+        let rows = InspectorView.lightRows
+        XCTAssertEqual(rows.map(\.title),
+                       ["曝光", "对比", "高光", "中间调", "阴影", "白色", "黑色"],
+                       "用户口径：高光 → 中间调 → 阴影；其余五行的顺序不动")
+        XCTAssertEqual(rows.count, 7)
+        XCTAssertEqual(rows.map(\.shape), Array(repeating: .knob, count: 7),
+                       "七根都是显示域渲染参数（.knob）")
+        XCTAssertEqual(rows.map(\.keyPath),
+                       [\.light.exposure, \.light.contrast, \.light.highlights,
+                        \.light.midtones, \.light.shadows, \.light.whites, \.light.blacks],
+                       "中间调直达 085 的 `light.midtones`，不需要新的接线")
+        for row in rows.dropFirst() {
+            XCTAssertEqual(row.range, -100 ... 100, "\(row.title) 与高光/阴影同为 ±100")
+            XCTAssertEqual(row.format, "%.0f")
+            XCTAssertEqual(row.decimals, 1)
+        }
+
+        let contentWidths = [WorkspaceLayout.inspectorWidthMin, 330, WorkspaceLayout.inspectorWidthMax]
+            .map { $0 - 2 * 12 - 2 * WorkspaceLayout.cardInsetH }
+        XCTAssertEqual(contentWidths, [244, 274, 308],
+                       "面板 300/330/364 → 卡内容 244/274/308（Light 的七行也按这三个宽度画）")
+    }
+
     // MARK: the inspector's 色彩分级 card
 
     /// **The card, as a layout contract** (2026-10-28, P0 色彩分级): where it sits (the 色彩 workspace,
