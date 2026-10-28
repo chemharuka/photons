@@ -265,6 +265,50 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertEqual(session.edit.light.blackOffset, before.light.blackOffset, "⌘Z 回到原值")
     }
 
+    /// 094 — `autoBlackOffset()` 端到端量的是**工作空间**（Rec2020）里三通道全负的点。
+    ///
+    /// 合成缓冲里放两类点：一个三通道全负的暗点（x = 0）和一个出色域点（x = 5，sRGB 里只有 R
+    /// 为负，最负 −0.018）。`autoBlackOffset()` 按 stride 5 采样，正好两个都看到。工作空间的最负值
+    /// ≈ −0.0035 → 自动值 0.004（没有被钳）；旧口径 `minChannel` 会看到 −0.018 并钳到 +0.01，
+    /// 所以这条用例同时钉住「换了空间」与「候选集排除了单通道为负的点」。
+    func testAutoBlackOffsetMeasuresInWorkingSpaceEndToEnd() throws {
+        let session = CatalogSession()
+        session.mode = .loupe
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        _ = loupe.view
+
+        let image = LinearImage(width: 6, height: 1, rgba: [
+            -0.005, -0.001, -0.001, 1,
+            0.1, 0.1, 0.1, 1,
+            0.1, 0.1, 0.1, 1,
+            0.1, 0.1, 0.1, 1,
+            0.1, 0.1, 0.1, 1,
+            -0.018, 0.004, 0.003, 1,
+        ], colorSpace: "linear", decoderVersion: "synthetic-094")
+        loupe.decodedForTesting = image
+
+        let working = image.darkestBelowBlack(sampleStride: 5)
+        let decoded = image.minChannel(sampleStride: 5)
+        print(String(format: "094 synthetic working min %.6f → auto %.4f · decoded min %.6f → old auto %.4f",
+                     working, LoupeController.autoBlackOffset(for: working),
+                     decoded, LoupeController.autoBlackOffset(for: decoded)))
+        XCTAssertEqual(Double(working), -0.00351, accuracy: 1e-3,
+                       "工作空间里只剩那个三通道全负的暗点")
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: decoded), 0.01,
+                       "旧口径会被出色域点的 −0.018 顶到钳位上限")
+
+        let offset = try XCTUnwrap(loupe.autoBlackOffset(), "有解码缓冲时必须返回写入值")
+        XCTAssertEqual(offset, 0.004, accuracy: 1e-9, "工作空间口径：≈ −0.0035 向上取整 = 0.004")
+        XCTAssertLessThan(offset, LightGroup.blackOffsetRange.upperBound, "没有被钳到 +0.01")
+        XCTAssertEqual(session.edit.light.blackOffset, offset)
+        XCTAssertEqual(session.history.count, 1, "一次点击 = 一条历史")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "黑电平 · 自动")
+
+        XCTAssertNil(loupe.autoBlackOffset(), "第二次点击是 no-op（幂等）")
+        XCTAssertEqual(session.history.count, 1, "no-op 不加历史")
+    }
+
     /// 没有解码缓冲（浏览器模式 / 还在加载）：返回 nil，不写文档、不加历史。
     func testAutoBlackOffsetReturnsNilWithoutADecodedBuffer() {
         let session = CatalogSession()
