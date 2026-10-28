@@ -45,12 +45,12 @@ final class TransformPanelTests: XCTestCase {
     func testTheTransformWorkspaceShowsTheCropCardFirst() throws {
         XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop, .angle],
                        "变换工作区认领裁切 + 角度两张卡（唯一一张「工作区 → 卡片」表）")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "角度"],
-                       "卡片清单的第一张必须是裁切，第二张是角度")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "变换"],
+                       "卡片清单的第一张必须是裁切，第二张是变换卡（093 改名）")
         XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop", "angle"])
         // 调整工作区不受影响：裁切是它自己的工作区的卡片。
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("裁切"))
-        XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("角度"))
+        XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("变换"))
         // 077（2026-10-28）：历史记录排在枚举末尾；蒙版仍是它前面最后一张参数卡
         // （`DecoderModelCardTests` 也钉这一条）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
@@ -60,7 +60,7 @@ final class TransformPanelTests: XCTestCase {
         panel.state.select(.transform)
         try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "角度"])
+        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "变换"])
         let card = try XCTUnwrap(panel.row(CropCardID.card), "裁切卡自己没有 frame")
         let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "角度卡自己没有 frame")
         print(String(format: "CARD · 变换第一张 = %@ · frame (%.1f, %.1f, %.1f×%.1f)",
@@ -296,7 +296,7 @@ final class TransformPanelTests: XCTestCase {
         panel.state.select(.transform)
         try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
         try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe) != nil }
-        let keys = ["宽高比", "转动", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
+        let keys = ["宽高比", "角度", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
         for key in keys {
             _ = try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(key) != nil }
         }
