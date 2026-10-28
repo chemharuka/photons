@@ -71,7 +71,17 @@ final class CacheVersionTests: XCTestCase {
             .add(identity).add(size).add(size).add(size).add(stripped(.geometry)).canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry)).add(stripped(.sceneLinear)).canonical
         let curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear)).add(stripped(.curve)).canonical
-        let toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(stripped(.toneMap)).canonical
+        // 098: S1.8 sits between the curve and S2; a contrast document has one more link, and the
+        // "strip the version" chain must have the same *shape* as production or ⑤ would be comparing
+        // two different graphs rather than one graph with and without its algorithm token.
+        var toneSeed = curve
+        if edit.hasContrastStage {
+            toneSeed = KeyBuilder(KeyBuilder.digest(of: curve))
+                .add("contrast")
+                .add(stripped(.contrast))
+                .canonical
+        }
+        let toneMap = KeyBuilder(KeyBuilder.digest(of: toneSeed)).add(stripped(.toneMap)).canonical
         let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(stripped(.color)).canonical
         let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(stripped(.vignette)).canonical
         let display = KeyBuilder(KeyBuilder.digest(of: vignette))
@@ -156,8 +166,9 @@ final class CacheVersionTests: XCTestCase {
     // MARK: - ② the version is derived, and scoped
 
     func testTheVersionIsDerivedFromTheStagesAndTheBumpIsScoped() throws {
-        // The three stages whose arithmetic moved after `graph-v1` was set.
-        XCTAssertEqual(StageAlgorithmVersion.toneMap, 3, "085: the three-window region lift")
+        // The three stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out
+        // of S2, so its generation moved again to 4).
+        XCTAssertEqual(StageAlgorithmVersion.toneMap, 4, "098: contrast left S2 for S1.8")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 2, "073C: the blacks travel")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
@@ -531,7 +542,7 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(edit.keyMaterial(.toneMap),
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
-        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=3"))
+        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=4"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=2"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
     }

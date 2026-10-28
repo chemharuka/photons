@@ -39,6 +39,13 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is **deleted**; this is the one curve. `grep -rn "s3_curve" Sources` must find nothing but
     /// this sentence.
     case curve = "s1.7-hdr-curve"
+    /// 098 — **contrast**, as a multiscale edge-aware decomposition of `Y` in the **scene-linear**
+    /// domain. Sits after the curve (it reads the curve's output) and before S2 (which now only does
+    /// its three region lifts).
+    ///
+    /// **Conditional** like the mask/effect stages: it exists only when `light.contrast != 0`, so a
+    /// neutral document keeps its pre-098 trace, key chain and pixels byte for byte.
+    case contrast = "s1.8-contrast"
     case toneMap = "s2-tone-map"
     case color = "s3-color"
     /// 2026-10-28 (P0-4) — **黑白**: the monochrome conversion, and the per-hue mix that decides how
@@ -127,8 +134,8 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// saturation never visits S3.5, one whose bands are all 0 never visits S3.6, and one whose grain
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .toneMap, .color, .bw,
-         .localColor, .hsl, .grade, .detailFX, .vignette, .grain, .display]
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .toneMap,
+         .color, .bw, .localColor, .hsl, .grade, .detailFX, .vignette, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -142,8 +149,10 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false,
                                 hasHSL: Bool = false, hasGrain: Bool = false,
                                 hasBW: Bool = false, hasGrade: Bool = false,
-                                hasDetailFX: Bool = false, hasHeal: Bool = false) -> [RenderStage] {
-        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX || hasHeal else {
+                                hasDetailFX: Bool = false, hasHeal: Bool = false,
+                                hasContrast: Bool = false) -> [RenderStage] {
+        guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX || hasHeal
+                || hasContrast else {
             return allCases
         }
         return order.filter { stage in
@@ -156,6 +165,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
             case .grade: return hasGrade
             case .detailFX: return hasDetailFX
             case .grain: return hasGrain
+            case .contrast: return hasContrast
             default: return true
             }
         }
@@ -175,6 +185,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .localApply: return "s1.6"
         case .heal: return "s1.9"
         case .curve: return "s1.7"
+        case .contrast: return "s1.8"
         case .toneMap: return "s2"
         case .color: return "s3-color"
         case .bw: return "s3.4"
@@ -192,7 +203,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     public var group: String {
         switch self {
         case .geometry: return "geometry"
-        case .sceneLinear, .toneMap: return "light"
+        case .sceneLinear, .contrast, .toneMap: return "light"
         case .maskAtlas, .localApply, .localColor: return "masks"
         case .heal: return "heal"
         case .curve: return "curve"
@@ -379,6 +390,10 @@ public enum RenderKeyChain {
         public var heal: String?
         public var toneMap: String
         public var curve: String
+        /// `H(curveKey | "contrast" | contrastMaterial)`; `nil` when `light.contrast == 0`, in which
+        /// case S1.8 does not exist for this render at all (098) and S2 is seeded by the curve exactly
+        /// as before.
+        public var contrast: String?
         public var color: String
         /// `H(colorKey | "bw" | bwMaterial)`; `nil` when the document is not black-and-white, in which
         /// case S3.4 does not exist for this render at all (2026-10-28) and the next link is seeded by
@@ -409,6 +424,7 @@ public enum RenderKeyChain {
 
         public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
         public var hasHealStage: Bool { heal != nil }
+        public var hasContrastStage: Bool { contrast != nil }
         public var hasBWStage: Bool { bw != nil }
         public var hasLocalColorStage: Bool { localColor != nil }
         public var hasHSLStage: Bool { hsl != nil }
@@ -422,7 +438,8 @@ public enum RenderKeyChain {
             RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                                  hasHSL: hasHSLStage, hasGrain: hasGrainStage,
                                  hasBW: hasBWStage, hasGrade: hasGradeStage,
-                                 hasDetailFX: hasDetailFXStage, hasHeal: hasHealStage)
+                                 hasDetailFX: hasDetailFXStage, hasHeal: hasHealStage,
+                                 hasContrast: hasContrastStage)
         }
     }
 
@@ -517,7 +534,19 @@ public enum RenderKeyChain {
         // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6/S1.9, which
         // is the whole reason the curve has its own stage instead of riding on S1's key (§3.2 of 030).
         curve = KeyBuilder(KeyBuilder.digest(of: curveSeed)).add(mat(.curve)).canonical
-        toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(mat(.toneMap)).canonical
+        // 098: S1.8 sits between the curve and S2 and exists only when contrast is non-zero. Neutral
+        // leaves the link `nil`, so S2 is seeded by the curve and every existing chain stays intact.
+        var contrast: String?
+        var toneMapSeed = curve
+        if edit.hasContrastStage {
+            let link = KeyBuilder(KeyBuilder.digest(of: curve))
+                .add("contrast")
+                .add(mat(.contrast))
+                .canonical
+            contrast = link
+            toneMapSeed = link
+        }
+        toneMap = KeyBuilder(KeyBuilder.digest(of: toneMapSeed)).add(mat(.toneMap)).canonical
 
         let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(mat(.color)).canonical
         // 2026-10-28 (P0-4): S3.4 sits between S3 and S3.5 and exists **only** when the 黑白 switch is
@@ -612,7 +641,8 @@ public enum RenderKeyChain {
 
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply, heal: heal,
-                     toneMap: toneMap, curve: curve, color: color, bw: bw, localColor: localColor,
+                     toneMap: toneMap, curve: curve, contrast: contrast, color: color, bw: bw,
+                     localColor: localColor,
                      hsl: hsl, grade: grade, detailFX: detailFX, vignette: vignette, grain: grain,
                      display: displayKey.canonical)
     }
@@ -626,6 +656,7 @@ public enum RenderKeyChain {
                   heal: links.heal.map(KeyBuilder.digest(of:)),
                   toneMap: KeyBuilder.digest(of: links.toneMap),
                   curve: KeyBuilder.digest(of: links.curve),
+                  contrast: links.contrast.map(KeyBuilder.digest(of:)),
                   color: KeyBuilder.digest(of: links.color),
                   bw: links.bw.map(KeyBuilder.digest(of:)),
                   localColor: links.localColor.map(KeyBuilder.digest(of:)),
@@ -665,6 +696,9 @@ public struct StageKeys: Sendable, Equatable {
     public var heal: String?
     public var toneMap: String
     public var curve: String
+    /// `H(curveKey | "contrast" | contrastMaterial)`; `nil` when `light.contrast == 0` (098), in which
+    /// case S1.8 does not exist for this render and S2 is seeded by the curve.
+    public var contrast: String?
     public var color: String
     /// `H(colorKey | "bw" | bwMaterial)`; `nil` when the document is not black-and-white
     /// (2026-10-28), in which case the stage does not exist for this render.
@@ -689,7 +723,7 @@ public struct StageKeys: Sendable, Equatable {
 
     public init(inputIdentity: String, geometry: String, sceneLinear: String,
                 maskAtlas: String? = nil, localApply: String? = nil, heal: String? = nil,
-                toneMap: String, curve: String, color: String,
+                toneMap: String, curve: String, contrast: String? = nil, color: String,
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
                 grade: String? = nil, detailFX: String? = nil,
@@ -702,6 +736,7 @@ public struct StageKeys: Sendable, Equatable {
         self.heal = heal
         self.toneMap = toneMap
         self.curve = curve
+        self.contrast = contrast
         self.color = color
         self.bw = bw
         self.localColor = localColor
@@ -715,6 +750,7 @@ public struct StageKeys: Sendable, Equatable {
 
     public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
     public var hasHealStage: Bool { heal != nil }
+    public var hasContrastStage: Bool { contrast != nil }
     public var hasBWStage: Bool { bw != nil }
     public var hasLocalColorStage: Bool { localColor != nil }
     public var hasHSLStage: Bool { hsl != nil }
@@ -733,6 +769,7 @@ public struct StageKeys: Sendable, Equatable {
         case .heal: return heal ?? ""
         case .toneMap: return toneMap
         case .curve: return curve
+        case .contrast: return contrast ?? ""
         case .color: return color
         case .bw: return bw ?? ""
         case .localColor: return localColor ?? ""
@@ -752,7 +789,7 @@ public struct StageKeys: Sendable, Equatable {
         RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                              hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage,
                              hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage,
-                             hasHeal: hasHealStage)
+                             hasHeal: hasHealStage, hasContrast: hasContrastStage)
     }
 
     public var shortTrace: String {
