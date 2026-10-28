@@ -920,21 +920,10 @@ index 2d48cd6..be88dc3 100644
  
      /// Double-click on one of the card's nine rows: **that** number back to its own default (0, i.e. "this
 diff --git a/Sources/PhotonsUI/InspectorWorkspaceTabs.swift b/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
-index de873c3..46977f2 100644
+index a292f1e..46977f2 100644
 --- a/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
 +++ b/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
-@@ -84,9 +84,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
-             // 预设, which stays last because it writes the other cards rather than adding a parameter.
-             // 2026-10-28: 黑白 (S3.4) **left** this workspace — the user moved it into 色彩 with HSL
-             // and 色彩分级 («黑白移动到色彩栏，不放在调整中»), which is also where its subject lives.
--            // Membership is listed in the panel's own render order (`Section.allCases`), because
--            // `UISmokeWorkspaceSwitchTests` compares the panel's reported titles to this array.
--            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail,
-+            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve,
-                     .effects, .presets]
-         case .transform:
-             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
-@@ -109,6 +107,15 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
+@@ -107,6 +107,15 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
          }
      }
  
@@ -951,7 +940,7 @@ index de873c3..46977f2 100644
      /// 「先空着」, and the view draws no cards, no placeholder and no message.
      public var hasCards: Bool { !cards.isEmpty }
 diff --git a/Sources/PhotonsUI/LoupeController.swift b/Sources/PhotonsUI/LoupeController.swift
-index d2e0946..d7ae7bb 100644
+index d2e0946..bf2afca 100644
 --- a/Sources/PhotonsUI/LoupeController.swift
 +++ b/Sources/PhotonsUI/LoupeController.swift
 @@ -1320,12 +1320,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
@@ -1096,7 +1085,7 @@ index d2e0946..d7ae7bb 100644
          if cropTool.isActive { refreshCropTool() }
          requestEditRender()
          return committed
-@@ -3584,6 +3651,70 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -3584,6 +3651,75 @@ public final class LoupeController: NSViewController, HeadroomSource {
          noteBackdropKeyMoved()
      }
  
@@ -1115,6 +1104,10 @@ index d2e0946..d7ae7bb 100644
 +    // 框**不动**：被挪的是画面（相机的 centre）。这与 ⑦ `clampToView` 不同，⑦ 是「框太大→缩小框」的
 +    // 兜底（拖手柄仍需要它），这里是把相机挡在「框刚好内接于画布」那一级之前。
 +
++    /// With this `false`, the crop session's camera clamp does nothing — 082 (追加)'s anti-proof. A test
++    /// flips it to show that 「框 ⊆ 画布」 and 「钳位后不再变化」 go red without it; the app never does.
++    var clampsCropCamera = true
++
 +    /// The crop frame in **source pixels** — the four edges the draft is drawing right now.
 +    public func cropFrameRect(source: ImageSize? = nil) -> CGRect? {
 +        guard cropTool.isActive else { return nil }
@@ -1130,6 +1123,7 @@ index d2e0946..d7ae7bb 100644
 +    /// anchored pan and a dragged handle all move it. `nil` when there is no frame to measure (the
 +    /// tool is off) or the projection is degenerate.
 +    public func cropZoomLimit(viewport: ImageSize? = nil) -> Double? {
++        guard clampsCropCamera else { return nil }
 +        guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
 +        let canvas = CGSize(width: Double(framing.viewport.width),
 +                            height: Double(framing.viewport.height))
@@ -1146,7 +1140,7 @@ index d2e0946..d7ae7bb 100644
 +    /// 「退出裁切后缩放/平移恢复自由」 true without a second rule.
 +    public func clampedToCropCanvas(_ state: LoupeViewState,
 +                                    viewport: ImageSize? = nil) -> LoupeViewState {
-+        guard cropTool.isActive, state.mode == .actual,
++        guard clampsCropCamera, cropTool.isActive, state.mode == .actual,
 +              let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return state }
 +        let canvas = CGSize(width: Double(framing.viewport.width),
 +                            height: Double(framing.viewport.height))
@@ -1167,7 +1161,7 @@ index d2e0946..d7ae7bb 100644
      /// ⑦ — the model-layer clamp, run before anything reads the layout (and after any gesture that
      /// could have put the frame outside the canvas: a drag, a zoom, a pan, a straighten).
      @discardableResult
-@@ -6100,7 +6231,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -6100,7 +6236,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
      private func syncZoomSlider() {
          // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
          // *displayed* at its continuous position — it is never a snap target.
@@ -2143,10 +2137,10 @@ index 4271249..eff70a8 100644
  }
 diff --git a/Tests/PhotonsUITests/CropCanvasClampTests.swift b/Tests/PhotonsUITests/CropCanvasClampTests.swift
 new file mode 100644
-index 0000000..50c8dac
+index 0000000..a2aacaf
 --- /dev/null
 +++ b/Tests/PhotonsUITests/CropCanvasClampTests.swift
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,417 @@
 +import XCTest
 +import AppKit
 +import PhotonsCatalog
@@ -2468,6 +2462,64 @@ index 0000000..50c8dac
 +        XCTAssertEqual(on.1, off.1, accuracy: 1e-9)
 +        XCTAssertEqual(on.2, off.2, "082 §5: 两条路径的框逐点相同")
 +        XCTAssertTrue(CropCanvasClamp.contains(on.2, in: canvasRect, tolerance: 0.5))
++    }
++
++    /// **The anti-proof**: with the clamp switched off, the same two requests go through — the zoom
++    /// runs past the ceiling and the frame ends up outside the canvas. The numbers are the failure the
++    /// user reported, measured.
++    func testWithoutTheClampTheZoomPassesTheCeilingAndTheFrameLeavesTheCanvas() throws {
++        let (loupe, session, window) = try makeLoupe()
++        defer { window.orderOut(nil) }
++        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
++        _ = session
++        loupe.cropTool.draft = CropToolController.Draft(
++            crop: CropRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5), straighten: 0, lock: .original)
++        let limit = try XCTUnwrap(loupe.cropZoomLimit())
++        loupe.zoomToFit()
++
++        let cropBefore = loupe.cropTool.draft.crop
++
++        // ① With the clamp: 400 % stops at the ceiling, the frame stays inside, and the **crop the user
++        //    drew is untouched** (that is the whole point — the camera gives way, not the frame).
++        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
++        let clamped = try frameOnScreen(loupe)
++        XCTAssertEqual(loupe.viewState.zoom, limit, accuracy: 1e-9)
++        XCTAssertTrue(CropCanvasClamp.contains(clamped, in: canvas(loupe), tolerance: 0.5))
++        XCTAssertEqual(loupe.cropTool.draft.crop.keyString, cropBefore.keyString,
++                       "082: 缩放不许偷偷改裁切框")
++
++        // ② Camera clamp off, ⑦ (the older 「框太大就缩小框」 clamp) still on: the zoom runs to 400 % and
++        //    the frame is kept on the canvas by **shrinking the crop** — the silent re-crop the user
++        //    reported as 「框自己变小了」. Numbers: the draft rect before → after.
++        loupe.clampsCropCamera = false
++        loupe.zoomToFit()
++        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
++        let shrunk = loupe.cropTool.draft.crop
++        print("082 anti-proof · 只关相机钳位（⑦ 还在）：请求 400% → 实际 \(loupe.viewState.zoomLabel) "
++              + "· 草稿框 \(cropBefore.keyString) → \(shrunk.keyString)")
++        XCTAssertEqual(loupe.viewState.zoom, 4, accuracy: 1e-9, "082 反证：没有上限，请求原样通过")
++        XCTAssertNotEqual(shrunk.keyString, cropBefore.keyString,
++                          "082 反证：没有相机钳位时是**裁切框**被迫缩小（不是相机让路）")
++
++        // ③ Both clamps off: nothing keeps the frame on the canvas any more — the failure the invariant
++        //    forbids, in pixels.
++        loupe.cropTool.clampsFrameToView = false
++        loupe.zoomToFit()
++        loupe.cropTool.draft = CropToolController.Draft(crop: cropBefore, straighten: 0, lock: .original)
++        loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
++        let unclamped = try frameOnScreen(loupe)
++        let canvasRect = canvas(loupe)
++        let over = max(canvasRect.minX - unclamped.minX,
++                       max(unclamped.maxX - canvasRect.maxX,
++                           max(canvasRect.minY - unclamped.minY, unclamped.maxY - canvasRect.maxY)))
++        print("082 anti-proof · 两个钳位都关：请求 400% → 实际 \(loupe.viewState.zoomLabel) · 框 "
++              + "\(NSStringFromRect(unclamped)) vs 画布 \(NSStringFromRect(canvasRect)) · "
++              + "每边最多出界 \(String(format: "%.1f", over)) px")
++        XCTAssertFalse(CropCanvasClamp.contains(unclamped, in: canvasRect, tolerance: 0.5),
++                       "082 反证：两个钳位都没有时，框必须跑出画布 —— 这正是被修掉的那一版")
++        XCTAssertGreaterThan(over, 100, "082 反证：出界要量得出来（现在 \(over) px）")
++        loupe.cropTool.clampsFrameToView = true
++        loupe.clampsCropCamera = true
 +    }
 +
 +    /// Outside 裁切 mode the same gestures are unlimited again — the clamp belongs to the tool.
