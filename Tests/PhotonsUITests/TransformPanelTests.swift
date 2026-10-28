@@ -334,9 +334,13 @@ final class TransformPanelTests: XCTestCase {
             try waitFor(panel) { $0.cards.cardIDs == ["crop"] }
 
             let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")
-            let rows = [CropCardID.aspect, CropCardID.angle, CropCardID.switches, CropCardID.apply]
+            // 082: four sections → five probe rows (裁切 / 角度 / 旋转 / 镜像 / 应用+取消). The section
+            // titles have their own probes (`section.<title>`) and are measured in
+            // `CropCardSectionsTests`; here it is the rows inside them.
+            let rows = [CropCardID.aspect, CropCardID.angle, CropCardID.turn,
+                        CropCardID.mirror, CropCardID.apply]
                 .compactMap { id in panel.row(id).map { (id, $0) } }
-            XCTAssertEqual(rows.count, 4, "\(width) pt：四行里少了（\(rows.map(\.0))）")
+            XCTAssertEqual(rows.count, 5, "\(width) pt：五行里少了（\(rows.map(\.0))）")
 
             // 每行都在卡片里，而且有宽度。
             for (id, frame) in rows {

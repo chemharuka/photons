@@ -4,14 +4,22 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 072 §D — 裁切栏 UI.
+/// 072 §D + **082 §2/§3** — 裁切悬浮栏：三段只读信息，角度是**实际角度**.
 ///
-/// D1 信息栏三段定宽 · D2 双击角度归位 · D3 三开关变蓝 · D4 默认模式灰掉裁切动作.
+/// 082 的用户原话把这条栏砍掉了控件：
 ///
-/// Everything is measured on the real `CropToolBar` (no snapshot, no screenshot): the three readout
-/// fields' `frame(x, width)` for four extreme drafts, the bar's total width for the same four, the
-/// two colour slots of each toggle, and the two menu items' `isEnabled` through the real
-/// `validateMenuItem`.
+///   > 裁切模式下方悬浮栏的调节功能全部移动到右侧面板，只保留比例，像素，角度的信息。
+///   > 注意角度有两个，一个是实际角度，一个是滑块角度。实际角度等于滑块角度 + 90 旋转两个之和。
+///
+/// 所以这一份现在钉四件事，全部量在**真实的** `CropToolBar` 上（没有快照、没有截图）：
+///
+///   1. **D1 原样**：三段定宽，五个极端草稿（含 90°/270° 转过的文档）之后 `frame(x, width)` 与整栏
+///      宽度**逐点相同** —— 数字不左右滑。
+///   2. **§2 只读**：视图树里可交互控件数 = **0**（没有 `NSButton` / `NSSlider` / `NSPopUpButton` /
+///      可编辑文本），而三段信息都在。
+///   3. **§3 实际角度**：`quarterTurns` 1 / 3 时栏里的角度是 `straighten + 90·turns`（三组数字）。
+///   4. **§D4 的动词（不是按钮）**：工具没开时 应用/取消 在*卡*里是灰的、菜单项校验为 false，⌘⏎ / ⌘.
+///      什么都不写 —— 082 之前这条量的是栏里的两个按钮，那两颗按钮搬进卡后，动词的门禁没有变。
 @MainActor
 final class CropBarLayoutTests: XCTestCase {
 
@@ -47,8 +55,9 @@ final class CropBarLayoutTests: XCTestCase {
 
     // MARK: - D1
 
-    /// Four extreme drafts — the worst angle, the widest ratio, the largest pixel text, and the
-    /// untouched frame — must produce **the same** three field rects and the same bar width.
+    /// Five extreme drafts — the worst angle, the widest ratio, the largest pixel text, the untouched
+    /// frame, and a document turned 270° with a straighten — must produce **the same** three field
+    /// rects and the same bar width.
     func testTheThreeReadoutFieldsNeverMoveOrResize() throws {
         let (bar, controller, session, window) = try makeBar()
         defer { window.orderOut(nil) }
@@ -70,9 +79,9 @@ final class CropBarLayoutTests: XCTestCase {
         controller.setStraighten(0)
         record("full frame")
         controller.setStraighten(-45)
-        record("−45.0°")
+        record("slider −45.0°")
         controller.setStraighten(45)
-        record("+45.0°")
+        record("slider +45.0°")
         controller.setAspect(.sixteenNine)
         controller.setStraighten(3.5)
         record("16:9 @ +3.5°")
@@ -81,6 +90,12 @@ final class CropBarLayoutTests: XCTestCase {
         controller.draft = CropToolController.Draft(crop: CropRect(x: 0.4, y: 0.4, width: 0.05, height: 0.05),
                                                     straighten: 0, lock: .square)
         record("tiny 1:1")
+        // 082: the widest 角度 string is the **actual** one — three turns + 45° = 315.0°.
+        controller.setStraighten(45)
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        record("270° + slider +45.0°")
 
         let first = try XCTUnwrap(snapshots.first)
         for shot in snapshots {
@@ -92,7 +107,7 @@ final class CropBarLayoutTests: XCTestCase {
         }
         // …and it is *one* assertion of the invariant the task asks for: the width does not follow the
         // numbers. The texts above are different strings while the rects are identical.
-        XCTAssertGreaterThan(Set(texts).count, 1, "the four drafts print different numbers")
+        XCTAssertGreaterThan(Set(texts).count, 1, "the drafts print different numbers")
         print("D1 · \(Set(texts).count) distinct readouts, all in \(snapshots.count) identical field rects")
 
         // No clipping: each field is at least its worst string plus the 2 pt headroom, and left-aligned.
@@ -101,7 +116,7 @@ final class CropBarLayoutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(first.ratio.width, worst.ratio)
         XCTAssertGreaterThanOrEqual(first.pixels.width, worst.pixels)
         XCTAssertEqual(bar.angleControl.alignment, .left)
-        XCTAssertLessThan(abs(worst.angle - (ceil(("-45.0°" as NSString)
+        XCTAssertLessThan(abs(worst.angle - (ceil((CropToolController.WorstCase.angle as NSString)
             .size(withAttributes: [.font: CropToolBar.infoFont]).width) + CropToolBar.infoHeadroom)), 1e-6)
 
         // 比例 is gone, and no dots: the three fields are all the readout prints.
@@ -109,131 +124,103 @@ final class CropBarLayoutTests: XCTestCase {
         XCTAssertFalse(text.angle.contains("·"))
         XCTAssertFalse(text.ratio.contains("·"))
         XCTAssertFalse(text.pixels.contains("·"))
-        XCTAssertFalse(bar.sizeReadoutForTesting().contains("Original"), "§D1: the lock's name is deleted")
         XCTAssertEqual(controller.sizeReadout().split(separator: " ").count, 3)
     }
 
-    // MARK: - D2
+    // MARK: - §2 只读
 
-    /// Double-clicking 角度 returns it to 0.0°, writes nothing by itself, and the apply that follows is
-    /// **one** history entry (not one for the reset and one for the crop).
-    func testDoubleClickingTheAngleResetsItInOneStep() throws {
-        let (bar, controller, session, window) = try makeBar()
+    /// **The bar has no controls at all** — the acceptance is 「悬浮栏视图树里可交互控件数 = 0」, and the
+    /// three readouts are still there with real text.
+    func testTheBarHasNoInteractiveControlsAndStillPrintsTheThreeSegments() throws {
+        let (bar, controller, _, window) = try makeBar()
         defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
-        controller.setStraighten(-17.5)
         layOut(bar)
-        XCTAssertEqual(bar.readoutText.angle, "-17.5°")
 
-        let historyBefore = session.history.snapshots.count
-        let revisionBefore = session.editRevision
-        let doubleClick = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [],
-                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
-                                             eventNumber: 0, clickCount: 2, pressure: 1)!
-        bar.angleControl.mouseDown(with: doubleClick)
+        // Every one of these used to exist on the bar (ratio popup, ⇄, 拉直 slider, 水平 / 垂直 /
+        // 九宫格, 应用 / 取消) and now lives in the card's four sections.
+        let controls = CropToolBar.interactiveControls(in: bar)
+        print("§2 · 悬浮栏可交互控件 \(controls.count) 个："
+              + controls.map { String(describing: type(of: $0)) }.joined(separator: ", "))
+        XCTAssertEqual(bar.interactiveControlCount, 0, "082 §2: 悬浮栏只剩只读信息，不许有控件")
+        XCTAssertTrue(controls.isEmpty)
+        // …and specifically: no button, no slider, no popup, nothing editable.
+        var stack: [NSView] = [bar]
+        var buttons = 0, sliders = 0, popups = 0, editable = 0
+        while let view = stack.popLast() {
+            if view is NSButton { buttons += 1 }
+            if view is NSSlider { sliders += 1 }
+            if view is NSPopUpButton { popups += 1 }
+            if let field = view as? NSTextField, field.isEditable || field.isSelectable { editable += 1 }
+            stack += view.subviews
+        }
+        XCTAssertEqual(buttons, 0, "NSButton")
+        XCTAssertEqual(sliders, 0, "NSSlider")
+        XCTAssertEqual(popups, 0, "NSPopUpButton")
+        XCTAssertEqual(editable, 0, "editable/selectable field")
+        XCTAssertEqual(bar.subviews.count, 1, "the pill is the only subview; nothing is added beside it")
 
-        XCTAssertEqual(controller.draft.straighten, 0, accuracy: 1e-12, "§D2: double-click → 0.0°")
-        XCTAssertEqual(bar.readoutText.angle, "+0.0°")
-        XCTAssertEqual(session.editRevision, revisionBefore, "a draft reset writes nothing")
-        XCTAssertEqual(session.history.snapshots.count, historyBefore, "and creates no snapshot")
-
-        // A second double-click at 0 is a no-op (one value, not a second write).
-        bar.angleControl.mouseDown(with: doubleClick)
-        XCTAssertEqual(controller.draft.straighten, 0)
-
-        // A 应用 whose only change is the reset is still an *unchanged* document: no snapshot.
-        controller.setStraighten(-17.5)     // the angle the user had chosen before the reset
-        bar.angleControl.mouseDown(with: doubleClick)
-        XCTAssertEqual(controller.draft.straighten, 0)
-        XCTAssertFalse(controller.apply(), "the reset alone leaves the document equal — nothing to commit")
-        XCTAssertEqual(session.history.snapshots.count, historyBefore)
-
-        // Reset + a real crop change = exactly **one** entry (the reset did not add one of its own).
-        XCTAssertTrue(controller.begin())
-        controller.setStraighten(-17.5)
-        bar.angleControl.mouseDown(with: doubleClick)
-        controller.setAspect(.square)
-        XCTAssertTrue(controller.apply())
-        print("D2 · double-click → 0.0°, history \(historyBefore) → \(session.history.snapshots.count)")
-        XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
-                       "§D2: the reset + 应用 is ONE history entry")
-        XCTAssertEqual(session.edit.geometry.straightenDegrees, 0, accuracy: 1e-12)
+        // The three segments are still printed, in the D1 order.
+        let text = bar.readoutText
+        XCTAssertFalse(text.ratio.isEmpty, "比值")
+        XCTAssertTrue(text.pixels.contains("×"), "像素: \(text.pixels)")
+        XCTAssertFalse(text.angle.isEmpty, "角度")
+        XCTAssertGreaterThan(bar.angleFrame.width, 0)
+        XCTAssertGreaterThan(bar.ratioFrame.width, 0)
+        XCTAssertGreaterThan(bar.pixelFrame.width, 0)
     }
 
-    // MARK: - D3
+    // MARK: - §3 实际角度
 
-    /// On = the system accent, off = exactly the old appearance (both colour slots nil), and the three
-    /// toggles refresh independently.
-    func testTheThreeTogglesTurnAccentBlueOnlyWhenOn() throws {
-        let (bar, controller, session, window) = try makeBar()
+    /// The bar's 角度 段 is `straighten + 90 × quarterTurns`, in three groups of numbers.
+    func testTheAngleSegmentIsTheActualAngle() throws {
+        let (bar, controller, _, window) = try makeBar()
         defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
-        layOut(bar)
 
-        // Default: grid on, both flips off.
-        var grid = bar.toggleStyle("grid")
-        var h = bar.toggleStyle("h")
-        var v = bar.toggleStyle("v")
-        XCTAssertTrue(grid.on)
-        XCTAssertEqual(grid.bezel, NSColor.controlAccentColor, "§D3: on = 系统强调色")
-        XCTAssertEqual(grid.tint, NSColor.white)
-        for (name, style) in [("h", h), ("v", v)] {
-            XCTAssertFalse(style.on, "\(name) starts off")
-            XCTAssertNil(style.bezel, "§D3: off keeps the old style (no bezel colour)")
-            XCTAssertNil(style.tint, "§D3: off keeps the old style (no content tint)")
+        var seen: [String] = []
+        func record(_ name: String) {
+            layOut(bar)
+            seen.append("\(name): 栏「\(bar.readoutText.angle)」 卡 实际 \(controller.angleText()) / "
+                        + "滑块 \(controller.sliderAngleText()) · turns \(controller.quarterTurns)")
+            print("§3 · \(seen.last!)")
         }
 
-        // Flip 水平 only: it turns blue, 垂直 and 九宫格 do not move.
-        controller.toggleFlipHorizontal()
-        bar.sync()
-        h = bar.toggleStyle("h")
-        v = bar.toggleStyle("v")
-        grid = bar.toggleStyle("grid")
-        XCTAssertTrue(h.on)
-        XCTAssertEqual(h.bezel, NSColor.controlAccentColor)
-        XCTAssertNil(v.bezel, "§D3: the flips refresh independently")
-        XCTAssertEqual(grid.bezel, NSColor.controlAccentColor)
+        controller.setStraighten(0)
+        record("turns 0 · slider 0")
+        XCTAssertEqual(bar.readoutText.angle, "0.0°")
 
-        // 九宫格 off → back to the plain style; the flips are untouched.
-        let hashBefore = CropUITestSupport.documentHash(session)
-        let historyBefore = session.history.snapshots.count
-        controller.toggleGrid()
-        bar.sync()
-        grid = bar.toggleStyle("grid")
-        h = bar.toggleStyle("h")
-        XCTAssertFalse(grid.on)
-        XCTAssertNil(grid.bezel, "§D3: off is the old style again")
-        XCTAssertNil(grid.tint)
-        XCTAssertEqual(h.bezel, NSColor.controlAccentColor, "and the independent flip keeps its colour")
-        // Pure view state: 九宫格 never reached the document or the history.
-        XCTAssertEqual(CropUITestSupport.documentHash(session), hashBefore,
-                       "§D3: 九宫格 is view state — nothing written")
-        XCTAssertEqual(session.history.snapshots.count, historyBefore)
-        print("D3 · grid on \(grid.on) bezel \(String(describing: grid.bezel)) · "
-              + "h on \(h.on) bezel \(String(describing: h.bezel)) · v on \(v.on) bezel \(String(describing: v.bezel))")
+        // ① turns = 1, straighten = 2.5 → 92.5°
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        controller.setStraighten(2.5)
+        record("turns 1 · slider +2.5")
+        XCTAssertEqual(bar.readoutText.angle, "92.5°", "实际 = 2.5 + 90")
+
+        // ② turns = 3, straighten = −4 → 266°
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        controller.setStraighten(-4)
+        record("turns 3 · slider −4")
+        XCTAssertEqual(bar.readoutText.angle, "266.0°", "实际 = −4 + 270")
+
+        // ③ turns = 4 (back to 0), straighten = 0 → 0°
+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
+        controller.setStraighten(0)
+        record("turns 4 · slider 0")
+        XCTAssertEqual(bar.readoutText.angle, "0.0°", "四圈回到 0°")
+
+        XCTAssertEqual(seen.count, 5)
+        // The document's own field is the same number the bar prints, so the two cannot drift.
+        XCTAssertEqual(controller.quarterTurns, 0)
     }
 
-    // MARK: - D4
+    // MARK: - §D4 (the verbs, not the buttons)
 
-    /// With the tool off, 应用/取消 are grey — the bar's two buttons **and** the menu's two items — and
-    /// ⌘⏎ / ⌘. do nothing.
+    /// With the tool off, 应用/取消 do nothing — ⌘⏎ / ⌘. write nothing and count nothing — and the menu's
+    /// validation closes the same door. (082 之前这条量的是栏里的两颗按钮；它们现在在卡里，
+    /// `TransformPanelTests` 量的是卡的灰态，这里量的是动词本身。)
     func testApplyAndCancelAreDeadOutsideCropMode() throws {
-        let (bar, controller, session, window) = try makeBar()
-        defer { window.orderOut(nil) }
-        layOut(bar)
-
-        // Bar: no tool, nothing to apply.
-        XCTAssertFalse(bar.applyControl.isEnabled, "§D4: 应用裁切 is grey in the default mode")
-        XCTAssertFalse(bar.cancelControl.isEnabled, "§D4: 取消裁切 is grey in the default mode")
-
-        // ⌘⏎ and ⌘. pressed on the canvas with no crop mode: nothing is written, nothing is counted.
-        // A **second, real** editor window (its own session) so the drag-free assertions cannot borrow
-        // the state of the bar's session above.
-        //
-        // 2026-10-27: 应用裁切 / 取消裁切 are no longer menu rows — they are the 裁切 card's two buttons
-        // (whose `isEnabled` is asserted in `TransformPanelTests`). What §D4 says is about the **verbs**,
-        // so the gate is asked of the verbs themselves: a bare `NSMenuItem` carrying the selector gets
-        // the same answer a panel button gets.
+        let (_session, _) = try CropUITestSupport.makeSession(in: workDir)
         let editor = EditorWindowController()
         let menu = MainMenu.build()
         func item(_ title: String) -> NSMenuItem? {
@@ -272,27 +259,23 @@ final class CropBarLayoutTests: XCTestCase {
                                          isARepeat: false, keyCode: 0)!
             canvas.keyDown(with: event)
         }
-        print("D4 · bar apply/cancel enabled = \(bar.applyControl.isEnabled)/\(bar.cancelControl.isEnabled) · "
-              + "menu(validated) = \(editor.validateMenuItem(applyItem))/\(editor.validateMenuItem(cancelItem)) · "
-              + "applied \(editorRoot.loupeController.cropTool.appliedCount), "
-              + "cancelled \(editorRoot.loupeController.cropTool.cancelledCount)")
+        print("D4 · menu(validated) = \(editor.validateMenuItem(applyItem))/"
+              + "\(editor.validateMenuItem(cancelItem)) · applied "
+              + "\(editorRoot.loupeController.cropTool.appliedCount), cancelled "
+              + "\(editorRoot.loupeController.cropTool.cancelledCount)")
         XCTAssertEqual(editorRoot.loupeController.cropTool.appliedCount, 0, "§D4: ⌘⏎ did nothing")
         XCTAssertEqual(editorRoot.loupeController.cropTool.cancelledCount, 0, "§D4: ⌘. did nothing")
         XCTAssertEqual(CropUITestSupport.documentHash(editorSession), before)
         XCTAssertEqual(editorSession.history.snapshots.count, historyBefore)
 
-        // With the tool on, both come alive — which is what makes the greying above a gate, not a bug.
+
+        // With the tool on, the card's pair comes alive (`DetailRowEnabledLog` is the card's seam) —
+        // which is what makes the greying above a gate, not a bug.
+        let (bar, controller, _, window) = try makeBar()
+        defer { window.orderOut(nil) }
         XCTAssertTrue(controller.begin())
         bar.sync()
-        XCTAssertTrue(bar.applyControl.isEnabled)
-        XCTAssertTrue(bar.cancelControl.isEnabled)
-    }
-}
-
-private extension CropToolBar {
-    /// The whole readout as one line — the string §D1 says must not contain the lock's name.
-    func sizeReadoutForTesting() -> String {
-        let t = readoutText
-        return "\(t.angle) \(t.ratio) \(t.pixels)"
+        XCTAssertEqual(bar.readoutText.pixels.contains("×"), true,
+                       "应用可用时栏里照样只有读数 —— 按钮在卡里")
     }
 }

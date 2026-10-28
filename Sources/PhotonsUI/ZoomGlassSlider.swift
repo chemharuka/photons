@@ -393,14 +393,19 @@ public final class ZoomGlassSlider: NSView {
     /// `LoupeController.updateStatusChip()`, so the chip and the thumb cannot disagree with the
     /// canvas. `fitZoom` is used for exactly one thing — the continuous thumb position — and is
     /// never a snap target.
-    public func update(zoomStop: Double?, fitZoom: Double?) {
+    public func update(zoomStop: Double?, fitZoom: Double?, zoom: Double? = nil) {
         self.zoomStop = zoomStop
         self.fitZoom = fitZoom
-        if let stop = zoomStop, stop.isFinite {
+        // 082 (追加): the camera's **own** number wins when it is handed in. In a crop session the
+        // ceiling is 「框恰好内接于画布」, which is usually not a rung (0.378 on a 4760-px crop in a
+        // 1800-px canvas), and a readout that said 33.3 % while the camera sits at 37.8 % — or 适应,
+        // because `currentZoomStop` is nil off the ladder — would be the one number on screen that
+        // contradicts the picture.
+        if let shown = zoom ?? zoomStop, shown.isFinite {
             showingFit = false
-            let index = LoupeViewState.stopIndex(of: stop) ?? geometry.nearestIndex(forZoom: stop)
+            let index = LoupeViewState.stopIndex(of: shown) ?? geometry.nearestIndex(forZoom: shown)
             currentIndex = min(max(index, 0), geometry.lastIndex)
-            chipLabel.stringValue = LoupeViewState.percentLabel(of: geometry.levels[currentIndex])
+            chipLabel.stringValue = LoupeViewState.percentLabel(of: shown)
             track.thumbX = geometry.x(forIndex: currentIndex)
         } else {
             showingFit = true

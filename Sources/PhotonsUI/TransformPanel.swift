@@ -3,76 +3,70 @@ import CoreGraphics
 import PhotonsCore
 import SwiftUI
 
-// MARK: - 变换工作区：第一张卡是裁切（2026-10-27）
+// MARK: - 变换工作区：第一张卡是裁切（2026-10-27，082 重写为四个分区）
 //
-// 用户的原话：
+// 用户的两次原话（2026-10-27 / 2026-10-28）：
 //
 //   > 将裁切下拉菜单中的相关功能，移动到右侧第二栏「变换」，变换包括裁切、旋转等功能；点开变换窗口，
 //   > **第一个卡片是裁切**；点按**直角尺图标**后进入裁切模式，出现裁切框；长宽比选择以及值的输入，
 //   > UI 类似于调节栏。
 //
-// 于是这一张卡就是裁切工具的**面板**：卡头右侧一个直角尺按钮进/出裁切模式，卡里是比例、角度、
-// 两个翻转、九宫格，以及裁切模式下的应用/取消。菜单里那些行一并删掉了（`AppMenu.swift` 的
-// 变换子菜单现在只剩一行 ⌘R），但 **⌘R 仍然能进/出裁切** —— 它和这个图标按钮走**同一个**动词
-// (`LoupeController.toggleCropTool()`)。
+//   > 右侧裁切模式的 UI 要重写，裁切、角度、旋转、镜像等要区分更大，现在挤在一起。
+//   > 裁切模式下方悬浮栏的调节功能全部移动到右侧面板，只保留比例，像素，角度的信息。
+//
+// 于是这张卡是裁切工具的**全部**控件，四个分区，每区一条分隔线 + 11 pt 次级小标题：
+//
+//     裁切   比例（含 自定义… / ⇄ 交换）、应用 / 取消、九宫格
+//     角度   滑块角度（−45…+45 的行）+ 实际角度（只读读数）
+//     旋转   逆时针 90° / 方向徽标 / 顺时针 90°（⌘[ / ⌘]，同一个动词）
+//     镜像   水平 / 垂直
+//
+// 分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里四区不换行、不重叠、任何两行不相交
+// （`CropCardSectionsTests` 量的是真实 frame）。
 //
 // ## 卡里不存第二份状态
 //
 // 每一个值都只读写两个地方，没有第三个：
 //
-//   · **草稿**（裁切框、角度、比例锁）→ `CropToolController.draft`。比例和角度改的是草稿，草稿只在
-//     裁切模式里存在，所以它们**只在裁切模式下可用**（置灰，见 `CropAspectRow` / `angleRow`）；
-//     应用时那一次 `apply()` 是唯一写文档的地方（`CropToolController.apply`）。
-//   · **文档**（水平/垂直翻转）→ `session.edit.geometry.flipHorizontal/flipVertical`，和 072 §F
-//     说的一样只有一份：卡里的两个开关和裁切浮动栏的「水平/垂直」读的是同一个位。
+//   · **草稿**（裁切框、滑块角度、比例锁）→ `CropToolController.draft`。应用时那一次 `apply()` 是唯一
+//     写文档的地方（`CropToolController.apply`）。
+//   · **文档**（水平/垂直翻转、`quarterTurns`、`straightenDegrees`）→ `session.edit.geometry`，和 072 §F
+//     说的一样只有一份：卡、菜单、裁切栏、⌘[ / ⌘] 读的是同一批字段。
 //   · **纯视图态**（九宫格）→ `CropToolController.showsGrid`，不进文档、不进历史。
 //
-// 面板**没有** `@State` 保存这些值。重画靠观察：`CropToolController` 是 `@Observable`，
-// `CatalogSession` 本来就是，所以草稿的一个 tick、模式的一次切换、文档的一次翻转都会让这张卡
-// 自己重画 —— 不是靠调用方记得 `sync()`（那是 AppKit 浮动栏的活儿）。
+// `CropToolController` 是 `@Observable`，`CatalogSession` 本来就是，所以草稿的一个 tick、模式的一次
+// 切换、文档的一次翻转/旋转都会让这张卡自己重画 —— 不需要调用方记得 `sync()`。
+//
+// ## 两个角度
+//
+// 「滑块角度」是 `draft.straighten`（−45…+45，行的滑杆）；「实际角度」= 滑块角度 + 90 × quarterTurns
+// （`CropToolController.actualAngle`）。只读读数印在一行里，两个词都写全：`实际角度 92.5° · 滑块角度
+// +2.5°`。悬浮栏的 `角度` 段印的是**同一个实际角度**，所以栏和卡永远说同一个数。
 //
 // ## 直角尺为什么是 `crop` 而不是 `ruler`
 //
-// 用户要的是「直角尺图标」。SF Symbols 里：
-//
-//   · `crop` 画的是**两个 L 形直角括号**（裁切框的四个角），正是直角尺的形状，而且和工作区标签上的
-//     `crop.rotate` 同一族 —— 一个「裁切/变换」的图标语言；
-//   · `ruler` 画的是一把**斜放的直尺**，读起来是「量尺寸」，不是「框住画面」。
-//
-// 所以按钮用 `crop`：它既是直角，又正好是裁切框本身。`CropModeButton.symbol` 是唯一的定义，
-// `TransformPanelTests` 会问 `NSImage(systemSymbolName:)` 它在本机解析不解析得出来。
+// 用户要的是「直角尺图标」。SF Symbols 里 `crop` 画的是**两个 L 形直角括号**（裁切框的四个角），正是
+// 直角尺的形状，而且和工作区标签上的 `crop.rotate` 同一族；`ruler` 画的是一把斜放的直尺，读起来是
+// 「量尺寸」，不是「框住画面」。082 起它不再是唯一入口（进变换工作区就进模式），但仍然是显式开关。
 
 extension InspectorView {
 
-    /// 「变换」的第一张卡（今天是唯一一张）：裁切。
-    ///
-    /// 卡头右侧是直角尺按钮（`CropModeButton`），下面是四行：比例 / 角度 / 翻转与九宫格 / 应用取消。
+    /// 「变换」的第一张卡（今天是唯一一张）：裁切，四个分区。
     var cropTransformCard: some View {
         let tool = loupe?.cropTool
         let geometry = session.edit.geometry
         return InspectorCardShell(title: Section.crop.title,
-                                  reset: nil,
+                                  reset: { resets.cropGeometry() },
                                   accessory: {
                                       CropModeButtonHost(isOn: tool?.isActive ?? false,
                                                          isEnabled: tool != nil,
                                                          action: { loupe?.toggleCropTool() })
                                   }) {
-            VStack(alignment: .leading, spacing: 8) {
-                CropAspectRow(tool: tool)
-                angleRow(tool)
-                CropTurnRow(turns: loupe?.quarterTurns ?? tool?.quarterTurns ?? 0,
-                            isEnabled: loupe != nil || tool != nil,
-                            onCounterClockwise: { turn(clockwise: false, tool: tool) },
-                            onClockwise: { turn(clockwise: true, tool: tool) })
-                CropSwitchesRow(horizontal: geometry.flipHorizontal,
-                                vertical: geometry.flipVertical,
-                                grid: tool?.showsGrid ?? true,
-                                onHorizontal: { flip(horizontal: true, tool: tool) },
-                                onVertical: { flip(horizontal: false, tool: tool) },
-                                onGrid: { tool?.toggleGrid() })
-                CropApplyRow(active: tool?.isActive ?? false,
-                             onApply: { loupe?.applyCropTool() },
-                             onCancel: { loupe?.cancelCropTool() })
+            VStack(alignment: .leading, spacing: Self.cropSectionGap) {
+                cropAspectSection(tool)
+                cropAngleSection(tool)
+                cropRotationSection(geometry: geometry, tool: tool)
+                cropMirrorSection(geometry: geometry, tool: tool)
             }
         }
         // The card's own frame (「卡片清单第一张 = 裁切」 is measured on it) — behind the chrome, so the
@@ -80,36 +74,102 @@ extension InspectorView {
         .background(CropRowProbeHost(rowID: CropCardID.card))
     }
 
-    /// 角度 — **调节栏的那一行**，一个字符都不改：`sliderRow` 的五条约定（数值可键入、双击名字归位、
-    /// 一条输入一条历史、mini 尺寸、一个 `Slider`）在这张卡里自动成立。
-    ///
-    /// 范围是文档自己的 ±45（`GeometryGroup.straightenLimit`）；双击名字归 0.0°（072 §D2 的同一个
-    /// 动词，只是这次写的是草稿）。归位**不**产生历史：草稿不是文档，应用那一下才算一次。
+    /// 分区之间 12 pt（082 的「拉开间距」）。
+    static let cropSectionGap: CGFloat = 12
+    /// 小标题与其内容之间 6 pt。
+    static let cropSectionTitleGap: CGFloat = 6
+
+    // MARK: 裁切
+
+    /// 裁切 — 比例（六个预设 + 自定义… + ⇄）、应用 / 取消、九宫格。
     @ViewBuilder
-    private func angleRow(_ tool: CropToolController?) -> some View {
-        let straighten = Binding<Double>(get: { tool?.draft.straighten ?? 0 },
-                                         set: { tool?.setStraighten($0) })
-        sliderRow("角度",
-                  straighten,
-                  -CropTool.straightenLimit ... CropTool.straightenLimit,
-                  "%+.1f°",
-                  decimals: 1,
-                  enabled: tool?.isActive ?? false,
-                  accessibilityID: "inspector.crop.angle",
-                  onReset: { tool?.setStraighten(0) },
-                  // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
-                  onEditingChanged: { _ in })
-            .background(CropRowProbeHost(rowID: CropCardID.angle))
+    private func cropAspectSection(_ tool: CropToolController?) -> some View {
+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            CropSectionHeader(title: CropSection.crop.title, isFirst: true,
+                              reset: { resets.cropSection(.crop) })
+            CropAspectRow(tool: tool)
+            HStack(spacing: 6) {
+                CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
+                         help: "裁切框上的三分线（视图态，不进文档）",
+                         action: { tool?.toggleGrid() })
+                Spacer(minLength: 4)
+                CropApplyRow(active: tool?.isActive ?? false,
+                             onApply: { loupe?.applyCropTool() },
+                             onCancel: { loupe?.cancelCropTool() })
+            }
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.aspect))
     }
 
-    /// 水平 / 垂直翻转 —— **文档动作**，和 072 §F 的菜单项、裁切栏的两个开关同一个位。
+    // MARK: 角度
+
+    /// 角度 — 滑块角度（行）+ 实际角度（只读）。
     ///
-    /// 有 loupe 时走它（它会顺手刷新裁切框并要一帧）；没有 loupe（面板在测试/预览里单独宿主、
-    /// 或画布还没起来）时直接问工具，写的是同一份文档。
-    /// 逆时针 / 顺时针旋转 90° — **文档动作** (P0-10), the same shape as `flip` above: with a loupe the
-    /// verb goes through it (one document write, one history row, one render); without one (the panel
-    /// hosted on its own, or a canvas that has not come up) it writes the same document through the
-    /// tool's session. Never a second state: `quarterTurns` is `GeometryGroup`'s field.
+    /// The row is the panel's own `sliderRow` (typing, double-click-to-reset, one input = one draft
+    /// tick) with the label 「滑块角度」 — the user's two words, spelled out rather than abbreviated.
+    /// The read-out under it is a real AppKit label (`CropAngleReadoutLabel`) so a test can read the
+    /// string the panel drew, not a string the test computed.
+    @ViewBuilder
+    private func cropAngleSection(_ tool: CropToolController?) -> some View {
+        let straighten = Binding<Double>(get: { tool?.draft.straighten ?? 0 },
+                                         set: { tool?.setStraighten($0) })
+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            CropSectionHeader(title: CropSection.angle.title, isFirst: false,
+                              reset: { resets.cropSection(.angle) })
+            sliderRow("滑块角度",
+                      straighten,
+                      -CropTool.straightenLimit ... CropTool.straightenLimit,
+                      "%+.1f°",
+                      decimals: 1,
+                      enabled: tool?.isActive ?? false,
+                      accessibilityID: "inspector.crop.angle",
+                      onReset: { tool?.setStraighten(0) },
+                      // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
+                      onEditingChanged: { _ in })
+            CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
+                                 slider: tool?.sliderAngleText() ?? "—")
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.angle))
+    }
+
+    // MARK: 旋转
+
+    /// 旋转 — 逆时针 / 徽标 / 顺时针。文档动作，⌘[ / ⌘] 同一个动词。
+    @ViewBuilder
+    private func cropRotationSection(geometry: GeometryGroup, tool: CropToolController?) -> some View {
+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            CropSectionHeader(title: CropSection.rotation.title, isFirst: false,
+                              reset: { resets.cropSection(.rotation) })
+            CropTurnRow(turns: loupe?.quarterTurns ?? tool?.quarterTurns ?? geometry.quarterTurns,
+                        isEnabled: loupe != nil || tool != nil,
+                        onCounterClockwise: { turn(clockwise: false, tool: tool) },
+                        onClockwise: { turn(clockwise: true, tool: tool) })
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.turn))
+    }
+
+    // MARK: 镜像
+
+    /// 镜像 — 水平 / 垂直。文档动作，和 072 §F 的菜单项同一个位。
+    @ViewBuilder
+    private func cropMirrorSection(geometry: GeometryGroup, tool: CropToolController?) -> some View {
+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            CropSectionHeader(title: CropSection.mirror.title, isFirst: false,
+                              reset: { resets.cropSection(.mirror) })
+            CropMirrorRow(horizontal: geometry.flipHorizontal,
+                          vertical: geometry.flipVertical,
+                          onHorizontal: { flip(horizontal: true, tool: tool) },
+                          onVertical: { flip(horizontal: false, tool: tool) })
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.mirror))
+    }
+
+    // MARK: the two document verbs
+
+    /// 逆时针 / 顺时针旋转 90° — **文档动作** (P0-10), with a loupe the verb goes through it (one
+    /// document write, one history row, one render); without one (the panel hosted on its own) it
+    /// writes the same document through the tool's session. Never a second state: `quarterTurns` is
+    /// `GeometryGroup`'s field.
     private func turn(clockwise: Bool, tool: CropToolController?) {
         if let loupe {
             _ = loupe.rotateQuarter(clockwise: clockwise)
@@ -118,6 +178,7 @@ extension InspectorView {
         _ = tool?.rotateQuarter(clockwise: clockwise)
     }
 
+    /// 水平 / 垂直翻转 — **文档动作**，和 072 §F 的菜单项、裁切栏的两个开关同一个位。
     private func flip(horizontal: Bool, tool: CropToolController?) {
         if let loupe {
             if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
@@ -128,16 +189,76 @@ extension InspectorView {
     }
 }
 
+// MARK: - 082: the four section names
+
+/// The card's four sections — one spelling for the header, the reset verb and the tests.
+public enum CropSection: String, CaseIterable, Sendable, Hashable {
+    case crop
+    case angle
+    case rotation
+    case mirror
+
+    public var title: String {
+        switch self {
+        case .crop: return "裁切"
+        case .angle: return "角度"
+        case .rotation: return "旋转"
+        case .mirror: return "镜像"
+        }
+    }
+
+    /// The order they are stacked in, top to bottom.
+    public static var displayOrder: [CropSection] { [.crop, .angle, .rotation, .mirror] }
+
+    /// The accessibility / probe id of the section's small title.
+    public var headerID: String { "inspector.crop.section.\(rawValue)" }
+}
+
+// MARK: - the section header
+
+/// One section's small title: a hairline, then an 11 pt secondary label.
+///
+/// The hairline is the 「视觉分隔线」 the user asked for (the four sections have to *look* separated,
+/// not only be spaced); the first section has none, because the card's own top edge is the line
+/// above it. Double-clicking the title is the section's reset — the same `ResetOnDoubleClick` gesture
+/// every other card uses, wired to one `PanelResets` verb per section.
+struct CropSectionHeader: View {
+
+    let title: String
+    let isFirst: Bool
+    let reset: () -> Void
+
+    static let titleFontSize: CGFloat = 11
+    static let hairlineOpacity: Double = 0.08
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !isFirst {
+                Rectangle()
+                    .fill(Color.primary.opacity(Self.hairlineOpacity))
+                    .frame(height: 1)
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(.system(size: Self.titleFontSize, weight: .medium))
+                .foregroundStyle(.secondary)
+                .modifier(ResetOnDoubleClick(action: reset, help: "双击复位「\(title)」"))
+                .accessibilityIdentifier("inspector.crop.section.\(title)")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CropRowProbeHost(rowID: "section.\(title)"))
+    }
+}
+
 // MARK: - the rows
 
-/// 「比例」行：六个预设 + 「自定义…」。
+/// 「比例」行：六个预设 + 「自定义…」+ ⇄（交换长宽）。
 ///
 /// 这是**唯一**一张比例表（`CropAspectPreset.allCases`），点击只走 `CropToolController.setAspect`
-/// —— 和浮动栏的下拉是同一个动词、同一份草稿。自定义走 ⑨ 的居中面板（`CropRatioPanels`），
-/// 输入 `5:4` 存进草稿的是 `AspectLock.custom(1.25)`，应用时原样进文档。
+/// —— 和 082 之前浮动栏的下拉是同一个动词、同一份草稿（下拉本身已经搬进这张卡，栏里只剩读数）。
+/// 自定义走 ⑨ 的居中面板（`CropRatioPanels`），输入 `5:4` 存进草稿的是 `AspectLock.custom(1.25)`。
 ///
-/// 未进入裁切时置灰（0.42 的不透明度，和「解码模型」行的既有写法一致）：草稿只在裁切模式里存在，
-/// 一个「改了却没人接住」的比例是本卡最不该提供的东西。
+/// 未进入裁切时置灰（0.42 的不透明度，和「解码模型」行的既有写法一致）：草稿只在裁切模式里存在。
 struct CropAspectRow: View {
 
     let tool: CropToolController?
@@ -156,7 +277,7 @@ struct CropAspectRow: View {
             Text("比例")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
             Menu {
                 ForEach(Self.items, id: \.self) { preset in
                     Button(preset.displayName) { tool?.setAspect(preset) }
@@ -175,8 +296,19 @@ struct CropAspectRow: View {
             .help(Self.help(for: tool))
             .accessibilityLabel("比例")
             .accessibilityIdentifier("inspector.crop.aspect")
+            // ⇄ — 交换长宽 (§C1). A separate door from the popup because a swap is a *value*
+            // operation on the current lock, not another preset.
+            Button {
+                _ = tool?.swapAspect()
+            } label: {
+                Text("⇄").font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .help("交换长宽")
+            .accessibilityLabel("交换长宽")
+            .accessibilityIdentifier("inspector.crop.swap")
         }
-        .background(CropRowProbeHost(rowID: Self.probeID))
         .disabled(!(tool?.isActive ?? false))
         .opacity(tool?.isActive == true ? 1 : 0.42)
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
@@ -203,17 +335,15 @@ struct CropAspectRow: View {
     }
 }
 
-/// 两个翻转 + 九宫格，一行三片 —— 也**没有**标签行：每片自己就是名字。
-struct CropSwitchesRow: View {
+/// 镜像：水平 / 垂直两片（082 — 九宫格搬到「裁切」区，这里只剩镜像）。
+struct CropMirrorRow: View {
 
     let horizontal: Bool
     let vertical: Bool
-    let grid: Bool
     let onHorizontal: () -> Void
     let onVertical: () -> Void
-    let onGrid: () -> Void
 
-    static let probeID = "switches"
+    static let probeID = "mirror"
 
     var body: some View {
         HStack(spacing: 6) {
@@ -222,10 +352,7 @@ struct CropSwitchesRow: View {
             CropChip(title: "垂直", on: vertical, help: "垂直翻转（文档动作，一次 ⌘Z）",
                      action: onVertical)
             Spacer(minLength: 4)
-            CropChip(title: "九宫格", on: grid, help: "裁切框上的三分线（视图态，不进文档）",
-                     action: onGrid)
         }
-        .background(CropRowProbeHost(rowID: Self.probeID))
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
     }
 }
@@ -236,12 +363,8 @@ struct CropSwitchesRow: View {
 /// `LoupeController.rotateQuarter(clockwise:)` —— 和菜单的 ⌘[ / ⌘] 同一个动词，所以按钮、快捷键、
 /// 徽标、`tiff:Orientation` 不会各说一套。
 ///
-/// 与「角度」行不同，这一行**不需要进入裁切模式**：旋转和两个翻转一样是文档动作，裁切框关着的时候
+/// 与「角度」区不同，这一区**不需要进入裁切模式**：旋转和两个翻转一样是文档动作，裁切框关着的时候
 /// 一样能转（徽标照样读文档）。
-///
-/// 两个按钮和徽标都是 **AppKit** 叶子（`TurnButton` / `TurnBadgeLabel`），原因和直角尺一样：验收是
-/// 「点按钮 → 文档转 90°、徽标跟着变」，量的是宿主出来的真面板，而 SwiftUI `Button` 在这个 app 的
-/// 测试进程里没有 AppKit 叶子，点不到；`Text` 也一样，读不到字。
 struct CropTurnRow: View {
 
     let turns: Int
@@ -256,7 +379,7 @@ struct CropTurnRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text("旋转")
+            Text("方向")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
@@ -274,7 +397,6 @@ struct CropTurnRow: View {
                            isEnabled: isEnabled, action: onClockwise)
                 .fixedSize()
         }
-        .background(CropRowProbeHost(rowID: Self.probeID))
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
     }
 }
@@ -408,7 +530,7 @@ struct TurnBadgeHost: NSViewRepresentable {
 }
 
 /// 裁切模式下的**应用 / 取消**。工具没开时两粒都是灰的（`isEnabled == false`），因为那时没有草稿
-/// 可以应用、也没有框可以取消 —— 和浮动栏的同一对按钮、菜单的 §D4 规则一致。
+/// 可以应用、也没有框可以取消 —— 和 082 之前浮动栏的同一对按钮、菜单的 §D4 规则一致。
 struct CropApplyRow: View {
 
     let active: Bool
@@ -422,7 +544,6 @@ struct CropApplyRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Spacer(minLength: 0)
             Button("应用", action: onApply)
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
@@ -436,7 +557,6 @@ struct CropApplyRow: View {
                 .help("放弃这次裁切，文档一个字节都不动")
                 .accessibilityIdentifier("inspector.crop.cancel")
         }
-        .background(CropRowProbeHost(rowID: Self.probeID))
         .disabled(!active)
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
     }
@@ -475,9 +595,72 @@ struct CropChip: View {
         .accessibilityIdentifier("inspector.crop.chip.\(title)")
     }
 
-    /// **The one colour decision of the three switches**: on = the system accent, off = nothing (the
-    /// card's own material shows through, exactly like the bar's unfilled `.inline` bezel).
+    /// **The one colour decision of the switches**: on = the system accent, off = nothing (the card's
+    /// own material shows through, exactly like the bar's unfilled `.inline` bezel used to).
     static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }
+}
+
+// MARK: - 082: the two-angle readout (read-only)
+
+/// 「实际角度 92.5° · 滑块角度 +2.5°」 — one line, both words spelled out, **read-only**.
+///
+/// An `NSTextField` label and not a SwiftUI `Text` for the reason every leaf in this card is AppKit:
+/// the acceptance reads the string the panel *drew* (and the accessibility tree is empty under
+/// `swift test`). It carries no gesture: 082's angle reset belongs to the section title and the row's
+/// own label, so a stray click on a number can never write anything.
+final class CropAngleReadoutLabel: NSTextField {
+
+    static let identifier = "inspector.crop.angle.readout"
+    static let fontSize: CGFloat = 10
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        drawsBackground = false
+        alignment = .left
+        font = .monospacedDigitSystemFont(ofSize: Self.fontSize, weight: .regular)
+        textColor = .secondaryLabelColor
+        lineBreakMode = .byTruncatingTail
+        setAccessibilityIdentifier(Self.identifier)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var isFlipped: Bool { true }
+
+    /// The one formatter both numbers go through: 「实际角度 90.0° · 滑块角度 +0.0°」.
+    static func text(actual: String, slider: String) -> String {
+        "实际角度 \(actual) · 滑块角度 \(slider)"
+    }
+
+    func refresh(actual: String, slider: String) {
+        stringValue = Self.text(actual: actual, slider: slider)
+        toolTip = "实际角度 = 滑块角度 + 90 × 旋转圈数"
+        setAccessibilityValue(stringValue)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let size = super.intrinsicContentSize
+        return NSSize(width: size.width, height: max(size.height, 14))
+    }
+}
+
+struct CropAngleReadoutHost: NSViewRepresentable {
+
+    let actual: String
+    let slider: String
+
+    func makeNSView(context: Context) -> CropAngleReadoutLabel {
+        let label = CropAngleReadoutLabel()
+        label.refresh(actual: actual, slider: slider)
+        return label
+    }
+
+    func updateNSView(_ label: CropAngleReadoutLabel, context: Context) {
+        label.refresh(actual: actual, slider: slider)
+    }
 }
 
 // MARK: - 卡头的直角尺（AppKit：它要能被真的点一下）
@@ -487,8 +670,11 @@ struct CropChip: View {
 /// Why not a SwiftUI `Button`: the acceptance for this card is 「点按直角尺图标后进入裁切模式，出现裁切框」
 /// measured on a **hosted, laid-out** panel — and a SwiftUI `Button` has no AppKit leaf in this app's
 /// test process (no accessibility tree either), so a click on it cannot be dispatched. An `NSButton`
-/// gives the test the same three things the floating bar's controls give it: a real frame, a real
-/// `isEnabled`, and `performClick(_:)` through the real target/action.
+/// gives the test the same three things the floating bar's controls used to give it: a real frame, a
+/// real `isEnabled`, and `performClick(_:)` through the real target/action.
+///
+/// 082: it is no longer the *only* way in (the workspace is), but it stays the explicit 「再点一次退出」
+/// switch the user asked to keep.
 final class CropModeButton: NSButton {
 
     /// **直角尺 = `crop`** (see this file's header): the two L-shaped corner brackets of a crop frame
@@ -498,7 +684,7 @@ final class CropModeButton: NSButton {
     static let glyphPointSize: CGFloat = 11
     static let size = NSSize(width: 20, height: 18)
 
-    /// 裁切模式开着 —— 按钮是强调色实底的（和浮动栏的开关同一个「打开变蓝」）。
+    /// 裁切模式开着 —— 按钮是强调色实底的（和开关同一个「打开变蓝」）。
     var isOn = false {
         didSet { if isOn != oldValue { refresh() } }
     }
@@ -571,7 +757,7 @@ struct CropModeButtonHost: NSViewRepresentable {
 
 // MARK: - 自定义比例：⑨ 的那个居中面板，卡里的这扇门
 
-/// 把「自定义…」接到 ⑨ 的面板上：窄面板里也能用，行为与浮动栏的下拉逐条一致。
+/// 把「自定义…」接到 ⑨ 的面板上：窄面板里也能用，行为与 082 之前浮动栏的下拉逐条一致。
 ///
 /// 它**不存比例**：面板只负责问，`commit(_:)` 走 `CropTool.ratio(from:)` + `setCustomRatio`
 /// 写进草稿的比例锁（非法输入一声响，什么都不写），最后一次输入的文本记在
@@ -586,7 +772,7 @@ final class CropRatioPanels {
     private weak var tool: CropToolController?
 
     /// Present the panel centred on the **window** the card lives in (⑨), with the same initial value
-    /// the floating bar uses.
+    /// the floating bar used.
     @discardableResult
     func present(for tool: CropToolController?,
                  initial: String = CropToolBar.lastCustomRatioText) -> Bool {
@@ -639,8 +825,12 @@ enum CropCardID {
     static let aspect = CropAspectRow.probeID
     static let angle = "angle"
     static let turn = CropTurnRow.probeID
-    static let switches = CropSwitchesRow.probeID
+    static let mirror = CropMirrorRow.probeID
     static let apply = CropApplyRow.probeID
+
+    /// 082: the four section titles, in the order they are stacked.
+    static var sections: [String] { CropSection.displayOrder.map(\.rawValue) }
+    static func section(_ section: CropSection) -> String { "section.\(section.title)" }
 }
 
 /// One row (or the whole card) of the crop card, in the panel's own coordinates.
