@@ -698,14 +698,16 @@ final class CurvePanelTests: XCTestCase {
     func testTheCurveCardSitsDirectlyUnderDetailAndLeavesEveryOtherCardInPlace() throws {
         let titles = InspectorView.sectionTitles
         let detail = try XCTUnwrap(titles.firstIndex(of: "细节"))
-        XCTAssertEqual(titles[detail + 1], "曲线", "曲线必须在细节之后，实际 \(titles)")
+        let curve = try XCTUnwrap(titles.firstIndex(of: "曲线"))
+        // 2026-10-28 (user): 「曲线移动到在细节上方」 — the curve is the card immediately above 细节.
+        XCTAssertEqual(detail - 1, curve, "曲线必须在细节之前，实际 \(titles)")
 
         // 076 把 HSL 插在 Color 之后（它属于「色彩」工作区），077 把历史记录放在最后，2026-10-28
         // 把效果插在曲线之后（暗角 + 颗粒是最后两段渲染），同一天又把黑白插在 Color 之后（S3.4 紧跟
         // S3）—— 其它卡的相对顺序一条都没动。
         XCTAssertEqual(titles.filter { $0 != "曲线" },
-                       ["直方图", "白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级", "细节",
-                        "效果", "预设", "裁切", "蒙版", "历史记录"],
+                       ["直方图", "白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
+                        "细节", "效果", "预设", "裁切", "蒙版", "历史记录"],
                        "插入一张卡，其它卡的相对顺序一条都不许变")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.curve), "曲线跟随滚动，不属于钉住区")
         XCTAssertFalse(InspectorView.scrollingSections.contains(.histogram))

@@ -24,10 +24,13 @@ final class DetailSectionTests: XCTestCase {
         // Color rather than one.
         // 2026-10-28 (P0 色彩分级): 色彩分级 (S3.8) is the 色彩 workspace's second card and sits
         // between HSL and 细节, so 细节 is now four rows under Color rather than three.
-        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 1 }, detail,
-                       "细节 belongs directly under 色彩分级, which belongs under HSL; got \(titles)")
-        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 2 }, detail)
-        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 4 }, detail)
+        // 2026-10-28 (user): 曲线 moved above 细节, so the curve is the card that now sits directly
+        // above it; the colour-partition chain above the curve is unchanged.
+        XCTAssertEqual(titles.firstIndex(of: "曲线").map { $0 + 1 }, detail,
+                       "细节 belongs directly under 曲线; got \(titles)")
+        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 2 }, detail)
+        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 3 }, detail)
+        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 5 }, detail)
         XCTAssertEqual(titles.filter { $0 == "细节" }.count, 1, "one 细节 card, not two")
 
         // The pinned head is untouched, and the new card scrolls with the rest.

@@ -86,13 +86,14 @@ public struct InspectorView: View {
         /// It lives in the **色彩** workspace (with HSL), because 色彩 and 分级 are one workspace's
         /// subject and the 调整 panel is already nine cards long.
         case colorGrading
-        /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
-        /// are the same panel in Lightroom, and below the tone controls because they act on the
-        /// decoded pixels rather than on the render.
-        case detail
-        /// 派单 051: 曲线. Directly under 细节, as 042 planned: the tone controls, then the decoder's
-        /// amounts, then the curve that reprofiles what came out of both.
+        /// 派单 051: 曲线 — **above 细节** (2026-10-28, user: 「曲线移动到在细节上方」). The tone controls
+        /// shape the picture, so they come before the decoder's amounts; the order inside the panel is
+        /// the user's, and the pipeline's own order is a separate fact (`RenderStage.order`).
         case curve
+        /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
+        /// are the same panel in Lightroom, and below the curve because they act on the decoded pixels
+        /// the curve then reprofiles.
+        case detail
         /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
         ///
         /// After 曲线 and before 预设, and the position is the pipeline's own order rather than a
