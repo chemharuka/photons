@@ -169,10 +169,14 @@ final class LayoutContractTests: XCTestCase {
     /// padding on each side and the card's own 16 pt inset. Pinning the identity here means a card that
     /// changed the panel's insets cannot quietly keep the old row geometry (the rendered proof is
     /// `BlackAndWhiteCardTests`, which measures the rows at exactly these three widths).
-    func testTheBlackAndWhiteCardIsNineRowsAfterColorAtTheThreeContentWidths() throws {
-        let sections = InspectorView.sections(in: .adjust)
-        let color = try XCTUnwrap(sections.firstIndex(of: .color))
-        XCTAssertEqual(sections[color + 1], .blackAndWhite, "黑白紧跟 Color：\(sections)")
+    func testTheBlackAndWhiteCardIsNineRowsInTheColourWorkspaceAtTheThreeContentWidths() throws {
+        // 2026-10-28 (user): 黑白 moved out of 调整 into 色彩 — it is a colour partition (a luminance
+        // switch), so it sits with HSL's hue bands and 色彩分级's luminance wheels.
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading])
+        let sections = InspectorView.sections(in: .colour)
+        XCTAssertEqual(sections.first, .blackAndWhite, "黑白是色彩工作区的第一张卡：\(sections)")
+        XCTAssertFalse(InspectorView.sections(in: .adjust).contains(.blackAndWhite),
+                       "调整里不许再有黑白卡")
         XCTAssertEqual(InspectorView.Section.blackAndWhite.title, "黑白")
 
         // 1 switch + 8 mixes, derived from the card's own table.
@@ -204,10 +208,11 @@ final class LayoutContractTests: XCTestCase {
     /// exactly 244 / 274 / 308 pt of card content.
     func testTheColorGradingCardIsNineRowsAfterHSLInTheColourWorkspace() throws {
         XCTAssertEqual(InspectorView.Section.colorGrading.title, "色彩分级")
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading],
-                       "色彩工作区的两张卡：HSL 在前，色彩分级在后")
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading],
+                       "色彩工作区的三张卡：黑白 / HSL / 色彩分级")
         let sections = InspectorView.sections(in: .colour)
-        XCTAssertEqual(sections, [.hsl, .colorGrading], "渲染顺序来自 Section.allCases：\(sections)")
+        XCTAssertEqual(sections, [.blackAndWhite, .hsl, .colorGrading],
+                       "渲染顺序来自 Section.allCases：\(sections)")
 
         // The pipeline says the same: S3.8 runs directly after S3.6 and before the vignette.
         let order = RenderStage.order

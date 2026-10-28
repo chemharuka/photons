@@ -429,7 +429,7 @@ final class BlackAndWhiteCardTests: XCTestCase {
 
     private func host(session: CatalogSession, width: CGFloat) throws -> Panel {
         _ = NSApplication.shared
-        let state = InspectorWorkspaceState(.adjust)
+        let state = InspectorWorkspaceState(.colour)   // 2026-10-28: 黑白 lives in 色彩 now
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: width, height: Self.panelHeight)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],

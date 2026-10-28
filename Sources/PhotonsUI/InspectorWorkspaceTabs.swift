@@ -82,9 +82,9 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // them here: 「以及既有的 预设 卡也留在这里」).
             // 2026-10-28: 效果 (暗角 + 颗粒) joined the workspace — the last editing card before
             // 预设, which stays last because it writes the other cards rather than adding a parameter.
-            // 2026-10-28: 黑白 (S3.4) joined it too, directly after Color — the stage order
-            // (`RenderStage.order` = … .color, .bw, .hsl …), which is also Lightroom's.
-            return [.whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .detail, .curve,
+            // 2026-10-28: 黑白 (S3.4) **left** this workspace — the user moved it into 色彩 with HSL
+            // and 色彩分级 («黑白移动到色彩栏，不放在调整中»), which is also where its subject lives.
+            return [.whiteBalance, .blackLevel, .light, .color, .detail, .curve,
                     .effects, .presets]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
@@ -94,8 +94,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         case .colour:
             // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it — same subject
             // (colour), different partition (luminance instead of hue), and the 调整 panel is already
-            // nine cards long. Order comes from `Section.allCases`, so HSL then 色彩分级.
-            return [.hsl, .colorGrading]
+            // nine cards long. 2026-10-28 (user): 黑白 moved here from 调整 as well, so the three
+            // colour-partition cards — luminance switch (S3.4), hue bands (S3.6), luminance wheels
+            // (S3.8) — sit together. Order still comes from `Section.allCases`.
+            return [.blackAndWhite, .hsl, .colorGrading]
         case .masks:
             return [.masks]
         case .history:
