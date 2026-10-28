@@ -17,11 +17,29 @@ public struct RenderInput: Sendable {
     /// route, not a requirement.
     public let sourceURL: URL?
 
-    public init(image: LinearImage, identity: String, sourceURL: URL? = nil) {
+    /// The file's DNG `OpcodeList3 / WarpRectilinear` planes, when it has them (097).
+    ///
+    /// A **decode-time file fact**, carried on the same path as `identity`/`sourceURL` rather than
+    /// inside `EditModel`: it describes how the raw pixels must be sampled, not what the user asked
+    /// for. When this is nil and `sourceURL` is present, the initializer reads it from the file —
+    /// every caller that already hands us a URL (loupe, export, CLI) therefore gets the correction
+    /// without a second plumbing path. A caller with a synthetic image can pass it explicitly.
+    ///
+    /// Only three *different* planes are used by S0 (`hasPerPlaneDifference`); a single plane means
+    /// Apple's own correction already ran and the graph must not warp twice.
+    public let lensProfile: LensProfile?
+
+    public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
+                lensProfile: LensProfile? = nil) {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
+        self.lensProfile = lensProfile ?? sourceURL.flatMap { LensProfile.read(from: $0) }
     }
+
+    /// Does S0 apply the file's per-channel warp? Exactly when the file carries three distinct
+    /// planes — the case `RAWDecoder` turned Apple's correction off for.
+    public var hasPerPlaneLensWarp: Bool { lensProfile?.hasPerPlaneDifference == true }
 }
 
 public struct RenderOptions: Sendable {
@@ -498,9 +516,9 @@ public struct MaskAtlasDump: Sendable {
 
 // MARK: - uniform blocks (must mirror the .metal structs byte for byte)
 
-/// Mirror of `Kernels/s0_geometry.metal`, byte for byte: **7 float4 = 112 bytes** (a mismatch reads
-/// the wrong uniform and does not fail, so `ChromaticAberrationTests` asserts the number on both
-/// sides).
+/// Mirror of `Kernels/s0_geometry.metal`, byte for byte: **7 float4 + float4x4 = 176 bytes** (a
+/// mismatch reads the wrong uniform and does not fail, so `ChromaticAberrationTests` asserts the
+/// number on both sides).
 struct S0Params {
     var a: SIMD4<Float>   // canvasSize.xy, contentOrigin.xy
     var b: SIMD4<Float>   // contentSize.xy, srcSize.xy
@@ -508,7 +526,10 @@ struct S0Params {
     var d: SIMD4<Float>   // cos, sin, flipH, flipV
     var e: SIMD4<Float>   // identity, backgroundOutside, pureCA, pad
     var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
-    var g: SIMD4<Float>   // caRed, caBlue, pad, pad (029)
+    var g: SIMD4<Float>   // caRed, caBlue, quarterTurns, pad (029 / P0-10)
+    /// 097: columns 0/1/2 = R/G/B radial coefficients (kr0…kr3), column 3 = normalized centre.
+    /// Read only by the `_lens` entry points; identity for every other document.
+    var lens: simd_float4x4
 }
 
 private struct S1Params {
@@ -1153,6 +1174,9 @@ public final class RenderGraph {
         /// CA, 1:1, no window), so S0's map is a permutation of the source's texels and the kernel
         /// may index them in integers. `s0_geometry.metal`'s `p.e.w`.
         let s0PureTurn: Bool
+        /// 097: this frame must run a per-channel DNG warp. It turns the three fast paths off,
+        /// because each of them is a sampling shortcut that would bypass the warp.
+        let s0LensWarp: Bool
         /// Where the photograph ended up **inside the canvas**, in canvas pixels, origin top-left
         /// (row 0 = texture row 0). One derivation, from the same `origin`/`frameOrigin`/`frameSize`
         /// S0 is handed — see `plan(_:_:)`. This is the rect a measurement of the frame's picture
@@ -1258,6 +1282,10 @@ public final class RenderGraph {
                "the picture's rect \(drawnRect) left the canvas \(canvas)")
         assert(canvas.width > 0 && canvas.height > 0, "a canvas with no pixels")
 
+        // 097: the lens profile is a **file** fact that changes which source pixel each channel
+        // reads, so it belongs in S0's geometry link when — and only when — we are the ones warping.
+        // The Apple path (one plane) and every pre-097 file append nothing, keeping their keys.
+        let lensWarp = input.hasPerPlaneLensWarp
         let keys = RenderKeyChain.keys(RenderKeyChain.links(identity: input.identity,
                                                             sourceSize: sourceSize,
                                                             canvas: canvas,
@@ -1265,7 +1293,8 @@ public final class RenderGraph {
                                                             edit: keyEdit(edit),
                                                             display: options.display,
                                                             outputWindow: window,
-                                                            orientation: orientation),
+                                                            orientation: orientation,
+                                                            lens: lensWarp ? input.lensProfile?.recipeComponent : nil),
                                        identity: input.identity)
         // 029: S0's fast paths. "Nothing to transform" is the pre-029 identity condition; on top of
         // it, CA either keeps the frame the identity copy (α = 0) or needs the three-sample branch
@@ -1293,9 +1322,10 @@ public final class RenderGraph {
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
                     frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys,
-                    s0Identity: untransformed && !caOn,
-                    s0PureCA: untransformed && caOn,
-                    s0PureTurn: s0PureTurn, drawnRect: drawnRect)
+                    s0Identity: untransformed && !caOn && !lensWarp,
+                    s0PureCA: untransformed && caOn && !lensWarp,
+                    s0PureTurn: s0PureTurn && !lensWarp,
+                    s0LensWarp: lensWarp, drawnRect: drawnRect)
     }
 
     // MARK: - S1's key (073)
@@ -2604,12 +2634,19 @@ public final class RenderGraph {
             // A rotate press therefore never resamples: at 1:1 it is the pure-turn branch below, and
             // everywhere else the un-turn is exact coordinate arithmetic.
             let turns = edit.geometry.quarterTurns
+            // 097: the four `_lens` entries are the same bodies with `HAS_LENS_WARP == true`; the
+            // default entries never contain that block, so a file without three distinct planes
+            // keeps the pre-097 machine code (and bytes).
             let function: String
-            switch (turns != 0, s0Rotates(edit)) {
-            case (false, false): function = "s0_geometry"
-            case (false, true): function = "s0_geometry_rot"
-            case (true, false): function = "s0_geometry_turn"
-            case (true, true): function = "s0_geometry_turn_rot"
+            switch (turns != 0, s0Rotates(edit), plan.s0LensWarp) {
+            case (false, false, false): function = "s0_geometry"
+            case (false, true, false): function = "s0_geometry_rot"
+            case (true, false, false): function = "s0_geometry_turn"
+            case (true, true, false): function = "s0_geometry_turn_rot"
+            case (false, false, true): function = "s0_geometry_lens"
+            case (false, true, true): function = "s0_geometry_lens_rot"
+            case (true, false, true): function = "s0_geometry_lens_turn"
+            case (true, true, true): function = "s0_geometry_lens_turn_rot"
             }
             let p = try kernels.pipeline(file: "s0_geometry", function: function)
             // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
@@ -2634,7 +2671,8 @@ public final class RenderGraph {
                 // for every document that has not touched the sliders or the rotate buttons, which
                 // is what keeps the CA-off and the un-turned path byte-identical.
                 g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue),
-                         Float(edit.geometry.quarterTurns), 0))
+                         Float(edit.geometry.quarterTurns), 0),
+                lens: Self.lensMatrix(plan.s0LensWarp ? input.lensProfile : nil))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
             // 075 — the **exit matrix**: what the decoder wrote (linear sRGB) → the graph's working
@@ -4261,6 +4299,22 @@ public final class RenderGraph {
                                        SIMD4(Float(m[0, 1]), Float(m[1, 1]), Float(m[2, 1]), 0),
                                        SIMD4(Float(m[0, 2]), Float(m[1, 2]), Float(m[2, 2]), 0),
                                        SIMD4(0, 0, 0, 1)))
+    }
+
+    /// 097 — the per-plane DNG warp as a column-major uniform: columns 0/1/2 are the R/G/B
+    /// `(kr0, kr1, kr2, kr3)`, column 3 is the normalized centre `(x, y, 0, 0)`. `nil` (or a profile
+    /// without a per-plane difference) returns the identity, which the default entries never read.
+    static func lensMatrix(_ profile: LensProfile?) -> simd_float4x4 {
+        guard let profile, profile.hasPerPlaneDifference, profile.planes.count >= 3 else {
+            return identityMatrix
+        }
+        func column(_ plane: LensWarpPlane) -> SIMD4<Float> {
+            SIMD4(Float(plane.kr0), Float(plane.kr1), Float(plane.kr2), Float(plane.kr3))
+        }
+        return simd_float4x4(columns: (column(profile.planes[0]),
+                                       column(profile.planes[1]),
+                                       column(profile.planes[2]),
+                                       SIMD4(Float(profile.centerX), Float(profile.centerY), 0, 0)))
     }
 
     /// The 4×4 identity, in the same (column-major) shape `primariesMatrix` returns.

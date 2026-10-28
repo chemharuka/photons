@@ -128,7 +128,8 @@ func cmdDecode(_ a: Args) throws {
     let key = DecodeCacheKey(fileSHA256: fileHash, decoderVersion: version,
                              exposureEV: opts.exposureEV, scale: opts.scale, draft: opts.draft,
                              colorSpace: opts.colorSpace.rawValue,
-                             whiteBalance: opts.whiteBalance)
+                             whiteBalance: opts.whiteBalance,
+                             lens: LensProfile.read(from: url)?.recipeComponent)
     if let hit = try store.load(key) {
         note("cache hit  \(store.binURL(for: key).lastPathComponent)")
         note("sha256     \(hit.sha256())")
@@ -319,7 +320,8 @@ func decodeForRender(_ a: Args, url: URL, decodeScale: Float, fileHash: String,
                      quiet: Bool = false) throws -> (LinearImage, String) {
     let key = DecodeCacheKey(fileSHA256: fileHash, decoderVersion: version, exposureEV: 0,
                              scale: decodeScale, draft: false, colorSpace: "extendedLinearSRGB",
-                             whiteBalance: whiteBalance)
+                             whiteBalance: whiteBalance,
+                             lens: LensProfile.read(from: url)?.recipeComponent)
     let decoder = makeDecoder()
     let opts = DecodeOptions(decoderVersion: a.value("--version"), scale: decodeScale,
                              whiteBalance: whiteBalance)

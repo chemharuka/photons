@@ -45,6 +45,10 @@ public struct DecodeInputs: Sendable, Hashable {
     /// `.identity` (all four untouched) appends nothing to the key, which is what keeps every document
     /// that has never touched the panel byte-identical to the pre-031 decode.
     public var detail: DetailSettings
+    /// 097: the file's lens-warp recipe (`lens=ours:…` / `lens=apple`), or `nil` for a file without
+    /// an opcode. It is derived from the file, not from the document, but it belongs to the same
+    /// stream because it changes which pipeline corrected the decoded pixels.
+    public var lens: String?
 
     /// The neutral development: the file's own balance, no version request, full scale.
     public static let asShot = DecodeInputs()
@@ -53,12 +57,14 @@ public struct DecodeInputs: Sendable, Hashable {
                 decoderVersion: String? = nil,
                 scale: Double = 1,
                 recipe: String = DecodeRecipe.current,
-                detail: DetailSettings = .identity) {
+                detail: DetailSettings = .identity,
+                lens: String? = nil) {
         self.whiteBalance = whiteBalance
         self.decoderVersion = decoderVersion
         self.scale = scale
         self.recipe = recipe
         self.detail = detail
+        self.lens = lens
     }
 
     /// The white-balance component of a decode key — `wb=5500K/+0` — or `nil` for as shot.
@@ -93,6 +99,7 @@ public struct DecodeInputs: Sendable, Hashable {
                      String(format: "scale=%.4f", scale)]
         if let wb = whiteBalanceComponent { parts.append(wb) }
         if let dt = detailComponent { parts.append(dt) }
+        if let lens { parts.append(lens) }
         return parts.joined(separator: ";")
     }
 
@@ -108,6 +115,7 @@ public struct DecodeInputs: Sendable, Hashable {
         if let ver = versionComponent { out += "|\(ver)" }
         if let wb = whiteBalanceComponent { out += "|\(wb)" }
         if let dt = detailComponent { out += "|\(dt)" }
+        if let lens { out += "|\(lens)" }
         return out
     }
 }

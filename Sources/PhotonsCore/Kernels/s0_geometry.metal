@@ -51,9 +51,7 @@ using namespace metal;
 //     general path). A tl;dr for the next reader: there is no branch here that skips the matrix.
 //
 // It arrives as a **uniform**, not as nine literals, so the numbers have exactly one source of truth
-// (`ColorPrimaries.conversion`), and it is a *separate* buffer rather than a field of `S0Params`: that
-// struct is 112 bytes and pinned on both sides by `ChromaticAberrationTests` (a wrong size reads the
-// wrong uniform and does not fail, so the pin is worth more than the 64 bytes).
+// (`ColorPrimaries.conversion`), and it is a *separate* buffer rather than a field of `S0Params`.
 struct S0Params {
     float4 a;   // canvasSize.xy, contentOrigin.xy
     float4 b;   // contentSize.xy, srcSize.xy
@@ -62,10 +60,14 @@ struct S0Params {
     float4 e;   // identity, backgroundOutside, pureCA, pureTurn  (pureTurn: P0-10's fast path)
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
     float4 g;   // caRed, caBlue, quarterTurns, pad  (029 / P0-10; 0 = off / no turn)
+    // 097 — per-channel DNG WarpRectilinear. Columns 0/1/2 are the R/G/B radial coefficients
+    // (kr0..kr3); column 3 is the normalized warp centre (x, y). Only `HAS_LENS_WARP` instances read
+    // it, so the default entry points never see this field's arithmetic.
+    float4x4 lens;
 };
-// 7 × float4 = 112 bytes. `RenderGraph.swift`'s mirror must stay the same size — a mismatch reads
-// the wrong uniform and **does not fail**, which is why `ChromaticAberrationTests` asserts 112 on
-// both sides.
+// 7 × float4 + float4x4 = 176 bytes. `RenderGraph.swift`'s mirror must stay the same size — a
+// mismatch reads the wrong uniform and **does not fail**, which is why `ChromaticAberrationTests`
+// asserts 176 on both sides.
 
 static inline float4 sample_bilinear(texture2d<float, access::read> src,
                                      float2 px,
@@ -117,7 +119,7 @@ static inline float4 to_working_primaries(float4 c, constant float4x4 &m) {
 // `HAS_ROTATION` is: the un-turn is a coordinate permutation with *no* arithmetic of its own, and a
 // branch that the compiler cannot fold would still be a branch per pixel in the hot loop. Four
 // instantiations, dispatched by `RenderGraph` on `quarterTurns != 0` × `straightenDegrees != 0`.
-template <bool HAS_ROTATION, bool HAS_TURN>
+template <bool HAS_ROTATION, bool HAS_TURN, bool HAS_LENS_WARP>
 static inline void s0_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S0Params &p,
@@ -240,6 +242,49 @@ static inline void s0_body(texture2d<float, access::read> src,
     if (HAS_TURN) { cropped = frame_unturn_uv(cropped, int(p.g.z + 0.5)); }
     float2 px = cropped * float2(srcSize);
 
+    // ── lens plane warp (097) ────────────────────────────────────────────────────────────────────
+    // The file's own `OpcodeList3 / WarpRectilinear` planes, applied **per channel** in source pixel
+    // space: for each channel c, `p_c = center + (px − center) · s_c(r)`, with
+    // `r = |px − center| / halfDiagonal` and `s_c = kr0 + kr1·r + kr2·r² + kr3·r³`.
+    //
+    // `HAS_LENS_WARP` is a template parameter, so this block is absent from every default entry
+    // point (the pre-097 byte-for-byte path). `RenderGraph` picks a `_lens` entry only when the
+    // decode profile has three *different* planes, and it also turns off the identity/pure-CA/pure-
+    // turn shortcuts for exactly that frame, because those would bypass this sampling.
+    //
+    // `kt0`/`kt1` (tangential) are not implemented: every file measured on this machine has both at
+    // zero. TODO if a file with non-zero tangential terms ever appears.
+    //
+    // Order with 029: lens warp first, then the manual α scale (`p.g.xy`), so the sliders remain the
+    // topmost fine adjustment. With α = 0 this is exactly the per-plane warp.
+    if (HAS_LENS_WARP) {
+        float2 lensCenter = float2(p.lens.columns[3].x, p.lens.columns[3].y) * float2(srcSize);
+        float2 d = px - lensCenter;
+        float r = length(d) / max(0.5 * length(float2(srcSize)), 1.0);
+        float4 kR = p.lens.columns[0];
+        float4 kG = p.lens.columns[1];
+        float4 kB = p.lens.columns[2];
+        float sR = kR.x + r * (kR.y + r * (kR.z + r * kR.w));
+        float sG = kG.x + r * (kG.y + r * (kG.z + r * kG.w));
+        float sB = kB.x + r * (kB.y + r * (kB.z + r * kB.w));
+        float2 pR = lensCenter + d * sR;
+        float2 pG = lensCenter + d * sG;
+        float2 pB = lensCenter + d * sB;
+        if (p.g.x != 0.0) {
+            float2 caAxis = float2(srcSize) * 0.5;
+            pR = caAxis + (pR - caAxis) * (1.0 + p.g.x);
+        }
+        if (p.g.y != 0.0) {
+            float2 caAxis = float2(srcSize) * 0.5;
+            pB = caAxis + (pB - caAxis) * (1.0 + p.g.y);
+        }
+        float4 red = sample_bilinear(src, pR, srcSize);
+        float4 green = sample_bilinear(src, pG, srcSize);
+        float4 blue = sample_bilinear(src, pB, srcSize);
+        dst.write(to_working_primaries(float4(red.r, green.g, blue.b, green.a), primaries), gid);
+        return;
+    }
+
     // ── lateral CA (029): one pass, three samples ───────────────────────────────────────────────
     // Green is the reference and never moves. Red and blue are taken at
     // `axis + (px − axis)·(1 + α)`, where `axis` is the **source** centre: lateral CA is a property
@@ -270,7 +315,7 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
                         constant S0Params &p [[buffer(0)]],
                         constant float4x4 &primaries [[buffer(1)]],
                         uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, false>(src, dst, p, primaries, gid);
+    s0_body<false, false, false>(src, dst, p, primaries, gid);
 }
 
 // The same body with the pixel-space turn compiled in. Picked only for a straightened document.
@@ -279,7 +324,7 @@ kernel void s0_geometry_rot(texture2d<float, access::read> src [[texture(0)]],
                             constant S0Params &p [[buffer(0)]],
                             constant float4x4 &primaries [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, false>(src, dst, p, primaries, gid);
+    s0_body<true, false, false>(src, dst, p, primaries, gid);
 }
 
 // 2026-10-28 (P0-10): the two 90° entry points. `s0_geometry_turn` is the one a rotate press takes
@@ -290,7 +335,7 @@ kernel void s0_geometry_turn(texture2d<float, access::read> src [[texture(0)]],
                              constant S0Params &p [[buffer(0)]],
                              constant float4x4 &primaries [[buffer(1)]],
                              uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, true>(src, dst, p, primaries, gid);
+    s0_body<false, true, false>(src, dst, p, primaries, gid);
 }
 
 kernel void s0_geometry_turn_rot(texture2d<float, access::read> src [[texture(0)]],
@@ -298,5 +343,43 @@ kernel void s0_geometry_turn_rot(texture2d<float, access::read> src [[texture(0)
                                  constant S0Params &p [[buffer(0)]],
                                  constant float4x4 &primaries [[buffer(1)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, true>(src, dst, p, primaries, gid);
+    s0_body<true, true, false>(src, dst, p, primaries, gid);
+}
+
+// ── 097: the per-plane lens-warp entry points ──────────────────────────────────────────────────
+// `RenderGraph` picks these only when `LensProfile.hasPerPlaneDifference` and it has also cleared
+// the S0 fast-path flags, so `s0_body` always reaches the general mapping above. The four
+// combinations exist for the same reason the four default entries do: the straighten's `× f / ÷ f`
+// round trip and the 90° turn's coordinate permutation must stay out of the instances that do not
+// need them.
+kernel void s0_geometry_lens(texture2d<float, access::read> src [[texture(0)]],
+                             texture2d<float, access::write> dst [[texture(1)]],
+                             constant S0Params &p [[buffer(0)]],
+                             constant float4x4 &primaries [[buffer(1)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    s0_body<false, false, true>(src, dst, p, primaries, gid);
+}
+
+kernel void s0_geometry_lens_rot(texture2d<float, access::read> src [[texture(0)]],
+                                 texture2d<float, access::write> dst [[texture(1)]],
+                                 constant S0Params &p [[buffer(0)]],
+                                 constant float4x4 &primaries [[buffer(1)]],
+                                 uint2 gid [[thread_position_in_grid]]) {
+    s0_body<true, false, true>(src, dst, p, primaries, gid);
+}
+
+kernel void s0_geometry_lens_turn(texture2d<float, access::read> src [[texture(0)]],
+                                  texture2d<float, access::write> dst [[texture(1)]],
+                                  constant S0Params &p [[buffer(0)]],
+                                  constant float4x4 &primaries [[buffer(1)]],
+                                  uint2 gid [[thread_position_in_grid]]) {
+    s0_body<false, true, true>(src, dst, p, primaries, gid);
+}
+
+kernel void s0_geometry_lens_turn_rot(texture2d<float, access::read> src [[texture(0)]],
+                                      texture2d<float, access::write> dst [[texture(1)]],
+                                      constant S0Params &p [[buffer(0)]],
+                                      constant float4x4 &primaries [[buffer(1)]],
+                                      uint2 gid [[thread_position_in_grid]]) {
+    s0_body<true, true, true>(src, dst, p, primaries, gid);
 }
