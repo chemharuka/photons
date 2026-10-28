@@ -40,6 +40,21 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertTrue(InspectorView.scrollingSections.contains(.detail))
     }
 
+    /// 096: the 色差 rows left this card. The detail table is still exactly the four decoder rows,
+    /// and the card no longer draws a 色差 title — the rows belong to 校正 now.
+    func testTheDetailCardNoLongerDrawsTheChromaticAberrationRows() {
+        XCTAssertFalse(InspectorView.detailContent.rows.map(\.title).contains("色差 R"))
+        XCTAssertFalse(InspectorView.detailContent.rows.map(\.title).contains("色差 B"))
+        XCTAssertEqual(InspectorView.Section.correction.title, "校正")
+        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.correction))
+        let sections = InspectorView.sections(in: .adjust)
+        let detail = sections.firstIndex(of: .detail)
+        let correction = sections.firstIndex(of: .correction)
+        let effects = sections.firstIndex(of: .effects)
+        XCTAssertEqual(correction, detail.map { $0 + 1 }, "校正紧跟在细节之后：\(sections)")
+        XCTAssertEqual(effects, correction.map { $0 + 1 }, "效果紧跟在校正之后：\(sections)")
+    }
+
     /// 040/042: four rows, each with **its own** travel — 细节 0…30 (amount 0…3, Apple's
     /// `CIRAWFilter.h:148-154`), the other three 0…100 (amount 0…1) — opening on the **body's**
     /// positions: 0 / 50 / 0 / 50 on a Leica, and 100 for sharpness on a body that reports 1.0. The

@@ -38,11 +38,11 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
     // MARK: - 1. the two rows, as data
 
-    func testTheTwoCaRowsLiveInTheDetailCardInSliderUnitsWithTheLinearAccent() throws {
-        // 细节 is in 调整, and it is the card the rows were chosen for (078 B8's own reasoning is in
-        // `InspectorView.caRows`' doc: pixel-level, lens-side work, one stage before the tone controls).
-        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.detail))
+    func testTheTwoCaRowsLiveInTheCorrectionCardInSliderUnitsWithTheLinearAccent() throws {
+        // 096: 校正 is in 调整, between 细节 and 效果 — the card the rows moved to.
+        XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.correction))
         XCTAssertEqual(InspectorView.Section.detail.title, "细节")
+        XCTAssertEqual(InspectorView.Section.correction.title, "校正")
         XCTAssertEqual(InspectorView.caRows.map(\.title), ["色差 R", "色差 B"])
         XCTAssertEqual(InspectorView.caRows.map(\.title), ["色差 R", "色差 B"],
                        "the undo label of each row is its own title")
@@ -73,6 +73,8 @@ final class ChromaticAberrationCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.detailContent.rows.count, 4)
         XCTAssertEqual(InspectorView.detailContent.rows.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"])
         XCTAssertTrue(PanelResets.Group.allCases.contains(.detail))
+        XCTAssertTrue(PanelResets.Group.allCases.contains(.correction))
+        XCTAssertEqual(PanelResets.Group.correction.title, "校正")
         print("CA CARD · rows \(InspectorView.caRows.map { "\($0.title) \($0.range) \($0.shape.rawValue)" })")
     }
 
@@ -221,7 +223,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
     /// The card's title: **both** rows back in one snapshot — the card is one thing on screen (the
     /// effects card's rule), and 029's two numbers are the only fields it owns here.
-    func testTheCardTitleResetsBothRowsInOneSnapshot() throws {
+    func testTheCorrectionTitleResetsBothRowsInOneSnapshotAndTheDetailTitleLeavesOpticsAlone() throws {
         let session = try Catalogue.makeSession()
         let resets = PanelResets(session: session)
         session.applyEdit {
@@ -231,14 +233,20 @@ final class ChromaticAberrationCardTests: XCTestCase {
         XCTAssertTrue(session.commitEdit(label: "色差"))
         let base = session.history.count
 
-        XCTAssertTrue(resets.group(.detail), "细节 卡的标题复位")
+        // 096: 细节 no longer owns 色差 — its title must not touch `optics` (the 078 B8 behaviour is gone).
+        XCTAssertFalse(resets.group(.detail), "细节 卡的标题不再碰色差")
+        XCTAssertEqual(session.edit.optics.caRed, OpticsGroup.alpha(fromSlider: 12))
+        XCTAssertEqual(session.edit.optics.caBlue, OpticsGroup.alpha(fromSlider: -73))
+        XCTAssertEqual(session.history.count, base, "…也不写历史")
+
+        XCTAssertTrue(resets.group(.correction), "校正 卡的标题复位")
         XCTAssertTrue(session.edit.optics.isIdentity, "两根都回 0")
         XCTAssertTrue(session.edit.optics.slidersAtRest)
         XCTAssertEqual(session.history.count, base + 1, "整卡复位也是**一条**历史")
-        XCTAssertEqual(session.history.currentSnapshot?.label, InspectorView.Section.detail.title)
+        XCTAssertEqual(session.history.currentSnapshot?.label, InspectorView.Section.correction.title)
 
         // Nothing left to write: the guard covers optics too (a second double-click is not a snapshot).
-        XCTAssertFalse(resets.group(.detail))
+        XCTAssertFalse(resets.group(.correction))
         XCTAssertEqual(session.history.count, base + 1)
 
         XCTAssertTrue(session.undo())
@@ -259,7 +267,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
         let session = CatalogSession()
         let panel = try host(session: session, width: 330)
         defer { panel.window.makeFirstResponder(nil); panel.window.contentView = nil }
-        _ = try waitFor(panel) { $0.probes.count == 3 }
+        _ = try waitFor(panel) { $0.probes.count == 4 }
 
         let field = try XCTUnwrap(panel.numberField("inspector.detail.色差 R"),
                                   "色差 R 的数值框不在树上")
@@ -287,13 +295,15 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
     // MARK: - 4. 画出来了
 
-    func testTheTwoRowsAreDrawnInsideTheDetailCard() throws {
+    func testTheTwoRowsAreDrawnInsideTheCorrectionCardAndOutsideTheDetailCard() throws {
         let panel = try host(width: 330, filled: true)
         defer { panel.window.contentView = nil }
-        try waitFor(panel) { $0.probes.count == 3 }
+        try waitFor(panel) { $0.probes.count == 4 }
 
-        let card = try XCTUnwrap(panel.cardFrame, "细节卡没有 frame")
+        let card = try XCTUnwrap(panel.cardFrame, "校正卡没有 frame")
+        let detail = try XCTUnwrap(panel.detailCardFrame, "细节卡没有 frame")
         XCTAssertGreaterThan(card.width, 200)
+        XCTAssertGreaterThanOrEqual(card.minY, detail.maxY - 0.5, "校正卡紧跟在细节卡下方")
         let rows = try InspectorView.caRows.map { row -> (String, CGRect) in
             let frame = try XCTUnwrap(panel.rowFrame(row.title), "「\(row.title)」没有画出来")
             return (row.title, frame)
@@ -305,6 +315,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
             XCTAssertLessThanOrEqual(frame.maxX, card.maxX + 0.5, "「\(title)」出了卡片右边")
             XCTAssertGreaterThanOrEqual(frame.minY, card.minY - 0.5, "「\(title)」在卡片上方")
             XCTAssertLessThanOrEqual(frame.maxY, card.maxY + 0.5, "「\(title)」在卡片下方")
+            XCTAssertFalse(detail.contains(frame), "「\(title)」仍在细节卡里 \(detail)")
         }
         let ordered = rows.sorted { $0.1.minY < $1.1.minY }.map(\.0)
         XCTAssertEqual(ordered, InspectorView.caRows.map(\.title), "上下顺序是表的顺序")
@@ -321,7 +332,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
         for width in Self.widths {
             let panel = try host(width: width, filled: true)
             defer { panel.window.contentView = nil }
-            try waitFor(panel) { $0.probes.count == 3 }
+            try waitFor(panel) { $0.probes.count == 4 }
             let card = try XCTUnwrap(panel.cardFrame)
             XCTAssertEqual(card.width, width - 2 * 12, accuracy: 0.5,
                            "卡宽 = 面板 − 2·12，实测 \(card.width)")
@@ -478,7 +489,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
         // The shipped wiring, for contrast: the panel's verb does mint the row.
         // The shipped wiring, for contrast: the panel's own verb mints the row the direct binding lost.
-        XCTAssertTrue(PanelResets(session: session).group(.detail))
+        XCTAssertTrue(PanelResets(session: session).group(.correction))
         XCTAssertEqual(session.history.count, base + 1, "面板的动词会写一条 —— 直接绑定不会")
         print("CA COUNTER-PROOF · direct binding: history \(base) · via PanelResets: "
               + "\(session.history.count)")
@@ -488,12 +499,18 @@ final class ChromaticAberrationCardTests: XCTestCase {
     /// release, the panel's only `sliderRow`, and no slider of its own. A card that wrote the model
     /// directly would pass the pixel test above and fail the double-click one.
     func testTheCardGoesThroughThePanelFurniture() throws {
-        let card = try Self.body(of: "private var detailCard: some View {",
-                                 upTo: "/// 「解码模型」 — **the file's own version list**",
+        let card = try Self.body(of: "private var correctionCard: some View {",
+                                 upTo: "/// 2026-10-28 (078 B8 / 096) — **色差**",
                                  in: Self.inspectorSource)
         XCTAssertTrue(card.contains("ForEach(Self.caRows"), "两行来自卡自己的表")
         XCTAssertTrue(card.contains("caSliderRow(row)"), "每一行都要画出来")
-        XCTAssertTrue(card.contains("resetGroup(.detail)"), "标题双击 = 整组复位")
+        XCTAssertTrue(card.contains("resetGroup(.correction)"), "标题双击 = 整组复位")
+
+        let detail = try Self.body(of: "private var detailCard: some View {",
+                                   upTo: "/// 2026-10-28 (096) — **校正**",
+                                   in: Self.inspectorSource)
+        XCTAssertFalse(detail.contains("ForEach(Self.caRows"), "细节卡里不许再画色差")
+        XCTAssertFalse(detail.contains("caSliderRow(row)"), "细节卡里不许再有色差行")
 
         let rows = try Self.body(of: "private func caSliderRow(_ row: ToneRow) -> some View {",
                                  upTo: "/// 色差's slider position ↔ document α",
@@ -539,6 +556,11 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
         var cardFrame: CGRect? {
             probes.first { $0.rowID == ChromaticAberrationProbe.cardID }
+                .map { $0.convert($0.bounds, to: host) }
+        }
+
+        var detailCardFrame: CGRect? {
+            probes.first { $0.rowID == ChromaticAberrationProbe.detailCardID }
                 .map { $0.convert($0.bounds, to: host) }
         }
 
