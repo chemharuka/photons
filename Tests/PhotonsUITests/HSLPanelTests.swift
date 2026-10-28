@@ -220,8 +220,9 @@ final class HSLPanelTests: XCTestCase {
         }
 
         /// Type into the row whose readout currently shows `value`, **through AppKit**: focus the real
-        /// `NSTextField`, let the field editor take the keystroke, then lose focus (057's third exit,
-        /// which commits exactly once).
+        /// `NSTextField`, let the field editor take the keystroke, then press **↵** — the only exit that
+        /// writes since 2026-10-28 (losing focus now cancels and restores the old value, per the user:
+        /// 「点击其他地方就取消点击输入，并退回之前的值」).
         func type(_ text: String, intoFieldShowing value: String) throws {
             let field = try XCTUnwrap(numberFields.first { $0.stringValue == value },
                                       "no row showing \(value) — rows are \(numberFields.map(\.stringValue))")
@@ -229,7 +230,7 @@ final class HSLPanelTests: XCTestCase {
             let editor = try XCTUnwrap(field.currentEditor() as? NSTextView, "no field editor")
             editor.setSelectedRange(NSRange(location: 0, length: 0))
             editor.insertText(text, replacementRange: editor.selectedRange())
-            window.makeFirstResponder(nil)      // blur commits
+            editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))   // ↵ commits
             pump(0.2)
         }
 
