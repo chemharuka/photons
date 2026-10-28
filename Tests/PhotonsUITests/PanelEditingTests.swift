@@ -169,7 +169,7 @@ final class PanelEditingTests: XCTestCase {
 
     func testEveryRowInEveryCardIsTypeable() {
         XCTAssertEqual(InspectorView.lightRows.map(\.title),
-                       ["曝光", "对比", "高光", "阴影", "白色", "黑色"])
+                       ["曝光", "对比", "高光", "中间调", "阴影", "白色", "黑色"])
         XCTAssertEqual(InspectorView.colorRows.map(\.title), ["自然饱和", "饱和"])
         XCTAssertEqual(InspectorView.detailContent.rows.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"])
         XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.title), ["色温", "色调"])
@@ -186,11 +186,11 @@ final class PanelEditingTests: XCTestCase {
         for row in InspectorView.whiteBalanceRows {
             XCTAssertTrue(row.editable, "白平衡的「\(row.title)」必须能键盘输入")
         }
-        // Four cards, fourteen rows, one entry point (047: 不许有的卡有、有的没有).
+        // Four cards, fifteen rows, one entry point (047: 不许有的卡有、有的没有).
         let total = InspectorView.lightRows.count + InspectorView.colorRows.count
             + InspectorView.detailContent.rows.count + InspectorView.whiteBalanceRows.count
-        XCTAssertEqual(total, 14)
-        print("typeable rows: \(total) across 4 cards (Light 6 · Color 2 · 细节 4 · 白平衡 2)")
+        XCTAssertEqual(total, 15)
+        print("typeable rows: \(total) across 4 cards (Light 7 · Color 2 · 细节 4 · 白平衡 2)")
     }
 
     /// The row builder draws the field for `editable` rows and never opts a card out; the two entry
@@ -445,7 +445,7 @@ final class PanelEditingTests: XCTestCase {
         XCTAssertNotEqual(InspectorView.sliderText(exposure.format, 1.4829, rounding: exposure.rounding),
                           InspectorView.sliderText(exposure.format, 1.4829, rounding: .outward))
         XCTAssertEqual(InspectorView.lightRows.dropFirst().map(\.rounding),
-                       Array(repeating: .outward, count: 5))
+                       Array(repeating: .outward, count: 6))
         XCTAssertEqual(InspectorView.colorRows.map(\.rounding), Array(repeating: .outward, count: 2))
         print("negative control: 曝光 1.4829 with .outward → 2.00 EV (wrong) · with .asIs → 1.48 EV")
     }

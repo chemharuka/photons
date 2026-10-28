@@ -7,16 +7,16 @@ import PhotonsCatalog
 /// 派单 046, the Light card's half of the rule: 曝光 / 对比 / 高光 / 阴影 / 白色 / 黑色 are **render**
 /// parameters — they act on the pixels the decoder already produced — so all six keep the round knob.
 ///
-/// The six rows are a table (`InspectorView.lightRows`) that the card iterates, which is what makes
+/// The seven rows are a table (`InspectorView.lightRows`) that the card iterates, which is what makes
 /// this assertable without a window session: the shape a row draws is the shape in the table.
 @MainActor
 final class LightCardTests: XCTestCase {
 
-    func testTheLightCardHasSixRenderRowsInOrder() {
+    func testTheLightCardHasSevenRenderRowsInOrder() {
         let rows = InspectorView.lightRows
-        XCTAssertEqual(rows.map(\.title), ["曝光", "对比", "高光", "阴影", "白色", "黑色"],
-                       "the tone card's six rows, in display order")
-        XCTAssertEqual(rows.count, 6)
+        XCTAssertEqual(rows.map(\.title), ["曝光", "对比", "高光", "中间调", "阴影", "白色", "黑色"],
+                       "the tone card's seven rows, in display order")
+        XCTAssertEqual(rows.count, 7)
         XCTAssertEqual(InspectorView.Section.light.title, "Light")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.light))
 
@@ -28,14 +28,15 @@ final class LightCardTests: XCTestCase {
             XCTAssertEqual(row.format, "%.0f", "\(row.title) prints an integer")
         }
         XCTAssertEqual(rows.map(\.keyPath), [\.light.exposure, \.light.contrast, \.light.highlights,
-                                             \.light.shadows, \.light.whites, \.light.blacks],
+                                             \.light.midtones, \.light.shadows, \.light.whites,
+                                             \.light.blacks],
                        "one write path per row, straight into `EditModel.light`")
     }
 
     /// 046's structural claim for this card: **every** row is `.knob`, none is `.bar`.
     func testEveryLightRowDrawsTheRoundKnob() {
         let shapes = InspectorView.lightRows.map(\.shape)
-        XCTAssertEqual(shapes, Array(repeating: .knob, count: 6),
+        XCTAssertEqual(shapes, Array(repeating: .knob, count: 7),
                        "046: 解 RAW 之后的参数是圆形滑杆; got \(shapes)")
         XCTAssertFalse(shapes.contains(.bar),
                        "no tone control is a decoder parameter — a `.bar` here would mean a re-develop")
@@ -76,9 +77,9 @@ final class LightCardTests: XCTestCase {
               + "others %.0f / .outward / decimals 1 / no quantum")
     }
 
-    /// The rendered card exposes the same six rows as the table — degraded to a print when the
+    /// The rendered card exposes the same seven rows as the table — degraded to a print when the
     /// accessibility tree is not available in this environment (as in `DetailSectionTests`).
-    func testTheRenderedCardStillCarriesTheSixRows() {
+    func testTheRenderedCardStillCarriesTheSevenRows() {
         let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: 2400)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
@@ -95,6 +96,30 @@ final class LightCardTests: XCTestCase {
             return
         }
         XCTAssertTrue(ids.contains("inspector.card.light"), "the Light card did not render: \(ids)")
+    }
+
+    /// 090: dragging 中间调 writes the document, and only releasing writes one history row.
+    /// The slider's `onEditingChanged` calls `commitEdit()` on release — the same path as every row.
+    func testDraggingMidtonesWritesTheDocumentAndCommitsOnceOnRelease() {
+        let session = CatalogSession()
+        // A baseline, so ⌘Z has a state to return to (the first commit has no earlier snapshot).
+        session.applyEdit { $0.light.midtones = 5 }
+        XCTAssertTrue(session.commitEdit(label: "起点"))
+        let before = session.history.count
+        let row = InspectorView.lightRows.first { $0.title == "中间调" }
+        XCTAssertNotNil(row)
+        XCTAssertEqual(row?.range, -100 ... 100)
+
+        session.applyEdit { $0.light.midtones = 20 }
+        XCTAssertEqual(session.history.count, before, "拖动中不写历史")
+        session.applyEdit { $0.light.midtones = 40 }
+        XCTAssertEqual(session.edit.light.midtones, 40, "文档跟着手走到 +40")
+        XCTAssertEqual(session.history.count, before, "还没松手，仍然没有新历史")
+
+        XCTAssertTrue(session.commitEdit(), "松手 = 一次 commit")
+        XCTAssertEqual(session.history.count, before + 1, "一次拖动 = 一条历史")
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit.light.midtones, 5, "⌘Z 一步回到拖动前")
     }
 
     // MARK: - helpers

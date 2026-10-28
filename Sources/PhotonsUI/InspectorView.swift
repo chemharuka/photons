@@ -1315,12 +1315,12 @@ public struct InspectorView: View {
     /// iterate a `ToneRow` table, so the shape comes from the row (`row.shape`), not from a literal
     /// here. Two cards, one table type — a row cannot be born without a shape, a default and a reset.
 
-    // MARK: the Light card's rows (046: all six are render parameters → .knob)
+    // MARK: the Light card's rows (046: all seven are render parameters → .knob)
 
     /// One tone row: what the row draws, which shape it draws, and what its default is.
     ///
-    /// A table rather than six inline calls because the **shape rule is per parameter class**, and a
-    /// test has to be able to hold the six rows' shapes without an accessibility tree
+    /// A table rather than seven inline calls because the **shape rule is per parameter class**, and a
+    /// test has to be able to hold the seven rows' shapes without an accessibility tree
     /// (`LightCardTests`). `keyPath` keeps the write path single-sourced — the card iterates this.
     ///
     /// 047 adds the two facts every row needs and no card may answer differently:
@@ -1354,14 +1354,18 @@ public struct InspectorView: View {
         public var defaultValue: Double { EditModel.neutral[keyPath: keyPath] }
     }
 
-    /// 曝光 / 对比 / 高光 / 阴影 / 白色 / 黑色 — the six tone controls, in display order.
+    /// 曝光 / 对比 / 高光 / 中间调 / 阴影 / 白色 / 黑色 — the seven tone controls, in display order.
     ///
-    /// All six are **render** parameters: they act on the decoded pixels and never re-develop the
+    /// All seven are **render** parameters: they act on the decoded pixels and never re-develop the
     /// RAW, so per 046 they keep the round knob. The day one of them moves into `DecodeInputs`, its
     /// `shape` here turns `.bar` and nothing else about the row changes.
     ///
+    /// 085 added 中间调 between 高光 and 阴影: the three S2 windows are the user's order, not the old
+    /// two-window layout's. `midtones` is already in `EditModel.changedStages` / `HistoryDirty`, so
+    /// this row needs no new wiring — it is a `ToneRow` like the other six.
+    ///
     /// 052: 曝光 is the one row that prints decimals (`%.2f EV`) and stores on a 0.01 grid; the other
-    /// five read as whole numbers rounded away from zero and store what was typed (their 1 step is 1,
+    /// six read as whole numbers rounded away from zero and store what was typed (their 1 step is 1,
     /// so a drag is already whole).
     public static let lightRows: [ToneRow] = [
         ToneRow(title: "曝光", range: -5 ... 5, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure,
@@ -1369,6 +1373,8 @@ public struct InspectorView: View {
         ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast,
                 decimals: 1),
         ToneRow(title: "高光", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.highlights,
+                decimals: 1),
+        ToneRow(title: "中间调", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.midtones,
                 decimals: 1),
         ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows,
                 decimals: 1),

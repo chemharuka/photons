@@ -91,6 +91,59 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertFalse(empty.requiresDecode)
     }
 
+    /// 090: 中间调 is one leaf — a copy of a midtones-only edit carries `midtones` and nothing else,
+    /// and pasting it moves only that leaf on the destination.
+    func testCopyingOnlyMidtonesCarriesOneLeafAndPastesOnlyIt() {
+        var a = EditModel.neutral
+        a.light.midtones = 40
+
+        let payload = EditSnapshot.capture(a)
+        XCTAssertEqual(payload.fieldCount, 1, "只有中间调这一叶")
+        XCTAssertEqual(payload.sections, [.light])
+        XCTAssertEqual(payload.light?.midtones, 40)
+        for leaf in [payload.light?.exposure, payload.light?.contrast, payload.light?.highlights,
+                     payload.light?.shadows, payload.light?.whites, payload.light?.blacks,
+                     payload.light?.highlightRecovery, payload.light?.temperature, payload.light?.tint,
+                     payload.light?.blackOffset] {
+            XCTAssertNil(leaf, "其余中间调以外的字段必须保持 nil")
+        }
+        XCTAssertNil(payload.curve)
+        XCTAssertNil(payload.color)
+        XCTAssertNil(payload.colorGrading)
+        XCTAssertNil(payload.detail)
+        XCTAssertNil(payload.effects)
+        XCTAssertNil(payload.geometry)
+        XCTAssertNil(payload.masks)
+
+        var b = documentB()
+        b.light.midtones = -12
+        let merged = payload.applied(to: b)
+        XCTAssertEqual(merged.light.midtones, 40, "粘贴写上中间调")
+        XCTAssertEqual(changedKeys(b, merged), [], "除了中间调，别的字段一个也没动")
+        XCTAssertEqual(merged.light.exposure, b.light.exposure, "曝光不动")
+        XCTAssertEqual(merged.light.contrast, b.light.contrast, "对比不动")
+        XCTAssertEqual(merged.light.temperature, b.light.temperature, "白平衡不动")
+    }
+
+    /// 090: an old envelope has no `midtones` key. It must decode as "not set" (nil) and a paste must
+    /// therefore leave the destination's own middle tone untouched — not zero it.
+    func testLegacyEnvelopeWithoutMidtonesDecodesNilAndPastesWithoutClearingTheTarget() throws {
+        let legacy = #"{"schemaVersion":2,"light":{"exposure":1.2,"contrast":15}}"#
+        let payload = try JSONDecoder().decode(EditSnapshot.self, from: Data(legacy.utf8))
+
+        XCTAssertNil(payload.light?.midtones, "旧信封没有 midtones 键 = 未设置")
+        XCTAssertEqual(payload.schemaVersion, 2, "不 bump 版本；旧信封原样解码")
+        XCTAssertEqual(payload.light?.fieldCount, 2)
+
+        var target = documentB()
+        target.light.midtones = -12
+        let merged = payload.applied(to: target)
+        XCTAssertEqual(merged.light.midtones, -12, "旧载荷不许把目标文档的中间调清零")
+        XCTAssertEqual(merged.light.exposure, 1.2, "旧载荷里的字段照常粘贴")
+        XCTAssertEqual(merged.light.contrast, 15)
+        XCTAssertEqual(changedKeys(target, merged), ["light.exposure", "light.contrast"])
+    }
+
     func testOnlyAWhiteBalancePayloadAsksForANewDecode() {
         XCTAssertTrue(EditSnapshot.capture(documentA()).requiresDecode, "the payload pins Kelvin")
 

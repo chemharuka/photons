@@ -8,7 +8,7 @@ import PhotonsCore
 /// 只差强调色；**071 把配色从两类改成三类**）：
 ///
 ///  1. **结构**：解码参数（细节卡的降噪 / 色彩降噪 / 细节 / 锐化、白平衡的色温 / 色调）是 `.bar`；
-///     渲染参数（Light 的六行、Color 的两行）是 `.knob`；线性域参数（黑电平，071）是 `.linear`。
+///     渲染参数（Light 的七行、Color 的两行）是 `.knob`；线性域参数（黑电平，071）是 `.linear`。
 ///     断言打在**卡片迭代的那张表**上，不是打在截图或无障碍树上 —— 后者在 `swift test` 里没有窗口
 ///     会话时是空的（同 `DetailSectionTests`）。
 ///  2. **一个控件**：`sliderRow` 里只有**一处** `Slider(value: …, in: …, onEditingChanged:)`；
@@ -41,11 +41,11 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertEqual(detail.map(\.axis), DetailAxis.panelOrder,
                        "the four rows are the four decode axes, in panel order")
 
-        // 渲染参数：Light 的六行 —— 每一行都是 `.knob`。
+        // 渲染参数：Light 的七行 —— 每一行都是 `.knob`。
         let light = InspectorView.lightRows
-        XCTAssertEqual(light.map(\.title), ["曝光", "对比", "高光", "阴影", "白色", "黑色"])
-        XCTAssertEqual(light.map(\.shape), Array(repeating: .knob, count: 6),
-                       "046: 解 RAW 之后的六根滑杆必须保持默认强调色")
+        XCTAssertEqual(light.map(\.title), ["曝光", "对比", "高光", "中间调", "阴影", "白色", "黑色"])
+        XCTAssertEqual(light.map(\.shape), Array(repeating: .knob, count: 7),
+                       "046: 解 RAW 之后的七根滑杆必须保持默认强调色")
         XCTAssertEqual(InspectorView.colorRows.map(\.shape), Array(repeating: .knob, count: 2),
                        "Color 的两行也是渲染参数 → 默认强调色")
         XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.shape), [.bar, .bar],

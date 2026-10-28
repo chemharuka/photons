@@ -161,7 +161,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
 public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable {
     case temperature, tint
     case blackOffset
-    case exposure, contrast, highlights, shadows, whites, blacks, highlightRecovery
+    case exposure, contrast, highlights, midtones, shadows, whites, blacks, highlightRecovery
     case vibrance, saturation
     case blackAndWhiteSwitch, blackAndWhiteMix
     case hslHue, hslSaturation, hslLuminance
@@ -177,7 +177,7 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         switch self {
         case .temperature, .tint: return .whiteBalance
         case .blackOffset: return .blackLevel
-        case .exposure, .contrast, .highlights, .shadows, .whites, .blacks, .highlightRecovery:
+        case .exposure, .contrast, .highlights, .midtones, .shadows, .whites, .blacks, .highlightRecovery:
             return .light
         case .vibrance, .saturation: return .color
         case .blackAndWhiteSwitch, .blackAndWhiteMix: return .blackAndWhite
@@ -200,6 +200,7 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .exposure: return "曝光"
         case .contrast: return "对比"
         case .highlights: return "高光"
+        case .midtones: return "中间调"
         case .shadows: return "阴影"
         case .whites: return "白"
         case .blacks: return "黑"
@@ -462,6 +463,9 @@ public struct LightPatch: Sendable, Equatable, Codable {
     public var exposure: Double?
     public var contrast: Double?
     public var highlights: Double?
+    /// 085 — the middle window of S2's three-zone lift, between 高光 and 阴影. Absent means "the
+    /// destination keeps its own middle tone", exactly like every other tone leaf.
+    public var midtones: Double?
     public var shadows: Double?
     public var whites: Double?
     public var blacks: Double?
@@ -470,27 +474,27 @@ public struct LightPatch: Sendable, Equatable, Codable {
     public var highlightRecovery: Double?
     /// 081: 黑电平 — `LightGroup.blackOffset`, the additive linear trim (派单 071). It rides in this
     /// patch because it *is* a field of `LightGroup`, but it is its own **section** (`blackLevel`),
-    /// so narrowing to 黑电平 keeps this leaf and drops the six tone ones (and vice versa). Absent in
+    /// so narrowing to 黑电平 keeps this leaf and drops the seven tone ones (and vice versa). Absent in
     /// every pre-081 payload, which is exactly what "the destination keeps its own black level" means.
     public var blackOffset: Double?
 
     public init() {}
 
     public var fieldCount: Int {
-        [exposure != nil, contrast != nil, highlights != nil, shadows != nil, whites != nil,
-         blacks != nil, temperature != nil, tint != nil, highlightRecovery != nil,
+        [exposure != nil, contrast != nil, highlights != nil, midtones != nil, shadows != nil,
+         whites != nil, blacks != nil, temperature != nil, tint != nil, highlightRecovery != nil,
          blackOffset != nil]
             .filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 10
+    public static let fullFieldCount = 11
 
     /// The tone leaves — everything the `light` section owns (black offset excluded).
     public var hasToneLeaves: Bool {
-        exposure != nil || contrast != nil || highlights != nil || shadows != nil
-            || whites != nil || blacks != nil || highlightRecovery != nil
+        exposure != nil || contrast != nil || highlights != nil || midtones != nil
+            || shadows != nil || whites != nil || blacks != nil || highlightRecovery != nil
     }
 
     /// The balance pair — everything the `whiteBalance` section owns.
@@ -736,6 +740,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.light.exposure, 0) { light.exposure = edit.light.exposure }
         if differs(edit.light.contrast, 0) { light.contrast = edit.light.contrast }
         if differs(edit.light.highlights, 0) { light.highlights = edit.light.highlights }
+        if differs(edit.light.midtones, 0) { light.midtones = edit.light.midtones }
         if differs(edit.light.shadows, 0) { light.shadows = edit.light.shadows }
         if differs(edit.light.whites, 0) { light.whites = edit.light.whites }
         if differs(edit.light.blacks, 0) { light.blacks = edit.light.blacks }
@@ -817,9 +822,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     // MARK: reading the payload
 
     /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (80). Masks are counted separately (`maskCount`): a mask is a
+    /// from is `fullDocumentFieldCount` (81). Masks are counted separately (`maskCount`): a mask is a
     /// nested document, and folding it into this arithmetic would make "1 slider + 1 mask" read as
-    /// 2 leaves of 80 — a fraction that means nothing.
+    /// 2 leaves of 81 — a fraction that means nothing.
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (colorGrading?.fieldCount ?? 0)
@@ -832,8 +837,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 }
 
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
-    /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 10
-    /// (6 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
+    /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
+    /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
     /// + detail 5 + effects 8.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
@@ -939,6 +944,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if on(.exposure) { p.exposure = l.exposure }
                 if on(.contrast) { p.contrast = l.contrast }
                 if on(.highlights) { p.highlights = l.highlights }
+                if on(.midtones) { p.midtones = l.midtones }
                 if on(.shadows) { p.shadows = l.shadows }
                 if on(.whites) { p.whites = l.whites }
                 if on(.blacks) { p.blacks = l.blacks }
@@ -1080,6 +1086,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.exposure { out.light.exposure = v }
             if let v = p.contrast { out.light.contrast = v }
             if let v = p.highlights { out.light.highlights = v }
+            if let v = p.midtones { out.light.midtones = v }
             if let v = p.shadows { out.light.shadows = v }
             if let v = p.whites { out.light.whites = v }
             if let v = p.blacks { out.light.blacks = v }
