@@ -486,7 +486,7 @@ public enum InspectorPhotoInfo {
         guard let geometry else { return uncropped(stored) }
 
         let frame = source.flatMap { size($0.width, $0.height) } ?? stored
-        let output = CropMath.outputSize(geometry.renderCrop(source: frame), in: frame)
+        let output = geometry.outputPixels(in: frame)
         // The geometry did not change the grid (no crop, a whole-frame crop, a flip, or a straighten
         // — S0 keeps the crop as the output frame): print the asset's own size, untouched.
         guard output != frame else { return uncropped(stored) }

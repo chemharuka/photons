@@ -59,9 +59,9 @@ struct S0Params {
     float4 b;   // contentSize.xy, srcSize.xy
     float4 c;   // crop rect (x, y, w, h) normalized
     float4 d;   // cos, sin, flipH, flipV
-    float4 e;   // identity, backgroundOutside, pureCA, pad
+    float4 e;   // identity, backgroundOutside, pureCA, pureTurn  (pureTurn: P0-10's fast path)
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
-    float4 g;   // caRed, caBlue, pad, pad  (029; dimensionless radial ratios, 0 = off)
+    float4 g;   // caRed, caBlue, quarterTurns, pad  (029 / P0-10; 0 = off / no turn)
 };
 // 7 × float4 = 112 bytes. `RenderGraph.swift`'s mirror must stay the same size — a mismatch reads
 // the wrong uniform and **does not fail**, which is why `ChromaticAberrationTests` asserts 112 on
@@ -113,7 +113,11 @@ static inline float4 to_working_primaries(float4 c, constant float4x4 &m) {
 // the pixel offsets instead is the similarity every crop tool means: the two basis vectors stay
 // orthogonal and equal (pure rotation + uniform scale), and a straightened picture is only
 // turned, never tapered.
-template <bool HAS_ROTATION>
+// `HAS_TURN` (P0-10) is the 90° document turn. It is a template parameter for the same reason
+// `HAS_ROTATION` is: the un-turn is a coordinate permutation with *no* arithmetic of its own, and a
+// branch that the compiler cannot fold would still be a branch per pixel in the hot loop. Four
+// instantiations, dispatched by `RenderGraph` on `quarterTurns != 0` × `straightenDegrees != 0`.
+template <bool HAS_ROTATION, bool HAS_TURN>
 static inline void s0_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S0Params &p,
@@ -131,6 +135,29 @@ static inline void s0_body(texture2d<float, access::read> src,
     if (p.e.x > 0.5) {
         dst.write(to_working_primaries(src.read(uint2(clamp(int2(gid), int2(0), srcSize - 1))),
                                        primaries), gid);
+        return;
+    }
+
+    // ── the pure turn (P0-10): integer in, integer out ───────────────────────────────────────────
+    // A document that is *only* turned — full crop, no straighten, no flips, no CA, canvas ==
+    // content == the turned source, no window — is a **permutation of the source's texels**, and the
+    // general path below would not give a permutation: `uv = framePx / frameSize` followed by
+    // `× srcSize` is the same `× f / ÷ f` round trip 073 removed from the rotation (≈1e-3 of a texel
+    // at 9504 px, i.e. a genuine blend of neighbours on an operation that has no arithmetic in it),
+    // and four of those would not return the same bytes. So the source index is computed in `int`s.
+    //
+    // `p.e.w` is set by `RenderGraph.plan` for exactly that document (`s0PureTurn`) and by nothing
+    // else, so every other frame keeps the general path bit for bit. The four cases are the inverse
+    // of a clockwise quarter turn: source (i, j) appears in the turned frame at (H−1−j, i).
+    if (HAS_TURN && p.e.w > 0.5) {
+        int W = srcSize.x, H = srcSize.y;
+        int2 s = int2(gid);
+        int turns = int(p.g.z + 0.5);
+        if (turns == 1)      { s = int2(gid.y, H - 1 - gid.x); }
+        else if (turns == 2) { s = int2(W - 1 - gid.x, H - 1 - gid.y); }
+        else if (turns == 3) { s = int2(W - 1 - gid.y, gid.x); }
+        dst.write(to_working_primaries(src.read(uint2(clamp(s, int2(0), srcSize - 1))), primaries),
+                  gid);
         return;
     }
 
@@ -198,7 +225,20 @@ static inline void s0_body(texture2d<float, access::read> src,
         r = fma(o, float2(1.0), float2(0.5));
     }
 
-    float2 px = (p.c.xy + r * p.c.zw) * float2(srcSize);
+    // ── the 90° turn, between the straighten and the crop ────────────────────────────────────────
+    // Order, and why: `r` above is a position in the **turned** picture (that is the frame the user
+    // sees, so the flips and the straighten — applied to `r` — are the ones the user asked for), and
+    // `p.c` is the crop measured **in that same turned frame** (schema 9: a crop is a rectangle of
+    // the picture, so turning the picture turns the rectangle — `CropMath.turnedClockwise`). The file's
+    // pixels are *not* turned, so the position inside the crop is turned back here, and only then
+    // mapped through the crop rect into source pixels. Forgetting this step is the classic 90°
+    // rotation bug: the box keeps its numbers, the picture turns, and the crop starts selecting a
+    // different part of the photograph. `QuarterTurnTests.testCropSelectsTheSamePixelsAfterATurn`
+    // pins it, and its second half renders exactly that broken document (the frame turned, the rect
+    // not) to show the same assertion going red.
+    float2 cropped = p.c.xy + r * p.c.zw;
+    if (HAS_TURN) { cropped = frame_unturn_uv(cropped, int(p.g.z + 0.5)); }
+    float2 px = cropped * float2(srcSize);
 
     // ── lateral CA (029): one pass, three samples ───────────────────────────────────────────────
     // Green is the reference and never moves. Red and blue are taken at
@@ -230,7 +270,7 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
                         constant S0Params &p [[buffer(0)]],
                         constant float4x4 &primaries [[buffer(1)]],
                         uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false>(src, dst, p, primaries, gid);
+    s0_body<false, false>(src, dst, p, primaries, gid);
 }
 
 // The same body with the pixel-space turn compiled in. Picked only for a straightened document.
@@ -239,5 +279,24 @@ kernel void s0_geometry_rot(texture2d<float, access::read> src [[texture(0)]],
                             constant S0Params &p [[buffer(0)]],
                             constant float4x4 &primaries [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true>(src, dst, p, primaries, gid);
+    s0_body<true, false>(src, dst, p, primaries, gid);
+}
+
+// 2026-10-28 (P0-10): the two 90° entry points. `s0_geometry_turn` is the one a rotate press takes
+// (no `× frameSize` / `÷ frameSize` in it, exactly like `s0_geometry`); `s0_geometry_turn_rot` is
+// turn + straighten, which is a genuine resample and nothing more.
+kernel void s0_geometry_turn(texture2d<float, access::read> src [[texture(0)]],
+                             texture2d<float, access::write> dst [[texture(1)]],
+                             constant S0Params &p [[buffer(0)]],
+                             constant float4x4 &primaries [[buffer(1)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    s0_body<false, true>(src, dst, p, primaries, gid);
+}
+
+kernel void s0_geometry_turn_rot(texture2d<float, access::read> src [[texture(0)]],
+                                 texture2d<float, access::write> dst [[texture(1)]],
+                                 constant S0Params &p [[buffer(0)]],
+                                 constant float4x4 &primaries [[buffer(1)]],
+                                 uint2 gid [[thread_position_in_grid]]) {
+    s0_body<true, true>(src, dst, p, primaries, gid);
 }

@@ -14,7 +14,8 @@ import PhotonsCore
 ///
 /// 这里仍然钉四件事，而且都钉在真实对象上：
 ///
-///   1. 变换子菜单只有一行（⌘R），显影没有裁切行，梯形/四边形校正仍然一行都没有；
+///   1. 变换子菜单三行（⌘R 裁切 + P0-10 的两个 90° 旋转 ⌘[ / ⌘]），显影没有裁切行，
+///      梯形/四边形校正仍然一行都没有；
 ///   2. 有照片 / 没照片的 enabled 表，以及裁切模式下那一行的勾；
 ///   3. 一次翻转 = 一条历史 + 一次 ⌘Z（hash 前后相同）；
 ///   4. 一份字段、三个入口：菜单（现在只有 ⌘R）、裁切浮动栏的两个开关、裁切卡的翻转片 ——
@@ -63,9 +64,10 @@ final class TransformMenuTests: XCTestCase {
         XCTAssertLessThan(transformIndex, developIndex, "§F: 变换 before 显影")
 
         let transform = try XCTUnwrap(menu.items[transformIndex].submenu)
-        XCTAssertEqual(transform.items.map(\.title), ["裁切"],
-                       "菜单里搬走的功能都删掉了：只剩 ⌘R 那一行")
-        XCTAssertFalse(transform.items.contains { $0.isSeparatorItem }, "一行菜单不该带分隔符")
+        XCTAssertEqual(transform.items.map(\.title),
+                       ["裁切", "逆时针旋转 90°", "顺时针旋转 90°"],
+                       "菜单里搬走的功能都删掉了：只剩 ⌘R 那一行 + P0-10 的两个旋转")
+        XCTAssertFalse(transform.items.contains { $0.isSeparatorItem }, "三行菜单不该带分隔符")
         print("F · 变换: \(transform.items.map { $0.isSeparatorItem ? "─" : $0.title })")
 
         let develop = try XCTUnwrap(menu.items[developIndex].submenu)

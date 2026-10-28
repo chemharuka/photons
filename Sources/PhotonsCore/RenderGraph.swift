@@ -1073,6 +1073,10 @@ public final class RenderGraph {
         /// can lose an ulp at large sizes and would move green).
         let s0Identity: Bool
         let s0PureCA: Bool
+        /// 2026-10-28 (P0-10): the document is *only* turned (full crop, no straighten, no flips, no
+        /// CA, 1:1, no window), so S0's map is a permutation of the source's texels and the kernel
+        /// may index them in integers. `s0_geometry.metal`'s `p.e.w`.
+        let s0PureTurn: Bool
         /// Where the photograph ended up **inside the canvas**, in canvas pixels, origin top-left
         /// (row 0 = texture row 0). One derivation, from the same `origin`/`frameOrigin`/`frameSize`
         /// S0 is handed — see `plan(_:_:)`. This is the rect a measurement of the frame's picture
@@ -1105,8 +1109,12 @@ public final class RenderGraph {
     private func plan(_ edit: EditModel, _ options: RenderOptions) -> Plan {
         // The aspect lock and the ±45 straighten limit are resolved here, once: S0 receives a plain
         // normalized rect plus cos/sin, exactly the shape it always had.
+        // Schema 9 (P0-10): the crop rect is measured in the **turned** frame, so the picture's
+        // pixel size is the rect against the turned source. For `quarterTurns == 0`
+        // `orientedSource` is the identity and this is the pre-9 line, byte for byte.
         let crop = edit.geometry.renderCrop(source: sourceSize)
-        let cropPixels = CropMath.outputSize(crop, in: sourceSize)
+        let orientedSource = edit.geometry.orientedSource(sourceSize)
+        let cropPixels = CropMath.outputSize(crop, in: orientedSource)
         let scale = max(0.01, options.scale)
         // The frame: the full cropped picture at this scale. Its pixel grid is what a window indexes,
         // which is why the window is resolved after it and not before.
@@ -1189,15 +1197,29 @@ public final class RenderGraph {
         // falls through to the general path — same `px` as before, only R/B from a scaled radius.
         let untransformed = crop == .full
             && edit.geometry.rotationDegrees == 0
+            && edit.geometry.quarterTurns == 0
             && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
             && content == sourceSize && canvas == sourceSize
             && window == nil
         let caOn = !edit.optics.isIdentity
+        // 2026-10-28 (P0-10): the turn's own fast path — the document is *only* turned, full crop,
+        // 1:1, no window, no CA. Then S0's map is a lattice permutation of the source and the kernel
+        // indexes it in `int`s (`s0_geometry.metal`, `p.e.w`) instead of round-tripping through
+        // `uv × srcSize`, which at 9504 px is worth ~1e-3 of a texel: a resample of an operation that
+        // has no arithmetic in it, and four of them would not give the original bytes back.
+        let s0PureTurn = edit.geometry.quarterTurns != 0
+            && crop == .full
+            && edit.geometry.rotationDegrees == 0
+            && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
+            && !caOn
+            && content == orientedSource && canvas == orientedSource
+            && window == nil
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
                     frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys,
                     s0Identity: untransformed && !caOn,
-                    s0PureCA: untransformed && caOn, drawnRect: drawnRect)
+                    s0PureCA: untransformed && caOn,
+                    s0PureTurn: s0PureTurn, drawnRect: drawnRect)
     }
 
     // MARK: - S1's key (073)
@@ -1779,8 +1801,7 @@ public final class RenderGraph {
                     // labels its numbers, so the card's canvas/ROI and 「采样 N px」 mean the same thing
                     // whichever path measured: the render's canvas is a viewport (or a backdrop's
                     // 4096), and neither is the picture.
-                    let pixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
-                                                     in: sourceSize)
+                    let pixels = edit.geometry.outputPixels(in: sourceSize)
                     let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
                     let binStart = DispatchTime.now().uptimeNanoseconds
                     histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
@@ -1907,8 +1928,7 @@ public final class RenderGraph {
     /// entries could only evict the frame's own; the pool still recycles every texture.
     public func measureHistogram(_ edit: EditModel, bins: Int = 256,
                                  headroom: Double = 1) throws -> Histogram {
-        let cropPixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
-                                             in: sourceSize)
+        let cropPixels = edit.geometry.outputPixels(in: sourceSize)
         let picture = ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height)
         let options = RenderOptions(
             scale: Histogram.sampleScale(for: cropPixels),
@@ -2077,8 +2097,7 @@ public final class RenderGraph {
         }
         // The picture's own pixel grid: the denominator 「采样 N px」 stands against, and the same
         // number the shipped path reports, so the two plots are labelled in one coordinate system.
-        let cropPixels = CropMath.outputSize(edit.geometry.renderCrop(source: sourceSize),
-                                             in: sourceSize)
+        let cropPixels = edit.geometry.outputPixels(in: sourceSize)
         let binCount = min(max(bins, 2), 1 << 16)
         // The rect as a *description of where the picture was drawn*, so clipping is an intersection
         // and not a move (048): `clamped(in:)` would slide a picture that hangs off the edge back to
@@ -2377,8 +2396,19 @@ public final class RenderGraph {
             // The choice is a *dispatch* choice, not a branch inside the kernel: `(uv−½)·f/f+½` is
             // 1 ulp away from `uv`, and having the expression in the code is enough to move the
             // pixels — exactly the lesson `s1_scene_linear` learned about its black offset.
-            let p = try kernels.pipeline(file: "s0_geometry",
-                                         function: s0Rotates(edit) ? "s0_geometry_rot" : "s0_geometry")
+            // 2026-10-28 (P0-10): four entry points now — the 90° turn is a second template
+            // parameter, so `s0_geometry_turn` (turn, no straighten) carries no `× f / ÷ f` either.
+            // A rotate press therefore never resamples: at 1:1 it is the pure-turn branch below, and
+            // everywhere else the un-turn is exact coordinate arithmetic.
+            let turns = edit.geometry.quarterTurns
+            let function: String
+            switch (turns != 0, s0Rotates(edit)) {
+            case (false, false): function = "s0_geometry"
+            case (false, true): function = "s0_geometry_rot"
+            case (true, false): function = "s0_geometry_turn"
+            case (true, true): function = "s0_geometry_turn_rot"
+            }
+            let p = try kernels.pipeline(file: "s0_geometry", function: function)
             // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
             // place, so the kernel's branch and the trace cannot disagree (029).
             let identity = plan.s0Identity
@@ -2395,11 +2425,13 @@ public final class RenderGraph {
                 // e.z: pure-CA fast path (029) — the frame is the source pixel grid, so `px` is taken
                 // directly and green stays a texel copy.
                 e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0,
-                         plan.s0PureCA ? 1 : 0, 0),
+                         plan.s0PureCA ? 1 : 0, plan.s0PureTurn ? 1 : 0),
                 f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
-                // g: the two dimensionless radial ratios; 0/0 for every document that has not
-                // touched the sliders, which is what keeps the CA-off path byte-identical.
-                g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue), 0, 0))
+                // g: the two dimensionless radial ratios, then the document's quarter turn. 0/0/0
+                // for every document that has not touched the sliders or the rotate buttons, which
+                // is what keeps the CA-off and the un-turned path byte-identical.
+                g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue),
+                         Float(edit.geometry.quarterTurns), 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
             // 075 — the **exit matrix**: what the decoder wrote (linear sRGB) → the graph's working
@@ -3148,7 +3180,9 @@ public final class RenderGraph {
                          Float(plan.crop.width), Float(plan.crop.height)),
             d: SIMD4(costheta(edit), sintheta(edit),
                      edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
-            e: SIMD4(Int32(count), 0, 0, 0),
+            // e.y: the document's quarter turn, so the atlas un-turns its position exactly where S0
+            // does (P0-10 / 080: one turn, two stages).
+            e: SIMD4(Int32(count), Int32(edit.geometry.quarterTurns), 0, 0),
             // Masks live in the *frame* (§4). A 1:1 window must therefore evaluate them through the
             // same frame-relative mapping S0 used, or the selection would slide with the window.
             f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))

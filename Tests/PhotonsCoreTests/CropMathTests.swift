@@ -379,4 +379,96 @@ final class CropMathTests: XCTestCase {
         XCTAssertEqual(fixture.geometry.cropRect.height, 0.5, accuracy: 1e-9)
         _ = try renderGolden("render-edit-crop-rot-s0.25")
     }
+
+    // MARK: - 90° turns (P0-10)
+
+    /// A quarter turn of a rect is `1 − x` on two edges and a swap of the four numbers — nothing else.
+    /// That is what makes four turns exact for a dyadic rect, and what the document's
+    /// 「转 4 次回到原帧」 rests on (`QuarterTurnTests` measures the pixels).
+    func testQuarterTurnRectIsExactAfterFourTurns() {
+        let rects: [(CropRect, String)] = [
+            (.full, "整幅"),
+            (CropRect(left: 0.125, top: 0.25, right: 0.625, bottom: 0.75), "二进制精确"),
+            (CropRect(left: 0.1, top: 0.2, right: 0.7, bottom: 0.65), "任意"),
+        ]
+        for (rect, name) in rects {
+            var turned = rect
+            for k in 1...4 {
+                turned = CropMath.turnedClockwise(turned)
+                // `.full` is invariant (a full-frame crop stays full), so it is the case that must
+                // *not* move; every other rect must.
+                if k < 4, rect != .full {
+                    XCTAssertNotEqual(turned.keyString, rect.keyString,
+                                      "\(name): 第 \(k) 次旋转没有改变矩形")
+                }
+            }
+            XCTAssertEqual(turned.keyString, rect.keyString,
+                           "\(name): 4 次旋转后 keyString 变了")
+            if name != "任意" {
+                XCTAssertEqual(turned, rect, "\(name): 4 次旋转后四边不是逐位相等")
+            }
+            // The inverse is the inverse.
+            XCTAssertEqual(CropMath.turnedCounterClockwise(CropMath.turnedClockwise(rect)).keyString,
+                           rect.keyString, "\(name): 逆运算不还原")
+            // Four turns of the *document* are the same rect whatever the direction used.
+            XCTAssertEqual(CropMath.turned(rect, quarterTurns: 4).keyString, rect.keyString)
+            XCTAssertEqual(CropMath.turned(rect, quarterTurns: -1).keyString,
+                           CropMath.turnedCounterClockwise(rect).keyString, "\(name): −1 ≠ 逆时针")
+        }
+    }
+
+    /// The rect turn and the point turn are the same rotation: the turned rect is the bounding box of
+    /// its four turned corners, and `sourceRect` is the inverse. Two spellings of one 90°, checked
+    /// against each other rather than against a second derivation.
+    func testPointTurnAgreesWithTheRectTurn() {
+        let rect = CropRect(left: 0.12, top: 0.2, right: 0.62, bottom: 0.75)
+        let corners = [NormalizedPoint(rect.left, rect.top), NormalizedPoint(rect.right, rect.top),
+                       NormalizedPoint(rect.right, rect.bottom), NormalizedPoint(rect.left, rect.bottom)]
+        for turns in 0..<4 {
+            let turned = CropMath.turned(rect, quarterTurns: turns)
+            let points = corners.map { CropMath.turned($0, quarterTurns: turns) }
+            let xs = points.map(\.x), ys = points.map(\.y)
+            XCTAssertEqual(xs.min()!, turned.left, accuracy: 1e-12, "q=\(turns): left")
+            XCTAssertEqual(xs.max()!, turned.right, accuracy: 1e-12, "q=\(turns): right")
+            XCTAssertEqual(ys.min()!, turned.top, accuracy: 1e-12, "q=\(turns): top")
+            XCTAssertEqual(ys.max()!, turned.bottom, accuracy: 1e-12, "q=\(turns): bottom")
+            // sourceRect undoes it, in the rect algebra.
+            XCTAssertEqual(CropMath.sourceRect(turned, quarterTurns: turns).keyString,
+                           rect.clamped().keyString, "q=\(turns): sourceRect 不是逆运算")
+        }
+        // A quarter turn is exact on a point too: `1 − y` and a swap, no arithmetic.
+        let p = NormalizedPoint(0.25, 0.5)
+        XCTAssertEqual(CropMath.turned(p, quarterTurns: 1).x, 0.5, accuracy: 0)
+        XCTAssertEqual(CropMath.turned(p, quarterTurns: 1).y, 0.25, accuracy: 0)
+        XCTAssertEqual(CropMath.turned(p, quarterTurns: 4).x, p.x, accuracy: 0)
+    }
+
+    /// `GeometryGroup.outputPixels` is the turned frame's pixel size, and `orientedSource` is the
+    /// grid it is measured against — the pair that makes 「裁剪后尺寸」 swapped rather than wrong.
+    func testOutputPixelsSwapWithAnOddTurn() {
+        let source = ImageSize(width: 240, height: 160)
+        var geometry = GeometryGroup(crop: NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
+        let upright = geometry.outputPixels(in: source)
+        XCTAssertEqual(upright, ImageSize(width: 120, height: 80))
+        XCTAssertEqual(geometry.orientedSource(source), source)
+
+        geometry.turn(clockwise: true)
+        XCTAssertEqual(geometry.orientedSource(source), ImageSize(width: 160, height: 240))
+        let turned = geometry.outputPixels(in: source)
+        XCTAssertEqual(turned, ImageSize(width: 80, height: 120),
+                       "转 90° 后同一块像素的长宽必须交换")
+        XCTAssertEqual(turned, ImageSize(width: upright.height, height: upright.width))
+
+        // A 1:1 lock stays 1:1 through a turn (the ratio inversion is what does it); 3:2 becomes 2:3.
+        geometry.aspectLock = .square
+        geometry.turn(clockwise: true)
+        XCTAssertEqual(geometry.aspectLock, .square, "1:1 转 90° 还是 1:1")
+        geometry.aspectLock = .threeTwo
+        geometry.turn(clockwise: true)
+        if let ratio = geometry.aspectLock.ratio {
+            XCTAssertEqual(ratio, 2.0 / 3.0, accuracy: 1e-12, "3:2 转 90° 应该是 2:3")
+        } else {
+            XCTFail("转 90° 不该把比例锁丢掉")
+        }
+    }
 }

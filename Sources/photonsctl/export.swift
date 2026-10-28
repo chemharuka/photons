@@ -116,7 +116,7 @@ func cmdExportBatch(_ a: Args) throws {
             native = ImageSize(width: probe.nativeWidth, height: probe.nativeHeight)
         }
         // Long edge applies to the *cropped* picture, which is what the file will contain.
-        let content = CropMath.outputSize(edit.geometry.renderCrop(source: native), in: native)
+        let content = edit.geometry.outputPixels(in: native)
         let scale = preset.renderScale(content: content)
         let decodeScale = decodeScaleLadder(scale)
         let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale))

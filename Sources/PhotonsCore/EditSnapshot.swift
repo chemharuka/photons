@@ -193,19 +193,23 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     public var flipHorizontal: Bool?
     public var flipVertical: Bool?
     public var aspectLock: AspectLock?
+    /// 2026-10-28 (P0-10): the 90° turn. Its own leaf, not folded into the crop: a copy that carries
+    /// the crop must carry the turn, or the rect would land in a frame it was not measured in. Kept
+    /// `nil` when 0 so every pre-9 snapshot keeps its bytes.
+    public var quarterTurns: Int?
 
     public init() {}
 
     public var fieldCount: Int {
         [cropX != nil, cropY != nil, cropWidth != nil, cropHeight != nil,
          rotationDegrees != nil, flipHorizontal != nil, flipVertical != nil,
-         aspectLock != nil].filter { $0 }.count
+         aspectLock != nil, quarterTurns != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
     /// Leaf count of the whole group in a full document (see `EditSnapshot.fullDocumentFieldCount`).
-    public static let fullFieldCount = 8
+    public static let fullFieldCount = 9
 }
 
 public struct LightPatch: Sendable, Equatable, Codable {
@@ -367,6 +371,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.geometry.crop.y, NormalizedRect.full.y) { geometry.cropY = edit.geometry.crop.y }
         if differs(edit.geometry.crop.width, NormalizedRect.full.width) { geometry.cropWidth = edit.geometry.crop.width }
         if differs(edit.geometry.crop.height, NormalizedRect.full.height) { geometry.cropHeight = edit.geometry.crop.height }
+        if edit.geometry.quarterTurns != 0 { geometry.quarterTurns = edit.geometry.quarterTurns }
         if differs(edit.geometry.rotationDegrees, 0) { geometry.rotationDegrees = edit.geometry.rotationDegrees }
         if edit.geometry.flipHorizontal { geometry.flipHorizontal = true }
         if edit.geometry.flipVertical { geometry.flipVertical = true }
@@ -437,7 +442,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     // MARK: reading the payload
 
     /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (57).
+    /// from is `fullDocumentFieldCount` (67).
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (detail?.fieldCount ?? 0) + (effects?.fieldCount ?? 0)
@@ -446,7 +451,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public var isEmpty: Bool { fieldCount == 0 }
 
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
-    /// geometry 8 + light 9 + curve 4 + color 26 (2 + 8 bands × 3) + detail 5 + effects 5.
+    /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 9
+    /// + curve 4 + color 26 (2 + 8 bands × 3) + detail 5 + effects 5.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + DetailPatch.fullFieldCount + EffectsPatch.fullFieldCount
@@ -544,6 +550,19 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         var out = target
 
         if let p = geometry {
+            // 2026-10-28 (P0-10): a quarter turn is a **transform**, not a free-standing number. If
+            // the payload carries the turn but none of the four crop edges, the rect it leaves alone
+            // is measured in a *different* frame — so it is turned by the same delta first, exactly
+            // the way `GeometryGroup.turn` does it. A payload that carries edges speaks absolute
+            // coordinates in the returned frame and wins (that is what 「复制设置」 stores when the
+            // source itself was cropped).
+            let carriesCrop = p.cropX != nil || p.cropY != nil
+                || p.cropWidth != nil || p.cropHeight != nil
+            if let turns = p.quarterTurns, !carriesCrop {
+                let delta = GeometryGroup.normalizedQuarterTurns(
+                    turns - out.geometry.quarterTurns)
+                out.geometry = out.geometry.turned(by: delta)
+            }
             if let v = p.cropX { out.geometry.crop.x = v }
             if let v = p.cropY { out.geometry.crop.y = v }
             if let v = p.cropWidth { out.geometry.crop.width = v }
@@ -552,6 +571,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.flipHorizontal { out.geometry.flipHorizontal = v }
             if let v = p.flipVertical { out.geometry.flipVertical = v }
             if let v = p.aspectLock { out.geometry.aspectLock = v }
+            if let v = p.quarterTurns { out.geometry.quarterTurns = v }
         }
 
         if let p = light {

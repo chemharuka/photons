@@ -271,6 +271,78 @@ public enum CropMath {
                          height: max(1, Int((Double(out.height) * s).rounded())))
     }
 
+    // MARK: quarter turns (90°)
+
+    /// The same rectangle, measured in the frame that has been **turned 90° clockwise**.
+    ///
+    /// The rect is a *rectangle of the picture*, so when the picture turns the rect turns with it —
+    /// this is the whole reason 90° rotation is not just a flag: a crop that kept its numbers while
+    /// the frame turned would select a different part of the photograph (the classic bug).
+    ///
+    /// In **edges**, a clockwise quarter turn is
+    ///
+    ///     (left, top, right, bottom) → (1 − bottom, left, 1 − top, right)
+    ///
+    /// which is one subtraction per coordinate and nothing else. That is not an implementation
+    /// detail: `1 − x` is exact for `x ∈ [0, 1]` in binary floating point, and the map is a
+    /// permutation of the four numbers, so **four turns restore the original four doubles bit for
+    /// bit** — which is what makes 「转 4 次回到原帧」 a claim about the document and not just about
+    /// the picture. The `NormalizedRect` spelling (`width = right − left`) is derived once from the
+    /// same two doubles on every step, so it round-trips for the same reason.
+    ///
+    /// Why the *normalised* rect turns without the aspect: the frame's pixel dimensions swap with
+    /// the turn, so `w·H` and `h·W` trade places. The normalised numbers move one way, the pixel
+    /// grid the other, and the pixel block is the same one. `CropMath.turnedClockwise` therefore
+    /// only ever needs the rect — see `testQuarterTurnRectIsExactAfterFourTurns` and the pixel-set
+    /// assertion in `QuarterTurnTests`.
+    public static func turnedClockwise(_ rect: CropRect) -> CropRect {
+        let c = rect.clamped()
+        return CropRect(left: 1 - c.bottom, top: c.left, right: 1 - c.top, bottom: c.right)
+    }
+
+    /// The inverse of `turnedClockwise`: the rect as measured in the frame turned 90° the other way.
+    public static func turnedCounterClockwise(_ rect: CropRect) -> CropRect {
+        let c = rect.clamped()
+        return CropRect(left: c.top, top: 1 - c.right, right: c.bottom, bottom: 1 - c.left)
+    }
+
+    /// `rect` after `quarterTurns` (0…3, clockwise) turns of the frame.
+    public static func turned(_ rect: CropRect, quarterTurns: Int) -> CropRect {
+        var out = rect.clamped()
+        for _ in 0..<(((quarterTurns % 4) + 4) % 4) { out = turnedClockwise(out) }
+        return out
+    }
+
+    /// A **point** of the file's frame, in the frame turned `quarterTurns` (0…3) times clockwise —
+    /// the forward direction, and therefore the inverse of `frame_unturn_uv` in
+    /// `Kernels/frame_turn.metal`.
+    ///
+    /// The host needs it for the one map that runs source → canvas (`MaskCanvasMapping.canvasPoint`,
+    /// which is the inverse of S0's). Mask shapes stay in the file's frame — a turn does not move
+    /// them relative to the photograph — so their *canvas* position is the turned one.
+    ///
+    /// Clockwise: `(x, y) → (1 − y, x)`, so the file's top-left lands at the turned frame's
+    /// top-right, and `turned(rect, …)` is the bounding box of the four turned corners (pinned by
+    /// `testPointTurnAgreesWithTheRectTurn`).
+    public static func turned(_ p: NormalizedPoint, quarterTurns: Int) -> NormalizedPoint {
+        var out = p
+        for _ in 0..<(((quarterTurns % 4) + 4) % 4) {
+            out = NormalizedPoint(1 - out.y, out.x)
+        }
+        return out
+    }
+
+    /// `rect` as measured in the **file's own** (pre-turn) frame — the space XMP's `crs:Crop*` live
+    /// in, and the inverse of `turned(_:quarterTurns:)`.
+    ///
+    /// One function, because two spellings of "undo the turn" is how a crop ends up written into a
+    /// sidecar that Lightroom reads as a different picture.
+    public static func sourceRect(_ rect: CropRect, quarterTurns: Int) -> CropRect {
+        var out = rect.clamped()
+        for _ in 0..<(((quarterTurns % 4) + 4) % 4) { out = turnedCounterClockwise(out) }
+        return out
+    }
+
     // MARK: rotation
 
     /// Smallest axis-aligned rectangle that contains `size` after rotating it by `degrees`.

@@ -205,16 +205,31 @@ public struct XMPOrientation: Sendable, Equatable {
         }
     }
 
-    public static func composed(exif: Int, flipHorizontal: Bool, flipVertical: Bool) -> Int {
+    /// The tag for a document's geometry against the file's own orientation:
+    /// `F ∘ T_q ∘ stored`, i.e. the file's orientation, then the document's **quarter turns**, then
+    /// its flips — the order the picture is built in (`GeometryGroup.quarterTurns`: the frame turns
+    /// first, the flips act inside the turned frame, so they come second).
+    ///
+    /// 2026-10-28 (P0-10): `quarterTurns` here is **the document's one field** — the same number the
+    /// renderer turns the picture by — so the pixels and the sidecar cannot disagree about which way
+    /// is clockwise. At 0 this is the pre-9 expression exactly (`T₀` is the identity and
+    /// `T_q ∘ base == base`), which is what keeps `XMPTests`' 20 round-trip items green.
+    public static func composed(exif: Int, flipHorizontal: Bool, flipVertical: Bool,
+                                quarterTurns: Int = 0) -> Int {
         let base = XMPOrientation.from(value: exif)
-        let flip: XMPOrientation
+        // A quarter turn of the *picture* is `R^k` applied after the file's own orientation: as a
+        // dihedral element that is `T_q ∘ base`, and `composed(with:)` is exactly "apply the argument
+        // first" (it negates the rotation when the argument mirrors, which is why this is not `+`).
+        var total = XMPOrientation(quarterTurns: quarterTurns, mirrored: false).composed(with: base)
+        let flip: XMPOrientation?
         switch (flipHorizontal, flipVertical) {
-        case (false, false): return base.value
+        case (false, false): flip = nil
         case (true, false): flip = XMPOrientation(quarterTurns: 0, mirrored: true)
         case (false, true): flip = XMPOrientation(quarterTurns: 2, mirrored: true)
         case (true, true): flip = XMPOrientation(quarterTurns: 2, mirrored: false)
         }
-        return flip.composed(with: base).value
+        if let flip { total = flip.composed(with: total) }
+        return total.value
     }
 }
 
@@ -336,7 +351,12 @@ public enum XMPWriter {
 
         // MARK: 1.2 geometry
 
-        let crop = g.crop.clamped()
+        // 2026-10-28 (P0-10): `crs:Crop*` is written in the **file's own** frame — the space
+        // Lightroom reads it in, and the space `tiff:Orientation` below finishes the job from. The
+        // document stores the rect in the *turned* frame (schema 9), so this is the one place the
+        // turn is undone on the way out; writing the stored numbers here would hand Lightroom a
+        // crop measured against a frame it does not have.
+        let crop = g.sourceCrop.normalizedRect
         let hasCrop = g.crop != .full
         try write(metadata, "crs:HasCrop", hasCrop ? (kCFBooleanTrue as CFTypeRef) : nil, &report)
         // Left/Top are fractions already; Right/Bottom are *edges* (x+width), not widths.
@@ -347,14 +367,17 @@ public enum XMPWriter {
         // Our rotation turns the picture clockwise, Lightroom turns the crop box clockwise → negate.
         try write(metadata, "crs:CropAngle", g.rotationDegrees == 0 ? nil : number(-g.rotationDegrees), &report)
 
-        // Flips compose with the container's own orientation. Default flips must not touch
-        // tiff:Orientation — the camera's tag is not ours to rewrite.
-        if g.flipHorizontal || g.flipVertical {
+        // Flips and quarter turns compose with the container's own orientation. A document with
+        // neither must not touch tiff:Orientation — the camera's tag is not ours to rewrite — which
+        // is why the condition is still "did the user move anything".
+        if g.flipHorizontal || g.flipVertical || g.quarterTurns != 0 {
             let orientation = XMPOrientation.composed(exif: context.exifOrientation ?? 1,
                                                       flipHorizontal: g.flipHorizontal,
-                                                      flipVertical: g.flipVertical)
+                                                      flipVertical: g.flipVertical,
+                                                      quarterTurns: g.quarterTurns)
             try write(metadata, "tiff:Orientation", number(Double(orientation)), &report)
-            report.notes.append("flips are baked into tiff:Orientation=\(orientation) "
+            report.notes.append("flips and \(g.quarterTurns * 90)° of turn are baked into "
+                                + "tiff:Orientation=\(orientation) "
                                 + "(lossy: it also carries the camera's own orientation)")
         }
 

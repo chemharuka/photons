@@ -1080,9 +1080,9 @@ final class HDRCurveTests: XCTestCase {
     /// `light.blackOffset` on top, 042 the per-axis 细节 travel) / `processVersion` 2 record the
     /// meaning changes.
     func testCurveModelNamingAndVersion() throws {
-        // 2026-10-28: 8 (黑白 的 switch 与八段 mix, on top of 颗粒's three). The curve's own shape
-        // did not move.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 8)
+        // 2026-10-28: 9 (`geometry.quarterTurns`, P0-10's 90° rotation, on top of 黑白's switch and
+        // eight mixes). The curve's own shape did not move.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 9)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 
         let legacy = Data(#"""

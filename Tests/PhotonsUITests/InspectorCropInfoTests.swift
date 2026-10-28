@@ -111,7 +111,7 @@ final class InspectorCropInfoTests: XCTestCase {
 
         session.applyEdit { $0.geometry.crop = self.halfCrop }
         pump(panel.window)
-        let expected = CropMath.outputSize(session.edit.geometry.renderCrop(source: stored), in: stored)
+        let expected = session.edit.geometry.outputPixels(in: stored)
         XCTAssertEqual(expected, ImageSize(width: 4760, height: 3168),
                        "the fixture's half crop is \(expected.width)×\(expected.height)")
         XCTAssertEqual(dims(), InspectorPhotoInfo.pixelDimensions(width: expected.width, height: expected.height))
@@ -148,7 +148,7 @@ final class InspectorCropInfoTests: XCTestCase {
         let panel = try host(session)
         defer { panel.window.contentView = nil }
 
-        let expected = CropMath.outputSize(session.edit.geometry.renderCrop(source: rotated), in: rotated)
+        let expected = session.edit.geometry.outputPixels(in: rotated)
         XCTAssertEqual(expected, ImageSize(width: 3168, height: 4760))
         XCTAssertEqual(panel.probes[InspectorPhotoInfo.SpecColumn.pixelDimensions.rawValue]?.text,
                        InspectorPhotoInfo.pixelDimensions(width: expected.width, height: expected.height))
@@ -157,7 +157,7 @@ final class InspectorCropInfoTests: XCTestCase {
 
         // The landscape reading of the same crop is the transposed string, and the MP count is the
         // same number either way — that is what 「W×H 换序、MP 不变」 means.
-        let landscape = CropMath.outputSize(session.edit.geometry.renderCrop(source: stored), in: stored)
+        let landscape = session.edit.geometry.outputPixels(in: stored)
         XCTAssertEqual(ImageSize(width: landscape.height, height: landscape.width), expected,
                        "the rotated grid is the landscape grid with the axes exchanged")
         XCTAssertEqual(InspectorPhotoInfo.pixelCount(width: landscape.width, height: landscape.height),

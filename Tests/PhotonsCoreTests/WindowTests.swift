@@ -316,7 +316,7 @@ final class WindowTests: XCTestCase {
         edit.geometry.crop = NormalizedRect(x: 0.08, y: 0.06, width: 0.72, height: 0.8)
         edit.geometry.rotationDegrees = 9
 
-        let frame = CropMath.outputSize(edit.geometry.renderCrop(source: size(image)), in: size(image))
+        let frame = edit.geometry.outputPixels(in: size(image))
         let window = ImageRect(x: frame.width / 3, y: frame.height / 4,
                                width: frame.width / 2, height: frame.height / 2)
         let whole = try render(graph, edit, window: nil)
@@ -349,7 +349,7 @@ final class WindowTests: XCTestCase {
         edit.geometry.flipHorizontal = true
         edit.geometry.flipVertical = true
 
-        let frame = CropMath.outputSize(edit.geometry.renderCrop(source: size(image)), in: size(image))
+        let frame = edit.geometry.outputPixels(in: size(image))
         let window = ImageRect(x: 41, y: 23, width: 120, height: 90)
         let whole = try render(graph, edit, window: nil)
         let part = try render(graph, edit, window: window)

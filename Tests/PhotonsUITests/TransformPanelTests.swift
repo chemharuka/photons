@@ -143,7 +143,9 @@ final class TransformPanelTests: XCTestCase {
 
         let menu = MainMenu.build()
         let transform = try XCTUnwrap(menu.items.compactMap(\.submenu).first { $0.title == "变换" })
-        XCTAssertEqual(transform.items.map(\.title), ["裁切"], "菜单里搬走的功能都删掉了，只剩 ⌘R")
+        XCTAssertEqual(transform.items.map(\.title),
+                       ["裁切", "逆时针旋转 90°", "顺时针旋转 90°"],
+                       "菜单里搬走的功能都删掉了，只剩 ⌘R + P0-10 的两个旋转")
         let item = try XCTUnwrap(transform.items.first)
         XCTAssertEqual(item.keyEquivalent, "r")
         XCTAssertEqual(item.keyEquivalentModifierMask, .command)

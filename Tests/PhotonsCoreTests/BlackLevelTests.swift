@@ -166,16 +166,18 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(old.light.blackOffset, 0)
         XCTAssertFalse(String(decoding: try encoder.encode(old), as: UTF8.self).contains("blackOffset"))
 
-        // 新文档：schemaVersion 8（2026-10-28 加了黑白 的 switch 与八段 mix），而且**仍然**不写
-        // blackOffset 这个键。
-        XCTAssertEqual(EditModel.currentSchemaVersion, 8)
-        XCTAssertEqual(EditModel.neutral.schemaVersion, 8)
+        // 新文档：schemaVersion 9（2026-10-28 加了 `geometry.quarterTurns`，P0-10 的 90° 旋转），
+        // 而且**仍然**不写 blackOffset 这个键。
+        XCTAssertEqual(EditModel.currentSchemaVersion, 9)
+        XCTAssertEqual(EditModel.neutral.schemaVersion, 9)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
-        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 8"), "新文档是版本 8")
+        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 9"), "新文档是版本 9")
         XCTAssertFalse(fresh.contains("blackOffset"), "0 不写键 —— 旧 blob 的逐字节稳定靠这条")
         // 2026-10-28: 黑白 的两个新键同样在默认值上缺席，所以 schema-7 的 blob 也能逐字节重编码。
         XCTAssertFalse(fresh.contains("blackAndWhite"))
         XCTAssertFalse(fresh.contains("\"mix\""))
+        // schema 9 的 quarterTurns 一样：默认 0 就是缺席，所以 schema-8 的 blob 逐字节重编码。
+        XCTAssertFalse(fresh.contains("quarterTurns"))
 
         // 用过控件的文档才写键，而且读回来还是同一个数。
         var used = EditModel.neutral

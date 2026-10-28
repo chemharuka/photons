@@ -608,14 +608,20 @@ public struct LoupeFraming: Equatable, Sendable {
 
     /// The constructor the loupe uses: the same `lockedCrop` call — in the same *decoded* pixel
     /// space — that `RenderGraph` would make, so `fit` stays pixel-identical to M3.
+    /// 2026-10-28 (P0-10): `decoded` is the **file's** grid and the projection is of the picture the
+    /// user sees, so a 90° turn swaps the two dimensions and the crop rect (which schema 9 stores in
+    /// the turned frame) is already in that space. A turned document's "source pixel" below is
+    /// therefore a pixel of the *turned* frame — the same photograph, rotated — which is what every
+    /// consumer of this projection (window, fit zoom, crop overlay) is asking about.
     public init(viewport: ImageSize, decoded: ImageSize, decodeScale: Double, edit: EditModel) {
         let ds = decodeScale > 0 && decodeScale.isFinite ? decodeScale : 1
+        let turned = edit.geometry.orientedSource(decoded)
         let crop = CropMath.lockedCrop(edit.geometry.aspectLock,
                                       in: edit.geometry.cropRect,
-                                      source: decoded)
+                                      source: turned)
         self.init(viewport: viewport,
-                  sourceWidth: Double(decoded.width) / ds,
-                  sourceHeight: Double(decoded.height) / ds,
+                  sourceWidth: Double(turned.width) / ds,
+                  sourceHeight: Double(turned.height) / ds,
                   crop: crop,
                   straightenDegrees: edit.geometry.straightenDegrees,
                   flipH: edit.geometry.flipHorizontal,

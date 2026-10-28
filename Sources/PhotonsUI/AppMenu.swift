@@ -143,6 +143,16 @@ public enum MainMenu {
         transform.addItem(withTitle: "裁切",
                           action: #selector(EditorWindowController.toggleCropAction(_:)),
                           keyEquivalent: "r")
+        // 2026-10-28 (P0-10): the 90° rotation. The card's two buttons are the mouse's door; these
+        // two rows are the keyboard's (⌘[ / ⌘], the pair every photo app ships). One verb behind each
+        // — `LoupeController.rotateQuarter(clockwise:)` — so the menu cannot turn the picture by a
+        // different rule from the buttons.
+        transform.addItem(withTitle: "逆时针旋转 90°",
+                          action: #selector(EditorWindowController.rotateCounterClockwiseAction(_:)),
+                          keyEquivalent: "[")
+        transform.addItem(withTitle: "顺时针旋转 90°",
+                          action: #selector(EditorWindowController.rotateClockwiseAction(_:)),
+                          keyEquivalent: "]")
         // Reserved: 梯形校正 / 四边形校正 go here (see the comment above — no dead rows).
 
         // Develop — presets. The list is the library's, so the menu is rebuilt every time it opens
