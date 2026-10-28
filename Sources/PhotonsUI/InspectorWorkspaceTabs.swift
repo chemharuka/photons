@@ -89,10 +89,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // 细节 since 2026-10-28), because `UISmokeWorkspaceSwitchTests` compares titles to this.
             return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail, .effects]
         case .transform:
-            // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
-            // card the workspace has today, and it is a `Section` like every other card, so the order
-            // still comes from `Section.allCases` and this table only decides membership.
-            return [.crop]
+            // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. 087 added the
+            // 角度 card right after it (转动 / 旋转 / 镜像), and both are `Section`s like every other
+            // card, so the order still comes from `Section.allCases`.
+            return [.crop, .angle]
         case .colour:
             // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it — same subject
             // (colour), different partition (luminance instead of hue), and the 调整 panel is already

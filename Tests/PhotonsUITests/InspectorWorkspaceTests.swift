@@ -51,7 +51,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         // 调整 = 既有面板的卡片：蒙版 / 裁切 / HSL 各有自己的工作区，历史记录也有（077）。
         XCTAssertEqual(InspectorView.sections(in: .adjust),
                        InspectorView.scrollingSections.filter {
-                           $0 != .masks && $0 != .crop && $0 != .hsl && $0 != .history
+                           $0 != .masks && $0 != .crop && $0 != .angle && $0 != .hsl && $0 != .history
                                && $0 != .colorGrading && $0 != .blackAndWhite
                        },
                        "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 色彩分级 / 黑白 / 历史记录交给各自的工作区")
@@ -66,7 +66,7 @@ final class InspectorWorkspaceTests: XCTestCase {
                        ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
-        XCTAssertEqual(titles[.transform], ["裁切"])
+        XCTAssertEqual(titles[.transform], ["裁切", "角度"])
         XCTAssertEqual(titles[.colour], ["HSL", "色彩分级", "黑白"],
                        "色彩工作区：HSL → 色彩分级 → 黑白（用户：黑白放在色彩分级下方）")
         XCTAssertEqual(titles[.history], ["历史记录"])
@@ -113,8 +113,9 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张；
         // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张，色彩分级（S3.8）→ 15 张；
-        // 081 (2026-10-28) 删掉 预设 卡 → 14 张。直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 14)
+        // 081 (2026-10-28) 删掉 预设 卡 → 14 张；087 加 角度 卡 → 15 张。直方图仍排第一 ——
+        // 这张测试钉的是过滤，不是重排。
+        XCTAssertEqual(InspectorView.Section.allCases.count, 15)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
@@ -435,7 +436,8 @@ final class InspectorWorkspaceTests: XCTestCase {
                       "唯一一张「工作区 → 卡片」表在 InspectorWorkspace.cards")
         XCTAssertTrue(tabs.contains("case .transform:\n            // 2026-10-27 — 裁切."),
                       "变换 认领裁切卡（2026-10-27：卡片从菜单/浮动栏搬进了工作区）")
-        XCTAssertTrue(tabs.contains("return [.crop]"), "变换工作区的第一张卡 = 裁切")
+        XCTAssertTrue(tabs.contains("return [.crop, .angle]"),
+                      "变换工作区的第一张卡 = 裁切，087 起第二张 = 角度")
     }
 
     // MARK: - harness

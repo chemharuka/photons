@@ -185,6 +185,8 @@ public final class CropToolController {
     public private(set) var lastHandle: CropToolHandle?
 
     private weak var session: CatalogSession?
+    /// 087 — the geometry the tool was entered with (Esc's target, see `cancel()`).
+    private var entryGeometry: GeometryGroup?
     private var drag: CropToolDrag?
     private var rotating = false
     private var rotateStart: Double = 0
@@ -257,6 +259,11 @@ public final class CropToolController {
     public func begin() -> Bool {
         guard !isActive, let session else { return false }
         draft = Draft(geometry: session.edit.geometry)
+        // 087 — the state Esc has to come back to. `转动` writes the document on every tick, and a
+        // released drag closes/reopens the tool session (one row per gesture), so by the time Esc
+        // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
+        // this tool was entered with is what makes 「除非 esc 取消回退」 true after several drags.
+        entryGeometry = session.edit.geometry
         isActive = true
         isDragging = false
         drag = nil
@@ -300,6 +307,12 @@ public final class CropToolController {
         // 077: zero rows, and (for a tool whose bar can write mid-session, e.g. the flips) the
         // document goes back to the state the session started from.
         session?.cancelToolSession()
+        // 087: rows a released 转动 gesture already wrote are outside that session; put the geometry
+        // back to what it was when the tool was entered, as one undoable row.
+        if let session, let entry = entryGeometry, session.edit.geometry != entry {
+            session.applyEdit { $0.geometry = entry }
+            _ = session.commitEdit(label: "变换 · 取消", coalesce: false)
+        }
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         cancelledCount += 1
     }
@@ -332,6 +345,34 @@ public final class CropToolController {
     public func setStraighten(_ degrees: Double) {
         draft.straighten = CropTool.clampStraighten(degrees)
         draftChanged()
+    }
+
+    /// 087 — 转动 is live: every tick writes the document, no history.
+    ///
+    /// The crop frame keeps 086's draft semantics, so only `straightenDegrees` is written here. The
+    /// open tool session swallows the commit; `commitStraighten()` is the one release action that
+    /// leaves exactly one row.
+    public func setStraightenLive(_ degrees: Double) {
+        setStraighten(degrees)
+        guard isActive, let session else { return }
+        let angle = draft.straighten
+        session.applyEdit { $0.geometry.rotationDegrees = angle }
+    }
+
+    /// End of one 转动 gesture: close the crop session around exactly one row, then reopen it so the
+    /// crop draft still waits for 应用 (086).
+    @discardableResult
+    public func commitStraighten() -> Bool {
+        guard isActive, let session else { return false }
+        let inSession = session.isToolSessionActive
+        let committed: Bool
+        if inSession {
+            committed = session.endToolSession(label: "转动")
+        } else {
+            committed = session.commitEdit(label: "转动", coalesce: false)
+        }
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        return committed
     }
 
     /// A ratio preset. The rect is reshaped **now** rather than at apply time, because the frame on
@@ -381,7 +422,9 @@ public final class CropToolController {
             else { model.geometry.flipVertical.toggle() }
         }
         let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
-        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        // A flip is discrete (072 §F): never fold it into the drag before it, and two flips are two
+        // rows even when no tool session was open to bracket them.
+        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转", coalesce: false)
         if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before

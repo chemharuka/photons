@@ -112,6 +112,8 @@ public struct InspectorView: View {
         /// the panel's own order says the same), while 裁切 belongs to a workspace of its own and is
         /// therefore invisible in 调整 either way.
         case crop
+        /// 087: 角度 — the 变换 workspace's second card (转动 / 旋转 / 镜像), after 裁切.
+        case angle
         case masks
         /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
         /// only one that is a *reading* rather than a control: it can jump, and delete the newest row
@@ -134,6 +136,7 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
+            case .angle: return "角度"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
@@ -330,6 +333,9 @@ public struct InspectorView: View {
             // 应用取消；进入工作区即进入裁切模式，卡头没有按钮。卡本身在 `TransformPanel.swift`
             // （同一套行样式，`sliderRow` 一字未改）。
             cropTransformCard
+        case .angle:
+            // 087: 变换工作区的第二张卡 —— 转动 / 旋转 / 镜像，放在裁切卡之后。
+            angleTransformCard
         case .masks:
             MaskListPanel(session: session)
         case .history:

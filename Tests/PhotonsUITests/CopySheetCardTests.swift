@@ -184,10 +184,13 @@ final class CopySheetCardTests: XCTestCase {
         let cardTitles = cardRows.map(\.title)
         XCTAssertEqual(cardTitles.filter { adjust.contains($0) }, adjust,
                        "对话框里属于调整工作区的行序必须跟着检查器的卡序：\(cardTitles) vs \(adjust)")
+        // 087: 角度 card's fields (转动 / 旋转 / 镜像) live in `EditSnapshotSection.crop`, so the
+        // copy sheet has no separate 角度 row even though the inspector draws a second card.
         XCTAssertEqual(Set(cardRows.map(\.title)),
                        Set([adjust, InspectorView.cardTitles(in: .colour),
                             InspectorView.cardTitles(in: .transform),
-                            InspectorView.cardTitles(in: .masks)].flatMap { $0 }))
+                            InspectorView.cardTitles(in: .masks)].flatMap { $0 })
+                           .subtracting(["角度"]))
         // 默认不画子项。
         XCTAssertEqual(view.rows.count, 12, "默认只有卡级行（081 §2）")
     }
