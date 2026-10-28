@@ -26,6 +26,10 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
     case effects
     case geometry
     case masks
+    /// 2026-10-28 (078 P0-1 / B9): 修复画笔's spot list, on S1.9 — its own group rather than a corner
+    /// of `.masks`: the 蒙版 card does not edit a spot, its undo wording is 「修复 …」, and a mask drag
+    /// must not report a heal pass (nor the other way round). One group, one stage, one dirty bit.
+    case heal
 
     /// Human label, used for menu titles ("Undo Exposure") and history rows.
     public var displayName: String {
@@ -38,6 +42,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .effects: return "Effects"
         case .geometry: return "Geometry"
         case .masks: return "Masks"
+        case .heal: return "Heal"
         }
     }
 
@@ -58,6 +63,8 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .effects: return [.detailFX, .vignette, .grain]
         case .geometry: return [.geometry]
         case .masks: return [.maskAtlas, .localApply, .localColor]
+        // 2026-10-28 (078 P0-1): one stage — S1.9.
+        case .heal: return [.heal]
         }
     }
 

@@ -72,6 +72,12 @@ public enum StageAlgorithmVersion {
 
     /// **1** — S3.9's first arithmetic (2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
     public static let detailFX = 1
+    /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
+    /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
+    /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
+    /// content-aware source search — is what bumps this, because it changes the pixels of the same
+    /// document without changing a stored number.
+    public static let heal = 1
     /// Unchanged.
     public static let vignette = 1
     /// Unchanged.
@@ -87,6 +93,7 @@ public enum StageAlgorithmVersion {
         case .sceneLinear: return sceneLinear
         case .maskAtlas: return maskAtlas
         case .localApply: return localApply
+        case .heal: return heal
         case .curve: return curve
         case .toneMap: return toneMap
         case .color: return color

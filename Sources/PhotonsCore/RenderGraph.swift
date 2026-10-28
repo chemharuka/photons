@@ -148,6 +148,17 @@ public struct RenderOptions: Sendable {
     /// part of a key.
     public var gradeGlobalWeights: Bool
 
+    /// **Tests only.** Make S1.9's `heal` behave as a plain **copy** — zero the boundary plane, i.e.
+    /// skip the Poisson step and keep only the texture. That is the plausible mistake this stage's
+    /// whole design exists to avoid: a copy that is masked by a feather looks like a heal in the
+    /// middle and is *wrong at the rim*, which is the one place a repair has to be invisible.
+    ///
+    /// `HealTests.testTheRefutationMakesTheBoundaryJumpFail` turns it on and measures the acceptance's
+    /// 「边界跳变 ≤ 2 码」 going from a number to a much larger one — the proof that assertion is about
+    /// the arithmetic and not about the blend ramp. The kernel reads it as `HealParamsU.b.y`; it is
+    /// never set by the app and never part of a key.
+    public var healWithoutBoundaryMatch: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -162,7 +173,8 @@ public struct RenderOptions: Sendable {
                 source: RenderSource = .edited,
                 originalRendersAsParametersCleared: Bool = false,
                 bwIndependentChannels: Bool = false,
-                gradeGlobalWeights: Bool = false) {
+                gradeGlobalWeights: Bool = false,
+                healWithoutBoundaryMatch: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -178,6 +190,7 @@ public struct RenderOptions: Sendable {
         self.originalRendersAsParametersCleared = originalRendersAsParametersCleared
         self.bwIndependentChannels = bwIndependentChannels
         self.gradeGlobalWeights = gradeGlobalWeights
+        self.healWithoutBoundaryMatch = healWithoutBoundaryMatch
     }
 }
 
@@ -610,6 +623,27 @@ private struct DetailFXParamsU {
 private struct DisplayParams {
     var m: simd_float4x4
     var a: SIMD4<Float>   // identityMatrix
+}
+
+// MARK: - heal uniforms (mirror of s1_9_heal.metal, byte for byte)
+
+/// One spot, in **canvas pixels**: `center = origin − frameOrigin + c·frameSize`, `radius` and the
+/// offset scaled by the frame's short edge (`HealSpotU` in the kernel's own words).
+private struct HealSpotU {
+    var a: SIMD4<Float>   // centerCanvas.xy, radiusPx, feather
+    var b: SIMD4<Float>   // offsetCanvas.xy, opacity, mode (0 heal, 1 clone)
+}
+
+private struct HealParamsU {
+    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var b: SIMD4<Float>   // spotCount, boundaryMatch, 0, 0
+}
+
+/// The fitted boundary plane, one record per spot (`HealStatU` in the kernel).
+private struct HealStatU {
+    var c0: SIMD4<Float>   // R: a0, a1, b1, 0
+    var c1: SIMD4<Float>   // G
+    var c2: SIMD4<Float>   // B
 }
 
 /// Mirror of `Kernels/histogram_sample.metal`, byte for byte: the picture's rect inside the frame
@@ -2433,6 +2467,101 @@ public final class RenderGraph {
         return LinearSample(width: w, height: h, rgba: rgba)
     }
 
+    // MARK: - S1.9 — 修复 / 克隆 (078 P0-1)
+
+    /// The spot list as the kernel reads it: **canvas pixels**, derived from the frame the plan
+    /// resolved. One conversion, here, so the pass and any measurement of it cannot disagree about
+    /// where a disk is.
+    ///
+    /// `center_canvas = origin − frameOrigin + c·frameSize`, `radius = r·min(frameSize)`,
+    /// `offset = o·min(frameSize)`. That is exactly the mapping S0 uses to place the picture in the
+    /// canvas (`s0_geometry.metal`: content pixel `gid` ← frame pixel `gid + 0.5 − origin +
+    /// frameOrigin`), so a spot defined at 0.5, 0.5 covers the frame's centre at every scale and in
+    /// a 1:1 loupe window too — a window render puts the same disk on the same photograph, which is
+    /// the property `HealTests.testAWindowPutsTheSpotOnTheSameTexels` measures.
+    private func healSpotU(_ edit: EditModel, plan: Plan) -> [HealSpotU] {
+        let shortEdge = max(min(plan.frameSize.x, plan.frameSize.y), 1)
+        let base = SIMD2<Float>(plan.origin.x - plan.frameOrigin.x,
+                                plan.origin.y - plan.frameOrigin.y)
+        return edit.activeHealSpots.map { spot in
+            let c = base + SIMD2<Float>(Float(spot.center.x) * plan.frameSize.x,
+                                        Float(spot.center.y) * plan.frameSize.y)
+            let r = Float(spot.clampedRadius) * shortEdge
+            return HealSpotU(a: SIMD4(c.x, c.y, max(r, 0.5), Float(spot.feather)),
+                             b: SIMD4(Float(spot.sourceOffset.x) * shortEdge,
+                                      Float(spot.sourceOffset.y) * shortEdge,
+                                      Float(spot.opacity),
+                                      spot.mode == .clone ? 1 : 0))
+        }
+    }
+
+    /// S1.9, two passes in one command buffer:
+    ///
+    ///   1. `s1_9_heal_stats` — one thread per spot walks the rim ring (`HealSpotU.a.xy` + `radius`)
+    ///      and fits the correction plane `a₀ + a₁u + b₁v` to `dst − src` there. 256 texel reads per
+    ///      spot, once per frame — the ring's mean and gradient is the whole of the Poisson step this
+    ///      build ships (`Kernels/s1_9_heal.metal` has the derivation and the truncation error).
+    ///   2. `s1_9_heal_apply` — every canvas pixel, every spot in document order, always reading the
+    ///      **input** texture as the source (so a spot's source is the picture S1.6 produced, never
+    ///      its own or a neighbour's output — that is what makes three spots independent).
+    ///
+    /// The two encoders are in one command buffer, so the stats are written before the apply reads
+    /// them (Metal orders encoders in a buffer); both bind the *same* pipeline texture, the first as
+    /// `access::read` for the identity copy and the second as `access::read` + `access::sample` for
+    /// the sub-texel source position.
+    private func encodeHeal(cb: MTLCommandBuffer, into out: MTLTexture,
+                            from src: MTLTexture, edit: EditModel, plan: Plan,
+                            options: RenderOptions) throws {
+        let spots = healSpotU(edit, plan: plan)
+        var params = HealParamsU(a: SIMD4(plan.origin.x, plan.origin.y,
+                                         Float(plan.content.width), Float(plan.content.height)),
+                                 b: SIMD4(Float(spots.count),
+                                          options.healWithoutBoundaryMatch ? 0 : 1, 0, 0))
+        let apply = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_apply")
+        guard !spots.isEmpty else {
+            // Not reachable through `pipeline(hasHeal:)` — a stage with no spot does not exist — but a
+            // caller that asked anyway gets a **copy** rather than an uninitialised texture.
+            let enc = try encoder(cb, apply, in: src, out: out)
+            enc.setTexture(src, index: 2)
+            enc.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
+            dispatch(enc, apply, plan.canvas)
+            enc.endEncoding()
+            return
+        }
+
+        let stride = MemoryLayout<HealStatU>.stride
+        guard let statBuffer = device.makeBuffer(length: stride * spots.count,
+                                                options: .storageModeShared) else {
+            throw RenderError.commandBufferFailed
+        }
+        // 1 — the boundary ring.
+        let stats = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_stats")
+        var spotArray = spots
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(stats)
+        e0.setTexture(src, index: 0)
+        e0.setTexture(src, index: 1)
+        e0.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
+        e0.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
+        e0.setBuffer(statBuffer, offset: 0, index: 2)
+        let tw = min(stats.threadExecutionWidth, spots.count)
+        e0.dispatchThreadgroups(MTLSize(width: (spots.count + tw - 1) / tw, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: tw, height: 1, depth: 1))
+        e0.endEncoding()
+
+        // 2 — the pixels.
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(apply)
+        e1.setTexture(src, index: 0)
+        e1.setTexture(out, index: 1)
+        e1.setTexture(src, index: 2)
+        e1.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
+        e1.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
+        e1.setBuffer(statBuffer, offset: 0, index: 2)
+        dispatch(e1, apply, plan.canvas)
+        e1.endEncoding()
+    }
+
     // MARK: encoding
 
     private func encoder(_ cb: MTLCommandBuffer, _ pipeline: MTLComputePipelineState,
@@ -2604,6 +2733,12 @@ public final class RenderGraph {
         case .maskAtlas:
             // Handled before the stage loop: it writes a side texture, not the pipeline image.
             throw RenderError.executeFailed("mask atlas must be encoded by encodeAtlas")
+
+        case .heal:
+            // S1.9 — 修复 / 克隆 (2026-10-28, 078 P0-1). Encoded **only** for documents that carry a
+            // spot (`RenderStage.pipeline(hasHeal:)`), so a document that never used the 修复画笔
+            // renders the pre-S1.9 frame by construction: there is no pass to be neutral in.
+            try encodeHeal(cb: cb, into: out, from: src, edit: edit, plan: plan, options: options)
 
         case .toneMap:
             // 0107: two entry points, chosen by whether the document has a contrast setting at all.

@@ -223,6 +223,12 @@ public final class LoupeCanvasView: NSView {
             // it consumes the click before a paint drag or a pan can start.
             controller?.handleEyedropperClick(atViewPoint: point)
             return
+        case .healClick:
+            // 2026-10-28 (078 P0-1): also a one-shot — the click places one spot and consumes
+            // nothing else (the tool stays armed, which is what makes clipping several blemishes in a
+            // row one action per click).
+            controller?.addHealSpot(atViewPoint: point)
+            return
         case .maskCreate:
             // A gradient drag is the innermost mask gesture: it exists only while a shape is armed,
             // and it is what turns two clicks into a linear ramp / an ellipse.
@@ -398,6 +404,12 @@ public enum LoupeCanvasGesture: Equatable, Sendable {
     case maskHandle
     /// Dragging adjusts the selected mask's geometry.
     case maskShape
+    /// 2026-10-28 (078 P0-1) — a click while the 修复画笔 is armed: one spot, at the click.
+    ///
+    /// Its own case rather than a corner of `.paint`: a spot is placed by a **click**, not a stroke,
+    /// and the two must not share a state machine (a drag with the heal tool armed pans, which is
+    /// what a one-shot tool should do).
+    case healClick
     case paint
     case doubleClick
     case pan
@@ -2698,6 +2710,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return NormalizedPoint(p.x / max(framing.sourceWidth, 1), p.y / max(framing.sourceHeight, 1))
     }
 
+    /// 2026-10-28 (078 P0-1) — one click, one spot.
+    ///
+    /// The click arrives in **source** space (`normalizedSourcePoint`, the same projection the brush
+    /// uses) and the spot lives in **frame** space (the cropped picture — `HealSpot`'s header says
+    /// why), so the document's own crop rect is what converts one into the other. A click that lands
+    /// outside the crop (on the empty canvas around a cropped picture, or before a decode has
+    /// arrived) places nothing: S1.9 has no pixels there.
+    ///
+    /// The mode and radius come from the panel's view state, and the source is the default one — one
+    /// radius to the right, which is Lightroom's own first guess.
+    @discardableResult
+    public func addHealSpot(atViewPoint point: CGPoint) -> HealSpot? {
+        guard let session, let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
+        let crop = session.edit.geometry.crop
+        let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
+        let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
+        return session.addHealSpot(at: frame)
+    }
+
     public func beginPaint(at point: CGPoint, pressure: Double? = nil) {
         guard let p = normalizedSourcePoint(forViewPoint: point) else { return }
         maskCanvas.begin(at: p, pressure: pressure)
@@ -3202,6 +3233,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return LoupeCanvasGesture.crop(clickCount: clickCount, hit: cropHit(atViewPoint: point))
         }
         if isEyedropperArmed { return .eyedropper }
+        if session?.healTool == true { return .healClick }
         if isShapeCreateArmed { return .maskCreate }
         if isMaskHandleArmed(atViewPoint: point) { return .maskHandle }
         if isShapeDragArmed { return .maskShape }

@@ -1067,12 +1067,17 @@ final class HDRCurveTests: XCTestCase {
 
     // MARK: - ⑫ the mount point
 
-    /// `.curve` sits between S1.6 and S2, its own key material moves when the curve does, and nothing
-    /// above it does — that is the whole reason it is a stage and not a second dispatch in S1.
+    /// `.curve` sits between S1.6 (or S1.9, when the document carries a heal spot) and S2, its own key
+    /// material moves when the curve does, and nothing above it does — that is the whole reason it is a
+    /// stage and not a second dispatch in S1.
     func testMountPointAndKeyChain() throws {
         let order = RenderStage.order
         let curveIndex = try XCTUnwrap(order.firstIndex(of: .curve))
-        XCTAssertEqual(order[curveIndex - 1], .localApply, "the curve must read S1.6's output")
+        // 2026-10-28 (078 P0-1): S1.9 is the stage *above* the curve when it exists — it is a repair of
+        // the picture and the curve is the look applied to it. With no spot the link does not exist and
+        // the curve is seeded by S1.6 (checked below through the chain, not the enum order).
+        XCTAssertEqual(order[curveIndex - 1], .heal, "the curve must read S1.9's output when a spot exists")
+        XCTAssertEqual(order[curveIndex - 2], .localApply, "…and S1.9 reads S1.6's")
         XCTAssertEqual(order[curveIndex + 1], .toneMap, "S2 must read the curve's output")
         XCTAssertEqual(RenderStage.allCases.firstIndex(of: .curve), 2)
         XCTAssertEqual(RenderStage.curve.short, "s1.7")
@@ -1091,6 +1096,7 @@ final class HDRCurveTests: XCTestCase {
         curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         let a = links(withMask), b = links(curved)
+        XCTAssertNil(a.heal, "a document with no heal spot has no S1.9 link at all")
         XCTAssertNotEqual(a.curve, b.curve, "a curve change must move its own key")
         XCTAssertEqual(a.sceneLinear, b.sceneLinear, "…and not S1's")
         XCTAssertEqual(a.maskAtlas, b.maskAtlas, "…and not rebuild the atlas")
@@ -1247,9 +1253,9 @@ final class HDRCurveTests: XCTestCase {
         // 2026-10-28: 9 (色彩分级's nine numbers, on top of 黑白's switch/mixes and 颗粒's three). The
         // curve's own shape did not move.
         // 2026-10-28: 9 (纹理/清晰度/去雾, on top of 黑白 and 颗粒). The curve's own shape did not move.
-        // 2026-10-28: 9 (`geometry.quarterTurns`, P0-10's 90° rotation, on top of 黑白's switch and
-        // eight mixes). The curve's own shape did not move.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 9)
+        // 2026-10-28: 10 (`healSpots`, 078 P0-1's 修复画笔, on top of `geometry.quarterTurns`'s 9,
+        // 黑白's switch and eight mixes). The curve's own shape did not move.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 
         let legacy = Data(#"""

@@ -322,6 +322,11 @@ extension EditHistory {
         // Masks — aligned by id. Array order is *combination* order (§3.3), so a reorder is an edit.
         out.append(contentsOf: maskChanges(before.masks, after.masks))
 
+        // 2026-10-28 (078 P0-1) — 修复画笔. Aligned by id like the masks, and for the same reason: a
+        // spot's numbers are per-spot, so the row must read 「修复 1 半径 0.020 → 0.035」 rather than a
+        // nameless 修复 change.
+        out.append(contentsOf: healChanges(before.healSpots, after.healSpots))
+
         // `showMaskID` is deliberately absent: it is view state (005e), never a document edit.
         return out
     }
@@ -406,6 +411,58 @@ extension EditHistory {
         return out
     }
 
+    /// The heal-spot half of the diff — the mask rule, read on a list that has no components.
+    ///
+    /// A spot is a disk plus a mode: centre (x, y), radius, source offset (x, y), mode, feather,
+    /// opacity. The structural entries (`heal.order`, added/removed) come last, so a row's summary
+    /// leads with the number the user moved.
+    static func healChanges(_ before: [HealSpot], _ after: [HealSpot]) -> [FieldChange] {
+        var out: [FieldChange] = []
+        let beforeIDs = before.map(\.id)
+        let afterIDs = after.map(\.id)
+        var beforeByID: [String: HealSpot] = [:]
+        for s in before { beforeByID[s.id] = s }
+        for s in after {
+            let id = s.id
+            let key = { (field: String) in "heal.\(id).\(field)" }
+            if beforeByID[id] == nil {
+                out.append(FieldChange(field: EditField(key: key("added"), group: .heal),
+                                       from: .text("无"), to: .text("有")))
+            }
+            let o = beforeByID[id]
+            func num(_ field: String, _ a: Double, _ b: Double) {
+                guard !EditParameters.areEqual(a, b) else { return }
+                out.append(FieldChange(field: EditField(key: key(field), group: .heal),
+                                       from: .number(a), to: .number(b)))
+            }
+            // A new spot is measured against the defaults, so the row says what it *is* — the same
+            // courtesy `Mask.fallback` pays a new mask.
+            let base = o ?? HealSpot(id: id)
+            num("center.x", base.center.x, s.center.x)
+            num("center.y", base.center.y, s.center.y)
+            num("radius", base.radius, s.radius)
+            num("source.x", base.sourceOffset.x, s.sourceOffset.x)
+            num("source.y", base.sourceOffset.y, s.sourceOffset.y)
+            num("feather", base.feather, s.feather)
+            num("opacity", base.opacity, s.opacity)
+            if base.mode != s.mode {
+                out.append(FieldChange(field: EditField(key: key("mode"), group: .heal),
+                                       from: .text(base.mode.rawValue), to: .text(s.mode.rawValue)))
+            }
+        }
+        let afterIDsSet = Set(afterIDs)
+        for o in before where !afterIDsSet.contains(o.id) {
+            out.append(FieldChange(field: EditField(key: "heal.\(o.id).removed", group: .heal),
+                                   from: .text("有"), to: .text("无")))
+        }
+        if beforeIDs != afterIDs {
+            out.append(FieldChange(field: EditField(key: "heal.order", group: .heal),
+                                   from: .number(Double(beforeIDs.count)),
+                                   to: .number(Double(afterIDs.count))))
+        }
+        return out
+    }
+
     // MARK: names
 
     /// Field key → the panel's wording. One table for the whole app; a key that is not in it reads as
@@ -416,6 +473,7 @@ extension EditHistory {
         if let point = curvePointName(key) { return point }
         if let band = bandName(key) { return band }
         if let mask = maskFieldName(key) { return mask }
+        if let heal = healFieldName(key) { return heal }
         return key
     }
 
@@ -479,6 +537,7 @@ extension EditHistory {
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
         "masks.order": "蒙版顺序",
+        "heal.order": "修复顺序",
     ]
 
     private static let maskFieldNames: [String: String] = [
@@ -548,6 +607,22 @@ extension EditHistory {
         let name = maskFieldNames[field] ?? field
         return "蒙版 \(name)"
     }
+
+    /// `heal.h-1F2A.radius` → 「修复 半径」; `heal.h-1F2A.added` → 「修复 新增」.
+    private static func healFieldName(_ key: String) -> String? {
+        guard key.hasPrefix("heal.") else { return nil }
+        if key == "heal.order" { return "修复 顺序" }
+        let rest = key.dropFirst("heal.".count)
+        guard let dot = rest.firstIndex(of: ".") else { return nil }
+        let field = String(rest[rest.index(after: dot)...])
+        return "修复 \(healFieldNames[field] ?? field)"
+    }
+
+    private static let healFieldNames: [String: String] = [
+        "added": "新增", "removed": "删除", "mode": "模式",
+        "center.x": "位置 x", "center.y": "位置 y", "radius": "半径",
+        "source.x": "源点 x", "source.y": "源点 y", "feather": "羽化", "opacity": "不透明度",
+    ]
 }
 
 // MARK: - 077: one row of the history panel

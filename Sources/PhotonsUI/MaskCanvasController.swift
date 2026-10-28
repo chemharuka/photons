@@ -16,6 +16,68 @@ import PhotonsCore
 //      trackpad drag over a 200 pt stroke is 200 events and ~20 points, and the difference is a
 //      200-point JSON blob per stroke versus a 20-point one.
 
+// MARK: - 修复画笔 (078 P0-1)
+//
+// The smallest panel that can drive S1.9, and no more: arm the tool, click the canvas, and a spot
+// lands at the click with its source one radius to the right (`HealSpot.defaultSourceOffset`). The
+// list below lets the user delete a spot and change its radius; there are **no drag handles** and no
+// hand-placed source point in this version, which is stated here rather than discovered.
+
+extension CatalogSession {
+
+    /// Radius of the next spot, in short-edge units of the frame. View state like `brushSize`: the
+    /// spot stores its own radius when it is created, so moving this never rewrites a spot that
+    /// already exists (and never grows the undo stack).
+    public static let defaultHealRadius: Double = HealSpot.defaultRadius
+
+    /// Append a spot at a **frame-normalised** point (0…1 of the cropped picture).
+    ///
+    /// One snapshot per spot: the click is one action, so ⌘Z takes the whole thing back in one press.
+    /// Returns `nil` when the document is full or the point is outside the frame, so a stray click on
+    /// the letterbox does not mint a history row.
+    @discardableResult
+    public func addHealSpot(at framePoint: NormalizedPoint, radius: Double? = nil) -> HealSpot? {
+        guard framePoint.x >= 0, framePoint.x <= 1,
+              framePoint.y >= 0, framePoint.y <= 1 else { return nil }
+        let r = radius ?? healRadius
+        let spot = HealSpot(center: framePoint, radius: r,
+                            sourceOffset: HealSpot.defaultSourceOffset(radius: r),
+                            mode: healMode)
+        var landed: HealSpot?
+        applyEdit { landed = $0.addHealSpot(spot) }
+        guard let landed else { return nil }
+        commitEdit(label: "修复", coalesce: false)
+        selectedHealSpotID = landed.id
+        return landed
+    }
+
+    /// Remove a spot. `commit: false` for a caller that is about to do more (nothing does today).
+    public func deleteHealSpot(_ id: String, commit: Bool = true) {
+        var removed = false
+        applyEdit { removed = $0.removeHealSpot(id) }
+        guard removed else { return }
+        if commit { commitEdit(label: "删除修复", coalesce: false) }
+        if selectedHealSpotID == id { selectedHealSpotID = edit.healSpots.last?.id }
+    }
+
+    /// Radius of one spot. The drag writes through with `commit: false` (so a hundred ticks are one
+    /// frame each and **one** snapshot at the end — the mask card's rule); the mouse-up commits.
+    public func setHealRadius(_ radius: Double, for id: String, commit: Bool = true) {
+        guard let index = edit.healSpots.firstIndex(where: { $0.id == id }) else { return }
+        let clamped = min(max(radius, 0.002), 0.5)
+        applyEdit { $0.healSpots[index].radius = clamped }
+        if commit { commitEdit(label: "修复 半径") }
+    }
+
+    /// Heal ⇄ clone for one spot — a discrete action, so its own snapshot.
+    public func setHealMode(_ mode: HealMode, for id: String) {
+        guard let index = edit.healSpots.firstIndex(where: { $0.id == id }),
+              edit.healSpots[index].mode != mode else { return }
+        applyEdit { $0.healSpots[index].mode = mode }
+        commitEdit(label: "修复 模式", coalesce: false)
+    }
+}
+
 // MARK: - tool
 
 /// What a drag on the loupe canvas means. `.off` keeps the M3 behaviour (pan/pinch), so arming a

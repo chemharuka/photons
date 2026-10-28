@@ -544,7 +544,7 @@ final class ColorGradingTests: XCTestCase {
     }
 
     /// A grade document writes the key, reads it back, and re-encodes byte-identically — and the
-    /// version is 9 because this build wrote it.
+    /// version is 10 because this build wrote it (9 was the grade's own number; 10 is `healSpots`).
     func testTheGradeGroupRoundTripsByteForByte() throws {
         let graded = document(2, hue: -12.5, saturation: 33, lightness: 7.25)
         let encoder = JSONEncoder()
@@ -553,11 +553,11 @@ final class ColorGradingTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("\"colorGrading\""))
         XCTAssertTrue(text.contains("\"highlights\""))
-        XCTAssertEqual(graded.schemaVersion, 9)
+        XCTAssertEqual(graded.schemaVersion, 10)
         let back = try JSONDecoder().decode(EditModel.self, from: data)
         XCTAssertEqual(back, graded)
         XCTAssertEqual(try encoder.encode(back), data)
-        print("GRADE SCHEMA · nine numbers round-trip byte for byte, version 9")
+        print("GRADE SCHEMA · nine numbers round-trip byte for byte, version 10")
     }
 
     // MARK: - ⑥ history

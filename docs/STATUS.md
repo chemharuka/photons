@@ -24,6 +24,7 @@
 - **XMP 导出**：`EditModel → crs:* + photons:*`，sidecar 与容器内写（JPEG/HEIC/TIFF 走 CopyImageSource 不重编码，PNG 解码重写，RAW 降级 sidecar）；不可映射项落 `photons:settings` 可无损带回。20 项往返。`5e6993b`
 - **几何**：`CropMath`（cropRect 的 left/top/right/bottom 是**绝对边界**，同 XMP）+ 拉直 ±45 + 翻转；crop=full 时 neutral hash 不变。`a7368ec`
 - **缩略图**：`ThumbnailCache`（内容寻址 `thumb|v1|hash|tier|pipeline|recipe`、原子写、LRU、DNG 上限）+ 镜头校正逐文件探测（探测后**必须复位**，否则改像素）。
+- **修复画笔（S1.9，078 P0-1，schema 10）**：`HealSpot`（画框归一化中心 / 短边半径 / 源点偏移 / heal|clone）+ S1.9 两趟 kernel（边界环最小二乘拟合「均值 + 一阶谐波」平面 = 泊松积分的 n ≤ 1 截断，截断误差 ≤ r²·max|d−s|·2/π）。位置：**S1.6 之后、S1.7 曲线之前**（修图是修画面、不是调色；源点必须是被 S1.6 写过的可见像素）。实测 4.10 Mpx 单 spot 整帧 **10.2 ms**；clone 目标区与源区**逐字节相同**（max |Δ| 0）；heal 对「渐变 + 斑点」与无斑点参考的最大偏差 **51 → 1 码**（−98 %）、边界环内外均值跳变 **0.14 码**；反证（去掉边界匹配）跳变 **22.6 码**；3 spot 互不干扰（对方区域 0 变化）；无 spot 文档不进链、帧 sha 不变。UI：蒙版卡里的「修复」按钮 + 每 spot 一行（半径 / 模式 / 删除），无拖动把手。
 
 ## 2026-10-26 重要更正：解码缓冲曾经整体上下镜像
 
