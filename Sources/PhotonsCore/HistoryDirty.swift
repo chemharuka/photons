@@ -29,6 +29,11 @@ extension EditHistory {
         if !EditParameters.areEqual(before.light, after.light) { dirty.insert(.light) }
         if !EditParameters.areEqual(before.curve, after.curve) { dirty.insert(.curve) }
         if !EditParameters.areEqual(before.color, after.color) { dirty.insert(.color) }
+        // 2026-10-28 (P0 色彩分级): the nine numbers are a group of their own, so a grade drag reports
+        // 色彩分级 — not Color, whose card does not read them, and not HSL, whose bands it does not read.
+        if !EditParameters.areEqual(before.colorGrading, after.colorGrading) {
+            dirty.insert(.colorGrading)
+        }
         if !EditParameters.areEqual(before.detail, after.detail) { dirty.insert(.detail) }
         // 派单 031: the decoder-side detail amounts share the panel with `detail`, so they share the
         // group. They dirty no *stage* (`.detail.stages` is empty and stays empty: a new
@@ -149,6 +154,17 @@ enum EditParameters {
         a.blackAndWhite == b.blackAndWhite
             && areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
             && areEqual(a.bands, b.bands)
+    }
+
+    /// 2026-10-28 (P0 色彩分级): the nine numbers. **Load-bearing** for the same reason
+    /// `blackOffset` and the three grain fields are: `CatalogSession.applyEdit` short-circuits on
+    /// `isSemanticallyIdentical`, so a group missing from here is a slider that writes nothing at all
+    /// (and `commitEdit` then finds nothing to commit, so the drag leaves no history row either).
+    static func areEqual(_ a: ColorGradingGroup, _ b: ColorGradingGroup) -> Bool {
+        zip(a.wheels, b.wheels).allSatisfy { x, y in
+            areEqual(x.hue, y.hue) && areEqual(x.saturation, y.saturation)
+                && areEqual(x.lightness, y.lightness)
+        }
     }
 
     static func areEqual(_ a: DetailGroup, _ b: DetailGroup) -> Bool {

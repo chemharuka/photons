@@ -176,6 +176,8 @@ public struct PresetPanel: View {
             case .light: return "L"
             case .curve: return "T"
             case .color: return "C"
+            // 2026-10-28 (P0 色彩分级): "K" for 分级 (the letter C is taken by Color; "G" by geometry).
+            case .colorGrading: return "K"
             case .detail: return "D"
             case .effects: return "E"
             }

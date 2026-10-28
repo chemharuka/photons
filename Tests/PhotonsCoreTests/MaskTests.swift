@@ -1015,11 +1015,13 @@ final class MaskTests: XCTestCase {
         // 056: this document's mask carries no hue/saturation, so S3.5 does not exist for it — the
         // trace is the nine pre-056 stages, and the local-colour key stays `nil`.
         // 076 also does not exist here (the document has no band value), S3.7 not (2026-10-28: the
-        // document has no grain) and S3.4 not (2026-10-28: the document is not black-and-white), so the
-        // expected set drops all four conditional stages.
+        // document has no grain), S3.4 not (2026-10-28: the document is not black-and-white) and S3.8
+        // not (2026-10-28, P0 色彩分级: the grade group is neutral), so the expected set drops all five
+        // conditional stages.
         XCTAssertEqual(Set(result.trace.executed),
                        Set(RenderStage.order.filter {
                            $0 != .localColor && $0 != .hsl && $0 != .grain && $0 != .bw
+                               && $0 != .grade
                        }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")

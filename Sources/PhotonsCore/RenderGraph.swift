@@ -136,6 +136,18 @@ public struct RenderOptions: Sendable {
     /// by the app, never part of a key.
     public var bwIndependentChannels: Bool
 
+    /// **Tests only.** Compute S3.8's region weights as `(1/3, 1/3, 1/3)` for every pixel — i.e. forget
+    /// the luminance windows and let every wheel reach the whole frame, which is the plausible mistake
+    /// this stage's whole design exists to avoid.
+    ///
+    /// `ColorGradingTests.testTheRefutationMakesTheIsolationFail` turns it on and measures the
+    /// highlight zone of a shadow-only document going from **0** changed pixels to most of them — the
+    /// proof that 「只改阴影轮，高光区 0 变化」 is a claim about the windows and not about the maths
+    /// happening to be small. `ColorGrade.apply(globalWeights:)` takes the same flag, so the CPU
+    /// reference and the kernel can be shown to be wrong in the same way. Never set by the app, never
+    /// part of a key.
+    public var gradeGlobalWeights: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -149,7 +161,8 @@ public struct RenderOptions: Sendable {
                 forceCurveArithmetic: Bool = false,
                 source: RenderSource = .edited,
                 originalRendersAsParametersCleared: Bool = false,
-                bwIndependentChannels: Bool = false) {
+                bwIndependentChannels: Bool = false,
+                gradeGlobalWeights: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -164,6 +177,7 @@ public struct RenderOptions: Sendable {
         self.source = source
         self.originalRendersAsParametersCleared = originalRendersAsParametersCleared
         self.bwIndependentChannels = bwIndependentChannels
+        self.gradeGlobalWeights = gradeGlobalWeights
     }
 }
 
@@ -551,6 +565,20 @@ private struct BWParamsU {
 private struct HSLBandU {
     var v: SIMD4<Float>   // hue, saturation, luminance (units), centre (OKLCh degrees)
     var e: SIMD4<Float>   // halfWidth to the previous centre, halfWidth to the next, pad, pad
+}
+
+/// Mirror of `Kernels/s3_8_grade.metal` (2026-10-28, P0 色彩分级), byte for byte.
+///
+/// Three `float4`s — one per wheel, each `(hue, saturation, lightness)` in slider units — plus the
+/// content rect and the one test-only flag. Slider units, not converted values: the kernel converts
+/// after blending (`ColorGrade.effective` does the same on the host), which is what makes a neutral
+/// wheel deliver exactly zero in its own region.
+private struct GradeParams {
+    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var b: SIMD4<Float>   // globalWeights (tests only), pad, pad, pad
+    var sh: SIMD4<Float>  // shadows:    hue, saturation, lightness, 0
+    var mid: SIMD4<Float> // midtones:   hue, saturation, lightness, 0
+    var hi: SIMD4<Float>  // highlights: hue, saturation, lightness, 0
 }
 
 private struct VignetteParams {
@@ -2635,6 +2663,29 @@ public final class RenderGraph {
             enc.setTexture(out, index: 2)
             enc.setBytes(&params, length: MemoryLayout<LocalColorParamsU>.stride, index: 0)
             enc.setBuffer(table.colorAdjustBuffer, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
+        case .grade:
+            // S3.8 — 色彩分级 (2026-10-28, P0). Encoded **only** for documents whose grade group is not
+            // neutral (`RenderStage.pipeline(hasGrade:)`), so a document that never touched the card
+            // renders the pre-S3.8 frame by construction rather than by arithmetic: there is no pass to
+            // be neutral in. The nine numbers go up in slider units — the kernel blends them by the
+            // luminance weight and converts once, exactly as `ColorGrade.effective` does on the host.
+            let p = try kernels.pipeline(file: "s3_8_grade", function: "s3_8_grade")
+            let wheels = edit.colorGrading.wheels
+            var params = GradeParams(
+                a: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)),
+                b: SIMD4(options.gradeGlobalWeights ? 1 : 0, 0, 0, 0),
+                sh: SIMD4(Float(wheels[0].hue), Float(wheels[0].saturation),
+                          Float(wheels[0].lightness), 0),
+                mid: SIMD4(Float(wheels[1].hue), Float(wheels[1].saturation),
+                           Float(wheels[1].lightness), 0),
+                hi: SIMD4(Float(wheels[2].hue), Float(wheels[2].saturation),
+                          Float(wheels[2].lightness), 0))
+            let enc = try encoder(cb, p, in: src, out: out)
+            enc.setBytes(&params, length: MemoryLayout<GradeParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 

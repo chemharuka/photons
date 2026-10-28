@@ -92,8 +92,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // still comes from `Section.allCases` and this table only decides membership.
             return [.crop]
         case .colour:
-            // 076: HSL — the one card this workspace exists for.
-            return [.hsl]
+            // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it — same subject
+            // (colour), different partition (luminance instead of hue), and the 调整 panel is already
+            // nine cards long. Order comes from `Section.allCases`, so HSL then 色彩分级.
+            return [.hsl, .colorGrading]
         case .masks:
             return [.masks]
         case .history:

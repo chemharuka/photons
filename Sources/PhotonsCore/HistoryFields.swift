@@ -56,6 +56,16 @@ public struct EditField: Hashable, Codable, Sendable {
     /// both at once and the user means "one drag" — two classes would put two rows in the timeline
     /// for one gesture. `light.exposure` is its own class, so exposure and contrast never merge.
     public var gestureClass: String {
+        // 2026-10-28 (P0 色彩分级): **a wheel is one gesture.** `colorGrading.shadows.hue` and
+        // `colorGrading.shadows.saturation` are one class, because the acceptance is 「每轮一行，拖动
+        // 合并」: dragging a wheel's 色相 and then its 饱和 is still one look being dialled in, and two
+        // rows would make ⌘Z take back half a gesture. The wheel's *name* is the class — a different
+        // wheel (阴影 → 高光) is a different gesture and breaks the run, exactly as `exposure,
+        // contrast, exposure` does.
+        if key.hasPrefix("colorGrading.") {
+            let parts = key.dropFirst("colorGrading.".count).split(separator: ".")
+            return "colorGrading." + (parts.first.map(String.init) ?? "")
+        }
         guard let close = key.lastIndex(of: "]"), key[key.startIndex..<close].contains("[") else {
             return key
         }
@@ -238,6 +248,20 @@ extension EditHistory {
         // number (`FieldValue.flag`, the same shape `light.lensCorrections` uses).
         flag("color.blackAndWhite", .color, before.color.blackAndWhite, after.color.blackAndWhite)
 
+        // 2026-10-28 (P0 色彩分级) — S3.8's nine numbers, in panel order: 阴影 → 中间调 → 高光, and
+        // 色相 → 饱和 → 亮度 inside each wheel. The order is the card's order, so a row that moved two
+        // of them (a reset, a paste) reads the way the card reads.
+        let gradeWheels: [(String, GradeWheel, GradeWheel)] = [
+            ("shadows", before.colorGrading.shadows, after.colorGrading.shadows),
+            ("midtones", before.colorGrading.midtones, after.colorGrading.midtones),
+            ("highlights", before.colorGrading.highlights, after.colorGrading.highlights),
+        ]
+        for (name, old, new) in gradeWheels {
+            num("colorGrading.\(name).hue", .colorGrading, old.hue, new.hue)
+            num("colorGrading.\(name).saturation", .colorGrading, old.saturation, new.saturation)
+            num("colorGrading.\(name).lightness", .colorGrading, old.lightness, new.lightness)
+        }
+
         // Detail — stored (XMP) and decode-side amounts share the group, so they share the rows.
         num("detail.sharpening", .detail, before.detail.sharpening, after.detail.sharpening)
         num("detail.sharpeningRadius", .detail,
@@ -409,6 +433,15 @@ extension EditHistory {
         "color.vibrance": "自然饱和",
         "color.saturation": "饱和",
         "color.blackAndWhite": "黑白",
+        "colorGrading.shadows.hue": "色彩分级[阴影] 色相",
+        "colorGrading.shadows.saturation": "色彩分级[阴影] 饱和",
+        "colorGrading.shadows.lightness": "色彩分级[阴影] 亮度",
+        "colorGrading.midtones.hue": "色彩分级[中间调] 色相",
+        "colorGrading.midtones.saturation": "色彩分级[中间调] 饱和",
+        "colorGrading.midtones.lightness": "色彩分级[中间调] 亮度",
+        "colorGrading.highlights.hue": "色彩分级[高光] 色相",
+        "colorGrading.highlights.saturation": "色彩分级[高光] 饱和",
+        "colorGrading.highlights.lightness": "色彩分级[高光] 亮度",
         "detail.sharpening": "锐化",
         "detail.sharpeningRadius": "锐化半径",
         "detail.noiseLuminance": "亮度降噪",
