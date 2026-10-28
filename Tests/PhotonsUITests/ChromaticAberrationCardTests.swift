@@ -76,23 +76,35 @@ final class ChromaticAberrationCardTests: XCTestCase {
         print("CA CARD · rows \(InspectorView.caRows.map { "\($0.title) \($0.range) \($0.shape.rawValue)" })")
     }
 
-    /// The slider grid: one unit is 5 × 10⁻⁵ of α, the ends are ±fullScale, and the two directions are
-    /// exact inverses on the integers (a knob that wobbles would print a number it does not store).
-    func testTheSliderGridIsFiveE5PerUnitAndRoundTripsOnTheIntegers() throws {
+    /// The slider grid: one unit is still 5 × 10⁻⁵ of α, the ends are ±fullScale, but the grid itself
+    /// is **0.1 of a unit** (084) so the thumb can sit on 2.5 while the row still prints an integer.
+    /// Both directions land on the same tenth so a knob that wobbles cannot store a number the row
+    /// cannot express.
+    func testTheSliderGridIsFiveE5PerUnitAndRoundTripsOnTheTenthGrid() throws {
         XCTAssertEqual(OpticsGroup.fullScale, 0.005)
+        XCTAssertEqual(OpticsGroup.sliderStep, 0.1)
         XCTAssertEqual(OpticsGroup.alphaPerSliderUnit, 0.00005, accuracy: 1e-18)
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: 0), 0)
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: 1), 0.00005, accuracy: 1e-18)
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: 5), 0.00025, accuracy: 1e-18, "输入 5 → 0.00025")
-        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 100), 0.005, accuracy: 1e-18)
-        XCTAssertEqual(OpticsGroup.alpha(fromSlider: -100), -0.005, accuracy: 1e-18)
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 2.5), 0.000125, accuracy: 1e-18,
+                       "084：0.1 网格上的一半 → 2.5 × 5e-5")
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 100), OpticsGroup.fullScale,
+                       "084：0.1 网格不能动满幅，逐位相等")
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: -100), -OpticsGroup.fullScale)
         // Out of travel and junk are clamped / dropped: a hand-edited document cannot ask for more.
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: 400), 0.005)
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: -400), -0.005)
         XCTAssertEqual(OpticsGroup.alpha(fromSlider: .nan), 0)
-        // …and it snaps to the row's own integer grid, so the printed number is the stored number.
-        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 5.4), OpticsGroup.alpha(fromSlider: 5))
-        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 5.6), OpticsGroup.alpha(fromSlider: 6))
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: .infinity), 0)
+        // …and it snaps to the row's own 0.1 grid: 2.54 is not a grid point, 2.5 is.
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 2.54), OpticsGroup.alpha(fromSlider: 2.5))
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 5.04), OpticsGroup.alpha(fromSlider: 5))
+        XCTAssertEqual(OpticsGroup.alpha(fromSlider: 5.06), OpticsGroup.alpha(fromSlider: 5.1))
+        // The inverse snaps too, including a hand-edited α that sits between two grid points.
+        XCTAssertEqual(OpticsGroup.sliderPosition(forAlpha: 0.000125), 2.5)
+        XCTAssertEqual(OpticsGroup.sliderPosition(forAlpha: 0.000126), 2.5, "2.52 步 → 吸到 2.5")
+        XCTAssertEqual(OpticsGroup.sliderPosition(forAlpha: 0.00013), 2.6, "2.6 步 → 2.6（不在 0.1 网格外）")
 
         for unit in stride(from: -100.0, through: 100.0, by: 7) {
             let alpha = OpticsGroup.alpha(fromSlider: unit)
@@ -106,7 +118,8 @@ final class ChromaticAberrationCardTests: XCTestCase {
         XCTAssertEqual(group.caBlueSliderPosition, -8, "-0.0004 / 5e-5 = −8")
         XCTAssertFalse(group.slidersAtRest)
         XCTAssertTrue(OpticsGroup.identity.slidersAtRest)
-        print("CA GRID · 1 unit = \(OpticsGroup.alphaPerSliderUnit) α · 100 = \(OpticsGroup.alpha(fromSlider: 100))")
+        print("CA GRID · step \(OpticsGroup.sliderStep) unit = \(OpticsGroup.alphaPerSliderUnit) α"
+              + " · 2.5 = \(OpticsGroup.alpha(fromSlider: 2.5)) · 100 = \(OpticsGroup.alpha(fromSlider: 100))")
     }
 
     /// **The link that was missing** — and the reason the two rows would have been dead on arrival.
@@ -135,16 +148,22 @@ final class ChromaticAberrationCardTests: XCTestCase {
         XCTAssertEqual(session.history.count, 1)
 
         // The cache key: a non-zero α appends its own token, so no stage below S0 can serve a buffer
-        // sampled with another ratio (029's `;car=`, unchanged by this task).
+        // sampled with another ratio. 084: the token is integer tenths (`;car=50` = position 5).
         let key = session.edit.keyMaterial(.geometry)
         XCTAssertNotEqual(key, EditModel.neutral.keyMaterial(.geometry))
-        XCTAssertTrue(key.contains(";car=0.00025"), "键里的 α 是读数 ÷ 100 × 0.005：\(key)")
-        // …and a 1-unit step is 50× the dirty tolerance, so every position the row can express moves
-        // the document (a row whose neighbour compares equal would print two numbers and store one).
+        XCTAssertTrue(key.contains(";car=50"), "键里的位置是 5 个滑杆单位 = 50 个十分位：\(key)")
+        // …and a step is 5× the dirty tolerance, so every position the row can express — 0.1
+        // included (5e-6 > 1e-6) — moves the document (a row whose neighbour compares equal would
+        // print two numbers and store one).
         var oneUnit = before
         oneUnit.optics.caRed = OpticsGroup.alpha(fromSlider: 1)
         XCTAssertEqual(EditHistory.dirtyGroups(from: before, to: oneUnit), [.geometry])
         XCTAssertNotEqual(oneUnit.keyMaterial(.geometry), before.keyMaterial(.geometry))
+        var oneStep = before
+        oneStep.optics.caRed = OpticsGroup.alpha(fromSlider: 0.1)
+        XCTAssertEqual(EditHistory.dirtyGroups(from: before, to: oneStep), [.geometry],
+                       "0.1 步（5e-6）仍然大于 1e-6 的脏阈值")
+        XCTAssertNotEqual(oneStep.keyMaterial(.geometry), before.keyMaterial(.geometry))
         print("CA LINK · dirty \(EditHistory.dirtyGroups(from: before, to: after).map(\.rawValue))"
               + " · key \(key)")
     }

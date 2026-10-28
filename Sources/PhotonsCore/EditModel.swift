@@ -605,8 +605,14 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 029: lateral CA. Appended **only when non-zero**, exactly like `asp`, so every document
             // that has never touched the CA sliders keeps the pre-029 geometry material byte for
             // byte — the seven pinned keys and every recorded golden depend on that.
-            if optics.caRed != 0 { s += ";car=\(k(optics.caRed))" }
-            if optics.caBlue != 0 { s += ";cab=\(k(optics.caBlue))" }
+            //
+            // 084: the token is **integer tenths of a slider unit** (`;car=25` = position 2.5), not
+            // `k()`'s `%.5f`. A 0.1 grid makes α a multiple of 5e-6 and `%.5f` cannot tell
+            // `0.000005` from `0.000010` (both print `0.00001`), so two adjacent positions would
+            // share a key and serve each other's frames. Documents already carrying a CA edit miss
+            // once on the new token and rebuild to the same pixels — a deliberate, one-time cost.
+            if optics.caRed != 0 { s += ";car=\(OpticsGroup.keyDeciles(forAlpha: optics.caRed))" }
+            if optics.caBlue != 0 { s += ";cab=\(OpticsGroup.keyDeciles(forAlpha: optics.caBlue))" }
             return s
 
         case .sceneLinear:
@@ -2138,10 +2144,10 @@ public struct OpticsGroup: Sendable, Equatable, Codable {
         max(abs(caRed), abs(caBlue)) * halfDiagonal
     }
 
-    // MARK: - the panel's units (2026-10-28, 078 B8)
+    // MARK: - the panel's units (2026-10-28, 078 B8; 0.1 grid 2026-10-28, 084)
 
-    /// The sliders' travel: **integers −100…+100, 0 in the middle** — the number the user reads and
-    /// types, and not the α the kernel takes.
+    /// The sliders' travel: **−100…+100, 0 in the middle** — the number the user reads and types,
+    /// and not the α the kernel takes.
     ///
     /// Why the panel does not show α: ±0.005 is a ratio, and a readout of `0.00250` is not a number
     /// anyone compares two frames with. −100…+100 is what Lightroom's 去边 sliders show, and it makes
@@ -2155,23 +2161,50 @@ public struct OpticsGroup: Sendable, Equatable, Codable {
     /// exactly `fullScale` and the two ends of the row are the two ends of the envelope.
     public static let alphaPerSliderUnit: Double = fullScale / 100
 
-    /// Slider position → α, on the row's own 1-unit grid.
+    /// The panel's step: **0.1 of a slider unit** (用户 2026-10-28, 084). One step = 5 × 10⁻⁶ of α,
+    /// so the thumb can sit on 2.5 while the readout still prints an integer (`%.0f`). The grid lives
+    /// here, not in a `Slider` `step:` — 046 forbids the tick marks that would draw.
+    public static let sliderStep: Double = 0.1
+
+    /// Snap a raw step count onto the travel's 0.1 grid and clamp it to the ends.
     ///
-    /// The grid is quantized **here**, not by a `step:` on the `Slider` (046 forbids tick marks): a
-    /// row whose readout says `7` must store `7 × 5e-5` and not `6.83 × 5e-5`, or the printed number
-    /// and the cache key would disagree below the digits the user can see.
-    public static func alpha(fromSlider position: Double) -> Double {
-        guard position.isFinite else { return 0 }
-        let unit = min(max(position.rounded(), sliderRange.lowerBound), sliderRange.upperBound)
-        return unit * alphaPerSliderUnit
+    /// Both directions go through this one function so the knob and the document cannot land on two
+    /// different grids (`blackOffsetSliderPosition`'s rule).
+    private static func snappedSteps(_ raw: Double) -> Double {
+        let lower = sliderRange.lowerBound / sliderStep
+        let upper = sliderRange.upperBound / sliderStep
+        return min(max(raw.rounded(), lower), upper)
     }
 
-    /// The inverse: the slider position this α asks for, on the same grid (so the knob does not
-    /// wobble around a value the row cannot print).
+    /// Slider position → α, on the row's own 0.1-unit grid.
+    ///
+    /// Quantized **here**, not by a `step:` on the `Slider` (046 forbids tick marks): a position of
+    /// `2.54` stores `2.5 × 5e-5` so the thumb never sits between two values the cache can tell
+    /// apart. The readout is still an integer — that is `caRows`' format, not this grid.
+    public static func alpha(fromSlider position: Double) -> Double {
+        guard position.isFinite else { return 0 }
+        let steps = snappedSteps(position / sliderStep)
+        return steps * sliderStep * alphaPerSliderUnit
+    }
+
+    /// The inverse: the slider position this α asks for, on the same 0.1 grid (so a hand-edited α
+    /// is pulled to a grid point rather than leaving `2.5000001` under the knob).
     public static func sliderPosition(forAlpha alpha: Double) -> Double {
         guard alpha.isFinite else { return 0 }
-        let unit = (alpha / alphaPerSliderUnit).rounded()
-        return min(max(unit, sliderRange.lowerBound), sliderRange.upperBound)
+        let steps = snappedSteps((alpha / alphaPerSliderUnit) / sliderStep)
+        return min(max(steps * sliderStep, sliderRange.lowerBound), sliderRange.upperBound)
+    }
+
+    /// The key's own units: **integer tenths of a slider unit**, e.g. `25` for position 2.5.
+    ///
+    /// `k()`'s `%.5f` cannot separate 0.1 steps (α = 5e-6: `0.000005` and `0.000010` both print
+    /// `0.00001`), so a 0.1 grid would let two positions share one geometry key. Integer text has no
+    /// rounding/locale ambiguity. Only used when α ≠ 0 (the `asp`/`car` discipline), so a document
+    /// that never touched the sliders keeps its old geometry material byte for byte; a document that
+    /// did misses once and rebuilds with the same pixels.
+    public static func keyDeciles(forAlpha alpha: Double) -> Int {
+        guard alpha.isFinite else { return 0 }
+        return Int(((alpha / alphaPerSliderUnit) / sliderStep).rounded())
     }
 
     /// The two rows' positions, for the panel's bindings — the knob and the document can never
