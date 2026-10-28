@@ -97,6 +97,21 @@ final class MaskPortraitProjectionTests: XCTestCase {
         return ((low + high) / 2, (high - low) / 2)
     }
 
+    /// The α = 0.5 radius of `radial_alpha` in **pixels** for a drawn radius `r` (px) and the
+    /// component's feather.
+    ///
+    /// A4 (2026-10-28) moved the profile to darktable's rule: solid 1.0 inside the rim, then a
+    /// quadratic falloff **outward** over `fp = f · 0.1 · minSide`. The half-coverage contour therefore
+    /// sits *outside* the drawn rim, at `r_out = 1 + fp / min(rx, ry)`. The older rule
+    /// (`1 − smoothstep(1 − f, 1, r)`) put it at `1 − f/2` of the rim — that constant is what this
+    /// assertion used to hardcode, and it is why the number moved when the feather口径 changed.
+    private func halfCoverageRadius(rx: Double, ry: Double, feather: Double, minSide: Double) -> Double {
+        let fp = feather * 0.1 * minSide
+        let rOut = 1 + fp / min(rx, ry)
+        // alpha(r) = clamp((rOut² − r²)/(rOut² − 1))² ; alpha = 0.5 ⇒ r² = rOut² − √0.5·(rOut² − 1)
+        return sqrt(rOut * rOut - sqrt(0.5) * (rOut * rOut - 1))
+    }
+
     private func centroid(_ slice: [Float], width: Int, height: Int) -> (x: Double, y: Double) {
         var sx = 0.0, sy = 0.0, mass = 0.0
         for y in 0..<height {
@@ -172,9 +187,15 @@ final class MaskPortraitProjectionTests: XCTestCase {
                                               level: 0.5),
                                          "\(shot.name): no vertical 50 % contour")
 
-            // `alpha = 1 − smoothstep(1−f, 1, r)` with f = 0.5 ⇒ half coverage at r = 0.75 of the radius.
-            let expectedRX = 0.75 * abs(drag.deltaPixels.x)
-            let expectedRY = 0.75 * abs(drag.deltaPixels.y)
+            // A4's profile: solid inside the rim, quadratic falloff outward, so half coverage lies
+            // just outside the drawn radius (see `halfCoverageRadius`). Both axes share the same
+            // `r_out` — it is measured on the short edge, not per axis.
+            let rxPixels = abs(drag.deltaPixels.x), ryPixels = abs(drag.deltaPixels.y)
+            let halfFactor = halfCoverageRadius(rx: rxPixels, ry: ryPixels, feather: 0.5,
+                                               minSide: Double(min(shot.upright.width,
+                                                                   shot.upright.height)))
+            let expectedRX = halfFactor * rxPixels
+            let expectedRY = halfFactor * ryPixels
             let expectedCentre = (x: drag.start.x * Double(dump.width),
                                  y: drag.start.y * Double(dump.height))
 
@@ -199,16 +220,28 @@ final class MaskPortraitProjectionTests: XCTestCase {
             let storedShape = MaskDragGeometry.radial(center: drag.start, to: drag.end,
                                                       source: storedFrame)
             let storedDump = try atlas(document(.radialGradient(storedShape)), flat(shot.upright))
-            let storedHorizontal = try XCTUnwrap(span(rowProfile(storedDump.slices[0],
-                                                                 width: storedDump.width, y: centreRow),
-                                                       level: 0.5))
-            let storedError = abs(storedHorizontal.half - expectedRX)
-            print(String(format: "028 drag %@: measured with the catalog (stored) frame → halfW %.2f, off by %.2f px",
-                         shot.name, storedHorizontal.half, storedError))
+            let storedHorizontal = span(rowProfile(storedDump.slices[0],
+                                                   width: storedDump.width, y: centreRow),
+                                        level: 0.5)
+            // A4 made the feather reach **outside** the drawn rim, so a transposed radius can push the
+            // half-coverage contour off the frame: no contour at all is the strongest form of "the
+            // stored frame measures this wrong", and it is the portrait case that used to be off by
+            // the long/short ratio.
             if shot.orientation.exchangesDimensions {
-                XCTAssertGreaterThan(storedError, 5,
-                    "\(shot.name): the stored dimensions are supposed to disagree with the upright frame by more than 5 px, got \(storedError)")
+                if let stored = storedHorizontal {
+                    let storedError = abs(stored.half - expectedRX)
+                    print(String(format: "028 drag %@: catalog frame → halfW %.2f, off by %.2f px",
+                                 shot.name, stored.half, storedError))
+                    XCTAssertGreaterThan(storedError, 5,
+                        "\(shot.name): the stored dimensions are supposed to disagree with the upright frame by more than 5 px, got \(storedError)")
+                } else {
+                    print("028 drag \(shot.name): catalog frame → no 50 % contour inside the frame (clipped)")
+                }
             } else {
+                let stored = try XCTUnwrap(storedHorizontal, "\(shot.name): EXIF 1 must still cross 50 %")
+                let storedError = abs(stored.half - expectedRX)
+                print(String(format: "028 drag %@: catalog frame → halfW %.2f, off by %.2f px",
+                             shot.name, stored.half, storedError))
                 XCTAssertLessThan(storedError, 1.5,
                     "\(shot.name): with EXIF 1 the stored and upright frames are the same, got \(storedError)")
             }
