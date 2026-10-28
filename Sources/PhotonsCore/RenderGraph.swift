@@ -1658,6 +1658,19 @@ public final class RenderGraph {
         // — nothing is encoded and `finish` is the frame the document produced, byte for byte.
         var showsMask = false
         var pendingOverlay: ShowMaskEntry?
+        /// Textures this frame has finished reading but that must not come back to the pool until the
+        /// command buffer that reads them has run.
+        ///
+        /// `shown` is the overlay pass's input, and it is still an input when its encoder ends — encoding
+        /// is not executing. Pooling it at that line was safe only while nothing else asked for a canvas
+        /// between there and the commit, and the histogram grid is exactly that ask whenever the picture
+        /// is small enough for the grid to be the canvas (`frameSampleSize` returns the picture's own
+        /// size below 256 on the long edge). The grid is then handed `shown` back and a later encoder in
+        /// the same command buffer writes the sampled pre-S4 picture into it: the overlay pass reads it
+        /// first (encoders run in order, so the wash survives), but on a reuse hit `shown` *is* the frame
+        /// being presented, and the readback then reads the grid instead of the frame. Deferring the
+        /// recycle is what makes the frame's own recycles independent of the encoders' order.
+        var finishedReading: [MTLTexture] = []
         if !decodeOnly, let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
            let slice = atlas.ids.firstIndex(of: wanted) {
             // P1e — the key this pass's output is a function of. `compositeKey` is the resume key of the
@@ -1680,7 +1693,7 @@ public final class RenderGraph {
                 // Nothing the pass reads moved: the pixels it would write are the ones already in hand.
                 // The display frame this frame just produced is not needed — give it straight back so
                 // the pool is left exactly as a cached frame leaves it.
-                pool.recycle(shown)
+                finishedReading.append(shown)
                 finish = entry.texture
                 if report != nil {
                     report?.showMaskID = wanted
@@ -1704,8 +1717,9 @@ public final class RenderGraph {
                 dispatch(enc, p, plan.canvas)
                 enc.endEncoding()
                 // The display texture is never a cache entry (`render` skips the cache for `.display`),
-                // so recycling it here is what keeps the pool honest.
-                pool.recycle(shown)
+                // so recycling it here is what keeps the pool honest — but only once the pass above has
+                // actually run it (see `finishedReading`).
+                finishedReading.append(shown)
                 finish = overlay
                 // Not committed to the slot yet: the pass is only a pass once the command buffer
                 // succeeded, and a slot pointing at a texture from a frame that threw would hand the
@@ -1721,7 +1735,10 @@ public final class RenderGraph {
         } else if !decodeOnly, edit.showMaskID == nil {
             // Hiding the overlay releases the slot: a canvas-sized texture (32.8 MB at 4.10 Mpx) held
             // for a pass that is not being shown is memory the next frame's stages want.
-            if let old = showMaskEntry { pool.recycle(old.texture) }
+            if let old = showMaskEntry {
+                pool.disown(old.texture)
+                pool.recycle(old.texture)
+            }
             showMaskEntry = nil
         }
 
@@ -1792,6 +1809,9 @@ public final class RenderGraph {
         if let err = cb.error {
             throw RenderError.executeFailed(err.localizedDescription)
         }
+        // The frame's inputs go back to the pool only now — after the command buffer that reads them
+        // has run, and before the next frame asks for a canvas.
+        for t in finishedReading { pool.recycle(t) }
         let gpu = (cb.gpuEndTime > 0 && cb.gpuEndTime > cb.gpuStartTime)
             ? (cb.gpuEndTime - cb.gpuStartTime) * 1000
             : wall
@@ -1801,7 +1821,14 @@ public final class RenderGraph {
         // dropped on the floor (`recycle(output:)` refuses to pool the slot's texture, so nothing else
         // could have taken it).
         if let pending = pendingOverlay {
-            if let old = showMaskEntry, old.texture !== pending.texture { pool.recycle(old.texture) }
+            if let old = showMaskEntry, old.texture !== pending.texture {
+                pool.disown(old.texture)
+                pool.recycle(old.texture)
+            }
+            // The slot's texture leaves circulation here: `render` hands it out as this frame's pixels,
+            // and the next frame may present it untouched. Any caller that returns the frame — through
+            // `recycle(output:)` or straight into `pool.recycle` — now hits a pool that refuses it.
+            pool.own(pending.texture)
             showMaskEntry = pending
             showMaskPasses += 1
         }
@@ -1898,6 +1925,8 @@ public final class RenderGraph {
     /// "returning" it is a no-op; it goes back to the pool when the slot is replaced (`invalidateCache`,
     /// a new overlay key, or the overlay being hidden).
     public func recycle(output: MTLTexture) {
+        // Belt and braces: `TexturePool.recycle` refuses an owned texture too, which is what protects
+        // the callers that never come through here (`maskAtlasWithReport` did not).
         if let e = showMaskEntry, e.texture === output { return }
         pool.recycle(output)
     }
@@ -2276,7 +2305,10 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
-        if let e = showMaskEntry { pool.recycle(e.texture) }
+        if let e = showMaskEntry {
+            pool.disown(e.texture)
+            pool.recycle(e.texture)
+        }
         showMaskEntry = nil
     }
 
@@ -3900,7 +3932,10 @@ public final class RenderGraph {
         var opts = options
         opts.wantsPixels = false
         let result = try render(edit, options: opts)
-        if let t = result.output { pool.recycle(t) }
+        // Through the graph, not the pool: a frame the graph handed out may be the `showMask` slot, and
+        // returning it straight to the pool is what handed the next frame the slot's texture (see
+        // `TexturePool.own`).
+        if let t = result.output { recycle(output: t) }
         guard let entry = atlasCache else { return nil }
 
         let tex = entry.texture
@@ -4156,6 +4191,28 @@ final class TexturePool {
     private var free: [String: [MTLTexture]] = [:]
     /// The order textures were recycled in, oldest first — the eviction order when over budget.
     private var freeOrder: [String] = []
+    /// The identities in `free`, so a texture cannot be in the idle list twice.
+    ///
+    /// A frame that hands its own canvas back can reach a second `recycle` of a texture that is
+    /// already idle — `showMask`'s reuse hit recycles the display frame it just produced, and that
+    /// frame may be the very texture the slot already gave back. Two entries for one texture means the
+    /// next two `obtain`s hand the same bytes to two live stages, so the second one's output is the
+    /// first one's input. Membership is the cheapest way to make that impossible.
+    private var idle: Set<ObjectIdentifier> = []
+    /// Textures the **graph** owns, which the pool must never hand out (P1e's `showMask` slot).
+    ///
+    /// `render` hands the overlay's canvas out as a frame while keeping it as the next static frame's
+    /// pixels. Anything that puts those bytes back into circulation turns the next frame's "nothing
+    /// moved, reuse it" hit into a picture with no overlay on it: the stage that took the texture from
+    /// the pool writes the plain display frame into it, and the slot still points there. `render`'s
+    /// comment says "`recycle(output:)` refuses to pool it", and that guard is real — but it only
+    /// covers callers that go through `recycle(output:)`; `maskAtlasWithReport` recycled the frame
+    /// straight into the pool and the golden frame came back without its overlay.
+    ///
+    /// The ownership lives here, beside `free`, because this is where the question is decided: `recycle`
+    /// is the one door a texture can enter the pool through, so a texture the graph owns cannot be
+    /// handed out no matter which call site returns it.
+    private var owned: [ObjectIdentifier: MTLTexture] = [:]
 
     /// Bytes currently held idle. This is the number the budget is expressed against.
     private(set) var idleBytes = 0
@@ -4193,6 +4250,8 @@ final class TexturePool {
         if var list = free[key], let t = list.popLast() {
             if list.isEmpty { free[key] = nil } else { free[key] = list }
             idleBytes -= bytes
+            idle.remove(ObjectIdentifier(t))
+            assert(owned[ObjectIdentifier(t)] == nil, "the pool handed out a texture the graph owns")
             if let i = freeOrder.lastIndex(of: key) { freeOrder.remove(at: i) }
             reuses += 1
             return t
@@ -4210,10 +4269,43 @@ final class TexturePool {
         return t
     }
 
+    /// Take a texture out of circulation: the graph keeps it, no `obtain` may hand it out, and no
+    /// `recycle` puts it back — until `disown` says the graph is done with it.
+    ///
+    /// Idempotent, and it takes the texture out of the idle list first, so it cannot matter whether
+    /// the caller owns the texture before or after the frame that produced it was returned.
+    func own(_ texture: MTLTexture) {
+        let id = ObjectIdentifier(texture)
+        if idle.contains(id) {
+            let key = "\(texture.width)x\(texture.height)"
+            if let list = free[key], let i = list.firstIndex(where: { $0 === texture }) {
+                var rest = list
+                rest.remove(at: i)
+                if rest.isEmpty { free[key] = nil } else { free[key] = rest }
+                idleBytes -= texture.width * texture.height * 8
+                if let f = freeOrder.lastIndex(of: key) { freeOrder.remove(at: f) }
+            }
+            idle.remove(id)
+        }
+        owned[id] = texture
+    }
+
+    /// Give an owned texture back to the pool's jurisdiction. Pooling it is then an ordinary
+    /// `recycle`, which the graph does right after — the two are separate so that a graph-invalidating
+    /// path can release the texture without asserting anything about when it is reusable.
+    func disown(_ texture: MTLTexture) {
+        owned.removeValue(forKey: ObjectIdentifier(texture))
+    }
+
     func recycle(_ texture: MTLTexture) {
         let key = "\(texture.width)x\(texture.height)"
+        let id = ObjectIdentifier(texture)
+        // A texture the graph owns is not the pool's to hand out (P1e), and one that is already idle
+        // must not enter the list twice — both would end with two live stages sharing one texture.
+        guard owned[id] == nil, !idle.contains(id) else { return }
         let bytes = texture.width * texture.height * 8
         idleBytes += bytes
+        idle.insert(id)
         free[key, default: []].append(texture)
         freeOrder.append(key)
         trim()
@@ -4228,6 +4320,7 @@ final class TexturePool {
             let dropped = list.removeFirst()
             if list.isEmpty { free[key] = nil } else { free[key] = list }
             let bytes = dropped.width * dropped.height * 8
+            idle.remove(ObjectIdentifier(dropped))
             idleBytes -= bytes
             droppedBytes += bytes
         }
@@ -4239,6 +4332,7 @@ final class TexturePool {
         let bytes = idleBytes
         free.removeAll()
         freeOrder.removeAll()
+        idle.removeAll()
         idleBytes = 0
         return bytes
     }
