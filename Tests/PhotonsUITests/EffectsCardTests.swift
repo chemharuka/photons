@@ -37,8 +37,12 @@ final class EffectsCardTests: XCTestCase {
 
         let sections = InspectorView.sections(in: .adjust)
         let curve = try XCTUnwrap(sections.firstIndex(of: .curve))
+        let detail = try XCTUnwrap(sections.firstIndex(of: .detail))
         let effects = try XCTUnwrap(sections.firstIndex(of: .effects))
-        XCTAssertEqual(effects, curve + 1, "效果紧跟在曲线之后")
+        // 曲线 sits above 细节 (2026-10-28, user), and 效果 is the card after both of them; 081's only
+        // change here is that 预设 is gone, so 效果 is now the last card of the workspace.
+        XCTAssertEqual(detail, curve + 1, "曲线在细节之上")
+        XCTAssertEqual(effects, detail + 1, "效果紧跟在细节之后")
         // 081 (2026-10-28): 预设 卡已删，所以 效果 就是调整工作区的最后一张卡。
         XCTAssertEqual(effects, sections.count - 1, "效果是调整工作区的最后一张卡（预设卡已删）")
         XCTAssertFalse(titles.contains("预设"), "预设 不再是卡片：它搬到了顶部菜单与复制对话框")

@@ -176,9 +176,9 @@ final class CopySheetCardTests: XCTestCase {
         XCTAssertEqual(cardRows.count, 12, "十二张卡：白平衡…蒙版")
         XCTAssertEqual(cardRows.map(\.title),
                        ["白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
-                        "细节", "曲线", "效果", "裁切", "蒙版"])
-        // The row order *is* the inspector's render order — not a second list. 调整's cards are the
-        // first eight of these (minus 黑白/HSL/色彩分级, which live in 色彩), and 裁切/蒙版 are the
+                        "曲线", "细节", "效果", "裁切", "蒙版"])
+        // The row order *is* the inspector's render order — not a second list (曲线 above 细节 since
+        // 2026-10-28). 调整's cards are 白平衡…效果, 黑白/HSL/色彩分级 are 色彩's, and 裁切/蒙版 are the
         // other two workspaces' single cards.
         let adjust = InspectorView.cardTitles(in: .adjust)
         let cardTitles = cardRows.map(\.title)

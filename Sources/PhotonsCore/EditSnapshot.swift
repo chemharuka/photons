@@ -87,14 +87,15 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     case masks
 
     /// The checklist order — `InspectorView.Section.allCases`' render order, not a second list.
-    /// 白平衡 → 黑电平 → Light → Color → 黑白 → HSL → 色彩分级 → 细节 → 曲线 → 效果 → 裁切 → 蒙版.
+    /// 白平衡 → 黑电平 → Light → Color → 黑白 → HSL → 色彩分级 → 曲线 → 细节 → 效果 → 裁切 → 蒙版.
+    /// (曲线 above 细节 since 2026-10-28 — the user's own panel order.)
     ///
     /// A test (`CopySheetCardTests`) compares it against `InspectorView.cardTitles(in: .adjust)` +
     /// the two cards that live in other workspaces, so a card that moves in the panel moves here or
     /// the test goes red.
     public static let panelOrder: [EditSnapshotSection] = [
         .whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .hsl, .colorGrading,
-        .detail, .curve, .effects, .geometry, .masks,
+        .curve, .detail, .effects, .geometry, .masks,
     ]
 
     /// Every section a paste can write — all of them, masks included since P1-5.

@@ -318,14 +318,14 @@ public final class UISmokeRunner {
         // 白平衡下面之后就已经对不上了 —— 它红在黑电平上，不是红在工作区上。
         let scrollTitles = InspectorView.scrollingSections.map(\.title)
         log("  scroll cards        \(scrollTitles.joined(separator: " → "))")
-        check("滚动区段顺序是 白平衡 → 黑电平 → Light → Color → 细节 → 曲线 → 效果 → 裁切 → 蒙版 → 历史记录（直方图钉在顶上，不在滚动区里；081 删掉预设卡）",
+        check("滚动区段顺序是 白平衡 → 黑电平 → Light → Color → 曲线 → 细节 → 效果 → 裁切 → 蒙版 → 历史记录（直方图钉在顶上，不在滚动区里；081 删掉预设卡）",
               Array(scrollTitles.prefix(3)) == ["白平衡", "黑电平", "Light"]
               && !scrollTitles.contains(InspectorView.Section.histogram.title)
               && !scrollTitles.contains("预设"))
         let adjustTitles = InspectorView.cardTitles(in: .adjust)
         log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
-        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 细节 / 曲线 / 效果，直方图与裁切都不在其中（081 预设卡已删）",
-              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "细节", "曲线", "效果"])
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 曲线 / 细节 / 效果，直方图与裁切都不在其中（081 预设卡已删）",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
