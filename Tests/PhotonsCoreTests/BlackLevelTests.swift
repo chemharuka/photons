@@ -370,6 +370,53 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(empty.minChannel(), 0)
     }
 
+    // MARK: - ⑥ 自动黑电平的输入改在工作空间（094）
+
+    /// 自动黑电平量的是 **Rec2020 工作空间**，不是解码缓冲的 sRGB 标签。
+    ///
+    /// 暗点 `sRGB ≈ (−0.009, −0.002, −0.001)` 换到 Rec2020 后三通道仍然全负，最负的是
+    /// R ≈ −0.0063：既落在 0.003…0.008，又与解码缓冲的 `minChannel()`（−0.009）不相等 ——
+    /// 矩阵真的乘过。把转换换成恒等时这里会返回 −0.009，绝对值掉出容差，用例立刻红。
+    func testDarkestBelowBlackMeasuresInWorkingSpaceNotInTheDecodedLabel() {
+        let image = Self.linear(width: 1, height: 1, pixels: [
+            [-0.009, -0.002, -0.001, 1],
+        ])
+        let working = image.darkestBelowBlack(sampleStride: 1)
+        XCTAssertEqual(Double(working), -0.00635, accuracy: 2e-3,
+                       "Rec2020 里的最负值 ≈ −0.0063，不是 sRGB 的 −0.009")
+        XCTAssertGreaterThanOrEqual(abs(Double(working)), 0.003, "必须落在工作空间的口径上")
+        XCTAssertLessThanOrEqual(abs(Double(working)), 0.008, "且明显小于 sRGB 的 −0.018 级离群点")
+        XCTAssertNotEqual(Double(working), Double(image.minChannel(sampleStride: 1)), accuracy: 1e-6,
+                          "转换必须真的发生：工作空间与解码标签不是同一个数")
+
+        // 已经非负 / 空缓冲 → 0（没有「黑点以下」的像素）。
+        let positive = Self.linear(width: 1, height: 1, pixels: [[0.1, 0.2, 0.3, 1]])
+        XCTAssertEqual(positive.darkestBelowBlack(sampleStride: 1), 0)
+        let empty = LinearImage(width: 0, height: 0, rgba: [], colorSpace: "linear",
+                                decoderVersion: "test")
+        XCTAssertEqual(empty.darkestBelowBlack(), 0)
+    }
+
+    /// 候选集是**三通道全负**：单通道为负、其余通道亮的出色域点不计入。
+    ///
+    /// 两个出色域点都只有一个负通道（第二个换到 Rec2020 后也只剩 R ≈ −0.00985），它们只能当
+    /// 解码缓冲的 `minChannel()`（−0.018），不能决定整幅黑场；返回值必须来自唯一的全负暗点。
+    /// 把条件放宽成「任一通道为负」时，第二个点会以 −0.00985 赢过暗点，这条用例就红。
+    func testDarkestBelowBlackExcludesOutOfGamutPointsWithOnlyOneNegativeChannel() {
+        let image = Self.linear(width: 3, height: 1, pixels: [
+            [-0.018, 0.30, 0.32, 1],
+            [-0.018, 0.004, 0.003, 1],
+            [-0.009, -0.002, -0.001, 1],
+        ])
+        let working = image.darkestBelowBlack(sampleStride: 1)
+        XCTAssertEqual(Double(working), -0.00635, accuracy: 2e-3,
+                       "返回值只能来自三通道全负的暗点")
+        XCTAssertGreaterThan(Double(working), -0.008,
+                             "不能是出色域点的工作空间 R ≈ −0.00985")
+        XCTAssertEqual(Double(image.minChannel(sampleStride: 1)), -0.018, accuracy: 1e-4,
+                       "解码缓冲里最负的仍是出色域点的 R = −0.018")
+    }
+
     private static func linear(width: Int, height: Int, pixels: [[Float16]]) -> LinearImage {
         LinearImage(width: width, height: height,
                     rgba: pixels.flatMap { $0 }, colorSpace: "linear", decoderVersion: "test")

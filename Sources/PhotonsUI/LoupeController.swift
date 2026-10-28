@@ -725,6 +725,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The rung the last presented frame came from — what `framing()` measures and what an edit
     /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
     private var decoded: LinearImage?
+    /// Test seam (094): a synthetic buffer with the two classes of points (all-negative vs a single
+    /// negative channel) is the only way to prove `autoBlackOffset()` end to end without a real RAW
+    /// that happens to carry a −0.018 outlier. Production never sets this; same `...ForTesting`
+    /// convention as the overlay layouts below.
+    var decodedForTesting: LinearImage? {
+        get { decoded }
+        set { decoded = newValue }
+    }
     private var decodedScale: Double = 0.5
     private var decodedCaps: DecoderCapabilities?
     private var decodeMilliseconds: Double = 0
@@ -3514,7 +3522,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func autoBlackOffset() -> Double? {
         guard let session, session.mode == .loupe, let image = decoded else { return nil }
-        let min = image.minChannel(sampleStride: 5)
+        let min = image.darkestBelowBlack(sampleStride: 5)
         let raw = min >= 0 ? 0 : -Double(min)
         let offset = Self.autoBlackOffset(for: min)
         if raw < LightGroup.blackOffsetRange.lowerBound || raw > LightGroup.blackOffsetRange.upperBound {

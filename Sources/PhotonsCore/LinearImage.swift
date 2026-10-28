@@ -225,6 +225,46 @@ public struct LinearImage: Sendable {
         return minV == .infinity ? 0 : minV
     }
 
+    /// 工作空间里**三通道全负**的像素中，最负的那个通道值（`0` = 没有这样的像素）。
+    /// 自动黑电平的唯一输入：三通道全负 ⇒ 该像素在黑点以下；单通道为负但其余通道亮的点是
+    /// **出色域颜色**（换到 Rec2020 后本就是合法值），不允许它们决定整幅黑场。
+    ///
+    /// `source`/`target` 默认就是管线的两端（解码缓冲是 sRGB 标签，S1 的输入是 Rec2020），矩阵用
+    /// `ColorPrimaries.conversion` 算，不手抄数字。判定在**转换之后**做：解码缓冲里那个 −0.018 的
+    /// 单通道负样本换到工作空间后会被邻通道抬回合法值，只有真正三通道全负的点才进候选集。
+    public func darkestBelowBlack(sampleStride: Int = 5,
+                                  from source: ColorPrimaries = .decoded,
+                                  to target: ColorPrimaries = .working) -> Float {
+        let step = Swift.max(1, sampleStride)
+        guard width > 0, height > 0 else { return 0 }
+        let isIdentity = source == target
+        let matrix = ColorPrimaries.conversion(from: source, to: target)
+        var darkest = Float.infinity
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let o = (y * width + x) * 4
+                let r0 = Double(rgba[o]), g0 = Double(rgba[o + 1]), b0 = Double(rgba[o + 2])
+                let r: Double, g: Double, b: Double
+                if isIdentity {
+                    r = r0; g = g0; b = b0
+                } else {
+                    let v = matrix.applying(to: SIMD3(r0, g0, b0))
+                    r = v.x; g = v.y; b = v.z
+                }
+                if r.isNaN || g.isNaN || b.isNaN { x += step; continue }
+                if r < 0 && g < 0 && b < 0 {
+                    let v = Float(Swift.min(r, Swift.min(g, b)))
+                    if v < darkest { darkest = v }
+                }
+                x += step
+            }
+            y += step
+        }
+        return darkest == .infinity ? 0 : darkest
+    }
+
     public func statistics(sampleStride: Int = 7) -> Statistics {
         var maxV: Float = 0
         var sum: Double = 0
