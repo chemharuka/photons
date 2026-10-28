@@ -402,9 +402,15 @@ public final class CropToolController {
         if inSession { session.endToolSession(label: "裁切与旋转") }
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-        guard turned else { return false }
+        guard turned else {
+            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+            return false
+        }
+        // The row first, then reopen: inside a tool session `commitEdit` answers `nil` (077 — the session
+        // owns the next snapshot), so committing after the reopen wrote nothing at all (082 measured it
+        // on the shipped path: one press left `quarterTurns` at 0 and added no row).
         session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         return true
     }
 

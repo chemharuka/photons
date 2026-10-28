@@ -645,10 +645,29 @@ index 772199c..ae77500 100644
  
      var onDoubleClick: (() -> Void)?
 diff --git a/Sources/PhotonsUI/CropToolController.swift b/Sources/PhotonsUI/CropToolController.swift
-index b780538..7bbe531 100644
+index b780538..1e0323f 100644
 --- a/Sources/PhotonsUI/CropToolController.swift
 +++ b/Sources/PhotonsUI/CropToolController.swift
-@@ -308,6 +308,16 @@ public final class CropToolController {
+@@ -157,7 +157,17 @@ public final class CropToolController {
+         didSet { if draft != oldValue { publishDraft() } }
+     }
+     /// 九宫格. View state, and the only toggle that does not touch the draft.
+-    public var showsGrid = true
++    public var showsGrid = true {
++        didSet { if showsGrid != oldValue { draftChanged() } }
++    }
++
++    /// 082 — the canvas half of one draft edit, wired by `LoupeController`: the card writes the draft,
++    /// the loupe re-lays the overlay and the bar's readout and asks for one render. A callback and not a
++    /// `didSet` on `draft` on purpose: `refreshCropTool` → `clampToView` can write the draft back, and a
++    /// notification there would be a loop.
++    var onDraftChange: (() -> Void)?
++
++    private func draftChanged() { onDraftChange?() }
+     public private(set) var isDragging = false
+     /// True while a ⌘-drag is turning the picture rather than moving the frame.
+     public var isRotatingPicture: Bool { rotating }
+@@ -308,9 +318,20 @@ public final class CropToolController {
  
      // MARK: the draft's commands (never touch the document)
  
@@ -665,7 +684,35 @@ index b780538..7bbe531 100644
      /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
      public func setStraighten(_ degrees: Double) {
          draft.straighten = CropTool.clampStraighten(degrees)
-@@ -699,7 +709,38 @@ public final class CropToolController {
++        draftChanged()
+     }
+ 
+     /// A ratio preset. The rect is reshaped **now** rather than at apply time, because the frame on
+@@ -320,6 +341,7 @@ public final class CropToolController {
+         let lock = preset.lock(source: source)
+         draft.lock = lock
+         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
++        draftChanged()
+     }
+ 
+     /// Direct lock write (the tests' door, and what `setAspect` ends in).
+@@ -327,6 +349,7 @@ public final class CropToolController {
+         let source = source ?? sourceSize
+         draft.lock = lock
+         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
++        draftChanged()
+     }
+ 
+     /// 水平翻转 / 垂直翻转 — **the document's field**, the same one 变换 ▸ 水平翻转 writes (§F).
+@@ -450,6 +473,7 @@ public final class CropToolController {
+         let top = min(max(c.centerY - height / 2, 0), 1 - height)
+         draft.lock = lock
+         draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
++        draftChanged()
+     }
+ 
+     /// The current ratio, as the popup shows it.
+@@ -699,7 +723,38 @@ public final class CropToolController {
      /// the pixel size, glued together by dots in one label — so the bar's width changed with the
      /// document and the numbers slid around as they were edited. Here each segment is its own string,
      /// and `CropToolBar` measures the worst case of each once and never lets it grow.
@@ -705,7 +752,7 @@ index b780538..7bbe531 100644
  
      /// `+2.5°` / `-45.0°` — the `%+.1f` form the slider has always printed (a leading `+` says
      /// "turned clockwise" without a legend).
-@@ -731,8 +772,11 @@ public final class CropToolController {
+@@ -731,8 +786,11 @@ public final class CropToolController {
      /// its fixed-width fields, and `CropBarLayoutTests` asserts that four extreme drafts produce the
      /// same `frame(x, width)` — so the constant lives next to the formatter that produces it.
      public enum WorstCase {
@@ -720,7 +767,7 @@ index b780538..7bbe531 100644
          public static let ratio = "9999.99"
          /// `9999×9999` — four digits per side and the multiplication sign.
 diff --git a/Sources/PhotonsUI/InspectorView.swift b/Sources/PhotonsUI/InspectorView.swift
-index 2d48cd6..28aca05 100644
+index 2d48cd6..be88dc3 100644
 --- a/Sources/PhotonsUI/InspectorView.swift
 +++ b/Sources/PhotonsUI/InspectorView.swift
 @@ -246,6 +246,17 @@ public struct InspectorView: View {
@@ -734,9 +781,9 @@ index 2d48cd6..28aca05 100644
 +        // a `false` and does nothing), so the workspace root's own wiring and this one cannot fight.
 +        // No document write either way: entering is a view-state switch, leaving *cancels* the draft
 +        // rather than applying it.
-+        .task { loupe?.setCropWorkspaceActive(workspaces.selection == .transform) }
++        .task { loupe?.setCropWorkspaceActive(workspaces.selection.showsCropCard) }
 +        .onChange(of: workspaces.selection) { _, workspace in
-+            loupe?.setCropWorkspaceActive(workspace == .transform)
++            loupe?.setCropWorkspaceActive(workspace.showsCropCard)
 +        }
      }
  
@@ -753,7 +800,7 @@ index 2d48cd6..28aca05 100644
  
      /// The two tooltips: `SliderRow`、蒙版与 `InspectorCardShell` 都用它们，所以是面板的，不是某张卡的。
      /// `internal`（不是 `private`）：`InspectorCardShell` 在文件作用域，裁切卡的头部件要用同一套标题行。
-@@ -2710,6 +2724,97 @@ public struct PanelResets {
+@@ -2710,6 +2724,100 @@ public struct PanelResets {
          }
      }
  
@@ -800,7 +847,10 @@ index 2d48cd6..28aca05 100644
 +            let turns = GeometryGroup.normalizedQuarterTurns(session.edit.geometry.quarterTurns)
 +            guard turns != 0 else { return false }
 +            return cropGeometryVerb(label: section.title) { geometry in
-+                for _ in 0..<GeometryGroup.normalizedQuarterTurns(4 - turns) {
++                // `turn(clockwise: false)` steps the count back by one (it is `+3 mod 4`), so one
++                // counter-clockwise turn per turn taken lands on 0 — not `4 − turns` of them, which
++                // would land on `2·turns` mod 4 (measured: 1 turn → 2).
++                for _ in 0..<turns {
 +                    geometry.turn(clockwise: false)
 +                }
 +                return true
@@ -852,7 +902,7 @@ index 2d48cd6..28aca05 100644
  
      /// Double-click on one of the card's nine rows: **that** number back to its own default (0, i.e. "this
 diff --git a/Sources/PhotonsUI/InspectorWorkspaceTabs.swift b/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
-index de873c3..a292f1e 100644
+index de873c3..46977f2 100644
 --- a/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
 +++ b/Sources/PhotonsUI/InspectorWorkspaceTabs.swift
 @@ -84,9 +84,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
@@ -866,11 +916,27 @@ index de873c3..a292f1e 100644
                      .effects, .presets]
          case .transform:
              // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. It is the only
+@@ -109,6 +107,15 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
+         }
+     }
+ 
++    /// **Does this workspace put the 裁切 card on screen?** — 082: that is what decides whether 裁切
++    /// mode is on (「点开裁切菜单后自动进入裁切模式」，切走就退出).
++    ///
++    /// Derived from `cards` and not a second table: if the crop card ever moves to another workspace,
++    /// the mode follows it, and a workspace without it cannot accidentally open the frame. It reads
++    /// `cards.contains(.crop)` rather than naming `.transform` so the one membership table stays the
++    /// only place that knows where the card lives.
++    public var showsCropCard: Bool { cards.contains(.crop) }
++
+     /// True when this workspace has something to show. `false` is not an error state: the ask says
+     /// 「先空着」, and the view draws no cards, no placeholder and no message.
+     public var hasCards: Bool { !cards.isEmpty }
 diff --git a/Sources/PhotonsUI/LoupeController.swift b/Sources/PhotonsUI/LoupeController.swift
-index d2e0946..e18756c 100644
+index d2e0946..5117b2a 100644
 --- a/Sources/PhotonsUI/LoupeController.swift
 +++ b/Sources/PhotonsUI/LoupeController.swift
-@@ -1320,13 +1320,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -1320,12 +1320,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
          // topmost chrome), and hidden until 裁切 mode is on.
          container.addSubview(cropBar)
          cropBar.isHidden = true
@@ -883,11 +949,17 @@ index d2e0946..e18756c 100644
 -        cropBar.onChange = { [weak self] in
 -            self?.refreshCropTool()
 -            self?.requestEditRender()
--        }
++        // 082: the card is the control surface now, so a draft edit it makes has to reach the canvas —
++        // the overlay's frame and the bar's three readouts are redrawn on the same tick, and one render
++        // is asked for (a straighten moves the picture).
++        cropTool.onDraftChange = { [weak self] in
++            guard let self else { return }
++            self.refreshCropTool()
++            self.requestEditRender()
+         }
          container.addSubview(statusChip)
          // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
-         // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).
-@@ -1582,8 +1579,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -1582,8 +1587,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
      public func zoomToActualSize(aroundView point: CGPoint?) {
          guard let framing = framing() else { return }
          pinchZoom = nil
@@ -900,7 +972,7 @@ index d2e0946..e18756c 100644
                       anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
      }
  
-@@ -1685,7 +1685,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -1685,7 +1693,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
      public func zoom(to stop: Double, aroundView point: CGPoint?) {
          guard let framing = framing() else { return }
          pinchZoom = nil
@@ -912,7 +984,7 @@ index d2e0946..e18756c 100644
          let anchor = point ?? canvasCentrePoint()
          setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
                                       backingScale: backingScale),
-@@ -1782,14 +1785,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -1782,14 +1793,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
          // The floor of the ladder is 25 %, and 25 % is where a pinch out stops: `fit` is a different
          // mode, entered by its own action, so a gesture cannot slide the camera into it by accident.
          let level = LoupeViewState.snappedLevel(for: raw)
@@ -936,7 +1008,7 @@ index d2e0946..e18756c 100644
          guard next != viewState else { return }
          let previous = viewState
          viewState = next
-@@ -3290,6 +3300,46 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -3290,6 +3308,46 @@ public final class LoupeController: NSViewController, HeadroomSource {
          return true
      }
  
@@ -983,7 +1055,7 @@ index d2e0946..e18756c 100644
      /// ↵ (and 双击框内): the draft becomes the document, once.
      @discardableResult
      public func applyCropTool() -> Bool {
-@@ -3584,6 +3634,70 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -3584,6 +3642,70 @@ public final class LoupeController: NSViewController, HeadroomSource {
          noteBackdropKeyMoved()
      }
  
@@ -1054,7 +1126,7 @@ index d2e0946..e18756c 100644
      /// ⑦ — the model-layer clamp, run before anything reads the layout (and after any gesture that
      /// could have put the frame outside the canvas: a drag, a zoom, a pan, a straighten).
      @discardableResult
-@@ -6100,7 +6214,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
+@@ -6100,7 +6222,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
      private func syncZoomSlider() {
          // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
          // *displayed* at its continuous position — it is never a snap target.
@@ -1068,7 +1140,7 @@ index d2e0946..e18756c 100644
  
      /// Slider-originated zoom: **always around the canvas centre**.
 diff --git a/Sources/PhotonsUI/TransformPanel.swift b/Sources/PhotonsUI/TransformPanel.swift
-index 7a9b4cd..e8ca6d7 100644
+index 7a9b4cd..3db2f2e 100644
 --- a/Sources/PhotonsUI/TransformPanel.swift
 +++ b/Sources/PhotonsUI/TransformPanel.swift
 @@ -3,76 +3,70 @@ import CoreGraphics
@@ -1183,7 +1255,7 @@ index 7a9b4cd..e8ca6d7 100644
              }
          }
          // The card's own frame (「卡片清单第一张 = 裁切」 is measured on it) — behind the chrome, so the
-@@ -80,36 +74,102 @@ extension InspectorView {
+@@ -80,36 +74,103 @@ extension InspectorView {
          .background(CropRowProbeHost(rowID: CropCardID.card))
      }
  
@@ -1213,7 +1285,6 @@ index 7a9b4cd..e8ca6d7 100644
 +                             onCancel: { loupe?.cancelCropTool() })
 +            }
 +        }
-+        .background(CropRowProbeHost(rowID: CropCardID.aspect))
 +    }
 +
 +    // MARK: 角度
@@ -1241,9 +1312,27 @@ index 7a9b4cd..e8ca6d7 100644
 -                  onReset: { tool?.setStraighten(0) },
 -                  // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
 -                  onEditingChanged: { _ in })
--            .background(CropRowProbeHost(rowID: CropCardID.angle))
--    }
--
++        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
++            CropSectionHeader(title: CropSection.angle.title, isFirst: false,
++                              reset: { resets.cropSection(.angle) })
++            VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
++                sliderRow("滑块角度",
++                          straighten,
++                          -CropTool.straightenLimit ... CropTool.straightenLimit,
++                          "%+.1f°",
++                          decimals: 1,
++                          enabled: tool?.isActive ?? false,
++                          accessibilityID: "inspector.crop.angle",
++                          onReset: { tool?.setStraighten(0) },
++                          // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
++                          onEditingChanged: { _ in })
++                CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
++                                     slider: tool?.sliderAngleText() ?? "—")
++            }
+             .background(CropRowProbeHost(rowID: CropCardID.angle))
++        }
+     }
+ 
 -    /// 水平 / 垂直翻转 —— **文档动作**，和 072 §F 的菜单项、裁切栏的两个开关同一个位。
 -    ///
 -    /// 有 loupe 时走它（它会顺手刷新裁切框并要一帧）；没有 loupe（面板在测试/预览里单独宿主、
@@ -1252,25 +1341,6 @@ index 7a9b4cd..e8ca6d7 100644
 -    /// verb goes through it (one document write, one history row, one render); without one (the panel
 -    /// hosted on its own, or a canvas that has not come up) it writes the same document through the
 -    /// tool's session. Never a second state: `quarterTurns` is `GeometryGroup`'s field.
-+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-+            CropSectionHeader(title: CropSection.angle.title, isFirst: false,
-+                              reset: { resets.cropSection(.angle) })
-+            sliderRow("滑块角度",
-+                      straighten,
-+                      -CropTool.straightenLimit ... CropTool.straightenLimit,
-+                      "%+.1f°",
-+                      decimals: 1,
-+                      enabled: tool?.isActive ?? false,
-+                      accessibilityID: "inspector.crop.angle",
-+                      onReset: { tool?.setStraighten(0) },
-+                      // 草稿没有「提交」：一 tick 改一次草稿，应用时才是一次 `applyEdit` + 一次快照。
-+                      onEditingChanged: { _ in })
-+            CropAngleReadoutHost(actual: tool?.angleText() ?? "—",
-+                                 slider: tool?.sliderAngleText() ?? "—")
-+        }
-+        .background(CropRowProbeHost(rowID: CropCardID.angle))
-+    }
-+
 +    // MARK: 旋转
 +
 +    /// 旋转 — 逆时针 / 徽标 / 顺时针。文档动作，⌘[ / ⌘] 同一个动词。
@@ -1283,8 +1353,8 @@ index 7a9b4cd..e8ca6d7 100644
 +                        isEnabled: loupe != nil || tool != nil,
 +                        onCounterClockwise: { turn(clockwise: false, tool: tool) },
 +                        onClockwise: { turn(clockwise: true, tool: tool) })
++                .background(CropRowProbeHost(rowID: CropCardID.turn))
 +        }
-+        .background(CropRowProbeHost(rowID: CropCardID.turn))
 +    }
 +
 +    // MARK: 镜像
@@ -1299,8 +1369,8 @@ index 7a9b4cd..e8ca6d7 100644
 +                          vertical: geometry.flipVertical,
 +                          onHorizontal: { flip(horizontal: true, tool: tool) },
 +                          onVertical: { flip(horizontal: false, tool: tool) })
++                .background(CropRowProbeHost(rowID: CropCardID.mirror))
 +        }
-+        .background(CropRowProbeHost(rowID: CropCardID.mirror))
 +    }
 +
 +    // MARK: the two document verbs
@@ -1312,7 +1382,7 @@ index 7a9b4cd..e8ca6d7 100644
      private func turn(clockwise: Bool, tool: CropToolController?) {
          if let loupe {
              _ = loupe.rotateQuarter(clockwise: clockwise)
-@@ -118,6 +178,7 @@ extension InspectorView {
+@@ -118,6 +179,7 @@ extension InspectorView {
          _ = tool?.rotateQuarter(clockwise: clockwise)
      }
  
@@ -1320,7 +1390,7 @@ index 7a9b4cd..e8ca6d7 100644
      private func flip(horizontal: Bool, tool: CropToolController?) {
          if let loupe {
              if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
-@@ -128,16 +189,76 @@ extension InspectorView {
+@@ -128,16 +190,76 @@ extension InspectorView {
      }
  }
  
@@ -1402,7 +1472,7 @@ index 7a9b4cd..e8ca6d7 100644
  struct CropAspectRow: View {
  
      let tool: CropToolController?
-@@ -156,7 +277,7 @@ struct CropAspectRow: View {
+@@ -156,7 +278,7 @@ struct CropAspectRow: View {
              Text("比例")
                  .font(.system(size: 10, weight: .medium))
                  .foregroundStyle(.secondary)
@@ -1411,7 +1481,7 @@ index 7a9b4cd..e8ca6d7 100644
              Menu {
                  ForEach(Self.items, id: \.self) { preset in
                      Button(preset.displayName) { tool?.setAspect(preset) }
-@@ -175,8 +296,19 @@ struct CropAspectRow: View {
+@@ -175,6 +297,18 @@ struct CropAspectRow: View {
              .help(Self.help(for: tool))
              .accessibilityLabel("比例")
              .accessibilityIdentifier("inspector.crop.aspect")
@@ -1428,11 +1498,9 @@ index 7a9b4cd..e8ca6d7 100644
 +            .accessibilityLabel("交换长宽")
 +            .accessibilityIdentifier("inspector.crop.swap")
          }
--        .background(CropRowProbeHost(rowID: Self.probeID))
+         .background(CropRowProbeHost(rowID: Self.probeID))
          .disabled(!(tool?.isActive ?? false))
-         .opacity(tool?.isActive == true ? 1 : 0.42)
-         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
-@@ -203,17 +335,15 @@ struct CropAspectRow: View {
+@@ -203,17 +337,15 @@ struct CropAspectRow: View {
      }
  }
  
@@ -1453,7 +1521,7 @@ index 7a9b4cd..e8ca6d7 100644
  
      var body: some View {
          HStack(spacing: 6) {
-@@ -222,10 +352,7 @@ struct CropSwitchesRow: View {
+@@ -222,10 +354,7 @@ struct CropSwitchesRow: View {
              CropChip(title: "垂直", on: vertical, help: "垂直翻转（文档动作，一次 ⌘Z）",
                       action: onVertical)
              Spacer(minLength: 4)
@@ -1464,7 +1532,7 @@ index 7a9b4cd..e8ca6d7 100644
          .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
      }
  }
-@@ -236,12 +363,8 @@ struct CropSwitchesRow: View {
+@@ -236,12 +365,8 @@ struct CropSwitchesRow: View {
  /// `LoupeController.rotateQuarter(clockwise:)` —— 和菜单的 ⌘[ / ⌘] 同一个动词，所以按钮、快捷键、
  /// 徽标、`tiff:Orientation` 不会各说一套。
  ///
@@ -1478,7 +1546,7 @@ index 7a9b4cd..e8ca6d7 100644
  struct CropTurnRow: View {
  
      let turns: Int
-@@ -256,7 +379,7 @@ struct CropTurnRow: View {
+@@ -256,7 +381,7 @@ struct CropTurnRow: View {
  
      var body: some View {
          HStack(spacing: 6) {
@@ -1487,7 +1555,7 @@ index 7a9b4cd..e8ca6d7 100644
                  .font(.system(size: 10, weight: .medium))
                  .foregroundStyle(.secondary)
              Spacer(minLength: 4)
-@@ -274,7 +397,6 @@ struct CropTurnRow: View {
+@@ -274,7 +399,6 @@ struct CropTurnRow: View {
                             isEnabled: isEnabled, action: onClockwise)
                  .fixedSize()
          }
@@ -1495,7 +1563,7 @@ index 7a9b4cd..e8ca6d7 100644
          .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
      }
  }
-@@ -408,7 +530,7 @@ struct TurnBadgeHost: NSViewRepresentable {
+@@ -408,7 +532,7 @@ struct TurnBadgeHost: NSViewRepresentable {
  }
  
  /// 裁切模式下的**应用 / 取消**。工具没开时两粒都是灰的（`isEnabled == false`），因为那时没有草稿
@@ -1504,7 +1572,7 @@ index 7a9b4cd..e8ca6d7 100644
  struct CropApplyRow: View {
  
      let active: Bool
-@@ -422,7 +544,6 @@ struct CropApplyRow: View {
+@@ -422,7 +546,6 @@ struct CropApplyRow: View {
  
      var body: some View {
          HStack(spacing: 6) {
@@ -1512,15 +1580,7 @@ index 7a9b4cd..e8ca6d7 100644
              Button("应用", action: onApply)
                  .buttonStyle(.bordered)
                  .controlSize(.mini)
-@@ -436,7 +557,6 @@ struct CropApplyRow: View {
-                 .help("放弃这次裁切，文档一个字节都不动")
-                 .accessibilityIdentifier("inspector.crop.cancel")
-         }
--        .background(CropRowProbeHost(rowID: Self.probeID))
-         .disabled(!active)
-         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
-     }
-@@ -475,11 +595,74 @@ struct CropChip: View {
+@@ -475,11 +598,74 @@ struct CropChip: View {
          .accessibilityIdentifier("inspector.crop.chip.\(title)")
      }
  
@@ -1597,7 +1657,7 @@ index 7a9b4cd..e8ca6d7 100644
  // MARK: - 卡头的直角尺（AppKit：它要能被真的点一下）
  
  /// The card's ruler button, as a real `NSButton`.
-@@ -487,8 +670,11 @@ struct CropChip: View {
+@@ -487,8 +673,11 @@ struct CropChip: View {
  /// Why not a SwiftUI `Button`: the acceptance for this card is 「点按直角尺图标后进入裁切模式，出现裁切框」
  /// measured on a **hosted, laid-out** panel — and a SwiftUI `Button` has no AppKit leaf in this app's
  /// test process (no accessibility tree either), so a click on it cannot be dispatched. An `NSButton`
@@ -1611,7 +1671,7 @@ index 7a9b4cd..e8ca6d7 100644
  final class CropModeButton: NSButton {
  
      /// **直角尺 = `crop`** (see this file's header): the two L-shaped corner brackets of a crop frame
-@@ -498,7 +684,7 @@ final class CropModeButton: NSButton {
+@@ -498,7 +687,7 @@ final class CropModeButton: NSButton {
      static let glyphPointSize: CGFloat = 11
      static let size = NSSize(width: 20, height: 18)
  
@@ -1620,7 +1680,7 @@ index 7a9b4cd..e8ca6d7 100644
      var isOn = false {
          didSet { if isOn != oldValue { refresh() } }
      }
-@@ -571,7 +757,7 @@ struct CropModeButtonHost: NSViewRepresentable {
+@@ -571,7 +760,7 @@ struct CropModeButtonHost: NSViewRepresentable {
  
  // MARK: - 自定义比例：⑨ 的那个居中面板，卡里的这扇门
  
@@ -1629,7 +1689,7 @@ index 7a9b4cd..e8ca6d7 100644
  ///
  /// 它**不存比例**：面板只负责问，`commit(_:)` 走 `CropTool.ratio(from:)` + `setCustomRatio`
  /// 写进草稿的比例锁（非法输入一声响，什么都不写），最后一次输入的文本记在
-@@ -586,7 +772,7 @@ final class CropRatioPanels {
+@@ -586,7 +775,7 @@ final class CropRatioPanels {
      private weak var tool: CropToolController?
  
      /// Present the panel centred on the **window** the card lives in (⑨), with the same initial value
@@ -1638,7 +1698,7 @@ index 7a9b4cd..e8ca6d7 100644
      @discardableResult
      func present(for tool: CropToolController?,
                   initial: String = CropToolBar.lastCustomRatioText) -> Bool {
-@@ -639,8 +825,12 @@ enum CropCardID {
+@@ -639,8 +828,12 @@ enum CropCardID {
      static let aspect = CropAspectRow.probeID
      static let angle = "angle"
      static let turn = CropTurnRow.probeID
@@ -1653,7 +1713,7 @@ index 7a9b4cd..e8ca6d7 100644
  
  /// One row (or the whole card) of the crop card, in the panel's own coordinates.
 diff --git a/Sources/PhotonsUI/WorkspaceRootView.swift b/Sources/PhotonsUI/WorkspaceRootView.swift
-index 68f1615..43df56f 100644
+index 68f1615..21a6356 100644
 --- a/Sources/PhotonsUI/WorkspaceRootView.swift
 +++ b/Sources/PhotonsUI/WorkspaceRootView.swift
 @@ -442,8 +442,13 @@ public final class WorkspaceRootView: NSView {
@@ -1663,10 +1723,10 @@ index 68f1615..43df56f 100644
 +            // 082 — 「点开裁切卡就进裁切模式，切走工作区就退出」. The same synchronous switch the mask
 +            // chrome rides: the frame is up before the panel has finished redrawing, and a hidden
 +            // overlay never lingers for a turn.
-+            self?.loupeController.setCropWorkspaceActive(workspace == .transform)
++            self?.loupeController.setCropWorkspaceActive(workspace.showsCropCard)
          }
          loupeController.setMasksWorkspaceActive(inspectorWorkspaces.selection == .masks)
-+        loupeController.setCropWorkspaceActive(inspectorWorkspaces.selection == .transform)
++        loupeController.setCropWorkspaceActive(inspectorWorkspaces.selection.showsCropCard)
  
          showModule(for: session.mode)
          applyBrowserMode()
@@ -1699,7 +1759,7 @@ index f04159a..da2eed0 100644
          } else {
              showingFit = true
 diff --git a/Tests/PhotonsUITests/CropBarLayoutTests.swift b/Tests/PhotonsUITests/CropBarLayoutTests.swift
-index 4271249..530dc87 100644
+index 4271249..eff70a8 100644
 --- a/Tests/PhotonsUITests/CropBarLayoutTests.swift
 +++ b/Tests/PhotonsUITests/CropBarLayoutTests.swift
 @@ -4,14 +4,22 @@ import PhotonsCatalog
@@ -1786,7 +1846,7 @@ index 4271249..530dc87 100644
              .size(withAttributes: [.font: CropToolBar.infoFont]).width) + CropToolBar.infoHeadroom)), 1e-6)
  
          // 比例 is gone, and no dots: the three fields are all the readout prints.
-@@ -109,131 +124,103 @@ final class CropBarLayoutTests: XCTestCase {
+@@ -109,131 +124,112 @@ final class CropBarLayoutTests: XCTestCase {
          XCTAssertFalse(text.angle.contains("·"))
          XCTAssertFalse(text.ratio.contains("·"))
          XCTAssertFalse(text.pixels.contains("·"))
@@ -1800,24 +1860,26 @@ index 4271249..530dc87 100644
 -    /// Double-clicking 角度 returns it to 0.0°, writes nothing by itself, and the apply that follows is
 -    /// **one** history entry (not one for the reset and one for the crop).
 -    func testDoubleClickingTheAngleResetsItInOneStep() throws {
--        let (bar, controller, session, window) = try makeBar()
 +    /// **The bar has no controls at all** — the acceptance is 「悬浮栏视图树里可交互控件数 = 0」, and the
 +    /// three readouts are still there with real text.
 +    func testTheBarHasNoInteractiveControlsAndStillPrintsTheThreeSegments() throws {
-+        let (bar, controller, _, window) = try makeBar()
++        // The session is **held**: `CropToolController.session` is `weak`, and a released session makes
++        // `begin()` answer `false` (the same trap `CropToggleAccentTests` records).
+         let (bar, controller, session, window) = try makeBar()
++        _ = session
          defer { window.orderOut(nil) }
          XCTAssertTrue(controller.begin())
 -        controller.setStraighten(-17.5)
          layOut(bar)
 -        XCTAssertEqual(bar.readoutText.angle, "-17.5°")
- 
+-
 -        let historyBefore = session.history.snapshots.count
 -        let revisionBefore = session.editRevision
 -        let doubleClick = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [],
 -                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
 -                                             eventNumber: 0, clickCount: 2, pressure: 1)!
 -        bar.angleControl.mouseDown(with: doubleClick)
--
+ 
 -        XCTAssertEqual(controller.draft.straighten, 0, accuracy: 1e-12, "§D2: double-click → 0.0°")
 -        XCTAssertEqual(bar.readoutText.angle, "+0.0°")
 -        XCTAssertEqual(session.editRevision, revisionBefore, "a draft reset writes nothing")
@@ -1882,10 +1944,10 @@ index 4271249..530dc87 100644
 -    /// On = the system accent, off = exactly the old appearance (both colour slots nil), and the three
 -    /// toggles refresh independently.
 -    func testTheThreeTogglesTurnAccentBlueOnlyWhenOn() throws {
--        let (bar, controller, session, window) = try makeBar()
 +    /// The bar's 角度 段 is `straighten + 90 × quarterTurns`, in three groups of numbers.
 +    func testTheAngleSegmentIsTheActualAngle() throws {
-+        let (bar, controller, _, window) = try makeBar()
+         let (bar, controller, session, window) = try makeBar()
++        _ = session
          defer { window.orderOut(nil) }
          XCTAssertTrue(controller.begin())
 -        layOut(bar)
@@ -1924,20 +1986,25 @@ index 4271249..530dc87 100644
 +        XCTAssertEqual(bar.readoutText.angle, "0.0°")
 +
 +        // ① turns = 1, straighten = 2.5 → 92.5°
-+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
++        // (Inside a tool session the verb answers `false` — `commitEdit` returns nil there by design —
++        // so the turn is measured on the document.)
++        controller.rotateQuarter(clockwise: true)
++        XCTAssertEqual(controller.quarterTurns, 1)
 +        controller.setStraighten(2.5)
 +        record("turns 1 · slider +2.5")
 +        XCTAssertEqual(bar.readoutText.angle, "92.5°", "实际 = 2.5 + 90")
 +
 +        // ② turns = 3, straighten = −4 → 266°
-+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
-+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
++        controller.rotateQuarter(clockwise: true)
++        controller.rotateQuarter(clockwise: true)
++        XCTAssertEqual(controller.quarterTurns, 3)
 +        controller.setStraighten(-4)
 +        record("turns 3 · slider −4")
 +        XCTAssertEqual(bar.readoutText.angle, "266.0°", "实际 = −4 + 270")
 +
 +        // ③ turns = 4 (back to 0), straighten = 0 → 0°
-+        XCTAssertTrue(controller.rotateQuarter(clockwise: true))
++        controller.rotateQuarter(clockwise: true)
++        XCTAssertEqual(controller.quarterTurns, 0)
 +        controller.setStraighten(0)
 +        record("turns 4 · slider 0")
 +        XCTAssertEqual(bar.readoutText.angle, "0.0°", "四圈回到 0°")
@@ -1959,7 +2026,7 @@ index 4271249..530dc87 100644
 -        XCTAssertEqual(session.history.snapshots.count, historyBefore)
 -        print("D3 · grid on \(grid.on) bezel \(String(describing: grid.bezel)) · "
 -              + "h on \(h.on) bezel \(String(describing: h.bezel)) · v on \(v.on) bezel \(String(describing: v.bezel))")
-+        XCTAssertEqual(seen.count, 5)
++        XCTAssertEqual(seen.count, 4)
 +        // The document's own field is the same number the bar prints, so the two cannot drift.
 +        XCTAssertEqual(controller.quarterTurns, 0)
      }
@@ -1993,7 +2060,7 @@ index 4271249..530dc87 100644
          let editor = EditorWindowController()
          let menu = MainMenu.build()
          func item(_ title: String) -> NSMenuItem? {
-@@ -272,27 +259,23 @@ final class CropBarLayoutTests: XCTestCase {
+@@ -272,27 +268,24 @@ final class CropBarLayoutTests: XCTestCase {
                                           isARepeat: false, keyCode: 0)!
              canvas.keyDown(with: event)
          }
@@ -2014,9 +2081,10 @@ index 4271249..530dc87 100644
 +
 +        // With the tool on, the card's pair comes alive (`DetailRowEnabledLog` is the card's seam) —
 +        // which is what makes the greying above a gate, not a bug.
-+        let (bar, controller, _, window) = try makeBar()
++        let (bar, controller, session, window) = try makeBar()
 +        defer { window.orderOut(nil) }
          XCTAssertTrue(controller.begin())
++        _ = session
          bar.sync()
 -        XCTAssertTrue(bar.applyControl.isEnabled)
 -        XCTAssertTrue(bar.cancelControl.isEnabled)
@@ -2399,10 +2467,10 @@ index 0000000..50c8dac
 +}
 diff --git a/Tests/PhotonsUITests/CropCardSectionsTests.swift b/Tests/PhotonsUITests/CropCardSectionsTests.swift
 new file mode 100644
-index 0000000..555239f
+index 0000000..881559f
 --- /dev/null
 +++ b/Tests/PhotonsUITests/CropCardSectionsTests.swift
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,540 @@
 +import XCTest
 +import AppKit
 +import SwiftUI
@@ -2542,26 +2610,26 @@ index 0000000..555239f
 +            }
 +        }
 +
-+        // Gaps: ≥ 12 pt between one section's content and the next title, 6 pt inside a section.
++        // Gaps: 6 pt from a title to its own content, ≥ 12 pt from a section's last row to the next
++        // section's title. Both numbers are measured, not assumed.
 +        let ordered = (rows + headers).sorted { $0.rect.minY < $1.rect.minY }
 +        var gaps: [String] = []
 +        for section in CropSection.displayOrder {
 +            let header = try XCTUnwrap(headers.first { $0.id == section.title }).rect
-+            guard let firstRow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
-+            let insideGap = firstRow.rect.minY - header.maxY
-+            print("082 §4 · 「\(section.title)」标题与 \(firstRow.id) 之间 \(String(format: "%.2f", insideGap)) pt")
++            guard let firstBelow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
++            let insideGap = firstBelow.rect.minY - header.maxY
++            gaps.append("「\(section.title)」→\(firstBelow.id) \(String(format: "%.2f", insideGap)) pt")
 +            XCTAssertGreaterThanOrEqual(insideGap, 5.5,
 +                                        "082 §4: 小标题与内容之间应 6 pt，实测 \(insideGap)")
 +        }
 +        for (a, b) in zip(headers, headers.dropFirst()) {
-+            // The previous section's last row → the next section's title.
-+            let previousRows = rows.filter { $0.rect.maxY <= a.rect.maxY + 0.5 }
-+            guard let last = previousRows.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
++            let above = ordered.filter { $0.rect.maxY <= b.rect.minY + 0.5 }
++            guard let last = above.max(by: { $0.rect.maxY < $1.rect.maxY }) else { continue }
 +            let gap = b.rect.minY - last.rect.maxY
-+            gaps.append("\(a.id)→\(b.id) \(String(format: "%.2f", gap)) pt")
++            gaps.append("\(last.id)→「\(b.id)」 \(String(format: "%.2f", gap)) pt")
 +            XCTAssertGreaterThanOrEqual(gap, 11.5, "082 §4: 分区之间应 ≥12 pt，实测 \(gap) pt")
 +        }
-+        print("082 §4 · 分区间距 " + gaps.joined(separator: " · "))
++        print("082 §4 · 间距 " + gaps.joined(separator: " · "))
 +
 +        XCTAssertLessThanOrEqual(ordered.last!.rect.maxY, card.maxY - WorkspaceLayout.cardInsetV + 0.5,
 +                                 "082 §4: 最后一区出了卡片底边")
@@ -2584,16 +2652,27 @@ index 0000000..555239f
 +        panel.state.select(.transform)
 +        _ = waitFor(panel) { $0.cards.cardIDs == ["crop"] }
 +
-+        func readout() throws -> String {
-+            let label = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first,
-+                                      "082 §3: 卡片上没有「实际角度 / 滑块角度」读数")
-+            _ = waitFor(panel) { _ in true }
-+            return label.stringValue
++        /// Poll until the panel has redrawn the readout (SwiftUI updates the AppKit leaf on the next
++        /// layout pass), then return what it prints.
++        func readout(expecting needle: String) throws -> String {
++            let deadline = Date().addingTimeInterval(3)
++            var text = ""
++            while Date() < deadline {
++                panel.host.layoutSubtreeIfNeeded()
++                if let label = panel.views(ofType: CropAngleReadoutLabel.self).first {
++                    text = label.stringValue
++                    if text.contains(needle) { return text }
++                }
++                CropUITestSupport.pump(0.02)
++            }
++            _ = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first,
++                              "082 §3: 卡片上没有「实际角度 / 滑块角度」读数")
++            return text
 +        }
 +
 +        // ① turns 0, slider +2.5 → 2.5°
 +        tool.setStraighten(2.5)
-+        var text = try readout()
++        var text = try readout(expecting: "实际角度 2.5°")
 +        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
 +        XCTAssertTrue(text.contains("实际角度 2.5°"), text)
 +        XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
@@ -2601,8 +2680,12 @@ index 0000000..555239f
 +        XCTAssertEqual(tool.actualAngle, 2.5, accuracy: 1e-12)
 +
 +        // ② turns 1, slider +2.5 → 92.5°
-+        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
-+        text = try readout()
++        // (The verb answers `false` while a crop session is open: `commitEdit` returns nil inside a tool
++        // session by design — 072/077's rule — and the row lands at 应用. So the turn is measured on the
++        // document, not on the return value.)
++        loupe.rotateQuarter(clockwise: true)
++        XCTAssertEqual(tool.quarterTurns, 1)
++        text = try readout(expecting: "实际角度 92.5°")
 +        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
 +        XCTAssertTrue(text.contains("实际角度 92.5°"), text)
 +        XCTAssertTrue(text.contains("滑块角度 +2.5°"), text)
@@ -2610,10 +2693,11 @@ index 0000000..555239f
 +        XCTAssertEqual(loupe.cropBar.readoutText.angle, "92.5°")
 +
 +        // ③ turns 3, slider −4 → 266°
-+        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
-+        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
++        loupe.rotateQuarter(clockwise: true)
++        loupe.rotateQuarter(clockwise: true)
++        XCTAssertEqual(tool.quarterTurns, 3)
 +        tool.setStraighten(-4)
-+        text = try readout()
++        text = try readout(expecting: "实际角度 266.0°")
 +        print("082 §3 · turns \(tool.quarterTurns) · slider \(tool.sliderAngleText()) · \(text)")
 +        XCTAssertTrue(text.contains("实际角度 266.0°"), text)
 +        XCTAssertTrue(text.contains("滑块角度 -4.0°"), text)
@@ -2624,7 +2708,7 @@ index 0000000..555239f
 +        let label = try XCTUnwrap(panel.views(ofType: CropAngleReadoutLabel.self).first)
 +        XCTAssertFalse(label.isEditable, "082 §3: 读数是只读的")
 +        XCTAssertFalse(label.isSelectable)
-+        XCTAssertEqual(label.identifier?.rawValue, CropAngleReadoutLabel.identifier)
++        XCTAssertEqual(label.accessibilityIdentifier(), CropAngleReadoutLabel.identifier)
 +        XCTAssertTrue(label.stringValue.contains("实际角度"))
 +        XCTAssertTrue(label.stringValue.contains("滑块角度"))
 +        // …and it is a *number*, not a second source of truth: it is derived from the tool.
@@ -2644,21 +2728,23 @@ index 0000000..555239f
 +        loupe.autoRenderEnabled = false
 +        loupe.collectsHistogram = false
 +        _ = loupe.view
-+        XCTAssertTrue(loupe.beginCropTool())
-+        let resets = PanelResets(session: session, loupe: loupe)
 +
-+        // A document with something in every section: crop, angle, turn, flip.
-+        loupe.rotateQuarter(clockwise: true)                  // turns 1
++        // A document with something in every section: crop, angle, turn, flip. Written **before** the
++        // tool opens, so the tool session's base *is* this document — that is what makes 「一次双击 =
++        // 一条历史」 measurable (a reset closes the session first, and a pending document change would
++        // become its own row, as it must: 072/077's rule).
++        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))   // turns 1
 +        XCTAssertTrue(loupe.flipHorizontal())                 // mirror
-+        loupe.cropTool.setStraighten(7.5)                     // slider angle (draft)
-+        session.applyEdit { $0.geometry.rotationDegrees = 7.5 }
-+        session.commitEdit(label: "角度", coalesce: false)
 +        session.applyEdit { model in
++            model.geometry.rotationDegrees = 7.5
 +            model.geometry.cropRect = CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9)
 +            model.geometry.aspectLock = .square
 +        }
 +        session.commitEdit(label: "比例", coalesce: false)
-+        loupe.cropTool.reseedDraftFromDocument()
++        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
++        let resets = PanelResets(session: session, loupe: loupe)
++        XCTAssertEqual(loupe.cropTool.draft.straighten, 7.5, accuracy: 1e-12,
++                       "草稿从文档播种：滑块角度 7.5°")
 +
 +        let turnsBefore = session.edit.geometry.quarterTurns
 +        let flipBefore = session.edit.geometry.flipHorizontal
@@ -2698,8 +2784,14 @@ index 0000000..555239f
 +        geometry = session.edit.geometry
 +        XCTAssertEqual(geometry.quarterTurns, 0, "082 §5: 旋转回 0°")
 +        XCTAssertEqual(geometry.straightenDegrees, angleBefore, accuracy: 1e-12, "082 §5: 旋转不动角度")
-+        XCTAssertEqual(geometry.cropRect, CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9),
-+                       "082 §5: 转回来的是同一块像素（rect 跟着转回去）")
++        let turnedBack = CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9)
++        for (lhs, rhs) in [(geometry.cropRect.left, turnedBack.left),
++                           (geometry.cropRect.top, turnedBack.top),
++                           (geometry.cropRect.right, turnedBack.right),
++                           (geometry.cropRect.bottom, turnedBack.bottom)] {
++            XCTAssertEqual(lhs, rhs, accuracy: 1e-9,
++                           "082 §5: 转回来的是同一块像素（rect 跟着转回去）\(geometry.cropRect)")
++        }
 +        XCTAssertEqual(session.history.snapshots.count, afterAngle + 2)
 +        XCTAssertFalse(resets.cropSection(.rotation), "已经 0° 就不写")
 +
@@ -2716,6 +2808,11 @@ index 0000000..555239f
 +        session.commitEdit(label: "角度", coalesce: false)
 +        _ = loupe.flipVertical()
 +        _ = loupe.rotateQuarter(clockwise: true)
++        // Flush the tool session's pending row first: a discrete geometry action inside a session
++        // closes it, so the *next* reset would otherwise commit two rows (the pending one + its own).
++        // That is 072/077's rule working as designed, not the reset's arithmetic.
++        session.endToolSession(label: "裁切与旋转")
++        session.beginToolSession("裁切", label: "裁切与旋转")
 +        let beforeTitle = session.history.snapshots.count
 +        XCTAssertTrue(resets.cropGeometry(), "082 §7: 双击卡标题 = 整卡复位")
 +        XCTAssertEqual(session.edit.geometry, .identity, "082 §7: 整卡回 identity")
@@ -2788,11 +2885,12 @@ index 0000000..555239f
 +    /// actual angle after a quarter turn.
 +    func testTheRealBarIsReadOnlyAndShowsTheActualAngle() throws {
 +        let editor = try CropUITestSupport.makeEditor(in: workDir)
-+        let loupe = editor.rootView.loupeController
++        let loupe = try XCTUnwrap(editor.rootView).loupeController
 +        defer { editor.window?.orderOut(nil) }
-+        XCTAssertTrue(loupe.beginCropTool())
++        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, editor.session))
 +        loupe.cropTool.setStraighten(1.5)
-+        XCTAssertTrue(loupe.rotateQuarter(clockwise: true))
++        loupe.rotateQuarter(clockwise: true)
++        XCTAssertEqual(loupe.quarterTurns, 1)
 +
 +        let bar = loupe.cropBar
 +        bar.sync()
@@ -2810,31 +2908,46 @@ index 0000000..555239f
 +    // MARK: - 7. 旧快捷键
 +
 +    /// ⌘[ / ⌘] still turn the picture by 90° (one snapshot each), and the card's badge follows.
++    ///
++    /// The two keys are **menu key equivalents** (`AppMenu` 变换 ▸ 逆时针/顺时针旋转 90°), so the
++    /// honest measurement is the shipped row: its `keyEquivalent`, the target AppKit dispatches to
++    /// (`EditorWindowController.rotateClockwiseAction`), and the document afterwards. A synthesised
++    /// `keyDown` on the canvas would prove nothing — that is not where the key is handled.
 +    func testTheQuarterTurnShortcutsStillWork() throws {
 +        let editor = try CropUITestSupport.makeEditor(in: workDir)
-+        let loupe = editor.rootView.loupeController
++        let loupe = try XCTUnwrap(editor.rootView).loupeController
 +        let session = editor.session
-+        let canvas = loupe.canvasView
 +        defer { editor.window?.orderOut(nil) }
 +        _ = loupe.view
 +        let historyBefore = session.history.snapshots.count
 +
-+        func press(_ characters: String) {
-+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command],
-+                                         timestamp: 0, windowNumber: canvas.window?.windowNumber ?? 0,
-+                                         context: nil, characters: characters,
-+                                         charactersIgnoringModifiers: characters,
-+                                         isARepeat: false, keyCode: 0)!
-+            canvas.keyDown(with: event)
++        func menuItem(_ title: String) -> NSMenuItem? {
++            var found: NSMenuItem?
++            func walk(_ menu: NSMenu) {
++                for item in menu.items {
++                    if item.title == title { found = item }
++                    if let sub = item.submenu { walk(sub) }
++                }
++            }
++            walk(MainMenu.build())
++            return found
 +        }
 +
-+        press("]")
++        let clockwise = try XCTUnwrap(menuItem("顺时针旋转 90°"), "082 §7: ⌘] 的菜单行不见了")
++        let counter = try XCTUnwrap(menuItem("逆时针旋转 90°"), "082 §7: ⌘[ 的菜单行不见了")
++        XCTAssertEqual(clockwise.keyEquivalent, "]", "082 §7: 顺时针 = ⌘]")
++        XCTAssertEqual(counter.keyEquivalent, "[", "082 §7: 逆时针 = ⌘[")
++        XCTAssertTrue(clockwise.keyEquivalentModifierMask.contains(.command))
++        XCTAssertTrue(counter.keyEquivalentModifierMask.contains(.command))
++        XCTAssertTrue(editor.validateMenuItem(clockwise), "有照片时 ⌘] 可用")
++
++        editor.rotateClockwiseAction(nil)
 +        print("082 §7 · ⌘] → quarterTurns \(session.edit.geometry.quarterTurns) · 徽标 "
 +              + "\(LoupeController.quarterTurnBadge(for: session.edit.geometry.quarterTurns))")
 +        XCTAssertEqual(session.edit.geometry.quarterTurns, 1, "082 §7: ⌘] = 顺时针 90°")
 +        XCTAssertEqual(LoupeController.quarterTurnBadge(for: session.edit.geometry.quarterTurns), "90°")
 +
-+        press("[")
++        editor.rotateCounterClockwiseAction(nil)
 +        XCTAssertEqual(session.edit.geometry.quarterTurns, 0, "082 §7: ⌘[ 转回来")
 +        XCTAssertEqual(session.history.snapshots.count, historyBefore + 2, "每一步一条历史")
 +        print("082 §7 · history \(historyBefore) → \(session.history.snapshots.count)")
@@ -2898,6 +3011,40 @@ index 0000000..555239f
 +        return predicate(panel)
 +    }
 +}
+diff --git a/Tests/PhotonsUITests/CropPermissionsTests.swift b/Tests/PhotonsUITests/CropPermissionsTests.swift
+index 372564d..5e13d7e 100644
+--- a/Tests/PhotonsUITests/CropPermissionsTests.swift
++++ b/Tests/PhotonsUITests/CropPermissionsTests.swift
+@@ -199,17 +199,26 @@ final class CropPermissionsTests: XCTestCase {
+         XCTAssertNotNil(pill.hitTest(NSPoint(x: pill.frame.midX, y: pill.frame.midY)),
+                         "and it is still a hit target inside its own pill")
+ 
++        // 082 (追加) — the pill still moves the camera, but a crop session's ceiling is
++        // 「裁切框恰好内接于画布」: a full-frame crop in this window stops at the fit level, so the
++        // numbers below are the *clamped* ones. That is a spec change, not a regression: §E4 said the
++        // pill must stay usable, and it is (mode moves to `.actual`, the readout is the real value).
++        let ceiling = try XCTUnwrap(loupe.cropZoomLimit(), "082: 裁切模式没有上限？")
+         let before = loupe.viewState
+         loupe.zoomFromSlider(to: 1)
+         let after = loupe.viewState
+         print("E4 · zoom pill in 裁切 mode: \(before.zoomLabel) → \(after.zoomLabel) "
+-              + "(mode \(after.mode.rawValue), zoom \(after.zoom))")
++              + "(mode \(after.mode.rawValue), zoom \(after.zoom)) · 上限 \(ceiling)")
+         XCTAssertEqual(after.mode, .actual, "the pill really moved the camera")
+-        XCTAssertEqual(after.zoom, 1, accuracy: 1e-12)
++        XCTAssertEqual(after.zoom, min(1, ceiling), accuracy: 1e-12,
++                       "082: 100% 的请求被钳在「框内接于画布」那一级")
+ 
+         // A 25 % stop through the same door, so it is not a one-off.
+         loupe.zoomFromSlider(to: 0.25)
+-        XCTAssertEqual(loupe.viewState.zoom, 0.25, accuracy: 1e-12)
++        XCTAssertEqual(loupe.viewState.zoom, min(0.25, ceiling), accuracy: 1e-12)
++        // …and the readout is the value the camera actually holds.
++        XCTAssertEqual(loupe.zoomSlider.labelText,
++                       LoupeViewState.percentLabel(of: loupe.viewState.zoom))
+         loupe.cancelCropTool()
+     }
+ 
 diff --git a/Tests/PhotonsUITests/CropToggleAccentTests.swift b/Tests/PhotonsUITests/CropToggleAccentTests.swift
 index c942530..4f5514b 100644
 --- a/Tests/PhotonsUITests/CropToggleAccentTests.swift

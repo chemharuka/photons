@@ -3466,10 +3466,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if inSession { session.endToolSession(label: "裁切与旋转") }
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-        guard turned else { return false }
+        guard turned else {
+            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+            return false
+        }
+        // **The row is committed before the crop session is reopened.** `commitEdit` answers `nil`
+        // inside a tool session (077: the session owns the next snapshot), so committing after the
+        // reopen wrote nothing — and the turn then lived only in memory until 应用, which is the
+        // 「点了一下没反应」 a crop session showed (082 measured it: `quarterTurns` stayed 0 and the
+        // history gained no row). Writing the row first is also what P0-10 promised: one press,
+        // one snapshot, with or without the frame up.
         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
-                                          coalesce: false)
+                                           coalesce: false)
+        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
         return committed
