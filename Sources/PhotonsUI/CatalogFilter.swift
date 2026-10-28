@@ -159,7 +159,11 @@ public struct CatalogFilter: Equatable, Sendable {
 
     /// The one place the bar's state becomes a query. `folders` comes from the source tree, which is
     /// why it is a parameter and not a field: the tree owns it, this only folds it in.
-    public func assetFilter(limit: Int = 200_000, folders: [FolderSelection] = []) -> AssetFilter {
+    ///
+    /// `albumIds` (078 B10) is a parameter for the same reason: the 相册 section owns "which album is
+    /// open", the bar owns "how it is narrowed", and the query is their AND.
+    public func assetFilter(limit: Int = 200_000, folders: [FolderSelection] = [],
+                            albumIds: [String] = []) -> AssetFilter {
         AssetFilter(ratingAtLeast: ratingAtLeast,
                     cameraKey: cameraKey,
                     includeDeleted: false,
@@ -167,7 +171,8 @@ public struct CatalogFilter: Equatable, Sendable {
                     flagEquals: flag,
                     colorLabelEquals: colorLabel,
                     folders: folders,
-                    criteria: criteria)
+                    criteria: criteria,
+                    albumIds: albumIds)
     }
 
     public var isActive: Bool {

@@ -396,4 +396,48 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(try catalog.stats().deleted, 1)
         XCTAssertNotNil(try catalog.asset(id: victim.id), "the row itself is kept")
     }
+
+    // MARK: - albums（078 B10）
+
+    /// 相册的两张表从 v1 就建好了，而**schema 就说了两件本文档必须保住的事**：
+    ///
+    /// * `album_assets` 的主键是 `(album_id, asset_id)` —— 一张照片可以属于多个相册，这是设计，
+    ///   不是要防的重复；
+    /// * `album_assets.asset_id` 的外键指向 `assets` —— 删照片时成员关系跟着走，而 `albums` 没有
+    ///   任何指向 `assets` 的外键 —— 删相册永远碰不到照片。
+    ///
+    /// 这两条是"删相册不删照片"在 schema 层的证据；行为层的断言在 `AlbumCRUDTests`。
+    func testAlbumSchemaIsTheMultiMembershipShape() throws {
+        let catalog = try newLibrary()
+        let dir = try sourceDir()
+        _ = try makeJPEG(at: dir.appendingPathComponent("1.jpg"), rating: 0, label: "None",
+                         keywords: [], seed: 71)
+        _ = try ImportService(catalog: catalog).run(sources: [dir], options: ImportOptions())
+        let asset = try XCTUnwrap(try catalog.assets(AssetFilter()).first)
+
+        let columns = try catalog.dbQueue.read { db in
+            try Row.fetchAll(db, sql: "PRAGMA table_info(album_assets)").map { ($0["name"] as String, $0["pk"] as Int) }
+        }
+        XCTAssertEqual(columns.filter { $0.1 > 0 }.map(\.0).sorted(), ["album_id", "asset_id"],
+                       "主键是 (album_id, asset_id)：同一张照片可以在多个相册里")
+
+        // 同一张照片进两个相册，两张表都接受，一行不多。
+        let one = Album(name: "A")
+        let two = Album(name: "B")
+        try catalog.dbQueue.write { db in
+            try one.insert(db)
+            try two.insert(db)
+            for album in [one, two] {
+                try db.execute(sql: "INSERT INTO album_assets(album_id, asset_id, position) VALUES (?, ?, 0)",
+                               arguments: [album.id, asset.id])
+            }
+        }
+        XCTAssertEqual(try catalog.albumMemberships(assetIDs: [asset.id])[asset.id]?.count, 2)
+
+        // 删照片：成员关系跟着走（显式 DELETE + 外键 CASCADE 两条路都指向同一结果），相册留着。
+        let report = try catalog.deleteAssets(ids: [asset.id])
+        XCTAssertEqual(report.albumEntries, 2)
+        XCTAssertEqual(try catalog.albums().map(\.name), ["A", "B"], "删照片不删相册")
+        XCTAssertEqual(try catalog.albums().map(\.count), [0, 0])
+    }
 }

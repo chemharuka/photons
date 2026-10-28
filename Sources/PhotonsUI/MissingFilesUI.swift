@@ -126,21 +126,47 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
         public var canFindLost: Bool { hasSelection && missingCount > 0 }
     }
 
+    /// 右键菜单里「加入相册 ▸」的一个条目（078 B10）。
+    ///
+    /// `containsAll` 是「选中的每一张都已经在这个相册里」—— 用来画勾，也用来决定「移出相册 ▸」
+    /// 列出哪些相册：没包含就移出它，那个菜单项什么都不做。
+    public struct AlbumItem: Equatable, Sendable {
+        public var id: String
+        public var name: String
+        public var containsAll: Bool
+
+        public init(id: String, name: String, containsAll: Bool = false) {
+            self.id = id
+            self.name = name
+            self.containsAll = containsAll
+        }
+    }
+
     public let menu = NSMenu()
 
     /// Selection as of the last `update(...)`; both actions apply to the **missing** entries only.
     public private(set) var state = State()
     public private(set) var targetIDs: [String] = []
+    /// The whole selection as of the last `update(...)` —— 相册动作作用于它，不是只作用于缺失文件。
+    public private(set) var selectedIDs: [String] = []
 
     /// Run after the user confirms. `Ask` is the sheet's answer, so the decision is made once, here.
     public var onDelete: (([String]) -> Void)?
     public var onFindLost: (([String]) -> Void)?
+    /// 相册动作。两个都拿「整批选中 id + 相册 id」：一次点击一次写入，不是每张一次。
+    public var onAddToAlbum: (([String], String) -> Void)?
+    public var onRemoveFromAlbum: (([String], String) -> Void)?
+    /// 相册清单 + 「选中的照片是否全在里面」，每次菜单打开前问一次。
+    public var albumsProvider: (([String]) -> [AlbumItem])?
     /// Asked immediately before the menu opens, so the owner can fold the clicked item into the
     /// selection (a right-click on an unselected cell means *that* cell).
     public var willOpen: (() -> Void)?
 
     public private(set) var deleteItem: NSMenuItem!
     public private(set) var findItem: NSMenuItem!
+    /// 「加入相册 ▸」与「移出相册 ▸」的父项（没有相册时禁用，不是隐藏：菜单位置稳定）。
+    public private(set) var addToAlbumItem: NSMenuItem!
+    public private(set) var removeFromAlbumItem: NSMenuItem!
 
     public override init() {
         super.init()
@@ -158,16 +184,28 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
         findItem.target = self
         findItem.isEnabled = false
         menu.addItem(findItem)
+
+        menu.addItem(.separator())
+        addToAlbumItem = NSMenuItem(title: "加入相册", action: nil, keyEquivalent: "")
+        addToAlbumItem.submenu = NSMenu(title: "加入相册")
+        addToAlbumItem.isEnabled = false
+        menu.addItem(addToAlbumItem)
+
+        removeFromAlbumItem = NSMenuItem(title: "移出相册", action: nil, keyEquivalent: "")
+        removeFromAlbumItem.submenu = NSMenu(title: "移出相册")
+        removeFromAlbumItem.isEnabled = false
+        menu.addItem(removeFromAlbumItem)
     }
 
     /// Fold one refresh of the selection into the menu. `missingIDs` is the missing subset, in
     /// library order, so the sheet's count and the action's targets are the same list.
     @discardableResult
-    public func update(selectedIDs: [String], missingIDs: [String]) -> State {
-        let selected = Set(selectedIDs)
+    public func update(selectedIDs ids: [String], missingIDs: [String]) -> State {
+        let selected = Set(ids)
         let targets = missingIDs.filter { selected.contains($0) }
         state = AssetContextMenu.state(hasSelection: !selected.isEmpty, missingCount: targets.count)
         targetIDs = targets
+        selectedIDs = ids
         deleteItem.isEnabled = state.canDelete
         findItem.isEnabled = state.canFindLost
         return state
@@ -178,8 +216,42 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
         State(hasSelection: hasSelection, missingCount: max(0, missingCount))
     }
 
+    /// 相册清单，纯函数：`albums` 是左栏那一份，`memberships` 是 `album_assets` 的一行行查出来的。
+    /// 测试拿它验「两个相册都在菜单里、照片在哪个里面带勾」。
+    public static func albumItems(albums: [AlbumSummary], memberships: [String: [String]],
+                                  selectedIDs: [String]) -> [AlbumItem] {
+        albums.map { album in
+            let all = !selectedIDs.isEmpty && selectedIDs.allSatisfy { ids in
+                memberships[ids]?.contains(album.id) == true
+            }
+            return AlbumItem(id: album.id, name: album.name, containsAll: all)
+        }
+    }
+
     public func menuNeedsUpdate(_ menu: NSMenu) {
         willOpen?()
+        guard menu === self.menu else { return }
+        let albums = albumsProvider?(selectedIDs) ?? []
+        addToAlbumItem.submenu?.removeAllItems()
+        removeFromAlbumItem.submenu?.removeAllItems()
+        for album in albums {
+            let add = NSMenuItem(title: album.name, action: #selector(addPressed(_:)), keyEquivalent: "")
+            add.target = self
+            add.representedObject = album.id
+            add.state = album.containsAll ? .on : .off
+            add.isEnabled = !selectedIDs.isEmpty
+            addToAlbumItem.submenu?.addItem(add)
+        }
+        for album in albums where album.containsAll {
+            let remove = NSMenuItem(title: album.name, action: #selector(removePressed(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = album.id
+            remove.isEnabled = !selectedIDs.isEmpty
+            removeFromAlbumItem.submenu?.addItem(remove)
+        }
+        addToAlbumItem.isEnabled = !selectedIDs.isEmpty && !albums.isEmpty
+        removeFromAlbumItem.isEnabled = !selectedIDs.isEmpty
+            && !(removeFromAlbumItem.submenu?.items.isEmpty ?? true)
     }
 
     @objc private func deletePressed() {
@@ -190,6 +262,16 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
     @objc private func findPressed() {
         guard !targetIDs.isEmpty else { return }
         onFindLost?(targetIDs)
+    }
+
+    @objc private func addPressed(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String, !selectedIDs.isEmpty else { return }
+        onAddToAlbum?(selectedIDs, albumID)
+    }
+
+    @objc private func removePressed(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String, !selectedIDs.isEmpty else { return }
+        onRemoveFromAlbum?(selectedIDs, albumID)
     }
 }
 

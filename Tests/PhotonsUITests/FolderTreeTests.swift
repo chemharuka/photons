@@ -143,14 +143,19 @@ final class FolderTreeTests: XCTestCase {
 
     // MARK: shape
 
-    /// Default state: 全部照片 is expanded, the root is the second level, its subfolders stay closed.
+    /// Default state: 相册 section (empty), 全部照片 expanded, the root the second level, its
+    /// subfolders closed. 相册 comes first: it is the section a returning user looks at, and 文件夹
+    /// below it is the browse-from-disk path (078 B10).
     func testTheTreeOpensAsAllPhotosAndOneRoot() {
-        XCTAssertEqual(tree.map(\.title), ["全部照片", "shoot"], "levels: \(tree.map { ($0.title, $0.level) })")
-        XCTAssertEqual(tree.map(\.level), [0, 1], "the root sits one level under 全部照片")
-        XCTAssertEqual(tree.map(\.detail), ["4", "4"], "the library holds four, the root holds four")
-        XCTAssertTrue(tree[0].isAllPhotos)
-        XCTAssertNil(tree[0].rootID)
-        XCTAssertEqual(tree[1].rootID, root.id)
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot"],
+                       "levels: \(tree.map { ($0.title, $0.level) })")
+        XCTAssertEqual(tree.map(\.level), [0, 0, 1], "the root sits one level under 全部照片")
+        XCTAssertEqual(tree.map(\.detail), ["", "4", "4"],
+                       "the library holds four, the root holds four; an empty 相册 section carries no number")
+        XCTAssertNil(tree[0].albumID, "the section header is not an album")
+        XCTAssertTrue(tree[1].isAllPhotos)
+        XCTAssertNil(tree[1].rootID)
+        XCTAssertEqual(tree[2].rootID, root.id)
 
         // Subfolders are collapsed by default — a library with 40 of them must not open as a wall.
         XCTAssertFalse(tree.contains { $0.path == "day2" }, "day2 is hidden until the root is opened")
@@ -160,21 +165,21 @@ final class FolderTreeTests: XCTestCase {
     /// Expand the root, then `day2`: the nesting is `全部照片 → shoot → day2 → day2/sub`.
     func testExpandingTheTreeShowsTheNestedFolders() {
         controller.setFolderExpanded(rootID: root.id, path: "", true)
-        XCTAssertEqual(tree.map(\.title), ["全部照片", "shoot", "day2", "day2x"])
-        XCTAssertEqual(tree.map(\.level), [0, 1, 2, 2])
-        XCTAssertEqual(tree.map(\.detail), ["4", "4", "2", "1"],
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot", "day2", "day2x"])
+        XCTAssertEqual(tree.map(\.level), [0, 0, 1, 2, 2])
+        XCTAssertEqual(tree.map(\.detail), ["", "4", "4", "2", "1"],
                        "day2 counts b + the nested c; day2x counts only d")
 
         controller.setFolderExpanded(rootID: root.id, path: "day2", true)
-        XCTAssertEqual(tree.map(\.title), ["全部照片", "shoot", "day2", "sub", "day2x"])
-        XCTAssertEqual(tree.map(\.level), [0, 1, 2, 3, 2], "sub is one level deeper than day2")
-        XCTAssertEqual(tree.map(\.detail), ["4", "4", "2", "1", "1"])
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot", "day2", "sub", "day2x"])
+        XCTAssertEqual(tree.map(\.level), [0, 0, 1, 2, 3, 2], "sub is one level deeper than day2")
+        XCTAssertEqual(tree.map(\.detail), ["", "4", "4", "2", "1", "1"])
         XCTAssertEqual(tree.first { $0.title == "sub" }?.path, "day2/sub")
         XCTAssertEqual(tree.first { $0.title == "sub" }?.rootID, root.id)
 
         // Collapsing again hides the subtree but keeps the row.
         controller.setFolderExpanded(rootID: root.id, path: "day2", false)
-        XCTAssertEqual(tree.map(\.title), ["全部照片", "shoot", "day2", "day2x"])
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot", "day2", "day2x"])
     }
 
     // MARK: filter
@@ -208,7 +213,8 @@ final class FolderTreeTests: XCTestCase {
         XCTAssertEqual(session.selectedFolderPath, "")
         XCTAssertEqual(session.assets.count, 4)
         XCTAssertEqual(controller.photoRowCount, 4)
-        XCTAssertEqual(controller.folderTreeRows.first?.title, "全部照片")
+        XCTAssertEqual(controller.selectedFolderKeys, ["*|"], "the highlight is back on 全部照片")
+        XCTAssertNil(session.selectedAlbumID)
     }
 
     /// The selection survives a reload: rating a photo re-runs the query, and the folder the user
@@ -448,5 +454,202 @@ final class FolderTreeTests: XCTestCase {
         // A short panel keeps the floor (the photo list gives way, the tree does not disappear).
         XCTAssertGreaterThanOrEqual(WorkspaceLayout.browserTreeHeight(rowCount: 100, panelHeight: 400),
                                     WorkspaceLayout.browserTreeMinHeight)
+    }
+
+    // MARK: 相册（078 B10）—— 左栏的第二个区段
+    //
+    // 验收要的四件事都在这一段：左栏的数量与库一致、两个相册可以共享一张照片、点相册只画成员、
+    // 删相册不删照片（也不删别的东西）。
+
+    private func assetID(_ filename: String) throws -> String {
+        try XCTUnwrap(session.assets.first { $0.filename == filename }?.id, "no asset \(filename)")
+    }
+
+    /// 相册段的第一行是标题，第二行起是相册，数字来自 `album_assets`。标题行本身没有数字。
+    func testTheAlbumsSectionListsEachAlbumWithItsMemberCount() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        try session.addPhotos([try assetID("a.dng"), try assetID("b.dng"), try assetID("c.dng")],
+                              toAlbum: trip.id)
+        controller.refresh()
+
+        XCTAssertTrue(controller.albumSectionExpanded, "相册段默认展开")
+        XCTAssertEqual(tree.map(\.title), ["相册", "旅行", "全部照片", "shoot"])
+        XCTAssertEqual(tree.map(\.level), [0, 1, 0, 1], "album rows sit under the section, like roots under 全部照片")
+        XCTAssertEqual(tree.map(\.detail), ["1", "3", "4", "4"],
+                       "1 album · 3 members · the library's 4 · the root's 4")
+        XCTAssertEqual(tree.first { $0.title == "旅行" }?.albumID, trip.id)
+        XCTAssertFalse(controller.folderTreeRows.contains { $0.isAllPhotos && $0.level > 0 })
+
+        // 收起标题行 → 相册行消失，标题行留下（它仍然能被右键「新建相册」）。
+        controller.setAlbumSectionExpanded(false)
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot"])
+        controller.setAlbumSectionExpanded(true)
+        XCTAssertEqual(tree.map(\.title), ["相册", "旅行", "全部照片", "shoot"])
+    }
+
+    /// 点相册 = 网格只画成员（验收原句）。高亮落在相册行上，文件夹一支必须已经放开。
+    func testClickingAnAlbumFiltersTheGridToItsMembers() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        let members = [try assetID("a.dng"), try assetID("b.dng"), try assetID("c.dng")]
+        try session.addPhotos(members, toAlbum: trip.id)
+        controller.refresh()
+
+        controller.selectAlbumRow(trip.id)
+
+        XCTAssertEqual(session.selectedAlbumID, trip.id)
+        XCTAssertTrue(session.selectedFolders.isEmpty, "相册与文件夹不是两个同时生效的范围")
+        XCTAssertEqual(Set(session.assets.map(\.id)), Set(members))
+        XCTAssertEqual(controller.photoRowCount, 3, "照片列表画的就是这三个")
+        XCTAssertEqual(controller.selectedFolderKeys, ["album|\(trip.id)"],
+                       "高亮在相册行上，不在「全部照片」上")
+
+        // 再点一次同一个相册：不重跑、不闪（模型相等即返回）。
+        controller.selectAlbumRow(trip.id)
+        XCTAssertEqual(controller.photoRowCount, 3)
+    }
+
+    /// 同一张照片属于两个相册；两个相册各自的成员数独立，点谁就是谁。
+    func testTwoAlbumsShareAPhotoAndKeepIndependentCounts() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        let picks = try session.createAlbum(named: "精选")
+        let a = try assetID("a.dng"), b = try assetID("b.dng")
+        try session.addPhotos([a, b, try assetID("c.dng")], toAlbum: trip.id)
+        try session.addPhotos([a, b], toAlbum: picks.id)
+        controller.refresh()
+
+        XCTAssertEqual(tree.filter { $0.albumID != nil }.map(\.detail), ["3", "2"])
+        XCTAssertEqual(session.albums.map(\.count), [3, 2])
+        // 库里 5 条关系、4 张照片 —— 共享的那张是两条关系。
+        let catalog = try Catalog.open(at: library)
+        XCTAssertEqual(try catalog.rowCount("album_assets", assetIDs: [a], keyColumn: "asset_id"), 2)
+
+        controller.selectAlbumRow(trip.id)
+        XCTAssertEqual(Set(session.assets.map(\.id)), [try assetID("a.dng"), try assetID("b.dng"),
+                                                       try assetID("c.dng")])
+        controller.selectAlbumRow(picks.id)
+        XCTAssertEqual(Set(session.assets.map(\.id)), [a, b])
+    }
+
+    /// 左栏只有一个「范围」：点文件夹就离开相册，点「全部照片」两样都清。
+    func testAlbumAndFolderAreOneScope() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        try session.addPhotos([try assetID("a.dng")], toAlbum: trip.id)
+        controller.refresh()
+
+        controller.selectAlbumRow(trip.id)
+        XCTAssertEqual(session.assets.count, 1)
+
+        controller.setFolderExpanded(rootID: root.id, path: "", true)
+        controller.selectFolderRow(rootID: root.id, path: "day2")
+        XCTAssertNil(session.selectedAlbumID, "点文件夹就是离开相册")
+        XCTAssertEqual(Set(session.assets.map(\.filename)), ["b.dng", "c.dng"])
+
+        controller.selectAlbumRow(trip.id)
+        XCTAssertTrue(session.selectedFolders.isEmpty, "点相册就是离开文件夹")
+
+        controller.selectFolderRow(rootID: nil, path: "")
+        XCTAssertNil(session.selectedAlbumID)
+        XCTAssertEqual(session.assets.count, 4)
+        XCTAssertEqual(controller.selectedFolderKeys, ["*|"])
+    }
+
+    /// 标题行不是范围：点它只改展开状态，网格不动。
+    func testClickingTheSectionHeaderDoesNotChangeTheGrid() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        try session.addPhotos([try assetID("a.dng")], toAlbum: trip.id)
+        controller.refresh()
+
+        let outline = try outlineView()
+        let groupRow = try XCTUnwrap(tree.firstIndex { $0.albumID == nil && $0.title == "相册" })
+        outline.selectRowIndexes(IndexSet(integer: groupRow), byExtendingSelection: false)
+
+        XCTAssertEqual(session.assets.count, 4, "标题行不是相册，不改变范围")
+        XCTAssertNil(session.selectedAlbumID)
+        XCTAssertEqual(controller.selectedFolderKeys, ["*|"], "高亮还给模型，不留在一个不是范围的标题行上")
+    }
+
+    /// 改名：行跟着变，成员数与网格都不动。
+    func testRenamingAnAlbumRenamesTheRowOnly() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        let a = try assetID("a.dng")
+        try session.addPhotos([a], toAlbum: trip.id)
+        controller.refresh()
+        controller.selectAlbumRow(trip.id)
+
+        XCTAssertTrue(controller.renameAlbum(trip.id, to: "旅行 2026"))
+        XCTAssertEqual(session.albums.map(\.name), ["旅行 2026"])
+        XCTAssertEqual(tree.first { $0.albumID == trip.id }?.title, "旅行 2026")
+        XCTAssertEqual(tree.first { $0.albumID == trip.id }?.detail, "1")
+        XCTAssertEqual(session.assets.map(\.id), [a], "改名不改成员，也不改网格")
+
+        // 重名被拒绝，且行还是旧名字。
+        _ = try session.createAlbum(named: "精选")
+        XCTAssertFalse(controller.renameAlbum(trip.id, to: "精选"))
+        XCTAssertEqual(controller.lastAlbumError, AlbumError.duplicateName("精选").localizedDescription)
+        XCTAssertEqual(tree.first { $0.albumID == trip.id }?.title, "旅行 2026")
+    }
+
+    /// 删相册：照片一张不少，库还在，左栏那一行消失，网格回到全库。
+    func testDeletingAnAlbumKeepsEveryPhoto() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        try session.addPhotos([try assetID("a.dng"), try assetID("b.dng")], toAlbum: trip.id)
+        controller.refresh()
+        controller.selectAlbumRow(trip.id)
+        XCTAssertEqual(session.assets.count, 2)
+        let photosBefore = session.stats?.total ?? 0
+
+        XCTAssertTrue(controller.deleteAlbum(trip.id))
+
+        XCTAssertNil(session.selectedAlbumID, "删掉的是正在看的相册 → 回到全库")
+        XCTAssertEqual(session.assets.count, 4, "网格回到整库")
+        XCTAssertEqual(controller.photoRowCount, 4)
+        XCTAssertEqual(tree.map(\.title), ["相册", "全部照片", "shoot"])
+        XCTAssertFalse(tree.contains { $0.albumID == trip.id })
+
+        // 库本身：照片行数与统计都没变。
+        let catalog = try Catalog.open(at: library)
+        XCTAssertEqual(try catalog.assets(AssetFilter(limit: 100)).count, 4)
+        XCTAssertEqual(try catalog.stats().total, photosBefore)
+        XCTAssertTrue(try catalog.albums().isEmpty)
+    }
+
+    /// 菜单路径：选中一批 → 加入相册 → 计数 +1 批；移出 → 计数回去。照片始终 4 张。
+    func testAddingAndRemovingTheSelectionThroughTheMenuPath() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        controller.refresh()
+
+        session.setSelection([try assetID("a.dng"), try assetID("b.dng")], anchor: try assetID("a.dng"))
+        XCTAssertEqual(controller.addSelectedPhotos(toAlbum: trip.id), 2)
+        XCTAssertEqual(session.albums.first?.count, 2)
+        XCTAssertEqual(tree.first { $0.albumID == trip.id }?.detail, "2")
+
+        // 重复加入是 0（已经在里面），不是 2。
+        XCTAssertEqual(controller.addSelectedPhotos(toAlbum: trip.id), 0)
+        XCTAssertEqual(session.albums.first?.count, 2)
+
+        XCTAssertEqual(controller.removeSelectedPhotos(fromAlbum: trip.id), 2)
+        XCTAssertEqual(session.albums.first?.count, 0)
+        XCTAssertEqual(tree.first { $0.albumID == trip.id }?.detail, "0")
+        XCTAssertEqual(session.stats?.total, 4, "加入/移出都不碰照片")
+    }
+
+    /// 相册是**库属性**：这一整段操作之后文档、历史、保存计数都不该动一下。
+    func testAlbumWritesNeverTouchTheDocument() throws {
+        let trip = try session.createAlbum(named: "旅行")
+        let editRevision = session.editRevision
+        let historyRows = session.history.rows.count
+        let persistCount = session.persistCount
+        let loadedEdit = session.loadedEditAssetID
+
+        try session.addPhotos([try assetID("a.dng")], toAlbum: trip.id)
+        try session.renameAlbum(id: trip.id, to: "旅行 2026")
+        try session.removePhotos([try assetID("a.dng")], fromAlbum: trip.id)
+        try session.deleteAlbum(id: trip.id)
+
+        XCTAssertEqual(session.editRevision, editRevision)
+        XCTAssertEqual(session.history.rows.count, historyRows)
+        XCTAssertEqual(session.persistCount, persistCount)
+        XCTAssertEqual(session.loadedEditAssetID, loadedEdit)
+        XCTAssertFalse(session.canUndo, "相册操作不进 ⌘Z 栈")
     }
 }

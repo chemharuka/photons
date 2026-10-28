@@ -14,7 +14,7 @@ import PhotonsCatalog
 /// `ThumbnailProvider.shared(for:)` the grid and the filmstrip use (one LRU, one single-flight map,
 /// 006 §4), keyed by the tier a 34 pt cell implies, and cancel whatever scrolls away.
 public final class BrowserPaneController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-                                          NSOutlineViewDataSource, NSOutlineViewDelegate {
+                                          NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
 
     /// Side of the square preview in a photo row, in points. It is the only input to the tier
     /// policy (`ThumbnailProvider.tier(cellEdgePoints:)` → `t256` at 1× and 2×).
@@ -37,13 +37,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private weak var session: CatalogSession?
     private var isApplyingModel = false
 
-    /// The source tree: 全部照片 → each source root → the folders `rel_path` implies.
+    /// The source tree: 相册 → 全部照片 → each source root → the folders `rel_path` implies.
     ///
     /// A class, not a struct, because `NSOutlineView` identifies items by object identity; the tree is
     /// rebuilt from the session on every `refresh()` (a 10k-photo library has few folders, and the
     /// nodes carry only counts, never pixels).
     final class FolderTreeItem: NSObject {
-        enum Kind { case allPhotos, root, folder }
+        /// 相册（078 B10）与文件夹是**同一层的两个区段**：`albumGroup` 是一个可展开的标题行，
+        /// `album` 是它下面的相册行。两者都不带 `rootID`/`path` —— 相册不是磁盘上的位置，
+        /// 把它硬塞进 `(rootId, path)` 会让「点相册」走成分支过滤。
+        enum Kind { case allPhotos, root, folder, albumGroup, album }
         let kind: Kind
         let title: String
         /// The right-aligned count.
@@ -53,23 +56,45 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         /// Path relative to the root; `""` is the root itself (and 全部照片).
         let path: String
         let status: String?
+        /// 相册行的 id（`.album`），其余为 nil。
+        let albumID: String?
         var children: [FolderTreeItem] = []
 
-        init(kind: Kind, title: String, detail: String, rootID: String?, path: String, status: String?) {
+        init(kind: Kind, title: String, detail: String, rootID: String?, path: String, status: String?,
+             albumID: String? = nil) {
             self.kind = kind
             self.title = title
             self.detail = detail
             self.rootID = rootID
             self.path = path
             self.status = status
+            self.albumID = albumID
         }
 
         var isAllPhotos: Bool { kind == .allPhotos }
+        var isAlbum: Bool { kind == .album }
+        var isAlbumGroup: Bool { kind == .albumGroup }
         var isExpandable: Bool { !children.isEmpty }
         /// Stable across a rebuild — used to keep the user's expansion state over `reloadData()`.
-        var key: String { "\(rootID ?? "*")|\(path)" }
-        /// SF Symbol: a folder for roots and subfolders, the library glyph for 全部照片.
-        var symbolName: String { kind == .allPhotos ? "photo.on.rectangle" : "folder" }
+        /// 相册行的键带自己的前缀：`(nil, "")` 是「全部照片」，相册行若复用同一套键就会在
+        /// `expandedKeys` 里撞上它，展开一个相册等于展开了整个文件夹树。
+        var key: String {
+            switch kind {
+            case .albumGroup: return "albums|"
+            case .album: return "album|\(albumID ?? "")"
+            default: return "\(rootID ?? "*")|\(path)"
+            }
+        }
+        /// SF Symbol: a folder for roots and subfolders, the library glyph for 全部照片,
+        /// a photo stack for the 相册 section and each album in it (078 B10).
+        var symbolName: String {
+            switch kind {
+            case .allPhotos: return "photo.on.rectangle"
+            case .albumGroup: return "rectangle.stack"
+            case .album: return "rectangle.stack.badge.play"
+            case .root, .folder: return "folder"
+            }
+        }
     }
 
     /// One visible row of the tree, in outline order. What the shape tests read.
@@ -80,10 +105,19 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         public var rootID: String?
         public var path: String
         public var isAllPhotos: Bool
+        /// 相册行的 id（`.album` 行），其余行 nil —— 「点这一行」在测试里靠它指名相册。
+        public var albumID: String?
     }
 
     private var treeRoot: FolderTreeItem?
     private var allPhotosItem: FolderTreeItem?
+    /// 「相册」区段的标题行（078 B10）。与 `treeRoot` 平级：左栏是两个区段，不是一个。
+    private var albumGroupItem: FolderTreeItem?
+    /// Top-level rows, in draw order: 相册, then 全部照片（它下面才是各个 root 与文件夹）。
+    /// `NSOutlineView` 只认这个数组和每个 item 的 `children`，所以「加一个区段」= 往这里加一行。
+    private var sections: [FolderTreeItem] = []
+    /// 相册段默认展开（相册通常是个位数，而且要两下点击才能看到内容等于藏起来）；用户收起过就记住。
+    private var albumsExpanded = true
     /// Expansion the user expressed, so a `reload()` does not collapse the folder they opened.
     private var expandedKeys: Set<String> = []
 
@@ -133,6 +167,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
         configure(table: photosTable, rowHeight: WorkspaceLayout.browserRowHeight, identifier: "PhotoRowCell")
         configureOutline()
+        configureAlbumMenu()
         photosTable.allowsMultipleSelection = true
 
         // 右键：the same two verbs the grid and the filmstrip offer, on the same menu object. The
@@ -140,6 +175,18 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         contextMenu.willOpen = { [weak self] in self?.prepareContextMenu() }
         contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        // 照片列表也是「菜单入口」的一部分：选中几张 → 右键 → 加入相册（078 B10）。
+        contextMenu.albumsProvider = { [weak self] ids in
+            AlbumMenuSupport.items(session: self?.session, ids: ids)
+        }
+        contextMenu.onAddToAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.add(ids, albumID: albumID, session: self?.session)
+            self?.refresh()
+        }
+        contextMenu.onRemoveFromAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.remove(ids, albumID: albumID, session: self?.session)
+            self?.refresh()
+        }
         photosTable.menu = contextMenu.menu
 
         sourcesScroll.documentView = sourcesOutline
@@ -282,6 +329,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             _ = session.anchorID
             _ = session.stats
             _ = session.metadataRevision
+            // 相册（078 B10）：左栏的「相册」段与它每一行的数字跟着库走 —— 建/改名/删/加入/移出
+            // 都只 bump 这一个值，所以视图不需要知道是哪种操作。
+            _ = session.albums.count
+            _ = session.selectedAlbumID
+            _ = session.albumRevision
             // 排序（网格/胶片条/左侧栏同源）：这一行让左侧照片行跟着换序，见 `PhotoSortOrder`。
             _ = session.sortOrder
         }, { [weak self] in
@@ -331,7 +383,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         for row in 0..<sourcesOutline.numberOfRows {
             if let item = sourcesOutline.item(atRow: row) as? FolderTreeItem,
                sourcesOutline.isItemExpanded(item) {
-                expandedKeys.insert(item.key)
+                if item.isAlbumGroup { albumsExpanded = true } else { expandedKeys.insert(item.key) }
             }
         }
         let all = FolderTreeItem(kind: .allPhotos, title: "全部照片",
@@ -357,8 +409,20 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             }
             return rootItem
         }
+        // 「相册」区段（078 B10）：标题行 + 一个相册一行，数字直接来自 `session.albums`
+        // —— 也就是 `album_assets` 里数出来的那一份。左栏的数字和点开后的行数不可能不一致，
+        // 因为两者都不在这一层算。
+        let group = FolderTreeItem(kind: .albumGroup, title: "相册",
+                                   detail: session.albums.isEmpty ? "" : "\(session.albums.count)",
+                                   rootID: nil, path: "", status: nil)
+        group.children = session.albums.map { album in
+            FolderTreeItem(kind: .album, title: album.name, detail: "\(album.count)",
+                           rootID: nil, path: "", status: nil, albumID: album.id)
+        }
         treeRoot = all
         allPhotosItem = all
+        albumGroupItem = group
+        sections = [group, all]
     }
 
     private func reloadTree() {
@@ -368,6 +432,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         if let all = allPhotosItem {
             sourcesOutline.expandItem(all)
             expandedKeys.insert(all.key)
+        }
+        // 相册段默认展开（用户可以收起，收起状态记在 `albumsExpanded` 里）。
+        if let group = albumGroupItem, albumsExpanded, group.isExpandable,
+           !sourcesOutline.isItemExpanded(group) {
+            sourcesOutline.expandItem(group)
         }
         // Then whatever the user had open: a `reload()` (an import, a rating, a click) must not
         // collapse the folder they just navigated into. Sorted by depth so a parent exists first.
@@ -380,11 +449,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     private func allItems() -> [FolderTreeItem] {
-        guard let root = treeRoot else { return [] }
-        var out: [FolderTreeItem] = [root]
-        var stack = root.children
+        var out: [FolderTreeItem] = sections
+        var stack = sections
         while let item = stack.popLast() {
-            out.append(item)
+            out.append(contentsOf: item.children)
             stack.append(contentsOf: item.children)
         }
         return out
@@ -392,7 +460,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     private func item(rootID: String?, path: String) -> FolderTreeItem? {
         let wanted = rootID == nil ? "" : (AssetFilter.normalizedFolderPath(path) ?? "")
-        return allItems().first { $0.rootID == rootID && $0.path == wanted }
+        // 相册行与「全部照片」都是 `(nil, "")`；不排除的话 `selectFolderRow(rootID: nil)` 会
+        // 把高亮装到某个相册上（而网格是整库）—— 这正是"左栏说 A、网格画 B"的生成方式。
+        return allItems().first {
+            !$0.isAlbum && !$0.isAlbumGroup && $0.rootID == rootID && $0.path == wanted
+        }
     }
 
     private func parentItem(of item: FolderTreeItem) -> FolderTreeItem? {
@@ -423,7 +495,15 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private func selectSourceItem() {
         guard let session else { return }
         var rows = IndexSet()
-        if session.selectedFolders.isEmpty {
+        if let albumID = session.selectedAlbumID, let album = item(albumID: albumID) {
+            // 相册高亮：模型说在看哪个相册，左栏就把它点亮（并确保它所在的段是展开的）。
+            if let group = albumGroupItem, !sourcesOutline.isItemExpanded(group) {
+                sourcesOutline.expandItem(group)
+                albumsExpanded = true
+            }
+            let row = sourcesOutline.row(forItem: album)
+            if row >= 0 { rows.insert(row) }
+        } else if session.selectedFolders.isEmpty {
             if let all = allPhotosItem, sourcesOutline.row(forItem: all) >= 0 {
                 rows.insert(sourcesOutline.row(forItem: all))
             }
@@ -442,6 +522,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         isApplyingModel = true
         sourcesOutline.selectRowIndexes(rows, byExtendingSelection: false)
         isApplyingModel = false
+    }
+
+    private func item(albumID: String) -> FolderTreeItem? {
+        allItems().first { $0.isAlbum && $0.albumID == albumID }
     }
 
     private func applySelectionFromModel() {
@@ -683,12 +767,12 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     // The folder tree is an `NSOutlineView`: AppKit asks these four, never `numberOfRows(in:)`.
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let node = item as? FolderTreeItem else { return treeRoot == nil ? 0 : 1 }
+        guard let node = item as? FolderTreeItem else { return sections.count }
         return node.children.count
     }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        guard let node = item as? FolderTreeItem else { return treeRoot as Any }
+        guard let node = item as? FolderTreeItem else { return sections[index] }
         return node.children[index]
     }
 
@@ -702,7 +786,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         let cell = SourceRowCell.reuse(in: outlineView, owner: self)
         cell.configure(title: node.title, detail: node.detail,
                        isOffline: node.status == "offline",
-                       isAllPhotos: node.isAllPhotos)
+                       isAllPhotos: node.isAllPhotos,
+                       symbolName: node.symbolName)
         return cell
     }
 
@@ -742,9 +827,20 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard !isApplyingModel, let session else { return }
         let items = sourcesOutline.selectedRowIndexes
             .compactMap { sourcesOutline.item(atRow: $0) as? FolderTreeItem }
+        // 相册行是**范围**，不是选择项：点它就是「网格只看这个相册」。
+        if let album = items.first(where: \.isAlbum) {
+            session.selectAlbum(album.albumID)
+            selectSourceItem()
+            return
+        }
+        // 「相册」标题行只表示展开状态；把它点亮等于让用户以为网格换了范围。高亮还给模型。
+        if items.contains(where: \.isAlbumGroup) {
+            selectSourceItem()
+            return
+        }
         if items.isEmpty {
             guard sourcesOutline.clickedRow >= 0 else { return }
-            session.selectFolders([])
+            session.selectFolders([])          // 也清掉相册：这是「回到全库」
             selectSourceItem()
             return
         }
@@ -780,14 +876,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     public func outlineViewItemDidExpand(_ notification: Notification) {
         if let item = notification.userInfo?["NSObject"] as? FolderTreeItem {
-            expandedKeys.insert(item.key)
+            if item.isAlbumGroup { albumsExpanded = true } else { expandedKeys.insert(item.key) }
         }
         layoutPanes()
     }
 
     public func outlineViewItemDidCollapse(_ notification: Notification) {
         if let item = notification.userInfo?["NSObject"] as? FolderTreeItem {
-            expandedKeys.remove(item.key)
+            if item.isAlbumGroup { albumsExpanded = false } else { expandedKeys.remove(item.key) }
         }
         layoutPanes()
     }
@@ -805,7 +901,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             return FolderTreeRow(title: item.title, detail: item.detail,
                                  level: sourcesOutline.level(forRow: row),
                                  rootID: item.rootID, path: item.path,
-                                 isAllPhotos: item.isAllPhotos)
+                                 isAllPhotos: item.isAllPhotos, albumID: item.albumID)
         }
     }
 
@@ -852,6 +948,209 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         sourcesOutline.selectedRowIndexes.compactMap { row in
             (sourcesOutline.item(atRow: row) as? FolderTreeItem)?.key
         }
+    }
+
+    // MARK: albums (078 B10) — 左栏相册段的 CRUD 与「点相册 = 过滤网格」
+
+    /// 最近一次相册操作失败的原因（重名、空名、已删）。不弹窗：一个已经把手放回鼠标的用户不该
+    /// 被模态框拦住；测试要断言的是这个字符串，不是一张对话框。
+    public private(set) var lastAlbumError: String?
+
+    @discardableResult
+    public func createAlbum(named name: String) -> String? {
+        guard let session else { return nil }
+        do {
+            let album = try session.createAlbum(named: name)
+            lastAlbumError = nil
+            refresh()
+            return album.id
+        } catch {
+            lastAlbumError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func renameAlbum(_ id: String, to name: String) -> Bool {
+        guard let session else { return false }
+        do {
+            _ = try session.renameAlbum(id: id, to: name)
+            lastAlbumError = nil
+            refresh()
+            return true
+        } catch {
+            lastAlbumError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// 删相册：只删相册与成员关系，照片一张不少（`Catalog.deleteAlbum` 的契约）。
+    @discardableResult
+    public func deleteAlbum(_ id: String) -> Bool {
+        guard let session else { return false }
+        do {
+            _ = try session.deleteAlbum(id: id)
+            lastAlbumError = nil
+            refresh()
+            return true
+        } catch {
+            lastAlbumError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func addSelectedPhotos(toAlbum id: String) -> Int {
+        guard let session else { return 0 }
+        do {
+            let added = try session.addSelection(toAlbum: id)
+            lastAlbumError = nil
+            refresh()
+            return added
+        } catch {
+            lastAlbumError = error.localizedDescription
+            return 0
+        }
+    }
+
+    @discardableResult
+    public func removeSelectedPhotos(fromAlbum id: String) -> Int {
+        guard let session else { return 0 }
+        do {
+            let removed = try session.removeSelection(fromAlbum: id)
+            lastAlbumError = nil
+            refresh()
+            return removed
+        } catch {
+            lastAlbumError = error.localizedDescription
+            return 0
+        }
+    }
+
+    /// 点左栏的相册行：展开「相册」段（若收起）、让模型进入这个相册、重画。
+    ///
+    /// 与 `selectFolderRow` 同一形状：一条路径既是 AppKit 的点击，也是测试/`--ui-smoke` 的入口，
+    /// 所以测试断言的展开与过滤就是真实点击的那一次。
+    public func selectAlbumRow(_ id: String) {
+        guard let session else { return }
+        if let group = albumGroupItem {
+            if !sourcesOutline.isItemExpanded(group) { sourcesOutline.expandItem(group) }
+            albumsExpanded = true
+        }
+        session.selectAlbum(id)
+        refresh()
+    }
+
+    /// 展开/收起「相册」段（标题行上的那个三角）。
+    public func setAlbumSectionExpanded(_ expanded: Bool) {
+        guard let group = albumGroupItem else { return }
+        albumsExpanded = expanded
+        if expanded { sourcesOutline.expandItem(group) } else { sourcesOutline.collapseItem(group) }
+        layoutPanes()
+    }
+
+    public var albumSectionExpanded: Bool {
+        guard let group = albumGroupItem else { return false }
+        return sourcesOutline.isItemExpanded(group)
+    }
+
+    // MARK: 相册的右键菜单
+    //
+    // 入口选择：**右键菜单**，不是拖放。三条理由，按重要性：
+    //
+    // 1. 拖放要在三个面（网格 `NSCollectionView`、左栏 `NSTableView`、胶片条）各自注册拖源与
+    //    拖目的地、各自持有一份 pasteboard type 与落点判定 —— 三份实现、三种失效方式。菜单是
+    //    **一个** `AssetContextMenu` 对象，三个面共用（它已经是「从库中删除…」的家）。
+    // 2. 菜单可以被无窗口的测试进程驱动（`menuNeedsUpdate` + `items` 读得到），拖放只能合成
+    //    `NSEvent`，在一个没有事件循环的测试里是不可靠的输入。
+    // 3. 键盘可达（Control-F2 或辅助功能右键），拖放对键盘用户不可达。
+
+    private lazy var albumSectionMenu: NSMenu = {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        return menu
+    }()
+
+    /// The album row the menu is being opened on (`nil` = the section header or blank space).
+    private var menuAlbumID: String?
+
+    private func configureAlbumMenu() {
+        sourcesOutline.menu = albumSectionMenu
+    }
+
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === albumSectionMenu else { return }
+        menu.removeAllItems()
+        let row = sourcesOutline.clickedRow
+        let item = row >= 0 ? sourcesOutline.item(atRow: row) as? FolderTreeItem : nil
+        menuAlbumID = item?.isAlbum == true ? item?.albumID : nil
+
+        let new = NSMenuItem(title: "新建相册…", action: #selector(albumMenuNew), keyEquivalent: "")
+        new.target = self
+        menu.addItem(new)
+
+        if let albumID = menuAlbumID {
+            menu.addItem(.separator())
+            let rename = NSMenuItem(title: "重命名相册…", action: #selector(albumMenuRename), keyEquivalent: "")
+            rename.target = self
+            rename.representedObject = albumID
+            menu.addItem(rename)
+
+            let delete = NSMenuItem(title: "删除相册…", action: #selector(albumMenuDelete), keyEquivalent: "")
+            delete.target = self
+            delete.representedObject = albumID
+            menu.addItem(delete)
+
+            // 选中照片时，「加入 / 移出这个相册」就在同一个菜单里：不用先去找网格的右键菜单。
+            let hasSelection = !(session?.selection.isEmpty ?? true)
+            let add = NSMenuItem(title: "把选中的照片加入此相册", action: #selector(albumMenuAdd), keyEquivalent: "")
+            add.target = self
+            add.representedObject = albumID
+            add.isEnabled = hasSelection
+            menu.addItem(add)
+
+            let remove = NSMenuItem(title: "把选中的照片移出此相册", action: #selector(albumMenuRemove), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = albumID
+            remove.isEnabled = hasSelection
+            menu.addItem(remove)
+        }
+    }
+
+    @objc private func albumMenuNew() {
+        guard let name = AlbumNamePrompt.run(title: "新建相册", message: "相册名", value: "") else { return }
+        _ = createAlbum(named: name)
+    }
+
+    @objc private func albumMenuRename(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String,
+              let album = session?.albums.first(where: { $0.id == albumID }) else { return }
+        guard let name = AlbumNamePrompt.run(title: "重命名相册", message: "相册名", value: album.name) else { return }
+        _ = renameAlbum(albumID, to: name)
+    }
+
+    @objc private func albumMenuDelete(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String,
+              let album = session?.albums.first(where: { $0.id == albumID }) else { return }
+        // 确认框只说真话：删的是相册，照片留在库里。
+        let alert = NSAlert()
+        alert.messageText = "删除相册「\(album.name)」？"
+        alert.informativeText = "相册里的 \(album.count) 张照片不会被删除，只是不再属于这个相册。"
+        alert.addButton(withTitle: "删除相册")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = deleteAlbum(albumID)
+    }
+
+    @objc private func albumMenuAdd(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String else { return }
+        _ = addSelectedPhotos(toAlbum: albumID)
+    }
+
+    @objc private func albumMenuRemove(_ sender: NSMenuItem) {
+        guard let albumID = sender.representedObject as? String else { return }
+        _ = removeSelectedPhotos(fromAlbum: albumID)
     }
 
     public var photoRowCount: Int { photosTable.numberOfRows }
@@ -904,15 +1203,17 @@ private final class SourceRowCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
-    func configure(title t: String, detail d: String, isOffline: Bool, isAllPhotos: Bool) {
+    func configure(title t: String, detail d: String, isOffline: Bool, isAllPhotos: Bool,
+                   symbolName: String = "folder") {
         title.stringValue = t
         detail.stringValue = d
         title.textColor = isOffline ? .tertiaryLabelColor : .labelColor
         title.toolTip = isOffline ? "offline" : nil
         // A folder for a root and for every subfolder; the library glyph for 全部照片, so the
-        // "everything" row never reads as a plain folder next to the folder it contains.
-        icon.image = NSImage(systemSymbolName: isAllPhotos ? "photo.on.rectangle" : "folder",
-                             accessibilityDescription: isAllPhotos ? "全部照片" : "文件夹")
+        // "everything" row never reads as a plain folder next to the folder it contains. 相册 段
+        // 与相册行各有自己的 glyph（078 B10）：左栏里「一叠照片」和「一个文件夹」是两种东西。
+        let description: String = isAllPhotos ? "全部照片" : (symbolName == "folder" ? "文件夹" : "相册")
+        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: description)
         icon.contentTintColor = isOffline ? .tertiaryLabelColor
             : (isAllPhotos ? .labelColor : .secondaryLabelColor)
     }

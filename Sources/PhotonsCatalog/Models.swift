@@ -271,6 +271,15 @@ public struct Album: CatalogRecord, Identifiable, Equatable, Sendable {
     public var name: String
     public var sort: Int
     public var createdAt: String
+
+    public init(id: String = UUID().uuidString, parentId: String? = nil, name: String,
+                sort: Int = 0, createdAt: String = ISO8601.now()) {
+        self.id = id
+        self.parentId = parentId
+        self.name = name
+        self.sort = sort
+        self.createdAt = createdAt
+    }
 }
 
 public struct ImportSession: CatalogRecord, Identifiable, Equatable, Sendable {

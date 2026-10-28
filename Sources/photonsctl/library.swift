@@ -16,10 +16,19 @@ func openLibrary(_ a: Args, index: Int) -> Catalog {
     do { return try Catalog.open(at: url) } catch { die("\(error.localizedDescription)") }
 }
 
+/// `<名字或 id>` → 相册行。名字大小写不敏感、必须唯一命中；打错名字是错误而不是"什么都不做"，
+/// 因为一个静默的空操作会让人以为照片进了相册。
+func resolveAlbum(_ catalog: Catalog, _ key: String) throws -> AlbumSummary {
+    if let byID = try catalog.album(id: key) { return byID }
+    if let byName = try catalog.album(named: key) { return byName }
+    die("no album '\(key)'")
+}
+
 func cmdLibrary(_ a: Args) throws {
     guard let sub = a.positional.first else {
         die("library needs a subcommand: create | import | rescan | assets | stats | verify | develop"
-            + " | copy-settings | paste-settings")
+            + " | copy-settings | paste-settings | albums | album-create | album-rename | album-delete"
+            + " | album-add | album-remove | album-assets")
     }
 
     switch sub {
@@ -134,6 +143,12 @@ func cmdLibrary(_ a: Args) throws {
         filter.sinceLocalDate = a.value("--since")
         filter.limit = a.value("--limit").flatMap(Int.init) ?? 200
         filter.includeDeleted = a.has("--deleted")
+        // `--album <名字或 id>`（078 B10）：把「点相册 → 网格只显示成员」这条验收也做成命令行，
+        // 这样它可以在真实库上跑，而不是只在单测里成立。
+        if let wanted = a.value("--album") {
+            let album = try resolveAlbum(catalog, wanted)
+            filter.albumIds = [album.id]
+        }
 
         let started = CFAbsoluteTimeGetCurrent()
         let assets = try catalog.assets(filter)
@@ -151,6 +166,74 @@ func cmdLibrary(_ a: Args) throws {
                 note("\(asset.captureLocalDate ?? "----------")  \(stars.padding(toLength: 5, withPad: " ", startingAt: 0))  \(asset.relPath)")
             }
             note(String(format: "… %d rows in %.1f ms", assets.count, elapsed))
+        }
+
+    // MARK: 相册（078 B10）
+
+    // 动词与表一一对应：建 / 改名 / 删 / 加入 / 移出 / 列出成员。每个动词一次事务，
+    // 输出逐行可比（`--json` 给脚本）。**删相册不删照片**在这一层也看得见 ——
+    // `album-delete` 打印操作后的 `photos` 总数，验收脚本比的就是它。
+
+    case "albums":
+        guard a.positional.count >= 2 else { die("library albums <pkg> [--json]") }
+        let catalog = openLibrary(a, index: 1)
+        let albums = try catalog.albums()
+        if a.has("--json") {
+            note(jsonLine(albums.map { ["id": $0.id, "name": $0.name, "count": $0.count, "sort": $0.sort] }))
+        } else {
+            for album in albums { note("album      \(album.count)\t\(album.name)\t\(album.id)") }
+            note("albums     \(albums.count)  memberships \(albums.reduce(0) { $0 + $1.count })")
+        }
+
+    case "album-create":
+        guard a.positional.count >= 3 else { die("library album-create <pkg> <name> [--json]") }
+        let catalog = openLibrary(a, index: 1)
+        let album = try catalog.createAlbum(named: a.positional[2])
+        if a.has("--json") {
+            note(jsonLine(["id": album.id, "name": album.name, "count": 0]))
+        } else {
+            note("created    \(album.name)  \(album.id)")
+        }
+
+    case "album-rename":
+        guard a.positional.count >= 4 else { die("library album-rename <pkg> <album> <new name>") }
+        let catalog = openLibrary(a, index: 1)
+        let album = try resolveAlbum(catalog, a.positional[2])
+        let renamed = try catalog.renameAlbum(id: album.id, to: a.positional[3])
+        note("renamed    \(album.name) → \(renamed.name)  \(renamed.id)")
+
+    case "album-delete":
+        guard a.positional.count >= 3 else { die("library album-delete <pkg> <album>") }
+        let catalog = openLibrary(a, index: 1)
+        let album = try resolveAlbum(catalog, a.positional[2])
+        let report = try catalog.deleteAlbum(id: album.id)
+        let photos = try catalog.stats().total
+        note("deleted    albums \(report.albums)  entries \(report.entries)  photos \(photos)")
+
+    case "album-add", "album-remove":
+        guard a.positional.count >= 4 else {
+            die("library \(sub) <pkg> <album> <assetId…>")
+        }
+        let catalog = openLibrary(a, index: 1)
+        let album = try resolveAlbum(catalog, a.positional[2])
+        let ids = Array(a.positional.dropFirst(3))
+        let changed = sub == "album-add"
+            ? try catalog.addAssets(ids, toAlbum: album.id)
+            : try catalog.removeAssets(ids, fromAlbum: album.id)
+        let count = try catalog.albumAssetCount(album.id)
+        note("\(sub == "album-add" ? "added     " : "removed   ") \(changed)  album \(album.name) now \(count)")
+        if a.has("--json") { note(jsonLine(["album": album.id, "changed": changed, "count": count])) }
+
+    case "album-assets":
+        guard a.positional.count >= 3 else { die("library album-assets <pkg> <album> [--json]") }
+        let catalog = openLibrary(a, index: 1)
+        let album = try resolveAlbum(catalog, a.positional[2])
+        let ids = try catalog.albumAssetIDs(album.id)
+        if a.has("--json") {
+            note(jsonLine(ids))
+        } else {
+            for id in ids { note("member     \(id)") }
+            note("album      \(album.name)  \(ids.count) photos")
         }
 
     case "stats":
@@ -201,6 +284,7 @@ func cmdLibrary(_ a: Args) throws {
 
     default:
         die("unknown library subcommand '\(sub)' (create|import|rescan|assets|stats|verify|develop"
-            + "|copy-settings|paste-settings)")
+            + "|copy-settings|paste-settings|albums|album-create|album-rename|album-delete"
+            + "|album-add|album-remove|album-assets)")
     }
 }

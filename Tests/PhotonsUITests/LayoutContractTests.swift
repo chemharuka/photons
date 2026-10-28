@@ -390,4 +390,30 @@ private extension LayoutContractTests {
         return StripFixture(collection: collection, viewport: viewport, frames: frames,
                             contentSize: flow.collectionViewContentSize)
     }
+
+    // MARK: 相册段（078 B10）
+
+    /// 相册段不是第二个侧栏：它住在同一个 `NSOutlineView` 里，所以行高、行距、高度公式、
+    /// 侧栏宽度都与文件夹行完全一致 —— 多加一个区段不新增一个布局契约。
+    ///
+    /// 这条是**故意**的：如果相册变成第二个滚动视图，就要再定一次最小高度、再算一次
+    /// "树与照片列表怎么分那 45 %"，而那正是 021 A 花了一轮才修好的那类数字。
+    func testTheAlbumsSectionSharesTheBrowserTreeGeometry() {
+        // 一行一个相册、一行一个文件夹：同一个 28 pt 常数（photo row 仍是 46）。
+        XCTAssertEqual(WorkspaceLayout.browserTreeRowHeight, 28, accuracy: 0.001)
+        XCTAssertEqual(WorkspaceLayout.browserRowHeight, 46, accuracy: 0.001)
+
+        // 5 行（相册标题 + 3 个相册 + 全部照片）走同一个公式：rows × 28 + 6。
+        XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 5, panelHeight: 744), 5 * 28 + 6,
+                       accuracy: 0.001, "rows × 28 + 6, album rows included")
+        // 多一个相册 = 多一行 = 高 28 pt（在没到 45 % 上限之前）。
+        XCTAssertEqual(WorkspaceLayout.browserTreeHeight(rowCount: 9, panelHeight: 744)
+                       - WorkspaceLayout.browserTreeHeight(rowCount: 5, panelHeight: 744), 4 * 28,
+                       accuracy: 0.001)
+
+        // 侧栏宽度不因为多了相册段而变：212 pt 默认，仍夹在 196…260。
+        let g = WorkspaceLayout.resolve(window: CGSize(width: 1600, height: 1000))
+        XCTAssertEqual(g.browser.width, WorkspaceLayout.browserWidthDefault, accuracy: 0.001)
+        XCTAssertEqual(g.browser.width, 212, accuracy: 0.001)
+    }
 }

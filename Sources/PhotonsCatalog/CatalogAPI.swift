@@ -96,11 +96,22 @@ public struct AssetFilter: Sendable {
     /// (nothing that already worked had to be rewritten to gain slots).
     public var criteria: [FilterCriterion]
 
+    /// 相册成员的约束（078 B10）：网格「点相册」就是这一条。
+    ///
+    /// 多个 id 是 **OR**（同一张照片在任一相册里即命中），且与 folders / criteria / 各 legacy 字段
+    /// **AND**：相册是「看什么范围」，筛选条是「在这个范围里挑」，两者叠在一起才等于用户眼里的结果 ——
+    /// 所以左栏点相册不该把筛选条清掉。空数组 = 不约束。
+    ///
+    /// 走 `EXISTS` 子查询而不是 join：一张照片在同一个相册里只有一行，join 不会放大行数，但
+    /// `EXISTS` 让这条子句可以被单独摘掉（facet 的 `excluding` 不需要它），也不需要 `DISTINCT`。
+    public var albumIds: [String]
+
     public init(ratingAtLeast: Int? = nil, cameraKey: String? = nil, sinceLocalDate: String? = nil,
                 includeDeleted: Bool = false, limit: Int = 200,
                 flagEquals: String? = nil, colorLabelEquals: String? = nil,
                 folders: [FolderSelection] = [],
-                criteria: [FilterCriterion] = []) {
+                criteria: [FilterCriterion] = [],
+                albumIds: [String] = []) {
         self.ratingAtLeast = ratingAtLeast
         self.cameraKey = cameraKey
         self.sinceLocalDate = sinceLocalDate
@@ -110,6 +121,7 @@ public struct AssetFilter: Sendable {
         self.colorLabelEquals = colorLabelEquals
         self.folders = folders
         self.criteria = criteria
+        self.albumIds = albumIds
     }
 
     /// `"day2/"` → `"day2"`, `"/day2//sub/"` → `"day2/sub"`, `""`/`nil` → `nil` (= the whole root).
