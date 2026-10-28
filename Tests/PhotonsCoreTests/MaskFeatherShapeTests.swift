@@ -99,8 +99,9 @@ final class MaskFeatherShapeTests: XCTestCase {
         return ratio * ratio
     }
 
-    /// `alpha = 1` past the half-way line, `clamp(1 − (d/w)²)²` for the `w`-wide band before it,
-    /// `w` = short-edge feather radius / the gradient's own length (both in source pixels).
+    /// 102: a **symmetric** smoothstep ramp of width `f` centred on the half-way line. (079 A4's
+    /// one-sided "outside the rim" ramp applied to the open shapes was the bug this file now records the
+    /// fix for; the radial helper above keeps that rule.)
     private func linearAlpha(x: Double, y: Double, _ s: LinearGradientShape, feather f: Double,
                              size: (w: Int, h: Int)) -> Double {
         let w = Double(size.w), h = Double(size.h)
@@ -114,18 +115,10 @@ final class MaskFeatherShapeTests: XCTestCase {
         var tp = t
         if abs(m - 0.5) > 1e-6 && t > 0 { tp = pow(t, log(0.5) / log(m)) }
         let radius = min(max(f, 0), 1)
-        let featherPx = radius * 0.1 * min(w, h)
-        let span = (dx * dx + dy * dy).squareRoot()
-        if featherPx <= 0 || span < 1e-6 {
-            let lo = 0.5 - 0.5 * radius
-            let hi = max(0.5 + 0.5 * radius, lo + 1e-5)
-            let tt = min(max((tp - lo) / (hi - lo), 0), 1)
-            return tt * tt * (3 - 2 * tt)
-        }
-        let width = featherPx / span
-        let outside = max(0.5 - tp, 0) / width
-        let ratio = min(max(1 - outside * outside, 0), 1)
-        return ratio * ratio
+        let lo = 0.5 - 0.5 * radius
+        let hi = max(0.5 + 0.5 * radius, lo + 1e-5)
+        let tt = min(max((tp - lo) / (hi - lo), 0), 1)
+        return tt * tt * (3 - 2 * tt)
     }
 
     private func h16(_ v: Float) -> Double { Double(Float16(v)) }
@@ -257,13 +250,13 @@ final class MaskFeatherShapeTests: XCTestCase {
         XCTAssertGreaterThan(falloff[2], falloff[7], "the decay must be real, not numeric dust")
     }
 
-    // MARK: - 3. linear gradient: same rule across its own half-way line
+    // MARK: - 3. linear gradient: symmetric ramp, unlike the radial rule
 
-    /// A vertical gradient across a 300-px short edge: coverage is exactly 1 everywhere past the
-    /// half-way line and decays quadratically over `featherPx` *before* it. The pre-A4 rule spread the
-    /// ramp ±f/2 around the middle, so the row at t = 0.55 read ≈ 0.57 at f = 1 — this test pins the
-    /// row at 1.0 instead, which is the whole point of A4.
-    func testLinearFeatherSitsOutsideTheRim() throws {
+    /// 102 — the linear feather is a **symmetric** ramp of width `f` of the span, centred on the
+    /// half-way line, so coverage is 0 below `½ − f/2`, 0.5 at `½` and 1 above `½ + f/2`. 079 A4 had
+    /// pinned the opposite (solid past `½`, a squared `0.1·shortEdge` band below it) by applying the
+    /// radial rule to the open shapes. That was the regression: one-sided and a tenth as wide.
+    func testLinearFeatherIsSymmetricAboutTheHalfWayLine() throws {
         let image = rampImage(width: 320, height: 300)
         let shape = LinearGradientShape(start: NormalizedPoint(0.5, 0), end: NormalizedPoint(0.5, 1))
         var worst = 0.0
@@ -276,10 +269,16 @@ final class MaskFeatherShapeTests: XCTestCase {
                     worst = max(worst, abs(expected - sample(dump, x, y)))
                 }
             }
-            // The interior half is solid, whatever the feather is.
-            for y in (image.height / 2 + 2)..<image.height {
+            // Past the ramp it is solid; below it, empty. At f = 0 that is the hard edge at ½.
+            let solidFrom = Int(((0.5 + 0.5 * f) * Double(image.height)).rounded(.up))
+            let emptyBelow = Int(((0.5 - 0.5 * f) * Double(image.height)).rounded(.down))
+            for y in solidFrom..<image.height {
                 XCTAssertEqual(sample(dump, image.width / 2, y), 1.0,
-                               "f = \(f): the half past the rim must be exactly 1.0 (row \(y))")
+                               "f = \(f): the half past the ramp must be exactly 1.0 (row \(y))")
+            }
+            for y in 0..<emptyBelow {
+                XCTAssertEqual(sample(dump, image.width / 2, y), 0.0,
+                               "f = \(f): the half below the ramp must be exactly 0.0 (row \(y))")
             }
         }
         XCTAssertLessThan(worst, 1.5 / 255.0, "the linear gradient deviates from its own reference")

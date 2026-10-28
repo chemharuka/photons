@@ -644,7 +644,8 @@ final class MaskSemanticTests: XCTestCase {
 
         let record = ShowMaskGolden(
             note: "Recorded by MaskSemanticTests on the synthetic 96×65 ramp image; two masks (m-a "
-                + "radial +0.6 EV, m-b linear −0.6 EV) with showMask = m-b. `showDisplaySHA256` is the "
+                + "radial +0.6 EV, m-b linear −0.6 EV, re-recorded for 102's symmetric linear feather) "
+                + "with showMask = m-b. `showDisplaySHA256` is the "
                 + "frame after the 50 % red overlay, `plainDisplaySHA256` the same document without it, "
                 + "so the file pins both sides of the 005e criterion. 8-bit quantised digests.",
             sourceWidth: image.width, sourceHeight: image.height,

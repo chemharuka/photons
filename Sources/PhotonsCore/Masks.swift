@@ -1378,16 +1378,13 @@ public enum MaskBounds {
         let minSide = min(w, h)
         switch component.shape {
         case .linearGradient(let g):
-            // `alpha > 0` past the line where `t' = lo`. 079 A4: the rim is `t' = ½` and the feather
-            // is spent **outside** it (`0.5 − w … 0.5`, `w` = feather radius / span, in `t'` units),
-            // so `lo` is no longer a fraction of the ramp — it is where the quadratic falloff reaches
-            // 0. `t' = t^(log ½ / log m)`, so `t_cut = lo^(log m / log ½)` — the exact inverse of the
+            // `alpha > 0` from `t' = lo` onwards. 102: the linear feather is a **symmetric** ramp of
+            // width `f` of the span, centred on `t' = ½` — the same `lo = ½ − f/2` the kernel uses.
+            // (079 A4 briefly made this the radial rule, `lo = ½ − featherPx/span`, which cut the
+            // atlas' own support in half once the kernel went back to the symmetric ramp.)
+            // `t' = t^(log ½ / log m)`, so `t_cut = lo^(log m / log ½)` — the exact inverse of the
             // kernel's midpoint remap.
-            let fpx = MaskRadius.featherPixels(component.feather, content: source)
-            let span = ((g.end.x - g.start.x) * w * (g.end.x - g.start.x) * w
-                        + (g.end.y - g.start.y) * h * (g.end.y - g.start.y) * h).squareRoot()
-            let fw = span > 1e-6 ? fpx / span : 1.0      // ≥ 1 ⇒ the falloff reaches past the start
-            let lo = max(0.5 - fw, 0)
+            let lo = max(0.5 - 0.5 * min(max(component.feather, 0), 1), 0)
             let m = min(max(g.midpoint, 0.02), 0.98)
             let exponent = log(0.5) / log(m)
             let tCut = lo <= 0 ? 0 : pow(lo, 1 / exponent)
