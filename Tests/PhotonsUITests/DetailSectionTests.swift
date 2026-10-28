@@ -28,8 +28,10 @@ final class DetailSectionTests: XCTestCase {
         // above it; the colour-partition chain above the curve is unchanged.
         XCTAssertEqual(titles.firstIndex(of: "曲线").map { $0 + 1 }, detail,
                        "细节 belongs directly under 曲线; got \(titles)")
-        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 2 }, detail)
-        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 3 }, detail)
+        // …and 黑白 sits between 色彩分级 and 曲线, so every offset below 曲线 gained one row:
+        // 曲线 (直接压在 细节 上) is +1, 黑白 +2, 色彩分级 +3, HSL +4 — Color itself stays +5.
+        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 3 }, detail)
+        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 4 }, detail)
         XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 5 }, detail)
         XCTAssertEqual(titles.filter { $0 == "细节" }.count, 1, "one 细节 card, not two")
 
