@@ -540,7 +540,7 @@ sidecar 里存 double，并且**自描述**：
 即 `isLensCorrectionEnabled` = 单一 warp，取 plane1，应用到三通道。
 
 **我们的做法（097）**：文件带分通道数据时 **把 Apple 的开关关掉**（`isLensCorrectionEnabled = false`），
-由 S0 在**源像素空间**按三个平面各自 warp（`s_c = kr0 + kr1·r + kr2·r² + kr3·r³`，同一趟、一次重采样），
+由 S0 在**源像素空间**按三个平面各自 warp（`f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶`，同一趟、一次重采样），
 再照旧转 Rec2020。单平面文件仍然留给 Apple（行为不变）。
 
 **为什么 warp 不放在 Rec2020 里做**（数值思想实验，`~/workspace/scripts/ca-basis-experiment.py`）：
@@ -555,3 +555,20 @@ sidecar 里存 double，并且**自描述**：
 （`lens=ours:…`），并导致 decode golden 与 3 个 render/mask golden 重录。真实 SL3 文件上我们的绿通道与
 Apple 的 on 版本 corr 0.941 —— 差异来自"Apple 在 raw 域先 warp 再 demosaic / 我们在 demosaic 后按三平面
 warp"，是顺序差不是符号错。
+
+### 16.1 两个只有真文件才能暴露的错（都已修，`9c9cfcb` / `d11bdd4`）
+
+**幂次**：规范是 `f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶`（**偶数次**）。写成
+`kr0 + r·(kr1 + r·(kr2 + r·kr3))` 时，凡 `kr1…kr3 = 0` 的合成文件两者逐位相同 —— 而真实 SL3 的
+`kr1 ≈ −0.0076`，于是整幅图相对 Apple 偏 **0.400 %** 半径（corr 0.930）。改成规范形式后 corr **0.99958**、
+Δs 0.000 %。判据现在有两条 pin：`LensWarpPlane.radialScale(at:)`（公式的 CPU 唯一表述）与 CAWarpTests 里对
+Metal 源码形状的断言。
+
+**解码与渲染必须共用一个 profile**：解码现在是 profile 相关的（逐平面文件关掉 Apple 校正），但
+`RenderInput` 只在给了 `sourceURL` 时才去读文件里的 profile。于是"先 decode 成 buffer 再建图"的路径
+（测试回放、缩略图、loupe 的两条量测图、photonsctl thumbs/export）会**解码不校正 + 渲染也不校正**，
+得到一张和主界面/CLI 不同的照片。这类调用点必须 `decodeDetailed` 并把 `outcome.lensProfile` 传下去。
+
+**构建坑**：`Kernels` 是 `.copy` 资源，`swift test` 不会因为 `.metal` 源文件改动而刷新已有测试 bundle 里的副本
+（症状：`photonsctl` 给出新结果，测试仍算出改动前的哈希）。改 kernel 后先删
+`.build/out/Products/*/*.xctest` 再跑。
