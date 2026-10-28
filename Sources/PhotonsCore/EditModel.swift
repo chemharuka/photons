@@ -2089,6 +2089,51 @@ public struct OpticsGroup: Sendable, Equatable, Codable {
     public func cornerPixels(halfDiagonal: Double) -> Double {
         max(abs(caRed), abs(caBlue)) * halfDiagonal
     }
+
+    // MARK: - the panel's units (2026-10-28, 078 B8)
+
+    /// The sliders' travel: **integers −100…+100, 0 in the middle** — the number the user reads and
+    /// types, and not the α the kernel takes.
+    ///
+    /// Why the panel does not show α: ±0.005 is a ratio, and a readout of `0.00250` is not a number
+    /// anyone compares two frames with. −100…+100 is what Lightroom's 去边 sliders show, and it makes
+    /// 「拖到尽头」, 「拖到一半」 and a typed `5` mean the same thing on every photo, at every preview
+    /// size — which is the whole reason the model stores a ratio in the first place (see the type's
+    /// note above). The same split as 黑电平 (071): the row is in slider units, the document is in the
+    /// parameter's own units, and the conversion below is the only place they meet.
+    public static let sliderRange: ClosedRange<Double> = -100 ... 100
+
+    /// The α **one slider unit** is worth: `fullScale / 100` = 5 × 10⁻⁵, so a full deflection is
+    /// exactly `fullScale` and the two ends of the row are the two ends of the envelope.
+    public static let alphaPerSliderUnit: Double = fullScale / 100
+
+    /// Slider position → α, on the row's own 1-unit grid.
+    ///
+    /// The grid is quantized **here**, not by a `step:` on the `Slider` (046 forbids tick marks): a
+    /// row whose readout says `7` must store `7 × 5e-5` and not `6.83 × 5e-5`, or the printed number
+    /// and the cache key would disagree below the digits the user can see.
+    public static func alpha(fromSlider position: Double) -> Double {
+        guard position.isFinite else { return 0 }
+        let unit = min(max(position.rounded(), sliderRange.lowerBound), sliderRange.upperBound)
+        return unit * alphaPerSliderUnit
+    }
+
+    /// The inverse: the slider position this α asks for, on the same grid (so the knob does not
+    /// wobble around a value the row cannot print).
+    public static func sliderPosition(forAlpha alpha: Double) -> Double {
+        guard alpha.isFinite else { return 0 }
+        let unit = (alpha / alphaPerSliderUnit).rounded()
+        return min(max(unit, sliderRange.lowerBound), sliderRange.upperBound)
+    }
+
+    /// The two rows' positions, for the panel's bindings — the knob and the document can never
+    /// disagree on the grid (`LightGroup.blackOffsetSliderPosition(of:)`'s rule).
+    public var caRedSliderPosition: Double { Self.sliderPosition(forAlpha: caRed) }
+    public var caBlueSliderPosition: Double { Self.sliderPosition(forAlpha: caBlue) }
+
+    /// True when both sliders are on 0 — the panel's own statement of `isIdentity`, in the units it
+    /// draws (a document hand-edited to `1e-9` is not "at zero" for either of them).
+    public var slidersAtRest: Bool { caRedSliderPosition == 0 && caBlueSliderPosition == 0 }
 }
 
 // MARK: - canonical number formatting for cache keys

@@ -702,10 +702,10 @@ final class CurvePanelTests: XCTestCase {
 
         // 076 把 HSL 插在 Color 之后（它属于「色彩」工作区），077 把历史记录放在最后，2026-10-28
         // 把效果插在曲线之后（暗角 + 颗粒是最后两段渲染），同一天又把黑白插在 Color 之后（S3.4 紧跟
-        // S3）—— 其它卡的相对顺序一条都没动。
+        // S3）、把色彩分级插在 HSL 之后（S3.8 紧跟 S3.6）—— 其它卡的相对顺序一条都没动。
         XCTAssertEqual(titles.filter { $0 != "曲线" },
-                       ["直方图", "白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "细节", "效果", "预设",
-                        "裁切", "蒙版", "历史记录"],
+                       ["直方图", "白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级", "细节", "效果",
+                        "预设", "裁切", "蒙版", "历史记录"],
                        "插入一张卡，其它卡的相对顺序一条都不许变")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.curve), "曲线跟随滚动，不属于钉住区")
         XCTAssertFalse(InspectorView.scrollingSections.contains(.histogram))
@@ -718,9 +718,11 @@ final class CurvePanelTests: XCTestCase {
                       "曲线卡的标题必须接 PanelResets.curve()")
         XCTAssertTrue(source.contains("case .curve:\n            curveCard"))
 
-        // 047 的四张参数卡清单没有被曲线改写：Group 还是那四个 + 2026-10-28 的效果卡 + 黑白卡。
+        // 047 的四张参数卡清单没有被曲线改写：Group 还是那四个 + 2026-10-28 的效果卡 + 黑白卡 +
+        // 色彩分级卡（九个数一起复位）。
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
-                       ["whiteBalance", "light", "color", "blackAndWhite", "detail", "effects"])
+                       ["whiteBalance", "light", "color", "blackAndWhite", "detail", "effects",
+                        "colorGrading"])
         print("layout · \(titles) · 曲线 index \(detail + 1)")
     }
 

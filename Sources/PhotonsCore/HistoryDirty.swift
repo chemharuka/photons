@@ -46,6 +46,18 @@ extension EditHistory {
         if before.decoderVersion != after.decoderVersion { dirty.insert(.detail) }
         if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
         if !EditParameters.areEqual(before.geometry, after.geometry) { dirty.insert(.geometry) }
+        // 2026-10-28 (078 B8): **色差**. 029 put the two ratios in `optics` and the cache key
+        // (`;car=`, `;cab=`) and the history's field table, but never here — and this is the list
+        // `applyEdit` short-circuits on (`isSemanticallyIdentical`). Without this line a CA write was
+        // *silently dropped*: the document stayed at 0, `commitEdit` found nothing to commit, and the
+        // panel's two sliders moved a knob that changed no pixel and left no history row. Nothing
+        // noticed for a month because the sliders had no UI (`ChromaticAberrationCardTests` is the
+        // test that would have caught it — it fails at `optics.caRed == 0.00025` on exactly this).
+        //
+        // `.geometry`, not a group of its own: CA *is* S0 (`RenderStage.geometry`), the stage the crop
+        // and the turn live on, and `RenderGroup.stages` is what turns this bool into "re-render from
+        // S0 down" — the same treatment `;car=` gets in `keyMaterial(.geometry)`.
+        if !EditParameters.areEqual(before.optics, after.optics) { dirty.insert(.geometry) }
         if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }
         return dirty
     }
@@ -203,6 +215,16 @@ enum EditParameters {
             && areEqual(a.grainSize, b.grainSize)
             && areEqual(a.grainRoughness, b.grainRoughness)
             && a.grainSeedValue == b.grainSeedValue
+    }
+
+    /// 2026-10-28 (078 B8): the two CA ratios. Same load-bearing rule as the grain lines above —
+    /// `dirtyGroups` reads this, `applyEdit` reads `dirtyGroups`, so a value this leaves out is a
+    /// slider that writes nothing.
+    ///
+    /// Compared at `dirtyTolerance` (1e-6), which is 1/50 of one slider unit (5 × 10⁻⁵ of α): every
+    /// position the panel can express is dirty against its neighbour, and a JSON round-trip is not.
+    static func areEqual(_ a: OpticsGroup, _ b: OpticsGroup) -> Bool {
+        areEqual(a.caRed, b.caRed) && areEqual(a.caBlue, b.caBlue)
     }
 
     /// Do two mask stacks contribute the same render material?

@@ -885,6 +885,11 @@ public struct InspectorView: View {
     ///     changes under a version switch is the document itself, because
     ///     `PanelResets.decoderVersion` puts all four back on their defaults as part of the same edit
     ///     (a v9 document never carries a 色彩降噪 amount the new decoder cannot honour).
+    ///
+    /// **2026-10-28 (078 B8) — the card ends with two render rows.** 色差 R / 色差 B are not decoder
+    /// rows: `caRows`' own doc has the reasoning, and the behaviour is the difference — they are never
+    /// greyed by `axes`, they take the `.linear` (red) accent instead of the decoder yellow, and they
+    /// commit on release as one history row instead of going through the preview rung.
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
@@ -909,7 +914,79 @@ public struct InspectorView: View {
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
+            divider
+            ForEach(Self.caRows, id: \.title) { row in
+                caSliderRow(row)
+            }
         }
+        // The card's own frame, for the layout test at 244 / 274 / 308 pt — a background, so it
+        // inherits the card's size and cannot change it.
+        .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID))
+    }
+
+    /// 2026-10-28 (078 B8) — **色差**: the two lateral-CA rows, in the 细节 card.
+    ///
+    /// ```text
+    /// 色差 R   −100…100   S0: red's radial ratio α_R (> 0 = the red image is larger, pull it in)
+    /// 色差 B   −100…100   S0: blue's, the same convention
+    /// ```
+    ///
+    /// **Why this card and not a new 光学 one.** 029 put CA in S0 and left it with no UI at all; the
+    /// question is only where a user looks for it. 细节 is the card that already owns *「像素级、镜头/
+    /// 机身前面的活」*: the four decoder sliders (降噪 / 锐化) are per-channel pixel work whose numbers
+    /// mean the same thing on every frame, and CA is that same class one stage earlier — it corrects
+    /// what the lens did to the pixels before any tone or colour control sees them. A card of its own
+    /// would be a one-card workspace for two numbers, and Lightroom's own Optics panel is where 去边
+    /// lives *beside* the lens corrections we do not have (profile, vignette, distortion) — none of
+    /// which exist here, so a 光学 card would be mostly empty promises.
+    ///
+    /// **The two rows are not decoder rows, and the card says so by behaviour, not by a note:** they
+    /// commit on release like every render row (`if !editing { session.commitEdit(…) }`), they are
+    /// never greyed by `axes`, and their travel is the slider's −100…+100 rather than α's ±0.005 —
+    /// the number on screen is `OpticsGroup.sliderPosition(forAlpha:)` and the document holds
+    /// `OpticsGroup.alpha(fromSlider:)`, one conversion in one place (the 071 黑电平 rule). A tick
+    /// re-runs S0 and everything below it, which is why they sit last: the four rows above them are a
+    /// re-*develop*, the two below are a re-*render*, and the divider is where the cost changes.
+    ///
+    /// The colour is `.linear` (red `#FF375F`) — 071's third class, "arithmetic on the scene-linear
+    /// buffer". S0 samples the decoded linear image radially; it is the same class as the 黑电平 trim
+    /// and not a display-domain render control (Light's six rows).
+    public static let caRows: [ToneRow] = [
+        ToneRow(title: "色差 R", range: OpticsGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.optics.caRed),
+        ToneRow(title: "色差 B", range: OpticsGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.optics.caBlue),
+    ]
+
+    /// One 色差 row: the panel's row, the slider↔α translation, and the frame probe.
+    ///
+    /// `row.keyPath` is the document field the row *owns*; the binding writes it as
+    /// `alpha(fromSlider:)` of the position the thumb (or a typed number) produced, so the readout,
+    /// the key material and the kernel's uniform carry one value.
+    private func caSliderRow(_ row: ToneRow) -> some View {
+        sliderRow(row.title, caBinding(row), row.range, row.format,
+                  shape: row.shape,
+                  decimals: row.decimals,
+                  rounding: row.rounding,
+                  editable: row.editable,
+                  accessibilityID: "inspector.detail.\(row.title)",
+                  onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+            // A render row: one drag = one history row, taken on release.
+            if !editing { session.commitEdit(label: row.title) }
+        }
+        .background(ChromaticAberrationProbeHost(rowID: row.title))
+    }
+
+    /// 色差's slider position ↔ document α. The row's `range` and its readout are the **slider's**
+    /// units (integers −100…+100); `row.keyPath` is `optics.caRed` / `optics.caBlue` (±0.005), and
+    /// `OpticsGroup`'s two mapping functions are the only conversion — the same split 黑电平's
+    /// `blackLevelBinding` makes, and the reason a typed `5` stores `0.00025` while the row says `5`.
+    private func caBinding(_ row: ToneRow) -> Binding<Double> {
+        Binding(get: { OpticsGroup.sliderPosition(forAlpha: session.edit[keyPath: row.keyPath]) },
+                set: { position in
+                    let alpha = OpticsGroup.alpha(fromSlider: position)
+                    session.applyEdit { $0[keyPath: row.keyPath] = alpha }
+                })
     }
 
     /// 「解码模型」 — **the file's own version list**, one item per `supportedDecoderVersions` entry.
@@ -1048,8 +1125,9 @@ public struct InspectorView: View {
     /// number format each row draws.
     ///
     /// 040's「下面解码参数什么的不用展示」is the reason this is a list of rows and not a view that also
-    /// knows how to print a note: the card's entire text is these four titles plus a number per row,
+    /// knows how to print a note: the card's decoder half is these four titles plus a number per row,
     /// so a test can hold the whole surface (`DetailSectionTests.testTheCardPrintsNoDecoderProse`).
+    /// Since 078 B8 the card also draws `caRows` (色差 R / 色差 B) — two titles more, still no prose.
     public static let detailContent = DetailCardContent.standard
 
     /// **Which item is on screen.** The document's own spelling, else the file's default choice
@@ -1794,11 +1872,16 @@ public struct InspectorView: View {
     }
 }
 
-/// What the 细节 card draws, in order (派单 040).
+/// What the 细节 card's **decoder** rows draw, in order (派单 040).
 ///
 /// Four rows and nothing else: the card used to end with a line of decoder prose (「解码参数 · v9 ·
 /// 0 = 系统默认」) and a second label per row (「基线 0.50」). Both are gone, and making the rows data
 /// is what lets a test hold the card's entire text surface instead of a screenshot.
+///
+/// 2026-10-28 (078 B8): the card has two more rows — 色差 R / 色差 B — but they are **not** in this
+/// table and must not be: these four are a re-*develop* (`DetailAxis`, `CIRAWFilter`, greyed per
+/// decoder version), while 色差 is a re-*render* on S0. They are `InspectorView.caRows`, drawn after
+/// the divider, and their own doc says why they live on this card.
 public struct DetailCardContent: Equatable, Sendable {
 
     public struct Row: Equatable, Sendable {
@@ -2583,11 +2666,20 @@ public struct PanelResets {
             // Apple's colour noise reduction off and move the pixels. The card's first row is the
             // 解码模型, so the same double-click also takes it back to **V8** (the default): a reset
             // that left the card on V9 would restore four sliders and then grey them out again.
+            //
+            // 2026-10-28 (078 B8): the card also holds 色差 R / 色差 B now, so the title takes them
+            // back to `OpticsGroup.identity` in the **same** snapshot. The number is 0 on both
+            // sides of the mapping (position 0 ⇔ α 0), which is what lets one guard cover both:
+            // a card whose title reset six rows to five is the bug the effects card's note warns
+            // about ("the card is one thing on screen").
+            let ca = session.edit.optics
             let changed = !session.edit.detailSettings.isIdentity || session.edit.decoderVersion != nil
+                || !ca.isIdentity
             guard changed else { return false }
             session.applyEdit {
                 $0.detailSettings = .identity
                 $0.decoderVersion = nil
+                $0.optics = .identity
             }
             let committed = session.commitEdit(label: group.title, coalesce: false)
             loupe?.endDetailAdjustment()
