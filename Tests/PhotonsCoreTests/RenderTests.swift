@@ -559,10 +559,14 @@ final class RenderTests: XCTestCase {
             // 派单 006: a document's white balance is a decode setting, so the golden's pixels come
             // from a development made *with* that white balance — an as-shot decode would silently
             // drop a 7150 K/+7 push.
-            let img = try RAWDecoder().decode(url, options: DecodeOptions(decoderVersion: nil,
-                                                                         scale: decodeScale,
-                                                                         whiteBalance: model.light.whiteBalance))
-            let graph = try RenderGraph(input: RenderInput(image: img, identity: "golden"))
+            // 097: the decode is now *profile-dependent* (a per-plane file turns Apple's own lens
+            // correction off), so the render must be handed the same profile — otherwise the frame is
+            // decoded unwarped and rendered unwarped, which is a different picture from the CLI's.
+            let outcome = try RAWDecoder().decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
+                                                                                     scale: decodeScale,
+                                                                                     whiteBalance: model.light.whiteBalance))
+            let graph = try RenderGraph(input: RenderInput(image: outcome.image, identity: "golden",
+                                                            lensProfile: outcome.lensProfile))
             let result = try graph.render(model, options: RenderOptions(scale: rec.scale / Double(decodeScale), wantsPixels: true))
             let pixels = try XCTUnwrap(result.display)
             XCTAssertEqual(pixels.width, rec.width, "\(file.lastPathComponent): width")

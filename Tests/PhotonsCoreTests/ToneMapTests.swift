@@ -572,9 +572,11 @@ final class ToneMapTests: XCTestCase {
         let frames = try measure()
         for f in frames {
             let path = NSString(string: "~/Desktop/test/\(f.name).dng").expandingTildeInPath
-            let img = try RAWDecoder().decode(URL(fileURLWithPath: path),
-                                              options: DecodeOptions(decoderVersion: nil, scale: 0.0625))
-            let graph = try RenderGraph(input: RenderInput(image: img, identity: f.name))
+            // 097: pass the decode's lens profile through, or the frame loses its lens correction.
+            let outcome = try RAWDecoder().decodeDetailed(URL(fileURLWithPath: path),
+                                                          options: DecodeOptions(decoderVersion: nil, scale: 0.0625))
+            let graph = try RenderGraph(input: RenderInput(image: outcome.image, identity: f.name,
+                                                            lensProfile: outcome.lensProfile))
             let opts = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
                                      useCache: false, wantsPixels: true)
             func codes(shadows: Double = 0, midtones: Double = 0,

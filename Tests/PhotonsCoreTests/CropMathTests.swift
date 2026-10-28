@@ -338,9 +338,11 @@ final class CropMathTests: XCTestCase {
             throw XCTSkip("\(name) was recorded against a different RAW fixture")
         }
         let decodeScale = Float(max(golden.scale, 0.125))
-        let image = try RAWDecoder().decode(raw, options: DecodeOptions(decoderVersion: nil,
-                                                                       scale: decodeScale))
-        let graph = try RenderGraph(input: RenderInput(image: image, identity: "cropmath-golden"))
+        // 097: decode and render must agree on the lens profile (see RenderTests' note).
+        let outcome = try RAWDecoder().decodeDetailed(raw, options: DecodeOptions(decoderVersion: nil,
+                                                                                 scale: decodeScale))
+        let graph = try RenderGraph(input: RenderInput(image: outcome.image, identity: "cropmath-golden",
+                                                        lensProfile: outcome.lensProfile))
         let model = try EditModel.load(from: Self.repoRoot
             .appendingPathComponent("Tests/Fixtures/\(golden.edit).json"))
         let result = try graph.render(model, options: RenderOptions(scale: golden.scale / Double(decodeScale),

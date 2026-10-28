@@ -327,12 +327,18 @@ final class BlackLevelTests: XCTestCase {
 
         XCTAssertGreaterThan(rows[0].clipped, 0,
                              "这条测试只有在 +2 EV 真的把像素夹掉时才有意义，否则它是空的")
-        XCTAssertLessThan(rows[1].clipped, rows[0].clipped,
-                          "+0.005 必须比 0 少夹一些像素：\(rows.map(\.clipped))")
-        XCTAssertLessThan(rows[2].clipped, rows[1].clipped,
-                          "+0.01 必须比 +0.005 再少一些：\(rows.map(\.clipped))")
-        XCTAssertLessThan(rows[1].negative, rows[0].negative, "负样本也要变少：\(rows.map(\.negative))")
-        XCTAssertLessThan(rows[2].negative, rows[1].negative, "负样本也要变少：\(rows.map(\.negative))")
+        // 097 之后这条曲线在第一个刻度就饱和了：解码不再走 Apple 的镜头 warp（逐平面文件改由 S0 按文件
+        // 三平面 warp），于是 1/8 解码缓冲里既没有那份重采样 ringing 造出来的负样本，也没有「越抬越少」
+        // 的梯度——实测夹断像素 [1494, 0, 0]、负样本 [13307, 0, 0]。所以判据从「每一档都必须严格变少」
+        // 改成「单调不减 + 端点必须真的变少」：机制（抬黑电平只会减少夹断）仍然被钉住，但不再要求一张
+        // 本来就没有梯度的图像伪造出梯度。
+        XCTAssertLessThanOrEqual(rows[1].clipped, rows[0].clipped,
+                                 "+0.005 不许比 0 夹得更多：\(rows.map(\.clipped))")
+        XCTAssertLessThanOrEqual(rows[2].clipped, rows[1].clipped,
+                                 "+0.01 不许比 +0.005 夹得更多：\(rows.map(\.clipped))")
+        XCTAssertLessThanOrEqual(rows[1].negative, rows[0].negative, "负样本不许变多：\(rows.map(\.negative))")
+        XCTAssertLessThanOrEqual(rows[2].negative, rows[1].negative, "负样本不许变多：\(rows.map(\.negative))")
+        XCTAssertLessThan(rows[2].clipped, rows[0].clipped, "整段必须真的少夹一些：\(rows.map(\.clipped))")
         XCTAssertGreaterThan(rows[1].shadow, rows[0].shadow, "暗部均值必须往上走：\(rows.map(\.shadow))")
         XCTAssertGreaterThan(rows[2].shadow, rows[1].shadow, "暗部均值必须往上走：\(rows.map(\.shadow))")
     }
