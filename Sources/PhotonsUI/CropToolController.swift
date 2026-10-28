@@ -568,14 +568,15 @@ public final class CropToolController {
     /// mid-animation — see `CropCarry`. Identity everywhere except a zoom bridge's tick.
     public func layout(mapping: LoupeMapping, source: ImageSize? = nil,
                        pointScale: Double = 1,
-                       carry: CropCarry = .identity) -> CropToolLayout {
+                       carry: CropCarry = .identity,
+                       quadRotationDegrees: Double? = nil) -> CropToolLayout {
         CropTool.layout(crop: effectiveCrop(source: source),
                         source: source ?? sourceSize,
                         mapping: mapping,
                         pointScale: pointScale,
                         showsGrid: showsGrid,
                         carry: carry,
-                        quadRotationDegrees: straightenDelta)
+                        quadRotationDegrees: quadRotationDegrees ?? straightenDelta)
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
@@ -646,6 +647,14 @@ public final class CropToolController {
         // crop to a pixel. A real canvas is at least 560 pt wide by contract.
         guard mapping.viewport.width > 64, mapping.viewport.height > 64 else { return false }
         let src = source ?? sourceSize
+        // 092 — at Δθ ≠ 0 the drawn frame is a **quad**, not the rect projected by the document
+        // framing. Clamping the un-turned rect would leave the turned corners outside, so the
+        // rotated path fits the quad's bounding box instead (Δθ = 0 keeps the old arithmetic bit
+        // for bit).
+        let delta = straightenDelta
+        if delta.isFinite, delta != 0 {
+            return clampRotatedQuadToView(mapping: mapping, source: src, degrees: delta)
+        }
         let room = safeCropRect(mapping: mapping, source: src)
         let before = draft.crop.clamped()
 
@@ -673,6 +682,100 @@ public final class CropToolController {
         let top = min(max(candidate.top, room.top), max(room.top, room.bottom - fh))
         let next = CropRect(left: left, top: top, right: left + fw, bottom: top + fh)
         guard next != before else { return false }
+        draft.crop = next
+        return true
+    }
+
+    /// 092 — the Δθ ≠ 0 half of `clampToView`: fit the **bounding box of the turned quad** into the
+    /// canvas instead of the un-turned rect.
+    ///
+    /// The frame the user sees at `degrees` is `effectiveCrop` (the rect inscribed in the turned
+    /// sensor) projected through `CropTool.layout`; its four corners are a rotated quad, and the thing
+    /// that has to stay on the canvas is their AABB. Shrinking is uniform about the rect's centre (so
+    /// the pixel ratio survives), moving translates the quad's centre in view space and is converted
+    /// back through the same inverse the drags use. The photo bound stays `effectiveCrop`'s job.
+    private func clampRotatedQuadToView(mapping: LoupeMapping, source: ImageSize,
+                                        degrees: Double) -> Bool {
+        let before = draft.crop.clamped()
+        let angle = CropTool.clampStraighten(draft.straighten)
+        func seen(_ rect: CropRect) -> CropRect {
+            let c = rect.clamped()
+            guard clampsToRotatedFrame, angle != 0 else { return c }
+            return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle)
+        }
+        func quadBounds(_ rect: CropRect) -> (center: CGPoint, halfWidth: Double, halfHeight: Double) {
+            let layout = CropTool.layout(crop: rect, source: source, mapping: mapping,
+                                         pointScale: 1, showsGrid: false,
+                                         quadRotationDegrees: degrees)
+            let xs = layout.corners.map { Double($0.x) }
+            let ys = layout.corners.map { Double($0.y) }
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else {
+                return (.zero, 0, 0)
+            }
+            return (CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2),
+                    (maxX - minX) / 2, (maxY - minY) / 2)
+        }
+        func fit(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+            lower <= upper ? min(max(value, lower), upper) : (lower + upper) / 2
+        }
+
+        let canvasWidth = Double(mapping.viewport.width)
+        let canvasHeight = Double(mapping.viewport.height)
+        let base = seen(before)
+
+        /// The rect at uniform scale `s` (about the frame's centre, so the ratio is untouched), then
+        /// moved so its quad's centre is as central on the canvas as that size allows. The move is
+        /// asked for in **view** space and converted back through the drags' own inverse; clamping the
+        /// stored rect to `0…1²` afterwards is what keeps it a rect of the frame.
+        func candidate(_ s: Double) -> CropRect {
+            let width = base.width * s, height = base.height * s
+            let raw = CropRect(x: base.centerX - width / 2, y: base.centerY - height / 2,
+                               width: width, height: height).clamped()
+            let box = quadBounds(raw)
+            let targetX = fit(Double(box.center.x), box.halfWidth, canvasWidth - box.halfWidth)
+            let targetY = fit(Double(box.center.y), box.halfHeight, canvasHeight - box.halfHeight)
+            guard let centre = Self.normalized(CGPoint(x: targetX, y: targetY), mapping: mapping,
+                                               source: source, pointScale: 1,
+                                               rotationDegrees: degrees) else { return raw }
+            var moved = CropRect(x: centre.x - width / 2, y: centre.y - height / 2,
+                                 width: width, height: height).clamped()
+            if draft.lock.ratio != nil {
+                moved = CropTool.constrain(moved, lock: draft.lock, source: source, anchor: .center)
+            }
+            return seen(moved)
+        }
+
+        func fits(_ rect: CropRect) -> Bool {
+            let box = quadBounds(rect)
+            let tolerance = 1e-7
+            return Double(box.center.x) - box.halfWidth >= -tolerance
+                && Double(box.center.x) + box.halfWidth <= canvasWidth + tolerance
+                && Double(box.center.y) - box.halfHeight >= -tolerance
+                && Double(box.center.y) + box.halfHeight <= canvasHeight + tolerance
+        }
+
+        // The derived inscribed frame already fits and no ratio has to be re-applied: nothing to
+        // clamp, so the stored rect (the user's intent) stays untouched — reducing the angle to 0°
+        // then gives the whole frame back.
+        if draft.lock.ratio == nil, fits(base) { return false }
+
+        var next = candidate(1)
+        if !fits(next) {
+            // The centre the visible quad needs may sit outside the crop rect's own `0…1²` room (a
+            // small frame at the top edge), so the full-size placement is illegal even though a
+            // smaller one is fine. Find the largest uniform scale whose quad's AABB fits — the
+            // frame stays as big as the canvas allows, never bigger.
+            var lower = 0.0, upper = 1.0
+            for _ in 0..<24 {
+                let middle = (lower + upper) / 2
+                if fits(candidate(middle)) { lower = middle } else { upper = middle }
+            }
+            next = candidate(lower)
+        }
+        // `base` is the derived inscribed frame, not a user edit: when the canvas needed nothing,
+        // leave the stored rect alone (the 088 rule — the shrink is a view, so 0° gives it back).
+        guard next != before, next != base else { return false }
         draft.crop = next
         return true
     }
