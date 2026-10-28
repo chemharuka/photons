@@ -70,16 +70,19 @@ final class CropFrameClampTests: XCTestCase {
         controller.clampsFrameToView = clamped
         controller.draft = CropToolController.Draft(crop: c.crop, straighten: c.straighten, lock: c.lock)
 
+        // 088: the document framing carries no draft angle; the picture on screen is un-turned and
+        // the crop quad is what turns (`quadRotationDegrees` below). 092 — measure that same model.
         let framing = LoupeFraming(viewport: ImageSize(width: Int(Self.canvas.width),
                                                        height: Int(Self.canvas.height)),
                                    sourceWidth: Double(c.source.width),
                                    sourceHeight: Double(c.source.height),
                                    crop: .full,
-                                   straightenDegrees: c.straighten)
+                                   straightenDegrees: 0)
         let mapping = framing.mapping(of: c.state)
         _ = controller.clampToView(mapping: mapping, source: c.source)
 
-        let layout = controller.layout(mapping: mapping, source: c.source, pointScale: 1)
+        let layout = controller.layout(mapping: mapping, source: c.source, pointScale: 1,
+                                       quadRotationDegrees: c.straighten)
         let xs = layout.corners.map(\.x), ys = layout.corners.map(\.y)
         let frame = NSRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
                            width: (xs.max() ?? 0) - (xs.min() ?? 0),
@@ -106,10 +109,13 @@ final class CropFrameClampTests: XCTestCase {
             && m.frame.minY >= m.canvas.minY - 0.5
             && m.frame.maxX <= m.canvas.maxX + 0.5
             && m.frame.maxY <= m.canvas.maxY + 0.5
-        let insidePhoto = m.samples.allSatisfy {
-            $0.x >= -0.5 && $0.x <= Double(source.width) + 0.5
-                && $0.y >= -0.5 && $0.y <= Double(source.height) + 0.5
-        }
+        // 092 — the frame is the quad's **bounding box** (what the clamp now promises), so the photo
+        // check uses that same box against the document frame's projection. At Δθ = 0 this is the
+        // old axis-aligned comparison, number for number.
+        let insidePhoto = m.frame.minX >= m.photo.minX - 0.5
+            && m.frame.minY >= m.photo.minY - 0.5
+            && m.frame.maxX <= m.photo.maxX + 0.5
+            && m.frame.maxY <= m.photo.maxY + 0.5
         let ratio: Bool
         if let expected {
             ratio = abs(m.pixelRatio - expected) / expected <= 0.005
