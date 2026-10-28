@@ -208,8 +208,8 @@ final class PanelEditingTests: XCTestCase {
         XCTAssertFalse(source.contains("editable: false"),
                        "no card may opt out of typing (047: 所有卡片统一)")
         // 2026-10-28: 效果 (暗角 + 颗粒) is the fifth card whose rows come from its own table; 黑白
-        // (the switch + eight 黑白混合 rows) makes six.
-        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 6,
+        // (the switch + eight 黑白混合 rows) makes six, and 色彩分级's nine rows make seven.
+        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 7,
                        "Light / 黑电平 / Color / 细节 / 效果 / 黑白 all take the fact from their row table")
 
         // A typed value takes the drag's path: the binding write, then the gesture-end commit.
