@@ -264,9 +264,17 @@ static inline void s0_body(texture2d<float, access::read> src,
         float4 kR = p.lens.columns[0];
         float4 kG = p.lens.columns[1];
         float4 kB = p.lens.columns[2];
-        float sR = kR.x + r * (kR.y + r * (kR.z + r * kR.w));
-        float sG = kG.x + r * (kG.y + r * (kG.z + r * kG.w));
-        float sB = kB.x + r * (kB.y + r * (kB.z + r * kB.w));
+        // DNG 1.6 §"WarpRectilinear": `f = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶` — **even powers**.
+        // (Writing it as `kr0 + r·(kr1 + r·(kr2 + r·kr3))` — odd powers — is the easy mistake: it
+        // agrees with the spec whenever kr1..kr3 are 0, so a synthetic `kr0`-only test cannot catch it,
+        // while on real files (kr1 ≈ −0.0076) it moves the whole picture by ~0.4 % of the radius.
+        // Measured against Apple's own warp on L1030433: odd powers leave a 0.4 % radial offset
+        // (corr 0.930); even powers match at 1.0000 (corr 0.9908, the remainder being Apple's
+        // raw-domain warp vs our post-demosaic one).
+        float r2 = r * r;
+        float sR = kR.x + r2 * (kR.y + r2 * (kR.z + r2 * kR.w));
+        float sG = kG.x + r2 * (kG.y + r2 * (kG.z + r2 * kG.w));
+        float sB = kB.x + r2 * (kB.y + r2 * (kB.z + r2 * kB.w));
         float2 pR = lensCenter + d * sR;
         float2 pG = lensCenter + d * sG;
         float2 pB = lensCenter + d * sB;

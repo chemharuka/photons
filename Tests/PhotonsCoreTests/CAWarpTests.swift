@@ -134,6 +134,38 @@ final class CAWarpTests: XCTestCase {
                           "Apple read plane 0 — it is not supposed to")
     }
 
+    // MARK: - 5b. the polynomial is the spec's (even powers)
+
+    /// The bug this pins: `kr0 + r·(kr1 + r·(kr2 + r·kr3))` — odd powers — agrees with the spec for
+    /// every `kr0`-only fixture and is wrong on every real file (SL3 `kr1 ≈ −0.0076` moves the picture
+    /// by 0.4 % of the radius; measured against Apple's warp: corr 0.930 vs 0.99958). Two pins, one
+    /// for the CPU statement and one for the Metal copy.
+    func testTheRadialPolynomialUsesEvenPowersAndTheMetalCopyAgrees() throws {
+        // Spec values, computed by hand: f(r) = 1 − 0.2 r² for kr1 = −0.2.
+        let plane = LensWarpPlane(kr0: 1, kr1: -0.2, kr2: 0, kr3: 0)
+        XCTAssertEqual(plane.radialScale(at: 0), 1.0, accuracy: 1e-12)
+        XCTAssertEqual(plane.radialScale(at: 0.5), 1 - 0.2 * 0.25, accuracy: 1e-12)
+        XCTAssertEqual(plane.radialScale(at: 1.0), 0.8, accuracy: 1e-12)
+        XCTAssertEqual(plane.radialScale(at: 0.5), 0.95, accuracy: 1e-12,
+                       "even powers: kr1·r² = −0.05; odd powers would give −0.10")
+
+        // The Metal copy must be spelled the same way. `r * (kR.y + r * …)` is the wrong shape.
+        let kernel = try String(contentsOfFile: Self.kernelSourcePath, encoding: .utf8)
+        XCTAssertTrue(kernel.contains("float r2 = r * r;"), "kernel lost the shared r²")
+        XCTAssertTrue(kernel.contains("kR.x + r2 * (kR.y + r2 * (kR.z + r2 * kR.w))"),
+                      "Metal radial polynomial is not the spec's even-power form")
+        XCTAssertFalse(kernel.contains("kR.x + r * (kR.y"),
+                       "Metal still has the odd-power (wrong) polynomial")
+    }
+
+    private static let kernelSourcePath: String = {
+        // `swift test` runs from the package root; go up from the test bundle if it ever does not.
+        let direct = "Sources/PhotonsCore/Kernels/s0_geometry.metal"
+        if FileManager.default.fileExists(atPath: direct) { return direct }
+        return NSString(string: "~/Documents/GitHub/Photons/Sources/PhotonsCore/Kernels/s0_geometry.metal")
+            .expandingTildeInPath
+    }()
+
     // MARK: - 6. the real file
 
     func testRealFileMatchesAppleDistortionAndRecordsChannelAlignment() throws {

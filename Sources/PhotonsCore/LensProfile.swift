@@ -1,13 +1,20 @@
 import Foundation
 
-/// One plane of a DNG `WarpRectilinear` opcode (DNG 1.4, §OpcodeList3).
+/// One plane of a DNG `WarpRectilinear` opcode (DNG 1.6, §"WarpRectilinear").
 ///
-/// The radial map is
+/// The radial map is (spec verbatim, **even powers**):
 ///
-///     r' = r · (kr0 + kr1·r + kr2·r² + kr3·r³)
+///     f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶        r' = f(r)·r
 ///
-/// with the tangential terms `kt0`/`kt1` (not applied today — every file measured on this machine
-/// has both at zero; see `s0_geometry.metal`).
+/// with `r` normalised so the farthest pixel is 1. The tangential terms `kt0`/`kt1` are not applied
+/// today — every file measured on this machine has both at zero; see `s0_geometry.metal`.
+///
+/// **The exponents are the trap.** Writing the same map as `kr0 + r·(kr1 + r·(kr2 + r·kr3))`
+/// (odd powers) agrees with the spec whenever `kr1…kr3` are zero — so a `kr0`-only test cannot see
+/// it — while on a real SL3 file (`kr1 ≈ −0.0076`) it shifts the whole picture by ~0.4 % of the
+/// radius. Measured against Apple's own warp: odd powers left corr 0.930 / Δs −0.400 %, even powers
+/// 0.99958 / Δs −0.000 %. `radialScale(at:)` is the single CPU statement of the spec formula; the
+/// Metal copy is pinned to it by `CAWarpTests`.
 public struct LensWarpPlane: Equatable, Sendable {
     public let kr0: Double
     public let kr1: Double
@@ -27,6 +34,16 @@ public struct LensWarpPlane: Equatable, Sendable {
     }
 
     public static let identity = LensWarpPlane(kr0: 1, kr1: 0, kr2: 0, kr3: 0)
+
+    /// `f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶` — the spec's radial factor (see the type doc).
+    ///
+    /// Exists so the formula has **one** CPU statement: `s0_geometry.metal` repeats it for the GPU, and
+    /// `CAWarpTests` asserts the Metal source contains exactly this shape (even powers). Without that
+    /// pin an odd-power rewrite passes every `kr0`-only fixture and is wrong on every real file.
+    public func radialScale(at r: Double) -> Double {
+        let r2 = r * r
+        return kr0 + r2 * (kr1 + r2 * (kr2 + r2 * kr3))
+    }
 
     public func isWithin(_ other: LensWarpPlane, tolerance: Double = 1e-9) -> Bool {
         abs(kr0 - other.kr0) <= tolerance

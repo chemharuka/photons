@@ -522,3 +522,36 @@ sidecar 里存 double，并且**自描述**：
 - **交互**（`CurvePoint(_:_:)`）夹在 `0…2`：指针拖不出绘图区，夹取在这里不可能掩盖错误。
 
 曲线轴到 +4 EV 是**固定**的，与显示器 headroom 无关（那是直方图上的标注，另案）。
+
+## 16. DNG `OpcodeList3`：镜头校正归谁做（2026-10-28 实测 + 097 实现，代码即如此）
+
+**文件里有什么**：本机 26 张 Leica SL3 DNG 全部 `OpcodeList3 = WarpRectilinear, planes=3`，三个平面的
+径向系数不同（kr0 差 1.6e-4…2.2e-3）。DNG 规范里 planes=3 就是"逐通道 warp"⇒ 应用它等于**畸变 + 横向色差
+一次做完**。载荷是 **big-endian**，即使 TIFF 头是 `II`。
+
+**Apple 给什么**（095 实测，构造 DNG 逐项验证）：
+
+| 试验 | 结果 |
+|---|---|
+| 只把 plane1(绿) 设成 0.90，其余恒等 | 绿通道大幅放大 ⇒ **只读 plane1** |
+| 只把 plane0(红) / plane2(蓝) 设成 0.90 | 渲染**逐位不变** ⇒ 那两个平面**完全不参与** |
+| 0.90 / 1.00 / 1.10（极端分通道） | 与"关掉校正"逐位相同，通道无分裂 ⇒ **色散永远不会被校正** |
+
+即 `isLensCorrectionEnabled` = 单一 warp，取 plane1，应用到三通道。
+
+**我们的做法（097）**：文件带分通道数据时 **把 Apple 的开关关掉**（`isLensCorrectionEnabled = false`），
+由 S0 在**源像素空间**按三个平面各自 warp（`s_c = kr0 + kr1·r + kr2·r² + kr3·r³`，同一趟、一次重采样），
+再照旧转 Rec2020。单平面文件仍然留给 Apple（行为不变）。
+
+**为什么 warp 不放在 Rec2020 里做**（数值思想实验，`~/workspace/scripts/ca-basis-experiment.py`）：
+逐通道 warp 只有在"该基色的通道 ≈ 该波段"时才是真值；Rec2020 的混色更大（`R₂₀₂₀ = 0.627·R_s +
+0.329·G_s + 0.043·B_s`，37% 来自别的通道），同样一次 warp 的误差大 **2.6×**（fringe 残差 3.7×）。
+负值不是问题：这条路上没有 clamp（第一个 clamp 在 S2 的 `max(v,0)`），插值保号。
+
+**验收证据**：三平面相同的合成文件 → 与旧路径**逐字节相同**；极端分通道文件（0.90/1.00/1.10）→
+我们 R→G 峰 **0.9000**、B→G 峰 **1.1000**，Apple 路径两个都是 **1.0000**。
+
+**代价（基线变更）**：逐平面文件的**解码缓冲不再含 Apple 的畸变校正**，所以 `DecodeRecipe` 进缓存键
+（`lens=ours:…`），并导致 decode golden 与 3 个 render/mask golden 重录。真实 SL3 文件上我们的绿通道与
+Apple 的 on 版本 corr 0.941 —— 差异来自"Apple 在 raw 域先 warp 再 demosaic / 我们在 demosaic 后按三平面
+warp"，是顺序差不是符号错。
