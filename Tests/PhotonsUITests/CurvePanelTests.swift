@@ -891,6 +891,107 @@ final class CurvePanelTests: XCTestCase {
               + String(format: "%.1e", tickError(ticks, positions, box)))
     }
 
+    // MARK: - 12. 080 — the tail's drag limit is 2, and only the tail's
+
+    /// 派单 080 (079 A5): 末段（最后两点之间）的斜率上限 **1 → 2**，而且拖动上限与渲染上限是**同一个数**
+    /// （`HDRCurve.tailSlopeLimit`，kernel 的两处 `clamp` 由 `HDRCurveTests` 解析比对）。
+    ///
+    /// 三条主张，各有自己的数：
+    ///   · 要求 4.0 的拖动落在 **2.000**（被限位），不是"随便就 4"；
+    ///   · 同一个拖动在 1.0 上限下会是 **1.1** —— 所以"2.0 可拖出"不是空话（这就是 079 A5 之前的行为）；
+    ///   · **中间段没有新上限**：不在末段的点原样写入（"y 不受夹取影响"是 061 起的既有规则，本单没有改它）。
+    ///
+    /// 最后一段的两端都能改变它的斜率，所以两端都被夹：末点往上拖封顶在 `prev.y + 2·Δx`，末点**左边那个**
+    /// 点往下拖封底在 `last.y − 2·Δx`。
+    func testTheTailCanBeDraggedToTwiceTheSlopeAndNoFurther() throws {
+        XCTAssertEqual(CurveEditor.tailSlopeLimit, HDRCurve.tailSlopeLimit,
+                       "拖动限位就是渲染上限，不是第二份拷贝")
+        XCTAssertEqual(CurveEditor.tailSlopeLimit, 2.0, "079 A5：1 → 2")
+
+        // A tail at 1.0 to start with — the old ceiling's maximum: (1.4, 0.8) → (2, 1.4).
+        let start = [CurvePoint(0, 0), CurvePoint(1.4, 0.8), CurvePoint(2, 1.4)]
+        XCTAssertEqual(try XCTUnwrap(CurveEditor.tailSlope(atLast: start[2], in: start)), 1.0,
+                       accuracy: 1e-12, "起点正是旧上限的最大值")
+
+        // Pull the white point left AND up: (1.7, 2) would be a slope of (2 − 0.8)/0.3 = 4.0.
+        let steep = CurveEditor.movedPoint(CurvePoint(1.7, 2), index: 2, in: start,
+                                           from: start[2], lock: .free)
+        XCTAssertEqual(steep.x, 1.7, accuracy: 1e-12, "x 在框内原样通过")
+        XCTAssertEqual(steep.y, 0.8 + 2 * 0.3, accuracy: 1e-12, "封顶在 y = 1.4 —— 斜率正好 2.0")
+        XCTAssertEqual(try XCTUnwrap(CurveEditor.tailSlope(atLast: steep, in: start)), 2.0,
+                       accuracy: 1e-12, "写出来的末段斜率就是 2.0")
+        XCTAssertNotEqual(steep.y, 2, "反证：不夹取就是 (1.7, 2) → 斜率 4.0")
+
+        // 反证 for the *old* ceiling: the same gesture with 1.0 lands on 1.1, i.e. 0.3 lower.
+        let asIfOne = start[1].y + 1.0 * (1.7 - start[1].x)
+        XCTAssertEqual(asIfOne, 1.1, accuracy: 1e-12)
+        XCTAssertGreaterThan(steep.y - asIfOne, 0.29, "上限 1.0 时这个拖动只能到 1.1")
+
+        // The other end of the tail: drag the point *before* it down, and it stops at slope 2.
+        let floored = CurveEditor.movedPoint(CurvePoint(1.6, 0.2), index: 1, in: start,
+                                            from: start[1], lock: .free)
+        XCTAssertEqual(floored.x, 1.6, accuracy: 1e-12)
+        XCTAssertEqual(floored.y, 1.4 - 2 * 0.4, accuracy: 1e-12, "封底在 y = 0.6")
+        XCTAssertEqual(try XCTUnwrap(CurveEditor.tailSlope(atLast: start[2],
+                                                          in: [start[0], floored, start[2]])), 2.0,
+                       accuracy: 1e-12)
+
+        // **中间段**: a point that is not on the tail passes through untouched — including a segment
+        // slope of 2.0, which is a legitimate midtone S and has been legal since 051/061 (the
+        // suite's own `testDraggingAPointPastItsNeighbourIsClampedToTheGap` drags `y` freely).
+        let four = [CurvePoint(0, 0), CurvePoint(0.5, 0.2), CurvePoint(1.5, 1.0), CurvePoint(2, 2)]
+        let interior = CurveEditor.movedPoint(CurvePoint(0.5, 1.2), index: 1, in: four,
+                                             from: four[1], lock: .free)
+        XCTAssertEqual(interior.y, 1.2, accuracy: 1e-12, "中间段的 y 原样通过（本单没有给它加上限）")
+        XCTAssertEqual((interior.y - four[0].y) / (interior.x - four[0].x), 1.2 / 0.5, accuracy: 1e-12,
+                       "段斜率 2.4 的中间段是合法的 —— 它只进表，不外延")
+        XCTAssertEqual(four[3].y, CurveEditor.movedPoint(CurvePoint(2, 2), index: 3, in: four,
+                                                         from: four[3], lock: .free).y,
+                       accuracy: 1e-12, "恒等末段（斜率 1）当然不被夹")
+
+        // **SDR 轴与 HDR 轴同一口径.** 卡上的 `x/2` 就是引擎的 `u`（`CurvePoint.u`），横竖两条轴按同一个 2
+        // 缩放，所以同一条曲线在卡坐标里和引擎轴里的末段斜率是**同一个数**，限位也就不需要按轴/半轴分支：
+        // 无论那一段落在 SDR 半轴还是 HDR 半轴，斜率 2 都是斜率 2。
+        let card = [CurvePoint(0.5, 0.2), CurvePoint(1.5, 1.0), CurvePoint(2, 1.8)]
+        let cardSlope = try XCTUnwrap(CurveEditor.tailSlope(atLast: card[2], in: card))
+        let axisSlope = (card[2].v - card[1].v) / (card[2].u - card[1].u)
+        XCTAssertEqual(axisSlope, cardSlope, accuracy: 1e-12, "Δv/Δu 与 Δy/Δx 是同一个数")
+        let clamped = CurveEditor.clampTail(2.0, x: 1.7, index: 2, in: card)
+        XCTAssertEqual((clamped - card[1].y) / (1.7 - card[1].x), 2.0, accuracy: 1e-12, "卡坐标里正好 2")
+        let onAxis = CurvePoint(1.7, clamped)
+        XCTAssertEqual((onAxis.v - card[1].v) / (onAxis.u - card[1].u), 2.0, accuracy: 1e-12,
+                       "…引擎轴里也是 2（换坐标不改斜率，所以 SDR/HDR 两半同一口径）")
+
+        // Through the panel's own path: 一次拖动 → 文档；再写盘、读回，还是那四个数。
+        let session = CatalogSession()
+        session.applyEdit { $0.curve.white = start }
+        session.commitEdit(label: "起点")
+        let model = CurveEditorModel(session: session, channel: .white)
+        let origin = try XCTUnwrap(model.beginDrag(at: 2))
+        model.drag(index: 2, to: CurvePoint(1.7, 2), from: origin, lock: .free)
+        XCTAssertTrue(model.endDrag(), "抬起 = 一条快照")
+        let written = session.edit.curve.white
+        XCTAssertEqual(written[2].x, 1.7, accuracy: 1e-12)
+        XCTAssertEqual(written[2].y, 0.8 + 2 * 0.3, accuracy: 1e-12,
+                       "通过 CurveEditorModel 写进文档的也是封顶后的 1.4")
+        XCTAssertEqual(try XCTUnwrap(CurveEditor.tailSlope(atLast: written[2], in: written)), 2.0,
+                       accuracy: 1e-12)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(session.edit)
+        let reloaded = try JSONDecoder().decode(EditModel.self, from: data)
+        XCTAssertEqual(reloaded.curve.white, written, "存盘 → 重载，末段斜率 2.0 的控制点原样回来")
+        XCTAssertEqual(try XCTUnwrap(CurveEditor.tailSlope(atLast: reloaded.curve.white[2],
+                                                          in: reloaded.curve.white)), 2.0,
+                       accuracy: 1e-12, "…重载后的斜率仍是 2.0")
+        XCTAssertEqual(try encoder.encode(reloaded), data, "写 → 读 → 写逐字节相等")
+
+        let csv = written.map { String(format: "%.4f,%.4f", $0.x, $0.y) }.joined(separator: "\n")
+        print("080 drag · 末段斜率 \(try XCTUnwrap(CurveEditor.tailSlope(atLast: written[2], in: written)))"
+              + " · 中间段 2.4 未被夹 · 存盘重载逐字节相等\ncurve.csv\nx,y\n" + csv)
+    }
+
     // MARK: - helpers
 
     /// The largest |tick − (box.minX + x/2·width)|, computed in one place so the print statement does
