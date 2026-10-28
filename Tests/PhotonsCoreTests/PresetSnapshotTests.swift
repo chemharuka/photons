@@ -106,7 +106,8 @@ final class PresetSnapshotTests: XCTestCase {
         XCTAssertEqual(decoded, snapshot)
         XCTAssertEqual(decoded.fieldCount, snapshot.fieldCount)
         XCTAssertEqual(decoded.schemaVersion, EditSnapshot.currentSchemaVersion)
-        XCTAssertFalse(json.contains("\"masks\""), "masks are not in the payload at all")
+        XCTAssertFalse(json.contains("\"masks\""),
+                       "this document has no masks, so the payload has no masks key")
         XCTAssertFalse(json.contains("showMaskID"))
         XCTAssertEqual(try encodeCanonical(decoded), json, "canonical form is stable")
     }
@@ -151,7 +152,10 @@ final class PresetSnapshotTests: XCTestCase {
         XCTAssertEqual(pasted.color, target.color)
     }
 
-    func testPasteDoesNotCarryMasksOrTheOverlay() {
+    /// P1-5 replaced this test's original claim ("paste never writes masks"). The list is carried now
+    /// — **appended**, with fresh ids — and what the old name pinned survives as the property that
+    /// matters: the destination's own mask is still there, and the overlay is still never pasted.
+    func testPasteAppendsMasksAndNeverCarriesTheOverlay() {
         var target = richEdit()
         target.masks = [Mask(id: "m-target", name: "Target")]
         target.showMaskID = "m-target"
@@ -161,13 +165,19 @@ final class PresetSnapshotTests: XCTestCase {
         source.showMaskID = "m-sky"
 
         let snapshot = EditSnapshot.capture(source)
+        XCTAssertEqual(snapshot.maskCount, 2)
         let pasted = snapshot.applied(to: target)
 
-        XCTAssertEqual(pasted.masks.map(\.id), ["m-target"],
-                       "paste never writes masks: the destination keeps its own")
-        XCTAssertEqual(pasted.showMaskID, "m-target")
+        print("PASTE  masks: \(target.masks.map(\.id)) + \(source.masks.map(\.id))"
+              + " → \(pasted.masks.map(\.id))")
+        XCTAssertEqual(pasted.masks.count, 3, "3 = the destination's own + the source's two")
+        XCTAssertEqual(Set(pasted.masks.map(\.id)).count, 3, "ids stay unique across the merge")
+        XCTAssertEqual(pasted.masks.first?.id, "m-target", "the destination's own mask is untouched")
+        XCTAssertEqual(pasted.masks.map(\.name), ["Target", "Source", "Sky"],
+                       "names travel (free text, not identity)")
+        XCTAssertEqual(pasted.showMaskID, "m-target", "the overlay is view state: never pasted")
         XCTAssertEqual(pasted.light, source.light)
-        XCTAssertNotEqual(pasted, source, "the two documents differ only by masks")
+        XCTAssertNotEqual(pasted, source, "the two documents still differ — by the destination's mask")
     }
 
     func testPasteDoesNotTouchVersions() {

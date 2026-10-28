@@ -40,7 +40,6 @@ final class CopySettingsSectionsTests: XCTestCase {
         a.masks = [mask("A-mask")]
         return a
     }
-
     /// The destination photo: its **own** balance, its own exposure, its own saturation, a full crop,
     /// its own sharpening, a different mask. Nothing here is an accident — every field is one the
     /// paste must leave alone unless the source names it.
@@ -74,15 +73,21 @@ final class CopySettingsSectionsTests: XCTestCase {
     func testCaptureCarriesOnlyTheNonDefaultLeaves() {
         let snapshot = EditSnapshot.capture(documentA())
         print("COPY  A: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
-              + " sections=\(EditSnapshotSection.panelOrder.filter { snapshot.sections.contains($0) }.map(\.title))")
+              + " sections=\(EditSnapshotSection.panelOrder.filter { snapshot.sections.contains($0) }.map(\.title))"
+              + " masks=\(snapshot.maskCount)")
         // temperature, tint, exposure, contrast, curve.white, vibrance, crop ×4, vignetteAmount = 11.
         XCTAssertEqual(snapshot.fieldCount, 11)
-        XCTAssertEqual(snapshot.sections, [.whiteBalance, .light, .curve, .color, .geometry, .effects])
-        XCTAssertFalse(snapshot.sections.contains(.masks), "蒙版 is never part of a payload")
+        // 蒙版 is a section since P1-5: A has one mask, so the payload carries one — but a mask is a
+        // nested document, not a leaf, and does not enter that count.
+        XCTAssertEqual(snapshot.sections,
+                       [.whiteBalance, .light, .curve, .color, .geometry, .effects, .masks])
+        XCTAssertEqual(snapshot.maskCount, 1)
+        XCTAssertEqual(snapshot.masks?.masks.map(\.id), ["A-mask"])
 
         let empty = EditSnapshot.capture(.neutral)
         XCTAssertTrue(empty.isEmpty)
         XCTAssertTrue(empty.sections.isEmpty)
+        XCTAssertEqual(empty.maskCount, 0, "no masks in, no masks out")
         XCTAssertFalse(empty.requiresDecode)
     }
 
@@ -107,12 +112,17 @@ final class CopySettingsSectionsTests: XCTestCase {
 
         let keys = changedKeys(b, merged)
         print("PASTE  A → B: \(keys.sorted())")
-        XCTAssertEqual(panels(keys), ["light.temperature", "light.tint", "light.exposure", "light.contrast",
-                                      "curve.white", "color.vibrance",
-                                      "geometry.crop.x", "geometry.crop.y",
-                                      "geometry.crop.width", "geometry.crop.height",
-                                      "effects.vignetteAmount"],
+        // Mask keys are id-keyed (`masks.<id>.added`), so they are folded out of the panel table and
+        // asserted on their own below — otherwise this test would pin a random UUID.
+        let maskKeys = keys.filter { $0.hasPrefix("masks.") }
+        XCTAssertEqual(panels(keys.subtracting(maskKeys)),
+                       ["light.temperature", "light.tint", "light.exposure", "light.contrast",
+                        "curve.white", "color.vibrance",
+                        "geometry.crop.x", "geometry.crop.y",
+                        "geometry.crop.width", "geometry.crop.height",
+                        "effects.vignetteAmount"],
                        "exactly the source's non-default leaves; got \(keys.sorted())")
+        XCTAssertFalse(maskKeys.isEmpty, "蒙版 was checked in, so the mask list moved too")
 
         // The destination's own values in every group the source did **not** change.
         XCTAssertEqual(merged.color.saturation, 30, "B's saturation is B's: A never touched it")
@@ -120,9 +130,15 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(merged.light.whites, 0)
         XCTAssertEqual(merged.light.blacks, 0)
 
-        // Masks are structurally out of reach: not in the payload, not written.
-        XCTAssertEqual(merged.masks.map(\.id), ["B-mask"])
+        // Masks since P1-5: appended, never substituted. B's own mask survives; A's arrives as a
+        // new mask (new id, same shape — the aspect ratios are both unknown here, so the normalised
+        // coordinates are copied as-is by design).
+        print("PASTE  masks: \(b.masks.map(\.id)) → \(merged.masks.map(\.id))")
+        XCTAssertEqual(merged.masks.count, 2)
+        XCTAssertEqual(merged.masks.first?.id, "B-mask", "the destination's own mask is not replaced")
         XCTAssertEqual(merged.masks.first?.feather, 0.6)
+        XCTAssertEqual(Set(merged.masks.map(\.id)).count, 2)
+        XCTAssertEqual(merged.masks[1].feather, 0.2, "the carried mask's own feather")
     }
 
     /// A source photo that left its balance at as-shot carries **no** Kelvin leaf, so pasting it
@@ -179,18 +195,40 @@ final class CopySettingsSectionsTests: XCTestCase {
         let payload = EditSnapshot.capture(documentA()).filtered(to: [])
         XCTAssertTrue(payload.isEmpty)
         XCTAssertTrue(changedKeys(b, payload.applied(to: b)).isEmpty)
-        // 蒙版 can be asked for explicitly and is still dropped: it is not a payload section.
-        XCTAssertTrue(EditSnapshot.capture(documentA()).filtered(to: [.masks]).isEmpty)
+    }
+
+    /// The mirror image: checking **only** 「蒙版」 writes the mask list and nothing else.
+    func testPastingOnlyMasksLeavesEveryOtherLeafOfTheDestinationAlone() {
+        let a = documentA()
+        let b = documentB()
+        let payload = EditSnapshot.capture(a).filtered(to: [.masks])
+        XCTAssertFalse(payload.isEmpty, "a mask list is content, even with no scalar leaf in it")
+        XCTAssertEqual(payload.fieldCount, 0)
+        XCTAssertEqual(payload.sections, [.masks])
+
+        let merged = payload.applied(to: b)
+        let keys = changedKeys(b, merged)
+        print("SECTION masks-only → B: \(keys.count) keys, all masks: \(keys.allSatisfy { $0.hasPrefix("masks.") })")
+        XCTAssertTrue(keys.allSatisfy { $0.hasPrefix("masks.") },
+                      "只粘蒙版 moved nothing outside the list; got \(keys.sorted())")
+        XCTAssertEqual(merged.light, b.light)
+        XCTAssertEqual(merged.color, b.color)
+        XCTAssertEqual(merged.curve, b.curve)
+        XCTAssertEqual(merged.geometry, b.geometry)
+        XCTAssertEqual(merged.effects, b.effects)
+        XCTAssertEqual(merged.masks.count, 2)
+        XCTAssertEqual(merged.masks.first?.id, "B-mask")
     }
 
     // MARK: - the checklist model (全选 / 全不选 / 预设组合)
 
-    func testTheChecklistHasTheThreeAnswersAndNeverCountsMasksIn() {
+    func testTheChecklistHasTheThreeAnswersAndCountsMasksIn() {
         var selection = CopySettingsSelection.all
         XCTAssertEqual(selection.sections, Set(EditSnapshotSection.copyable))
         XCTAssertEqual(selection.matchingPreset, .all)
-        XCTAssertFalse(selection.contains(.masks))
-        XCTAssertEqual(selection.summary, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切")
+        // P1-5: 蒙版 is a row like any other — 全部 carries it, and the summary says so.
+        XCTAssertTrue(selection.contains(.masks))
+        XCTAssertEqual(selection.summary, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切 · 蒙版")
 
         selection.selectNone()
         XCTAssertTrue(selection.isEmpty)
@@ -201,11 +239,13 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(selection.sections, [.whiteBalance, .light, .curve])
         XCTAssertEqual(selection.matchingPreset, .basic)
 
-        // 蒙版 cannot be switched on, by the popup or by a checkbox.
+        // 蒙版 can be switched on, by a checkbox or by hand, and off again.
         selection.set(.masks, true)
-        XCTAssertFalse(selection.contains(.masks))
+        XCTAssertTrue(selection.contains(.masks))
+        XCTAssertNil(selection.matchingPreset, "白平衡 + 曝光 + 曲线 + 蒙版 is 自定义")
         selection.toggle(.masks)
         XCTAssertFalse(selection.contains(.masks))
+        XCTAssertEqual(selection.matchingPreset, .basic)
 
         // A hand-made set is 自定义, and the popup must say so rather than the nearest preset.
         selection = CopySettingsSelection(sections: [.light, .effects])
@@ -247,7 +287,11 @@ final class CopySettingsSectionsTests: XCTestCase {
         // saturation, the mask list replaced, the effects invented. The as-shot variant of this case
         // is `testAnAsShotSourceLeavesTheDestinationsWhiteBalanceAlone`.
         XCTAssertEqual(merged.light.temperature, 5500)
-        XCTAssertEqual(merged.masks.map(\.id), b.masks.map(\.id))
         XCTAssertEqual(merged.color.saturation, 30)
+        // The mask list is the one place the merge **adds** rather than replaces (P1-5): replacing it
+        // — what `naive` does — would delete B's own mask, which the user never named.
+        XCTAssertEqual(merged.masks.count, 2)
+        XCTAssertEqual(merged.masks.first?.id, b.masks.first?.id)
+        XCTAssertEqual(naive.masks.count, 1, "反证: a whole-document paste has one mask, not two")
     }
 }

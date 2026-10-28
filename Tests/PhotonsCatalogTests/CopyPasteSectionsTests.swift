@@ -115,10 +115,13 @@ final class CopyPasteSectionsTests: XCTestCase {
         let id = try insertAsset(catalog, name: "noop.dng", edit: target())
         let before = try rows(catalog, id)
 
-        // The payload is the target's own document: every leaf already holds these values.
+        // The payload is the target's own document: every leaf already holds these values. 蒙版 is
+        // left out of the narrowing on purpose — a mask list is *additive* (pasting a document's own
+        // masks onto itself adds copies, the way Lightroom does), so the no-op contract is about the
+        // scalar leaves.
+        let leafSections = Set(EditSnapshotSection.copyable).subtracting([.masks])
         let selfPayload = EditSnapshot.capture(try catalog.develop(forAsset: id))
-        let report = try catalog.pasteSettings(selfPayload, intoAsset: id,
-                                               sections: Set(EditSnapshotSection.copyable))
+        let report = try catalog.pasteSettings(selfPayload, intoAsset: id, sections: leafSections)
         XCTAssertFalse(report.changed)
         XCTAssertTrue(report.fields.isEmpty)
         XCTAssertEqual(try rows(catalog, id), before, "a no-op paste must not grow the stack")
@@ -128,11 +131,98 @@ final class CopyPasteSectionsTests: XCTestCase {
         XCTAssertFalse(empty.changed)
         XCTAssertEqual(try rows(catalog, id), before)
 
-        // 蒙版 asked for explicitly is dropped, so it is also nothing.
+        // 蒙版 asked for explicitly: this source carries none, so there is nothing to write.
         let masksOnly = try catalog.pasteSettings(EditSnapshot.capture(source()), intoAsset: id,
                                                   sections: [.masks])
         XCTAssertFalse(masksOnly.changed)
         XCTAssertEqual(try rows(catalog, id), before)
+
+        // And a mask list pasted onto the photo it came from is a real edit (a copy), not a no-op —
+        // stated here so the difference is a measurement rather than a surprise.
+        //
+        // It is not id churn dressed up as a change: the document gains a second mask object.
+        // `isSemanticallyIdentical` — the rule `commit` uses to drop a row — answers false because the
+        // mask lists differ, and `maskApplyMaterial` (S1.6's input) differs because there are now two
+        // `applyKey`s. Whether the *pixels* move depends on the mask: one carrying local adjustments
+        // is applied twice by S1.6, while the fixture's mask here is `LocalAdjustments.identity`, so
+        // the picture need not move — but a duplicated mask is still a thing the user can see in the
+        // list and must be able to undo. Pasting your own mask list asking for a copy is what
+        // Lightroom does too.
+        let beforeSelf = try catalog.develop(forAsset: id)
+        let selfMasks = try catalog.pasteSettings(selfPayload, intoAsset: id, sections: [.masks])
+        XCTAssertTrue(selfMasks.changed, "masks are objects: pasting them adds them")
+        let afterSelf = try catalog.develop(forAsset: id)
+        XCTAssertEqual(afterSelf.masks.count, 2)
+        XCTAssertEqual(try rows(catalog, id), before + 1)
+        XCTAssertFalse(EditHistory.isSemanticallyIdentical(beforeSelf, afterSelf),
+                       "the documents differ by a mask, so this is not a no-op row")
+        XCTAssertTrue(EditHistory.dirtyGroups(from: beforeSelf, to: afterSelf).contains(.masks))
+        XCTAssertNotEqual(afterSelf.maskApplyMaterial, beforeSelf.maskApplyMaterial,
+                          "the local stage runs twice: the copied mask carries its own adjustments")
+    }
+
+    // MARK: - P1-5: 蒙版 as a section, in the catalog
+
+    /// A masks-only paste: **three** masks afterwards (one of the destination's + two carried), all
+    /// ids distinct, the destination's own mask untouched, every other field byte-identical — and
+    /// exactly **one** history row, so one ⌘Z takes the whole thing back.
+    func testAMasksOnlyPasteAppendsReidentifiedMasksAsOneHistoryRow() throws {
+        let catalog = try newLibrary()
+        var sourceDoc = source()
+        sourceDoc.light.exposure = 1.2
+        sourceDoc.masks = [
+            Mask(id: "m-a1", name: "A 天空", feather: 0.2, components: [
+                MaskComponent(id: "c-a1", shape: .radialGradient(
+                    RadialGradientShape(center: NormalizedPoint(0.25, 0.75),
+                                        radius: NormalizedPoint(0.2, 0.2)))),
+            ]),
+            Mask(id: "m-a2", name: "A 前景", feather: 0.1),
+        ]
+        let sourceID = try insertAsset(catalog, name: "src.dng", edit: sourceDoc)
+        let targetID = try insertAsset(catalog, name: "dst.dng", edit: target())
+
+        let payload = EditSnapshot.capture(try catalog.develop(forAsset: sourceID),
+                                          frameAspect: 4.0 / 3.0)
+        let before = try catalog.develop(forAsset: targetID)
+        let rowsBefore = try rows(catalog, targetID)
+
+        let report = try catalog.pasteSettings(payload, intoAsset: targetID, sections: [.masks],
+                                               destinationAspect: 3.0 / 2.0)
+        XCTAssertTrue(report.changed)
+        XCTAssertEqual(report.sections, [.masks])
+        XCTAssertFalse(report.requiresDecode, "a mask is a GPU-stage change, not a development")
+        XCTAssertEqual(try rows(catalog, targetID), rowsBefore + 1, "one paste = one row")
+
+        let after = try catalog.develop(forAsset: targetID)
+        print("CATALOG masks-only: \(before.masks.map(\.id)) → \(after.masks.map(\.id))")
+        XCTAssertEqual(after.masks.count, 3)
+        XCTAssertEqual(Set(after.masks.map(\.id)).count, 3, "ids unique in the stored document")
+        XCTAssertEqual(after.masks[0].id, "B-mask", "the destination's own mask keeps its id")
+        XCTAssertEqual(after.masks[0].feather, 0.6)
+        XCTAssertFalse(after.masks.map(\.id).contains("m-a1"))
+        XCTAssertEqual(after.masks[1].name, "A 天空", "the name travels")
+        XCTAssertEqual(after.masks[1].feather, 0.2)
+        // 4:3 → 3:2: the carried circle re-anchored on the short edge (0.25 → 0.2778, y unchanged).
+        guard case .radialGradient(let g)? = after.masks[1].components.first?.shape else {
+            return XCTFail("still a radial gradient after the round trip through SQLite")
+        }
+        XCTAssertEqual(g.center.x, 0.5 + (0.25 - 0.5) * (8.0 / 9.0), accuracy: 1e-12)
+        XCTAssertEqual(g.center.y, 0.75, accuracy: 0)
+        XCTAssertEqual(g.radius.x, 0.2, "the radius is short-edge normalised: unchanged")
+
+        // Everything that was not checked in is the bytes it was.
+        XCTAssertEqual(after.light, before.light)
+        XCTAssertEqual(after.color, before.color)
+        XCTAssertEqual(after.curve, before.curve)
+        XCTAssertEqual(after.geometry, before.geometry)
+        XCTAssertEqual(Array(after.masks.map(\.id).prefix(1)), ["B-mask"])
+
+        // One ⌘Z: back to one mask and the original document.
+        var history = try catalog.editHistory(forAsset: targetID)
+        XCTAssertEqual(history.count, 2, "import row + one paste row")
+        let undone = try XCTUnwrap(history.undo())
+        XCTAssertEqual(undone.masks.map(\.id), before.masks.map(\.id))
+        XCTAssertEqual(undone.light, before.light)
     }
 
     // MARK: - history: one ⌘Z takes the whole paste back

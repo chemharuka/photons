@@ -50,6 +50,9 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 
 - **预设与复制粘贴**：`Preset`（6 组、应用只覆盖子集，不抹其它组）/ `EditSnapshot` 稀疏快照（全量 57 叶，改 9 处 → 22 叶）；
   Catalog 迁移 **v4**（`presets` 表 + name NOCASE 唯一 + 单默认约束，未 ALTER 既有表，迁移前快照实测 `library.bak-v3.db`）。
+- **复制设置带蒙版（P1-5）**：`EditSnapshot.masks`（信封 schema **1 → 2**，缺省即“保留目标蒙版”）；几何按**短边锚定**
+  跨比例搬运（4:3 → 3:2：`kx = 8/9`，短轴**逐位不变**；半径/羽化/角度是短边单位，原样过），粘贴时**重发 mask/component id**
+  并**追加**（A 两张 + B 一张 = 3 张，id 唯一）。选组对话框「蒙版」行解禁；粘贴仍是**一条历史**，⌘Z 一次回滚。
 - **批量导出**：`ExportPreset`（jpeg/heic/tiff/png/avif、长边不放大、质量、sRGB/P3、XMP、命名模板）+ `BatchExporter`
   （并发 2，实测 1.7×；逐张 outcome，失败隔离；同名 `-1/-2` 不覆盖）。20×60MP → 6000×3993：总 **19.36 s**、每张 p50 **1.91 s**。
   峰值 RSS 5.0 GB；**debug 构建不能用于性能**（同批 60 s/张）。

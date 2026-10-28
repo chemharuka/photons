@@ -1127,7 +1127,11 @@ public final class CatalogSession {
         let document = asset.id == loadedEditAssetID
             ? MaskViewState.documentOnly(edit)
             : (catalog.flatMap { try? $0.develop(forAsset: asset.id) } ?? .neutral)
-        let payload = EditSnapshot.capture(document).filtered(to: choice)
+        // P1-5: masks travel with the aspect ratio of the frame they were measured in, so the paste
+        // side can re-anchor them. This is the one place that knows it (the document does not store
+        // its own pixel size).
+        let payload = EditSnapshot.capture(document, frameAspect: frameAspect(of: asset.id))
+            .filtered(to: choice)
         copiedSettings = payload
         copiedSettingsSourceID = asset.id
         if selection != nil { copySelection = choice }
@@ -1180,7 +1184,8 @@ public final class CatalogSession {
             do {
                 let report = try catalog.pasteSettings(payload, intoAsset: id,
                                                        sections: Set(EditSnapshotSection.copyable),
-                                                       label: "粘贴设置")
+                                                       label: "粘贴设置",
+                                                       destinationAspect: frameAspect(of: id))
                 reports.append(report)
             } catch {
                 failures.append("\(id.prefix(8))：\(error.localizedDescription)")
@@ -1201,13 +1206,45 @@ public final class CatalogSession {
     /// drag that happened to precede it (EditHistory's merge rule is asked not to apply).
     /// The mask overlay (`showMaskID`) is pasted back on top because it is view state, exactly as
     /// `undo()` does.
+    ///
+    /// The perspective a mask paste has to be re-anchored in: `W/H` of the photo's **upright**
+    /// source frame (P1-5).
+    ///
+    /// Three sources, in the order they can be trusted:
+    ///   1. the frame the renderer actually ingested for *this* photo (`ingestedSourceFrame`) — the
+    ///      exact numbers every mask on screen was normalised against, including EXIF orientation;
+    ///   2. the catalog row's `width`/`height` — the *stored* dimensions, which are transposed for
+    ///      EXIF 5…8, so for those files this answers the reciprocal ratio. That is a degradation,
+    ///      not a wrong point: a reciprocal pair still meets an unknown aspect on the other side, and
+    ///      the paste falls back to copying fractions rather than inventing a factor;
+    ///   3. nothing (`nil`) — a paste copies the normalised coordinates as-is, which is what a
+    ///      same-aspect copy would do anyway.
+    func frameAspect(of assetID: String) -> Double? {
+        if assetID == loadedEditAssetID, let frame = ingestedSourceFrame, frame.assetID == assetID {
+            return Self.aspect(of: frame.size)
+        }
+        guard let row = assets.first(where: { $0.id == assetID }) else { return nil }
+        return Self.aspect(width: row.width, height: row.height)
+    }
+
+    static func aspect(of size: ImageSize) -> Double? {
+        aspect(width: size.width, height: size.height)
+    }
+
+    static func aspect(width: Int?, height: Int?) -> Double? {
+        guard let w = width, let h = height, w > 0, h > 0 else { return nil }
+        return Double(w) / Double(h)
+    }
+
+    /// The live-document half of ⌘V. (See `frameAspect(of:)` for the `destinationAspect` term.)
     private func pasteIntoLiveDocument(_ payload: EditSnapshot) -> SettingsPasteReport? {
         // A tool session owns the next snapshot (`EditHistory.beginSession`): an edit made inside it
         // records no row of its own, so a paste here would move the document with nothing to undo.
         // Refused rather than folded into the tool's base.
         guard !isToolSessionActive else { return nil }
         let current = MaskViewState.documentOnly(edit)
-        let merged = payload.applied(to: current)
+        let merged = payload.applied(to: current,
+                                     destinationAspect: frameAspect(of: loadedEditAssetID ?? ""))
         let fields = EditHistory.changedFields(between: current, and: merged)
         guard !fields.isEmpty else {
             return SettingsPasteReport(assetID: loadedEditAssetID ?? "",

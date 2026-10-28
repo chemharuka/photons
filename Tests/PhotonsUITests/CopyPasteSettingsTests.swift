@@ -77,7 +77,8 @@ final class CopyPasteSettingsTests: XCTestCase {
     }
 
     @discardableResult
-    private func insertAsset(_ catalog: Catalog, name: String, edit: EditModel) throws -> String {
+    private func insertAsset(_ catalog: Catalog, name: String, edit: EditModel,
+                             size: (Int, Int)? = nil) throws -> String {
         let rootDir = workDir.appendingPathComponent("src", isDirectory: true)
         try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
         let root = try catalog.ensureRoot(for: rootDir, mode: .reference)
@@ -89,6 +90,8 @@ final class CopyPasteSettingsTests: XCTestCase {
                           kind: .raw,
                           size: 1024, mtime: 0,
                           contentHash: UUID().uuidString,
+                          width: size?.0,
+                          height: size?.1,
                           developJson: blob)
         try catalog.dbQueue.write { db in
             try asset.insert(db)
@@ -384,7 +387,7 @@ final class CopyPasteSettingsTests: XCTestCase {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.selection.sections, Set(EditSnapshotSection.copyable))
-        XCTAssertEqual(view.statusLabel.stringValue, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切")
+        XCTAssertEqual(view.statusLabel.stringValue, "将复制：白平衡 · 曝光 · 曲线 · 颜色 · 细节 · 效果 · 裁切 · 蒙版")
         XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 1, "全部 is the first preset row")
 
         // 全不选 / 全选 buttons.
@@ -404,15 +407,82 @@ final class CopyPasteSettingsTests: XCTestCase {
         XCTAssertEqual(view.checkboxes[.curve]?.state, .on)
         XCTAssertEqual(view.checkboxes[.color]?.state, .off)
 
-        // 蒙版 is drawn (Lightroom parity) but disabled, and a click cannot count it in.
+        // 蒙版 is a selectable row since P1-5, with a tooltip that says what a mask copy does.
         let masks = view.checkboxes[.masks]
-        XCTAssertEqual(masks?.isEnabled, false)
-        XCTAssertEqual(masks?.toolTip?.isEmpty, false)
+        XCTAssertEqual(masks?.isEnabled, true, "the 蒙版 row is no longer greyed out")
+        XCTAssertEqual(masks?.title, "蒙版", "no 「（暂不支持）」 suffix any more")
+        XCTAssertEqual(masks?.toolTip?.isEmpty, false, "the row still explains what it does")
+        view.click(.masks)
+        XCTAssertTrue(view.selection.contains(.masks), "a click checks it in")
+        XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 0, "全部 + 自定义… is 自定义")
         view.click(.masks)
         XCTAssertFalse(view.selection.contains(.masks))
 
         // Any hand-made combination reads 自定义 (index 0), not the nearest preset.
         view.click(.color)
         XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 0)
+    }
+
+    // MARK: - ⑦ P1-5: 蒙版 through the shipped path (⌘C → ⌘V → ⌘Z)
+
+    /// A(2 masks) → B(1 mask), pasted through `CatalogSession` with the aspect ratios the catalog
+    /// rows carry: **three** masks in the live document, ids all distinct, A's circle re-anchored on
+    /// the short edge, **one** history row, and one ⌘Z puts the list back to one.
+    func testCopyingMasksFromAAndPastingToBAppendsThemAsOneUndoStep() throws {
+        let setup = try Catalog.create(at: packageURL)
+        var a = documentA()
+        a.masks = [
+            Mask(id: "m-a1", name: "天空", feather: 0.2, components: [
+                MaskComponent(id: "c-a1", shape: .radialGradient(
+                    RadialGradientShape(center: NormalizedPoint(0.25, 0.75),
+                                        radius: NormalizedPoint(0.2, 0.2)))),
+            ]),
+            Mask(id: "m-a2", name: "地面", feather: 0.1),
+        ]
+        // 4:3 for A, 3:2 for B — the rows carry the pixel size the app reads at import.
+        let sourceID = try insertAsset(setup, name: "MA.dng", edit: a, size: (4032, 3024))
+        let targetID = try insertAsset(setup, name: "MB.dng", edit: documentB(), size: (6000, 4000))
+
+        let session = CatalogSession()
+        try session.open(packageURL)
+        XCTAssertEqual(session.frameAspect(of: targetID) ?? 0, 1.5, accuracy: 1e-12)
+        XCTAssertEqual(session.frameAspect(of: sourceID) ?? 0, 4.0 / 3.0, accuracy: 1e-12)
+
+        session.selectOnly(sourceID)
+        let payload = try XCTUnwrap(session.copySettingsFromAnchor(selection: .init(sections: [.masks])))
+        print("UI     payload: masks=\(payload.maskCount) fields=\(payload.fieldCount)"
+              + " aspect=\(String(describing: payload.masks?.frameAspect))")
+        XCTAssertEqual(payload.maskCount, 2)
+        XCTAssertEqual(payload.fieldCount, 0, "只勾蒙版: a tone leaf is not in the payload")
+        XCTAssertEqual(payload.masks?.frameAspect ?? 0, 4.0 / 3.0, accuracy: 1e-12)
+
+        session.selectOnly(targetID)
+        let before = session.edit
+        let rowsBefore = session.history.count
+        let reports = session.pasteSettings()
+        let report = try XCTUnwrap(reports.first)
+        print("UI     paste → \(report.summary.prefix(80)) changed=\(report.changed)")
+
+        XCTAssertEqual(session.history.count, rowsBefore + 1, "one paste = one history row")
+        XCTAssertEqual(session.edit.masks.count, 3, "1 of B's own + 2 carried")
+        let ids = session.edit.masks.map(\.id)
+        XCTAssertEqual(Set(ids).count, 3, "ids unique in the live document; got \(ids)")
+        XCTAssertEqual(ids.first, "B-mask")
+        XCTAssertEqual(session.edit.light, before.light, "只粘蒙版: B's exposure is B's")
+        XCTAssertEqual(session.edit.color, before.color)
+        XCTAssertEqual(session.edit.curve, before.curve)
+        XCTAssertEqual(session.edit.geometry, before.geometry)
+        XCTAssertEqual(session.edit.masks[1].components.first?.shape,
+                       .radialGradient(RadialGradientShape(center: NormalizedPoint(0.5 + (0.25 - 0.5) * (8.0 / 9.0), 0.75),
+                                                           radius: NormalizedPoint(0.2, 0.2))),
+                       "4:3 → 3:2 through the session: the circle is re-anchored, not moved blindly")
+
+        // One ⌘Z: the whole paste, masks included — and it reaches the store, not just the screen.
+        XCTAssertTrue(session.undo())
+        print("UI     after ⌘Z: \(session.edit.masks.map(\.id))"
+              + " stored=\(try stored(setup, targetID).masks.count)")
+        XCTAssertEqual(session.edit.masks.map(\.id), before.masks.map(\.id))
+        XCTAssertEqual(try stored(setup, targetID).masks.map(\.id), before.masks.map(\.id),
+                       "one ⌘Z takes the whole paste back, in the document and on disk")
     }
 }

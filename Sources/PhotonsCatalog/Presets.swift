@@ -308,14 +308,17 @@ extension Catalog {
     /// Merge a clipboard payload into one asset, as **one** undo step.
     ///
     /// The merge is `EditSnapshot.applied(to:)`, which writes only the fields the payload carries:
-    /// the destination's other groups, its masks and its `showMaskID` are left alone. When the paste
-    /// changes nothing (same values), `appendDevelop` commits nothing and `changed` is false — a
-    /// paste is not an edit just because it was clicked.
+    /// the destination's other groups and its `showMaskID` are left alone, and its **masks are kept**
+    /// — a payload's masks are *appended*, not substituted (P1-5). `destinationAspect` is the
+    /// `W/H` of this asset's frame, which is what re-anchors a carried mask; `nil` copies the
+    /// normalised coordinates as-is. When the paste changes nothing (same values), `appendDevelop`
+    /// commits nothing and `changed` is false — a paste is not an edit just because it was clicked.
     @discardableResult
     public func pasteSettings(_ snapshot: EditSnapshot, intoAsset id: String,
-                              label: String = "Paste Settings") throws -> DevelopSaveResult {
+                              label: String = "Paste Settings",
+                              destinationAspect: Double? = nil) throws -> DevelopSaveResult {
         let current = try develop(forAsset: id)
-        let merged = snapshot.applied(to: current)
+        let merged = snapshot.applied(to: current, destinationAspect: destinationAspect)
         return try appendDevelop(merged, label: label, forAsset: id)
     }
 
@@ -323,23 +326,28 @@ extension Catalog {
     ///
     /// Same merge, one narrowing step in front of it: `snapshot.filtered(to:)` drops every leaf the
     /// user did not check, and the merge then cannot read (or write) the sections it dropped. So
-    /// 「只粘曝光 + 曲线」 leaves the destination's white balance — and its crop, colour, masks —
-    /// bit for bit, which is what the field-by-field assertions check.
+    /// 「只粘曝光 + 曲线」 leaves the destination's white balance — and its crop, colour, masks — bit
+    /// for bit, which is what the field-by-field assertions check. Checking 「蒙版」 is the mirror
+    /// image of that: the mask list is appended and **nothing else in the document moves** (P1-5).
     ///
     /// `changed == false` covers three honest no-ops: the narrowed payload is empty, the destination
     /// already held those values, or the blob was already canonical. None of them grows the stack.
+    ///
+    /// `destinationAspect` (P1-5) is `W/H` of this asset's own frame; the caller is the only one who
+    /// can know it (a document does not store its pixel size). `nil` copies mask coordinates as-is.
     @discardableResult
     public func pasteSettings(_ snapshot: EditSnapshot,
                               intoAsset id: String,
                               sections: Set<EditSnapshotSection>,
-                              label: String = "粘贴设置") throws -> SettingsPasteReport {
+                              label: String = "粘贴设置",
+                              destinationAspect: Double? = nil) throws -> SettingsPasteReport {
         let payload = snapshot.filtered(to: sections)
         let current = try develop(forAsset: id)
         guard !payload.isEmpty else {
             return SettingsPasteReport(assetID: id, changed: false, fields: [],
                                        sections: [], requiresDecode: false, historyRows: nil)
         }
-        let merged = payload.applied(to: current)
+        let merged = payload.applied(to: current, destinationAspect: destinationAspect)
         let fields = EditHistory.changedFields(between: current, and: merged)
         guard !fields.isEmpty else {
             // Nothing moved: do not call `appendDevelop` at all, so a paste that equals what the
@@ -365,8 +373,12 @@ extension Catalog {
     public func pasteSettings(_ snapshot: EditSnapshot,
                               intoAssets ids: [String],
                               sections: Set<EditSnapshotSection>,
-                              label: String = "粘贴设置") throws -> [SettingsPasteReport] {
-        try ids.map { try pasteSettings(snapshot, intoAsset: $0, sections: sections, label: label) }
+                              label: String = "粘贴设置",
+                              destinationAspect: (String) -> Double? = { _ in nil }) throws -> [SettingsPasteReport] {
+        try ids.map {
+            try pasteSettings(snapshot, intoAsset: $0, sections: sections, label: label,
+                              destinationAspect: destinationAspect($0))
+        }
     }
 
 

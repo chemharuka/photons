@@ -782,6 +782,19 @@ public struct Mask: Sendable, Equatable, Codable, Identifiable {
         self = v
     }
 
+    /// A new `"m-<uuid>"` that is not in `taken` — the identity a **pasted** mask gets (P1-5).
+    ///
+    /// The id is the mask's atlas identity (`selectionKey`) and the key of its row in the history
+    /// diff (`masks.<id>.…`), so a copy must not land on an id the destination already holds: two
+    /// masks with one id would share a cache key, collapse in `MaskGraph`, and make the history's
+    /// id-keyed diff report one of them as the other. `UUID` collisions are not a practical worry;
+    /// the loop is here so the *invariant* is stated in the one place that mints the value.
+    public static func freshID(excluding taken: Set<String> = []) -> String {
+        var id = "m-\(UUID().uuidString)"
+        while taken.contains(id) { id = "m-\(UUID().uuidString)" }
+        return id
+    }
+
     /// Atlas layer identity: everything that changes the selection, nothing that changes the edit.
     /// `selectionKey(mask) = id|kind|components[op,invert,feather,shape…]|invert|opacity|feather|refine|isEnabled`
     public var selectionKey: String {

@@ -264,7 +264,7 @@ final class PresetCatalogTests: XCTestCase {
                           "two fields out of 57: the payload is sparse by construction")
     }
 
-    func testPasteSettingsProducesExactlyOneHistoryRowAndSkipsMasks() throws {
+    func testPasteSettingsProducesExactlyOneHistoryRowAndAppendsMasks() throws {
         let catalog = try newLibrary()
         let source = try insertAsset(catalog, name: "source.dng")
         let target = try insertAsset(catalog, name: "target.dng")
@@ -293,7 +293,14 @@ final class PresetCatalogTests: XCTestCase {
         XCTAssertEqual(after.light, sourceEdit.light, "the copied group landed")
         XCTAssertEqual(after.color, sourceEdit.color)
         XCTAssertEqual(after.effects, targetEdit.effects, "Effects was not copied")
-        XCTAssertEqual(after.masks.map(\.id), ["m-target"], "masks are never pasted")
+        // P1-5: the mask list is carried **appended** — the destination keeps its own mask and gains
+        // the source's as a new, re-identified mask. The overlay is still never pasted.
+        print("PASTE  masks: \(targetEdit.masks.map(\.id)) + \(sourceEdit.masks.map(\.id))"
+              + " → \(after.masks.map(\.id))")
+        XCTAssertEqual(after.masks.count, 2, "1 of the target's own + 1 carried")
+        XCTAssertEqual(after.masks.first?.id, "m-target", "the destination's own mask is untouched")
+        XCTAssertEqual(after.masks.last?.name, "Source mask", "the carried mask keeps its name")
+        XCTAssertEqual(Set(after.masks.map(\.id)).count, 2, "ids stay unique")
         XCTAssertEqual(after.showMaskID, "m-target", "the overlay selection is not pasted either")
 
         // Undo takes the whole paste back in one step.
