@@ -632,6 +632,58 @@ public enum CurveEditor {
     /// before, i.e. a *tighter* clamp, and still far wider than one table sample (2.4e-4).
     public static let minimumGap = 1e-3
 
+    /// The **last** segment's slope ceiling, in the card's own coordinate (派单 080 / 079 A5).
+    ///
+    /// It is `HDRCurve.tailSlopeLimit` — the number the kernel clamps the extrapolation above +4 EV
+    /// with — and never a second copy of it: the drag limit and the render limit must be one number,
+    /// or the card would let the user draw a slope the pixels silently cap (which is what [0, 1] on
+    /// the kernel side did to every steeper end before this task).
+    ///
+    /// Card coordinates need no conversion here: the engine's `u = x/2` and `v = y/2` scale both axes
+    /// by the same 2, so the last segment's slope **is** the number in the uniform.
+    public static let tailSlopeLimit = HDRCurve.tailSlopeLimit
+
+    /// The last segment's slope for a candidate last point: `Δy/Δx` in the card's coordinate, or
+    /// `nil` when there is no last segment to speak of (one point, or no room between them).
+    ///
+    /// The card prints nothing from this yet; the tests read it, and it is the definition the clamp
+    /// below is written against (one rule, one place, so "drag limit 2" and "tail slope 2" cannot
+    /// drift apart).
+    public static func tailSlope(atLast point: CurvePoint, in points: [CurvePoint]) -> Double? {
+        guard points.count >= 2 else { return nil }
+        let prev = points[points.count - 2]
+        let span = point.x - prev.x
+        guard span > 0 else { return nil }
+        return (point.y - prev.y) / span
+    }
+
+    /// Hold the **tail segment** inside `±tailSlopeLimit` while one of its two endpoints is dragged.
+    ///
+    /// Only the last segment is limited, and only because it is the only segment whose slope leaves
+    /// the table: everything to the left of the last point is interpolated inside `v ∈ [0, 1]` (where
+    /// a steep segment is a legitimate midtone S, not an overshoot) and rule 4 never reads it.
+    /// Both ends of the tail move on the plot, so both are clamped: dragging the white point up is
+    /// capped at `prev.y + 2·Δx`, and dragging the point *before* it down is floored at
+    /// `last.y − 2·Δx`. A descending tail (`slope < 0`) is left alone — the kernel already flattens it
+    /// to a ceiling (`HDRCurve.tailSlopeFloor`), and taking the white point below its neighbour has
+    /// been legal since 061.
+    public static func clampTail(_ y: Double, x: Double, index: Int, in points: [CurvePoint]) -> Double {
+        guard points.count >= 2 else { return y }
+        let last = points.count - 1
+        let prev = points[last - 1]
+        if index == last {
+            let span = x - prev.x
+            guard span > 0 else { return y }
+            return min(y, prev.y + tailSlopeLimit * span)
+        }
+        if index == last - 1 {
+            let span = points[last].x - x
+            guard span > 0 else { return y }
+            return max(y, points[last].y - tailSlopeLimit * span)
+        }
+        return y
+    }
+
     /// Keep a dragged point inside its neighbours, one gap away on each side.
     ///
     /// **061: the endpoints move in x too.** 051 pinned the first point at `x = 0` and the last at
@@ -669,6 +721,10 @@ public enum CurveEditor {
     }
 
     /// The point a drag produces: ⇧'s axis lock, then the clamp, then the card's square.
+    ///
+    /// 080: the **x clamp comes first**, because the tail's slope ceiling is a function of `x` (the
+    /// segment can be made steeper by pulling its right end left, not only by pulling `y` up) — so
+    /// `clampTail` is applied to the x that will actually be written, not to the pointer's.
     public static func movedPoint(_ target: CurvePoint, index: Int, in points: [CurvePoint],
                                   from origin: CurvePoint, lock: CurveAxisLock) -> CurvePoint {
         guard points.indices.contains(index) else { return target }
@@ -678,7 +734,8 @@ public enum CurveEditor {
         case .x: locked = CurvePoint(target.x, origin.y)
         case .y: locked = CurvePoint(origin.x, target.y)
         }
-        return CurvePoint(clampX(locked.x, index: index, in: points), locked.y)
+        let x = clampX(locked.x, index: index, in: points)
+        return CurvePoint(x, clampTail(locked.y, x: x, index: index, in: points))
     }
 
     /// Insert a point at `(x, y)` in x order. The new x is clamped into the stretch it fell in, so a
@@ -1171,6 +1228,9 @@ public struct CurvePanel: View {
                     .onEnded { value in released(value, geometry: geometry) }
             )
             .accessibilityIdentifier("curve.plot")
+            .help("拖动控制点：末段（最后两点之间）的斜率上限 2.0 —— +4 EV 以上的高光尾巴"
+                  + "可以画得比 1× 更陡，渲染与拖动用同一个上限；其它段不受这个上限约束"
+                  + "（它们只在表内插值，不会外延）")
         }
         .frame(height: CurvePanelMetrics.plotHeight)
     }

@@ -68,7 +68,13 @@ using namespace metal;
 //     u = 1.25, i.e. past the end) stays within 1.5e-6 relative, and through the fp16 display
 //     buffer 1000 comes back as 997.65 — the storage step (9.77e-4), not the slope. A user's roll-off
 //     (slope < 1) keeps compressing; slope = 0 is a hard ceiling at 16 *the user drew*, not a
-//     pipeline clamp. The slope is clamped to [0, 1] so it can neither invert nor manufacture gain.
+//     pipeline clamp. The slope is clamped to **[0, 2]** (派单 080 / 079 A5 — it was [0, 1]): one
+//     unit of `u` past the end is 8 EV, so the slope *is* the log-log contrast above +4 EV, and a
+//     user who draws a steeper end means it. 2 is a guard against a hand-written document, not a
+//     picture decision; the ceiling and the floor are the **same numbers** `HDRCurve.tailSlopeLimit`
+//     / `.tailSlopeFloor` on the CPU side (a test parses this line), and this is the only segment
+//     they apply to — every interior segment is interpolated inside the table's `0…1` and never
+//     multiplied by `max(u − 1, 0)`, so it cannot see the clamp at all.
 //
 // ## WRGB: W is a luma **gain**, R/G/B are separable per-channel tables
 //
@@ -162,7 +168,7 @@ static inline float hdr_channel(float x, device const float *lut, int offset, in
         return hdr_inverse(hdr_lut(lut, offset, n, 0.0), uWhite, perStop);  // 061: the black clip
     }
     float u = hdr_forward(x, uWhite, perStop);
-    float v = hdr_lut(lut, offset, n, u) + max(u - 1.0, 0.0) * clamp(slope, 0.0, 1.0);
+    float v = hdr_lut(lut, offset, n, u) + max(u - 1.0, 0.0) * clamp(slope, 0.0, 2.0);
     return hdr_inverse(v, uWhite, perStop);
 }
 
@@ -211,7 +217,7 @@ kernel void s1_7_hdr_curve(texture2d<float, access::read> src [[texture(0)]],
     float y = dot(max(c.rgb, float3(0.0)), p.d.xyz);
     if (y > 0.0 && (identityMask & 1u) == 0u) {
         float uy = hdr_forward(y, uWhite, perStop);
-        float vy = hdr_lut(lut, 0, n, uy) + max(uy - 1.0, 0.0) * clamp(p.c.x, 0.0, 1.0);
+        float vy = hdr_lut(lut, 0, n, uy) + max(uy - 1.0, 0.0) * clamp(p.c.x, 0.0, 2.0);
         // The offset is `log2(x(v)/x(u))` — the ratio of the two *light* values the axis maps, not
         // `(v − u)·16`. On 044's log1p axis the two agreed to 0.1 %; on this one the SDR half is
         // display-encoded, where a unit of `u` is 12–100 stops, so a single constant would make the

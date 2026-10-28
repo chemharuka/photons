@@ -595,6 +595,170 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(top1000, 16, accuracy: 0.5, "slope 0 means 16 (+4 EV) and no further")
     }
 
+    // MARK: - 080 (079 A5): the tail's slope ceiling is 2
+
+    /// The two numbers that make rule 4 — and the **same** two on the GPU side.
+    ///
+    /// 079 A5: the segment above +4 EV used to be clamped to `[0, 1]`, so a user who drew a steeper
+    /// end had it silently flattened to "carry on". One unit of `u` past the end is 8 EV, so the slope
+    /// *is* the log-log contrast of the HDR tail: `0` is a hard ceiling, `1` carries on, `2` is the
+    /// steepest end the product accepts. `2` is a guard against a hand-written document (40 in the
+    /// uniform would render at 40), not a picture decision.
+    ///
+    /// The kernel's clamp is **parsed**, not grepped for a comment: an edit that puts `1.0` back turns
+    /// this red even if the header is rewritten to match — the discipline
+    /// `testAxisIsHalfSDRHalfHDRAndTheKernelHeaderAgrees` established for the axis numbers.
+    func testTheTailSlopeCeilingIsTwoOnBothSides() throws {
+        XCTAssertEqual(HDRCurve.tailSlopeLimit, 2, "079 A5: 末段斜率上限 1 → 2")
+        XCTAssertEqual(HDRCurve.tailSlopeFloor, 0, "下界不变：反转仍被压成零斜率的天花板")
+
+        // The clamp: [0, 2], both ends inclusive, everything between passing through untouched.
+        func clampTail(_ s: Double) -> Double { HDRCurve.clampTailSlope(s) }
+        XCTAssertEqual(clampTail(-3), 0, "负斜率 → 0")
+        XCTAssertEqual(clampTail(0), 0)
+        XCTAssertEqual(clampTail(1), 1, "恰恰 1 原样通过（旧上限的最边缘）")
+        XCTAssertEqual(clampTail(1.5), 1.5, "1 与 2 之间原样通过 —— 这就是本单放开的区间")
+        XCTAssertEqual(clampTail(2), 2)
+        XCTAssertEqual(clampTail(7.5), 2, "上界 2：手改文档的荒唐值被挡住")
+        let wide: Float = 3.25
+        XCTAssertEqual(HDRCurve.clampTailSlope(wide), 2, "Float 与 Double 两条入口同一个夹取")
+
+        // …and the kernel: **both** sites — the W gain's own continuation and `hdr_channel`'s. Missing
+        // one of the two is exactly the bug this test exists to catch (the W branch is the luminance
+        // curve, i.e. the one a user's "steeper end" is usually drawn on).
+        let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let re = try NSRegularExpression(pattern: "clamp\\((?:slope|p\\.c\\.x), ([0-9.]+), ([0-9.]+)\\)")
+        let matches = re.matches(in: source, range: NSRange(source.startIndex..., in: source))
+        XCTAssertEqual(matches.count, 2,
+                       "末段斜率在 kernel 里有两处夹取（W 的增益 + hdr_channel），改成 \(matches.count) 处就是漏改或有第三处")
+        var seen: [String] = []
+        for m in matches {
+            let lo = Double(source[Range(m.range(at: 1), in: source)!])!
+            let hi = Double(source[Range(m.range(at: 2), in: source)!])!
+            seen.append("[\(lo), \(hi)]")
+            XCTAssertEqual(lo, HDRCurve.tailSlopeFloor, "kernel 的下界不是 CPU 的 tailSlopeFloor")
+            XCTAssertEqual(hi, HDRCurve.tailSlopeLimit,
+                           "kernel 的上界不是 CPU 的 tailSlopeLimit —— 拖动上限与渲染上限必须是同一个数")
+        }
+        print("080 tail slope · CPU clamp [\(HDRCurve.tailSlopeFloor), \(HDRCurve.tailSlopeLimit)]"
+              + " · kernel: \(matches.count) 处 " + seen.joined(separator: " "))
+    }
+
+    /// The control points of a document whose **last segment has slope 2.0**, and their twin at 1.0.
+    ///
+    /// In the card's `0…2` coordinate the last segment is `(1.4, 0.8) → (2, 2)`: `Δy/Δx = 1.2/0.6`,
+    /// i.e. exactly the number the editor's drag limit now allows. The twin ends at `y = 1.4`
+    /// (`Δ = 0.6/0.6 = 1.0`) — the old ceiling's maximum, so the two frames differ **only** in what
+    /// rule 4 does above +4 EV plus the shape of the last segment itself.
+    private var steepTailPoints: [CurvePoint] {
+        [CurvePoint(0, 0), CurvePoint(1.4, 0.8), CurvePoint(2, 2)]
+    }
+
+    private var oneTailPoints: [CurvePoint] {
+        [CurvePoint(0, 0), CurvePoint(1.4, 0.8), CurvePoint(2, 1.4)]
+    }
+
+    /// A document with a **2.0 tail slope** renders a steeper HDR tail than its 1.0 twin — on the GPU,
+    /// through the shaper, at the far end of the axis — and lands where the analytic rule 4 says.
+    ///
+    /// This is the pixel half of 079 A5: the point of raising the ceiling is that the user's steeper
+    /// end reaches the picture. Numbers, for the record: input 64 (`u = 1.25`, i.e. +6 EV) comes out at
+    /// `x(1 + 2·0.25) = 256` with the steep end and `x(0.7 + 0.25) = 12.1` with the 1.0 twin; at
+    /// +5 EV (input 32) it is 64 vs 6.1. That factor is what a flattened clamp used to erase.
+    func testATailSlopeOfTwoReachesThePixels() throws {
+        let steepTable = table(steepTailPoints)
+        let oneTable = table(oneTailPoints)
+        let steepSlope = CurveLUT.slope(of: steepTable)
+        let oneSlope = CurveLUT.slope(of: oneTable)
+        XCTAssertEqual(steepSlope, 2.0, accuracy: 5e-3, "表尾估计就是 2.0（控制点算出来的）")
+        XCTAssertEqual(oneSlope, 1.0, accuracy: 5e-3, "…而这一条是 1.0（旧上限的最大值）")
+
+        let values: [Float] = [0.5, 1, 2, 4, 8, 16, 32, 64]
+        let graph = try makeGraph(bands(values), identity: "hdr-curve-tail-slope")
+
+        var steep = EditModel.neutral
+        steep.curve.white = steepTailPoints
+        var one = EditModel.neutral
+        one.curve.white = oneTailPoints
+
+        let steepFrame = try render(graph, steep, headroom: 4096)
+        let oneFrame = try render(graph, one, headroom: 4096)
+        let steepOut = bandValues(steepFrame, count: values.count)
+        let oneOut = bandValues(oneFrame, count: values.count)
+
+        // Rule 4, analytically, at the two bands past +4 EV.
+        let far = (steep: HDRCurve.axis.forward(64), one: HDRCurve.axis.forward(64))
+        XCTAssertEqual(far.steep, 1.25, accuracy: 1e-12)
+        let vSteep = HDRCurve.lutValue(steepTable, slope: steepSlope, u: far.steep)
+        let vOne = HDRCurve.lutValue(oneTable, slope: oneSlope, u: far.one)
+        XCTAssertEqual(vSteep, 1 + 2 * (far.steep - 1), accuracy: 1e-3, "v = v(1) + 2·(u − 1)")
+        XCTAssertEqual(vOne, 0.7 + 1 * (far.one - 1), accuracy: 1e-3, "…and the twin continues at 1×")
+        let xSteep = HDRCurve.axis.inverse(vSteep)
+        let xOne = HDRCurve.axis.inverse(vOne)
+        print(String(format: "080 tail 2.0 vs 1.0 · x=64 → linear %.3f / %.3f · "
+                     + "display %.4f / %.4f · sha %@ / %@",
+                     xSteep, xOne, Double(steepOut[7]), Double(oneOut[7]),
+                     String(steepFrame.sha256().prefix(12)), String(oneFrame.sha256().prefix(12))))
+
+        XCTAssertGreaterThan(xSteep, 20 * xOne, "2× 斜率在 +6 EV 上就是一个数量级以上")
+        XCTAssertEqual(decode(steepOut[7]) / xSteep, 1, accuracy: 0.02,
+                       "steep tail: x=64 落在 x(v) = \(xSteep)（2 % 量测误差）")
+        XCTAssertEqual(decode(oneOut[7]) / xOne, 1, accuracy: 0.05,
+                       "1.0 tail: 落在 x(v) = \(xOne)")
+        // …and the same claim one stop in, so the number is not a coincidence of one band.
+        let u32 = HDRCurve.axis.forward(32)
+        XCTAssertEqual(decode(steepOut[6]) / HDRCurve.axis.inverse(
+            HDRCurve.lutValue(steepTable, slope: steepSlope, u: u32)), 1, accuracy: 0.02)
+        XCTAssertNotEqual(steepFrame.sha256(), oneFrame.sha256(),
+                          "末段 2.0 与 1.0 必须是不同的像素（反证：上限 1.0 时两者会相等）")
+        // The SDR half and the +0…+4 EV half are *not* the claim here (the two documents have
+        // different tables below `u = 1` as well); what the next test pins is that the clamp itself
+        // cannot be seen there for a **fixed** table.
+    }
+
+    /// **Only the last segment.** The clamp multiplies `max(u − 1, 0)`, so for `u ≤ 1` the slope
+    /// argument is invisible — 200 sampled points, both tables, exact equality — and for a slope the
+    /// old ceiling allowed (`0…1`) the new clamp is *bit-identical* to the old one, i.e. every
+    /// document written before this task renders the block it always rendered.
+    func testTheCeilingIsInvisibleAtOrBelowPlusFourEV() throws {
+        for points in [steepTailPoints, oneTailPoints] {
+            let t = table(points)
+            for i in 0...200 {
+                let u = Double(i) / 200
+                XCTAssertEqual(HDRCurve.lutValue(t, slope: 1, u: u),
+                               HDRCurve.lutValue(t, slope: 2, u: u),
+                               "u = \(u) ≤ 1 看见了斜率参数")
+            }
+            // Above the end it *is* visible: that is the whole change.
+            XCTAssertGreaterThan(HDRCurve.lutValue(t, slope: 2, u: 1.25),
+                                 HDRCurve.lutValue(t, slope: 1, u: 1.25))
+        }
+
+        // The old expression, written out: `clamp(slope, 0, 1)`. For every slope a pre-080 document
+        // can have drawn, the new clamp answers the same `Double`, bit for bit — so "旧文档逐字节不变"
+        // is a property of the expression, not of a lucky sample.
+        func oldClamp(_ s: Float) -> Double { Double(min(max(s, 0), 1)) }
+        for i in 0...1000 {
+            let s = Float(i) / 1000
+            XCTAssertEqual(Double(HDRCurve.clampTailSlope(s)), oldClamp(s), "slope \(s)")
+        }
+
+        // …and the same claim as a **frame**: a pre-080 document (last segment 0.6, the middle of the
+        // old ceiling's range) rendered through the real graph, at the far end of the axis. Its digest
+        // is what the pre-080 build produced — `min(max(s, 0), 2)` and `min(max(s, 0), 1)` are the
+        // same `Double` for every `s ≤ 1`, so no pixel can move. (The number is printed so the two
+        // builds can be compared without pinning a GPU-specific digest into the test.)
+        let legacy = [CurvePoint(0, 0), CurvePoint(1.0, 1.0), CurvePoint(2, 1.6)]
+        XCTAssertEqual(CurveLUT.slope(of: table(legacy)), 0.6, accuracy: 5e-3)
+        let legacyGraph = try makeGraph(bands([0.5, 1, 2, 4, 8, 16, 32, 64]), identity: "hdr-curve-legacy")
+        var legacyEdit = EditModel.neutral
+        legacyEdit.curve.white = legacy
+        let legacyFrame = try render(legacyGraph, legacyEdit, headroom: 4096)
+        print("080 · clamp(0…1) == old clamp(0…1) over 1001 slopes, bit for bit"
+              + " · legacy doc (tail 0.6) frame sha \(legacyFrame.sha256())")
+    }
+
     // MARK: - ⑧ sub-black passes through
 
     /// 018's staircase, through a curve that would lift it if it could: the negative bands stay at

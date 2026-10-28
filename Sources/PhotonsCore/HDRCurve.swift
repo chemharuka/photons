@@ -166,6 +166,45 @@ public enum HDRCurve {
         return (r: w.x, g: w.y, b: w.z)
     }()
 
+    /// Rule 4's slope ceiling — the **last** segment's, and only the last one's (派单 080 / 079 A5).
+    ///
+    /// `2`, not `1`. `u > 1` is the only place a control-point segment is *extrapolated*, so its
+    /// slope is the one number that "how steep did the user draw the end" turns into pixels with.
+    /// On this axis one unit of `u` above white is 8 EV, so `s` **is** the log-log contrast above
+    /// +4 EV: `s = 1` carries on, `s < 1` rolls off, `s > 1` steepens the HDR tail (the tail is
+    /// *compressed* less, i.e. it keeps more of its light). 1 was a ceiling on the *user*, not on the
+    /// maths — darktable's `tonecurve` extrapolates with a power law fitted to the table's end and
+    /// clamps nothing (`src/iop/tonecurve.c:401`) — and 2 is where the ceiling stops being a picture
+    /// decision and becomes a guard against a hand-written document: past 2 the extension climbs so
+    /// fast that one table sample of error is a visible step, and no photograph has a tail there.
+    ///
+    /// **The ticket's 「其它段仍 ≤1」 needs no code, and must not get any.** A segment that is not the
+    /// last one is *not* extrapolated: it is interpolated inside the table, where `v` is clamped to
+    /// `0…1` (`buildOne`), Fritsch–Carlson keeps the interpolant monotone and the fold check falls
+    /// back to the identity — so it cannot leave the card and it cannot invert, whatever its slope
+    /// (a steep interior segment is a legitimate midtone S; `CurvePanelTests` has dragged `y` freely
+    /// since 051/061). What this constant can do is *relax a clamp*, and the clamp exists only on the
+    /// one segment that is multiplied past the table: the two `clamp(` sites in
+    /// `s1_7_hdr_curve.metal` both multiply by `max(u − 1, 0)`, so `u ≤ 1` cannot see the number at
+    /// all (`HDRCurveTests` measures that at 200 points per table).
+    public static let tailSlopeLimit: Double = 2
+
+    /// The other end of rule 4's clamp: a **descending** last segment is flattened to a ceiling, not
+    /// allowed to invert. Unchanged from the pre-080 `clamp(slope, 0, 1)`.
+    public static let tailSlopeFloor: Double = 0
+
+    /// `slope` as the kernel uses it: `clamp(slope, tailSlopeFloor, tailSlopeLimit)`.
+    ///
+    /// Named so the CPU (`lutValue`) and the GPU (`hdr_channel`) are the same expression, and so a
+    /// document written by hand with 40 in `slopes` renders at 2 rather than at 40.
+    public static func clampTailSlope(_ slope: Float) -> Float {
+        Float(clampTailSlope(Double(slope)))
+    }
+
+    public static func clampTailSlope(_ slope: Double) -> Double {
+        min(max(slope, tailSlopeFloor), tailSlopeLimit)
+    }
+
     /// The table's interpolation, on CPU: clamp `u` into [0,1], lerp, plus rule 4's continuation.
     public static func lutValue(_ table: [Float], slope: Float, u: Double) -> Double {
         guard table.count >= 2 else { return u }
@@ -175,7 +214,7 @@ public enum HDRCurve {
         let i1 = min(i0 + 1, n - 1)
         let f = t - Double(i0)
         let v = Double(table[i0]) * (1 - f) + Double(table[i1]) * f
-        return v + max(u - 1, 0) * Double(min(max(slope, 0), 1))
+        return v + max(u - 1, 0) * clampTailSlope(Double(slope))
     }
 
     /// One channel through one table — `hdr_channel` in the kernel.

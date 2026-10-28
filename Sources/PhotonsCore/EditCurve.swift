@@ -80,8 +80,12 @@ public enum CurveLUT {
     /// Rule 4's slopes: the last segment of each table, extrapolated to a per-unit-u slope.
     ///
     /// `(lut[N−1] − lut[N−2]) · (N−1)` — exactly 1 for the identity table, < 1 for a roll-off, 0 for
-    /// a ceiling the user drew at the right end. The kernel clamps it into [0,1]; the value here is
-    /// what goes into the uniform.
+    /// a ceiling the user drew at the right end, and **up to 2** for a steepened HDR tail (派单 080:
+    /// the clamp used to stop at 1, which silently threw away every slope the user drew above it).
+    /// The kernel clamps it into `[0, HDRCurve.tailSlopeLimit]` — the value here is the **raw**
+    /// estimate that goes into the uniform, and both sides clamp with the same two numbers
+    /// (`HDRCurve.clampTailSlope`), so a test can compare them. Only the tail is extrapolated: for
+    /// `u ≤ 1` this number is never read, which is why the other segments need no ceiling of their own.
     public static func slopes(_ tables: [Float]) -> [Float] {
         guard tables.count == tableCount * size else {
             return [Float](repeating: 1, count: tableCount)
