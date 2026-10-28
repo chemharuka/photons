@@ -28,11 +28,11 @@ final class HSLPanelTests: XCTestCase {
     // MARK: - structure
 
     func testTheColourWorkspaceIsTheHSLCardAndNothingElse() {
-        // 2026-10-28 (P0 色彩分级): the workspace holds two cards now — HSL first, then 色彩分级 —
-        // and HSL is still the one this suite is about.
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading])
-        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["HSL", "色彩分级"],
-                       "the colour workspace's first card is HSL")
+        // 2026-10-28: the workspace holds three cards — 黑白 (moved here), HSL, then 色彩分级 — and HSL
+        // is still the one this suite is about.
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.blackAndWhite, .hsl, .colorGrading])
+        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["黑白", "HSL", "色彩分级"],
+                       "the colour workspace: 黑白, then HSL, then 色彩分级")
         XCTAssertEqual(InspectorView.Section.hsl.title, "HSL")
         XCTAssertTrue(InspectorWorkspace.colour.hasCards)
         XCTAssertFalse(InspectorWorkspace.colour.help.contains("尚未实现"),
@@ -75,7 +75,7 @@ final class HSLPanelTests: XCTestCase {
     func testTheCardFitsAtEveryWidth() throws {
         for width in Self.widths {
             let panel = try host(width: width, state: .init(.colour))
-            XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading"],
+            XCTAssertEqual(panel.cardIDs, ["blackAndWhite", "hsl", "colorGrading"],
                            "\(width) pt: the colour workspace shows HSL then 色彩分级")
 
             let probes = panel.bandProbes
@@ -96,9 +96,11 @@ final class HSLPanelTests: XCTestCase {
             }
 
             let fields = panel.numberFields
-            // 3 HSL rows + 9 色彩分级 rows: every number on this workspace's two cards is typeable.
-            XCTAssertEqual(fields.count, 3 + InspectorView.colorGradingRowCount,
-                           "\(width) pt: 色相/饱和/亮度 (+ the nine grade rows) must each be typeable")
+            // 3 HSL rows + 9 色彩分级 rows + the 黑白 card's eight mixes (its switch is not a number):
+            // since 2026-10-28 黑白 lives in this workspace, so every number here is typeable.
+            XCTAssertEqual(fields.count, 3 + InspectorView.colorGradingRowCount
+                                              + InspectorView.bwRows.count,
+                           "\(width) pt: 色相/饱和/亮度 + 九行分级 + 八行黑白混合 must each be typeable")
             for f in panel.numberFieldFrames {
                 XCTAssertGreaterThanOrEqual(f.minX, -0.5, "\(width) pt: a row starts off-panel")
                 XCTAssertLessThanOrEqual(f.maxX, width + 0.5, "\(width) pt: a row runs past the panel")
@@ -254,7 +256,7 @@ final class HSLPanelTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.45))
         host.layoutSubtreeIfNeeded()
         let panel = Panel(host: host, window: window, session: session, state: state)
-        XCTAssertEqual(panel.cardIDs, ["hsl", "colorGrading"], "the panel did not open on the HSL card")
+        XCTAssertEqual(panel.cardIDs, ["blackAndWhite", "hsl", "colorGrading"], "the panel did not open on the HSL card")
         return panel
     }
 }
