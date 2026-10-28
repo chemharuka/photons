@@ -1,11 +1,11 @@
 {
-  "atlasSHA256" : "d1a6605e238ab7e854bfef86db0791aad8802d45461ce78971ce515f610ab7a3",
+  "atlasSHA256" : "d8bb1575b9ffad97829f162b7c6c6e5b35ba3fb64ebdeb7b4f527ae062c3b482",
   "maskIDs" : [
     "m-a",
     "m-b"
   ],
   "note" : "Recorded by MaskSemanticTests on the synthetic 96×65 ramp image; two masks (m-a radial +0.6 EV, m-b linear −0.6 EV) with showMask = m-b. `showDisplaySHA256` is the frame after the 50 % red overlay, `plainDisplaySHA256` the same document without it, so the file pins both sides of the 005e criterion. 8-bit quantised digests.",
-  "plainDisplaySHA256" : "6db557e01d27920906d92afc759cac2b10f9311775b8943b07015e20543bf1d2",
+  "plainDisplaySHA256" : "ba8bbe6ed49fc9b82979c605ae7c39fea5ceeaa6eb5580207bb39aec3b96c6ba",
   "sampleX" : [
     8,
     48,
@@ -29,9 +29,9 @@
       0.398193359375
     ],
     [
-      0.67431640625,
-      0.58984375,
-      0.57568359375
+      0.78076171875,
+      0.76318359375,
+      0.7451171875
     ],
     [
       0.8212890625,
@@ -39,14 +39,14 @@
       0.306396484375
     ],
     [
-      0.6884765625,
-      0.578125,
-      0.56396484375
+      0.67529296875,
+      0.66015625,
+      0.64453125
     ],
     [
-      0.71484375,
-      0.69775390625,
-      0.6806640625
+      0.71533203125,
+      0.69873046875,
+      0.68212890625
     ],
     [
       0.8330078125,
@@ -54,7 +54,7 @@
       0.317626953125
     ]
   ],
-  "showDisplaySHA256" : "3e0f8a1f3fd54ce6b7efa5fd9c78b0a30c6d86df21f6e5cfa6d2fd288446b8e3",
+  "showDisplaySHA256" : "275214a7bc77b923e0fa0bcc454a4abde01e0485a5d78ad940209521871f82ee",
   "shownMaskID" : "m-b",
   "shownSlice" : 1,
   "sourceHeight" : 65,
