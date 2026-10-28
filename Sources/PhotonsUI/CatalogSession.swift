@@ -265,6 +265,10 @@ public final class CatalogSession {
         // per library". Assigned directly rather than through `applyFilter` because the restore right
         // below (or the `reload()` further down) is what runs the query — one query, not three.
         filter = .none
+        // 上一个库的相册范围同理不能继承：相册 id 属于那个库，留在 `selectedAlbumID` 里只会让新库的
+        // 第一次查询空着（`reload()` 也会把它当"已不存在的相册"丢掉，但没必要开一次空查询）。
+        selectedAlbumID = nil
+        albums = []
         // Before the first query, so the grid's very first paint already carries 「原文件已移动」:
         // the flag is a filesystem fact and this is the only moment it can be fresh. A failure here
         // only means the flags keep yesterday's values, which is why it does not throw.
@@ -297,6 +301,13 @@ public final class CatalogSession {
             // then guaranteed to describe the same library state, and a selected folder that lost
             // its last photo (a delete, a relink) stops filtering instead of filtering to nothing.
             folderNodes = (try? c.folderIndex()) ?? [:]
+            // 相册：左栏的「相册」段与它每一行的数字都读这一个列表（078 B10）。加载在查询**之前**，
+            // 因为下面那次 `assets()` 就带着 `selectedAlbumID`；一个已经不存在的相册（另一个进程删的、
+            // 或者本进程刚删的）必须在这里被丢掉，否则网格会永远空着而左栏没有那一行可点回来。
+            albums = (try? c.albums()) ?? []
+            if let open = selectedAlbumID, !albums.contains(where: { $0.id == open }) {
+                selectedAlbumID = nil
+            }
             // Drop selections that no longer exist — a delete, a relink or a removed root. A dead
             // *root* drops its row outright; a dead *subfolder* falls back to its root, which is
             // what the single-selection model did ("the folder I was in lost its last photo" must
@@ -326,7 +337,10 @@ public final class CatalogSession {
             // second SQL dialect (`ORDER BY … ASC`) and no second query — one comparator defines
             // "newest" for the grid, the browser and the strip at once.
             let f = filter
-            assets = sortOrder.sorted(try c.assets(f.assetFilter(limit: 200_000, folders: selectedFolders)))
+            let albumScope = selectedAlbumID.map { [$0] } ?? []
+            assets = sortOrder.sorted(try c.assets(f.assetFilter(limit: 200_000,
+                                                                 folders: selectedFolders,
+                                                                 albumIds: albumScope)))
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -434,6 +448,18 @@ public final class CatalogSession {
     /// display name and therefore cannot tell two folders of the same name apart.
     public private(set) var folderNodes: [String: [FolderNode]] = [:]
 
+    /// 相册（078 B10）。`reload()` 从 `Catalog.albums()` 填，每行带成员数；左栏那一列的数字、
+    /// 「这一行点开有几张」和命令行 `library albums` 是同一份数据，不是三份各自算的。
+    public private(set) var albums: [AlbumSummary] = []
+
+    /// 当前打开的相册，`nil` = 不在任何相册里。与 `selectedFolders` 互斥（见 `selectFolders`）：
+    /// 左栏只有一个「范围」高亮，网格只有一个范围。
+    public private(set) var selectedAlbumID: String?
+
+    /// 相册集合或成员数每变一次 +1 —— 与 `metadataRevision` 同一套用法：视图观察这个数，不去 diff
+    /// 整个数组。**不进文档、不进历史**：相册是库属性，`editRevision` 不会为它动。
+    public private(set) var albumRevision = 0
+
     public func selectRoot(_ id: String?) {
         selectFolder(rootID: id, path: "")
     }
@@ -447,8 +473,12 @@ public final class CatalogSession {
     /// over. One reload per gesture, never one per row.
     public func selectFolders(_ folders: [FolderSelection]) {
         let normalized = Self.normalizedFolders(folders)
-        guard normalized != selectedFolders else { return }
+        // 相册与文件夹是同一个问题的两个入口（「现在在看什么范围」）。点任意文件夹行 —— 包括
+        // 「全部照片」—— 就意味着离开相册，即使文件夹集合本来就是空的：那一下点击的语义是
+        // 「回到全库」，不是「什么都不做」。所以 `selectedAlbumID` 也参与这个 guard。
+        guard normalized != selectedFolders || selectedAlbumID != nil else { return }
         selectedFolders = normalized
+        selectedAlbumID = nil
         reload()
     }
 
@@ -482,6 +512,106 @@ public final class CatalogSession {
         var out: [String: Int] = [:]
         for (id, nodes) in folderNodes { out[id] = nodes.first { $0.path.isEmpty }?.total ?? 0 }
         return out
+    }
+
+    // MARK: albums (078 B10) — 库属性，不是文档属性
+    //
+    // 这一段里没有一个函数碰 `edit` / `history` / `develop_json`：相册成员是「谁和谁放在一起看」，
+    // 不是「这张照片长什么样」。所以 ⌘Z 不会撤一次「加入相册」，`editRevision` 也不会动一下
+    // （`AlbumCRUDTests.testAlbumWritesNeverTouchTheDocument` 把这条钉成断言）。
+
+    /// 点左栏的相册行：一个范围，一次查询。
+    ///
+    /// 与文件夹互斥是**设计**而不是限制：左栏是「现在看什么」的唯一入口，两个高亮意味着两个
+    /// 不同的范围同时生效，而网格只能画一个结果 —— 那种不一致正是 078 B10 要消掉的东西。
+    /// 筛选条（026 的槽位）不受影响：范围是 AND 的一边，挑选是另一边。
+    public func selectAlbum(_ id: String?) {
+        guard id != selectedAlbumID else { return }
+        selectedAlbumID = id
+        if id != nil { selectedFolders = [] }
+        reload()
+    }
+
+    @discardableResult
+    public func createAlbum(named name: String) throws -> AlbumSummary {
+        guard let catalog else { throw AlbumError.noLibrary }
+        let album = try catalog.createAlbum(named: name)
+        try refreshAlbums()
+        return albums.first { $0.id == album.id }
+            ?? AlbumSummary(id: album.id, parentId: album.parentId, name: album.name,
+                            sort: album.sort, createdAt: album.createdAt, count: 0)
+    }
+
+    @discardableResult
+    public func renameAlbum(id: String, to name: String) throws -> AlbumSummary {
+        guard let catalog else { throw AlbumError.noLibrary }
+        let album = try catalog.renameAlbum(id: id, to: name)
+        try refreshAlbums()
+        return albums.first { $0.id == album.id }
+            ?? AlbumSummary(id: album.id, parentId: album.parentId, name: album.name,
+                            sort: album.sort, createdAt: album.createdAt, count: 0)
+    }
+
+    /// 删相册 —— **只删相册与成员关系，照片留在库里**。若删的正是当前打开的那个相册，
+    /// 网格回到全库（不是回到一个已经不存在的相册）。
+    @discardableResult
+    public func deleteAlbum(id: String) throws -> AlbumDeleteReport {
+        guard let catalog else { throw AlbumError.noLibrary }
+        let report = try catalog.deleteAlbum(id: id)
+        if selectedAlbumID == id { selectedAlbumID = nil }
+        try refreshAlbums()
+        reload()
+        return report
+    }
+
+    /// 把照片加入相册（一次事务）。返回真正新增的成员数。
+    ///
+    /// 加完 `reload()`：正在看这个相册时，新成员必须立刻出现在网格里；不在看的时候这次 reload
+    /// 也只是把左栏的数字改对。**不写 develop、不进历史。**
+    @discardableResult
+    public func addPhotos(_ ids: [String], toAlbum albumId: String) throws -> Int {
+        guard let catalog else { throw AlbumError.noLibrary }
+        let added = try catalog.addAssets(ids, toAlbum: albumId)
+        try refreshAlbums()
+        if added > 0 { reload() } else { albumRevision += 1 }
+        return added
+    }
+
+    @discardableResult
+    public func removePhotos(_ ids: [String], fromAlbum albumId: String) throws -> Int {
+        guard let catalog else { throw AlbumError.noLibrary }
+        let removed = try catalog.removeAssets(ids, fromAlbum: albumId)
+        try refreshAlbums()
+        if removed > 0 { reload() } else { albumRevision += 1 }
+        return removed
+    }
+
+    /// 把当前选中（或锚点）的照片加入 / 移出相册 —— 菜单动作的落点。
+    @discardableResult
+    public func addSelection(toAlbum albumId: String) throws -> Int {
+        try addPhotos(metadataTargetIDs, toAlbum: albumId)
+    }
+
+    @discardableResult
+    public func removeSelection(fromAlbum albumId: String) throws -> Int {
+        try removePhotos(metadataTargetIDs, fromAlbum: albumId)
+    }
+
+    /// 这些照片各自在哪些相册里 —— 右键菜单的「移出相册」用它决定列出谁。
+    public func albumMemberships(of ids: [String]) -> [String: [String]] {
+        guard let catalog else { return [:] }
+        return (try? catalog.albumMemberships(assetIDs: ids)) ?? [:]
+    }
+
+    public func albumAssetIDs(_ albumId: String) -> [String] {
+        guard let catalog else { return [] }
+        return (try? catalog.albumAssetIDs(albumId)) ?? []
+    }
+
+    private func refreshAlbums() throws {
+        guard let catalog else { return }
+        albums = try catalog.albums()
+        albumRevision += 1
     }
 
     public var anchorIndex: Int? {
@@ -682,8 +812,10 @@ public final class CatalogSession {
     /// a ladder of ISO values.
     public func facetValues(_ dimension: FilterDimension) -> [String] {
         guard let c = catalog else { return [] }
+        let albumScope = selectedAlbumID.map { [$0] } ?? []
         return c.facetValues(dimension, filter: filter.assetFilter(limit: 200_000,
-                                                                  folders: selectedFolders))
+                                                                  folders: selectedFolders,
+                                                                  albumIds: albumScope))
     }
 
     // MARK: documents

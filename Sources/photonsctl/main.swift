@@ -28,7 +28,7 @@ let valueFlags: Set<String> = [
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
-    "--repeat",
+    "--repeat", "--album",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -733,6 +733,9 @@ do {
 } catch let e as DecodeError {
     die(e.errorDescription ?? "\(e)")
 } catch let e as CatalogError {
+    die(e.errorDescription ?? "\(e)")
+} catch let e as AlbumError {
+    // 相册的错误是给用户看的（重名、空名、已删），不是域错误 dump。
     die(e.errorDescription ?? "\(e)")
 } catch {
     die("\(error)")

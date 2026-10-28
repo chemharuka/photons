@@ -154,6 +154,15 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // Same two verbs as the grid, on the same kind of menu.
         contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        contextMenu.albumsProvider = { [weak self] ids in
+            AlbumMenuSupport.items(session: self?.session, ids: ids)
+        }
+        contextMenu.onAddToAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.add(ids, albumID: albumID, session: self?.session)
+        }
+        contextMenu.onRemoveFromAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.remove(ids, albumID: albumID, session: self?.session)
+        }
         collectionView.contextMenuProvider = { [weak self] event in self?.menuForRightClick(event) }
 
         let scroll = NSScrollView()

@@ -333,6 +333,39 @@ final class ImportUITests: XCTestCase {
         XCTAssertEqual(Set(session.assets.map(\.filename)), Set(["named.jpg", "top.jpg"]))
     }
 
+    /// 相册（078 B10）在导入路径上的两条契约：导入不改已有相册的成员，新照片不会自动进相册。
+    ///
+    /// 这条守着一种很自然的错误实现：把「导入」当成「顺便把新照片塞进当前打开的相册」。
+    /// 相册是用户摆的，不是导入器决定的。
+    func testAnImportLeavesAlbumsAloneAndDoesNotJoinThem() throws {
+        let library = libraryURL()
+        let session = try newSession(at: library)
+        let dir = try sourceDir()
+        try makeJPEG(at: dir.appendingPathComponent("a.jpg"), seed: 41)
+        try makeJPEG(at: dir.appendingPathComponent("b.jpg"), seed: 42)
+
+        let coordinator = ImportCoordinator(session: session, defaults: freshDefaults())
+        _ = try runImport(coordinator, ImportRequest(sources: [dir], includeSubfolders: true))
+        XCTAssertEqual(session.assets.count, 2)
+
+        let album = try session.createAlbum(named: "旅行")
+        let member = try XCTUnwrap(session.assets.first?.id)
+        try session.addPhotos([member], toAlbum: album.id)
+        XCTAssertEqual(session.albums.first?.count, 1)
+
+        // 第二次导入：同一批文件（幂等）+ 新的一张。
+        try makeJPEG(at: dir.appendingPathComponent("c.jpg"), seed: 43)
+        let again = try runImport(coordinator, ImportRequest(sources: [dir], includeSubfolders: true))
+        XCTAssertEqual(again.added, 1)
+
+        XCTAssertEqual(session.stats?.total, 3, "导入真的进了库")
+        XCTAssertEqual(session.albums.map(\.name), ["旅行"], "导入不动相册本身")
+        XCTAssertEqual(session.albums.first?.count, 1, "新照片不会自动加入相册")
+        let catalog = try Catalog.open(at: library)
+        XCTAssertEqual(try catalog.albumAssetIDs(album.id), [member],
+                       "库里的成员关系与导入前一字不差")
+    }
+
     // MARK: - 6. the interaction
 
     func testEveryImportShowsThePanelAndCancelStartsNothing() throws {

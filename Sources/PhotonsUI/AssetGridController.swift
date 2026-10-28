@@ -241,6 +241,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // where the event landed), and let the two verbs run through the session.
         contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
+        // 相册（078 B10）：同一个 `AssetContextMenu` 对象在三个面共用，所以三个面拿到的
+        // 「加入相册 / 移出相册」是同一份代码，不是三份。写入走 session（一次事务），
+        // 再由观察桥重画三个面。
+        contextMenu.albumsProvider = { [weak self] ids in
+            AlbumMenuSupport.items(session: self?.session, ids: ids)
+        }
+        contextMenu.onAddToAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.add(ids, albumID: albumID, session: self?.session)
+        }
+        contextMenu.onRemoveFromAlbum = { [weak self] ids, albumID in
+            AlbumMenuSupport.remove(ids, albumID: albumID, session: self?.session)
+        }
         collectionView.contextMenuProvider = { [weak self] event in self?.menuForRightClick(event) }
 
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick(_:)))

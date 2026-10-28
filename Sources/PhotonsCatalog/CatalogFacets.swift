@@ -285,6 +285,17 @@ extension Catalog {
             }
         }
 
+        // 相册成员（078 B10）：`EXISTS` 一条子查询，值全部绑定。多个相册 OR（「这张在哪个相册里」），
+        // 与外层其他子句 AND。相册 id 是我们自己生成的 UUID，但同样走 `?` —— 这条查询里没有
+        // 任何用户数据进 SQL 文本，规则不分例外。
+        if !filter.albumIds.isEmpty {
+            let marks = Array(repeating: "?", count: filter.albumIds.count).joined(separator: ", ")
+            clauses.append("""
+                EXISTS (SELECT 1 FROM album_assets aa WHERE aa.asset_id = a.id AND aa.album_id IN (\(marks)))
+                """)
+            args.append(contentsOf: filter.albumIds)
+        }
+
         // Criteria: **same dimension ORs, different dimensions AND** (026 v2). A slot holding
         // 1★·2★·5★ arrives as three criteria of `.rating`; grouping them into one clause is what
         // makes it `rating IN (1,2,5)` rather than three ANDed equalities (which would be empty).
