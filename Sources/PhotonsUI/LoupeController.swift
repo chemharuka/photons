@@ -1358,8 +1358,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func cancelWhiteBalancePreview() {
         guard whiteBalancePreview != nil else { return }
         let shown = whiteBalancePreviewShownTarget
+        // 144: a backdrop made during the drag is of the preview source, not of the document that is
+        // on screen again. Release it here so a cancelled gesture cannot leave a digest behind.
+        let hadPreviewBackdrop = backdrop.key?.digest.hasSuffix(Self.backdropPreviewMarker) ?? false
         invalidateWhiteBalancePreviewRender()
         finishWhiteBalancePreview()
+        if hadPreviewBackdrop {
+            invalidateBackdrop()
+            // 144: the document's own bottom image is the picture on screen again; ask for it now,
+            // one generation, instead of leaving the cancel as a hole the next pointer entry fills.
+            backdropWanted = true
+            serveWantedBackdrop()
+        }
         if shown != previewDocumentWhiteBalance { requestSettleFrame() }
     }
 
@@ -4213,6 +4223,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var detailPreview = false
     /// The pending "the hand stopped" re-development.
     private var detailSettle: DispatchWorkItem?
+    /// 144: the last preview-rung frames have been replaced by the settle's full-size frames, so the
+    /// cached backdrop (rendered from the preview rung) belongs to a source that is gone. The next
+    /// frame clears it — not a render, just the digest, exactly like an edit does.
+    private var detailSettleInvalidatesBackdrop = false
     /// The identity of the last preview rung this loupe asked for during a detail drag, so the next
     /// tick can drop the one it superseded instead of queueing a decode for every thumb position.
     private var pendingDetailPreviewIdentity: String?
@@ -4242,7 +4256,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             self.detailSettle = nil
             // The hand stopped: whatever produced the last frame was a preview, so this one is the
             // full-size development the spec asks for 150–250 ms after the movement ended.
+            let wasPreview = self.detailPreview
             self.detailPreview = false
+            // 144: the frames that follow are a different **source** from the preview rung the
+            // backdrop may have been rendered from, so it cannot stay current.
+            self.detailSettleInvalidatesBackdrop = wasPreview
             self.requestSettleFrame()
         }
         detailSettle = work
@@ -4706,14 +4724,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 037 ②: the low-resolution whole picture belongs to the photo going away. Released here (and
         // not re-rendered) — the next pointer entry on the new photo generates its own. The histogram's
         // snapshot goes with it, so a background measurement can never read the old photo's picture.
-        backdrop.invalidate()
-        fullPictureBox.store(nil)
+        invalidateBackdrop()
         // 派单 031: a pending detail settle belongs to the photo that is going away; firing it at the
         // next one would develop a 60 MP frame nobody asked for.
         detailSettle?.cancel()
         detailSettle = nil
         detailGesturing = false
         detailPreview = false
+        detailSettleInvalidatesBackdrop = false
         pendingDetailPreviewIdentity = nil
         // 143b: a preview belongs to the photo and the buffer it was rendered from. Switching the
         // picture (or leaving the loupe) must not let a queued preview render paint the new one;
@@ -4875,6 +4893,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
         currentEdit
     }
 
+    /// 144: the document the **pixels on the canvas** are from, which is not always the document.
+    ///
+    /// While a white-balance drag is live, the canvas holds a real render of the target pair (143b)
+    /// made from the resident buffer; the document keeps the old pair until the hand lets go. A
+    /// backdrop keyed only by the document would therefore describe a picture the eye is not looking
+    /// at — the 「实时预览结束后底图没更新」 this task fixes. The target pair is folded into the edit
+    /// the backdrop is rendered from *and* into its digest (below), so the preview and the settled
+    /// frame are two different sources even when they happen to name the same pair.
+    private func backdropEdit(_ document: EditModel) -> EditModel {
+        guard let target = backdropPreviewTarget else { return document }
+        var edit = document
+        edit.light.temperature = target.temperature
+        edit.light.tint = target.tint
+        return edit
+    }
+
+    /// The target pair a live preview frame is actually showing, or `nil` when the canvas is a settled
+    /// frame. Beginning a drag puts the document's own pair in the preview state (`beginWhiteBalance-
+    /// Preview`), so the key stays the settled one until a tick moves it — entering the canvas on the
+    /// un-moved slider must not retire a perfectly good bottom image.
+    private var backdropPreviewTarget: WhiteBalance? {
+        guard let preview = whiteBalancePreview, let document = currentEdit else { return nil }
+        return preview.target == document.light.whiteBalance ? nil : preview.target
+    }
+
     // MARK: the anti-proof switches (tests only)
 
     /// With this `false`, a camera change does **not** re-lay-out the crop overlay — the pre-①
@@ -4890,9 +4933,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
         guard let photo = backdropPhotoKey else { return nil }
+        let edit = backdropEdit(edit)
+        // 144: the digest names **what was rendered**, not just the document. A preview frame is a
+        // real render of the target pair but not a settled document yet; giving it the document's own
+        // digest would make the cache claim a picture it does not hold (and make the settled frame
+        // look like a hit for the preview's texture). The settled digest stays exactly
+        // `Histogram.editDigest(edit)` so every existing key — and the histogram's whole-picture
+        // source — keeps its meaning.
+        let digest = Histogram.editDigest(edit)
         return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
-                                 digest: Histogram.editDigest(edit))
+                                 digest: backdropPreviewTarget == nil
+                                     ? digest : digest + Self.backdropPreviewMarker)
     }
+
+    /// The source half of a preview backdrop's digest (144). Internal so a test can say what it
+    /// expects without re-encoding the whole document.
+    static let backdropPreviewMarker = "|source=preview"
 
     /// The photo half of the key: `contentHash|assetID` in the app, a frame source's identity in the
     /// tests and the bench — the same strings the decode ladder keys on.
@@ -4928,8 +4984,41 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard presenter != nil else { return }
         guard let key = backdropKey else { return }
         guard let held = backdrop.key, held != key else { return }
-        backdrop.invalidate()
+        invalidateBackdrop()
         backdropWanted = true
+    }
+
+    /// Release the texture and the histogram's snapshot together (144).
+    ///
+    /// `BackdropCache.invalidate()` alone leaves `fullPictureBox` pointing at the old texture, which a
+    /// background histogram measurement can still read. The digest gate would usually refuse it, but
+    /// the box is a second copy of "what the bottom image is" and the two must not disagree.
+    private func invalidateBackdrop() {
+        backdrop.invalidate()
+        fullPictureBox.store(nil)
+    }
+
+    /// 144: a frame landed for another source than the cached backdrop names.
+    ///
+    /// Returns `true` when a texture was released. It deliberately **does not** render: an edit still
+    /// only marks the backdrop dirty (039), and the next pointer entry (or an explicit
+    /// `ensureLowResFullFrame`) pays for the new one. A preview turn (143b) is the case that used to
+    /// leave the old digest in place: the preview key is `source=preview`, so the settled frame's key
+    /// differs even when it names the same pair, and this is where the cache stops claiming it.
+    @discardableResult
+    private func invalidateBackdropIfSourceMoved() -> Bool {
+        guard let key = backdropKey else { return false }
+        // A generation for **this** source is already on its way: it will replace whatever is held
+        // when it lands, so releasing the cache now would only cancel the right render (a late frame
+        // of the previous document must not kill a preview generation that started after it).
+        if backdrop.inFlight == key { return false }
+        let staleHeld = backdrop.key.map { $0 != key } ?? false
+        // A generation that has not landed yet is the same hazard: a preview render started before
+        // the release would otherwise be adopted **after** the settled frame and claim its digest.
+        let staleInFlight = backdrop.inFlight != nil
+        guard staleHeld || staleInFlight else { return false }
+        invalidateBackdrop()
+        return true
     }
 
     /// The document on screen as this class sees it (a frame source names its own document).
@@ -4942,6 +5031,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// two cannot disagree about the key or about what a generation is.
     private func requestLowResFullFrame(key: BackdropCache.Key, edit: EditModel,
                                         template: RenderJob) {
+        // 144: the key may name a preview source, so the render must use the same edit the key was
+        // built from. `backdropEdit` is that one function; a job built before a tick cannot drift.
+        let edit = backdropEdit(edit)
         let job = RenderJob(kind: template.kind, url: template.url,
                             baseIdentity: template.baseIdentity, viewport: template.viewport,
                             edit: edit, state: template.state, target: template.target,
@@ -5955,9 +6047,32 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 118: the new frame landed. If it carries the revision the release committed — or anything
         // newer — this is the real white balance, so the simulation is dropped **before** the draw:
         // one atomic switch from old-frame×gain to the new frame, never a flash of the old pair.
-        if let awaiting = whiteBalancePreview?.awaitingRevision, frame.editRevision >= awaiting {
+        //
+        // 144: dropping the simulation is also the moment the backdrop's source changes. The cache is
+        // keyed by `source=preview` while the drag is live; the settled frame's key is the document's,
+        // so a stale preview texture is released here rather than left to claim a digest the pixels on
+        // screen no longer have. One generation is asked for **now**, behind the settled frame: that
+        // is the next time the bottom image is needed, and it is once per gesture rather than once per
+        // preview tick or per frame.
+        let settledWhiteBalancePreview = whiteBalancePreview?.awaitingRevision.map {
+            frame.editRevision >= $0
+        } ?? false
+        if settledWhiteBalancePreview {
             finishWhiteBalancePreview()
+            backdropWanted = true
         }
+        // 144: the detail settle's full-size frame replaces the preview rung the backdrop may name.
+        if detailSettleInvalidatesBackdrop, !detailPreview {
+            detailSettleInvalidatesBackdrop = false
+            invalidateBackdrop()
+            backdropWanted = true
+        }
+        // 144: any frame whose source differs from the cached bottom image retires it. This is the
+        // generic half of "a formal frame replaces a preview": an undo/redo or a rung switch lands
+        // with a digest the cache cannot honestly answer for.
+        invalidateBackdropIfSourceMoved()
+        // Serve the request the settle just armed, behind the frame that is about to reach the canvas.
+        if backdropWanted { serveWantedBackdrop() }
         // Task 028: the mask UI measures its normalised geometry against the frame the renderer
         // actually ingested (upright, EXIF orientation already applied). Published here — on the main
         // thread, next to the pixels it belongs to — because the catalog row's `PixelWidth/PixelHeight`
