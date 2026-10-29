@@ -134,8 +134,10 @@ final class QuarterTurnTests: XCTestCase {
                 XCTAssertEqual(document.geometry, start.geometry,
                                "\(name): 4 次之后几何不是逐字段相等")
             }
-            // Odd turns swap the frame's axes; 180° does not.
-            XCTAssertEqual(sizes[0], start.geometry.outputPixels(in: source).swapped,
+            // Odd turns swap the frame's axes. 132: the frame is the rotated crop's bounding box, so
+            // a straighten grows the turn-0 canvas too; a quarter turn swaps that canvas' axes.
+            let startCanvas = CropGeometry(geometry: start.geometry, source: source).canvas
+            XCTAssertEqual(sizes[0], startCanvas.swapped,
                            "\(name): 转 90° 后帧的宽高没有交换")
         }
     }

@@ -112,7 +112,14 @@ final class CropToolProjectionTests: XCTestCase {
         let w = abs(c[1].x - c[0].x), h = abs(c[3].y - c[0].y)
         XCTAssertEqual(h / w, (crop.height * 1200) / (crop.width * 800), accuracy: 1e-9,
                        "a portrait frame is tall on screen, not transposed")
-        XCTAssertEqual(w, crop.width * 800 * (800.0 / 800.0), accuracy: 1e-6)
+        // 132: 适应 fits the *rotated whole frame* into the viewport, so the crop's on-screen width
+        // is its pixel width × that zoom. The pre-132 assertion wrote `× (800/800)` — i.e. zoom = 1,
+        // which is no longer the fit at 9° (it is 0.8181 → 327.24 px, not 400).
+        let theta = 9.0 * .pi / 180
+        let frameW = 800 * cos(theta) + 1200 * sin(theta)
+        let frameH = 800 * sin(theta) + 1200 * cos(theta)
+        let fitZoom = min(800 / frameW, 1200 / frameH)
+        XCTAssertEqual(w, crop.width * 800 * fitZoom, accuracy: 1e-6)
     }
 
     // MARK: 3. a drag inside the frame follows the hand (same sign, same distance)

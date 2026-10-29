@@ -97,11 +97,11 @@ final class SubBlackSignalTests: XCTestCase {
     /// **Where the multiplier stops and the level starts.** For `|blacks| ≤ 50` the four negative bands
     /// stay negative and S2/S4 clamp them to 0 — `0 → 0`, which is 073B's claim and is still true.
     ///
-    /// At `blacks = +100` (073C) the black point itself moves: `v′ = v·2^1.5 + 0.005`, so the black
-    /// point sits at `v = −0.0018` and the *shallow* sub-black bands (−0.001) come back while the
-    /// deeper ones (−0.002 … −0.004) stay under it. That is Lightroom's black level — the old affine
-    /// level did the same thing but by moving the *whole picture*, which is what 073B was fixing; here
-    /// it happens only inside the 2.5 EV level window and only past the middle of the travel.
+    /// At `blacks = +100` the black point itself moves. Since a4494626 (2026-10-29) the level is
+    /// `+B_LEV = +0.006` outside a **full 3 EV** gain, `v′ = v·2³ + 0.006`, so the black point sits
+    /// at `v = −0.00075`: a `0.0` sample comes back (0.0701 display) while the negative bands
+    /// (−0.001 and deeper) stay under it. (Before that commit the gain was the halved 1.5 EV and the
+    /// level 0.005, i.e. a −0.0018 point — which is why this test used to expect the −0.001 band.)
     func testTheLevelHalfMovesTheBlackPointAndTheEVHalfDoesNot() throws {
         let graph = try makeGraph(staircase())
 
@@ -122,11 +122,11 @@ final class SubBlackSignalTests: XCTestCase {
         edit.light.blacks = 100
         let means = bandMeans(try render(graph, edit))
         print("sub-black staircase means (blacks +100):", means.map { String(format: "%.4f", $0) })
-        XCTAssertGreaterThan(means[3], 0.01,
-                             "band 3 (−0.001) must come back: at +100 the black point moved to −0.0018")
-        for i in 0..<3 {
+        XCTAssertGreaterThan(means[4], 0.01,
+                             "band 4 (0.0) must come back: at +100 the black point moved to −0.00075")
+        for i in 0..<4 {
             XCTAssertEqual(means[i], 0, accuracy: 1e-4,
-                           "band \(i) is deeper than −0.0018 and must stay under the black point: \(means)")
+                           "band \(i) is below −0.00075 and must stay under the black point: \(means)")
         }
         // Order is preserved: a deeper band never comes out brighter.
         for i in 1..<means.count {
