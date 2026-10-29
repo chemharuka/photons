@@ -12,17 +12,20 @@ using namespace metal;
 //
 // **085 replaced the two-window layout with three complementary windows.**
 //
-//     shadow  1 − a,  a = smoothstep(−5.0, −3.2, L)     (deep shadow → mid)
-//     mid     a(1 − b), b = smoothstep(−2.6, −1.0, L)  (mid → high)
-//     high    b(1 − c), c = smoothstep(−1.2, 0.0, L)   (high → display white, closing the top)
+//     shadow  1 − a,  a = smoothstep(−5.4, −3.9, L)     (deep shadow → mid)
+//     mid     a(1 − b), b = smoothstep(−2.4, −0.9, L)  (mid → high)
+//     high    b(1 − c), c = smoothstep(+4.0, +6.0, L)  (high → white, closing above the HDR range)
 //
 // Because `a` reaches 1 before `b` starts, the three weights sum to 1 over the whole shadow→high run:
-// every luminance has a full-weight owner and there is no gap. Above white `c = 1` makes `high = 0`
-// and the gain is exactly 1, so HDR samples pass through bit for bit (079 §4: S2 has no upper clamp).
+// every luminance has a full-weight owner and there is no gap. **124** moved `c` off display white:
+// it used to close at 0 EV, which is why the 高光 slider did nothing to a value above 1.0. Now
+// `c = 0` through the whole HDR range (default 2.3 EV headroom; 114 may go to 4 EV) and only closes
+// at +4…+6 EV, so 高光 owns the entire range above −0.9 EV. S2 still has no upper clamp, so a pixel
+// above white simply passes through with the gain the window gives it.
 //
 // Travel and its monotonicity gate are **CPU-side** (`S2Regions.travelEV`): 0.90 / 0.70 / 0.60 EV at
 // full slider, compressed by one common factor when opposite-sign combinations would push the
-// derivative below 0.5. The kernel receives EV directly (`S2Params.b.xyz`) and only weights and
+// derivative below 0.400. The kernel receives EV directly (`S2Params.b.xyz`) and only weights and
 // exponentiates.
 //
 // Direction (派单 008 A): Lightroom's, i.e. **all three region sliders brighten towards +**.
@@ -79,11 +82,11 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // stage must still not clamp it away before its own maths.)
     float3 v = c.rgb;
 
-    // 085: three complementary windows (`tone_shape.metal#region_weights3`), all on
+    // 085/124: three complementary windows (`tone_shape.metal#region_weights3`), all on
     // `L = log2(luma)` — EV relative to display white, the histogram's own HDR axis — so a window's
-    // width is exposure-invariant. Every luminance has a full-weight owner, and above white the high
-    // window closes, so HDR samples pass through with gain exactly 1. `p.b.xyz` is the gated EV travel
-    // from `S2Regions`.
+    // width is exposure-invariant. Every luminance has a full-weight owner, and 124 moved the white
+    // closure above +4 EV, so the high window reaches through the whole HDR range instead of
+    // stopping at white. `p.b.xyz` is the gated EV travel from `S2Regions`.
     float3 w = region_weights3(v);
     // LR convention (派单 008 A): `+` brightens the named zone, `−` pulls it down.
     v *= region_gain3(w, p.b.xyz);

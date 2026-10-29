@@ -9,7 +9,7 @@ import Foundation
 ///
 ///     a = smoothstep(−5.4, −3.9, L)    // shadow → mid
 ///     b = smoothstep(−2.4, −0.9, L)    // mid → high
-///     c = smoothstep(−1.2,  0.0, L)    // high → white (closes the top)
+///     c = smoothstep(+4.0, +6.0, L)    // high → white (closes the top, outside the HDR range)
 ///
 ///     w_shadow = 1 − a
 ///     w_mid    = a · (1 − b)
@@ -21,15 +21,19 @@ import Foundation
 /// The shadow seam sits **below** the reference frames' median (p50 ∈ [−4.36, −3.28] EV) on purpose:
 /// at the median `w_shadow` is only ≈0.13, so 阴影 ±100 moves a median by a few codes while the
 /// 中间调 slider owns it — the same separation the old two-window layout had, without the gap.
-/// Above white `c = 1` ⇒ `w_high = 0` and the other two are already 0, so the gain is exactly 1 and
-/// HDR samples pass through bit for bit.
+///
+/// **124 (2026-10-29): 高光 covers the whole HDR range.** The closure used to be
+/// `smoothstep(−1.2, 0.0, L)`, so `w_high` was 0 at and above display white and a linear value above
+/// 1.0 was untouched by the 高光 slider. `c` now closes at +4…+6 EV, beyond the default 2.3 EV
+/// headroom (and 114's possible 4 EV), so `w_high = 1` from −0.9 EV through the whole HDR range. The
+/// 阴影 / 中间调 windows are unchanged: the 0.400 slope budget is measured on their seams too.
 ///
 /// Each slider is a displacement in EV (`+` brightens that zone, 派单 008 A), with full travel
 /// 0.90 / 0.70 / 0.60 EV. Three independent travels can fold the map when they have opposite signs
 /// (e.g. shadows +100 and midtones −100), so `travelEV` compresses all three by one common factor when
-/// the worst derivative budget exceeds 0.5. The scale is positive and symmetric about zero, so the
-/// identity and the direction of every slider are untouched; only extreme opposite-sign combinations
-/// are reduced.
+/// the worst derivative budget exceeds `1 − minSlope`. The scale is positive and symmetric about zero,
+/// so the identity and the direction of every slider are untouched; only extreme opposite-sign
+/// combinations are reduced.
 public enum S2Regions {
 
     /// Full travel at |slider| = 100, in EV.
@@ -37,9 +41,15 @@ public enum S2Regions {
     public static let midTravel: Double = 0.70
     public static let highTravel: Double = 0.60
 
-    /// The steepest slope `d(log2 v′)/dL` the gate is allowed to produce. The limiter's budget is
-    /// `1.5/width` per seam, so the derivative is bounded below by `1 − 0.5`.
-    public static let minSlope: Double = 0.5
+    /// The steepest slope `d(log2 v′)/dL` the gate is allowed to produce. It stays 085's shipped
+    /// 0.500 so the shadow/mid travel (and their measured code shifts) does not move: a single
+    /// `shadows +100` is compressed from 0.90 to 0.50 EV by this number.
+    ///
+    /// **124** recomputed the raw budget at the +2.3 EV end: a full-travel 高光 (0.60 EV) across the
+    /// 1.5 EV mid→high seam has a worst derivative of `1.5/1.5 · 0.60 = 0.60`, i.e. a raw slope floor
+    /// of `1 − 0.60 = 0.400`. The gate may compress that to 0.500; both are at or above the 0.400
+    /// budget the task pins.
+    public static let minSlope: Double = 0.500
 
     /// Test-only switch: `true` skips the common compression, so a test can show that the
     /// monotonicity in `testTheRegionLiftsAreMonotoneForEveryCombination` is bought by the gate and
@@ -55,7 +65,7 @@ public enum S2Regions {
     public static func weights(L: Double) -> (shadow: Double, mid: Double, high: Double) {
         let a = smoothstep(-5.4, -3.9, L)
         let b = smoothstep(-2.4, -0.9, L)
-        let c = smoothstep(-1.2, 0.0, L)
+        let c = smoothstep(4.0, 6.0, L)
         return (1 - a, a * (1 - b), b * (1 - c))
     }
 
@@ -72,7 +82,7 @@ public enum S2Regions {
             let deficit = max(
                 (1.5 / 1.5) * abs(dm - ds),      // shadow↔mid seam is 1.5 EV wide
                 (1.5 / 1.5) * abs(dh - dm),      // mid↔high seam is 1.5 EV wide
-                (1.5 / 1.2) * abs(dh))           // the high release is 1.2 EV wide
+                (1.5 / 2.0) * abs(dh))           // 124: the high release is +4…+6 EV (2 EV wide)
             // `deficit` is the worst-case fall of the local slope (`1 − deficit`), so the gate is
             // "keep the slope at or above `minSlope`".
             if deficit > 1 - minSlope {

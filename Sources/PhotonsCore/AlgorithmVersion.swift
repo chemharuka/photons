@@ -58,6 +58,11 @@ public enum StageAlgorithmVersion {
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
     public static let contrast = 1
+    /// **5** — 124: 高光 covers the whole HDR range. The high→white closure moved from
+    /// `smoothstep(−1.2, 0.0, L)` to `smoothstep(+4.0, +6.0, L)`, so a document with
+    /// `highlights != 0` now moves every pixel above −0.9 EV, including values above display white
+    /// that the old window passed through untouched. Same stored numbers, different pixels.
+    ///
     /// **4** — 098: S2 no longer contains contrast (it moved to S1.8), so its pixels for the same
     /// stored numbers changed even though the region-lift arithmetic did not.
     ///
@@ -67,7 +72,7 @@ public enum StageAlgorithmVersion {
     ///
     /// **2** — 0107: contrast became a displacement in log2 EV over a held core with a bounded shoulder
     /// and a toe shift (no upper asymptote, no 4× slope); 074 R2 moved the region lifts to EV windows.
-    public static let toneMap = 4
+    public static let toneMap = 5
     /// Unchanged (vibrance/saturation only, since 076).
     public static let color = 1
     /// Unchanged (S3.4's eight-band grey mix).
