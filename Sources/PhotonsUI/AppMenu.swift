@@ -115,6 +115,14 @@ public enum MainMenu {
             item.keyEquivalentModifierMask = [.option]
             item.tag = index
         }
+        // ⌥0 — clear the label. Same path as the six values (`setColorLabelForSelection(nil)`), so a
+        // multi-selection clears as one metadata write and no history entry appears: a colour label is
+        // a library fact, not an edit.
+        photo.addItem(.separator())
+        let noLabel = photo.addItem(withTitle: "色标：无",
+                                    action: #selector(EditorWindowController.clearColorLabelAction(_:)),
+                                    keyEquivalent: "0")
+        noLabel.keyEquivalentModifierMask = [.option]
 
         // 变换 — **before 显影** (072 §F). Everything that moves the picture's geometry lives under
         // this title: it changes where the pixels come from, not what colour they are.
