@@ -131,7 +131,7 @@ constant float LEV_LO_EV = -6.0;
 constant float LEV_HI_EV = -1.0;
 constant float LEV_KNEE = 1e-3;
 
-// Whites: ±0.6 EV (unchanged — that is "where the white point is") plus a **multiplicative** level.
+// Whites: an EV move that rises monotonically through display white, plus a **multiplicative** level.
 //
 // 127: the level used to be additive and windowed (`+ W_LEV·Δw·|Δw|·ww`, W_LEV = 0.06), so at −2 EV
 // and below it was exactly 0 and `whites +100` did not move p1/p5/p50 at all (measured: 7.5/26.2/89.9
@@ -146,10 +146,31 @@ constant float LEV_KNEE = 1e-3;
 // only 2…5 codes (at +100: ×1.25 in linear ≈ +2 codes at code 7.5, +4 at code 26). A shadow that has
 // to be *visibly* brighter is `blacks` (its EV toe) or `exposure`; `whites` cannot be that and still
 // leave a neutral black neutral.
-constant float W_EV = 0.6;
+//
+// **138 — the EV weight rises with L instead of decaying above white.**
+//
+// 073B/127 used `ww = smoothstep(−2, 0, L)` below white and `exp(−L)` above it. Measured on
+// L1030433 at +2 EV (−100, `--tone-map global`): p99.9 moved +0.0003 code (a super-white pixel did
+// not come down at all) while p70–p85 moved −0.10…−0.13, and the 0.55–0.75 code bands kept only
+// 0.51–0.62 of their local slope — 「90 % 被压到 70 %、高光不变」. The weight pointed at the wrong end:
+// it was full at white and decayed through the HDR tail, so the shoulder took the −0.86 EV and the
+// super-white pixels took almost nothing.
+//
+// The shape is one monotone window (`smoothstep(WW_LO_EV, WW_HI_EV, L)`): 0 at −2 EV and below, 1 at
+// +2 EV and above. A pixel at display white receives `smoothstep(−2, 2, 0) · W_EV = 0.50 · 1.2 ≈
+// 0.60 EV`, the same travel 073B pinned at the white point; the HDR tail receives the full 1.2 EV,
+// i.e. **at least** the white point's move, which is what the owner asked for. `WW_HI_EV = +2` (not
+// the brief's +1) is the measured choice: at +1 the same render put the 0.55–0.75 bands at 0.48/0.39
+// of their slope, at +2 at 0.70/0.58, and p99.9 still fell 0.029 code (the brief's ≥0.020) — i.e. +2
+// keeps more texture for the same super-white travel. Monotonicity: `slope = 1 + W_EV·Δw·ww′`, worst
+// case `1 − 1.2 · 1.5/4 = 0.55` (the same argument as 073B's 7 EV toe), so the map cannot fold.
+//
+// No upper clamp is added: this is a positive multiplicative gain, so the EDR tail and the 4 EV
+// histogram keep their values (079 §4). `0 → 0` is preserved by the level, not by clipping.
+constant float W_EV = 1.2;
 constant float W_LEV = 0.20;
-constant float W_BAND = 2.0;
-constant float W_TAU = 1.0;
+constant float WW_LO_EV = -2.0;
+constant float WW_HI_EV = 2.0;
 
 // The luma the **end points** sample, and why it is written out here instead of read from
 // `kWorkingLumaWeights`: 073B/073C measured and pinned their knee positions against these three
@@ -227,11 +248,11 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
         v *= exp2(B_EV * db * wb);
     }
 
-    // whites: the EV term keeps 073B's shoulder (full weight at display white, 0 at −2 EV, exp(−L/1 EV)
-    // above 0). The **level** is 127's multiplicative one and has no window: `level = 1` exactly when
-    // `dw == 0`, and every other travel scales the whole range by 1/(1 − W_LEV·dw·|dw|) — including
-    // the HDR tail, because "a level" is a property of the picture, not of a band.
-    float ww = L <= 0.0 ? smoothstep(-W_BAND, 0.0, L) : exp(-L / W_TAU);
+    // whites: 138's monotone EV window (0 at −2 EV, full at +2 EV and above) plus 127's global
+    // multiplicative level. The old shape (`exp(−L)` above white) decayed exactly where the owner
+    // wanted the super-white pixels to follow the white point; see the constants' comment for the
+    // measured table and the monotonicity bound.
+    float ww = smoothstep(WW_LO_EV, WW_HI_EV, L);
     float level = 1.0 / (1.0 - W_LEV * dw * abs(dw));
     v = v * exp2(W_EV * dw * ww) * level;
     return v;
