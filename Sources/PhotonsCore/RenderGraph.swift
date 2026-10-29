@@ -636,9 +636,10 @@ private struct ColorParams {
     var b: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 }
 
-/// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076).
+/// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076, global triplet 101).
 private struct HSLParamsU {
     var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var g: SIMD4<Float>   // 101 — global: hue, saturation, luminance (slider units), pad
 }
 
 /// Mirror of `Kernels/s3_4_bw.metal` (2026-10-28, P0-4). The band table is the **same**
@@ -2937,11 +2938,18 @@ public final class RenderGraph {
             // `HSLBandU`s (values + the reach towards each neighbour). The centres come from
             // `HSLBands.centresDegrees`, i.e. the same eight physical colours the wheel names,
             // measured in the space this pass computes in.
-            let p = try kernels.pipeline(file: "s3_6_hsl", function: "s3_6_hsl")
+            //
+            // 101 — the ninth selector (「全局」) rides the same pass but a **different instantiation**:
+            // only a document with a non-zero global triplet compiles/executes the global arithmetic,
+            // so every pre-101 document keeps 076's kernel byte for byte.
+            let function = edit.color.hasGlobal ? "s3_6_hsl_global" : "s3_6_hsl"
+            let p = try kernels.pipeline(file: "s3_6_hsl", function: function)
             let bands = try hslBandBuffer(for: edit.color)
             var params = HSLParamsU(
                 a: SIMD4(plan.origin.x, plan.origin.y,
-                         Float(plan.content.width), Float(plan.content.height)))
+                         Float(plan.content.width), Float(plan.content.height)),
+                g: SIMD4(Float(edit.color.global.hue), Float(edit.color.global.saturation),
+                         Float(edit.color.global.luminance), 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<HSLParamsU>.stride, index: 0)
             enc.setBuffer(bands, offset: 0, index: 1)

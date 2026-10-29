@@ -40,13 +40,18 @@ using namespace metal;
 
 struct HSLParams {
     float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    float4 g;   // 101 — global: hue, saturation, luminance (slider units), pad
 };
 
-kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
-                     texture2d<float, access::write> dst [[texture(1)]],
-                     constant HSLParams &p [[buffer(0)]],
-                     constant HSLBandDesc *bands [[buffer(1)]],
-                     uint2 gid [[thread_position_in_grid]]) {
+// One body, two entry points (101). `kGlobal` is a compile-time flag, so the default instantiation
+// contains none of the global arithmetic — not "the global arithmetic with a zero in it". The band
+// path is 076's source verbatim; only `p.g` is new, and the default kernel never reads it.
+template <bool kGlobal>
+static inline void s3_6_hsl_body(texture2d<float, access::read> src,
+                                 texture2d<float, access::write> dst,
+                                 constant HSLParams &p,
+                                 constant HSLBandDesc *bands,
+                                 uint2 gid) {
     float4 c = src.read(gid);
     if (p.a.z <= 0.0 || p.a.w <= 0.0) {              // no content (degenerate window)
         dst.write(c, gid);
@@ -71,6 +76,58 @@ kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
     // angle), 1 from 0.02 up, and a `smoothstep` in between so a near-neutral gradient fades in instead
     // of stepping at a threshold (079 §2.6.3).
     float gate = hsl_chroma_gate(chroma);
+    if (kGlobal) {
+        // 101: hue and saturation ride the same gate as the bands; luminance does not (the next
+        // branches below are the grey path — a grey has no hue to rotate, but it can get lighter).
+        float3 global = p.g.xyz;
+        if (gate <= 0.0) {
+            if (global.z == 0.0) {
+                dst.write(c, gid);
+                return;
+            }
+            float h0 = atan2(ab.y, ab.x) * (180.0 / M_PI_F);
+            if (h0 < 0.0) { h0 += 360.0; }
+            float l0 = L * exp2(global.z / 100.0);
+            float3 out0 = oklch_to_linear(l0, chroma, h0);
+            dst.write(float4(max(out0, 0.0), c.a), gid);
+            return;
+        }
+        float hueG = atan2(ab.y, ab.x) * (180.0 / M_PI_F);
+        if (hueG < 0.0) { hueG += 360.0; }
+
+        float3 shiftG = float3(0.0);
+        float wSumG = 0.0;
+        for (int i = 0; i < 8; ++i) {
+            HSLBandDesc d = bands[i];
+            float delta = hueG - d.v.w;
+            if (delta > 180.0) { delta -= 360.0; }
+            if (delta < -180.0) { delta += 360.0; }
+            float reach = delta >= 0.0 ? d.e.y : d.e.x;
+            if (reach <= 0.0) { continue; }
+            float w = hsl_band_weight(delta, reach);
+            if (w <= 0.0) { continue; }
+            shiftG += w * d.v.xyz;
+            wSumG += w;
+        }
+        if (wSumG > 0.0) {
+            shiftG /= wSumG;
+            shiftG *= gate;
+        }
+        // The global triplet sits **after** the band shift, in the same units: hue units of 0.3°,
+        // saturation ×(1 + s/100), luminance in stops. Its 明度 is the one axis that is not gated.
+        shiftG += float3(global.x * gate, global.y * gate, global.z);
+        if (shiftG.x == 0.0 && shiftG.y == 0.0 && shiftG.z == 0.0) {
+            dst.write(c, gid);
+            return;
+        }
+        float h2G = hueG + shiftG.x * 0.3;
+        float c2G = max(chroma * (1.0 + shiftG.y / 100.0), 0.0);
+        float l2G = L * exp2(shiftG.z / 100.0);
+        float3 outG = oklch_to_linear(l2G, c2G, h2G);
+        dst.write(float4(max(outG, 0.0), c.a), gid);
+        return;
+    }
+
     if (gate <= 0.0) {
         dst.write(c, gid);
         return;
@@ -117,4 +174,22 @@ kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
     // A hue rotation can leave the working gamut; a negative channel is not a colour. Nothing is
     // clamped at the top, so a display-referred highlight keeps its headroom (S4 is the only clamp).
     dst.write(float4(max(out, 0.0), c.a), gid);
+}
+
+// The two instantiated entry points: the first is byte for byte 076's pass (no global code is
+// generated), the second is the same body with the ninth selector's triplet folded in.
+kernel void s3_6_hsl(texture2d<float, access::read> src [[texture(0)]],
+                     texture2d<float, access::write> dst [[texture(1)]],
+                     constant HSLParams &p [[buffer(0)]],
+                     constant HSLBandDesc *bands [[buffer(1)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+    s3_6_hsl_body<false>(src, dst, p, bands, gid);
+}
+
+kernel void s3_6_hsl_global(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant HSLParams &p [[buffer(0)]],
+                            constant HSLBandDesc *bands [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    s3_6_hsl_body<true>(src, dst, p, bands, gid);
 }

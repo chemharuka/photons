@@ -550,6 +550,10 @@ public struct ColorPatch: Sendable, Equatable, Codable {
     public var saturation: Double?
     /// Only the bands that differ from `HSLBand()`; absent bands are the destination's.
     public var bands: [HSLBandPatch]?
+    /// 101 — 全局: the ninth selector's triplet, sparse like a band patch. Its `index` is
+    /// `ColorGroup.bandCount` (the ninth cell) and is not a leaf; a paste ignores it and writes
+    /// `color.global` directly.
+    public var global: HSLBandPatch?
     /// 2026-10-28 (P0-4): the 黑白 switch. Copied as a field of its own so "paste onto a colour photo"
     /// can carry the mode — a mix list without the switch is a look nobody asked for.
     public var blackAndWhite: Bool?
@@ -559,6 +563,7 @@ public struct ColorPatch: Sendable, Equatable, Codable {
     public var fieldCount: Int {
         [vibrance != nil, saturation != nil, blackAndWhite != nil].filter { $0 }.count
             + (bands ?? []).reduce(0) { $0 + $1.fieldCount }
+            + (global?.fieldCount ?? 0)
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
@@ -567,9 +572,11 @@ public struct ColorPatch: Sendable, Equatable, Codable {
 
     // MARK: 081 — the three cards this one patch serves
 
-    /// Any band carries a 色相 / 饱和度 / 亮度 number — what the `hsl` card owns.
+    /// Any band carries a 色相 / 饱和度 / 亮度 number — what the `hsl` card owns. Since 101 the
+    /// global triplet belongs to the same card, so a global-only copy is an HSL copy too.
     public var hasHSL: Bool {
-        (bands ?? []).contains { $0.hue != nil || $0.saturation != nil || $0.luminance != nil }
+        global != nil
+            || (bands ?? []).contains { $0.hue != nil || $0.saturation != nil || $0.luminance != nil }
     }
 
     /// Any band carries a 黑白混合 number — what the `blackAndWhite` card owns besides its switch.
@@ -780,6 +787,19 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if !patch.isEmpty { bands.append(patch) }
         }
         if !bands.isEmpty { color.bands = bands }
+        // 101 — the ninth selector. Sparse like a band: only the non-zero axes travel, so pasting a
+        // global 色相 leaves the destination's global 明度 alone (「只带非默认字段」).
+        if edit.color.hasGlobal {
+            var patch = HSLBandPatch(index: ColorGroup.bandCount)
+            if differs(edit.color.global.hue, 0) { patch.hue = edit.color.global.hue }
+            if differs(edit.color.global.saturation, 0) {
+                patch.saturation = edit.color.global.saturation
+            }
+            if differs(edit.color.global.luminance, 0) {
+                patch.luminance = edit.color.global.luminance
+            }
+            if !patch.isEmpty { color.global = patch }
+        }
         s.color = color.isEmpty ? nil : color
 
         // 081: 色彩分级 — nine numbers, one wheel per luminance region. A region whose three numbers
@@ -986,6 +1006,14 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if !patch.isEmpty { bands.append(patch) }
             }
             if !bands.isEmpty { p.bands = bands }
+            // 101: the global triplet follows the hsl card and its three children, exactly like a band.
+            if sections.contains(.hsl), let g = c.global {
+                var patch = HSLBandPatch(index: g.index)
+                if on(.hslHue) { patch.hue = g.hue }
+                if on(.hslSaturation) { patch.saturation = g.saturation }
+                if on(.hslLuminance) { patch.luminance = g.luminance }
+                if !patch.isEmpty { p.global = patch }
+            }
             out.color = p.isEmpty ? nil : p
         }
 
@@ -1117,6 +1145,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if let v = patch.luminance { band.luminance = v }
                 if let v = patch.mix { band.mix = v }
                 out.color.bands[patch.index] = band
+            }
+            // 101: the ninth selector's triplet, written over the destination's global.
+            if let patch = p.global {
+                if let v = patch.hue { out.color.global.hue = v }
+                if let v = patch.saturation { out.color.global.saturation = v }
+                if let v = patch.luminance { out.color.global.luminance = v }
             }
         }
 

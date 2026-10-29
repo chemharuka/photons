@@ -624,6 +624,168 @@ final class HSLTests: XCTestCase {
         XCTAssertGreaterThan(peak, 1.05, "the highlight was flattened — the headroom was lost")
     }
 
+    // MARK: - ⑥ 全局 (101)
+
+    /// The ninth selector at 0 must be *absent*: no stage, no link, the neutral frame byte for byte,
+    /// and the pre-101 key text unchanged.
+    func testTheNinthSelectorAtZeroKeepsTheOldStageAndKey() throws {
+        let image = flat(0.42)
+        let graph = try makeGraph(image, identity: "101-neutral")
+        let neutral = try graph.render(EditModel.neutral, options: RenderOptions(scale: 1, wantsPixels: true))
+        let zero = try graph.render(EditModel.neutral, options: RenderOptions(scale: 1, wantsPixels: true))
+        XCTAssertEqual(try XCTUnwrap(zero.display).sha256(), try XCTUnwrap(neutral.display).sha256())
+        XCTAssertFalse(zero.trace.executed.contains(.hsl), "an all-zero global must not visit S3.6")
+
+        let expected = "bands=" + ColorGroup.identityBands.map(\.keyString).joined(separator: ";")
+        XCTAssertEqual(EditModel.neutral.color.hslKeyString, expected,
+                       "the eight-band text is 076's, byte for byte")
+        XCTAssertFalse(EditModel.neutral.color.hslKeyString.contains(";gh="))
+    }
+
+    /// A band-only document keeps 076's key material; the global triplet is appended only when it is
+    /// non-zero, in the fixed `gh/gs/gl` order.
+    func testTheGlobalTripletIsAppendedOnlyWhenItMoves() {
+        var edit = document(2, hue: 5, saturation: 6, luminance: 7)
+        let bandsOnly = edit.color.hslKeyString
+        XCTAssertEqual(bandsOnly,
+                       "bands=" + edit.color.bands.map(\.keyString).joined(separator: ";"))
+        XCTAssertFalse(bandsOnly.contains(";gh="))
+
+        edit.color.global = HSLBand(hue: 10, saturation: 20, luminance: 30)
+        XCTAssertEqual(bandsOnly + ";gh=10.00000;gs=20.00000;gl=30.00000",
+                       edit.color.hslKeyString)
+        XCTAssertTrue(edit.keyMaterial(.hsl).contains(";gh=10.00000;gs=20.00000;gl=30.00000"))
+        XCTAssertTrue(edit.hasHSL)
+    }
+
+    /// Eight patches, one per band centre, at a chroma well above the gate and a lightness that stays
+    /// inside the display gamut after a 30° rotation, a ×2 chroma and one stop of lift.
+    private func bandCentrePicture() -> LinearImage {
+        picture(8, 4) { x, _ in
+            let working = OKLCh.toLinear(L: 0.38, C: 0.03,
+                                         hue: Double(HSLBands.centresDegrees[x % 8]))
+            let srgb = Self.toSRGB.applying(to: working)
+            return (srgb.x, srgb.y, srgb.z)
+        }
+    }
+
+    /// The display image's own OKLCh (decode sRGB, go to the working primaries, then `OKLCh`).
+    private func displayedLCh(_ image: DisplayImage, x: Int, y: Int)
+        -> (L: Double, C: Double, hue: Double) {
+        let o = (y * image.width + x) * 4
+        func decode(_ v: Float16) -> Double {
+            let c = min(max(Double(v), 0), 1)
+            return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        let srgb = SIMD3(decode(image.rgba[o]), decode(image.rgba[o + 1]),
+                         decode(image.rgba[o + 2]))
+        return OKLCh.fromLinear(Self.toWorking.applying(to: srgb))
+    }
+
+    /// 101 — 全局亮度 is ±1 stop of OKLab L at every band centre, symmetric, and it reaches grey (the one
+    /// axis that is allowed to, because there is no hue for it to need).
+    func testGlobalLuminanceLiftsEveryBandCentreAndLowersSymmetrically() throws {
+        let image = bandCentrePicture()
+        let graph = try makeGraph(image, identity: "101-lum")
+        let before = try display(graph, EditModel.neutral)
+        var up = EditModel.neutral
+        up.color.global.luminance = 100
+        var down = EditModel.neutral
+        down.color.global.luminance = -100
+        let lifted = try display(graph, up)
+        let lowered = try display(graph, down)
+
+        for x in 0..<8 {
+            let l0 = displayedLCh(before, x: x, y: 0).L
+            let a = displayedLCh(lifted, x: x, y: 0).L
+            let b = displayedLCh(lowered, x: x, y: 0).L
+            let gain = log2(a / l0)
+            let loss = log2(b / l0)
+            XCTAssertGreaterThanOrEqual(gain, 0.9, "band \(x): +100 must be a stop of L")
+            XCTAssertLessThanOrEqual(loss, -0.9, "band \(x): −100 must be a stop of L")
+        }
+        print("HSL GLOBAL 亮度 · 8 band centres: +100 ≥ +0.9 stop, −100 ≤ −0.9 stop")
+    }
+
+    /// 101 — 全局饱和 doubles chroma (within 2 %) at every band centre; 全局色相 adds 30° (within
+    /// 0.5°). Both ride the gate, so the grey test below stays bit-exact for them.
+    func testGlobalSaturationAndHueHaveTheBandsOwnUnits() throws {
+        let image = bandCentrePicture()
+        let graph = try makeGraph(image, identity: "101-sat-hue")
+        let before = try display(graph, EditModel.neutral)
+
+        var sat = EditModel.neutral
+        sat.color.global.saturation = 100
+        let saturated = try display(graph, sat)
+        var hue = EditModel.neutral
+        hue.color.global.hue = 100
+        let rotated = try display(graph, hue)
+
+        for x in 0..<8 {
+            let c0 = displayedLCh(before, x: x, y: 0).C
+            let c1 = displayedLCh(saturated, x: x, y: 0).C
+            XCTAssertEqual(c1 / c0, 2, accuracy: 0.04,
+                           "band \(x): +100 saturation must double chroma ±2 %")
+            let h0 = displayedLCh(before, x: x, y: 0).hue
+            let h1 = displayedLCh(rotated, x: x, y: 0).hue
+            var delta = (h1 - h0).truncatingRemainder(dividingBy: 360)
+            if delta > 180 { delta -= 360 }
+            if delta < -180 { delta += 360 }
+            XCTAssertEqual(delta, 30, accuracy: 0.5, "band \(x): +100 hue must be +30°")
+        }
+        print("HSL GLOBAL 饱和/色相 · 8 band centres: chroma ×2, hue +30°")
+    }
+
+    /// Grey has no hue: 全局色相/饱和 leave it bit-identical (the 079 gate), while 全局亮度 — the one
+    /// ungated axis — still moves it. That asymmetry is the whole point of the ninth selector.
+    func testGlobalHueAndSaturationLeaveGreyAloneButLuminanceDoesNot() throws {
+        let image = flat(0.37, width: 32, height: 32)
+        let graph = try makeGraph(image, identity: "101-grey")
+        let neutral = try display(graph, EditModel.neutral).sha256()
+        var hueSat = EditModel.neutral
+        hueSat.color.global = HSLBand(hue: 100, saturation: 100)
+        XCTAssertEqual(try display(graph, hueSat).sha256(), neutral,
+                       "a grey has no hue to rotate and no chroma to scale")
+        var lum = EditModel.neutral
+        lum.color.global.luminance = 100
+        XCTAssertNotEqual(try display(graph, lum).sha256(), neutral,
+                          "全局亮度 is the axis that must reach grey")
+        print("HSL GLOBAL 灰 · 色相/饱和逐位不变 · 亮度可见")
+    }
+
+    /// 101 — the snapshot carries the global triplet, applies it back, and a commit that moves only
+    /// 全局 is one history row.
+    func testGlobalRoundTripsThroughASnapshotAndTheHistory() {
+        var edit = EditModel.neutral
+        edit.color.global = HSLBand(hue: 12, saturation: -7, luminance: 3)
+        let snapshot = EditSnapshot.capture(edit)
+        XCTAssertNil(snapshot.color?.bands)
+        XCTAssertEqual(snapshot.color?.global?.hue, 12)
+        XCTAssertEqual(snapshot.color?.global?.saturation, -7)
+        XCTAssertEqual(snapshot.color?.global?.luminance, 3)
+        XCTAssertTrue(snapshot.sections.contains(.hsl))
+        XCTAssertEqual(snapshot.applied(to: .neutral).color.global, edit.color.global)
+
+        var history = EditHistory(baseline: .neutral)
+        XCTAssertNotNil(history.commit(edit, label: "全局"))
+        XCTAssertEqual(history.count, 2, "one baseline + one 全局 row")
+    }
+
+    /// 101 — the JSON rule: a neutral document writes no `global` key (byte-identical re-encode), a
+    /// document with a global triplet round-trips it.
+    func testTheGlobalTripletIsAbsentFromNeutralJSON() throws {
+        let neutral = try JSONEncoder().encode(EditModel.neutral)
+        XCTAssertFalse(try XCTUnwrap(String(data: neutral, encoding: .utf8)).contains("\"global\""),
+                       "all-zero 全局 must not add a key")
+
+        var edit = EditModel.neutral
+        edit.color.global = HSLBand(hue: 12, saturation: -7, luminance: 3)
+        let data = try JSONEncoder().encode(edit)
+        XCTAssertTrue(try XCTUnwrap(String(data: data, encoding: .utf8)).contains("\"global\""))
+        XCTAssertEqual(try JSONDecoder().decode(EditModel.self, from: data).color.global,
+                       edit.color.global)
+    }
+
     // MARK: - ⑤ cost
 
     /// 4.10 Mpx, one frame, `useCache: false`: the whole pipeline with and without S3.6, and the
