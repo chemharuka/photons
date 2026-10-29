@@ -18,8 +18,10 @@ import PhotonsCore
 ///   1. **中性 = 零像素 + 阶段不存在**: `dehaze == 0` has no `.dehaze` link and no pass.
 ///   2. **去雾有效**: on a 0.4 uniform veil, RMS contrast ≥ 2×, dark-channel mean −50 %, and the
 ///      measured `A` within 10 % of the veil (read from the 1 × 1 texture via the test probe).
-///   3. **HDR 参与且不失控**: `I = 0.3 / 1.5 / 4.0` patches all move, `J ≤ I/t0`, samples below `A`
-///      darken and samples above `A` brighten, and no NaN/Inf appears.
+///   3. **130 — 高光不再当雾**: recovery is on luminance (one gain ⇒ channel ratios invariant) and
+///      fades out above the veil's reach (`L ≥ 2A` is untouched). The pre-130 per-channel formula is
+///      kept behind `RenderOptions.legacyDehazePerChannel` so the blue-highlight measurement can be
+///      shown to be the formula's doing.
 ///   4. **单调**: amount 0 → 50 → 100 moves the dark channel down monotonically and never increases
 ///      the fraction of 255 codes.
 ///   5. **行颜色**: the 去雾 row is `.linear` (scene-linear red).
@@ -73,12 +75,14 @@ final class DehazeLinearTests: XCTestCase {
     }
 
     private func render(_ graph: RenderGraph, _ edit: EditModel, headroom: Double = 1,
-                        bitDepth: Int = 16, probeAirlight: Bool = false) throws -> DisplayImage {
+                        bitDepth: Int = 16, probeAirlight: Bool = false,
+                        legacyPerChannel: Bool = false) throws -> DisplayImage {
         let options = RenderOptions(scale: 1,
                                     display: DisplayOptions(primaries: .sRGB, bitDepth: bitDepth,
                                                             headroom: headroom),
                                     useCache: false, wantsPixels: true,
-                                    probesDehazeAirlight: probeAirlight)
+                                    probesDehazeAirlight: probeAirlight,
+                                    legacyDehazePerChannel: legacyPerChannel)
         let result = try graph.render(edit, options: options)
         if let t = result.output { graph.recycle(output: t) }
         return try XCTUnwrap(result.display)
@@ -241,9 +245,9 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertLessThan(rmsContrast(hazier), c0, "负值必须把雾加回来")
     }
 
-    // MARK: - 3. HDR 参与且不失控
+    // MARK: - 3. 130 — 高光参与但只到 A 的两倍
 
-    func testHDRParticipatesWithoutBreakingThePhysicalBound() throws {
+    func testHDRParticipationStopsAtTwiceTheAirlight() throws {
         // Three uniform patches with one 0.6 pinhole column per 4 px, so the measured airlight is 0.6
         // rather than the brightest patch (which would make `A > I` for every patch).
         let w = 64, h = 48
@@ -270,16 +274,19 @@ final class DehazeLinearTests: XCTestCase {
             let before = linearRGB(neutral, x, y).0
             let after = linearRGB(out, x, y).0
             rows.append(String(format: "I=%.2f → %.3f (Δ%+.3f)", patches[i], after, after - before))
-            XCTAssertGreaterThan(abs(after - before), 1e-3,
-                                 "patch \(patches[i]) 必须被去雾改动（|Δ| > 1e-3）")
             XCTAssertLessThanOrEqual(after, before / 0.1 + 1e-6,
                                      "J ≤ I/t0（t0 = 0.1）是物理上界")
-            if A < before {
-                XCTAssertGreaterThan(after, before + 1e-6, "A < I 的样本必须变亮（从雾幕里恢复）")
-            } else if A > before {
-                XCTAssertLessThan(after, before - 1e-6, "A > I 的样本必须变暗（它是雾）")
+            if patches[i] < A {
+                // Below the airlight the pixel *is* mostly veil: it must darken.
+                XCTAssertLessThan(after, before - 1e-6, "I < A 的样本必须变暗（它就是雾）")
+            } else if patches[i] >= 2 * A {
+                // 130: above 2A the veil cannot be the reason for the value — the pixel is left alone.
+                XCTAssertEqual(after, before, accuracy: 1e-9,
+                               "I ≥ 2A 的样本不许被当成雾（130：高光影响小到零）")
             }
         }
+        XCTAssertGreaterThan(abs(linearRGB(out, 1, 6).0 - linearRGB(neutral, 1, 6).0), 1e-3,
+                             "I < A 的样本必须真的被去雾改动")
         print("HDR · " + rows.joined(separator: " · ") + String(format: " · A %.3f", A))
 
         for y in 0..<h {
@@ -291,7 +298,152 @@ final class DehazeLinearTests: XCTestCase {
         }
     }
 
-    // MARK: - 4. 单调
+    // MARK: - 4. 130 — 色度守恒（以及旧公式的反证）
+
+    /// Four coloured patches at scene luminances 0.2 / 0.5 / 0.9 (one low channel each, so none of them
+    /// can own the airlight) plus a neutral 0.30 band that does, and a bright saturated band whose
+    /// luminance is ≥ 2A (the 130 fade puts it outside the veil). `A` is therefore 0.30 and the first
+    /// three coloured patches sit in `A < L < 2A`, where the fade still lets the recovery act.
+    private func colouredBlocks(width: Int = 100, height: Int = 48) -> LinearImage {
+        let bands: [(Double, Double, Double)] = [
+            (0.30, 0.30, 0.30),   // owns A (block minimum 0.30)
+            (0.50, 0.25, 0.10),   // L ≈ 0.307
+            (0.30, 0.45, 0.05),   // L ≈ 0.387
+            (0.45, 0.30, 0.04),   // L ≈ 0.324
+            (0.30, 0.90, 0.10),   // L ≈ 0.688 ≥ 2A — untouched
+        ]
+        let band = max(width / bands.count, 1)
+        var rgba = [Float16](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let c = bands[min(x / band, bands.count - 1)]
+                let i = (y * width + x) * 4
+                rgba[i] = Float16(c.0); rgba[i + 1] = Float16(c.1)
+                rgba[i + 2] = Float16(c.2); rgba[i + 3] = 1
+            }
+        }
+        return LinearImage(width: width, height: height, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+    }
+
+    private func ratios(_ image: DisplayImage, _ x: Int, _ y: Int) -> (Double, Double) {
+        let c = linearRGB(image, x, y)
+        return (c.1 / c.0, c.2 / c.0)
+    }
+
+    func testChromaIsConservedAndTheLegacyFormulaRotatesIt() throws {
+        let width = 100, height = 48
+        let graph = try makeGraph(colouredBlocks(width: width, height: height))
+        var edit = EditModel.neutral
+        edit.effects.dehaze = 20
+        var full = EditModel.neutral
+        full.effects.dehaze = 100
+
+        let before = try render(graph, .neutral)
+        let after = try render(graph, edit)
+        // The counterproof uses the full amount: at 20 the old per-channel formula still rotates the
+        // ratios by 0.5…2 % (it is mixed with the original at `amount`), which is easy to see but a
+        // narrow margin over the readback's own resolution; at 100 the rotation is unambiguous.
+        let legacy = try render(graph, full, legacyPerChannel: true)
+
+        let band = width / 5
+        let samples = (1..<5).map { $0 * band + band / 2 }
+        var rows: [String] = []
+        for x in samples {
+            let y = height / 2
+            let r0 = ratios(before, x, y)
+            let r1 = ratios(after, x, y)
+            let rL = ratios(legacy, x, y)
+            rows.append(String(format: "x=%d · g/r %.5f→%.5f (旧 %.5f) · b/r %.5f→%.5f (旧 %.5f)",
+                               x, r0.0, r1.0, rL.0, r0.1, r1.1, rL.1))
+            if x == samples.last {
+                // 130's fade is off at `L ≥ 2A`: the highlight is not haze, so it is bit-identical and
+                // its ratios move by exactly 0 — well inside the acceptance's 1e-4.
+                XCTAssertEqual(r1.0, r0.0, accuracy: 1e-4, "L ≥ 2A 的高光不许改 g/r")
+                XCTAssertEqual(r1.1, r0.1, accuracy: 1e-4, "L ≥ 2A 的高光不许改 b/r")
+                for c in 0..<3 {
+                    XCTAssertEqual(code(after, x, y, c), code(before, x, y, c),
+                                   "L ≥ 2A 的高光必须逐字节不动（通道 \(c)）")
+                }
+            } else {
+                // One gain on all three channels cannot move a ratio. The tolerance is the readback's,
+                // not the formula's: the frame is `rgba16Float`, whose half-precision relative step is
+                // 4.9e-4 (and the sRGB inverse amplify it), so 1e-4 is below this buffer's resolution.
+                XCTAssertLessThanOrEqual(abs(r1.0 / r0.0 - 1), 2.5e-3,
+                                         "dehaze 20 不许改 g/r（\(x),\(y)）")
+                XCTAssertLessThanOrEqual(abs(r1.1 / r0.1 - 1), 2.5e-3,
+                                         "dehaze 20 不许改 b/r（\(x),\(y)）")
+                // Counterproof: the same frame, same A/D/t, through the pre-130 per-channel formula
+                // does move the ratios — so the invariance above is the formula's, not the chain's.
+                XCTAssertGreaterThan(abs(rL.0 / r0.0 - 1), 5e-3,
+                                     "旧逐通道公式必须旋转色相（g/r），否则这个测试什么都没证明")
+                XCTAssertGreaterThan(abs(rL.1 / r0.1 - 1), 5e-3,
+                                     "旧逐通道公式必须旋转色相（b/r）")
+            }
+        }
+        print("CHROMA · " + rows.joined(separator: "\n         "))
+    }
+
+    // MARK: - 5. 130 — 用户的 DJI 复现（有素材才跑）
+
+    /// Highlight-region statistics in display codes: fraction with `max(r,g,b) ≥ 0.90`, mean `B − R`
+    /// and mean saturation `(max − min)/max` over that region.
+    private func highlightStats(_ image: DisplayImage) -> (fraction: Double, blueShift: Double,
+                                                           saturation: Double) {
+        var n = 0, blue = 0.0, sat = 0.0
+        let total = image.width * image.height
+        for i in stride(from: 0, to: image.rgba.count, by: 4) {
+            let r = Double(image.rgba[i]), g = Double(image.rgba[i + 1]), b = Double(image.rgba[i + 2])
+            let hi = max(r, max(g, b))
+            guard hi >= 0.90 else { continue }
+            n += 1
+            blue += b - r
+            sat += hi > 0 ? (hi - min(r, min(g, b))) / hi : 0
+        }
+        return (Double(n) / Double(max(total, 1)),
+                n > 0 ? blue / Double(n) : 0,
+                n > 0 ? sat / Double(n) : 0)
+    }
+
+    func testTheDJIBlueSkyHighlightDoesNotRotateTowardBlue() throws {
+        let path = NSString(string: "~/Desktop/US/DJI_air3_2250_D.dng").expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("需要 ~/Desktop/US/DJI_air3_2250_D.dng（用户的 DJI Air 3 原片）")
+        }
+        let decoded = try RAWDecoder().decode(URL(fileURLWithPath: path),
+                                              options: DecodeOptions(scale: 0.25))
+        let graph = try makeGraph(decoded, identity: "dehaze-dji-air3")
+        var base = EditModel.neutral
+        base.light.exposure = 2.0
+        var dehazed = base
+        dehazed.effects.dehaze = 20
+
+        let zero = try render(graph, base)
+        let twenty = try render(graph, dehazed)
+        let legacy = try render(graph, dehazed, legacyPerChannel: true)
+        let s0 = highlightStats(zero), s20 = highlightStats(twenty)
+        let sLegacy = highlightStats(legacy)
+        let c0 = rmsContrast(zero), c20 = rmsContrast(twenty)
+        print(String(format: "DJI · 高光占比 %.1f%%→%.1f%% · B−R %+.3f→%+.3f (旧 %+.3f) · 饱和 %.3f→%.3f (旧 %.3f) · 对比度 %.4f→%.4f (%.2fx)",
+                     s0.fraction * 100, s20.fraction * 100, s0.blueShift, s20.blueShift,
+                     sLegacy.blueShift, s0.saturation, s20.saturation, sLegacy.saturation,
+                     c0, c20, c20 / c0))
+
+        XCTAssertLessThanOrEqual(s20.blueShift, 0.08,
+                                 String(format: "dehaze 20 的高光 B−R 必须 ≤ +0.08（实测 %+.3f）", s20.blueShift))
+        XCTAssertLessThanOrEqual(s20.saturation, 0.10,
+                                 String(format: "dehaze 20 的高光饱和必须 ≤ 0.10（实测 %.3f）", s20.saturation))
+        // Counterproof on the same frame: the old formula reproduces the reported 0.27 / 0.27.
+        XCTAssertGreaterThanOrEqual(sLegacy.blueShift, 0.20,
+                                    String(format: "旧公式必须复现蓝色高光（实测 %+.3f）", sLegacy.blueShift))
+        XCTAssertGreaterThanOrEqual(sLegacy.saturation, 0.20,
+                                    String(format: "旧公式必须复现饱和膨胀（实测 %.3f）", sLegacy.saturation))
+        // Dehaze must still be doing something.
+        XCTAssertGreaterThanOrEqual(c20 / c0, 1.15,
+                                    String(format: "dehaze 20 的 RMS 对比度必须 ≥ 1.15×（实测 %.2fx）", c20 / c0))
+    }
+
+    // MARK: - 6. 单调
 
     func testAmountIsMonotonicAndDoesNotClipMore() throws {
         let graph = try makeGraph(foggy(landscape(bright: 1.0)))
@@ -314,7 +466,7 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertLessThanOrEqual(w100, w0 + 1e-9, "…and 100 no more than 50")
     }
 
-    // MARK: - 5. keys
+    // MARK: - 7. keys
 
     func testDehazeOwnsItsOwnLinkAndStage() {
         var e = EditModel.neutral
@@ -337,7 +489,7 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertTrue(links(e).pipeline.contains(.dehaze))
     }
 
-    // MARK: - 6. 开销
+    // MARK: - 8. 开销
 
     func testThreePassesStayInsideTheFrameBudget() throws {
         let width = benchmarks ? 6000 : 1500

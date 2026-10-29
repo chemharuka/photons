@@ -92,7 +92,11 @@ public enum StageAlgorithmVersion {
     /// **2** — 117: 去雾 left S3.9 for S1.9 (`s1_9_dehaze.metal`). The domain changed from
     /// display-referred codes with `A = 1` to scene-linear light with a measured airlight, so every
     /// document with `effects.dehaze != 0` changes pixels even though its stored number did not.
-    public static let dehaze = 2
+    /// **3** — 130: the recovery is hue-preserving (He's inversion on Rec.2020 luminance, one common
+    /// gain on the three channels) and fades out above the veil's reach (`w = 1 − smoothstep(A, 2A, L)`),
+    /// so a `dehaze > 0` document no longer rotates blue highlights toward blue. `dehaze < 0` is
+    /// unchanged; `dehaze == 0` never reaches the stage.
+    public static let dehaze = 3
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
