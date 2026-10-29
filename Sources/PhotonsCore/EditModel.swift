@@ -66,13 +66,14 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// this build saves carries 9.
     ///
     /// 9 = 2026-10-28 (P0-6): 纹理 / 清晰度 / 去雾 — `effects.texture`, `effects.clarity` and
-    /// `effects.dehaze` (−100…100, default 0), the Effects card's missing third block. S3.8 renders all
-    /// three (`Kernels/s3_8_detail_fx.metal`); before this version none of them existed.
+    /// `effects.dehaze` (−100…100, default 0), the Effects card's missing third block. S1.9 renders it
+    /// (117 moved it out of S3.9 and out of the display domain); 纹理/清晰度 stay in S3.9. Before this
+    /// version none of them existed.
     ///
     /// **Nothing migrates, and the encoding is additive.** Each of the three is written only when it is
     /// non-zero (the `blackOffset`/`blackAndWhite` rule), so a schema-8 document re-encodes **byte for
-    /// byte** and an absent key reads as its default: 0, so `hasDetailFX == false`, S3.8 is not encoded
-    /// for it, and its pixels are byte-identical. Like schemas 7 and 8, the version is not stamped at
+    /// byte** and an absent key reads as its default: 0, so neither S3.9 nor S1.9 is encoded for it,
+    /// and its pixels are byte-identical. Like schemas 7 and 8, the version is not stamped at
     /// decode time on a document that carries none of the three keys — a document keeps the number its
     /// own file wrote, and only a document this build saves carries 9.
     ///
@@ -300,10 +301,15 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// and the key chain for nothing.
     public var hasGrain: Bool { effects.hasGrain }
 
-    /// 2026-10-28 (P0-6): does S3.8 exist for this document? Judged **by value** — any of the three
-    /// numbers non-zero — exactly the way `hasGrain` judges S3.7. A document whose three are 0 keeps the
-    /// pre-S3.8 stage list, key chain and pixels byte for byte: the pass is not encoded at all.
+    /// 2026-10-28 (P0-6): does S3.9 exist for this document? Judged **by value** — 纹理 or 清晰度
+    /// non-zero — exactly the way `hasGrain` judges S3.7. 117 moved 去雾 out of this stage, so it no
+    /// longer contributes. A document whose two are 0 keeps the pre-S3.9 stage list, key chain and
+    /// pixels byte for byte: the pass is not encoded at all.
     public var hasDetailFX: Bool { effects.hasDetailFX }
+
+    /// 117: does S1.9 exist for this document? Judged **by value** — `effects.dehaze != 0`. It is a
+    /// separate stage at the end of the linear chain, so it has its own link and its own condition.
+    public var hasDehaze: Bool { effects.hasDehaze }
 
     /// 098: does S1.8 exist for this document? Judged **by value** — `light.contrast != 0` — exactly
     /// the way `hasDetailFX` judges S3.9. A document with contrast 0 keeps the pre-098 stage list, key
@@ -525,13 +531,15 @@ public struct EditModel: Sendable, Equatable, Codable {
                 || effects.grainSeedValue != old.effects.grainSeedValue {
                 s.insert(.grain)
             }
-            // 2026-10-28 (P0-6): the card's third block is a third stage — S3.8 reads the three detail
-            // numbers and none of the vignette/grain ones, so a clarity drag must dirty S3.8 alone.
+            // 2026-10-28 (P0-6): the card's third block is a third stage — S3.9 reads 纹理/清晰度 and
+            // none of the vignette/grain numbers, so a clarity drag must dirty S3.9 alone.
             if effects.texture != old.effects.texture
-                || effects.clarity != old.effects.clarity
-                || effects.dehaze != old.effects.dehaze {
+                || effects.clarity != old.effects.clarity {
                 s.insert(.detailFX)
             }
+            // 117: 去雾 is S1.9 now, in the linear chain — its own stage and its own dirty bit, so a
+            // dehaze drag must not re-run the display-referred detail filter.
+            if effects.dehaze != old.effects.dehaze { s.insert(.dehaze) }
         }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
@@ -730,8 +738,12 @@ public struct EditModel: Sendable, Equatable, Codable {
             // belt-and-braces shape as `.hsl`/`.bw`: a log line names what wrote the pixels.
             return colorGrading.keyString
         case .detailFX:
-            // 2026-10-28 (P0-6): S3.8's own material — the three numbers and nothing else.
+            // 2026-10-28 (P0-6): S3.9's own material — 纹理 and 清晰度 and nothing else.
             return effects.detailFXKeyString
+
+        case .dehaze:
+            // 117: S1.9's own material — the dehaze amount and nothing else.
+            return effects.dehazeKeyString
 
         case .display:
             return "primaries=\(displayKeyPrimaries)"
@@ -1939,10 +1951,11 @@ public struct DetailGroup: Sendable, Equatable, Codable {
 ///   · `grainSize` 0…100 — the cell, in frame fractions;
 ///   · `grainRoughness` 0…100 — the weight of the finer octave;
 ///   · `grainSeed` 0…999 — the hash's only free variable (see `grainSeedValue`);
-///   · `texture` −100…100 — S3.8's fine band (2…8 px), the guided filter's residual at a small radius;
-///   · `clarity` −100…100 — S3.8's mid band (a few percent of the frame), the same residual at a radius
+///   · `texture` −100…100 — S3.9's fine band (2…8 px), the guided filter's residual at a small radius;
+///   · `clarity` −100…100 — S3.9's mid band (a few percent of the frame), the same residual at a radius
 ///     the kernel derives from the frame — local contrast without the halo a plain unsharp draws;
-///   · `dehaze` −100…100 — S3.8's dark channel prior; negative adds a 0.4 veil back.
+///   · `dehaze` −100…100 — S1.9's dark channel prior in scene-linear light (117); negative adds a
+///     0.4-relative veil back.
 ///
 /// Nothing here is a second copy of a value the shader also holds: the defaults are the shader's
 /// neutral, and `keyString`/`grainKeyString` are built from these fields only.
@@ -1963,15 +1976,16 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     public var grainSeed: Double
     /// 纹理 (−100…100, default 0) — the **fine** detail band (2…8 px at the render's own scale):
     /// `s3_8_detail_fx.metal`'s guided-filter residual at a small radius. 0 = the band is not touched
-    /// and, when the other two are 0 too, S3.8 does not exist for the document at all.
+    /// and, when the other two are 0 too, S3.9 does not exist for the document at all.
     public var texture: Double
     /// 清晰度 (−100…100, default 0) — the **mid** band (a few percent of the frame): the same
     /// guided-filter residual at a radius the kernel derives from the frame, i.e. local contrast
     /// without the halo a plain unsharp mask draws at a step edge (`DetailFXTests` measures the
     /// overshoot, and the same test measures the unsharp alternative failing that bound).
     public var clarity: Double
-    /// 去雾 (−100…100, default 0) — dark-channel-prior haze removal (He/Sun/Tang 2010, simplified:
-    /// airlight `A = 1`, transmission from a `1/q` dark channel). Negative **adds** the veil back.
+    /// 去雾 (−100…100, default 0) — **S1.9**, in scene-linear light: the dark-channel prior of
+    /// He/Sun/Tang (2010) with a measured airlight `A` (`Kernels/s1_9_dehaze.metal`). Negative
+    /// **adds** the veil back.
     public var dehaze: Double
 
     public static let identity = EffectsGroup()
@@ -1988,15 +2002,24 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
     public var hasGrain: Bool { grain > 0 }
 
-    /// Does S3.8 exist for this document? Judged **by value**: any of the three numbers non-zero. A
-    /// document with all three at 0 keeps the pre-S3.8 chain byte for byte — the strongest form of
-    /// 「中性零变化」, the pass is not encoded rather than encoded and multiplied by zero.
-    public var hasDetailFX: Bool { texture != 0 || clarity != 0 || dehaze != 0 }
+    /// Does S3.9 exist for this document? Judged **by value**: 纹理 or 清晰度 non-zero (117 removed
+    /// 去雾 from this stage). A document with both at 0 keeps the pre-S3.9 chain byte for byte — the
+    /// strongest form of 「中性零变化」, the pass is not encoded rather than encoded and multiplied by zero.
+    public var hasDetailFX: Bool { texture != 0 || clarity != 0 }
 
-    /// S3.8's material — the three numbers and nothing else. A clarity drag must not miss a cached
-    /// vignette (S3c reads none of them) and a vignette drag must not re-run S3.8.
+    /// 117: does S1.9 (去雾) exist for this document? Its own stage, its own link.
+    public var hasDehaze: Bool { dehaze != 0 }
+
+    /// S3.9's material — 纹理 and 清晰度 and nothing else. A clarity drag must not miss a cached
+    /// vignette (S3c reads neither) and a vignette drag must not re-run S3.9. 去雾 has its own string
+    /// now that it is its own stage.
     public var detailFXKeyString: String {
-        "tx=\(k(texture));cl=\(k(clarity));dz=\(k(dehaze))"
+        "tx=\(k(texture));cl=\(k(clarity))"
+    }
+
+    /// S1.9's material — the dehaze amount and nothing else.
+    public var dehazeKeyString: String {
+        "dz=\(k(dehaze))"
     }
 
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,

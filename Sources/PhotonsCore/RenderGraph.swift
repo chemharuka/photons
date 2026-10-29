@@ -181,6 +181,12 @@ public struct RenderOptions: Sendable {
     /// never set by the app and never part of a key.
     public var healWithoutBoundaryMatch: Bool
 
+    /// **Tests only.** Read the 1 × 1 airlight texture back to the CPU after the frame, into
+    /// `RenderGraph.lastDehazeAirlight` (117's acceptance needs to compare the estimated `A` with the
+    /// synthetic veil). The shipped path never reads it back: `s1_9_dehaze_apply` samples the texture
+    /// on the GPU, and this flag adds only a 4-byte blit when it is on. Never part of a key.
+    public var probesDehazeAirlight: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -196,7 +202,8 @@ public struct RenderOptions: Sendable {
                 originalRendersAsParametersCleared: Bool = false,
                 bwIndependentChannels: Bool = false,
                 gradeGlobalWeights: Bool = false,
-                healWithoutBoundaryMatch: Bool = false) {
+                healWithoutBoundaryMatch: Bool = false,
+                probesDehazeAirlight: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -213,6 +220,7 @@ public struct RenderOptions: Sendable {
         self.bwIndependentChannels = bwIndependentChannels
         self.gradeGlobalWeights = gradeGlobalWeights
         self.healWithoutBoundaryMatch = healWithoutBoundaryMatch
+        self.probesDehazeAirlight = probesDehazeAirlight
     }
 }
 
@@ -739,12 +747,20 @@ private struct GrainParams {
 /// each kernel reads the two or three fields it needs and ignores the rest, so the CPU side has one
 /// object to keep in step with one header.
 private struct DetailFXParamsU {
-    var a: SIMD4<Float>    // texture, clarity, dehaze amounts (−1…1 = the document's −100…100 /100)
+    var a: SIMD4<Float>    // texture, clarity amounts (−1…1 = the document's −100…100 /100), pad, pad
     var luma: SIMD4<Float> // Rec.709 luma weights, pad
-    var d: SIMD4<Float>    // epsilon (this chain's), unread, ω (dehaze), t0 (dehaze)
+    var d: SIMD4<Float>    // epsilon (this band's), unread, unread, unread
     var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
+}
+
+/// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117).
+private struct DehazeParamsU {
+    var a: SIMD4<Float>   // amount (−1…1), ω, t0, "no haze" threshold for A
+    var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
+    var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
+    var d: SIMD4<Int32>   // qH, pad, pad, pad
 }
 
 private struct DisplayParams {
@@ -1101,6 +1117,12 @@ public final class RenderGraph {
     /// included, both of which now have slots of their own).
     public private(set) var stageRuns: [RenderStage: Int] = [:]
     public private(set) var stageHits: [RenderStage: Int] = [:]
+    /// **Tests only** — the airlight `A` S1.9 estimated on the last frame, when
+    /// `RenderOptions.probesDehazeAirlight` asked for it. `nil` when the stage did not run or the flag
+    /// is off, which is what makes "the production path never reads it back" checkable.
+    public private(set) var lastDehazeAirlight: Double?
+    /// The 4-byte readback the probe queues inside the frame's command buffer; consumed after commit.
+    private var dehazeAirlightProbe: MTLBuffer?
     /// The number the acceptance of 073 reads: 1 for a burst of blue slider steps, one per red step.
     public var s1Passes: Int { stageRuns[.sceneLinear] ?? 0 }
     public var s1Hits: Int { stageHits[.sceneLinear] ?? 0 }
@@ -1556,6 +1578,10 @@ public final class RenderGraph {
         // parameters-cleared document instead, which is the refutation.
         let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
+        // 117: the airlight probe is per frame. A stale value from an earlier probed render must not
+        // look like this frame's estimate, and a frame without the flag reports `nil`.
+        dehazeAirlightProbe = nil
+        lastDehazeAirlight = nil
         let recyclesEachStage = pool.retainsNothing
             || (!options.useCache && plan.canvas.pixelCount * 8 >= TexturePool.eagerRecycleFloorBytes)
         var trace = RenderTrace()
@@ -1979,6 +2005,11 @@ public final class RenderGraph {
         let wall = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         if let err = cb.error {
             throw RenderError.executeFailed(err.localizedDescription)
+        }
+        if let probe = dehazeAirlightProbe {
+            let bits = probe.contents().load(as: UInt16.self)
+            lastDehazeAirlight = Double(Float16(bitPattern: bits))
+            dehazeAirlightProbe = nil
         }
         // The frame's inputs go back to the pool only now — after the command buffer that reads them
         // has run, and before the next frame asks for a canvas.
@@ -3043,16 +3074,19 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
         case .detailFX:
-            // S3.8 — 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6). Encoded **only** for documents whose three
-            // numbers are not all 0 (`RenderStage.pipeline(hasDetailFX:)`), so a neutral document's
-            // frame is the pre-S3.8 frame by construction: there is no pass to be neutral in.
+            // S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6). Encoded **only** for documents whose two numbers
+            // are not both 0 (`RenderStage.pipeline(hasDetailFX:)`), so a neutral document's frame is
+            // the pre-S3.9 frame by construction: there is no pass to be neutral in.
             //
-            // The three operators are chained in the order the panel names them (dehaze → texture →
-            // clarity), each writing the next texture: dehaze first because it changes what the detail
-            // operators should read (a veil is a low-frequency offset that would otherwise be part of
-            // the guided filter's base), texture before clarity because the fine band is a subset of
-            // the mid one.
+            // The two detail operators are chained in the order the panel names them (texture →
+            // clarity), each writing the next texture: texture before clarity because the fine band is
+            // a subset of the mid one. 去雾 is S1.9 now (117).
             try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan)
+
+        case .dehaze:
+            // S1.9 — 117: 去雾 in the scene-linear domain. Encoded **only** when `effects.dehaze != 0`
+            // (`RenderStage.pipeline(hasDehaze:)`), so a neutral document has no pass to be neutral in.
+            try encodeDehaze(cb: cb, into: out, from: src, edit: edit, plan: plan, options: options)
 
         case .vignette:
             let p = try kernels.pipeline(file: "s3_vignette", function: "s3_vignette")
@@ -3245,18 +3279,18 @@ public final class RenderGraph {
         e1.endEncoding()
     }
 
-    // MARK: - S3.8 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6)
+    // MARK: - S3.9 纹理 / 清晰度 (2026-10-28, P0-6; 117 split 去雾 out)
     //
     // The statistics block. `4` is not a knob: at 4×4 averaging a 2…8 px pattern is gone from the
     // regression while a step edge is not, which is the whole reason the guided filter's gate follows
-    // *structure* and not merely variance. It also makes the three chains one sixteenth / one half of
-    // the frame instead of three full ones.
+    // *structure* and not merely variance. It also makes the two chains a sixteenth of the frame
+    // instead of two full ones.
     private static let detailFXBlock = 4
 
-    /// The stage: up to three chains, in the panel's order (去雾 → 纹理 → 清晰度).
+    /// The stage: up to two chains, in the panel's order (纹理 → 清晰度).
     ///
     /// Each chain reads the previous chain's texture, so only the first sees `src` and only the last
-    /// writes `out`. A document with one number set pays one chain, not three.
+    /// writes `out`. A document with one number set pays one chain, not two. 去雾 is S1.9 now.
     private func encodeDetailFX(cb: MTLCommandBuffer, into out: MTLTexture,
                                 from src: MTLTexture, edit: EditModel, plan: Plan) throws {
         let w = plan.canvas.width, h = plan.canvas.height
@@ -3274,18 +3308,14 @@ public final class RenderGraph {
         }
         let textureRadius = radiusQ(0.0015, cap: 4)      // ≈ 4 px at a 2731 px frame
         let clarityRadius = radiusQ(0.02, cap: 24)       // ≈ 55 px at a 2731 px frame
-        let darkRadius = radiusQ(0.003, cap: 4)          // ≈ 8 px (a 15 px window, He's own)
 
         let textureAmount = Float(edit.effects.texture) / 100
         let clarityAmount = Float(edit.effects.clarity) / 100
-        let dehazeAmount = Float(edit.effects.dehaze) / 100
 
         var params = DetailFXParamsU(
-            a: SIMD4(textureAmount, clarityAmount, dehazeAmount, 0),
+            a: SIMD4(textureAmount, clarityAmount, 0, 0),
             luma: SIMD4(0.2126, 0.7152, 0.0722, 0),
-            // 0.95 = He's ω (the transmission keeps 5 % of the veil, so the result has air in it rather
-            // than the plastic look of a full removal); 0.1 = He's t0 floor.
-            d: SIMD4(0.0, 0, 0.95, 0.1),
+            d: SIMD4(0.0, 0, 0, 0),
             // The gate's knee, in **luma per 1/q texel**: a 0.44 step is 0.11 per 4 px texel, a 0.1
             // step is 0.025, a sky gradient over 100 px is 0.001. 0.015…0.06 therefore passes every
             // gradual transition and stops every step — which is where an unsharp mask draws its halo.
@@ -3293,49 +3323,8 @@ public final class RenderGraph {
             b: SIMD4(Int32(w), Int32(h), Int32(q), 0),
             c: SIMD4(Int32(qW), Int32(qH), 32, 0))
 
-        // The two chains' destinations: the **last** one writes the stage's output texture, an earlier
-        // one writes a scratch the next chain reads. (Writing a scratch for the last chain and
-        // forgetting to copy it into `out` is exactly the bug that made a texture-only document render
-        // black — the frame was correct in the scratch and never reached the pipeline.)
         let bandsActive = textureAmount != 0 || clarityAmount != 0
         var current = src
-
-        // 1. 去雾 — dark channel prior. Four passes, three of them at 1/16 of the frame.
-        if dehazeAmount != 0 {
-            let dark = try scratch("detailfx-dark", width: qW, height: qH, format: .rgba16Float)
-            let darkTmp = try scratch("detailfx-dark-tmp", width: qW, height: qH, format: .rgba16Float)
-            let trans = try scratch("detailfx-trans", width: qW, height: qH, format: .rgba16Float)
-            params.b.w = darkRadius
-
-            let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dark_pack")
-            let enc = try encoder(cb, pack, in: current, out: dark)
-            enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
-            dispatch(enc, pack, ImageSize(width: qW, height: qH))
-            enc.endEncoding()
-
-            try detailFXMin(cb: cb, from: dark, tmp: darkTmp, to: dark, params: &params,
-                            qW: qW, qH: qH)
-
-            let transPipe = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dark_trans")
-            let enc2 = try encoder(cb, transPipe, in: dark, out: trans)
-            enc2.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
-            dispatch(enc2, transPipe, ImageSize(width: qW, height: qH))
-            enc2.endEncoding()
-
-            let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_dehaze_apply")
-            let next = bandsActive
-                ? try scratch("detailfx-img-0", width: w, height: h, format: .rgba16Float)
-                : out
-            guard let enc3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            enc3.setComputePipelineState(apply)
-            enc3.setTexture(current, index: 0)
-            enc3.setTexture(trans, index: 1)
-            enc3.setTexture(next, index: 2)
-            enc3.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
-            dispatch(enc3, apply, plan.canvas)
-            enc3.endEncoding()
-            current = next
-        }
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
         // apply. One statistics pack (the 4×4 block means), one separable box per band (the two
@@ -3449,18 +3438,88 @@ public final class RenderGraph {
         e1.endEncoding()
     }
 
-    /// The separable running minimum of the dark channel: `from → tmp → to`.
-    private func detailFXMin(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture, to: MTLTexture,
-                             params: inout DetailFXParamsU, qW: Int, qH: Int) throws {
-        try detailFXBox(cb: cb, from: from, tmp: tmp, to: to, params: &params, qW: qW, qH: qH,
-                        horizontal: "s3_8_dark_min_h", vertical: "s3_8_dark_min_v")
-    }
-
     /// One thread per 32-texel segment, 32 threads per group — the `s1_7_mask_neighbourhood` dispatch,
     /// which is what lets a running sum/min walk a segment instead of a pixel.
     private func dispatchSegments(_ enc: MTLComputeCommandEncoder, qW: Int, qH: Int) {
         enc.dispatchThreadgroups(MTLSize(width: max(1, (qW + 31) / 32), height: max(1, qH), depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+    }
+
+    // MARK: - S1.9 去雾 (117)
+    //
+    // Three passes over a `1/q` dark channel, q = 4:
+    //
+    //   · `s1_9_dehaze_dark`     — block minimum, one texel per q × q block (rgba16Float, r used);
+    //   · `s1_9_dehaze_airlight` — one threadgroup scans the block texture for the largest block
+    //                              minimum and writes a 1 × 1 texture (He's brightest-dark-channel
+    //                              estimate, cheaply and deterministically);
+    //   · `s1_9_dehaze_apply`    — full resolution: samples the block texture bilinearly, builds
+    //                              `t = max(1 − ω·D, t0)`, applies `J = (I − A(1 − t))/t`, and never
+    //                              clamps the top (the HDR tail is the point of 117).
+    //
+    // The airlight never comes back to the CPU on the shipped path; `probesDehazeAirlight` adds a
+    // 4-byte blit for the acceptance's measurement.
+    private func encodeDehaze(cb: MTLCommandBuffer, into out: MTLTexture,
+                              from src: MTLTexture, edit: EditModel, plan: Plan,
+                              options: RenderOptions) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let q = 4
+        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+
+        var params = DehazeParamsU(
+            a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, 0.1, 0.02),
+            b: SIMD4(plan.origin.x, plan.origin.y,
+                     Float(plan.content.width), Float(plan.content.height)),
+            c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
+            d: SIMD4(Int32(qH), 0, 0, 0))
+
+        let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
+        let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)
+
+        let pack = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_dark")
+        let e0 = try encoder(cb, pack, in: src, out: dark)
+        e0.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(e0, pack, ImageSize(width: qW, height: qH))
+        e0.endEncoding()
+
+        let aPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_airlight")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(aPipe)
+        e1.setTexture(dark, index: 0)
+        e1.setTexture(airlight, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        e1.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        e1.endEncoding()
+
+        let apply = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_apply")
+        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e2.setComputePipelineState(apply)
+        e2.setTexture(src, index: 0)
+        e2.setTexture(dark, index: 1)
+        e2.setTexture(airlight, index: 2)
+        e2.setTexture(out, index: 3)
+        e2.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(e2, apply, plan.canvas)
+        e2.endEncoding()
+
+        if options.probesDehazeAirlight {
+            // rgba16Float: four 16-bit channels. Read the red channel back as a half float, not the
+            // whole texel as a Float (that was the bug the first version of this probe had).
+            let texelBytes = MemoryLayout<UInt16>.stride * 4
+            guard let probe = device.makeBuffer(length: texelBytes, options: .storageModeShared),
+                  let blit = cb.makeBlitCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            blit.copy(from: airlight, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: 1, height: 1, depth: 1),
+                      to: probe, destinationOffset: 0,
+                      destinationBytesPerRow: texelBytes,
+                      destinationBytesPerImage: texelBytes)
+            blit.endEncoding()
+            dehazeAirlightProbe = probe
+        }
     }
 
     // S0 and the mask atlas must rotate by the same angle, so both read `straightenDegrees`

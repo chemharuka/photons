@@ -169,6 +169,9 @@ public struct RenderInputs: Sendable, Equatable {
             // this key **byte for byte** — `s3.8-detail-fx=tx=0…` is not a key segment any cached
             // render was written against.
             .filter { $0 != .detailFX || edit.hasDetailFX }
+            // 117: and S1.9 (去雾) is the sixth. Its link lives in the linear chain and must not add a
+            // segment to a document that has never touched the slider.
+            .filter { $0 != .dehaze || edit.hasDehaze }
             .map { "\($0.rawValue)=\(edit.keyMaterial($0))" }
             .joined(separator: "|")
     }

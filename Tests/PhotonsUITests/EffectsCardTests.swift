@@ -59,6 +59,9 @@ final class EffectsCardTests: XCTestCase {
                        ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化", "暗角圆度"])
         XCTAssertTrue(InspectorView.vignetteRows.allSatisfy { $0.shape == .linear },
                       "暗角在线性域，行必须是红色（.linear）")
+        // 117: 去雾 is scene-linear (S1.9), so its row is red as well.
+        XCTAssertEqual(InspectorView.detailFXRows.first { $0.title == "去雾" }?.shape, .linear,
+                       "去雾在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 4)
         XCTAssertEqual(InspectorView.detailFXRows.count, 3)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
@@ -80,6 +83,28 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(panel.rowFrames.count, InspectorView.effectsRows.count,
                        "画出来的行数 \(panel.rowFrames.count) ≠ 表里的 \(InspectorView.effectsRows.count)")
         print("EFFECTS CARD · \(panel.cards.cardIDs)")
+    }
+
+    /// 121 — 校正 卡右对齐说明：文件自带校正（DNG 的 WarpRectilinear / 松下 RW2 的 0x0119）时，
+    /// 无论由 Apple 的解码器应用还是由我们的 S0 warp 应用，卡片都要说明「已自动应用配置文件」。
+    func testTheCorrectionCardSaysWhenTheProfileWasAppliedForYou() throws {
+        let raw = URL(fileURLWithPath: ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"]
+            ?? NSString(string: "~/Desktop/test/L1030433.dng").expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: raw.path) else {
+            throw XCTSkip("no test RAW at \(raw.path)")
+        }
+        // Our test body carries a WarpRectilinear opcode, so it is the "applied for you" case.
+        let profile = try XCTUnwrap(LensProfile.read(from: raw))
+        XCTAssertFalse(profile.planes.isEmpty)
+        XCTAssertEqual(InspectorView.autoProfileNote(for: raw), "已自动应用配置文件")
+
+        // A file that carries no preview/opcodes says nothing at all.
+        let plain = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("plain-\(UUID().uuidString).dng")
+        try Data("not a raw".utf8).write(to: plain)
+        addTeardownBlock { try? FileManager.default.removeItem(at: plain) }
+        XCTAssertNil(InspectorView.autoProfileNote(for: plain))
+        XCTAssertNil(InspectorView.autoProfileNote(for: nil))
     }
 
     // MARK: - 2. 三宽不截断

@@ -3,12 +3,12 @@ import Metal
 import CryptoKit
 import PhotonsCore
 
-/// 2026-10-28 (P0-6) — the 效果 card's third block at the pixel level: 纹理 / 清晰度 / 去雾.
+/// 2026-10-28 (P0-6) — the 效果 card's 纹理 / 清晰度 block at the pixel level.
 ///
-/// Three controls, two operators (`Kernels/s3_8_detail_fx.metal`): a **guided filter** (He/Sun/Tang
-/// 2010) whose residual is the detail band, at two radii — 纹理 (a few px) and 清晰度 (a few percent of
-/// the frame) — and the **dark channel prior** (same paper) for 去雾, with `A = 1` and the transmission
-/// estimated at `1/q`.
+/// Two controls, one operator (`Kernels/s3_8_detail_fx.metal`): a **guided filter**
+/// (He/Sun/Tang 2010) whose residual is the detail band, at two radii — 纹理 (a few px) and
+/// 清晰度 (a few percent of the frame). 去雾 moved to S1.9 in the scene-linear domain (117); its
+/// pixel tests live in `DehazeLinearTests`.
 ///
 /// Everything is measured on the shipped kernels through the shipped graph, on synthetic frames whose
 /// two regions are unambiguous: a fine checkerboard (texture that must move) and one hard step edge
@@ -23,11 +23,9 @@ import PhotonsCore
 ///      plain unsharp does not.
 ///   4. **纹理 +100**: fine-band energy up, the step's plateaus and amplitude **unchanged** (≤ 1 code),
 ///      with the scale response printed (2 / 4 / 8 / 16 px).
-///   5. **去雾 +100** on a 0.4 uniform veil: RMS contrast (σ/µ of linear luma) **≥ 2×**, dark-channel
-///      mean **−50 % or more**, and the recovered contrast within 30 % of the *unfogged* original.
-///   6. **键与历史**: one parameter = one stage, the link appears only when a number is non-zero, no
-///      decode, and the three are independent stages in the key chain.
-///   7. **开销** at 4.10 Mpx, per control.
+///   5. **键与历史**: one parameter = one stage, the link appears only when a number is non-zero, no
+///      decode, and 纹理/清晰度 are independent of the other stages in the key chain.
+///   6. **开销** at 4.10 Mpx, per control.
 final class DetailFXTests: XCTestCase {
 
     private static let frameWidth = 1500
@@ -77,94 +75,6 @@ final class DetailFXTests: XCTestCase {
         }
         return (LinearImage(width: width, height: height, rgba: rgba,
                             colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic"), height / 2)
-    }
-
-    /// A "landscape" with the property the dark channel prior needs — something near black in every
-    /// window: a bright band, a textured mid band, a near-black band.
-    private func landscape(width: Int = 750, height: Int = 500) -> LinearImage {
-        var rgba = [Float16](repeating: 0, count: width * height * 4)
-        for y in 0..<height {
-            for x in 0..<width {
-                var v: Double
-                if y < height / 3 {
-                    v = 0.80 - 0.10 * Double(y) / Double(height / 3)
-                } else if y < 2 * height / 3 {
-                    v = 0.20 + ((x / 4 + y / 4) % 2 == 0 ? 0.05 : -0.05)
-                } else {
-                    v = 0.01 + 0.02 * Double(x) / Double(width)
-                }
-                let i = (y * width + x) * 4
-                rgba[i] = Float16(v); rgba[i + 1] = Float16(v); rgba[i + 2] = Float16(v); rgba[i + 3] = 1
-            }
-        }
-        return LinearImage(width: width, height: height, rgba: rgba,
-                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
-    }
-
-    /// The same picture under a uniform veil: `I = (1 − veil)·J + veil` in **linear light** — the model
-    /// the dark channel prior inverts (`I = t·J + A(1 − t)`, `A = 1`).
-    private func foggy(_ image: LinearImage, veil: Double = 0.4) -> LinearImage {
-        var rgba = image.rgba
-        for i in stride(from: 0, to: rgba.count, by: 4) {
-            for c in 0..<3 { rgba[i + c] = Float16(Double(rgba[i + c]) * (1 - veil) + veil) }
-        }
-        return LinearImage(width: image.width, height: image.height, rgba: rgba,
-                           colorSpace: image.colorSpace, decoderVersion: image.decoderVersion)
-    }
-
-    /// 用户 2026-10-29：**去雾会把高亮部分变得更亮，这是错误的。**
-    ///
-    /// 根因：`J = (I − 1)/t + 1`（airlight A = 1）只在显示域成立；`I > 1` 时它 `加光`
-    /// （`(I−1)/t > I−1`），于是 HDR 高光随着去雾升高而更亮。修法是把模型跑在 `min(I, 1)` 上，
-    /// 白点以上的通道原样穿过 —— 于是 `out ≤ in` 逐像素成立，高光一个字节都不动。
-    func testDehazeNeverBrightensAnything() throws {
-        // A ramp with a real HDR tail: 0.05 … 2.0, so both sides of display white are represented.
-        let w = 256, h = 64
-        var rgba = [Float16](repeating: 0, count: w * h * 4)
-        for y in 0..<h {
-            for x in 0..<w {
-                let v = Float(0.05 + 1.95 * Double(x) / Double(w - 1))
-                let i = (y * w + x) * 4
-                rgba[i] = Float16(v); rgba[i + 1] = Float16(v); rgba[i + 2] = Float16(v)
-                rgba[i + 3] = 1
-            }
-        }
-        let image = LinearImage(width: w, height: h, rgba: rgba,
-                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
-        let graph = try makeGraph(image)
-        var edit = EditModel.neutral
-        edit.effects.dehaze = 100
-
-        // headroom 4 so the tail above white actually survives into the output.
-        let options = RenderOptions(canvas: nil, scale: 1,
-                                    display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: 4),
-                                    useCache: false, wantsPixels: true)
-        let neutral = try XCTUnwrap(graph.render(EditModel.neutral, options: options).display)
-        let dehazed = try XCTUnwrap(graph.render(edit, options: options).display)
-
-        var worstBrighten: Double = 0
-        var brightenedPixels = 0
-        var changedAboveWhite = 0
-        for i in stride(from: 0, to: neutral.rgba.count, by: 4) {
-            for c in 0..<3 {
-                let before = Double(neutral.rgba[i + c])
-                let after = Double(dehazed.rgba[i + c])
-                if before > 1.0 {
-                    if abs(after - before) > 1e-4 { changedAboveWhite += 1 }
-                } else if after > before {
-                    brightenedPixels += 1
-                    worstBrighten = max(worstBrighten, after - before)
-                }
-            }
-        }
-        XCTAssertEqual(changedAboveWhite, 0,
-                       "白点以上的像素被去雾改动了 \(changedAboveWhite) 个通道")
-        XCTAssertEqual(brightenedPixels, 0,
-                       "去雾把 \(brightenedPixels) 个显示域通道变亮了（最多 +\(worstBrighten)）")
-        // …and it still removes haze: the darkest end must actually come up or down, not stay put
-        // (a no-op would satisfy the two assertions above).
-        XCTAssertLessThan(Double(dehazed.rgba[0]), Double(neutral.rgba[0]) - 1e-3,
-                          "去雾在最暗处没有任何作用，说明它根本没跑")
     }
 
     private func render(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
@@ -531,37 +441,6 @@ final class DetailFXTests: XCTestCase {
         XCTAssertGreaterThan(midGain, 3 * coarseGain, "4…8 px 增加的能量必须 ≥ 3× 16…32 px 的")
     }
 
-    // MARK: - 4. 去雾
-
-    func testDehazeLiftsContrastAndDropsTheDarkChannel() throws {
-        let clean = landscape()
-        let graph = try makeGraph(foggy(clean))
-        var edit = EditModel.neutral
-        edit.effects.dehaze = 100
-        var negative = EditModel.neutral
-        negative.effects.dehaze = -100
-
-        let fogged = try render(graph, .neutral)
-        let cleared = try render(graph, edit)
-        let hazier = try render(graph, negative)
-
-        let c0 = rmsContrast(fogged), c1 = rmsContrast(cleared)
-        let d0 = darkChannelMean(fogged), d1 = darkChannelMean(cleared)
-        // The reference: the same picture with no veil at all.
-        let cleanGraph = try makeGraph(clean)
-        let cClean = rmsContrast(try render(cleanGraph, .neutral))
-
-        print(String(format: "DEHAZE · 对比度(σ/µ) %.4f→%.4f (%.2fx) · 干净原图 %.4f · 暗通道 %.4f→%.4f (%+.1f%%) · 反向 −100 → %.4f",
-                     c0, c1, c1 / c0, cClean, d0, d1, (d1 / d0 - 1) * 100, rmsContrast(hazier)))
-
-        XCTAssertGreaterThanOrEqual(c1 / c0, 2.0, String(format: "去雾 +100 的对比度必须 ≥ 2×(实测 %.2fx)", c1 / c0))
-        XCTAssertLessThanOrEqual(d1 / d0, 0.5, String(format: "暗通道均值必须下降 ≥ 50 %%(实测 %+.1f %%)", (d1 / d0 - 1) * 100))
-        // …and it must be a *recovery*, not a contrast trick: within 30 % of the picture with no veil.
-        XCTAssertLessThan(abs(c1 / cClean - 1), 0.30,
-                          String(format: "去雾后的对比度必须落回干净原图附近（实测 %.2fx 原图）", c1 / cClean))
-        XCTAssertLessThan(rmsContrast(hazier), c0, "负值必须把雾加回来")
-    }
-
     // MARK: - 5. 键 / 历史 / 解码
 
     func testEachControlIsItsOwnStageAndNoneOfThemRedevelops() throws {
@@ -573,16 +452,19 @@ final class DetailFXTests: XCTestCase {
         }
         XCTAssertEqual(stages { $0.effects.texture = 40 }, [.detailFX])
         XCTAssertEqual(stages { $0.effects.clarity = 40 }, [.detailFX])
-        XCTAssertEqual(stages { $0.effects.dehaze = 40 }, [.detailFX])
+        XCTAssertEqual(stages { $0.effects.dehaze = 40 }, [.dehaze],
+                       "117: 去雾是线性链的独立阶段，不再是 S3.9")
         XCTAssertEqual(stages { $0.effects.vignetteAmount = -20 }, [.vignette],
-                       "暗角拖动不许连带 S3.8")
-        XCTAssertEqual(stages { $0.effects.grain = 20 }, [.grain], "颗粒拖动不许连带 S3.8")
+                       "暗角拖动不许连带 S3.9")
+        XCTAssertEqual(stages { $0.effects.grain = 20 }, [.grain], "颗粒拖动不许连带 S3.9")
 
         // The stage list and the key chain follow the values, one link per document.
         XCTAssertEqual(RenderStage.pipeline(hasMasks: false), RenderStage.allCases)
         let order = RenderStage.order
         XCTAssertLessThan(order.firstIndex(of: .hsl)!, order.firstIndex(of: .detailFX)!)
-        XCTAssertLessThan(order.firstIndex(of: .detailFX)!, order.firstIndex(of: .vignette)!)
+        XCTAssertLessThan(order.firstIndex(of: .detailFX)!, order.firstIndex(of: .grain)!)
+        XCTAssertLessThan(order.firstIndex(of: .dehaze)!, order.firstIndex(of: .vignette)!,
+                          "117: 去雾在线性链末尾，暗角之前")
 
         let size = ImageSize(width: 100, height: 100)
         func links(_ edit: EditModel) -> RenderKeyChain.Links {
@@ -631,12 +513,9 @@ final class DetailFXTests: XCTestCase {
         textureOnly.effects.texture = 100
         var clarityOnly = EditModel.neutral
         clarityOnly.effects.clarity = 100
-        var dehazeOnly = EditModel.neutral
-        dehazeOnly.effects.dehaze = 100
-        var all = EditModel.neutral
-        all.effects.texture = 100
-        all.effects.clarity = 100
-        all.effects.dehaze = 100
+        var both = EditModel.neutral
+        both.effects.texture = 100
+        both.effects.clarity = 100
 
         func median(_ edit: EditModel) throws -> Double {
             let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
@@ -659,19 +538,18 @@ final class DetailFXTests: XCTestCase {
         let neutral = try median(.neutral)
         let texture = try median(textureOnly)
         let clarity = try median(clarityOnly)
-        let dehaze = try median(dehazeOnly)
-        let everything = try median(all)
+        let everything = try median(both)
 
-        print(String(format: "COST · %d×%d (%.2f Mpx), cache off, no readback · best neutral %.2f · 纹理 %.2f (+%.2f) · 清晰度 %.2f (+%.2f) · 去雾 %.2f (+%.2f) · 三者 %.2f (+%.2f) ms",
+        print(String(format: "COST · %d×%d (%.2f Mpx), cache off, no readback · best neutral %.2f · 纹理 %.2f (+%.2f) · 清晰度 %.2f (+%.2f) · 两者 %.2f (+%.2f) ms",
                      Self.frameWidth, Self.frameHeight,
                      Double(Self.frameWidth * Self.frameHeight) / 1e6,
                      neutral, texture, texture - neutral, clarity, clarity - neutral,
-                     dehaze, dehaze - neutral, everything, everything - neutral))
+                     everything, everything - neutral))
 
-        // The mask suite's budget is p95 ≤ 16.7 ms for a three-mask frame. Three guided-filter chains
-        // plus the dark channel are five full-resolution passes between them; the ceiling here is
-        // generous on purpose — it catches a chain that became quadratic or fell off the fast path.
-        XCTAssertLessThan(everything, 40.0, "4.10 Mpx 三者全开 best \(everything) ms 超出预算的 2.4 倍")
-        XCTAssertLessThan(everything - neutral, 12.0, "S3.8 自己必须 < 12 ms")
+        // The mask suite's budget is p95 ≤ 16.7 ms for a three-mask frame. Two guided-filter chains
+        // are two statistics packs plus one full-resolution apply; the ceiling here is generous on
+        // purpose — it catches a chain that became quadratic or fell off the fast path.
+        XCTAssertLessThan(everything, 40.0, "4.10 Mpx 两者全开 best \(everything) ms 超出预算的 2.4 倍")
+        XCTAssertLessThan(everything - neutral, 12.0, "S3.9 自己必须 < 12 ms")
     }
 }

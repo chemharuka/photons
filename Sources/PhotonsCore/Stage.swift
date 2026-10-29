@@ -46,6 +46,20 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// **Conditional** like the mask/effect stages: it exists only when `light.contrast != 0`, so a
     /// neutral document keeps its pre-098 trace, key chain and pixels byte for byte.
     case contrast = "s1.8-contrast"
+    /// 117 — **去雾**, in the scene-linear domain, at the end of the linear chain.
+    ///
+    /// It used to ride in S3.9 (`s3_8_detail_fx.metal`) **after** the tone map, with airlight fixed at
+    /// `A = 1` in display codes: `J = (I − 1)/t + 1` *adds* light for every `I > 1`, so an HDR highlight
+    /// grew brighter as dehaze went up. Here the dark-channel-prior model runs where its quantities
+    /// live (`Kernels/s1_9_dehaze.metal`): `A` is measured from the dark channel, `t` from the same
+    /// block texture, and `J = (I − A(1 − t))/t` recovers a sample from under the veil instead of
+    /// assuming the veil is display white.
+    ///
+    /// Placed after S1.8 and before the vignette: it multiplies/subtracts **light**, like 116's
+    /// vignette, and the vignette's own falloff must not be read as haze. Conditional like the other
+    /// effect stages: it exists only when `effects.dehaze != 0`, so a neutral document keeps its trace,
+    /// key chain and pixels byte for byte.
+    case dehaze = "s1.9-dehaze"
     case toneMap = "s2-tone-map"
     case color = "s3-color"
     /// 2026-10-28 (P0-4) — **黑白**: the monochrome conversion, and the per-hue mix that decides how
@@ -138,25 +152,28 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     public static var order: [RenderStage] {
         // 116 — the vignette moved to the **end of the linear chain** (after S1.8, before S2): it is a
         // lens-vignetting *correction*, so it multiplies light, not tone-mapped codes.
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .vignette,
-         .toneMap, .color, .bw, .localColor, .hsl, .grade, .detailFX, .grain, .display]
+        // 117 — dehaze joins that same linear tail, between contrast and the vignette: it removes a
+        // veil from scene light, and the vignette must see the recovered light, not the veil.
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .dehaze,
+         .vignette, .toneMap, .color, .bw, .localColor, .hsl, .grade, .detailFX, .grain, .display]
     }
 
     /// The stages one render actually visits.
     ///
-    /// Five conditional families, five predicates: the mask stages appear when *any* mask is enabled,
+    /// Each conditional stage has one predicate: the mask stages appear when *any* mask is enabled,
     /// S3.5 only when a mask actually carries a hue or a saturation value (派单 056 §验收 7 — the
     /// judgement is by value, not by "there is a mask"), S3.6 only when a band carries a value
-    /// (派单 076), S3.7 only when the grain amount is above zero, and S3.4 only when the 黑白 switch is
-    /// on (2026-10-28). With none of them, the answer is exactly the pre-056 list, which is what keeps
-    /// every existing trace and key byte for byte.
+    /// (派单 076), S3.7 only when the grain amount is above zero, S3.4 only when the 黑白 switch is
+    /// on, S1.8 only when contrast is non-zero, S1.9 only when dehaze is non-zero (117). With none of
+    /// them, the answer is exactly the pre-056 list, which is what keeps every existing trace and key
+    /// byte for byte.
     public static func pipeline(hasMasks: Bool, hasLocalColor: Bool = false,
                                 hasHSL: Bool = false, hasGrain: Bool = false,
                                 hasBW: Bool = false, hasGrade: Bool = false,
                                 hasDetailFX: Bool = false, hasHeal: Bool = false,
-                                hasContrast: Bool = false) -> [RenderStage] {
+                                hasContrast: Bool = false, hasDehaze: Bool = false) -> [RenderStage] {
         guard hasMasks || hasHSL || hasGrain || hasBW || hasGrade || hasDetailFX || hasHeal
-                || hasContrast else {
+                || hasContrast || hasDehaze else {
             return allCases
         }
         return order.filter { stage in
@@ -168,6 +185,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
             case .hsl: return hasHSL
             case .grade: return hasGrade
             case .detailFX: return hasDetailFX
+            case .dehaze: return hasDehaze
             case .grain: return hasGrain
             case .contrast: return hasContrast
             default: return true
@@ -190,6 +208,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .heal: return "s1.9"
         case .curve: return "s1.7"
         case .contrast: return "s1.8"
+        case .dehaze: return "s1.9-dz"
         case .toneMap: return "s2"
         case .color: return "s3-color"
         case .bw: return "s3.4"
@@ -212,7 +231,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .heal: return "heal"
         case .curve: return "curve"
         case .color, .bw, .hsl, .grade: return "color"
-        case .vignette, .grain, .detailFX: return "effects"
+        case .vignette, .grain, .detailFX, .dehaze: return "effects"
         case .display: return "output"
         }
     }
@@ -415,6 +434,10 @@ public enum RenderKeyChain {
         /// case S1.8 does not exist for this render at all (098) and S2 is seeded by the curve exactly
         /// as before.
         public var contrast: String?
+        /// `H(contrast-or-curve key | "dehaze" | dehazeMaterial)`; `nil` when `effects.dehaze == 0`,
+        /// in which case S1.9 does not exist for this render at all (117) and S2 is seeded exactly as
+        /// before.
+        public var dehaze: String?
         public var color: String
         /// `H(colorKey | "bw" | bwMaterial)`; `nil` when the document is not black-and-white, in which
         /// case S3.4 does not exist for this render at all (2026-10-28) and the next link is seeded by
@@ -446,6 +469,7 @@ public enum RenderKeyChain {
         public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
         public var hasHealStage: Bool { heal != nil }
         public var hasContrastStage: Bool { contrast != nil }
+        public var hasDehazeStage: Bool { dehaze != nil }
         public var hasBWStage: Bool { bw != nil }
         public var hasLocalColorStage: Bool { localColor != nil }
         public var hasHSLStage: Bool { hsl != nil }
@@ -460,7 +484,7 @@ public enum RenderKeyChain {
                                  hasHSL: hasHSLStage, hasGrain: hasGrainStage,
                                  hasBW: hasBWStage, hasGrade: hasGradeStage,
                                  hasDetailFX: hasDetailFXStage, hasHeal: hasHealStage,
-                                 hasContrast: hasContrastStage)
+                                 hasContrast: hasContrastStage, hasDehaze: hasDehazeStage)
         }
     }
 
@@ -567,6 +591,18 @@ public enum RenderKeyChain {
             contrast = link
             toneMapSeed = link
         }
+        // 117: S1.9 sits between S1.8 and the vignette in `RenderStage.order`, i.e. at the end of the
+        // linear chain; S2 therefore reads the dehaze link when it exists. Neutral leaves the link
+        // `nil` and S2 seeded by the contrast (or curve) link exactly as before.
+        var dehaze: String?
+        if edit.hasDehaze {
+            let link = KeyBuilder(KeyBuilder.digest(of: toneMapSeed))
+                .add("dehaze")
+                .add(mat(.dehaze))
+                .canonical
+            dehaze = link
+            toneMapSeed = link
+        }
         toneMap = KeyBuilder(KeyBuilder.digest(of: toneMapSeed)).add(mat(.toneMap)).canonical
 
         let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(mat(.color)).canonical
@@ -662,7 +698,8 @@ public enum RenderKeyChain {
 
         return Links(geometry: geometry, sceneLinear: sceneLinear,
                      maskAtlas: maskAtlas, localApply: localApply, heal: heal,
-                     toneMap: toneMap, curve: curve, contrast: contrast, color: color, bw: bw,
+                     toneMap: toneMap, curve: curve, contrast: contrast, dehaze: dehaze,
+                     color: color, bw: bw,
                      localColor: localColor,
                      hsl: hsl, grade: grade, detailFX: detailFX, vignette: vignette, grain: grain,
                      display: displayKey.canonical)
@@ -678,6 +715,7 @@ public enum RenderKeyChain {
                   toneMap: KeyBuilder.digest(of: links.toneMap),
                   curve: KeyBuilder.digest(of: links.curve),
                   contrast: links.contrast.map(KeyBuilder.digest(of:)),
+                  dehaze: links.dehaze.map(KeyBuilder.digest(of:)),
                   color: KeyBuilder.digest(of: links.color),
                   bw: links.bw.map(KeyBuilder.digest(of:)),
                   localColor: links.localColor.map(KeyBuilder.digest(of:)),
@@ -720,6 +758,9 @@ public struct StageKeys: Sendable, Equatable {
     /// `H(curveKey | "contrast" | contrastMaterial)`; `nil` when `light.contrast == 0` (098), in which
     /// case S1.8 does not exist for this render and S2 is seeded by the curve.
     public var contrast: String?
+    /// `H(contrast-or-curve key | "dehaze" | dehazeMaterial)`; `nil` when `effects.dehaze == 0`
+    /// (117), in which case S1.9 does not exist for this render.
+    public var dehaze: String?
     public var color: String
     /// `H(colorKey | "bw" | bwMaterial)`; `nil` when the document is not black-and-white
     /// (2026-10-28), in which case the stage does not exist for this render.
@@ -744,7 +785,8 @@ public struct StageKeys: Sendable, Equatable {
 
     public init(inputIdentity: String, geometry: String, sceneLinear: String,
                 maskAtlas: String? = nil, localApply: String? = nil, heal: String? = nil,
-                toneMap: String, curve: String, contrast: String? = nil, color: String,
+                toneMap: String, curve: String, contrast: String? = nil, dehaze: String? = nil,
+                color: String,
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
                 grade: String? = nil, detailFX: String? = nil,
@@ -758,6 +800,7 @@ public struct StageKeys: Sendable, Equatable {
         self.toneMap = toneMap
         self.curve = curve
         self.contrast = contrast
+        self.dehaze = dehaze
         self.color = color
         self.bw = bw
         self.localColor = localColor
@@ -772,6 +815,7 @@ public struct StageKeys: Sendable, Equatable {
     public var hasMaskStages: Bool { maskAtlas != nil && localApply != nil }
     public var hasHealStage: Bool { heal != nil }
     public var hasContrastStage: Bool { contrast != nil }
+    public var hasDehazeStage: Bool { dehaze != nil }
     public var hasBWStage: Bool { bw != nil }
     public var hasLocalColorStage: Bool { localColor != nil }
     public var hasHSLStage: Bool { hsl != nil }
@@ -791,6 +835,7 @@ public struct StageKeys: Sendable, Equatable {
         case .toneMap: return toneMap
         case .curve: return curve
         case .contrast: return contrast ?? ""
+        case .dehaze: return dehaze ?? ""
         case .color: return color
         case .bw: return bw ?? ""
         case .localColor: return localColor ?? ""
@@ -810,7 +855,8 @@ public struct StageKeys: Sendable, Equatable {
         RenderStage.pipeline(hasMasks: hasMaskStages, hasLocalColor: hasLocalColorStage,
                              hasHSL: hasHSLStage, hasGrain: hasGrainStage, hasBW: hasBWStage,
                              hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage,
-                             hasHeal: hasHealStage, hasContrast: hasContrastStage)
+                             hasHeal: hasHealStage, hasContrast: hasContrastStage,
+                             hasDehaze: hasDehazeStage)
     }
 
     public var shortTrace: String {

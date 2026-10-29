@@ -82,6 +82,10 @@ public enum StageAlgorithmVersion {
 
     /// **1** — S3.9's first arithmetic (2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
     public static let detailFX = 1
+    /// **2** — 117: 去雾 left S3.9 for S1.9 (`s1_9_dehaze.metal`). The domain changed from
+    /// display-referred codes with `A = 1` to scene-linear light with a measured airlight, so every
+    /// document with `effects.dehaze != 0` changes pixels even though its stored number did not.
+    public static let dehaze = 2
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
@@ -115,6 +119,7 @@ public enum StageAlgorithmVersion {
         case .hsl: return hsl
         case .grade: return grade
         case .detailFX: return detailFX
+        case .dehaze: return dehaze
         case .vignette: return vignette
         case .grain: return grain
         case .display: return display
