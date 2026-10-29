@@ -207,10 +207,11 @@ final class PanelEditingTests: XCTestCase {
                       "the inspector's cards must go through that one row view")
         XCTAssertFalse(source.contains("editable: false"),
                        "no card may opt out of typing (047: 所有卡片统一)")
-        // 2026-10-28: 效果 (暗角 + 颗粒) is the fifth card whose rows come from its own table; 黑白
-        // (the switch + eight 黑白混合 rows) makes six, 色彩分级's nine rows make seven, and the 细节
-        // card's 色差 R/B rows (their own table) make eight.
-        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 8,
+        // 2026-10-30: seven, not the eight this pinned when 色彩分级/色差 joined (df9cfd0). 69160eb
+        // moved 暗角 into 校正 (+1 → 9), then 0832e21's `PanelCardSpec` collapsed Light / Color / 校正 /
+        // 效果 onto one spec-driven row (−2 → 7). The seven paths that still read the fact from a row
+        // table: 黑电平, 黑白, 色彩分级, 细节, 色差, the spec row, and 效果.
+        XCTAssertEqual(Self.occurrences(of: "editable: row.editable", in: source), 7,
                        "Light / 黑电平 / Color / 细节 / 效果 / 黑白 all take the fact from their row table")
 
         // A typed value takes the drag's path: the binding write, then the gesture-end commit.

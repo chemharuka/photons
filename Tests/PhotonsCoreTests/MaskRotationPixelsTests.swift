@@ -140,11 +140,17 @@ final class MaskRotationPixelsTests: XCTestCase {
     /// The forward half of S0's map in `Double`: normalised **source** point → canvas pixel index of
     /// the picture (no flips, no window — every probe here is one of those).
     ///
+    /// `frame` is the crop's own pixel size (the space the rotation runs in) and `canvas` is what S0
+    /// allocates. Since 132 the two differ at a non-zero angle: the canvas is the bounding box of the
+    /// rotated crop, so the picture is centred in it with empty margins around it. Using the canvas
+    /// as the rotation's pixel size (what this formula did before 132) mixes a scale error into the
+    /// comparison and reports a 552 px "formula error" for a picture whose pixels are correct.
+    ///
     /// Spelled from `s0_geometry.metal`'s pixel-space turn, and cross-checked below against the
     /// rendered dot's own centroid, so it cannot quietly become a description of whatever the kernel
     /// happens to do.
     private func canvasOfSource(_ s: NormalizedPoint, crop: NormalizedRect, angle: Double,
-                                frame: ImageSize) -> (x: Double, y: Double) {
+                                frame: ImageSize, canvas: ImageSize) -> (x: Double, y: Double) {
         let t = angle * .pi / 180
         let cs = cos(t), sn = sin(t)
         let fx = Double(frame.width), fy = Double(frame.height)
@@ -152,11 +158,13 @@ final class MaskRotationPixelsTests: XCTestCase {
         let ry = (s.y - crop.y) / max(crop.height, 1e-9) - 0.5
         // `R(+θ)` on a **pixel** offset about the frame's centre — the forward direction of S0's
         // canvas→source walk (`s0_geometry` consumes `R(−θ)` since 126, so the picture turns this
-        // way). Then back to index space (a pixel index i has its centre at i + 0.5).
+        // way). Then back to index space (a pixel index i has its centre at i + 0.5), centred in the
+        // canvas — `origin + (frameSize)/2` in `RenderGraph.plan`.
         let px = rx * fx, py = ry * fy
         let ox = px * cs - py * sn
         let oy = px * sn + py * cs
-        return (ox + 0.5 * fx - 0.5, oy + 0.5 * fy - 0.5)
+        return (ox + 0.5 * Double(canvas.width) - 0.5,
+                oy + 0.5 * Double(canvas.height) - 0.5)
     }
 
     /// Coverage-weighted centroid of one slice, in canvas pixel indices.
@@ -233,8 +241,13 @@ final class MaskRotationPixelsTests: XCTestCase {
             let dump = try XCTUnwrap(try graph.maskAtlas(edit, options: RenderOptions(scale: 1)),
                                      "\(p.name): the document has a mask, so there must be an atlas")
 
-            let frame = ImageSize(width: display.width, height: display.height)
-            let expected = canvasOfSource(sourceUV, crop: p.crop, angle: p.angle, frame: frame)
+            let canvas = ImageSize(width: display.width, height: display.height)
+            // 132: `display` is the rotated crop's bounding box; the crop's own pixel size is still
+            // the frame the rotation runs in (and the picture is centred in the canvas).
+            let frame = CropMath.outputSize(CropRect(p.crop), in: source,
+                                            allowsOutsideSource: true)
+            let expected = canvasOfSource(sourceUV, crop: p.crop, angle: p.angle,
+                                          frame: frame, canvas: canvas)
             let picture = pictureCentroid(display)
             let mask = maskCentroid(dump, slice: 0)
 
@@ -282,7 +295,8 @@ final class MaskRotationPixelsTests: XCTestCase {
                 let source = NormalizedPoint(crop.x + probe.x * crop.width,
                                              crop.y + probe.y * crop.height)
                 let host = mapping.canvasPoint(source)
-                let kernel = canvasOfSource(source, crop: crop, angle: angle, frame: frame)
+                let kernel = canvasOfSource(source, crop: crop, angle: angle,
+                                            frame: frame, canvas: frame)
                 let off = hypot(host.x - kernel.x, host.y - kernel.y)
                 XCTAssertLessThan(off, 1e-6,
                                   "\(frame.keyString) at \(angle)°: `canvasPoint` is \(off) px from "
