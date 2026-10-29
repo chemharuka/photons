@@ -784,6 +784,7 @@ private struct S1Params {
     var c: SIMD4<Float>
     // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between the level and the
     // gain. 0 for every document that never used the control, and then the kernel's `kTrim` is false.
+    // 147: y is S1's exposure gain `g` — `s1_end_points` reads whites' EV window on `L − log2 g`.
     var e: SIMD4<Float>
 }
 
@@ -801,7 +802,7 @@ private struct S2Params {
 private struct ContrastParamsU {
     var a: SIMD4<Float>    // t (= contrast/100), pivot EV, coarse ε, mid ε
     var b: SIMD4<Float>    // k_c, k_m, k_f, gate lower knee
-    var c: SIMD4<Float>    // gate upper knee, pad, pad, pad
+    var c: SIMD4<Float>    // gate upper knee, 147: S1 exposure gain (the analysis divides by it), pad, pad
     var luma: SIMD4<Float> // Rec2020 luma weights, pad
     var rect: SIMD4<Float> // contentOrigin.xy, contentSize.xy (canvas pixels)
     var d: SIMD4<Int32>    // canvasW, canvasH, q, coarse radius in the 1/q domain
@@ -962,6 +963,8 @@ private struct MaskAtlasParams {
     var d: SIMD4<Float>   // cos, sin, flipH, flipV
     var e: SIMD4<Int32>   // maskCount
     var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
+    // 147 — S1's exposure gain (x). The picture predicates divide their sample by it.
+    var g: SIMD4<Float>
 }
 
 private struct MaskDescU {
@@ -3144,7 +3147,8 @@ public final class RenderGraph {
                 // 071: the additive linear trim, clamped once (`clampedBlackOffset`) so the number in
                 // the key material and the number the kernel adds cannot disagree. 0 → the kernel's
                 // branch is not taken at all.
-                e: SIMD4(Float(edit.light.clampedBlackOffset), 0, 0, 0))
+                e: SIMD4(Float(edit.light.clampedBlackOffset),
+                         Float(edit.light.exposureGain), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -3454,7 +3458,10 @@ public final class RenderGraph {
                      Float(MultiscaleContrast.midEpsilon)),
             b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
                      Float(MultiscaleContrast.gateLo)),
-            c: SIMD4(Float(MultiscaleContrast.gateHi), 0, 0, 0),
+            c: SIMD4(Float(MultiscaleContrast.gateHi),
+                     // 147 — S1's exposure gain, so the kernel's `luma / g` is the unexposed
+                     // coordinate. `g == 1` divides by one and keeps the pre-147 bytes.
+                     Float(edit.light.exposureGain), 0, 0),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(plan.origin.x, plan.origin.y,
                         Float(plan.content.width), Float(plan.content.height)),
@@ -4311,7 +4318,10 @@ public final class RenderGraph {
             e: SIMD4(Int32(count), Int32(edit.geometry.quarterTurns), 0, 0),
             // Masks live in the *frame* (§4). A 1:1 window must therefore evaluate them through the
             // same frame-relative mapping S0 used, or the selection would slide with the window.
-            f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y))
+            f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
+            // 147: the picture predicates read the sample on the decoder's light (`sample / g`), so a
+            // luma/colour selection is the same selection at every EV. `g == 1` divides by one.
+            g: SIMD4(Float(edit.light.exposureGain), 0, 0, 0))
         guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         enc.setComputePipelineState(p)
         enc.setTexture(src, index: 0)

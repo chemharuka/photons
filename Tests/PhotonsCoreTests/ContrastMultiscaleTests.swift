@@ -685,7 +685,9 @@ private final class ContrastKernelHarness {
                      Float(MultiscaleContrast.coarseEpsilon), Float(MultiscaleContrast.midEpsilon)),
             b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
                      Float(MultiscaleContrast.gateLo)),
-            c: SIMD4(Float(MultiscaleContrast.gateHi), 0, 0, 0),
+            // 147: c.y is S1's exposure gain; the harness renders at E = 0, so it is 1 (not 0 —
+            // the kernel divides by it).
+            c: SIMD4(Float(MultiscaleContrast.gateHi), 1, 0, 0),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(0, 0, Float(w), Float(h)),
             d: SIMD4(Int32(w), Int32(h), Int32(q), rc),

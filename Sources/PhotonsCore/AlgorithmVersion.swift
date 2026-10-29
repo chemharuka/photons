@@ -42,6 +42,10 @@ public enum StageAlgorithmVersion {
 
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic).
     public static let geometry = 1
+    /// **6** — 147: `whites`' EV window is read on the unexposed light (`L − log2(exposureGain)`)
+    /// instead of the exposed one, so the same `whites` number is the same scene operation at every
+    /// exposure. A document with `whites != 0` and `exposure != 0` now renders different pixels;
+    /// `exposure == 0` (g = 1) and `whites == 0` are bit-identical to 5.
     /// **5** — 143: white balance is S1's own scene-linear gain (`WhiteBalanceEstimate`) instead of a
     /// decoder input. A document with an explicit Kelvin/tint now applies a gain in this pass, so
     /// the same stored pair produces different pixels; an as-shot document (`nil`) is still the
@@ -54,12 +58,16 @@ public enum StageAlgorithmVersion {
     /// shadows scale with the white end; 073C's blacks travel and 073B's EV shoulder are unchanged.
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
-    public static let sceneLinear = 5
+    public static let sceneLinear = 6
+    /// **3** — 147: a mask's `luminanceRange`/`colorRange` predicate reads the S1 sample divided by
+    /// the global exposure gain, so the selection no longer drifts with the EV slider. A document
+    /// with a picture-reading mask and `exposure != 0` now renders different pixels; `exposure == 0`
+    /// (g = 1) is bit-identical to 2.
     /// **2** — 079 A4: a shape's `feather` is a **short-edge percentage spent outside the rim**
     /// (interior 1.0, quadratic falloff beyond), not a fraction of the shape spent inside it. Same
     /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
     /// old expression verbatim and does not.
-    public static let maskAtlas = 2
+    public static let maskAtlas = 3
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
     public static let localApply = 3
@@ -69,9 +77,13 @@ public enum StageAlgorithmVersion {
     /// table, so the same stored points produce different pixels. The stage's generation moves;
     /// the positive-curve pixels do not.
     public static let curve = 2
+    /// **2** — 147: the decomposition runs on `G0 = log2(Y) − log2(exposureGain)`, i.e. the pivot is
+    /// read on the unexposed light, so exposure shifts the picture without moving the bands against
+    /// the pivot. A document with `contrast != 0` and `exposure != 0` now renders different pixels;
+    /// `exposure == 0` (g = 1) is bit-identical to 1.
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
-    public static let contrast = 1
+    public static let contrast = 2
     /// **5** — 124: 高光 covers the whole HDR range. The high→white closure moved from
     /// `smoothstep(−1.2, 0.0, L)` to `smoothstep(+4.0, +6.0, L)`, so a document with
     /// `highlights != 0` now moves every pixel above −0.9 EV, including values above display white

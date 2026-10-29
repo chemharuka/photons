@@ -12,6 +12,13 @@ using namespace metal;
 // Evaluating the predicate inside S1/S2/S3 instead would mean three copies of it and three
 // different selections.
 //
+// **147 — the selection is exposure-independent.** The picture predicates (colour range, luminance
+// range) take their sample from S1, i.e. after the global exposure gain `g = 2^EV`; a naive read made
+// the same `luminanceRange 0.55…1.0` select 17 % of the frame at E 0 and 55 % at E +2 (IoU 0.196).
+// The sample is now divided by `g` (params `g.x`) before OKLab, so both predicates see the decoder's
+// light. Nothing else in this file moved: the coordinate walk, the shapes, the feather and the
+// combination order are untouched; `g == 1` is an exact division by one.
+//
 // Slice contents: `opacity · combine(components) · mask invert`, alpha in 0…1. Component invert is
 // applied per component before combining; masks without components (or with shapes this build does
 // not evaluate) are covered as 0 rather than guessed.
@@ -75,6 +82,10 @@ struct MaskAtlasParams {
     float4 d;   // cos, sin, flipH, flipV
     int4   e;   // maskCount, quarterTurns (P0-10), pad, pad
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
+    // 147 — S1's exposure gain `g = 2^EV` (x), 3 pad. The two picture predicates (kind 3/4) read the
+    // sample **divided by g**, so a mask selects the same scene tones at every exposure; the geometry
+    // and the neighbourhood operators never touch this number. `g == 1` is an exact division by 1.
+    float4 g;
 };
 
 struct MaskDesc {
@@ -419,8 +430,13 @@ static inline void atlas_body(texture2d<float, access::read> src,
             // Predicates that read the picture (colour range, luminance range) see the S1 output: the
             // frame the editing stage will see, not the decoder's. Only fetched when some component
             // of *this* mask looks at it; before 081 every pixel of every mask paid for an rgba16f
-            // read that a geometry-only mask never used.
-            float3 linearRGB = m.meta.w != 0 ? src.read(gid).rgb : float3(0.0);
+            // read that a geometry-only mask never used. **147** — the sample is divided by S1's
+            // exposure gain before the predicate looks at it, so the selection is a fact about the
+            // scene and not about the EV slider (the audit measured IoU 0.196 on one mask at E 0 vs
+            // E +2). Dividing by 1.0 at E 0 is exact, so recorded atlases keep their bytes.
+            float3 linearRGB = m.meta.w != 0
+                ? src.read(gid).rgb / max(p.g.x, 1e-6)
+                : float3(0.0);
             float acc = 0.0;
             for (int i = 0; i < m.meta.y; ++i) {
                 MaskShapeDesc d = shapes[m.meta.x + i];

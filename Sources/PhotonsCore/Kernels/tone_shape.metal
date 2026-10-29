@@ -203,8 +203,19 @@ static inline float3 s1_toe(float3 x) {
 ///     EV:    v *= exp2(B_EV · t · wb)                             wb = the 7 EV toe
 ///     level: v  = toe(v + B_LEV · t · m · wl)                     wl = the −6…−1 EV window
 ///     whites: v *= 2^(W_EV·w·ww) · 1/(1 − W_LEV·w·|w|)            ww = the EV shoulder, level global (127)
+///
+/// **147 — whites is read on the unexposed scale.** S1's exposure gain `g = 2^EV` is already in `v`
+/// when this runs, so a naive `ww = smoothstep(WW_LO, WW_HI, L)` slid the whole white-point window up
+/// by the exposure: the same `whites` number acted on different scene tones at E 0 and E +2 (the
+/// audit measured p95 1.266 → 2.070). `L0 = L − log2 g` is the luma in the decoder's own light, so the
+/// window is a fact about the scene and the stage commutes with exposure. The *shape* (138's
+/// smoothstep, `W_EV`, the global level) is untouched, and `g == 1` makes `L0 == L` bit for bit.
+///
+/// `blacks` deliberately still reads `L`: 147 scopes the fix to 147's three defects, and the toe's
+/// pinned numbers were measured on the exposed coordinate.
 template <bool kHybrid>
-static inline float3 s1_end_points(float3 v, float blacks, float whites) {
+static inline float3 s1_end_points(float3 v, float blacks, float whites,
+                                   float exposureGain = 1.0) {
     float db = clamp(blacks, -100.0, 100.0) / 100.0;
     float dw = clamp(whites, -100.0, 100.0) / 100.0;
 
@@ -212,7 +223,15 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
     // channel by a different EV and shift hue in the lifted toe.
     float luma = dot(v, kEndPointLumaWeights);
     float L = log2(max(luma, 1e-9));
-
+    // 147: the whites window is read on the decoder's light, not on the exposed light. `g == 1` is
+    // exactly `L0 == L`, so a neutral document keeps every recorded byte.
+    //
+    // A non-positive `g` means "the uniform was never filled", not "the picture is 20 EV dark": the
+    // naive `max(g, 1e-6)` would push `L0` up by 20 EV and open the whole whites window (measured:
+    // BwLevelsTests' harness passed 0 and whites +100 became ×2.87 instead of ×1.25). Zero/negative
+    // therefore falls back to the identity gain, so an unset uniform degrades to "no exposure".
+    float g = exposureGain > 0.0 ? exposureGain : 1.0;
+    float L0 = L - log2(g);
     // blacks: 1 below B_LO, 0 above B_HI, smoothstep between (C¹ at both ends, so the toe and the knee
     // have no seam). `0 → 0`: pure multiplication never lifts black into grey.
     float wb = 1.0 - smoothstep(B_LO_EV, B_HI_EV, L);
@@ -251,8 +270,9 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
     // whites: 138's monotone EV window (0 at −2 EV, full at +2 EV and above) plus 127's global
     // multiplicative level. The old shape (`exp(−L)` above white) decayed exactly where the owner
     // wanted the super-white pixels to follow the white point; see the constants' comment for the
-    // measured table and the monotonicity bound.
-    float ww = smoothstep(WW_LO_EV, WW_HI_EV, L);
+    // measured table and the monotonicity bound. 147: the window reads `L0`, so exposure slides the
+    // picture through a fixed window instead of sliding the window with the picture.
+    float ww = smoothstep(WW_LO_EV, WW_HI_EV, L0);
     float level = 1.0 / (1.0 - W_LEV * dw * abs(dw));
     v = v * exp2(W_EV * dw * ww) * level;
     return v;
