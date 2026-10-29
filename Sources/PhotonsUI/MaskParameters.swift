@@ -597,21 +597,32 @@ extension CatalogSession {
     }
 
     /// One mask-level scalar (opacity / feather / refine), clamped to the field's own domain.
+    ///
+    /// A `commit: true` here is a slider's **mouse-up** — one gesture — so it is committed as a
+    /// discrete row (`coalesce: false`). Letting 077 fold it into the previous same-class row made
+    /// three separate ±2 EV releases disappear (`UISmokeRunner`'s 12.5 check read history +0): the
+    /// first one merged into the mask-creation row, and because it returned the value to that row's
+    /// start, the merge rule deleted the row instead of appending one.
     @discardableResult
     public func setMaskLevel(_ id: String, _ parameter: MaskLevelParameter, _ value: Double,
                              commit: Bool = false) -> Bool {
         let clamped = min(max(value, parameter.range.lowerBound), parameter.range.upperBound)
-        return writeMask(id, label: "蒙版\(parameter.label)", commit: commit) { mask in
+        return writeMask(id, label: "蒙版\(parameter.label)", commit: commit,
+                         coalesce: false) { mask in
             parameter.write(&mask, clamped)
         }
     }
 
     /// One local slider. `amount` is clamped to 0…100, everything else to ±the documented span.
+    ///
+    /// `coalesce: false` for the same reason as `setMaskLevel`: `commit: true` is the release of one
+    /// drag, and two releases are two history rows even when they touch the same parameter.
     @discardableResult
     public func setMaskAdjustment(_ id: String, _ parameter: MaskAdjustmentParameter,
                                   _ value: Double, commit: Bool = false) -> Bool {
         let clamped = min(max(value, parameter.range.lowerBound), parameter.range.upperBound)
-        return writeMask(id, label: "局部\(parameter.label)", commit: commit) { mask in
+        return writeMask(id, label: "局部\(parameter.label)", commit: commit,
+                         coalesce: false) { mask in
             mask.adjustments[keyPath: parameter.keyPath] = clamped
         }
     }

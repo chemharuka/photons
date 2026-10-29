@@ -324,8 +324,10 @@ public final class UISmokeRunner {
               && !scrollTitles.contains("预设"))
         let adjustTitles = InspectorView.cardTitles(in: .adjust)
         log("  adjust workspace    \(adjustTitles.joined(separator: " → "))")
-        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 曲线 / 细节 / 效果，直方图与裁切都不在其中（081 预设卡已删）",
-              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "效果"])
+        // 116 起校正卡（暗角）属于调整工作区：`InspectorWorkspaceTabs.adjust` 把 `.correction` 放在
+        // 细节与效果之间，期望值跟着它，而不是回到 081 的七张卡。
+        check("调整工作区（默认）的卡片 = 白平衡 / 黑电平 / Light / Color / 曲线 / 细节 / 校正 / 效果，直方图与裁切都不在其中（081 删预设卡，116 起校正卡属于调整工作区）",
+              adjustTitles == ["白平衡", "黑电平", "Light", "Color", "曲线", "细节", "校正", "效果"])
 
         let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
         let asShotBefore = session.edit.light.whiteBalance
@@ -2117,9 +2119,13 @@ public final class UISmokeRunner {
         card.clearPointerReadout()
         card.needsDisplay = true
         card.display()
-        check("没有指针在画面上 → 通道行空白（“\(card.channelRowText)” 空、一个字母都不画），槽与有指针时完全相同 \(card.channelRowRect)（高 \(String(format: "%.1f", card.channelRowRect.height))）",
+        // 80b62e3 (2026-10-27): the R/G/B letters are **always** on screen; leaving the picture drops
+        // only the values. The row is therefore never letterless — assert the letters stay, not that
+        // they vanish.
+        check("没有指针在画面上 → 通道行只留 R/G/B 三个字母（“\(card.channelRowText)” 无数值），槽与有指针时完全相同 \(card.channelRowRect)（高 \(String(format: "%.1f", card.channelRowRect.height))）",
               card.channelRowText.isEmpty
-              && card.channelLetterRects.isEmpty
+              && card.channelLetterRects.count == 3
+              && card.channelValueRects.isEmpty
               && card.channelRowRect == channelSlotWithPixel
               && card.channelRowRect.height == HistogramCardView.channelRowHeight)
 
@@ -2293,12 +2299,13 @@ public final class UISmokeRunner {
             loupe.pointerExited()
             card.needsDisplay = true
             card.display()
-            check("光标离开画布 → 这一行回到空（通道行 “\(card.channelRowText)”，计数 “\(card.hoverCountText)”），行高不变 \(String(format: "%.1f", card.readoutRowRect.height))，读回次数 \(beforeExit) → \(loupe.pointerReadbackCount)（不增）",
+            check("光标离开画布 → 这一行回到只剩 R/G/B 三个字母（通道行 “\(card.channelRowText)”，计数 “\(card.hoverCountText)”），行高不变 \(String(format: "%.1f", card.readoutRowRect.height))，读回次数 \(beforeExit) → \(loupe.pointerReadbackCount)（不增）",
                   card.readoutState == .idle
                   && card.hoverReadoutRect.isEmpty
                   && card.readoutRowRect.height == HistogramCardView.readoutRowHeight
                   && loupe.pointerReadbackCount == beforeExit
-                  && card.channelRowText.isEmpty && card.channelLetterRects.isEmpty)
+                  && card.channelRowText.isEmpty && card.channelValueRects.isEmpty
+                  && card.channelLetterRects.count == 3)
             loupe.pointerReadoutTarget = nil
             loupe.autoRenderEnabled = true
 
@@ -3259,7 +3266,9 @@ public final class UISmokeRunner {
         var pillStops: [Double] = []
         var pillOffLadder: [Double] = []
         let pillStart = pill.point(forIndex: 0)
-        let pillEnd = pill.point(forIndex: 7)
+        // The ladder is nine stops since 12.5% joined it (8bcd6f5); the old eight-stop control had
+        // 400% at index 7, so this line must end on the last index, not on a literal 7.
+        let pillEnd = pill.point(forIndex: pill.geometry.lastIndex)
         pill.pointerDown(at: pillStart)
         for step in 1...60 {
             let t = CGFloat(step) / 60
