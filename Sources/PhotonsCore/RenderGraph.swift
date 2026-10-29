@@ -890,7 +890,7 @@ private struct DehazeParamsU {
     var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
     var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
     var d: SIMD4<Int32>   // qH, pad, pad, pad
-    var e: SIMD4<Float>   // 130: k (2A fade-out edge), legacy per-channel switch, pad, pad
+    var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), pad
 }
 
 private struct DisplayParams {
@@ -3577,12 +3577,14 @@ public final class RenderGraph {
 
     // MARK: - S1.9 去雾 (117)
     //
-    // Three passes over a `1/q` dark channel, q = 4:
+    // Four passes over a `1/q` dark channel, q = 4:
     //
     //   · `s1_9_dehaze_dark`     — block minimum, one texel per q × q block (rgba16Float, r used);
     //   · `s1_9_dehaze_airlight` — one threadgroup scans the block texture for the largest block
     //                              minimum and writes a 1 × 1 texture (He's brightest-dark-channel
     //                              estimate, cheaply and deterministically);
+    //   · `s1_9_dehaze_limit`    — 135: caps that estimate at `κ·p99(L)` (`κ = 0.95`) in a second
+    //                              1 × 1 texture;
     //   · `s1_9_dehaze_apply`    — full resolution: samples the block texture bilinearly, builds
     //                              `t = max(1 − ω·D, t0)`, recovers **luminance** (130, hue
     //                              preserving) with the `w = 1 − smoothstep(A, 2A, L)` fog-amount fade,
@@ -3603,10 +3605,11 @@ public final class RenderGraph {
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
             d: SIMD4(Int32(qH), 0, 0, 0),
-            e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0, 0))
+            e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0.95, 0.0))
 
         let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
         let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)
+        let limited = try scratch("dehaze-limited", width: 1, height: 1, format: .rgba16Float)
 
         let pack = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_dark")
         let e0 = try encoder(cb, pack, in: src, out: dark)
@@ -3624,12 +3627,26 @@ public final class RenderGraph {
                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         e1.endEncoding()
 
+        // 135 — cap A at κ·p99(L) on the GPU: one threadgroup samples the content rect, bisects the
+        // 1 % tail and writes the effective airlight. The raw estimate stays in `airlight` for the
+        // test probe; the apply pass reads `limited`.
+        let limit = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_limit")
+        guard let e1b = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1b.setComputePipelineState(limit)
+        e1b.setTexture(src, index: 0)
+        e1b.setTexture(airlight, index: 1)
+        e1b.setTexture(limited, index: 2)
+        e1b.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        e1b.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        e1b.endEncoding()
+
         let apply = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_apply")
         guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         e2.setComputePipelineState(apply)
         e2.setTexture(src, index: 0)
         e2.setTexture(dark, index: 1)
-        e2.setTexture(airlight, index: 2)
+        e2.setTexture(limited, index: 2)
         e2.setTexture(out, index: 3)
         e2.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
         dispatch(e2, apply, plan.canvas)
