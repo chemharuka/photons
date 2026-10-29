@@ -94,8 +94,10 @@ final class SubBlackSignalTests: XCTestCase {
                              "the staircase collapsed — the sub-black signal is still being clamped")
     }
 
-    /// **Where the multiplier stops and the level starts.** For `|blacks| ≤ 50` the four negative bands
+    /// **Where the multiplier stops and the level starts.** For `|blacks| ≤ 20` the four negative bands
     /// stay negative and S2/S4 clamp them to 0 — `0 → 0`, which is 073B's claim and is still true.
+    /// (129: the level's entry is 20, not 50 — `smoothstep(0.2, 1, |blacks|/100)` is exactly 0 there,
+    /// so ±20 is the last value whose kernel instance is the pure multiplier.)
     ///
     /// At `blacks = +100` the black point itself moves. Since a4494626 (2026-10-29) the level is
     /// `+B_LEV = +0.006` outside a **full 3 EV** gain, `v′ = v·2³ + 0.006`, so the black point sits
@@ -106,7 +108,7 @@ final class SubBlackSignalTests: XCTestCase {
         let graph = try makeGraph(staircase())
 
         // The first half: still a pure multiplier, every negative band stays clamped.
-        for blacks in [25.0, 50, -25, -50] {
+        for blacks in [20.0, -20] {
             var edit = EditModel.neutral
             edit.light.blacks = blacks
             let means = bandMeans(try render(graph, edit))
@@ -116,6 +118,12 @@ final class SubBlackSignalTests: XCTestCase {
                                + "first half of the travel is a multiplier (\(means))")
             }
         }
+
+        // 129 (2026-10-30): past 20 the level is on, so this test **stops here** — the sub-black bands
+        // are no longer all clamped for `|blacks| > 20` and which of them clear the black point is the
+        // gain/level ratio's business, pinned by `BlacksBoundaryTests` (which does it band by band and
+        // asserts the `50 → 50.01` seam is gone). This one pins the entry point: at exactly ±20 the
+        // kernel instance is still the pure multiplier and every negative band is still clamped.
 
         // The second half: the black point moves, band by band.
         var edit = EditModel.neutral
