@@ -52,7 +52,7 @@ final class EffectsCardTests: XCTestCase {
         // 116: 暗角 moved to 校正 (it corrects a lens defect, it does not add atmosphere), so this
         // card is two blocks: the Presence triple (S3.8), then the four grain rows.
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
-                       ["纹理", "清晰度", "去雾",
+                       ["纹理", "清晰度", "去雾", "去雾深度",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
         // …and the three vignette rows are now the 校正 card's second block, in linear-domain red.
         // 134 removed 圆度: the contour is circular by construction.
@@ -64,14 +64,14 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.detailFXRows.first { $0.title == "去雾" }?.shape, .linear,
                        "去雾在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 3)
-        XCTAssertEqual(InspectorView.detailFXRows.count, 3)
+        XCTAssertEqual(InspectorView.detailFXRows.count, 4)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
 
         // Every row's travel is the kernel's own (a slider the shader cannot honour lies):
         XCTAssertEqual(InspectorView.vignetteRows.map(\.range),
                        [-100 ... 100, 0 ... 100, 0 ... 100])
         XCTAssertEqual(InspectorView.detailFXRows.map(\.range),
-                       [-100 ... 100, -100 ... 100, -100 ... 100])
+                       [-100 ... 100, -100 ... 100, -100 ... 100, 0 ... 100])
         XCTAssertEqual(InspectorView.grainRows.map(\.range),
                        [0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
 
@@ -257,7 +257,8 @@ final class EffectsCardTests: XCTestCase {
     func testDetailFXRowsWriteTheDocument() throws {
         for (name, keyPath) in [("纹理", \EditModel.effects.texture),
                                 ("清晰度", \EditModel.effects.clarity),
-                                ("去雾", \EditModel.effects.dehaze)] {
+                                ("去雾", \EditModel.effects.dehaze),
+                                ("去雾深度", \EditModel.effects.dehazeDepth)] {
             let session = CatalogSession()
             session.loadEditForAnchor()
             let before = session.history.count

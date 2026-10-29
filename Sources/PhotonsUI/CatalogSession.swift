@@ -256,6 +256,20 @@ public final class CatalogSession {
     /// What the last decode actually used — v9 or a silent v8 downgrade (§11.1).
     public private(set) var capabilities: DecoderCapabilities?
 
+    /// 120b — whether a depth map is available for the current picture. This is a **measured fact**
+    /// about the render input, not a document edit: the depth engine (or a test) sets it when it
+    /// hands `RenderInput.depth` to the graph. `false` means the depth-mask shape covers 0 and the
+    /// 去雾深度 row is disabled with an explanatory line — never "select everything".
+    public private(set) var depthAvailable = false
+
+    /// Notify the inspector that the current picture's depth map exists (or was dropped). Equality-
+    /// guarded for the same reason `recordCapabilities` is: a per-frame write would re-render the
+    /// panel for no information.
+    public func recordDepthAvailability(_ available: Bool) {
+        guard depthAvailable != available else { return }
+        depthAvailable = available
+    }
+
     private var catalog: Catalog?
 
     /// Where the filter bar's state is remembered (043). Injectable so a test runs against its own

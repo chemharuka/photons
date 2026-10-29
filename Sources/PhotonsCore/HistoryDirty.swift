@@ -320,6 +320,9 @@ enum EditParameters {
         t.field("texture") { areEqual($0.texture, $1.texture) }
         t.field("clarity") { areEqual($0.clarity, $1.clarity) }
         t.field("dehaze") { areEqual($0.dehaze, $1.dehaze) }
+        // 120b — the depth-assisted dehaze strength. Without this line `applyEdit` sees the group as
+        // unchanged and a drag of the new row writes nothing (the EffectsCardTests' 2026-10-29 bug).
+        t.field("dehazeDepth") { areEqual($0.dehazeDepth, $1.dehazeDepth) }
         return t
     }()
 

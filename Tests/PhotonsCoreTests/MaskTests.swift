@@ -430,6 +430,8 @@ final class MaskTests: XCTestCase {
                                         tolerance: 0.22, smoothness: 0.4)),
             .luminanceRange(LuminanceRangeShape(low: 0.1, high: 0.9,
                                                 lowFeather: 0.2, highFeather: 0.3)),
+            .depthRange(DepthRangeShape(near: 0.82, far: 0.24,
+                                        nearFeather: 0.18, farFeather: 0.07, invert: true)),
             .semantic(SemanticShape(kind: .sky, provider: .systemMatte, softEdge: 0.3,
                                     rasterDigest: "abc123")),
             .unsupported(kind: "spotRemoval", payload: .object([
