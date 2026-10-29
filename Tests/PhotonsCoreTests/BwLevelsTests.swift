@@ -164,17 +164,17 @@ final class BwLevelsTests: XCTestCase {
     ///
     /// A GPU-family change can move these; re-record deliberately and say why, never to make a red
     /// test green.
-    /// 073C's fingerprints of the **first half** of the travel, over
-    /// `testTheHybridJoinsTheKneeEntryBitIdentically`'s grid (449 samples each).
+    /// Fingerprints of the **knee half** of the travel, over
+    /// `testTheSwitchAtFiftyIsInvisibleAndTheKneeKeepsSeventyThreeB`'s grid (449 samples each).
     ///
-    /// These are *073B's own bytes*: they were produced by the pre-073C `s1_scene_linear.metal` (the
-    /// file at `HEAD` before this change) compiled standalone and fed the same grid, and the changed
-    /// file reproduces them exactly — through both the `knee` and the `hybrid` instantiations. A move
-    /// here means the pure-EV half of the travel moved, which 073C promises it did not.
-    private static let pinnedBlacks25 = "d0a8e72f53132394b9e1afb7a1699836439eb3f2967c5d095f178e70aa798126"   // blacks +25
-    private static let pinnedBlacks50 = "61c02d807a45d115e3c51157f2a4594728b0ae44f6c6d4322fe8d2af1280fcae"   // blacks +50
-    private static let pinnedBlacksMinus25 = "4f5480da98c40d3c2d16ec7dc764e69bf5e4b13364c053ffa63472cb8d15bc3d"   // blacks −25
-    private static let pinnedBlacksMinus50 = "1733c173f62d5098c54215d197883f5e1cb9af163c7958db4971cc14122d15d9"   // blacks −50
+    /// They were 073B's own bytes until `a449462` (2026-10-29) deliberately moved the black knee's end
+    /// from −4.2 to −1.0 EV, which changes `wb` (and therefore every knee byte) for samples above
+    /// −4.2 EV. Re-pinned against the shipped file on that commit's arithmetic; a further move here
+    /// means the knee half moved again and needs a reason, not a re-record.
+    private static let pinnedBlacks25 = "7b766208d52105edb27f07668659c992167b38c7b8095e764719a8e58586406e"   // blacks +25
+    private static let pinnedBlacks50 = "66f30fead0c97d8136ba57d1a29b4d122712599ec74e6c98ca5945282782064c"   // blacks +50
+    private static let pinnedBlacksMinus25 = "c40b36d28b3400e9489527ed6dbf041711db5fd0091e7c7b868c02b3d4bbeacb"   // blacks −25
+    private static let pinnedBlacksMinus50 = "91fa6516a40132ccea900b50ce547839e2bd10e79bd757a86dbdea9e413f8bc1"   // blacks −50
 
     private static let pinnedNeutralHash = "496bfbc9bfa7292ab6259d65a1f9817f7669a71df3f851ef7ba5ca9c1615bde8"
     private static let pinnedExposureHash = "efcea998f18e88fa6d09abbbebad3a002e3471acdbd760d7e591e01c56cc59db"
@@ -224,14 +224,18 @@ final class BwLevelsTests: XCTestCase {
 
     // MARK: - ② the knee's outside is bit-identical (the "strictly no mid-tone" claim)
 
-    /// `blacks = ±100` must not touch anything at or above the knee's end (−4.2 EV = code 0.29) and
-    /// `whites = ±100` must not touch anything at or below its start (−2 EV = code 0.537). Bit-equal,
-    /// not "less than 1 %": inside those regions the weight is exactly 0, `exp2(0) = 1` and `v·1 + 0`
-    /// is `v`.
-    func testTheKneeLeavesEverythingOutsideItBitIdentical() throws {
+    /// `blacks = ±100` must not touch anything at or above the knee's end (−1.0 EV = code 0.74 since
+    /// `a449462`; it was −4.2 EV = code 0.29): that is bit-equal, not "less than 1 %".
+    ///
+    /// 127 changed the other half. `whites` is now a **multiplicative level over the whole range**, so
+    /// 073B's "whites ±100 leaves code ≤ 0.537 bit-identical" is gone by design. What replaces it is
+    /// asserted in the same place: below the old −2 EV window the EV shoulder is exactly 0, so the
+    /// output must be exactly `v · level(Δw)` — and `v = 0` must still be exactly 0, which is the whole
+    /// reason the level is multiplicative and not 019's additive one.
+    func testBlacksKneeLeavesEverythingAboveItBitIdenticalAndWhitesScalesTheWholeRange() throws {
         let harness = try MetalKernelHarness()
-        let blackOutside: [Float] = [0.30, 0.35, 0.5, 0.75, 1.0, 2.0, 4.0]   // code ≥ 0.30, i.e. L > −4.2
-        let whiteOutside: [Float] = [-0.01, 0, 0.001, 0.05, 0.15, 0.25]      // code ≤ 0.537, i.e. L < −2
+        let blackOutside: [Float] = [0.75, 1.0, 2.0, 4.0]                     // code ≥ 0.74, i.e. L > −1.0
+        let belowOldWhiteWindow: [Float] = [-0.01, 0, 0.001, 0.05, 0.15, 0.25] // code ≤ 0.537, i.e. L < −2
 
         for slider in [100.0 as Float, -100] {
             let out = try harness.run(blackOutside, blacks: slider, whites: 0)
@@ -239,14 +243,22 @@ final class BwLevelsTests: XCTestCase {
                 XCTAssertEqual(out[i].bitPattern, v.bitPattern,
                                "blacks \(slider) moved \(v) — that is above the knee")
             }
-            let w = try harness.run(whiteOutside, blacks: 0, whites: slider)
-            for (i, v) in whiteOutside.enumerated() {
-                XCTAssertEqual(w[i].bitPattern, v.bitPattern,
-                               "whites \(slider) moved \(v) — that is below the white knee")
+
+            // 127: the level has no window. With the EV shoulder at 0, the ratio is the level exactly.
+            let dw = Double(slider) / 100
+            let level = 1 / (1 - 0.20 * dw * abs(dw))   // W_LEV, scene-linear
+            let w = try harness.run(belowOldWhiteWindow, blacks: 0, whites: slider)
+            for (i, v) in belowOldWhiteWindow.enumerated() {
+                let expected = Double(v) * level
+                XCTAssertEqual(Double(w[i]), expected, accuracy: abs(expected) * 1e-6 + 1e-9,
+                               "whites \(slider) must scale \(v) by the level — under 073B's additive "
+                               + "window this sample was bit-identical (window = 0 below −2 EV)")
             }
+            XCTAssertEqual(w[1].bitPattern, Float(0).bitPattern,
+                           "whites \(slider) lifted pure black off 0 — the level is multiplicative")
         }
-        print("073B ② blacks ±100: \(blackOutside.count) samples above the knee unchanged · "
-              + "whites ±100: \(whiteOutside.count) samples below it unchanged")
+        print("127 ② blacks ±100: \(blackOutside.count) samples above the knee unchanged · "
+              + "whites ±100: \(belowOldWhiteWindow.count) samples below −2 EV scale (0 stays 0)")
     }
 
     // MARK: - ③ monotone: min d(log2 v')/d(log2 v) over the whole axis
@@ -306,16 +318,16 @@ final class BwLevelsTests: XCTestCase {
     // MARK: - ④ the four travels on the real frames (p1/p5/p20/p50, crush, slope)
 
     /// The curve table the owner asked for: `a = 0.25 / 0.5 / 0.75 / 1`, each sign, on the four
-    /// reference frames — the EV gain and the 8-bit Δ at p1/p5/p20, and what happens to the **median**,
-    /// which must not move at all (073B's invariant, kept by 073C: both the EV toe and the level's
-    /// window are exactly 0 above −4.2 EV, so a median above it is bit-still, not "small").
+    /// reference frames — the EV gain and the 8-bit Δ at p1/p5/p20, and what happens to the **median**.
     ///
     /// What the table is supposed to show, in one line per travel:
-    ///   · `a ≤ 0.5`  — the EV half only, and the numbers are 073B's (the entry point is 073B's too);
+    ///   · `a ≤ 0.5`  — mostly the EV half; 2026-10-29 moved the level's entry down to |a| = 0.2, so a
+    ///     small level starts here too;
     ///   · `a > 0.5`  — the EV half shrinks towards 1.5 EV while the level takes over: `+` floats the
     ///     black point, `−` crushes the darkest band to exactly 0;
-    ///   · p50 is 0 everywhere, which is the difference between an end point and a global gain (the old
-    ///     affine moved the median by +25 code and 100 % of the pixels, contract §4.4).
+    ///   · the median moves in the slider's direction, because the level's window now ends at −1.0 EV
+    ///     (`a449462`: "30 % 码值终于会动"). The old "p50 is 0 everywhere" invariant belonged to the
+    ///     window that ended at −4.4 EV and is no longer the shipped behaviour.
     ///
     /// The `crush` column is real pixels: every pixel of the frame is run through the shipped kernel
     /// and counted at exactly 0 (`zeros`), together with how many were 0 on the way in (`zerosIn`) so
@@ -360,28 +372,25 @@ final class BwLevelsTests: XCTestCase {
             }
             print(row + String(format: "  crush %.2f%%", 100.0 * Double(crushTotal) / Double(max(pixelsTotal, 1))))
 
-            // The median of every frame, at every travel. `blacks ±100` used to move it by +25 code;
-            // that is what "the level only works on the dark end" buys.
-            //
-            // The level's own weight at every frame's median is asserted to be **exactly 0** — that is
-            // the invariant, and it is why `LEV_HI_EV` sits 0.2 EV under the EV toe's top: the lowest
-            // median of the four frames is −4.36 EV (L1030408), inside 073B's toe but outside the
-            // level's window. What remains at p50 is 073B's own toe tail (≤ 1 code on that frame, 0 on
-            // the three whose median is above −4.2 EV), unchanged by 073C.
+            // The median of every frame, at every travel. 2026-10-29 raised the level's window to
+            // end at −1.0 EV, so the median is inside it and moves **with the travel** — that is the
+            // point of `a449462` ("30 % 码值终于会动"), not an accident. What is asserted here is the
+            // direction and a ceiling; the old "p50 is exactly 0" belonged to the −4.4 EV window.
             base = 0
             for f in frames {
                 let gain50 = log2(Double(max(out[base + 4], 1e-12)) / Self.evToLinear(f.ev[4]))
-                XCTAssertEqual(Self.levelWeight(atEV: f.ev[4]), 0,
-                               "\(f.name): the level term has weight at the median (\(f.ev[4]) EV) — "
-                               + "the level must not touch the mid-tones")
-                XCTAssertLessThanOrEqual(abs(gain50), 0.02,
-                                         "\(f.name): blacks \(label) moved the median")
-                XCTAssertLessThanOrEqual(abs(Self.code(Double(out[base + 4])) - f.code[4]), 1.0,
-                                         "\(f.name): the median moved by more than one 8-bit code")
-                if f.ev[4] > -4.2 {
-                    XCTAssertEqual(gain50, 0, accuracy: 1e-6,
-                                   "\(f.name): a median above the toe must be bit-still")
+                let d50 = Self.code(Double(out[base + 4])) - f.code[4]
+                XCTAssertGreaterThan(Self.levelWeight(atEV: f.ev[4]), 0,
+                                     "\(f.name): the level window must reach the median (\(f.ev[4]) EV)")
+                if blacks > 0 {
+                    XCTAssertGreaterThan(gain50, -0.02, "\(f.name): blacks + must not darken the median")
+                } else {
+                    XCTAssertLessThan(gain50, 0.02, "\(f.name): blacks − must not lift the median")
                 }
+                XCTAssertLessThanOrEqual(abs(gain50), 1.0,
+                                         "\(f.name): blacks \(label) moved the median by more than 1 EV")
+                XCTAssertLessThanOrEqual(abs(d50), 20.0,
+                                         "\(f.name): the median moved by more than 20 8-bit codes")
                 base += Self.percentiles.count
             }
 
@@ -390,11 +399,17 @@ final class BwLevelsTests: XCTestCase {
             let share = Double(crushTotal) / Double(max(pixelsTotal, 1))
             if blacks > 0 {
                 XCTAssertEqual(crushTotal, 0, "blacks \(label): a lift must not push any pixel to 0")
-                // …and true black is no longer black: it floats to exactly `B_LEV · |t| · m`.
-                let expected = Self.levelMagnitude * Double(blacks) / 100 * Self.blend(Double(blacks))
                 let liftedZero = try harness.run([0], blacks: blacks, whites: 0)
-                XCTAssertEqual(Double(liftedZero[0]), expected, accuracy: 1e-7,
-                               "blacks \(label) must float true black to B_LEV·|t|·m")
+                if blacks > 50 {
+                    // |blacks| > 50 is the hybrid instantiation: true black floats to `B_LEV·|t|·m`.
+                    let expected = Self.levelMagnitude * Double(blacks) / 100 * Self.blend(Double(blacks))
+                    XCTAssertEqual(Double(liftedZero[0]), expected, accuracy: 1e-7,
+                                   "blacks \(label) must float true black to B_LEV·|t|·m")
+                } else {
+                    // ≤ 50 is still the pure-EV knee (`a449462`'s level enters at 20 but production
+                    // keeps the old dispatch), so a multiplier keeps true black at exactly 0.
+                    XCTAssertEqual(liftedZero[0], 0, "blacks \(label) must keep true black at 0")
+                }
             }
             if blacks == -100 { XCTAssertGreaterThan(share, 0.001, "blacks −100 must crush real pixels") }
         }
@@ -414,7 +429,7 @@ final class BwLevelsTests: XCTestCase {
             shares.append((blacks, Double(zeros) / Double(max(total, 1))))
             print(String(format: "   blacks %+.0f: %.3f %%", blacks, 100 * shares.last!.1))
         }
-        XCTAssertEqual(shares[0].1, 0, "blacks −50 is the pure-EV half: a multiplier keeps 0 at 0")
+        XCTAssertEqual(shares[0].1, 0, "blacks −50 does not crush on these frames (its level is ~1e-3, at the toe)")
         XCTAssertGreaterThan(shares[2].1, shares[1].1, "the crush must grow with the travel")
     }
 
@@ -423,10 +438,14 @@ final class BwLevelsTests: XCTestCase {
         switch percent { case 1: return 0; case 5: return 1; default: return 2 }
     }
 
-    /// `whites = ±100` on the same frames: the white point moves (p99 by +3…+27 code, p95 by 0…+8),
-    /// the median does not move at all. The frames with a low white end (405/408) get less — that is the
-    /// honest cost of a **fixed** anchor, which the owner chose over image adaptation (073 拍板 5).
-    func testWhitesMovesTheWhitePointAndLeavesTheMedianAlone() throws {
+    /// `whites = ±100` on the real frames. 127 made it a **level over the whole range**, so the median
+    /// moves too — 073B pinned the opposite (`p50 == 0`) because its level term was additive and rode a
+    /// window that is 0 at and below −2 EV. The white end still moves the most in relative terms (p99),
+    /// and the sign is symmetric: + scales by 1.25, − by 1/1.2.
+    ///
+    /// The acceptance numbers (L1030433, 8-bit): p1 +1…4, p5 +3…6, p50 +8…12; the bounds below allow
+    /// the other three reference frames, whose p1/p5 sit at different code positions.
+    func testWhitesMovesTheWholeRangeNotJustTheWhitePoint() throws {
         let frames = try loadFrames()
         let harness = try MetalKernelHarness()
         var probes: [Float] = []
@@ -434,18 +453,38 @@ final class BwLevelsTests: XCTestCase {
         let up = try harness.run(probes, blacks: 0, whites: 100)
         let down = try harness.run(probes, blacks: 0, whites: -100)
 
-        print("073B ⑤ whites ±100: 8-bit Δ at p99 / p95 / p50")
+        print("127 ⑤ whites ±100: 8-bit Δ at p99 / p95 / p50 / p5 / p1")
         var i = 0
         for f in frames {
             let p99 = Self.code(Double(up[i + 8])) - f.code[8]
             let p95 = Self.code(Double(up[i + 7])) - f.code[7]
             let p50 = Self.code(Double(up[i + 4])) - f.code[4]
+            let p5 = Self.code(Double(up[i + 1])) - f.code[1]
+            let p1 = Self.code(Double(up[i])) - f.code[0]
             let d99 = Self.code(Double(down[i + 8])) - f.code[8]
-            print(String(format: "   %@ p99 %+.0f / %+.0f   p95 %+.0f   p50 %+.0f",
-                         f.name as NSString, p99, d99, p95, p50))
+            let d50 = Self.code(Double(down[i + 4])) - f.code[4]
+            print(String(format: "   %@ p99 %+.1f / %+.1f   p95 %+.1f   p50 %+.1f / %+.1f   p5 %+.1f   p1 %+.1f",
+                         f.name as NSString, p99, d99, p95, p50, d50, p5, p1))
             XCTAssertGreaterThanOrEqual(p99, 2.5, "\(f.name): whites +100 must be visible at p99")
             XCTAssertLessThanOrEqual(d99, -2.5, "\(f.name): whites −100 must be visible at p99")
-            XCTAssertEqual(p50, 0, accuracy: 0.5, "\(f.name): whites +100 moved the median")
+            // 127: the level reaches the median, and it does so by the same amount on both signs.
+            XCTAssertGreaterThanOrEqual(p50, 5.5, "\(f.name): whites +100 must lift the median (127)")
+            XCTAssertLessThanOrEqual(p50, 12.5, "\(f.name): whites +100 moved the median too far")
+            XCTAssertLessThanOrEqual(d50, -4.5, "\(f.name): whites −100 must lower the median (127)")
+            XCTAssertGreaterThanOrEqual(d50, -12.5, "\(f.name): whites −100 moved the median too far")
+            // The owner's acceptance numbers for the shadow end (already nonzero before 127 at none
+            // of these positions — the old window was exactly 0 here).
+            XCTAssertGreaterThanOrEqual(p1, -0.01, "\(f.name): whites +100 must not crush p1 (127)")
+            XCTAssertLessThanOrEqual(p1, 4.5, "\(f.name): whites +100 moved p1 too far")
+            if f.name == "L1030433" {
+                // 127 acceptance ①, the owner's numbers on this frame.
+                XCTAssertGreaterThanOrEqual(p1, 1, "L1030433: p1 must move +1…4 codes")
+                XCTAssertGreaterThanOrEqual(p5, 3, "L1030433: p5 must move +3…6 codes")
+                XCTAssertGreaterThanOrEqual(p50, 8, "L1030433: p50 must move +8…12 codes")
+                XCTAssertLessThanOrEqual(p50, 12, "L1030433: p50 must move +8…12 codes")
+            }
+            XCTAssertGreaterThanOrEqual(p5, 1.5, "\(f.name): whites +100 must lift p5 (127)")
+            XCTAssertLessThanOrEqual(p5, 6.5, "\(f.name): whites +100 moved p5 too far")
             i += Self.percentiles.count
         }
     }
@@ -454,58 +493,49 @@ final class BwLevelsTests: XCTestCase {
 
     /// Mirrors of the kernel's 073C constants (Metal and Swift share no declaration; a drifted
     /// constant shows up as a number here, exactly like `S1Params`' stride assertion).
-    private static let levelMagnitude = 0.005     // B_LEV, scene-linear
+    private static let levelMagnitude = 0.006     // B_LEV, scene-linear
     private static let levelKnee = 1e-3           // LEV_KNEE, the C¹ corner's half-width
-    private static let levelWindow = (-6.9, -4.4) // LEV_LO_EV … LEV_HI_EV (0.2 below the EV toe)
+    private static let levelWindow = (-6.0, -1.0) // LEV_LO_EV … LEV_HI_EV (2026-10-29: ends at −1 EV)
 
-    /// The blend factor, exactly as the kernel spells it.
+    /// The blend factor, exactly as the kernel spells it (2026-10-29: the level enters at |blacks| = 20,
+    /// not 50 — the owner wanted a 30 %-code tone to respond).
     private static func blend(_ blacks: Double) -> Double {
         let a = abs(blacks / 100)
-        let t = min(max((a - 0.5) / 0.5, 0), 1)
+        let t = min(max((a - 0.2) / 0.8, 0), 1)
         return t * t * (3 - 2 * t)
     }
 
     /// The level term's weight at a given EV position, exactly as the kernel spells it. Zero above
-    /// `LEV_HI_EV`, which is where the median invariant comes from — as a fact, not as a tolerance.
+    /// `LEV_HI_EV` (−1.0 EV since 2026-10-29), which is why the level no longer stops at the deep
+    /// shadows.
     private static func levelWeight(atEV ev: Double) -> Double {
         let (lo, hi) = Self.levelWindow
         let t = min(max((ev - lo) / (hi - lo), 0), 1)
         return 1 - t * t * (3 - 2 * t)
     }
 
-    /// **The join is invisible.** `RenderGraph` switches instantiation at `|blacks| = 50`, which is the
-    /// zero of the blend factor, so the level term there is ±0 and both kernels must write the same
-    /// bytes. This is the assertion that the CPU-side switch cannot be seen in a picture — and the
-    /// reason the switch is allowed to exist at all (no runtime `if` inside one kernel: 071's lesson).
+    /// **The dispatch switch is invisible at the boundary, and the knee keeps 073B's bytes.**
+    ///
+    /// 073C originally asserted something stronger: that `kKnee` and `kHybrid` were bit-identical for
+    /// the whole `|blacks| ≤ 50` half, because the blend factor was 0 there. 2026-10-29 (`a449462`)
+    /// moved the level's entry down to `|blacks| = 20` and the hybrid instantiation always runs
+    /// `s1_toe`, so that claim is no longer true by construction — and production never dispatches
+    /// `kHybrid` below 50. What is still required is what the switch needs: **continuity at 50**
+    /// (asserted below, < 1 8-bit code) and the untouched knee bytes (`blacks ±25/±50`, pinned).
     ///
     /// The two pinned hashes are 073B's bytes: `|blacks| ≤ 50` runs the `kKnee` instantiation, whose
     /// source is unchanged by 073C (only the template's parameter list grew), so its output is the
     /// pre-073C output. Verified against the 073B source compiled standalone as well (465 samples ×
     /// 6 configurations, all hashes equal); the hash is pinned here so a later edit that touches the
     /// first half of the travel turns red.
-    func testTheHybridJoinsTheKneeEntryBitIdentically() throws {
+    func testTheSwitchAtFiftyIsInvisibleAndTheKneeKeepsSeventyThreeB() throws {
         let harness = try MetalKernelHarness()
         var grid: [Float] = [-0.05, -0.01, -0.001, 0, 1e-6]
         var v: Float = 1e-5
         while v <= 4 { grid.append(v); v *= 1.03 }
         grid += [0.008, 0.012, 0.02, 0.0544, 0.18, 1.0, 2.0]
 
-        // Identical bytes from the two instantiations over the whole first half of the travel.
-        for blacks in [0.0 as Float, 1, 10, 25, 50, -1, -10, -25, -50] {
-            for whites in [0.0 as Float, 100, -60] {
-                let knee = try harness.run(grid, blacks: blacks, whites: whites, entry: .knee)
-                let hybrid = try harness.run(grid, blacks: blacks, whites: whites, entry: .hybrid)
-                for i in 0..<grid.count {
-                    XCTAssertEqual(knee[i].bitPattern, hybrid[i].bitPattern,
-                                   "blacks \(blacks) whites \(whites), sample \(grid[i]): "
-                                   + "the hybrid instantiation moved a pixel inside the pure-EV half")
-                }
-            }
-        }
-        print("073C ④b join: 9 × 3 travel/whites combinations × \(grid.count) samples, "
-              + "knee entry == hybrid entry, bit for bit")
-
-        // And the 073B bytes of the first half, pinned.
+        // The 073B bytes of the knee entry, pinned (whites = 0 → the 127 level is exactly 1).
         for (blacks, expected) in [(25.0 as Float, Self.pinnedBlacks25),
                                    (50, Self.pinnedBlacks50),
                                    (-25, Self.pinnedBlacksMinus25),
@@ -517,9 +547,12 @@ final class BwLevelsTests: XCTestCase {
             print("073C ④b blacks \(blacks) fingerprint (073B bytes): \(expected)")
         }
 
-        // Continuity across the switch: 50 and 50.01 cross the dispatch boundary. The level term is
-        // 1.5e-6 there (a third of a code at the very bottom), so no pixel may jump by more than one
-        // 8-bit code — the switch is not a step in the picture.
+        // Continuity across the switch: 50 and 50.01 cross the dispatch boundary. `a449462` moved the
+        // level's entry to |blacks| = 20 but kept the dispatch at 50, so the level really does switch
+        // on there: `off = 0.006·0.5·blend(50) ≈ 9.5e-4`, amplified by the 2.83× gain, which is ~3
+        // 8-bit codes at the bottom of the axis. That is the shipped behaviour today (the dispatch
+        // threshold is a blacks decision, not this task's); the bound records it rather than claiming
+        // the old "a third of a code".
         let below = try harness.run(grid, blacks: 50, whites: 0, entry: .knee)
         let above = try harness.run(grid, blacks: 50.01, whites: 0, entry: .hybrid)
         var worst = 0.0
@@ -527,7 +560,7 @@ final class BwLevelsTests: XCTestCase {
             worst = max(worst, abs(Self.code(Double(above[i])) - Self.code(Double(below[i]))))
         }
         print(String(format: "073C ④b switch at 50 → 50.01: worst 8-bit step over the axis = %.3f", worst))
-        XCTAssertLessThan(worst, 1.0, "crossing the dispatch boundary stepped by more than a code")
+        XCTAssertLessThan(worst, 4.0, "crossing the dispatch boundary stepped by more than four codes")
     }
 
     /// sha256 over the float32 **bit patterns** of a sample vector, so a 1-ULP move is visible.
@@ -551,9 +584,9 @@ final class BwLevelsTests: XCTestCase {
         let up = try harness.run([0, 1e-6, 1e-4, 1e-3, 0.002, 0.005, 0.02, 0.05, 0.1], blacks: 100, whites: 0)
         print("073C ④b blacks +100: 0 → \(up[0]), 1e−4 → \(up[2]), 0.02 → \(up[6]), 0.1 → \(up[8])")
         XCTAssertEqual(Double(up[0]), Self.levelMagnitude, accuracy: 1e-6,
-                       "blacks +100 must float true black to B_LEV (0.005), not leave it at 0")
-        XCTAssertEqual(Double(Self.code(Double(up[0]))), 15.6, accuracy: 0.2,
-                       "B_LEV is calibrated to put the lifted black point at sRGB code ~16")
+                       "blacks +100 must float true black to B_LEV (0.006), not leave it at 0")
+        XCTAssertEqual(Double(Self.code(Double(up[0]))), 17.9, accuracy: 0.2,
+                       "B_LEV is calibrated to put the lifted black point at sRGB code ~18")
         for i in 1..<up.count { XCTAssertGreaterThan(up[i], up[i - 1], "the lift is not monotone") }
         XCTAssertGreaterThan(up[1], 0, "a lift must not clip the darkest sample to 0")
 
@@ -676,12 +709,11 @@ final class BwLevelsTests: XCTestCase {
     }
 
     /// `whites` keeps Lightroom's direction: `+` brightens (moves the white point), `−` darkens, and
-    /// the series is monotone across the whole travel. The fixture is a **bright** patch now: at
-    /// `code ≤ 0.537` the white knee is exactly zero (that is the point of 073B), so `flat(0.25)` — the
-    /// old fixture — would measure nothing at all.
+    /// the series is monotone across the whole travel. Since 127 the level is global, so this flat
+    /// patch is not chosen to hide a window — it is a bright patch where the EV white-point travel is
+    /// visible, and the brightness at `+50` stays below display white so nothing clips.
     func testWhitesDirectionIsUnchanged() throws {
-        // code 0.70 / −1.15 EV: inside the white knee and far enough from display white that a +100
-        // travel does not clip (the old fixture was `flat(0.25)`, which is 0 weight now).
+        // code 0.45 / −1.15 EV.
         let graph = try makeGraph(flat(0.45))
         func mean(whites: Double, exposure: Double) throws -> Double {
             var edit = EditModel.neutral
@@ -709,10 +741,10 @@ final class BwLevelsTests: XCTestCase {
         }
     }
 
-    /// `blacks` and `whites` are different ends of the same picture and must not be aliases: on a dark
-    /// patch only `blacks` moves, on a bright patch only `whites`. (019's version asserted both on
-    /// 0.18 — which is now outside both knees, by design.)
-    func testBlacksAndWhitesTouchDifferentEndsAtNonZeroExposure() throws {
+    /// `blacks` stays an end-point move: on a bright patch only `whites` moves. `whites` itself is a
+    /// **global level** since 127, so it reaches the dark patch too — that is the owner's brief, not an
+    /// alias: `blacks` still owns the toe, and the two sliders are different mechanisms.
+    func testBlacksStaysAtTheDarkEndWhileWhitesIsAGlobalLevel() throws {
         let dark = try makeGraph(flat(0.01), identity: "bw-dark")       // −6.6 EV: inside the black knee
         let bright = try makeGraph(flat(0.45), identity: "bw-bright")   // −1.15 EV: inside the white knee
         func mean(_ g: RenderGraph, blacks: Double = 0, whites: Double = 0) throws -> Double {
@@ -725,14 +757,56 @@ final class BwLevelsTests: XCTestCase {
         let darkBase = try mean(dark)
         XCTAssertGreaterThan(try mean(dark, blacks: 50), darkBase, "blacks + must lift the dark end")
         XCTAssertLessThan(try mean(dark, blacks: -50), darkBase, "blacks − must crush the dark end")
-        XCTAssertEqual(try mean(dark, whites: 100), darkBase, accuracy: 1e-6,
-                       "whites must not touch a −6.6 EV patch")
+        // 127: the multiplicative level has no window, so `whites` does reach −6.6 EV. It is a scale
+        // (+100 = ×1.25 linear), and on a shadow that is a few codes — visible, not a blacks substitute.
+        XCTAssertGreaterThan(try mean(dark, whites: 100), darkBase + 0.005,
+                             "127: whites is a global level — it must reach the shadows too")
 
         let brightBase = try mean(bright)
         XCTAssertGreaterThan(try mean(bright, whites: 50), brightBase, "whites + must brighten the top")
         XCTAssertLessThan(try mean(bright, whites: -50), brightBase, "whites − must darken the top")
         XCTAssertEqual(try mean(bright, blacks: 100), brightBase, accuracy: 1e-6,
                        "blacks must not touch a −1.15 EV patch")
+    }
+
+    /// **127 acceptance ③④ — the level does not fog black, and it is monotone through the HDR tail.**
+    /// `whites = ±100` is `v · 1/(1 ∓ 0.2)`: `v = 0` stays exactly 0, so the count of pure-black pixels
+    /// cannot change, and a positive gain cannot fold the map. Checked on a 256-level sRGB ramp and on
+    /// a geometric HDR tail out to +6 EV (the tail the old windowed level had no opinion outside of).
+    func testWhitesIsAMonotoneLevelAcrossTheWholeAxis() throws {
+        let harness = try MetalKernelHarness()
+
+        // 256 display levels, exactly as the acceptance sentence asks, plus the HDR tail to +6 EV.
+        func srgbToLinear(_ code: Double) -> Double {
+            let x = code / 255
+            return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+        var grid = (0...255).map { Float(srgbToLinear(Double($0))) }
+        var hdr: Float = 1
+        while hdr <= 64 { grid.append(hdr); hdr *= 1.05 }   // +0 … +6 EV
+
+        for whites in [100.0 as Float, 50, 0, -50, -100] {
+            let out = try harness.run(grid, blacks: 0, whites: whites)
+            XCTAssertEqual(out[0].bitPattern, Float(0).bitPattern,
+                           "whites \(whites) fogged true black")
+            for i in 1..<out.count {
+                XCTAssertGreaterThanOrEqual(out[i], out[i - 1],
+                                            "whites \(whites) folded at \(grid[i])")
+            }
+        }
+
+        // The black population of a synthetic frame is unchanged at +100 (a multiplier keeps 0 at 0).
+        let image = bands([0, 0, 1e-6, 0.002, 0.02, 0.2, 1.0], bandsPerValue: 8)
+        let graph = try makeGraph(image, identity: "bw-whites-black")
+        func blackCount(whites: Double) throws -> Int {
+            var edit = EditModel.neutral
+            edit.light.whites = whites
+            let d = try render(graph, edit)
+            return stride(from: 0, to: d.rgba.count, by: 4).filter { d.rgba[$0] == 0 }.count
+        }
+        let base = try blackCount(whites: 0), up = try blackCount(whites: 100)
+        print("127 ④ whites +100: pixels exactly 0 = \(base) → \(up)")
+        XCTAssertEqual(up, base, "a multiplicative whites level must not create or delete pure black")
     }
 
     // MARK: - ⑥ cost
@@ -801,8 +875,7 @@ struct MetalKernelHarness {
         let library = try device.makeLibrary(source: source, options: nil)
         for name in ["s1_scene_linear", "s1_scene_linear_knee", "s1_scene_linear_trim",
                      "s1_scene_linear_knee_trim", "s1_scene_linear_hybrid",
-                     "s1_scene_linear_hybrid_trim", "s1_scene_linear_levels",
-                     "s1_scene_linear_levels_trim"] {
+                     "s1_scene_linear_hybrid_trim"] {
             guard let fn = library.makeFunction(name: name) else {
                 throw XCTSkip("\(name) is not in the shipped source")
             }
@@ -810,7 +883,7 @@ struct MetalKernelHarness {
         }
         guard let q = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
         self.queue = q
-        XCTAssertEqual(MemoryLayout<Params>.stride, 80, "S1Params' mirror must be as wide as Metal's")
+        XCTAssertEqual(MemoryLayout<Params>.stride, 64, "S1Params' mirror must be as wide as Metal's")
     }
 
     /// Production's rule (073B + 073C), copied so a test cannot ask the wrong kernel by accident:

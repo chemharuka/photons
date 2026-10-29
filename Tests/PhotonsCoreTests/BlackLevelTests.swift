@@ -91,24 +91,24 @@ final class BlackLevelTests: XCTestCase {
         edit.light.highlightRecovery = 0.4
         edit.light.whites = 10
         edit.light.blacks = -5
-        // P1f: `;alg=2` is S1's algorithm-version token (`StageAlgorithmVersion` — 073C's hybrid
+        // P1f: `;alg=3` is S1's algorithm-version token (`StageAlgorithmVersion` — 127's whites level;
         // blacks travel), appended to every stage's material. The *parameters* are still byte-identical
         // to main@73eca0b, which is what `algorithmVersion: false` asserts.
         let preBlackOffset = "ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"
         XCTAssertEqual(edit.keyMaterial(.sceneLinear, algorithmVersion: false), preBlackOffset,
                        "blackOffset = 0 时参数部分必须与 main@73eca0b 逐字节相同")
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=2",
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=3",
                        "唯一的差别是算法版本号")
 
         // 非零才追加，而且追加的是**内核真正加的那个数**（clamped）。
         edit.light.blackOffset = 0.007
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.00700;alg=2")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.00700;alg=3")
         edit.light.blackOffset = -0.01
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=-0.01000;alg=2")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=-0.01000;alg=3")
         edit.light.blackOffset = 0.4                      // 越界：键与内核都说 +0.01
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.01000;alg=2")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.01000;alg=3")
         edit.light.blackOffset = 0
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=2",
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=3",
                        "清零之后键必须回到原样")
 
         // 只差这一个参数的两份文档，键必须不同 —— 否则缓存会串。

@@ -143,7 +143,7 @@ final class CacheVersionTests: XCTestCase {
         // documented one-time migration. What must never happen again is S0 moving because *S2* was
         // bumped, so S2's generation may not appear anywhere in S0's material or S1's:
         XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=1"), true)
-        XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=2"), "S0 does not carry S2's generation")
+        XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=5"), "S0 does not carry S2's generation")
         XCTAssertFalse(new.toneMap.isEmpty)
         XCTAssertNotEqual(old.geometry, new.geometry,
                           "the unconditional token re-records every key once, S0 included")
@@ -169,7 +169,7 @@ final class CacheVersionTests: XCTestCase {
         // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2,
         // so its generation moved again to 4; 124 moved 高光's white closure above the HDR range).
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
-        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 2, "073C: the blacks travel")
+        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 3, "127: whites is a global multiplicative level")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 2,
@@ -545,7 +545,7 @@ final class CacheVersionTests: XCTestCase {
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
-        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=2"))
+        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=3"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
     }
 }

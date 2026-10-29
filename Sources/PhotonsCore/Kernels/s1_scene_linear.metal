@@ -11,7 +11,8 @@ using namespace metal;
 //   ①b linear black **offset** (071):          v = v + blackOffset          additive, linear units
 //   ② exposure gain + WB gains:                v *= gain · wb              multiplicative
 //   ③ blacks:  EV (first half of the travel), then EV + **level** (second half, 073C)
-//   ④ whites:  EV (91 %) + level (9 %), soft shoulder   ±0.6 EV at display white, 0 below −2 EV
+//   ④ whites:  EV shoulder (±0.6 EV at display white, 0 below −2 EV) × a multiplicative level
+//              (127: global, so the shadows scale too; `0 → 0`)
 //   ⑤ highlight recovery: the soft shoulder, unchanged
 //
 // **073B — why the affine level left this path.** 019 made `blacks`/`whites` an affine remap
@@ -23,8 +24,17 @@ using namespace metal;
 //
 // So the sliders no longer touch the span. `blacks` is a **pure multiplicative EV** at the dark end
 // (`0 → 0`: it never manufactures grey where there was none — that is `blackOffset`'s job, 071) and
-// `whites` is mostly EV with a small additive level term, because a scene-linear multiplier alone
-// cannot make the white point *move* where the picture has almost no pixels.
+// `whites` is mostly EV with a small **multiplicative** level term (127), because a scene-linear
+// multiplier alone cannot make the white point *move* where the picture has almost no pixels.
+//
+// **127 — the level is multiplicative, and global.** 073B paired that EV term with a *small additive*
+// level riding the same −2 EV window as the shoulder ("it does not fog the picture"). The owner then
+// measured the consequence: `whites +100` on an exp+2 frame moved p95/p99.9 but left p1/p5/p50 at
+// 7.5 / 26.2 / 89.9 codes — the shadows do not respond at all, because the window is 0 there. What the
+// owner means by 「电平」 is a scale over the whole range. A multiplier does that without 019's fog
+// (019's affine/additive level lifted pure black to code 0.397): `v·k` is still 0 at `v = 0`. The EV
+// half and its shoulder stay exactly as 073B wrote them — this is a level *on top of* the white-point
+// move, not a redefinition of it.
 //
 // **The knee is a window on L = log2(luma), not on the linear value and not on the display code.**
 // Three coordinates were measured (contract 073 §4.9); for a ±3 EV travel the coded one loses: a
@@ -96,12 +106,13 @@ using namespace metal;
 // where they meet: at |blacks| = 50 the level term is ±0 · B_LEV = 0 and the EV exponent is
 // `3·t·1·wb`, today's expression, unchanged in the source of the `kKnee` instantiation.
 //
-// **Whites** (contract §4.2, unchanged constants): full weight at display white (0 EV), fading down to
-// 0 at −2 EV (the shoulder on the dark side) and decaying as exp(−L/1 EV) above 0 (the shoulder on the
-// HDR side: +1 EV 0.368, +4 EV 0.018). The additive level term rides the *same* weight, so both terms
-// vanish together at −2 EV and the map is continuous at the 0 EV join where the two branches meet.
-// Ratio at the end point: 91 % EV / 9 % level (measured, contract §4.2) — "whites moves the white
-// point, it does not fog the picture".
+// **Whites** (127): the EV half keeps contract §4.2's constants — full weight at display white (0 EV),
+// fading down to 0 at −2 EV (the shoulder on the dark side) and decaying as exp(−L/1 EV) above 0 (the
+// shoulder on the HDR side: +1 EV 0.368, +4 EV 0.018). The level is now multiplicative and has **no**
+// window (`1/(1 − 0.20·Δw·|Δw|)`, ×1.25 at +100), so it scales every luma including the HDR tail; it
+// is exactly 1 at `Δw = 0`, which is why a neutral document is byte-still. Its physical ceiling is
+// small by construction (p1 moves ≈2 codes at +100) — a shadow that must be visibly brighter is
+// `blacks`' EV toe or `exposure`, not this slider.
 //
 // **The default path has no new arithmetic.** `blacks == 0 && whites == 0` selects the entry point
 // without the knee code at all, exactly as 071 split off the trim: a branch inside the function
