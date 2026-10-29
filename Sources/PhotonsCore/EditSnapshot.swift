@@ -105,12 +105,10 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
 
     /// Does a paste of this section have to **develop again** (a new buffer), or only re-render?
     ///
-    /// `whiteBalance` is `DecodeInputs.whiteBalance` and a Kelvin change is measured to move
-    /// 0.15–0.40 % of samples — a new rung, not a new S1 pass (派单 006/011). Everything else here
-    /// keys the render graph, and `detail` is *stored, not rendered* (`DetailGroup`'s header) so it
-    /// cannot move a buffer either. The decoder model (`decoderVersion`) is not a section at all:
-    /// `EditSnapshot` does not carry it (it is a per-file decoder fact, not a develop setting).
-    public var requiresDecode: Bool { self == .whiteBalance }
+    /// Since 143 nothing here requires a development: the white balance is an S1 gain computed from
+    /// the decoded buffer, and the decoder is always at as-shot. The property stays (the copy sheet
+    /// asks it) because a future decode-side section would need exactly one place to say so.
+    public var requiresDecode: Bool { false }
 
     /// The card's title — **the inspector card's own string**, so the sheet's rows and the panel's
     /// headers cannot drift apart (`CopySheetCardTests` holds them to `InspectorView`'s titles).

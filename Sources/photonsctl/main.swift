@@ -615,19 +615,26 @@ func cmdRender(_ a: Args) throws {
     let scale = a.value("--scale").flatMap(Double.init) ?? 1
     let display = displayOptions(a)
     let toneMap = toneMapOption(a)
-    let (edits, names) = try loadEdits(a)
+    var (edits, names) = try loadEdits(a)
     let trace = a.has("--trace-stages")
 
     let probe = try makeDecoder().probe(url)
     let version = a.value("--version") ?? probe.defaultVersion
     let fileHash = try FileDigest.sha256(of: url)
     let decodeScale = a.value("--decode-scale").flatMap(Float.init) ?? decodeScaleLadder(scale)
-    // 派单 006: the document's white balance *is* the decode, so the render develops the RAW with
-    // it. `--wb` overrides for a one-off measurement; without an edit the file's as-shot applies.
+    // 143: the decode is always the as-shot balance; a document's (Kelvin, tint) is an S1 gain. A
+    // `--wb` override therefore has to reach the **documents**, not the decoder — patching only the
+    // cache key would render the edit's own pair.
     let wb = renderWhiteBalance(a, edits: edits)
+    if a.value("--wb") != nil {
+        for i in edits.indices {
+            edits[i].light.temperature = wb.temperature
+            edits[i].light.tint = wb.tint
+        }
+    }
     if a.value("--wb") == nil, edits.count > 1,
        edits.contains(where: { $0.light.whiteBalance != wb }) {
-        err("warning: one decode serves every --edit; white balance taken from '\(names[0])' (\(wb.summary))")
+        err("warning: one decode serves every --edit; their own white balances render independently")
     }
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
                                                   fileHash: fileHash, version: version,

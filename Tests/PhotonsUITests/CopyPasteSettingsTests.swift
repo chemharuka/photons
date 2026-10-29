@@ -20,8 +20,8 @@ import PhotonsCatalog
 ///   ③ **一次粘贴 = 一条历史**: `history.count + 1`, and one ⌘Z puts every pasted leaf back (the
 ///      before/after values are printed, not just the count).
 ///   ④ **多选**: three selected photos → one paste → one row in *each* photo's own stack.
-///   ⑤ **解码**: render-only sections never develop (`RAWDecoder.decodeCounts` +0); a white-balance
-///      paste develops exactly once (+1) — counted on the real decoder, not by a stopwatch.
+///   ⑤ **解码**: render-only sections never develop (`RAWDecoder.decodeCounts` +0); since 143 a
+///      white-balance paste is a render too (+0) — counted on the real decoder, not by a stopwatch.
 ///   ⑥ **焦点**: with a text view owning the keyboard, ⌘C copies *text* (the item validates off and
 ///      the action forwards to `NSText.copy:`), and the settings clipboard is untouched.
 @MainActor
@@ -327,15 +327,15 @@ final class CopyPasteSettingsTests: XCTestCase {
         _ = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: scale, edit: session.edit)
         XCTAssertEqual(decodeTotal(), baseline)
 
-        // White balance: one new development, because `CIRAWFilter.neutralTemperature` is part of the
-        // buffer. Different rung scale than the baseline? No — same scale, new wb=… component.
+        // White balance: 143 — the balance is an S1 gain, so it re-renders the resident buffer and
+        // develops nothing.
         _ = session.pasteSettings(sections: [.whiteBalance])
         XCTAssertEqual(session.edit.light.temperature, 5500)
         _ = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: scale, edit: session.edit)
         let afterWB = decodeTotal()
         print("DECODE after white-balance paste: \(RAWDecoder.decodeCounts()) (+\(afterWB - baseline))")
-        XCTAssertEqual(afterWB, baseline + 1,
-                       "a Kelvin paste re-develops exactly once: \(RAWDecoder.decodeCounts())")
+        XCTAssertEqual(afterWB, baseline,
+                       "a Kelvin paste must re-render, not develop: \(RAWDecoder.decodeCounts())")
     }
 
     // MARK: - ⑥ 焦点在文本域时 ⌘C 不被劫持

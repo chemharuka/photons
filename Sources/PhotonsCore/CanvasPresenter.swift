@@ -241,12 +241,13 @@ public struct PresentRequest {
     public let backdropQuad: ImageRect?
     /// The texels of `backdrop` its quad reads — picture coordinates (058).
     public let backdropWindow: PresentWindow
-    /// 118: a **display-only** linear-light RGB gain, or `nil` for the untouched picture.
+    /// 118/143: a **display-only** linear-light RGB gain, or `nil` for the untouched picture.
     ///
-    /// White balance is a decode input, so a drag cannot re-render in time. The loupe multiplies the
-    /// frame already on the canvas by the same `WhiteBalanceSolver.gain` the decode is predicted with,
-    /// in linear light, on the last hand-off of the on-screen path. Nothing else reads this number:
-    /// it is not in a `RenderKey`, a cache key, a document or a history snapshot.
+    /// A drag cannot wait for a full render, so the loupe multiplies the frame already on the canvas
+    /// by the ratio of the two `WhiteBalanceEstimate` gains (target / reference), in linear light, on
+    /// the last hand-off of the on-screen path. The settled frame applies the same **target** triple
+    /// in S1; nothing else reads this number: it is not in a `RenderKey`, a cache key, a document or a
+    /// history snapshot.
     public let whiteBalanceGain: SIMD3<Float>?
 
     /// The request every call site builds: the geometry is inverted from the frame's own window.

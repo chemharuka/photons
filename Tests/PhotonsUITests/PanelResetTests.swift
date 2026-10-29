@@ -15,8 +15,8 @@ import PhotonsCore
 ///      一条是 1，另一条是 7。
 ///   2. **默认不是字面 0**。参考值是 `EditModel.neutral`（各组自己的默认构造）与 `DetailAxis` 的机身
 ///      基线 —— 细节是 `0/50/0/50`（Leica），白平衡是 `nil`（原照）。硬编码 0 会让这条红。
-///   3. **白平衡 = 原照设定 = 重新解码**：`decodeInputs.key` 必须移动过去再回来（这正是「会重新
-///      develop」的机器可读形式，与 `WhiteBalanceSectionTests` 用 `decodeCounts` 测的是同一件事）。
+///   3. **白平衡 = 原照设定 = S1 增益回恒等**：`renderInputs.key` 必须移动过去再回来（143：白平衡
+///      是渲染输入，不再碰 `decodeInputs`；`WhiteBalanceSectionTests` 用 `decodeCounts` 测同一件事）。
 ///   4. **已经默认就不写历史**：双击一下不该长出一条空快照，更不该截断 redo 分支。
 ///
 /// 走的是 `PanelResets` —— 面板双击时调用的**同一个**实现（与 `WhiteBalanceCommands` 同一套路），
@@ -265,27 +265,32 @@ final class PanelResetTests: XCTestCase {
 
     // MARK: - 3. 白平衡 = 原照设定
 
-    /// 双击「白平衡」→ `temperature/tint` 回 `nil`，**一条**历史，且 `decodeInputs` 移动（= 重新 develop）。
-    func testTheWhiteBalanceGroupResetIsAsShotAndMovesTheDecodeInputs() {
+    /// 双击「白平衡」→ `temperature/tint` 回 `nil`，**一条**历史，且 `renderInputs` 移动（143：
+    /// 白平衡是 S1 增益，所以它改渲染键而不是解码输入）。
+    func testTheWhiteBalanceGroupResetIsAsShotAndMovesTheRenderInputs() {
         let session = CatalogSession()
         let resets = PanelResets(session: session)
-        let asShotKey = session.edit.decodeInputs.key
+        let asShotKey = session.edit.renderInputs.key
+        let asShotDecode = session.edit.decodeInputs.key
 
         session.applyEdit { model in
             model.light.temperature = 5200
             model.light.tint = 8
         }
         XCTAssertTrue(session.commitEdit(label: "色温"))
-        XCTAssertNotEqual(session.edit.decodeInputs.key, asShotKey,
-                          "显式色温必然是另一份解码输入（= 一次新的 develop）")
+        XCTAssertNotEqual(session.edit.renderInputs.key, asShotKey,
+                          "显式色温必然改 S1 的增益（同一个缓冲，新渲染）")
+        XCTAssertEqual(session.edit.decodeInputs.key, asShotDecode,
+                       "白平衡不再碰解码输入")
         let before = session.history.count
 
         XCTAssertTrue(resets.group(.whiteBalance))
         XCTAssertNil(session.edit.light.temperature, "原照设定 = nil（不是 5200，也不是 6500）")
         XCTAssertNil(session.edit.light.tint)
         XCTAssertTrue(session.edit.light.whiteBalance.isAsShot)
-        XCTAssertEqual(session.edit.decodeInputs.key, asShotKey,
-                       "回到原照：解码输入回到 as shot 那一份，所以会重新 develop")
+        XCTAssertEqual(session.edit.renderInputs.key, asShotKey,
+                       "回到原照：S1 增益回到恒等，渲染键回到起点")
+        XCTAssertEqual(session.edit.decodeInputs.key, asShotDecode)
         XCTAssertEqual(session.history.count, before + 1, "整组复位 = 一条历史")
         XCTAssertEqual(session.history.currentSnapshot?.label, "原照设置")
 

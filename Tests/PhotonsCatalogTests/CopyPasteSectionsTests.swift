@@ -103,8 +103,9 @@ final class CopyPasteSectionsTests: XCTestCase {
         }
         // The payload's own answer about the pipeline: [.light, .curve] has no balance in it.
         XCTAssertFalse(reports[0].requiresDecode)
-        XCTAssertTrue(try catalog.pasteSettings(payload, intoAsset: ids[0],
-                                               sections: [.whiteBalance]).requiresDecode)
+        XCTAssertFalse(try catalog.pasteSettings(payload, intoAsset: ids[0],
+                                                 sections: [.whiteBalance]).requiresDecode,
+                       "since 143 a white balance is a render gain, not a development")
         XCTAssertEqual(try catalog.develop(forAsset: ids[0]).light.temperature, 5500)
     }
 

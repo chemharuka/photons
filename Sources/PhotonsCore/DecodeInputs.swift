@@ -4,10 +4,11 @@ import Foundation
 //
 // A develop document holds two kinds of setting, and they part ways at the decoder:
 //
-//   · **DecodeInputs** — everything that changes the pixels ImageIO hands back: the white balance
-//     (`CIRAWFilter.neutralTemperature`/`neutralTint`), the decode recipe, the requested decoder
-//     version and the scale. A change here means "the buffer itself is a different picture", so it
-//     must **develop again**: a new ladder rung, a new `DecodeCacheKey`, a new on-disk buffer.
+//   · **DecodeInputs** — everything that changes the pixels ImageIO hands back: the decode recipe,
+//     the requested decoder version and the scale. (Since 143 the white balance is **not** one of
+//     them: the filter always stays at the file's as-shot balance, and the document's Kelvin/tint is
+//     an S1 gain.) A change here means "the buffer itself is a different picture", so it must
+//     **develop again**: a new ladder rung, a new `DecodeCacheKey`, a new on-disk buffer.
 //   · **RenderInputs** — everything the GPU stages do *after* the decode: exposure, contrast,
 //     highlights/shadows/whites/blacks, curves, colour, masks, geometry. A change here means "draw
 //     the buffer I already have differently", and must **never** develop.
@@ -29,7 +30,10 @@ import Foundation
 /// orphans every buffer written by the old recipe.
 public struct DecodeInputs: Sendable, Hashable {
 
-    /// The white balance assigned inside the decoder. `.asShot` leaves Apple's own balance alone.
+    /// Retained only for the key spellings that already exist. Since 143 the document never fills
+    /// this with anything but `.asShot`; the decoder is always the file's as-shot balance and the
+    /// balance itself is an S1 gain (`WhiteBalanceEstimate`). `.asShot` appends nothing to any key,
+    /// which keeps every pre-143 buffer on disk hitting.
     public var whiteBalance: WhiteBalance
     /// Decoder version requested from the system pipeline; `nil` = whatever Apple defaults to.
     /// Part of the key because a v9 request that silently became v8 is a different buffer.
@@ -124,18 +128,19 @@ public struct DecodeInputs: Sendable, Hashable {
 /// Everything the render graph reads — the document **without** its decode inputs.
 ///
 /// A thin, explicit wrapper rather than "the rest of the struct": equality on this type is the
-/// question "would the pixels differ for the same buffer?", and it is deliberately *insensitive* to
-/// temperature/tint, which the buffer has already absorbed.
+/// question "would the pixels differ for the same buffer?", and it **does** see temperature/tint —
+/// since 143 those are S1 gains on the buffer, so a balance change is a render change.
 public struct RenderInputs: Sendable, Equatable {
 
-    /// The document with its decode inputs neutralised (white balance back to as shot). Same crop,
-    /// same tone, same curve, same colour, same masks — the decode half says nothing.
+    /// The document with its decode-only inputs neutralised (detail and decoder version). The white
+    /// balance is deliberately kept: it is no longer a decode input.
     public let edit: EditModel
 
     public init(_ edit: EditModel) {
         var e = edit
-        e.light.temperature = nil
-        e.light.tint = nil
+        // 143: the white balance is **not** a decode input any more. It is an S1 gain computed from
+        // the buffer's own illuminant, so a Kelvin/tint change must be visible here — that is what
+        // makes it a render (and what lets the drag preview settle on a real frame without a decode).
         // 派单 031: the noise-reduction/detail amounts are assigned inside `CIRAWFilter`, so the
         // buffer already carries them. Leaving them here would make "did this change the render?"
         // answer yes for a change the render cannot see.
@@ -199,7 +204,11 @@ public extension EditModel {
     /// The document keeps its white balance in `light` (one `Codable` blob, 派单 011 A's last
     /// bullet); this property is the derivation, so there is no second stored copy to drift.
     var decodeInputs: DecodeInputs {
-        DecodeInputs(whiteBalance: light.whiteBalance,
+        // 143 — the white balance is **not** a decoder input. The filter is always left at the file's
+        // as-shot balance; the document's Kelvin/tint is an S1 gain (`WhiteBalanceEstimate`). Keeping
+        // the component at `.asShot` here is what makes "as shot adds nothing" continue to hold for
+        // every decode key, rung identity and buffer on disk.
+        DecodeInputs(whiteBalance: .asShot,
                      decoderVersion: decoderVersion,
                      scale: 1,
                      recipe: DecodeRecipe.current,
@@ -222,10 +231,8 @@ public extension EditModel {
 
     /// The one decision function: decode, render, or nothing.
     ///
-    /// A white-balance change is `.decode` even when the numbers happen to be the file's own
-    /// (`nil` → 5871.6 K is still a decode: assigning a value is not a no-op — 派单 006 measured
-    /// 0.15–0.40 % of samples moving). Exposure, contrast, curve, colour, masks and geometry are
-    /// `.render`: the buffer is already the right picture.
+    /// A white-balance change is `.render` since 143: it is an S1 gain on the resident buffer, so no
+    /// development happens. (Before 143 it was `.decode` because the decoder owned the balance.)
     func splitFrom(_ old: EditModel) -> EditSplit {
         if decodesDifferently(from: old) { return .decode }
         if renderInputs != old.renderInputs { return .render }

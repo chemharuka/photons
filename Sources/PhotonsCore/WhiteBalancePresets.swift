@@ -222,6 +222,11 @@ public enum WhiteBalanceSolver {
     public static let searchRange = 2000.0...12000.0
     private static let iterations = 40
 
+    /// The nominal white point this model is centred on — and, since 143, the reference of the
+    /// scene-linear estimator as well. One constant, so the solver, the mask's anchor and the new
+    /// `WhiteBalanceEstimate` cannot disagree about what "6500 K" means.
+    public static let nominalTemperature = 6500.0
+
     /// The illuminant a buffer was decoded under. `nil` temperature (as shot with no decode yet) is
     /// read as the nominal 6500 K the model is centred on, and the caller is expected to have said so.
     public struct Reference: Sendable, Equatable {
@@ -234,7 +239,7 @@ public enum WhiteBalanceSolver {
         }
 
         public init(_ wb: WhiteBalance, fallback: WhiteBalance = .asShot) {
-            self.temperature = wb.temperature ?? fallback.temperature ?? 6500
+            self.temperature = wb.temperature ?? fallback.temperature ?? WhiteBalanceSolver.nominalTemperature
             self.tint = wb.tint ?? fallback.tint ?? 0
         }
     }
@@ -298,7 +303,7 @@ public enum WhiteBalanceSolver {
     /// The result is normalized on green exactly as `gain` is, and there is **no extra brightness
     /// compensation** — the mask has never had one, and adding one now would make a masked +30 a
     /// different *level* change from a global one (the global decode does not preserve luma either).
-    public static let localAnchorKelvin = 6500.0
+    public static let localAnchorKelvin = nominalTemperature
     /// The mask's kelvin step per slider unit (M1-7's mapping, unchanged).
     public static let localKelvinPerUnit = 30.0
     /// The reference the mask's relative units are measured from.
@@ -324,7 +329,7 @@ public enum WhiteBalanceSolver {
     /// `nil` for a sample that carries no colour information (black, or a channel at zero), where
     /// "make this neutral" has no meaning and any Kelvin would be a guess.
     public static func neutral(for sample: RGBSample,
-                               reference: Reference = Reference(temperature: 6500, tint: 0))
+                               reference: Reference = Reference(temperature: WhiteBalanceSolver.nominalTemperature, tint: 0))
         -> WhiteBalanceSolve? {
         let r = sample.r, g = sample.g, b = sample.b
         guard r.isFinite, g.isFinite, b.isFinite,
@@ -373,7 +378,7 @@ public enum WhiteBalanceSolver {
 
     /// The model's answer for "the document says `wb`, the sample was decoded under `reference`".
     public static func apply(_ wb: WhiteBalance, to sample: RGBSample,
-                             reference: Reference = Reference(temperature: 6500, tint: 0)) -> RGBSample {
+                             reference: Reference = Reference(temperature: WhiteBalanceSolver.nominalTemperature, tint: 0)) -> RGBSample {
         let g = gain(temperature: wb.temperature ?? reference.temperature,
                      tint: wb.tint ?? reference.tint, reference: reference)
         return RGBSample(r: sample.r * g.r, g: sample.g * g.g, b: sample.b * g.b)
