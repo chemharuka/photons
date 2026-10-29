@@ -2951,21 +2951,36 @@ public struct PanelResets {
             return committed
 
         case .correction:
-            // 096: 色差 R / 色差 B back to `OpticsGroup.identity` in **one** snapshot — the card is one
-            // thing on screen, so one double-click is one ⌘Z. `false` when both are already 0, so a
-            // stray double-click cannot mint an empty snapshot (or truncate the redo branch).
-            guard !session.edit.optics.isIdentity else { return false }
-            session.applyEdit { $0.optics = .identity }
+            // The **card's** scope, not a group's: 096's 色差 (optics) plus 116's four 暗角 numbers,
+            // which moved here from 效果 but kept their `effects.*` fields. Resetting only `optics`
+            // was the migration miss the user hit on 2026-10-29 (「双击校正不能让暗角的任何滑块归位」),
+            // so the vignette rows now come from the same table the card draws them from.
+            let vigRows = InspectorView.vignetteRows
+            let neutralEdit = EditModel.neutral
+            let vignetteChanged = vigRows.contains {
+                session.edit[keyPath: $0.keyPath] != neutralEdit[keyPath: $0.keyPath]
+            }
+            guard !session.edit.optics.isIdentity || vignetteChanged else { return false }
+            session.applyEdit { model in
+                model.optics = .identity
+                for row in vigRows { model[keyPath: row.keyPath] = neutralEdit[keyPath: row.keyPath] }
+            }
             return session.commitEdit(label: group.title, coalesce: false)
 
         case .effects:
-            // 2026-10-28: the whole card — 暗角's four numbers **and** 颗粒's four — back to
-            // `EffectsGroup.identity` in one snapshot. The card is one thing on screen, so one
-            // double-click is one ⌘Z; the reference is the group's own default initializer (grain
-            // amount 0, size 25, roughness 50, seed 0), never a literal, which is what keeps
-            // 「默认不是 0」 true for the three rows whose default is not.
-            guard session.edit.effects != EffectsGroup.identity else { return false }
-            session.applyEdit { $0.effects = .identity }
+            // The card's own rows, and **only** those: 纹理/清晰度/去雾 and the four grain numbers.
+            // 116 moved 暗角 to 校正, so a double-click here must not reach into another card's
+            // sliders (the same rule as `.color` vs `.colorGrading`). The default values come from
+            // `EditModel.neutral` — grain's are not all zero, and a literal would flatten them.
+            let rows = InspectorView.detailFXRows + InspectorView.grainRows
+            let neutralEdit = EditModel.neutral
+            let changed = rows.contains {
+                session.edit[keyPath: $0.keyPath] != neutralEdit[keyPath: $0.keyPath]
+            }
+            guard changed else { return false }
+            session.applyEdit { model in
+                for row in rows { model[keyPath: row.keyPath] = neutralEdit[keyPath: row.keyPath] }
+            }
             return session.commitEdit(label: group.title, coalesce: false)
 
         case .colorGrading:

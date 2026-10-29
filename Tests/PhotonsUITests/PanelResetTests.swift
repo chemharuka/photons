@@ -164,6 +164,41 @@ final class PanelResetTests: XCTestCase {
 
     /// **反证（常驻）**：把整组复位写成「每字段各提交一次」就是 N 条历史。
     ///
+    /// 116 把四个暗角滑杆搬进「校正」卡，但双击校正只复位了 `optics`（色差）——用户 2026-10-29
+    /// 的原话是「双击校正不能让暗角的任何滑块归位」。这条钉住卡片的**完整**范围：色差 + 四个暗角，
+    /// 一次双击一条历史；而「效果」卡不再伸进暗角（那是另一张卡的滑杆）。
+    func testDoubleClickOnCorrectionResetsOpticsAndVignetteInOneSnapshot() throws {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        session.applyEdit { model in
+            model.optics.caRed = 12
+            model.optics.caBlue = -8
+            model.effects.vignetteAmount = -55
+            model.effects.vignetteMidpoint = 70
+        }
+        XCTAssertTrue(session.commitEdit(label: "校正"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.group(.correction), "changed card must reset")
+        XCTAssertEqual(session.history.count, before + 1, "one double-click = one ⌘Z")
+        XCTAssertTrue(session.edit.optics.isIdentity)
+        let neutral = EditModel.neutral.effects
+        XCTAssertEqual(session.edit.effects.vignetteAmount, neutral.vignetteAmount, accuracy: 1e-12)
+        XCTAssertEqual(session.edit.effects.vignetteMidpoint, neutral.vignetteMidpoint, accuracy: 1e-12)
+        XCTAssertFalse(resets.group(.correction), "nothing left to reset → no empty snapshot")
+
+        // 效果 卡不再碰暗角：只复位它自己那七行。
+        session.applyEdit { model in
+            model.effects.vignetteAmount = -40
+            model.effects.grain = 35
+        }
+        XCTAssertTrue(session.commitEdit(label: "效果"))
+        XCTAssertTrue(resets.group(.effects))
+        XCTAssertEqual(session.edit.effects.vignetteAmount, -40, accuracy: 1e-12,
+                       "暗角 belongs to 校正 now — 效果's double-click must leave it alone")
+        XCTAssertEqual(session.edit.effects.grain, EditModel.neutral.effects.grain, accuracy: 1e-12)
+    }
+
     /// 这里把两条路径都跑一遍：`group(.light)` 是 1，逐字段循环是 7。前者一旦被改成后者，第一条
     /// 断言立刻红 —— 这就是规格第 7 条要的反证，不需要改代码再手动跑一次。
     func testTheGroupResetIsOneEntryWhileThePerFieldPathWouldBeSeven() {
@@ -563,7 +598,9 @@ final class PanelResetTests: XCTestCase {
                         InspectorView.Section.effects.title,
                         InspectorView.Section.colorGrading.title],
                        "the undo label is the card the user double-clicked")
-        XCTAssertTrue(source.contains("card(Section.correction.title, reset: { resetGroup(.correction) })"),
+        // 121 给这张卡加了标题行的 accessory（「已自动应用配置文件」），所以调用是多行的 —— 断言只认
+        // 「标题 + 复位回调」这一段，不认括号位置。
+        XCTAssertTrue(source.contains("Section.correction.title, reset: { resetGroup(.correction) }"),
                       "校正卡也要能从标题复位")
         XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
                       "效果卡也要能从标题复位")
