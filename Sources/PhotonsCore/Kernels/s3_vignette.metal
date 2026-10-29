@@ -39,9 +39,19 @@ kernel void s3_vignette(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
+    // Two metrics, deliberately in two spaces:
+    //
+    //  · `square` is per-axis normalised (`uv`), so its contour touches all four edges — this is the
+    //    rectangle-ish end and it must stay byte-identical to what roundness 0 has always drawn;
+    //  · `circle` is measured in **pixels over half the short edge**, so its contour is a real circle.
+    //    Measuring the radial term in `uv` (as this used to) stretches it by the aspect ratio, which
+    //    is why pulling the amount down gave an ellipse on a 3:2 frame.
     float2 d = (uv - 0.5) * 2.0;
+    float2 px = (uv - 0.5) * size;
+    float halfShort = max(min(size.x, size.y) * 0.5, 1.0);
+    float2 dPix = px / halfShort;
     float roundness = clamp(0.5 + p.a.w / 100.0 * 0.5, 0.0, 1.0);
-    float dist = mix(max(abs(d.x), abs(d.y)), length(d), roundness);
+    float dist = mix(max(abs(d.x), abs(d.y)), length(dPix), roundness);
 
     float midpoint = clamp(p.a.y / 100.0, 0.0, 1.0);
     float feather = clamp(p.a.z / 100.0, 0.02, 1.0);

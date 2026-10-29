@@ -112,6 +112,61 @@ final class DetailFXTests: XCTestCase {
                            colorSpace: image.colorSpace, decoderVersion: image.decoderVersion)
     }
 
+    /// 用户 2026-10-29：**去雾会把高亮部分变得更亮，这是错误的。**
+    ///
+    /// 根因：`J = (I − 1)/t + 1`（airlight A = 1）只在显示域成立；`I > 1` 时它 `加光`
+    /// （`(I−1)/t > I−1`），于是 HDR 高光随着去雾升高而更亮。修法是把模型跑在 `min(I, 1)` 上，
+    /// 白点以上的通道原样穿过 —— 于是 `out ≤ in` 逐像素成立，高光一个字节都不动。
+    func testDehazeNeverBrightensAnything() throws {
+        // A ramp with a real HDR tail: 0.05 … 2.0, so both sides of display white are represented.
+        let w = 256, h = 64
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let v = Float(0.05 + 1.95 * Double(x) / Double(w - 1))
+                let i = (y * w + x) * 4
+                rgba[i] = Float16(v); rgba[i + 1] = Float16(v); rgba[i + 2] = Float16(v)
+                rgba[i + 3] = 1
+            }
+        }
+        let image = LinearImage(width: w, height: h, rgba: rgba,
+                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let graph = try makeGraph(image)
+        var edit = EditModel.neutral
+        edit.effects.dehaze = 100
+
+        // headroom 4 so the tail above white actually survives into the output.
+        let options = RenderOptions(canvas: nil, scale: 1,
+                                    display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: 4),
+                                    useCache: false, wantsPixels: true)
+        let neutral = try XCTUnwrap(graph.render(EditModel.neutral, options: options).display)
+        let dehazed = try XCTUnwrap(graph.render(edit, options: options).display)
+
+        var worstBrighten: Double = 0
+        var brightenedPixels = 0
+        var changedAboveWhite = 0
+        for i in stride(from: 0, to: neutral.rgba.count, by: 4) {
+            for c in 0..<3 {
+                let before = Double(neutral.rgba[i + c])
+                let after = Double(dehazed.rgba[i + c])
+                if before > 1.0 {
+                    if abs(after - before) > 1e-4 { changedAboveWhite += 1 }
+                } else if after > before {
+                    brightenedPixels += 1
+                    worstBrighten = max(worstBrighten, after - before)
+                }
+            }
+        }
+        XCTAssertEqual(changedAboveWhite, 0,
+                       "白点以上的像素被去雾改动了 \(changedAboveWhite) 个通道")
+        XCTAssertEqual(brightenedPixels, 0,
+                       "去雾把 \(brightenedPixels) 个显示域通道变亮了（最多 +\(worstBrighten)）")
+        // …and it still removes haze: the darkest end must actually come up or down, not stay put
+        // (a no-op would satisfy the two assertions above).
+        XCTAssertLessThan(Double(dehazed.rgba[0]), Double(neutral.rgba[0]) - 1e-3,
+                          "去雾在最暗处没有任何作用，说明它根本没跑")
+    }
+
     private func render(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
         let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
                                     useCache: false, wantsPixels: true)

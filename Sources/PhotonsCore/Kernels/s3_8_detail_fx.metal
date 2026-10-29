@@ -347,7 +347,14 @@ kernel void s3_8_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
     float amount = clamp(p.a.z, -1.0, 1.0);
     float3 outRGB;
     if (amount >= 0.0) {
-        float3 clear = (rgb - 1.0) / t + 1.0;
+        // `J = (I − 1)/t + 1` is the dark-channel-prior recovery with airlight A = 1, and it is only
+        // meaningful for **display-referred** input. Above white the same expression *adds* light
+        // (`I > 1 ⇒ (I−1)/t > I−1`), which made HDR highlights brighter as dehaze went up — a veil
+        // removal must never brighten anything. So the model runs on `min(rgb, 1)` and the HDR tail
+        // passes through untouched (`out == rgb` there, hence `out ≤ rgb` everywhere).
+        float3 display = min(rgb, 1.0);
+        float3 clear = (display - 1.0) / t + 1.0;
+        clear = select(clear, rgb, rgb > 1.0);        // per-channel: keep >1 exactly as it was
         outRGB = mix(rgb, clear, amount);
     } else {
         float3 hazy = rgb * 0.6 + 0.4;

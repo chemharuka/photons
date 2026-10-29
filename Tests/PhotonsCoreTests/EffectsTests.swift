@@ -314,7 +314,15 @@ final class EffectsTests: XCTestCase {
                 if g >= 0.5 { measured = x; break }
             }
             let inner = 0.25 + (1.05 - 0.25) * (midpoint / 100.0)
-            let predicted = (1 - inner) * Double(w) / 2
+            // `dist` blends a per-axis square with a **pixel-space** radius, so on the centre row it
+            // is `|2u−1|` scaled by `k = 1 + r0·(aspect − 1)` (r0 = 0.5 at roundness 0; on a square
+            // frame k = 1 and this is the old formula verbatim).
+            let roundness = 0.5 + 0.0 / 100.0 * 0.5
+            // The radial metric is `pixels / (short edge / 2)`, so along **x** the scale is
+            // `W/min(W,H)` — 1 on a portrait frame, the aspect on a landscape one.
+            let xScale = Double(w) / Double(min(w, h))
+            let k = 1 + roundness * (xScale - 1)
+            let predicted = (1 - inner / k) * Double(w) / 2
             rings.append(Ring(midpoint: midpoint, measured: measured, predicted: predicted))
 
             XCTAssertEqual(Double(measured), predicted, accuracy: 6,
@@ -330,6 +338,40 @@ final class EffectsTests: XCTestCase {
             print(String(format: "VIGNETTE RING · 中点 %2.0f → 50%% 环 x = %d px（预测 %.0f，中心行 y = %d，宽 %d）",
                          r.midpoint, r.measured, r.predicted, y, w))
         }
+    }
+
+    /// 用户 2026-10-29：**暗角拉到底是一个椭圆，显然错误 —— 暗角要按圆形来。**
+    ///
+    /// 根因：`dist` 的径向支用的是 `uv`（每轴各自归一化），在 3:2 的帧上等于把圆按宽高比拉伸。
+    /// 现在径向支改成「像素 / 短边一半」，并且要求：在**同样像素半径**上，水平方向和垂直方向的
+    /// 增益必须相同（±2%），且等值线真的在 r 处而不是 r·aspect 处。
+    func testTheVignetteContourIsACircleNotAnEllipse() throws {
+        let graph = try makeGraph(flat())          // 非正方形：宽高比就是这条测试的意义
+        let neutral = try render(graph, .neutral)
+        let w = neutral.width, h = neutral.height
+        XCTAssertGreaterThan(abs(w - h), 100, "这条测试需要一个明确的非正方形帧")
+
+        var edit = EditModel.neutral
+        edit.effects.vignetteAmount = -100
+        edit.effects.vignetteRoundness = 100       // 圆的极端
+        edit.effects.vignetteMidpoint = 50
+        let frame = try render(graph, edit)
+
+        func gain(_ x: Int, _ y: Int) -> Double {
+            linear(code(frame, x, y)) / max(linear(code(neutral, x, y)), 1e-9)
+        }
+        // Same pixel radius along +x and +y from the centre; a circle gives equal gains, an ellipse
+        // does not (the horizontal point sits at r/aspect of the vertical one's relative distance).
+        let cx = w / 2, cy = h / 2
+        let r = Int(Double(min(w, h)) * 0.35)
+        let alongX = gain(cx + r, cy)
+        let alongY = gain(cx, cy + r)
+        print(String(format: "VIGNETTE CIRCLE · r=%d px · 水平增益 %.4f · 垂直增益 %.4f", r, alongX, alongY))
+        XCTAssertEqual(alongX, alongY, accuracy: 0.02,
+                       "同样 \(r) px 处水平 \(alongX) 与垂直 \(alongY) 不一致 —— 等值线是椭圆")
+
+        // …and it is not a circle by accident at the centre: the corner must be darker than the edge.
+        XCTAssertLessThan(gain(w - 2, h - 2), alongX, "角点应比边上更暗")
     }
 
     // MARK: - 3. 颉粒：size × roughness
