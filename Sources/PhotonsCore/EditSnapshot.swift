@@ -606,7 +606,6 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     public var vignetteAmount: Double?
     public var vignetteMidpoint: Double?
     public var vignetteFeather: Double?
-    public var vignetteRoundness: Double?
     public var grain: Double?
     /// 2026-10-28 (P0-6): S3.8's three numbers. Sparse like every other leaf — a copy of a
     /// vignette-only look carries no `texture`, so pasting it leaves the target's 纹理 alone.
@@ -618,13 +617,13 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
 
     public var fieldCount: Int {
         [vignetteAmount != nil, vignetteMidpoint != nil, vignetteFeather != nil,
-         vignetteRoundness != nil, grain != nil,
+         grain != nil,
          texture != nil, clarity != nil, dehaze != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 8
+    public static let fullFieldCount = 7
 }
 
 /// 色彩分级 — the nine wheel numbers (S3.8), one optional `GradeWheel` per region.
@@ -823,7 +822,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.effects.vignetteAmount, 0) { effects.vignetteAmount = edit.effects.vignetteAmount }
         if differs(edit.effects.vignetteMidpoint, 50) { effects.vignetteMidpoint = edit.effects.vignetteMidpoint }
         if differs(edit.effects.vignetteFeather, 50) { effects.vignetteFeather = edit.effects.vignetteFeather }
-        if differs(edit.effects.vignetteRoundness, 0) { effects.vignetteRoundness = edit.effects.vignetteRoundness }
         if differs(edit.effects.grain, 0) { effects.grain = edit.effects.grain }
         if differs(edit.effects.texture, 0) { effects.texture = edit.effects.texture }
         if differs(edit.effects.clarity, 0) { effects.clarity = edit.effects.clarity }
@@ -842,9 +840,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     // MARK: reading the payload
 
     /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (81). Masks are counted separately (`maskCount`): a mask is a
+    /// from is `fullDocumentFieldCount` (80). Masks are counted separately (`maskCount`): a mask is a
     /// nested document, and folding it into this arithmetic would make "1 slider + 1 mask" read as
-    /// 2 leaves of 81 — a fraction that means nothing.
+    /// 2 leaves of 80 — a fraction that means nothing.
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (colorGrading?.fieldCount ?? 0)
@@ -859,7 +857,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
     /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
-    /// + detail 5 + effects 8.
+    /// + detail 5 + effects 7 (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3).
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + ColorGradingPatch.fullFieldCount
@@ -1037,13 +1035,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
 
         if sections.contains(.effects), let e = effects {
             var p = EffectsPatch()
-            // 暗角 is one row on the card and four numbers in the patch: the child governs all four,
-            // because a vignette with a copied amount and an uncopied feather is a different look.
+            // 暗角 is one row on the card and three numbers in the patch: the child governs all
+            // three, because a vignette with a copied amount and an uncopied feather is another look.
             if on(.vignette) {
                 p.vignetteAmount = e.vignetteAmount
                 p.vignetteMidpoint = e.vignetteMidpoint
                 p.vignetteFeather = e.vignetteFeather
-                p.vignetteRoundness = e.vignetteRoundness
             }
             if on(.grain) { p.grain = e.grain }
             if on(.texture) { p.texture = e.texture }
@@ -1172,7 +1169,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.vignetteAmount { out.effects.vignetteAmount = v }
             if let v = p.vignetteMidpoint { out.effects.vignetteMidpoint = v }
             if let v = p.vignetteFeather { out.effects.vignetteFeather = v }
-            if let v = p.vignetteRoundness { out.effects.vignetteRoundness = v }
             if let v = p.grain { out.effects.grain = v }
             if let v = p.texture { out.effects.texture = v }
             if let v = p.clarity { out.effects.clarity = v }

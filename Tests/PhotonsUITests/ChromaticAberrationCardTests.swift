@@ -499,7 +499,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
     /// release, the panel's only `sliderRow`, and no slider of its own. A card that wrote the model
     /// directly would pass the pixel test above and fail the double-click one.
     func testTheCardGoesThroughThePanelFurniture() throws {
-        // 125: the 校正 card is a spec — its two CA rows and four vignette rows are the table the
+        // 125: the 校正 card is a spec — its two CA rows and three vignette rows are the table the
         // card draws and resets. No source string is needed to say which card owns a row.
         let correction = InspectorView.PanelCardSpec.correctionCard
         XCTAssertEqual(correction.section, .correction)

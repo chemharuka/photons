@@ -129,7 +129,6 @@ final class PanelRowSpecTests: XCTestCase {
             $0.effects.vignetteAmount = -55
             $0.effects.vignetteMidpoint = 70
             $0.effects.vignetteFeather = 30
-            $0.effects.vignetteRoundness = 40
         }
         XCTAssertTrue(session.commitEdit(label: "暗角"))
         XCTAssertTrue(PanelResets(session: session).group(movedEffects),

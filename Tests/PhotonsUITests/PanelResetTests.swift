@@ -164,8 +164,8 @@ final class PanelResetTests: XCTestCase {
 
     /// **反证（常驻）**：把整组复位写成「每字段各提交一次」就是 N 条历史。
     ///
-    /// 116 把四个暗角滑杆搬进「校正」卡，但双击校正只复位了 `optics`（色差）——用户 2026-10-29
-    /// 的原话是「双击校正不能让暗角的任何滑块归位」。这条钉住卡片的**完整**范围：色差 + 四个暗角，
+    /// 116 把三个暗角滑杆搬进「校正」卡，但双击校正只复位了 `optics`（色差）——用户 2026-10-29
+    /// 的原话是「双击校正不能让暗角的任何滑块归位」。这条钉住卡片的**完整**范围：色差 + 三个暗角，
     /// 一次双击一条历史；而「效果」卡不再伸进暗角（那是另一张卡的滑杆）。
     func testDoubleClickOnCorrectionResetsOpticsAndVignetteInOneSnapshot() throws {
         let session = CatalogSession()

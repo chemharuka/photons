@@ -172,8 +172,8 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 3, "127: whites is a global multiplicative level")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
-        XCTAssertEqual(StageAlgorithmVersion.vignette, 2,
-                       "116: the vignette moved into the end of the linear chain")
+        XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
+                       "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         // …and the ones that did not, so a bump stays a statement about one stage.
         for stage in [RenderStage.geometry, .curve, .color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,

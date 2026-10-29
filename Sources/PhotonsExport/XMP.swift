@@ -452,7 +452,9 @@ public enum XMPWriter {
         try write(metadata, "crs:PostCropVignetteAmount", zeroOrNil(e.vignetteAmount), &report)
         try write(metadata, "crs:PostCropVignetteMidpoint", e.vignetteMidpoint == 50 ? nil : number(e.vignetteMidpoint), &report)
         try write(metadata, "crs:PostCropVignetteFeather", e.vignetteFeather == 50 ? nil : number(e.vignetteFeather), &report)
-        try write(metadata, "crs:PostCropVignetteRoundness", zeroOrNil(e.vignetteRoundness), &report)
+        // 134: 圆度 has no field and is **not mapped** — the vignette is always circular. An imported
+        // `crs:PostCropVignetteRoundness` is ignored (there is no matching document key), and this
+        // writer deliberately emits none: the shape is not a parameter any more.
         // 2026-10-28: the two shape keys Lightroom has lived in since CS6 and this document had no
         // field for — `crs:GrainSize` (0…100, LR default 25) is 颗粒大小 and `crs:GrainFrequency`
         // (0…100, LR default 50) is 颗粒粗糙度: LR's "frequency" *is* the roughness control.

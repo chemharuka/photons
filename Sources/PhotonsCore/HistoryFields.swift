@@ -296,8 +296,6 @@ extension EditHistory {
             before.effects.vignetteMidpoint, after.effects.vignetteMidpoint)
         num("effects.vignetteFeather", .effects,
             before.effects.vignetteFeather, after.effects.vignetteFeather)
-        num("effects.vignetteRoundness", .effects,
-            before.effects.vignetteRoundness, after.effects.vignetteRoundness)
         num("effects.grain", .effects, before.effects.grain, after.effects.grain)
         // 2026-10-28 (P0-6) — S3.8's three numbers, so a 清晰度 drag reads as 「清晰度 +40」 in the
         // history panel rather than as a nameless 效果 row.
@@ -522,7 +520,6 @@ extension EditHistory {
         "effects.vignetteAmount": "暗角",
         "effects.vignetteMidpoint": "暗角中点",
         "effects.vignetteFeather": "暗角羽化",
-        "effects.vignetteRoundness": "暗角圆度",
         "effects.grain": "颗粒数量",
         "effects.grainSize": "颗粒大小",
         "effects.grainRoughness": "颗粒粗糙度",

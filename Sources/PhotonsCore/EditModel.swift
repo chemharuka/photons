@@ -521,8 +521,7 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 076 made for Color's two stages.
             if effects.vignetteAmount != old.effects.vignetteAmount
                 || effects.vignetteMidpoint != old.effects.vignetteMidpoint
-                || effects.vignetteFeather != old.effects.vignetteFeather
-                || effects.vignetteRoundness != old.effects.vignetteRoundness {
+                || effects.vignetteFeather != old.effects.vignetteFeather {
                 s.insert(.vignette)
             }
             if effects.grain != old.effects.grain
@@ -1943,9 +1942,14 @@ public struct DetailGroup: Sendable, Equatable, Codable {
 ///
 ///   · `vignetteAmount` −100…100 (`s3_vignette.metal`'s `gain`): negative darkens the corners,
 ///     positive brightens them, 0 is the identity (the pass copies);
-///   · `vignetteMidpoint` 0…100 — where the falloff starts (`inner = mix(0.25, 1.05, mid/100)`);
+///   · `vignetteMidpoint` 0…100 — where the falloff's 50 % point sits on the half-diagonal scale:
+///     0 = the centre (the whole frame darkens), 100 = the corner (`norm = 0.5·hypot(w, h)` makes
+///     the corner 1.0 at every aspect ratio; 134);
 ///   · `vignetteFeather` 0…100 — how soft the transition is (the kernel clamps it to 2…100 %);
-///   · `vignetteRoundness` −100…100 — square (max-norm) → circular (euclidean) blend;
+///
+/// The vignette is always circular (134, user 2026-10-29): the removed 圆度 field is an unknown key
+/// to this decoder and is ignored, so an old document still opens and renders with the pure-circle
+/// model.
 ///   · `grain` 0…100 — the grain's **amount** (standard deviation): 0 = no grain, and then S3.7 is not
 ///     encoded at all;
 ///   · `grainSize` 0…100 — the cell, in frame fractions;
@@ -1961,9 +1965,8 @@ public struct DetailGroup: Sendable, Equatable, Codable {
 /// neutral, and `keyString`/`grainKeyString` are built from these fields only.
 public struct EffectsGroup: Sendable, Equatable, Codable {
     public var vignetteAmount: Double      // -100…100, default 0 (negative = darker corners)
-    public var vignetteMidpoint: Double    // 0…100, default 50
+    public var vignetteMidpoint: Double    // 0…100, default 50; 100 = the corner (half diagonal)
     public var vignetteFeather: Double     // 0…100, default 50
-    public var vignetteRoundness: Double   // -100…100, default 0 (square → circular)
     /// 颗粒的**数量** (0…100, default 0). Kept under its original key `grain` so every document
     /// written before S3.7 re-encodes byte for byte (schema 5's `blackOffset` discipline).
     public var grain: Double
@@ -2023,14 +2026,13 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     }
 
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,
-                vignetteFeather: Double = 50, vignetteRoundness: Double = 0,
+                vignetteFeather: Double = 50,
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
                 texture: Double = 0, clarity: Double = 0, dehaze: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
-        self.vignetteRoundness = vignetteRoundness
         self.grain = grain
         self.grainSize = grainSize
         self.grainRoughness = grainRoughness
@@ -2046,7 +2048,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.vignetteAmount = c.val("vignetteAmount", v.vignetteAmount)
         v.vignetteMidpoint = c.val("vignetteMidpoint", v.vignetteMidpoint)
         v.vignetteFeather = c.val("vignetteFeather", v.vignetteFeather)
-        v.vignetteRoundness = c.val("vignetteRoundness", v.vignetteRoundness)
         v.grain = c.val("grain", v.grain)
         v.grainSize = c.val("grainSize", v.grainSize)
         v.grainRoughness = c.val("grainRoughness", v.grainRoughness)
@@ -2066,7 +2067,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         try c.encode(vignetteAmount, forKey: AnyCodingKey("vignetteAmount"))
         try c.encode(vignetteMidpoint, forKey: AnyCodingKey("vignetteMidpoint"))
         try c.encode(vignetteFeather, forKey: AnyCodingKey("vignetteFeather"))
-        try c.encode(vignetteRoundness, forKey: AnyCodingKey("vignetteRoundness"))
         try c.encode(grain, forKey: AnyCodingKey("grain"))
         try c.encode(grainSize, forKey: AnyCodingKey("grainSize"))
         try c.encode(grainRoughness, forKey: AnyCodingKey("grainRoughness"))
@@ -2076,11 +2076,10 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
     }
 
-    /// S3c's material — the four vignette numbers and nothing else. A grain drag must not miss a
+    /// S3c's material — the three vignette numbers and nothing else. A grain drag must not miss a
     /// cached vignette (they are different stages, and `.grain` carries its own material).
     public var keyString: String {
         "vig=\(k(vignetteAmount));mid=\(k(vignetteMidpoint));fea=\(k(vignetteFeather))"
-            + ";rou=\(k(vignetteRoundness))"
     }
 
     /// S3.7's material — the amount, the shape, and the **seed**, so two documents that differ only in

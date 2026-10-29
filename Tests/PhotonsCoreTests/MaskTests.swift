@@ -51,7 +51,7 @@ final class MaskTests: XCTestCase {
         edit.color = ColorGroup(vibrance: 15, saturation: -10, bands: ColorGroup.identityBands)
         edit.color.bands[3].hue = 20
         edit.effects = EffectsGroup(vignetteAmount: -40, vignetteMidpoint: 45,
-                                    vignetteFeather: 60, vignetteRoundness: 30)
+                                    vignetteFeather: 60)
         edit.detail = DetailGroup(sharpening: 40)
         edit.masks = []
         return edit
@@ -573,12 +573,12 @@ final class MaskTests: XCTestCase {
             // deliberately non-default band — gains an eighth link between S3 and the vignette.
             ("hsl", "46c83fd2ec9c572075bb9eb74996b3f9f35fb538dc40d93398d614b422bb90fb",
              "87cdfaa7ba2dc38d9544b31db78a25fcdf964e4b48f93b8d42c30c36ee84072a|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            // 116: 暗角搬进场景线性域 —— `AlgorithmVersion.vignette` 升到 2，所以这一段键**故意**变了，
+            // 134: 圆度删除、半径按半对角线归一、`AlgorithmVersion.vignette` 3，所以这一段键**故意**变了，
             // 链条下游的 display 也跟着变（它把 vignette 的摘要串在自己前面）。
-            ("vignette", "4da1fd1e4d59071b0b252745fe33012368edf872fbe577ad86e216897111ecba",
-             "46c83fd2ec9c572075bb9eb74996b3f9f35fb538dc40d93398d614b422bb90fb|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=2"),
-            ("display", "8916d88211dd38773afe250832a1ea0962e6c7a2553cc8a7215622b8ac32ad00",
-             "4da1fd1e4d59071b0b252745fe33012368edf872fbe577ad86e216897111ecba|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("vignette", "295c2b71463e2f08d677ae9cd09a9b6a7bbfb57af7f430a70984011e6b1ce67a",
+             "46c83fd2ec9c572075bb9eb74996b3f9f35fb538dc40d93398d614b422bb90fb|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("display", "3e7a1b0a5b822b0f12931a951494a5470fc4ddf7dc7c9707ae59db58490bc431",
+             "295c2b71463e2f08d677ae9cd09a9b6a7bbfb57af7f430a70984011e6b1ce67a|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
@@ -2407,7 +2407,7 @@ final class MaskTests: XCTestCase {
         return EditModel(geometry: .identity, light: .identity, curve: .identity,
                          color: .identity, detail: .identity,
                          effects: EffectsGroup(vignetteAmount: -20, vignetteMidpoint: 50,
-                                               vignetteFeather: 50, vignetteRoundness: 0),
+                                               vignetteFeather: 50),
                          masks: [maskA, maskB])
     }
 

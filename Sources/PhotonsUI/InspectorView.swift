@@ -1139,9 +1139,8 @@ public struct InspectorView: View {
     ///
     /// ```text
     /// 暗角        −100…100       S3c: negative darkens the corners
-    /// 暗角中点      0…100         where the falloff starts
+    /// 暗角中点      0…100         half-diagonal radius; 100 = the corner
     /// 暗角羽化      0…100         how soft the transition is
-    /// 暗角圆度   −100…100         square → circular
     /// ─────────────────────────
     /// 纹理       −100…100       S3.8: the guided-filter residual in the 2…8 px band
     /// 清晰度     −100…100       S3.8: the same residual at a few percent of the frame
@@ -1153,12 +1152,11 @@ public struct InspectorView: View {
     /// 种子          0…999         the hash's only free variable
     /// ```
     ///
-    /// **One card, not two.** The three blocks are the pipeline's S3c, S3.8 and S3.7 and could have
-    /// been split, but the ask was Lightroom's Effects *card*, and the user resets the card as one
-    /// thing — one double-click on 「效果」 puts all eleven numbers back in **one** snapshot. The
-    /// `divider`s between the blocks are the only thing the split is worth: they say "three stages"
-    /// without making the user find a second card for a look that is one decision (frames are usually
-    /// vignetted, their detail shaped *and* grained).
+    /// **One card, not two.** The two blocks are the pipeline's S3.8 and S3.7 and could have been
+    /// split, but the ask was Lightroom's Effects *card*, and the user resets the card as one thing —
+    /// one double-click on 「效果」 puts all seven numbers back in **one** snapshot. The `divider`
+    /// between the blocks is the only thing the split is worth: it says "two stages" without making
+    /// the user find a second card for a look that is one decision (detail shaped *and* grained).
     ///
     /// **The card stores nothing.** Every number comes from and goes to `effects` through
     /// `effectsRows`' key paths — there is no second copy of a value here, no draft, no local mirror
@@ -1515,16 +1513,18 @@ public struct InspectorView: View {
                 keyPath: \.color.saturation, decimals: 1),
     ]
 
-    /// 2026-10-28 — the 效果 card's 暗角 block: **S3c's four uniforms, in the kernel's own order**
-    /// (`s3_vignette.metal`: amount, midpoint, feather, roundness), with the kernel's own travels.
+    /// 2026-10-28 — the 效果 card's 暗角 block: **S3c's three uniforms, in the kernel's own order**
+    /// (`s3_vignette.metal`: amount, midpoint, feather), with the kernel's own travels.
     ///
     /// Nothing is added that the shader does not read: 高光对比 / 颜色优先 / 样式 are Lightroom's
     /// extra vignette keys and this kernel has no uniform for them, so no row exists for them — a
     /// slider that writes a number nothing consumes is the defect `optics`' own comment warns about
-    /// (a parameter in a group `keyMaterial` does not branch on renders nothing, silently).
+    /// (a parameter in a group `keyMaterial` does not branch on renders nothing, silently). The shape
+    /// slider is gone for the same reason (134): the contour is circular by construction, so it would
+    /// be a number no kernel reads.
     ///
-    /// All four are `.knob`: S3c runs in the display-referred domain on the already-decoded frame, so
-    /// 060's yellow would claim a decode parameter and 071's red a scene-linear one.
+    /// All three are `.linear`: S3c runs in the scene-linear chain (116), so 060's yellow would claim
+    /// a decode parameter and 071's red a scene-linear one; the card paints them red.
     public static let vignetteRows: [ToneRow] = [
         ToneRow(title: "暗角", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteAmount),
@@ -1532,8 +1532,6 @@ public struct InspectorView: View {
                 keyPath: \.effects.vignetteMidpoint),
         ToneRow(title: "暗角羽化", range: 0 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteFeather),
-        ToneRow(title: "暗角圆度", range: -100 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.vignetteRoundness),
     ]
 
     /// 2026-10-28 — the 效果 card's 颗粒 block: S3.7's four numbers (`s3_7_grain.metal`).
@@ -1573,11 +1571,11 @@ public struct InspectorView: View {
                 keyPath: \.effects.dehaze),
     ]
 
-    /// The card's eleven rows in draw order — the three blocks and the dividers between them. One
-    /// list, so a test can hold 「十一根滑杆」 and the card cannot draw a row the table does not have.
+    /// The card's seven rows in draw order — the two blocks and the divider between them. One list,
+    /// so a test can hold 「七根滑杆」 and the card cannot draw a row the table does not have.
     public static var effectsRows: [ToneRow] { detailFXRows + grainRows }
 
-    /// The 校正 card's rows in draw order: the two CA ratios (S0) and the four vignette rows (116 —
+    /// The 校正 card's rows in draw order: the two CA ratios (S0) and the three vignette rows (116 —
     /// linear-domain lens-vignetting correction), all drawn red.
     public static var correctionRows: [ToneRow] { caRows + vignetteRows }
 
@@ -2799,7 +2797,7 @@ public struct PanelResets {
         case detail
         /// 2026-10-28 (096): 校正 — 色差 R / 色差 B, one double-click.
         case correction
-        /// 2026-10-28: 效果 — 暗角 + 颗粒, eight numbers, one double-click.
+        /// 2026-10-28: 效果 — 暗角 + 颗粒, seven numbers (134 removed 圆度), one double-click.
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
         case colorGrading
