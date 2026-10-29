@@ -189,30 +189,21 @@ static inline float linear_alpha(float2 p, MaskShapeDesc d, float2 srcSize) {
     }
 
     float f = clamp(d.p1.y, 0.0, 1.0);
-    // 079 A4 — the feather is a **short-edge percentage** spent *outside* the rim (darktable's
-    // drawn-mask rule, `masks/ellipse.c:1502-1534`), not a fraction of the shape spent inside it.
-    // Same unit as `MaskRadius.featherPixels` on the host: one number, one meaning, at thumbnail,
-    // fit, 1:1 and export scale.
-    float featherPx = f * 0.1 * min(srcSize.x, srcSize.y);
-    float span = length(dir);
-
-    if (featherPx <= 0.0 || span < 1e-6) {
-        // f == 0 (or a zero-length gradient, which has no rim to feather): the pre-079 arithmetic,
+    // 079 A4's "short-edge percentage spent outside the rim" is the **radial** rule (darktable's
+    // `masks/ellipse.c:1502-1534`); 079 A4 applied it to the open shapes too and that broke the linear
+    // gradient — one-sided, a tenth as wide, and no longer through the midpoint. Restored here to the
+    // pre-A4 (e3a011d^) contract: `f` is the fraction of the **whole span**, centred on `t' = ½`.
+    float lo = 0.5 - 0.5 * f;
+    float hi = max(0.5 + 0.5 * f, lo + 1e-5);
+    if (f <= 0.0) {
+        // f == 0 (or a zero-length gradient, which has no span to ramp over): the pre-079 arithmetic,
         // verbatim. Every document that carries `feather = 0` must stay **bit-identical** — the
         // recorded atlases and every digest taken from them were produced by this expression.
-        float lo = 0.5 - 0.5 * f;
-        float hi = max(0.5 + 0.5 * f, lo + 1e-5);
         return smoothstep(lo, hi, tp);
     }
 
-    // The rim is the half-way line `t' = ½`: coverage is **1** everywhere past it and decays to 0
-    // over `featherPx` *before* it, squared — `ratio = 1 − (d/featherPx)²`, out = ratio². The width
-    // is measured in `t'` units by dividing by the gradient's own length in source pixels, so a
-    // short gradient and a long one feather by the same number of pixels.
-    float w = featherPx / span;                       // feather width in t' units
-    float outside = max(0.5 - tp, 0.0) / w;           // 0 at the rim, 1 at the outer edge
-    float ratio = clamp(1.0 - outside * outside, 0.0, 1.0);
-    return ratio * ratio;
+    // Symmetric ramp: alpha = 0 at `lo`, 0.5 exactly at the half-way line `t' = ½`, 1 at `hi`.
+    return smoothstep(lo, hi, tp);
 }
 
 static inline float radial_alpha(float2 p, MaskShapeDesc d, float2 srcSize, float minSide) {

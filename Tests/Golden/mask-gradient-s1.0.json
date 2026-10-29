@@ -1,11 +1,11 @@
 {
-  "atlasSHA256" : "97468015c7ac959215beff3470eee42ea86e34b7c8d2ef82fd6d28b201dc3df8",
-  "displaySHA256" : "e43530c7fcd1175ba4621a6a3e118dc401c9a35dd11583cfe11a87cc50e4cf1d",
+  "atlasSHA256" : "4436531f957f783e174b4a613fba304671c2c80454a15a04fa32db0ecbe6ddcf",
+  "displaySHA256" : "d63dbb6397374ef4aef945b59c404c4869e93f9ccba7616609b493d86a57ef91",
   "maskIDs" : [
     "m-a",
     "m-b"
   ],
-  "note" : "Recorded by MaskTests on the synthetic 96×64 flat-0.4 image; masks m-a (linear, +0.5 EV, +10 sat, midpoint 0.4) and m-b (radial, −1 EV). Digests cover 8-bit quantised values so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended.",
+  "note" : "Recorded by MaskTests on the synthetic 96×64 flat-0.4 image; masks m-a (linear, +0.5 EV, +10 sat, midpoint 0.4 — 102's symmetric feather ramp) and m-b (radial, −1 EV). Digests cover 8-bit quantised values so a GPU family change does not invalidate the frame; re-record only when a kernel change is intended.",
   "sampleX" : [
     4,
     48,
@@ -24,27 +24,27 @@
   ],
   "samples" : [
     [
-      0,
+      0.0491943359375,
       0
     ],
     [
-      1,
+      0.64599609375,
       1
     ],
     [
-      1,
+      0.99462890625,
       0
     ],
     [
-      0,
+      0.204345703125,
       0
     ],
     [
-      1,
+      0.947265625,
       0
     ],
     [
-      1,
+      0.90576171875,
       0
     ]
   ],
