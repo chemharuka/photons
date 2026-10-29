@@ -175,7 +175,8 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(EditModel.currentSchemaVersion, 11)
         XCTAssertEqual(EditModel.neutral.schemaVersion, 11)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
-        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 10"), "新文档是版本 10")
+        XCTAssertTrue(fresh.contains("\"schemaVersion\" : \(EditModel.currentSchemaVersion)"),
+                      "新文档的版本号取自 currentSchemaVersion，不写死")
         XCTAssertFalse(fresh.contains("blackOffset"), "0 不写键 —— 旧 blob 的逐字节稳定靠这条")
         // 2026-10-28: 黑白 的两个新键同样在默认值上缺席，所以 schema-7 的 blob 也能逐字节重编码。
         XCTAssertFalse(fresh.contains("blackAndWhite"))
@@ -570,7 +571,16 @@ final class BlackLevelTests: XCTestCase {
             self.trimPipeline = try Self.pipeline(library, device: device, "s1_scene_linear_trim")
             guard let queue = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
             self.queue = queue
-            XCTAssertEqual(MemoryLayout<Params>.stride, 80, "S1Params 的镜像必须与 Metal 侧同宽")
+            // schema 11 删掉了电平那一组 float4，宽度从 80 变成 64 —— 所以这里**不写死数字**，
+            // 而是数 `.metal` 里 `S1Params` 的 float4 成员（每行 16 字节），再与 Swift 镜像比对。
+            // 写死宽度的版本在删字段时只会变成一条「64 不等于 80」的红，说不清是哪边错了。
+            let metal = try String(contentsOf: url, encoding: .utf8)
+            let structBody = metal.components(separatedBy: "struct S1Params {").last?
+                .components(separatedBy: "};").first ?? ""
+            let float4s = structBody.components(separatedBy: "float4").count - 1
+            XCTAssertGreaterThan(float4s, 0, "S1Params 的成员必须能在 .metal 里数出来")
+            XCTAssertEqual(MemoryLayout<Params>.stride, float4s * 16,
+                           "S1Params 的镜像必须与 Metal 侧同宽（\(float4s) 个 float4）")
         }
 
         private static func pipeline(_ library: MTLLibrary, device: MTLDevice,
