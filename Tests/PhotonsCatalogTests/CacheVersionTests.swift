@@ -169,8 +169,8 @@ final class CacheVersionTests: XCTestCase {
         // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2,
         // so its generation moved again to 4; 124 moved 高光's white closure above the HDR range).
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
-        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 6,
-                       "147: whites' EV window reads the unexposed scale (143 had made WB S1's own gain)")
+        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 7,
+                       "129: the blacks level's dispatch boundary moved to |blacks| = 20")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
@@ -548,7 +548,7 @@ final class CacheVersionTests: XCTestCase {
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
-        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=6"))
+        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=7"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
     }
 }

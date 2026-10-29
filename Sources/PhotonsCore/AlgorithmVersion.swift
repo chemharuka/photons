@@ -42,6 +42,13 @@ public enum StageAlgorithmVersion {
 
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic).
     public static let geometry = 1
+    /// **7** — 129: S1's instantiation switch for the blacks level now sits where the level term is
+    /// zero (`|blacks| > 20`, `smoothstep(0.2, 1, |blacks|/100)`), not at 073C's original 50. The
+    /// kernel arithmetic is unchanged; documents with **20 < |blacks| ≤ 50** now take the hybrid
+    /// instantiation they should have taken since `a449462`, so their pixels move (S1 output: up to
+    /// 0.17 code at blacks 30, 1.19 at 45, 1.70 at 49.9; true black +0.82 from the hybrid toe's
+    /// floor). `|blacks| ≤ 20` and every other document are byte-identical to 6, and 50 → 50.01 no
+    /// longer steps 3.13 codes.
     /// **6** — 147: `whites`' EV window is read on the unexposed light (`L − log2(exposureGain)`)
     /// instead of the exposed one, so the same `whites` number is the same scene operation at every
     /// exposure. A document with `whites != 0` and `exposure != 0` now renders different pixels;
@@ -58,7 +65,7 @@ public enum StageAlgorithmVersion {
     /// shadows scale with the white end; 073C's blacks travel and 073B's EV shoulder are unchanged.
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
-    public static let sceneLinear = 6
+    public static let sceneLinear = 7
     /// **3** — 147: a mask's `luminanceRange`/`colorRange` predicate reads the S1 sample divided by
     /// the global exposure gain, so the selection no longer drifts with the EV slider. A document
     /// with a picture-reading mask and `exposure != 0` now renders different pixels; `exposure == 0`

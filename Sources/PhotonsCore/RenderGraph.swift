@@ -3047,6 +3047,22 @@ public final class RenderGraph {
 
     // MARK: encoding
 
+    /// 129 — where S1's blacks travel switches from 073B's pure-EV instantiation to 073C's hybrid
+    /// (EV + black-point level). It is the zero of `tone_shape.metal`'s blend factor
+    /// `m = smoothstep(0.2, 1, |blacks|/100)`, i.e. **20**, not 073C's original 50: `a449462`
+    /// (2026-10-29) moved the level's entry to 20 but left this CPU switch at 50, so 20…50 rendered
+    /// with the level term switched off and crossing 50 stepped the picture by 3.13 codes.
+    ///
+    /// Strict `>` is deliberate: at exactly 20 `m` is 0, so either instantiation is the same
+    /// *level* (the knee one keeps 073B's bytes); 20.01 is the first value that needs the level.
+    static let blacksLevelEntry: Double = 20
+
+    /// The one decision `encode(.sceneLinear)` uses to pick `kHybrid`, exposed so
+    /// `BlacksBoundaryTests` pins the boundary instead of copying the number.
+    static func sceneLinearUsesLevelEntry(blacks: Double) -> Bool {
+        abs(blacks) > blacksLevelEntry
+    }
+
     private func encoder(_ cb: MTLCommandBuffer, _ pipeline: MTLComputePipelineState,
                          in src: MTLTexture, out dst: MTLTexture) throws -> MTLComputeCommandEncoder {
         guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3148,17 +3164,21 @@ public final class RenderGraph {
             // that spelling moving 2980/12309 samples of the push document by an ULP).
             //
             //   · no dropper level, `blacks == whites == 0` → 019's arithmetic without any new code;
-            //   · `blacks`/`whites` ≠ 0, `|blacks| ≤ 50`        → the end-point (knee) model, 073B;
-            //   · `|blacks| > 50`                             → 073C: the same toe plus the black-point
-            //     level move. The threshold is exactly the zero of the blend factor `m(a)`, so the two
-            //     instantiations agree bit for bit where they meet — the switch is invisible in the
-            //     picture, and the whole first half of the travel keeps 073B's bytes;
+            //   · `blacks`/`whites` ≠ 0, `|blacks| ≤ 20`        → the end-point (knee) model, 073B;
+            //   · `|blacks| > 20`                             → 073C: the same toe plus the black-point
+            //     level move. **129:** the level enters at |blacks| = 20 since `a449462`
+            //     (`m(a) = smoothstep(0.2, 1, |blacks|/100)`), so 20 — not 073C's original 50 — is
+            //     where `m` is exactly 0 and the two instantiations' level terms meet. At 20 the level
+            //     term is absent from both; the knee keeps 073B's bytes for the whole first 20 %. The
+            //     hybrid instantiation still routes the lift through `s1_toe` even at `off == 0`, which
+            //     is the sole (pre-existing, kernel-side) difference at true black; see
+            //     `BlacksBoundaryTests`.
             //   · 071's trim is orthogonal: `_trim` for each of the two.
             //
             // schema 11: there is no dropper level any more, so `kLevels` (030's affine remap) is not
             // one of the choices — `blackOffset` and the two end-point sliders are the whole travel.
             let knee = edit.light.blacks != 0 || edit.light.whites != 0
-            let hybrid = knee && abs(edit.light.blacks) > LightGroup.blacksEVToLevelSplit
+            let hybrid = knee && Self.sceneLinearUsesLevelEntry(blacks: edit.light.blacks)
             let trim = edit.light.blackOffset != 0
             let function: String
             switch (knee, hybrid, trim) {
