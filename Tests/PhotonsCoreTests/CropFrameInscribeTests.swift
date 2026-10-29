@@ -135,7 +135,7 @@ final class CropFrameInscribeTests: XCTestCase {
         ]
 
         for e in expected {
-            let clamped = CropMath.clampedToRotatedFrame(.full, in: source, degrees: e.degrees)
+            let clamped = CropMath.clampedToRotatedFrame(.full, in: source, degrees: e.degrees, keepsInsideRotatedFrame: true)
             report("全图", clamped, degrees: e.degrees)
             let px = size(clamped)
 
@@ -187,7 +187,7 @@ final class CropFrameInscribeTests: XCTestCase {
             (45, 724.077343935, 407.293505963),
         ]
         for e in expected {
-            let clamped = CropMath.clampedToRotatedFrame(base, in: source, degrees: e.degrees)
+            let clamped = CropMath.clampedToRotatedFrame(base, in: source, degrees: e.degrees, keepsInsideRotatedFrame: true)
             report("16:9 锁", clamped, degrees: e.degrees)
             let px = size(clamped)
 
@@ -225,8 +225,8 @@ final class CropFrameInscribeTests: XCTestCase {
         ]
         for angle in [0.0, 1, 5, 9, 15, 30, 45, -9, -12.5] {
             for (name, rect) in rects {
-                let once = CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle)
-                let twice = CropMath.clampedToRotatedFrame(once, in: source, degrees: angle)
+                let once = CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle, keepsInsideRotatedFrame: true)
+                let twice = CropMath.clampedToRotatedFrame(once, in: source, degrees: angle, keepsInsideRotatedFrame: true)
                 XCTAssertEqual(twice, once, "\(name) at \(angle)°: clamp is not idempotent")
             }
         }
@@ -238,10 +238,10 @@ final class CropFrameInscribeTests: XCTestCase {
     func testTheSidesNeverGrowWithTheAngle() {
         let sixteenNine = CropMath.fittedCrop(aspect: 16.0 / 9.0, in: .full, source: source)
         for (name, base) in [("全图", CropRect.full), ("16:9", sixteenNine)] {
-            var previous = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: 0))
+            var previous = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: 0, keepsInsideRotatedFrame: true))
             var widths: [String] = []
             for degrees in stride(from: 1.0, through: 15.0, by: 1.0) {
-                let px = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: degrees))
+                let px = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: degrees, keepsInsideRotatedFrame: true))
                 widths.append(String(format: "%g°:%.3f", degrees, px.width))
                 XCTAssertLessThanOrEqual(px.width, previous.width,
                                          "\(name): width grew from \(previous.width) at \(degrees)°")
@@ -254,7 +254,7 @@ final class CropFrameInscribeTests: XCTestCase {
                                   "\(name): the frame did not shrink between steps at \(degrees)°")
                 previous = px
             }
-            let at45 = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: 45))
+            let at45 = size(CropMath.clampedToRotatedFrame(base, in: source, degrees: 45, keepsInsideRotatedFrame: true))
             XCTAssertLessThanOrEqual(at45.width, previous.width, "\(name): 45° wider than 15°")
             print("单调 \(name) · " + widths.joined(separator: " ") +
                   String(format: " · 45°:%.3f", at45.width))
@@ -270,16 +270,16 @@ final class CropFrameInscribeTests: XCTestCase {
                      CropRect(left: 0.0, top: 0.0, right: 0.4, bottom: 0.7),
                      CropRect(left: 0.6, top: 0.3, right: 1.0, bottom: 1.0)]
         for rect in rects {
-            let back = CropMath.clampedToRotatedFrame(rect, in: source, degrees: 0)
+            let back = CropMath.clampedToRotatedFrame(rect, in: source, degrees: 0, keepsInsideRotatedFrame: true)
             XCTAssertEqual(back, rect, "0° must be the identity")
             XCTAssertEqual(back.left, rect.left, accuracy: 0)
             XCTAssertEqual(back.right, rect.right, accuracy: 0)
         }
         // …and the *same* rect comes back after a round trip through a large angle.
         for degrees in [5.0, 9, 15, 45] {
-            let shrunk = CropMath.clampedToRotatedFrame(.full, in: source, degrees: degrees)
+            let shrunk = CropMath.clampedToRotatedFrame(.full, in: source, degrees: degrees, keepsInsideRotatedFrame: true)
             XCTAssertNotEqual(shrunk, .full, "\(degrees)°: nothing shrank")
-            let back = CropMath.clampedToRotatedFrame(.full, in: source, degrees: 0)
+            let back = CropMath.clampedToRotatedFrame(.full, in: source, degrees: 0, keepsInsideRotatedFrame: true)
             XCTAssertEqual(back, .full, "\(degrees)° → 0°: the frame did not come back")
         }
     }
@@ -295,7 +295,7 @@ final class CropFrameInscribeTests: XCTestCase {
         ]
         for angle in [5.0, 9, 12, 15, 30, 45, -9, -45] {
             for (name, rect) in rects {
-                let clamped = CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle)
+                let clamped = CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle, keepsInsideRotatedFrame: true)
                 let m = containment(clamped, degrees: angle)
                 XCTAssertTrue(m.inside, "\(name) at \(angle)°: corner outside by \(-m.minClearance) px")
                 // 保中心: the shrink is about the rect's own centre.
@@ -310,7 +310,7 @@ final class CropFrameInscribeTests: XCTestCase {
                 // model's own normalization: `right = left + width` is one ULP off a literal
                 // `bottom: 0.45` before the constraint ever runs).
                 if CropMath.fitsInsideRotatedFrame(rect, in: source, degrees: angle) {
-                    XCTAssertEqual(CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle),
+                    XCTAssertEqual(CropMath.clampedToRotatedFrame(rect, in: source, degrees: angle, keepsInsideRotatedFrame: true),
                                    rect.clamped(), "\(name) at \(angle)°: a legal rect was shrunk")
                 }
             }
@@ -326,7 +326,7 @@ final class CropFrameInscribeTests: XCTestCase {
             XCTAssertEqual(CropMath.rotatedFrameScale(cornered, in: source, degrees: angle), 0,
                            "\(angle)°: the corner really is outside — the fallback is what is tested")
             XCTAssertFalse(CropMath.fitsInsideRotatedFrame(cornered, in: source, degrees: angle))
-            let rescued = CropMath.clampedToRotatedFrame(cornered, in: source, degrees: angle)
+            let rescued = CropMath.clampedToRotatedFrame(cornered, in: source, degrees: angle, keepsInsideRotatedFrame: true)
             let m = containment(rescued, degrees: angle)
             XCTAssertTrue(m.inside, "\(angle)°: the rescued frame is still outside")
             XCTAssertEqual(ratio(rescued), 1.0, accuracy: 1e-12, "\(angle)°: shape changed")
@@ -361,7 +361,7 @@ final class CropFrameInscribeTests: XCTestCase {
         }
 
         let withConstraint = criteria { crop, degrees in
-            CropMath.clampedToRotatedFrame(crop, in: source, degrees: degrees)
+            CropMath.clampedToRotatedFrame(crop, in: source, degrees: degrees, keepsInsideRotatedFrame: true)
         }
         let withoutConstraint = criteria { crop, _ in crop }
 

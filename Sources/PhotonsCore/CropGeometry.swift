@@ -70,7 +70,12 @@ public struct CropGeometry: Sendable, Equatable {
         self.rotation = RotationMatrix(degrees: geometry.straightenDegrees)
         self.crop = crop
         self.source = oriented
-        self.canvas = CropMath.outputSize(crop, in: oriented)
+        // 132: the canvas is the bounding box of the rotated crop. At 0° this is the same
+        // `outputSize(crop, in: oriented)` call as before — same function, same arguments.
+        self.canvas = CropMath.canvasSize(crop: crop, in: source,
+                                          straightenDegrees: geometry.straightenDegrees,
+                                          quarterTurns: geometry.quarterTurns,
+                                          allowsOutsideSource: true)
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(geometry.quarterTurns)
         self.flipHorizontal = geometry.flipHorizontal
         self.flipVertical = geometry.flipVertical

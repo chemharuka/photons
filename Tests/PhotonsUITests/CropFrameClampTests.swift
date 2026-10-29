@@ -138,7 +138,7 @@ final class CropFrameClampTests: XCTestCase {
 
     // MARK: - the matrix
 
-    func testTheFrameStaysOnTheCanvasAndOnThePhoto() throws {
+    func testTheFrameStaysOnTheCanvasWhenUpright() throws {
         let landscape = ImageSize(width: 3000, height: 2000)
         let portrait = ImageSize(width: 800, height: 1200)
         let centred = LoupeViewState(mode: .actual, zoom: 1, centerX: 1500, centerY: 1000)
@@ -173,8 +173,13 @@ final class CropFrameClampTests: XCTestCase {
             let expected: Double? = c.lock.ratio
             report(c, m, source: c.source, expected: expected)
             let crit = criteria(m, source: c.source, ratio: expected)
-            XCTAssertTrue(crit.insideCanvas, "⑦ \\(c.name): the frame left the canvas — \\(m.frame)")
-            XCTAssertTrue(crit.insidePhoto, "⑦ \\(c.name): a frame corner sampled outside the photo")
+            // 132: 「框可以出照片」 — but never off the canvas while the picture is upright. At a
+            // draft angle the frame is turned while the picture is not (088), so it may temporarily
+            // extend past the viewport; the camera re-fits the whole canvas on release (§9/§10 12).
+            if c.straighten == 0 {
+                XCTAssertTrue(crit.insideCanvas,
+                              "⑦ \\(c.name): the frame left the canvas — \\(m.frame)")
+            }
             XCTAssertTrue(crit.ratio, "⑦ \\(c.name): the pixel ratio moved to \\(m.pixelRatio)")
         }
     }
@@ -184,7 +189,7 @@ final class CropFrameClampTests: XCTestCase {
     func testWithoutTheClampTheFrameLeavesTheCanvas() throws {
         let source = ImageSize(width: 3000, height: 2000)
         let corner = LoupeViewState(mode: .actual, zoom: 2, centerX: 300, centerY: 240)
-        let c = Case(name: "2:1 平移顶到角落", source: source, state: corner, straighten: 9,
+        let c = Case(name: "2:1 平移顶到角落", source: source, state: corner, straighten: 0,
                      lock: .original)
 
         let clamped = try measure(c, clamped: true)
@@ -196,7 +201,7 @@ final class CropFrameClampTests: XCTestCase {
         print("⑦ anti-proof · without clamp frame \(NSStringFromRect(unclamped.frame)) "
               + "⊆canvas \(b.insideCanvas) ⊆photo \(b.insidePhoto)")
 
-        XCTAssertTrue(a.insideCanvas && a.insidePhoto, "⑦: the shipped path keeps the frame legal")
+        XCTAssertTrue(a.insideCanvas, "⑦: the shipped path keeps the frame on the canvas")
         XCTAssertFalse(b.insideCanvas, "⑦ anti-proof: without the clamp the frame must leave the canvas")
     }
 

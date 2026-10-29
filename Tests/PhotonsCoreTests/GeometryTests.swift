@@ -27,7 +27,12 @@ final class GeometryTests: XCTestCase {
 
         XCTAssertEqual(carried.rotationDegrees, -12.5, accuracy: 1e-12)
         XCTAssertEqual(carried.crop, geometry.renderCrop(source: source))
-        XCTAssertEqual(carried.canvas, CropMath.outputSize(carried.crop, in: source))
+        // 132: the canvas is the bounding box of the rotated crop; at 0° it is `outputSize`.
+        XCTAssertEqual(carried.canvas,
+                       CropMath.canvasSize(crop: carried.crop, in: source,
+                                           straightenDegrees: -12.5, quarterTurns: 0))
+        XCTAssertNotEqual(carried.canvas, CropMath.outputSize(carried.crop, in: source),
+                          "a straightened frame's canvas is the rotated bounding box")
         XCTAssertEqual(carried.source, source)
         XCTAssertEqual(carried.cosine, cos(-12.5 * .pi / 180), accuracy: 1e-12)
         XCTAssertEqual(carried.sine, sin(-12.5 * .pi / 180), accuracy: 1e-12)
@@ -112,7 +117,8 @@ final class GeometryTests: XCTestCase {
 
         /// Where the rotation matrix says a source pixel centre lands, built **only** from
         /// `rotatedFrameCorners` (the quad the crop UI uses).
-        func expected(_ centre: (x: Int, y: Int), degrees: Double) -> (x: Double, y: Double) {
+        func expected(_ centre: (x: Int, y: Int), degrees: Double,
+                      canvas: DisplayImage) -> (x: Double, y: Double) {
             let quad = CropMath.rotatedFrameCorners(in: frame, degrees: degrees)
             let u = (Double(centre.x) + 0.5) / Double(width)
             let v = (Double(centre.y) + 0.5) / Double(height)
@@ -122,8 +128,11 @@ final class GeometryTests: XCTestCase {
                 + u * v * quad[2].x + (1 - u) * v * quad[3].x
             let y = (1 - u) * (1 - v) * quad[0].y + u * (1 - v) * quad[1].y
                 + u * v * quad[2].y + (1 - u) * v * quad[3].y
-            // Normalised position (0…1) → pixel **index**: a texel's centre is at index + 0.5.
-            return (x * Double(width) - 0.5, y * Double(height) - 0.5)
+            // Normalised position (0…1) of the **frame** → the canvas. 132: the canvas is the
+            // rotated crop's bounding box, so the frame is centred in it (the empty margins are the
+            // difference). At 0° the offset is 0 and this is the old map.
+            let ox = Double(canvas.width - width) / 2, oy = Double(canvas.height - height) / 2
+            return (ox + x * Double(width) - 0.5, oy + y * Double(height) - 0.5)
         }
 
         /// Centroids of the eight bright blobs, as pixel indices.
@@ -165,7 +174,7 @@ final class GeometryTests: XCTestCase {
 
             var matched = [Bool](repeating: false, count: found.count)
             for (i, centre) in centres.enumerated() {
-                let want = expected(centre, degrees: degrees)
+                let want = expected(centre, degrees: degrees, canvas: rendered)
                 // Nearest blob that no other probe has claimed.
                 var best = -1
                 var bestDistance = Double.infinity

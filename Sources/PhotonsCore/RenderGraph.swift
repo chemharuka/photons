@@ -83,6 +83,13 @@ public struct RenderOptions: Sendable {
     /// Copy the result back to the CPU. Off for the on-screen path, where the cost is a real
     /// regression: 2560×1600 rgba16Float is 32 MB per frame.
     public var wantsPixels: Bool
+    /// 132 §9 — when the requested content already fits inside `canvas`, **letterbox it instead of
+    /// scaling it up**. The loupe's crop workspace asks for this: its "fit" is deliberately 90 % of
+    /// the ordinary fit, and the pre-132 `fit()` would blow that 10 % margin back up to the viewport.
+    ///
+    /// Not a key: it only chooses between two sizes of the same picture (the caller names the scale),
+    /// and it is `false` for every pre-existing caller, so nothing moves.
+    public var neverUpscalesContent: Bool
     /// Patch-level recomputation of the local stage (005d, §3.4).
     ///
     /// `.off` is the 005c behaviour (one full-canvas dispatch) and is what the recorded goldens were
@@ -203,6 +210,7 @@ public struct RenderOptions: Sendable {
                 display: DisplayOptions = DisplayOptions(),
                 useCache: Bool = true,
                 wantsPixels: Bool = true,
+                neverUpscalesContent: Bool = false,
                 maskTiling: MaskTiling = .auto,
                 collectHistogram: Bool = false,
                 histogramBins: Int = 256,
@@ -221,6 +229,7 @@ public struct RenderOptions: Sendable {
         self.display = display
         self.useCache = useCache
         self.wantsPixels = wantsPixels
+        self.neverUpscalesContent = neverUpscalesContent
         self.maskTiling = maskTiling
         self.collectHistogram = collectHistogram
         self.histogramBins = histogramBins
@@ -1472,7 +1481,10 @@ public final class RenderGraph {
         // `orientedSource` is the identity and this is the pre-9 line, byte for byte.
         let crop = edit.geometry.renderCrop(source: sourceSize)
         let orientedSource = edit.geometry.orientedSource(sourceSize)
-        let cropPixels = CropMath.outputSize(crop, in: orientedSource)
+        // 132: a crop may extend past the photograph. `allowsOutsideSource` only changes the answer
+        // for such a crop; every in-range document takes the same arithmetic as before.
+        let cropPixels = CropMath.outputSize(crop, in: orientedSource,
+                                             allowsOutsideSource: true)
         let scale = max(0.01, options.scale)
         // The frame: the full cropped picture at this scale. Its pixel grid is what a window indexes,
         // which is why the window is resolved after it and not before.
@@ -1498,41 +1510,112 @@ public final class RenderGraph {
             .flatMap { $0 == whole ? nil : $0 }
 
         let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? frame
-        let canvas = options.canvas ?? requested
-        let content = canvas == requested ? requested : ImageSize.fit(requested, in: canvas)
-        let origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
+
+        // ── 132: the canvas is the bounding box of the rotated crop ────────────────────────────────
+        //
+        // With no window this render *is* the output picture, so an angle grows the canvas instead of
+        // turning the picture inside a fixed one: `canvasSize` returns `outputSize` itself at θ = 0
+        // (same function, same arguments), which is what keeps every un-straightened key and golden
+        // byte-identical. At θ ≠ 0 S0's pixel-space rotation runs about the canvas' centre
+        // (`p.f.zw = origin + (frameSize − content)/2`, see below) and its existing
+        // "rotated past the picture is background" branch paints the corners 0/0/0.
+        //
+        // A **window** render keeps the pre-132 geometry: a 1:1 window is already a canvas-space
+        // camera that can look past the photograph, and `WindowTests`' θ ≠ 0 cases pin its bytes.
+        let rotatedCanvas = (edit.geometry.straightenDegrees != 0 && window == nil)
+            ? CropMath.canvasSize(crop: crop, in: sourceSize,
+                                  straightenDegrees: edit.geometry.straightenDegrees,
+                                  quarterTurns: edit.geometry.quarterTurns,
+                                  allowsOutsideSource: true)
+            : nil
+
+        let canvas: ImageSize
+        let content: ImageSize
+        let origin: SIMD2<Float>
+        let frameSize: SIMD2<Float>
+        let frameOrigin: SIMD2<Float>
+        let frameInCanvas: ImageSize
+        let drawnRect: ImageRect
+        if let rotatedCanvas {
+            // The output at this scale, before the viewport letterboxes it.
+            let baseline = ImageSize(
+                width: max(1, Int((Double(rotatedCanvas.width) * scale).rounded())),
+                height: max(1, Int((Double(rotatedCanvas.height) * scale).rounded())))
+            canvas = options.canvas ?? baseline
+            // A caller's canvas smaller than the output shrinks the whole picture — never just its
+            // content — so the picture and any overlay keep one scale.
+            let fit = min(1, min(Double(canvas.width) / Double(baseline.width),
+                                 Double(canvas.height) / Double(baseline.height)))
+            content = ImageSize(width: max(1, Int((Double(baseline.width) * fit).rounded())),
+                                height: max(1, Int((Double(baseline.height) * fit).rounded())))
+            origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
+                                  Float((canvas.height - content.height) / 2))
+            let kx = Float(Double(content.width) / Double(baseline.width))
+            let ky = Float(Double(content.height) / Double(baseline.height))
+            frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
+            // S0: `r = R⁻¹(local + f.zw − f.xy/2)/f.xy + 0.5`. This makes `local = content/2` the
+            // centre of the rotation, i.e. the canvas centre — the crop stays centred and the
+            // margins around it are the rotated-out empty pixels.
+            frameOrigin = origin + (frameSize
+                - SIMD2<Float>(Float(content.width), Float(content.height))) / 2
+            // The mask/spot maps normalize against the **frame** grid, not the AABB: the AABB is
+            // the frame plus empty margins, and a mask shape at 0.5, 0.5 must stay on the crop's
+            // centre.
+            frameInCanvas = ImageSize(width: max(1, Int(frameSize.x.rounded())),
+                                      height: max(1, Int(frameSize.y.rounded())))
+            // The picture *is* the whole AABB (the rotated photograph plus its black corners); the
+            // present quad must cover it, or it would cut the four corners off again.
+            drawnRect = ImageRect(x: Int(origin.x.rounded()), y: Int(origin.y.rounded()),
+                                  width: content.width, height: content.height)
+                .intersected(in: canvas)
+        } else {
+            canvas = options.canvas ?? requested
+            if canvas == requested {
+                content = requested
+            } else if options.neverUpscalesContent {
+                // 132 §9: keep the requested size when it fits; only a genuinely smaller canvas
+                // shrinks the picture.
+                let fits = Double(canvas.width) >= Double(requested.width)
+                    && Double(canvas.height) >= Double(requested.height)
+                content = fits ? requested : ImageSize.fit(requested, in: canvas)
+            } else {
+                content = ImageSize.fit(requested, in: canvas)
+            }
+            origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
                                   Float((canvas.height - content.height) / 2))
 
-        // Content pixels per frame pixel: 1 unless letterboxing rescaled the content rect. Pre-scaling
-        // the frame here is what lets the kernels stay one add and one divide per pixel.
-        let kx = Float(Double(content.width) / Double(requested.width))
-        let ky = Float(Double(content.height) / Double(requested.height))
-        let frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
-        let frameOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
-        let frameInCanvas = window == nil ? content
-            : ImageSize(width: Int((Double(frameSize.x)).rounded()),
-                        height: Int((Double(frameSize.y)).rounded()))
+            // Content pixels per frame pixel: 1 unless letterboxing rescaled the content rect.
+            // Pre-scaling the frame here is what lets the kernels stay one add and one divide per pixel.
+            let kx = Float(Double(content.width) / Double(requested.width))
+            let ky = Float(Double(content.height) / Double(requested.height))
+            frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
+            frameOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
+            frameInCanvas = window == nil ? content
+                : ImageSize(width: Int((Double(frameSize.x)).rounded()),
+                            height: Int((Double(frameSize.y)).rounded()))
 
-        // Where the photograph was **drawn**, in canvas pixels — the one place this is worked out
-        // (048).
-        //
-        // S0 writes content pixel `gid` at frame pixel `gid + 0.5 − origin + frameOrigin`
-        // (`s0_geometry.metal`), so the frame (i.e. the photograph) occupies content pixels
-        // `[−frameOrigin, frameSize − frameOrigin)` and canvas pixels
-        // `origin − frameOrigin + frameSize` — origin top-left, row-major, the same space the texture
-        // is read back in and `histogram_sample.metal` indexes. With no window, `frameOrigin == 0`
-        // and this is exactly `origin + content`, which is what every pre-048 caller assumed; with a
-        // window that reaches past the frame (`backgroundOutside`) the picture sits *off-centre*
-        // inside `content` and the canvas holds background around it, so `origin + content` is the
-        // window, not the picture, and measuring over it counts that background into bin 0.
-        //
-        // Clipped, not moved (`intersected(in:)`): the part of the picture outside the canvas was not
-        // drawn, so it is not part of what a measurement can count.
-        let pictureRaw = ImageRect(x: Int((origin.x - frameOrigin.x).rounded()),
-                                   y: Int((origin.y - frameOrigin.y).rounded()),
-                                   width: Int((Double(frameSize.x)).rounded()),
-                                   height: Int((Double(frameSize.y)).rounded()))
-        let drawnRect = pictureRaw.intersected(in: canvas)
+            // Where the photograph was **drawn**, in canvas pixels — the one place this is worked out
+            // (048).
+            //
+            // S0 writes content pixel `gid` at frame pixel `gid + 0.5 − origin + frameOrigin`
+            // (`s0_geometry.metal`), so the frame (i.e. the photograph) occupies content pixels
+            // `[−frameOrigin, frameSize − frameOrigin)` and canvas pixels
+            // `origin − frameOrigin + frameSize` — origin top-left, row-major, the same space the
+            // texture is read back in and `histogram_sample.metal` indexes. With no window,
+            // `frameOrigin == 0` and this is exactly `origin + content`, which is what every pre-048
+            // caller assumed; with a window that reaches past the frame (`backgroundOutside`) the
+            // picture sits *off-centre* inside `content` and the canvas holds background around it,
+            // so `origin + content` is the window, not the picture, and measuring over it counts
+            // that background into bin 0.
+            //
+            // Clipped, not moved (`intersected(in:)`): the part of the picture outside the canvas was
+            // not drawn, so it is not part of what a measurement can count.
+            let pictureRaw = ImageRect(x: Int((origin.x - frameOrigin.x).rounded()),
+                                       y: Int((origin.y - frameOrigin.y).rounded()),
+                                       width: Int((Double(frameSize.x)).rounded()),
+                                       height: Int((Double(frameSize.y)).rounded()))
+            drawnRect = pictureRaw.intersected(in: canvas)
+        }
         // The bounds assertion the派单 asks for, in the form that can fail loudly: a rect that is not
         // inside the canvas would let a measurement read someone else's pixels.
         assert(drawnRect.x >= 0 && drawnRect.y >= 0
@@ -2918,6 +3001,11 @@ public final class RenderGraph {
             // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
             // place, so the kernel's branch and the trace cannot disagree (029).
             let identity = plan.s0Identity
+            // 132: a crop that extends past the photograph has to write the outside as background at
+            // θ = 0 too. `g.w` was padding (0 for every document that predates this task), so the
+            // kernel can carry the flag without moving any recorded byte.
+            let outsideCrop = plan.crop.left < 0 || plan.crop.top < 0
+                || plan.crop.right > 1 || plan.crop.bottom > 1
             var params = S0Params(
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
@@ -2933,11 +3021,11 @@ public final class RenderGraph {
                 e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0,
                          plan.s0PureCA ? 1 : 0, plan.s0PureTurn ? 1 : 0),
                 f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
-                // g: the two dimensionless radial ratios, then the document's quarter turn. 0/0/0
-                // for every document that has not touched the sliders or the rotate buttons, which
-                // is what keeps the CA-off and the un-turned path byte-identical.
+                // g: the two dimensionless radial ratios, then the document's quarter turn, then
+                // 132's "this crop extends past the photograph" flag (0 for every document that
+                // predates it). 0/0/0/0 for the CA-off, un-turned path, byte-identical.
                 g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue),
-                         Float(edit.geometry.quarterTurns), 0),
+                         Float(edit.geometry.quarterTurns), outsideCrop ? 1 : 0),
                 lens: Self.lensMatrix(plan.s0LensWarp ? input.lensProfile : nil))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)

@@ -200,9 +200,10 @@ final class CropToolTests: XCTestCase {
     /// 框内拖动 = 移动取景框，方向和手**同号**（往左拖，框往左走）。
     ///
     /// It used to be the opposite (`base.left − dx`), i.e. hand left → frame right, which reads as
-    /// 「拖的是画布，方向反了」. Same sign, same magnitude, and it stops at the frame's edge instead of
-    /// leaving the source.
-    func testDraggingInsidePansThePictureAndClampsAtTheEdge() {
+    /// 「拖的是画布，方向反了」. Same sign, same magnitude. **132**: the frame may leave the source now
+    /// (the output frame may be bigger than the photograph; the outside is black and the frame turns
+    /// red), so a pan that runs past the edge stays where the hand put it instead of snapping back.
+    func testDraggingInsidePansThePictureAndDoesNotSnapBackAtTheEdge() {
         let crop = CropRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
         let source = landscape
         let drag = CropToolDrag(handle: .inside, crop: crop,
@@ -213,13 +214,13 @@ final class CropToolTests: XCTestCase {
         XCTAssertEqual(moved.width, 0.4, accuracy: 1e-9, "a pan never resizes the frame")
         XCTAssertEqual(moved.top, 0.3, accuracy: 1e-9)
 
-        // Dragged far past the right/bottom edge: it stops with the whole frame inside the source.
-        let clamped = drag.crop(at: NormalizedPoint(2.0, 2.0), source: source)
-        XCTAssertEqual(clamped.left, 0.6, accuracy: 1e-9)
-        XCTAssertEqual(clamped.top, 0.6, accuracy: 1e-9)
-        XCTAssertEqual(clamped.width, 0.4, accuracy: 1e-9)
-        XCTAssertLessThanOrEqual(clamped.right, 1 + 1e-9)
-        XCTAssertLessThanOrEqual(clamped.bottom, 1 + 1e-9)
+        // Dragged far past the right/bottom edge: 132 — no snap-back. The frame follows the hand out
+        // of the photograph and keeps its size (one drag, one position, no ratchet).
+        let outside = drag.crop(at: NormalizedPoint(2.0, 2.0), source: source)
+        XCTAssertEqual(outside.left, 1.8, accuracy: 1e-9)
+        XCTAssertEqual(outside.top, 1.8, accuracy: 1e-9)
+        XCTAssertEqual(outside.width, 0.4, accuracy: 1e-9)
+        XCTAssertEqual(outside.right, 2.2, accuracy: 1e-9)
 
         // And the inverse direction: a left drag moves the frame left, exactly as far.
         let back = drag.crop(at: NormalizedPoint(0.4, 0.5), source: source)

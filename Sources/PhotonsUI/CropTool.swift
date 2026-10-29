@@ -144,11 +144,17 @@ public struct CropToolLayout: Sendable, Equatable {
     public var grips: [Grip]
     /// Rule-of-thirds lines (only when the grid is on).
     public var grid: [CropToolSegment]
+    /// 132: the frame covers pixels outside the photograph (including the rotated-out margins). The
+    /// overlay paints its stroke and grips red. A **view fact only** — it never moves the rect, never
+    /// writes the document and never enters a render key.
+    public var exceedsPicture: Bool
 
-    public init(corners: [CGPoint] = [], grips: [Grip] = [], grid: [CropToolSegment] = []) {
+    public init(corners: [CGPoint] = [], grips: [Grip] = [], grid: [CropToolSegment] = [],
+                exceedsPicture: Bool = false) {
         self.corners = corners
         self.grips = grips
         self.grid = grid
+        self.exceedsPicture = exceedsPicture
     }
 
     public var isEmpty: Bool { corners.count < 4 }
@@ -254,9 +260,10 @@ public enum CropTool {
                               pointScale: Double = 1,
                               showsGrid: Bool = true,
                               carry: CropCarry = .identity,
-                              quadRotationDegrees: Double = 0) -> CropToolLayout {
+                              quadRotationDegrees: Double = 0,
+                              exceedsPicture: Bool = false) -> CropToolLayout {
         let scale = pointScale > 0 ? pointScale : 1
-        let c = crop.clamped()
+        let c = crop.clamped(allowsOutsideSource: true)
         let centreX = Double(max(source.width, 1)) / 2
         let centreY = Double(max(source.height, 1)) / 2
         let rotation = CropGeometry.RotationMatrix(degrees: quadRotationDegrees.isFinite ? quadRotationDegrees : 0)
@@ -281,7 +288,7 @@ public enum CropTool {
 
         let corners = [view(c.left, c.top), view(c.right, c.top),
                        view(c.right, c.bottom), view(c.left, c.bottom)]
-        var layout = CropToolLayout(corners: corners)
+        var layout = CropToolLayout(corners: corners, exceedsPicture: exceedsPicture)
 
         // Corners first: they are drawn on top and they win the hit test, so the order here is the
         // order of precedence, not an accident.
@@ -386,7 +393,7 @@ public enum CropTool {
                                  lock: AspectLock,
                                  source: ImageSize,
                                  anchor: CropToolAnchor) -> CropRect {
-        let c = rect.clamped()
+        let c = rect.clamped(allowsOutsideSource: true)
         guard let ratio = lock.ratio, let na = normalizedAspect(ratio, source: source) else {
             return c
         }
@@ -597,22 +604,25 @@ public struct CropToolDrag: Sendable, Equatable {
             // 「拖的是画布，而且方向反了」. Same sign, same magnitude, clamped at the frame's edge.
             let dx = point.x - grab.x, dy = point.y - grab.y
             let width = base.width, height = base.height
-            left = min(max(base.left + dx, 0), 1 - width)
-            top = min(max(base.top + dy, 0), 1 - height)
+            // 132: no 0…1 bounds — the frame is the output and may be dragged off the picture.
+            left = base.left + dx
+            top = base.top + dy
             right = left + width
             bottom = top + height
-            return CropRect(left: left, top: top, right: right, bottom: bottom).clamped()
+            return CropRect(left: left, top: top, right: right, bottom: bottom)
+                .clamped(allowsOutsideSource: true)
 
         case .outside:
             // A frame drawn from the grab to the pointer; both directions are legal, so the two
             // coordinates are ordered rather than trusted.
-            left = min(max(min(grab.x, point.x), 0), 1)
-            right = min(max(max(grab.x, point.x), 0), 1)
-            top = min(max(min(grab.y, point.y), 0), 1)
-            bottom = min(max(max(grab.y, point.y), 0), 1)
-            if right - left < span.width { right = min(1, left + span.width) }
-            if bottom - top < span.height { bottom = min(1, top + span.height) }
-            return CropRect(left: left, top: top, right: right, bottom: bottom).clamped()
+            left = min(grab.x, point.x)
+            right = max(grab.x, point.x)
+            top = min(grab.y, point.y)
+            bottom = max(grab.y, point.y)
+            if right - left < span.width { right = left + span.width }
+            if bottom - top < span.height { bottom = top + span.height }
+            return CropRect(left: left, top: top, right: right, bottom: bottom)
+                .clamped(allowsOutsideSource: true)
 
         case .topLeft, .topRight, .bottomRight, .bottomLeft,
              .top, .right, .bottom, .left:
@@ -621,13 +631,14 @@ public struct CropToolDrag: Sendable, Equatable {
             let movesTop = handle == .topLeft || handle == .topRight || handle == .top
             let movesBottom = handle == .bottomLeft || handle == .bottomRight || handle == .bottom
 
-            if movesLeft { left = min(max(point.x, 0), right - span.width) }
-            if movesRight { right = max(min(point.x, 1), left + span.width) }
-            if movesTop { top = min(max(point.y, 0), bottom - span.height) }
-            if movesBottom { bottom = max(min(point.y, 1), top + span.height) }
+            if movesLeft { left = min(point.x, right - span.width) }
+            if movesRight { right = max(point.x, left + span.width) }
+            if movesTop { top = min(point.y, bottom - span.height) }
+            if movesBottom { bottom = max(point.y, top + span.height) }
         }
 
-        let free = CropRect(left: left, top: top, right: right, bottom: bottom).clamped()
+        let free = CropRect(left: left, top: top, right: right, bottom: bottom)
+            .clamped(allowsOutsideSource: true)
         guard lock.ratio != nil else { return free }
         return CropTool.constrain(free, lock: lock, source: source, anchor: handle.anchor)
     }

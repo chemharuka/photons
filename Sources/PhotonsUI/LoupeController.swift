@@ -2720,7 +2720,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
                                 decodeScale: decodedScale,
-                                edit: edit)
+                                edit: edit,
+                                fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1)
         }
         if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
             // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
@@ -2732,7 +2733,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return LoupeFraming(viewport: size,
                                 decoded: source,
                                 decodeScale: 1,
-                                edit: edit)
+                                edit: edit,
+                                fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1)
         }
         return nil
     }
@@ -3473,11 +3475,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if isShapeDragArmed { cancelShapeDrag() }
         session.pendingMaskShape = nil
         session.maskTool = .off
+        // 132 §9 — 裁切模式比普通适应小 10 %：这是为「拖动小角度不跳缩放」付的代价（拉直绝大多数是
+        // 轻微角度；按 45° 的最坏情况预留会让画面常年小 29 %，不成比例）。`framing()` 在本工具
+        // active 时给出 `fitScale = 0.90`，所以这一句同时把普通 fit 之外的那 10 % 留了出来。
         zoomToFit()
         refreshCropTool()
         requestEditRender()
         return true
     }
+
+    /// 132 §9: the crop workspace's 取景 = 普通 fit × 0.90 (see `LoupeFraming.fitScale`).
+    static let cropWorkspaceFitScale = 0.90
 
     /// 082 — the card's section resets (and its title) write the document; the frame on screen is the
     /// draft, so it is re-seeded from the new document and re-laid-out in the same turn.
@@ -4973,10 +4981,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 throw RenderError.executeFailed("the backdrop render produced no texture")
             }
             let measured = result.histogram
-            // No canvas was asked for, so the picture is the whole texture — but say it with the size
-            // the render reported rather than with `texture.width`, so a letterbox can never be
-            // silently described as picture.
-            let content = ImageRect(x: 0, y: 0, width: result.content.width, height: result.content.height)
+            // 132: no canvas was asked for, but the output can be wider than the picture (the rotated
+            // crop's bounding box). The picture's own rect is the receipt, not `(0, 0)` — a centred
+            // photo described as starting at the origin is the bug this one line exists to avoid.
+            let content = result.drawnRect
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let adopted = self.backdrop.finish(texture, key: key, content: content,
@@ -5256,6 +5264,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
                 useCache: true,
                 wantsPixels: false,
+                // 132 §9: the crop workspace's fit is a deliberate 90 %; do not let the renderer
+                // scale that margin back up to the viewport.
+                neverUpscalesContent: cropTool.isActive,
                 collectHistogram: measure,
                 histogramSampleLongEdge: (measure || wantsPointerSample)
                     ? Histogram.frameSampleLongEdge : 0,

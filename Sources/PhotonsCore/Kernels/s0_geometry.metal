@@ -59,7 +59,7 @@ struct S0Params {
     float4 d;   // cos, sin, flipH, flipV
     float4 e;   // identity, backgroundOutside, pureCA, pureTurn  (pureTurn: P0-10's fast path)
     float4 f;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
-    float4 g;   // caRed, caBlue, quarterTurns, pad  (029 / P0-10; 0 = off / no turn)
+    float4 g;   // caRed, caBlue, quarterTurns, outsideCrop  (029 / P0-10 / 132; 0 = off)
     // 097 — per-channel DNG WarpRectilinear. Columns 0/1/2 are the R/G/B radial coefficients
     // (kr0..kr3); column 3 is the normalized warp centre (x, y). Only `HAS_LENS_WARP` instances read
     // it, so the default entry points never see this field's arithmetic.
@@ -245,8 +245,14 @@ static inline void s0_body(texture2d<float, access::read> src,
     // source position is outside the photograph is transparent. This lives only in the rotating
     // instantiation, so `rotationDegrees == 0` keeps the recorded bytes (the non-rotating path never
     // runs this expression and keeps its clamp-to-edge behaviour for crop/scale).
-    if (HAS_ROTATION && (cropped.x < 0.0 || cropped.x > 1.0
-                         || cropped.y < 0.0 || cropped.y > 1.0)) {
+    //
+    // 132 — `p.g.w` is the "this crop deliberately extends past the photograph" flag (0 for every
+    // document that predates the task). A crop can now be the output frame and larger than the
+    // picture even at 0°, and those pixels must be the same deterministic black, not a smear of the
+    // border: the flag adds the branch to the un-rotated instantiation without changing the value
+    // the comparison produces for an in-range crop.
+    if ((HAS_ROTATION || p.g.w > 0.5) && (cropped.x < 0.0 || cropped.x > 1.0
+                                          || cropped.y < 0.0 || cropped.y > 1.0)) {
         dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
         return;
     }

@@ -128,7 +128,8 @@ public final class CropToolController {
         /// without the turn would write that rect into an un-turned frame — every 应用 would silently
         /// undo the rotation.
         public func geometry(flipsOf document: GeometryGroup) -> GeometryGroup {
-            GeometryGroup(crop: crop.clamped().normalizedRect,
+            // 132: the draft may sit outside the photograph (the output frame can be bigger).
+            GeometryGroup(crop: crop.clamped(allowsOutsideSource: true).normalizedRect,
                           rotationDegrees: CropTool.clampStraighten(straighten),
                           flipHorizontal: document.flipHorizontal,
                           flipVertical: document.flipVertical,
@@ -195,10 +196,10 @@ public final class CropToolController {
     private var rotating = false
     private var rotateStart: Double = 0
 
-    /// With this `false`, `effectiveCrop` hands back the stored rect untouched — the anti-proof for
-    /// 「旋转后框自动缩小」. A test flips it to show that the containment and monotonicity criteria go
-    /// red without the constraint; nothing in the app touches it.
-    var clampsToRotatedFrame = true
+    /// The 803aff6 "框必须内切于旋转后的照片" rule — **off by default since 132** (user 2026-10-29:
+    /// the crop may leave the picture; the pixels outside are black, and the frame turns red instead
+    /// of being pulled back). A test flips it to prove the old containment behaviour still exists.
+    var clampsToRotatedFrame = false
 
     public init(session: CatalogSession?) {
         self.session = session
@@ -259,7 +260,8 @@ public final class CropToolController {
     /// The draft with the crop replaced by the rect the overlay drew (`effectiveCrop`).
     private func effectiveGeometry(_ geometry: GeometryGroup) -> GeometryGroup {
         var geometry = geometry
-        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
+        geometry.crop = effectiveCrop(source: sourceSize)
+            .clamped(allowsOutsideSource: true).normalizedRect
         return geometry
     }
 
@@ -299,10 +301,23 @@ public final class CropToolController {
     /// the same four numbers (the 072 rule: one writer, one value).
     public func effectiveCrop(source: ImageSize? = nil, degrees: Double? = nil) -> CropRect {
         let src = source ?? sourceSize
-        let stored = draft.crop.clamped()
+        // 132: the draft may sit outside the photograph — the crop is the output frame now, and the
+        // clamp only keeps the span finite/positive.
+        let stored = draft.crop.clamped(allowsOutsideSource: true)
         let angle = CropTool.clampStraighten(degrees ?? draft.straighten)
-        guard clampsToRotatedFrame, angle != 0 else { return stored }
-        return CropMath.clampedToRotatedFrame(stored, in: src, degrees: angle)
+        return CropMath.clampedToRotatedFrame(stored, in: src, degrees: angle,
+                                              keepsInsideRotatedFrame: clampsToRotatedFrame)
+    }
+
+    /// Does the frame the user sees cover pixels outside the photograph? Read by the overlay only —
+    /// it paints the frame red; it never moves the rect and never writes the document. The geometry
+    /// is 803aff6's own `fitsInsideRotatedFrame` (kept, not rewritten), with its purpose changed from
+    /// "pull the frame back" to "warn".
+    public func frameExceedsPicture(source: ImageSize? = nil, degrees: Double? = nil) -> Bool {
+        let src = source ?? sourceSize
+        let angle = CropTool.clampStraighten(degrees ?? draft.straighten)
+        return CropMath.frameExceedsPicture(effectiveCrop(source: src, degrees: angle),
+                                            in: src, degrees: angle)
     }
 
     /// Hand the live draft to the inspector (派单 049). One property write, no render, no document:
@@ -315,7 +330,8 @@ public final class CropToolController {
             return
         }
         var geometry = draft.geometry(flipsOf: session.edit.geometry)
-        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
+        geometry.crop = effectiveCrop(source: sourceSize)
+            .clamped(allowsOutsideSource: true).normalizedRect
         session.cropToolDraft = (id, geometry)
     }
 
@@ -730,7 +746,8 @@ public final class CropToolController {
                         pointScale: pointScale,
                         showsGrid: showsGrid,
                         carry: carry,
-                        quadRotationDegrees: quadRotationDegrees ?? geometry.rotationDegrees)
+                        quadRotationDegrees: quadRotationDegrees ?? geometry.rotationDegrees,
+                        exceedsPicture: frameExceedsPicture(source: source))
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
@@ -768,13 +785,12 @@ public final class CropToolController {
         var left = min(a.x, b.x) / w, right = max(a.x, b.x) / w
         var top = min(a.y, b.y) / h, bottom = max(a.y, b.y) / h
 
-        // The picture's own `0…1²` is the only rect bound left here. The **straightened** bound is no
-        // longer an intersection with the centred `inscribedCrop`: that rect is the largest one at the
-        // *frame's* centre, and cutting a room out of it dragged a frame at the edge of the picture
-        // toward the middle (「旋转后框会自己跑」). The turned picture's real bound depends on where the
-        // rect is, so it is a shrink about the rect's own centre — `effectiveCrop` — not a room.
-        left = max(left, 0); top = max(top, 0)
-        right = min(right, 1); bottom = min(bottom, 1)
+        // 132 (user 2026-10-29): there is **no photo bound** any more. The crop is the output frame
+        // and may sit outside the photograph; the pixels outside are black, and the frame turns red.
+        // The only bound is the canvas itself, which is what `framePoint` already says. (The old
+        // `0…1²` intersection is what made 「框可以出画面」 impossible to express in the model.)
+        left = max(left, -1e6); top = max(top, -1e6)
+        right = min(right, 1e6); bottom = min(bottom, 1e6)
         guard right > left + 1e-9, bottom > top + 1e-9 else {
             // Nothing of the frame is on screen (a degenerate projection): the whole frame is the only
             // answer that keeps the arithmetic finite; `effectiveCrop` then fits it to the picture.
@@ -810,7 +826,7 @@ public final class CropToolController {
             return clampRotatedQuadToView(mapping: mapping, source: src, degrees: delta)
         }
         let room = safeCropRect(mapping: mapping, source: src)
-        let before = draft.crop.clamped()
+        let before = draft.crop.clamped(allowsOutsideSource: true)
 
         // Shrink **uniformly** — one scale for both axes — so the frame keeps its shape
         // (⑦.5's 宽高比不变). The minimum span is a floor on that same scale, and only when the room
@@ -830,11 +846,24 @@ public final class CropToolController {
         if draft.lock.ratio != nil {
             candidate = CropTool.constrain(candidate, lock: draft.lock, source: src, anchor: .center)
         }
-        // Move (never resize) into the room, so a crop that already fits keeps its exact size.
+        // Shrink (never resize a crop that already fits) so a frame larger than the canvas can be
+        // seen — but 132: **do not move it back**. A frame that is smaller than the canvas may sit
+        // partly outside it (the user dragged it there, §7.4 「不弹回」); the overlay turns red when that
+        // puts it outside the photograph. Only a frame bigger than the canvas is shrunk, which is ⑦'s
+        // original purpose (「框要看得见」).
         let fw = min(candidate.width, room.width), fh = min(candidate.height, room.height)
-        let left = min(max(candidate.left, room.left), max(room.left, room.right - fw))
-        let top = min(max(candidate.top, room.top), max(room.top, room.bottom - fh))
-        let next = CropRect(left: left, top: top, right: left + fw, bottom: top + fh)
+        var next = CropRect(left: candidate.left, top: candidate.top,
+                            right: candidate.left + fw, bottom: candidate.top + fh)
+        // A frame whose **centre** left the canvas is not a drag the user can see any more (a panned
+        // camera moved the picture out from under it). That is the one case ⑦'s old "move it back"
+        // still applies; a frame the hand put partly outside stays there (§7.4 「不弹回」).
+        let cx = (next.left + next.right) / 2, cy = (next.top + next.bottom) / 2
+        if cx < room.left || cx > room.right || cy < room.top || cy > room.bottom {
+            let left = min(max(next.left, room.left), max(room.left, room.right - next.width))
+            let top = min(max(next.top, room.top), max(room.top, room.bottom - next.height))
+            next = CropRect(left: left, top: top,
+                            right: left + next.width, bottom: top + next.height)
+        }
         guard next != before else { return false }
         draft.crop = next
         return true
@@ -850,12 +879,28 @@ public final class CropToolController {
     /// back through the same inverse the drags use. The photo bound stays `effectiveCrop`'s job.
     private func clampRotatedQuadToView(mapping: LoupeMapping, source: ImageSize,
                                         degrees: Double) -> Bool {
-        let before = draft.crop.clamped()
+        // 132: the turned-quad clamp existed to keep the *photo-bound* frame on the canvas. With the
+        // frame allowed outside the photograph and the camera re-fitting the whole canvas (see
+        // `LoupeFraming.fitZoom`), shrinking the draft here is exactly the 「第一次改角度框就没了」
+        // report: the binary search below can land on `CropRect.clamped()`'s 0.001 floor. So the
+        // default path does nothing; the old behaviour is still reachable through the flag.
+        let before = draft.crop.clamped(allowsOutsideSource: true)
+        guard clampsToRotatedFrame else {
+            // The frame stays where the hand put it — but a ratio lock is a document constraint, not
+            // part of the old photo-bound clamp, so it is still honoured.
+            guard draft.lock.ratio != nil else { return false }
+            let locked = CropTool.constrain(before, lock: draft.lock, source: source,
+                                            anchor: .center)
+            guard locked != before else { return false }
+            draft.crop = locked
+            return true
+        }
         let angle = CropTool.clampStraighten(draft.straighten)
         func seen(_ rect: CropRect) -> CropRect {
-            let c = rect.clamped()
+            let c = rect.clamped(allowsOutsideSource: true)
             guard clampsToRotatedFrame, angle != 0 else { return c }
-            return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle)
+            return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle,
+                                                  keepsInsideRotatedFrame: true)
         }
         func quadBounds(_ rect: CropRect) -> (center: CGPoint, halfWidth: Double, halfHeight: Double) {
             let layout = CropTool.layout(crop: rect, source: source, mapping: mapping,
@@ -885,7 +930,7 @@ public final class CropToolController {
         func candidate(_ s: Double) -> CropRect {
             let width = base.width * s, height = base.height * s
             let raw = CropRect(x: base.centerX - width / 2, y: base.centerY - height / 2,
-                               width: width, height: height).clamped()
+                               width: width, height: height).clamped(allowsOutsideSource: true)
             let box = quadBounds(raw)
             let targetX = fit(Double(box.center.x), box.halfWidth, canvasWidth - box.halfWidth)
             let targetY = fit(Double(box.center.y), box.halfHeight, canvasHeight - box.halfHeight)
@@ -893,7 +938,7 @@ public final class CropToolController {
                                                source: source, pointScale: 1,
                                                rotationDegrees: degrees) else { return raw }
             var moved = CropRect(x: centre.x - width / 2, y: centre.y - height / 2,
-                                 width: width, height: height).clamped()
+                                 width: width, height: height).clamped(allowsOutsideSource: true)
             if draft.lock.ratio != nil {
                 moved = CropTool.constrain(moved, lock: draft.lock, source: source, anchor: .center)
             }
