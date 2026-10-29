@@ -1187,6 +1187,12 @@ final class HDRCurveTests: XCTestCase {
 
     /// The black point is S1's, so it dirties exactly what the sliders do — and the curve dirties only
     /// itself. `changedStages` is group-level by design (D10): downstream is the key chain's job.
+    ///
+    /// 148: two different questions used to be one assertion here. A **decode** change (the detail
+    /// panel) really is every stage, because every stage's source pixels are new — that case is now
+    /// pinned with a detail input instead of a temperature. A **white-balance** change is not a decode
+    /// change since 143: it is S1's gain, so it dirties exactly `.sceneLinear`, and the chain below it
+    /// is invalidated by the digest (checked as text below).
     func testDirtyStages() {
         var base = EditModel.neutral
         base.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
@@ -1200,10 +1206,80 @@ final class HDRCurveTests: XCTestCase {
         curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.4), CurvePoint(u: 1, v: 1)]
         XCTAssertEqual(curved.changedStages(from: base), [.curve])
 
+        // 148: a real decode input (the detail panel is assigned inside `CIRAWFilter`) is still every
+        // stage's source pixels. This is the assertion the old `warm` case was trying to make.
+        var developed = base
+        developed.detailSettings.luminanceNR = 30
+        XCTAssertTrue(developed.decodesDifferently(from: base))
+        XCTAssertEqual(developed.changedStages(from: base), Set(RenderStage.allCases),
+                       "a decode change is every stage, as always")
+
         var warm = base
         warm.light.temperature = 5200
-        XCTAssertEqual(warm.changedStages(from: base), Set(RenderStage.allCases),
-                       "a decode change is every stage, as always")
+        XCTAssertFalse(warm.decodesDifferently(from: base),
+                       "143: the document's Kelvin is no longer fed to the decoder")
+        XCTAssertEqual(warm.changedStages(from: base), [.sceneLinear],
+                       "143: WB is S1's gain, so it dirties S1 and only S1")
+        XCTAssertEqual(warm.splitFrom(base), .render)
+
+        // …and "only S1" is enough because every link below S1 is seeded by the previous link's
+        // digest (`RenderKeyChain.links`), not by the parameters alone. One changed material moves
+        // the whole linear/render chain.
+        func links(_ edit: EditModel) -> RenderKeyChain.Links {
+            RenderKeyChain.links(identity: "wb-dirty", sourceSize: ImageSize(width: 640, height: 480),
+                                 canvas: ImageSize(width: 640, height: 480),
+                                 content: ImageSize(width: 640, height: 480),
+                                 edit: edit, display: DisplayOptions())
+        }
+        let cold = links(base), hot = links(warm)
+        XCTAssertNotEqual(cold.sceneLinear, hot.sceneLinear, "S1's own material must carry temp/tint")
+        XCTAssertNotEqual(cold.curve, hot.curve, "S1.7 is seeded by S1's digest")
+        XCTAssertNotEqual(cold.toneMap, hot.toneMap, "S2 is seeded by S1.7's digest")
+        XCTAssertNotEqual(cold.color, hot.color, "S3 is seeded by S2's digest")
+        XCTAssertNotEqual(cold.vignette, hot.vignette, "S3c is seeded by S3's digest")
+        XCTAssertNotEqual(cold.display, hot.display, "S4 is seeded by S3c's digest")
+        print("148 WB dirty · temp=shot → 5200: sceneLinear …\(cold.sceneLinear.suffix(60)) → "
+              + "…\(hot.sceneLinear.suffix(60)), display \(cold.display.prefix(12))… → "
+              + "\(hot.display.prefix(12))…")
+    }
+
+    /// 148 — the pixel half of the key claim above: 100 K moves S1's material, the whole chain misses
+    /// (each link is seeded by the previous digest) and the frame's bytes move. This is what the
+    /// decoder no longer doing white balance must not cost us: a render, not a stale cache hit.
+    func testWhiteBalanceMovesTheRenderKeyAndTheFrame() throws {
+        let graph = try makeGraph(solid((0.18, 0.12, 0.06)), identity: "wb-key")
+        let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
+                                    useCache: true, wantsPixels: true)
+
+        var base = EditModel.neutral
+        base.light.temperature = 5500
+        base.light.tint = 0
+        var warm = base
+        warm.light.temperature = 5600
+
+        let cold = try graph.render(base, options: options)
+        if let t = cold.output { graph.recycle(output: t) }
+        let hot = try graph.render(warm, options: options)
+        if let t = hot.output { graph.recycle(output: t) }
+        let coldFrame = try XCTUnwrap(cold.display)
+        let hotFrame = try XCTUnwrap(hot.display)
+
+        print("148 WB frame · S1 material \(base.keyMaterial(.sceneLinear)) → "
+              + "\(warm.keyMaterial(.sceneLinear))")
+        print("148 WB frame · executed \(hot.trace.executed.map(\.short).joined(separator: " "))")
+        print("148 WB frame · sha \(coldFrame.sha256().prefix(16))… → \(hotFrame.sha256().prefix(16))…")
+
+        XCTAssertEqual(base.decodeKey, warm.decodeKey, "100 K is not a new development")
+        XCTAssertNotEqual(cold.keys.sceneLinear, hot.keys.sceneLinear)
+        XCTAssertNotEqual(cold.keys.curve, hot.keys.curve)
+        XCTAssertNotEqual(cold.keys.toneMap, hot.keys.toneMap)
+        XCTAssertNotEqual(cold.keys.display, hot.keys.display)
+        XCTAssertTrue(hot.trace.executed.contains(.sceneLinear),
+                      "a 100 K drag must re-run S1, not serve it from the cache")
+        XCTAssertTrue(hot.trace.executed.contains(.toneMap),
+                      "…and the chain below S1 must miss too")
+        XCTAssertNotEqual(coldFrame.sha256(), hotFrame.sha256(),
+                          "the picture must move: WB is an S1 gain now")
     }
 
     // MARK: - the model: names and versions
