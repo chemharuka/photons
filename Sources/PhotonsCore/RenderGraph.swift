@@ -1394,8 +1394,9 @@ public final class RenderGraph {
     ///     canvas sizes, EXIF orientation, the output window, and crop/straighten/flip/CA. This is S0's
     ///     key, and S1 reads S0's output, so it is S1's input too: a crop or a zoom miss is a different
     ///     buffer, not a cache the linear pass may serve from.
-    ///   · `edit.keyMaterial(.sceneLinear)` — the levels (`blk`/`wht` sliders, `blackLevel`,
-    ///     `whiteLevel`), 071's `blackOffset`, the exposure gain, white balance (a decode input, so the
+    ///   · `edit.keyMaterial(.sceneLinear)` — the levels (`blk`/`wht` sliders) and 071's
+    ///     `blackOffset` (schema 11 deleted 030's absolute `blackLevel`/`whiteLevel`, so they no longer
+    ///     appear here), the exposure gain, white balance (a decode input, so the
     ///     identity moves with it) and highlight recovery.
     ///
     /// **What is deliberately absent** is everything from S1.6 down — mask adjustments, the curve, the
