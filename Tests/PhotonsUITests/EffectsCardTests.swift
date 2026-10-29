@@ -225,10 +225,13 @@ final class EffectsCardTests: XCTestCase {
         let before = session.history.count
 
         XCTAssertTrue(resets.group(.effects), "整卡复位必须真的写了一次")
-        XCTAssertEqual(session.edit.effects, EffectsGroup.identity)
         XCTAssertEqual(session.edit.effects.grainSize, 25, "颗粒大小回 25，不是 0")
         XCTAssertEqual(session.edit.effects.grainRoughness, 50, "粗糙度回 50，不是 0")
-        XCTAssertEqual(session.edit.effects.vignetteMidpoint, 50, "暗角中点回 50")
+        // 116 moved the four 暗角 numbers to 校正, so this card's double-click must **not** reach them
+        // (the 122 rule: a card resets its own sliders and nobody else's). 校正's own double-click
+        // resets them — `PanelResetTests` pins that half.
+        XCTAssertEqual(session.edit.effects.vignetteAmount, -50, "暗角属于校正卡，效果卡的复位不该碰它")
+        XCTAssertEqual(session.edit.effects.vignetteMidpoint, 30, "暗角中点也不该被效果卡复位")
         XCTAssertEqual(session.edit.effects.texture, 0, "纹理回 0")
         XCTAssertEqual(session.edit.effects.clarity, 0, "清晰度回 0")
         XCTAssertEqual(session.edit.effects.dehaze, 0, "去雾回 0")
