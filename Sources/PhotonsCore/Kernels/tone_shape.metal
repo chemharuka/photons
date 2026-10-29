@@ -131,9 +131,23 @@ constant float LEV_LO_EV = -6.0;
 constant float LEV_HI_EV = -1.0;
 constant float LEV_KNEE = 1e-3;
 
-// Whites (contract §4.2): ±0.6 EV, plus 0.06 of a linear level at full travel, over a 2 EV shoulder.
+// Whites: ±0.6 EV (unchanged — that is "where the white point is") plus a **multiplicative** level.
+//
+// 127: the level used to be additive and windowed (`+ W_LEV·Δw·|Δw|·ww`, W_LEV = 0.06), so at −2 EV
+// and below it was exactly 0 and `whites +100` did not move p1/p5/p50 at all (measured: 7.5/26.2/89.9
+// codes, unchanged). The owner's brief is a *level*: the whole range scales, shadows included. The
+// additive form is what 019 was rejected for (it lifts `v = 0` into grey); a multiplier keeps `0 → 0`,
+// so it can be global without fogging the blacks.
+//
+//     level = 1 / (1 − W_LEV · Δw · |Δw|)        Δw = whites/100 ∈ [−1, 1]
+//     v *= level                                every luma, including the HDR tail
+//
+// W_LEV = 0.20 is the physical ceiling of this control, not a taste knob: the level can lift p1 by
+// only 2…5 codes (at +100: ×1.25 in linear ≈ +2 codes at code 7.5, +4 at code 26). A shadow that has
+// to be *visibly* brighter is `blacks` (its EV toe) or `exposure`; `whites` cannot be that and still
+// leave a neutral black neutral.
 constant float W_EV = 0.6;
-constant float W_LEV = 0.06;
+constant float W_LEV = 0.20;
 constant float W_BAND = 2.0;
 constant float W_TAU = 1.0;
 
@@ -164,10 +178,10 @@ static inline float3 s1_toe(float3 x) {
 /// per-mask instantiation to spend, so it always calls `kHybrid = true`; `m` is exactly 0 for
 /// `|blacks| ≤ 50`, which is what makes the mask agree with S1's 073B entry in that whole range.
 ///
-///     t = blacks/100, a = |t|, m = smoothstep(0.5, 1, a)
-///     EV:    v *= exp2(B_EV · t · (1 − ½m) · wb)          wb = the 7 EV toe
-///     level: v  = toe(v + B_LEV · t · m · wl)             wl = the 2.5 EV window, toe only on the crush
-///     whites: v = v·2^(W_EV·w·ww) + W_LEV·w·|w|·ww        ww = the shoulder (2 EV below, exp above)
+///     t = blacks/100, a = |t|, m = smoothstep(0.2, 1, a)          (2026-10-29: enters at 20)
+///     EV:    v *= exp2(B_EV · t · wb)                             wb = the 7 EV toe
+///     level: v  = toe(v + B_LEV · t · m · wl)                     wl = the −6…−1 EV window
+///     whites: v *= 2^(W_EV·w·ww) · 1/(1 − W_LEV·w·|w|)            ww = the EV shoulder, level global (127)
 template <bool kHybrid>
 static inline float3 s1_end_points(float3 v, float blacks, float whites) {
     float db = clamp(blacks, -100.0, 100.0) / 100.0;
@@ -213,12 +227,13 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
         v *= exp2(B_EV * db * wb);
     }
 
-    // whites: full weight at display white, 0 at −2 EV, exp(−L/1 EV) above 0 (the HDR shoulder). The
-    // level term is (Δw·|Δw|) — quadratic, so a small travel is nearly pure EV and only the end of the
-    // travel actually moves the white point (contract §4.2). It rides `ww`, so it is continuous at both
-    // ends of the window and does not touch the mid-tones.
+    // whites: the EV term keeps 073B's shoulder (full weight at display white, 0 at −2 EV, exp(−L/1 EV)
+    // above 0). The **level** is 127's multiplicative one and has no window: `level = 1` exactly when
+    // `dw == 0`, and every other travel scales the whole range by 1/(1 − W_LEV·dw·|dw|) — including
+    // the HDR tail, because "a level" is a property of the picture, not of a band.
     float ww = L <= 0.0 ? smoothstep(-W_BAND, 0.0, L) : exp(-L / W_TAU);
-    v = v * exp2(W_EV * dw * ww) + float3(W_LEV * dw * abs(dw) * ww);
+    float level = 1.0 / (1.0 - W_LEV * dw * abs(dw));
+    v = v * exp2(W_EV * dw * ww) * level;
     return v;
 }
 
