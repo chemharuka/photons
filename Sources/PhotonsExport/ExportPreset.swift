@@ -77,6 +77,24 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// 109 — what an **SDR** export does with values above display white.
+///
+/// `.none` is the historical path: `s4_display` clamps at 1 before the OETF, byte for byte. `.global`
+/// renders the same frame through `s4_display_linear` and lets Core Image's global tone map roll the
+/// highlights into 0…1 before the transfer curve, so a bright sky keeps its shape instead of turning
+/// into a flat white patch. Only consulted while HDR is off — an HDR export has its own two halves.
+public enum SDRToneMapping: String, Codable, Sendable, CaseIterable {
+    case global
+    case none
+
+    public var displayName: String {
+        switch self {
+        case .global: return "全局"
+        case .none: return "无（硬截断）"
+        }
+    }
+}
+
 // MARK: - errors
 
 public enum ExportPresetError: LocalizedError, CustomStringConvertible {
@@ -304,6 +322,8 @@ public struct ExportPreset: Sendable, Equatable {
     /// 8 or 16 bits per channel. Coerced to 8 for formats that cannot carry 16 (JPEG, AVIF).
     public var bitDepth: Int
     public var colorSpace: OutputPrimaries
+    /// 109 — the SDR highlight policy. Ignored while `hdr` is enabled; `.none` is the pre-109 path.
+    public var sdrToneMapping: SDRToneMapping
     /// 100/111 — the HDR path (`kind` = gain map / HLG / PQ). `nil`/disabled = the exact pre-HDR
     /// export path.
     public var hdr: HDRExport?
@@ -336,6 +356,7 @@ public struct ExportPreset: Sendable, Equatable {
                 quality: Double = 0.92,
                 bitDepth: Int = 8,
                 colorSpace: OutputPrimaries = .displayP3,
+                sdrToneMapping: SDRToneMapping = .global,
                 hdr: HDRExport? = nil,
                 hdrKind: HDRKind? = nil,
                 writeXMP: Bool = false,
@@ -353,6 +374,7 @@ public struct ExportPreset: Sendable, Equatable {
         self.quality = quality
         self.bitDepth = bitDepth
         self.colorSpace = colorSpace
+        self.sdrToneMapping = sdrToneMapping
         if let hdrKind {
             var h = hdr ?? HDRExport()
             h.kind = hdrKind
@@ -391,6 +413,12 @@ public struct ExportPreset: Sendable, Equatable {
                 hdr = h
             }
         }
+    }
+
+    /// 109 — the SDR renderer takes the linear exit and Core Image's tone map. `false` keeps S4's
+    /// hard clamp, which is the byte-identical pre-109 path.
+    public var appliesSDRToneMap: Bool {
+        hdrKind == .none && sdrToneMapping == .global
     }
 
     /// What the encoder is actually allowed to write.
@@ -547,6 +575,7 @@ extension ExportPreset: Codable {
     enum CodingKeys: String, CodingKey {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
         case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel
+        case sdrToneMapping
     }
 
     public init(from decoder: Decoder) throws {
@@ -563,6 +592,8 @@ extension ExportPreset: Codable {
         self.quality = try c.decodeIfPresent(Double.self, forKey: .quality) ?? 0.92
         self.bitDepth = try c.decodeIfPresent(Int.self, forKey: .bitDepth) ?? 8
         self.colorSpace = OutputPrimaries(presetName: rawSpace) ?? .displayP3
+        self.sdrToneMapping = try c.decodeIfPresent(String.self, forKey: .sdrToneMapping)
+            .flatMap(SDRToneMapping.init(rawValue:)) ?? .global
         self.hdr = try c.decodeIfPresent(HDRExport.self, forKey: .hdr)
         self.writeXMP = try c.decodeIfPresent(Bool.self, forKey: .writeXMP) ?? false
         self.sharpen = try c.decodeIfPresent(OutputSharpening.self, forKey: .sharpen)
@@ -589,6 +620,9 @@ extension ExportPreset: Codable {
         try c.encode(quality, forKey: .quality)
         try c.encode(bitDepth, forKey: .bitDepth)
         try c.encode(colorSpace.rawValue, forKey: .colorSpace)
+        if sdrToneMapping != .global {
+            try c.encode(sdrToneMapping.rawValue, forKey: .sdrToneMapping)
+        }
         // Encoded only when present, so a preset written before 100 is byte-identical (`git diff`
         // clean in tests that round-trip the old fixture).
         try c.encodeIfPresent(hdr, forKey: .hdr)

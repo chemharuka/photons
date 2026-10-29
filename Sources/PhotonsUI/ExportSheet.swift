@@ -103,6 +103,24 @@ public enum UIExportRenderer {
             // only. The tone map is `min(v, 1)` until 112 swaps in the shoulder.
             return LinearPixels(frame).displaySDR(bitDepth: preset.effectiveBitDepth)
         }
+        // 109 §3 — SDR with the global tone map takes the same linear exit the HDR base uses, then
+        // rolls the highlights into 1 before the OETF. `.none` stays on the historical S4 path below,
+        // which is the byte-identical hard clamp.
+        if preset.appliesSDRToneMap {
+            let linearOptions = RenderOptions(canvas: nil,
+                                              scale: scale / Double(decodeScale),
+                                              display: DisplayOptions(primaries: preset.colorSpace,
+                                                                      bitDepth: preset.effectiveBitDepth,
+                                                                      headroom: 1,
+                                                                      linearOutput: true),
+                                              useCache: false,
+                                              wantsPixels: true)
+            guard let frame = try graph.render(edit, options: linearOptions).display else {
+                throw UIExportError.noPixels(item.name)
+            }
+            return Exporter.toneMapSDR(LinearPixels(frame))
+                .displaySDR(bitDepth: preset.effectiveBitDepth)
+        }
         let options = RenderOptions(canvas: nil,
                                     scale: scale / Double(decodeScale),
                                     display: DisplayOptions(primaries: preset.colorSpace,
@@ -175,6 +193,33 @@ public struct ExportRow: Identifiable, Sendable {
 
 // MARK: - model
 
+/// 109 §1 — the two halves of the gain-map row. `HDRExport.GainMap` is the storage spelling; these
+/// are what the user picks. Apple's gain map is monochrome by construction, so RGB + Apple is not a
+/// state the sheet can enter (picking one side locks the other).
+public enum GainMapColorModel: String, Sendable, CaseIterable {
+    case rgb
+    case mono
+
+    public var displayName: String {
+        switch self {
+        case .rgb: return "RGB"
+        case .mono: return "黑白"
+        }
+    }
+}
+
+public enum GainMapVersion: String, Sendable, CaseIterable {
+    case iso
+    case apple
+
+    public var displayName: String {
+        switch self {
+        case .iso: return "ISO"
+        case .apple: return "Apple"
+        }
+    }
+}
+
 /// The sheet's state: the draft preset, the items, the per-image rows and the report.
 ///
 /// `@Observable` so the SwiftUI leaf re-renders on a row change, `@MainActor` because every write
@@ -205,6 +250,15 @@ public final class ExportSheetModel {
     public private(set) var presetError: String?
     public private(set) var cancellation: CancellationToken?
 
+    /// 109 §2 — the UTIs this machine's ImageIO can write. Injected by the tests so "AVIF is not
+    /// offered without an encoder" can be asserted on a machine that happens to have one.
+    public let writableUTIs: Set<String>
+
+    /// The format row: only formats with a real encoder, in the enum's stable order.
+    public var availableFormats: [ExportFormat] {
+        ExportFormat.available(writableUTIs: writableUTIs)
+    }
+
     /// How many photos the sheet will export — set when it is presented, shown as "将导出 N 张".
     public var selectionCount: Int = 0
 
@@ -227,22 +281,29 @@ public final class ExportSheetModel {
 
     public init(preset: ExportPreset = ExportSheetModel.defaultPreset,
                 outputDirectory: URL = ExportSheetModel.defaultOutputDirectory,
-                presetStore: ExportPresetStore? = nil) {
+                presetStore: ExportPresetStore? = nil,
+                writableUTIs: Set<String>? = nil) {
         self.preset = preset
         self.hdrPreferredEnabled = preset.hdr?.enabled ?? true
         self.outputDirectory = outputDirectory
+        self.writableUTIs = writableUTIs ?? ExportFormat.writableUTIs
         let store = presetStore ?? ExportPresetStore()
         self.presetStore = store
         self.presetNames = store.names
     }
 
-    /// "网络 2048" — a JPEG that is safe to hand to anyone, not a TIFF of the original.
+    /// "网络 2048" — a HEIC that is safe to hand to anyone, not a TIFF of the original.
+    ///
+    /// 109's defaults: HEIC + HDR gain map + quality 0.95 + P3. The 109 sheet is the one surface that
+    /// owns this draft, so the values live here rather than in `ExportPreset()` (whose JPEG default
+    /// is the CLI/API default).
     ///
     /// `nonisolated`: a default argument is evaluated at the call site, which is not the main actor,
     /// and both of these are pure values.
     public nonisolated static var defaultPreset: ExportPreset {
-        ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.85,
-                     colorSpace: .displayP3, hdr: HDRExport(), writeXMP: false, nameTemplate: "{name}")
+        ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.95,
+                     bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
+                     hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}")
     }
 
     public nonisolated static var defaultOutputDirectory: URL {
@@ -272,10 +333,69 @@ public final class ExportSheetModel {
         set { updateHDR { $0.halfSize = newValue } }
     }
 
+    /// 109 §1 — which half of the gain-map row is highlighted. `.iso` is the only RGB spelling, so
+    /// RGB and `.mono`/`.apple` are the two sides of the same three-value enum.
+    public var gainMapColorModel: GainMapColorModel {
+        preset.hdr?.gainMap == .iso ? .rgb : .mono
+    }
+
+    /// `.apple` is the only Apple spelling; both ISO values read as version ISO.
+    public var gainMapVersion: GainMapVersion {
+        preset.hdr?.gainMap == .apple ? .apple : .iso
+    }
+
+    /// Apple's gain map is single-channel, so choosing RGB locks the version to ISO; choosing Apple
+    /// locks the model to 黑白. The sheet never shows an illegal pair, and the preset can never hold
+    /// one either.
+    public func setGainMapColorModel(_ model: GainMapColorModel) {
+        switch model {
+        case .rgb:
+            updateHDR { $0.gainMap = .iso }
+        case .mono:
+            updateHDR { $0.gainMap = gainMapVersion == .apple ? .apple : .mono }
+        }
+    }
+
+    public func setGainMapVersion(_ version: GainMapVersion) {
+        updateHDR { hdr in
+            switch version {
+            case .apple:
+                hdr.gainMap = .apple
+            case .iso:
+                hdr.gainMap = gainMapColorModel == .rgb ? .iso : .mono
+            }
+        }
+    }
+
+    /// 109 §1 — HDR on shows the gain-map row and hides tone mapping; HDR off is the reverse.
+    public var showsGainMapRows: Bool { hdrEnabled }
+    public var showsToneMappingRow: Bool { !hdrEnabled }
+
+    /// 109 §3 — only an SDR export consults this.
+    public var sdrToneMapping: SDRToneMapping {
+        get { preset.sdrToneMapping }
+        set { preset.sdrToneMapping = newValue }
+    }
+
+    public func setSDRToneMapping(_ value: SDRToneMapping) {
+        preset.sdrToneMapping = value
+    }
+
+    /// 109 §1 / 108 — the bit-depth row's legal values for the current format.
+    public var bitDepths: [Int] { preset.format.bitDepths }
+
+    public func selectBitDepth(_ depth: Int) {
+        guard bitDepths.contains(depth) else { return }
+        preset.bitDepth = depth
+    }
+
     /// The 文件设置 picker's door: going non-HEIC turns HDR off (and `validated()` would reject it
-    /// anyway), coming back re-applies the remembered choice.
+    /// anyway), coming back re-applies the remembered choice. A depth the new container cannot store
+    /// is clamped instead of left behind as an invisible illegal value.
     public func selectFormat(_ format: ExportFormat) {
+        guard availableFormats.contains(format) else { return }
         preset.format = format
+        preset.bitDepth = format.clampedBitDepth(preset.bitDepth)
         applyHDR(enabled: format == .heic ? hdrPreferredEnabled : false)
     }
 
@@ -671,20 +791,92 @@ public struct ExportSheetView: View {
 
     private var fileSection: some View {
         Section {
+            // 109 §2 — one button per *writable* format. A missing encoder means a missing button,
+            // not a greyed one (AVIF on an old system).
             HStack(spacing: 8) {
                 Text("格式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Picker("", selection: formatBinding) {
-                    ForEach(ExportFormat.allCases, id: \.self) { format in
+                    ForEach(model.availableFormats, id: \.self) { format in
                         Text(format.rawValue.uppercased()).tag(format)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 110)
-                .disabled(model.phase == .running)
+                .frame(width: 300)
+                .disabled(model.phase == .running || model.availableFormats.isEmpty)
             }
+            // 109 §1 — 文件设置 follows the user's list: format, HDR switch, the HDR or SDR row,
+            // quality, colour, depth.
+            HStack(spacing: 8) {
+                Toggle(isOn: hdrEnabledBinding) {
+                    Text("HDR 输出").font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(model.preset.format == .heic
+                                         ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .disabled(model.phase == .running || model.preset.format != .heic)
+                Spacer(minLength: 8)
+                if model.preset.format != .heic {
+                    Text("只有 HEIC 能带 HDR")
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+            }
+            .background(ExportLayoutProbeHost(kind: .hdrRow))
+
+            if model.showsGainMapRows {
+                HStack(spacing: 6) {
+                    Text("增益图").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Picker("", selection: gainMapColorBinding) {
+                        ForEach(GainMapColorModel.allCases, id: \.self) { colorModel in
+                            Text(colorModel.displayName).tag(colorModel)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 96)
+                    .disabled(model.phase == .running)
+                    Picker("", selection: gainMapVersionBinding) {
+                        ForEach(GainMapVersion.allCases, id: \.self) { version in
+                            Text(version.displayName).tag(version)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 104)
+                    .disabled(model.phase == .running)
+                    Toggle(isOn: hdrHalfSizeBinding) {
+                        Text("半尺寸").font(.system(size: 10))
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .disabled(model.phase == .running)
+                    .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Text("tone mapping").font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Picker("", selection: sdrToneMappingBinding) {
+                        ForEach(SDRToneMapping.allCases, id: \.self) { mapping in
+                            Text(mapping.displayName).tag(mapping)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 200)
+                    .disabled(model.phase == .running)
+                    .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
+                }
+            }
+
             HStack(spacing: 8) {
                 Text("质量").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
@@ -698,36 +890,37 @@ public struct ExportSheetView: View {
                                      ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
                     .frame(width: 38, alignment: .trailing)
             }
+            // 109 §2b — three direct buttons; P3 is the default (user's 2026-10-29 口径).
             HStack(spacing: 8) {
-                Text("色彩空间").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Text("色彩").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Picker("", selection: $model.preset.colorSpace) {
                     Text("sRGB").tag(OutputPrimaries.sRGB)
                     Text("P3").tag(OutputPrimaries.displayP3)
                     Text("Rec2020").tag(OutputPrimaries.rec2020)
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 110)
+                .frame(width: 200)
                 .disabled(model.phase == .running)
             }
+            // 109 §1 / 108 — only the depths this container really stores (HEIC 8/10, JPEG 8,
+            // PNG/TIFF 8/16, AVIF 8).
             HStack(spacing: 8) {
                 Text("位深").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Picker("", selection: sixteenBitBinding) {
-                    Text("8 位").tag(false)
-                    Text("16 位").tag(true)
+                Picker("", selection: bitDepthBinding) {
+                    ForEach(model.bitDepths, id: \.self) { depth in
+                        Text("\(depth) 位").tag(depth)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 110)
-                .disabled(model.phase == .running || !model.preset.format.supports16Bit)
+                .frame(width: model.bitDepths.count > 2 ? 200 : 130)
+                .disabled(model.phase == .running)
             }
-            // 106 §A — HDR is HEIC-only (`validated()` throws elsewhere), so the row goes grey with
-            // the format, and the remembered switch value is restored when HEIC comes back.
-            ExportHDRRow(model: model)
         } header: {
             sectionHeader("文件设置")
         }
@@ -1008,9 +1201,29 @@ public struct ExportSheetView: View {
                 })
     }
 
-    private var sixteenBitBinding: Binding<Bool> {
-        Binding(get: { model.preset.bitDepth == 16 },
-                set: { model.preset.bitDepth = $0 ? 16 : 8 })
+    private var bitDepthBinding: Binding<Int> {
+        Binding(get: { model.preset.bitDepth },
+                set: { model.selectBitDepth($0) })
+    }
+
+    private var hdrEnabledBinding: Binding<Bool> {
+        Binding(get: { model.hdrEnabled }, set: { model.setHDR($0) })
+    }
+
+    private var gainMapColorBinding: Binding<GainMapColorModel> {
+        Binding(get: { model.gainMapColorModel }, set: { model.setGainMapColorModel($0) })
+    }
+
+    private var gainMapVersionBinding: Binding<GainMapVersion> {
+        Binding(get: { model.gainMapVersion }, set: { model.setGainMapVersion($0) })
+    }
+
+    private var hdrHalfSizeBinding: Binding<Bool> {
+        Binding(get: { model.hdrHalfSize }, set: { model.hdrHalfSize = $0 })
+    }
+
+    private var sdrToneMappingBinding: Binding<SDRToneMapping> {
+        Binding(get: { model.sdrToneMapping }, set: { model.setSDRToneMapping($0) })
     }
 
     private var formatBinding: Binding<ExportFormat> {

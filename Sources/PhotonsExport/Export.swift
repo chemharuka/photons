@@ -1,6 +1,8 @@
 import Foundation
 import PhotonsCore
 import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -35,6 +37,64 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         case .png: return "png"
         case .avif: return "avif"
         }
+    }
+
+    /// The identifier used to ask ImageIO's writer list about this container.
+    ///
+    /// AVIF is the one case where `utType` has a fallback: on systems without the AVIF UTI a file
+    /// would be silently written as HEIC, so the *availability* question must use the real identifier
+    /// (nil = not writable) rather than the fallback.
+    public var writableTypeIdentifier: String? {
+        switch self {
+        case .avif: return UTType("public.avif")?.identifier
+        default: return utType.identifier
+        }
+    }
+
+    /// 109 §2 — only the formats this machine has an encoder for.
+    ///
+    /// The set comes from `CGImageDestinationCopyTypeIdentifiers()`; taking it as a parameter keeps
+    /// the rule testable without depending on what the running OS happens to ship.
+    public static func available(writableUTIs: Set<String>) -> [ExportFormat] {
+        allCases.filter { format in
+            guard let identifier = format.writableTypeIdentifier else { return false }
+            return writableUTIs.contains(identifier)
+        }
+    }
+
+    /// The writable UTI set on this machine.
+    public static var writableUTIs: Set<String> {
+        Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
+    }
+
+    /// What the 文件设置 format row may offer here.
+    public static var availableHere: [ExportFormat] {
+        available(writableUTIs: writableUTIs)
+    }
+
+    /// 109 §1 / 108 — the bit depths the container can honestly store, narrowest first.
+    ///
+    /// AVIF is deliberately 8-only in the sheet: ImageIO's AVIF writer accepts 10 bpc but the
+    /// project has no fixture that reads it back as 10, so offering it would promise a file the
+    /// encoder does not reliably produce yet.
+    public var bitDepths: [Int] {
+        switch self {
+        case .jpeg: return [8]
+        case .heic: return [8, 10]
+        case .tiff, .png: return [8, 16]
+        case .avif: return [8]
+        }
+    }
+
+    /// The closest depth this container really accepts. Switching HEIC 10 → JPEG gives 8 instead of
+    /// leaving a hidden illegal value in the preset.
+    public func clampedBitDepth(_ depth: Int) -> Int {
+        let legal = bitDepths
+        if legal.contains(depth) { return depth }
+        if depth >= 16, legal.contains(16) { return 16 }
+        if depth > 8, legal.contains(10) { return 10 }
+        if depth > 8, legal.contains(16) { return 16 }
+        return legal.first ?? 8
     }
 
     public var supportsQuality: Bool {
@@ -139,6 +199,70 @@ public enum Exporter {
         // Rec.2020 primaries, sRGB transfer — the tag a 16-bit TIFF/PNG (or 10-bit HEIC) should carry.
         case .rec2020: return CGColorSpace(name: CGColorSpace.itur_2020)
         }
+    }
+
+    /// The extended-range linear companion of `colorSpace(for:)`, for handing linear pixels to Core
+    /// Image without a colour conversion in between.
+    static func extendedLinearColorSpace(for primaries: OutputPrimaries) -> CGColorSpace? {
+        switch primaries {
+        case .sRGB: return CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        case .displayP3: return CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        case .rec2020: return CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020)
+        }
+    }
+
+    /// 109 §3 — the **global** SDR tone map, applied to the linear frame before the OETF.
+    ///
+    /// Core Image's `CIToneMapHeadroom` is the system's global tone curve: `sourceHeadroom` is the
+    /// frame's own peak (1.0 means "already SDR", in which case the input is returned untouched and
+    /// the result is the same hard clamp as before), `targetHeadroom = 1` rolls that peak into
+    /// display white. It is available from macOS 15; on 14 the caller keeps the clamp path, which is
+    /// why this returns the input unchanged instead of inventing a curve.
+    public static func toneMapSDR(_ linear: LinearPixels) -> LinearPixels {
+        if #available(macOS 15.0, *) {
+            var peak: Float = 0
+            for i in stride(from: 0, to: linear.rgba.count, by: 4) {
+                peak = max(peak, max(Float(linear.rgba[i]),
+                                     max(Float(linear.rgba[i + 1]), Float(linear.rgba[i + 2]))))
+            }
+            guard peak > 1.0001,
+                  let space = extendedLinearColorSpace(for: linear.primaries) else { return linear }
+
+            let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                                    | CGBitmapInfo.floatComponents.rawValue
+                                    | CGBitmapInfo.byteOrder16Little.rawValue)
+            let data = linear.rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+            guard let provider = CGDataProvider(data: data as CFData),
+                  let cg = CGImage(width: linear.width, height: linear.height,
+                                   bitsPerComponent: 16, bitsPerPixel: 64,
+                                   bytesPerRow: linear.width * 8, space: space,
+                                   bitmapInfo: info, provider: provider, decode: nil,
+                                   shouldInterpolate: false, intent: .defaultIntent) else {
+                return linear
+            }
+            let context = CIContext(options: [.workingColorSpace: space])
+            let input = CIImage(cgImage: cg)
+            let filter = CIFilter.toneMapHeadroom()
+            filter.inputImage = input
+            filter.sourceHeadroom = peak
+            filter.targetHeadroom = 1
+            guard let output = filter.outputImage,
+                  let mapped = context.createCGImage(output, from: output.extent,
+                                                     format: .RGBAh, colorSpace: space) else {
+                return linear
+            }
+            // Read the filtered linear frame back in the same extended space: `createCGImage` may
+            // return a lazily backed image, and the batch worker must not hold the CI context.
+            var out = [Float16](repeating: 0, count: linear.rgba.count)
+            guard let bitmap = CGContext(data: &out, width: linear.width, height: linear.height,
+                                         bitsPerComponent: 16, bytesPerRow: linear.width * 8,
+                                         space: space, bitmapInfo: info) else { return linear }
+            bitmap.draw(mapped, in: CGRect(x: 0, y: 0,
+                                           width: linear.width, height: linear.height))
+            return LinearPixels(width: linear.width, height: linear.height, rgba: out,
+                                primaries: linear.primaries)
+        }
+        return linear
     }
 
     public static func cgImage(_ image: DisplayImage, bitDepth: Int) throws -> CGImage {

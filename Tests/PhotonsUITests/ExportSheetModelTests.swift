@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import PhotonsCore
 import PhotonsExport
 @testable import PhotonsUI
@@ -25,8 +26,9 @@ final class ExportSheetModelTests: XCTestCase {
         if let scratch { try? FileManager.default.removeItem(at: scratch) }
     }
 
-    private func model() -> ExportSheetModel {
-        ExportSheetModel(presetStore: ExportPresetStore(directory: scratch))
+    private func model(writableUTIs: Set<String>? = nil) -> ExportSheetModel {
+        ExportSheetModel(presetStore: ExportPresetStore(directory: scratch),
+                         writableUTIs: writableUTIs)
     }
 
     // MARK: sections
@@ -34,6 +36,111 @@ final class ExportSheetModelTests: XCTestCase {
     func testSectionOrderMatchesLightroom() {
         XCTAssertEqual(ExportSheetModel.sectionTitles,
                        ["位置", "文件命名", "文件设置", "图像尺寸", "输出锐化", "元数据", "导出"])
+    }
+
+    // MARK: - 109 文件设置
+
+    /// §4.1 — a format without an encoder is not in the row at all.
+    func testTheFormatRowOnlyCarriesWritableFormats() {
+        let partial = model(writableUTIs: [UTType.jpeg.identifier, UTType.heic.identifier,
+                                           UTType.tiff.identifier])
+        XCTAssertEqual(partial.availableFormats, [.jpeg, .heic, .tiff])
+        XCTAssertEqual(partial.preset.format, .heic, "HEIC is the default draft")
+
+        let all = model(writableUTIs: Set(ExportFormat.allCases.map { $0.utType.identifier }))
+        XCTAssertEqual(all.availableFormats.count, 5)
+
+        // A format the machine cannot write is ignored rather than silently selected.
+        partial.selectFormat(.avif)
+        XCTAssertEqual(partial.preset.format, .heic)
+    }
+
+    /// §4.4 — the default draft, field by field (user's 2026-10-29 口径).
+    func testDefaultDraftIsHEICHDRP3At095() {
+        let preset = ExportSheetModel.defaultPreset
+        XCTAssertEqual(preset.format, .heic)
+        XCTAssertEqual(preset.hdr?.enabled, true)
+        XCTAssertEqual(preset.hdr?.gainMap, .iso)
+        XCTAssertEqual(preset.quality, 0.95)
+        XCTAssertEqual(preset.colorSpace, .displayP3)
+        XCTAssertEqual(preset.bitDepth, 8)
+        XCTAssertEqual(preset.sdrToneMapping, .global)
+        XCTAssertEqual(preset.conflict, .rename)
+    }
+
+    /// §4.5 — the summary says P3 (the 099 summary assertion moved with the default).
+    func testDefaultColourIsP3AndTheSummarySaysSo() {
+        let sheet = model()
+        XCTAssertEqual(sheet.preset.colorSpace, .displayP3)
+        XCTAssertTrue(sheet.summaryLine.contains("Display P3"), sheet.summaryLine)
+        XCTAssertFalse(sheet.summaryLine.contains("sRGB"), sheet.summaryLine)
+        XCTAssertEqual(ExportPreset().colorSpace, .displayP3,
+                       "默认色彩从 sRGB 改 P3 是用户 2026-10-29 的口径")
+    }
+
+    /// §4.2 — HDR on shows the gain-map row and hides tone mapping; off is the reverse.
+    func testHDRAndSDRRowsAreMutuallyExclusive() {
+        let sheet = model()
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertTrue(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+        XCTAssertEqual(sheet.sdrToneMapping, .global)
+
+        sheet.setHDR(false)
+        XCTAssertFalse(sheet.hdrEnabled)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertTrue(sheet.showsToneMappingRow)
+        sheet.setSDRToneMapping(.none)
+        XCTAssertEqual(sheet.preset.sdrToneMapping, .none)
+    }
+
+    /// §4.3 — RGB + Apple is not reachable; each legal pair lands on the right `GainMap`.
+    func testGainMapModelAndVersionMapToTheThreeSpellings() {
+        let sheet = model()
+
+        sheet.setGainMapColorModel(.rgb)
+        sheet.setGainMapVersion(.iso)
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
+        XCTAssertEqual(sheet.gainMapColorModel, .rgb)
+        XCTAssertEqual(sheet.gainMapVersion, .iso)
+
+        sheet.setGainMapColorModel(.mono)
+        sheet.setGainMapVersion(.iso)
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .mono)
+        XCTAssertEqual(sheet.gainMapColorModel, .mono)
+
+        sheet.setGainMapColorModel(.mono)
+        sheet.setGainMapVersion(.apple)
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .apple)
+        XCTAssertEqual(sheet.gainMapColorModel, .mono)
+        XCTAssertEqual(sheet.gainMapVersion, .apple)
+
+        // Clicking RGB while Apple is selected locks the version back to ISO …
+        sheet.setGainMapColorModel(.rgb)
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
+        XCTAssertEqual(sheet.gainMapVersion, .iso)
+        // … and clicking Apple while RGB is selected locks the model to 黑白.
+        sheet.setGainMapVersion(.apple)
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .apple)
+        XCTAssertEqual(sheet.gainMapColorModel, .mono)
+        XCTAssertNoThrow(try sheet.preset.validated())
+    }
+
+    /// §1 / 108 — the depth row only offers legal values and clamps on a format switch.
+    func testBitDepthRowFollowsTheFormat() {
+        let sheet = model()
+        XCTAssertEqual(sheet.bitDepths, [8, 10])
+        sheet.selectBitDepth(10)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+        sheet.selectFormat(.jpeg)
+        XCTAssertEqual(sheet.bitDepths, [8])
+        XCTAssertEqual(sheet.preset.bitDepth, 8, "HEIC 10 → JPEG must not leave a hidden 10")
+        sheet.selectFormat(.png)
+        XCTAssertEqual(sheet.bitDepths, [8, 16])
+        sheet.selectBitDepth(16)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        sheet.selectBitDepth(10)
+        XCTAssertEqual(sheet.preset.bitDepth, 16, "10 is not a PNG depth")
     }
 
     // MARK: summary
@@ -109,8 +216,8 @@ final class ExportSheetModelTests: XCTestCase {
         let sheet = model()
         XCTAssertEqual(sheet.preset.format, .heic, "HDR needs the HEIF container")
         XCTAssertEqual(sheet.preset.hdr?.enabled, true, "HDR defaults to on")
-        // 默认值随系统：15+ 是 ISO（ImageIO 的 ISOGainMap），14 是 Apple（14.1 就有 HDRGainMap）。
-        XCTAssertEqual(sheet.preset.hdr?.gainMap, HDRExport.defaultGainMap)
+        // 109's default draft names ISO explicitly (it is the macOS 15+ spelling).
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
         XCTAssertEqual(sheet.preset.hdr?.halfSize, false)
         XCTAssertEqual(sheet.preset.hdr?.headroom, .auto)
 
@@ -224,37 +331,29 @@ final class ExportSheetModelTests: XCTestCase {
                        "「还没有导出…」 还在 results 里，没有挪到按钮那一行")
     }
 
-    /// §A (the visible half): the row's menu is actually greyed out when the format cannot carry a
-    /// gain map, and alive again on HEIC. (SwiftUI's checkbox has no `NSButton` leaf inside a `Form`
-    /// — it draws into a `_NSGraphicsView` — so the row's `Menu`, which is a real control, carries the
-    /// enabled-state assertion; the model test above pins the checkbox's own value.)
-    func testTheHDRMenuIsGreyedOutForNonHEICFormats() throws {
+    /// §A (the visible half): the HDR row stays in place and greys out for non-HEIC formats; the
+    /// gain-map controls follow the toggle (109 replaced 106's menu with two segmented groups).
+    func testTheHDRRowStaysPutAndTheGainMapControlsFollowTheFormat() throws {
         let sheet = model()
         let hosted = try host(height: 760, model: sheet)
 
-        func rowRect() throws -> NSRect { try frame(of: .hdrRow, in: hosted.host) }
-        func menu() throws -> NSButton {
-            let row = try rowRect()
-            let match = descendants(of: hosted.host).compactMap { $0 as? NSButton }
-                .first { !$0.title.isEmpty
-                    && $0.convert($0.bounds, to: hosted.host).intersects(row) }
-            return try XCTUnwrap(match, "the gain-map menu is not in the HDR row")
-        }
-
-        let heicRow = try rowRect()
+        let heicRow = try frame(of: .hdrRow, in: hosted.host)
         XCTAssertGreaterThan(heicRow.height, 0, "the HDR row is in the sheet")
-        XCTAssertTrue(try menu().isEnabled, "HEIC is the one format that supports HDR")
-        XCTAssertEqual(try menu().title, "ISO RGB")
+        XCTAssertTrue(sheet.hdrEnabled, "HEIC is the one format that supports HDR")
+        XCTAssertTrue(sheet.showsGainMapRows)
 
         sheet.selectFormat(.jpeg)
         pump(hosted.host)
-        XCTAssertEqual(try rowRect().height, heicRow.height, accuracy: 0.5,
-                       "the row stays put, it just greys out")
-        XCTAssertFalse(try menu().isEnabled, "the row must be greyed before the user can hit 导出")
+        XCTAssertEqual(try frame(of: .hdrRow, in: hosted.host).height, heicRow.height,
+                       accuracy: 0.5, "the row stays put, it just greys out")
+        XCTAssertFalse(sheet.hdrEnabled, "the row must be off before the user can hit 导出")
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertTrue(sheet.showsToneMappingRow)
 
         sheet.selectFormat(.heic)
         pump(hosted.host)
-        XCTAssertTrue(try menu().isEnabled, "the remembered choice came back with HEIC")
+        XCTAssertTrue(sheet.hdrEnabled, "the remembered choice came back with HEIC")
+        XCTAssertTrue(sheet.showsGainMapRows)
     }
 
     // MARK: - hosting helpers
