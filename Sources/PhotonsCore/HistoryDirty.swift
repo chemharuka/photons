@@ -90,6 +90,30 @@ extension EditHistory {
 
 // MARK: - the comparisons
 
+/// One group's compared fields, **named**.
+///
+/// The name is the struct's own stored-property label, and `FieldCoverageTests` reflects over the
+/// group to assert that this list and the struct agree in both directions. That is the point: the
+/// bug this replaces was a hand-written `&&` chain that silently omitted 纹理 / 清晰度 / 去雾 for a
+/// month, so every `applyEdit` on those sliders returned on `isSemanticallyIdentical` and the drag
+/// snapped back to 0. A field cannot be forgotten now without a red test.
+struct FieldTable<G> {
+    private(set) var names: [String] = []
+    private var checks: [(G, G) -> Bool] = []
+
+    init() {}
+
+    mutating func field(_ name: String, _ check: @escaping (G, G) -> Bool) {
+        names.append(name)
+        checks.append(check)
+    }
+
+    func allEqual(_ a: G, _ b: G) -> Bool {
+        for check in checks where !check(a, b) { return false }
+        return true
+    }
+}
+
 /// Tolerant equality for every value type in `EditModel`. Internal: the public surface is the
 /// group question, not "is this double close enough".
 enum EditParameters {
@@ -136,31 +160,44 @@ enum EditParameters {
     }
 
     static func areEqual(_ a: GeometryGroup, _ b: GeometryGroup) -> Bool {
-        areEqual(a.crop, b.crop)
-            && areEqual(a.rotationDegrees, b.rotationDegrees)
-            && areEqual(a.flipHorizontal, b.flipHorizontal)
-            && areEqual(a.flipVertical, b.flipVertical)
-            && a.quarterTurns == b.quarterTurns
+        geometryFields.allEqual(a, b)
     }
 
+    static let geometryFields: FieldTable<GeometryGroup> = {
+        var t = FieldTable<GeometryGroup>()
+        t.field("crop") { areEqual($0.crop, $1.crop) }
+        t.field("rotationDegrees") { areEqual($0.rotationDegrees, $1.rotationDegrees) }
+        t.field("flipHorizontal") { areEqual($0.flipHorizontal, $1.flipHorizontal) }
+        t.field("flipVertical") { areEqual($0.flipVertical, $1.flipVertical) }
+        // The ratio lock is document state the crop tool writes on its own (toggling 🔒 ↔ free moves
+        // no pixels), and `applyEdit` drops anything it cannot see — so it is compared even though it
+        // is not render material: without this the lock would refuse to toggle.
+        t.field("aspectLock") { $0.aspectLock == $1.aspectLock }
+        t.field("quarterTurns") { $0.quarterTurns == $1.quarterTurns }
+        return t
+    }()
+
     static func areEqual(_ a: LightGroup, _ b: LightGroup) -> Bool {
-        areEqual(a.exposure, b.exposure)
-            && areEqual(a.contrast, b.contrast)
-            && areEqual(a.highlights, b.highlights)
-            && areEqual(a.midtones, b.midtones)
-            && areEqual(a.shadows, b.shadows)
-            && areEqual(a.whites, b.whites)
-            && areEqual(a.blacks, b.blacks)
-            && areEqual(a.temperature, b.temperature)
-            && areEqual(a.tint, b.tint)
-            && areEqual(a.highlightRecovery, b.highlightRecovery)
-            // 071: **this line is load-bearing, not bookkeeping.** `CatalogSession.applyEdit`
-            // short-circuits on `isSemanticallyIdentical`, so a field that is missing here is a field
-            // whose slider writes nothing at all — measured: before this line the 黑电平 slider moved,
-            // `applyEdit` returned silently, and the document stayed at 0. A step is 0.001, i.e. a
-            // thousand `dirtyTolerance`s, so no tolerance can hide one.
-            && areEqual(a.blackOffset, b.blackOffset)
+        lightFields.allEqual(a, b)
     }
+
+    static let lightFields: FieldTable<LightGroup> = {
+        var t = FieldTable<LightGroup>()
+        t.field("exposure") { areEqual($0.exposure, $1.exposure) }
+        t.field("contrast") { areEqual($0.contrast, $1.contrast) }
+        t.field("highlights") { areEqual($0.highlights, $1.highlights) }
+        t.field("midtones") { areEqual($0.midtones, $1.midtones) }
+        t.field("shadows") { areEqual($0.shadows, $1.shadows) }
+        t.field("whites") { areEqual($0.whites, $1.whites) }
+        t.field("blacks") { areEqual($0.blacks, $1.blacks) }
+        t.field("temperature") { areEqual($0.temperature, $1.temperature) }
+        t.field("tint") { areEqual($0.tint, $1.tint) }
+        t.field("highlightRecovery") { areEqual($0.highlightRecovery, $1.highlightRecovery) }
+        // 071: blackOffset missing here meant the 黑电平 slider moved, `applyEdit` returned silently
+        // and the document stayed at 0. A step is 0.001 — a thousand tolerances.
+        t.field("blackOffset") { areEqual($0.blackOffset, $1.blackOffset) }
+        return t
+    }()
 
     /// As shot (`nil`) is a *state*, not a number: a document that follows the file and one that
     /// pins 6500 K are different documents, so the comparison has to be three-valued (派单 006).
@@ -173,72 +210,106 @@ enum EditParameters {
     }
 
     static func areEqual(_ a: CurveGroup, _ b: CurveGroup) -> Bool {
-        areEqual(a.rgb, b.rgb) && areEqual(a.red, b.red)
-            && areEqual(a.green, b.green) && areEqual(a.blue, b.blue)
+        curveFields.allEqual(a, b)
     }
 
+    static let curveFields: FieldTable<CurveGroup> = {
+        var t = FieldTable<CurveGroup>()
+        // `white` is the stored master curve; `rgb` is a computed view of it (`tables` =
+        // [white, red, green, blue]), so the stored field is what the comparison must name.
+        t.field("white") { areEqual($0.white, $1.white) }
+        t.field("red") { areEqual($0.red, $1.red) }
+        t.field("green") { areEqual($0.green, $1.green) }
+        t.field("blue") { areEqual($0.blue, $1.blue) }
+        return t
+    }()
+
     static func areEqual(_ a: ColorGroup, _ b: ColorGroup) -> Bool {
-        a.blackAndWhite == b.blackAndWhite
-            && areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
-            && areEqual(a.bands, b.bands)
-            && areEqual(a.global, b.global)
+        colorFields.allEqual(a, b)
     }
+
+    static let colorFields: FieldTable<ColorGroup> = {
+        var t = FieldTable<ColorGroup>()
+        t.field("blackAndWhite") { $0.blackAndWhite == $1.blackAndWhite }
+        t.field("vibrance") { areEqual($0.vibrance, $1.vibrance) }
+        t.field("saturation") { areEqual($0.saturation, $1.saturation) }
+        t.field("bands") { areEqual($0.bands, $1.bands) }
+        t.field("global") { areEqual($0.global, $1.global) }
+        return t
+    }()
 
     /// 2026-10-28 (P0 色彩分级): the nine numbers. **Load-bearing** for the same reason
     /// `blackOffset` and the three grain fields are: `CatalogSession.applyEdit` short-circuits on
     /// `isSemanticallyIdentical`, so a group missing from here is a slider that writes nothing at all
     /// (and `commitEdit` then finds nothing to commit, so the drag leaves no history row either).
     static func areEqual(_ a: ColorGradingGroup, _ b: ColorGradingGroup) -> Bool {
-        zip(a.wheels, b.wheels).allSatisfy { x, y in
+        colorGradingFields.allEqual(a, b)
+    }
+
+    static let colorGradingFields: FieldTable<ColorGradingGroup> = {
+        var t = FieldTable<ColorGradingGroup>()
+        let wheel: (GradeWheel, GradeWheel) -> Bool = { x, y in
             areEqual(x.hue, y.hue) && areEqual(x.saturation, y.saturation)
                 && areEqual(x.lightness, y.lightness)
         }
-    }
+        // Three stored wheels; `wheels` is their computed array.
+        t.field("shadows") { wheel($0.shadows, $1.shadows) }
+        t.field("midtones") { wheel($0.midtones, $1.midtones) }
+        t.field("highlights") { wheel($0.highlights, $1.highlights) }
+        return t
+    }()
 
     static func areEqual(_ a: DetailGroup, _ b: DetailGroup) -> Bool {
-        areEqual(a.sharpening, b.sharpening)
-            && areEqual(a.sharpeningRadius, b.sharpeningRadius)
-            && areEqual(a.noiseLuminance, b.noiseLuminance)
-            && areEqual(a.noiseColor, b.noiseColor)
-            && areEqual(a.lensCorrections, b.lensCorrections)
+        detailFields.allEqual(a, b)
     }
+
+    static let detailFields: FieldTable<DetailGroup> = {
+        var t = FieldTable<DetailGroup>()
+        t.field("sharpening") { areEqual($0.sharpening, $1.sharpening) }
+        t.field("sharpeningRadius") { areEqual($0.sharpeningRadius, $1.sharpeningRadius) }
+        t.field("noiseLuminance") { areEqual($0.noiseLuminance, $1.noiseLuminance) }
+        t.field("noiseColor") { areEqual($0.noiseColor, $1.noiseColor) }
+        t.field("lensCorrections") { areEqual($0.lensCorrections, $1.lensCorrections) }
+        return t
+    }()
 
     /// 派单 031: the decoder-side amounts. One unit of slider travel is 0.01 of a filter value (040's
     /// 0…100 scale), so the 1e-6 tolerance is far below a step and far above JSON round-trip noise.
     static func areEqual(_ a: DetailSettings, _ b: DetailSettings) -> Bool {
-        areEqual(a.luminanceNR, b.luminanceNR)
-            && areEqual(a.colorNR, b.colorNR)
-            && areEqual(a.sharpness, b.sharpness)
-            && areEqual(a.detail, b.detail)
+        detailSettingsFields.allEqual(a, b)
     }
 
+    static let detailSettingsFields: FieldTable<DetailSettings> = {
+        var t = FieldTable<DetailSettings>()
+        t.field("luminanceNR") { areEqual($0.luminanceNR, $1.luminanceNR) }
+        t.field("colorNR") { areEqual($0.colorNR, $1.colorNR) }
+        t.field("sharpness") { areEqual($0.sharpness, $1.sharpness) }
+        t.field("detail") { areEqual($0.detail, $1.detail) }
+        return t
+    }()
+
     static func areEqual(_ a: EffectsGroup, _ b: EffectsGroup) -> Bool {
-        areEqual(a.vignetteAmount, b.vignetteAmount)
-            && areEqual(a.vignetteMidpoint, b.vignetteMidpoint)
-            && areEqual(a.vignetteFeather, b.vignetteFeather)
-            && areEqual(a.vignetteRoundness, b.vignetteRoundness)
-            && areEqual(a.grain, b.grain)
-            // 2026-10-28 — and the same load-bearing rule as `blackOffset` above: `applyEdit`
-            // short-circuits on `isSemanticallyIdentical`, so a field missing from here is a slider
-            // that writes nothing at all. Measured the hard way when 颗粒大小/粗糙度/种子 were added:
-            // without these three lines `applyEdit { grainRoughness = 90 }` returned silently, the
-            // document stayed at 50 and `commitEdit` found nothing to commit — `EffectsCardTests`
-            // (`testOneRowsResetUsesItsOwnDefault`) was the test that caught it.
-            //
-            // The seed compares as `grainSeedValue`, the integer the kernel hashes: a document holding
-            // 3.7 and one holding 4 are the same noise, so they must not mint an undo step either.
-            && areEqual(a.grainSize, b.grainSize)
-            && areEqual(a.grainRoughness, b.grainRoughness)
-            && a.grainSeedValue == b.grainSeedValue
-            // 2026-10-29 — 纹理 / 清晰度 / 去雾. Exactly the same failure as the grain lines above,
-            // found the same way (a user dragging a slider that snapped back to 0): without these
-            // three lines `applyEdit { texture = 10 }` returned on `isSemanticallyIdentical`, the
-            // document stayed at 0, `commitEdit` found nothing, and S3.8 was never encoded.
-            // `EffectsCardTests.testDetailFXRowsWriteTheDocument` is the test that now holds them.
-            && areEqual(a.texture, b.texture)
-            && areEqual(a.clarity, b.clarity)
-            && areEqual(a.dehaze, b.dehaze)
+        effectsFields.allEqual(a, b)
     }
+
+    static let effectsFields: FieldTable<EffectsGroup> = {
+        var t = FieldTable<EffectsGroup>()
+        t.field("vignetteAmount") { areEqual($0.vignetteAmount, $1.vignetteAmount) }
+        t.field("vignetteMidpoint") { areEqual($0.vignetteMidpoint, $1.vignetteMidpoint) }
+        t.field("vignetteFeather") { areEqual($0.vignetteFeather, $1.vignetteFeather) }
+        t.field("vignetteRoundness") { areEqual($0.vignetteRoundness, $1.vignetteRoundness) }
+        t.field("grain") { areEqual($0.grain, $1.grain) }
+        t.field("grainSize") { areEqual($0.grainSize, $1.grainSize) }
+        t.field("grainRoughness") { areEqual($0.grainRoughness, $1.grainRoughness) }
+        // The seed compares as the integer the kernel hashes: 3.7 and 4 are the same noise.
+        t.field("grainSeed") { $0.grainSeedValue == $1.grainSeedValue }
+        // 2026-10-29 — 纹理 / 清晰度 / 去雾 were the missing three; the drag snapped back to 0 because
+        // `applyEdit` short-circuited. `EffectsCardTests.testDetailFXRowsWriteTheDocument` holds them.
+        t.field("texture") { areEqual($0.texture, $1.texture) }
+        t.field("clarity") { areEqual($0.clarity, $1.clarity) }
+        t.field("dehaze") { areEqual($0.dehaze, $1.dehaze) }
+        return t
+    }()
 
     /// 2026-10-28 (078 B8): the two CA ratios. Same load-bearing rule as the grain lines above —
     /// `dirtyGroups` reads this, `applyEdit` reads `dirtyGroups`, so a value this leaves out is a
@@ -247,8 +318,15 @@ enum EditParameters {
     /// Compared at `dirtyTolerance` (1e-6), which is 1/50 of one slider unit (5 × 10⁻⁵ of α): every
     /// position the panel can express is dirty against its neighbour, and a JSON round-trip is not.
     static func areEqual(_ a: OpticsGroup, _ b: OpticsGroup) -> Bool {
-        areEqual(a.caRed, b.caRed) && areEqual(a.caBlue, b.caBlue)
+        opticsFields.allEqual(a, b)
     }
+
+    static let opticsFields: FieldTable<OpticsGroup> = {
+        var t = FieldTable<OpticsGroup>()
+        t.field("caRed") { areEqual($0.caRed, $1.caRed) }
+        t.field("caBlue") { areEqual($0.caBlue, $1.caBlue) }
+        return t
+    }()
 
     /// Do two mask stacks contribute the same render material?
     ///
