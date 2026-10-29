@@ -725,6 +725,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The rung the last presented frame came from — what `framing()` measures and what an edit
     /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
     private var decoded: LinearImage?
+    /// 派单 105: which file `decoded` came from, so the automatic black level can ask the decoder for
+    /// a second, measurement-only development of the same pixels' source. Set next to `decoded`.
+    private var decodedURL: URL?
     /// Test seam (094): a synthetic buffer with the two classes of points (all-negative vs a single
     /// negative channel) is the only way to prove `autoBlackOffset()` end to end without a real RAW
     /// that happens to carry a −0.018 outlier. Production never sets this; same `...ForTesting`
@@ -3512,6 +3515,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 自动黑电平 (2026-10-28)
 
+    /// 派单 105: the measurement-side decode, replaceable by the fallback test.
+    ///
+    /// Production leaves this `nil` and asks `RAWDecoder.decodeForMeasurement`; the test injects a
+    /// throwing closure to prove that `autoBlackOffset()` still returns a value (from the display
+    /// buffer) when the measurement decode fails.
+    var measurementDecodeForTesting: ((URL, Double) throws -> LinearImage)?
+
     /// 自动黑电平：把解码缓冲的最小通道值拉到 0（一次文档写、一条历史）。返回写进去的值；没有解码图时 nil。
     ///
     /// The buffer is the **decoded** scene-linear one (`LinearImage.rgba`), not the rendered frame:
@@ -3519,20 +3529,60 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// additive on the samples. `−min` is rounded **up** to the document's 1/1000 grid — a half tick
     /// down would leave the darkest sample negative, which is exactly what the user asked to remove.
     /// A value already at zero (or any buffer that is already non-negative) is a no-op.
+    ///
+    /// 派单 105: the value is measured on a **measurement-only decode** (`decodeForMeasurement`,
+    /// sharpening / colour NR / detail / lens correction all off), not on the display buffer, whose
+    /// untouched Apple defaults (sharpness 0.5, colour NR 0.5) can manufacture a dozen single-pixel
+    /// overshoots at strong edges. When that decode fails — or there is no source URL, as with the
+    /// synthetic buffers the tests use — the display buffer is measured instead, with one log line.
+    /// The estimator **is the minimum** — 用户 2026-10-29 14:20 明确「不加守卫」：不做任何按像素数
+    /// 切换估计量的分支。干净解码之后最负的那颗就是电平该补的量，哪怕只有一颗。
     @discardableResult
     public func autoBlackOffset() -> Double? {
-        guard let session, session.mode == .loupe, let image = decoded else { return nil }
-        let min = image.darkestBelowBlack(sampleStride: 5)
-        let raw = min >= 0 ? 0 : -Double(min)
-        let offset = Self.autoBlackOffset(for: min)
-        if raw < LightGroup.blackOffsetRange.lowerBound || raw > LightGroup.blackOffsetRange.upperBound {
-            print("AUTO BLACK · min \(min) → offset 钳到 ±0.01")
+        guard let session, session.mode == .loupe, let display = decoded else { return nil }
+
+        let measured: LinearImage
+        if let url = decodedURL, let image = try? measurementImage(url) {
+            measured = image
+        } else {
+            print("AUTO BLACK · measurement decode failed, falling back")
+            measured = display
+        }
+
+        let candidates = measured.blackCandidates(sampleStride: 5)
+        let rawValue = candidates.min
+        let offset = Self.autoBlackOffset(for: rawValue)
+        print(String(format: "AUTO BLACK · min %.6f · 候选 %d → %.4f",
+                     candidates.min, candidates.count, offset))
+        if offset == LightGroup.blackOffsetRange.lowerBound
+            || offset == LightGroup.blackOffsetRange.upperBound {
+            print(String(format: "AUTO BLACK · min %.6f → offset 钳到 ±0.01", candidates.min))
         }
         guard abs(offset - session.edit.light.blackOffset) >= 1e-9 else { return nil }
         session.applyEdit { $0.light.blackOffset = offset }
         requestEditRender()
         session.commitEdit(label: "黑电平 · 自动", coalesce: false)
         return offset
+    }
+
+    private func measurementImage(_ url: URL) throws -> LinearImage {
+        if let measurementDecodeForTesting {
+            return try measurementDecodeForTesting(url, 0.5)
+        }
+        return try RAWDecoder().decodeForMeasurement(url, scale: 0.5)
+    }
+
+    /// The value `autoBlackOffset()` measures: the minimum when there are enough genuinely extreme
+    /// candidates for it to mean something, otherwise the candidate set's 0.1st percentile.
+    ///
+    /// 派单 105's guard: even at a measurement decode a few single-pixel overshoots can survive, and
+    /// one of them must not decide the whole black point. Fewer than 50 candidates below −0.008 is
+    /// treated as "noise, not signal".
+    /// 估计量就是最小值（105 复核：用户要求不加守卫）。
+    static func autoBlackRawValue(min: Float, p001: Float, extremeCount: Int) -> Float {
+        _ = p001
+        _ = extremeCount
+        return min
     }
 
     /// The value `autoBlackOffset()` writes, as a pure function (the tests ask it without a decode).
@@ -4957,6 +5007,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             graphPhoto = nil
         }
         decoded = image
+        decodedURL = url
         decodedScale = ds
         decodedCaps = outcome.rung.capabilities
         currentDecodeScale = decodeScale

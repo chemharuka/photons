@@ -89,7 +89,23 @@ public enum UIExportRenderer {
                                     useCache: false,
                                     wantsPixels: true)
         let result = try graph.render(edit, options: options)
-        guard let pixels = result.display else { throw UIExportError.noPixels(item.name) }
+        guard var pixels = result.display else { throw UIExportError.noPixels(item.name) }
+        // 106 — HDR is a second pass through the same graph, this time through `s4_display_linear`
+        // (extended-range values, no OETF). `Exporter.write` only takes `GainMapHEIC` when this
+        // companion is present; without it the file would silently be the SDR base (100's fallback).
+        if preset.isHDR {
+            let linear = RenderOptions(canvas: nil,
+                                       scale: scale / Double(decodeScale),
+                                       display: DisplayOptions(primaries: preset.colorSpace,
+                                                               bitDepth: preset.effectiveBitDepth,
+                                                               headroom: 1,
+                                                               linearOutput: true),
+                                       useCache: false,
+                                       wantsPixels: true)
+            if let linearPixels = try graph.render(edit, options: linear).display {
+                pixels = pixels.withLinear(LinearPixels(linearPixels))
+            }
+        }
         return pixels
     }
 
@@ -207,6 +223,7 @@ public final class ExportSheetModel {
                 outputDirectory: URL = ExportSheetModel.defaultOutputDirectory,
                 presetStore: ExportPresetStore? = nil) {
         self.preset = preset
+        self.hdrPreferredEnabled = preset.hdr?.enabled ?? true
         self.outputDirectory = outputDirectory
         let store = presetStore ?? ExportPresetStore()
         self.presetStore = store
@@ -218,13 +235,58 @@ public final class ExportSheetModel {
     /// `nonisolated`: a default argument is evaluated at the call site, which is not the main actor,
     /// and both of these are pure values.
     public nonisolated static var defaultPreset: ExportPreset {
-        ExportPreset(name: "网络 2048", format: .jpeg, longEdge: 2048, quality: 0.85,
-                     colorSpace: .sRGB, writeXMP: false, nameTemplate: "{name}")
+        ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.85,
+                     colorSpace: .sRGB, hdr: HDRExport(), writeXMP: false, nameTemplate: "{name}")
     }
 
     public nonisolated static var defaultOutputDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/Photons 导出", isDirectory: true)
+    }
+
+    // MARK: HDR (106)
+
+    /// The user's last HDR checkbox choice. Kept here (not in a fresh `@State`) so a format round
+    /// trip — HEIC → JPEG → HEIC — restores what they picked instead of resetting to `true`.
+    public private(set) var hdrPreferredEnabled: Bool
+
+    /// What the checkbox shows. Non-HEIC is always off (the row is greyed out there too).
+    public var hdrEnabled: Bool {
+        guard preset.format == .heic else { return false }
+        return preset.hdr?.enabled ?? hdrPreferredEnabled
+    }
+
+    public var hdrGainMap: HDRExport.GainMap {
+        get { preset.hdr?.gainMap ?? .iso }
+        set { updateHDR { $0.gainMap = newValue } }
+    }
+
+    public var hdrHalfSize: Bool {
+        get { preset.hdr?.halfSize ?? false }
+        set { updateHDR { $0.halfSize = newValue } }
+    }
+
+    /// The 文件设置 picker's door: going non-HEIC turns HDR off (and `validated()` would reject it
+    /// anyway), coming back re-applies the remembered choice.
+    public func selectFormat(_ format: ExportFormat) {
+        preset.format = format
+        applyHDR(enabled: format == .heic ? hdrPreferredEnabled : false)
+    }
+
+    /// The HDR checkbox. Writes through to the preset the batch will use.
+    public func setHDR(_ enabled: Bool) {
+        hdrPreferredEnabled = enabled
+        applyHDR(enabled: enabled)
+    }
+
+    private func applyHDR(enabled: Bool) {
+        updateHDR { $0.enabled = enabled }
+    }
+
+    private func updateHDR(_ body: (inout HDRExport) -> Void) {
+        var hdr = preset.hdr ?? HDRExport(enabled: preset.format == .heic)
+        body(&hdr)
+        preset.hdr = hdr
     }
 
     // MARK: derived
@@ -262,6 +324,14 @@ public final class ExportSheetModel {
     public var canRun: Bool {
         phase != .running && selectionCount > 0
             && !preset.nameTemplate.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The footer's one line: the empty prompt, live progress, or the finished report. Errors win —
+    /// they are why a run stopped, and the footer is where the user is looking after pressing 导出.
+    public var footerStatus: String {
+        if let errorText { return errorText }
+        if phase == .idle, rows.isEmpty { return "还没有导出。选择照片，点“导出”。" }
+        return summaryLine
     }
 
     // MARK: running
@@ -380,6 +450,8 @@ public final class ExportSheetModel {
     public func loadPreset(named name: String) {
         do {
             preset = try presetStore.load(named: name)
+            hdrPreferredEnabled = preset.hdr?.enabled ?? true
+            if preset.format == .heic { applyHDR(enabled: hdrPreferredEnabled) }
             presetError = nil
         } catch {
             presetError = error.localizedDescription
@@ -449,11 +521,17 @@ public struct ExportSheetView: View {
             }
             .formStyle(.grouped)
             .disabled(model.phase == .running)
+            // 106 §B: the form keeps the height it has at the sheet's own 760 pt size and scrolls
+            // its overflow; `results` below is the region that grows with the window.
+            .frame(minHeight: 320)
+            .background(ExportLayoutProbeHost(kind: .form))
             results
             footer
         }
         .padding(18)
-        .frame(width: 620, height: 760, alignment: .topLeading)
+        // 620×760 is the sheet's size (`ExportSheetController.present`); the height is a floor here
+        // so a layout pass at a taller height grows the results region instead of stretching the form.
+        .frame(minWidth: 620, maxWidth: 620, minHeight: 760, alignment: .topLeading)
         .background(.regularMaterial)
         .alert("存储预设", isPresented: $showingSavePreset) {
             TextField("预设名称", text: $newPresetName)
@@ -586,7 +664,7 @@ public struct ExportSheetView: View {
             HStack(spacing: 8) {
                 Text("格式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Picker("", selection: $model.preset.format) {
+                Picker("", selection: formatBinding) {
                     ForEach(ExportFormat.allCases, id: \.self) { format in
                         Text(format.rawValue.uppercased()).tag(format)
                     }
@@ -636,6 +714,9 @@ public struct ExportSheetView: View {
                 .frame(width: 110)
                 .disabled(model.phase == .running || !model.preset.format.supports16Bit)
             }
+            // 106 §A — HDR is HEIC-only (`validated()` throws elsewhere), so the row goes grey with
+            // the format, and the remembered switch value is restored when HEIC comes back.
+            ExportHDRRow(model: model)
         } header: {
             sectionHeader("文件设置")
         }
@@ -809,53 +890,69 @@ public struct ExportSheetView: View {
 
     // MARK: results
 
+    /// 106 §B — the remaining height between the form and the footer is the results region.
+    /// The empty prompt is *not* in here any more: the scroll view holds rows only, so the prompt
+    /// lives on the footer line (the two used to look crammed together because of the 170 pt cap).
     private var results: some View {
-        ScrollView {
-            VStack(spacing: 2) {
-                ForEach(model.rows) { row in
-                    HStack(spacing: 6) {
-                        Image(systemName: row.state.symbol)
-                            .font(.system(size: 9))
-                            .foregroundStyle(color(for: row.state))
-                            .frame(width: 12)
-                        Text(row.name)
-                            .font(.system(size: 10, weight: row.isFailure ? .semibold : .regular))
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(row.detail)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(row.isFailure ? AnyShapeStyle(Color.red)
-                                                           : AnyShapeStyle(.secondary))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+        Group {
+            if model.rows.isEmpty {
+                Color.clear
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(model.rows) { row in
+                            HStack(spacing: 6) {
+                                Image(systemName: row.state.symbol)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(color(for: row.state))
+                                    .frame(width: 12)
+                                Text(row.name)
+                                    .font(.system(size: 10,
+                                                  weight: row.isFailure ? .semibold : .regular))
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(row.detail)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(row.isFailure
+                                                     ? AnyShapeStyle(Color.red)
+                                                     : AnyShapeStyle(.secondary))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .padding(.vertical, 2)
+                            .padding(.horizontal, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(row.isFailure ? Color.red.opacity(0.08) : Color.clear)
+                            )
+                        }
                     }
-                    .padding(.vertical, 2)
-                    .padding(.horizontal, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(row.isFailure ? Color.red.opacity(0.08) : Color.clear)
-                    )
-                }
-                if model.rows.isEmpty {
-                    Text("还没有导出。选择照片，点“导出”。")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 110, maxHeight: 170)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .layoutPriority(1)
+        .background(ExportLayoutProbeHost(kind: .results, rowCount: model.rows.count))
     }
 
     // MARK: footer
 
     private var footer: some View {
         HStack(spacing: 8) {
+            Text(model.footerStatus)
+                .font(.system(size: 10))
+                .foregroundStyle(model.errorText == nil
+                                 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(model.footerStatus)
+                .background(ExportLayoutProbeHost(kind: .status))
+            Spacer(minLength: 8)
             if model.phase == .finished && model.writtenCount > 0 {
                 Button("在 Finder 中显示") { model.revealInFinder() }
                     .controlSize(.small)
             }
-            Spacer(minLength: 8)
             Button("关闭") { model.onClose?() }
                 .controlSize(.small)
             Button("取消") { model.cancel() }
@@ -869,6 +966,8 @@ public struct ExportSheetView: View {
             .keyboardShortcut(.defaultAction)
             .disabled(!model.canRun)
         }
+        .frame(maxWidth: .infinity)
+        .background(ExportLayoutProbeHost(kind: .footer))
     }
 
     // MARK: building blocks
@@ -901,6 +1000,11 @@ public struct ExportSheetView: View {
     private var sixteenBitBinding: Binding<Bool> {
         Binding(get: { model.preset.bitDepth == 16 },
                 set: { model.preset.bitDepth = $0 ? 16 : 8 })
+    }
+
+    private var formatBinding: Binding<ExportFormat> {
+        Binding(get: { model.preset.format },
+                set: { model.selectFormat($0) })
     }
 
     private var sizingModeBinding: Binding<ExportSizingMode> {

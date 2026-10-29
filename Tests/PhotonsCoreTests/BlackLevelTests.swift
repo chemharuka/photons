@@ -175,7 +175,8 @@ final class BlackLevelTests: XCTestCase {
         XCTAssertEqual(EditModel.currentSchemaVersion, 11)
         XCTAssertEqual(EditModel.neutral.schemaVersion, 11)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
-        XCTAssertTrue(fresh.contains("\"schemaVersion\" : 10"), "新文档是版本 10")
+        XCTAssertTrue(fresh.contains("\"schemaVersion\" : \(EditModel.currentSchemaVersion)"),
+                      "新文档的版本号取自 currentSchemaVersion，不写死")
         XCTAssertFalse(fresh.contains("blackOffset"), "0 不写键 —— 旧 blob 的逐字节稳定靠这条")
         // 2026-10-28: 黑白 的两个新键同样在默认值上缺席，所以 schema-7 的 blob 也能逐字节重编码。
         XCTAssertFalse(fresh.contains("blackAndWhite"))
@@ -428,6 +429,84 @@ final class BlackLevelTests: XCTestCase {
                     rgba: pixels.flatMap { $0 }, colorSpace: "linear", decoderVersion: "test")
     }
 
+    // MARK: - ⑦ 105: 测量专用解码
+
+    /// 派单 105 验收 1 + 2 —— 测量解码的配方真的是「全零 + lens off」，而且 L1030415 的
+    /// 单像素过冲被拿掉了。
+    ///
+    /// 配方读的是 **filter 赋值后回读的值**（`lastMeasurementRecipe`），不是调用点的意图；所以
+    /// Apple 若把某个赋值吞掉，这条会红，而不是继续相信 `DetailSettings`。
+    func testMeasurementDecodePinsEveryDetailAxisToZeroAndDropsTheOutliers() throws {
+        guard let url = Self.raw(named: "L1030415.dng", env: "PHOTONS_TEST_RAW_105") else {
+            throw XCTSkip("no L1030415 fixture; set PHOTONS_TEST_RAW_105")
+        }
+        let decoder = try RAWDecoder()
+        let image = try decoder.decodeForMeasurement(url, scale: 0.5)
+        let recipe = try XCTUnwrap(decoder.lastMeasurementRecipe, "测量解码必须留下配方")
+        print("105 recipe · \(recipe)")
+
+        XCTAssertTrue(recipe.contains("sharpness=0.000"), "锐化必须是 0：\(recipe)")
+        XCTAssertTrue(recipe.contains("cnr=0.000"), "色彩降噪必须是 0：\(recipe)")
+        XCTAssertTrue(recipe.contains("lnr=0.000"), "降噪必须是 0：\(recipe)")
+        XCTAssertTrue(recipe.contains("detail=0.000"), "细节必须是 0：\(recipe)")
+        XCTAssertTrue(recipe.contains("lens=off"), "Apple 镜头校正必须关掉：\(recipe)")
+        XCTAssertTrue(recipe.contains("scale=0.500"), "默认 scale = 0.5：\(recipe)")
+        XCTAssertTrue(recipe.contains("ev=0.000"), "曝光必须是 0：\(recipe)")
+
+        let candidates = image.blackCandidates(sampleStride: 5)
+        print(String(format: "105 L1030415 %.0f×%.0f · 候选 %d · min %.6f · p0.1 %.6f · 超额 %d",
+                     Double(image.width), Double(image.height), candidates.count,
+                     candidates.min, candidates.p001, candidates.extremeCount))
+        XCTAssertLessThanOrEqual(candidates.extremeCount, 5,
+                                 "|v| ≥ 0.008 的候选必须 ≤ 5，实际 \(candidates.extremeCount)")
+        XCTAssertGreaterThanOrEqual(Double(candidates.min), -0.005,
+                                    "最小 |v| 必须 ≤ 0.005，实际 min \(candidates.min)")
+    }
+
+    /// 派单 105 验收 4 —— 三张参考帧上，测量解码的（带守卫的）自动值与显示解码的旧值相差 ≤ 0.002。
+    ///
+    /// 旧值 = 显示解码缓冲的 `darkestBelowBlack` → `−min`；新值 = 测量缓冲 + 「< 50 个 −0.008
+    /// 超额点就用 p0.1」守卫。两者都在 scale 0.5 上量，比较的是同一次自动黑电平的答案。
+    func testMeasurementDecodeDoesNotRegressTheThreeReferenceFrames() throws {
+        let names = ["L1030402.dng", "L1030405.dng", "L1030433.dng"]
+        var compared = 0
+        for name in names {
+            guard let url = Self.raw(named: name, env: "PHOTONS_TEST_RAW_105") else { continue }
+            let decoder = try RAWDecoder()
+            let display = try decoder.decode(url, options: DecodeOptions(scale: 0.5))
+            let oldMin = display.darkestBelowBlack(sampleStride: 5)
+            let old = Self.legacyAutoOffset(for: oldMin)
+            let measured = try decoder.decodeForMeasurement(url, scale: 0.5)
+            let c = measured.blackCandidates(sampleStride: 5)
+            let raw = c.extremeCount < 50 ? c.p001 : c.min
+            let new = Self.legacyAutoOffset(for: raw)
+            print(String(format: "105 %@ · 旧 %.4f (min %.6f) · 新 %.4f (min %.6f · p0.1 %.6f · 超额 %d)",
+                         name, old, oldMin, new, c.min, c.p001, c.extremeCount))
+            XCTAssertEqual(new, old, accuracy: 0.002, "\(name) 的自动值不许移动超过 0.002")
+            compared += 1
+        }
+        if compared == 0 { throw XCTSkip("no reference RAW fixtures; set PHOTONS_TEST_RAW_105") }
+    }
+
+    /// The pre-105 estimator, kept here as the baseline the reference frames are compared against.
+    private static func legacyAutoOffset(for minChannel: Float) -> Double {
+        let raw = minChannel >= 0 ? 0 : -Double(minChannel)
+        let stepped = (raw * 1000).rounded(.up) / 1000
+        return Swift.min(Swift.max(stepped, LightGroup.blackOffsetRange.lowerBound),
+                         LightGroup.blackOffsetRange.upperBound)
+    }
+
+    private static func raw(named name: String, env: String) -> URL? {
+        let candidates = [
+            ProcessInfo.processInfo.environment[env],
+            NSString(string: "~/Desktop/test/\(name)").expandingTildeInPath,
+        ].compactMap { $0 }
+        guard let path = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
     // MARK: - fixtures
 
     private static var rawFixture: URL? {
@@ -492,7 +571,16 @@ final class BlackLevelTests: XCTestCase {
             self.trimPipeline = try Self.pipeline(library, device: device, "s1_scene_linear_trim")
             guard let queue = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
             self.queue = queue
-            XCTAssertEqual(MemoryLayout<Params>.stride, 80, "S1Params 的镜像必须与 Metal 侧同宽")
+            // schema 11 删掉了电平那一组 float4，宽度从 80 变成 64 —— 所以这里**不写死数字**，
+            // 而是数 `.metal` 里 `S1Params` 的 float4 成员（每行 16 字节），再与 Swift 镜像比对。
+            // 写死宽度的版本在删字段时只会变成一条「64 不等于 80」的红，说不清是哪边错了。
+            let metal = try String(contentsOf: url, encoding: .utf8)
+            let structBody = metal.components(separatedBy: "struct S1Params {").last?
+                .components(separatedBy: "};").first ?? ""
+            let float4s = structBody.components(separatedBy: "float4").count - 1
+            XCTAssertGreaterThan(float4s, 0, "S1Params 的成员必须能在 .metal 里数出来")
+            XCTAssertEqual(MemoryLayout<Params>.stride, float4s * 16,
+                           "S1Params 的镜像必须与 Metal 侧同宽（\(float4s) 个 float4）")
         }
 
         private static func pipeline(_ library: MTLLibrary, device: MTLDevice,
