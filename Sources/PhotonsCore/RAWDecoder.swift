@@ -499,18 +499,28 @@ public final class RAWDecoder {
     /// default `.all` is only for a caller that has no capabilities at all (probes, tests).
     static func applyDetail(_ detail: DetailSettings, to filter: CIRAWFilter,
                             baseline: DetailBaseline? = nil,
-                            axes: DetailAxes = .all) throws -> DetailDecodeValues {
+                            axes: DetailAxes = .all,
+                            forceAll: Bool = false) throws -> DetailDecodeValues {
         // The baseline of all four axes, **before** anything is assigned.
         let base = baseline ?? detailBaseline(of: filter)
         var values = detail.clamped().decodeValues(baseline: base)
-        // The seam's veto, **axis by axis**: an amount whose axis the effective decoder does not honour
-        // is never written, and reads back as `nil` in `detailApplied` — "we did not ask", not "we asked
-        // and nothing happened". Under v9 that is 色彩降噪 + 细节 only; 降噪 and 锐化 are still assigned
-        // (Apple's flags say supported and the pixels move — see `DetailAxes`).
-        if !axes.nr { values.luminanceNR = nil }
-        if !axes.cnr { values.colorNR = nil }
-        if !axes.detail { values.detail = nil }
-        if !axes.sharpness { values.sharpness = nil }
+        if forceAll {
+            // 派单 105: a measurement decode asks for **zero on every axis**, including the axes whose
+            // body baseline is already 0 (where the slider→amount mapping would say "nothing to
+            // assign"). Zero is the value that removes Apple's default sharpening / colour NR, so it
+            // must be written unconditionally — not merely "left at a baseline that happens to be 0".
+            values = DetailDecodeValues(luminanceNR: 0, colorNR: 0, sharpness: 0, detail: 0)
+        } else {
+            // The seam's veto, **axis by axis**: an amount whose axis the effective decoder does not
+            // honour is never written, and reads back as `nil` in `detailApplied` — "we did not ask",
+            // not "we asked and nothing happened". Under v9 that is 色彩降噪 + 细节 only; 降噪 and
+            // 锐化 are still assigned (Apple's flags say supported and the pixels move — see
+            // `DetailAxes`).
+            if !axes.nr { values.luminanceNR = nil }
+            if !axes.cnr { values.colorNR = nil }
+            if !axes.detail { values.detail = nil }
+            if !axes.sharpness { values.sharpness = nil }
+        }
 
         func assign(_ name: String, _ wanted: Double?,
                     _ get: () -> Float, _ set: (Float) -> Void) throws {
@@ -544,6 +554,20 @@ public final class RAWDecoder {
                        colorNR: Double(filter.colorNoiseReductionAmount),
                        sharpness: Double(filter.sharpnessAmount),
                        detail: Double(filter.detailAmount))
+    }
+
+    /// 派单 105: the effective measurement recipe as one line — what the **filter reports after the
+    /// assignments**, not what we meant to assign. A test can therefore prove that 0 / 0 / 0 / 0 and
+    /// `lens=off` really reached the decoder instead of trusting the call site.
+    static func measurementRecipe(_ filter: CIRAWFilter) -> String {
+        String(format: "sharpness=%.3f cnr=%.3f lnr=%.3f detail=%.3f lens=%@ scale=%.3f ev=%.3f",
+               Double(filter.sharpnessAmount),
+               Double(filter.colorNoiseReductionAmount),
+               Double(filter.luminanceNoiseReductionAmount),
+               Double(filter.detailAmount),
+               filter.isLensCorrectionEnabled ? "on" : "off",
+               Double(filter.scaleFactor),
+               Double(filter.exposure))
     }
 
     /// Toggle-and-read-back, on this file only (§11.3).
@@ -610,6 +634,45 @@ public final class RAWDecoder {
     }
 
     public func decodeDetailed(_ url: URL, options: DecodeOptions = DecodeOptions()) throws -> DecodeOutcome {
+        try decodeDetailed(url, options: options, measurement: false)
+    }
+
+    /// 派单 105: the last measurement decode's effective recipe, for the acceptance probe.
+    ///
+    /// Written only by `decodeForMeasurement`. `nil` before the first measurement, and reset at the
+    /// start of every one, so a failed measurement cannot leave the previous file's recipe behind.
+    public private(set) var lastMeasurementRecipe: String?
+
+    /// 派单 105 — **measurement-only decode**: no sharpening, no noise reduction, no detail, no
+    /// Apple lens correction, exposure 0, and no on-disk cache.
+    ///
+    /// The display decode must keep Apple's defaults (`sharpnessAmount` / `colorNoiseReductionAmount`
+    /// are 0.5 when untouched — `DetailSettings.swift:15-21`), because those defaults are what every
+    /// recorded golden was made with. The automatic black level, however, was measuring those
+    /// display pixels: sharpening overshoot at a strong edge can push a single pixel far below zero,
+    /// and `−min` then lets a dozen edge pixels decide the whole black point. So this entry point
+    /// asks the same system decoder for a picture with the four detail axes pinned to 0 and Apple's
+    /// lens warp switched off.
+    ///
+    /// - Apple's lens correction: forced **off** whether or not the file carries an opcode. Our own
+    ///   warp lives in S0 (render time), so the decoded buffer is un-warped either way.
+    /// - Detail: `DetailSettings` all zero, assigned unconditionally (see `forceAll` in
+    ///   `applyDetail`) — a body whose baseline is already 0 still gets an explicit 0.
+    /// - Exposure: 0; `scale` defaults to 0.5 (one whole-frame decode is ~0.4 s on a 60 MP file).
+    /// - Cache: this method never calls `LinearImageStore`; measurements neither read nor pollute
+    ///   the display keys.
+    public func decodeForMeasurement(_ url: URL, scale: Double = 0.5) throws -> LinearImage {
+        lastMeasurementRecipe = nil
+        let options = DecodeOptions(exposureEV: 0,
+                                    scale: Float(scale),
+                                    draft: false,
+                                    detail: DetailSettings(luminanceNR: 0, colorNR: 0,
+                                                           sharpness: 0, detail: 0))
+        return try decodeDetailed(url, options: options, measurement: true).image
+    }
+
+    private func decodeDetailed(_ url: URL, options: DecodeOptions,
+                                measurement: Bool) throws -> DecodeOutcome {
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
 
         // ── 097 / 103: whose lens correction runs ─────────────────────────────────────────────
@@ -620,8 +683,11 @@ public final class RAWDecoder {
         // Apple's switch on would double-correct green and leave red/blue behind. So: keep Apple's
         // switch for a single-plane DNG and every file with no profile, and turn it off only when
         // `requiresOwnWarp`; `S0` then samples the source with the file's own profile (097/103).
+        //
+        // 派单 105: a measurement decode turns it off **unconditionally** — measurement wants raw,
+        // un-resampled samples, and S0's warp is not part of a decode buffer anyway.
         let lensProfile = LensProfile.read(from: url) ?? LensProfile.readPanasonic(from: url)
-        if lensProfile?.requiresOwnWarp == true {
+        if measurement || lensProfile?.requiresOwnWarp == true {
             filter.isLensCorrectionEnabled = false
         }
 
@@ -709,7 +775,16 @@ public final class RAWDecoder {
         // develop assigns exactly two of the four. The document keeps its numbers either way;
         // switching back to v8 assigns them again untouched.
         let axes = capabilities.detailAxes
-        if !options.detail.isIdentity && axes.anyEnabled {
+        if measurement {
+            // 派单 105: the measurement recipe. Every amount is 0 and every amount is written,
+            // regardless of the seam's support flags — the point is that no sharpening / noise
+            // reduction reaches the candidate set, and a read-back failure must surface rather than
+            // silently leave Apple's 0.5 baseline in place.
+            detailApplied = try Self.applyDetail(options.detail, to: filter,
+                                                 baseline: detailBaseline, axes: axes,
+                                                 forceAll: true)
+            lastMeasurementRecipe = Self.measurementRecipe(filter)
+        } else if !options.detail.isIdentity && axes.anyEnabled {
             detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline,
                                                  axes: axes)
         }

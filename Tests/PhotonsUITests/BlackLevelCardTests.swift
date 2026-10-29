@@ -324,6 +324,73 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertNil(loupe.autoBlackOffset(), "浏览器模式同样 nil")
     }
 
+    // MARK: - 5. 105 测量专用解码 + 守卫 + 回退
+
+    /// 派单 105 的估计量守卫：−0.008 更负的点不足 50 个时用 p0.1，够多时仍用 min。
+    func testTheEstimatorFallsBackToThePointOnePercentileWhenOnlyAFewOutliersAreLeft() {
+        // 只有 14 颗单像素过冲：min −0.019，p0.1 −0.0042 → 用 p0.1，滑块不会顶到钳位。
+        XCTAssertEqual(LoupeController.autoBlackRawValue(min: -0.019, p001: -0.0042,
+                                                         extremeCount: 14), -0.0042)
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: LoupeController.autoBlackRawValue(
+            min: -0.019, p001: -0.0042, extremeCount: 14)), 0.005)
+        // 50 颗及以上是场景信号：仍用 min。
+        XCTAssertEqual(LoupeController.autoBlackRawValue(min: -0.006, p001: -0.004,
+                                                         extremeCount: 50), -0.006)
+        // 没有候选：两者都是 0，自动值是 0。
+        XCTAssertEqual(LoupeController.autoBlackRawValue(min: 0, p001: 0, extremeCount: 0), 0)
+    }
+
+    /// 派单 105 验收 3 —— L1030415 的自动黑电平不再顶到 ±0.01 钳位。
+    ///
+    /// 显示解码在 0.125 上（和 loupe 的首帧一致），测量解码在 0.5 上；写入值必须在 (0, 0.005]，
+    /// 且按候选集覆盖率 ≥ 95%（候选集里加 offset 之后仍为负的不到 5%）。
+    func testAutoBlackOffsetOnL1030415StopsHittingTheClamp() throws {
+        let url = try fixture(named: "L1030415.dng", env: "PHOTONS_TEST_RAW_105")
+        let session = CatalogSession()
+        session.mode = .loupe
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        _ = loupe.view
+        _ = try loupe.makeFrame(url: url, viewport: ImageSize(width: 800, height: 600),
+                                decodeScale: 0.125, edit: session.edit)
+
+        let offset = try XCTUnwrap(loupe.autoBlackOffset(), "有解码缓冲时必须返回写入值")
+        let measured = try RAWDecoder().decodeForMeasurement(url, scale: 0.5)
+        let candidates = measured.blackCandidates(sampleStride: 5)
+        let coverage = candidates.coverage(at: offset)
+        print(String(format: "105 L1030415 auto %.4f · 候选 %d · 覆盖率 %.4f · min %.6f · p0.1 %.6f",
+                     offset, candidates.count, coverage, candidates.min, candidates.p001))
+
+        XCTAssertGreaterThan(offset, 0, "有候选集，自动值必须抬起来")
+        XCTAssertLessThanOrEqual(offset, 0.005, "绝不能顶到 +0.01；滑块应 ≤ 5.0，实际 \(offset * 1000)")
+        XCTAssertGreaterThanOrEqual(coverage, 0.95, "候选集覆盖率必须 ≥ 95%")
+        XCTAssertEqual(session.edit.light.blackOffset, offset)
+        XCTAssertEqual(session.history.count, 1, "一次点击 = 一条历史")
+    }
+
+    /// 派单 105 验收 6 —— 测量解码抛错时，`autoBlackOffset()` 退回显示缓冲、仍写入一个值，并打印
+    /// 那行回退日志。
+    func testAutoBlackOffsetFallsBackToTheDisplayBufferWhenTheMeasurementDecodeFails() throws {
+        let url = try rawFixture()
+        let session = CatalogSession()
+        session.mode = .loupe
+        let loupe = LoupeController(session: session)
+        loupe.autoRenderEnabled = false
+        _ = loupe.view
+        _ = try loupe.makeFrame(url: url, viewport: ImageSize(width: 800, height: 600),
+                                decodeScale: 0.125, edit: session.edit)
+        loupe.measurementDecodeForTesting = { _, _ in throw DecodeError.renderFailed }
+
+        let offset = try XCTUnwrap(loupe.autoBlackOffset(), "回退路径仍必须返回一个值")
+        XCTAssertGreaterThan(offset, 0)
+        XCTAssertEqual(session.edit.light.blackOffset, offset)
+        XCTAssertEqual(session.history.count, 1)
+
+        let source = try String(contentsOf: Self.loupeSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("AUTO BLACK · measurement decode failed, falling back"),
+                      "回退必须留下那一行日志")
+    }
+
     // MARK: - helpers
 
     private func rawFixture() throws -> URL {
@@ -335,6 +402,17 @@ final class BlackLevelCardTests: XCTestCase {
             return URL(fileURLWithPath: c)
         }
         throw XCTSkip("no RAW fixture; set PHOTONS_TEST_RAW")
+    }
+
+    private func fixture(named name: String, env: String) throws -> URL {
+        let candidates = [
+            ProcessInfo.processInfo.environment[env],
+            NSString(string: "~/Desktop/test/\(name)").expandingTildeInPath,
+        ].compactMap { $0 }
+        for c in candidates where FileManager.default.isReadableFile(atPath: c) {
+            return URL(fileURLWithPath: c)
+        }
+        throw XCTSkip("no \(name) fixture; set \(env)")
     }
 
     private static func firstView(in root: NSView, where match: (NSView) -> Bool) -> NSView? {

@@ -265,6 +265,82 @@ public struct LinearImage: Sendable {
         return darkest == .infinity ? 0 : darkest
     }
 
+    /// 派单 105 — the **candidate set** behind the automatic black level, as statistics.
+    ///
+    /// Same population as `darkestBelowBlack` (three channels all negative *after* conversion to the
+    /// working space, sampled on the same grid), but with the two numbers the guarded estimator
+    /// needs: the minimum and the 0.1st percentile. `extremeCount` counts candidates more negative
+    /// than −0.008 — the "a handful of single-pixel overshoots" signal. `coverage(at:)` answers the
+    /// acceptance question "what fraction of the candidates is non-negative after adding this
+    /// offset".
+    public struct BlackCandidates: Sendable, Equatable {
+        public let count: Int
+        /// The most negative candidate channel value (`0` when there is no candidate).
+        public let min: Float
+        /// 0.1st percentile of the candidate values (nearest rank; `0` when there is none).
+        public let p001: Float
+        /// Candidates strictly more negative than −0.008.
+        public let extremeCount: Int
+        private let values: [Float]
+
+        init(values: [Float]) {
+            let sorted = values.sorted()
+            self.values = sorted
+            self.count = sorted.count
+            self.min = sorted.first ?? 0
+            if sorted.isEmpty {
+                self.p001 = 0
+            } else {
+                let rank = Swift.min(sorted.count - 1,
+                                     Swift.max(0, Int(Double(sorted.count - 1) * 0.001)))
+                self.p001 = sorted[rank]
+            }
+            self.extremeCount = sorted.reduce(0) { $1 < -0.008 ? $0 + 1 : $0 }
+        }
+
+        /// Fraction of candidates with `min(R,G,B) + offset >= 0`. An empty set is fully covered.
+        public func coverage(at offset: Double) -> Double {
+            guard !values.isEmpty else { return 1 }
+            let shifted = Float(offset)
+            let covered = values.reduce(0) { $1 + shifted >= 0 ? $0 + 1 : $0 }
+            return Double(covered) / Double(values.count)
+        }
+    }
+
+    /// The automatic black level's candidate set, in the working space (094's rule: measure the same
+    /// data S1 consumes, not the decode buffer's label).
+    public func blackCandidates(sampleStride: Int = 5,
+                                from source: ColorPrimaries = .decoded,
+                                to target: ColorPrimaries = .working) -> BlackCandidates {
+        let step = Swift.max(1, sampleStride)
+        guard width > 0, height > 0 else { return BlackCandidates(values: []) }
+        let isIdentity = source == target
+        let matrix = ColorPrimaries.conversion(from: source, to: target)
+        var values: [Float] = []
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let o = (y * width + x) * 4
+                let r0 = Double(rgba[o]), g0 = Double(rgba[o + 1]), b0 = Double(rgba[o + 2])
+                let r: Double, g: Double, b: Double
+                if isIdentity {
+                    r = r0; g = g0; b = b0
+                } else {
+                    let v = matrix.applying(to: SIMD3(r0, g0, b0))
+                    r = v.x; g = v.y; b = v.z
+                }
+                if r.isNaN || g.isNaN || b.isNaN { x += step; continue }
+                if r < 0 && g < 0 && b < 0 {
+                    values.append(Float(Swift.min(r, Swift.min(g, b))))
+                }
+                x += step
+            }
+            y += step
+        }
+        return BlackCandidates(values: values)
+    }
+
     public func statistics(sampleStride: Int = 7) -> Statistics {
         var maxV: Float = 0
         var sum: Double = 0
