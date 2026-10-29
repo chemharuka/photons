@@ -107,8 +107,8 @@ static inline float region_gain3(float3 w, float3 dEV) {
 // below anything the decoder produces as picture (the frames' p1 sits at −8…−15 EV); −4.2 EV (code
 // 0.29) is below every measured p30, so the mid-tones are outside the window.
 constant float B_EV = 3.0;
-constant float B_LO_EV = -11.2;
-constant float B_HI_EV = -4.2;
+constant float B_LO_EV = -12.0;
+constant float B_HI_EV = -1.0;
 
 // 073C — the level half of the hybrid travel: the black point moves by up to ±B_LEV in scene-linear
 // light over its own window (LEV_LO_EV … LEV_HI_EV), with a C¹ knee of LEV_KNEE at 0 on the crush side.
@@ -118,9 +118,9 @@ constant float B_HI_EV = -4.2;
 // "the level only works on the dark end" invariant would be a tolerance instead of a fact. B_LEV is
 // pinned by the monotonicity constraint (B_LEV < 1.5/(d·ln2·2^(LEV_HI−d)) = 0.0056 for the 2.5 EV
 // window below); 0.005 is sRGB code 15.6, i.e. where a print fade sits.
-constant float B_LEV = 0.005;
-constant float LEV_LO_EV = -6.9;
-constant float LEV_HI_EV = -4.4;
+constant float B_LEV = 0.006;
+constant float LEV_LO_EV = -6.0;
+constant float LEV_HI_EV = -1.0;
 constant float LEV_KNEE = 1e-3;
 
 // Whites (contract §4.2): ±0.6 EV, plus 0.06 of a linear level at full travel, over a 2 EV shoulder.
@@ -175,18 +175,31 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites) {
     float wb = 1.0 - smoothstep(B_LO_EV, B_HI_EV, L);
     if (kHybrid) {
         // 073C — the second half of the travel. `mb` is exactly 0 for |blacks| ≤ 50.
-        float mb = smoothstep(0.5, 1.0, abs(db));
-        v *= exp2(B_EV * db * (1.0 - 0.5 * mb) * wb);
+        // 2026-10-29 — 电平从 |blacks| = 20 就进场（旧版要等到 50），而且不再从增益里扣一半去抵消它。
+        //
+        // 旧版在 −100 时两件事同时发生：电平窗口只到 −4.4 EV（30 % 码值在 −3.8 EV 之外，一点不动），
+        // 增益又被砍成 1.5 EV。现在电平的窗口抬到 −1.0 EV、增益保留满 3 EV，于是 30 % 码值真的变暗
+        // （−100：30 % → 24.8 %，20 % → 12.9 %）。
+        float mb = smoothstep(0.2, 1.0, abs(db));
 
-        // The level: the black point moves by `off` linear units over its own 2.5 EV window. The window
-        // is a weight in L, not a clip, so it is continuous at both ends; `wl = 0` makes `off` ±0 and
-        // the pixel bit-still.
+        // The level: the black point moves by `off` linear units over its own window. The window is a
+        // weight in L, not a clip, so it is continuous at both ends; `wl = 0` makes `off` ±0 and the
+        // pixel bit-still.
         float wl = 1.0 - smoothstep(LEV_LO_EV, LEV_HI_EV, L);
         float off = B_LEV * db * mb * wl;
-        float3 x = v + off;
-        // A lift must not clip (invariant: t = +1 leaves no pixel at 0), so the toe is only taken on the
-        // crush side — the darkest pixels really reach 0 when the slider is pushed down.
-        v = off < 0.0 ? s1_toe(x) : x;
+        float gain = exp2(B_EV * db * wb);
+
+        // **The order depends on the sign, and that is what keeps the response monotone.**
+        //
+        //   · crush (off < 0): the level goes on first and the gain multiplies the leveled value — the
+        //     owner's 「电平先算，然后算增益」. Both darken, so the minimum slope stays positive.
+        //   · lift (off > 0): the gain goes on first and the level rides **outside** it. Adding ±0.006
+        //     *inside* an 8× gain lifts the darkest texel eight times as far as the next one, which is
+        //     exactly the inversion measured on the +100 staircase (band means 0.339 → 0.266, i.e. the
+        //     darkest band came out brightest). Outside, it is a plain black-point move.
+        float3 crushed = s1_toe(v + off) * gain;
+        float3 lifted = s1_toe(v * gain + off);
+        v = off < 0.0 ? crushed : lifted;
     } else {
         // 073B, verbatim: the first half of the travel is this, bit for bit.
         v *= exp2(B_EV * db * wb);
