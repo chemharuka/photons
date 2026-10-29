@@ -1,4 +1,7 @@
 import Foundation
+import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import Metal
 import simd
 import CryptoKit
@@ -248,6 +251,24 @@ public enum MaskTiling: String, Sendable, Codable, CaseIterable {
     case tiles
 }
 
+/// 112 — the two numbers that drive the export's SDR tone map, named after toGainMapHDR's flags.
+///
+/// `measurementRatio` is `-r`: the peak is measured on the frame scaled down by `1/r` (larger =
+/// keep less highlight). `maxHeadroom` is `-R`: the most headroom the map will spend, as a linear
+/// ratio (6 = three stops above white), not an EV count. The defaults are toGainMapHDR's own.
+public struct SDRToneMap: Sendable, Equatable {
+    public var measurementRatio: Float
+    public var maxHeadroom: Float
+
+    public init(measurementRatio: Float = 3, maxHeadroom: Float = 6) {
+        self.measurementRatio = Swift.max(1, measurementRatio)
+        self.maxHeadroom = Swift.max(1, maxHeadroom)
+    }
+
+    /// `-r 3`, `-R 6` — what the export uses unless a caller says otherwise.
+    public static let global = SDRToneMap()
+}
+
 /// 100 — extended-range **linear** pixels from `s4_display_linear`: same primaries as the SDR base,
 /// values are linear light (no OETF), may exceed 1.
 ///
@@ -272,22 +293,27 @@ public struct LinearPixels: Sendable {
                   primaries: image.primaries)
     }
 
-    /// 113 — the **SDR base** of an HDR export: the HDR frame first, then tone map, then the OETF.
+    /// 113/112 — the **SDR base** of an export: the linear frame first, then the optional global tone
+    /// map, then the OETF.
     ///
     /// The order matters. Deriving the base from a separate `s4_display` render would clamp *before*
     /// anything else had a say, so the gain map's ratio would be measured against a picture that was
-    /// hard-cut at display white; and once the export grows a real tone map (112) the two halves would
-    /// be projections of different pictures. Here both halves come from the same extended-range frame.
+    /// hard-cut at display white. Here both halves come from the same extended-range frame.
     ///
-    /// The tone map is the identity-in-effect clamp `min(v, 1)` for now — 112 replaces this one line
-    /// with the shoulder, and nothing else in the export path has to move.
+    /// `toneMap == nil` is the historical path: OETF over `min(v, 1)`, byte-identical to
+    /// `s4_display`. `.global` rolls the highlights off with Core Image's `CIToneMapHeadroom`, the
+    /// same system filter `toGainMapHDR` uses. A frame whose peak is below 1.05 takes the hard-clamp
+    /// path even when `.global` is asked for, so an ordinary SDR document still exports unchanged.
     ///
     /// `srgb_encode` is a function of the half value, so it is table-driven over all 65 536 half bit
     /// patterns: a 60 Mpx frame is 180 M lookups instead of 180 M `pow` calls (measured 0.06 s vs 3.9 s).
-    public func displaySDR(bitDepth: Int) -> DisplayImage {
-        var out = [Float16](repeating: 0, count: rgba.count)
+    public func displaySDR(bitDepth: Int, toneMap: SDRToneMap? = nil) -> DisplayImage {
+        let source = toneMap.flatMap {
+            Self.toneMapped(rgba, width: width, height: height, primaries: primaries, map: $0)
+        } ?? rgba
+        var out = [Float16](repeating: 0, count: source.count)
         let table = Self.srgbHalfTable
-        rgba.withUnsafeBufferPointer { src in
+        source.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
                 var i = 0
                 let n = src.count
@@ -301,8 +327,102 @@ public struct LinearPixels: Sendable {
                 }
             }
         }
+        // `linear` stays the **input** frame: for an HDR export it is the gain map's numerator, and
+        // the tone map above only ever produced the SDR denominator.
         return DisplayImage(width: width, height: height, rgba: out, primaries: primaries,
                             bitDepth: bitDepth, linear: self)
+    }
+
+    /// The global roll-off, kept in the **linear** domain so the OETF above stays the single
+    /// implementation.
+    ///
+    /// Same two numbers as `toGainMapHDR`: the peak is measured on the frame scaled by `1/-r`, capped
+    /// at `-R`, then Core Image maps `sourceHeadroom → 1` with `CIToneMapHeadroom`. Returns `nil`
+    /// when the frame is already SDR (`P < 1.05`), when the used headroom is 1, or when Core Image
+    /// cannot produce the map — all three mean "use the byte-identical hard clamp".
+    private static func toneMapped(_ rgba: [Float16], width: Int, height: Int,
+                                   primaries: OutputPrimaries, map: SDRToneMap) -> [Float16]? {
+        guard #available(macOS 15.0, *) else { return nil }
+
+        var peak: Float = 0
+        rgba.withUnsafeBufferPointer { src in
+            var i = 0
+            while i < src.count {
+                peak = Swift.max(peak, Swift.max(Float(src[i]),
+                                                 Swift.max(Float(src[i + 1]), Float(src[i + 2]))))
+                i += 4
+            }
+        }
+        // toGainMapHDR's warning branch: `picHeadroom < 1.05` means the input is effectively SDR.
+        guard peak >= 1.05,
+              let space = extendedLinearColorSpace(for: primaries) else { return nil }
+
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                                | CGBitmapInfo.floatComponents.rawValue
+                                | CGBitmapInfo.byteOrder16Little.rawValue)
+        let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let provider = CGDataProvider(data: data as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 16,
+                                  bitsPerPixel: 64, bytesPerRow: width * 8, space: space,
+                                  bitmapInfo: info, provider: provider, decode: nil,
+                                  shouldInterpolate: false, intent: .defaultIntent) else {
+            return nil
+        }
+        let context = CIContext(options: [.workingColorSpace: space])
+        let input = CIImage(cgImage: image)
+
+        // `-r` — measure the peak on the frame shrunk by `1/r`, so a handful of hot pixels cannot
+        // spend the whole highlight range. `areaMaximum` is toGainMapHDR's `maxChannelValue`.
+        var sampledPeak = peak
+        let ratio = CGFloat(map.measurementRatio)
+        if ratio > 1.0001 {
+            let scaled = input.transformed(by: CGAffineTransform(scaleX: 1 / ratio,
+                                                                y: 1 / ratio))
+            let area = CIFilter.areaMaximum()
+            area.inputImage = scaled
+            area.extent = scaled.extent
+            if let maximum = area.outputImage {
+                var pixel = [Float](repeating: 0, count: 4)
+                context.render(maximum, toBitmap: &pixel,
+                               rowBytes: 4 * MemoryLayout<Float>.size,
+                               bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                               format: .RGBAf, colorSpace: nil)
+                sampledPeak = Swift.max(pixel[0], Swift.max(pixel[1], pixel[2]))
+            }
+        }
+        if !(sampledPeak >= 1) { sampledPeak = 1 }
+        // `-R` — the most headroom the map may spend. `-R` is a ratio (6 = three stops), not an EV
+        // count; `toGainMapHDR` warns and clips beyond it, which is exactly this `min`.
+        let headroom = Swift.min(sampledPeak, map.maxHeadroom)
+        guard headroom > 1.0001 else { return nil }
+
+        let filter = CIFilter.toneMapHeadroom()
+        filter.inputImage = input
+        filter.sourceHeadroom = headroom
+        filter.targetHeadroom = 1
+        guard let output = filter.outputImage,
+              let mapped = context.createCGImage(output, from: input.extent,
+                                                 format: .RGBAh, colorSpace: space) else {
+            return nil
+        }
+        // Read the filtered linear frame back in the same extended space: `createCGImage` may return
+        // a lazily backed image, and the batch worker must not hold the CI context.
+        var out = [Float16](repeating: 0, count: rgba.count)
+        guard let bitmap = CGContext(data: &out, width: width, height: height,
+                                     bitsPerComponent: 16, bytesPerRow: width * 8,
+                                     space: space, bitmapInfo: info) else { return nil }
+        bitmap.draw(mapped, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return out
+    }
+
+    /// The extended-range linear space matching the output primaries, so Core Image does no colour
+    /// conversion — only the headroom roll-off.
+    static func extendedLinearColorSpace(for primaries: OutputPrimaries) -> CGColorSpace? {
+        switch primaries {
+        case .sRGB: return CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        case .displayP3: return CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        case .rec2020: return CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020)
+        }
     }
 
     /// `texture → half`, for every half bit pattern: `srgb_encode(min(max(v, 0), 1))`.

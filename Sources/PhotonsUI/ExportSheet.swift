@@ -100,8 +100,9 @@ public enum UIExportRenderer {
                 throw UIExportError.noPixels(item.name)
             }
             // `s4_display_linear` already applied the primaries matrix, so this is tone map + OETF
-            // only. The tone map is `min(v, 1)` until 112 swaps in the shoulder.
-            return LinearPixels(frame).displaySDR(bitDepth: preset.effectiveBitDepth)
+            // only. 112 — the SDR base gets the same `-r`/`-R` global roll-off toGainMapHDR uses.
+            return LinearPixels(frame).displaySDR(bitDepth: preset.effectiveBitDepth,
+                                                  toneMap: .global)
         }
         // 109 §3 — SDR with the global tone map takes the same linear exit the HDR base uses, then
         // rolls the highlights into 1 before the OETF. `.none` stays on the historical S4 path below,
@@ -118,8 +119,8 @@ public enum UIExportRenderer {
             guard let frame = try graph.render(edit, options: linearOptions).display else {
                 throw UIExportError.noPixels(item.name)
             }
-            return Exporter.toneMapSDR(LinearPixels(frame))
-                .displaySDR(bitDepth: preset.effectiveBitDepth)
+            return LinearPixels(frame).displaySDR(bitDepth: preset.effectiveBitDepth,
+                                                  toneMap: .global)
         }
         let options = RenderOptions(canvas: nil,
                                     scale: scale / Double(decodeScale),

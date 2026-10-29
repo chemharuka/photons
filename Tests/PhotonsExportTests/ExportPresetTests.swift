@@ -196,7 +196,7 @@ final class ExportPresetTests: XCTestCase {
         }
         let linear = LinearPixels(width: w, height: h, rgba: rgba, primaries: .sRGB)
         let clamped = linear.displaySDR(bitDepth: 8)
-        let toneMapped = Exporter.toneMapSDR(linear).displaySDR(bitDepth: 8)
+        let toneMapped = linear.displaySDR(bitDepth: 8, toneMap: .global)
 
         // `.none` is the renderer's old path: OETF over `min(v, 1)`, nothing else.
         let reference = LinearPixels(width: w, height: h, rgba: rgba, primaries: .sRGB)
