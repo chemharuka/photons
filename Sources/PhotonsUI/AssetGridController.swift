@@ -729,7 +729,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     @objc private func handleDoubleClick(_ recognizer: NSClickGestureRecognizer) {
-        let point = collectionView.convert(recognizer.location(in: collectionView), from: collectionView)
+        activateItem(at: recognizer.location(in: collectionView))
+    }
+
+    /// Open the cell under `point` (grid coordinates). `internal` for the same reason the strip's
+    /// twin is: the test drives the hit-testing the gesture uses.
+    func activateItem(at point: NSPoint) {
         guard let indexPath = collectionView.indexPathForItem(at: point),
               let session, let asset = session.assets[safe: indexPath.item] else { return }
         onActivate?(asset.id)

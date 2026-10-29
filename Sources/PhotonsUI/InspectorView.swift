@@ -1667,7 +1667,13 @@ public struct InspectorView: View {
         SliderRow(title: title, value: value, range: range, format: format, shape: shape,
                   style: style, decimals: decimals, rounding: rounding, editable: editable,
                   enabled: enabled, accessibilityID: accessibilityID, onReset: onReset,
-                  onEditingChanged: onEditingChanged)
+                  onEditingChanged: { editing in
+                      // 119: the drag's own state lives on the session, so a mode switch on the
+                      // first real write does not read as "the gesture ended". The card still gets
+                      // the same true/false pair for its commit-on-release rule.
+                      session.setAdjusting(editing)
+                      onEditingChanged(editing)
+                  })
     }
 
     /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that says

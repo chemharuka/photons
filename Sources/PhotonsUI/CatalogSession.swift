@@ -129,6 +129,19 @@ public final class CatalogSession {
         didSet { if mode == .loupe, anchorID == nil { anchorID = assets.first?.id } }
     }
 
+    /// True while a continuous control (a slider) is being dragged.
+    ///
+    /// View state, exactly like `mode` and `selectedMaskID`: not in `EditModel`, not in history, not
+    /// persisted. It exists so entering the loupe on the first real write of a grid drag can be
+    /// asserted without a window: the mode changes under the gesture, the gesture does not end.
+    public private(set) var isAdjusting = false
+
+    /// Slider press/release, called by the panel's one row builder (`InspectorView.sliderRow`).
+    func setAdjusting(_ adjusting: Bool) {
+        guard adjusting != isAdjusting else { return }
+        isAdjusting = adjusting
+    }
+
     // MARK: view state — sort order
     //
     // The order the grid, the left browser and the filmstrip read `assets` in. It is **one value in
@@ -651,6 +664,31 @@ public final class CatalogSession {
         assets.filter { selection.contains($0.id) }
     }
 
+    /// Which photo a document edit applies to, given the selection and the grid's current order.
+    ///
+    /// 「当前顺序」 is the order the grid and filmstrip are actually drawing (`assets`, already sorted
+    /// by `sortOrder`), not the order the user clicked the photos in and not the anchor. The answer
+    /// is the **first selected photo in that order**; an empty selection — or a selection whose ids
+    /// have all disappeared from the library — has no target and therefore writes nothing.
+    ///
+    /// Pure on purpose: the edit path and its tests both read this one function, so "多选时改的是
+    /// 当前顺序第一张" cannot drift into "改的是锚点" in one place and not the other.
+    public static func editTarget(selection: [String], order: [String]) -> String? {
+        guard !selection.isEmpty else { return nil }
+        let selected = Set(selection)
+        return order.first { selected.contains($0) }
+    }
+
+    /// `editTarget` asked against *this* session's live selection and order.
+    public var currentEditTargetID: String? {
+        Self.editTarget(selection: Array(selection), order: assets.map(\.id))
+    }
+
+    /// Instance spelling, for callers that already hold the session.
+    public func editTarget(selection: [String], order: [String]) -> String? {
+        Self.editTarget(selection: selection, order: order)
+    }
+
     public func setSelection(_ ids: Set<String>, anchor: String? = nil) {
         selection = ids
         if let anchor {
@@ -846,7 +884,54 @@ public final class CatalogSession {
     ///
     /// Bumps `editRevision` only when the value actually changed, so an idle drag calls the
     /// renderer zero times instead of once per mouse move.
+    ///
+    /// A real write while the **grid** is on screen is also the moment the workspace enters the
+    /// loupe (派单 119): the target is `editTarget(selection:order:)`, not necessarily the anchor, so
+    /// a multi-selection is adjusted on its first photo in the current order. Pressing a slider
+    /// without changing a value is not an edit and does not switch; entering happens on the first
+    /// tick that writes, and the following ticks of the same drag continue in the loupe.
     public func applyEdit(_ mutate: (inout EditModel) -> Void) {
+        if mode == .grid, catalog != nil {
+            applyEditFromGrid(mutate)
+            return
+        }
+        applyEditInPlace(mutate)
+    }
+
+    /// The grid half of `applyEdit`: choose the target, write that photo's document, and switch.
+    ///
+    /// The target's document is read from the catalog **before** the switch so the mutation is
+    /// applied exactly once (a closure may append a mask or generate an id; calling it twice to
+    /// "test the water" would be a different edit). Nothing is written when the selection is empty
+    /// or the mutation is a no-op.
+    private func applyEditFromGrid(_ mutate: (inout EditModel) -> Void) {
+        guard let target = currentEditTargetID else { return }
+        let base: EditModel
+        if target == loadedEditAssetID {
+            base = edit
+        } else if let catalog, let stored = try? catalog.develop(forAsset: target) {
+            base = MaskViewState.documentOnly(stored)
+        } else {
+            base = .neutral
+        }
+        var next = base
+        mutate(&next)
+        guard !EditHistory.isSemanticallyIdentical(base, next) else { return }
+
+        // 多选时改的是「当前顺序第一张」：切进单图后选集收成这一张，锚点同步成它。文档加载发生
+        // 在写入之前，所以 `edit` / `history` / `loadedEditAssetID` 从第一帧起就是同一张照片的。
+        if selection != [target] || anchorID != target || loadedEditAssetID != target {
+            selectOnly(target)
+        }
+        mode = .loupe
+        edit = next
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// The old `applyEdit` body, also used by commands whose target is already the loaded anchor
+    /// (paste settings, presets): those are not grid adjustments and must not be retargeted.
+    private func applyEditInPlace(_ mutate: (inout EditModel) -> Void) {
         var next = edit
         mutate(&next)
         guard !EditHistory.isSemanticallyIdentical(edit, next) else { return }
@@ -1156,7 +1241,7 @@ public final class CatalogSession {
                 lastPresetError = nil
                 return false
             }
-            applyEdit { $0 = merged }
+            applyEditInPlace { $0 = merged }
             let committed = commitEdit(label: "预设 \(record.name)")
             lastPresetError = committed ? nil : "预设没有落地"
             return committed
@@ -1432,7 +1517,7 @@ public final class CatalogSession {
                                        changed: false, fields: [], sections: payload.sections,
                                        requiresDecode: payload.requiresDecode, historyRows: nil)
         }
-        applyEdit { $0 = MaskViewState.restoring(merged, keeping: $0.showMaskID) }
+        applyEditInPlace { $0 = MaskViewState.restoring(merged, keeping: $0.showMaskID) }
         let committed = commitEdit(label: "粘贴设置", coalesce: false)
         return SettingsPasteReport(assetID: loadedEditAssetID ?? "", changed: committed,
                                    fields: fields, sections: payload.sections,
