@@ -436,6 +436,13 @@ public final class WorkspaceRootView: NSView {
         loupeController.onCropModeChange = { [weak self] _ in self?.updateInspectorGate() }
         workspaces.onSelectionChange = { [weak self] _ in self?.updateInspectorGate() }
 
+        // 123 — a confirmed transform returns the panel to 调整. Esc keeps the workspace where it is
+        // (nothing was written); the callback fires only for ↵ / 完成.
+        loupeController.onTransformConfirmed = { [weak self] in
+            guard let self, self.inspectorWorkspaces.selection == .transform else { return }
+            self.inspectorWorkspaces.select(.adjust)
+        }
+
         // 蒙版 workspace → the canvas' mask chrome (2026-10-27). `selection` is the panel's one writer
         // (`InspectorWorkspaceState.selection`), and its `onChange` fires synchronously, so the grips
         // are away in the same turn as the tab click — a turn of delay would leave them hittable while

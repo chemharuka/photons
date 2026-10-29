@@ -120,7 +120,7 @@ extension InspectorView {
                      action: { loupe?.cropTool.toggleGrid() })
                 .background(CropRowProbeHost(rowID: CropCardID.grid))
             Spacer(minLength: 4)
-            CropApplyRow(onApply: { loupe?.applyCropTool() },
+            CropApplyRow(onApply: { loupe?.completeCropTool() },
                          onCancel: { loupe?.cancelCropTool() })
         }
     }
@@ -134,8 +134,8 @@ extension InspectorView {
     /// draft semantics: only the straighten is written here.
     @ViewBuilder
     private func cropAngleSection(_ tool: CropToolController?) -> some View {
-        let straighten = Binding<Double>(get: { tool?.draft.straighten ?? 0 },
-                                         set: { tool?.setStraightenLive($0) })
+        let straighten = Binding<Double>(get: { tool?.angleUIValue ?? 0 },
+                                         set: { tool?.setAngle(uiValue: $0) })
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.angle.title, isFirst: true,
                               reset: { resets.cropSection(.angle) })
@@ -148,7 +148,7 @@ extension InspectorView {
                           enabled: true,
                           accessibilityID: "inspector.crop.angle",
                           onReset: {
-                              tool?.setStraightenLive(0)
+                              tool?.setAngle(uiValue: 0)
                               _ = tool?.commitStraighten()
                           },
                           onEditingChanged: { editing in
@@ -235,7 +235,7 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         // 086: the first section's small title is the user's new word. The *card* title (「裁切」) is
         // `InspectorView.Section.crop.title` and is not this enum, so it does not move with this.
         case .crop: return "宽高比"
-        case .angle: return "转动"
+        case .angle: return "角度"
         case .rotation: return "旋转"
         case .mirror: return "镜像"
         }

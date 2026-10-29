@@ -37,7 +37,7 @@ final class CropPanelTests: XCTestCase {
         let cards = try XCTUnwrap(Self.find(InspectorCardsProbe.self, in: inspector),
                                   "面板没有报卡片清单")
         XCTAssertEqual(cards.cardIDs, ["crop", "angle"])
-        XCTAssertEqual(cards.cardTitles, ["裁切", "变换"])
+        XCTAssertEqual(cards.cardTitles, ["裁切", "旋转"])
 
         let crop = try XCTUnwrap(Self.probe(CropCardID.card, in: inspector))
         let angle = try XCTUnwrap(Self.probe(CropCardID.angleCard, in: inspector))
@@ -46,12 +46,12 @@ final class CropPanelTests: XCTestCase {
         XCTAssertGreaterThan(angleRect.minY, cropRect.maxY, "角度卡必须在裁切卡之后")
 
         var headers: [CGRect] = []
-        for title in ["宽高比", "转动", "旋转", "镜像"] {
+        for title in ["宽高比", "角度", "旋转", "镜像"] {
             let probe = try XCTUnwrap(Self.probe("section.\(title)", in: inspector),
                                       "二级标题「\(title)」没有画出来")
             headers.append(probe.convert(probe.bounds, to: inspector))
         }
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
         for (a, b) in zip(headers, headers.dropFirst()) {
             XCTAssertGreaterThan(b.minY, a.minY)
         }

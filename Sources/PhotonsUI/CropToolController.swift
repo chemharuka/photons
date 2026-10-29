@@ -145,6 +145,10 @@ public final class CropToolController {
 
     // MARK: state
 
+    /// 123 — the name the transform acceptance uses. It is the same view state as `isActive`; a
+    /// session is "cropping" exactly while the draft is open.
+    public var isCropping: Bool { isActive }
+
     public private(set) var isActive = false {
         // 派单 049: the inspector's 「像素数量 / 尺寸」 follows the *live* draft, so every entry into
         // and exit from 裁切 mode republishes it (leaving clears it, and the row falls back to the
@@ -213,6 +217,72 @@ public final class CropToolController {
         let stored = session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
         return (session?.edit.geometry ?? GeometryGroup.identity).orientedSource(stored)
     }
+
+    // MARK: 123 — the one transform value
+
+    /// The draft as the transform session sees it: the document's flips and quarter turn plus the
+    /// draft's crop, angle and lock. This value type owns the UI→document angle mapping; nothing in
+    /// the card does trigonometry.
+    public var transformSession: TransformSession {
+        TransformSession(geometry: draftGeometry, source: sourceSize)
+    }
+
+    /// Same value under the shorter name the panel reads.
+    public var transform: TransformSession { transformSession }
+
+    /// The geometry both the overlay and the renderer consume. The rotation matrix lives here, so a
+    /// second caller cannot pick a different sign. The crop is `effectiveCrop` — the rect the overlay
+    /// actually draws and `finish(.confirm)` writes — not the stored intent behind it.
+    public var cropGeometry: CropGeometry {
+        if !isActive, let session {
+            return CropGeometry(geometry: session.edit.geometry, source: sourceSize)
+        }
+        return CropGeometry(geometry: effectiveGeometry(draftGeometry), source: sourceSize)
+    }
+
+    /// The overlay draws against the **un-turned** document while the slider is dragged (088), so it
+    /// needs the delta between the draft and the committed angle — still derived from the session's
+    /// geometry, never re-derived with its own `cos`/`sin`.
+    public var overlayGeometry: CropGeometry {
+        var delta = effectiveGeometry(draftGeometry)
+        delta.rotationDegrees = CropTool.clampStraighten(draft.straighten)
+            - CropTool.clampStraighten(session?.edit.geometry.straightenDegrees ?? 0)
+        return CropGeometry(geometry: delta, source: sourceSize)
+    }
+
+    /// The draft's geometry with the document's flips and quarter turn carried (the same value
+    /// `apply()` writes).
+    private var draftGeometry: GeometryGroup {
+        draft.geometry(flipsOf: session?.edit.geometry ?? GeometryGroup.identity)
+    }
+
+    /// The draft with the crop replaced by the rect the overlay drew (`effectiveCrop`).
+    private func effectiveGeometry(_ geometry: GeometryGroup) -> GeometryGroup {
+        var geometry = geometry
+        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
+        return geometry
+    }
+
+    /// The geometry `finish(.confirm)` writes: the draft's fields, with the crop replaced by the one
+    /// the overlay actually drew (`effectiveCrop` — the rect inscribed in the turned frame).
+    private func committedGeometry(for document: GeometryGroup) -> GeometryGroup {
+        effectiveGeometry(draft.geometry(flipsOf: document))
+    }
+
+    /// The slider's value in the UI's own convention: positive = clockwise.
+    public var angleUIValue: Double { -CropTool.clampStraighten(draft.straighten) }
+
+    /// 123 — the one UI→document angle write. `TransformSession.setAngle(uiValue:)` chooses the
+    /// sign; this method only carries its answer into the draft.
+    public func setAngle(uiValue: Double) {
+        var session = TransformSession(geometry: draftGeometry, source: sourceSize)
+        session.setAngle(uiValue: uiValue)
+        draft.straighten = session.draft.straightenDegrees
+        draftChanged()
+    }
+
+    /// The canvas the draft will produce, in pixels.
+    public var effectiveCanvas: ImageSize { cropGeometry.canvas }
 
     // MARK: the draft's rect, as the turned picture allows it
 
@@ -283,24 +353,44 @@ public final class CropToolController {
     /// commits nothing (`applyEdit` short-circuits on a semantically identical model and the session
     /// ends with nothing to record).
     @discardableResult
-    public func apply() -> Bool {
+    public func apply() -> Bool { finish(.confirm) }
+
+    /// 完成 (the card's button) — the same write as `apply()`, through the same `finish(_:)`.
+    @discardableResult
+    public func complete() -> Bool { finish(.done) }
+
+    /// 123 — the one finish path. ↵ (`confirm`), Esc (`cancel`) and 完成 (`done`) all land here, so
+    /// the mode, the draft, the history and the camera cannot take three different routes out.
+    @discardableResult
+    public func finish(_ outcome: TransformFinish) -> Bool {
+        switch outcome {
+        case .confirm, .done:
+            return confirmDraft()
+        case .cancel:
+            cancelDraft()
+            return false
+        }
+    }
+
+    @discardableResult
+    private func confirmDraft() -> Bool {
         guard isActive, let session else { return false }
         // **The same rect the overlay drew.** 应用 commits `effectiveCrop`, not `draft.crop`: at a
         // non-zero straighten the stored rect is the user's *intent* and the constraint is what the
         // picture allows, so writing the stored one would commit a frame the user never saw.
-        var geometry = draft.geometry(flipsOf: session.edit.geometry)
-        geometry.crop = effectiveCrop(source: sourceSize).clamped().normalizedRect
+        let geometry = committedGeometry(for: session.edit.geometry)
         endDrag()
         isActive = false
         session.applyEdit { $0.geometry = geometry }
         let committed = session.endToolSession(label: "裁切与旋转")
+        draft = Draft(geometry: geometry)
         if committed { appliedCount += 1 }
         return committed
     }
 
     /// 取消 (Esc): drop the draft. Nothing is written, so the document, its revision and its history
     /// are exactly what they were before `begin()` — not "restored to", *untouched*.
-    public func cancel() {
+    private func cancelDraft() {
         guard isActive else { return }
         endDrag()
         isActive = false
@@ -316,6 +406,9 @@ public final class CropToolController {
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         cancelledCount += 1
     }
+
+    /// Kept as the named Esc door; it is `finish(.cancel)`.
+    public func cancel() { finish(.cancel) }
 
     /// Leaving the loupe, changing photo, or the canvas going away: drop the tool silently. Not a
     /// 取消 the user asked for, so it does not count as one.
@@ -628,13 +721,16 @@ public final class CropToolController {
                        pointScale: Double = 1,
                        carry: CropCarry = .identity,
                        quadRotationDegrees: Double? = nil) -> CropToolLayout {
-        CropTool.layout(crop: effectiveCrop(source: source),
+        // 123: the angle is the same value the renderer will consume, via `CropGeometry`. The
+        // overlay still draws the *delta* against the document while the slider is in flight (088).
+        let geometry = overlayGeometry
+        return CropTool.layout(crop: effectiveCrop(source: source),
                         source: source ?? sourceSize,
                         mapping: mapping,
                         pointScale: pointScale,
                         showsGrid: showsGrid,
                         carry: carry,
-                        quadRotationDegrees: quadRotationDegrees ?? straightenDelta)
+                        quadRotationDegrees: quadRotationDegrees ?? geometry.rotationDegrees)
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
@@ -945,13 +1041,12 @@ public final class CropToolController {
         guard rotationDegrees.isFinite, rotationDegrees != 0 else {
             return NormalizedPoint(p.x / w, p.y / h)
         }
-        let theta = rotationDegrees * .pi / 180
-        let cosT = cos(theta), sinT = sin(theta)
+        // 123: the one rotation matrix (`CropGeometry.RotationMatrix`) — this file no longer spells
+        // its own `cos`/`sin`.
+        let rotation = CropGeometry.RotationMatrix(degrees: rotationDegrees)
         let dx = p.x - w / 2, dy = p.y - h / 2
-        // R(+θ), the inverse of the layout's R(−θ).
-        let x = w / 2 + dx * cosT - dy * sinT
-        let y = h / 2 + dx * sinT + dy * cosT
-        return NormalizedPoint(x / w, y / h)
+        let turned = rotation.apply(x: dx, y: dy)
+        return NormalizedPoint((w / 2 + turned.x) / w, (h / 2 + turned.y) / h)
     }
 
     // MARK: the readout

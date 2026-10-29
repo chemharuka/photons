@@ -3534,11 +3534,11 @@ public final class RenderGraph {
     }
 
     private func costheta(_ edit: EditModel) -> Float {
-        Float(cos(edit.geometry.straightenDegrees * .pi / 180))
+        Float(CropGeometry(geometry: edit.geometry, source: sourceSize).cosine)
     }
 
     private func sintheta(_ edit: EditModel) -> Float {
-        Float(sin(edit.geometry.straightenDegrees * .pi / 180))
+        Float(CropGeometry(geometry: edit.geometry, source: sourceSize).sine)
     }
 
     // MARK: - masks (S1.5 / S1.6)

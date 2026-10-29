@@ -1184,6 +1184,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// right-hand panel is **inert** (its hosting view answers `hitTest → nil`), not merely greyed, and
     /// the moment the tool closes the panel is live again. View state, like the mode itself.
     public var onCropModeChange: ((Bool) -> Void)?
+    /// 123 — a transform was **confirmed** (↵ / 完成): the workspace can now leave 变换 (the
+    /// acceptance asks the panel to return to `.adjust`). Esc does not call this.
+    public var onTransformConfirmed: (() -> Void)?
     /// What the callback was last told, so a drag tick cannot republish it.
     private var publishedCropModeActive = false
     /// 072 §A1 — 确认/取消裁切后, the picture is carried from the crop framing to the entry framing by
@@ -3374,6 +3377,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // EXIF 5…8.
 
     public var isCropToolActive: Bool { cropTool.isActive }
+    /// 123 — the acceptance's name for the same view state.
+    public var isCropping: Bool { cropTool.isActive }
 
     /// What a press at `point` belongs to — **one** decision, in one place.
     ///
@@ -3495,18 +3500,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// ↵ (and 双击框内): the draft becomes the document, once.
     @discardableResult
     public func applyCropTool() -> Bool {
-        guard cropTool.isActive else { return false }
-        let applied = cropTool.apply()
-        leaveCropTool()
-        return applied
+        finishCropTool(.confirm)
+    }
+
+    /// The card's 完成 button: the same write as ↵, through the same finish path.
+    @discardableResult
+    public func completeCropTool() -> Bool {
+        finishCropTool(.done)
     }
 
     /// Esc: the frame goes away and **nothing** is written — the document, its revision and its
     /// history are exactly what they were before ⌘R.
     public func cancelCropTool() {
-        guard cropTool.isActive else { return }
-        cropTool.cancel()
+        finishCropTool(.cancel)
+    }
+
+    /// 123 — ↵, Esc and 完成 all arrive here. The three doors differ only in the `TransformFinish`
+    /// they hand to `CropToolController.finish(_:)`; the mode, the camera and the workspace are
+    /// handled once.
+    @discardableResult
+    public func finishCropTool(_ outcome: TransformFinish) -> Bool {
+        guard cropTool.isActive else { return false }
+        let applied = cropTool.finish(outcome)
         leaveCropTool()
+        if outcome != .cancel { onTransformConfirmed?() }
+        return applied
     }
 
     private func leaveCropTool() {
