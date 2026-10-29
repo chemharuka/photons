@@ -195,6 +195,8 @@ public struct RenderOptions: Sendable {
     /// `RenderGraph.lastDehazeAirlight` (117's acceptance needs to compare the estimated `A` with the
     /// synthetic veil). The shipped path never reads it back: `s1_9_dehaze_apply` samples the texture
     /// on the GPU, and this flag adds only a 4-byte blit when it is on. Never part of a key.
+    /// 141: the value is in the **unexposed** space (`A/g`), i.e. the airlight the scene carries
+    /// independent of S1's exposure gain.
     public var probesDehazeAirlight: Bool
 
     /// **Tests only.** Make S1.9's recovery the **pre-130 per-channel** `(I_c − A(1 − t))/t` instead
@@ -906,7 +908,7 @@ private struct DehazeParamsU {
     var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
     var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
     var d: SIMD4<Int32>   // qH, pad, pad, pad
-    var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), pad
+    var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), 141: S1 exposure gain g
 }
 
 private struct DisplayParams {
@@ -3708,6 +3710,11 @@ public final class RenderGraph {
     //
     // The airlight never comes back to the CPU on the shipped path; `probesDehazeAirlight` adds a
     // 4-byte blit for the acceptance's measurement.
+    //
+    // 141 — every pass receives S1's exposure gain in `params.e.w`: the three estimating passes divide
+    // it out (so `A`, `t` and the 135 percentile are facts about the scene, not the EV slider) and the
+    // apply pass multiplies the recovered light back by it. `g == 1` for a neutral document, so the
+    // `E = 0` pixels are bit-identical to the pre-141 stage.
     private func encodeDehaze(cb: MTLCommandBuffer, into out: MTLTexture,
                               from src: MTLTexture, edit: EditModel, plan: Plan,
                               options: RenderOptions) throws {
@@ -3721,7 +3728,11 @@ public final class RenderGraph {
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
             d: SIMD4(Int32(qH), 0, 0, 0),
-            e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0.95, 0.0))
+            // 141: S1's exposure gain. The four passes divide it out of every measurement and the
+            // apply pass multiplies it back, so the dehaze result commutes with the exposure slider.
+            // WB is not part of this number: it belongs to the light source, not the EV control.
+            e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0.95,
+                     Float(edit.light.exposureGain)))
 
         let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
         let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)
