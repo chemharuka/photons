@@ -49,12 +49,16 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(effects, sections.count - 1, "效果是调整工作区的最后一张卡（预设卡已删）")
         XCTAssertFalse(titles.contains("预设"), "预设 不再是卡片：它搬到了顶部菜单与复制对话框")
 
-        // One card, three blocks: the four vignette rows, the Presence triple (S3.8), then the four
-        // grain rows, in that order.
+        // 116: 暗角 moved to 校正 (it corrects a lens defect, it does not add atmosphere), so this
+        // card is two blocks: the Presence triple (S3.8), then the four grain rows.
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
-                       ["暗角", "暗角中点", "暗角羽化", "暗角圆度",
-                        "纹理", "清晰度", "去雾",
+                       ["纹理", "清晰度", "去雾",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
+        // …and the four vignette rows are now the 校正 card's second block, in linear-domain red.
+        XCTAssertEqual(InspectorView.correctionRows.map(\.title),
+                       ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化", "暗角圆度"])
+        XCTAssertTrue(InspectorView.vignetteRows.allSatisfy { $0.shape == .linear },
+                      "暗角在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 4)
         XCTAssertEqual(InspectorView.detailFXRows.count, 3)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
@@ -266,7 +270,7 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
                       "效果卡的标题必须挂整卡复位")
         XCTAssertTrue(source.contains("ForEach(Self.vignetteRows, id: \\.title)"),
-                      "暗角四行来自表")
+                      "暗角四行来自表（现在在 校正 卡里）")
         XCTAssertTrue(source.contains("ForEach(Self.detailFXRows, id: \\.title)"),
                       "纹理/清晰度/去雾三行来自表")
         XCTAssertTrue(source.contains("ForEach(Self.grainRows, id: \\.title)"),

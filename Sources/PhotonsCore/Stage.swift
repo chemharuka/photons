@@ -103,7 +103,9 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is non-zero, so a document with all three at 0 keeps its pre-S3.9 trace, key chain and pixels
     /// byte for byte. Numbered after S3.8 (the grade) — merge order: grade took the 8.
     case detailFX = "s3.9-detail-fx"
-    /// S3c — post-crop vignette, and the card's other half.
+    /// S3c — **镜头暗角校正**. 116 moved it out of S3 into the linear chain (after S1.8): a vignette is
+    /// compensating illumination falloff, so it belongs on light, not on tone-mapped codes. The raw
+    /// value keeps its old spelling so recorded traces stay readable.
     case vignette = "s3-vignette"
     /// 2026-10-28 — **grain**, the Effects card's second stage.
     ///
@@ -134,8 +136,10 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// saturation never visits S3.5, one whose bands are all 0 never visits S3.6, and one whose grain
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .toneMap,
-         .color, .bw, .localColor, .hsl, .grade, .detailFX, .vignette, .grain, .display]
+        // 116 — the vignette moved to the **end of the linear chain** (after S1.8, before S2): it is a
+        // lens-vignetting *correction*, so it multiplies light, not tone-mapped codes.
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .vignette,
+         .toneMap, .color, .bw, .localColor, .hsl, .grade, .detailFX, .grain, .display]
     }
 
     /// The stages one render actually visits.

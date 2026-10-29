@@ -88,8 +88,10 @@ public enum StageAlgorithmVersion {
     /// content-aware source search — is what bumps this, because it changes the pixels of the same
     /// document without changing a stored number.
     public static let heal = 1
-    /// Unchanged.
-    public static let vignette = 1
+    /// **2** — 116: the vignette moved out of S3 into the end of the linear chain, so the same stored
+    /// numbers now multiply **light** instead of tone-mapped codes. Every document with
+    /// `vignetteAmount != 0` changes pixels; the arithmetic inside the kernel did not change.
+    public static let vignette = 2
     /// Unchanged.
     public static let grain = 1
     /// Unchanged (the OETF/encode).

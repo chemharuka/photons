@@ -997,6 +997,12 @@ public struct InspectorView: View {
             ForEach(Self.caRows, id: \.title) { row in
                 caSliderRow(row)
             }
+            // 116 — 镜头暗角校正. Linear domain (red), because it multiplies scene light at the end of
+            // the linear chain; the numbers are the same fields the 效果 card used to draw.
+            divider
+            ForEach(Self.vignetteRows, id: \.title) { row in
+                correctionSliderRow(row)
+            }
         }
         .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID))
     }
@@ -1155,10 +1161,7 @@ public struct InspectorView: View {
     /// entry on release, like every other render card (`if !editing { session.commitEdit() }`).
     private var effectsCard: some View {
         card(Section.effects.title, reset: { resetGroup(.effects) }) {
-            ForEach(Self.vignetteRows, id: \.title) { row in
-                effectsSliderRow(row)
-            }
-            divider
+            // 116 — 暗角 moved to 校正 (it is a lens correction, not an effect).
             ForEach(Self.detailFXRows, id: \.title) { row in
                 effectsSliderRow(row)
             }
@@ -1170,6 +1173,21 @@ public struct InspectorView: View {
         // The card's own frame, for the layout test at 300 / 330 / 364 (`EffectsRowProbe.cardID`) —
         // a background, so it inherits the card's size and cannot change it.
         .background(EffectsRowProbeHost(rowID: EffectsRowProbe.cardID))
+    }
+
+    /// One 校正-card render row (116's vignette block): the panel's `sliderRow`, **without** the effects
+    /// card's frame probe — that probe is the effects card's layout contract (`EffectsRowProbe` counts
+    /// its rows), and a second card drawing the same probe would make the count lie.
+    private func correctionSliderRow(_ row: ToneRow) -> some View {
+        sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
+                  shape: row.shape,
+                  decimals: row.decimals,
+                  rounding: row.rounding,
+                  editable: row.editable,
+                  accessibilityID: "inspector.correction.\(row.title)",
+                  onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+            if !editing { session.commitEdit() }
+        }
     }
 
     /// One 效果 row: the panel's own `sliderRow`, plus the frame probe the layout tests measure. The
@@ -1439,13 +1457,13 @@ public struct InspectorView: View {
     /// All four are `.knob`: S3c runs in the display-referred domain on the already-decoded frame, so
     /// 060's yellow would claim a decode parameter and 071's red a scene-linear one.
     public static let vignetteRows: [ToneRow] = [
-        ToneRow(title: "暗角", range: -100 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "暗角", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteAmount),
-        ToneRow(title: "暗角中点", range: 0 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "暗角中点", range: 0 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteMidpoint),
-        ToneRow(title: "暗角羽化", range: 0 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "暗角羽化", range: 0 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteFeather),
-        ToneRow(title: "暗角圆度", range: -100 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "暗角圆度", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.vignetteRoundness),
     ]
 
@@ -1485,7 +1503,11 @@ public struct InspectorView: View {
 
     /// The card's eleven rows in draw order — the three blocks and the dividers between them. One
     /// list, so a test can hold 「十一根滑杆」 and the card cannot draw a row the table does not have.
-    public static var effectsRows: [ToneRow] { vignetteRows + detailFXRows + grainRows }
+    public static var effectsRows: [ToneRow] { detailFXRows + grainRows }
+
+    /// The 校正 card's rows in draw order: the two CA ratios (S0) and the four vignette rows (116 —
+    /// linear-domain lens-vignetting correction), all drawn red.
+    public static var correctionRows: [ToneRow] { caRows + vignetteRows }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
     ///

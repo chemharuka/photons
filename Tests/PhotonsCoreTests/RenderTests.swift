@@ -460,7 +460,13 @@ final class RenderTests: XCTestCase {
 
         XCTAssertTrue(b.trace.executed.contains(.hsl), "a band must run S3.6")
         XCTAssertNotNil(b.keys.hsl)
-        XCTAssertEqual(Array(b.keys.pipeline.suffix(3)), [.hsl, .vignette, .display])
+        // 116 moved the vignette into the linear chain, so HSL is now the last pass before the encode
+        // rather than two steps before the vignette.
+        XCTAssertEqual(Array(b.keys.pipeline.suffix(2)), [.hsl, .display])
+        let vignetteIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .vignette))
+        let toneMapIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .toneMap))
+        XCTAssertEqual(toneMapIndex, vignetteIndex + 1,
+                       "116：暗角是线性域的最后一个 pass，紧接 tone map 之前")
         XCTAssertNotEqual(pa.sha256(), pb.sha256(), "saturation −100 on 绿 must change the picture")
         print("076 · banded: \(b.keys.shortTrace) · sha \(pb.sha256().prefix(12))…")
     }
@@ -541,11 +547,12 @@ final class RenderTests: XCTestCase {
         let fileHash = try FileDigest.sha256(of: url)
 
         for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            struct Rec: Decodable {
+            struct Rec: Codable {
                 let rawSHA256: String
                 let edit: String
                 let scale: Double
-                let pixelSHA256: String
+                var pixelSHA256: String
+                var fileSHA256: String? = nil
                 let width: Int
                 let height: Int
             }
@@ -571,6 +578,18 @@ final class RenderTests: XCTestCase {
             let pixels = try XCTUnwrap(result.display)
             XCTAssertEqual(pixels.width, rec.width, "\(file.lastPathComponent): width")
             XCTAssertEqual(pixels.height, rec.height, "\(file.lastPathComponent): height")
+            // `PHOTONS_RECORD_GOLDEN=1` re-records (same convention as the mask goldens) — a stage that
+            // deliberately moves pixels (a version bump) has to be able to rewrite its own golden.
+            if ProcessInfo.processInfo.environment["PHOTONS_RECORD_GOLDEN"] == "1" {
+                var updated = rec
+                updated.pixelSHA256 = pixels.sha256()
+                updated.fileSHA256 = fileHash
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(updated).write(to: file)
+                print("RECORDED \(file.lastPathComponent) · \(rec.pixelSHA256.prefix(12))… → \(updated.pixelSHA256.prefix(12))…")
+                continue
+            }
             XCTAssertEqual(pixels.sha256(), rec.pixelSHA256,
                            "\(file.lastPathComponent): rendered pixels changed — Apple's decoder or our graph moved")
         }
