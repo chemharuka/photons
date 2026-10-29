@@ -570,10 +570,12 @@ final class MaskTests: XCTestCase {
             // deliberately non-default band — gains an eighth link between S3 and the vignette.
             ("hsl", "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af",
              "d00caa929ce732b3afe408e4ad9b2fb37fe5f02e6485b5d78d279eed76405f8c|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            ("vignette", "9d716e48946966ee71731c7d4ad9d7be93291c4d4af7a31afc6e9fdb534ffaa1",
-             "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=1"),
-            ("display", "b3d7cc4d9ff4649371f73b8dfaa2fdf74125eb06a2a10b0dd30023dbcef7127c",
-             "9d716e48946966ee71731c7d4ad9d7be93291c4d4af7a31afc6e9fdb534ffaa1|sRGB;bits=8;headroom=1.000|1500x1000"),
+            // 116: 暗角搬进场景线性域 —— `AlgorithmVersion.vignette` 升到 2，所以这一段键**故意**变了，
+            // 链条下游的 display 也跟着变（它把 vignette 的摘要串在自己前面）。
+            ("vignette", "b5ab857269c8b1ec83683b682e1cd646c759a467a1251952faec0f83cb7382e4",
+             "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=2"),
+            ("display", "bfe21b18042cf23d3eb185b99501b7400cef500bd19e42db7fda4e2848012208",
+             "b5ab857269c8b1ec83683b682e1cd646c759a467a1251952faec0f83cb7382e4|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
@@ -2530,13 +2532,16 @@ final class MaskTests: XCTestCase {
     /// Shared comparison: digests, ids, and the six sample pairs.
     private func assertGolden(named name: String, record actual: MaskGolden, json: String) throws {
         let url = Self.goldenDir.appendingPathComponent(name)
+        // `PHOTONS_RECORD_GOLDEN=1` used to overwrite **only when the file was missing**, so the
+        // documented "Regenerate with PHOTONS_RECORD_GOLDEN=1" did nothing once a golden existed and
+        // every stale golden had to be deleted by hand. Recording now always wins.
+        if ProcessInfo.processInfo.environment["PHOTONS_RECORD_GOLDEN"] == "1" {
+            try FileManager.default.createDirectory(at: Self.goldenDir,
+                                                    withIntermediateDirectories: true)
+            try Data(json.utf8).write(to: url)
+            return
+        }
         guard let data = try? Data(contentsOf: url) else {
-            if ProcessInfo.processInfo.environment["PHOTONS_RECORD_GOLDEN"] == "1" {
-                try FileManager.default.createDirectory(at: Self.goldenDir,
-                                                        withIntermediateDirectories: true)
-                try Data(json.utf8).write(to: url)
-                return
-            }
             XCTFail("no golden at \(url.path). Recorded frame:\n\(json)")
             return
         }

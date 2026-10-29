@@ -46,7 +46,8 @@ final class CropPanelTests: XCTestCase {
         XCTAssertGreaterThan(angleRect.minY, cropRect.maxY, "角度卡必须在裁切卡之后")
 
         var headers: [CGRect] = []
-        for title in ["宽高比", "角度", "旋转", "镜像"] {
+        // 122 A: 角度 没有二级标题（卡片自己叫「旋转」），所以这里是三个。
+        for title in ["宽高比", "旋转", "镜像"] {
             let probe = try XCTUnwrap(Self.probe("section.\(title)", in: inspector),
                                       "二级标题「\(title)」没有画出来")
             headers.append(probe.convert(probe.bounds, to: inspector))
