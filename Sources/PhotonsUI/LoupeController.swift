@@ -1270,6 +1270,29 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Start a drag. A no-op while a preview is already live: the frame on screen still belongs to the
     /// **first** baseline even if the document has already been committed and the new frame is on its
     /// way, so re-baselining would flash the old white balance back.
+    /// The measured gain table to use for this drag (118 §3), or `nil` when nothing is available.
+    ///
+    /// A table measured on this very body (Application Support) wins; otherwise the shipped one, which
+    /// is the per-node median of five bodies against a common 6000 K reference. Both store *absolute*
+    /// `(temperature, tint)` nodes, so `gain(from:to:)` — a ratio of two nodes — does not care which
+    /// reference each was measured against. Cached per asset: it is a file read plus, at most, one
+    /// header probe, and a drag updates dozens of times.
+    private var whiteBalanceTableCache: (assetID: String, table: WhiteBalancePreviewTable?)?
+
+    private func whiteBalanceTable() -> WhiteBalancePreviewTable? {
+        guard let session, let asset = session.anchorAsset else { return nil }
+        if let cached = whiteBalanceTableCache, cached.assetID == asset.id { return cached.table }
+        var resolved: WhiteBalancePreviewTable = .shipped
+        if let model = asset.cameraModel ?? asset.cameraMake, let url = session.fileURL(for: asset) {
+            let version = (try? RAWDecoder().probe(url))?.defaultVersion ?? ""
+            resolved = WhiteBalancePreviewTable.table(
+                forCamera: model, decoderVersion: version,
+                in: WhiteBalancePreviewTable.loadAll()) ?? .shipped
+        }
+        whiteBalanceTableCache = (asset.id, resolved)
+        return resolved
+    }
+
     public func beginWhiteBalancePreview() {
         guard whiteBalancePreview == nil else { return }
         let current = previewDocumentWhiteBalance
@@ -1291,8 +1314,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // `nil` is as shot, not zero: the file's own pair is what the preview moves *away* from.
         let kelvin = target.temperature ?? shot.temperature ?? 6500
         let tintValue = target.tint ?? shot.tint ?? 0
-        let gain = WhiteBalanceSolver.gain(temperature: kelvin, tint: tintValue,
-                                           reference: preview.reference)
+        // 118 §3 — measured table first (0.4–1.5 % on off-node requests, and the solver is only
+        // ~10 % near neutral but drifts to >200 % at the ends), analytic solver as the last resort.
+        let measured = whiteBalanceTable()?.gain(
+            from: .init(temperature: preview.reference.temperature, tint: preview.reference.tint),
+            to: .init(temperature: kelvin, tint: tintValue))
+        let gain = measured ?? WhiteBalanceSolver.gain(temperature: kelvin, tint: tintValue,
+                                                      reference: preview.reference)
         preview.gain = SIMD3(gain.r, gain.g, gain.b)
         preview.target = target
         preview.awaitingRevision = nil

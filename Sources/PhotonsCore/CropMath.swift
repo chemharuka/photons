@@ -432,13 +432,14 @@ public enum CropMath {
     public static func rotatedFrameCorners(in source: ImageSize,
                                            degrees: Double) -> [NormalizedPoint] {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
-        let r = degrees * Double.pi / 180
-        let cosine = cos(r), sine = sin(r)
+        // 123: the matrix comes from `CropGeometry.RotationMatrix` — the one place the rotation's
+        // sign lives — so this walk and the renderer's cannot drift apart (they did once: the frame
+        // turned one way and the selection the other).
+        let m = CropGeometry.RotationMatrix(degrees: degrees)
         return [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner in
             let dx = corner.0 * w - w / 2, dy = corner.1 * h - h / 2
-            let px = dx * cosine - dy * sine
-            let py = dx * sine + dy * cosine
-            return NormalizedPoint((px + w / 2) / w, (py + h / 2) / h)
+            let turned = m.apply(x: dx, y: dy)
+            return NormalizedPoint((turned.x + w / 2) / w, (turned.y + h / 2) / h)
         }
     }
 
@@ -545,9 +546,9 @@ public enum CropMath {
                                       degrees: Double) -> (x: Double, y: Double) {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
         let dx = c.centerX * w - w / 2, dy = c.centerY * h - h / 2
-        let r = degrees * Double.pi / 180
-        let cosine = cos(r), sine = sin(r)
-        return (dx * cosine + dy * sine, -dx * sine + dy * cosine)
+        // The rect lives in sensor axes, so this is the **inverse** turn — same matrix, inverted.
+        let turned = CropGeometry.RotationMatrix(degrees: degrees).invert(x: dx, y: dy)
+        return (turned.x, turned.y)
     }
 
     private static func scale(dx: Double, dy: Double, a: Double, b: Double,
@@ -576,7 +577,7 @@ public enum CropMath {
     /// |cos|, |sin| of an angle in degrees. Abs because a rectangle's extent is the same either
     /// way round, and both signs appear in the formulas.
     static func cosSin(_ degrees: Double) -> (Double, Double) {
-        let r = degrees * Double.pi / 180
-        return (abs(cos(r)), abs(sin(r)))
+        let m = CropGeometry.RotationMatrix(degrees: degrees)
+        return (abs(m.cosine), abs(m.sine))
     }
 }
