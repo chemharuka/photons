@@ -993,7 +993,21 @@ public struct InspectorView: View {
     /// so the slider travel, the `.linear` accent, one history row on release and the S0 re-render all
     /// stay as they were on 细节.
     private var correctionCard: some View {
-        card(Section.correction.title, reset: { resetGroup(.correction) }) {
+        card(Section.correction.title, reset: { resetGroup(.correction) },
+             accessory: {
+                 // 121 — the file arrived with its own corrections. DNG carries them as opcodes
+                 // (WarpRectilinear, and Panasonic's own in RW2), which Apple's decoder applies on its
+                 // own — or, when the planes disagree, our S0 warp does. Either way the user dialled in
+                 // none of it, so the card says so instead of leaving three sliders at 0 and implying
+                 // nothing happened.
+                 if let note = autoProfileNote {
+                     Text(note)
+                         .font(.system(size: 9))
+                         .foregroundStyle(.secondary)
+                         .lineLimit(1)
+                         .accessibilityIdentifier("inspector.correction.autoProfile")
+                 }
+             }) {
             ForEach(Self.caRows, id: \.title) { row in
                 caSliderRow(row)
             }
@@ -1005,6 +1019,24 @@ public struct InspectorView: View {
             }
         }
         .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID))
+    }
+
+    /// 「已自动应用配置文件」 when the photo's own file carries lens corrections.
+    ///
+    /// One read of the anchor's headers (`LensProfile.read`), not per-body-pass: the profile is a
+    /// property of the file, and the slider rows do not need it.
+    private var autoProfileNote: String? {
+        InspectorView.autoProfileNote(for: session.currentPhotoURL)
+    }
+
+    /// The note's text, as a pure function so the criterion is testable without a rendered card.
+    public static func autoProfileNote(for url: URL?) -> String? {
+        guard let url, let profile = LensProfile.read(from: url), !profile.planes.isEmpty else {
+            return nil
+        }
+        // A file whose planes agree is corrected by Apple's own decode; one whose planes disagree is
+        // corrected by our S0 warp. Both are "applied from the file", which is what the note claims.
+        return "已自动应用配置文件"
     }
 
     /// 2026-10-28 (078 B8 / 096) — **色差**: the two lateral-CA rows, now in the 校正 card.
@@ -1353,7 +1385,17 @@ public struct InspectorView: View {
     private func card<Content: View>(_ title: String,
                                      reset: (() -> Void)? = nil,
                                      @ViewBuilder _ content: @escaping () -> Content) -> some View {
-        InspectorCardShell(title: title, reset: reset, accessory: { EmptyView() }) {
+        card(title, reset: reset, accessory: { EmptyView() }, content)
+    }
+
+    /// The same card with something on its title line, right-aligned (`accessory`), for the 校正 card's
+    /// 「已自动应用配置文件」 note.
+    private func card<Content: View, Accessory: View>(_ title: String,
+                                                      reset: (() -> Void)? = nil,
+                                                      @ViewBuilder accessory: @escaping () -> Accessory,
+                                                      @ViewBuilder _ content: @escaping () -> Content)
+        -> some View {
+        InspectorCardShell(title: title, reset: reset, accessory: accessory) {
             content()
         }
     }
