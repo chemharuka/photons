@@ -1082,7 +1082,11 @@ final class HDRCurveTests: XCTestCase {
         // 所以紧跟在曲线后面的是 `.contrast`，不是 `.toneMap`；S2 读的是对比度阶段的输出。
         // 「曲线是 S2 的输入」这条语义没变，只是中间多了一站。
         XCTAssertEqual(order[curveIndex + 1], .contrast, "098: S1.8 sits between the curve and S2")
-        XCTAssertEqual(order[curveIndex + 2], .toneMap, "…and S2 still reads what the curve chain produced")
+        // 117: 去雾 joined the linear tail between contrast and the vignette, so S2 still reads what
+        // the curve chain produced (through one more station).
+        XCTAssertEqual(order[curveIndex + 2], .dehaze, "117: S1.9 reads S1.8 and sits before the vignette")
+        XCTAssertEqual(order[curveIndex + 3], .vignette, "…the vignette is the last linear pass")
+        XCTAssertEqual(order[curveIndex + 4], .toneMap, "…and S2 reads the whole linear chain")
         XCTAssertEqual(RenderStage.allCases.firstIndex(of: .curve), 2)
         XCTAssertEqual(RenderStage.curve.short, "s1.7")
         XCTAssertEqual(RenderStage.curve.rawValue, "s1.7-hdr-curve")

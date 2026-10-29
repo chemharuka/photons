@@ -59,6 +59,9 @@ final class EffectsCardTests: XCTestCase {
                        ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化", "暗角圆度"])
         XCTAssertTrue(InspectorView.vignetteRows.allSatisfy { $0.shape == .linear },
                       "暗角在线性域，行必须是红色（.linear）")
+        // 117: 去雾 is scene-linear (S1.9), so its row is red as well.
+        XCTAssertEqual(InspectorView.detailFXRows.first { $0.title == "去雾" }?.shape, .linear,
+                       "去雾在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 4)
         XCTAssertEqual(InspectorView.detailFXRows.count, 3)
         XCTAssertEqual(InspectorView.grainRows.count, 4)

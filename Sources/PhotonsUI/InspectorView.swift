@@ -1485,11 +1485,12 @@ public struct InspectorView: View {
                 keyPath: \.effects.grainSeed, quantum: 1),
     ]
 
-    /// 2026-10-28 (P0-6) — the 效果 card's **纹理 / 清晰度 / 去雾** block: S3.8's three numbers
-    /// (`s3_8_detail_fx.metal`), Lightroom's Presence triple, in the panel's order.
+    /// 2026-10-28 (P0-6) — the 效果 card's **纹理 / 清晰度 / 去雾** block: S3.9's 纹理/清晰度 and
+    /// S1.9's 去雾 (117 moved dehaze to the scene-linear chain), Lightroom's Presence triple, in the
+    /// panel's order.
     ///
     /// The travels are the kernel's: −100…100 for all three. 0 means the band is not touched — and when
-    /// all three are 0 the stage is not encoded at all, so the frame is the pre-S3.8 frame byte for
+    /// all three are 0 neither stage is encoded at all, so the frame is the pre-change frame byte for
     /// byte. `effects.detailFXRows` is what the card iterates, so a row that is drawn but not in the
     /// table (or the reverse) cannot exist.
     public static let detailFXRows: [ToneRow] = [
@@ -1497,7 +1498,9 @@ public struct InspectorView: View {
                 keyPath: \.effects.texture),
         ToneRow(title: "清晰度", range: -100 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.clarity),
-        ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .knob,
+        // 117: 去雾 runs in the scene-linear chain (S1.9), so its row carries the linear-domain red
+        // (071's class) like the vignette rows in 校正.
+        ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.dehaze),
     ]
 
