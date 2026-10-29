@@ -335,8 +335,11 @@ final class BlackLevelCardTests: XCTestCase {
                                                          extremeCount: 50), -0.006)
         XCTAssertEqual(LoupeController.autoBlackRawValue(min: 0, p001: 0, extremeCount: 0), 0)
         // 一颗极端像素也照样用 min（这正是用户要的：干净解码之后最负的那颗就是电平该补的量）。
-        XCTAssertEqual(LoupeController.autoBlackOffset(for: LoupeController.autoBlackRawValue(
-            min: -0.0129, p001: -0.0031, extremeCount: 1)), 0.013)
+        XCTAssertEqual(LoupeController.autoBlackRawValue(min: -0.0129, p001: -0.0031,
+                                                         extremeCount: 1), -0.0129)
+        // 0.0129 会撞上 blackOffsetRange 的 +0.01 上限（旧版本滑块因此顶到 10.0），这层钳位是既有行为。
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: -0.0129), 0.01, accuracy: 1e-9)
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: -0.0042), 0.005, accuracy: 1e-9)
     }
 
     /// 派单 105 验收 3 —— L1030415 的自动黑电平不再顶到 ±0.01 钳位。
