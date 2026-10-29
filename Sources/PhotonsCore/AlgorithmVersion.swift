@@ -55,13 +55,19 @@ public enum StageAlgorithmVersion {
     public static let localApply = 3
     /// Unchanged (030's HDR curve).
     public static let curve = 1
+    /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
+    /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
+    public static let contrast = 1
+    /// **4** — 098: S2 no longer contains contrast (it moved to S1.8), so its pixels for the same
+    /// stored numbers changed even though the region-lift arithmetic did not.
+    ///
     /// **3** — 085: the two-window shadows/highlights lift became the three-window
     /// shadow/mid/high chain with a gated EV travel (`S2Regions`); the pixels of a document with a
     /// non-zero region slider change even though its stored numbers do not.
     ///
     /// **2** — 0107: contrast became a displacement in log2 EV over a held core with a bounded shoulder
     /// and a toe shift (no upper asymptote, no 4× slope); 074 R2 moved the region lifts to EV windows.
-    public static let toneMap = 3
+    public static let toneMap = 4
     /// Unchanged (vibrance/saturation only, since 076).
     public static let color = 1
     /// Unchanged (S3.4's eight-band grey mix).
@@ -99,6 +105,7 @@ public enum StageAlgorithmVersion {
         case .localApply: return localApply
         case .heal: return heal
         case .curve: return curve
+        case .contrast: return contrast
         case .toneMap: return toneMap
         case .color: return color
         case .bw: return bw

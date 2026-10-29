@@ -578,9 +578,10 @@ public final class RAWDecoder {
         public let detailBaseline: DetailBaseline
         /// The four filter values this development actually assigned; all `nil` for a default document.
         public let detailApplied: DetailDecodeValues
-        /// 097: the file's `WarpRectilinear` profile, when it has one. `RAWDecoder` reads it once,
-        /// uses `hasPerPlaneDifference` to decide whether Apple's own lens correction stays on, and
-        /// hands it to the frame so S0 can apply the per-channel warp when Apple's was turned off.
+        /// 097 / 103: the file's own lens profile, when it has one (DNG `WarpRectilinear` or
+        /// Panasonic RW2 `0x0119`). `RAWDecoder` reads it once, uses `requiresOwnWarp` to decide
+        /// whether Apple's own lens correction stays on, and hands it to the frame so S0 can apply
+        /// the warp when Apple's was turned off.
         public let lensProfile: LensProfile?
 
         public init(image: LinearImage, capabilities: DecoderCapabilities,
@@ -611,15 +612,16 @@ public final class RAWDecoder {
     public func decodeDetailed(_ url: URL, options: DecodeOptions = DecodeOptions()) throws -> DecodeOutcome {
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
 
-        // ── 097: whose lens correction runs ───────────────────────────────────────────────────
-        // `CIRAWFilter.isLensCorrectionEnabled` applies **plane 1 (green)** of the file's
-        // `OpcodeList3 / WarpRectilinear` to all three channels. When the file carries three
-        // *different* planes (every Leica SL3 DNG measured here), that is both double-corrected
-        // green and an uncorrected red/blue lateral CA. So: keep Apple's switch for a single-plane
-        // file, and turn it off — assignments below are the only truth, not the flag — when the
-        // file has a per-plane warp. `S0` then applies the three planes itself (097).
-        let lensProfile = LensProfile.read(from: url)
-        if lensProfile?.hasPerPlaneDifference == true {
+        // ── 097 / 103: whose lens correction runs ─────────────────────────────────────────────
+        // `CIRAWFilter.isLensCorrectionEnabled` applies **plane 1 (green)** of a DNG's
+        // `OpcodeList3 / WarpRectilinear` to all three channels, and on an RW2 it applies whatever
+        // Apple's own Panasonic handling does. When the file carries a correction we can apply
+        // ourselves — three *different* DNG planes, or a usable Panasonic `0x0119` block — keeping
+        // Apple's switch on would double-correct green and leave red/blue behind. So: keep Apple's
+        // switch for a single-plane DNG and every file with no profile, and turn it off only when
+        // `requiresOwnWarp`; `S0` then samples the source with the file's own profile (097/103).
+        let lensProfile = LensProfile.read(from: url) ?? LensProfile.readPanasonic(from: url)
+        if lensProfile?.requiresOwnWarp == true {
             filter.isLensCorrectionEnabled = false
         }
 
@@ -920,7 +922,7 @@ public struct DecodeRung: Sendable {
     /// assigned. The inspector prints it as the baseline the 0 position means, so the number under a
     /// slider is relative to *this body's* default rather than to a nominal zero.
     public let detailBaseline: DetailBaseline
-    /// 097: the file's `WarpRectilinear` profile (nil when it has none). Carried so a frame can hand
+    /// 097 / 103: the file's own lens profile (nil when it has none). Carried so a frame can hand
     /// it to `RenderInput` without re-reading the file.
     public let lensProfile: LensProfile?
 

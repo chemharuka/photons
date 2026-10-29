@@ -354,7 +354,7 @@ final class RenderTests: XCTestCase {
 
         var c = a
         c.light.contrast = 20
-        XCTAssertEqual(c.changedStages(from: a), [.toneMap])
+        XCTAssertEqual(c.changedStages(from: a), [.contrast])
 
         var d = a
         d.color.saturation = 10

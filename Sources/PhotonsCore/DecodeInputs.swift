@@ -45,9 +45,10 @@ public struct DecodeInputs: Sendable, Hashable {
     /// `.identity` (all four untouched) appends nothing to the key, which is what keeps every document
     /// that has never touched the panel byte-identical to the pre-031 decode.
     public var detail: DetailSettings
-    /// 097: the file's lens-warp recipe (`lens=ours:…` / `lens=apple`), or `nil` for a file without
-    /// an opcode. It is derived from the file, not from the document, but it belongs to the same
-    /// stream because it changes which pipeline corrected the decoded pixels.
+    /// 097 / 103: the file's lens-warp recipe (`lens=ours:…`, `lens=apple`, or
+    /// `lens=panasonic:…`), or `nil` for a file without a profile. It is derived from the file, not
+    /// from the document, but it belongs to the same stream because it changes which pipeline
+    /// corrected the decoded pixels.
     public var lens: String?
 
     /// The neutral development: the file's own balance, no version request, full scale.

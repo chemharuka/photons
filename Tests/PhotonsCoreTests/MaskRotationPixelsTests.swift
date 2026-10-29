@@ -306,12 +306,12 @@ final class MaskRotationPixelsTests: XCTestCase {
     func testStraightenZeroAtlasIsBitIdentical() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         // Straight from `main`, recorded by this test before the kernel learned to turn pixels — and
-        // re-recorded once after **079 A4** moved the shape feather outside the rim (m-radial and
-        // m-linear carry `feather` 0.35/0.6, so their coverage legitimately grew; m-brush is untouched,
-        // which is itself the receipt that only the two gradients changed).
+        // re-recorded after **079 A4** moved the shape feather outside the rim, and again after **102**
+        // restored the linear gradient's symmetric ramp (m-linear carries `feather` 0.6; m-radial and
+        // m-brush are untouched by 102, which is the receipt that only the open shape moved).
         let pinned = [
             "m-radial": "b8795dbbdd1b4b9180364d2eb0d86a91fd637d91633f7de5ce22954d8445d31a",
-            "m-linear": "af881ab020cd9a04359b075abc1a11b03c5077049f6b5198c98673a7d2acb260",
+            "m-linear": "50266d9be21ce5d74d99906335099d75c4119fcaf9f5d345e2ccfbb7e1b93428",
             "m-brush": "7af8a92cf35a30e9f87cbbff19185fc14800eb1e96fe3f8b7ed4ceb853012e73",
         ]
 

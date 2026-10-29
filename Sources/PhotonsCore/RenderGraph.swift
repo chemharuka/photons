@@ -17,7 +17,7 @@ public struct RenderInput: Sendable {
     /// route, not a requirement.
     public let sourceURL: URL?
 
-    /// The file's DNG `OpcodeList3 / WarpRectilinear` planes, when it has them (097).
+    /// The file's lens profile, when it has one (097 DNG / 103 Panasonic RW2).
     ///
     /// A **decode-time file fact**, carried on the same path as `identity`/`sourceURL` rather than
     /// inside `EditModel`: it describes how the raw pixels must be sampled, not what the user asked
@@ -25,8 +25,9 @@ public struct RenderInput: Sendable {
     /// every caller that already hands us a URL (loupe, export, CLI) therefore gets the correction
     /// without a second plumbing path. A caller with a synthetic image can pass it explicitly.
     ///
-    /// Only three *different* planes are used by S0 (`hasPerPlaneDifference`); a single plane means
-    /// Apple's own correction already ran and the graph must not warp twice.
+    /// S0 uses it only when `requiresOwnWarp`: three *different* DNG planes, or any usable Panasonic
+    /// warp. A single DNG plane means Apple's own correction already ran and the graph must not warp
+    /// twice.
     public let lensProfile: LensProfile?
 
     public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
@@ -34,12 +35,15 @@ public struct RenderInput: Sendable {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
-        self.lensProfile = lensProfile ?? sourceURL.flatMap { LensProfile.read(from: $0) }
+        self.lensProfile = lensProfile ?? sourceURL.flatMap {
+            LensProfile.read(from: $0) ?? LensProfile.readPanasonic(from: $0)
+        }
     }
 
-    /// Does S0 apply the file's per-channel warp? Exactly when the file carries three distinct
-    /// planes — the case `RAWDecoder` turned Apple's correction off for.
-    public var hasPerPlaneLensWarp: Bool { lensProfile?.hasPerPlaneDifference == true }
+    /// Does S0 apply the file's own lens warp? DNG: exactly when it carries three distinct planes;
+    /// RW2: whenever a usable Panasonic profile was parsed. Both cases are the ones `RAWDecoder`
+    /// turned Apple's correction off for.
+    public var hasPerPlaneLensWarp: Bool { lensProfile?.requiresOwnWarp == true }
 }
 
 public struct RenderOptions: Sendable {
@@ -236,6 +240,31 @@ public enum MaskTiling: String, Sendable, Codable, CaseIterable {
     case tiles
 }
 
+/// 100 — extended-range **linear** pixels from `s4_display_linear`: same primaries as the SDR base,
+/// values are linear light (no OETF), may exceed 1.
+///
+/// A distinct type from `DisplayImage` on purpose: the two are the same picture in different
+/// domains, and mixing them up (feeding linear pixels to the file encoder or OETF-decoding an
+/// already-linear map) is a silent colour error. It also keeps `DisplayImage` non-recursive.
+public struct LinearPixels: Sendable {
+    public let width: Int
+    public let height: Int
+    public let rgba: [Float16]
+    public let primaries: OutputPrimaries
+
+    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries) {
+        self.width = width
+        self.height = height
+        self.rgba = rgba
+        self.primaries = primaries
+    }
+
+    public init(_ image: DisplayImage) {
+        self.init(width: image.width, height: image.height, rgba: image.rgba,
+                  primaries: image.primaries)
+    }
+}
+
 /// Display-encoded pixels (0…1, sRGB transfer already applied) plus the primaries they are in.
 public struct DisplayImage: Sendable {
     public let width: Int
@@ -243,13 +272,29 @@ public struct DisplayImage: Sendable {
     public let rgba: [Float16]
     public let primaries: OutputPrimaries
     public let bitDepth: Int
+    /// 100 — the **linear** companion for HDR export: the same picture through `s4_display_linear`,
+    /// in the same primaries, with extended-range values intact. `nil` for every screen/thumbnail/SDR
+    /// render, which is what keeps the default path allocation-free.
+    ///
+    /// It rides on `DisplayImage` rather than a second return value so the batch engine's
+    /// `render -> DisplayImage` closure can carry both halves without a second export pipeline
+    /// (`BatchExport.swift` is 099's file and must not be forked).
+    public let linear: LinearPixels?
 
-    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries, bitDepth: Int) {
+    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries, bitDepth: Int,
+                linear: LinearPixels? = nil) {
         self.width = width
         self.height = height
         self.rgba = rgba
         self.primaries = primaries
         self.bitDepth = bitDepth
+        self.linear = linear
+    }
+
+    /// Attach (or clear) the linear companion. Used by the export renderer after the SDR frame.
+    public func withLinear(_ image: LinearPixels?) -> DisplayImage {
+        DisplayImage(width: width, height: height, rgba: rgba, primaries: primaries,
+                     bitDepth: bitDepth, linear: image)
     }
 
     public var size: ImageSize { ImageSize(width: width, height: height) }
@@ -545,13 +590,25 @@ private struct S1Params {
 }
 
 private struct S2Params {
-    var a: SIMD4<Float>   // contrast, travel, pad, pad
     // 085 — dShadow, dMid, dHighlight (all EV, already gated by `S2Regions.travelEV`), identity.
     var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
     // it the region lifts treat the matte's 0 as a picture pixel and the viewport's background bars
     // light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
     var c: SIMD4<Float>
+}
+
+/// 098 — mirror of `ContrastParams` in `Kernels/s1_8_contrast.metal`, byte for byte. One struct for
+/// every pass of the stage; each kernel reads the fields it needs.
+private struct ContrastParamsU {
+    var a: SIMD4<Float>    // t (= contrast/100), pivot EV, coarse ε, mid ε
+    var b: SIMD4<Float>    // k_c, k_m, k_f, gate lower knee
+    var c: SIMD4<Float>    // gate upper knee, pad, pad, pad
+    var luma: SIMD4<Float> // Rec2020 luma weights, pad
+    var rect: SIMD4<Float> // contentOrigin.xy, contentSize.xy (canvas pixels)
+    var d: SIMD4<Int32>    // canvasW, canvasH, q, coarse radius in the 1/q domain
+    var e: SIMD4<Int32>    // qW, qH, segment length, mid radius in the 1/q domain
+    var f: SIMD4<Int32>    // mode (0 = G statistics, 1 = D1 statistics), pad, pad, pad
 }
 
 /// Mirror of `HDRCurveParams` in `s1_7_hdr_curve.metal`, byte for byte (派单 030).
@@ -580,9 +637,10 @@ private struct ColorParams {
     var b: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
 }
 
-/// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076).
+/// Mirror of `Kernels/s3_6_hsl.metal`'s two structs (派单 076, global triplet 101).
 private struct HSLParamsU {
     var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var g: SIMD4<Float>   // 101 — global: hue, saturation, luminance (slider units), pad
 }
 
 /// Mirror of `Kernels/s3_4_bw.metal` (2026-10-28, P0-4). The band table is the **same**
@@ -1171,8 +1229,9 @@ public final class RenderGraph {
         /// CA, 1:1, no window), so S0's map is a permutation of the source's texels and the kernel
         /// may index them in integers. `s0_geometry.metal`'s `p.e.w`.
         let s0PureTurn: Bool
-        /// 097: this frame must run a per-channel DNG warp. It turns the three fast paths off,
-        /// because each of them is a sampling shortcut that would bypass the warp.
+        /// 097 / 103: this frame must run the file's own lens warp (DNG per-plane or Panasonic). It
+        /// turns the three fast paths off, because each of them is a sampling shortcut that would
+        /// bypass the warp.
         let s0LensWarp: Bool
         /// Where the photograph ended up **inside the canvas**, in canvas pixels, origin top-left
         /// (row 0 = texture row 0). One derivation, from the same `origin`/`frameOrigin`/`frameSize`
@@ -2764,15 +2823,10 @@ public final class RenderGraph {
             try encodeHeal(cb: cb, into: out, from: src, edit: edit, plan: plan, options: options)
 
         case .toneMap:
-            // 0107: two entry points, chosen by whether the document has a contrast setting at all.
-            // The one without it contains none of the log2/exp2 arithmetic, so `contrast == 0` is the
-            // pass it always was (see the `kContrast` note in the kernel).
-            let toneFunction = edit.light.contrast == 0 ? "s2_tone_map" : "s2_tone_map_contrast"
-            let p = try kernels.pipeline(file: "s2_tone_map", function: toneFunction)
-            // Only what bends the 0…1 range: contrast and the three region lifts. Blacks/whites are a
-            // level and moved to S1 (派单 019), so they no longer appear here — neither in the identity
-            // test nor in `keyMaterial(.toneMap)`.
-            let identity = edit.light.contrast == 0 && edit.light.highlights == 0
+            // 098: contrast moved to S1.8, so this stage is one entry point again: the three region
+            // lifts and the final clamp. It reads whatever the curve (or S1.8) produced.
+            let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
+            let identity = edit.light.highlights == 0
                 && edit.light.midtones == 0 && edit.light.shadows == 0
             // 085: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
             // kernel only weights and exponentiates.
@@ -2780,9 +2834,6 @@ public final class RenderGraph {
                                        midtones: edit.light.midtones,
                                        highlights: edit.light.highlights)
             var params = S2Params(
-                // `.y` is the bend's full-scale travel in EV — 8/(white − black) of the axis, the
-                // derived replacement for the old hard-coded `2.0` (0107, `S2Contrast.travelEV`).
-                a: SIMD4(Float(edit.light.contrast), Float(S2Contrast.travelEV), 0, 0),
                 b: SIMD4(Float(d.shadow), Float(d.mid), Float(d.high), identity ? 1 : 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
@@ -2793,6 +2844,12 @@ public final class RenderGraph {
             enc.setBytes(&params, length: MemoryLayout<S2Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
+
+        case .contrast:
+            // S1.8 — 098: the multiscale, edge-aware decomposition of Y in the scene-linear domain.
+            // Encoded **only** for documents whose contrast is non-zero (`hasContrastStage`), so a
+            // neutral document has no pass to be neutral in.
+            try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan)
 
         case .curve:
             // S1.7 — the one curve, in the log-light domain (派单 030). It reads the scene-linear
@@ -2869,11 +2926,18 @@ public final class RenderGraph {
             // `HSLBandU`s (values + the reach towards each neighbour). The centres come from
             // `HSLBands.centresDegrees`, i.e. the same eight physical colours the wheel names,
             // measured in the space this pass computes in.
-            let p = try kernels.pipeline(file: "s3_6_hsl", function: "s3_6_hsl")
+            //
+            // 101 — the ninth selector (「全局」) rides the same pass but a **different instantiation**:
+            // only a document with a non-zero global triplet compiles/executes the global arithmetic,
+            // so every pre-101 document keeps 076's kernel byte for byte.
+            let function = edit.color.hasGlobal ? "s3_6_hsl_global" : "s3_6_hsl"
+            let p = try kernels.pipeline(file: "s3_6_hsl", function: function)
             let bands = try hslBandBuffer(for: edit.color)
             var params = HSLParamsU(
                 a: SIMD4(plan.origin.x, plan.origin.y,
-                         Float(plan.content.width), Float(plan.content.height)))
+                         Float(plan.content.width), Float(plan.content.height)),
+                g: SIMD4(Float(edit.color.global.hue), Float(edit.color.global.saturation),
+                         Float(edit.color.global.luminance), 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<HSLParamsU>.stride, index: 0)
             enc.setBuffer(bands, offset: 0, index: 1)
@@ -2974,7 +3038,12 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .display:
-            let p = try kernels.pipeline(file: "s4_display", function: "s4_display")
+            // 100: HDR export asks for the linear exit (`s4_display_linear`) — same matrix, no OETF
+            // and no headroom clamp. The default branch names `s4_display` exactly as before, so the
+            // shipped path is untouched down to the pipeline function's name.
+            let linear = options.display.linearOutput
+            let p = try kernels.pipeline(file: "s4_display",
+                                         function: linear ? "s4_display_linear" : "s4_display")
             // 075: the source is the **working** space, not sRGB — the S0 exit matrix put every
             // number into it. `primariesMatrix` is exhaustive over (source, target) and returns the
             // exact identity only when the two are equal; the kernel's `p.a.x` flag mirrors that
@@ -2989,6 +3058,140 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
         }
+    }
+
+    // MARK: - S1.8 contrast (098)
+
+    /// The stage: coarse guided filter → mid guided filter on the coarse residual → one full-resolution
+    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the three gains.
+    ///
+    /// The second filter's **input statistics** are built at `1/q` from the coarse coefficient map,
+    /// so the frame is only read at full resolution twice (pack + apply), not once per band.
+    private func encodeContrast(cb: MTLCommandBuffer, into out: MTLTexture,
+                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let q = MultiscaleContrast.block
+        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+        let frameShort = Double(min(plan.frameSize.x, plan.frameSize.y))
+        let radiusC = Int32(MultiscaleContrast.radiusQ(
+            fraction: MultiscaleContrast.coarseRadiusFraction,
+            cap: MultiscaleContrast.coarseRadiusCap, shortEdge: frameShort))
+        let radiusM = Int32(MultiscaleContrast.radiusQ(
+            fraction: MultiscaleContrast.midRadiusFraction,
+            cap: MultiscaleContrast.midRadiusCap, shortEdge: frameShort))
+        let gains = MultiscaleContrast.scaleGains(t: edit.light.contrast / 100)
+        let lw = ColorPrimaries.working.luminanceWeights
+
+        var params = ContrastParamsU(
+            a: SIMD4(Float(edit.light.contrast / 100), Float(MultiscaleContrast.pivotEV),
+                     Float(MultiscaleContrast.coarseEpsilon),
+                     Float(MultiscaleContrast.midEpsilon)),
+            b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
+                     Float(MultiscaleContrast.gateLo)),
+            c: SIMD4(Float(MultiscaleContrast.gateHi), 0, 0, 0),
+            luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
+            rect: SIMD4(plan.origin.x, plan.origin.y,
+                        Float(plan.content.width), Float(plan.content.height)),
+            d: SIMD4(Int32(w), Int32(h), Int32(q), radiusC),
+            e: SIMD4(Int32(qW), Int32(qH), 32, radiusM),
+            f: SIMD4(0, 0, 0, 0))
+
+        let base = try scratch("contrast-g-base", width: qW, height: qH, format: .rgba32Float)
+        let tmp = try scratch("contrast-g-tmp", width: qW, height: qH, format: .rgba32Float)
+        let boxedC = try scratch("contrast-g-coarse", width: qW, height: qH, format: .rgba32Float)
+        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba16Float)
+        let statsM = try scratch("contrast-g-mid", width: qW, height: qH, format: .rgba32Float)
+        let boxedM = try scratch("contrast-g-mid-boxed", width: qW, height: qH, format: .rgba32Float)
+        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba16Float)
+
+        // 1. Pack G's block statistics at full resolution.
+        let pack = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_pack")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(pack)
+        e0.setTexture(src, index: 0)
+        e0.setTexture(base, index: 1)
+        // Mode 0 never reads these two; bind the textures the later passes will write rather than
+        // aliasing `base` as both a read and a write binding.
+        e0.setTexture(coeffC, index: 2)
+        e0.setTexture(statsM, index: 3)
+        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e0, pack, ImageSize(width: qW, height: qH))
+        e0.endEncoding()
+
+        // 2. Coarse guided filter: box the statistics, then solve (a, b, gate).
+        params.e.w = radiusC
+        try contrastBox(cb: cb, from: base, tmp: tmp, to: boxedC, params: &params, qW: qW, qH: qH)
+        params.f.x = 0
+        let coeffPipe = try kernels.pipeline(file: "s1_8_contrast",
+                                             function: "s1_8_g_contrast_coeff")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(coeffPipe)
+        e1.setTexture(boxedC, index: 0)
+        e1.setTexture(coeffC, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e1, coeffPipe, ImageSize(width: qW, height: qH))
+        e1.endEncoding()
+
+        // 3. The mid band's input: `D1 = G − (a_c·G + b_c)` per pixel, packed as block statistics.
+        // The residual has to be sampled per pixel: its block mean from the *block* mean of G is
+        // always zero, because the self-guided base passes through that mean.
+        params.f.x = 1
+        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e2.setComputePipelineState(pack)
+        e2.setTexture(src, index: 0)
+        e2.setTexture(statsM, index: 1)
+        e2.setTexture(coeffC, index: 2)
+        e2.setTexture(statsM, index: 3)
+        e2.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e2, pack, ImageSize(width: qW, height: qH))
+        e2.endEncoding()
+
+        // 4. Mid guided filter on `D1`.
+        params.e.w = radiusM
+        try contrastBox(cb: cb, from: statsM, tmp: tmp, to: boxedM, params: &params, qW: qW, qH: qH)
+        params.f.x = 1
+        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e3.setComputePipelineState(coeffPipe)
+        e3.setTexture(boxedM, index: 0)
+        e3.setTexture(coeffM, index: 1)
+        e3.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e3, coeffPipe, ImageSize(width: qW, height: qH))
+        e3.endEncoding()
+
+        // 5. Full-resolution apply: one gain for all three channels.
+        let apply = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_apply")
+        guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e4.setComputePipelineState(apply)
+        e4.setTexture(src, index: 0)
+        e4.setTexture(coeffC, index: 1)
+        e4.setTexture(coeffM, index: 2)
+        e4.setTexture(out, index: 3)
+        e4.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e4, apply, plan.canvas)
+        e4.endEncoding()
+    }
+
+    /// The separable box mean of one statistics map: `from → tmp → to`.
+    private func contrastBox(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture,
+                             to: MTLTexture, params: inout ContrastParamsU,
+                             qW: Int, qH: Int) throws {
+        let h = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_h")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(h)
+        e0.setTexture(from, index: 0)
+        e0.setTexture(tmp, index: 1)
+        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatchSegments(e0, qW: qW, qH: qH)
+        e0.endEncoding()
+
+        let v = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_v")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(v)
+        e1.setTexture(tmp, index: 0)
+        e1.setTexture(to, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatchSegments(e1, qW: qW, qH: qH)
+        e1.endEncoding()
     }
 
     // MARK: - S3.8 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6)
@@ -4286,9 +4489,11 @@ public final class RenderGraph {
 
     /// 097 — the per-plane DNG warp as a column-major uniform: columns 0/1/2 are the R/G/B
     /// `(kr0, kr1, kr2, kr3)`, column 3 is the normalized centre `(x, y, 0, 0)`. `nil` (or a profile
-    /// without a per-plane difference) returns the identity, which the default entries never read.
+    /// that does not need our own warp) returns the identity, which the default entries never read.
+    /// An RW2 profile fills all three columns with the same fitted inverse (Panasonic has no
+    /// per-channel distortion data), so the same `s0_geometry_lens` entry point consumes it.
     static func lensMatrix(_ profile: LensProfile?) -> simd_float4x4 {
-        guard let profile, profile.hasPerPlaneDifference, profile.planes.count >= 3 else {
+        guard let profile, profile.requiresOwnWarp, profile.planes.count >= 3 else {
             return identityMatrix
         }
         func column(_ plane: LensWarpPlane) -> SIMD4<Float> {

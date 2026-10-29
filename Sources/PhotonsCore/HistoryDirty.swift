@@ -127,6 +127,14 @@ enum EditParameters {
         }
     }
 
+    /// 101 — one HSL triplet. Load-bearing for the same reason the fields above are: `applyEdit`
+    /// short-circuits on `isSemanticallyIdentical`, so a global slider missing here would write
+    /// nothing at all (and the ninth selector would be invisible to the document).
+    static func areEqual(_ a: HSLBand, _ b: HSLBand) -> Bool {
+        areEqual(a.hue, b.hue) && areEqual(a.saturation, b.saturation)
+            && areEqual(a.luminance, b.luminance) && areEqual(a.mix, b.mix)
+    }
+
     static func areEqual(_ a: GeometryGroup, _ b: GeometryGroup) -> Bool {
         areEqual(a.crop, b.crop)
             && areEqual(a.rotationDegrees, b.rotationDegrees)
@@ -173,6 +181,7 @@ enum EditParameters {
         a.blackAndWhite == b.blackAndWhite
             && areEqual(a.vibrance, b.vibrance) && areEqual(a.saturation, b.saturation)
             && areEqual(a.bands, b.bands)
+            && areEqual(a.global, b.global)
     }
 
     /// 2026-10-28 (P0 色彩分级): the nine numbers. **Load-bearing** for the same reason

@@ -37,6 +37,14 @@ public enum HSLAxis: String, CaseIterable, Sendable {
     /// cannot name the same band differently.
     public static let bandNames = HSLBands.bandNames
 
+    /// 101 — the ninth selector, 「全局」, read from the core table for the same reason as the eight.
+    public static let globalName = HSLBands.globalBandName
+
+    /// The selector's cells: the eight bands, then 全局. Kept here so the strip, the probe and the
+    /// view-state clamp cannot disagree about there being nine of them.
+    public static var selectorCount: Int { bandNames.count + 1 }
+    public static var isGlobal: (Int) -> Bool { { $0 == HSLBands.bandNames.count } }
+
     /// A band's own colour, for the selector dot: OKLCh at the band's **own centre** (the same number
     /// the stage weights against), a mid lightness and a chroma that survives being drawn 12 pt wide.
     ///
@@ -68,6 +76,9 @@ public final class HSLBandProbe: NSView {
     public private(set) var title: String = ""
     public private(set) var isSelected: Bool = false
     public private(set) var swatch: NSColor = .clear
+    /// 101: the colour the cell was actually filled with — equal to `swatch` for the eight bands and
+    /// pure white for 全局, which is what makes 「第九个按钮底色是白的」 measurable.
+    public private(set) var backgroundColor: NSColor = .clear
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -86,6 +97,7 @@ public final class HSLBandProbe: NSView {
         self.title = title
         self.isSelected = isSelected
         self.swatch = swatch
+        self.backgroundColor = swatch
     }
 }
 
@@ -106,12 +118,12 @@ struct HSLBandProbeHost: NSViewRepresentable {
     }
 }
 
-/// The eight selector buttons, as one row.
+/// The nine selector buttons, as one row: the eight bands, then 「全局」.
 ///
 /// Equal width, 18 pt tall, 3 pt between them — at the narrowest panel (244 pt) the card's content
-/// width is `244 − 2·12 − 2·16 = 188 pt`, so each cell is `(188 − 7·3)/8 ≈ 20.9 pt`: a 12 pt glyph is
-/// two characters of 8 pt type (「品红」 uses both), which still fits without truncation. `HSLPanelTests`
-/// measures that at 244 / 330 / 364 rather than trusting the arithmetic.
+/// width is `244 − 2·12 − 2·16 = 188 pt`, so each cell is `(188 − 8·3)/9 ≈ 18.2 pt`: a 12 pt glyph is
+/// two characters of 8 pt type (「品红」 uses both), which still fits with the label's scale-down.
+/// `HSLPanelTests` measures that at 244 / 330 / 364 rather than trusting the arithmetic.
 public struct HSLBandStrip: View {
 
     public var selection: Int
@@ -127,7 +139,7 @@ public struct HSLBandStrip: View {
 
     public var body: some View {
         HStack(spacing: Self.spacing) {
-            ForEach(0..<HSLAxis.bandNames.count, id: \.self) { i in
+            ForEach(0..<HSLAxis.selectorCount, id: \.self) { i in
                 band(i)
             }
         }
@@ -137,8 +149,12 @@ public struct HSLBandStrip: View {
 
     private func band(_ i: Int) -> some View {
         let selected = i == selection
-        let name = HSLAxis.bandNames[i]
-        let colour = HSLAxis.swatch(i)
+        let global = HSLAxis.isGlobal(i)
+        let name = global ? HSLAxis.globalName : HSLAxis.bandNames[i]
+        // 101: the ninth cell's **background** is pure white (the user's one visual requirement), not
+        // a swatch from the wheel — so its probe reports sRGB (1, 1, 1, 1) and its label is drawn in
+        // black when selected, because white-on-white is the one combination that cannot be read.
+        let colour = global ? NSColor.white : HSLAxis.swatch(i)
         return Button {
             onSelect(i)
         } label: {
@@ -149,13 +165,13 @@ public struct HSLBandStrip: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color(nsColor: colour).opacity(selected ? 1.0 : 0.35))
+                        .fill(Color(nsColor: colour).opacity(global || selected ? 1.0 : 0.35))
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 1.5)
                 }
-                .foregroundStyle(selected ? Color.white : Color.primary)
+                .foregroundStyle(global ? Color.black : (selected ? Color.white : Color.primary))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

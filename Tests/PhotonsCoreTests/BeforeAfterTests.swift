@@ -397,7 +397,13 @@ final class BeforeAfterTests: XCTestCase {
         let edited = try graph.render(doc, options: RenderOptions(canvas: Self.viewport, scale: 1,
                                                                   useCache: false, wantsPixels: false))
         if let texture = edited.output { graph.recycle(output: texture) }
-        XCTAssertEqual(edited.trace.executed, RenderStage.allCases)
+        // `allCases` 是「每个文档都会跑的阶段」，条件阶段不在里面；这份 fixture 带 contrast = 35，
+        // 098 之后它多跑一个 `.contrast`。所以比的是**这个文档自己的 pipeline**，不是 allCases。
+        let expected = RenderStage.pipeline(hasMasks: false, hasLocalColor: false, hasHSL: false,
+                                            hasGrain: false, hasBW: false, hasGrade: false,
+                                            hasDetailFX: false, hasHeal: false, hasContrast: true)
+        XCTAssertEqual(edited.trace.executed, expected)
+        XCTAssertTrue(edited.trace.executed.contains(.contrast), "098: 有对比度的文档必须跑 S1.8")
     }
 }
 

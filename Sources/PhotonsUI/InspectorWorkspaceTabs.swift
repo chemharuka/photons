@@ -183,7 +183,8 @@ public final class InspectorWorkspaceState {
     /// so it has to stay live while the tool is on, and the gate therefore depends on both facts.
     public var onSelectionChange: ((InspectorWorkspace) -> Void)?
 
-    /// Which of the eight HSL bands the 色彩 card's three sliders are editing (派单 076).
+    /// Which of the **nine** HSL cells the 色彩 card's three sliders are editing (派单 076/101): the
+    /// eight bands are 0…7, 全局 is `ColorGroup.bandCount`.
     ///
     /// View state for the same reason the workspace is: "I am working on the greens" is not a fact
     /// about the photograph, so it is not in `EditModel`, not in `EditHistory`, and switching bands
@@ -202,9 +203,10 @@ public final class InspectorWorkspaceState {
         onSelectionChange?(workspace)
     }
 
-    /// The band selector's action. Clamped, and — like `select` — never a document write.
+    /// The band selector's action. Clamped to the nine cells, and — like `select` — never a document
+    /// write.
     public func selectBand(_ index: Int) {
-        hslBand = min(max(index, 0), ColorGroup.bandCount - 1)
+        hslBand = min(max(index, 0), ColorGroup.bandCount)
     }
 }
 

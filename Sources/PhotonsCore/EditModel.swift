@@ -290,10 +290,10 @@ public struct EditModel: Sendable, Equatable, Codable {
         return v
     }
 
-    /// 派单 076: does S3.6 exist for this document? Judged **by value** (any of the 24 band numbers is
-    /// non-zero), exactly the way `hasLocalColor` is judged for S3.5 — a stage that is present but
-    /// neutral would still move the trace and the key chain.
-    public var hasHSL: Bool { color.hasBands }
+    /// 派单 076 / 101: does S3.6 exist for this document? Judged **by value** — any of the 24 band
+    /// numbers or the global (「全局」) triplet is non-zero — exactly the way `hasLocalColor` is judged
+    /// for S3.5. A stage that is present but neutral would still move the trace and the key chain.
+    public var hasHSL: Bool { color.hasBands || color.hasGlobal }
 
     /// 2026-10-28: does S3.7 exist for this document? Judged **by value** (the grain amount is above
     /// zero), exactly the way `hasHSL` judges S3.6 — a stage present but neutral would move the trace
@@ -304,6 +304,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// numbers non-zero — exactly the way `hasGrain` judges S3.7. A document whose three are 0 keeps the
     /// pre-S3.8 stage list, key chain and pixels byte for byte: the pass is not encoded at all.
     public var hasDetailFX: Bool { effects.hasDetailFX }
+
+    /// 098: does S1.8 exist for this document? Judged **by value** — `light.contrast != 0` — exactly
+    /// the way `hasDetailFX` judges S3.9. A document with contrast 0 keeps the pre-098 stage list, key
+    /// chain and pixels byte for byte: the pass is not encoded at all.
+    public var hasContrastStage: Bool { light.contrast != 0 }
 
     /// 2026-10-28 (P0-4): does S3.4 exist for this document? Judged **by value** — the 黑白 switch,
     /// not "the color group exists" and not "a mix is non-zero": a mix with the switch off is a value
@@ -470,8 +475,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 || light.blackOffset != old.light.blackOffset {
                 s.insert(.sceneLinear)
             }
-            if light.contrast != old.light.contrast
-                || light.highlights != old.light.highlights
+            if light.contrast != old.light.contrast { s.insert(.contrast) }
+            if light.highlights != old.light.highlights
                 || light.midtones != old.light.midtones
                 || light.shadows != old.light.shadows {
                 s.insert(.toneMap)
@@ -494,7 +499,9 @@ public struct EditModel: Sendable, Equatable, Codable {
             let hslMoved = zip(color.bands, old.color.bands).contains {
                 $0.hue != $1.hue || $0.saturation != $1.saturation || $0.luminance != $1.luminance
             }
-            if hslMoved { s.insert(.hsl) }
+            // 101: the ninth selector (「全局」) writes its own triplet — S3.6 is the only stage that
+            // reads it, so it dirties exactly the stage the eight bands do.
+            if hslMoved || color.global != old.color.global { s.insert(.hsl) }
             let mixMoved = zip(color.bands, old.color.bands).contains { $0.mix != $1.mix }
             if color.blackAndWhite != old.color.blackAndWhite || mixMoved { s.insert(.bw) }
         }
@@ -673,15 +680,18 @@ public struct EditModel: Sendable, Equatable, Codable {
             return "localcolor=\(localColorMaterial)"
 
         case .toneMap:
-            // Contrast and the three region lifts only — the whites/blacks levels moved into the
-            // `.sceneLinear` material with the maths (派单 019), so a level change must not be able to
-            // miss a cached S1 output by landing in this key instead.
+            // 098: contrast left this stage for S1.8, so its material is the three region lifts only.
+            // A contrast drag must not be able to miss a cached S2 output by landing here instead.
             //
             // 085: `md` is appended **only when non-zero**, the `asp`/`car`/`q` discipline, so a
             // document that never touched 中间调 keeps its pre-085 tone-map material byte for byte.
-            var m = "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
+            var m = "hi=\(k(light.highlights));sh=\(k(light.shadows))"
             if light.midtones != 0 { m += ";md=\(k(light.midtones))" }
             return m
+
+        case .contrast:
+            // 098: S1.8's own material — the contrast number and nothing else.
+            return "con=\(k(light.contrast))"
 
         case .curve:
             return curve.keyString
@@ -1572,6 +1582,16 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// Written only when `true`, so a document that never used the switch re-encodes byte for byte
     /// (the `blackOffset` discipline) and reads back as the pre-S3.4 graph.
     public var blackAndWhite: Bool
+    /// 101 — 全局: the ninth selector's triplet, applied **on top of** every band's own shift.
+    ///
+    /// Same units and travel as a band (`HSLBand`), but one value for all eight hues: 色相 and 饱和
+    /// still ride the chroma gate (a grey has no hue to rotate and no colour to saturate), while 明度
+    /// does not — the lightness axis is the one operation that is meaningful on a neutral pixel.
+    ///
+    /// All-zero is absent from the document's JSON and from the key material, so a document that never
+    /// used the ninth button re-encodes byte for byte (the `blackAndWhite`/`blackOffset` discipline).
+    /// Its `mix` field is never read: 黑白混合 is S3.4's, not this group's.
+    public var global: HSLBand
 
     public static let bandCount = 8
 
@@ -1581,11 +1601,13 @@ public struct ColorGroup: Sendable, Equatable, Codable {
 
     public init(vibrance: Double = 0, saturation: Double = 0,
                 bands: [HSLBand] = ColorGroup.identityBands,
-                blackAndWhite: Bool = false) {
+                blackAndWhite: Bool = false,
+                global: HSLBand = HSLBand()) {
         self.vibrance = vibrance
         self.saturation = saturation
         self.bands = ColorGroup.normalize(bands)
         self.blackAndWhite = blackAndWhite
+        self.global = global
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1595,6 +1617,8 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         v.saturation = c.val("saturation", v.saturation)
         v.bands = ColorGroup.normalize(c.val("bands", v.bands))
         v.blackAndWhite = c.val("blackAndWhite", v.blackAndWhite)
+        // 101: additive — an absent key reads as the all-zero triplet, i.e. the pre-101 graph.
+        v.global = c.val("global", v.global)
         self = v
     }
 
@@ -1606,6 +1630,9 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         try c.encode(saturation, forKey: AnyCodingKey("saturation"))
         try c.encode(bands, forKey: AnyCodingKey("bands"))
         if blackAndWhite { try c.encode(blackAndWhite, forKey: AnyCodingKey("blackAndWhite")) }
+        // 101: the ninth triplet is absent while it is all zero — the same "the new key appears only
+        // in a document that uses it" rule the switch above follows.
+        if !global.isIdentity { try c.encode(global, forKey: AnyCodingKey("global")) }
     }
 
     /// Tolerate hand-written or future documents: always eight bands, missing ones identity.
@@ -1620,7 +1647,8 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// S3.4 (`blackAndWhite` + `bands[i].mix`). This one stays what it always was: "this panel has
     /// nothing in it".
     public var isIdentity: Bool {
-        vibrance == 0 && saturation == 0 && !blackAndWhite && bands.allSatisfy { $0.isIdentity }
+        vibrance == 0 && saturation == 0 && !blackAndWhite && global.isIdentity
+            && bands.allSatisfy { $0.isIdentity }
     }
 
     /// True when any of the 24 HSL numbers (hue/saturation/luminance) is non-zero — the predicate
@@ -1633,6 +1661,10 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// made between `vibrance`/`saturation` and `bands`).
     public var hasBands: Bool { bands.contains { !$0.isHSLIdentity } }
 
+    /// 101 — does the ninth selector carry a value? Judged the same way `hasBands` is: the three HSL
+    /// axes only (the global triplet's unused `mix` is not S3.6's material).
+    public var hasGlobal: Bool { !global.isHSLIdentity }
+
     /// True when any band carries a 黑白混合 value. Part of S3.4's material, not S3.6's.
     public var hasMix: Bool { bands.contains { $0.mix != 0 } }
 
@@ -1641,11 +1673,16 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         "vib=\(k(vibrance));sat=\(k(saturation))"
     }
 
-    /// `bands=…` — S3.6's material (076). Same spelling the color material used for its band tail, so
-    /// a log line still reads the 24 numbers the way it always did. The mixes are **not** here: they
-    /// are S3.4's, and a mix drag must not miss a cached S3.6 output (`bwGrayKeyString` carries them).
+    /// `bands=…;gh=…;gs=…;gl=…` — S3.6's material (076/101). The eight-band text is **unchanged** byte
+    /// for byte; the global triplet is appended only when it is non-zero, in fixed order, so a document
+    /// that never used the ninth button keeps every recorded key. The mixes are **not** here: they are
+    /// S3.4's, and a mix drag must not miss a cached S3.6 output (`bwGrayKeyString` carries them).
     public var hslKeyString: String {
-        "bands=" + bands.map(\.keyString).joined(separator: ";")
+        var s = "bands=" + bands.map(\.keyString).joined(separator: ";")
+        if hasGlobal {
+            s += ";gh=\(k(global.hue));gs=\(k(global.saturation));gl=\(k(global.luminance))"
+        }
+        return s
     }
 
     /// `gray=…` — S3.4's per-hue weights, in band order. All eight, always: the stage's link exists
@@ -1653,6 +1690,12 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     public var bwMixKeyString: String {
         "gray=" + bands.map(\.mixKeyString).joined(separator: ";")
     }
+}
+
+/// 101 — the ninth selector's name lives in the core alongside the eight (`HSLBands.bandNames`), so the
+/// card does not hard-write a name a future rename would leave behind.
+extension HSLBands {
+    public static let globalBandName = "全局"
 }
 
 public struct HSLBand: Sendable, Equatable, Codable, Hashable {
