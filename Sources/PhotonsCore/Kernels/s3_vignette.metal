@@ -3,11 +3,21 @@ using namespace metal;
 
 // S3c — post-crop vignette (Lightroom's Effects panel).
 //
-// Shape blends between a square falloff and a radial one via `roundness`; `midpoint` moves where
-// darkening starts; `feather` sets how soft the transition is. Amount < 0 darkens the corners,
-// > 0 lightens them. Distances are measured in **frame** space, never in window space: a vignette is
-// a property of the photograph, so a 1:1 window must see exactly the falloff the whole frame has at
-// the same physical place — and the letterbox padding must not be vignetted at all.
+// The contour is **always circular**: a lens is rotationally symmetric, so the light falloff it
+// causes is too. There is no roundness control (134, user 2026-10-29) — darktable approximates the
+// shape through the aspect ratio and RawTherapee has radius/strength/centre only. Radius is
+// normalised by **half the diagonal**: `norm = 0.5·hypot(size.x, size.y)` and `dRad = |px| / norm`,
+// so the image corner is *always* `1.0` whatever the aspect ratio. That is the same
+// half-diagonal convention darktable uses for its vignetting knots and lensfun's pa model
+// (`local/src/redlamp/docs/research/darktable/notes/E-lenses-and-geometry.md:110,227`).
+//
+// `midpoint` is where the falloff's 50 % point sits on that scale: 0 starts at the centre (the whole
+// frame darkens), 100 puts it at the corner. This replaces the old short-edge-half-normalised scale
+// (082/084), whose `inner ∈ 0.25…1.05` could never reach a 3:2 frame's corner at 1.803.
+// `feather` sets how soft the transition is. Amount < 0 darkens the corners, > 0 lightens them.
+// Distances are measured in **frame** space, never in window space: a vignette is a property of the
+// photograph, so a 1:1 window must see exactly the falloff the whole frame has at the same physical
+// place — and the letterbox padding must not be vignetted at all.
 //
 // `p.b.xy` is the frame's size, `p.b.zw` the window's origin, both in content pixels
 // (`RenderOptions.outputWindow`); `p.c.yz` is the content rect's origin inside the canvas. Without a
@@ -15,7 +25,7 @@ using namespace metal;
 // existed.
 
 struct VignetteParams {
-    float4 a;   // amount, midpoint, feather, roundness
+    float4 a;   // amount, midpoint, feather, pad
     float4 b;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
     float4 c;   // identity, contentOrigin.x, contentOrigin.y, pad
 };
@@ -39,24 +49,24 @@ kernel void s3_vignette(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
-    // Two metrics, deliberately in two spaces:
-    //
-    //  · `square` is per-axis normalised (`uv`), so its contour touches all four edges — this is the
-    //    rectangle-ish end and it must stay byte-identical to what roundness 0 has always drawn;
-    //  · `circle` is measured in **pixels over half the short edge**, so its contour is a real circle.
-    //    Measuring the radial term in `uv` (as this used to) stretches it by the aspect ratio, which
-    //    is why pulling the amount down gave an ellipse on a 3:2 frame.
-    float2 d = (uv - 0.5) * 2.0;
+    // One metric: **pixels over half the diagonal**. Corner = 1.0 at every aspect ratio; the old
+    // metric divided by half the short edge (so a 3:2 corner was 1.803) and mixed in the square
+    // max-norm, which is what made the contour an ellipse.
     float2 px = (uv - 0.5) * size;
-    float halfShort = max(min(size.x, size.y) * 0.5, 1.0);
-    float2 dPix = px / halfShort;
-    float roundness = clamp(0.5 + p.a.w / 100.0 * 0.5, 0.0, 1.0);
-    float dist = mix(max(abs(d.x), abs(d.y)), length(dPix), roundness);
+    float norm = max(0.5 * length(size), 1.0);
+    float dist = length(px) / norm;
 
     float midpoint = clamp(p.a.y / 100.0, 0.0, 1.0);
     float feather = clamp(p.a.z / 100.0, 0.02, 1.0);
-    float inner = mix(0.25, 1.05, midpoint);
-    float t = smoothstep(inner - feather * 0.5, inner + feather * 0.5, dist);
+    float inner = midpoint;   // 0 = centre, 1 = the corner
+    // There must be room outside `inner` for a band of this width: at the corner there is none, so
+    // the feather narrows with the remaining radius (a hard step at the very corner, rather than a
+    // band that would start at 0.75 and darken the long-edge midpoint at midpoint 100).
+    // The floor is 0.2 % of the corner radius: a zero-width step at exactly 1.0 would never touch a
+    // pixel centre (the last pixel sits half a pixel inside the geometric corner), so the corner
+    // would not visibly darken at all.
+    float halfWidth = max(feather * 0.5 * (1.0 - inner), 0.002);
+    float t = smoothstep(inner - halfWidth, inner + halfWidth, dist);
 
     float gain = clamp(1.0 + p.a.x / 100.0 * t, 0.0, 4.0);
     dst.write(float4(max(c.rgb * gain, 0.0), c.a), gid);

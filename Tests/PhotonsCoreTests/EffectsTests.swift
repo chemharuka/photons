@@ -286,13 +286,13 @@ final class EffectsTests: XCTestCase {
 
     /// 中点 moves the dark ring, and the ring lands where `s3_vignette.metal` says it must.
     ///
-    /// On the centre row `dist == |2u − 1|` (y is at the middle, so `d.y = 0`, and `roundness` 0
-    /// interpolates two equal numbers), so a midpoint `m` puts the kernel's own 50 %-of-amount ring at
-    /// `x = (1 − inner)·W/2` with `inner = mix(0.25, 1.05, m/100)`. The test *scans* for that ring
-    /// instead of trusting the formula: it walks the centre row inwards and reports the first pixel
-    /// where the gain crossed half of `amount`.
+    /// 134: radius is `|px| / (0.5·hypot(W, H))`, so the 50 %-of-amount ring is exactly at
+    /// `dist = inner = mid/100`. On a **3:2 landscape** frame (1500×1000) the corner has `dist = 1`
+    /// and every midpoint's ring lies inside the frame. The test *scans* the centre row for that ring
+    /// instead of trusting the formula: it walks inwards and reports the first pixel where the gain
+    /// crossed half of `amount`.
     func testVignetteMidpointMovesTheDarkRingToItsPredictedPixel() throws {
-        let graph = try makeGraph(flat())
+        let graph = try makeGraph(flat(width: 1500, height: 1000))
         let neutral = try render(graph, .neutral)
         let w = neutral.width, h = neutral.height
         let y = h / 2
@@ -313,16 +313,13 @@ final class EffectsTests: XCTestCase {
                 let g = linear(code(frame, x, y)) / max(linear(code(neutral, x, y)), 1e-9)
                 if g >= 0.5 { measured = x; break }
             }
-            let inner = 0.25 + (1.05 - 0.25) * (midpoint / 100.0)
-            // `dist` blends a per-axis square with a **pixel-space** radius, so on the centre row it
-            // is `|2u−1|` scaled by `k = 1 + r0·(aspect − 1)` (r0 = 0.5 at roundness 0; on a square
-            // frame k = 1 and this is the old formula verbatim).
-            let roundness = 0.5 + 0.0 / 100.0 * 0.5
-            // The radial metric is `pixels / (short edge / 2)`, so along **x** the scale is
-            // `W/min(W,H)` — 1 on a portrait frame, the aspect on a landscape one.
-            let xScale = Double(w) / Double(min(w, h))
-            let k = 1 + roundness * (xScale - 1)
-            let predicted = (1 - inner / k) * Double(w) / 2
+            // Same arithmetic as the kernel: `norm` half the diagonal, and the row is half a pixel
+            // off the exact centre (`y + 0.5 − h/2`), so solve for x on the ring.
+            let inner = midpoint / 100.0
+            let norm = 0.5 * hypot(Double(w), Double(h))
+            let dy = Double(y) + 0.5 - Double(h) / 2
+            let predicted = Double(w) / 2 - 0.5
+                - (pow(inner * norm, 2) - dy * dy).squareRoot()
             rings.append(Ring(midpoint: midpoint, measured: measured, predicted: predicted))
 
             XCTAssertEqual(Double(measured), predicted, accuracy: 6,
@@ -342,36 +339,119 @@ final class EffectsTests: XCTestCase {
 
     /// 用户 2026-10-29：**暗角拉到底是一个椭圆，显然错误 —— 暗角要按圆形来。**
     ///
-    /// 根因：`dist` 的径向支用的是 `uv`（每轴各自归一化），在 3:2 的帧上等于把圆按宽高比拉伸。
-    /// 现在径向支改成「像素 / 短边一半」，并且要求：在**同样像素半径**上，水平方向和垂直方向的
-    /// 增益必须相同（±2%），且等值线真的在 r 处而不是 r·aspect 处。
+    /// 134：轮廓只有一个度量 `|px| / (0.5·hypot(W,H))`，所以四个轴向等像素半径的增益必须相同，
+    /// 对角线上 `r = 0.6·norm` 与轴上同半径也相同。**反面**：旧的 `max(|dx|,|dy|)` 口径下，
+    /// 长边中点 `r = 0.832` 会先于同半径的对角点变暗；现在两者同为 `0.832`，所以必须相等。
     func testTheVignetteContourIsACircleNotAnEllipse() throws {
-        let graph = try makeGraph(flat())          // 非正方形：宽高比就是这条测试的意义
+        // Odd 3:2 so the centre is a pixel centre: every probe below then sits on an exact integer
+        // pixel offset, and two probes at the same pixel radius need no sub-pixel reconstruction
+        // (whose Float16 readback error is ~1e-3, larger than the 1e-4 being asserted).
+        let w = 1501, h = 1001
+        let graph = try makeGraph(flat(width: w, height: h))
         let neutral = try render(graph, .neutral)
-        let w = neutral.width, h = neutral.height
         XCTAssertGreaterThan(abs(w - h), 100, "这条测试需要一个明确的非正方形帧")
 
         var edit = EditModel.neutral
-        edit.effects.vignetteAmount = -100
-        edit.effects.vignetteRoundness = 100       // 圆的极端
+        edit.effects.vignetteAmount = -50
         edit.effects.vignetteMidpoint = 50
+        edit.effects.vignetteFeather = 50
         let frame = try render(graph, edit)
 
         func gain(_ x: Int, _ y: Int) -> Double {
             linear(code(frame, x, y)) / max(linear(code(neutral, x, y)), 1e-9)
         }
-        // Same pixel radius along +x and +y from the centre; a circle gives equal gains, an ellipse
-        // does not (the horizontal point sits at r/aspect of the vertical one's relative distance).
         let cx = w / 2, cy = h / 2
-        let r = Int(Double(min(w, h)) * 0.35)
-        let alongX = gain(cx + r, cy)
-        let alongY = gain(cx, cy + r)
-        print(String(format: "VIGNETTE CIRCLE · r=%d px · 水平增益 %.4f · 垂直增益 %.4f", r, alongX, alongY))
-        XCTAssertEqual(alongX, alongY, accuracy: 0.02,
-                       "同样 \(r) px 处水平 \(alongX) 与垂直 \(alongY) 不一致 —— 等值线是椭圆")
+
+        // ① Four directions, the same pixel radius: a circle gives identical gains.
+        let r = 400
+        let plusX = gain(cx + r, cy), minusX = gain(cx - r, cy)
+        let plusY = gain(cx, cy + r), minusY = gain(cx, cy - r)
+        print(String(format: "VIGNETTE CIRCLE · r=%d px · +x %.6f −x %.6f +y %.6f −y %.6f",
+                     r, plusX, minusX, plusY, minusY))
+        for (name, value) in [("+x", plusX), ("−x", minusX), ("+y", plusY), ("−y", minusY)] {
+            XCTAssertEqual(value, plusX, accuracy: 1e-4, "同半径 \(name) 的增益与 +x 不一致")
+        }
+
+        // ② Off-axis at the same radius. 3-4-5 integer points keep the probe on pixel centres:
+        //    (324, 432) has r = 540 px ≈ 0.6·norm, and (600, 450) has r = 750 px = the 3:2
+        //    long-edge midpoint (0.832·norm). A circle gives the axis point's gain at both; the old
+        //    max(|dx|,|dy|) norm made the long-edge midpoint darken before the off-axis point.
+        func equalRadiusProbe(_ axis: Int, _ dx: Int, _ dy: Int, _ label: String) -> Double {
+            XCTAssertEqual(dx * dx + dy * dy, axis * axis, "\(label): the probes are not one radius")
+            let onAxis = gain(cx + axis, cy)
+            let offAxis = gain(cx + dx, cy + dy)
+            let norm = 0.5 * hypot(Double(w), Double(h))
+            print(String(format: "VIGNETTE CIRCLE · %@ r=%d px (%.3f·norm) · 轴上 %.6f · 斜向 %.6f",
+                         label, axis, Double(axis) / norm, onAxis, offAxis))
+            XCTAssertEqual(onAxis, offAxis, accuracy: 1e-4,
+                           "\(label): 同半径的轴上点与斜向点增益不同 —— 轮廓不是圆")
+            return onAxis
+        }
+        _ = equalRadiusProbe(540, 324, 432, "r ≈ 0.6·norm")
+        _ = equalRadiusProbe(750, 600, 450, "长边中点 r = 0.832·norm")
 
         // …and it is not a circle by accident at the centre: the corner must be darker than the edge.
-        XCTAssertLessThan(gain(w - 2, h - 2), alongX, "角点应比边上更暗")
+        XCTAssertLessThan(gain(w - 2, h - 2), plusX, "角点应比边上更暗")
+    }
+
+    /// 134 §4.2 — 中点 100 puts the falloff's start at the **corner** on a 3:2 frame: the centre and
+    /// the long-edge midpoint (`r = 1.5/1.803 = 0.832`) are untouched, the corner is not. 中点 0
+    /// darkens the whole frame, centre included (this is the new meaning; the old `inner = 0.25`).
+    func testVignetteMidpointReachesTheCorner() throws {
+        let w = 1500, h = 1000
+        let graph = try makeGraph(flat(width: w, height: h))
+        let neutral = try render(graph, .neutral)
+        let norm = 0.5 * hypot(Double(w), Double(h))
+
+        func gain(_ frame: DisplayImage, _ x: Int, _ y: Int) -> Double {
+            linear(code(frame, x, y)) / max(linear(code(neutral, x, y)), 1e-9)
+        }
+
+        var atCorner = EditModel.neutral
+        atCorner.effects.vignetteAmount = -100
+        atCorner.effects.vignetteMidpoint = 100
+        let corner = try render(graph, atCorner)
+
+        let centre = gain(corner, w / 2, h / 2)
+        // Long-edge midpoint: x = 0.5 (the first pixel column), y = h/2 → r = 749.5 / 901.4 = 0.8315.
+        let edgeMid = gain(corner, 0, h / 2)
+        let cornerPixel = gain(corner, 0, 0)
+        print(String(format: "VIGNETTE CORNER · norm %.1f px · 中心 %.6f · 长边中点(r=%.3f) %.6f · 角点 %.4f",
+                     norm, centre, 1.5 / 1.8027756377, edgeMid, cornerPixel))
+        XCTAssertEqual(centre, 1.0, accuracy: 1e-4, "中点 100 的中心必须不受影响")
+        XCTAssertEqual(edgeMid, 1.0, accuracy: 1e-3, "中点 100 的长边中点必须不受影响")
+        XCTAssertLessThan(cornerPixel, 0.99, "中点 100 必须已经压到角点")
+
+        var atCentre = EditModel.neutral
+        atCentre.effects.vignetteAmount = -100
+        atCentre.effects.vignetteMidpoint = 0
+        let whole = try render(graph, atCentre)
+        let centreAtZero = gain(whole, w / 2, h / 2)
+        print(String(format: "VIGNETTE MIDPOINT 0 · 中心 gain %.4f", centreAtZero))
+        XCTAssertLessThanOrEqual(centreAtZero, 0.99, "中点 0 必须全画面压暗（中心也变暗）")
+    }
+
+    /// 134 §4.3 — an old blob that still carries the removed 圆度 key decodes (unknown keys are
+    /// ignored) and renders **byte for byte** like the same edit without it: both are the pure-circle
+    /// model.
+    func testAnOldDocumentWithRoundnessStillDecodesAndRendersThePureCircle() throws {
+        var edit = EditModel.neutral
+        edit.effects.vignetteAmount = -60
+        edit.effects.vignetteMidpoint = 70
+        edit.effects.vignetteFeather = 40
+
+        var json = String(decoding: try JSONEncoder().encode(edit), as: UTF8.self)
+        let anchor = "\"vignetteFeather\":40"
+        XCTAssertTrue(json.contains(anchor), "encoded effects changed shape: \(json)")
+        let removedKey = "vignette" + "Roundness"      // split so the deleted field stays deleted
+        json = json.replacingOccurrences(of: anchor, with: anchor + ",\"\(removedKey)\":40")
+        let old = try JSONDecoder().decode(EditModel.self, from: Data(json.utf8))
+
+        let graph = try makeGraph(flat(width: 300, height: 200))
+        let a = try render(graph, edit)
+        let b = try render(graph, old)
+        print("VIGNETTE OLD BLOB · roundness 40 decodes · sha \(a.sha256().prefix(12))… == \(b.sha256().prefix(12))…")
+        XCTAssertEqual(a.sha256(), b.sha256(), "带旧圆度字段的文档必须与纯圆模型逐字节相同")
     }
 
     // MARK: - 3. 颉粒：size × roughness
@@ -560,7 +640,6 @@ final class EffectsTests: XCTestCase {
             ("暗角", { $0.effects.vignetteAmount = -30 }),
             ("暗角中点", { $0.effects.vignetteMidpoint = 40 }),
             ("暗角羽化", { $0.effects.vignetteFeather = 60 }),
-            ("暗角圆度", { $0.effects.vignetteRoundness = 30 }),
             ("颗粒数量", { $0.effects.grain = 20 }),
             ("颗粒大小", { $0.effects.grainSize = 60 }),
             ("颗粒粗糙度", { $0.effects.grainRoughness = 70 }),

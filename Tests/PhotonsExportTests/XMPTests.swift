@@ -99,7 +99,7 @@ final class XMPTests: XCTestCase {
                      "crs:Sharpness", "crs:SharpenRadius", "crs:LuminanceSmoothing",
                      "crs:ColorNoiseReduction", "crs:LensProfileEnable",
                      "crs:PostCropVignetteAmount", "crs:PostCropVignetteMidpoint",
-                     "crs:PostCropVignetteFeather", "crs:PostCropVignetteRoundness",
+                     "crs:PostCropVignetteFeather",
                      "crs:GrainAmount", "crs:ToneCurvePV2012", "crs:ToneCurveName2012",
                      "crs:CropLeft", "crs:CropTop", "crs:CropRight", "crs:CropBottom",
                      "crs:CropAngle", "crs:HasCrop", "tiff:Orientation"] {

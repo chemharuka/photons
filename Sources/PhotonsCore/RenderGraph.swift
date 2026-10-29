@@ -859,7 +859,7 @@ private struct GradeParams {
 }
 
 private struct VignetteParams {
-    var a: SIMD4<Float>   // amount, midpoint, feather, roundness
+    var a: SIMD4<Float>   // amount, midpoint, feather, pad
     var b: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (the whole frame, in content pixels)
     var c: SIMD4<Float>   // identity, contentOrigin.x, contentOrigin.y, pad
 }
@@ -3223,7 +3223,7 @@ public final class RenderGraph {
             let identity = edit.effects.vignetteAmount == 0
             var params = VignetteParams(
                 a: SIMD4(Float(edit.effects.vignetteAmount), Float(edit.effects.vignetteMidpoint),
-                         Float(edit.effects.vignetteFeather), Float(edit.effects.vignetteRoundness)),
+                         Float(edit.effects.vignetteFeather), 0),
                 // Frame-relative, not content-relative: a vignette is a property of the photograph, so
                 // a 1:1 window sees the same falloff in the same physical place as the whole frame.
                 b: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),

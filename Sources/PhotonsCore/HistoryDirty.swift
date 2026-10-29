@@ -297,7 +297,6 @@ enum EditParameters {
         t.field("vignetteAmount") { areEqual($0.vignetteAmount, $1.vignetteAmount) }
         t.field("vignetteMidpoint") { areEqual($0.vignetteMidpoint, $1.vignetteMidpoint) }
         t.field("vignetteFeather") { areEqual($0.vignetteFeather, $1.vignetteFeather) }
-        t.field("vignetteRoundness") { areEqual($0.vignetteRoundness, $1.vignetteRoundness) }
         t.field("grain") { areEqual($0.grain, $1.grain) }
         t.field("grainSize") { areEqual($0.grainSize, $1.grainSize) }
         t.field("grainRoughness") { areEqual($0.grainRoughness, $1.grainRoughness) }

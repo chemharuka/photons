@@ -12,7 +12,7 @@ import PhotonsCore
 /// and every number is the `effects` field it names — so what is pinned here is the *card*, not a second
 /// implementation of a row:
 ///
-///   1. **一张卡，两块**：暗角's four rows and 颗粒's four live in 效果, which sits after 曲线 and
+///   1. **一张卡，两块**：暗角's three rows and 颗粒's four live in 效果, which sits after 曲线 and
 ///      before 预设 in 调整; the row table (`effectsRows`) is what the card iterates, so a row that is
 ///      not in the table cannot be drawn and a row in the table cannot be skipped.
 ///   2. **300 / 330 / 364 不截断**: measured off the AppKit tree (`EffectsRowProbe`), not arithmetic —
@@ -54,21 +54,22 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
                        ["纹理", "清晰度", "去雾",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
-        // …and the four vignette rows are now the 校正 card's second block, in linear-domain red.
+        // …and the three vignette rows are now the 校正 card's second block, in linear-domain red.
+        // 134 removed 圆度: the contour is circular by construction.
         XCTAssertEqual(InspectorView.correctionRows.map(\.title),
-                       ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化", "暗角圆度"])
+                       ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化"])
         XCTAssertTrue(InspectorView.vignetteRows.allSatisfy { $0.shape == .linear },
                       "暗角在线性域，行必须是红色（.linear）")
         // 117: 去雾 is scene-linear (S1.9), so its row is red as well.
         XCTAssertEqual(InspectorView.detailFXRows.first { $0.title == "去雾" }?.shape, .linear,
                        "去雾在线性域，行必须是红色（.linear）")
-        XCTAssertEqual(InspectorView.vignetteRows.count, 4)
+        XCTAssertEqual(InspectorView.vignetteRows.count, 3)
         XCTAssertEqual(InspectorView.detailFXRows.count, 3)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
 
         // Every row's travel is the kernel's own (a slider the shader cannot honour lies):
         XCTAssertEqual(InspectorView.vignetteRows.map(\.range),
-                       [-100 ... 100, 0 ... 100, 0 ... 100, -100 ... 100])
+                       [-100 ... 100, 0 ... 100, 0 ... 100])
         XCTAssertEqual(InspectorView.detailFXRows.map(\.range),
                        [-100 ... 100, -100 ... 100, -100 ... 100])
         XCTAssertEqual(InspectorView.grainRows.map(\.range),
@@ -227,7 +228,7 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertTrue(resets.group(.effects), "整卡复位必须真的写了一次")
         XCTAssertEqual(session.edit.effects.grainSize, 25, "颗粒大小回 25，不是 0")
         XCTAssertEqual(session.edit.effects.grainRoughness, 50, "粗糙度回 50，不是 0")
-        // 116 moved the four 暗角 numbers to 校正, so this card's double-click must **not** reach them
+        // 116 moved the three 暗角 numbers to 校正, so this card's double-click must **not** reach them
         // (the 122 rule: a card resets its own sliders and nobody else's). 校正's own double-click
         // resets them — `PanelResetTests` pins that half.
         XCTAssertEqual(session.edit.effects.vignetteAmount, -50, "暗角属于校正卡，效果卡的复位不该碰它")

@@ -103,10 +103,14 @@ public enum StageAlgorithmVersion {
     /// content-aware source search — is what bumps this, because it changes the pixels of the same
     /// document without changing a stored number.
     public static let heal = 1
+    /// **3** — 134: the radius is normalised to half the **diagonal** (the corner is 1.0 at every
+    /// aspect ratio), the contour is always circular (the `roundness` field is gone), and `midpoint`
+    /// now spans centre → corner (`inner = mid/100`, was `mix(0.25, 1.05, …)` measured in half the
+    /// short edge). Every document with `vignetteAmount != 0` changes pixels.
+    ///
     /// **2** — 116: the vignette moved out of S3 into the end of the linear chain, so the same stored
-    /// numbers now multiply **light** instead of tone-mapped codes. Every document with
-    /// `vignetteAmount != 0` changes pixels; the arithmetic inside the kernel did not change.
-    public static let vignette = 2
+    /// numbers now multiply **light** instead of tone-mapped codes.
+    public static let vignette = 3
     /// Unchanged.
     public static let grain = 1
     /// Unchanged (the OETF/encode).
