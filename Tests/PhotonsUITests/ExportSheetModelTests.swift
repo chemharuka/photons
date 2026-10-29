@@ -182,58 +182,45 @@ final class ExportSheetModelTests: XCTestCase {
     /// §B: the scroll region is the flexible one — 760 pt gives it at least 35 % of the window, a
     /// taller window gives it the extra ~240 pt, and the form/footer keep their heights. The empty
     /// prompt is on the footer row, outside the results region, and empty results build no scroll view.
-    func testResultsFillTheRemainingHeightAndTheEmptyPromptSitsOnTheFooterRow() throws {
-        let short = try host(height: 760)
-        let tall = try host(height: 1000)
+    /// The sheet is a fixed 620×900 now: the seven 文件设置-era sections must get their natural
+    /// height (they used to be squeezed to 320 pt, which read as 「格式选择全都没了」), and the results
+    /// region takes what is left with a floor of 120 pt.
+    func testTheSevenSectionsGetTheirHeightAndResultsTakeTheRest() throws {
+        let sheet = try host(height: 900)
+        let resultsFrame = try frame(of: .results, in: sheet.host)
+        let formFrame = try frame(of: .form, in: sheet.host)
+        let footerFrame = try frame(of: .footer, in: sheet.host)
+        let status = try frame(of: .status, in: sheet.host)
+        let resultsProbe = try probe(of: .results, in: sheet.host)
 
-        let results760 = try frame(of: .results, in: short.host)
-        let results1000 = try frame(of: .results, in: tall.host)
-        let form760 = try frame(of: .form, in: short.host)
-        let form1000 = try frame(of: .form, in: tall.host)
-        let footer760 = try frame(of: .footer, in: short.host)
-        let footer1000 = try frame(of: .footer, in: tall.host)
-        let status = try frame(of: .status, in: short.host)
-        let resultsProbe = try probe(of: .results, in: short.host)
+        print(String(format: "layout · form %.1f · results %.1f · footer %.1f (footer maxY %.1f of %.1f)",
+                     formFrame.height, resultsFrame.height, footerFrame.height,
+                     footerFrame.maxY, sheet.host.bounds.maxY))
 
-        print(String(format: "106 layout · results %.1f → %.1f pt (+%.1f) · form %.1f → %.1f "
-                     + "· footer %.1f → %.1f · status midY %.1f vs footer midY %.1f",
-                     results760.height, results1000.height, results1000.height - results760.height,
-                     form760.height, form1000.height, footer760.height, footer1000.height,
-                     status.midY, footer760.midY))
-
-        // 1. at the sheet's own 760 pt the scroll region is at least 35 % of the window.
-        XCTAssertGreaterThanOrEqual(results760.height, 760 * 0.35,
-                                    "results is \(results760.height) pt of 760")
-        // 2. growing the window 760 → 1000 grows results by the extra 240 pt (≥ 200).
-        XCTAssertGreaterThanOrEqual(results1000.height - results760.height, 200,
-                                    "the extra height went somewhere else: "
-                                    + "\(results760.height) → \(results1000.height)")
-        // 3. the settings and the footer did not breathe with it.
-        XCTAssertEqual(form1000.height, form760.height, accuracy: 0.5,
-                       "the form took the window's extra height")
-        XCTAssertEqual(footer1000.height, footer760.height, accuracy: 0.5)
-        XCTAssertLessThan(results760.maxY, footer760.maxY)
-        XCTAssertGreaterThan(results760.minY, form760.maxY, "results sits between form and footer")
-
-        // 4. empty state: no rows, and therefore no scroll view in the results region at all.
+        // 1. the form is not squeezed: much more than the old 320 pt clamp.
+        XCTAssertGreaterThanOrEqual(formFrame.height, 600,
+                                    "文件设置 那一组又被压扁了：form 只有 \(formFrame.height) pt")
+        // 2. results keeps a usable floor and does not overflow the sheet.
+        XCTAssertGreaterThanOrEqual(resultsFrame.height, 140,
+                                    "results 只有 \(resultsFrame.height) pt")
+        XCTAssertLessThanOrEqual(resultsFrame.maxY, sheet.host.bounds.maxY)
+        // 3. order: form → results → footer.
+        XCTAssertGreaterThan(resultsFrame.minY, formFrame.maxY, "results 必须排在 form 下面")
+        XCTAssertLessThan(resultsFrame.maxY, footerFrame.maxY)
+        // 4. the empty prompt is on the footer's row and outside any scroll view.
         XCTAssertEqual(resultsProbe.rowCount, 0)
-        let scrollsInResults = descendants(of: short.host)
+        XCTAssertEqual(status.midY, footerFrame.midY, accuracy: 2,
+                       "空态文案必须和按钮同一行")
+        let scrollsInResults = descendants(of: sheet.host)
             .compactMap { $0 as? NSScrollView }
             .filter { scroll in
-                scroll.convert(scroll.bounds, to: short.host)
-                    .intersects(results760.insetBy(dx: 1, dy: 1))
+                scroll.convert(scroll.bounds, to: sheet.host)
+                    .intersects(resultsFrame.insetBy(dx: 1, dy: 1))
             }
         XCTAssertTrue(scrollsInResults.isEmpty,
-                      "the empty prompt must not be inside a scroll view: "
-                      + "\(scrollsInResults.map { $0.convert($0.bounds, to: short.host) })")
-
-        // 5. the empty prompt and the buttons are one row (≤ 2 pt apart), and the prompt is below
-        //    the results region, i.e. in the footer — not clipped inside it.
-        XCTAssertEqual(status.midY, footer760.midY, accuracy: 2,
-                       "「还没有导出…」 is not on the button row")
-        XCTAssertFalse(status.intersects(results760),
-                       "the empty prompt is still inside the results region")
-        XCTAssertLessThan(status.minY, footer760.maxY)
+                      "空态时 results 里不该有滚动视图")
+        XCTAssertFalse(status.intersects(resultsFrame),
+                       "「还没有导出…」 还在 results 里，没有挪到按钮那一行")
     }
 
     /// §A (the visible half): the row's menu is actually greyed out when the format cannot carry a

@@ -527,17 +527,21 @@ public struct ExportSheetView: View {
             }
             .formStyle(.grouped)
             .disabled(model.phase == .running)
-            // 106 §B: the form keeps the height it has at the sheet's own 760 pt size and scrolls
-            // its overflow; `results` below is the region that grows with the window.
-            .frame(minHeight: 320)
+            // The seven sections always get their **natural** height: at 320 they were squeezed and
+            // the form scrolled internally, which looked like 「格式选择全都没了，只剩位置/文件命名」.
+            // The seven sections want ~1078 pt (a grouped Form row is ~44 pt), more than any sheet
+            // should occupy, so this scrolls — but with the indicator **always visible**: before this,
+            // the squeezed 320 pt form hid its scrollbar and looked like 「格式选择全都没了」.
+            .layoutPriority(2)
+            .scrollIndicators(.visible)
             .background(ExportLayoutProbeHost(kind: .form))
             results
             footer
         }
         .padding(18)
-        // 620×760 is the sheet's size (`ExportSheetController.present`); the height is a floor here
-        // so a layout pass at a taller height grows the results region instead of stretching the form.
-        .frame(minWidth: 620, maxWidth: 620, minHeight: 760, alignment: .topLeading)
+        // 620×900 is the sheet's size (`ExportSheetController.present`): tall enough for all seven
+        // sections plus a results region that still has room to grow.
+        .frame(width: 620, height: 900, alignment: .topLeading)
         .background(.regularMaterial)
         .alert("存储预设", isPresented: $showingSavePreset) {
             TextField("预设名称", text: $newPresetName)
@@ -937,8 +941,8 @@ public struct ExportSheetView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .layoutPriority(1)
+        .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+        .layoutPriority(0)
         .background(ExportLayoutProbeHost(kind: .results, rowCount: model.rows.count))
     }
 
@@ -1113,7 +1117,7 @@ public final class ExportSheetController: NSObject {
         if let existing = sheetWindow, existing.sheetParent != nil {
             return
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 900),
                               styleMask: [.titled],
                               backing: .buffered,
                               defer: false)
