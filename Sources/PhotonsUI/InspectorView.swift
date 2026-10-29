@@ -201,6 +201,10 @@ public struct InspectorView: View {
     /// committed once — one decode, one history snapshot.
     @State private var draftTemperature: Double?
     @State private var draftTint: Double?
+    /// 118: the canvas is showing a simulated white balance (dragging, or released and waiting for
+    /// the real decode). Kept here rather than read from the loupe on every body pass: the loupe
+    /// calls `onWhiteBalancePreviewSettled` when the real frame lands.
+    @State private var whiteBalancePreviewing = false
 
     /// The exposure row of the anchor photo (派单 014). Read handle + last read, both view state:
     /// the catalog stays the source of truth and nothing here is ever written back.
@@ -1695,6 +1699,12 @@ public struct InspectorView: View {
         public var shape: SliderShape = .bar
     }
 
+    /// 118: the line 「as shot」 / 「模拟预览」 lives on. One height for both states is what keeps the
+    /// row from jumping when a drag starts: only the text and its type size change, never the box.
+    public static let whiteBalanceStatusHeight: CGFloat = 10
+    public static let asShotStatusFontSize: CGFloat = 8
+    public static let previewStatusFontSize: CGFloat = 9
+
     /// 色温 / 色调, in display order — Kelvin first, as the decoder takes them.
     public static let whiteBalanceRows: [WhiteBalanceRow] = [
         WhiteBalanceRow(title: "色温", isTemperature: true,
@@ -1784,11 +1794,12 @@ public struct InspectorView: View {
                     .modifier(ResetOnDoubleClick(
                         action: { resets.whiteBalanceField(isTemperature: isTemperature) },
                         help: Self.resetParameterHelp))
-                if stored == nil {
-                    Text("as shot")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.tertiary)
-                }
+                // 118: the same slot as 「as shot」. Same height, same baseline, same place: the preview
+                // label replaces the state word while the canvas is a simulation, then the real frame
+                // arriving puts the state word back.
+                WhiteBalanceStatusLabel(kind: whiteBalancePreviewing ? .simulated
+                                                                     : (stored == nil ? .asShot : nil))
+                    .accessibilityIdentifier("inspector.whiteBalance.status.\(row.title)")
                 Spacer(minLength: 4)
                 SliderNumberField(value: shown,
                                   range: row.range,
@@ -1797,7 +1808,13 @@ public struct InspectorView: View {
                                   width: 52,
                                   accessibilityID: "inspector.whiteBalance.\(row.title)",
                                   onCommit: { typed in
+                                      let revisionBefore = session.editRevision
                                       commitWhiteBalanceValue(typed, isTemperature: isTemperature)
+                                      if whiteBalancePreviewing {
+                                          loupe?.releaseWhiteBalancePreview(
+                                              awaiting: session.editRevision != revisionBefore
+                                                  ? session.editRevision : nil)
+                                      }
                                   })
             }
             // 046/060: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以是
@@ -1809,11 +1826,17 @@ public struct InspectorView: View {
                                      set: { newValue in
                                          if isTemperature { draftTemperature = newValue }
                                          else { draftTint = newValue }
+                                         previewWhiteBalance(isTemperature: isTemperature, value: newValue)
                                      }),
                              in: row.range,
                              shape: row.shape) { editing in
-                // Release = quantize + one document write = one development (`commitWhiteBalance`).
-                if !editing { commitWhiteBalance(isTemperature: isTemperature) }
+                if editing {
+                    beginWhiteBalancePreview()
+                } else {
+                    // Release = quantize + one document write = one development (`commitWhiteBalance`),
+                    // and the simulated preview survives until that frame lands.
+                    commitWhiteBalance(isTemperature: isTemperature)
+                }
             }
         }
     }
@@ -1914,8 +1937,38 @@ public struct InspectorView: View {
         defer {
             if isTemperature { draftTemperature = nil } else { draftTint = nil }
         }
-        guard let draft = isTemperature ? draftTemperature : draftTint else { return }
+        guard let draft = isTemperature ? draftTemperature : draftTint else {
+            // A click that moved nothing has no write and therefore no real frame to wait for.
+            loupe?.releaseWhiteBalancePreview(awaiting: nil)
+            return
+        }
+        let revisionBefore = session.editRevision
         commitWhiteBalanceValue(draft, isTemperature: isTemperature)
+        let changed = session.editRevision != revisionBefore
+        // 118: the simulation stays on screen, old frame × gain, until the decode carrying the new
+        // pair lands. A release that wrote nothing ends it now.
+        if whiteBalancePreviewing || loupe?.isWhiteBalancePreviewActive == true {
+            loupe?.releaseWhiteBalancePreview(awaiting: changed ? session.editRevision : nil)
+        }
+    }
+
+    /// 118 — the drag's two view-state calls, so the slider body reads as one gesture.
+    private func beginWhiteBalancePreview() {
+        guard let loupe else { return }
+        whiteBalancePreviewing = true
+        loupe.onWhiteBalancePreviewSettled = { whiteBalancePreviewing = false }
+        loupe.beginWhiteBalancePreview()
+    }
+
+    private func previewWhiteBalance(isTemperature: Bool, value: Double) {
+        guard let loupe else { return }
+        if !whiteBalancePreviewing { beginWhiteBalancePreview() }
+        // The axis not under the hand keeps the document's value (`nil` = as shot); only the dragged
+        // axis reads the new `@State`, which is what the pixels before the decode are a prediction of.
+        let stored = session.edit.light.whiteBalance
+        let temperature = isTemperature ? value : (draftTemperature ?? stored.temperature)
+        let tint = isTemperature ? (draftTint ?? stored.tint) : value
+        loupe.updateWhiteBalancePreview(temperature: temperature, tint: tint)
     }
 
     /// The one place a white-balance *number* becomes a document change — shared by a drag's release
@@ -1974,6 +2027,54 @@ public struct InspectorView: View {
         Rectangle()
             .fill(Color.primary.opacity(0.08))
             .frame(height: 1)
+    }
+}
+
+/// 118 — the word in the white-balance row's status slot.
+///
+/// The two states are one view with one fixed height, so 「模拟预览」 lands on the exact frame 「as shot」
+/// occupied (and the row cannot grow while the hand moves). The type sizes differ by the task's own
+/// spec: 9 pt secondary for the simulation, 8 pt tertiary for the state.
+struct WhiteBalanceStatusLabel: View {
+
+    enum Kind: Equatable {
+        case asShot
+        case simulated
+
+        var text: String {
+            switch self {
+            case .asShot: return "as shot"
+            case .simulated: return "模拟预览"
+            }
+        }
+
+        var fontSize: CGFloat {
+            switch self {
+            case .asShot: return InspectorView.asShotStatusFontSize
+            case .simulated: return InspectorView.previewStatusFontSize
+            }
+        }
+
+        var style: AnyShapeStyle {
+            switch self {
+            case .asShot: return AnyShapeStyle(.tertiary)
+            case .simulated: return AnyShapeStyle(.secondary)
+            }
+        }
+    }
+
+    let kind: Kind?
+
+    var body: some View {
+        if let kind {
+            Text(kind.text)
+                .font(.system(size: kind.fontSize))
+                .foregroundStyle(kind.style)
+                .frame(height: InspectorView.whiteBalanceStatusHeight)
+                .accessibilityIdentifier("inspector.whiteBalance.statusText.\(kind.text)")
+        } else {
+            EmptyView()
+        }
     }
 }
 

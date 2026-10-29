@@ -48,7 +48,8 @@ struct PresentParams {
                      // `uv = window.xy + canvasPosition · window.zw` — the window is a function of the
                      // canvas position, not of the quad's local coordinates, because the texture is
                      // canvas-sized and the window is the map that places it there.
-    float4 misc;     // x = linearize, y/w/z = unused (kept as float4 so the offsets stay 16-byte).
+    float4 misc;     // x = linearize; yzw = 118 preview gain in linear light ((1,1,1) = none). Three
+                     // unused floats carry it so the struct stays three float4s (stride 48).
 };
 
 struct PresentOut {
@@ -90,6 +91,15 @@ static inline float3 present_transfer(float3 rgb, constant PresentParams &p) {
     return v;
 }
 
+/// The forward sRGB OETF, the inverse of `srgb_encode_inverse`. Only the 118 preview branch needs it:
+/// the gain is a *linear-light* multiply, and the 8-bit fallback drawable stores encoded values.
+static inline float3 srgb_encode(float3 v) {
+    v = min(max(v, 0.0), 1.0);
+    return float3(v.x <= 0.0031308 ? v.x * 12.92 : 1.055 * pow(v.x, 1.0 / 2.4) - 0.055,
+                  v.y <= 0.0031308 ? v.y * 12.92 : 1.055 * pow(v.y, 1.0 / 2.4) - 0.055,
+                  v.z <= 0.0031308 ? v.z * 12.92 : 1.055 * pow(v.z, 1.0 / 2.4) - 0.055);
+}
+
 /// One sample, transferred. This is the whole of the pass: no matte branch, no `photoRect`, no
 /// edge epsilon, no feather, no "outside the picture" special case. The texture bound here is the
 /// picture for the picture quad and the low-resolution whole picture for the backdrop quad.
@@ -102,5 +112,15 @@ fragment float4 present_fragment(PresentOut in [[stage_in]],
                                  texture2d<float> src [[texture(0)]],
                                  constant PresentParams &p [[buffer(0)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
-    return float4(present_transfer(src.sample(smp, in.uv).rgb, p), 1.0);
+    float3 rgb = max(src.sample(smp, in.uv).rgb, 0.0);
+    // 118: an identity gain takes the exact pre-118 path — no OETF round-trip, so the recorded
+    // "byte-identical to 025" hashes still hold. A real preview gain multiplies in linear light, the
+    // space the decoder corrects in, and then writes the transfer function the drawable expects.
+    if (p.misc.y != 1.0 || p.misc.z != 1.0 || p.misc.w != 1.0) {
+        float3 linear = float3(srgb_encode_inverse(rgb.x), srgb_encode_inverse(rgb.y),
+                               srgb_encode_inverse(rgb.z));
+        linear *= p.misc.yzw;
+        return float4(p.misc.x > 0.5 ? linear : srgb_encode(linear), 1.0);
+    }
+    return float4(present_transfer(rgb, p), 1.0);
 }
