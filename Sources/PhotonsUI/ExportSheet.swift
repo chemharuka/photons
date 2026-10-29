@@ -111,6 +111,8 @@ public struct ExportRow: Identifiable, Sendable {
         case rendering
         case done
         case failed
+        case skipped
+        case cancelled
 
         public var symbol: String {
             switch self {
@@ -118,6 +120,8 @@ public struct ExportRow: Identifiable, Sendable {
             case .rendering: return "arrow.triangle.2.circlepath"
             case .done: return "checkmark.circle.fill"
             case .failed: return "xmark.octagon.fill"
+            case .skipped: return "arrow.uturn.forward.circle"
+            case .cancelled: return "minus.circle"
             }
         }
     }
@@ -164,10 +168,20 @@ public final class ExportSheetModel {
         case finished
     }
 
+    /// 099: the sections, in Lightroom's order, as data — the view and its test read the same list.
+    public static let sectionTitles = ["位置", "文件命名", "文件设置", "图像尺寸",
+                                       "输出锐化", "元数据", "导出"]
+
     /// What the user is editing. Passed to `BatchExporter` verbatim at run time.
     public var preset: ExportPreset
     /// Where the files go. Chosen with a folder picker in the sheet; a sane default otherwise.
     public var outputDirectory: URL
+
+    /// Named presets, one file each (see `ExportPresetStore`).
+    public let presetStore: ExportPresetStore
+    public private(set) var presetNames: [String] = []
+    public private(set) var presetError: String?
+    public private(set) var cancellation: CancellationToken?
 
     /// How many photos the sheet will export — set when it is presented, shown as "将导出 N 张".
     public var selectionCount: Int = 0
@@ -190,9 +204,13 @@ public final class ExportSheetModel {
     public var onExportRequest: (() -> Void)?
 
     public init(preset: ExportPreset = ExportSheetModel.defaultPreset,
-                outputDirectory: URL = ExportSheetModel.defaultOutputDirectory) {
+                outputDirectory: URL = ExportSheetModel.defaultOutputDirectory,
+                presetStore: ExportPresetStore? = nil) {
         self.preset = preset
         self.outputDirectory = outputDirectory
+        let store = presetStore ?? ExportPresetStore()
+        self.presetStore = store
+        self.presetNames = store.names
     }
 
     /// "网络 2048" — a JPEG that is safe to hand to anyone, not a TIFF of the original.
@@ -217,6 +235,8 @@ public final class ExportSheetModel {
 
     public var writtenCount: Int { rows.filter { $0.state == .done }.count }
     public var failedCount: Int { rows.filter { $0.state == .failed }.count }
+    public var skippedCount: Int { rows.filter { $0.state == .skipped }.count }
+    public var cancelledCount: Int { rows.filter { $0.state == .cancelled }.count }
     public var writtenURLs: [URL] { rows.compactMap { $0.state == .done ? $0.fileURL : nil } }
 
     public var elapsed: Double {
@@ -231,10 +251,11 @@ public final class ExportSheetModel {
         case .running:
             return String(format: "导出中… 已渲染 %d/%d · %.1f s", rendered, total, elapsed)
         case .finished:
-            let failed = failedCount
-            let base = String(format: "完成：%d 个文件", writtenCount)
-            let tail = failed == 0 ? "" : "，\(failed) 张失败（其余已导出）"
-            return base + tail + String(format: " · 共 %.2f s", elapsed)
+            var parts = [String(format: "完成：%d 个文件", writtenCount)]
+            if skippedCount > 0 { parts.append("跳过 \(skippedCount)") }
+            if cancelledCount > 0 { parts.append("取消 \(cancelledCount)") }
+            if failedCount > 0 { parts.append("失败 \(failedCount)") }
+            return parts.joined(separator: "，") + String(format: " · 共 %.2f s", elapsed)
         }
     }
 
@@ -270,6 +291,8 @@ public final class ExportSheetModel {
         phase = .running
         startedAt = CFAbsoluteTimeGetCurrent()
         finishedAt = 0
+        let token = CancellationToken()
+        cancellation = token
 
         let preset = self.preset
         let directory = outputDirectory
@@ -284,9 +307,16 @@ public final class ExportSheetModel {
             let report = BatchExporter.run(items: items, preset: preset,
                                            outputDirectory: directory,
                                            concurrency: BatchExporter.defaultConcurrency,
+                                           cancel: token,
                                            render: render)
             DispatchQueue.main.async { self?.finish(with: report) }
         }
+    }
+
+    /// The 取消 button. In-flight renders finish; queued items come back as cancelled.
+    public func cancel() {
+        guard phase == .running else { return }
+        cancellation?.cancel()
     }
 
     private func markRendered(_ id: String) {
@@ -301,7 +331,8 @@ public final class ExportSheetModel {
     private func finish(with report: BatchExportReport) {
         self.report = report
         finishedAt = CFAbsoluteTimeGetCurrent()
-        rendered = total
+        cancellation = nil
+        rendered = report.outcomes.filter { !$0.cancelled }.count
         rows = report.outcomes.map { outcome in
             var row = ExportRow(id: outcome.id, name: outcome.sourceName)
             row.fileURL = outcome.fileURL
@@ -318,6 +349,12 @@ public final class ExportSheetModel {
                 if !outcome.warnings.isEmpty {
                     row.detail += " · \(outcome.warnings.count) 条警告"
                 }
+            } else if outcome.cancelled {
+                row.state = .cancelled
+                row.detail = "已取消"
+            } else if outcome.skipped {
+                row.state = .skipped
+                row.detail = "跳过：目标文件已存在"
             } else {
                 row.state = .failed
                 row.detail = "失败：\(outcome.error ?? "未知原因")"
@@ -331,6 +368,49 @@ public final class ExportSheetModel {
         let urls = writtenURLs
         guard !urls.isEmpty else { return }
         onReveal?(urls)
+    }
+
+    // MARK: presets
+
+    public func refreshPresets() {
+        presetStore.refresh()
+        presetNames = presetStore.names
+    }
+
+    public func loadPreset(named name: String) {
+        do {
+            preset = try presetStore.load(named: name)
+            presetError = nil
+        } catch {
+            presetError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    public func savePreset(named name: String) -> Bool {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            presetError = "预设名称不能为空"
+            return false
+        }
+        do {
+            preset = try presetStore.save(preset, named: name)
+            presetNames = presetStore.names
+            presetError = nil
+            return true
+        } catch {
+            presetError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func deletePreset(named name: String) {
+        do {
+            try presetStore.delete(named: name)
+            presetNames = presetStore.names
+            presetError = nil
+        } catch {
+            presetError = error.localizedDescription
+        }
     }
 
     private func byteText(_ bytes: Int) -> String {
@@ -347,23 +427,45 @@ public final class ExportSheetModel {
 public struct ExportSheetView: View {
     @Bindable public var model: ExportSheetModel
 
+    @State private var selectedPreset = ""
+    @State private var showingSavePreset = false
+    @State private var newPresetName = ""
+
     public init(model: ExportSheetModel) {
         self.model = model
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             header
-            settings
-            divider
-            progressBlock
+            Form {
+                locationSection
+                namingSection
+                fileSection
+                sizeSection
+                sharpenSection
+                metadataSection
+                exportSection
+            }
+            .formStyle(.grouped)
+            .disabled(model.phase == .running)
             results
-            divider
             footer
         }
         .padding(18)
-        .frame(width: 560, height: 640, alignment: .topLeading)
+        .frame(width: 620, height: 760, alignment: .topLeading)
         .background(.regularMaterial)
+        .alert("存储预设", isPresented: $showingSavePreset) {
+            TextField("预设名称", text: $newPresetName)
+            Button("存储") {
+                if model.savePreset(named: newPresetName) {
+                    selectedPreset = newPresetName
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("存到 \(model.presetStore.directory.path)")
+        }
     }
 
     // MARK: header
@@ -372,126 +474,323 @@ public struct ExportSheetView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("导出")
                 .font(.system(size: 14, weight: .bold))
-            Text(model.phase == .idle
-                 ? "将导出 \(model.selectionCount) 张"
-                 : model.summaryLine)
+            Text(model.errorText ?? model.summaryLine)
                 .font(.system(size: 11))
                 .foregroundStyle(model.errorText == nil ? AnyShapeStyle(.secondary)
                                                         : AnyShapeStyle(Color.red))
                 .fixedSize(horizontal: false, vertical: true)
-            Text(model.preset.summary)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
+            if let presetError = model.presetError {
+                Text(presetError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.red)
+            }
         }
     }
 
-    // MARK: settings (bound straight to ExportPreset)
+    // MARK: 位置
 
-    private var settings: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                labelled("格式") {
-                    Picker("", selection: $model.preset.format) {
-                        ForEach(ExportFormat.allCases, id: \.self) { format in
-                            Text(format.rawValue.uppercased()).tag(format)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+    private var locationSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("目标目录").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text(model.outputDirectory.path)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 300, alignment: .trailing)
+                Button("选择…") { model.onChooseDirectory?() }
+                    .controlSize(.mini)
+            }
+            HStack(spacing: 8) {
+                Text("子文件夹").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                TextField("{date}/{camera}", text: $model.preset.subfolder)
+                    .textFieldStyle(.roundedBorder)
                     .controlSize(.small)
-                    .frame(width: 110)
+                    .font(.system(size: 10, design: .monospaced))
+                    .frame(width: 220)
                     .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("重名文件").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: $model.preset.conflict) {
+                    ForEach(ExportConflict.allCases, id: \.self) { policy in
+                        Text(policy.displayName).tag(policy)
+                    }
                 }
-                labelled("长边") {
-                    Picker("", selection: longEdgeBinding) {
-                        Text("原尺寸").tag(0)
-                        ForEach([512, 1024, 2048, 4096], id: \.self) { edge in
-                            Text("\(edge) px").tag(edge)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .disabled(model.phase == .running)
+            }
+        } header: {
+            sectionHeader("位置")
+        }
+    }
+
+    // MARK: 文件命名
+
+    private var namingSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("命名模板").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                TextField("{name} / {date} / {seq} / {rating}",
+                          text: $model.preset.nameTemplate)
+                    .textFieldStyle(.roundedBorder)
                     .controlSize(.small)
-                    .frame(width: 110)
+                    .font(.system(size: 10, design: .monospaced))
+                    .frame(width: 260)
                     .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("预设").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: presetSelection) {
+                    Text("—").tag("")
+                    ForEach(model.presetNames, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
                 }
-                labelled("色彩") {
-                    Picker("", selection: $model.preset.colorSpace) {
-                        Text("sRGB").tag(OutputPrimaries.sRGB)
-                        Text("Display P3").tag(OutputPrimaries.displayP3)
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 160)
+                .disabled(model.phase == .running)
+                Button("存储…") {
+                    newPresetName = model.preset.name ?? ""
+                    showingSavePreset = true
+                }
+                .controlSize(.mini)
+                .disabled(model.phase == .running)
+                Button("删除") {
+                    model.deletePreset(named: selectedPreset)
+                    selectedPreset = ""
+                }
+                .controlSize(.mini)
+                .disabled(model.phase == .running || selectedPreset.isEmpty)
+            }
+        } header: {
+            sectionHeader("文件命名")
+        }
+    }
+
+    // MARK: 文件设置
+
+    private var fileSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("格式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: $model.preset.format) {
+                    ForEach(ExportFormat.allCases, id: \.self) { format in
+                        Text(format.rawValue.uppercased()).tag(format)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("质量").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Slider(value: $model.preset.quality, in: 0.1 ... 1.0)
                     .controlSize(.small)
-                    .frame(width: 110)
-                    .disabled(model.phase == .running)
+                    .frame(width: 140)
+                    .disabled(model.phase == .running || !model.preset.format.supportsQuality)
+                Text(String(format: "%.2f", model.preset.quality))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(model.preset.format.supportsQuality
+                                     ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                    .frame(width: 38, alignment: .trailing)
+            }
+            HStack(spacing: 8) {
+                Text("色彩空间").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: $model.preset.colorSpace) {
+                    Text("sRGB").tag(OutputPrimaries.sRGB)
+                    Text("Display P3").tag(OutputPrimaries.displayP3)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("位深").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: sixteenBitBinding) {
+                    Text("8 位").tag(false)
+                    Text("16 位").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .disabled(model.phase == .running || !model.preset.format.supports16Bit)
+            }
+        } header: {
+            sectionHeader("文件设置")
+        }
+    }
+
+    // MARK: 图像尺寸
+
+    private var sizeSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("尺寸模式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: sizingModeBinding) {
+                    ForEach(ExportSizingMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 220)
+                .disabled(model.phase == .running)
+            }
+            switch model.preset.sizingMode {
+            case .longEdge:
+                HStack(spacing: 8) {
+                    Text("长边").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    SliderNumberField(value: Double(model.preset.longEdge ?? 2400),
+                                      range: 1 ... 20_000, format: "%.0f",
+                                      decimals: 0, fontSize: 10, width: 60,
+                                      accessibilityID: "export.size.longEdge") { typed in
+                        model.preset.longEdge = max(1, Int(typed.rounded()))
+                    }
+                    Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            case .percent:
+                HStack(spacing: 8) {
+                    Text("长边百分比").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    SliderNumberField(value: Double(model.preset.percent ?? 100),
+                                      range: 10 ... 100, format: "%.0f",
+                                      decimals: 0, fontSize: 10, width: 60,
+                                      accessibilityID: "export.size.percent") { typed in
+                        model.preset.percent = min(100, max(10, Int(typed.rounded())))
+                    }
+                    Text("%").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            case .none:
+                HStack {
+                    Text("按裁切后的原始像素导出")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
                 }
             }
+        } header: {
+            sectionHeader("图像尺寸")
+        }
+    }
 
-            HStack(spacing: 10) {
-                labelled("质量") {
-                    HStack(spacing: 6) {
-                        Slider(value: $model.preset.quality, in: 0.1 ... 1.0)
-                            .controlSize(.small)
-                            .frame(width: 120)
-                            .disabled(model.phase == .running || !model.preset.format.supportsQuality)
-                        Text(String(format: "%.2f", model.preset.quality))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(model.preset.format.supportsQuality
-                                             ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                    }
-                }
-                Toggle(isOn: $model.preset.writeXMP) {
-                    Text("写入 XMP")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
+    // MARK: 输出锐化
+
+    private var sharpenSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Toggle(isOn: sharpenEnabledBinding) {
+                    Text("输出锐化").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
                 .disabled(model.phase == .running)
+                Spacer(minLength: 8)
+                Text("最终像素之后，只影响导出文件")
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
             }
-
-            HStack(spacing: 10) {
-                labelled("命名") {
-                    TextField("{name} / {date} / {seq} / {rating}", text: $model.preset.nameTemplate)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
-                        .font(.system(size: 10, design: .monospaced))
-                        .frame(width: 230)
-                        .disabled(model.phase == .running)
-                }
-                Toggle(isOn: sixteenBitBinding) {
-                    Text("16 位")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running || !model.preset.format.supports16Bit)
-                .help(model.preset.format.supports16Bit
-                      ? "16 位/通道（JPEG、AVIF 只能 8 位）"
-                      : "\(model.preset.format.rawValue.uppercased()) 只能 8 位/通道")
-            }
-
             HStack(spacing: 8) {
-                labelled("目录") {
-                    Text(model.outputDirectory.path)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                Text("强度").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Slider(value: sharpenAmountBinding, in: 0 ... 1)
+                    .controlSize(.small)
+                    .frame(width: 150)
+                    .disabled(model.phase == .running || model.preset.sharpen == nil)
+                SliderNumberField(value: model.preset.sharpen?.amount ?? 0.6,
+                                  range: 0 ... 1, format: "%.2f",
+                                  decimals: 2, fontSize: 10, width: 48,
+                                  accessibilityID: "export.sharpen.amount") { typed in
+                    updateSharpen { $0.amount = min(1, max(0, typed)) }
                 }
-                Button("选择…") { model.onChooseDirectory?() }
-                    .controlSize(.mini)
-                    .disabled(model.phase == .running)
+                .disabled(model.phase == .running || model.preset.sharpen == nil)
             }
+            HStack(spacing: 8) {
+                Text("半径").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Slider(value: sharpenRadiusBinding, in: 0.3 ... 3)
+                    .controlSize(.small)
+                    .frame(width: 150)
+                    .disabled(model.phase == .running || model.preset.sharpen == nil)
+                SliderNumberField(value: model.preset.sharpen?.radius ?? 0.8,
+                                  range: 0.3 ... 3, format: "%.1f",
+                                  decimals: 1, fontSize: 10, width: 44,
+                                  accessibilityID: "export.sharpen.radius") { typed in
+                    updateSharpen { $0.radius = min(3, max(0.3, typed)) }
+                }
+                .disabled(model.phase == .running || model.preset.sharpen == nil)
+                Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        } header: {
+            sectionHeader("输出锐化")
         }
     }
 
-    // MARK: progress + results
+    // MARK: 元数据
 
-    private var progressBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var metadataSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("元数据").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: metadataLevelBinding) {
+                    ForEach(ExportMetadataLevel.allCases, id: \.self) { level in
+                        Text(level.displayName).tag(level)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Toggle(isOn: writeXMPBinding) {
+                    Text("写入 XMP").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .disabled(model.phase == .running || model.preset.metadataLevel != .all)
+                Spacer(minLength: 8)
+                Text(model.preset.metadataLevel == .all
+                     ? "完整 develop 设置"
+                     : "由上面的档位决定，不能再单独开关")
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+        } header: {
+            sectionHeader("元数据")
+        }
+    }
+
+    // MARK: 导出
+
+    private var exportSection: some View {
+        Section {
+            Text(model.summaryLine)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if model.phase == .running {
                 ProgressView(value: model.progress)
                     .controlSize(.small)
@@ -503,8 +802,12 @@ public struct ExportSheetView: View {
                     .foregroundStyle(Color.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        } header: {
+            sectionHeader("导出")
         }
     }
+
+    // MARK: results
 
     private var results: some View {
         ScrollView {
@@ -541,8 +844,10 @@ public struct ExportSheetView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 110, maxHeight: 170)
     }
+
+    // MARK: footer
 
     private var footer: some View {
         HStack(spacing: 8) {
@@ -553,6 +858,9 @@ public struct ExportSheetView: View {
             Spacer(minLength: 8)
             Button("关闭") { model.onClose?() }
                 .controlSize(.small)
+            Button("取消") { model.cancel() }
+                .controlSize(.small)
+                .disabled(model.phase != .running)
             Button(model.phase == .finished ? "再导出一次" : "导出") {
                 // The controller owns item assembly (it has the session); this is the UI door.
                 model.onExportRequest?()
@@ -565,14 +873,10 @@ public struct ExportSheetView: View {
 
     // MARK: building blocks
 
-    private func labelled<Content: View>(_ title: String,
-                                         @ViewBuilder _ content: () -> Content) -> some View {
-        HStack(spacing: 5) {
-            Text(title)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-            content()
-        }
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
     }
 
     private func color(for state: ExportRow.State) -> Color {
@@ -580,27 +884,73 @@ public struct ExportSheetView: View {
         case .done: return .green
         case .failed: return .red
         case .rendering: return .accentColor
-        case .pending: return .secondary
+        case .pending, .skipped, .cancelled: return .secondary
         }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.08))
-            .frame(height: 1)
-    }
+    // MARK: bindings
 
-    private var longEdgeBinding: Binding<Int> {
-        Binding(get: { model.preset.longEdge ?? 0 },
-                set: { model.preset.longEdge = $0 <= 0 ? nil : $0 })
+    private var presetSelection: Binding<String> {
+        Binding(get: { selectedPreset },
+                set: { name in
+                    selectedPreset = name
+                    if !name.isEmpty { model.loadPreset(named: name) }
+                })
     }
 
     private var sixteenBitBinding: Binding<Bool> {
         Binding(get: { model.preset.bitDepth == 16 },
                 set: { model.preset.bitDepth = $0 ? 16 : 8 })
     }
-}
 
+    private var sizingModeBinding: Binding<ExportSizingMode> {
+        Binding(get: { model.preset.sizingMode },
+                set: { mode in
+                    model.preset.sizingMode = mode
+                    if mode == .percent, model.preset.percent == nil {
+                        model.preset.percent = 100
+                    }
+                })
+    }
+
+    private var metadataLevelBinding: Binding<ExportMetadataLevel> {
+        Binding(get: { model.preset.metadataLevel },
+                set: { level in
+                    model.preset.metadataLevel = level
+                    if level != .all { model.preset.writeXMP = false }
+                })
+    }
+
+    private var writeXMPBinding: Binding<Bool> {
+        Binding(get: { model.preset.metadataLevel == .all && model.preset.writeXMP },
+                set: { model.preset.writeXMP = $0 })
+    }
+
+    private var sharpenEnabledBinding: Binding<Bool> {
+        Binding(get: { model.preset.sharpen != nil },
+                set: { on in
+                    model.preset.sharpen = on
+                        ? (model.preset.sharpen ?? OutputSharpening(amount: 0.6, radius: 0.8))
+                        : nil
+                })
+    }
+
+    private var sharpenAmountBinding: Binding<Double> {
+        Binding(get: { model.preset.sharpen?.amount ?? 0.6 },
+                set: { value in updateSharpen { $0.amount = min(1, max(0, value)) } })
+    }
+
+    private var sharpenRadiusBinding: Binding<Double> {
+        Binding(get: { model.preset.sharpen?.radius ?? 0.8 },
+                set: { value in updateSharpen { $0.radius = min(3, max(0.3, value)) } })
+    }
+
+    private func updateSharpen(_ body: (inout OutputSharpening) -> Void) {
+        var sharpening = model.preset.sharpen ?? OutputSharpening(amount: 0.6, radius: 0.8)
+        body(&sharpening)
+        model.preset.sharpen = sharpening
+    }
+}
 // MARK: - presentation
 
 /// SwiftUI in an `NSHostingController`, shown as a window sheet.
@@ -653,7 +1003,7 @@ public final class ExportSheetController: NSObject {
         if let existing = sheetWindow, existing.sheetParent != nil {
             return
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
                               styleMask: [.titled],
                               backing: .buffered,
                               defer: false)
@@ -692,7 +1042,12 @@ public final class ExportSheetController: NSObject {
     /// Re-capture what the sheet will write (a new selection, a new document).
     public func refreshItems() {
         let assets = session.exportableSelection
-        items = session.exportItems(for: assets)
+        var captured = session.exportItems(for: assets)
+        // The catalog already knows the camera key; the subfolder token needs it on the item.
+        for index in captured.indices where index < assets.count {
+            captured[index].cameraKey = assets[index].cameraKey
+        }
+        items = captured
         var sizes: [String: ImageSize] = [:]
         for asset in assets {
             if let w = asset.width, let h = asset.height, w > 0, h > 0 {

@@ -17,15 +17,24 @@ public struct ExportItem: Sendable {
     public var rating: Int
     public var edit: EditModel?
     public var sourceURL: URL?
+    /// The catalog's `make|model` key, for the `{camera}` subfolder token.
+    public var cameraKey: String?
+    /// Written by the `copyright` metadata level when the caller knows them.
+    public var author: String?
+    public var copyright: String?
 
     public init(id: String, name: String, captureDate: Date? = nil, rating: Int = 0,
-                edit: EditModel? = nil, sourceURL: URL? = nil) {
+                edit: EditModel? = nil, sourceURL: URL? = nil, cameraKey: String? = nil,
+                author: String? = nil, copyright: String? = nil) {
         self.id = id
         self.name = name
         self.captureDate = captureDate
         self.rating = rating
         self.edit = edit
         self.sourceURL = sourceURL
+        self.cameraKey = cameraKey
+        self.author = author
+        self.copyright = copyright
     }
 }
 
@@ -48,8 +57,12 @@ public struct BatchExportOutcome: Sendable {
     public var warnings: [String]
     /// Non-nil = this item failed. The batch keeps going.
     public var error: String?
+    /// The conflict policy said "skip": no file was written and the name was left alone.
+    public var skipped: Bool = false
+    /// The batch was cancelled before this item started rendering.
+    public var cancelled: Bool = false
 
-    public var isSuccess: Bool { error == nil && fileURL != nil }
+    public var isSuccess: Bool { error == nil && fileURL != nil && !skipped && !cancelled }
 }
 
 public struct BatchExportReport: Sendable {
@@ -62,7 +75,13 @@ public struct BatchExportReport: Sendable {
     public var peakConcurrency: Int
 
     public var written: [BatchExportOutcome] { outcomes.filter(\.isSuccess) }
-    public var failures: [BatchExportOutcome] { outcomes.filter { !$0.isSuccess } }
+    public var failures: [BatchExportOutcome] {
+        outcomes.filter { !$0.isSuccess && !$0.skipped && !$0.cancelled }
+    }
+    public var skipped: [BatchExportOutcome] { outcomes.filter(\.skipped) }
+    public var cancelled: [BatchExportOutcome] { outcomes.filter(\.cancelled) }
+    public var skippedCount: Int { skipped.count }
+    public var cancelledCount: Int { cancelled.count }
     public var bytes: Int { written.reduce(0) { $0 + $1.fileBytes } }
 
     /// Per-image wall time of the successful exports.
@@ -96,6 +115,29 @@ enum BatchMath {
     }
 }
 
+// MARK: - cancellation
+
+/// A one-way flag the sheet's 取消 button sets. Checked before each queued item starts; an item
+/// already rendering is allowed to finish (so its file is complete, never half written), and the
+/// rest come back as `cancelled` outcomes.
+public final class CancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    public init() {}
+
+    public func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    public var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+}
+
 // MARK: - engine
 
 /// Batch export: one item at a time per worker, at most `concurrency` in flight, one result per
@@ -121,6 +163,7 @@ public enum BatchExporter {
                            preset: ExportPreset,
                            outputDirectory: URL,
                            concurrency: Int = defaultConcurrency,
+                           cancel: CancellationToken? = nil,
                            render: @escaping (ExportItem, ExportPreset) throws -> DisplayImage)
         -> BatchExportReport {
 
@@ -133,7 +176,7 @@ public enum BatchExporter {
         try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let collector = Collector(count: items.count)
-        let allocator = OutputNameAllocator(directory: outputDirectory)
+        let allocator = OutputNameAllocator()
         let queue = OperationQueue()
         queue.name = "photons.batch-export"
         queue.maxConcurrentOperationCount = limit
@@ -141,6 +184,10 @@ public enum BatchExporter {
 
         for (index, item) in items.enumerated() {
             queue.addOperation {
+                if cancel?.isCancelled == true {
+                    collector.leave(cancelledOutcome(index: index, item: item))
+                    return
+                }
                 collector.enter()
                 let outcome = exportOne(item: item, index: index, preset: preset,
                                         directory: outputDirectory, allocator: allocator,
@@ -154,6 +201,12 @@ public enum BatchExporter {
                                  seconds: CFAbsoluteTimeGetCurrent() - started,
                                  requestedConcurrency: limit,
                                  peakConcurrency: collector.peak)
+    }
+
+    private static func cancelledOutcome(index: Int, item: ExportItem) -> BatchExportOutcome {
+        BatchExportOutcome(index: index, id: item.id, sourceName: item.name, fileURL: nil,
+                           fileBytes: 0, pixelSize: nil, seconds: 0, xmpURL: nil,
+                           warnings: [], error: nil, skipped: false, cancelled: true)
     }
 
     // MARK: one image
@@ -172,6 +225,16 @@ public enum BatchExporter {
                                          fileURL: nil, fileBytes: 0, pixelSize: nil, seconds: 0,
                                          xmpURL: nil, warnings: warnings, error: nil)
         do {
+            // 1. the destination folder, created on demand. A subfolder template cannot escape the
+            //    batch's destination: `ExportNaming.subfolder` sanitises every component.
+            let folder = ExportNaming.subfolder(template: preset.subfolder, item: item)
+            let directory = folder.isEmpty
+                ? directory
+                : directory.appendingPathComponent(folder, isDirectory: true)
+            if !folder.isEmpty {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+
             let rendered = try render(item, preset)
             if rendered.width <= 0 || rendered.height <= 0 {
                 throw BatchExportError.noPixels(item.name)
@@ -181,36 +244,69 @@ public enum BatchExporter {
                                                          got: rendered.primaries)
             }
 
-            // 1. size — the preset's ceiling, applied to the pixels we were handed.
+            // 2. size — the preset's rule, applied to the pixels we were handed.
             var image = rendered
-            if let longEdge = preset.longEdge {
-                image = DisplayResample.fitLongEdge(image, to: longEdge)
-                if max(rendered.width, rendered.height) > longEdge {
-                    warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
-                                    + "resampled to \(image.width)×\(image.height)")
+            switch preset.sizingMode {
+            case .longEdge:
+                if let longEdge = preset.longEdge {
+                    image = DisplayResample.fitLongEdge(image, to: longEdge)
+                    if max(rendered.width, rendered.height) > longEdge {
+                        warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
+                                        + "resampled to \(image.width)×\(image.height)")
+                    }
                 }
+            case .percent:
+                if let percent = preset.percent {
+                    let longEdge = max(1, Int((Double(max(rendered.width, rendered.height))
+                                               * Double(percent) / 100).rounded()))
+                    image = DisplayResample.fitLongEdge(image, to: longEdge)
+                    if max(rendered.width, rendered.height) > longEdge {
+                        warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
+                                        + "resampled to \(image.width)×\(image.height)")
+                    }
+                }
+            case .none:
+                break
             }
-            // 2. output sharpening, at the final pixel size (that is the point of it).
+            // 3. output sharpening, at the final pixel size (that is the point of it).
             if let sharpen = preset.sharpen, sharpen.isEnabled {
                 image = DisplaySharpen.apply(image, sharpen)
             }
 
-            // 3. a name nobody else in this batch (or on disk) already owns.
+            // 4. a name nobody else in this batch (or, under `rename`, on disk) already owns.
             let base = ExportNaming.baseName(template: preset.nameTemplate, item: item,
                                              sequence: index + 1)
-            let url = allocator.reserve(base: base, ext: preset.format.fileExtension)
+            guard let url = allocator.reserve(base: base, ext: preset.format.fileExtension,
+                                              in: directory, policy: preset.conflict) else {
+                outcome.skipped = true
+                outcome.seconds = CFAbsoluteTimeGetCurrent() - t0
+                outcome.warnings = warnings
+                return outcome
+            }
 
-            // 4. encode.
+            // 5. encode.
             try Exporter.write(image, to: url, options: preset.exportOptions)
             let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
 
-            // 5. XMP, when the preset asked for it. A failed packet does not discard a written image.
-            if preset.writeXMP {
+            // 6. metadata, when the preset asked for it. A failed packet does not discard a written
+            //    image. `.none` wins over the stored `writeXMP` flag on purpose.
+            switch preset.metadataLevel {
+            case .none:
+                break
+            case .copyright:
                 do {
-                    outcome.xmpURL = try writeXMP(item: item, to: url, preset: preset,
-                                                  warnings: &warnings)
+                    outcome.xmpURL = try writeCopyright(item: item, to: url, warnings: &warnings)
                 } catch {
                     warnings.append("XMP not written: \(error.localizedDescription)")
+                }
+            case .all:
+                if preset.writeXMP {
+                    do {
+                        outcome.xmpURL = try writeXMP(item: item, to: url, preset: preset,
+                                                      warnings: &warnings)
+                    } catch {
+                        warnings.append("XMP not written: \(error.localizedDescription)")
+                    }
                 }
             }
 
@@ -223,6 +319,51 @@ public enum BatchExporter {
         outcome.seconds = CFAbsoluteTimeGetCurrent() - t0
         outcome.warnings = warnings
         return outcome
+    }
+
+    /// The `copyright` level's packet: `dc:creator` + `dc:rights`, nothing from the develop graph.
+    /// Written beside the image (not embedded) on purpose — embedding through ImageIO re-encodes
+    /// PNG and would drop the preset's bit depth for a two-field packet.
+    private static func writeCopyright(item: ExportItem, to url: URL,
+                                       warnings: inout [String]) throws -> URL? {
+        let author = item.author?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rights = item.copyright?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard author?.isEmpty == false || rights?.isEmpty == false else {
+            warnings.append("metadata level is copyright, but the item has no author/copyright")
+            return nil
+        }
+        let sidecar = url.deletingPathExtension().appendingPathExtension("xmp")
+        try XMPWriter.writeAtomically(copyrightPacket(author: author, rights: rights), to: sidecar)
+        return sidecar
+    }
+
+    private static func copyrightPacket(author: String?, rights: String?) -> Data {
+        func escape(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+        }
+        var body = ""
+        if let author, !author.isEmpty {
+            body += "<dc:creator><rdf:Seq><rdf:li>\(escape(author))</rdf:li></rdf:Seq></dc:creator>\n"
+        }
+        if let rights, !rights.isEmpty {
+            body += "<dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">\(escape(rights))"
+                + "</rdf:li></rdf:Alt></dc:rights>\n"
+        }
+        let xml = """
+        <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        \(body)  </rdf:Description>
+         </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="w"?>
+
+        """
+        return Data(xml.utf8)
     }
 
     /// Embed into the exported copy where ImageIO can carry a packet (JPEG/HEIC/TIFF/PNG), sidecar
@@ -287,36 +428,49 @@ public enum BatchExporter {
 
 // MARK: - names
 
-/// Hands out filenames nobody else owns. The set is in-memory (one process = one batch) *and* the
-/// filesystem is consulted, so a re-run into the same folder gets `-1`, `-2`, … instead of replacing
-/// yesterday's export. Lower-cased keys because APFS is case-insensitive by default: `IMG_1.jpg` and
-/// `img_1.jpg` are one file there.
+/// Hands out filenames according to the preset's conflict policy. The set is in-memory (one process
+/// = one batch) *and* the filesystem is consulted. Lower-cased keys because APFS is case-insensitive
+/// by default: `IMG_1.jpg` and `img_1.jpg` are one file there.
 final class OutputNameAllocator {
     private let lock = NSLock()
-    private let directory: URL
     private let fm = FileManager.default
     private var used: Set<String> = []
 
-    init(directory: URL) { self.directory = directory }
+    init() {}
 
-    func reserve(base: String, ext: String) -> URL {
+    /// `nil` means "skip": the caller must not write anything for this item.
+    func reserve(base: String, ext: String, in directory: URL,
+                 policy: ExportConflict) -> URL? {
         lock.lock(); defer { lock.unlock() }
-        var n = 0
-        while n < 10_000 {
-            let suffix = n == 0 ? "" : "-\(n)"
-            let name = base + suffix + (ext.isEmpty ? "" : "." + ext)
-            let url = directory.appendingPathComponent(name)
-            let key = url.standardizedFileURL.path.lowercased()
-            if !used.contains(key) && !fm.fileExists(atPath: url.path) {
-                used.insert(key)
-                return url
+        let suffix = ext.isEmpty ? "" : "." + ext
+        let first = directory.appendingPathComponent(base + suffix)
+        let firstKey = first.standardizedFileURL.path.lowercased()
+
+        switch policy {
+        case .overwrite:
+            used.insert(firstKey)
+            return first
+        case .skip:
+            guard !used.contains(firstKey), !fm.fileExists(atPath: first.path) else { return nil }
+            used.insert(firstKey)
+            return first
+        case .rename:
+            var n = 0
+            while n < 10_000 {
+                let name = base + (n == 0 ? "" : "-\(n)") + suffix
+                let url = directory.appendingPathComponent(name)
+                let key = url.standardizedFileURL.path.lowercased()
+                if !used.contains(key) && !fm.fileExists(atPath: url.path) {
+                    used.insert(key)
+                    return url
+                }
+                n += 1
             }
-            n += 1
+            let fallback = directory.appendingPathComponent(base + "-" + UUID().uuidString.prefix(8)
+                                                            + suffix)
+            used.insert(fallback.standardizedFileURL.path.lowercased())
+            return fallback
         }
-        let fallback = directory.appendingPathComponent(base + "-" + UUID().uuidString.prefix(8)
-                                                        + (ext.isEmpty ? "" : "." + ext))
-        used.insert(fallback.standardizedFileURL.path.lowercased())
-        return fallback
     }
 }
 
