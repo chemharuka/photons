@@ -104,6 +104,7 @@ record: build
 ## M3 — the app bundle. `make verify` is unchanged by this: it stays one command.
 app: build
 	@scripts/bundle-app.sh $(CONFIG)
+	@scripts/depth-model.sh
 	@plutil -lint .build/Photons.app/Contents/Info.plist >/dev/null && echo "info.plist  OK"
 	@codesign --verify --deep --strict .build/Photons.app && echo "codesign    OK"
 
