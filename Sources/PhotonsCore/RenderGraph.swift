@@ -190,6 +190,13 @@ public struct RenderOptions: Sendable {
     /// on the GPU, and this flag adds only a 4-byte blit when it is on. Never part of a key.
     public var probesDehazeAirlight: Bool
 
+    /// **Tests only.** Make S1.9's recovery the **pre-130 per-channel** `(I_c − A(1 − t))/t` instead
+    /// of the hue-preserving luminance recovery with the `2A` fog-participation fade. It reads
+    /// `DehazeParamsU.e.y`; the same `D`, `A` and `t` go through both formulas, so the difference
+    /// between the two renders is the formula and nothing else. Used by `DehazeLinearTests`'
+    /// counterproof. Never set by the app, never part of a key.
+    public var legacyDehazePerChannel: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -206,7 +213,8 @@ public struct RenderOptions: Sendable {
                 bwIndependentChannels: Bool = false,
                 gradeGlobalWeights: Bool = false,
                 healWithoutBoundaryMatch: Bool = false,
-                probesDehazeAirlight: Bool = false) {
+                probesDehazeAirlight: Bool = false,
+                legacyDehazePerChannel: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -224,6 +232,7 @@ public struct RenderOptions: Sendable {
         self.gradeGlobalWeights = gradeGlobalWeights
         self.healWithoutBoundaryMatch = healWithoutBoundaryMatch
         self.probesDehazeAirlight = probesDehazeAirlight
+        self.legacyDehazePerChannel = legacyDehazePerChannel
     }
 }
 
@@ -881,6 +890,7 @@ private struct DehazeParamsU {
     var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
     var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
     var d: SIMD4<Int32>   // qH, pad, pad, pad
+    var e: SIMD4<Float>   // 130: k (2A fade-out edge), legacy per-channel switch, pad, pad
 }
 
 private struct DisplayParams {
@@ -3574,8 +3584,9 @@ public final class RenderGraph {
     //                              minimum and writes a 1 × 1 texture (He's brightest-dark-channel
     //                              estimate, cheaply and deterministically);
     //   · `s1_9_dehaze_apply`    — full resolution: samples the block texture bilinearly, builds
-    //                              `t = max(1 − ω·D, t0)`, applies `J = (I − A(1 − t))/t`, and never
-    //                              clamps the top (the HDR tail is the point of 117).
+    //                              `t = max(1 − ω·D, t0)`, recovers **luminance** (130, hue
+    //                              preserving) with the `w = 1 − smoothstep(A, 2A, L)` fog-amount fade,
+    //                              and never clamps the top (the HDR tail is the point of 117).
     //
     // The airlight never comes back to the CPU on the shipped path; `probesDehazeAirlight` adds a
     // 4-byte blit for the acceptance's measurement.
@@ -3591,7 +3602,8 @@ public final class RenderGraph {
             b: SIMD4(plan.origin.x, plan.origin.y,
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
-            d: SIMD4(Int32(qH), 0, 0, 0))
+            d: SIMD4(Int32(qH), 0, 0, 0),
+            e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0, 0))
 
         let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
         let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)

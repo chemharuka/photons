@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "primaries.metal"
 using namespace metal;
 
 // S1.9 — **去雾**, the dark-channel prior (He/Sun/Tang 2010) in the **scene-linear** domain (117).
@@ -23,6 +24,25 @@ using namespace metal;
 // exactly `A·(1 − t)/t`. A sample darker than the airlight (`I < A`) gives `J < I` (it is haze, not
 // object). Neither direction is an unbounded brightening: the old `A = 1` in the display domain was
 // the special case where the airlight happened to be the encoding's white.
+//
+// **130 — the recovery is on luminance, and only where there is fog to account for.** The
+// per-channel `J_c = (I_c − A(1 − t))/t` subtracts the same constant from three different channels
+// and then divides by the same `t`, so the *difference* between channels is multiplied by `1/t`.
+// On a +2 EV blue sky that is a hue rotation: B − R grew 5.3× and saturation 5.1× at dehaze 20 while
+// the picture also darkened. Two changes fix it:
+//
+//   1. **Hue-preserving recovery.** He's inversion is applied to the Rec.2020 luminance only, and the
+//      three channels are scaled by one common `gain`: `out = I·gain`. One gain cannot change a
+//      channel ratio, so hue and chroma are invariant and only brightness moves.
+//   2. **Participation by fog amount.** A veil can only lift a pixel *towards* `A`; its whole
+//      contribution is `A·(1 − t)`. For `L` far above `A` that contribution is negligible, so the
+//      correction fades out with `w = 1 − smoothstep(A, k·A, L)`, `k = 2`: at `L ≥ 2A` the pixel is
+//      left alone. This is an **amend of 117's "HDR participates"**, not a regression of it: 117
+//      rejected the old `A = 1` in display codes that brightened every highlight without bound; `A`
+//      is still measured, and the only thing 130 says is that a pixel brighter than twice the
+//      airlight carries no evidence of fog. Do not "restore" the per-channel formula.
+//
+// The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
 // **Three passes, as the stage is specified:**
 //
@@ -50,6 +70,8 @@ struct DehazeParams {
     int4 c;
     // qH, pad, pad, pad
     int4 d;
+    // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch (tests only), pad, pad
+    float4 e;
 };
 
 /// Per `q × q` block: `min` over the block of `min` over channels, in **linear Rec2020**. `min` is
@@ -105,9 +127,11 @@ kernel void s1_9_dehaze_airlight(texture2d<float, access::read> dark [[texture(0
     }
 }
 
-/// The recovery: `t = max(1 − ω·D, t0)`, `J = (I − A(1 − t))/t`, `out = mix(I, J, amount)`.
-/// Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`). No upper clamp: `J ≤ I/t0` is the
-/// physical bound, and S4's headroom is what decides how much of that tail is written.
+/// The recovery: `t = max(1 − ω·D, t0)`, then (130) the He inversion on **luminance only** with the
+/// `w = 1 − smoothstep(A, kA, L)` fog-amount fade, and one common gain on all three channels;
+/// `out = mix(I, J, amount)`. Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
+/// No upper clamp: `J ≤ I/t0` is the physical bound, and S4's headroom is what decides how much of
+/// that tail is written.
 kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::sample> dark [[texture(1)]],
                               texture2d<float, access::read> airlight [[texture(2)]],
@@ -146,7 +170,23 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
     float3 outRGB;
     if (amount >= 0.0) {
         float t = max(1.0 - omega * D, t0);
-        float3 clear = (I - A * (1.0 - t)) / t;
+        float3 clear;
+        if (p.e.y > 0.5) {
+            // Tests only: the pre-130 per-channel recovery, kept so the acceptance can show that the
+            // hue rotation is the formula's and not the rest of the chain's.
+            clear = (I - A * (1.0 - t)) / t;
+        } else {
+            // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
+            // and let the correction fade out where the veil cannot be a meaningful part of the
+            // pixel: `w = 0` for `L ≥ k·A`.
+            float L = dot(I, kWorkingLumaWeights);
+            float recovered = (L - A * (1.0 - t)) / t;
+            float k = max(p.e.x, 1.0);
+            float w = 1.0 - smoothstep(A, k * A, L);
+            float Lout = mix(L, recovered, w);
+            float gain = max(Lout, 0.0) / max(L, 1e-6);
+            clear = I * gain;
+        }
         outRGB = mix(I, clear, amount);
     } else {
         float3 hazy = I * 0.6 + 0.4 * A;
