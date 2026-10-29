@@ -235,11 +235,11 @@ final class TransformPanelTests: XCTestCase {
 
         XCTAssertEqual(loupe.cropTool.angleUIValue, 1.5, accuracy: 1e-9,
                        "敲进去的 1.5 是 UI 的正向角度")
-        XCTAssertEqual(loupe.cropTool.draft.straighten, -1.5, accuracy: 1e-9,
-                       "123: UI 正角 → 文档符号由 TransformSession.setAngle 决定")
+        XCTAssertEqual(loupe.cropTool.draft.straighten, 1.5, accuracy: 1e-9,
+                       "用户实测后（2026-10-29）：滑块正角就是文档正角，不再取反")
         // 087: 转动 is live — one typed value writes the document and commits one row.
-        XCTAssertEqual(session.edit.geometry.rotationDegrees, -1.5, accuracy: 1e-9,
-                       "123: 滑块向右 = 画面顺时针（文档存反向角）：\(session.edit.geometry.rotationDegrees)")
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, 1.5, accuracy: 1e-9,
+                       "滑块向右 = 画面顺时针（文档与 UI 同号）：\(session.edit.geometry.rotationDegrees)")
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
                        "一次输入 = 一条历史（松手 / 回车）")
         print("ANGLE · typed 1.5 → live document rotationDegrees "
@@ -495,8 +495,8 @@ final class TransformPanelTests: XCTestCase {
         pump(0.2)
         XCTAssertFalse(loupe.isCropping)
         XCTAssertEqual(root.inspectorWorkspaces.selection, .adjust)
-        XCTAssertEqual(session.edit.geometry.rotationDegrees, -5, accuracy: 1e-9,
-                       "123: 完成写入的是 TransformSession 的符号")
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, 5, accuracy: 1e-9,
+                       "完成写入的是 TransformSession 的符号（与 UI 同号）")
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
                        "123: 有改动加一条历史")
 
@@ -516,7 +516,7 @@ final class TransformPanelTests: XCTestCase {
         loupe.finishCropTool(.cancel)
         pump(0.2)
         XCTAssertFalse(loupe.isCropping)
-        XCTAssertEqual(session.edit.geometry.rotationDegrees, -5, accuracy: 1e-9,
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, 5, accuracy: 1e-9,
                        "Esc 不写文档")
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
                        "Esc 不加历史")

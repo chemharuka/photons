@@ -168,15 +168,20 @@ public struct TransformSession: Sendable, Equatable {
     public var effectiveCanvas: ImageSize { cropGeometry.canvas }
 
     /// The UI's slider value. `setAngle(uiValue:)` is the only place the sign is chosen.
-    public var angleUIValue: Double { -draft.straightenDegrees }
+    public var angleUIValue: Double { draft.straightenDegrees }
 
-    /// Slider positive → picture turns **clockwise**. The document's `rotationDegrees` is stored in
-    /// the sign S0 has always consumed, so the UI's positive value is written negated — here and
-    /// nowhere else.
+    /// Slider positive → picture turns the way the user expects. The document stores the angle
+    /// **as the slider shows it**; the negation that used to live here was the 122 "picture turns the
+    /// wrong way" bug (2026-10-29: the frame's limits looked fine because an inscribed rectangle is
+    /// mirror-symmetric, so only the picture revealed the sign).
     public mutating func setAngle(uiValue: Double) {
         let limit = GeometryGroup.straightenLimit
         let clamped = min(max(uiValue.isFinite ? uiValue : 0, -limit), limit)
-        draft.rotationDegrees = -clamped
+        // User 2026-10-29, after testing 123 in the app: pushing the slider right turned the picture
+        // **left**. The crop frame's limits looked right only because an inscribed rectangle is
+        // mirror-symmetric — a sign error is invisible there. The UI value therefore goes straight
+        // into the document (`+`), and the picture follows the slider.
+        draft.rotationDegrees = clamped
     }
 
     /// A ratio preset's lock, with the crop re-cut to it around the same centre.

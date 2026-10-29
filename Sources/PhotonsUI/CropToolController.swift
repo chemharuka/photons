@@ -270,7 +270,7 @@ public final class CropToolController {
     }
 
     /// The slider's value in the UI's own convention: positive = clockwise.
-    public var angleUIValue: Double { -CropTool.clampStraighten(draft.straighten) }
+    public var angleUIValue: Double { CropTool.clampStraighten(draft.straighten) }
 
     /// 123 — the one UI→document angle write. `TransformSession.setAngle(uiValue:)` chooses the
     /// sign; this method only carries its answer into the draft.
