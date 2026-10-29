@@ -636,7 +636,7 @@ final class BlackLevelTests: XCTestCase {
                 b: SIMD4(0, 0, 0, 0),
                 c: SIMD4(Float(content?.x ?? 0), 0,
                          Float(content?.width ?? width), Float(height)),
-                e: SIMD4(offset, 0, 0, 0))
+                e: SIMD4(offset, 1, 0, 0))
 
             guard let cb = queue.makeCommandBuffer(),
                   let enc = cb.makeComputeCommandEncoder() else { throw XCTSkip("no command buffer") }

@@ -151,8 +151,8 @@ struct S1Params {
     float4 a;   // gain, wbR, wbG, wbB
     float4 b;   // recovery, identity, blacks, whites
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    // 派单 071 — the linear black offset in scene-linear units (x), 3 pad. Read only by the `kTrim`
-    // instantiation.
+    // 派单 071 — the linear black offset in scene-linear units (x). 147 — the S1 exposure gain (y),
+    // handed to `s1_end_points` so whites' EV window is read on the unexposed light. 2 pad.
     float4 e;
 };
 
@@ -217,7 +217,7 @@ static inline void s1_body(texture2d<float, access::read> src,
         //    coordinate L, the **gain and the level** are applied in scene-linear light. Both sliders
         //    are clamped to their travel inside that function, so a hand-edited document cannot ask the
         //    kernel for 30 EV, and a mask asking for the same numbers gets the same picture.
-        v = s1_end_points<kHybrid>(v, p.b.z, p.b.w);
+        v = s1_end_points<kHybrid>(v, p.b.z, p.b.w, p.e.y);
     }
 
     // ⑤ The shoulder, untouched, and always last.

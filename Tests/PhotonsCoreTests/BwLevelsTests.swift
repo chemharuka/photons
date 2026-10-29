@@ -974,7 +974,7 @@ struct MetalKernelHarness {
         var p = Params(a: SIMD4(gain, 1, 1, 1),
                        b: SIMD4(recovery, 0, blacks, whites),
                        c: SIMD4(0, 0, Float(width), Float(height)),
-                       e: SIMD4(offset, 0, 0, 0))
+                       e: SIMD4(offset, 1, 0, 0))
         guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
             throw XCTSkip("no command buffer")
         }
@@ -1013,7 +1013,7 @@ struct MetalKernelHarness {
         }
         var p = Params(a: SIMD4(1, 1, 1, 1), b: SIMD4(0, 0, blacks, whites),
                        c: SIMD4(0, 0, Float(width), Float(height)),
-                       e: SIMD4(0, 0, 0, 0))
+                       e: SIMD4(0, 1, 0, 0))
         var samples: [Double] = []
         for _ in 0..<batches {
             let cb = try XCTUnwrap(queue.makeCommandBuffer())
