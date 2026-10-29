@@ -230,6 +230,14 @@ enum EditParameters {
             && areEqual(a.grainSize, b.grainSize)
             && areEqual(a.grainRoughness, b.grainRoughness)
             && a.grainSeedValue == b.grainSeedValue
+            // 2026-10-29 — 纹理 / 清晰度 / 去雾. Exactly the same failure as the grain lines above,
+            // found the same way (a user dragging a slider that snapped back to 0): without these
+            // three lines `applyEdit { texture = 10 }` returned on `isSemanticallyIdentical`, the
+            // document stayed at 0, `commitEdit` found nothing, and S3.8 was never encoded.
+            // `EffectsCardTests.testDetailFXRowsWriteTheDocument` is the test that now holds them.
+            && areEqual(a.texture, b.texture)
+            && areEqual(a.clarity, b.clarity)
+            && areEqual(a.dehaze, b.dehaze)
     }
 
     /// 2026-10-28 (078 B8): the two CA ratios. Same load-bearing rule as the grain lines above —

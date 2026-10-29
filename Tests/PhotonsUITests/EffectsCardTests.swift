@@ -216,6 +216,31 @@ final class EffectsCardTests: XCTestCase {
     }
 
     /// Per-row reset: 颗粒粗糙度 back to 50 (not 0), one entry.
+    /// 2026-10-29 — 用户实测：纹理 / 清晰度 / 去雾 拖一下就弹回 0，手填 10 也没有任何变化。
+    ///
+    /// 根因不在界面：`EditParameters.areEqual(EffectsGroup)` 漏了这三个字段，`applyEdit` 于是在
+    /// `isSemanticallyIdentical` 上短路返回，文档根本没被写过 —— 和文件里 grain 那三行注释记的是
+    /// 同一个坑。这条测试逐个字段写入 + 断言文档真的变了，且历史里真的多了一行。
+    func testDetailFXRowsWriteTheDocument() throws {
+        for (name, keyPath) in [("纹理", \EditModel.effects.texture),
+                                ("清晰度", \EditModel.effects.clarity),
+                                ("去雾", \EditModel.effects.dehaze)] {
+            let session = CatalogSession()
+            session.loadEditForAnchor()
+            let before = session.history.count
+
+            session.applyEdit { $0[keyPath: keyPath] = 10 }
+            XCTAssertEqual(session.edit[keyPath: keyPath], 10,
+                           "\(name) 写入必须落到文档上（applyEdit 不许短路）")
+            XCTAssertTrue(session.commitEdit(label: name), "\(name) 必须产生一条历史")
+            XCTAssertEqual(session.history.count, before + 1, "\(name) 应只多一行")
+
+            // 负值同样要能写进去：三个滑杆的行程是 −100…100。
+            session.applyEdit { $0[keyPath: keyPath] = -35 }
+            XCTAssertEqual(session.edit[keyPath: keyPath], -35, "\(name) 的负向也必须落地")
+        }
+    }
+
     func testOneRowsResetUsesItsOwnDefault() throws {
         let session = CatalogSession()
         session.loadEditForAnchor()
