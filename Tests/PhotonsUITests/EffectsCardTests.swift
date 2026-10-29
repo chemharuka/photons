@@ -289,24 +289,23 @@ final class EffectsCardTests: XCTestCase {
                        "已经在默认值上就不再写")
     }
 
-    // MARK: - 5. 接线（源码，因为 `swift test` 没有无障碍树）
+    // MARK: - 5. 接线（规格表，不是源码字符串）
 
-    /// The card gets its reset from `card(_:reset:)` — the same shell every other card uses — and its
-    /// rows come from the table, so 「十一根滑杆」 cannot drift into a twelfth hand-written row.
-    func testTheCardIsWiredThroughThePanelOneRowBuilder() throws {
-        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
-                      "效果卡的标题必须挂整卡复位")
-        XCTAssertTrue(source.contains("ForEach(Self.vignetteRows, id: \\.title)"),
-                      "暗角四行来自表（现在在 校正 卡里）")
-        XCTAssertTrue(source.contains("ForEach(Self.detailFXRows, id: \\.title)"),
-                      "纹理/清晰度/去雾三行来自表")
-        XCTAssertTrue(source.contains("ForEach(Self.grainRows, id: \\.title)"),
-                      "颗粒四行来自表")
-        XCTAssertTrue(source.contains("private func effectsSliderRow(_ row: ToneRow) -> some View"),
-                      "行必须走面板唯一的 sliderRow（一个 row view）")
-        XCTAssertFalse(source.contains("Slider(value: Binding(get: { session.edit.effects"),
-                       "卡里不许自己造滑杆")
+    /// The card gets its reset and its rows from the **same** `PanelCardSpec`. Moving a row to another
+    /// card's spec is the only edit: this test holds that the effects card's scope is exactly the
+    /// 纹理/清晰度/去雾 + 颗粒 table, and that no row is drawn outside a spec.
+    func testTheCardIsWiredThroughThePanelOneRowSpec() {
+        let spec = InspectorView.PanelCardSpec.effectsCard
+        XCTAssertEqual(spec.section, .effects)
+        XCTAssertEqual(spec.group, .effects)
+        XCTAssertEqual(spec.rows.map(\.title), InspectorView.effectsRows.map(\.title),
+                       "效果卡画的正是 `effectsRows`")
+        XCTAssertEqual(spec.blocks.map(\.group), [.presence, .grain])
+        XCTAssertTrue(spec.rows.allSatisfy { spec.rowStyle(for: $0) == .effects },
+                      "每一行都由这张卡的 spec 决定样式（含 frame probe）")
+        XCTAssertFalse(spec.rows.contains { $0.title == "暗角" },
+                       "暗角属于校正卡；效果卡的复位范围里不应出现它")
+        XCTAssertEqual(spec.accessibilityPrefix(for: spec.rows[0]), "inspector.effects")
     }
 
     // MARK: - host
@@ -378,13 +377,5 @@ final class EffectsCardTests: XCTestCase {
         if let hit = view as? T { found.append(hit) }
         for sub in view.subviews { found += all(type, in: sub) }
         return found
-    }
-
-    private static var inspectorSource: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
     }
 }

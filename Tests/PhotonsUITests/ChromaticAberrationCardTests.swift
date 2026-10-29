@@ -499,20 +499,22 @@ final class ChromaticAberrationCardTests: XCTestCase {
     /// release, the panel's only `sliderRow`, and no slider of its own. A card that wrote the model
     /// directly would pass the pixel test above and fail the double-click one.
     func testTheCardGoesThroughThePanelFurniture() throws {
-        let card = try Self.body(of: "private var correctionCard: some View {",
-                                 upTo: "/// 2026-10-28 (078 B8 / 096) — **色差**",
-                                 in: Self.inspectorSource)
-        XCTAssertTrue(card.contains("ForEach(Self.caRows"), "两行来自卡自己的表")
-        XCTAssertTrue(card.contains("caSliderRow(row)"), "每一行都要画出来")
-        XCTAssertTrue(card.contains("resetGroup(.correction)"), "标题双击 = 整组复位")
+        // 125: the 校正 card is a spec — its two CA rows and four vignette rows are the table the
+        // card draws and resets. No source string is needed to say which card owns a row.
+        let correction = InspectorView.PanelCardSpec.correctionCard
+        XCTAssertEqual(correction.section, .correction)
+        XCTAssertEqual(correction.group, .correction)
+        XCTAssertEqual(correction.blocks.map(\.group), [.ca, .vignette])
+        XCTAssertEqual(correction.blocks[0].rows, InspectorView.caRows, "两行来自卡自己的表")
+        XCTAssertTrue(correction.rows.allSatisfy {
+            correction.rowStyle(for: $0) == .chromaticAberration || $0.shape == .linear
+        })
+        XCTAssertEqual(correction.rowStyle(for: InspectorView.caRows[0]), .chromaticAberration)
+        XCTAssertEqual(correction.accessibilityPrefix(for: InspectorView.caRows[0]), "inspector.detail")
+        XCTAssertFalse(InspectorView.PanelCardSpec.all.contains { $0.section == .detail },
+                       "细节卡没有 row spec，更不许再画色差")
 
-        let detail = try Self.body(of: "private var detailCard: some View {",
-                                   upTo: "/// 2026-10-28 (096) — **校正**",
-                                   in: Self.inspectorSource)
-        XCTAssertFalse(detail.contains("ForEach(Self.caRows"), "细节卡里不许再画色差")
-        XCTAssertFalse(detail.contains("caSliderRow(row)"), "细节卡里不许再有色差行")
-
-        let rows = try Self.body(of: "private func caSliderRow(_ row: ToneRow) -> some View {",
+        let rows = try Self.body(of: "private func caSliderRow(_ row: ToneRow,",
                                  upTo: "/// 色差's slider position ↔ document α",
                                  in: Self.inspectorSource)
         XCTAssertTrue(rows.contains("resets.field(row.keyPath, label: row.title)"),

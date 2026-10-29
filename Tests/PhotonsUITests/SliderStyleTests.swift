@@ -164,8 +164,8 @@ final class SliderStyleTests: XCTestCase {
         // 细节卡的 shape 来自它的表，Light 卡来自 `lightRows`，黑电平来自 `blackLevelRows`。
         XCTAssertTrue(source.contains("ForEach(Self.detailContent.rows"),
                       "the 细节 card iterates the table this test asserts on")
-        XCTAssertTrue(source.contains("ForEach(Self.lightRows"),
-                      "the Light card iterates the table this test asserts on")
+        XCTAssertEqual(InspectorView.PanelCardSpec.lightCard.rows, InspectorView.lightRows,
+                       "the Light card's spec is the table this test asserts on")
         XCTAssertTrue(source.contains("ForEach(Self.blackLevelRows"),
                       "the 黑电平 card iterates the table this test asserts on")
     }
