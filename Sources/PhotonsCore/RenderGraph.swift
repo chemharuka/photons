@@ -263,6 +263,56 @@ public struct LinearPixels: Sendable {
         self.init(width: image.width, height: image.height, rgba: image.rgba,
                   primaries: image.primaries)
     }
+
+    /// 113 — the **SDR base** of an HDR export: the HDR frame first, then tone map, then the OETF.
+    ///
+    /// The order matters. Deriving the base from a separate `s4_display` render would clamp *before*
+    /// anything else had a say, so the gain map's ratio would be measured against a picture that was
+    /// hard-cut at display white; and once the export grows a real tone map (112) the two halves would
+    /// be projections of different pictures. Here both halves come from the same extended-range frame.
+    ///
+    /// The tone map is the identity-in-effect clamp `min(v, 1)` for now — 112 replaces this one line
+    /// with the shoulder, and nothing else in the export path has to move.
+    ///
+    /// `srgb_encode` is a function of the half value, so it is table-driven over all 65 536 half bit
+    /// patterns: a 60 Mpx frame is 180 M lookups instead of 180 M `pow` calls (measured 0.06 s vs 3.9 s).
+    public func displaySDR(bitDepth: Int) -> DisplayImage {
+        var out = [Float16](repeating: 0, count: rgba.count)
+        let table = Self.srgbHalfTable
+        rgba.withUnsafeBufferPointer { src in
+            out.withUnsafeMutableBufferPointer { dst in
+                var i = 0
+                let n = src.count
+                while i < n {
+                    // RGB go through the transfer function; alpha is copied verbatim.
+                    dst[i] = Float16(bitPattern: table[Int(src[i].bitPattern)])
+                    dst[i + 1] = Float16(bitPattern: table[Int(src[i + 1].bitPattern)])
+                    dst[i + 2] = Float16(bitPattern: table[Int(src[i + 2].bitPattern)])
+                    dst[i + 3] = src[i + 3]
+                    i += 4
+                }
+            }
+        }
+        return DisplayImage(width: width, height: height, rgba: out, primaries: primaries,
+                            bitDepth: bitDepth, linear: self)
+    }
+
+    /// `texture → half`, for every half bit pattern: `srgb_encode(min(max(v, 0), 1))`.
+    private static let srgbHalfTable: [UInt16] = {
+        var table = [UInt16](repeating: 0, count: 1 << 16)
+        for bits in 0..<(1 << 16) {
+            let v = Float(Float16(bitPattern: UInt16(bits)))
+            let clamped = Swift.min(Swift.max(v, 0), 1)
+            let encoded: Float
+            if clamped <= 0.0031308 {
+                encoded = 12.92 * clamped
+            } else {
+                encoded = 1.055 * powf(clamped, 1.0 / 2.4) - 0.055
+            }
+            table[bits] = Float16(encoded).bitPattern
+        }
+        return table
+    }()
 }
 
 /// Display-encoded pixels (0…1, sRGB transfer already applied) plus the primaries they are in.

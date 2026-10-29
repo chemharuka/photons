@@ -81,6 +81,28 @@ public enum UIExportRenderer {
                                                       sourceURL: url),
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
+        // 113 — HDR export is **one** render of the HDR frame; the SDR base is a projection of it.
+        //
+        // The order used to be the other way round (SDR render first, then a second `linearOutput`
+        // pass), which meant the gain map's ratio was measured against a picture that had already
+        // been hard-cut at display white, and would have split into two unrelated histories the
+        // moment the SDR side grew a real tone map (112). Now both halves come from one frame.
+        if preset.isHDR {
+            let hdr = RenderOptions(canvas: nil,
+                                    scale: scale / Double(decodeScale),
+                                    display: DisplayOptions(primaries: preset.colorSpace,
+                                                            bitDepth: preset.effectiveBitDepth,
+                                                            headroom: 1,
+                                                            linearOutput: true),
+                                    useCache: false,
+                                    wantsPixels: true)
+            guard let frame = try graph.render(edit, options: hdr).display else {
+                throw UIExportError.noPixels(item.name)
+            }
+            // `s4_display_linear` already applied the primaries matrix, so this is tone map + OETF
+            // only. The tone map is `min(v, 1)` until 112 swaps in the shoulder.
+            return LinearPixels(frame).displaySDR(bitDepth: preset.effectiveBitDepth)
+        }
         let options = RenderOptions(canvas: nil,
                                     scale: scale / Double(decodeScale),
                                     display: DisplayOptions(primaries: preset.colorSpace,
@@ -89,23 +111,7 @@ public enum UIExportRenderer {
                                     useCache: false,
                                     wantsPixels: true)
         let result = try graph.render(edit, options: options)
-        guard var pixels = result.display else { throw UIExportError.noPixels(item.name) }
-        // 106 — HDR is a second pass through the same graph, this time through `s4_display_linear`
-        // (extended-range values, no OETF). `Exporter.write` only takes `GainMapHEIC` when this
-        // companion is present; without it the file would silently be the SDR base (100's fallback).
-        if preset.isHDR {
-            let linear = RenderOptions(canvas: nil,
-                                       scale: scale / Double(decodeScale),
-                                       display: DisplayOptions(primaries: preset.colorSpace,
-                                                               bitDepth: preset.effectiveBitDepth,
-                                                               headroom: 1,
-                                                               linearOutput: true),
-                                       useCache: false,
-                                       wantsPixels: true)
-            if let linearPixels = try graph.render(edit, options: linear).display {
-                pixels = pixels.withLinear(LinearPixels(linearPixels))
-            }
-        }
+        guard let pixels = result.display else { throw UIExportError.noPixels(item.name) }
         return pixels
     }
 
