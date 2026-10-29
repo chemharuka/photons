@@ -2,7 +2,11 @@ import Foundation
 import PhotonsCore
 import PhotonsExport
 import PhotonsCatalog
+import PhotonsDepth
+import CoreVideo
 import CryptoKit
+import CoreGraphics
+import ImageIO
 
 // photonsctl — the acceptance harness. Deliberately dependency-free (no
 // swift-argument-parser): it must keep building even when the app is mid-refactor.
@@ -28,7 +32,7 @@ let valueFlags: Set<String> = [
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
-    "--repeat", "--album", "--tone-map", "--tone-map-headroom",
+    "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -225,6 +229,205 @@ func cmdCache(_ a: Args) throws {
         let gb = Double(a.value("--limit-gb") ?? "20") ?? 20
         store.evict(keepingBytes: Int64(gb * 1e9))
         note(String(format: "after evict %.1f MB (limit %.0f GB)", Double(store.totalBytes()) / 1e6, gb))
+    }
+}
+
+// MARK: - 120a: depth (Depth Anything V2 Small)
+
+/// Peak resident size of this process. macOS reports `ru_maxrss` in bytes.
+func peakResidentBytes() -> Int64 {
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    return Int64(usage.ru_maxrss)
+}
+
+/// Set when `--model` pointed at an `.mlpackage`; removed when the command finishes.
+var depthModelTemporaryDirectory: URL?
+
+/// `--model` is either a compiled `.mlmodelc` or the shipped `.mlpackage`; the latter is compiled
+/// into a throwaway directory with the same `coremlcompiler` `scripts/depth-model.sh` calls.
+func compileDepthPackage(_ url: URL) throws -> URL {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("photons-depth-model-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    process.arguments = ["coremlcompiler", "compile", url.path, tmp.path]
+    do { try process.run() } catch { die("cannot run xcrun coremlcompiler: \(error)") }
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        die("coremlcompiler failed (\(process.terminationStatus)) for \(url.path)")
+    }
+    let compiled = tmp.appendingPathComponent(
+        url.deletingPathExtension().lastPathComponent + ".mlmodelc")
+    guard FileManager.default.fileExists(atPath: compiled.path) else {
+        die("coremlcompiler produced no \(compiled.lastPathComponent)")
+    }
+    note("compiled    \(url.lastPathComponent) -> \(compiled.path)")
+    depthModelTemporaryDirectory = tmp
+    return compiled
+}
+
+/// The model the CLI should use: `--model`, else the app bundle, else the two places the build
+/// scripts put it. Nothing is downloaded or guessed.
+func resolveDepthModelURL(_ a: Args) -> URL {
+    let fm = FileManager.default
+    if let raw = a.value("--model") {
+        let url = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+        guard fm.fileExists(atPath: url.path) else { die("no such model: \(url.path)") }
+        if url.pathExtension == "mlpackage" {
+            do { return try compileDepthPackage(url) } catch { die("\(error)") }
+        }
+        return url
+    }
+    let cwd = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+    // Do **not** resolve the executable's symlinks: `.build/debug` is a symlink into
+    // `.build/out/Products/Debug`, and the model sits beside `.build`, not beside the product.
+    let executable = URL(fileURLWithPath: CommandLine.arguments[0], relativeTo: cwd)
+        .standardizedFileURL
+    let debugDir = executable.deletingLastPathComponent()
+    let buildDir = debugDir.deletingLastPathComponent()
+    let name = "\(DepthModel.modelName).mlmodelc"
+    let candidates = [
+        Bundle.main.url(forResource: DepthModel.modelName, withExtension: "mlmodelc"),
+        Optional(debugDir.appendingPathComponent(name)),
+        Optional(buildDir.appendingPathComponent("depth-model/\(name)")),
+        Optional(buildDir.appendingPathComponent("Photons.app/Contents/Resources/\(name)")),
+        Optional(cwd.appendingPathComponent(".build/depth-model/\(name)")),
+        Optional(cwd.appendingPathComponent(".build/Photons.app/Contents/Resources/\(name)")),
+    ].compactMap { $0 }
+    if let hit = candidates.first(where: { fm.fileExists(atPath: $0.path) }) { return hit }
+    die("""
+    depth model not found: \(name) (looked in the bundle, .build/debug and .build/depth-model).
+      build the app:        make app
+      or the model alone:   scripts/depth-model.sh
+      or pass a path:       --model <…/\(DepthModel.modelName).mlmodelc|.mlpackage>
+    """)
+}
+
+/// The decoded scene-linear buffer as the 8-bit sRGB picture the model was trained on. A 12-bit
+/// lookup table applies the sRGB OETF once per code; `Histogram.srgbEncode` is the one definition.
+func depthPixelBuffer(_ image: LinearImage) throws -> CVPixelBuffer {
+    let buffer = try PixelBufferResize.makePixelBuffer(width: image.width, height: image.height,
+                                                      pixelFormat: kCVPixelFormatType_32BGRA)
+    var lut = [UInt8](repeating: 0, count: 4097)
+    for i in 0...4096 {
+        lut[i] = UInt8(clamping: Int((Histogram.srgbEncode(Float(i) / 4096) * 255).rounded()))
+    }
+    func code(_ linear: Float) -> UInt8 {
+        guard linear.isFinite else { return 0 }
+        return lut[Int((min(max(linear, 0), 1) * 4096).rounded())]
+    }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+        throw DepthError.inferenceFailed("cannot lock the BGRA copy of the decode")
+    }
+    let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+    let width = image.width
+    for y in 0..<image.height {
+        let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
+        let source = y * width * 4
+        for x in 0..<width {
+            let i = source + x * 4, o = x * 4
+            row[o] = code(Float(image.rgba[i + 2]))
+            row[o + 1] = code(Float(image.rgba[i + 1]))
+            row[o + 2] = code(Float(image.rgba[i]))
+            row[o + 3] = 255
+        }
+    }
+    return buffer
+}
+
+/// A human-readable 8-bit grey TIFF: after `normalised()` larger (nearer) is brighter, so the
+/// foreground comes out white and the sky black.
+func writeDepthTIFF(_ map: DepthMap, to url: URL) throws {
+    let stretched = map.normalised() ?? map
+    var bytes = [UInt8](repeating: 0, count: map.width * map.height)
+    for i in 0..<bytes.count {
+        let value = Float(stretched.values[i])
+        bytes[i] = UInt8(clamping: Int((min(max(value, 0), 1) * 255).rounded()))
+    }
+    guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+          let image = CGImage(width: map.width, height: map.height, bitsPerComponent: 8,
+                              bitsPerPixel: 8, bytesPerRow: map.width,
+                              space: CGColorSpaceCreateDeviceGray(),
+                              bitmapInfo: CGBitmapInfo(rawValue: 0), provider: provider,
+                              decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    else { die("cannot build the depth TIFF image") }
+
+    let tmp = url.appendingPathExtension("tmp")
+    try? FileManager.default.removeItem(at: tmp)
+    guard let destination = CGImageDestinationCreateWithURL(tmp as CFURL, "public.tiff" as CFString,
+                                                           1, nil) else {
+        die("cannot create \(tmp.path)")
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { die("cannot write \(tmp.path)") }
+    try? FileManager.default.removeItem(at: url)
+    try FileManager.default.moveItem(at: tmp, to: url)
+}
+
+func cmdDepth(_ a: Args) throws {
+    let url = requireRaw(a)
+    guard let scale = Float(a.value("--scale") ?? "1"), scale > 0 else {
+        die("bad --scale '\(a.value("--scale") ?? "")' (want > 0, e.g. 0.25)")
+    }
+    let modelURL = resolveDepthModelURL(a)
+    defer {
+        if let tmp = depthModelTemporaryDirectory { try? FileManager.default.removeItem(at: tmp) }
+    }
+    let model: DepthModel
+    do {
+        model = try DepthModel(modelURL: modelURL)
+    } catch {
+        die("\(error)")
+    }
+    note("model       \(modelURL.lastPathComponent)  input \(model.inputWidth)×\(model.inputHeight)")
+
+    let opts = decodeOptions(a)
+    let decoder = makeDecoder()
+    let decodeStart = CFAbsoluteTimeGetCurrent()
+    let decoded = try decoder.decode(url, options: opts).oriented()
+    note(String(format: "decode      %.2f s  %d×%d (scale %.3f)",
+                CFAbsoluteTimeGetCurrent() - decodeStart, decoded.width, decoded.height,
+                opts.scale))
+
+    let convertStart = CFAbsoluteTimeGetCurrent()
+    let buffer = try depthPixelBuffer(decoded)
+    note(String(format: "encode      %.2f s  linear -> BGRA8", CFAbsoluteTimeGetCurrent() - convertStart))
+
+    var cold = 0.0
+    var hot: [Double] = []
+    var map: DepthMap?
+    for run in 0...5 {
+        let start = CFAbsoluteTimeGetCurrent()
+        let produced = try model.infer(pixelBuffer: buffer)
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        if run == 0 {
+            cold = elapsed
+            map = produced
+        } else {
+            hot.append(elapsed)
+        }
+    }
+    guard let depth = map else { die("depth inference produced nothing") }
+    note(String(format: "infer cold  %.1f ms", cold * 1000))
+    note(String(format: "infer hot   p50 %.1f ms  (min %.1f, max %.1f, n=%d)",
+                median(hot) * 1000, (hot.min() ?? 0) * 1000, (hot.max() ?? 0) * 1000, hot.count))
+    note("depth       \(depth.width)×\(depth.height)")
+
+    let finite = depth.values.map { Float($0) }.filter { $0.isFinite }.sorted()
+    if let low = finite.first, let high = finite.last {
+        note(String(format: "range       min %.4f  max %.4f  p50 %.4f",
+                    low, high, percentile(finite.map { Double($0) }, 0.5)))
+    }
+    note(String(format: "peakRSS     %.1f MB", Double(peakResidentBytes()) / 1e6))
+
+    if let out = a.value("--out") {
+        let path = URL(fileURLWithPath: (out as NSString).expandingTildeInPath)
+        try writeDepthTIFF(depth, to: path)
+        note("wrote       \(path.path)  (near = bright)")
     }
 }
 
@@ -759,6 +962,7 @@ guard let cmd = argv.first else {
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
       photonsctl histogram <raw> [--edit <json>] [--roi x,y,w,h] [--bins 256] [--json|--csv]
       photonsctl detail <raw> [--version V] [--scale F]   # 派单 031 降噪/细节解码参数实测
+      photonsctl depth  <raw> [--scale F] [--out map.tiff] [--model path]   # 120: 深度图（近 = 亮）
 
       photonsctl library create  <pkg.photonslibrary>
       photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
@@ -813,6 +1017,7 @@ do {
     case "bench":    try cmdBench(rest)
     case "histogram": try cmdHistogram(rest)
     case "detail":    try cmdDetail(rest)
+    case "depth":     try cmdDepth(rest)
     case "library":  try cmdLibrary(rest)
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)
