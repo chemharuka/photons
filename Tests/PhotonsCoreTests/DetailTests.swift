@@ -487,7 +487,8 @@ final class DetailTests: XCTestCase {
         // 2026-10-28: the current version is 10 (黑白 的 switch 与八段 mix 是 8，90° 旋转的
         // `geometry.quarterTurns` 是 9，修复画笔的 `healSpots` 是 10); the migration still divides a
         // schema-5 position by ten and stamps the **current** version.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
+        // 版本号本身在 BlackLevelTests 里被钉住；这里只关心「迁移把文档盖成当前版本」。
+        XCTAssertEqual(old.schemaVersion, EditModel.currentSchemaVersion)
 
         // Old 50 → amount 0.5 → new position 5.
         let half = try migrate(#"""
