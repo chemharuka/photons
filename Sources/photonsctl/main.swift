@@ -28,7 +28,7 @@ let valueFlags: Set<String> = [
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
-    "--repeat", "--album",
+    "--repeat", "--album", "--tone-map", "--tone-map-headroom",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -244,6 +244,10 @@ struct RenderGolden: Codable {
     var osVersion: String
     var createdAt: String
     var note: String?
+    /// 133 — only written when the render used a tone map, so a golden recorded on the historical
+    /// hard-clamp path still decodes (and re-encodes) exactly as before.
+    var toneMap: String?
+    var toneMapHeadroom: Float?
 }
 
 func sha256Hex(_ data: Data) -> String {
@@ -260,6 +264,49 @@ func displayOptions(_ a: Args) -> DisplayOptions {
     // without an EDR screen (the card itself always uses the screen's own headroom).
     if let h = a.value("--headroom").flatMap(Double.init) { d.headroom = min(max(h, 1), 16) }
     return d
+}
+
+/// 133 — `--tone-map none|global`. `nil` is the historical S4 hard clamp, so every existing
+/// golden and recorded baseline stays byte-identical; `global` is `SDRToneMap` (the same
+/// `CIToneMapHeadroom` roll-off the export uses) and is the right choice for measurement renders.
+func toneMapOption(_ a: Args) -> SDRToneMap? {
+    let raw = (a.value("--tone-map") ?? "none").lowercased()
+    switch raw {
+    case "none":
+        if a.value("--tone-map-headroom") != nil {
+            die("--tone-map-headroom needs --tone-map global")
+        }
+        return nil
+    case "global":
+        var map = SDRToneMap.global
+        if let rawHeadroom = a.value("--tone-map-headroom") {
+            guard let h = Float(rawHeadroom), h.isFinite, h >= 1 else {
+                die("bad --tone-map-headroom '\(rawHeadroom)' (want ≥ 1, e.g. 6)")
+            }
+            map = SDRToneMap(measurementRatio: map.measurementRatio, maxHeadroom: h)
+        }
+        return map
+    default:
+        die("bad --tone-map '\(raw)' (want none | global)")
+    }
+}
+
+func goldenToneMap(_ rec: RenderGolden, args: Args) -> SDRToneMap? {
+    let recorded = rec.toneMap ?? "none"
+    guard recorded == "none" || recorded == "global" else {
+        die("golden recorded an unknown tone-map '\(recorded)'")
+    }
+    if let requested = args.value("--tone-map"), requested.lowercased() != recorded {
+        die("golden was recorded with --tone-map \(recorded); "
+            + "pass --tone-map \(recorded) or re-record")
+    }
+    guard recorded == "global" else { return nil }
+    let map = SDRToneMap(maxHeadroom: rec.toneMapHeadroom ?? SDRToneMap.global.maxHeadroom)
+    if let raw = args.value("--tone-map-headroom"), let h = Float(raw), h != map.maxHeadroom {
+        die("golden was recorded with --tone-map-headroom \(map.maxHeadroom); "
+            + "pass \(map.maxHeadroom) or re-record")
+    }
+    return map
 }
 
 func exportOptions(_ a: Args, url: URL) -> ExportOptions {
@@ -364,6 +411,7 @@ func cmdRender(_ a: Args) throws {
     let outURL = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
     let scale = a.value("--scale").flatMap(Double.init) ?? 1
     let display = displayOptions(a)
+    let toneMap = toneMapOption(a)
     let (edits, names) = try loadEdits(a)
     let trace = a.has("--trace-stages")
 
@@ -391,18 +439,21 @@ func cmdRender(_ a: Args) throws {
     let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
     guard let goldenMode = a.value("--golden") else {
         try renderAll(a, graph: graph, edits: edits, names: names, outURL: outURL,
-                      scale: scale, renderScale: renderScale, display: display, trace: trace,
+                      scale: scale, renderScale: renderScale, display: display,
+                      toneMap: toneMap, trace: trace,
                       raw: url, rawHash: fileHash, decoderVersion: version)
         return
     }
     guard ["record", "check"].contains(goldenMode) else { die("--golden needs record|check") }
     try renderAll(a, graph: graph, edits: edits, names: names, outURL: outURL,
-                  scale: scale, renderScale: renderScale, display: display, trace: trace,
+                  scale: scale, renderScale: renderScale, display: display,
+                  toneMap: toneMap, trace: trace,
                   raw: url, rawHash: fileHash, decoderVersion: version, goldenMode: goldenMode)
 }
 
 func renderAll(_ a: Args, graph: RenderGraph, edits: [EditModel], names: [String], outURL: URL,
-               scale: Double, renderScale: Double, display: DisplayOptions, trace: Bool,
+               scale: Double, renderScale: Double, display: DisplayOptions,
+               toneMap: SDRToneMap?, trace: Bool,
                raw: URL, rawHash: String, decoderVersion: String, goldenMode: String? = nil) throws {
     let dir = URL(fileURLWithPath: ((a.value("--dir") ?? "Tests/Golden") as NSString).expandingTildeInPath)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -416,12 +467,44 @@ func renderAll(_ a: Args, graph: RenderGraph, edits: [EditModel], names: [String
             outFile = URL(fileURLWithPath: base.path + "-" + name + (ext.isEmpty ? "" : "." + ext))
         }
 
+        let ex = exportOptions(a, url: outFile)
+        let goldenURL = dir.appendingPathComponent(
+            String(format: "render-%@-s%.2f.json", name, scale))
+
+        // Check reproduces the tone map recorded with the golden; a mismatch with an explicit
+        // flag is an error rather than a silent second baseline under the same filename.
+        var effectiveToneMap = toneMap
+        var checked: RenderGolden?
+        if let mode = goldenMode, mode == "check" {
+            guard FileManager.default.fileExists(atPath: goldenURL.path) else {
+                die("no golden at \(goldenURL.path) — run with --golden record")
+            }
+            let rec = try JSONDecoder().decode(RenderGolden.self, from: Data(contentsOf: goldenURL))
+            effectiveToneMap = goldenToneMap(rec, args: a)
+            checked = rec
+        }
+
         let opts = RenderOptions(canvas: nil, scale: renderScale, display: display,
                                  useCache: true, wantsPixels: true)
-        let result = try graph.render(edit, options: opts)
-        guard let pixels = result.display else { die("render returned no pixels") }
+        let result: RenderResult
+        let pixels: DisplayImage
+        if let map = effectiveToneMap {
+            // 133 — the same two-step the export uses: `s4_display_linear`, then the global roll-off
+            // and one OETF. The linear pass has its own cache key, so the hard-clamp path is untouched.
+            var linearDisplay = display
+            linearDisplay.linearOutput = true
+            let linearResult = try graph.render(edit, options: RenderOptions(
+                canvas: nil, scale: renderScale, display: linearDisplay,
+                useCache: true, wantsPixels: true))
+            guard let frame = linearResult.display else { die("render returned no pixels") }
+            result = linearResult
+            pixels = LinearPixels(frame).displaySDR(bitDepth: display.bitDepth, toneMap: map)
+        } else {
+            result = try graph.render(edit, options: opts)
+            guard let rendered = result.display else { die("render returned no pixels") }
+            pixels = rendered
+        }
 
-        let ex = exportOptions(a, url: outFile)
         try Exporter.write(pixels, to: outFile, options: ex)
         let bytes = try Data(contentsOf: outFile)
         let fileDigest = sha256Hex(bytes)
@@ -439,8 +522,6 @@ func renderAll(_ a: Args, graph: RenderGraph, edits: [EditModel], names: [String
         note("file sha   \(fileDigest)")
 
         guard let mode = goldenMode else { continue }
-        let goldenURL = dir.appendingPathComponent(
-            String(format: "render-%@-s%.2f.json", name, scale))
         if mode == "record" {
             let rec = RenderGolden(raw: raw.lastPathComponent, rawSHA256: rawHash,
                                    decoderVersion: decoderVersion, edit: name, scale: scale,
@@ -449,15 +530,14 @@ func renderAll(_ a: Args, graph: RenderGraph, edits: [EditModel], names: [String
                                    stageKeys: result.keys.shortTrace,
                                    osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                                    createdAt: ISO8601DateFormatter().string(from: Date()),
-                                   note: "Recorded by photonsctl render. Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.")
+                                   note: "Recorded by photonsctl render. Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.",
+                                   toneMap: effectiveToneMap == nil ? nil : "global",
+                                   toneMapHeadroom: effectiveToneMap?.maxHeadroom)
             try JSONEncoder.pretty.encode(rec).write(to: goldenURL, options: .atomic)
             note("golden     recorded \(goldenURL.lastPathComponent)")
             continue
         }
-        guard FileManager.default.fileExists(atPath: goldenURL.path) else {
-            die("no golden at \(goldenURL.path) — run with --golden record")
-        }
-        let rec = try JSONDecoder().decode(RenderGolden.self, from: Data(contentsOf: goldenURL))
+        guard let rec = checked else { die("golden check lost its record") }
         if rec.pixelSHA256 == pixels.sha256() && rec.fileSHA256 == fileDigest {
             note("golden     PASS \(goldenURL.lastPathComponent)")
         } else {
@@ -701,6 +781,8 @@ guard let cmd = argv.first else {
       --quality F      lossy quality 0…1     (default 0.95)
       --trace-stages   print which stages executed and which came from the cache
       --golden         record | check        (baseline in --dir, default Tests/Golden)
+      --tone-map       none | global         (default none; use global for measurement renders)
+      --tone-map-headroom F  global tone map -R (≥1, default 6; needs --tone-map global)
       --cache-dir      keep decoded linear buffers on disk between runs
 
     decode options:
