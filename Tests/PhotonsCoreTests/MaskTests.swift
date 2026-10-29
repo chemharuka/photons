@@ -1041,8 +1041,11 @@ final class MaskTests: XCTestCase {
         let clamped = crop.clamped()
         let frame = (width: Double(dump.width), height: Double(dump.height))
         let cs = cos(rotation * Double.pi / 180), sn = sin(rotation * Double.pi / 180)
-        // No output window here, so the frame *is* the canvas and `p.f.xy` is its size.
-        let fx = frame.width, fy = frame.height
+        // 132: at θ ≠ 0 the canvas is the rotated crop's bounding box and the frame is centred in it,
+        // so `p.f.xy` is the frame's pixel size and the canvas origin is `(frame − canvas)/2`.
+        let framePixels = edit.geometry.outputPixels(in: ImageSize(width: image.width, height: image.height))
+        let fx = Double(framePixels.width), fy = Double(framePixels.height)
+        let ox = (Double(dump.width) - fx) / 2, oy = (Double(dump.height) - fy) / 2
 
         var worst = 0.0
         for y in 0..<dump.height {
@@ -1051,8 +1054,8 @@ final class MaskTests: XCTestCase {
                 // the frame, flip, then turn the **pixel** offset about the frame's centre.
                 // 126: S0 walks canvas → source with `R(−θ)` (its `sintheta` is the inverse sine),
                 // because `+θ` is the picture's clockwise turn in the other direction.
-                var u = (Double(x) + 0.5) / fx
-                var v = (Double(y) + 0.5) / fy
+                var u = (Double(x) + 0.5 - ox) / fx
+                var v = (Double(y) + 0.5 - oy) / fy
                 u = 1 - u                                  // flipHorizontal
                 let px = (u - 0.5) * fx, py = (v - 0.5) * fy
                 let r = ((px * cs + py * sn) / fx, (-px * sn + py * cs) / fy)
@@ -1066,15 +1069,16 @@ final class MaskTests: XCTestCase {
         }
         XCTAssertLessThan(worst, 2.0 / 255.0,
                           "the atlas does not invert crop/rotation/flip (worst \(worst))")
-        XCTAssertLessThan(dump.width, image.width, "the atlas follows the crop, not the source")
+        XCTAssertLessThan(crop.clamped().width * Double(image.width), Double(dump.width),
+                          "the atlas follows the crop, not the source")
 
         // Where S0's own map puts the probe, in canvas pixel indices (`MaskCanvasMapping` is the same
         // arithmetic with the flips in it, which is what makes it the right thing to compare to).
         let mapping = MaskCanvasMapping(geometry: edit.geometry, source: ImageSize(width: image.width,
                                                                                   height: image.height),
-                                        content: ImageSize(width: dump.width, height: dump.height),
+                                        content: framePixels,
                                         canvas: ImageSize(width: dump.width, height: dump.height),
-                                        origin: (0, 0))
+                                        origin: (ox, oy))
         let expectedPoint = mapping.canvasPoint(probeSource)
 
         var sx = 0.0, sy = 0.0, sw = 0.0

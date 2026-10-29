@@ -56,6 +56,8 @@ final class CropRotatedFrameClampTests: XCTestCase {
                                                              height: source.height)
         let controller = CropToolController(session: session)
         XCTAssertTrue(controller.begin())
+        // 132: 803aff6's "the drawn frame must be inscribed in the turned picture" is opt-in now.
+        controller.clampsToRotatedFrame = true
 
         for degrees in [9.0, 15, 45] {
             controller.draft = CropToolController.Draft(crop: .full, straighten: degrees,
@@ -104,13 +106,16 @@ final class CropRotatedFrameClampTests: XCTestCase {
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, editor.session))
         let source = loupe.cropSourceSize
         XCTAssertEqual(source, ImageSize(width: 9520, height: 6336), "the upright frame")
+        // 132: this test keeps covering the opt-in inscribed rect (the shipped default no longer
+        // shrinks; `testTheFrameMayLeaveThePicture…` covers that).
+        loupe.cropTool.clampsToRotatedFrame = true
 
         loupe.cropTool.setStraighten(9)
         loupe.refreshCropTool()
         XCTAssertEqual(loupe.cropTool.draft.straighten, 9)
 
         let drawn = loupe.cropTool.effectiveCrop(source: source)
-        let expected = CropMath.clampedToRotatedFrame(.full, in: source, degrees: 9)
+        let expected = CropMath.clampedToRotatedFrame(.full, in: source, degrees: 9, keepsInsideRotatedFrame: true)
         print(String(format: "真窗口 · 9° · 绘制框 l %.12f t %.12f r %.12f b %.12f",
                      drawn.left, drawn.top, drawn.right, drawn.bottom))
 

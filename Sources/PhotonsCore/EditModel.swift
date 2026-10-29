@@ -832,7 +832,9 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         // a writer that emits both writes them consistently, and a hand-edited document says what it
         // means once, in the newer spelling.
         if let edges = try? c.decodeIfPresent(CropRect.self, forKey: AnyCodingKey("cropRect")) {
-            v.crop = edges.clamped().normalizedRect
+            // 132: a crop may deliberately lie outside the photograph (the output frame may be
+            // larger than the picture). In-range documents come back exactly as before.
+            v.crop = edges.clamped(allowsOutsideSource: true).normalizedRect
         }
         v.rotationDegrees = c.val("rotationDegrees", v.rotationDegrees)
         v.flipHorizontal = c.val("flipHorizontal", v.flipHorizontal)
@@ -884,7 +886,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// its width is a fraction of the turned width). This is the same two calls with the turned
     /// size in the second one, kept in one place so no caller can forget the swap.
     public func outputPixels(in source: ImageSize) -> ImageSize {
-        CropMath.outputSize(renderCrop(source: source), in: orientedSource(source))
+        CropMath.outputSize(renderCrop(source: source), in: orientedSource(source),
+                            allowsOutsideSource: true)
     }
 
     /// One quarter turn, as a mutation of the document's geometry: the frame turns and the crop
@@ -951,7 +954,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// fitted against `orientedSource`, and the rect stays a rectangle of the picture the user sees.
     /// At `quarterTurns == 0` this is byte for byte the pre-9 call.
     public func renderCrop(source: ImageSize) -> CropRect {
-        CropMath.lockedCrop(aspectLock, in: cropRect, source: orientedSource(source)).clamped()
+        // 132: the crop is the output frame and may extend past the photograph; S0 writes those
+        // pixels transparent/black. An in-range rect is unchanged by the editing clamp.
+        CropMath.lockedCrop(aspectLock, in: cropRect, source: orientedSource(source),
+                            allowsOutsideSource: true)
+            .clamped(allowsOutsideSource: true)
     }
 
     /// `renderCrop` in the stored `NormalizedRect` form.

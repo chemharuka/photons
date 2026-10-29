@@ -60,8 +60,23 @@ public struct CropRect: Sendable, Equatable, Hashable, Codable {
     ///
     /// Same policy — and the same numbers — as `NormalizedRect.clamped()`, so a full-frame crop
     /// keeps rendering as the whole image and a degenerate one cannot become zero-sized.
-    public func clamped(minimumSpan: Double = 0.001) -> CropRect {
+    ///
+    /// **132 (user 2026-10-29)**: `allowsOutsideSource: true` is the editing clamp — it keeps the
+    /// minimum span and the finiteness but **does not pull the rect back inside the picture**. A crop
+    /// is the output frame now, and the user may drag it off the photograph; the pixels outside the
+    /// source are written as transparent/black by S0, never smeared. `false` (the default) is the
+    /// historical clamp every document decode, XMP read, mask and export check still uses, so an
+    /// in-range document keeps its exact numbers byte for byte.
+    public func clamped(minimumSpan: Double = 0.001,
+                        allowsOutsideSource: Bool = false) -> CropRect {
         let span = min(max(minimumSpan, 0), 1)
+        if allowsOutsideSource {
+            let w = width.isFinite ? max(width, span) : span
+            let h = height.isFinite ? max(height, span) : span
+            let l = left.isFinite ? left : 0
+            let t = top.isFinite ? top : 0
+            return CropRect(left: l, top: t, right: l + w, bottom: t + h)
+        }
         let w = min(max(width, span), 1)
         let h = min(max(height, span), 1)
         let l = min(max(left, 0), 1 - w)
@@ -237,10 +252,21 @@ public enum CropMath {
 
     /// Pixel rect of a normalized crop. Rounding is `round(source * normalized)`, the exact formula
     /// `RenderGraph.plan` has always used, so the rendered size cannot drift by a pixel.
-    public static func pixelRect(_ crop: CropRect, in source: ImageSize) -> PixelRect {
-        let c = crop.clamped()
+    ///
+    /// `allowsOutsideSource: true` (132) keeps the origin where the crop puts it instead of pulling
+    /// it back inside the source, and lets the width/height exceed the source (`round(source × span)`
+    /// with a span > 1) — the crop editing path's output frame may be larger than the photograph.
+    /// `false` is the historical clamp, byte for byte.
+    public static func pixelRect(_ crop: CropRect, in source: ImageSize,
+                                 allowsOutsideSource: Bool = false) -> PixelRect {
+        let c = crop.clamped(allowsOutsideSource: allowsOutsideSource)
         let w = max(1, Int((Double(source.width) * c.width).rounded()))
         let h = max(1, Int((Double(source.height) * c.height).rounded()))
+        if allowsOutsideSource {
+            return PixelRect(x: Int((Double(source.width) * c.left).rounded()),
+                             y: Int((Double(source.height) * c.top).rounded()),
+                             width: w, height: h)
+        }
         let x = min(max(Int((Double(source.width) * c.left).rounded()), 0), source.width - w)
         let y = min(max(Int((Double(source.height) * c.top).rounded()), 0), source.height - h)
         return PixelRect(x: x, y: y, width: w, height: h)
@@ -257,9 +283,35 @@ public enum CropMath {
     }
 
     /// Size of the cropped picture at 1:1 — "裁剪后尺寸".
-    public static func outputSize(_ crop: CropRect, in source: ImageSize) -> ImageSize {
-        let p = pixelRect(crop, in: source)
+    public static func outputSize(_ crop: CropRect, in source: ImageSize,
+                                  allowsOutsideSource: Bool = false) -> ImageSize {
+        let p = pixelRect(crop, in: source, allowsOutsideSource: allowsOutsideSource)
         return ImageSize(width: p.width, height: p.height)
+    }
+
+    /// The output canvas: the crop's pixel size, grown to the **bounding box of the rotated crop**
+    /// (132).
+    ///
+    /// `quarterTurns` is applied to `source` first — `source` is the file's own frame, exactly like
+    /// `GeometryGroup.orientedSource` — because `crop` is measured in the turned frame.
+    ///
+    /// **θ = 0 returns `outputSize` itself** (same function, same arguments, first line): the canvas
+    /// of every un-straightened document is bit-for-bit what it was before this task, which is what
+    /// keeps every θ = 0 key, golden and thumbnail byte-identical. Only a non-zero angle reaches the
+    /// `|w·cos| + |h·sin|` arithmetic, and the rounding is `renderSize`'s: `.rounded()`, `max(1, …)`.
+    public static func canvasSize(crop: CropRect, in source: ImageSize,
+                                  straightenDegrees: Double,
+                                  quarterTurns: Int,
+                                  allowsOutsideSource: Bool = false) -> ImageSize {
+        let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
+            ? ImageSize(width: source.height, height: source.width)
+            : source
+        let out = outputSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource)
+        guard straightenDegrees.isFinite, straightenDegrees != 0 else { return out }
+        let (cosine, sine) = cosSin(straightenDegrees)
+        let w = Double(out.width), h = Double(out.height)
+        return ImageSize(width: max(1, Int((w * cosine + h * sine).rounded())),
+                         height: max(1, Int((w * sine + h * cosine).rounded())))
     }
 
     /// Size the renderer allocates at `scale` relative to the crop (1 = 1:1 pixels).
@@ -296,19 +348,19 @@ public enum CropMath {
     /// only ever needs the rect — see `testQuarterTurnRectIsExactAfterFourTurns` and the pixel-set
     /// assertion in `QuarterTurnTests`.
     public static func turnedClockwise(_ rect: CropRect) -> CropRect {
-        let c = rect.clamped()
+        let c = rect.clamped(allowsOutsideSource: true)
         return CropRect(left: 1 - c.bottom, top: c.left, right: 1 - c.top, bottom: c.right)
     }
 
     /// The inverse of `turnedClockwise`: the rect as measured in the frame turned 90° the other way.
     public static func turnedCounterClockwise(_ rect: CropRect) -> CropRect {
-        let c = rect.clamped()
+        let c = rect.clamped(allowsOutsideSource: true)
         return CropRect(left: c.top, top: 1 - c.right, right: c.bottom, bottom: 1 - c.left)
     }
 
     /// `rect` after `quarterTurns` (0…3, clockwise) turns of the frame.
     public static func turned(_ rect: CropRect, quarterTurns: Int) -> CropRect {
-        var out = rect.clamped()
+        var out = rect.clamped(allowsOutsideSource: true)
         for _ in 0..<(((quarterTurns % 4) + 4) % 4) { out = turnedClockwise(out) }
         return out
     }
@@ -338,7 +390,7 @@ public enum CropMath {
     /// One function, because two spellings of "undo the turn" is how a crop ends up written into a
     /// sidecar that Lightroom reads as a different picture.
     public static func sourceRect(_ rect: CropRect, quarterTurns: Int) -> CropRect {
-        var out = rect.clamped()
+        var out = rect.clamped(allowsOutsideSource: true)
         for _ in 0..<(((quarterTurns % 4) + 4) % 4) { out = turnedCounterClockwise(out) }
         return out
     }
@@ -377,8 +429,9 @@ public enum CropMath {
     }
 
     /// Largest crop with pixel ratio `aspect`, centred on `crop` and contained by it.
-    public static func fittedCrop(aspect: Double, in crop: CropRect, source: ImageSize) -> CropRect {
-        let c = crop.clamped()
+    public static func fittedCrop(aspect: Double, in crop: CropRect, source: ImageSize,
+                                  allowsOutsideSource: Bool = false) -> CropRect {
+        let c = crop.clamped(allowsOutsideSource: allowsOutsideSource)
         guard aspect.isFinite, aspect > 0 else { return c }
         // The ratio in normalized units is not the ratio in pixels: a 3:2 frame is 3:2 only after
         // multiplying width by W and height by H.
@@ -399,9 +452,13 @@ public enum CropMath {
 
     /// The rect a lock produces inside an arbitrary selection: free rect when the lock carries no
     /// ratio (`.original`).
-    public static func lockedCrop(_ lock: AspectLock, in crop: CropRect, source: ImageSize) -> CropRect {
-        guard let ratio = lock.ratio else { return crop.clamped() }
-        return fittedCrop(aspect: ratio, in: crop, source: source)
+    public static func lockedCrop(_ lock: AspectLock, in crop: CropRect, source: ImageSize,
+                                  allowsOutsideSource: Bool = false) -> CropRect {
+        guard let ratio = lock.ratio else {
+            return crop.clamped(allowsOutsideSource: allowsOutsideSource)
+        }
+        return fittedCrop(aspect: ratio, in: crop, source: source,
+                          allowsOutsideSource: allowsOutsideSource)
     }
 
     /// True when every sample of `crop` (rotated by `degrees` about its own centre) lands inside the
@@ -472,7 +529,15 @@ public enum CropMath {
     }
 
     /// `crop` shrunk — **keeping its centre and its pixel aspect** — until it is fully inscribed in
-    /// the sensor turned by `degrees`: the auto-shrink a straighten needs.
+    /// the sensor turned by `degrees`: the auto-shrink a straighten used to need.
+    ///
+    /// **132 (user 2026-10-29) changed the default.** The 803aff6 rule ("框不许出旋转后的照片", added
+    /// to stop a crop that reached the sensor's edge from smearing the border outward) is now
+    /// **opt-in** through `keepsInsideRotatedFrame: true`. The user's new rule is the opposite
+    /// trade: the box may leave the picture, and the pixels outside are written black/transparent by
+    /// S0 (the same deterministic value, never a smear), so nothing has to be pulled back. Keeping the
+    /// function and its arithmetic is deliberate — `frameExceedsPicture` below uses the same
+    /// closed form to colour the frame red instead of moving it.
     ///
     /// Properties the callers rely on, each asserted in `CropFrameInscribeTests`:
     ///
@@ -491,8 +556,10 @@ public enum CropMath {
     /// same rectangle `inscribedCrop` describes, which is the largest one that fits.
     public static func clampedToRotatedFrame(_ crop: CropRect,
                                              in source: ImageSize,
-                                             degrees: Double) -> CropRect {
-        let c = crop.clamped()
+                                             degrees: Double,
+                                             keepsInsideRotatedFrame: Bool = false) -> CropRect {
+        let c = crop.clamped(allowsOutsideSource: true)
+        guard keepsInsideRotatedFrame, degrees.isFinite, degrees != 0 else { return c }
         guard c.width > 0, c.height > 0 else { return c }
         let (a, b) = halves(c, in: source)
         let (cosine, sine) = cosSin(degrees)
@@ -530,6 +597,20 @@ public enum CropMath {
         let halfY = a * sine + b * cosine
         return abs(centre.x) + halfX <= w / 2 + tolerance
             && abs(centre.y) + halfY <= h / 2 + tolerance
+    }
+
+    /// Does `crop`, straightened by `degrees`, cover any pixel **outside the photograph**? The
+    /// UI-facing predicate of the 803aff6 arithmetic: instead of clamping the frame back inside the
+    /// picture (132's old default), the frame is left where the user put it and painted red.
+    ///
+    /// This is exactly `!fitsInsideRotatedFrame`: at 0° a full-frame crop fits (no red); a full frame
+    /// at 45° does not (its corners reach past the rotated sensor); a 0.6× centred crop at 45° does.
+    /// Nothing is recomputed on the UI side — it reads this one Bool.
+    public static func frameExceedsPicture(_ crop: CropRect,
+                                           in source: ImageSize,
+                                           degrees: Double,
+                                           tolerance: Double = 1e-6) -> Bool {
+        !fitsInsideRotatedFrame(crop, in: source, degrees: degrees, tolerance: tolerance)
     }
 
     // MARK: the constraint's private arithmetic

@@ -196,20 +196,24 @@ final class CropTurnFrameTests: XCTestCase {
         XCTAssertEqual(screenAngle, -5.0, accuracy: 1e-6,
                        "088 §2: the frame turns the opposite way to the picture it will become")
 
-        // The equivalence with the old committed state: on a full crop, the same quad is where the
-        // un-turned source corners land once the document is rendered at 5°.
-        // Same source authority on both sides: a framing of this rung, 0° vs 5°, crop full — so the
-        // only difference is which side of the equation carries the rotation.
-        let neutral = LoupeFraming(viewport: framing.viewport,
-                                   sourceWidth: Double(source.width),
-                                   sourceHeight: Double(source.height),
-                                   crop: .full,
-                                   straightenDegrees: 0,
-                                   flipH: framing.flipH,
-                                   flipV: framing.flipV)
-        let neutralMapping = neutral.mapping(of: loupe.viewState)
-        let draftQuads = turned(corners(rect, source: source), by: 5.0, source: source)
-            .map { neutralMapping.frameView(frameX: $0.x, frameY: $0.y) }
+        // 132: on screen the committed state is a *different camera* — the canvas grows to the
+        // rotated bounding box and 适应 re-fits it (§9), so comparing screen points across the two
+        // projections would be comparing zoom levels. The invariant is in **picture space**: the
+        // quad the draft draws, mapped back through the un-turned projection, is the same rotated
+        // rectangle the committed document names.
+        let turnedCorners = turned(corners(rect, source: source), by: 5.0, source: source)
+        var equivalence = 0.0
+        for (corner, want) in zip(drawn.corners, turnedCorners) {
+            let got = try XCTUnwrap(loupe.sourcePoint(forViewPoint: corner),
+                                    "the live projection cannot map the drawn corner")
+            equivalence = max(equivalence, hypot(got.x - want.x, got.y - want.y))
+        }
+        print(String(format: "088 §2 · draft quad ↔ rotated source corners %.4f px", equivalence))
+        XCTAssertLessThanOrEqual(equivalence, 0.5,
+                                 "the draft quad and the committed state must describe the same frame")
+
+        // …and the committed camera really does frame the rotated bounding box, not the un-turned
+        // crop (132's whole point).
         let committed = LoupeFraming(viewport: framing.viewport,
                                      sourceWidth: Double(source.width),
                                      sourceHeight: Double(source.height),
@@ -217,16 +221,10 @@ final class CropTurnFrameTests: XCTestCase {
                                      straightenDegrees: 5.0,
                                      flipH: framing.flipH,
                                      flipV: framing.flipV)
-        let committedMapping = committed.mapping(of: loupe.viewState)
-        let committedCorners = corners(rect, source: source)
-            .map { committedMapping.viewPoint(sourceX: $0.x, sourceY: $0.y) }
-        var equivalence = 0.0
-        for (got, want) in zip(draftQuads, committedCorners) {
-            equivalence = max(equivalence, hypot(got.x - want.x, got.y - want.y))
-        }
-        print(String(format: "088 §2 · draft quad ↔ committed θ₀=5 source corners %.6f pt", equivalence))
-        XCTAssertLessThanOrEqual(equivalence, 0.05,
-                                 "the draft quad and the committed state must describe the same frame")
+        let committedWindow = committed.windowSize(of: .fit)
+        XCTAssertEqual(committedWindow.width, committed.rotatedCropExtent.width, accuracy: 1e-9)
+        XCTAssertGreaterThan(committedWindow.width, committed.cropWidthPixels,
+                             "5°: the committed canvas must be the rotated bounding box")
     }
 
     // MARK: - 3. 松手只写一次、只渲一帧

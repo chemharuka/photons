@@ -15,7 +15,10 @@ import PhotonsCore
 //     (`CropView._InteractiveCropGuideView.swift:973-1009`).
 //   · the **frame + eight grips** — corner brackets, the shape every crop tool draws, because a
 //     bracket reads as "this corner" while a dot reads as "a point" (Brightroom's corner overlay is
-//     exactly this: two 20 pt arms per corner, `CropView.CropInsideOverlay.swift:63-106`).
+//     exactly this: two 20 pt arms per corner, `CropView.CropInsideOverlay.swift:63-106`). 132: when
+//     the frame covers pixels outside the photograph (`layout.exceedsPicture`) the stroke and the
+//     grips are drawn **red** as a warning; the view still draws the same geometry at the same place
+//     — colour is the whole difference, and it never writes the document.
 //   · the **rule-of-thirds grid**, which turns with the frame because the frame turns with the
 //     picture.
 //
@@ -68,10 +71,10 @@ final class CropToolOverlayView: NSView {
         }
         grid.stroke()
 
-        // 3. The frame itself.
+        // 3. The frame itself. 132: red when the crop covers pixels outside the photograph.
         let frame = quad(layout.corners)
         frame.lineWidth = 1.5
-        NSColor.white.withAlphaComponent(0.9).setStroke()
+        Self.frameColour(alert: layout.exceedsPicture).setStroke()
         frame.stroke()
 
         // 4. The grips.
@@ -88,9 +91,17 @@ final class CropToolOverlayView: NSView {
         return path
     }
 
+    /// The frame's stroke colour: white, or **red** for a frame that leaves the picture (132). The
+    /// active grip keeps the accent colour so "the hand is on this one" stays readable.
+    static func frameColour(alert: Bool, active: Bool = false) -> NSColor {
+        if alert { return active ? .systemRed.blended(withFraction: 0.35, of: .white) ?? .systemRed
+                                 : .systemRed }
+        return active ? NSColor.controlAccentColor : NSColor.white
+    }
+
     private func draw(grip: CropToolLayout.Grip, in layout: CropToolLayout) {
         let active = grip.kind == self.active
-        let colour = active ? NSColor.controlAccentColor : NSColor.white
+        let colour = Self.frameColour(alert: layout.exceedsPicture, active: active)
         let p = grip.point
         let w = Self.bracketWidth
         let arm = Self.bracketArm

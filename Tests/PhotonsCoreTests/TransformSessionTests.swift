@@ -166,18 +166,24 @@ extension TransformSessionTests {
         let flat = try render(.identity)
         let before = centroid(flat)
         let after = centroid(turned)
-        print("123 · marker \(before) → \(after)")
+        // 132: the straightened canvas is the rotated crop's bounding box, so the untouched frame is
+        // centred in it. Compare the marker in the **same** space.
+        let ox = Double(turned.width - width) / 2
+        let oy = Double(turned.height - height) / 2
+        print("123 · marker \(before) → \(after) (canvas offset \(ox), \(oy))")
 
         XCTAssertGreaterThan(after.count, 0, "the marker vanished")
         // 126: the slider's "+5°" turns the picture **clockwise** on screen, so a marker in the
         // top-left quadrant travels toward the top-right. Measured here (and confirmed by the user):
         // before the S0 inverse the same document put it left+down, i.e. the picture was rendered at
         // R(−θ) while the crop frame was drawn at R(+θ) — the 2θ mismatch of 126.
-        XCTAssertGreaterThan(after.x, before.x + 0.1, "+5° must move the top-left marker right")
-        XCTAssertLessThan(after.y, before.y - 0.1, "…and up (clockwise)")
+        XCTAssertGreaterThan(after.x, before.x + ox + 0.1, "+5° must move the top-left marker right")
+        XCTAssertLessThan(after.y, before.y + oy - 0.1, "…and up (clockwise)")
 
-        // Corners are background (0), not the flat frame's 0.25 edge colour.
-        let corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+        // Corners of the **canvas** (the AABB, not the frame) are background (0), not the flat
+        // frame's 0.25 edge colour.
+        let corners = [(0, 0), (turned.width - 1, 0),
+                       (0, turned.height - 1), (turned.width - 1, turned.height - 1)]
         for (x, y) in corners {
             let o = (y * turned.width + x) * 4
             for c in 0..<3 {
@@ -198,7 +204,7 @@ extension TransformSessionTests {
 
         // A pixel just inside the picture still carries the photograph, so the corners really are
         // "background vs picture", not an all-black frame.
-        let edge = (turned.height / 2) * turned.width * 4
+        let edge = ((turned.height / 2) * turned.width + turned.width / 2) * 4
         XCTAssertGreaterThan(turned.rgba[edge], 0.05, "the picture itself disappeared")
     }
 
@@ -265,8 +271,8 @@ extension TransformSessionTests {
 
         func centroid(_ weight: (Int, Int) -> Double) -> (x: Double, y: Double) {
             var sx = 0.0, sy = 0.0, sw = 0.0
-            for y in 0..<height {
-                for x in 0..<width {
+            for y in 0..<display.height {
+                for x in 0..<display.width {
                     let w = weight(x, y)
                     if w <= 0 { continue }
                     sx += Double(x) * w; sy += Double(y) * w; sw += w
@@ -282,7 +288,7 @@ extension TransformSessionTests {
             if luma > 1e-4 { darkest = min(darkest, luma) }
         }
         let picture = centroid { x, y in
-            let o = (y * width + x) * 4
+            let o = (y * display.width + x) * 4
             let luma = (Double(display.rgba[o]) + Double(display.rgba[o + 1])
                         + Double(display.rgba[o + 2])) / 3
             return luma - darkest
@@ -293,9 +299,11 @@ extension TransformSessionTests {
         let quad = CropMath.rotatedFrameCorners(in: ImageSize(width: width, height: height),
                                                 degrees: 9.7)
         let u = probe.x, v = probe.y
-        let want = (x: ((1 - u) * (1 - v) * quad[0].x + u * (1 - v) * quad[1].x
+        // 132: the canvas is the rotated crop's bounding box; the frame is centred in it.
+        let ox = Double(display.width - width) / 2, oy = Double(display.height - height) / 2
+        let want = (x: ox + ((1 - u) * (1 - v) * quad[0].x + u * (1 - v) * quad[1].x
                         + u * v * quad[2].x + (1 - u) * v * quad[3].x) * Double(width) - 0.5,
-                    y: ((1 - u) * (1 - v) * quad[0].y + u * (1 - v) * quad[1].y
+                    y: oy + ((1 - u) * (1 - v) * quad[0].y + u * (1 - v) * quad[1].y
                         + u * v * quad[2].y + (1 - u) * v * quad[3].y) * Double(height) - 0.5)
 
         print(String(format: "126 · dot expected (%.2f, %.2f) picture (%.2f, %.2f) mask (%.2f, %.2f)",

@@ -592,10 +592,17 @@ public struct LoupeFraming: Equatable, Sendable {
     public var straightenDegrees: Double
     public var flipH: Bool
     public var flipV: Bool
+    /// 132 §9 — the **crop workspace's** fit is the ordinary fit × this factor (0.90 by default):
+    /// entering 裁切 leaves 10 % of room so dragging a small angle does not have to rescale the
+    /// canvas. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
+    public var fitScale: Double
+    /// The angle above which the crop workspace re-fits the whole canvas once instead of keeping the
+    /// 90 % framing (§9/§10 12). In between, the 90 % framing wins — the accepted trade.
+    public static let cropRefitDegrees = 6.0
 
     public init(viewport: ImageSize, sourceWidth: Double, sourceHeight: Double,
                 crop: CropRect = .full, straightenDegrees: Double = 0,
-                flipH: Bool = false, flipV: Bool = false) {
+                flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
@@ -604,6 +611,7 @@ public struct LoupeFraming: Equatable, Sendable {
                                      GeometryGroup.straightenLimit)
         self.flipH = flipH
         self.flipV = flipV
+        self.fitScale = fitScale.isFinite ? min(max(fitScale, 0.1), 1) : 1
     }
 
     /// The constructor the loupe uses: the same `lockedCrop` call — in the same *decoded* pixel
@@ -613,7 +621,8 @@ public struct LoupeFraming: Equatable, Sendable {
     /// the turned frame) is already in that space. A turned document's "source pixel" below is
     /// therefore a pixel of the *turned* frame — the same photograph, rotated — which is what every
     /// consumer of this projection (window, fit zoom, crop overlay) is asking about.
-    public init(viewport: ImageSize, decoded: ImageSize, decodeScale: Double, edit: EditModel) {
+    public init(viewport: ImageSize, decoded: ImageSize, decodeScale: Double, edit: EditModel,
+                fitScale: Double = 1) {
         let ds = decodeScale > 0 && decodeScale.isFinite ? decodeScale : 1
         let turned = edit.geometry.orientedSource(decoded)
         let crop = CropMath.lockedCrop(edit.geometry.aspectLock,
@@ -625,7 +634,8 @@ public struct LoupeFraming: Equatable, Sendable {
                   crop: crop,
                   straightenDegrees: edit.geometry.straightenDegrees,
                   flipH: edit.geometry.flipHorizontal,
-                  flipV: edit.geometry.flipVertical)
+                  flipV: edit.geometry.flipVertical,
+                  fitScale: fitScale)
     }
 
     // MARK: crop metrics
@@ -634,6 +644,30 @@ public struct LoupeFraming: Equatable, Sendable {
     public var cropHeightPixels: Double { crop.height * sourceHeight }
     public var cropOriginX: Double { crop.left * sourceWidth }
     public var cropOriginY: Double { crop.top * sourceHeight }
+
+    /// 132 — the axis-aligned bounding box of a `w × h` box turned by the document's angle, in
+    /// pixels. At 0° the arithmetic is `w·1 + h·0` and `w·0 + h·1`, which is exactly `(w, h)`, so
+    /// every θ = 0 number below is the one this type produced before the task.
+    public static func rotatedExtent(width: Double, height: Double,
+                                     degrees: Double) -> (width: Double, height: Double) {
+        guard degrees.isFinite, degrees != 0 else { return (width, height) }
+        let m = CropGeometry.RotationMatrix(degrees: degrees)
+        let c = abs(m.cosine), s = abs(m.sine)
+        return (width * c + height * s, width * s + height * c)
+    }
+
+    /// The whole source turned by the document's angle — what ordinary 适应 frames.
+    public var rotatedSourceExtent: (width: Double, height: Double) {
+        Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
+                           degrees: straightenDegrees)
+    }
+
+    /// The crop turned by the document's angle — the canvas 132 renders, and therefore the window
+    /// 适应 shows (the empty corners are part of the output, black).
+    public var rotatedCropExtent: (width: Double, height: Double) {
+        Self.rotatedExtent(width: cropWidthPixels, height: cropHeightPixels,
+                           degrees: straightenDegrees)
+    }
 
     /// Canvas pixels per source pixel when the **whole source frame** is fitted into the viewport.
     ///
@@ -654,10 +688,25 @@ public struct LoupeFraming: Equatable, Sendable {
     /// to lay the frame out and to label the readout (`适应 31%`). Nothing may assume fit sits below
     /// 25 %, below 50 %, or below the current zoom.
     public var fitZoom: Double {
-        let z = min(Double(viewport.width) / max(sourceWidth, 1e-9),
-                    Double(viewport.height) / max(sourceHeight, 1e-9))
+        // 132: 适应 is the **rotated** source's bounding box, so a 45° document shows its whole
+        // picture (the corners are inside the viewport instead of being cut off). At 0° the extent is
+        // exactly (sourceWidth, sourceHeight), so this is the old expression bit for bit.
+        let base = rotatedSourceExtent
+        let z = min(Double(viewport.width) / max(base.width, 1e-9),
+                    Double(viewport.height) / max(base.height, 1e-9))
         guard z.isFinite, z > 0 else { return 1 }
-        return min(1, z)
+        var zoom = min(1, z * fitScale)
+        // 132 §9 — the crop workspace keeps the 90 % framing for small angles (§10 11: the five
+        // samples must read one number), and re-fits the **whole canvas** once the turned crop no
+        // longer fits at that framing (§10 12). Both are the same `zoom`, applied to the picture and
+        // to the crop frame by the one mapping; nothing about the crop's document size moves.
+        if fitScale >= 1 || abs(straightenDegrees) > Self.cropRefitDegrees {
+            let aabb = rotatedCropExtent
+            let fit = min(Double(viewport.width) / max(aabb.width, 1e-9),
+                          Double(viewport.height) / max(aabb.height, 1e-9))
+            if fit.isFinite, fit > 0 { zoom = min(zoom, min(1, fit)) }
+        }
+        return zoom
     }
 
     public func zoom(of state: LoupeViewState) -> Double {
@@ -690,7 +739,9 @@ public struct LoupeFraming: Equatable, Sendable {
     /// taking over the screen.
     public func windowSize(of state: LoupeViewState) -> (width: Double, height: Double) {
         guard state.mode == .actual else {
-            return (cropWidthPixels, cropHeightPixels)
+            // 132: 适应 shows the crop's rotated bounding box — the same rectangle the canvas is.
+            // At 0° this is exactly `(cropWidthPixels, cropHeightPixels)`.
+            return rotatedCropExtent
         }
         let z = zoom(of: state)
         return (Double(viewport.width) / z, Double(viewport.height) / z)
