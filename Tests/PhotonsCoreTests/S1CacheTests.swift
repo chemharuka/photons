@@ -69,11 +69,10 @@ final class S1CacheTests: XCTestCase {
         return d
     }
 
-    /// A red step: 071's trim and the absolute black level — the linear domain.
+    /// A red step: 071's trim — the linear domain.
     private func redStep(_ doc: EditModel, _ i: Int) -> EditModel {
         var d = doc
         d.light.blackOffset = Double(i + 1) * 0.001
-        d.light.blackLevel = 0.004 + Double(i) * 0.001
         return d
     }
 

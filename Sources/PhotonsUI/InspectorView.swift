@@ -2681,21 +2681,17 @@ public struct PanelResets {
                 .resetToAsShot()
 
         case .light:
-            // The card's own scope, taken from the card's own table (`lightRows`) plus the two absolute
-            // levels — so adding a seventh slider to Light resets it without touching this function.
+            // The card's own scope, taken from the card's own table (`lightRows`) — so adding a
+            // seventh slider to Light resets it without touching this function. (The two absolute
+            // levels it used to clear are gone with schema 11.)
             let rows = InspectorView.lightRows
             let neutral = EditModel.neutral
-            let levels = LightGroup.identity
             let changed = rows.contains {
                 session.edit[keyPath: $0.keyPath] != neutral[keyPath: $0.keyPath]
-            } || session.edit.light.blackLevel != levels.blackLevel
-              || session.edit.light.whiteLevel != levels.whiteLevel
+            }
             guard changed else { return false }
             session.applyEdit { model in
                 for row in rows { model[keyPath: row.keyPath] = neutral[keyPath: row.keyPath] }
-                // 030: "the sliders' mapping is in force again" is `nil`, not 0 / 1.
-                model.light.blackLevel = levels.blackLevel
-                model.light.whiteLevel = levels.whiteLevel
             }
             // 白平衡 is *not* in this group: it is its own card and its own double-click. One
             // `applyEdit` + one `commitEdit` = one snapshot, which is the whole point.

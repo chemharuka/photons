@@ -553,7 +553,7 @@ final class ColorGradingTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("\"colorGrading\""))
         XCTAssertTrue(text.contains("\"highlights\""))
-        XCTAssertEqual(graded.schemaVersion, 10)
+        XCTAssertEqual(graded.schemaVersion, 11)
         let back = try JSONDecoder().decode(EditModel.self, from: data)
         XCTAssertEqual(back, graded)
         XCTAssertEqual(try encoder.encode(back), data)

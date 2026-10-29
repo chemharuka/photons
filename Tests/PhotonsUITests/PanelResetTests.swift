@@ -104,8 +104,6 @@ final class PanelResetTests: XCTestCase {
             model.light.shadows = 25
             model.light.whites = 15
             model.light.blacks = -10
-            model.light.blackLevel = 0.02
-            model.light.whiteLevel = 1.5
             // 白平衡不在这张卡里：它有自己的卡和自己的双击，所以这里必须原样保留。
             model.light.temperature = 5200
             model.light.tint = 8
@@ -115,7 +113,7 @@ final class PanelResetTests: XCTestCase {
 
         XCTAssertTrue(resets.group(.light), "a changed card must reset")
 
-        // 逐字段：七个滑杆回自己字段的默认，两个电平回 nil。
+        // 逐字段：七个滑杆回自己字段的默认（schema 11 之后 Light 卡只有这七个）。
         let neutral = EditModel.neutral.light
         XCTAssertEqual(session.edit.light.exposure, neutral.exposure, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.contrast, neutral.contrast, accuracy: 1e-12)
@@ -124,10 +122,6 @@ final class PanelResetTests: XCTestCase {
         XCTAssertEqual(session.edit.light.shadows, neutral.shadows, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.whites, neutral.whites, accuracy: 1e-12)
         XCTAssertEqual(session.edit.light.blacks, neutral.blacks, accuracy: 1e-12)
-        XCTAssertEqual(session.edit.light.blackLevel, LightGroup.identity.blackLevel)
-        XCTAssertEqual(session.edit.light.whiteLevel, LightGroup.identity.whiteLevel)
-        XCTAssertNil(session.edit.light.blackLevel, "030: 回到滑杆映射 = nil，不是 0")
-        XCTAssertNil(session.edit.light.whiteLevel)
         // 白平衡原样：Light 的复位不许偷偷把色温也清掉。
         XCTAssertEqual(session.edit.light.temperature, 5200,
                        "the Light card does not own the white balance — its reset must not touch it")
@@ -139,9 +133,7 @@ final class PanelResetTests: XCTestCase {
         print("Light reset: history +\(session.history.count - before) · "
               + "\(session.edit.light.exposure)/\(session.edit.light.contrast)/"
               + "\(session.edit.light.highlights)/\(session.edit.light.midtones)/\(session.edit.light.shadows)/"
-              + "\(session.edit.light.whites)/\(session.edit.light.blacks) · "
-              + "levels \(String(describing: session.edit.light.blackLevel))/"
-              + "\(String(describing: session.edit.light.whiteLevel))")
+              + "\(session.edit.light.whites)/\(session.edit.light.blacks)")
     }
 
     /// 一步 ⌘Z 把整组逐字段带回来。

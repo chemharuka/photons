@@ -1111,108 +1111,16 @@ final class HDRCurveTests: XCTestCase {
 
     // MARK: - black / white level fields
 
-    /// The two absolute level fields are the *level*, not the curve: `blackLevel` puts 0 exactly where
-    /// the sample was, `whiteLevel` puts 1 there, and the absolute spelling wins over the slider.
-    func testAbsoluteLevelsPlaceZeroAndOne() throws {
-        // 2^-6 = 0.015625: a level the fp16 fixture can hold *exactly*, so "the sampled point maps to
-        // exactly 0" is a claim about the renderer and not about the fixture's rounding.
-        let values: [Float] = [0.001875, 0.0078125, 0.015625, 0.05, 0.18]
-        let graph = try makeGraph(bands(values))
-
-        var levelled = EditModel.neutral
-        levelled.light.blackLevel = 0.015625
-        levelled.light.blacks = 100          // deliberately contradictory: the absolute field wins
-        let out = bandValues(try render(graph, levelled), count: values.count)
-        print("030 blackLevel 0.015625: " + out.map { String(format: "%.4f", $0) }.joined(separator: " "))
-        XCTAssertEqual(out[2], 0, "the sampled point must land on exactly 0")
-        XCTAssertEqual(out[0], 0, "anything darker is 0 too")
-        XCTAssertEqual(out[1], 0, "anything darker is 0 too")
-        XCTAssertGreaterThan(out[3], 0)
-        XCTAssertGreaterThan(out[4], out[3], "brighter input must stay brighter")
-        XCTAssertEqual(levelled.light.levels.black, 0.015625, "the absolute field wins over `blacks`")
-
-        let whiteValues: [Float] = [0.5, 1.0, 2.0]
-        let whiteGraph = try makeGraph(bands(whiteValues), identity: "hdr-curve-white")
-        var whited = EditModel.neutral
-        whited.light.whiteLevel = 2.0
-        let whiteOut = bandValues(try render(whiteGraph, whited), count: 3)
-        print("030 whiteLevel 2.0: " + whiteOut.map { String(format: "%.4f", $0) }.joined(separator: " "))
-        // 0.9995 rather than 1.0 is the fp16 store of `1.055 − 0.055`, not a levelling error — the
-        // same half-ulp `HeadroomTests` pins for a clamped 1.0.
-        XCTAssertEqual(whiteOut[2], 1, accuracy: 1e-3, "+1 EV must be display white")
-        XCTAssertEqual(whiteOut[1], encode(0.5), accuracy: 2e-3, "1.0 → 0.5 linear")
-        XCTAssertEqual(whiteOut[0], encode(0.25), accuracy: 2e-3, "0.5 → 0.25 linear")
-
-        // Envelope and cross-constraint, in one place (`LightGroup.levels`).
-        var out0 = EditModel.neutral
-        out0.light.blackLevel = 99
-        XCTAssertEqual(out0.light.levels.black, LightGroup.blackLevelRange.upperBound)
-        var crossed = EditModel.neutral
-        crossed.light.blackLevel = 0.4
-        crossed.light.whiteLevel = 0.4
-        XCTAssertGreaterThanOrEqual(crossed.light.levels.white - crossed.light.levels.black, 1e-3)
-    }
-
-    /// 061 ③：**曲线端点和黑电平是两件事，顺序是先电平后曲线** —— 而且它们**不合并**。
-    ///
-    /// `light.blackLevel` 是 S1 的线性电平（019），`first.x` 是曲线域的裁切（061）。S1 在 S1.7 之前
-    /// （`RenderStage.order`），所以曲线看到的是**已经电平过的**值：黑电平 0.10 把 0.1011 压到 0.0012，
-    /// 而曲线黑点的裁切边落在 `x = 2.0e-3`（062 的轴上那是 `u = axis.forward(2e-3) ≈ 0.0129`；
-    /// 044 的 log1p 轴上同一个 x 曾是 `u = 0.2`，所以下面那个 u 由轴算出来、不再写死）—— 于是这一带
-    /// 正好被曲线裁成同一个值。
-    /// **反证**：黑电平归零时同样的输入在裁切边之上，曲线一个都不裁。
-    func testBlackLevelRunsBeforeTheCurveSoTheBlackPointSeesTheLevelledValue() throws {
-        let values: [Float] = [0.1011, 0.1012, 0.105, 0.15, 0.5]
-        let graph = try makeGraph(bands(values), identity: "curve-levels")
-
-        // 裁切边钉在 x 上（2.0e-3），u 从轴取 —— 轴换了，这条断言的意义不变。
-        let lifted: [CurvePoint] = [CurvePoint(u: HDRCurve.axis.forward(2.0e-3), v: 0),
-                                    CurvePoint(u: 0.6, v: 0.45), CurvePoint(u: 1, v: 1)]
-        var both = EditModel.neutral
-        both.light.blackLevel = 0.10          // +10 % of white, in S1's linear units
-        both.curve.red = lifted
-        both.curve.green = lifted
-        both.curve.blue = lifted
-        let out = bandValues(try render(graph, both), count: values.count)
-
-        // S1 first: 0.1011 → (0.1011 − 0.10)/0.9 = 1.2e-3, below the curve's 2.0e-3 edge → clipped.
-        XCTAssertEqual(out[0], 0, "S1 电平把它压到裁切边之下 → 曲线裁成 0")
-        XCTAssertEqual(out[1], 0)
-        XCTAssertGreaterThan(out[2], 0, "0.105 电平后仍高于裁切边，曲线不裁")
-        XCTAssertGreaterThan(out[3], out[2])
-        XCTAssertGreaterThan(out[4], out[3], "曲线仍单调")
-
-        // 反证：同一个曲线，黑电平归零 → 同样的输入全在裁切边之上，一个都不裁
-        var curveOnly = EditModel.neutral
-        curveOnly.curve.red = lifted
-        curveOnly.curve.green = lifted
-        curveOnly.curve.blue = lifted
-        let plain = bandValues(try render(graph, curveOnly), count: values.count)
-        XCTAssertGreaterThan(plain[0], 0.02, "没有电平，0.1011 远在 2.0e-3 之上 → 不裁")
-        XCTAssertNotEqual(plain[0], 0)
-
-        // 两条规则各自只脏自己那一级：电平整 S1，曲线整 S1.7 —— 谁也不是谁的别名
-        XCTAssertEqual(both.changedStages(from: curveOnly), [.sceneLinear])
-        XCTAssertEqual(curveOnly.changedStages(from: .neutral), [.curve])
-
-        print("061 levels+curve · blackLevel 0.10 + first.x 0.2: "
-              + out.map { String(format: "%.4f", $0) }.joined(separator: " ")
-              + " · 只有曲线: " + plain.map { String(format: "%.4f", $0) }.joined(separator: " "))
-    }
-
-    /// The fields are a level (S1), so they dirty exactly what the sliders do — and the curve dirties
-    /// only itself. `changedStages` is group-level by design (D10): downstream is the key chain's job.
+    /// The black point is S1's, so it dirties exactly what the sliders do — and the curve dirties only
+    /// itself. `changedStages` is group-level by design (D10): downstream is the key chain's job.
     func testDirtyStages() {
         var base = EditModel.neutral
         base.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
 
         var newer = base
-        newer.light.blackLevel = 0.02
-        XCTAssertEqual(newer.changedStages(from: base), [.sceneLinear])
-
-        var whiteNext = base
-        whiteNext.light.whiteLevel = 2
-        XCTAssertEqual(whiteNext.changedStages(from: base), [.sceneLinear])
+        newer.light.blackOffset = 0.002
+        XCTAssertEqual(newer.changedStages(from: base), [.sceneLinear],
+                       "schema 11: `blackOffset` is the only black point, and it is S1's")
 
         var curved = base
         curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.4), CurvePoint(u: 1, v: 1)]
@@ -1222,25 +1130,6 @@ final class HDRCurveTests: XCTestCase {
         warm.light.temperature = 5200
         XCTAssertEqual(warm.changedStages(from: base), Set(RenderStage.allCases),
                        "a decode change is every stage, as always")
-    }
-
-    /// The level fields write `blL`/`whL` into S1's material **only when set**, so a document that
-    /// never touched them keeps its key (§3.2 discipline), and one that did can never share a cached
-    /// S1 buffer.
-    func testLevelFieldsJoinTheSceneLinearKeyOnlyWhenSet() {
-        let plain = EditModel.neutral.keyMaterial(.sceneLinear)
-        XCTAssertFalse(plain.contains("blL"), "an unset level must not appear in the key")
-        XCTAssertFalse(plain.contains("whL"))
-
-        var withBlack = EditModel.neutral
-        withBlack.light.blackLevel = 0.013
-        XCTAssertTrue(withBlack.keyMaterial(.sceneLinear).contains("blL=0.01300"))
-        XCTAssertFalse(withBlack.keyMaterial(.sceneLinear).contains("whL"))
-
-        var withWhite = EditModel.neutral
-        withWhite.light.whiteLevel = 2
-        XCTAssertTrue(withWhite.keyMaterial(.sceneLinear).contains("whL=2.00000"))
-        XCTAssertFalse(withWhite.keyMaterial(.sceneLinear).contains("blL"))
     }
 
     // MARK: - the model: names and versions
@@ -1255,7 +1144,8 @@ final class HDRCurveTests: XCTestCase {
         // 2026-10-28: 9 (纹理/清晰度/去雾, on top of 黑白 and 颗粒). The curve's own shape did not move.
         // 2026-10-28: 10 (`healSpots`, 078 P0-1's 修复画笔, on top of `geometry.quarterTurns`'s 9,
         // 黑白's switch and eight mixes). The curve's own shape did not move.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
+        // 2026-10-29: 11 (030's absolute `blackLevel`/`whiteLevel` deleted). Still not the curve.
+        XCTAssertEqual(EditModel.currentSchemaVersion, 11)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 
         let legacy = Data(#"""

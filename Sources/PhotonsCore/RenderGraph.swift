@@ -539,9 +539,6 @@ private struct S1Params {
     // because the dropper's level and 071's offset both move the matte's 0. Same convention as S0's
     // `a`/`b` and S3c's `c`. (073B's knee keeps 0 at 0, but the other two spellings do not.)
     var c: SIMD4<Float>
-    // 030: blackLevel, whiteLevel, hasBlack, hasWhite. Read only by the `kLevels` entry point — the
-    // black/white *sliders* are an EV window now (073B) and never arrive here as a level.
-    var d: SIMD4<Float>
     // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between the level and the
     // gain. 0 for every document that never used the control, and then the kernel's `kTrim` is false.
     var e: SIMD4<Float>
@@ -1393,8 +1390,6 @@ public final class RenderGraph {
         stripped.light.blacks = 0
         stripped.light.whites = 0
         stripped.light.blackOffset = 0
-        stripped.light.blackLevel = nil
-        stripped.light.whiteLevel = nil
         // The same two-step construction `RenderKeyChain.links` + `keys` use, so the neutral red group
         // is the *only* difference: `H(geometryKey | material)` and then the digest.
         let canonical = KeyBuilder(plan.keys.geometry)
@@ -2697,24 +2692,21 @@ public final class RenderGraph {
             //     level move. The threshold is exactly the zero of the blend factor `m(a)`, so the two
             //     instantiations agree bit for bit where they meet — the switch is invisible in the
             //     picture, and the whole first half of the travel keeps 073B's bytes;
-            //   · a dropper level (`blackLevel`/`whiteLevel`) → 030's affine level, unchanged. The two
-            //     spellings never coexist in a document (`LightGroup.levels`), and the absolute one
-            //     wins if a hand-edited file somehow sets both — the pre-073 precedence.
-            //   · 071's trim is orthogonal: `_trim` for each of the three.
-            let hasLevels = edit.light.blackLevel != nil || edit.light.whiteLevel != nil
-            let knee = !hasLevels && (edit.light.blacks != 0 || edit.light.whites != 0)
+            //   · 071's trim is orthogonal: `_trim` for each of the two.
+            //
+            // schema 11: there is no dropper level any more, so `kLevels` (030's affine remap) is not
+            // one of the choices — `blackOffset` and the two end-point sliders are the whole travel.
+            let knee = edit.light.blacks != 0 || edit.light.whites != 0
             let hybrid = knee && abs(edit.light.blacks) > LightGroup.blacksEVToLevelSplit
             let trim = edit.light.blackOffset != 0
             let function: String
-            switch (hasLevels, knee, hybrid, trim) {
-            case (true, _, _, false): function = "s1_scene_linear_levels"
-            case (true, _, _, true): function = "s1_scene_linear_levels_trim"
-            case (false, false, _, false): function = "s1_scene_linear"
-            case (false, false, _, true): function = "s1_scene_linear_trim"
-            case (false, true, true, false): function = "s1_scene_linear_hybrid"
-            case (false, true, true, true): function = "s1_scene_linear_hybrid_trim"
-            case (false, true, false, false): function = "s1_scene_linear_knee"
-            case (false, true, false, true): function = "s1_scene_linear_knee_trim"
+            switch (knee, hybrid, trim) {
+            case (false, _, false): function = "s1_scene_linear"
+            case (false, _, true): function = "s1_scene_linear_trim"
+            case (true, true, false): function = "s1_scene_linear_hybrid"
+            case (true, true, true): function = "s1_scene_linear_hybrid_trim"
+            case (true, false, false): function = "s1_scene_linear_knee"
+            case (true, false, true): function = "s1_scene_linear_knee_trim"
             }
             let p = try kernels.pipeline(file: "s1_scene_linear", function: function)
             // ── S1 is end points + exposure + highlight recovery ────────────────────────────────
@@ -2736,11 +2728,9 @@ public final class RenderGraph {
             // not the same picture; see `WhiteBalanceTests`).
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
                 && edit.light.blacks == 0 && edit.light.whites == 0
-                && edit.light.blackLevel == nil && edit.light.whiteLevel == nil
                 // 071: a trim on its own is *not* the identity — it moves pixels — so it takes the
                 // copy branch away exactly like a level does.
                 && edit.light.blackOffset == 0
-            let levels = edit.light.levels
             var params = S1Params(
                 a: SIMD4(edit.light.exposureGain, 1, 1, 1),
                 b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0,
@@ -2750,13 +2740,6 @@ public final class RenderGraph {
                 // the whole canvas — one guard per pixel is cheaper than a second encoder.
                 c: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)),
-                // 030: the absolute levels, resolved through `LevelPair` so the envelope and the
-                // `white ≥ black + 1e-3` constraint are applied in **one** place. The flags are what
-                // tell the kernel to ignore the sliders; a document without them sends 0/0 and gets
-                // 019's arithmetic bit for bit.
-                d: SIMD4(Float(levels.black), Float(levels.white),
-                         edit.light.blackLevel == nil ? 0 : 1,
-                         edit.light.whiteLevel == nil ? 0 : 1),
                 // 071: the additive linear trim, clamped once (`clampedBlackOffset`) so the number in
                 // the key material and the number the kernel adds cannot disagree. 0 → the kernel's
                 // branch is not taken at all.

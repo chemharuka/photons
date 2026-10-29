@@ -211,8 +211,6 @@ extension EditHistory {
         opt("light.tint", .light, before.light.tint, after.light.tint)
         num("light.highlightRecovery", .light,
             before.light.highlightRecovery, after.light.highlightRecovery)
-        opt("light.blackLevel", .light, before.light.blackLevel, after.light.blackLevel)
-        opt("light.whiteLevel", .light, before.light.whiteLevel, after.light.whiteLevel)
         num("light.blackOffset", .light, before.light.blackOffset, after.light.blackOffset)
 
         // S1.7 — the curve. Structure first: a point added or removed is one row ("点数 2 → 3"),
@@ -498,8 +496,6 @@ extension EditHistory {
         "light.temperature": "色温",
         "light.tint": "色调",
         "light.highlightRecovery": "高光恢复",
-        "light.blackLevel": "黑电平",
-        "light.whiteLevel": "白电平",
         "light.blackOffset": "黑电平微调",
         "color.vibrance": "自然饱和",
         "color.saturation": "饱和",

@@ -778,7 +778,6 @@ struct MetalKernelHarness {
         var a: SIMD4<Float>   // gain, wbR, wbG, wbB
         var b: SIMD4<Float>   // recovery, identity, blacks, whites
         var c: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
-        var d: SIMD4<Float>   // blackLevel, whiteLevel, hasBlack, hasWhite
         var e: SIMD4<Float>   // 071: blackOffset, pad, pad, pad
     }
 
@@ -868,8 +867,6 @@ struct MetalKernelHarness {
         var p = Params(a: SIMD4(gain, 1, 1, 1),
                        b: SIMD4(recovery, 0, blacks, whites),
                        c: SIMD4(0, 0, Float(width), Float(height)),
-                       d: SIMD4(levels?.black ?? 0, levels?.white ?? 1,
-                                levels == nil ? 0 : 1, levels == nil ? 0 : 1),
                        e: SIMD4(offset, 0, 0, 0))
         guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
             throw XCTSkip("no command buffer")
@@ -908,7 +905,7 @@ struct MetalKernelHarness {
                         withBytes: buf.baseAddress!, bytesPerRow: width * 16)
         }
         var p = Params(a: SIMD4(1, 1, 1, 1), b: SIMD4(0, 0, blacks, whites),
-                       c: SIMD4(0, 0, Float(width), Float(height)), d: SIMD4(0, 0, 0, 0),
+                       c: SIMD4(0, 0, Float(width), Float(height)),
                        e: SIMD4(0, 0, 0, 0))
         var samples: [Double] = []
         for _ in 0..<batches {

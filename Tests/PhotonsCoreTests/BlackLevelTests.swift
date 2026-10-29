@@ -145,7 +145,6 @@ final class BlackLevelTests: XCTestCase {
         legacyModel.schemaVersion = 4
         legacyModel.light.exposure = 0.5
         legacyModel.light.blacks = -12
-        legacyModel.light.whiteLevel = 2
         let legacy = String(decoding: try encoder.encode(legacyModel), as: UTF8.self)
         XCTAssertFalse(legacy.contains("blackOffset"), "旧 blob 里本来就没有这个键")
 
@@ -172,8 +171,9 @@ final class BlackLevelTests: XCTestCase {
         // blackOffset 这个键。
         // 新文档：schemaVersion 10（2026-10-28 加了 `healSpots`，078 P0-1 的 修复画笔），
         // 而且**仍然**不写 blackOffset 这个键。
-        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
-        XCTAssertEqual(EditModel.neutral.schemaVersion, 10)
+        // 2026-10-29: 11 (030's absolute `blackLevel`/`whiteLevel` deleted — one black point left).
+        XCTAssertEqual(EditModel.currentSchemaVersion, 11)
+        XCTAssertEqual(EditModel.neutral.schemaVersion, 11)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
         XCTAssertTrue(fresh.contains("\"schemaVersion\" : 10"), "新文档是版本 10")
         XCTAssertFalse(fresh.contains("blackOffset"), "0 不写键 —— 旧 blob 的逐字节稳定靠这条")
@@ -469,7 +469,6 @@ final class BlackLevelTests: XCTestCase {
             var a: SIMD4<Float>   // gain, wbR, wbG, wbB
             var b: SIMD4<Float>   // recovery, identity, blacks, whites
             var c: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
-            var d: SIMD4<Float>   // blackLevel, whiteLevel, hasBlack, hasWhite
             var e: SIMD4<Float>   // 071: blackOffset, pad, pad, pad
         }
 
@@ -549,7 +548,6 @@ final class BlackLevelTests: XCTestCase {
                 b: SIMD4(0, 0, 0, 0),
                 c: SIMD4(Float(content?.x ?? 0), 0,
                          Float(content?.width ?? width), Float(height)),
-                d: SIMD4(0, 0, 0, 0),
                 e: SIMD4(offset, 0, 0, 0))
 
             guard let cb = queue.makeCommandBuffer(),

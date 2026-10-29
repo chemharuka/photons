@@ -99,7 +99,16 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// is not encoded at all, and the frame is the pre-S1.9 frame by construction rather than by
     /// arithmetic. No stored number changes *meaning*, so the version is not stamped on decode — a
     /// document keeps the number its own file wrote, and only a document this build saves carries 10.
-    public static let currentSchemaVersion = 10
+    ///
+    /// **11 (2026-10-29): 030's absolute black/white levels are deleted.** `light.blackLevel` and
+    /// `light.whiteLevel` were a second and third spelling of "where black is" — an artefact of the
+    /// 042 dropper, whose UI is long gone (073B made the sliders an EV window, 071 added the additive
+    /// trim). Nothing could set them any more, but the model, the kernel's `kLevels` entry point, the
+    /// history labels and the copy sheet all still had to reason about them. They are gone: the decode
+    /// drops the two keys, `s1_scene_linear_levels*` no longer exists, and `blackOffset` is the one
+    /// black-point control. A document that does carry one of the keys is stamped (its bytes and its
+    /// pixels both move); measured before the change, zero documents on this machine had either key.
+    public static let currentSchemaVersion = 11
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -367,6 +376,14 @@ public struct EditModel: Sendable, Equatable, Codable {
         // picture, and honouring the key would rotate a photograph its author never turned. The
         // version is not stamped — schema 7/8's rule — so a v8 document re-encodes byte for byte.
         if v.schemaVersion < 9 { v.geometry.quarterTurns = 0 }
+        // schema 11: 030's absolute levels are deleted model-wide, so a document that still carries
+        // one loses the level it named. Stamped, unlike the additive schema-7/8/9/10 keys: the bytes
+        // change (a key disappears) and the pixels change (019's affine level stops being applied).
+        if v.schemaVersion < 11,
+           let lc = try? c.nestedContainer(keyedBy: AnyCodingKey.self, forKey: AnyCodingKey("light")),
+           lc.contains(AnyCodingKey("blackLevel")) || lc.contains(AnyCodingKey("whiteLevel")) {
+            v.schemaVersion = EditModel.currentSchemaVersion
+        }
         // 2026-10-28 (078 P0-1): `healSpots` is additive (schema 7/8/9's rule): an absent key reads
         // as `[]`, which is `hasHeal == false` and no S1.9 — so there is nothing to convert and the
         // version is not stamped. A spot read back from disk is clamped for the same reason
@@ -446,16 +463,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             // does: the linear buffer itself is what changed (派单 019). White balance (派单 006)
             // straddles neither: it was already answered above, by `decodeInputs`.
             //
-            // 030: the absolute `blackLevel`/`whiteLevel` are the same level under a second name
-            // (one control, two handles — the sliders and the curve panel's reference lines), so
-            // they dirty exactly the stage the sliders do. Nothing else: the mask atlas is
-            // downstream of `.sceneLinear`'s key, which the chain handles.
             if light.exposure != old.light.exposure
                 || light.highlightRecovery != old.light.highlightRecovery
                 || light.whites != old.light.whites
                 || light.blacks != old.light.blacks
-                || light.blackLevel != old.light.blackLevel
-                || light.whiteLevel != old.light.whiteLevel
                 || light.blackOffset != old.light.blackOffset {
                 s.insert(.sceneLinear)
             }
@@ -625,15 +636,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             // output changes and everything below it must miss. The tokens are the same ones S2 used
             // to carry, in the same order, so a document's numbers read the same in a log line.
             //
-            // 030 appends the absolute levels **only when they are set** (§3.2 discipline): a
-            // document that never used a level dropper keeps its S1 material byte for byte, and a
-            // document that did can never serve a cached S1 buffer levelled somewhere else.
+            // schema 11: 030's `blL`/`whL` tokens are gone with the fields they named. A document
+            // written by an earlier build re-keys once (the level it named no longer renders) and
+            // never again — `boff` below is the one remaining black-point token.
             var m = "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
                 + ";tint=\(light.tint.map { k($0) } ?? "shot")"
                 + ";hlr=\(k(light.highlightRecovery))"
                 + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
-            if let bl = light.blackLevel { m += ";blL=\(k(bl))" }
-            if let wh = light.whiteLevel { m += ";whL=\(k(wh))" }
             // 071: appended **only when non-zero**, the `asp`/`car`/`blL` discipline. A document that
             // never used the trim keeps the S1 material of every document written before 071 byte for
             // byte — the pinned vectors in `WindowTests` / `MaskTests` and every recorded golden depend
@@ -977,9 +986,6 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// quadratic so a short travel is nearly pure EV), over a 2 EV window that ends at display white
     /// and decays above it (shoulder). Both terms ride the same weight, so nothing moves below −2 EV.
     ///
-    /// It used to be an affine level (`wht = 1 − whites/100·0.15`, 派单 019), which brightened the
-    /// whole picture and moved the mid-tones; `+` still means "up", the shape is what changed. The
-    /// affine spelling now belongs only to `whiteLevel` below, where "this sample is white" is a level.
     public var whites: Double            // -100…100, default 0; + moves the white point up
     /// 073B/073C — the **black end point**: half the travel is a multiplicative EV on the dark end
     /// (`0 → 0`), the second half blends in a black-point **level** move so the black end can really
@@ -997,8 +1003,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// picks 073B's entry point there — see `blacksEVToLevelSplit`).
     ///
     /// It used to be an affine level (`blk = −blacks/100·0.15`), which moved every pixel, including
-    /// 50 % grey — that is not what the control is for. The affine spelling now belongs only to
-    /// `blackLevel` below, where "this sample is black" really is a level. `+` still lifts the shadows.
+    /// 50 % grey — that is not what the control is for. `+` still lifts the shadows.
     public var blacks: Double            // -100…100, default 0
 
     /// 073C — where the travel switches mechanism, `|blacks| = 50`.
@@ -1021,31 +1026,16 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// Soft shoulder for values above ~0.8; 0 = untouched, 1 = asymptote at 1.0.
     public var highlightRecovery: Double // 0…1, default 0
 
-    /// Absolute black level in **scene-linear** light (`0.18` means "the 18 % grey patch reads
-    /// here"), or `nil` = no absolute level at all (派单 030).
-    ///
-    /// Since 073B this is the *only* affine level left in S1, and it is the dropper's spelling on
-    /// purpose: a sampled "this is black" means "make this value 0", which is a level and nothing else.
-    /// The `blacks` slider is a different animal (an EV window over the dark end), so the two never
-    /// coexist in one document — `levels` picks this field when it is set, and the UI clears it when the
-    /// slider is dragged.
-    ///
-    /// Why an absolute value exists at all: a slider's travel cannot express an HDR white point. A
-    /// `whiteLevel` of 2.0 (a +1 EV highlight) is not reachable by `wht ∈ [0.85, 1.15]`.
-    public var blackLevel: Double?
-    /// Absolute white level in scene-linear light; `nil` = no absolute level. Same rules as
-    /// `blackLevel`, with `white ≥ black + 1e−3` enforced on the pair.
-    public var whiteLevel: Double?
-
     /// 派单 071 — an **additive** black trim in scene-linear units: +0.01…−0.01, default 0.
     ///
-    /// A third spelling of "where black is", and deliberately not a replacement for the other two:
-    /// `blacks` is a coarse level (±0.15, and it also moves the white point's span) and `blackLevel`
-    /// is an absolute dropper reading. This one is the fine trim the user asked for —「让 0 值变为
-    /// ±0.01」— with 1/1000 granularity, and it is the only control that can lift the decoder's own
-    /// negative samples back across zero without moving where 0 and 1 are:
+    /// The **only** spelling of "where black is" in the document (030's absolute
+    /// `blackLevel`/`whiteLevel` pair was deleted in schema 11 — a second meaning of one control with
+    /// no UI left to set it). `blacks` is the coarse end-point control (±3 EV of knee at the dark
+    /// end); this is the fine trim the user asked for — 「让 0 值变为 ±0.01」— with 1/1000
+    /// granularity, and it is the only control that can lift the decoder's own negative samples back
+    /// across zero without moving where 0 and 1 are:
     ///
-    ///     v = (v − blk)/span + blackOffset        // S1, between the levels and the gain
+    ///     v = v + blackOffset        // S1, before the exposure gain
     ///
     /// It is additive and it sits **before the exposure gain**, so the trim is scaled by the same
     /// gain the negative samples are: +0.01 at +2 EV lifts +0.04. That is what makes `+` pull the
@@ -1065,17 +1055,9 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// The slider's travel: integers only, 0 in the middle (`slider / 1000` = the document value).
     public static let blackOffsetSliderRange: ClosedRange<Double> = -10...10
 
-    /// The envelope the level fields are clamped into (`§7.1`): a black sample below −3 EV is noise,
-    /// and a white above +4 EV is past the far end of the curve's axis (the shaper keeps going at the
-    /// last slope, but nothing above it can be labelled — 044 moved the end from +6 to +4 EV; the
-    /// envelope itself stays where §7.1 put it, so old documents still load).
-    public static let blackLevelRange: ClosedRange<Double> = -0.05...0.5
-    public static let whiteLevelRange: ClosedRange<Double> = 0.05...64
-
     public init(exposure: Double = 0, contrast: Double = 0, highlights: Double = 0,
                 midtones: Double = 0, shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
                 temperature: Double? = nil, tint: Double? = nil, highlightRecovery: Double = 0,
-                blackLevel: Double? = nil, whiteLevel: Double? = nil,
                 blackOffset: Double = 0) {
         self.exposure = exposure
         self.contrast = contrast
@@ -1087,8 +1069,6 @@ public struct LightGroup: Sendable, Equatable, Codable {
         self.temperature = temperature
         self.tint = tint
         self.highlightRecovery = highlightRecovery
-        self.blackLevel = blackLevel
-        self.whiteLevel = whiteLevel
         self.blackOffset = blackOffset
     }
 
@@ -1105,8 +1085,8 @@ public struct LightGroup: Sendable, Equatable, Codable {
         v.temperature = c.val("temperature", v.temperature)
         v.tint = c.val("tint", v.tint)
         v.highlightRecovery = c.val("highlightRecovery", v.highlightRecovery)
-        v.blackLevel = c.val("blackLevel", v.blackLevel)
-        v.whiteLevel = c.val("whiteLevel", v.whiteLevel)
+        // schema 11: 030's absolute pair is gone; a document that still carries the keys loads
+        // without them (`EditModel.init(from:)` stamps the version so the re-encode says so).
         // 071: an absent key is 0 — the pre-071 document's meaning, and the identity of the trim.
         v.blackOffset = c.val("blackOffset", v.blackOffset)
         self = v
@@ -1141,30 +1121,14 @@ public struct LightGroup: Sendable, Equatable, Codable {
         try c.encodeIfPresent(temperature, forKey: AnyCodingKey("temperature"))
         try c.encodeIfPresent(tint, forKey: AnyCodingKey("tint"))
         try c.encode(highlightRecovery, forKey: AnyCodingKey("highlightRecovery"))
-        // 030: absent, not `null` — a document that never set a level encodes byte-identically to
-        // the pre-030 JSON (the `temperature`/`tint` rule again).
-        try c.encodeIfPresent(blackLevel, forKey: AnyCodingKey("blackLevel"))
-        try c.encodeIfPresent(whiteLevel, forKey: AnyCodingKey("whiteLevel"))
         // 071: **absent at 0**, not `"blackOffset": 0` — a document that never touched the control
-        // re-encodes byte for byte (the `temperature`/`tint`/`blackLevel` rule). It is the same
+        // re-encodes byte for byte (the `temperature`/`tint` rule). It is the same
         // discipline the kernel follows: the default path is not "the old path plus zero", it is the
         // old path.
         if blackOffset != 0 { try c.encode(blackOffset, forKey: AnyCodingKey("blackOffset")) }
     }
 
     public var isIdentity: Bool { self == LightGroup.identity }
-
-    /// The black level the `blacks` slider *used to* ask for, `blk = −blacks/100·0.15` (派单 019).
-    ///
-    /// 073B kept the arithmetic and stopped using it for the picture: the slider is an EV window now,
-    /// so this value only reaches `levels` (and from there the curve panel's reference line and the
-    /// `blL`/`whL` key tokens). Reading it as "where black is" would be wrong for a 073B document; it
-    /// is here because `LevelPair` is still the one place the *dropper's* level is reconciled.
-    public var sliderBlackLevel: Double { -blacks / 100 * 0.15 }
-
-    /// The white level the `whites` slider used to ask for, `wht = 1 − whites/100·0.15`. See
-    /// `sliderBlackLevel`.
-    public var sliderWhiteLevel: Double { 1 - whites / 100 * 0.15 }
 
     // MARK: - 071: the additive linear trim's mapping
 
@@ -1199,26 +1163,6 @@ public struct LightGroup: Sendable, Equatable, Codable {
         guard blackOffset.isFinite else { return 0 }
         return min(max(blackOffset, LightGroup.blackOffsetRange.lowerBound),
                    LightGroup.blackOffsetRange.upperBound)
-    }
-
-    /// Where 0 and 1 are, after the absolute fields and the sliders are reconciled.
-    ///
-    /// One answer, one place: S1's `kLevels` entry point, the level droppers and the curve panel's
-    /// reference lines all read this, so "which black point is in force" cannot be answered two ways.
-    ///
-    /// 073B: the **slider** half is legacy arithmetic. The sliders are EV windows now and never reach
-    /// S1 as a level, so for a document without a dropper these numbers describe where an *019-era*
-    /// document's level would have been — the flags in S1's `d` are 0, so the kernel ignores them. The
-    /// curve panel's reference line still draws them; that is a follow-up ticket (the line should show
-    /// the window, not the old level), not a second black point.
-    public var levels: LevelPair {
-        let blk = min(max(blackLevel ?? sliderBlackLevel,
-                          LightGroup.blackLevelRange.lowerBound), LightGroup.blackLevelRange.upperBound)
-        let whtRaw = min(max(whiteLevel ?? sliderWhiteLevel,
-                             LightGroup.whiteLevelRange.lowerBound), LightGroup.whiteLevelRange.upperBound)
-        // `max(…, 1e-3)` on the span, exactly as S1's remap does: a pair that crossed over would
-        // divide by ≤ 0 and invert the picture.
-        return LevelPair(black: blk, white: max(whtRaw, blk + 1e-3))
     }
 
     /// S1 exposure gain. 1.0 at 0 EV.
@@ -1270,36 +1214,6 @@ public struct LightGroup: Sendable, Equatable, Codable {
         func clamp(_ v: Double) -> Double { min(max(v, 1), 255) }
         return (clamp(r), clamp(g), clamp(b))
     }
-}
-
-/// The pair of linear levels S1 applies — "where 0 is" and "where white is".
-///
-/// One value type rather than two loose numbers, because three things must agree about it: the S1
-/// remap `(v − black)/span`, the droppers' cross-constraint (a black sample may not be pushed onto
-/// the white level) and `keyMaterial`'s envelope. §13.1 asks for exactly this: the mapping lives in
-/// one place so a later change to the level form (stops instead of linear, say) is one edit.
-public struct LevelPair: Sendable, Equatable {
-    /// Input value that maps to 0.
-    public var black: Double
-    /// Input value that maps to 1.
-    public var white: Double
-
-    public init(black: Double, white: Double) {
-        self.black = black
-        self.white = white
-    }
-
-    public static let identity = LevelPair(black: 0, white: 1)
-
-    /// The divisor, floored exactly as `s1_scene_linear.metal` floors it: a pair that crossed over
-    /// must not invert the picture.
-    public var span: Double { max(white - black, 1e-3) }
-
-    /// The affine remap S1 performs, in `Double` — for solvers and tests, not for the GPU.
-    public func normalised(_ v: Double) -> Double { (v - black) / span }
-
-    /// True when this pair maps `0 → 0` and `1 → 1` exactly: no levelling at all.
-    public var isIdentity: Bool { black == 0 && white == 1 }
 }
 
 /// Lightroom's tone curve. Four monotone-cubic LUTs: **W** (luminance) plus per-channel R/G/B.

@@ -109,22 +109,19 @@ using namespace metal;
 // that spelling moving 2980/12309 samples of the push document by an ULP. So the body is one templated
 // function and the CPU picks an entry point:
 //
-//     kLevels  kKnee  kHybrid  kTrim   entry point                      dispatched when
-//     false    false  false    false   s1_scene_linear                   no levels, no sliders, no trim
-//     false    false  false    true    s1_scene_linear_trim              071's trim only
-//     true     false  false    false   s1_scene_linear_levels            030 dropper, no trim
-//     true     false  false    true    s1_scene_linear_levels_trim
-//     false    true   false    false   s1_scene_linear_knee              sliders ≠ 0, |blacks| ≤ 50
-//     false    true   false    true    s1_scene_linear_knee_trim
-//     false    true   true     false   s1_scene_linear_hybrid            073C: |blacks| > 50
-//     false    true   true     true    s1_scene_linear_hybrid_trim
+//     kKnee  kHybrid  kTrim   entry point                      dispatched when
+//     false  false    false   s1_scene_linear                   no sliders, no trim
+//     false  false    true    s1_scene_linear_trim              071's trim only
+//     true   false    false   s1_scene_linear_knee              sliders ≠ 0, |blacks| ≤ 50
+//     true   false    true    s1_scene_linear_knee_trim
+//     true   true     false   s1_scene_linear_hybrid            073C: |blacks| > 50
+//     true   true     true    s1_scene_linear_hybrid_trim
 //
-// `kLevels` is 030's dropper, and it stays affine on purpose: the dropper's whole meaning is "make
-// *this* sample black" (`blackLevel` → 0, `whiteLevel` → 1), which is a level and nothing else — the
-// paint-by-number reading of an absolute sample. The two spellings never coexist: `LightGroup.levels`
-// uses the absolute field when it is set and the sliders otherwise, and the UI clears one when the
-// other is dragged, so a document is either on the level path or on the knee path. A hand-edited
-// document that sets both gets the absolute level (the pre-073 precedence: the flag wins).
+// **`kLevels` and 030's dropper are gone (schema 11).** `s1_scene_linear_levels(_trim)` was the affine
+// remap `(v − blackLevel)/span` for a document that carried an absolute level from the 042 dropper.
+// That control was deleted, the two document keys went with it, and the model now has exactly one
+// black point (`light.blackOffset`, 071). A document written by an older build keeps its pixels to
+// within that level's absence: `EditModel` drops the key and stamps the schema.
 //
 // **Highlight recovery** is a soft shoulder: values above knee 0.8 are compressed towards 1.0 with a
 // shape controlled by `amount`. amount = 0 is exact identity; amount = 1 asymptotes at 1.0. It stays
@@ -143,9 +140,6 @@ struct S1Params {
     float4 a;   // gain, wbR, wbG, wbB
     float4 b;   // recovery, identity, blacks, whites
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    // 派单 030 — the absolute levels: blackLevel, whiteLevel, hasBlack, hasWhite.
-    // Read only by the `kLevels` instantiation; the knee entries never look at them.
-    float4 d;
     // 派单 071 — the linear black offset in scene-linear units (x), 3 pad. Read only by the `kTrim`
     // instantiation.
     float4 e;
@@ -165,7 +159,7 @@ struct S1Params {
 // (`|blacks| > 50`) is exactly where `m` is 0, so the two instantiations agree bit for bit at the
 // boundary and the untouched one keeps 073B's source verbatim.
 
-template <bool kLevels, bool kKnee, bool kHybrid, bool kTrim>
+template <bool kKnee, bool kHybrid, bool kTrim>
 static inline void s1_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S1Params &p,
@@ -192,16 +186,7 @@ static inline void s1_body(texture2d<float, access::read> src,
 
     float3 v = c.rgb;
 
-    // ① 030 — the absolute level the dropper sampled, when the document has one. Affine and
-    //    sign-preserving, byte for byte 019's remap: a dropper says "this sample is black", i.e. where
-    //    0 is, and that is a level by definition. The slider path never reaches this code.
-    if (kLevels) {
-        float blk = p.d.x;
-        float wht = p.d.y;
-        v = (v - blk) / max(wht - blk, 1e-3);
-    }
-
-    // ①b 071 — the additive linear trim, **before** the gain so it is scaled by the same gain the
+    // ① 071 — the additive linear trim, **before** the gain so it is scaled by the same gain the
     //    negative samples are (see 071's header: -0.01 at +1.6 EV is -0.03).
     if (kTrim) {
         v += float3(p.e.x);
@@ -243,7 +228,7 @@ kernel void s1_scene_linear(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             constant S1Params &p [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, false, false>(src, dst, p, gid);
+    s1_body<false, false, false>(src, dst, p, gid);
 }
 
 // 071: the same body with the offset in it.
@@ -251,22 +236,7 @@ kernel void s1_scene_linear_trim(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, false, true>(src, dst, p, gid);
-}
-
-// 030: the absolute level a dropper sampled. No knee: the two spellings never coexist.
-kernel void s1_scene_linear_levels(texture2d<float, access::read> src [[texture(0)]],
-                                   texture2d<float, access::write> dst [[texture(1)]],
-                                   constant S1Params &p [[buffer(0)]],
-                                   uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, false, false>(src, dst, p, gid);
-}
-
-kernel void s1_scene_linear_levels_trim(texture2d<float, access::read> src [[texture(0)]],
-                                        texture2d<float, access::write> dst [[texture(1)]],
-                                        constant S1Params &p [[buffer(0)]],
-                                        uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, false, true>(src, dst, p, gid);
+    s1_body<false, false, true>(src, dst, p, gid);
 }
 
 // 073B: the black/white end points. Picked only when `blacks != 0 || whites != 0`.
@@ -274,14 +244,14 @@ kernel void s1_scene_linear_knee(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, false, false>(src, dst, p, gid);
+    s1_body<true, false, false>(src, dst, p, gid);
 }
 
 kernel void s1_scene_linear_knee_trim(texture2d<float, access::read> src [[texture(0)]],
                                       texture2d<float, access::write> dst [[texture(1)]],
                                       constant S1Params &p [[buffer(0)]],
                                       uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, false, true>(src, dst, p, gid);
+    s1_body<true, false, true>(src, dst, p, gid);
 }
 
 // 073C: the second half of the blacks travel — the same EV toe plus the black-point level move.
@@ -291,12 +261,12 @@ kernel void s1_scene_linear_hybrid(texture2d<float, access::read> src [[texture(
                                    texture2d<float, access::write> dst [[texture(1)]],
                                    constant S1Params &p [[buffer(0)]],
                                    uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, true, false>(src, dst, p, gid);
+    s1_body<true, true, false>(src, dst, p, gid);
 }
 
 kernel void s1_scene_linear_hybrid_trim(texture2d<float, access::read> src [[texture(0)]],
                                         texture2d<float, access::write> dst [[texture(1)]],
                                         constant S1Params &p [[buffer(0)]],
                                         uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, true, true, true>(src, dst, p, gid);
+    s1_body<true, true, true>(src, dst, p, gid);
 }
