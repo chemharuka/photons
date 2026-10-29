@@ -151,6 +151,14 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.register(FilmstripCell.self, forItemWithIdentifier: FilmstripCell.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
 
+        // 119: a double-click opens the photo under the pointer, exactly like the grid's. The strip
+        // used to open only the anchor (Return); "double-click which one, open that one" needs the
+        // hit row, and only this view knows it.
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick(_:)))
+        doubleClick.numberOfClicksRequired = 2
+        doubleClick.delaysPrimaryMouseButtonEvents = false
+        collectionView.addGestureRecognizer(doubleClick)
+
         // Same two verbs as the grid, on the same kind of menu.
         contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
@@ -542,6 +550,19 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         default:
             return false
         }
+    }
+
+    @objc private func handleDoubleClick(_ recognizer: NSClickGestureRecognizer) {
+        activateItem(at: recognizer.location(in: collectionView))
+    }
+
+    /// Open the cell under `point` (strip coordinates). `internal` so the test can drive the same
+    /// hit-testing the gesture uses instead of guessing a window-space click.
+    func activateItem(at point: NSPoint) {
+        guard let session,
+              let indexPath = collectionView.indexPathForItem(at: point),
+              let asset = session.assets[safe: indexPath.item] else { return }
+        onActivate?(asset.id)
     }
 
     /// Cells actually laid out — `--ui-smoke` asserts this against the library row count.
