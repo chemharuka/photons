@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import SwiftUI
 import PhotonsCore
+import PhotonsExport
 @testable import PhotonsUI
 
 /// 099 — the sheet's section order, the one-line summary, and the preset files behind the popup.
@@ -108,7 +109,8 @@ final class ExportSheetModelTests: XCTestCase {
         let sheet = model()
         XCTAssertEqual(sheet.preset.format, .heic, "HDR needs the HEIF container")
         XCTAssertEqual(sheet.preset.hdr?.enabled, true, "HDR defaults to on")
-        XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
+        // 默认值随系统：15+ 是 ISO（ImageIO 的 ISOGainMap），14 是 Apple（14.1 就有 HDRGainMap）。
+        XCTAssertEqual(sheet.preset.hdr?.gainMap, HDRExport.defaultGainMap)
         XCTAssertEqual(sheet.preset.hdr?.halfSize, false)
         XCTAssertEqual(sheet.preset.hdr?.headroom, .auto)
 
@@ -162,6 +164,8 @@ final class ExportSheetModelTests: XCTestCase {
         sheet.selectionCount = 2
         sheet.preset = ExportSheetModel.defaultPreset
 
+        // 钉死 iso 再断言文案，别让这条测试随 macOS 版本漂移。
+        sheet.hdrGainMap = .iso
         XCTAssertTrue(sheet.summaryLine.contains("HDR ISO RGB"), sheet.summaryLine)
         sheet.hdrGainMap = .mono
         sheet.hdrHalfSize = true
