@@ -354,6 +354,37 @@ final class ToneMapTests: XCTestCase {
         }
     }
 
+    /// **138 — the white point must not move more than the super-white pixels.**
+    ///
+    /// `L = log2(v)` relative to display white. 073B/127's `exp(−L)` above white made `L = +1.5 EV`
+    /// move −0.13 EV while `L = 0` moved −0.60 EV — the owner's 「高光不变」 (measured on the render:
+    /// p99.9 moved +0.0003 code at `whites = −100`). 138's `smoothstep(−2, +1, L)` is monotone in L, so
+    /// the **drop** at +1.5 EV has to be at least the drop at white. The old shape fails this test by
+    /// construction (its weight decays exactly where the assertion looks); that is the point of it.
+    func testWhitesCompressesAboveWhiteNotBelow() throws {
+        let harness = try MetalKernelHarness()
+        let white: Float = 1
+        let above: Float = pow(2, 1.5)                    // +1.5 EV above display white
+        let down = try harness.run([white, above], blacks: 0, whites: -100)
+        let dWhite = log2(Double(down[0]) / Double(white))
+        let dAbove = log2(Double(down[1]) / Double(above))
+        print(String(format: "138 whites −100: ΔEV at white (L=0) %+.3f, at +1.5 EV %+.3f",
+                     dWhite, dAbove))
+        XCTAssertGreaterThanOrEqual(-dAbove, -dWhite + 0.15,
+                                    "super-white must drop at least as much as the white point "
+                                    + "(white \(dWhite) EV, +1.5 EV \(dAbove) EV)")
+        XCTAssertLessThan(dAbove, 0, "whites −100 must actually darken a super-white pixel")
+
+        // The other sign keeps the same ordering: +100 lifts the HDR tail at least as far as white.
+        let up = try harness.run([white, above], blacks: 0, whites: 100)
+        let uWhite = log2(Double(up[0]) / Double(white))
+        let uAbove = log2(Double(up[1]) / Double(above))
+        print(String(format: "138 whites +100: ΔEV at white (L=0) %+.3f, at +1.5 EV %+.3f",
+                     uWhite, uAbove))
+        XCTAssertGreaterThanOrEqual(uAbove, uWhite - 1e-4,
+                                    "super-white must lift at least as much as the white point")
+    }
+
     // MARK: - B. the matte
 
     /// Acceptance ②: canvas ≠ content, four extreme slider settings. Every letterbox pixel must be

@@ -11,8 +11,8 @@ using namespace metal;
 //   ①b linear black **offset** (071):          v = v + blackOffset          additive, linear units
 //   ② exposure gain + WB gains:                v *= gain · wb              multiplicative
 //   ③ blacks:  EV (first half of the travel), then EV + **level** (second half, 073C)
-//   ④ whites:  EV shoulder (±0.6 EV at display white, 0 below −2 EV) × a multiplicative level
-//              (127: global, so the shadows scale too; `0 → 0`)
+//   ④ whites:  EV (138: 0 below −2 EV, rising monotonically to 1.2 EV at +2 EV and above display
+//              white) × a multiplicative level (127: global, so the shadows scale too; `0 → 0`)
 //   ⑤ highlight recovery: the soft shoulder, unchanged
 //
 // **073B — why the affine level left this path.** 019 made `blacks`/`whites` an affine remap
@@ -33,8 +33,8 @@ using namespace metal;
 // 7.5 / 26.2 / 89.9 codes — the shadows do not respond at all, because the window is 0 there. What the
 // owner means by 「电平」 is a scale over the whole range. A multiplier does that without 019's fog
 // (019's affine/additive level lifted pure black to code 0.397): `v·k` is still 0 at `v = 0`. The EV
-// half and its shoulder stay exactly as 073B wrote them — this is a level *on top of* the white-point
-// move, not a redefinition of it.
+// half is 073B's white-point move with 138's monotone window (see `tone_shape.metal`); this is a level
+// *on top of* the white-point move, not a redefinition of it.
 //
 // **The knee is a window on L = log2(luma), not on the linear value and not on the display code.**
 // Three coordinates were measured (contract 073 §4.9); for a ±3 EV travel the coded one loses: a

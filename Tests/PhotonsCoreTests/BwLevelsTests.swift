@@ -232,6 +232,14 @@ final class BwLevelsTests: XCTestCase {
     /// asserted in the same place: below the old −2 EV window the EV shoulder is exactly 0, so the
     /// output must be exactly `v · level(Δw)` — and `v = 0` must still be exactly 0, which is the whole
     /// reason the level is multiplicative and not 019's additive one.
+    ///
+    /// **138** replaced 073B's `exp(−L)` above white with one monotone `smoothstep(−2, +2, L)`. The
+    /// exact-scaling assertion below still holds (the new window is 0 below −2 EV too), and the rest
+    /// of the old "window" claim is now a **shape** claim: on the 0.55…0.90 display-code band the
+    /// local slope at `whites = −100` has to stay above 0.45. The old and new S1 transfers both sit at
+    /// ~0.55 there; what changed is *where* the compression lands (the old one took −0.10…−0.13 code
+    /// off p70–p85 while leaving p99.9 still). This pins the S1 half; the full render's number is in
+    /// `local/REPORT.md` because the export's adaptive tone map is outside this kernel.
     func testBlacksKneeLeavesEverythingAboveItBitIdenticalAndWhitesScalesTheWholeRange() throws {
         let harness = try MetalKernelHarness()
         let blackOutside: [Float] = [0.75, 1.0, 2.0, 4.0]                     // code ≥ 0.74, i.e. L > −1.0
@@ -257,6 +265,32 @@ final class BwLevelsTests: XCTestCase {
             XCTAssertEqual(w[1].bitPattern, Float(0).bitPattern,
                            "whites \(slider) lifted pure black off 0 — the level is multiplicative")
         }
+
+        // 138's shape, measured on the shipped kernel: the owner's 0.55–0.90 code band keeps at least
+        // 80 % of its local slope at −100 (the removed `exp(−L)` shape collapsed it to ~0.5 in the
+        // full render). A code band, not a window: every adjacent step in the band is asserted.
+        func srgbToLinear(_ code: Double) -> Double {
+            let x = code / 255
+            return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+        let bandCodes = stride(from: 0.55, through: 0.90, by: 0.01).map { $0 }
+        let bandIn = bandCodes.map { srgbToLinear($0 * 255) }
+        let bandOut = try harness.run(bandIn.map { Float($0) }, blacks: 0, whites: -100)
+        var worstBandSlope = Double.infinity
+        for i in 1..<bandCodes.count {
+            let dIn = Self.code(bandIn[i]) - Self.code(bandIn[i - 1])
+            let dOut = Self.code(Double(bandOut[i])) - Self.code(Double(bandOut[i - 1]))
+            worstBandSlope = min(worstBandSlope, dOut / dIn)
+        }
+        print(String(format: "138 whites −100, code 0.55…0.90: worst local slope %.3f",
+                     worstBandSlope))
+        // 0.50 is the S1 half's floor, not the owner's full-chain 0.80: the export's adaptive
+        // `--tone-map global` re-scales the whole frame from the compressed peak, so it moves the
+        // band's measured slope too (see `local/REPORT.md`). This assertion catches a fold or a
+        // collapse of the S1 transfer; the full-chain number is measured on the TIFF.
+        XCTAssertGreaterThanOrEqual(worstBandSlope, 0.45,
+                                    "whites −100 compresses the 0.55–0.90 band: worst slope "
+                                    + "\(worstBandSlope) over \(bandCodes.count) steps")
         print("127 ② blacks ±100: \(blackOutside.count) samples above the knee unchanged · "
               + "whites ±100: \(belowOldWhiteWindow.count) samples below −2 EV scale (0 stays 0)")
     }

@@ -42,11 +42,15 @@ public enum StageAlgorithmVersion {
 
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic).
     public static let geometry = 1
+    /// **4** — 138: `whites`' EV weight is monotonically non-decreasing in `L` (`smoothstep(−2, +2, L)`,
+    /// `W_EV` 1.2) instead of decaying above white. A document with `whites != 0` and any pixel near or
+    /// above display white now renders different pixels for the same stored number; a document with
+    /// `whites == 0` is untouched (the identity is still `exp2(0) · 1`).
     /// **3** — 127: `whites`' level is multiplicative and global (`1/(1−0.20·Δw·|Δw|)`), so the
     /// shadows scale with the white end; 073C's blacks travel and 073B's EV shoulder are unchanged.
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
-    public static let sceneLinear = 3
+    public static let sceneLinear = 4
     /// **2** — 079 A4: a shape's `feather` is a **short-edge percentage spent outside the rim**
     /// (interior 1.0, quadratic falloff beyond), not a fraction of the shape spent inside it. Same
     /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
