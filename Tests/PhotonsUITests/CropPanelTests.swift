@@ -266,6 +266,190 @@ final class CropPanelTests: XCTestCase {
               + " · history \(session.history.snapshots.count)")
     }
 
+    // MARK: - 104 · 比例 chip：单击循环、⇧ 反向
+
+    /// Acceptance 1: six clicks walk `原始 → 1:1 → 4:3 → 3:2 → 16:9 → 自由` and come back to where they
+    /// started; a ⇧-click steps one back. The assertion is on the **chip text**, not a colour.
+    func testTheRatioChipCyclesTheSixPresetsAndShiftStepsBack() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let inspector = editor.rootView.inspectorHost
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        CropUITestSupport.pump(0.2)
+        inspector.layoutSubtreeIfNeeded()
+
+        let chip = try XCTUnwrap(Self.find(RatioChipButton.self, id: CropAspectRow.chipID,
+                                           in: inspector),
+                                 "104: 比例 chip 不在树上")
+        XCTAssertEqual(chip.title, "自由", "干净文档的比例锁是 original = 自由")
+
+        var seen: [String] = []
+        for _ in 0..<6 {
+            chip.performClick(nil)
+            CropUITestSupport.pump(0.05)
+            inspector.layoutSubtreeIfNeeded()
+            seen.append(chip.title)
+        }
+        XCTAssertEqual(seen, ["原始", "1:1", "4:3", "3:2", "16:9", "自由"],
+                       "104: 单击 6 次必须走完固定循环并回到起点（实测 \(seen)）")
+
+        chip.click(backward: true)
+        CropUITestSupport.pump(0.05)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertEqual(chip.title, "16:9", "104: ⇧+单击 = 上一步")
+        print("104 cycle · \(seen.joined(separator: " → ")) · ⇧ → \(chip.title)")
+    }
+
+    // MARK: - 104 · 🔒 / 🔓
+
+    /// Acceptance 2: `lock.open` only for 自由, `lock.fill` for the other five; and the toggle is
+    /// 自由 ⇄ last locked (`4:3` here), remembering the ratio across the round trip.
+    func testTheRatioLockShowsTheRightSymbolAndRemembersTheLastLockedRatio() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let inspector = editor.rootView.inspectorHost
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        CropUITestSupport.pump(0.2)
+        inspector.layoutSubtreeIfNeeded()
+
+        let tool = editor.rootView.loupeController.cropTool
+        let chip = try XCTUnwrap(Self.find(RatioChipButton.self, id: CropAspectRow.chipID,
+                                           in: inspector))
+        let lock = try XCTUnwrap(Self.find(RatioIconButton.self, id: CropAspectRow.lockID,
+                                           in: inspector), "104: 比例锁不在树上")
+
+        XCTAssertEqual(lock.symbol, "lock.open", "104: 自由 → lock.open")
+        for preset in CropAspectPreset.allCases where preset != .free {
+            tool.setAspect(preset)
+            CropUITestSupport.pump(0.05)
+            inspector.layoutSubtreeIfNeeded()
+            XCTAssertEqual(lock.symbol, "lock.fill",
+                           "104: \(preset.displayName) 是约束，必须 lock.fill")
+        }
+        tool.setAspect(.free)
+        CropUITestSupport.pump(0.05)
+        XCTAssertEqual(lock.symbol, "lock.open", "104: 自由 → lock.open")
+
+        // 4:3 → 🔒 click → 自由 → 🔒 click → 4:3.
+        tool.setAspect(.fourThree)
+        CropUITestSupport.pump(0.05)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertEqual(chip.title, "4:3")
+        XCTAssertEqual(lock.symbol, "lock.fill")
+
+        lock.performClick(nil)
+        CropUITestSupport.pump(0.05)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertEqual(chip.title, "自由", "104: 点锁 = 切到自由")
+        XCTAssertEqual(lock.symbol, "lock.open")
+
+        lock.performClick(nil)
+        CropUITestSupport.pump(0.05)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertEqual(chip.title, "4:3", "104: 再点锁 = 回到上一次被锁定的比例")
+        XCTAssertEqual(lock.symbol, "lock.fill")
+        print("104 lock · 4:3 → \(chip.title) · symbol \(lock.symbol)")
+    }
+
+    // MARK: - 104 · 内联键入（不弹框）
+
+    /// Acceptance 3: the pencil swaps the chip for an inline field. `5:4` becomes
+    /// `AspectLock.custom(1.25)`, and neither opening nor committing creates an `NSWindow`/`NSPanel`.
+    func testTheInlineRatioFieldWritesACustomLockAndNeverCreatesAWindow() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let inspector = editor.rootView.inspectorHost
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        CropUITestSupport.pump(0.2)
+        inspector.layoutSubtreeIfNeeded()
+
+        let tool = editor.rootView.loupeController.cropTool
+        let pencil = try XCTUnwrap(Self.find(RatioIconButton.self, id: CropAspectRow.editID,
+                                             in: inspector), "104: 铅笔按钮不在树上")
+        pencil.performClick(nil)
+        CropUITestSupport.pump(0.1)
+        inspector.layoutSubtreeIfNeeded()
+
+        let field = try XCTUnwrap(Self.inlineField(in: inspector), "104: chip 没有就地变成字段")
+        XCTAssertNil(CropRatioPanels.shared.prompt, "104: 内联输入不许创建面板")
+        // The field being focused creates the AppKit text-input window (`TUINSWindow`), not a panel of
+        // ours; what the acceptance pins is the **commit** path, so the baseline is taken here.
+        let windowsBeforeCommit = NSApp.windows.count
+
+        field.stringValue = "5:4"
+        field.commitForTesting()
+        CropUITestSupport.pump(0.1)
+        inspector.layoutSubtreeIfNeeded()
+
+        guard case .custom(let ratio) = tool.draft.lock else {
+            return XCTFail("104: 5:4 没有写进草稿的锁（\(tool.draft.lock)）")
+        }
+        XCTAssertEqual(ratio, 1.25, accuracy: 1e-9, "104: 5:4 = custom(1.25)")
+        let chip = try XCTUnwrap(Self.find(RatioChipButton.self, id: CropAspectRow.chipID,
+                                           in: inspector))
+        XCTAssertEqual(chip.title, "5:4", "104: chip 显示键入的 W:H")
+        XCTAssertNil(CropRatioPanels.shared.prompt, "104: 提交路径没有面板")
+        XCTAssertEqual(NSApp.windows.count, windowsBeforeCommit, "104: 提交路径不创建任何窗口")
+
+        // 非法输入：一声响、不写、chip 回到原文本（`CropRatioPanels.commit` 是那条语义的读回点）。
+        let lockBefore = tool.draft.lock
+        XCTAssertFalse(CropRatioPanels.shared.commit("5:x", to: tool), "104: 5:x 必须被拒绝")
+        XCTAssertEqual(tool.draft.lock, lockBefore, "104: 被拒的输入不许改比例")
+        XCTAssertEqual(NSApp.windows.count, windowsBeforeCommit, "104: 被拒的提交也不创建窗口")
+        print("104 inline · 5:4 → \(tool.draft.lock.code) · chip \(chip.title)"
+              + " · windows (commit baseline) \(windowsBeforeCommit) → \(NSApp.windows.count)")
+    }
+
+    // MARK: - 104 · 底部信息栏重排
+
+    /// Acceptance 4: the pill hugs its content (+ 12 pt each side), the three segments sit 16 pt
+    /// apart, the group is centred on the bar, and the bar is centred on the canvas — at 900 / 1200 /
+    /// 1600 pt. Printed frames are the evidence.
+    func testTheCropBarHugsItsContentAndCentresTheThreeSegments() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir)
+        let controller = CropToolController(session: session)
+        XCTAssertTrue(controller.begin())
+        let bar = CropToolBar(frame: NSRect(x: 0, y: 0, width: 900, height: 34))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1700, height: 60),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = bar
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        bar.controller = controller
+
+        for canvasWidth in [900 as CGFloat, 1200, 1600] {
+            let canvas = NSRect(x: 0, y: 0, width: canvasWidth, height: 600)
+            bar.sync()
+            bar.layout(in: canvas)
+            bar.layoutSubtreeIfNeeded()
+            let pill = bar.pillFrame
+            let segments = bar.segmentFrames
+            let separators = bar.separatorFrames
+
+            XCTAssertEqual(bar.barWidth, CropToolBar.contentWidth + 24, accuracy: 1,
+                           "104: pill 宽 = 内容宽 + 左右 12 pt（\(canvasWidth) pt 画布）")
+            XCTAssertEqual(bar.frame.midX, canvas.midX, accuracy: 1,
+                           "104: pill 水平居中于画布（\(canvasWidth) pt）")
+            XCTAssertEqual((segments.angle.minX + segments.pixels.maxX) / 2, pill.midX, accuracy: 1,
+                           "104: 三段整体中心 = pill 中心（\(canvasWidth) pt）")
+            XCTAssertEqual(segments.ratio.minX - segments.angle.maxX, 16, accuracy: 1,
+                           "104: 角度 | 比例 段间距 16 pt")
+            XCTAssertEqual(segments.pixels.minX - segments.ratio.maxX, 16, accuracy: 1,
+                           "104: 比例 | 像素 段间距 16 pt")
+            XCTAssertEqual(separators.count, 2, "104: 两段之间各一条 1 pt 分隔线")
+            for separator in separators {
+                XCTAssertEqual(separator.width, 1, accuracy: 0.5)
+                XCTAssertEqual(separator.height, 18, accuracy: 0.5)
+            }
+            print("104 bar \(Int(canvasWidth)) pt · bar \(NSStringFromRect(bar.frame))"
+                  + " · pill \(NSStringFromRect(pill)) · angle \(NSStringFromRect(segments.angle))"
+                  + " · ratio \(NSStringFromRect(segments.ratio))"
+                  + " · pixels \(NSStringFromRect(segments.pixels))"
+                  + " · gaps \(String(format: "%.2f", segments.ratio.minX - segments.angle.maxX))"
+                  + "/\(String(format: "%.2f", segments.pixels.minX - segments.ratio.maxX))")
+        }
+    }
+
     // MARK: - finding the shipped views
 
     private static func probe(_ rowID: String, in root: NSView) -> CropRowProbe? {
@@ -279,6 +463,11 @@ final class CropPanelTests: XCTestCase {
 
     private static func find<T: NSView>(_ type: T.Type, in root: NSView) -> T? {
         allViews(in: root).compactMap { $0 as? T }.first
+    }
+
+    private static func inlineField(in root: NSView) -> RatioInlineField? {
+        allViews(in: root).compactMap { $0 as? RatioInlineField }
+            .first { $0.accessibilityIdentifier() == CropAspectRow.fieldID }
     }
 
     private static func allViews(in root: NSView) -> [NSView] {

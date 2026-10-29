@@ -155,7 +155,6 @@ final class TransformPanelTests: XCTestCase {
     func testTheSixPresetsAndACustomRatioReachTheDocument() throws {
         XCTAssertEqual(CropAspectRow.items, CropAspectPreset.allCases, "比例行就是那张预设表")
         XCTAssertEqual(CropAspectRow.items.map(\.displayName), ["原始", "1:1", "4:3", "3:2", "16:9", "自由"])
-        XCTAssertEqual(CropAspectRow.customTitle, "自定义…")
 
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.orderOut(nil) }
@@ -175,28 +174,17 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertEqual(Set(codes).count, 6, "六个预设不能有两个落到同一个锁上")
         XCTAssertEqual(session.edit.geometry.aspectLock, .original, "比例是草稿的事，应用前不碰文档")
 
-        // 自定义…：真面板、真输入、真提交。
-        let window = try XCTUnwrap(CropCardHost.shared.window ?? editor.window)
-        XCTAssertTrue(CropRatioPanels.shared.present(for: loupe.cropTool, initial: "4:3"))
+        // 104: 自定义不再弹框 —— 输入走卡里内联字段的同一条提交路径（解析 + setCustomRatio）。
+        XCTAssertNil(CropRatioPanels.shared.prompt, "104：比例行不再有居中面板")
+        XCTAssertTrue(CropRatioPanels.shared.commit("5:4", to: loupe.cropTool), "5:4 必须被接受")
         pump(0.1)
-        let prompt = try XCTUnwrap(CropRatioPanels.shared.prompt, "自定义比例面板没有出现")
-        XCTAssertLessThanOrEqual(abs(prompt.frame.midX - window.frame.midX), 1,
-                                 "⑨：面板必须居中于窗口（Δx \(prompt.frame.midX - window.frame.midX)）")
-        XCTAssertLessThanOrEqual(abs(prompt.frame.midY - window.frame.midY), 1,
-                                 "⑨：面板必须居中于窗口（Δy \(prompt.frame.midY - window.frame.midY)）")
-
-        let field = try XCTUnwrap(prompt.firstResponder as? NSTextView, "输入框没有焦点")
-        field.string = "5:4"
-        prompt.performCommitForTesting()
-        pump(0.1)
-        XCTAssertNil(CropRatioPanels.shared.prompt, "提交后面板要消失")
         if case .custom(let ratio) = loupe.cropTool.draft.lock {
             XCTAssertEqual(ratio, 5.0 / 4.0, accuracy: 1e-9, "输入 5:4 应该锁成 1.25")
         } else {
             XCTFail("自定义比例没有进草稿的锁：\(loupe.cropTool.draft.lock)")
         }
-        XCTAssertEqual(CropAspectRow.title(for: loupe.cropTool), "自定义 1.25:1",
-                       "比例行要说出它现在是一个自定义比例")
+        XCTAssertEqual(CropAspectRow.title(for: loupe.cropTool), "5:4",
+                       "比例 chip 要说出它现在是一个自定义比例（W:H）")
 
         // 应用：那一个锁原样进文档。
         XCTAssertTrue(loupe.applyCropTool())
@@ -210,7 +198,7 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertTrue(loupe.beginCropTool())
         pump(0.1)
         let lockBefore = loupe.cropTool.draft.lock
-        XCTAssertFalse(CropRatioPanels.shared.commit("0:0"), "0:0 必须被拒绝")
+        XCTAssertFalse(CropRatioPanels.shared.commit("0:0", to: loupe.cropTool), "0:0 必须被拒绝")
         XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "被拒的输入不许改比例")
         loupe.cancelCropTool()
     }
