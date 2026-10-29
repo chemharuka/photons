@@ -32,13 +32,21 @@ import PhotonsCore
 /// (`PanelResets.maskCard(_:)`: this mask's parameter surface, one snapshot).
 public struct MaskListPanel: View {
     @Bindable public var session: CatalogSession
+    /// The canvas the eyedropper arms. `nil` in tests / previews: the picker buttons are then
+    /// disabled, exactly like the white-balance dropper without a loupe.
+    public let loupe: LoupeController?
 
     /// The name being typed. View state, deliberately: a keystroke must not grow the undo stack, so
     /// the document is written once — on ⏎ or the ✓ — and this is only what the field shows.
     @State private var nameDraft: String = ""
+    /// Which mask picker this panel armed. View state, like the brush and the overlay: not in the
+    /// document, not in history, not in a key. The loupe owns the actual armed flag (Esc clears it
+    /// without a SwiftUI event), so this only remembers *what* the next click means.
+    @State private var armedEyedropper: MaskEyedropperKind?
 
-    public init(session: CatalogSession) {
+    public init(session: CatalogSession, loupe: LoupeController? = nil) {
         self.session = session
+        self.loupe = loupe
     }
 
     private var masks: [Mask] { session.edit.masks }
@@ -76,6 +84,11 @@ public struct MaskListPanel: View {
                                selectedName: selectedMask?.name ?? "")
                 .frame(width: 1, height: 1)
         )
+        // 139 — the picker is a mode on the canvas, so leaving the mask (or the photo) must not leave
+        // it armed for a click that now means something else. Esc is handled by the canvas itself.
+        .onChange(of: session.selectedMaskID) { _, _ in cancelMaskEyedropper() }
+        .onChange(of: session.anchorID) { _, _ in cancelMaskEyedropper() }
+        .onDisappear { cancelMaskEyedropper() }
     }
 
     // MARK: header
@@ -385,18 +398,97 @@ public struct MaskListPanel: View {
     /// mask was sampled from, they are not a control.
     @ViewBuilder private func shapeParameters(for mask: Mask, component: Int,
                                               shape: MaskShape) -> some View {
+        if case .luminanceRange = shape {
+            maskEyedropperRow(.luminance)
+        }
         if case .colorRange(let c) = shape {
+            maskEyedropperRow(.colour)
             sampleSwatches(c)
+            colourRangePreview(c)
+            Text("样本与选择范围是并集：加样本扩大覆盖，减小选择范围收缩")
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         ForEach(MaskShapeSliderRow.rows(for: shape), id: \.title) { row in
             shapeRow(row, for: mask, component: component, shape: shape)
         }
+        // 139 ②: the bar sits under the 下限/上限 rows and edits the same two numbers.
+        if case .luminanceRange(let l) = shape {
+            MaskRangeBar(shape: l) { next, commit in
+                session.setMaskComponentShape(
+                    mask.id, component: component, shape: .luminanceRange(next),
+                    commit: commit, label: "亮度范围条", coalesce: false)
+            }
+        }
     }
 
-    /// What a colour-range mask was sampled from: up to four swatches, and how many samples it holds.
+    // MARK: 139 — pickers and the colour band
+
+    private func maskEyedropperRow(_ kind: MaskEyedropperKind) -> some View {
+        MaskEyedropperRow(
+            kind: kind,
+            isArmed: armedEyedropper == kind && (loupe?.isEyedropperArmed ?? false),
+            enabled: loupe != nil) {
+                toggleMaskEyedropper(kind)
+            }
+    }
+
+    /// Arm one picker. A second click on the same button disarms; picking stays armed so several
+    /// colour samples can be added in a row (the cap is eight, not one). The loupe owns Esc.
+    private func toggleMaskEyedropper(_ kind: MaskEyedropperKind) {
+        guard let loupe else { return }
+        if loupe.isEyedropperArmed, armedEyedropper == kind {
+            cancelMaskEyedropper()
+            return
+        }
+        loupe.cancelEyedropper()
+        armedEyedropper = kind
+        loupe.armEyedropper(staysArmed: true) { outcome, option in
+            guard case .sampled(let sample) = outcome else { return }   // miss: stay armed
+            guard let maskID = session.selectedMaskID,
+                  let mask = session.edit.masks.first(where: { $0.id == maskID }),
+                  let component = mask.components.indices.last else { return }
+            switch kind {
+            case .luminance:
+                session.pickMaskLuminance(maskID, component: component,
+                                          at: MaskEyedropper.luminance(from: sample.rgb),
+                                          moveNearerEdge: option)
+            case .colour:
+                session.pickMaskColour(maskID, component: component,
+                                       sampleSRGB: MaskEyedropper.colour(from: sample.rgb))
+            }
+        }
+    }
+
+    private func cancelMaskEyedropper() {
+        guard armedEyedropper != nil || loupe?.isEyedropperArmed == true else { return }
+        armedEyedropper = nil
+        loupe?.cancelEyedropper()
+    }
+
+    /// The 「当前样本色 → 中性」 band: left end is the newest sample, right end the neutral the range
+    /// fades towards. It reports `tolerance`/`smoothness`; it is not a second control.
+    private func colourRangePreview(_ c: ColorRangeShape) -> some View {
+        let sample = c.samples.last ?? [0.5, 0.5, 0.5]
+        let start = Color(.sRGB,
+                          red: sample.count > 0 ? sample[0] : 0.5,
+                          green: sample.count > 1 ? sample[1] : 0.5,
+                          blue: sample.count > 2 ? sample[2] : 0.5)
+        return RoundedRectangle(cornerRadius: 2, style: .continuous)
+            .fill(LinearGradient(colors: [start, Color(.sRGB, red: 0.5, green: 0.5, blue: 0.5)],
+                                 startPoint: .leading, endPoint: .trailing))
+            .frame(height: 8)
+            .overlay(RoundedRectangle(cornerRadius: 2)
+                .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+            .accessibilityIdentifier("mask.color.rangePreview")
+            .help("选择范围：样本色 → 中性；容差越大，带越宽")
+    }
+
+    /// What a colour-range mask was sampled from: up to eight swatches, and how many samples it holds.
     private func sampleSwatches(_ c: ColorRangeShape) -> some View {
         HStack(spacing: 5) {
-            ForEach(Array(c.samples.prefix(4).enumerated()), id: \.offset) { _, sample in
+            ForEach(Array(c.samples.prefix(ColorRangeShape.maxSamples).enumerated()), id: \.offset) { _, sample in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(Color(.sRGB,
                                 red: sample.count > 0 ? sample[0] : 0.5,

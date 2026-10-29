@@ -360,6 +360,20 @@ public struct ColorRangeShape: Sendable, Equatable, Codable {
         let s = samples.map { $0.map { k($0) }.joined(separator: ",") }.joined(separator: ";")
         return "colour(n=\(samples.count);s=[\(s)];tol=\(k(tolerance));smo=\(k(smoothness)))"
     }
+
+    /// Picker write: append one sRGB triple, dropping the oldest sample once the cap is reached.
+    ///
+    /// FIFO rather than "replace the nearest": the cap is a storage limit, not a statement about
+    /// which colour the user still wants. `tolerance` and `smoothness` are untouched — adding a
+    /// sample widens the union, it does not reset the range the user set.
+    public func appendingSample(_ sample: [Double]) -> ColorRangeShape {
+        var next = samples
+        next.append(sample)
+        if next.count > ColorRangeShape.maxSamples {
+            next.removeFirst(next.count - ColorRangeShape.maxSamples)
+        }
+        return ColorRangeShape(samples: next, tolerance: tolerance, smoothness: smoothness)
+    }
 }
 
 /// §4.5 — OKLab L with two-sided feather.
@@ -397,6 +411,41 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     public var ordered: (low: Double, high: Double, lowFeather: Double, highFeather: Double) {
         guard low > high else { return (low, high, lowFeather, highFeather) }
         return (high, low, highFeather, lowFeather)
+    }
+
+    /// Width a **single click** centres on the sample. A window that is already "the whole range"
+    /// (`≥ 0.999`) is not a window the user can see, so the picker opens a 0.25-wide one; any other
+    /// window keeps its width and only moves.
+    public static let pickerDefaultWidth: Double = 0.25
+
+    /// Click: put `value` at the centre of the current window, keeping its width and both feathers.
+    ///
+    /// The two edges are clamped to the sampling axis (`0…1`), so a click near an end narrows the
+    /// window rather than moving it off the axis. An inverted pair (`low > high`) keeps its signed
+    /// width, which keeps the mirror operation a mirror — the UI never repairs the order here
+    /// (`ordered` owns that rule).
+    public func centring(on value: Double) -> LuminanceRangeShape {
+        let v = min(max(value, 0), 1)
+        let raw = high - low
+        let width = raw >= 0.999 ? LuminanceRangeShape.pickerDefaultWidth : raw
+        var next = self
+        next.low = min(max(v - width / 2, 0), 1)
+        next.high = min(max(v + width / 2, 0), 1)
+        return next
+    }
+
+    /// ⌥-click: move **the nearer edge** to `value`, leaving the other edge and both feathers
+    /// verbatim. This is the "set one end, then the other" gesture; the order may become inverted,
+    /// which `ordered` defines rather than the UI.
+    public func movingNearerEdge(to value: Double) -> LuminanceRangeShape {
+        let v = min(max(value, 0), 1)
+        var next = self
+        if abs(v - low) <= abs(v - high) {
+            next.low = v
+        } else {
+            next.high = v
+        }
+        return next
     }
 
     public var keyString: String {
@@ -485,6 +534,33 @@ public enum OKLabMetric {
         let da = (p.a - q.a) / chromaSpan
         let db = (p.b - q.b) / chromaSpan
         return (dL * dL + da * da + db * db).squareRoot()
+    }
+
+    /// **The luminance picker's coordinate**, and the reason it is here instead of in the UI.
+    ///
+    /// `s1_5_mask_atlas.metal`'s `luminance_range_alpha` (case 4, around line 352) computes
+    /// `L = oklab(clamp(linearRGB, 0, 1)).x` from the **S1 output in working primaries**. The
+    /// eyedropper reads the resident decode buffer, which is linear **sRGB** (`ColorPrimaries.decoded`,
+    /// `LinearImage.averageRGB`), so the sample is converted into the working primaries and each
+    /// channel is clamped exactly as the kernel clamps before the fold. Without the clamp a highlight
+    /// above display white would sample as `L > 1` and the picker would centre a window the kernel can
+    /// never reach.
+    public static func maskLuminance(fromDecodedSRGB r: Double, _ g: Double, _ b: Double) -> Double {
+        let toWorking = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
+        let w = toWorking.applying(to: SIMD3(r, g, b))
+        let lab = fromLinear(min(max(w.x, 0), 1), min(max(w.y, 0), 1), min(max(w.z, 0), 1))
+        return min(max(lab.L, 0), 1)
+    }
+
+    /// **The colour picker's storage triple**: decoded scene-linear sRGB → sRGB-encoded 0…1.
+    ///
+    /// `ColorRangeShape.samples` is sRGB by contract, and `metricSamples` decodes it back to linear
+    /// before folding through the working primaries. Encoding the buffer here therefore closes the
+    /// loop: the stored sample and the pixel reach `fromLinear` through the same path.
+    public static func maskSampleSRGB(fromDecodedSRGB r: Double, _ g: Double, _ b: Double) -> [Double] {
+        [HDRCurveAxis.srgbEncode(min(max(r, 0), 1)),
+         HDRCurveAxis.srgbEncode(min(max(g, 0), 1)),
+         HDRCurveAxis.srgbEncode(min(max(b, 0), 1))]
     }
 }
 
