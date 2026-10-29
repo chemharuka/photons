@@ -31,8 +31,10 @@ final class BatchExportTests: XCTestCase {
 
     /// A horizontal gradient with a step in the middle: uniform areas are useless for a sharpening
     /// test, and an exact ramp is easy to reason about for a resample.
+    /// The default preset asks for Display P3 (`ExportPreset.colorSpace`), and `BatchExporter`
+    /// refuses to retag pixels that were rendered in another space, so the fixture is P3 too.
     private func image(width: Int = 320, height: Int = 240,
-                       primaries: OutputPrimaries = .sRGB) -> DisplayImage {
+                       primaries: OutputPrimaries = .displayP3) -> DisplayImage {
         var rgba = [Float16](repeating: 0, count: width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
@@ -195,6 +197,7 @@ final class BatchExportTests: XCTestCase {
         let report = BatchExporter.run(items: [item("mismatch")],
                                        preset: ExportPreset(format: .jpeg, colorSpace: .displayP3),
                                        outputDirectory: out,
+                                       // deliberately the *other* space: this test is the guard
                                        render: { _, _ in self.image(primaries: .sRGB) })
         XCTAssertTrue(report.written.isEmpty)
         XCTAssertTrue(report.failures.first?.error?.contains("Display P3") ?? false)
