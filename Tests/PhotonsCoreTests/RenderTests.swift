@@ -581,13 +581,17 @@ final class RenderTests: XCTestCase {
             // `PHOTONS_RECORD_GOLDEN=1` re-records (same convention as the mask goldens) — a stage that
             // deliberately moves pixels (a version bump) has to be able to rewrite its own golden.
             if ProcessInfo.processInfo.environment["PHOTONS_RECORD_GOLDEN"] == "1" {
-                var updated = rec
-                updated.pixelSHA256 = pixels.sha256()
-                updated.fileSHA256 = fileHash
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(updated).write(to: file)
-                print("RECORDED \(file.lastPathComponent) · \(rec.pixelSHA256.prefix(12))… → \(updated.pixelSHA256.prefix(12))…")
+                // 132: `GoldenRecord` only *decodes* the keys the test compares, so re-encoding it was
+                // silently dropping the diagnostics photonsctl writes (`stageKeys`, `toneMap`,
+                // `osVersion`, `note`). A re-record through this path must not lose them — patch the
+                // two mutable keys into the file the CLI wrote instead of rewriting the whole record.
+                var object = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any] ?? [:]
+                object["pixelSHA256"] = pixels.sha256()
+                object["fileSHA256"] = fileHash
+                let data = try JSONSerialization.data(withJSONObject: object,
+                                                      options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: file)
+                print("RECORDED \(file.lastPathComponent) · \(rec.pixelSHA256.prefix(12))… → \(pixels.sha256().prefix(12))…")
                 continue
             }
             XCTAssertEqual(pixels.sha256(), rec.pixelSHA256,
