@@ -61,3 +61,27 @@ kernel void s4_display(texture2d<float, access::read> src [[texture(0)]],
     float3 enc = float3(srgb_encode(v.x), srgb_encode(v.y), srgb_encode(v.z));
     dst.write(float4(enc, 1.0), gid);
 }
+
+// S4 — the **linear exit** (100, HDR export). Same primaries matrix as `s4_display`, then **nothing**:
+// no OETF, no `min(v, headroom)`, so extended-range values survive into an `rgba16Float` texture.
+//
+// This exists because a gain map is a ratio between HDR and SDR *linear* light; deriving it from the
+// display-encoded texture would (a) lose everything the headroom clamp removed and (b) invert a
+// nonlinear transfer twice. It is the same code stream as the screen — one matrix, one read — so an
+// export cannot disagree with what S4 would have shown.
+//
+// `s4_display` itself is untouched above: the default path stays byte-identical (golden-checked).
+kernel void s4_display_linear(texture2d<float, access::read> src [[texture(0)]],
+                              texture2d<float, access::write> dst [[texture(1)]],
+                              constant DisplayParams &p [[buffer(0)]],
+                              uint2 gid [[thread_position_in_grid]]) {
+    float4 c = src.read(gid);
+    float3 v = max(c.rgb, 0.0);
+    if (p.a.x < 0.5) {
+        v = (p.m * float4(v, 0.0)).xyz;
+    }
+    // The output primaries' cube still has a negative side (`Rec2020 → sRGB`'s −0.5876); a linear
+    // export writes light, and negative light is not a value the file format can carry.
+    v = max(v, 0.0);
+    dst.write(float4(v, 1.0), gid);
+}

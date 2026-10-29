@@ -143,7 +143,24 @@ func cmdExportBatch(_ a: Args) throws {
         guard let pixels = result.display else {
             throw BatchExportError.noPixels(item.name)
         }
-        return pixels
+
+        // 100 — HDR: the SDR frame above is the file's base and is exactly what a non-HDR export
+        // renders (same options, same call). The linear exit is a second render of the *same*
+        // document through S4 only (`s4_display_linear`): same matrix, no OETF, no clamp.
+        guard preset.isHDR else { return pixels }
+        let linearDisplay = DisplayOptions(primaries: preset.colorSpace,
+                                           bitDepth: 16,
+                                           headroom: 1,
+                                           linearOutput: true)
+        let linearResult = try graph.render(edit, options: RenderOptions(canvas: nil,
+                                                                        scale: scale / Double(decodeScale),
+                                                                        display: linearDisplay,
+                                                                        useCache: false,
+                                                                        wantsPixels: true))
+        guard let linear = linearResult.display else {
+            throw BatchExportError.noPixels(item.name)
+        }
+        return pixels.withLinear(LinearPixels(linear))
     }
 
     // M5's ceiling is two: the flag exists to *lower* it (serial for debugging), never to raise it.
@@ -178,6 +195,8 @@ func cmdExportBatch(_ a: Args) throws {
                 "quality": preset.quality,
                 "bitDepth": preset.effectiveBitDepth,
                 "colorSpace": preset.colorSpace.rawValue,
+                "hdr": preset.hdr?.enabled == true
+                    ? "\(preset.hdr!.gainMap.rawValue)\(preset.hdr!.halfSize ? "-half" : "")" : "",
                 "writeXMP": preset.writeXMP,
                 "sharpen": preset.sharpen?.amount ?? 0,
                 "nameTemplate": preset.nameTemplate,

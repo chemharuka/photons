@@ -61,11 +61,15 @@ public struct ExportOptions: Sendable {
     public var format: ExportFormat
     public var quality: Double        // 0…1, lossy formats only
     public var bitDepth: Int          // 8 or 16
+    /// 100 — HEIC + gain map. `nil` = the pre-HDR encoder path, byte for byte.
+    public var hdr: HDRExport?
 
-    public init(format: ExportFormat = .jpeg, quality: Double = 0.95, bitDepth: Int = 8) {
+    public init(format: ExportFormat = .jpeg, quality: Double = 0.95, bitDepth: Int = 8,
+                hdr: HDRExport? = nil) {
         self.format = format
         self.quality = quality
         self.bitDepth = bitDepth
+        self.hdr = hdr
     }
 
     public static func detect(from url: URL) -> ExportOptions {
@@ -155,7 +159,22 @@ public enum Exporter {
         return cg
     }
 
-    public static func write(_ image: DisplayImage, to url: URL, options: ExportOptions) throws {
+    /// Write `image`. When `options.hdr` is enabled **and** the image carries a linear companion
+    /// (rendered through `s4_display_linear`), this routes to `GainMapHEIC`, which writes the same SDR
+    /// base plus a gain-map auxiliary image. Otherwise it is the untouched pre-100 encoder.
+    ///
+    /// - Returns: non-fatal HDR notes (an SDR fallback, a clipped headroom). Empty on the normal path.
+    @discardableResult
+    public static func write(_ image: DisplayImage, to url: URL, options: ExportOptions) throws -> [String] {
+        if let hdr = options.hdr, hdr.enabled, options.format == .heic, let linear = image.linear {
+            let result = try GainMapHEIC.write(sdr: image, linear: linear, to: url,
+                                               options: HDRGainMapOptions(gainMap: hdr.gainMap,
+                                                                          halfSize: hdr.halfSize,
+                                                                          headroom: hdr.headroom,
+                                                                          quality: options.quality,
+                                                                          bitDepth: options.bitDepth))
+            return result.warnings
+        }
         guard options.bitDepth == 8 || (options.bitDepth == 16 && options.format.supports16Bit) else {
             throw ExportError.badBitDepth(options.format.rawValue, options.bitDepth)
         }
@@ -176,6 +195,7 @@ public enum Exporter {
         guard CGImageDestinationFinalize(dest) else {
             throw ExportError.finalizeFailed(url)
         }
+        return []
     }
 
     /// Encode in memory (determinism tests compare digests without touching the filesystem).

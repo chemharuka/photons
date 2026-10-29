@@ -236,6 +236,31 @@ public enum MaskTiling: String, Sendable, Codable, CaseIterable {
     case tiles
 }
 
+/// 100 — extended-range **linear** pixels from `s4_display_linear`: same primaries as the SDR base,
+/// values are linear light (no OETF), may exceed 1.
+///
+/// A distinct type from `DisplayImage` on purpose: the two are the same picture in different
+/// domains, and mixing them up (feeding linear pixels to the file encoder or OETF-decoding an
+/// already-linear map) is a silent colour error. It also keeps `DisplayImage` non-recursive.
+public struct LinearPixels: Sendable {
+    public let width: Int
+    public let height: Int
+    public let rgba: [Float16]
+    public let primaries: OutputPrimaries
+
+    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries) {
+        self.width = width
+        self.height = height
+        self.rgba = rgba
+        self.primaries = primaries
+    }
+
+    public init(_ image: DisplayImage) {
+        self.init(width: image.width, height: image.height, rgba: image.rgba,
+                  primaries: image.primaries)
+    }
+}
+
 /// Display-encoded pixels (0…1, sRGB transfer already applied) plus the primaries they are in.
 public struct DisplayImage: Sendable {
     public let width: Int
@@ -243,13 +268,29 @@ public struct DisplayImage: Sendable {
     public let rgba: [Float16]
     public let primaries: OutputPrimaries
     public let bitDepth: Int
+    /// 100 — the **linear** companion for HDR export: the same picture through `s4_display_linear`,
+    /// in the same primaries, with extended-range values intact. `nil` for every screen/thumbnail/SDR
+    /// render, which is what keeps the default path allocation-free.
+    ///
+    /// It rides on `DisplayImage` rather than a second return value so the batch engine's
+    /// `render -> DisplayImage` closure can carry both halves without a second export pipeline
+    /// (`BatchExport.swift` is 099's file and must not be forked).
+    public let linear: LinearPixels?
 
-    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries, bitDepth: Int) {
+    public init(width: Int, height: Int, rgba: [Float16], primaries: OutputPrimaries, bitDepth: Int,
+                linear: LinearPixels? = nil) {
         self.width = width
         self.height = height
         self.rgba = rgba
         self.primaries = primaries
         self.bitDepth = bitDepth
+        self.linear = linear
+    }
+
+    /// Attach (or clear) the linear companion. Used by the export renderer after the SDR frame.
+    public func withLinear(_ image: LinearPixels?) -> DisplayImage {
+        DisplayImage(width: width, height: height, rgba: rgba, primaries: primaries,
+                     bitDepth: bitDepth, linear: image)
     }
 
     public var size: ImageSize { ImageSize(width: width, height: height) }
@@ -3001,7 +3042,12 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .display:
-            let p = try kernels.pipeline(file: "s4_display", function: "s4_display")
+            // 100: HDR export asks for the linear exit (`s4_display_linear`) — same matrix, no OETF
+            // and no headroom clamp. The default branch names `s4_display` exactly as before, so the
+            // shipped path is untouched down to the pipeline function's name.
+            let linear = options.display.linearOutput
+            let p = try kernels.pipeline(file: "s4_display",
+                                         function: linear ? "s4_display_linear" : "s4_display")
             // 075: the source is the **working** space, not sRGB — the S0 exit matrix put every
             // number into it. `primariesMatrix` is exhaustive over (source, target) and returns the
             // exact identity only when the two are equal; the kernel's `p.a.x` flag mirrors that
