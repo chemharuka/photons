@@ -60,9 +60,11 @@ final class CropCardSectionsTests: XCTestCase {
         XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
         XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
 
-        // …and the panel really drew four headers, in that order, top to bottom.
+        // …and the panel really drew its headers in that order, top to bottom. 122 A (user 2026-10-29):
+        // the 「转动」 sub-header is gone — the card is titled 「旋转」 and the angle row sits directly
+        // under it — so 角度 is the one section with no header of its own.
         var drawn: [(title: String, rect: CGRect)] = []
-        for section in CropSection.displayOrder {
+        for section in CropSection.displayOrder where section != .angle {
             let id = "section.\(section.title)"
             guard let rect = panel.row(id) else {
                 XCTFail("082: 分区小标题「\(section.title)」没有画出来（probe \(id)）")
@@ -71,14 +73,16 @@ final class CropCardSectionsTests: XCTestCase {
             drawn.append((section.title, rect))
             print("082 §4 · 小标题「\(section.title)」 \(NSStringFromRect(rect))")
         }
-        XCTAssertEqual(drawn.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(drawn.map(\.title), ["宽高比", "旋转", "镜像"])
         for (a, b) in zip(drawn, drawn.dropFirst()) {
             XCTAssertGreaterThan(b.rect.minY, a.rect.minY,
                                  "082 §4: 「\(b.title)」必须在「\(a.title)」下面")
         }
         // Nothing else calls itself a section.
         let allSectionProbes = panel.probes.filter { $0.rowID.hasPrefix("section.") }
-        XCTAssertEqual(allSectionProbes.count, 4, "082 §4: 正好四个分区，多出来的是 \(allSectionProbes.map(\.rowID))")
+        // 122 A: 角度 has no header of its own any more (the card itself is 「旋转」).
+        XCTAssertEqual(allSectionProbes.count, 3,
+                       "082 §4: 三个分区小标题，多出来的是 \(allSectionProbes.map(\.rowID))")
     }
 
     /// 244 pt of content: every row has a real width, nothing leaves the card, the section gaps are
@@ -129,7 +133,7 @@ final class CropCardSectionsTests: XCTestCase {
             }
 
             var headers: [(id: String, rect: CGRect)] = []
-            for section in sections {
+            for section in sections where section != .angle {   // 122 A: 角度 没有小标题
                 let rect = try XCTUnwrap(panel.row("section.\(section.title)"))
                 headers.append((section.title, rect))
             }
@@ -151,7 +155,7 @@ final class CropCardSectionsTests: XCTestCase {
 
             // Gaps: 6 pt from a title to its own content, ≥ 12 pt between sections.
             let ordered = (rows + headers).sorted { $0.rect.minY < $1.rect.minY }
-            for section in sections {
+            for section in sections where section != .angle {   // 122 A: 角度 没有小标题
                 let header = try XCTUnwrap(headers.first { $0.id == section.title }).rect
                 guard let firstBelow = ordered.first(where: { $0.rect.minY > header.maxY - 0.5 }) else { continue }
                 let insideGap = firstBelow.rect.minY - header.maxY
@@ -259,21 +263,21 @@ final class CropCardSectionsTests: XCTestCase {
         panel.state.select(.transform)
         _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        let angleHeader = try XCTUnwrap(panel.row("section.\(CropSection.angle.title)"),
-                                        "转动小标题没有画出来")
+        // 122 A (user 2026-10-29: 「转动的二级标题删掉」): there is no 角度 header any more — the angle
+        // row sits directly under the card title, which is now 「旋转」. The other two sections keep
+        // their headers, hairline and all.
+        XCTAssertNil(panel.row("section.\(CropSection.angle.title)"),
+                     "122 A: 角度 小标题必须已经删掉")
         let rotationHeader = try XCTUnwrap(panel.row("section.\(CropSection.rotation.title)"),
                                            "旋转小标题没有画出来")
         let mirrorHeader = try XCTUnwrap(panel.row("section.\(CropSection.mirror.title)"),
                                          "镜像小标题没有画出来")
-        print("093 §2 · 转动 header \(NSStringFromRect(angleHeader))"
-              + " · 旋转 \(NSStringFromRect(rotationHeader)) · 镜像 \(NSStringFromRect(mirrorHeader))")
-        XCTAssertLessThan(angleHeader.height, 20,
-                          "093 §2: 转动小节的第一条分割线必须去掉（header 只剩标题，实测 \(angleHeader.height) pt）")
+        print("093 §2 · 旋转 \(NSStringFromRect(rotationHeader)) · 镜像 \(NSStringFromRect(mirrorHeader))")
         XCTAssertGreaterThanOrEqual(rotationHeader.height, 20,
                                     "093 §2: 旋转小节仍要有发丝线（实测 \(rotationHeader.height) pt）")
         XCTAssertGreaterThanOrEqual(mirrorHeader.height, 20,
                                     "093 §2: 镜像小节仍要有发丝线（实测 \(mirrorHeader.height) pt）")
-        XCTAssertLessThan(angleHeader.maxY, rotationHeader.minY, "093 §2: 三节顺序不变")
+
 
         _ = waitFor(panel) { _ in DetailRowEnabledLog.shared.value("角度") != nil }
         XCTAssertEqual(DetailRowEnabledLog.shared.value("角度"), true,

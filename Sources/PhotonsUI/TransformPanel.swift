@@ -136,9 +136,10 @@ extension InspectorView {
     private func cropAngleSection(_ tool: CropToolController?) -> some View {
         let straighten = Binding<Double>(get: { tool?.angleUIValue ?? 0 },
                                          set: { tool?.setAngle(uiValue: $0) })
+        // 122 A: the card is titled 「旋转」 and the old 「转动」 sub-header is gone — the angle row sits
+        // directly under the card title. The section keeps its reset button on the row itself
+        // (`sliderRow`'s own reset), so nothing is lost with the header.
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-            CropSectionHeader(title: CropSection.angle.title, isFirst: true,
-                              reset: { resets.cropSection(.angle) })
             VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
                 sliderRow("角度",
                           straighten,
