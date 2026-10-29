@@ -425,12 +425,25 @@ final class ToneMapTests: XCTestCase {
               + "toe 0.02 → +\(toeUp) −\(toeDown) (neutral \(toeBase)); "
               + "white 0.98 → +\(whiteUp) −\(whiteDown) (neutral \(brightBase))")
 
-        // 073B: the knee ends at −4.2 EV and 0.35 is −1.5 EV, so a mid-tone is outside it — exactly.
-        XCTAssertEqual(midUp, midBase, accuracy: 1e-6, "blacks + must not move a mid-tone")
-        XCTAssertEqual(midDown, midBase, accuracy: 1e-6, "blacks − must not move a mid-tone")
+        // 2026-10-29 — the knee now ends at −1.0 EV (it was −4.2) because the owner wants a 30 %-code
+        // tone to respond; 0.35 linear is −1.5 EV, so this mid-tone moves a little instead of not at
+        // all. Pin the **magnitude** (a mid-tone drifting would be the real defect), not zero.
+        XCTAssertEqual(midUp, midBase, accuracy: midBase * 0.01,
+                       "blacks + must not lift a mid-tone by more than 1 %")
+        XCTAssertEqual(midDown, midBase, accuracy: midBase * 0.01,
+                       "blacks − must not crush a mid-tone by more than 1 %")
         // The toe is what the slider names: + opens it, − crushes it.
         XCTAssertGreaterThan(toeUp, toeBase, "local blacks + must open the toe")
         XCTAssertLessThan(toeDown, toeBase, "local blacks − must crush the toe")
+        // The tone the owner named: a 30 %-code patch (linear 0.073, −3.8 EV) used to be **completely
+        // untouched** by blacks −100 (the window ended at −4.2 EV). It must now darken.
+        let thirty = flat(0.073)
+        let thirtyBase = try probe(thirty), thirtyDown = try probe(thirty, blacks: -100)
+        print(String(format: "079 30%% 码值 blacks −100: %.4f → %.4f (%.1f%%)",
+                     thirtyBase, thirtyDown, (thirtyDown / thirtyBase - 1) * 100))
+        XCTAssertLessThan(thirtyDown, thirtyBase * 0.95,
+                          "30 % 码值在 blacks −100 时必须明显变暗（旧版完全不动）")
+
         // Whites is the other end (派单 008 A's direction, unchanged by 073B).
         XCTAssertGreaterThan(whiteUp, brightBase, "local whites + must brighten")
         XCTAssertLessThan(whiteDown, brightBase, "local whites − must darken")
