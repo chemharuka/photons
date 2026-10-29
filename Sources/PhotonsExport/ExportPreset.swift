@@ -82,6 +82,7 @@ public enum ExportPresetError: LocalizedError {
     case badPercent(Int)
     case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
+    case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
     case emptyNameTemplate
     case unreadable(URL, String)
@@ -102,6 +103,8 @@ public enum ExportPresetError: LocalizedError {
             return "output sharpening radius must be 0.3…3, got \(r)"
         case .hdrRequiresHEIC(let f):
             return "HDR export needs HEIC (gain maps live in the HEIF container), got \(f)"
+        case .hdrGainMapNeedsMacOS15(let g):
+            return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
             return "HDR manual headroom must be ≥ 1.05, got \(h)"
         case .emptyNameTemplate:
@@ -155,8 +158,26 @@ public struct HDRExport: Sendable, Codable, Equatable {
     public var halfSize: Bool
     public var headroom: Headroom
 
-    public init(enabled: Bool = true, gainMap: GainMap = .iso, halfSize: Bool = false,
-                headroom: Headroom = .auto) {
+    /// ISO 21496-1 (`ISOGainMap` + `HDRToneMap/1.0`) is written through ImageIO's auxiliary-data API,
+    /// which only exists on macOS 15; Apple's spelling (`HDRGainMap` + MakerNote) has been there since
+    /// 14.1. So the *default* follows the OS instead of asking for a path this machine cannot write.
+    public static var defaultGainMap: GainMap {
+        if #available(macOS 15.0, *) { return .iso }
+        return .apple
+    }
+
+    /// Whether this spelling can be written on the running system.
+    public var isWritableHere: Bool {
+        switch gainMap {
+        case .apple: return true          // 14.1 is the package floor for this target
+        case .iso, .mono:
+            if #available(macOS 15.0, *) { return true }
+            return false
+        }
+    }
+
+    public init(enabled: Bool = true, gainMap: GainMap = HDRExport.defaultGainMap,
+                halfSize: Bool = false, headroom: Headroom = .auto) {
         self.enabled = enabled
         self.gainMap = gainMap
         self.halfSize = halfSize
@@ -334,6 +355,9 @@ public struct ExportPreset: Sendable, Equatable {
             }
             if case .manual(let h) = hdr.headroom, h < 1.05 {
                 throw ExportPresetError.badHDRHeadroom(h)
+            }
+            if !hdr.isWritableHere {
+                throw ExportPresetError.hdrGainMapNeedsMacOS15(hdr.gainMap.displayName)
             }
         }
         return self
