@@ -1048,11 +1048,13 @@ final class MaskTests: XCTestCase {
             for x in 0..<dump.width {
                 // Forward model of one canvas pixel, exactly as `s0_geometry` does it: normalise to
                 // the frame, flip, then turn the **pixel** offset about the frame's centre.
+                // 126: S0 walks canvas → source with `R(−θ)` (its `sintheta` is the inverse sine),
+                // because `+θ` is the picture's clockwise turn in the other direction.
                 var u = (Double(x) + 0.5) / fx
                 var v = (Double(y) + 0.5) / fy
                 u = 1 - u                                  // flipHorizontal
                 let px = (u - 0.5) * fx, py = (v - 0.5) * fy
-                let r = ((px * cs - py * sn) / fx, (px * sn + py * cs) / fy)
+                let r = ((px * cs + py * sn) / fx, (-px * sn + py * cs) / fy)
                 let sx = (clamped.x + (r.0 + 0.5) * clamped.width) * w
                 let sy = (clamped.y + (r.1 + 0.5) * clamped.height) * h
 

@@ -3657,8 +3657,21 @@ public final class RenderGraph {
         Float(CropGeometry(geometry: edit.geometry, source: sourceSize).cosine)
     }
 
+    /// 126 — the **inverse** sine, because S0 walks *canvas → source*.
+    ///
+    /// `CropGeometry.RotationMatrix` states the one convention: `+θ` turns the **picture clockwise**
+    /// on screen (y-down), which is what `CropMath.rotatedFrameCorners` draws and what the overlay
+    /// shows. S0 asks the opposite question — "which source pixel belongs to this canvas pixel?" — so
+    /// it must rotate by `−θ`. Handing it `+sine` made the picture appear at `R(−θ)` while the crop
+    /// frame was drawn at `R(+θ)`: the 2θ mismatch the user saw (框的四角 ≠ 框内的照片).
+    ///
+    /// `costheta` stays the cosine: cos is even, so `cos(−θ) == cos(θ)` and changing its spelling
+    /// would only add floating-point noise at θ = 0, where the recorded pixels live.
+    ///
+    /// The same two numbers feed `s1_5_mask_atlas` (`frame_turn_pixels` is shared), so the selection
+    /// turns with the picture by construction rather than by a second sign decision.
     private func sintheta(_ edit: EditModel) -> Float {
-        Float(CropGeometry(geometry: edit.geometry, source: sourceSize).sine)
+        Float(CropGeometry(geometry: edit.geometry, source: sourceSize).inverseSine)
     }
 
     // MARK: - masks (S1.5 / S1.6)

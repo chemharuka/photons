@@ -169,11 +169,12 @@ extension TransformSessionTests {
         print("123 · marker \(before) → \(after)")
 
         XCTAssertGreaterThan(after.count, 0, "the marker vanished")
-        // Measured in the app on 2026-10-29: the slider's "+5°" has to turn the picture the way the
-        // user asked for. With the sign as shipped before this fix the marker travelled right+up and
-        // the picture looked counter-clockwise on screen, so the assertion runs the other way now.
-        XCTAssertLessThan(after.x, before.x - 0.1, "+5° must move the top-left marker left")
-        XCTAssertGreaterThan(after.y, before.y + 0.1, "…and down")
+        // 126: the slider's "+5°" turns the picture **clockwise** on screen, so a marker in the
+        // top-left quadrant travels toward the top-right. Measured here (and confirmed by the user):
+        // before the S0 inverse the same document put it left+down, i.e. the picture was rendered at
+        // R(−θ) while the crop frame was drawn at R(+θ) — the 2θ mismatch of 126.
+        XCTAssertGreaterThan(after.x, before.x + 0.1, "+5° must move the top-left marker right")
+        XCTAssertLessThan(after.y, before.y - 0.1, "…and up (clockwise)")
 
         // Corners are background (0), not the flat frame's 0.25 edge colour.
         let corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
@@ -216,5 +217,93 @@ extension TransformSessionTests {
         let out = try XCTUnwrap(result.display)
         let o = 0
         XCTAssertGreaterThan(out.rgba[o], 0.05, "rotationDegrees == 0 must not paint background")
+    }
+
+    /// 126 acceptance ③ — **the mask turns by the same inverse as the picture.**
+    ///
+    /// A small radial mask sits on a bright dot in the upper-left of the source. After a +9.7°
+    /// straighten the dot must still be *inside* that mask: the mask's centroid (read back from the
+    /// atlas, i.e. through `s1_5_mask_atlas`) and the picture's centroid (read off the rendered frame,
+    /// i.e. through `s0_geometry`) are the same place to ≤ 2 px. Their only shared input is
+    /// `RenderGraph`'s `(costheta, sintheta)` pair, so a second sign decision would split them again.
+    func testRadialMaskTurnsWithThePictureAtPlus9_7() throws {
+        let width = 400, height = 300
+        let probe = NormalizedPoint(0.18, 0.18)
+        let sigma = 6.0
+        let background: Float = 0.05
+        var rgba = [Float16](repeating: 0, count: width * height * 4)
+        for i in 0..<(width * height) {
+            let o = i * 4
+            rgba[o] = Float16(background); rgba[o + 1] = Float16(background)
+            rgba[o + 2] = Float16(background); rgba[o + 3] = 1
+        }
+        let cx = probe.x * Double(width), cy = probe.y * Double(height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let dx = Double(x) + 0.5 - cx, dy = Double(y) + 0.5 - cy
+                let v = background + 0.95 * Float(exp(-(dx * dx + dy * dy) / (2 * sigma * sigma)))
+                let o = (y * width + x) * 4
+                rgba[o] = Float16(v); rgba[o + 1] = Float16(v); rgba[o + 2] = Float16(v)
+            }
+        }
+        let image = LinearImage(width: width, height: height, rgba: rgba,
+                                colorSpace: "sRGB", decoderVersion: "transform-session-mask")
+        let graph = try makeGraph(image, identity: "transform-session-mask")
+
+        var edit = EditModel.neutral
+        edit.geometry = GeometryGroup(crop: .full, rotationDegrees: 9.7)
+        edit.masks = [Mask(id: "m-dot", components: [MaskComponent(
+            id: "c", feather: 0,
+            shape: .radialGradient(RadialGradientShape(
+                center: probe, radius: NormalizedPoint(0.08, 0.08), angle: 0)))],
+            adjustments: LocalAdjustments())]
+
+        let result = try graph.render(edit, options: RenderOptions(scale: 1, useCache: false,
+                                                                  wantsPixels: true))
+        let display = try XCTUnwrap(result.display)
+        let dump = try XCTUnwrap(try graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
+
+        func centroid(_ weight: (Int, Int) -> Double) -> (x: Double, y: Double) {
+            var sx = 0.0, sy = 0.0, sw = 0.0
+            for y in 0..<height {
+                for x in 0..<width {
+                    let w = weight(x, y)
+                    if w <= 0 { continue }
+                    sx += Double(x) * w; sy += Double(y) * w; sw += w
+                }
+            }
+            return sw > 0 ? (sx / sw, sy / sw) : (.nan, .nan)
+        }
+
+        var darkest = Double.infinity
+        for i in stride(from: 0, to: width * height * 4, by: 4) {
+            let luma = (Double(display.rgba[i]) + Double(display.rgba[i + 1])
+                        + Double(display.rgba[i + 2])) / 3
+            if luma > 1e-4 { darkest = min(darkest, luma) }
+        }
+        let picture = centroid { x, y in
+            let o = (y * width + x) * 4
+            let luma = (Double(display.rgba[o]) + Double(display.rgba[o + 1])
+                        + Double(display.rgba[o + 2])) / 3
+            return luma - darkest
+        }
+        let mask = centroid { x, y in Double(dump.value(slice: 0, x: x, y: y) ?? 0) }
+
+        // The independent expectation: the same rotation `CropMath` draws for the crop UI.
+        let quad = CropMath.rotatedFrameCorners(in: ImageSize(width: width, height: height),
+                                                degrees: 9.7)
+        let u = probe.x, v = probe.y
+        let want = (x: ((1 - u) * (1 - v) * quad[0].x + u * (1 - v) * quad[1].x
+                        + u * v * quad[2].x + (1 - u) * v * quad[3].x) * Double(width) - 0.5,
+                    y: ((1 - u) * (1 - v) * quad[0].y + u * (1 - v) * quad[1].y
+                        + u * v * quad[2].y + (1 - u) * v * quad[3].y) * Double(height) - 0.5)
+
+        print(String(format: "126 · dot expected (%.2f, %.2f) picture (%.2f, %.2f) mask (%.2f, %.2f)",
+                     want.x, want.y, picture.x, picture.y, mask.x, mask.y))
+        XCTAssertEqual(picture.x, want.x, accuracy: 2, "the picture is not on the rotated quad")
+        XCTAssertEqual(picture.y, want.y, accuracy: 2, "the picture is not on the rotated quad")
+        XCTAssertLessThanOrEqual(hypot(mask.x - picture.x, mask.y - picture.y), 2,
+                                 "the mask is \(hypot(mask.x - picture.x, mask.y - picture.y)) px off "
+                                 + "the picture — S0 and S1.5 are not using the same inverse")
     }
 }
