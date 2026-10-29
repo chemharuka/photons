@@ -554,7 +554,8 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
             // 117: 去雾 is S1.9 now, in the linear chain — its own stage and its own dirty bit, so a
             // dehaze drag must not re-run the display-referred detail filter.
-            if effects.dehaze != old.effects.dehaze { s.insert(.dehaze) }
+            if effects.dehaze != old.effects.dehaze
+                || effects.dehazeDepth != old.effects.dehazeDepth { s.insert(.dehaze) }
         }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
@@ -2039,6 +2040,10 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// He/Sun/Tang (2010) with a measured airlight `A` (`Kernels/s1_9_dehaze.metal`). Negative
     /// **adds** the veil back.
     public var dehaze: Double
+    /// 120b — how strongly 去雾 reads the depth map (0…100, default 0). 0 is the pre-120b arithmetic
+    /// **byte for byte**; the uniform is this number / 100. The stage still exists by `dehaze`, not by
+    /// this field: a depth strength with no dehaze has nothing to modulate (and no depth map is read).
+    public var dehazeDepth: Double
 
     public static let identity = EffectsGroup()
 
@@ -2062,6 +2067,11 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// 117: does S1.9 (去雾) exist for this document? Its own stage, its own link.
     public var hasDehaze: Bool { dehaze != 0 }
 
+    /// 120b: does 去雾 actually read the depth map? Judged by value — the stage must exist (`dehaze`)
+    /// and the user must have moved the assist away from 0. A strength with no dehaze has nothing to
+    /// modulate, and appending a depth key for it would invalidate a cached neutral frame for nothing.
+    public var usesDepthDehaze: Bool { dehaze != 0 && dehazeDepth != 0 }
+
     /// S3.9's material — 纹理 and 清晰度 and nothing else. A clarity drag must not miss a cached
     /// vignette (S3c reads neither) and a vignette drag must not re-run S3.9. 去雾 has its own string
     /// now that it is its own stage.
@@ -2069,16 +2079,20 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         "tx=\(k(texture));cl=\(k(clarity))"
     }
 
-    /// S1.9's material — the dehaze amount and nothing else.
+    /// S1.9's material — the dehaze amount and, when it is non-zero, 120b's depth strength. The depth
+    /// texture itself is environment and enters the stage key (RenderGraph), not the document.
     public var dehazeKeyString: String {
-        "dz=\(k(dehaze))"
+        var m = "dz=\(k(dehaze))"
+        if dehazeDepth != 0 { m += ";dd=\(k(dehazeDepth))" }
+        return m
     }
 
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,
                 vignetteFeather: Double = 50,
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
-                texture: Double = 0, clarity: Double = 0, dehaze: Double = 0) {
+                texture: Double = 0, clarity: Double = 0, dehaze: Double = 0,
+                dehazeDepth: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
@@ -2089,6 +2103,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         self.texture = texture
         self.clarity = clarity
         self.dehaze = dehaze
+        self.dehazeDepth = dehazeDepth
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2104,6 +2119,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.texture = c.val("texture", v.texture)
         v.clarity = c.val("clarity", v.clarity)
         v.dehaze = c.val("dehaze", v.dehaze)
+        v.dehazeDepth = c.val("dehazeDepth", v.dehazeDepth)
         self = v
     }
 
@@ -2123,6 +2139,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
         if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
+        if dehazeDepth != 0 { try c.encode(dehazeDepth, forKey: AnyCodingKey("dehazeDepth")) }
     }
 
     /// S3c's material — the three vignette numbers and nothing else. A grain drag must not miss a

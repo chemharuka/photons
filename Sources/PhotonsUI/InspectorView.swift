@@ -1354,6 +1354,14 @@ public struct InspectorView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .accessibilityIdentifier("inspector.correction.autoProfile")
+        } else if spec.section == .effects, !session.depthAvailable {
+            // 120b — the user's rule: no depth map, no pretending. The 去雾深度 row is disabled for
+            // the same reason; this line says which fact is missing.
+            Text("这张还没算深度：去雾深度辅助不可用")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .accessibilityIdentifier("inspector.effects.depthUnavailable")
         }
     }
 
@@ -1404,6 +1412,7 @@ public struct InspectorView: View {
                   decimals: row.decimals,
                   rounding: row.rounding,
                   editable: row.editable,
+                  enabled: !row.requiresDepth || session.depthAvailable,
                   accessibilityID: "\(accessibilityPrefix).\(row.title)",
                   onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
             if !editing { session.commitEdit() }
@@ -1615,6 +1624,10 @@ public struct InspectorView: View {
         /// 0.01 — `edit.light.exposure * 100` is an integer — the others keep their own quantization
         /// (整数行 stay integers because their step is 1; 细节 / 白平衡 quantize in the model).
         public var quantum: Double = 0
+        /// 120b — this row only means something when the picture has a depth map (去雾深度). The card
+        /// disables it and draws the reason instead of letting a slider claim an operation that
+        /// cannot run.
+        public var requiresDepth: Bool = false
 
         /// The field's own default, read from the neutral document — never a hard-coded number.
         public var defaultValue: Double { EditModel.neutral[keyPath: keyPath] }
@@ -1718,6 +1731,10 @@ public struct InspectorView: View {
         // (071's class) like the vignette rows in 校正.
         ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.dehaze),
+        // 120b: the depth-assisted distribution, directly under 去雾 (the user's own wording). Its
+        // stage is still S1.9; 0 is the pre-120b frame byte for byte, and no depth map disables it.
+        ToneRow(title: "去雾深度", range: 0 ... 100, format: "%.0f", shape: .linear,
+                keyPath: \.effects.dehazeDepth, requiresDepth: true),
     ]
 
     /// The card's seven rows in draw order — the two blocks and the divider between them. One list,

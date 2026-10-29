@@ -317,6 +317,8 @@ extension EditHistory {
         num("effects.texture", .effects, before.effects.texture, after.effects.texture)
         num("effects.clarity", .effects, before.effects.clarity, after.effects.clarity)
         num("effects.dehaze", .effects, before.effects.dehaze, after.effects.dehaze)
+        num("effects.dehazeDepth", .effects,
+            before.effects.dehazeDepth, after.effects.dehazeDepth)
         // 2026-10-28 — S3.7's shape and seed. The seed is reported as the integer the kernel
         // hashes, so a row can never claim a change the pixels cannot see.
         num("effects.grainSize", .effects, before.effects.grainSize, after.effects.grainSize)
@@ -549,6 +551,7 @@ extension EditHistory {
         "effects.texture": "纹理",
         "effects.clarity": "清晰度",
         "effects.dehaze": "去雾",
+        "effects.dehazeDepth": "去雾深度",
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
         "masks.order": "蒙版顺序",

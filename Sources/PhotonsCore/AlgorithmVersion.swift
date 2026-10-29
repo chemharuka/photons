@@ -67,7 +67,14 @@ public enum StageAlgorithmVersion {
     /// (interior 1.0, quadratic falloff beyond), not a fraction of the shape spent inside it. Same
     /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
     /// old expression verbatim and does not.
-    public static let maskAtlas = 3
+    ///
+    /// **4** — 120b: the atlas may read the depth map (kind 6, `MaskShape.depthRange`). A document
+    /// that carries no depth mask has no new shape to evaluate and is bit-identical; a document with
+    /// one renders pixels it could not render before (zeros when no map is supplied), which is still
+    /// "different pixels for the same stored parameters" and therefore a bump. The bump is
+    /// conditional in effect (`hasDepthRangeMask` also gates the depth key suffix) but the generation
+    /// number is per stage, so it moves once for everyone.
+    public static let maskAtlas = 4
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
     public static let localApply = 3
@@ -132,7 +139,12 @@ public enum StageAlgorithmVersion {
     /// (`I / 2^EV`, with the recovered light multiplied back), so dehaze commutes with the exposure
     /// slider. A document with both `exposure != 0` and `effects.dehaze != 0` now renders different
     /// pixels for the same stored numbers; `exposure == 0` (g = 1) is bit-identical to 4.
-    public static let dehaze = 5
+    ///
+    /// **6** — 120b: the depth-assisted distribution (`effects.dehazeDepth`, `depthStrength`). The
+    /// stage now reads the depth map and modulates `A`/`t` per pixel; `depthStrength == 0` (or no
+    /// map) takes the pre-120b branch verbatim and is byte-identical, so the bump changes pixels only
+    /// for documents that actually ask for the assist.
+    public static let dehaze = 6
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a

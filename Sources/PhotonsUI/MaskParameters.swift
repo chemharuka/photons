@@ -588,6 +588,62 @@ public struct MaskShapeSliderRow: Sendable {
                     defaultValue: LuminanceRangeShape.default.high),
             ]
 
+        case .depthRange:
+            return [
+                MaskShapeSliderRow(
+                    title: "近端", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: "深度近端",
+                    read: { if case .depthRange(let d) = $0 { return d.near } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .depthRange(let d) = shape else { return shape }
+                        // No order repair here, exactly like 亮度范围: `DepthRangeShape.ordered`
+                        // owns the inversion (and swaps the feathers with the bounds).
+                        return .depthRange(DepthRangeShape(near: min(max(value, 0), 1),
+                                                           far: d.far,
+                                                           nearFeather: d.nearFeather,
+                                                           farFeather: d.farFeather,
+                                                           invert: d.invert))
+                    },
+                    defaultValue: DepthRangeShape.default.near),
+                MaskShapeSliderRow(
+                    title: "远端", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: "深度远端",
+                    read: { if case .depthRange(let d) = $0 { return d.far } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .depthRange(let d) = shape else { return shape }
+                        return .depthRange(DepthRangeShape(near: d.near,
+                                                           far: min(max(value, 0), 1),
+                                                           nearFeather: d.nearFeather,
+                                                           farFeather: d.farFeather,
+                                                           invert: d.invert))
+                    },
+                    defaultValue: DepthRangeShape.default.far),
+                MaskShapeSliderRow(
+                    title: "近端羽化", range: 0 ... 0.5, format: "%.2f", decimals: 2,
+                    rounding: .asIs, label: "深度近端羽化",
+                    read: { if case .depthRange(let d) = $0 { return d.nearFeather } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .depthRange(let d) = shape else { return shape }
+                        return .depthRange(DepthRangeShape(near: d.near, far: d.far,
+                                                           nearFeather: min(max(value, 0), 0.5),
+                                                           farFeather: d.farFeather,
+                                                           invert: d.invert))
+                    },
+                    defaultValue: DepthRangeShape.default.nearFeather),
+                MaskShapeSliderRow(
+                    title: "远端羽化", range: 0 ... 0.5, format: "%.2f", decimals: 2,
+                    rounding: .asIs, label: "深度远端羽化",
+                    read: { if case .depthRange(let d) = $0 { return d.farFeather } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .depthRange(let d) = shape else { return shape }
+                        return .depthRange(DepthRangeShape(near: d.near, far: d.far,
+                                                           nearFeather: d.nearFeather,
+                                                           farFeather: min(max(value, 0), 0.5),
+                                                           invert: d.invert))
+                    },
+                    defaultValue: DepthRangeShape.default.farFeather),
+            ]
+
         case .semantic:
             return [MaskShapeSliderRow(
                 title: "软边", range: 0 ... 0.6, format: "%.2f", decimals: 2, rounding: .asIs,
