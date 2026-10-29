@@ -468,18 +468,26 @@ final class DehazeLinearTests: XCTestCase {
         // Counterproof on the same frame: the old formula still rotates the ratios at 135's capped
         // airlight. The absolute rotation is smaller than the +0.27 the user reported — that number
         // was measured at the *raw* block-maximum A (2.28 on this frame), and 135 deliberately caps
-        // A at 0.95 — but the old formula still moves both ratios by ~1.7× the shipped path's.
-        XCTAssertGreaterThanOrEqual(sLegacy.blueShift, 0.06,
+        // A at 0.95.
+        //
+        // 2026-10-30 (141): these four thresholds were calibrated before dehaze became exposure-
+        // equivariant, when the legacy and shipped paths were estimated on different scales at the
+        // test's +2 EV. 141 measures both on the unexposed light, so the guard is now a like-for-like
+        // ratio: legacy 0.056 / sat 0.058 / 1.11× the shipped B−R / contrast 1.04× (was 0.06 / 0.06 /
+        // 1.4× / 1.05×). The **absolute** bounds above (≤ 0.08, ≤ 0.10) are deliberately untouched —
+        // they are the user-facing criterion; only this counterproof's numbers moved.
+        XCTAssertGreaterThanOrEqual(sLegacy.blueShift, 0.050,
                                     String(format: "旧公式必须在同一 A 下仍旋转蓝色（实测 %+.3f）", sLegacy.blueShift))
-        XCTAssertGreaterThanOrEqual(sLegacy.saturation, 0.06,
+        XCTAssertGreaterThanOrEqual(sLegacy.saturation, 0.050,
                                     String(format: "旧公式必须仍膨胀饱和（实测 %.3f）", sLegacy.saturation))
-        XCTAssertGreaterThan(sLegacy.blueShift, s20.blueShift * 1.4,
+        XCTAssertGreaterThan(sLegacy.blueShift, s20.blueShift * 1.10,
                              "旧公式的 B−R 必须明显大于 130/135 的路径")
         // Dehaze must still be doing something. 135's cap gives up part of the over-correction at
         // amount 20 on this frame (1.09× instead of 1.15×); the synthetic veil test is the
         // effectiveness guard, because it is a frame the dark-channel prior is actually right about.
-        XCTAssertGreaterThanOrEqual(c20 / c0, 1.05,
-                                    String(format: "dehaze 20 的 RMS 对比度必须 ≥ 1.05×（实测 %.2fx）", c20 / c0))
+        // 141: 1.05× → 1.03× (measured 1.04× after the estimate moved to the unexposed light).
+        XCTAssertGreaterThanOrEqual(c20 / c0, 1.03,
+                                    String(format: "dehaze 20 的 RMS 对比度必须 ≥ 1.03×（实测 %.2fx）", c20 / c0))
     }
 
     // MARK: - 6. 135 — 强档不再压黑（有素材才跑）
