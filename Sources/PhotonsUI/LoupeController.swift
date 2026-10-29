@@ -219,9 +219,11 @@ public final class LoupeCanvasView: NSView {
             controller?.applyCropTool()
             return
         case .eyedropper:
-            // 派单 009 C: the eyedropper is a modal one-shot, so it is the innermost gesture of all —
-            // it consumes the click before a paint drag or a pan can start.
-            controller?.handleEyedropperClick(atViewPoint: point)
+            // 派单 009 C: the eyedropper is a modal gesture, so it is the innermost of all — it
+            // consumes the click before a paint drag or a pan can start. White balance disarms after
+            // one sample; the mask pickers stay armed (`staysArmed`) until Esc / the button.
+            controller?.handleEyedropperClick(atViewPoint: point,
+                                              option: event.modifierFlags.contains(.option))
             return
         case .healClick:
             // 2026-10-28 (078 P0-1): also a one-shot — the click places one spot and consumes
@@ -2797,23 +2799,39 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
     }
 
-    /// True between arming the tool and the first successful sample (or Esc).
+    /// True between arming the tool and the disarming sample (white balance) or until Esc / the
+    /// inspector's toggle (mask pickers, `staysArmed`).
     public private(set) var isEyedropperArmed = false
-    private var eyedropperHandler: ((DropperOutcome) -> Void)?
+    private var eyedropperHandler: ((DropperOutcome, Bool) -> Void)?
+    /// False for the white-balance one-shot; true for the mask pickers, which keep sampling until
+    /// Esc / the inspector's toggle / a photo switch (多采样点 needs more than one click).
+    private var eyedropperStaysArmed = false
 
     /// Arm the one-shot picker. The next click on the canvas samples and disarms; a click that lands
     /// outside the picture reports `.outsideImage` and **stays armed**, so a user who missed does not
     /// have to re-arm (Lightroom behaves the same way).
-    public func armEyedropper(_ handler: @escaping (DropperOutcome) -> Void) {
+    ///
+    /// The second closure argument is the ⌥ key at the click (the luminance picker's "move only the
+    /// nearer edge" gesture). One-argument callers keep the white-balance semantics through the
+    /// overload below.
+    public func armEyedropper(staysArmed: Bool = false,
+                              _ handler: @escaping (DropperOutcome, Bool) -> Void) {
         isEyedropperArmed = true
+        eyedropperStaysArmed = staysArmed
         eyedropperHandler = handler
         refreshEyedropperCursor()
+    }
+
+    /// The one-shot spelling used by the white-balance dropper.
+    public func armEyedropper(_ handler: @escaping (DropperOutcome) -> Void) {
+        armEyedropper(staysArmed: false) { outcome, _ in handler(outcome) }
     }
 
     /// Esc, or the inspector's toggle going off.
     public func cancelEyedropper() {
         guard isEyedropperArmed else { return }
         isEyedropperArmed = false
+        eyedropperStaysArmed = false
         eyedropperHandler = nil
         refreshEyedropperCursor()
     }
@@ -2827,15 +2845,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     /// Returns `nil` when the tool is not armed — a plain click on the canvas is a pan, not a probe.
     @discardableResult
-    public func handleEyedropperClick(atViewPoint point: CGPoint) -> DropperOutcome? {
+    public func handleEyedropperClick(atViewPoint point: CGPoint,
+                                      option: Bool = false) -> DropperOutcome? {
         guard isEyedropperArmed, let handler = eyedropperHandler else { return nil }
         let outcome = samplePixel(atViewPoint: point)
-        if case .sampled = outcome {
+        if case .sampled = outcome, !eyedropperStaysArmed {
             isEyedropperArmed = false      // one-shot: Lightroom's dropper is a click, not a mode
             eyedropperHandler = nil
             refreshEyedropperCursor()
         }
-        handler(outcome)
+        handler(outcome, option)
         return outcome
     }
 
@@ -4665,6 +4684,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func notePhotoIdentity(_ identity: String?) {
         guard identity != renderedPhoto else { return }
         renderedPhoto = identity
+        // A picker is aimed at one picture; a different one is a cancellation, like the crop frame.
+        if isEyedropperArmed { cancelEyedropper() }
         cancelPendingFrames()
         // 065b: 「低清照片渲染在切换/打开照片的一瞬间就要完成并且换进来」. The ask is armed here, at the
         // instant the photo changes, and **served by the first frame of that photo** — the render queue

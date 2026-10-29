@@ -1536,6 +1536,42 @@ final class MaskTests: XCTestCase {
         XCTAssertGreaterThan(a.slices[0].max() ?? 0, 0.99, "and it must not be empty")
     }
 
+    /// 139: the picker's two window gestures are pure Core helpers, and their coordinate is the
+    /// kernel's own OKLab L on clamped working-linear light.
+    func testLuminancePickerHelpersUseTheKernelCoordinate() {
+        // A full-range window opens 0.25 wide, centred; a narrower one keeps its width.
+        let opened = LuminanceRangeShape.default.centring(on: 0.9)
+        XCTAssertEqual(opened.low, 0.775, accuracy: 1e-12)
+        XCTAssertEqual(opened.high, 1.0, accuracy: 1e-12)
+        let kept = LuminanceRangeShape(low: 0.10, high: 0.40).centring(on: 0.60)
+        XCTAssertEqual(kept.low, 0.45, accuracy: 1e-12)
+        XCTAssertEqual(kept.high, 0.75, accuracy: 1e-12)
+        XCTAssertEqual(kept.lowFeather, LuminanceRangeShape.default.lowFeather)
+        XCTAssertEqual(kept.highFeather, LuminanceRangeShape.default.highFeather)
+
+        // ⌥ moves only the nearer edge and never repairs the order.
+        let option = LuminanceRangeShape(low: 0.775, high: 1.0).movingNearerEdge(to: 0.1)
+        XCTAssertEqual(option.low, 0.1, accuracy: 1e-12)
+        XCTAssertEqual(option.high, 1.0, accuracy: 1e-12)
+        let crossed = LuminanceRangeShape(low: 0.2, high: 0.4).movingNearerEdge(to: 0.9)
+        XCTAssertEqual(crossed.low, 0.2, accuracy: 1e-12)
+        XCTAssertEqual(crossed.high, 0.9, accuracy: 1e-12)
+
+        // The picker's luminance is the kernel's: OKLab L of clamp(working linear, 0, 1).
+        let mid = OKLabMetric.maskLuminance(fromDecodedSRGB: 0.5, 0.5, 0.5)
+        let working = ColorPrimaries.conversion(from: .sRGB, to: .working)
+            .applying(to: SIMD3(0.5, 0.5, 0.5))
+        let expected = OKLabMetric.fromLinear(working.x, working.y, working.z).L
+        XCTAssertEqual(mid, expected, accuracy: 1e-12)
+        let narrow = LuminanceRangeShape(low: mid - 0.02, high: mid + 0.02,
+                                         lowFeather: 0, highFeather: 0)
+        XCTAssertGreaterThanOrEqual(luminanceRangeAlpha(r: 0.5, g: 0.5, b: 0.5, narrow), 0.95,
+                                    "a ±0.02 window centred on the picker's value covers the pixel")
+        // Above display white the kernel clamps each channel first; the picker must do the same.
+        XCTAssertLessThanOrEqual(OKLabMetric.maskLuminance(fromDecodedSRGB: 4, 4, 4), 1 + 1e-12)
+        print("PICKER CORE · mid L \(mid) · opened \(opened.low)…\(opened.high)")
+    }
+
     // MARK: - 005c: amount and opacity
 
     /// `amount = 0` is the identity branch, bit-exactly, even when every other slider is at an

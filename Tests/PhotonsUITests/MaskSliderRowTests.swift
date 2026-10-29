@@ -142,7 +142,7 @@ final class MaskSliderRowTests: XCTestCase {
                       + "\(fmt(row.defaultValue)) · history +1")
             }
         }
-        XCTAssertEqual(Set(titles), ["中点", "半径", "角度", "容差", "下限", "上限", "软边"],
+        XCTAssertEqual(Set(titles), ["中点", "半径", "角度", "选择范围", "过渡", "下限", "上限", "软边"],
                        "每一根形状滑杆都在表里，一根不缺")
         print("MASK shape rows · \(titles)")
     }

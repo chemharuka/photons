@@ -367,7 +367,7 @@ public struct InspectorView: View {
             // 087: 变换工作区的第二张卡 —— 转动 / 旋转 / 镜像，放在裁切卡之后。
             angleTransformCard
         case .masks:
-            MaskListPanel(session: session)
+            MaskListPanel(session: session, loupe: loupe)
         case .history:
             // 077: the timeline draws its own header and card chrome (the mask list does the same):
             // it needs a count line, and it is not a parameter card with a reset.

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import PhotonsCore
 
 // MARK: - 蒙版的参数，和它们各自的数域
@@ -16,6 +17,82 @@ import PhotonsCore
 // `MaskRadius.featherPixels` clamps to 0…1); a narrower one hides half of what a document may hold,
 // and then opening someone else's document shows a slider at its end stop with no way to tell that
 // the value is simply outside the widget.
+
+// MARK: - 吸管（任务 139）
+
+/// Which parameter an armed mask eyedropper writes.
+///
+/// The picker itself is the loupe's existing one (`LoupeController.armEyedropper`, the same route the
+/// white-balance dropper uses): armed state, Esc and the crosshair are view state and are never in
+/// the document. This enum only says *what* the next click means.
+public enum MaskEyedropperKind: String, Sendable, Equatable {
+    case luminance
+    case colour
+
+    public var label: String {
+        switch self {
+        case .luminance: return "亮度吸管"
+        case .colour: return "颜色吸管"
+        }
+    }
+
+    public var accessibilityID: String {
+        switch self {
+        case .luminance: return "mask.luminance.eyedropper"
+        case .colour: return "mask.color.eyedropper"
+        }
+    }
+
+    public var help: String {
+        switch self {
+        case .luminance:
+            return "点击画面：以该点亮度为中心重设窗口；⌥点击：只移动较近的一条边（Esc 取消）"
+        case .colour:
+            return "点击画面：把该点颜色加入样本（最多 8 个，超过时替换最旧的一个）；Esc 取消"
+        }
+    }
+}
+
+/// The armed-state row above a luminance / colour range section.
+///
+/// A plain button, not a menu: the owner treats picking as a normal operation, so it is visible at
+/// the top of the row block. `isArmed` is read from the loupe (the source of truth), so Esc — which
+/// the canvas handles without telling SwiftUI — turns the highlight off on the next render.
+public struct MaskEyedropperRow: View {
+    public let kind: MaskEyedropperKind
+    public let isArmed: Bool
+    public let enabled: Bool
+    public let action: () -> Void
+
+    public init(kind: MaskEyedropperKind, isArmed: Bool, enabled: Bool,
+                action: @escaping () -> Void) {
+        self.kind = kind
+        self.isArmed = isArmed
+        self.enabled = enabled
+        self.action = action
+    }
+
+    public var body: some View {
+        HStack(spacing: 6) {
+            Button(action: action) {
+                Image(systemName: "eyedropper")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.mini)
+            .disabled(!enabled)
+            .help(kind.help)
+            .accessibilityIdentifier(kind.accessibilityID)
+            .foregroundStyle(isArmed ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+
+            Text(isArmed ? "点击画布取样 · Esc 取消" : kind.label)
+                .font(.system(size: 10))
+                .foregroundStyle(isArmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+        }
+    }
+}
 
 // MARK: mask-level parameters
 
@@ -452,16 +529,33 @@ public struct MaskShapeSliderRow: Sendable {
             ]
 
         case .colorRange:
-            return [MaskShapeSliderRow(
-                title: "容差", range: 0.02 ... 1.0, format: "%.2f", decimals: 2, rounding: .asIs,
-                label: "颜色容差",
-                read: { if case .colorRange(let c) = $0 { return c.tolerance } else { return .nan } },
-                apply: { shape, value in
-                    guard case .colorRange(let c) = shape else { return shape }
-                    return .colorRange(ColorRangeShape(samples: c.samples, tolerance: value,
-                                                       smoothness: c.smoothness))
-                },
-                defaultValue: ColorRangeShape.default.tolerance)]
+            return [
+                MaskShapeSliderRow(
+                    // 139 — the one control that means 「扩大选择范围」. Row units are percent
+                    // (0…100 %); the document stays `tolerance` in 0…1, so this is the only
+                    // conversion and the panel's readout is the engine's own number ×100.
+                    title: "选择范围", range: 0 ... 100, format: "%.0f%%", decimals: 0,
+                    rounding: .outward, label: "颜色选择范围",
+                    read: { if case .colorRange(let c) = $0 { return c.tolerance * 100 } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .colorRange(let c) = shape else { return shape }
+                        return .colorRange(ColorRangeShape(
+                            samples: c.samples,
+                            tolerance: min(max(value, 0), 100) / 100,
+                            smoothness: c.smoothness))
+                    },
+                    defaultValue: ColorRangeShape.default.tolerance * 100),
+                MaskShapeSliderRow(
+                    title: "过渡", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: "颜色过渡",
+                    read: { if case .colorRange(let c) = $0 { return c.smoothness } else { return .nan } },
+                    apply: { shape, value in
+                        guard case .colorRange(let c) = shape else { return shape }
+                        return .colorRange(ColorRangeShape(samples: c.samples, tolerance: c.tolerance,
+                                                           smoothness: min(max(value, 0), 1)))
+                    },
+                    defaultValue: ColorRangeShape.default.smoothness),
+            ]
 
         case .luminanceRange:
             return [
@@ -471,8 +565,10 @@ public struct MaskShapeSliderRow: Sendable {
                     read: { if case .luminanceRange(let l) = $0 { return l.low } else { return .nan } },
                     apply: { shape, value in
                         guard case .luminanceRange(let l) = shape else { return shape }
-                        // The pair stays ordered (`low ≤ high`), exactly as the drag path writes it.
-                        return .luminanceRange(LuminanceRangeShape(low: min(value, l.high),
+                        // 139: no ordering clamp here. `low > high` is a mirror with its own
+                        // documented meaning (`LuminanceRangeShape.ordered`); a second repair in the
+                        // UI is how two rules start disagreeing.
+                        return .luminanceRange(LuminanceRangeShape(low: min(max(value, 0), 1),
                                                                    high: l.high,
                                                                    lowFeather: l.lowFeather,
                                                                    highFeather: l.highFeather))
@@ -485,7 +581,7 @@ public struct MaskShapeSliderRow: Sendable {
                     apply: { shape, value in
                         guard case .luminanceRange(let l) = shape else { return shape }
                         return .luminanceRange(LuminanceRangeShape(low: l.low,
-                                                                   high: max(value, l.low),
+                                                                   high: min(max(value, 0), 1),
                                                                    lowFeather: l.lowFeather,
                                                                    highFeather: l.highFeather))
                     },
@@ -507,6 +603,72 @@ public struct MaskShapeSliderRow: Sendable {
         case .brush, .unsupported:
             return []
         }
+    }
+}
+
+// MARK: - 吸管：the sampled value and the two document writes
+
+/// The bridge between the loupe's decode-buffer sample and the two mask parameters.
+///
+/// `LoupeController.samplePixel` returns `RGBSample` in the **decoded** buffer's space (linear sRGB,
+/// `ColorPrimaries.decoded`). The kernel's predicates run on **S1's output** in working primaries, so
+/// both conversions live in `OKLabMetric` next to the metric they must agree with — see
+/// `maskLuminance` / `maskSampleSRGB` there, and the report's space check.
+public enum MaskEyedropper {
+
+    /// The luminance axis: OKLab L of clamped working-linear light (`0…1`).
+    public static func luminance(from sample: RGBSample) -> Double {
+        OKLabMetric.maskLuminance(fromDecodedSRGB: sample.r, sample.g, sample.b)
+    }
+
+    /// The colour storage triple: sRGB-encoded 0…1, the contract of `ColorRangeShape.samples`.
+    public static func colour(from sample: RGBSample) -> [Double] {
+        OKLabMetric.maskSampleSRGB(fromDecodedSRGB: sample.r, sample.g, sample.b)
+    }
+}
+
+extension CatalogSession {
+
+    /// One luminance pick = **one** document write = one history entry.
+    ///
+    /// `moveNearerEdge` is the ⌥-click: it replaces only the edge closer to the sample. A plain
+    /// click re-centres the current window (or opens a 0.25-wide one when the window was "everything").
+    /// Feathers are untouched in both cases; `ordered` is the only place that repairs an inverted
+    /// pair.
+    @discardableResult
+    public func pickMaskLuminance(_ maskID: String, component: Int, at value: Double,
+                                  moveNearerEdge: Bool = false) -> Bool {
+        guard let mask = edit.masks.first(where: { $0.id == maskID }),
+              mask.components.indices.contains(component),
+              case .luminanceRange(let shape) = mask.components[component].shape else { return false }
+        let next = moveNearerEdge ? shape.movingNearerEdge(to: value) : shape.centring(on: value)
+        guard next != shape else { return false }
+        setMaskComponentShape(maskID, component: component, shape: .luminanceRange(next),
+                              commit: true,
+                              label: moveNearerEdge ? "亮度吸管 · 单边" : "亮度吸管",
+                              coalesce: false)
+        return true
+    }
+
+    /// One colour pick = one sample append (FIFO past 8) = one history entry.
+    ///
+    /// `tolerance` and `smoothness` are copied through unchanged: the picker widens the **union** of
+    /// sampled colours, it does not reset the range the user set.
+    @discardableResult
+    public func pickMaskColour(_ maskID: String, component: Int, sampleSRGB: [Double]) -> Bool {
+        guard sampleSRGB.count >= 3,
+              let mask = edit.masks.first(where: { $0.id == maskID }),
+              mask.components.indices.contains(component),
+              case .colorRange(let shape) = mask.components[component].shape else { return false }
+        // A new 颜色范围 mask opens on the mid-grey placeholder (`MaskShapeControls.defaultShape`:
+        // "a starting point the user replaces by picking a colour"). The first real pick replaces
+        // it; otherwise "pick red" would also keep selecting the whole mid-tone range.
+        var base = shape
+        if base.samples == [[0.5, 0.5, 0.5]] { base.samples = [] }
+        let next = base.appendingSample(Array(sampleSRGB.prefix(3)))
+        setMaskComponentShape(maskID, component: component, shape: .colorRange(next),
+                              commit: true, label: "颜色吸管", coalesce: false)
+        return true
     }
 }
 
