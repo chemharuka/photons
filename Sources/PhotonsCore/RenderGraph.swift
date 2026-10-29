@@ -839,6 +839,13 @@ private struct HSLParamsU {
     var g: SIMD4<Float>   // 101 — global: hue, saturation, luminance (slider units), pad
 }
 
+/// Mirror of `Kernels/s3_6b_point_colour.metal`, byte for byte (140).
+private struct PointColorParamsU {
+    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var b: SIMD4<Float>   // sampleHue, sampleChroma, range, feather
+    var c: SIMD4<Float>   // hue, saturation, luminance, active (1 when the stage should compute)
+}
+
 /// Mirror of `Kernels/s3_4_bw.metal` (2026-10-28, P0-4). The band table is the **same**
 /// `HSLBandU` array S3.6 uploads — one band geometry, two consumers.
 private struct BWParamsU {
@@ -3241,6 +3248,27 @@ public final class RenderGraph {
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<HSLParamsU>.stride, index: 0)
             enc.setBuffer(bands, offset: 0, index: 1)
+            dispatch(enc, p, plan.canvas)
+            enc.endEncoding()
+
+        case .pointColour:
+            // 140 — 点颜色: one sampled OKLCh hue window on display-referred data. Encoded **only**
+            // when the card has both a sample and a non-zero adjustment (`RenderStage.pipeline`), so a
+            // document that never used it has no pass to be neutral in. The kernel is a separate
+            // instantiation, not a branch inside S3.6: a band drag must not compile this arithmetic
+            // and a point-colour drag must not re-run S3.6.
+            let p = try kernels.pipeline(file: "s3_6b_point_colour",
+                                         function: "s3_6b_point_colour")
+            let point = edit.color.point ?? PointColor()
+            var params = PointColorParamsU(
+                a: SIMD4(plan.origin.x, plan.origin.y,
+                         Float(plan.content.width), Float(plan.content.height)),
+                b: SIMD4(Float(point.sampleHue), Float(point.sampleChroma),
+                         Float(point.range), Float(point.feather)),
+                c: SIMD4(Float(point.hue), Float(point.saturation), Float(point.luminance),
+                         point.isActive ? 1 : 0))
+            let enc = try encoder(cb, p, in: src, out: out)
+            enc.setBytes(&params, length: MemoryLayout<PointColorParamsU>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 

@@ -54,7 +54,7 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         switch self {
         case .light: return [.sceneLinear, .toneMap]
         case .curve: return [.curve]
-        case .color: return [.color, .bw, .hsl]
+        case .color: return [.color, .bw, .hsl, .pointColour]
         // 2026-10-28 (P0 色彩分级): one stage — S3.8.
         case .colorGrading: return [.grade]
         case .detail: return []

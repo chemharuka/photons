@@ -461,8 +461,8 @@ final class BlackAndWhiteTests: XCTestCase {
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("bw").add(document().keyMaterial(.bw)).canonical,
                        "S3.4 is seeded by S3's key, not by the vignette's")
-        XCTAssertEqual(Array(bw.pipeline.dropFirst(4).prefix(2)), [.color, .bw])
-        XCTAssertEqual(Array(bw.pipeline.suffix(3)), [.bw, .vignette, .display])
+        XCTAssertEqual(Array(bw.pipeline.dropFirst(4).prefix(2)), [.toneMap, .color])
+        XCTAssertEqual(Array(bw.pipeline.suffix(3)), [.color, .bw, .display])
         XCTAssertEqual(bw.pipeline.count, plain.pipeline.count + 1)
         XCTAssertNotEqual(bw.vignette, plain.vignette, "the vignette reads the grey, so its key must move")
 

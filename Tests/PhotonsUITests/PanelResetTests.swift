@@ -599,7 +599,7 @@ final class PanelResetTests: XCTestCase {
         // The group list itself is still the eight cards 047 + 2026-10-28 built.
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "blackAndWhite", "detail", "correction",
-                        "effects", "colorGrading"])
+                        "effects", "colorGrading", "pointColor"])
     }
 
     // MARK: - helpers

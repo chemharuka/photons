@@ -367,7 +367,8 @@ final class HSLTests: XCTestCase {
         XCTAssertEqual(both, [.localColor, .hsl], "S3.5 then S3.6, in `RenderStage.order`'s order")
         XCTAssertNotNil(result.keys.localColor)
         let hslLink = try XCTUnwrap(result.keys.hsl)
-        XCTAssertEqual(Array(result.keys.pipeline.suffix(4)), [.localColor, .hsl, .vignette, .display])
+        XCTAssertEqual(Array(result.keys.pipeline.suffix(4)),
+                       [.color, .localColor, .hsl, .display])
         XCTAssertNotEqual(result.keys.vignette, KeyBuilder.digest(of: hslLink),
                           "the vignette link is H(hsl | effects), so it cannot be the hsl link itself")
         print("HSL BOTH · " + result.keys.shortTrace)
@@ -414,7 +415,7 @@ final class HSLTests: XCTestCase {
                                           edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.hsl)
         XCTAssertEqual(links.pipeline, RenderStage.pipeline(hasMasks: false, hasHSL: true))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.hsl, .vignette, .display])
+        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.color, .hsl, .display])
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("hsl").add(withBand.keyMaterial(.hsl)).canonical,
                        "S3.6 must be seeded by S3's key, not by the vignette's")

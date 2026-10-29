@@ -37,7 +37,7 @@ final class BlackAndWhiteCardTests: XCTestCase {
     /// two blocks as data.
     func testTheCardIsTheLastColourCardWithOneSwitchAndEightMixRows() throws {
         let sections = InspectorView.sections(in: .colour)
-        XCTAssertEqual(sections, [.hsl, .colorGrading, .blackAndWhite],
+        XCTAssertEqual(sections, [.hsl, .pointColor, .colorGrading, .blackAndWhite],
                        "色彩工作区：HSL → 色彩分级 → 黑白，实际 \(sections)")
         // The *pipeline* still runs S3.4 before S3.6/S3.8 — the panel's reading order is the user's,
         // the execution order is the renderer's.

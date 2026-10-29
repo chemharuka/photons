@@ -109,7 +109,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// drops the two keys, `s1_scene_linear_levels*` no longer exists, and `blackOffset` is the one
     /// black-point control. A document that does carry one of the keys is stamped (its bytes and its
     /// pixels both move); measured before the change, zero documents on this machine had either key.
-    public static let currentSchemaVersion = 11
+    ///
+    /// **12 (2026-10-29, 140): `color.point` — 点颜色.** An optional `PointColor`; absent means the
+    /// card has never been used and S3.6b does not exist for the document. The key is additive (the
+    /// `colorGrading`/`healSpots` rule): a schema-11 blob reads `nil`, re-encodes byte for byte, and
+    /// is not stamped. Only a document this build saves after a point-colour edit carries 12.
+    public static let currentSchemaVersion = 12
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -295,6 +300,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// numbers or the global (「全局」) triplet is non-zero — exactly the way `hasLocalColor` is judged
     /// for S3.5. A stage that is present but neutral would still move the trace and the key chain.
     public var hasHSL: Bool { color.hasBands || color.hasGlobal }
+
+    /// 140: does S3.6b exist for this document? **Sampled colour and a non-zero adjustment** — the
+    /// same by-value predicate `hasHSL` uses. A sample alone (adjustments all 0) and adjustments
+    /// dragged before a sample both keep the pre-140 pipeline, key chain and pixels byte for byte.
+    public var hasPointColor: Bool { color.hasPointColor }
 
     /// 2026-10-28: does S3.7 exist for this document? Judged **by value** (the grain amount is above
     /// zero), exactly the way `hasHSL` judges S3.6 — a stage present but neutral would move the trace
@@ -508,6 +518,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 101: the ninth selector (「全局」) writes its own triplet — S3.6 is the only stage that
             // reads it, so it dirties exactly the stage the eight bands do.
             if hslMoved || color.global != old.color.global { s.insert(.hsl) }
+            // 140: S3.6b's own material is the sampled colour, the window and the three adjustments.
+            // A re-sample therefore dirties exactly this stage (not S3.6), which is what makes the
+            // dropper one edit of the point card rather than a band drag.
+            if color.point != old.color.point { s.insert(.pointColour) }
             let mixMoved = zip(color.bands, old.color.bands).contains { $0.mix != $1.mix }
             if color.blackAndWhite != old.color.blackAndWhite || mixMoved { s.insert(.bw) }
         }
@@ -715,6 +729,12 @@ public struct EditModel: Sendable, Equatable, Codable {
             // saturation are S3's). Same shape as `.localColor`: a stage key that names the values it
             // reads cannot silently stop tracking them.
             return "hsl=\(color.hslKeyString)"
+
+        case .pointColour:
+            // 140: S3.6b's own material — the sampled colour, the window and the three adjustments.
+            // Written even when the optional is `nil` (the stage only exists when it is active, so
+            // this is the safety answer for a caller asking for a stage the document does not have).
+            return "point=\(color.pointKeyString)"
 
         case .bw:
             // 2026-10-28 (P0-4): S3.4's own material — the switch and the eight mixes, nothing else
@@ -1610,6 +1630,10 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// used the ninth button re-encodes byte for byte (the `blackAndWhite`/`blackOffset` discipline).
     /// Its `mix` field is never read: 黑白混合 is S3.4's, not this group's.
     public var global: HSLBand
+    /// 140 — 点颜色: one sampled OKLCh colour and the three adjustments scoped to it. `nil` (the
+    /// default) means the card has never been used: S3.6b is not in the pipeline, no key segment is
+    /// added and a schema-11 blob re-encodes byte for byte. Written only when non-nil.
+    public var point: PointColor?
 
     public static let bandCount = 8
 
@@ -1620,12 +1644,14 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     public init(vibrance: Double = 0, saturation: Double = 0,
                 bands: [HSLBand] = ColorGroup.identityBands,
                 blackAndWhite: Bool = false,
-                global: HSLBand = HSLBand()) {
+                global: HSLBand = HSLBand(),
+                point: PointColor? = nil) {
         self.vibrance = vibrance
         self.saturation = saturation
         self.bands = ColorGroup.normalize(bands)
         self.blackAndWhite = blackAndWhite
         self.global = global
+        self.point = point
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1637,6 +1663,8 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         v.blackAndWhite = c.val("blackAndWhite", v.blackAndWhite)
         // 101: additive — an absent key reads as the all-zero triplet, i.e. the pre-101 graph.
         v.global = c.val("global", v.global)
+        // 140: additive — an absent key reads as `nil`, i.e. the pre-140 graph.
+        v.point = c.val("point", v.point)
         self = v
     }
 
@@ -1651,6 +1679,8 @@ public struct ColorGroup: Sendable, Equatable, Codable {
         // 101: the ninth triplet is absent while it is all zero — the same "the new key appears only
         // in a document that uses it" rule the switch above follows.
         if !global.isIdentity { try c.encode(global, forKey: AnyCodingKey("global")) }
+        // 140: the point-colour object is absent while the card is unused — the same rule.
+        if let point { try c.encode(point, forKey: AnyCodingKey("point")) }
     }
 
     /// Tolerate hand-written or future documents: always eight bands, missing ones identity.
@@ -1666,7 +1696,7 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// nothing in it".
     public var isIdentity: Bool {
         vibrance == 0 && saturation == 0 && !blackAndWhite && global.isIdentity
-            && bands.allSatisfy { $0.isIdentity }
+            && bands.allSatisfy { $0.isIdentity } && point == nil
     }
 
     /// True when any of the 24 HSL numbers (hue/saturation/luminance) is non-zero — the predicate
@@ -1682,6 +1712,10 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// 101 — does the ninth selector carry a value? Judged the same way `hasBands` is: the three HSL
     /// axes only (the global triplet's unused `mix` is not S3.6's material).
     public var hasGlobal: Bool { !global.isHSLIdentity }
+
+    /// 140 — does S3.6b exist for this group? Sampled **and** adjusted; a sample alone or three
+    /// sliders without a sample is not a stage (and must not move the trace, the key or a pixel).
+    public var hasPointColor: Bool { point?.isActive ?? false }
 
     /// True when any band carries a 黑白混合 value. Part of S3.4's material, not S3.6's.
     public var hasMix: Bool { bands.contains { $0.mix != 0 } }
@@ -1707,6 +1741,12 @@ public struct ColorGroup: Sendable, Equatable, Codable {
     /// only when the switch is on, so there is no "default" spelling to preserve inside it.
     public var bwMixKeyString: String {
         "gray=" + bands.map(\.mixKeyString).joined(separator: ";")
+    }
+
+    /// `point=…` — S3.6b's material (140). `none` when the card has never been used; the stage does
+    /// not exist in that case, but the material still has to answer for a caller that asks.
+    public var pointKeyString: String {
+        point?.keyString ?? "none"
     }
 }
 

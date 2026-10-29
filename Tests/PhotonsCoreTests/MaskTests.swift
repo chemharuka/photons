@@ -1142,7 +1142,8 @@ final class MaskTests: XCTestCase {
         // stages.
         XCTAssertEqual(Set(result.trace.executed),
                        Set(RenderStage.order.filter {
-                           $0 != .localColor && $0 != .hsl && $0 != .grain && $0 != .bw
+                           $0 != .localColor && $0 != .hsl && $0 != .pointColour && $0 != .grain
+                               && $0 != .bw
                                && $0 != .grade && $0 != .detailFX && $0 != .heal
                                && $0 != .dehaze   // 117: no dehaze value ⇒ no S1.9
                                && $0 != .contrast   // 098: no contrast value ⇒ no S1.8

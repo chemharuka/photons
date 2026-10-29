@@ -172,8 +172,8 @@ final class BlackLevelTests: XCTestCase {
         // 新文档：schemaVersion 10（2026-10-28 加了 `healSpots`，078 P0-1 的 修复画笔），
         // 而且**仍然**不写 blackOffset 这个键。
         // 2026-10-29: 11 (030's absolute `blackLevel`/`whiteLevel` deleted — one black point left).
-        XCTAssertEqual(EditModel.currentSchemaVersion, 11)
-        XCTAssertEqual(EditModel.neutral.schemaVersion, 11)
+        XCTAssertEqual(EditModel.currentSchemaVersion, 12)
+        XCTAssertEqual(EditModel.neutral.schemaVersion, 12)
         let fresh = String(decoding: try encoder.encode(EditModel.neutral), as: UTF8.self)
         XCTAssertTrue(fresh.contains("\"schemaVersion\" : \(EditModel.currentSchemaVersion)"),
                       "新文档的版本号取自 currentSchemaVersion，不写死")

@@ -253,6 +253,21 @@ extension EditHistory {
         // number (`FieldValue.flag`, the same shape `light.lensCorrections` uses).
         flag("color.blackAndWhite", .color, before.color.blackAndWhite, after.color.blackAndWhite)
 
+        // 140 — 点颜色: the sample, the window and the three adjustments, in the card's order. A
+        // `nil` document is the card's own default (`PointColor()`), so sampling from an empty card
+        // reads as “采样色相 / 采样彩度” rather than as six fields entering from nowhere.
+        if before.color.point != nil || after.color.point != nil {
+            let p0 = before.color.point ?? PointColor()
+            let p1 = after.color.point ?? PointColor()
+            num("color.point.sampleHue", .color, p0.sampleHue, p1.sampleHue)
+            num("color.point.sampleChroma", .color, p0.sampleChroma, p1.sampleChroma)
+            num("color.point.range", .color, p0.range, p1.range)
+            num("color.point.feather", .color, p0.feather, p1.feather)
+            num("color.point.hue", .color, p0.hue, p1.hue)
+            num("color.point.saturation", .color, p0.saturation, p1.saturation)
+            num("color.point.luminance", .color, p0.luminance, p1.luminance)
+        }
+
         // 2026-10-28 (P0 色彩分级) — S3.8's nine numbers, in panel order: 阴影 → 中间调 → 高光, and
         // 色相 → 饱和 → 亮度 inside each wheel. The order is the card's order, so a row that moved two
         // of them (a reset, a paste) reads the way the card reads.
@@ -498,6 +513,13 @@ extension EditHistory {
         "color.vibrance": "自然饱和",
         "color.saturation": "饱和",
         "color.blackAndWhite": "黑白",
+        "color.point.sampleHue": "点颜色[采样] 色相",
+        "color.point.sampleChroma": "点颜色[采样] 彩度",
+        "color.point.range": "点颜色 范围",
+        "color.point.feather": "点颜色 过渡",
+        "color.point.hue": "点颜色 色相",
+        "color.point.saturation": "点颜色 饱和",
+        "color.point.luminance": "点颜色 亮度",
         "colorGrading.shadows.hue": "色彩分级[阴影] 色相",
         "colorGrading.shadows.saturation": "色彩分级[阴影] 饱和",
         "colorGrading.shadows.lightness": "色彩分级[阴影] 亮度",

@@ -483,7 +483,7 @@ final class ColorGradingTests: XCTestCase {
                                          edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.grade)
         XCTAssertEqual(links.pipeline, RenderStage.pipeline(hasMasks: false, hasGrade: true))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.grade, .vignette, .display])
+        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.color, .grade, .display])
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("grade").add(graded.keyMaterial(.grade)).canonical,
                        "S3.8 必须由 S3 的键种下（没有 HSL/黑白/局部色时）")
@@ -500,7 +500,7 @@ final class ColorGradingTests: XCTestCase {
         let links = RenderKeyChain.links(identity: "grade-both", sourceSize: dims,
                                          canvas: dims, content: dims,
                                          edit: edit, display: DisplayOptions())
-        XCTAssertEqual(Array(links.pipeline.suffix(4)), [.hsl, .grade, .vignette, .display])
+        XCTAssertEqual(Array(links.pipeline.suffix(4)), [.color, .hsl, .grade, .display])
         XCTAssertEqual(try XCTUnwrap(links.grade),
                        KeyBuilder(KeyBuilder.digest(of: try XCTUnwrap(links.hsl)))
                         .add("grade").add(edit.keyMaterial(.grade)).canonical)
@@ -553,7 +553,7 @@ final class ColorGradingTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("\"colorGrading\""))
         XCTAssertTrue(text.contains("\"highlights\""))
-        XCTAssertEqual(graded.schemaVersion, 11)
+        XCTAssertEqual(graded.schemaVersion, 12)
         let back = try JSONDecoder().decode(EditModel.self, from: data)
         XCTAssertEqual(back, graded)
         XCTAssertEqual(try encoder.encode(back), data)

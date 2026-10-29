@@ -1219,7 +1219,7 @@ final class HDRCurveTests: XCTestCase {
         // 2026-10-28: 10 (`healSpots`, 078 P0-1's 修复画笔, on top of `geometry.quarterTurns`'s 9,
         // 黑白's switch and eight mixes). The curve's own shape did not move.
         // 2026-10-29: 11 (030's absolute `blackLevel`/`whiteLevel` deleted). Still not the curve.
-        XCTAssertEqual(EditModel.currentSchemaVersion, 11)
+        XCTAssertEqual(EditModel.currentSchemaVersion, 12)
         XCTAssertEqual(EditModel.currentProcessVersion, 2)
 
         let legacy = Data(#"""

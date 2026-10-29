@@ -193,7 +193,7 @@ final class CopySheetCardTests: XCTestCase {
                        Set([adjust, InspectorView.cardTitles(in: .colour),
                             InspectorView.cardTitles(in: .transform),
                             InspectorView.cardTitles(in: .masks)].flatMap { $0 })
-                           .subtracting(["旋转", "校正"]))
+                           .subtracting(["旋转", "校正", "点颜色"]))
         // 默认不画子项。
         XCTAssertEqual(view.rows.count, 12, "默认只有卡级行（081 §2）")
     }

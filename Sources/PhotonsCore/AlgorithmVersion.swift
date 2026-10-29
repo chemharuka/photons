@@ -91,6 +91,9 @@ public enum StageAlgorithmVersion {
     public static let localColor = 1
     /// Unchanged (S3.6's OKLCh bands).
     public static let hsl = 1
+    /// **1** — S3.6b's first arithmetic (140, 点颜色): one sampled OKLCh hue window × the S3.6
+    /// chroma gate, three adjustments scaled by the window weight. Starts at 1.
+    public static let pointColour = 1
     /// **1** — S3.8's first arithmetic (2026-10-28, P0 色彩分级): three luminance windows ×
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
@@ -145,6 +148,7 @@ public enum StageAlgorithmVersion {
         case .bw: return bw
         case .localColor: return localColor
         case .hsl: return hsl
+        case .pointColour: return pointColour
         case .grade: return grade
         case .detailFX: return detailFX
         case .dehaze: return dehaze
