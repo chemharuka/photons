@@ -214,6 +214,12 @@ public final class EditorWindowController: NSWindowController {
         return session.setColorLabelForSelection(ColorLabel.allCases[tag].rawValue)
     }
 
+    /// ⌥0 — remove the label from the whole selection. `nil` is the same write the six values use.
+    @discardableResult
+    public func clearColorLabel() -> Bool {
+        session.setColorLabelForSelection(nil)
+    }
+
     // MARK: menu actions (nil-target items: AppKit walks the responder chain and lands here,
     // because a window controller sits between its window and the application)
 
@@ -430,6 +436,8 @@ public final class EditorWindowController: NSWindowController {
         applyColorLabel(tag: item.tag)
     }
 
+    @objc public func clearColorLabelAction(_ sender: Any?) { clearColorLabel() }
+
     // MARK: menu validation
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -553,6 +561,11 @@ public final class EditorWindowController: NSWindowController {
             let labels = Set(session.selectedAssets.map { $0.colorLabel ?? "" })
             item.state = (labels.count == 1 && labels.first == want) ? .on : .off
             return !session.metadataTargetIDs.isEmpty
+        case #selector(clearColorLabelAction(_:)):
+            // Grey when there is nothing to remove — the 清除旗标 rule. No tick: this is a command,
+            // and the six label rows already show which colour the selection holds.
+            return !session.metadataTargetIDs.isEmpty
+                && session.selectedAssets.contains { $0.colorLabel != nil }
         case #selector(exportAction(_:)):
             // Nothing selected = nothing to export: grey, not a sheet that says "将导出 0 张".
             item.title = session.selection.count > 1

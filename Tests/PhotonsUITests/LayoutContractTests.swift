@@ -244,16 +244,21 @@ final class LayoutContractTests: XCTestCase {
         XCTAssertEqual(sections, [.hsl, .colorGrading, .blackAndWhite],
                        "渲染顺序来自 Section.allCases：\(sections)")
 
-        // The pipeline says the same: S3.8 runs directly after S3.6 and before the vignette.
+        // The pipeline says the same: S3.8 runs directly after S3.6 and before detailFX.
         let order = RenderStage.order
         let hsl = try XCTUnwrap(order.firstIndex(of: .hsl))
         let grade = try XCTUnwrap(order.firstIndex(of: .grade))
         let vignette = try XCTUnwrap(order.firstIndex(of: .vignette))
-        // 2026-10-28: S3.9（纹理/清晰度/去雾）merged after the grade, so the grade is no longer
-        // adjacent to the vignette — the invariant is the *order*, not adjacency.
+        let contrast = try XCTUnwrap(order.firstIndex(of: .contrast))
+        let dehaze = try XCTUnwrap(order.firstIndex(of: .dehaze))
+        // 116 把暗角搬进线性链末尾，117 把去雾插在它与对比度之间 —— 相邻关系因此不再成立。
+        // What survives is the *position*: dehaze directly follows contrast, the vignette directly
+        // follows dehaze (the linear tail), and both sit before the tone map and the grade.
         let detail = try XCTUnwrap(order.firstIndex(of: .detailFX))
         XCTAssertEqual(detail, grade + 1, "S3.9 紧跟 S3.8：\(order.map(\.short))")
-        XCTAssertEqual(detail + 1, vignette, "…且在暗角之前")
+        XCTAssertEqual(dehaze, contrast + 1, "117: 去雾紧跟对比度：\(order.map(\.short))")
+        XCTAssertEqual(vignette, dehaze + 1, "117: 去雾在对比度与暗角之间：\(order.map(\.short))")
+        XCTAssertLessThan(vignette, grade, "116: 暗角在线性链，色彩分级在显示链")
         XCTAssertLessThan(hsl, grade)
 
         // 3 wheels × 3 axes, derived from the card's own table.
