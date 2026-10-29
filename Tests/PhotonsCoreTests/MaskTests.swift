@@ -562,20 +562,22 @@ final class MaskTests: XCTestCase {
              "b132ce255825acb03824afe5c3cb87c382100d30c8dfa9e963da787e8445a259|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=1"),
             ("contrast", "97fccab085a1e87ab349e1fa3e4816c94be0cef6cb82b380945f15137b5bd84e",
              "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862|contrast|con=20.00000;alg=1"),
-            ("toneMap", "14c359713c582410aefc9197e02011fffc1b4c1fe7fe21a151a0f2b954bb028e",
-             "97fccab085a1e87ab349e1fa3e4816c94be0cef6cb82b380945f15137b5bd84e|hi=-30.00000;sh=15.00000;alg=4"),
-            ("color", "d00caa929ce732b3afe408e4ad9b2fb37fe5f02e6485b5d78d279eed76405f8c",
-             "14c359713c582410aefc9197e02011fffc1b4c1fe7fe21a151a0f2b954bb028e|vib=15.00000;sat=-10.00000;alg=1"),
+            // 124: toneMap 4 → 5 (高光 reaches the HDR range), so this link and every link below it
+            // move; the sceneLinear/curve/contrast links above do not.
+            ("toneMap", "b7bacc142e4109bf2f072e5e6c723e0c5781ed4b886a4272531b0dc21ad96250",
+             "97fccab085a1e87ab349e1fa3e4816c94be0cef6cb82b380945f15137b5bd84e|hi=-30.00000;sh=15.00000;alg=5"),
+            ("color", "8ff3fcff891387214689d4b0f36729626ec30f724bf69792f90c0e7d4602f396",
+             "b7bacc142e4109bf2f072e5e6c723e0c5781ed4b886a4272531b0dc21ad96250|vib=15.00000;sat=-10.00000;alg=1"),
             // 076: the eight bands left S3 for S3.6, so this fixture — which carries one
             // deliberately non-default band — gains an eighth link between S3 and the vignette.
-            ("hsl", "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af",
-             "d00caa929ce732b3afe408e4ad9b2fb37fe5f02e6485b5d78d279eed76405f8c|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "256da32070a33168cc63262ec6504521decc1c4e47f6a1029e82f67d38d6bcc3",
+             "8ff3fcff891387214689d4b0f36729626ec30f724bf69792f90c0e7d4602f396|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 116: 暗角搬进场景线性域 —— `AlgorithmVersion.vignette` 升到 2，所以这一段键**故意**变了，
             // 链条下游的 display 也跟着变（它把 vignette 的摘要串在自己前面）。
-            ("vignette", "b5ab857269c8b1ec83683b682e1cd646c759a467a1251952faec0f83cb7382e4",
-             "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=2"),
-            ("display", "bfe21b18042cf23d3eb185b99501b7400cef500bd19e42db7fda4e2848012208",
-             "b5ab857269c8b1ec83683b682e1cd646c759a467a1251952faec0f83cb7382e4|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("vignette", "f2f69e866c9a9c317a125dde1d5dc0373520331317dc070cb5ee582cd2247743",
+             "256da32070a33168cc63262ec6504521decc1c4e47f6a1029e82f67d38d6bcc3|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=2"),
+            ("display", "66b6da82d1ef27b49f6822d2bab17f0ebdc0a74fbc65960c41b7fe877a05b414",
+             "f2f69e866c9a9c317a125dde1d5dc0373520331317dc070cb5ee582cd2247743|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

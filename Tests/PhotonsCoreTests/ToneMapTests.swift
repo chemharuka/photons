@@ -202,6 +202,132 @@ final class ToneMapTests: XCTestCase {
         XCTAssertLessThan(down, baseMean - 0.005, "highlights -50 must recover (darken) the highlights")
     }
 
+    // MARK: - 124 · 高光 covers the whole HDR range
+
+    /// A +2 EV frame: 25 % of the samples at 4.0 linear, the rest a normal SDR ramp, so the share
+    /// above 1.0 is comfortably over the acceptance's 20 %.
+    private func hdrImage(width: Int = 320, height: Int = 240) -> LinearImage {
+        var rgba = [Float16](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let t = Double(x) / Double(width - 1)
+                let v: Float = x >= (width * 3) / 4 ? 4.0 : Float(0.02 + 0.90 * t)
+                let o = (y * width + x) * 4
+                rgba[o] = Float16(v); rgba[o + 1] = Float16(v)
+                rgba[o + 2] = Float16(v); rgba[o + 3] = 1
+            }
+        }
+        return LinearImage(width: width, height: height, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+    }
+
+    /// **124 acceptance ② — HDR is actually reached.** A +2 EV frame through the real graph, rendered
+    /// through the linear exit so the values above white survive: 高光 −100's p99.9 must sit at least
+    /// 0.25 EV below 高光 +100's. Before 124 the difference was exactly 0 — the high window closed at
+    /// display white and every HDR sample passed through bit for bit.
+    func testHighlightsRecoverARealHDRFrame() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let graph = try makeGraph(hdrImage(), identity: "hdr-highlight-124")
+        let opts = RenderOptions(scale: 1,
+                                 display: DisplayOptions(headroom: 8, linearOutput: true),
+                                 useCache: false, wantsPixels: true)
+
+        func linearLuma(highlights: Double) throws -> [Double] {
+            var edit = EditModel.neutral
+            edit.light.highlights = highlights
+            let r = try graph.render(edit, options: opts)
+            defer { if let t = r.output { graph.recycle(output: t) } }
+            let d = try XCTUnwrap(r.display)
+            return stride(from: 0, to: d.rgba.count, by: 4).map {
+                0.2126 * Double(d.rgba[$0]) + 0.7152 * Double(d.rgba[$0 + 1])
+                    + 0.0722 * Double(d.rgba[$0 + 2])
+            }
+        }
+
+        func p999(_ values: [Double]) -> Double {
+            let s = values.sorted()
+            return s[min(s.count - 1, Int(0.999 * Double(s.count - 1)))]
+        }
+
+        let down = try linearLuma(highlights: -100)
+        let neutral = try linearLuma(highlights: 0)
+        let up = try linearLuma(highlights: 100)
+        let share = Double(neutral.filter { $0 > 1.0 }.count) / Double(neutral.count)
+        let gap = log2(p999(up)) - log2(p999(down))
+        print(String(format: "124 HDR: %.1f%% of samples > 1.0; p99.9 −100 %.3f → 0 %.3f → +100 %.3f (gap %.3f EV)",
+                     share * 100, p999(down), p999(neutral), p999(up), gap))
+        XCTAssertGreaterThan(share, 0.20, "the fixture must actually be HDR")
+        XCTAssertGreaterThanOrEqual(gap, 0.25, "高光 must cover the HDR range, not stop at white")
+        XCTAssertLessThan(p999(down), p999(neutral), "高光 −100 must recover the top tail")
+        XCTAssertGreaterThan(p999(up), p999(neutral), "高光 +100 must open it")
+    }
+
+    /// **124 acceptance ③ — the recovery is not clipping.** With the display at headroom = 1, count
+    /// the red samples sitting on the ceiling: 高光 −100 must not add any compared with 高光 0.
+    func testHighlightRecoveryAddsNoNewClippedPixels() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let graph = try makeGraph(hdrImage(), identity: "hdr-highlight-clip")
+        let opts = RenderOptions(scale: 1, wantsPixels: true)
+
+        func clippedChannels(highlights: Double) throws -> Int {
+            var edit = EditModel.neutral
+            edit.light.highlights = highlights
+            let d = try XCTUnwrap(graph.render(edit, options: opts).display)
+            var n = 0
+            // The ceiling, not the literal bit pattern: the GPU's float→half write of OETF(1.0) lands
+            // on 0.99951, so `== 1` is a property of the converter. 0.999 is above every OETF value a
+            // below-white sample can produce (0.92 linear encodes to 0.966), so it counts exactly the
+            // pixels the headroom clamp put on the ceiling.
+            for i in stride(from: 0, to: d.rgba.count, by: 4) where d.rgba[i] >= 0.999 { n += 1 }
+            return n
+        }
+
+        let neutral = try clippedChannels(highlights: 0)
+        let down = try clippedChannels(highlights: -100)
+        print("124 clipping: ceiling channels at 高光 0 = \(neutral), at −100 = \(down)")
+        XCTAssertGreaterThan(neutral, 0, "the fixture's HDR samples must clip at headroom 1")
+        XCTAssertLessThanOrEqual(down, neutral, "高光 −100 must not manufacture new white")
+    }
+
+    /// **124 acceptance ④ — a frame with no HDR still takes the neutral path.**
+    ///
+    /// The dispatch's literal sentence ("a peak ≤ 1.05 frame is byte-identical at all three 高光
+    /// settings") describes the old `c` that closed at 0 EV — the very window ①–③ remove, so it cannot
+    /// also hold once the slider covers +2.3 EV. What is kept and pinned here: on an SDR-only frame
+    /// (peak ≤ 1.05) 高光 = 0 is still the identity, the render is deterministic, and the three
+    /// settings are monotone. The one-sentence unresolved conflict is in `local/REPORT.md`.
+    func testNoHDRFrameStillUsesTheNeutralPath() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let w = 64, h = 64
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for i in stride(from: 0, to: rgba.count, by: 4) {
+            rgba[i] = Float16(0.8); rgba[i + 1] = Float16(0.8)
+            rgba[i + 2] = Float16(0.8); rgba[i + 3] = 1
+        }
+        let image = LinearImage(width: w, height: h, rgba: rgba,
+                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let graph = try makeGraph(image, identity: "hdr-highlight-sdr")
+        let opts = RenderOptions(scale: 1, wantsPixels: true)
+
+        func render(highlights: Double) throws -> DisplayImage {
+            var edit = EditModel.neutral
+            edit.light.highlights = highlights
+            return try XCTUnwrap(graph.render(edit, options: opts).display)
+        }
+
+        let neutral = try render(highlights: 0)
+        let again = try render(highlights: 0)
+        let down = try render(highlights: -100)
+        let up = try render(highlights: 100)
+        let rect = (0, 0, neutral.width, neutral.height)
+        print(String(format: "124 no-HDR: mean −100 %.4f, 0 %.4f, +100 %.4f",
+                     meanLuma(down, rect: rect), meanLuma(neutral, rect: rect),
+                     meanLuma(up, rect: rect)))
+        XCTAssertEqual(neutral.sha256(), again.sha256(), "高光 = 0 must stay deterministic")
+        XCTAssertLessThan(meanLuma(down, rect: rect), meanLuma(neutral, rect: rect))
+        XCTAssertGreaterThan(meanLuma(up, rect: rect), meanLuma(neutral, rect: rect))
+    }
+
     /// Monotonicity, per slider, on a fixed picture: five stops of the same slider never fold back.
     func testEachSliderIsMonotoneAcrossItsRange() throws {
         let image = rampImage()
@@ -667,13 +793,23 @@ final class ToneMapTests: XCTestCase {
                                  "L = \(L) EV has no dominant zone")
         }
         // Full-weight ownership either side of the seam, and the chain sums to 1 through the whole
-        // shadow→mid→high run (up to −1.2 EV, where the white closure starts).
+        // shadow→mid→high run. 124 moved the white closure from 0 EV to +4 EV, so the partition now
+        // covers the whole HDR range the sliders are allowed to see.
         var L = -12.0
-        while L <= -1.2 {
+        while L <= 3.9 {
             let w = S2Regions.weights(L: L)
             XCTAssertEqual(w.shadow + w.mid + w.high, 1.0, accuracy: 1e-12,
                            "the three windows must partition the range at L = \(L)")
             L += 0.1
+        }
+        // …and 高光 owns the whole HDR segment the owner asked for: −0.9 EV through +2.3 EV is a
+        // single full-weight zone, and the closure only starts above +4 EV.
+        for L in [-0.9, 0.0, 1.0, 2.3, 4.0] {
+            let w = S2Regions.weights(L: L)
+            print(String(format: "124 weights at L = %+.1f EV: shadow %.3f, mid %.3f, high %.3f",
+                         L, w.shadow, w.mid, w.high))
+            XCTAssertEqual(w.high, 1.0, accuracy: 1e-12,
+                           "高光 must own L = \(L) EV with full weight")
         }
     }
 
@@ -698,29 +834,78 @@ final class ToneMapTests: XCTestCase {
         XCTAssertNotNil(light["midtones"], "085 writes the field, including its default")
     }
 
-    /// Above display white the high window closes: all three weights are 0, so the gain is exactly 1
-    /// and an HDR sample passes through bit for bit, for every slider combination.
-    func testSamplesAboveWhitePassThrough() throws {
+    /// **124 — pass-through only exists above the new white closure.**
+    ///
+    /// Before 124 the high window closed at display white, so every sample at L ≥ 0 was a bit-exact
+    /// copy — that is exactly the owner's 「+1 以上无效」. The closure moved to +4…+6 EV, so the
+    /// bit-exact region is now L ≥ +6 EV and +2 EV (inside the default 2.3 EV headroom) must move.
+    /// Both halves are pinned, because an implementation that simply widened the slider until it
+    /// clipped would pass the second half alone.
+    func testPassThroughOnlyExistsAboveTheNewWhiteClosure() throws {
         let harness = try S2KernelHarness()
-        let values: [Float] = [1.0, 1.5, 2.0, 4.0, 8.0]   // L = 0 … +3 EV
         let combos: [(Float, Float, Float)] = [(100, 0, 0), (-100, 0, 0),
                                                (0, 100, 0), (0, -100, 0),
                                                (0, 0, 100), (0, 0, -100),
                                                (100, -100, 100), (-100, 100, -100)]
+        // +6 EV and above: c = 1, high = 0, gain exactly 1.
+        let aboveClosure: [Float] = [64.0, 128.0, 256.0]   // L = +6 … +8 EV
         for (shadows, midtones, highlights) in combos {
-            let out = try harness.run(values, highlights: highlights, midtones: midtones,
+            let out = try harness.run(aboveClosure, highlights: highlights, midtones: midtones,
                                       shadows: shadows)
-            for (i, v) in values.enumerated() {
+            for (i, v) in aboveClosure.enumerated() {
                 XCTAssertEqual(out[i].bitPattern, v.bitPattern,
                                "L = \(log2(Double(v))) EV moved with (\(shadows), \(midtones), \(highlights))")
             }
         }
-        print("085 above white: bit-identical for all 8 extreme combinations")
+
+        // +2 EV is HDR the owner can see. The old window left all three of these bit-identical.
+        let hdr: [Float] = [1.0, 2.0, 4.0]   // L = 0, +1, +2 EV
+        let down = try harness.run(hdr, highlights: -100)
+        let neutral = try harness.run(hdr, highlights: 0)
+        let up = try harness.run(hdr, highlights: 100)
+        for (i, v) in hdr.enumerated() {
+            XCTAssertLessThan(down[i], neutral[i], "高光 −100 must recover L = \(log2(Double(v))) EV")
+            XCTAssertGreaterThan(up[i], neutral[i], "高光 +100 must lift L = \(log2(Double(v))) EV")
+        }
+        print("124 pass-through: exact above +6 EV; +2 EV −100 = \(down[2]), 0 = \(neutral[2]), +100 = \(up[2])")
     }
 
-    /// **085 — the monotonicity gate.** 3×3×3 slider combinations × `L` from −12 to +2 EV in 0.02
-    /// steps: the gain's log2 slope is never below `S2Regions.minSlope`. The gate is what makes this
-    /// true (the next test removes it and shows the fold).
+    /// **124 acceptance ① — 高光 alone is monotone across the requested range.**
+    ///
+    /// For −100 / 0 / +100, `L ↦ log2(v′)` has no fold on `L ∈ [−3, +2.3]` and its smallest slope is
+    /// at or above 085's 0.400 budget, recomputed for the 124 window. The +2.3 EV end is the point:
+    /// there the old map had slope exactly 1 because the gain was exactly 1 (nothing happened).
+    func testHighlightsAreMonotoneThroughTheHDRRange() {
+        var worst = Double.infinity
+        var worstAt = (L: 0.0, highlights: 0.0)
+        for highlights in [-100.0, 0.0, 100.0] {
+            let d = S2Regions.travelEV(shadows: 0, midtones: 0, highlights: highlights)
+            var L = -3.0
+            while L <= 2.3 {
+                let h = 1e-5
+                let a = S2Regions.weights(L: L - h)
+                let b = S2Regions.weights(L: L + h)
+                let slope = 1 + ((b.shadow - a.shadow) * d.shadow
+                                 + (b.mid - a.mid) * d.mid
+                                 + (b.high - a.high) * d.high) / (2 * h)
+                if slope < worst {
+                    worst = slope
+                    worstAt = (L, highlights)
+                }
+                L += 0.01
+            }
+        }
+        print(String(format: "124 高光 min slope %+.6f at L = %+.2f EV (highlights = %+.0f), budget %.3f",
+                     worst, worstAt.L, worstAt.highlights, S2Regions.minSlope))
+        XCTAssertGreaterThanOrEqual(worst, S2Regions.minSlope - 1e-6,
+                                    "the 高光 map folds at L = \(worstAt.L) EV")
+        XCTAssertGreaterThanOrEqual(worst, 0.400 - 1e-9,
+                                    "124 must keep 085's 0.400 slope budget")
+    }
+
+    /// **085/124 — the monotonicity gate.** 3×3×3 slider combinations × `L` from −12 to +2.3 EV in
+    /// 0.02 steps: the gain's log2 slope is never below `S2Regions.minSlope`. The gate is what makes
+    /// this true (the next test removes it and shows the fold).
     func testTheRegionLiftsAreMonotoneForEveryCombination() {
         let stops: [Double] = [-100, 0, 100]
         var worst = Double.infinity
@@ -731,7 +916,7 @@ final class ToneMapTests: XCTestCase {
                     let d = S2Regions.travelEV(shadows: shadows, midtones: midtones,
                                                highlights: highlights)
                     var L = -12.0
-                    while L <= 2.0 {
+                    while L <= 2.3 {
                         let h = 1e-5
                         let a = S2Regions.weights(L: L - h)
                         let b = S2Regions.weights(L: L + h)

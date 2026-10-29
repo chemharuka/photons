@@ -166,14 +166,16 @@ final class CacheVersionTests: XCTestCase {
     // MARK: - ② the version is derived, and scoped
 
     func testTheVersionIsDerivedFromTheStagesAndTheBumpIsScoped() throws {
-        // The three stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out
-        // of S2, so its generation moved again to 4).
-        XCTAssertEqual(StageAlgorithmVersion.toneMap, 4, "098: contrast left S2 for S1.8")
+        // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2,
+        // so its generation moved again to 4; 124 moved 高光's white closure above the HDR range).
+        XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 2, "073C: the blacks travel")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
+        XCTAssertEqual(StageAlgorithmVersion.vignette, 2,
+                       "116: the vignette moved into the end of the linear chain")
         // …and the ones that did not, so a bump stays a statement about one stage.
-        for stage in [RenderStage.geometry, .curve, .color, .vignette, .grain, .display] {
+        for stage in [RenderStage.geometry, .curve, .color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
                            "\(stage.rawValue) did not change and must not be re-versioned")
         }
@@ -542,7 +544,7 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(edit.keyMaterial(.toneMap),
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
-        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=4"))
+        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=2"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
     }

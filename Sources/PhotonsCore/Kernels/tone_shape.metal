@@ -71,20 +71,28 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
 //
 //     a = smoothstep(−5.4, −3.9, L)   shadow → mid
 //     b = smoothstep(−2.4, −0.9, L)   mid → high
-//     c = smoothstep(−1.2,  0.0, L)   high → white (closes the top)
+//     c = smoothstep(+4.0, +6.0, L)   high → white (closes the top, **outside** the HDR range)
 //
 //     shadow = 1 − a,  mid = a(1 − b),  high = b(1 − c)
 //
 // `a` reaches 1 before `b` starts, so there is no band where all three are 0 — the defect of the old
-// −3.9…−3.2 EV gap, which is exactly where the reference frames' medians sat. Above display white
-// `c = 1` makes `high = 0`, so the gain is exactly 1 and HDR samples pass through unchanged.
+// −3.9…−3.2 EV gap, which is exactly where the reference frames' medians sat.
+//
+// **124 (2026-10-29) — 高光 covers the whole HDR range.** The closure used to be
+// `smoothstep(−1.2, 0.0, L)`, so `high` was exactly 0 at and above display white and a pixel above
+// 1.0 was untouched by 高光 (`c = 1` ⇒ gain 1). The owner measured that as 「高光对 +1 以上的像素
+// 无效」 and asked for the slider to reach the whole HDR range. `c` now starts closing at +4 EV and
+// is 1 at +6 EV, i.e. `c = 0` through the default 2.3 EV headroom and through 114's possible 4 EV
+// preference block, so `high = b = 1` from −0.9 EV all the way up. 白色 keeps its own narrow band at
+// the very top instead of eating the HDR range.
+//
 // The CPU owns the travel and its monotonicity gate (`S2Regions`); these functions take **EV**.
 constant float REGION3_SHADOW_LO_EV = -5.4;
 constant float REGION3_SHADOW_HI_EV = -3.9;
 constant float REGION3_MID_LO_EV = -2.4;
 constant float REGION3_MID_HI_EV = -0.9;
-constant float REGION3_HIGH_LO_EV = -1.2;
-constant float REGION3_HIGH_HI_EV = 0.0;
+constant float REGION3_HIGH_LO_EV = 4.0;
+constant float REGION3_HIGH_HI_EV = 6.0;
 
 /// `(shadow, mid, high)` for one pixel, each 0…1.
 static inline float3 region_weights3(float3 v) {
