@@ -1237,21 +1237,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 118 — the simulated white-balance preview
 
-    /// One drag's virtual white balance: the linear gain a `WhiteBalanceSolver.gain` predicts between
-    /// the pair the frame on screen was decoded under (`reference`) and the pair the hand is asking
-    /// for (`target`).
+    /// One drag's virtual white balance: the linear gain between the pair the frame on screen was
+    /// rendered with (`reference`) and the pair the hand is asking for (`target`).
     ///
     /// This is **view state**. It never reaches `EditModel`, a `RenderKey`, a decode key, the history
     /// or an export: the document keeps the old pair until the hand lets go, which is what makes the
     /// pixels a simulation rather than an edit.
+    ///
+    /// 143 — the numbers come from `WhiteBalanceEstimate`, the **same** estimator the real S1 pass
+    /// uses. `targetGain` is bit-for-bit the triple a settled render of `target` will apply;
+    /// `gain` is `targetGain / referenceGain`, the display-only multiplier that moves the frame
+    /// already on the canvas. No table, no decoder prediction.
     public struct WhiteBalancePreviewState: Equatable, Sendable {
-        /// Linear-light RGB multipliers, already normalized on green by the solver.
+        /// Linear-light RGB multipliers used by the present pass, already normalised on green.
         public internal(set) var gain: SIMD3<Double>
         /// The pair being previewed (`nil` axes still mean as shot).
         public internal(set) var target: WhiteBalance
-        /// The illuminant the displayed frame was decoded under — fixed at drag start, so twenty
-        /// ticks compute twenty gains from one baseline instead of compounding errors.
-        public internal(set) var reference: WhiteBalanceSolver.Reference
+        /// The document pair the displayed frame was rendered with — fixed at drag start.
+        public internal(set) var reference: WhiteBalance
+        /// The settled render's own gain for `reference` (the frame on screen already has it).
+        public internal(set) var referenceGain: SIMD3<Double>
+        /// The settled render's own gain for `target` — what the real frame will apply.
+        public internal(set) var targetGain: SIMD3<Double>
         /// Set on release: the frame whose `editRevision` is at least this one is the real render,
         /// and presenting it is what clears the preview. `nil` while the hand is still moving.
         public internal(set) var awaitingRevision: Int?
@@ -1259,6 +1266,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// The same gain in the shader's precision.
         public var simdGain: SIMD3<Float> {
             SIMD3(Float(gain.x), Float(gain.y), Float(gain.z))
+        }
+
+        /// The settled render's gain in the shader's precision (for tests/diagnostics).
+        public var simdTargetGain: SIMD3<Float> {
+            SIMD3(Float(targetGain.x), Float(targetGain.y), Float(targetGain.z))
         }
     }
 
@@ -1269,40 +1281,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// listens to this instead of polling the loupe.
     public var onWhiteBalancePreviewSettled: (() -> Void)?
 
-    /// Start a drag. A no-op while a preview is already live: the frame on screen still belongs to the
-    /// **first** baseline even if the document has already been committed and the new frame is on its
-    /// way, so re-baselining would flash the old white balance back.
-    /// The measured gain table to use for this drag (118 §3), or `nil` when nothing is available.
-    ///
-    /// A table measured on this very body (Application Support) wins; otherwise the shipped one, which
-    /// is the per-node median of five bodies against a common 6000 K reference. Both store *absolute*
-    /// `(temperature, tint)` nodes, so `gain(from:to:)` — a ratio of two nodes — does not care which
-    /// reference each was measured against. Cached per asset: it is a file read plus, at most, one
-    /// header probe, and a drag updates dozens of times.
-    private var whiteBalanceTableCache: (assetID: String, table: WhiteBalancePreviewTable?)?
-
-    private func whiteBalanceTable() -> WhiteBalancePreviewTable? {
-        guard let session, let asset = session.anchorAsset else { return nil }
-        if let cached = whiteBalanceTableCache, cached.assetID == asset.id { return cached.table }
-        var resolved: WhiteBalancePreviewTable = .shipped
-        if let model = asset.cameraModel ?? asset.cameraMake, let url = session.fileURL(for: asset) {
-            let version = (try? RAWDecoder().probe(url))?.defaultVersion ?? ""
-            resolved = WhiteBalancePreviewTable.table(
-                forCamera: model, decoderVersion: version,
-                in: WhiteBalancePreviewTable.loadAll()) ?? .shipped
-        }
-        whiteBalanceTableCache = (asset.id, resolved)
-        return resolved
+    /// The illuminant the frame on screen was measured to have (143). The graph caches the estimate,
+    /// so a drag reads one number instead of re-scanning the buffer; a graph that does not exist yet
+    /// means the first development has not landed and there is nothing to preview against.
+    private var previewIlluminant: WhiteBalanceEstimate.Illuminant {
+        graph?.measuredAsShotIlluminant ?? .neutral
     }
 
     public func beginWhiteBalancePreview() {
         guard whiteBalancePreview == nil else { return }
         let current = previewDocumentWhiteBalance
-        let shot = previewAsShotWhiteBalance
+        let referenceGain = current.isAsShot
+            ? (r: 1.0, g: 1.0, b: 1.0)
+            : WhiteBalanceEstimate.gain(for: current, asShot: previewIlluminant)
         whiteBalancePreview = WhiteBalancePreviewState(
             gain: SIMD3(1, 1, 1),
             target: current,
-            reference: WhiteBalanceSolver.Reference(current, fallback: shot),
+            reference: current,
+            referenceGain: SIMD3(referenceGain.r, referenceGain.g, referenceGain.b),
+            targetGain: SIMD3(referenceGain.r, referenceGain.g, referenceGain.b),
             awaitingRevision: nil)
     }
 
@@ -1311,20 +1308,24 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func updateWhiteBalancePreview(temperature: Double?, tint: Double?) {
         if whiteBalancePreview == nil { beginWhiteBalancePreview() }
         guard var preview = whiteBalancePreview else { return }
-        let shot = previewAsShotWhiteBalance
         let target = WhiteBalance(temperature: temperature, tint: tint).clamped()
-        // `nil` is as shot, not zero: the file's own pair is what the preview moves *away* from.
-        let kelvin = target.temperature ?? shot.temperature ?? 6500
-        let tintValue = target.tint ?? shot.tint ?? 0
-        // 118 §3 — measured table first (0.4–1.5 % on off-node requests, and the solver is only
-        // ~10 % near neutral but drifts to >200 % at the ends), analytic solver as the last resort.
-        let measured = whiteBalanceTable()?.gain(
-            from: .init(temperature: preview.reference.temperature, tint: preview.reference.tint),
-            to: .init(temperature: kelvin, tint: tintValue))
-        let gain = measured ?? WhiteBalanceSolver.gain(temperature: kelvin, tint: tintValue,
-                                                      reference: preview.reference)
-        preview.gain = SIMD3(gain.r, gain.g, gain.b)
+        // 143 — same estimator, same constants, no table and no decoder prediction. The settled frame
+        // will apply `targetGain`; the frozen frame already carries `referenceGain`, so the present
+        // pass multiplies by their ratio. `nil` is the as-shot state, not 0 K.
+        let targetGain = target.isAsShot
+            ? (r: 1.0, g: 1.0, b: 1.0)
+            : WhiteBalanceEstimate.gain(for: target, asShot: previewIlluminant)
+        let tg = SIMD3(targetGain.r, targetGain.g, targetGain.b)
+        let rg = preview.referenceGain
+        let relative = SIMD3(tg.x / max(abs(rg.x), 1e-12),
+                             tg.y / max(abs(rg.y), 1e-12),
+                             tg.z / max(abs(rg.z), 1e-12))
+        // Renormalise on green: the present shader's gain is a display-only multiplier, and a pure
+        // ratio of two green-normalised triples is already 1 there except for rounding.
+        let green = max(abs(relative.y), 1e-12)
+        preview.gain = SIMD3(relative.x / green, relative.y / green, relative.z / green)
         preview.target = target
+        preview.targetGain = tg
         preview.awaitingRevision = nil
         whiteBalancePreview = preview
         rePresentWhiteBalancePreview()
@@ -1362,13 +1363,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var previewDocumentWhiteBalance: WhiteBalance {
         if let session { return session.edit.light.whiteBalance }
         return frameSource?.edit.light.whiteBalance ?? .asShot
-    }
-
-    private var previewAsShotWhiteBalance: WhiteBalance {
-        asShotWhiteBalance
-            ?? lastFrame?.capabilities?.asShotWhiteBalance
-            ?? session?.capabilities?.asShotWhiteBalance
-            ?? .asShot
     }
 
     /// Draw the frame already on the canvas again, this time through the preview gain. One present,
@@ -2890,6 +2884,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return .sampled(DropperSample(sourceX: source.x, sourceY: source.y,
                                       bufferX: bx, bufferY: by, decodeScale: ds,
                                       rgb: image.averageRGB(x: bx, y: by)))
+    }
+
+    /// The scene illuminant measured from the resident decoded buffer (143). The eyedropper's test
+    /// applies the same gain the settled render will apply; the app itself never reads this (the
+    /// render does, through the graph).
+    public var measuredAsShotIlluminant: WhiteBalanceEstimate.Illuminant {
+        graph?.measuredAsShotIlluminant ?? .neutral
     }
 
     /// The picture's mean colour, for the 自动 preset. The same grey-world input Lightroom's Auto WB

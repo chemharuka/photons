@@ -97,8 +97,12 @@ public struct DecodeOptions: Sendable {
     public var scale: Float
     public var draft: Bool
     public var colorSpace: LinearColorSpace
-    /// White balance applied **inside** the decoder (`neutralTemperature`/`neutralTint`). `.asShot`
-    /// leaves Apple's as-shot balance alone, which is the default and the pre-006 behaviour.
+    /// Retained for source compatibility; **ignored by the decoder since 143**.
+    ///
+    /// White balance is no longer a decode setting: `CIRAWFilter.neutralTemperature`/`neutralTint`
+    /// are never written, so every decode is the file's as-shot balance and the document's pair is an
+    /// S1 gain (`WhiteBalanceEstimate`). Keeping the field means `DecodeInputs`/`DecodeCacheKey` can
+    /// still spell a legacy key without a second initializer; the pixels do not depend on it.
     public var whiteBalance: WhiteBalance
     /// 派单 031: noise reduction / detail applied **inside** the decoder
     /// (`luminanceNoiseReductionAmount`, `colorNoiseReductionAmount`, `sharpnessAmount`,
@@ -288,9 +292,6 @@ public enum DecodeError: LocalizedError {
     case unsupportedVersion(requested: String, available: [String])
     case renderFailed
     case badDimensions(CGSize)
-    /// The decoder did not keep the white balance we assigned (`§8c`'s read-back rule, applied to
-    /// `neutralTemperature`/`neutralTint` instead of the version string).
-    case whiteBalanceRejected(assigned: String, readBack: String)
     /// One of the four detail amounts did not read back as assigned (派单 031). Measured on this
     /// machine all four read back exactly, so this fires only if Apple changes the properties — but
     /// a slider that cannot change pixels must never be silently accepted.
@@ -304,7 +305,6 @@ public enum DecodeError: LocalizedError {
         case .unsupportedVersion(let r, let a): return "decoder version '\(r)' not offered by this file; available: \(a.joined(separator: ", "))"
         case .renderFailed: return "CIRAWFilter produced no image (or the version was rejected)"
         case .badDimensions(let s): return "unusable dimensions \(s)"
-        case .whiteBalanceRejected(let a, let b): return "white balance \(a) was not accepted by the decoder (it reads back \(b))"
         case .detailRejected(let n, let a, let b): return "\(n) = \(a) was not accepted by the decoder (it reads back \(b))"
         }
     }
@@ -445,32 +445,8 @@ public final class RAWDecoder {
                      tint: saneTint(filter.neutralTint))
     }
 
-    /// Assign, then **read back** (§8c's rule, the same discipline the decoder version gets).
-    ///
-    /// `CIRAWFilter` accepts out-of-range neutrals without complaint (measured: 99999 K and 100 K
-    /// are kept verbatim), so the clamp is ours and the read-back is the only thing that proves the
-    /// value that shaped these pixels is the value the document asked for. A mismatch is an error,
-    /// never a silent fallback: a white balance the filter ignored would render as "as shot" while
-    /// the slider claims 3500 K.
-    static func applyWhiteBalance(_ wb: WhiteBalance, to filter: CIRAWFilter) throws {
-        let wanted = wb.clamped()
-        if let t = wanted.temperature {
-            filter.neutralTemperature = Float(t)
-            let back = Double(filter.neutralTemperature)
-            guard abs(back - t) <= 0.51 else {
-                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%.1f K", t),
-                                                       readBack: String(format: "%.1f K", back))
-            }
-        }
-        if let i = wanted.tint {
-            filter.neutralTint = Float(i)
-            let back = Double(filter.neutralTint)
-            guard abs(back - i) <= 0.51 else {
-                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%+.1f", i),
-                                                       readBack: String(format: "%+.1f", back))
-            }
-        }
-    }
+    // 143: `applyWhiteBalance` (and the `neutralTemperature`/`neutralTint` writes it performed) is
+    // gone. White balance is no longer a decoder input; see `WhiteBalanceEstimate` and S1.
 
     /// The four detail amounts, assigned and read back (派单 031).
     ///
@@ -732,15 +708,13 @@ public final class RAWDecoder {
         filter.scaleFactor = options.scale
         filter.exposure = options.exposureEV
 
-        // ── 前置 ③ white balance, or nothing at all ──────────────────────────────────────────
-        // The as-shot pair is read before anything is assigned — it is what the inspector shows and
-        // what the document's `nil` means. Only an explicit document touches the filter: assigning
-        // the reported as-shot value back is *not* a no-op (0.15–0.40 % of the samples move), so
-        // "leave it alone" is the only way the default document stays byte-identical to pre-006.
+        // ── 前置 ③ white balance: read the file's pair, but **never write it** (143) ─────────────
+        // The decoder always stays at Apple's as-shot balance. A document's `(Kelvin, tint)` is a
+        // scene-linear gain we apply in S1 (`WhiteBalanceEstimate`), so there is no
+        // `neutralTemperature`/`neutralTint` assignment in this class at all — that assignment was
+        // the "predict the decoder" path 118's table and 143 remove. `DecodeOptions.whiteBalance` is
+        // retained only as a source-compatibility field and is deliberately **not read here**.
         let asShot = Self.asShotWhiteBalance(filter)
-        if !options.whiteBalance.isAsShot {
-            try Self.applyWhiteBalance(options.whiteBalance, to: filter)
-        }
 
         // ── 前置 ④ which axes are alive, from the instance itself ────────────────────────────
         // 解码模型 (owner, 2026-10-27): Apple answers "does THIS file, at THIS decoder version,

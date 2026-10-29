@@ -2041,7 +2041,9 @@ public struct InspectorView: View {
         public var format: String
         /// 047: typeable, like every other row (no card opts out).
         public var editable: Bool = true
-        /// 060/071: 色温/色调 写 `CIRAWFilter`（= 重新解码），所以它们是「解 RAW 参数」→ `.bar` → 黄。
+        /// 143: 色温/色调 are **our own** scene-linear gain (`WhiteBalanceEstimate`) applied in S1, not a
+        /// decoder input. They stay 「解 RAW 参数」 → `.bar` → yellow: the yellow is the card's promise
+        /// that the value shapes the picture from the linear buffer, not that it triggers a decode.
         /// 类别归 `SliderShape` 一处表达，行视图照着上色，不写死一个颜色。
         public var shape: SliderShape = .bar
     }
@@ -2164,9 +2166,9 @@ public struct InspectorView: View {
                                       }
                                   })
             }
-            // 046/060: 色温/色调 **会重新解码 RAW**（写 `CIRAWFilter` 的 temperature/tint），所以是
-            // 「解 RAW 参数」→ 黄色强调色（071 把 060 的橙改成了黄）；曝光/对比那些只跑渲染的滑杆
-            // 跟随系统强调色（默认蓝），线性域的「黑电平」是红 #FF375F。
+            // 143: 色温/色调 是场景线性的 S1 增益（`WhiteBalanceEstimate`），不是 `CIRAWFilter` 的输入，
+            // 所以它们不再是「重新解码」——释放滑杆只重算一次增益、重画同一张缓冲。黄色仍然是
+            // 「解 RAW 参数」的卡片承诺（值直接作用于线性缓冲），只是不再隐含一次 develop。
             // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
             // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
             Self.shapeSlider(Binding(get: { shown },
@@ -2252,7 +2254,7 @@ public struct InspectorView: View {
         case .asShot:
             commands.resetToAsShot()
             lastPresetID = preset.id
-            hint = "原照设置 · 交给解码器（不写温度/色调）"
+            hint = "原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）"
         case .fixed:
             guard let wb = preset.whiteBalance else { return }
             commands.commit(wb, label: "预设 \(preset.name)")
@@ -2292,8 +2294,8 @@ public struct InspectorView: View {
         let revisionBefore = session.editRevision
         commitWhiteBalanceValue(draft, isTemperature: isTemperature)
         let changed = session.editRevision != revisionBefore
-        // 118: the simulation stays on screen, old frame × gain, until the decode carrying the new
-        // pair lands. A release that wrote nothing ends it now.
+        // 118/143: the simulation stays on screen, old frame × gain, until the **render** carrying the
+        // new pair lands. A release that wrote nothing ends it now.
         if whiteBalancePreviewing || loupe?.isWhiteBalancePreviewActive == true {
             loupe?.releaseWhiteBalancePreview(awaiting: changed ? session.editRevision : nil)
         }
@@ -2360,14 +2362,15 @@ public struct InspectorView: View {
     /// Double-click on 「白平衡」.
     ///
     /// 白平衡 is the one group whose default is not a number in `EditModel.neutral`: its default is *the
-    /// file's own balance*, i.e. `nil` on both axes (the user's call, 2026-10-27), which is also a new
-    /// development. The slider draft and the menu's selection go with it.
+    /// file's own balance*, i.e. `nil` on both axes (the user's call, 2026-10-27), which since 143 is
+    /// an S1 gain of exactly 1 (the decoded buffer is already at as-shot). The slider draft and the
+    /// menu's selection go with it.
     private func resetWhiteBalance() {
         draftTemperature = nil
         draftTint = nil
         guard resets.group(.whiteBalance) else { return }
         lastPresetID = WhiteBalancePresets.asShot.id
-        hint = "原照设置 · 交给解码器（不写温度/色调）"
+        hint = "原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）"
     }
 
     private var divider: some View {
@@ -2898,15 +2901,15 @@ public struct WhiteBalanceCommands {
         return solve
     }
 
-    /// The illuminant the buffer on screen was decoded under — the baseline the solve is relative to.
+    /// The illuminant the buffer on screen is referred to — the baseline the solve is absolute to.
     ///
-    /// The document's own pair when it has one, otherwise the file's as shot (派单 006's `nil`). The
-    /// `6500 / 0` fallback inside `Reference` only fires before the first development, where there is
-    /// no buffer to sample anyway.
+    /// 143: the decoded buffer is at Apple's as-shot balance and our model anchors that balance at
+    /// the nominal 6500 K / 0 (`WhiteBalanceSolver.localReference`). The eyedropper samples the
+    /// **decoded** buffer (not the rendered frame), so the solve is independent of the document's
+    /// current pair; using the file's reported Kelvin here would put the inverse on a different white
+    /// point than the S1 gain that will apply the answer.
     public var reference: WhiteBalanceSolver.Reference {
-        let current = session.edit.light.whiteBalance
-        if !current.isAsShot { return WhiteBalanceSolver.Reference(current) }
-        return WhiteBalanceSolver.Reference(asShot ?? session.capabilities?.asShotWhiteBalance ?? .asShot)
+        WhiteBalanceSolver.localReference
     }
 }
 

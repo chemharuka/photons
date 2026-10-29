@@ -139,10 +139,12 @@ final class WhiteBalancePreviewTests: XCTestCase {
         XCTAssertTrue(between.picture === frame.texture,
                       "the between state must still be the old frame")
 
-        // The real render arrives. Presenting it is the atomic switch: new pixels, gain gone.
+        // The real render arrives. Presenting it is the atomic switch: new pixels, gain gone. Since
+        // 143 a white-balance release is a **render**, not a development: the same buffer is drawn
+        // through the new S1 gain.
         let newFrame = try develop(loupe, url, session.edit)
         XCTAssertEqual(newFrame.editRevision, committedRevision)
-        XCTAssertEqual(decodeTotal(), decodesBefore + 1, "the commit develops exactly once")
+        XCTAssertEqual(decodeTotal(), decodesBefore, "a white-balance release must not decode again")
         var settled = false
         loupe.onWhiteBalancePreviewSettled = { settled = true }
         loupe.presentForTesting(newFrame, state: .fit)
@@ -155,7 +157,7 @@ final class WhiteBalancePreviewTests: XCTestCase {
         XCTAssertNotEqual(newFrame.displayHash, frame.displayHash,
                           "the committed white balance must change the picture")
 
-        print("WB preview release: history +1 · decode +1 · gain cleared on the frame carrying "
+        print("WB preview release: history +1 · decode +0 · gain cleared on the frame carrying "
               + "revision \(committedRevision)")
     }
 
@@ -217,10 +219,8 @@ final class WhiteBalancePreviewTests: XCTestCase {
         loupe.beginWhiteBalancePreview()
         loupe.updateWhiteBalancePreview(temperature: nil, tint: nil)
         let state = try XCTUnwrap(loupe.whiteBalancePreview)
-        let expected = WhiteBalanceSolver.gain(temperature: try XCTUnwrap(shot.temperature),
-                                               tint: shot.tint ?? 0,
-                                               reference: WhiteBalanceSolver.Reference(WhiteBalance(temperature: 3000, tint: 20),
-                                                                                      fallback: shot))
+        let expected = WhiteBalanceEstimate.relativeGain(
+            from: WhiteBalance(temperature: 3000, tint: 20), to: .asShot)
         XCTAssertEqual(state.gain.x, expected.r, accuracy: 1e-12)
         XCTAssertEqual(state.gain.y, expected.g, accuracy: 1e-12)
         XCTAssertEqual(state.gain.z, expected.b, accuracy: 1e-12)

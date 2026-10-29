@@ -481,14 +481,16 @@ public struct EditModel: Sendable, Equatable, Codable {
             // Lightroom's Light panel straddles S1 (blacks/whites levels, exposure, highlight
             // recovery) and S2 (contrast, highlights, shadows). Blacks/whites are a **level** — the
             // 0 and 1 points of the scene-linear buffer — so they dirty `.sceneLinear` like exposure
-            // does: the linear buffer itself is what changed (派单 019). White balance (派单 006)
-            // straddles neither: it was already answered above, by `decodeInputs`.
-            //
+            // does: the linear buffer itself is what changed (派单 019). Since 143 the white balance
+            // is S1's gain slot too, so a Kelvin/tint change dirties `.sceneLinear` and nothing
+            // upstream of it (there is no development any more).
             if light.exposure != old.light.exposure
                 || light.highlightRecovery != old.light.highlightRecovery
                 || light.whites != old.light.whites
                 || light.blacks != old.light.blacks
-                || light.blackOffset != old.light.blackOffset {
+                || light.blackOffset != old.light.blackOffset
+                || light.temperature != old.light.temperature
+                || light.tint != old.light.tint {
                 s.insert(.sceneLinear)
             }
             if light.contrast != old.light.contrast { s.insert(.contrast) }

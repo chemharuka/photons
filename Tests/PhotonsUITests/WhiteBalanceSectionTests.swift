@@ -17,10 +17,11 @@ import PhotonsCatalog
 ///     pretends otherwise.
 ///   · **The preset table** (B): eight entries, Lightroom's absolute Kelvin/tint pairs, and a *derived*
 ///     selection — a dragged pair must read 自定义, never the nearest preset.
-///   · **One preset = one history entry + one development.** Not "the call returned": the real decoder
-///     counter moves by exactly one, and the same document rendered twice is one development.
-///   · **The eyedropper** (C): the sampled pixel's R/G/B before and after the re-decode, the solved
-///     Kelvin/tint, the model's residual, one history entry, one development — and a click on the
+///   · **One preset = one history entry, no development.** Not "the call returned": since 143 the
+///     balance is an S1 gain, so the real decoder counter does not move and the same buffer is drawn
+///     with a new gain.
+///   · **The eyedropper** (C): the sampled pixel's R/G/B before and after the applied gain, the solved
+///     Kelvin/tint, the model's residual, one history entry, no development — and a click on the
 ///     letterbox writing nothing at all.
 ///
 /// The RAW fixture is the user's own photo and is not vendored: set `PHOTONS_TEST_RAW` or the suite
@@ -167,9 +168,9 @@ final class WhiteBalanceSectionTests: XCTestCase {
                                                      preferred: "flash"), "闪光灯")
     }
 
-    // MARK: - B. one preset = one history entry = one development
+    // MARK: - B. one preset = one history entry, no development
 
-    func testChoosingDaylightWritesOneHistoryEntryAndOneDevelopment() throws {
+    func testChoosingDaylightWritesOneHistoryEntryAndNoDevelopment() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
         let loupe = makeLoupe(session)
@@ -191,13 +192,14 @@ final class WhiteBalanceSectionTests: XCTestCase {
         XCTAssertEqual(session.history.currentSnapshot?.label, "预设 日光")
 
         let edited = try develop(loupe, url, session.edit)
-        XCTAssertFalse(edited.usedCachedDecode, "a new Kelvin must develop, not reuse as shot")
-        XCTAssertEqual(decodeTotal(), decodesBefore + 1, "one preset = one development")
+        XCTAssertTrue(edited.usedCachedDecode,
+                      "a new Kelvin must reuse the as-shot buffer — white balance is an S1 gain since 143")
+        XCTAssertEqual(decodeTotal(), decodesBefore, "one preset = zero developments")
 
         // …and the new document is itself resident: a second frame at 5500 K is a hit.
         let again = try develop(loupe, url, session.edit)
         XCTAssertTrue(again.usedCachedDecode)
-        XCTAssertEqual(decodeTotal(), decodesBefore + 1)
+        XCTAssertEqual(decodeTotal(), decodesBefore)
         print("预设 日光: \(session.edit.light.whiteBalance.summary)"
               + " · history +\(session.history.count - historyBefore)"
               + " · decodes +\(decodeTotal() - decodesBefore)"
@@ -209,7 +211,7 @@ final class WhiteBalanceSectionTests: XCTestCase {
         XCTAssertNil(session.edit.light.tint)
         XCTAssertEqual(session.history.count, historyBefore + 2)
         _ = try develop(loupe, url, session.edit)
-        XCTAssertEqual(decodeTotal(), decodesBefore + 2)
+        XCTAssertEqual(decodeTotal(), decodesBefore, "原照设置 is a render too, not a development")
         print("原照设置: \(session.edit.light.whiteBalance.summary)"
               + " · history +\(session.history.count - historyBefore)"
               + " · decodes +\(decodeTotal() - decodesBefore)")
@@ -241,7 +243,7 @@ final class WhiteBalanceSectionTests: XCTestCase {
                           "the grey area is still \(String(format: "%.2f%%", report.afterChroma * 100))")
         XCTAssertLessThan(report.afterChroma, report.beforeChroma)
         XCTAssertEqual(report.historyDelta, 1, "the dropper writes one snapshot")
-        XCTAssertEqual(report.decodeDelta, 1, "the dropper's write develops once")
+        XCTAssertEqual(report.decodeDelta, 0, "a white-balance write is a render since 143")
     }
 
     /// The same click on a strongly coloured patch: the model is a Planckian fit, so a sample the fit
@@ -264,7 +266,7 @@ final class WhiteBalanceSectionTests: XCTestCase {
                           + String(format: "%.2f%%", report.beforeChroma * 100) + " → "
                           + String(format: "%.2f%%", report.afterChroma * 100) + ")")
         XCTAssertEqual(report.historyDelta, 1)
-        XCTAssertEqual(report.decodeDelta, 1)
+        XCTAssertEqual(report.decodeDelta, 0)
     }
 
     func testDropperOnTheLetterboxWritesNothing() throws {
@@ -341,11 +343,14 @@ final class WhiteBalanceSectionTests: XCTestCase {
         let applied = try XCTUnwrap(solve, "the dropper produced no solution")
         XCTAssertEqual(clicked?.rgb, sample.rgb, "the click must sample what it reported")
 
-        // The pixels: develop the new document and read the same source point again.
+        // The pixels: 143 — the decoded buffer no longer changes, the **S1 gain** does. Apply the
+        // exact triple the settled render writes into the linear buffer to the sample we read.
         _ = try develop(loupe, url, session.edit)
-        guard case .sampled(let after) = loupe.samplePixel(atViewPoint: point) else {
-            throw XCTSkip("the re-decoded buffer refused the same point")
-        }
+        let gain = WhiteBalanceEstimate.gain(for: session.edit.light.whiteBalance,
+                                             asShot: loupe.measuredAsShotIlluminant)
+        let after = RGBSample(r: sample.rgb.r * gain.r,
+                              g: sample.rgb.g * gain.g,
+                              b: sample.rgb.b * gain.b)
         let text = String(format: """
             [%@] src %.0f,%.0f → buf %d,%d @%.3f×
               solve   %@ (reference %.0f K / %+.1f) · model residual %.2f%% · clamped %@
@@ -359,31 +364,26 @@ final class WhiteBalanceSectionTests: XCTestCase {
             applied.residual * 100, applied.clamped ? "YES" : "no", applied.predicted.text,
             sample.rgb.text, sample.rgb.chroma * 100,
             sample.rgb.b / sample.rgb.r, sample.rgb.g / sample.rgb.r,
-            after.rgb.text, after.rgb.chroma * 100,
-            after.rgb.b / after.rgb.r, after.rgb.g / after.rgb.r,
+            after.text, after.chroma * 100,
+            after.b / after.r, after.g / after.r,
             session.history.count - historyBefore, decodeTotal() - decodesBefore)
         return DropperReport(text: text, solve: applied,
-                             beforeChroma: sample.rgb.chroma, afterChroma: after.rgb.chroma,
+                             beforeChroma: sample.rgb.chroma, afterChroma: after.chroma,
                              historyDelta: session.history.count - historyBefore,
                              decodeDelta: decodeTotal() - decodesBefore)
     }
 
-    // MARK: - 派单 011: the split, measured on the real decoder
+    // MARK: - 143: the split, measured on the real decoder
 
-    /// The acceptance the whole split exists for: **a white-balance change develops, a render change
-    /// does not.** Counted with `RAWDecoder.decodeCounts`, not with a stopwatch — a second decode of
-    /// the same rung is easy to hide inside a frame that was going to be slow anyway, so the count is
-    /// the only honest evidence.
+    /// **A white-balance change no longer develops; it re-renders the same buffer.** Counted with
+    /// `RAWDecoder.decodeCounts`, because a second decode is easy to hide inside a frame that was
+    /// going to be slow anyway.
     ///
-    /// The four claims, in order:
     ///   1. exposure / contrast / curve / colour → `usedCachedDecode`, **0** new decodes;
-    ///   2. temperature + tint → a miss, **+1** decode, and the pixels differ from the same document
-    ///      without the white balance;
-    ///   3. the same white balance again → a hit (one rung per decode key, not per request);
-    ///   4. back to as shot → the *original* rung is still resident, so it hits — the rung key is the
-    ///      decode key, and the render half (still carrying exposure 1.2 and the curve) never entered
-    ///      it.
-    func testExposureNeverDecodesAndWhiteBalanceAlwaysDoes() throws {
+    ///   2. temperature + tint → still `usedCachedDecode`, **0** new decodes, and the pixels differ
+    ///      because S1's gain moved;
+    ///   3. back to as shot → the same buffer again, and the pixels return to the render-only frame.
+    func testExposureAndWhiteBalanceBothReuseTheAsShotBuffer() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
         let loupe = makeLoupe(session)
@@ -408,39 +408,36 @@ final class WhiteBalanceSectionTests: XCTestCase {
                           "the render-side edits changed no pixel — the fixture edit is a no-op")
         XCTAssertEqual(decodeTotal(), base, "a second render-side frame is still no development")
 
-        // ── white balance: a different decode key, so exactly **one** development
+        // ── white balance: the same rung, a different S1 gain
         var warm = render
         warm.light.temperature = 3500
         warm.light.tint = 12
         let developed = try develop(loupe, url, warm)
-        XCTAssertFalse(developed.usedCachedDecode,
-                       "3500 K/+12 was served the as-shot (or the exposure-only) buffer")
-        XCTAssertEqual(decodeTotal(), base + 1, "改色温/色调必然重解码（解码计数 +1）")
+        XCTAssertTrue(developed.usedCachedDecode,
+                      "3500 K/+12 developed a new buffer — the balance is a render gain since 143")
+        XCTAssertEqual(decodeTotal(), base, "改色温/色调不重解码（解码计数不变）")
         let warmPixels = try hashedFrame(loupe, url, warm)
         XCTAssertNotEqual(warmPixels, renderPixels,
-                          "the white balance developed but the pixels did not move")
+                          "the white balance re-rendered but the pixels did not move")
 
-        // ── one rung per decode key: the same document again is a hit, not a development
+        // ── the same document again is a cache hit (render key included)
         let again = try develop(loupe, url, warm)
         XCTAssertTrue(again.usedCachedDecode, "the same 3500 K document developed twice")
-        XCTAssertEqual(decodeTotal(), base + 1)
+        XCTAssertEqual(decodeTotal(), base)
 
-        // ── back to as shot. The ladder keeps **one decode key** resident at a time, so this is a
-        // development even though the document is the one that started the test — and its pixels
-        // must be exactly the ones `render` produced, because the render half never left the key.
+        // ── back to as shot: the same buffer, and the render-only pixels return.
         var backToShot = warm
         backToShot.light.temperature = nil
         backToShot.light.tint = nil
         let reused = try develop(loupe, url, backToShot)
-        XCTAssertFalse(reused.usedCachedDecode,
-                       "the ladder served the 3500 K buffer for an as-shot document")
-        XCTAssertEqual(decodeTotal(), base + 2, "as shot is a different decode key, so it develops once")
+        XCTAssertTrue(reused.usedCachedDecode,
+                      "the ladder developed again for the as-shot document")
+        XCTAssertEqual(decodeTotal(), base, "as shot re-renders the as-shot buffer")
         XCTAssertEqual(try hashedFrame(loupe, url, backToShot), renderPixels,
                        "as shot with the same render inputs must be the same picture")
-        XCTAssertEqual(decodeTotal(), base + 2, "a second as-shot frame is a hit")
 
-        print("decode split: as shot \(base) decode(s) → render edits +0 → 3500 K/+12 +1 "
-              + "→ repeat +0 → back to as shot +1 (total \(decodeTotal()), one rung resident)")
+        print("decode split: as shot \(base) decode(s) → render edits +0 → 3500 K/+12 +0 "
+              + "→ repeat +0 → back to as shot +0 (total \(decodeTotal()), one rung resident)")
     }
 
     /// A frame whose pixels are hashed — the "did the decode reach the picture" half of the counting.

@@ -181,32 +181,32 @@ final class WindowTests: XCTestCase {
         let expected: [(String, String, String)] = [
             ("geometry", "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702",
              "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=1"),
-            ("sceneLinear", "77d15e63a8be79ece24daf9e6641b910bf9ac43c20c79c03da2f8e60faf434de",
-             "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=4"),
-            ("curve", "ff08d78077bcfb1efa8791c518b0f11666782f7c40b2e75b7e2f75824ed45648",
-             "77d15e63a8be79ece24daf9e6641b910bf9ac43c20c79c03da2f8e60faf434de|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
-            ("contrast", "742739b72cfc3fe01b550d347efbe9ac3f54c7484bac0fb5d26fc0ea13f88a5d",
-             "ff08d78077bcfb1efa8791c518b0f11666782f7c40b2e75b7e2f75824ed45648|contrast|con=20.00000;alg=1"),
+            ("sceneLinear", "d48136a07588ed1347c0f6b54c442de74b7d8fc242248c2bc454f090aed012b6",
+             "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=5"),
+            ("curve", "c40abed1591f581367ff6157e39953d4e6dd5d661c4daa68cf12b6affd2269d5",
+             "d48136a07588ed1347c0f6b54c442de74b7d8fc242248c2bc454f090aed012b6|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
+            ("contrast", "f0b0979b396032b991b41470d4c8cfa658f82fa7e7df0efd1db19cc0a2a9fcb0",
+             "c40abed1591f581367ff6157e39953d4e6dd5d661c4daa68cf12b6affd2269d5|contrast|con=20.00000;alg=1"),
             // 124: toneMap 4 → 5 (高光 reaches the HDR range) moved this link and every link below it.
             // 127: sceneLinear 2 → 3 (whites is a global multiplicative level) moved this link *and*
             // everything below it, including curve/contrast — the one-time re-recording P1f documents.
             // 137: curve 1 → 2 (inverted curves now render the descending table instead of the
             // identity) moved the curve link and every link below it; positive curves' pixels did not
             // move, so only the generation token changed here.
-            ("toneMap", "40bbcbb7ddfed902d1de210fd961f265be3016b7f24e995a9e8cb218cd312ffe",
-             "742739b72cfc3fe01b550d347efbe9ac3f54c7484bac0fb5d26fc0ea13f88a5d|hi=-30.00000;sh=15.00000;alg=5"),
-            ("color", "db11ba436696b82d0247de9ca7df52c4b71c830393cc3dcf96088f80cfa03493",
-             "40bbcbb7ddfed902d1de210fd961f265be3016b7f24e995a9e8cb218cd312ffe|vib=15.00000;sat=-10.00000;alg=1"),
+            ("toneMap", "fe40debeb83ec8fa8a382359223cb73ed4c4f2a32db4e5dc92aecd128f6f26a0",
+             "f0b0979b396032b991b41470d4c8cfa658f82fa7e7df0efd1db19cc0a2a9fcb0|hi=-30.00000;sh=15.00000;alg=5"),
+            ("color", "2797e1bbfcc6048f4be95b60381eb9b88bfd4b0f480026c788b4536088eb132d",
+             "fe40debeb83ec8fa8a382359223cb73ed4c4f2a32db4e5dc92aecd128f6f26a0|vib=15.00000;sat=-10.00000;alg=1"),
             // 076: the eight bands are S3.6's material now, so a document that carries one gains an
             // eighth link **between S3 and the vignette**. Without a band it does not exist at all, and
             // the chain is the M1 seven (HSLTests pins that side).
-            ("hsl", "713983d096a62ff2c3889855269e837b44ff049a593084b698a4c052c9d41a5d",
-             "db11ba436696b82d0247de9ca7df52c4b71c830393cc3dcf96088f80cfa03493|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "4b0b7b43ea794c6e89cace5b0d6416844a00ba3a5685ae2873c2b0008416ad04",
+             "2797e1bbfcc6048f4be95b60381eb9b88bfd4b0f480026c788b4536088eb132d|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 134: 圆度 deleted, radius normalised to the half diagonal, alg 2 → 3.
-            ("vignette", "4fdb2a9e810fd0bf6c9625ed1ca2cb3787777e7aa47b6b7a5e1cba45750e1704",
-             "713983d096a62ff2c3889855269e837b44ff049a593084b698a4c052c9d41a5d|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            ("display", "88e99b26031743c5f77ee3b85ec620681958c1270b3518b20eafcef740dd9b3b",
-             "4fdb2a9e810fd0bf6c9625ed1ca2cb3787777e7aa47b6b7a5e1cba45750e1704|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("vignette", "ef3d924e5c2efcabc205ee87fb82c15c7386a5b9b4bedd83dccffa8131046674",
+             "4b0b7b43ea794c6e89cace5b0d6416844a00ba3a5685ae2873c2b0008416ad04|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("display", "170d1a19467da5483350f5ce52e3c746c432dee2e4cdbfb8001f3a8b09608013",
+             "ef3d924e5c2efcabc205ee87fb82c15c7386a5b9b4bedd83dccffa8131046674|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

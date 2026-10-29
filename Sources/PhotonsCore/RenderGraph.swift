@@ -1160,6 +1160,13 @@ public final class RenderGraph {
     private let kernels: KernelLibrary
     private let input: RenderInput
     private let sourceTexture: MTLTexture
+    /// 143 — the illuminant measured from the decoded buffer, computed once per graph.
+    ///
+    /// The decode is at the file's as-shot balance, so this is the reference an explicit
+    /// `(Kelvin, tint)` is divided by. It is a property of the **buffer** (not of the document), which
+    /// is why it lives here next to `sourceTexture` and not in `EditModel`.
+    private var measuredIlluminantCache: WhiteBalanceEstimate.Illuminant?
+    private var measuredIlluminantDone = false
     /// The source after orientation, i.e. exactly what `sourceTexture` holds. Identical to
     /// `input.image` for `.up` (no copy), so the semantic matte raster and the GPU texture can
     /// never disagree about which way up the picture is.
@@ -1401,6 +1408,24 @@ public final class RenderGraph {
 
     deinit {
         // Nothing to tear down explicitly: Metal objects are ARC-managed.
+    }
+
+    // MARK: - 143 white balance (our own estimate, not the decoder's)
+
+    /// The scene illuminant measured from this graph's decoded buffer. Computed once; the buffer is
+    /// immutable for the life of a graph (a new rung gets a new graph — see `LoupeController`).
+    public var measuredAsShotIlluminant: WhiteBalanceEstimate.Illuminant {
+        if !measuredIlluminantDone {
+            measuredIlluminantCache = WhiteBalanceEstimate.estimate(from: uprightImage)
+            measuredIlluminantDone = true
+        }
+        return measuredIlluminantCache ?? .neutral
+    }
+
+    /// The S1 gain for a document's white balance, relative to the buffer's own as-shot estimate.
+    public func whiteBalanceGain(for whiteBalance: WhiteBalance)
+        -> (r: Double, g: Double, b: Double) {
+        WhiteBalanceEstimate.gain(for: whiteBalance, asShot: measuredAsShotIlluminant)
     }
 
     // MARK: plan
@@ -3086,19 +3111,27 @@ public final class RenderGraph {
             // changed the slope of the whole picture, which is not what the owner asked for — and
             // survives only as 030's dropper level, where "this sample is black" *is* a level.
             //
-            // White balance is a **decode** setting now: `light.temperature`/`tint` go to
-            // `CIRAWFilter.neutralTemperature`/`neutralTint` and the RAW is developed again, so the
-            // pixels arriving here are already balanced. The gains below are literally (1, 1, 1) —
-            // the old Planckian fit here would be a *second* correction on top of the decoder's, and
-            // the two would disagree (measured: at 3500 K / +30 the gain path and the decode path are
-            // not the same picture; see `WhiteBalanceTests`).
+            // 143 — the white balance is **ours** now. The decoder is left at the file's as-shot
+            // balance; the document's `(Kelvin, tint)` becomes a scene-linear gain computed by
+            // `WhiteBalanceEstimate` from the buffer's own illuminant and written into the slot S1
+            // has always had (`v *= gain · wb`). There is no table and no decoder prediction any more.
+            let documentWhiteBalance = edit.light.whiteBalance
+            let whiteBalance = documentWhiteBalance.isAsShot
+                ? (r: 1.0, g: 1.0, b: 1.0)
+                : WhiteBalanceEstimate.gain(for: documentWhiteBalance,
+                                            asShot: measuredAsShotIlluminant)
+            let whiteBalanceIsIdentity = whiteBalance.r == 1 && whiteBalance.g == 1
+                && whiteBalance.b == 1
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
                 && edit.light.blacks == 0 && edit.light.whites == 0
                 // 071: a trim on its own is *not* the identity — it moves pixels — so it takes the
                 // copy branch away exactly like a level does.
                 && edit.light.blackOffset == 0
+                // 143: a white balance is not the identity either (and `nil` is, by definition).
+                && whiteBalanceIsIdentity
             var params = S1Params(
-                a: SIMD4(edit.light.exposureGain, 1, 1, 1),
+                a: SIMD4(edit.light.exposureGain,
+                         Float(whiteBalance.r), Float(whiteBalance.g), Float(whiteBalance.b)),
                 b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0,
                          Float(edit.light.blacks), Float(edit.light.whites)),
                 // The content rect travels with the levels, because a lifted black point maps the

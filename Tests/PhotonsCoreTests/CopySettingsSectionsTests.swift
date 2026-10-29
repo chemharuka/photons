@@ -144,8 +144,9 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(changedKeys(target, merged), ["light.exposure", "light.contrast"])
     }
 
-    func testOnlyAWhiteBalancePayloadAsksForANewDecode() {
-        XCTAssertTrue(EditSnapshot.capture(documentA()).requiresDecode, "the payload pins Kelvin")
+    func testAWhiteBalancePayloadIsARenderChange() {
+        XCTAssertFalse(EditSnapshot.capture(documentA()).requiresDecode,
+                       "since 143 the balance is an S1 gain, not a development")
 
         var toneOnly = EditModel.neutral
         toneOnly.light.exposure = 1

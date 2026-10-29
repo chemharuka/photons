@@ -2,20 +2,19 @@ import XCTest
 import CoreGraphics
 @testable import PhotonsCore
 
-/// 派单 006: white balance is a **decode** setting, not an S1 gain.
+/// 006's contract, **after 143**: the decoder is always the as-shot decode, and a document's
+/// white balance is an S1 gain computed by `WhiteBalanceEstimate`.
 ///
 /// What is pinned here, and why each assertion is the one that matters:
 ///
-///   · **The default document is byte-identical.** The whole change is only safe because as shot
-///     (`nil`) means "do not touch the filter" — the decode path for a default document is the
-///     pre-006 path, unchanged. `#2` asserts it two ways (same hash, same options), and `#3` records
-///     *why* it cannot be done by assigning the value the filter reports.
-///   · **An explicit value is a different development.** Not a render, not a gain: a second trip
-///     through ImageIO (`#4`), with its own cache identity (`#5`) so a stale buffer can never answer
-///     a 3500 K document.
-///   · **The cost is bounded.** 25 K / 1 tint quantization makes a whole drag one rung, and the
-///     ladder answers the repeat request without developing again (`#6`, `#7`).
-///   · **S1 no longer multiplies by a WB gain** (`#8`), which is what "退化为恒等" means in pixels.
+///   · **The default document is byte-identical.** The decoder is left untouched for every document
+///     (`nil` and explicit alike), so the default decode path is the pre-006 path unchanged.
+///   · **A white balance is not a development.** Two requests produce the same buffer; the gain is a
+///     render-side number (`testExplicitWhiteBalanceIsNotADifferentDevelopment`).
+///   · **The cost is bounded.** 25 K / 1 tint quantization still makes a whole drag one document
+///     value, and since there is no decode at all the ladder is asked once per photo.
+///   · **S1 applies the estimator's gain**, not the old encoded fit
+///     (`testWhiteBalanceOnlyDocumentRendersDifferentlyToNeutral`).
 ///
 /// The RAW fixture is the user's own photo and is not vendored: set `PHOTONS_TEST_RAW` or the suite
 /// skips. The second body (if present) is used only where two cameras prove the point.
@@ -84,10 +83,11 @@ final class WhiteBalanceTests: XCTestCase {
         }
     }
 
-    /// Why `nil` is a state and not a number: assigning the value the filter *reports* is not a
-    /// no-op. Measured here rather than asserted from a comment, because the whole design of `nil`
-    /// rests on it.
-    func testAssigningTheAsShotValueBackIsNotTheAsShotState() throws {
+    /// 143 — assigning the reported as-shot value is now exactly the as-shot decode: the decoder has
+    /// no write path for `neutralTemperature`/`neutralTint` at all. (Before 143 this test asserted the
+    /// opposite, because 006 deliberately *did* write the pair; the pairs of pixels that moved are the
+    /// reason the table/prediction path existed, and both are gone.)
+    func testAssigningAWhiteBalanceDoesNotTouchTheDecode() throws {
         let url = try fixtureURL()
         let d = try decoder()
         let outcome = try d.decodeDetailed(url, options: DecodeOptions(scale: 0.125))
@@ -97,30 +97,33 @@ final class WhiteBalanceTests: XCTestCase {
 
         let pinned = try d.decode(url, options: DecodeOptions(scale: 0.125,
                                                               whiteBalance: WhiteBalance(temperature: t, tint: i)))
-        XCTAssertNotEqual(pinned.sha256(), outcome.image.sha256(),
-                          "assigning the reported as-shot value IS a no-op — `nil` could then be a number, "
-                          + "and this test (and its doc comment) would be wrong")
+        XCTAssertEqual(pinned.sha256(), outcome.image.sha256(),
+                       "the decoder still wrote a white balance into the filter")
+        let wild = try d.decode(url, options: DecodeOptions(scale: 0.125,
+                                                            whiteBalance: WhiteBalance(temperature: 3500, tint: 30)))
+        XCTAssertEqual(wild.sha256(), outcome.image.sha256(),
+                       "an explicit pair changed the decoded pixels — 143 says it must not")
     }
 
-    // MARK: - 3. an explicit value is a second development
+    // MARK: - 3. an explicit value is a render-side gain, not a second development
 
-    func testExplicitWhiteBalanceIsADifferentDevelopment() throws {
+    func testExplicitWhiteBalanceIsNotADifferentDevelopment() throws {
         let url = try fixtureURL()
         let d = try decoder()
         let shot = try d.decode(url, options: DecodeOptions(scale: 0.125))
-        let warmer = try d.decode(url, options: DecodeOptions(scale: 0.125,
-                                                             whiteBalance: WhiteBalance(temperature: 3500, tint: 30)))
+        let warm = try d.decode(url, options: DecodeOptions(scale: 0.125,
+                                                           whiteBalance: WhiteBalance(temperature: 3500, tint: 30)))
         let again = try d.decode(url, options: DecodeOptions(scale: 0.125,
                                                             whiteBalance: WhiteBalance(temperature: 3500, tint: 30)))
-        XCTAssertNotEqual(shot.sha256(), warmer.sha256(), "3500 K/+30 produced the as-shot pixels")
-        XCTAssertEqual(warmer.sha256(), again.sha256(), "the decoder is not deterministic for a WB it accepted")
+        XCTAssertEqual(shot.sha256(), warm.sha256(),
+                       "3500 K/+30 developed a different buffer — it must be an S1 gain now")
+        XCTAssertEqual(warm.sha256(), again.sha256(), "the as-shot decode is not deterministic")
 
-        // A WB the decoder cannot honour must be an error, not a quiet as-shot. The filter accepts
-        // out-of-range values verbatim, so the clamp is ours; what must never happen is a silent
-        // fallback to the file's own balance.
-        XCTAssertNoThrow(try d.decode(url, options: DecodeOptions(scale: 0.0625,
-                                                                  whiteBalance: WhiteBalance(temperature: 99_999,
-                                                                                             tint: 4_000))))
+        // The gain the render applies is real (and not the old encoded fit), so the picture the user
+        // sees does change even though the buffer does not.
+        let g = WhiteBalanceEstimate.gain(for: WhiteBalance(temperature: 3500, tint: 30))
+        XCTAssertFalse(abs(g.r - 1) < 1e-3 && abs(g.b - 1) < 1e-3,
+                       "3500 K/+30 is the identity — pick another value")
     }
 
     // MARK: - 4. cache identity
@@ -146,15 +149,18 @@ final class WhiteBalanceTests: XCTestCase {
                                                             whiteBalance: WhiteBalance(tint: 30)).digest)
     }
 
-    /// The on-disk store must keep two white balances apart, byte for byte — the v9 lesson (§8c) was
-    /// that a key which does not carry a setting serves the wrong buffer with no error at all.
-    func testStoreRoundTripIsKeyedByWhiteBalance() throws {
+    /// The on-disk store still keeps two **keys** apart byte for byte — the v9 lesson (§8c) was that a
+    /// key which does not carry a setting serves the wrong buffer with no error at all. Since 143 the
+    /// document never names the second key (white balance is a render gain), but a caller that does
+    /// still gets the buffer it named.
+    func testStoreRoundTripIsKeyedAndTheDecoderStaysAsShot() throws {
         let url = try fixtureURL()
         let d = try decoder()
         let shot = try d.decode(url, options: DecodeOptions(scale: 0.0625))
         let warm = try d.decode(url, options: DecodeOptions(scale: 0.0625,
                                                            whiteBalance: WhiteBalance(temperature: 3500, tint: 30)))
-        XCTAssertNotEqual(shot.sha256(), warm.sha256())
+        XCTAssertEqual(shot.sha256(), warm.sha256(),
+                       "two decodes of the same file differ — the decoder still takes a balance")
 
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("photons-wb-test-\(UUID().uuidString)")
@@ -164,6 +170,7 @@ final class WhiteBalanceTests: XCTestCase {
                                      scale: 0.0625, whiteBalance: .asShot)
         let warmKey = DecodeCacheKey(fileSHA256: "wb", decoderVersion: warm.decoderVersion,
                                      scale: 0.0625, whiteBalance: WhiteBalance(temperature: 3500, tint: 30))
+        XCTAssertNotEqual(shotKey.digest, warmKey.digest)
         try store.save(shot, key: shotKey)
         try store.save(warm, key: warmKey)
         XCTAssertEqual(try XCTUnwrap(store.load(shotKey)).sha256(), shot.sha256())
@@ -197,65 +204,55 @@ final class WhiteBalanceTests: XCTestCase {
         XCTAssertNil(WhiteBalance().keyString)
     }
 
-    // MARK: - 6. one development per white balance, not per request
+    // MARK: - 6. one development per photo, not per white balance
 
-    /// The loupe's mechanism, exercised directly: a rung identity that carries the white balance.
-    /// The counter is `RAWDecoder.decodeCounts()` — real ImageIO runs, not jobs created.
-    func testOneDevelopmentPerWhiteBalanceNotPerRequest() throws {
+    /// 143: a white-balance request never reaches the decoder. The ladder is asked once, and every
+    /// later pair — including the release of a drag — is a render over that one buffer.
+    func testOneDevelopmentRegardlessOfWhiteBalance() throws {
         let url = try fixtureURL()
         RAWDecoder.resetDecodeCounts()
 
         let ladder = DecodeLadder()
         let base = "\(url.lastPathComponent)|asset-1"
-        func identity(_ wb: WhiteBalance) -> String {
-            base + "#wb=" + (wb.keyString ?? "as-shot")
-        }
-        func develop(_ wb: WhiteBalance) throws -> DecodeRung {
+        func identity() -> String { base }
+        func develop() throws -> DecodeRung {
             let d = try RAWDecoder()
-            let o = try d.decodeDetailed(url, options: DecodeOptions(scale: 0.125, whiteBalance: wb))
+            let o = try d.decodeDetailed(url, options: DecodeOptions(scale: 0.125))
             return DecodeRung(scale: 0.125, image: o.image, capabilities: o.capabilities, milliseconds: 0)
         }
         func total() -> Int { RAWDecoder.decodeCounts().values.reduce(0, +) }
 
-        // ① as shot: one development, and it is a hit on the second ask.
-        let asShot = WhiteBalance.asShot
-        let first = try ladder.rung(identity: identity(asShot), scale: 0.125) { try develop(asShot) }
+        let first = try ladder.rung(identity: identity(), scale: 0.125) { try develop() }
         XCTAssertFalse(first.cached)
         XCTAssertEqual(total(), 1)
-        let second = try ladder.rung(identity: identity(asShot), scale: 0.125) { try develop(asShot) }
-        XCTAssertTrue(second.cached, "the second as-shot request developed the file again")
+
+        let second = try ladder.rung(identity: identity(), scale: 0.125) { try develop() }
+        XCTAssertTrue(second.cached, "the second request developed the file again")
         XCTAssertEqual(total(), 1)
 
-        // ② release the slider at 3500 K/+30: +1 development, under its own identity.
-        let warm = WhiteBalance(temperature: 3500, tint: 30)
-        let third = try ladder.rung(identity: identity(warm), scale: 0.125) { try develop(warm) }
-        XCTAssertFalse(third.cached)
-        XCTAssertEqual(total(), 2, "a new white balance did not develop the RAW exactly once")
-        XCTAssertNotEqual(first.rung.image.sha256(), third.rung.image.sha256())
-
-        // ③ the same value again (a second release, or coming back to it): a cache hit.
-        let fourth = try ladder.rung(identity: identity(warm), scale: 0.125) { try develop(warm) }
-        XCTAssertTrue(fourth.cached)
-        XCTAssertEqual(total(), 2, "re-submitting the same white balance developed the file again")
-
-        // ④ drag ticks never reach the decoder: the gate is the document, and the document is only
-        //    written on release. 12 ticks inside one bucket are one identity, hence zero new decodes.
+        // A release at 3500 K/+30 shares that rung: the pair is an S1 gain, so the identity did not
+        // move and the decoder was not asked again.
         var model = EditModel.neutral
+        model.light.temperature = 3500
+        model.light.tint = 30
+        XCTAssertEqual(model.decodeInputs.appending(to: base), base)
+        let third = try ladder.rung(identity: model.decodeInputs.appending(to: base), scale: 0.125) {
+            try develop()
+        }
+        XCTAssertTrue(third.cached)
+        XCTAssertEqual(total(), 1, "a white balance developed the RAW again")
+
+        // Twelve drag ticks inside one bucket still develop nothing.
         for k in stride(from: 3563.0, through: 3585.0, by: 2.0) { model.light.temperature = k }
-        XCTAssertEqual(total(), 2, "a slider tick decoded the RAW")
-        model.light.temperature = WhiteBalance(temperature: 3575).quantized().temperature
-        let released = model.light.whiteBalance
-        XCTAssertEqual(identity(released), base + "#wb=3575K/shot")
-        XCTAssertEqual(total(), 2)
+        XCTAssertEqual(total(), 1, "a slider tick decoded the RAW")
     }
 
-    // MARK: - 7. S1's white-balance gain is the identity
+    // MARK: - 7. S1's white-balance gain is the estimator's
 
-    /// A white-balance-only document must render **the same pixels** as the neutral document on the
-    /// same decoded buffer, because the balancing happened in the decoder. If S1 still applied its
-    /// old Planckian gain this would differ — and that difference is exactly the double correction
-    /// 派单 006 removed.
-    func testWhiteBalanceOnlyDocumentRendersIdenticallyToNeutral() throws {
+    /// 143 — a white-balance-only document must **not** render the neutral document's pixels: the
+    /// balance is S1's gain now. The pair is also emphatically not the old encoded fit, so the
+    /// difference is the new estimator's arithmetic rather than a coincidence of 3500/30.
+    func testWhiteBalanceOnlyDocumentRendersDifferentlyToNeutral() throws {
         let url = try fixtureURL()
         let image = try decoder().decode(url, options: DecodeOptions(scale: 0.125))
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "wb-identity-test"))
@@ -267,14 +264,16 @@ final class WhiteBalanceTests: XCTestCase {
         let opts = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
         let neutral = try XCTUnwrap(try graph.render(.neutral, options: opts).display)
         let balanced = try XCTUnwrap(try graph.render(wbOnly, options: opts).display)
-        XCTAssertEqual(neutral.sha256(), balanced.sha256(),
-                       "S1 applied a white-balance gain on top of the decode")
+        XCTAssertNotEqual(neutral.sha256(), balanced.sha256(),
+                          "S1 did not apply the white-balance gain")
 
-        // And the old approximation is emphatically not a no-op, so the identity above is a real
-        // assertion about the render path and not a property of the numbers 3500/30.
-        let gains = wbOnly.light.whiteBalanceGains
+        // The gain is the estimator's diagonal and it is not the identity.
+        let gains = graph.whiteBalanceGain(for: wbOnly.light.whiteBalance)
         XCTAssertFalse(abs(gains.r - 1) < 1e-3 && abs(gains.g - 1) < 1e-3 && abs(gains.b - 1) < 1e-3,
-                       "the mask-local fit says 3500 K/+30 is identity — pick another value")
+                       "the estimator says 3500 K/+30 is identity — pick another value")
+        // …and the old display-encoded fit is a different number, so this is not a re-run of it.
+        let old = wbOnly.light.whiteBalanceGains
+        XCTAssertNotEqual(Float(gains.r), old.r, accuracy: 1e-3)
     }
 
     // MARK: - 8. documents written before schema 3
