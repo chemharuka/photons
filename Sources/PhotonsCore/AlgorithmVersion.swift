@@ -116,7 +116,11 @@ public enum StageAlgorithmVersion {
     /// block minimum sat above almost every pixel used to recover to negative light at
     /// `amount = 100` and wrote black; the same stored `dehaze` value now produces different
     /// (non-black) pixels, so the stage's generation moves.
-    public static let dehaze = 4
+    /// **5** — 141: `A`, `t` and the 135 percentile are estimated on the **unexposed** light
+    /// (`I / 2^EV`, with the recovered light multiplied back), so dehaze commutes with the exposure
+    /// slider. A document with both `exposure != 0` and `effects.dehaze != 0` now renders different
+    /// pixels for the same stored numbers; `exposure == 0` (g = 1) is bit-identical to 4.
+    public static let dehaze = 5
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a

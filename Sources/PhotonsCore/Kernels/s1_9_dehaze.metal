@@ -62,6 +62,26 @@ using namespace metal;
 // The negative amount reverses the same model (`hazy = 0.6·I + 0.4·A`), so the slider is symmetric
 // about 0 and 0 is the identity. The stage exists only when `effects.dehaze != 0`
 // (`RenderStage.pipeline(hasDehaze:)`), so a neutral document never reaches this file.
+//
+// **141 — the estimate is taken on the unexposed light.** S1 puts the global exposure gain `g = 2^EV`
+// *upstream* of this stage, so a naive reading measures `A`, `t` and `p99` on `g·I₀` and the same
+// dehaze amount acts differently at every exposure — measured on `L1030437`: the bright-decile gain
+// flipped from 0.884× (crushing) at EV 0 to 1.066× (lifting) at EV +2, and the p99→p99.9 headroom
+// collapsed from 0.065 to 0.030. Exposure and dehaze must commute:
+//
+//     render(E, D) = 2^E · render(0, D)
+//
+// so every measurement below is taken on `I = src / g` and the recovery is multiplied back by `g`:
+// the four passes run on the same numbers for every exposure, and the stage becomes exactly
+// scale-equivariant in the exposure gain (`g` is the S1 gain and nothing else — white balance is the
+// light source, not the slider, and is deliberately *not* divided out). `g == 1` for a neutral
+// document, so every estimate is bit-identical to the pre-141 pass; multiplication/division by 1.0 is
+// exact, which is what keeps the `E = 0` frames byte-for-byte unchanged.
+//
+// The 135 airlight cap is estimated in that same normalized space (`p99(L/g)` and `A/g`) and the
+// apply pass multiplies the capped value back by `g`: without this, a bright frame would push `A`
+// through the `0.95·p99` ceiling and dehaze would become a no-op (measured: EV +4 with `D = 100` was
+// bit-identical to `D = 0`).
 
 struct DehazeParams {
     // amount (−1…1), ω, t0, "no haze" threshold for A
@@ -73,7 +93,7 @@ struct DehazeParams {
     // qH, pad, pad, pad
     int4 d;
     // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
-    // units of p99(L)), pad
+    // units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is taken on)
     float4 e;
 };
 
@@ -87,13 +107,16 @@ kernel void s1_9_dehaze_dark(texture2d<float, access::read> src [[texture(0)]],
     int qW = p.c.w, qH = p.d.x, q = max(p.c.z, 1);
     if (int(gid.x) >= qW || int(gid.y) >= qH) { return; }
     int w = p.c.x, h = p.c.y;
+    // 141: divide S1's exposure gain out of every sample before the dark channel is measured, so this
+    // block minimum is a fact about the scene light and not about the exposure slider.
+    float inv = 1.0 / max(p.e.w, 1e-6);
 
     float m = 1e9;
     for (int dy = 0; dy < q; ++dy) {
         int y = min(int(gid.y) * q + dy, h - 1);
         for (int dx = 0; dx < q; ++dx) {
             int x = min(int(gid.x) * q + dx, w - 1);
-            float3 c = src.read(uint2(x, y)).rgb;
+            float3 c = src.read(uint2(x, y)).rgb * inv;
             m = min(m, min(min(c.r, c.g), c.b));
         }
     }
@@ -147,6 +170,10 @@ kernel void s1_9_dehaze_airlight(texture2d<float, access::read> dark [[texture(0
 /// (`p.e.z`), i.e. "the airlight may reach 95 % of the bright end". The 2 % deadband means an
 /// estimate that merely grazes the percentile keeps its measured value: the synthetic veil's bright
 /// band sits 0.1 % above its p99, and a blanket 5 % cut there costs the dark channel 16 points.
+///
+/// **141**: the percentile is taken on `L / g` (S1's exposure gain divided out), so the cap is a fact
+/// about the scene and the same `A` survives every exposure. Both `A` (from the normalized dark
+/// channel) and the ceiling are in that space; the apply pass multiplies the capped value back by `g`.
 constant uint DEHAZE_LIMIT_LANES = 256;
 
 kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
@@ -168,6 +195,9 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
     // that the pass is invisible next to the two full-resolution passes around it.
     int stride = max(1, n / 65536);
     int samples = (n + stride - 1) / stride;
+    // 141: the percentile is measured on the unexposed light (the dark channel already is); `g == 1`
+    // makes this exact identity, so the pre-141 `E = 0` frame is untouched.
+    float inv = 1.0 / max(p.e.w, 1e-6);
 
     float lo = 0.0, hi = 1.0;
     for (int it = 0; it < 12; ++it) {
@@ -177,7 +207,7 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
             int i = s * stride;
             int x = x0 + i % cw;
             int y = y0 + i / cw;
-            float L = dot(src.read(uint2(x, y)).rgb, kWorkingLumaWeights);
+            float L = dot(src.read(uint2(x, y)).rgb, kWorkingLumaWeights) * inv;
             if (L >= mid) { above += 1; }
         }
         scratch[tid] = float(above);
@@ -210,6 +240,8 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
 /// `out = mix(I, J, amount)`. Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
 /// **135** reads the capped airlight from `limited` (texture 2). No upper clamp:
 /// `J ≤ I/t0` is the physical bound, and S4's headroom decides how much of that tail is written.
+/// **141** runs the whole recovery in the unexposed space `I/g` and multiplies the result back by
+/// `g`, so the stage commutes with S1's exposure gain (`g == 1` is bit-identical to the pre-141 pass).
 kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::sample> dark [[texture(1)]],
                               texture2d<float, access::read> limited [[texture(2)]],
@@ -218,6 +250,9 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
     float3 I = c.rgb;
+    // 141: the whole model lives in the unexposed light; `g` is the same gain S1 applied upstream.
+    float g = max(p.e.w, 1e-6);
+    float3 In = I / g;
 
     // The letterbox is not part of the picture: copy it untouched.
     if (float(gid.x) < p.b.x || float(gid.y) < p.b.y
@@ -252,23 +287,24 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         if (p.e.y > 0.5) {
             // Tests only: the pre-130 per-channel recovery, kept so the acceptance can show that the
             // hue rotation is the formula's and not the rest of the chain's.
-            clear = (I - A * (1.0 - t)) / t;
+            clear = (In - A * (1.0 - t)) / t;
         } else {
             // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
             // and let the correction fade out where the veil cannot be a meaningful part of the
             // pixel: `w = 0` for `L ≥ k·A`.
-            float L = dot(I, kWorkingLumaWeights);
+            float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
             float k = max(p.e.x, 1.0);
             float w = 1.0 - smoothstep(A, k * A, L);
             float Lout = mix(L, recovered, w);
             float gain = max(Lout, 0.0) / max(L, 1e-6);
-            clear = I * gain;
+            clear = In * gain;
         }
-        outRGB = mix(I, clear, amount);
+        outRGB = mix(In, clear, amount);
     } else {
-        float3 hazy = I * 0.6 + 0.4 * A;
-        outRGB = mix(I, hazy, -amount);
+        float3 hazy = In * 0.6 + 0.4 * A;
+        outRGB = mix(In, hazy, -amount);
     }
-    dst.write(float4(max(outRGB, 0.0), c.a), gid);
+    // 141: back into the exposed light; `g == 1` leaves this multiplication exact.
+    dst.write(float4(max(outRGB * g, 0.0), c.a), gid);
 }
