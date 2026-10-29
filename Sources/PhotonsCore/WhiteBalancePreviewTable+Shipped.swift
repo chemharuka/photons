@@ -7,14 +7,17 @@ import Foundation
 /// 6000 K / tint 0 decode of the same frame*, then per-node **medians across the bodies**, so the
 /// numbers are not tied to one camera.
 ///
-/// Why one table is enough: with a common reference the cumulative gain is a function of the target
-/// pair alone. Predicting each body's own as-shot-referenced table from this one matches the direct
-/// measurement to 1.4-2.3 percent (median) and 3.4 percent worst over 4500-10000 K. The 2x spreads
-/// we first saw were an artefact of comparing five tables measured against five *different* as-shot
-/// points, not of the cameras disagreeing.
+/// Why one table is enough *per channel* matters (measured 2026-10-29, 4000 K anchor, SL3 vs EOS R5):
 ///
-/// The ends are worse (4000 K and below spreads to about 1.7x, 12000 K to about 1.3x):
-/// `gain(from:to:)` clamps there, and a preview that far out is approximate by construction.
+/// - **R and G agree to 1-2 %** across 2500-5500 K. The "cold end spreads 1.7x" we saw earlier was a
+///   coordinate artefact: those tables were anchored at five different as-shot points.
+/// - **Blue drifts with distance from the anchor**: 1.19x at +500 K, 1.28x at +1000 K, 1.41x at
+///   +1500 K (and 0.86x at -1500 K). That is a real per-body difference in the blue channel
+///   (CFA / IR-filter spectral response), Canon being the largest outlier here.
+///
+/// So a drag preview drawn from this table has the **right direction** everywhere and a magnitude
+/// error that grows with how far the target is from the frame's as-shot. That is acceptable for a
+/// preview and is the reason a per-body table, when present, still wins.
 ///
 /// 6000 K / tint 0 is a node with the identity gain: it is the reference every measurement was
 /// taken against, so its value needs no measurement.
