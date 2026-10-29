@@ -442,12 +442,18 @@ final class PanelResetTests: XCTestCase {
     }
 
     /// The **card** reset is wired to the title, like the other parameter cards (047's contract).
-    func testTheHSLCardCanBeResetFromItsTitle() throws {
-        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        XCTAssertTrue(source.contains("card(Section.hsl.title, reset: { resets.hsl() })"),
-                      "the HSL card's title must carry the whole-card reset")
-        XCTAssertTrue(source.contains("onReset: { resets.hslField(band, axis) })"),
-                      "each HSL row's name must reset that row's own field")
+    /// 125: the assertion is the verb's behaviour, not a source line.
+    func testTheHSLCardCanBeResetFromItsTitle() {
+        let session = CatalogSession()
+        let resets = PanelResets(session: session)
+        XCTAssertFalse(resets.hsl(), "a fresh document has no bands to reset")
+
+        session.applyEdit { $0.color.bands[2] = HSLBand(hue: 11, saturation: 22, luminance: 33) }
+        XCTAssertTrue(session.commitEdit(label: "HSL"))
+        session.applyEdit { $0.color.bands[5] = HSLBand(hue: -4, saturation: -5, luminance: -6) }
+
+        XCTAssertTrue(resets.hsl(), "双击标题 = 整卡复位")
+        XCTAssertEqual(session.edit.color.bands, ColorGroup.identityBands)
     }
 
     // MARK: - 5c. 黑白 (S3.4, 2026-10-28)
@@ -565,55 +571,35 @@ final class PanelResetTests: XCTestCase {
         XCTAssertEqual(session.history.count, 0, "空双击不该长出一条空快照")
     }
 
-    // MARK: - 7. 每张参数卡都能从标题复位（视图层接线）
+    // MARK: - 7. 每张参数卡都能从标题复位（规格即接线）
 
-    /// `card(title:reset:)` 是分组的唯一入口：四张参数卡都传了 reset，其它卡没有。
+    /// 125: a card's reset is its spec — the title verb and the row table are the same value, so
+    /// 「这张卡复位哪些字段」 cannot drift from 「这张卡画哪些行」.
     ///
-    /// `swift test` 里没有窗口会话，双击不可注入，所以这条钉源码 —— 与 `SliderStyleTests`
-    /// (`whiteBalanceRow` 必须是长条) 同一种手法。
-    func testEveryParameterCardCanBeResetFromItsTitle() throws {
-        let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
-        XCTAssertTrue(source.contains("private func card<Content: View>(_ title: String,\n"
-                                      + "                                     reset: (() -> Void)? = nil,"),
-                      "the card builder must take the group reset, or a card cannot get one")
-        XCTAssertTrue(source.contains(".modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))"),
-                      "the reset must hang on the card's title, not on the card's body")
+    /// The old source-string assertions are gone: they pinned a particular `ForEach` line, not the
+    /// behaviour, and they were exactly what made moving a row比改表更难.
+    func testEveryToneCardHasOneSpecAndOneResetGroup() {
+        let specs = InspectorView.PanelCardSpec.all
+        XCTAssertEqual(specs.map(\.section), [.light, .color, .correction, .effects])
+        XCTAssertEqual(specs.map(\.group.rawValue), ["light", "color", "correction", "effects"],
+                       "one spec card per tone group, in panel order")
+        XCTAssertEqual(Set(specs.map(\.group)).count, specs.count, "no group is claimed by two cards")
 
-        // 四张参数卡：Light / Color / 细节 / 白平衡 —— 各一处，且都在标题上。
-        XCTAssertTrue(source.contains("card(Section.light.title, reset: { resetGroup(.light) })"))
-        XCTAssertTrue(source.contains("card(Section.color.title, reset: { resetGroup(.color) })"))
-        XCTAssertTrue(source.contains("card(Section.detail.title, reset: { resetGroup(.detail) })"))
-        XCTAssertTrue(source.contains("card(Section.whiteBalance.title, reset: { resetWhiteBalance() })"))
+        for spec in specs {
+            XCTAssertFalse(spec.rows.isEmpty, "\(spec.section) 的 spec 不能是空表")
+            XCTAssertEqual(spec.rows.map(\.keyPath), spec.keyPaths)
+            XCTAssertEqual(Set(spec.rows.map(\.title)).count, spec.rows.count,
+                           "\(spec.section) 的 spec 不能重复声明同一行")
+            XCTAssertEqual(PanelResets.Group.allCases.filter { $0 == spec.group }, [spec.group],
+                           "the card's group must be in the public enum (undo label + title dispatch)")
+            XCTAssertTrue(InspectorView.cardTitles(in: .adjust).contains(spec.section.title),
+                          "\(spec.section.title) 必须真的在调整工作区里")
+        }
 
-        // 分组清单就是那八张卡（2026-10-28 加效果：暗角 + 颗粒，八个数字一起复位；加黑白：开关 +
-        // 八个混合；加色彩分级：三个轮 × 三个轴，九个数字；096 加校正：色差 R / 色差 B）；蒙版是列表，
-        // 没有「整组默认」。
+        // The group list itself is still the eight cards 047 + 2026-10-28 built.
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "blackAndWhite", "detail", "correction",
                         "effects", "colorGrading"])
-        XCTAssertEqual(PanelResets.Group.allCases.map(\.title),
-                       [InspectorView.Section.whiteBalance.title, InspectorView.Section.light.title,
-                        InspectorView.Section.color.title, InspectorView.Section.blackAndWhite.title,
-                        InspectorView.Section.detail.title, InspectorView.Section.correction.title,
-                        InspectorView.Section.effects.title,
-                        InspectorView.Section.colorGrading.title],
-                       "the undo label is the card the user double-clicked")
-        // 121 给这张卡加了标题行的 accessory（「已自动应用配置文件」），所以调用是多行的 —— 断言只认
-        // 「标题 + 复位回调」这一段，不认括号位置。
-        XCTAssertTrue(source.contains("Section.correction.title, reset: { resetGroup(.correction) }"),
-                      "校正卡也要能从标题复位")
-        XCTAssertTrue(source.contains("card(Section.effects.title, reset: { resetGroup(.effects) })"),
-                      "效果卡也要能从标题复位")
-        XCTAssertTrue(source.contains("card(Section.blackAndWhite.title, reset: { resetGroup(.blackAndWhite) })"),
-                      "黑白卡也要能从标题复位")
-        XCTAssertTrue(source.contains("card(Section.colorGrading.title, reset: { resetGroup(.colorGrading) })"),
-                      "色彩分级卡也要能从标题复位（九个数字一起，一行历史）")
-
-        // 每一根滑杆都有复位：`sliderRow` 的 `onReset` 是必填参数，不是可选的。
-        XCTAssertFalse(source.contains("onReset: (() -> Void)? = nil"),
-                       "a row must not be able to opt out of double-click reset")
-        XCTAssertTrue(source.contains("onReset: @escaping () -> Void,"),
-                      "onReset is a required parameter of the one row builder")
     }
 
     // MARK: - helpers
@@ -622,13 +608,5 @@ final class PanelResetTests: XCTestCase {
     private enum SessionDefaults {
         static let temperature = EditModel.neutral.light.temperature
         static let tint = EditModel.neutral.light.tint
-    }
-
-    private static var inspectorSource: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // PhotonsUITests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // package root
-            .appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
     }
 }

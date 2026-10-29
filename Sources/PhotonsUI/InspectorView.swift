@@ -194,6 +194,11 @@ public struct InspectorView: View {
     /// Optional: the inspector is also built without a loupe (tests, previews, the grid side).
     public let loupe: LoupeController?
 
+    /// 125: the row tables the four tone cards draw and reset from. Production uses
+    /// `PanelCardSpec.all`; a test hands in a variant to prove that moving a row between cards is one
+    /// edit (the migration drill), without touching any view code or the reset switch.
+    private let injectedCardSpecs: [PanelCardSpec]
+
     /// The value under the thumb while a white-balance drag is in progress (派单 006).
     ///
     /// Not a document write: a Kelvin change means a **re-decode** (~762 ms full size), so a tick
@@ -230,9 +235,11 @@ public struct InspectorView: View {
     @State private var workspaces: InspectorWorkspaceState
 
     public init(session: CatalogSession, loupe: LoupeController? = nil,
-                workspaces: InspectorWorkspaceState? = nil) {
+                workspaces: InspectorWorkspaceState? = nil,
+                cardSpecs: [PanelCardSpec] = PanelCardSpec.all) {
         self.session = session
         self.loupe = loupe
+        self.injectedCardSpecs = cardSpecs
         // A caller may hand in the state (a test, or a host that wants to remember the workspace); the
         // default is a fresh one, i.e. 调整.
         _workspaces = State(initialValue: workspaces ?? InspectorWorkspaceState())
@@ -484,19 +491,7 @@ public struct InspectorView: View {
     /// 047: the title resets the whole card (`PanelResets.group(.light)` — one snapshot, and the two
     /// absolute levels back to `nil`), each name resets its own field.
     private var lightCard: some View {
-        card(Section.light.title, reset: { resetGroup(.light) }) {
-            ForEach(Self.lightRows, id: \.title) { row in
-                sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
-                          shape: row.shape,
-                          decimals: row.decimals,
-                          rounding: row.rounding,
-                          editable: row.editable,
-                          onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
-                    // Drag end = one edit action = one history snapshot (never per tick).
-                    if !editing { session.commitEdit() }
-                }
-            }
-        }
+        toneCard(cardSpec(.light))
     }
 
     /// 派单 071: 黑电平 — one row: the additive linear black trim (±0.01, 1/1000 steps).
@@ -608,18 +603,7 @@ public struct InspectorView: View {
     }
 
     private var colorCard: some View {
-        card(Section.color.title, reset: { resetGroup(.color) }) {
-            ForEach(Self.colorRows, id: \.title) { row in
-                sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
-                          shape: row.shape,
-                          decimals: row.decimals,
-                          rounding: row.rounding,
-                          editable: row.editable,
-                          onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
-                    if !editing { session.commitEdit() }
-                }
-            }
-        }
+        toneCard(cardSpec(.color))
     }
 
     // MARK: 黑白 (S3.4, 2026-10-28)
@@ -1007,32 +991,7 @@ public struct InspectorView: View {
     /// so the slider travel, the `.linear` accent, one history row on release and the S0 re-render all
     /// stay as they were on 细节.
     private var correctionCard: some View {
-        card(Section.correction.title, reset: { resetGroup(.correction) },
-             accessory: {
-                 // 121 — the file arrived with its own corrections. DNG carries them as opcodes
-                 // (WarpRectilinear, and Panasonic's own in RW2), which Apple's decoder applies on its
-                 // own — or, when the planes disagree, our S0 warp does. Either way the user dialled in
-                 // none of it, so the card says so instead of leaving three sliders at 0 and implying
-                 // nothing happened.
-                 if let note = autoProfileNote {
-                     Text(note)
-                         .font(.system(size: 9))
-                         .foregroundStyle(.secondary)
-                         .lineLimit(1)
-                         .accessibilityIdentifier("inspector.correction.autoProfile")
-                 }
-             }) {
-            ForEach(Self.caRows, id: \.title) { row in
-                caSliderRow(row)
-            }
-            // 116 — 镜头暗角校正. Linear domain (red), because it multiplies scene light at the end of
-            // the linear chain; the numbers are the same fields the 效果 card used to draw.
-            divider
-            ForEach(Self.vignetteRows, id: \.title) { row in
-                correctionSliderRow(row)
-            }
-        }
-        .background(ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID))
+        toneCard(cardSpec(.correction))
     }
 
     /// 「已自动应用配置文件」 when the photo's own file carries lens corrections.
@@ -1088,13 +1047,14 @@ public struct InspectorView: View {
     /// `row.keyPath` is the document field the row *owns*; the binding writes it as
     /// `alpha(fromSlider:)` of the position the thumb (or a typed number) produced, so the readout,
     /// the key material and the kernel's uniform carry one value.
-    private func caSliderRow(_ row: ToneRow) -> some View {
+    private func caSliderRow(_ row: ToneRow,
+                             accessibilityPrefix: String = "inspector.detail") -> some View {
         sliderRow(row.title, caBinding(row), row.range, row.format,
                   shape: row.shape,
                   decimals: row.decimals,
                   rounding: row.rounding,
                   editable: row.editable,
-                  accessibilityID: "inspector.detail.\(row.title)",
+                  accessibilityID: "\(accessibilityPrefix).\(row.title)",
                   onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
             // A render row: one drag = one history row, taken on release.
             if !editing { session.commitEdit(label: row.title) }
@@ -1206,45 +1166,98 @@ public struct InspectorView: View {
     /// `EditModel.neutral[keyPath:]`. A drag writes the document on every tick and commits one history
     /// entry on release, like every other render card (`if !editing { session.commitEdit() }`).
     private var effectsCard: some View {
-        card(Section.effects.title, reset: { resetGroup(.effects) }) {
-            // 116 — 暗角 moved to 校正 (it is a lens correction, not an effect).
-            ForEach(Self.detailFXRows, id: \.title) { row in
-                effectsSliderRow(row)
-            }
-            divider
-            ForEach(Self.grainRows, id: \.title) { row in
-                effectsSliderRow(row)
-            }
-        }
-        // The card's own frame, for the layout test at 300 / 330 / 364 (`EffectsRowProbe.cardID`) —
-        // a background, so it inherits the card's size and cannot change it.
-        .background(EffectsRowProbeHost(rowID: EffectsRowProbe.cardID))
+        toneCard(cardSpec(.effects))
     }
 
-    /// One 校正-card render row (116's vignette block): the panel's `sliderRow`, **without** the effects
-    /// card's frame probe — that probe is the effects card's layout contract (`EffectsRowProbe` counts
-    /// its rows), and a second card drawing the same probe would make the count lie.
-    private func correctionSliderRow(_ row: ToneRow) -> some View {
-        sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
-                  shape: row.shape,
-                  decimals: row.decimals,
-                  rounding: row.rounding,
-                  editable: row.editable,
-                  accessibilityID: "inspector.correction.\(row.title)",
-                  onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
-            if !editing { session.commitEdit() }
+    // MARK: - 125: one table per card
+
+    /// The card spec that owns `section` — shipped `PanelCardSpec.all` unless a test injected a
+    /// variant (the migration drill in `PanelRowSpecTests` moves rows by handing in a different list,
+    /// not by editing any view code).
+    private func cardSpec(_ section: Section) -> PanelCardSpec {
+        if let injected = injectedCardSpecs.first(where: { $0.section == section }) { return injected }
+        return PanelCardSpec.all.first { $0.section == section } ?? PanelCardSpec.lightCard
+    }
+
+    /// **A card drawn from its spec.** This is the only body these four cards have: their rows, the
+    /// dividers between blocks and the whole-card reset all come from `PanelCardSpec`, so moving a row
+    /// from one card to another is one edit in one table (125).
+    private func toneCard(_ spec: PanelCardSpec) -> some View {
+        card(spec.section.title, reset: { resets.group(spec) },
+             accessory: { toneCardAccessory(spec) }) {
+            ForEach(Array(spec.blocks.enumerated()), id: \.offset) { index, block in
+                if index > 0 { divider }
+                ForEach(block.rows, id: \.title) { row in
+                    toneCardRow(row, in: spec)
+                }
+            }
+        }
+        .background { toneCardProbe(spec.section) }
+    }
+
+    /// 121 — the file arrived with its own corrections. DNG carries them as opcodes
+    /// (WarpRectilinear, and Panasonic's own in RW2), which Apple's decoder applies on its own — or,
+    /// when the planes disagree, our S0 warp does. Either way the user dialled in none of it, so the
+    /// card says so instead of leaving three sliders at 0 and implying nothing happened.
+    @ViewBuilder
+    private func toneCardAccessory(_ spec: PanelCardSpec) -> some View {
+        if spec.section == .correction, let note = autoProfileNote {
+            Text(note)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .accessibilityIdentifier("inspector.correction.autoProfile")
+        }
+    }
+
+    /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.
+    @ViewBuilder
+    private func toneCardProbe(_ section: Section) -> some View {
+        switch section {
+        case .correction:
+            ChromaticAberrationProbeHost(rowID: ChromaticAberrationProbe.cardID)
+        case .effects:
+            EffectsRowProbeHost(rowID: EffectsRowProbe.cardID)
+        default:
+            EmptyView()
+        }
+    }
+
+    /// One spec row. The row's *style* (CA's slider↔α mapping, the effects frame probe, or a plain
+    /// direct binding) and its accessibility prefix both come from the spec's section/block, so a row
+    /// that moves to another card is drawn the way that card draws its rows.
+    @ViewBuilder
+    private func toneCardRow(_ row: ToneRow, in spec: PanelCardSpec) -> some View {
+        let prefix = spec.accessibilityPrefix(for: row)
+        switch spec.rowStyle(for: row) {
+        case .chromaticAberration:
+            caSliderRow(row, accessibilityPrefix: prefix)
+        case .effects:
+            effectsSliderRow(row, accessibilityPrefix: prefix)
+        case .plain:
+            sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
+                      shape: row.shape,
+                      decimals: row.decimals,
+                      rounding: row.rounding,
+                      editable: row.editable,
+                      accessibilityID: "\(prefix).\(row.title)",
+                      onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
+                // Drag end = one edit action = one history snapshot (never per tick).
+                if !editing { session.commitEdit() }
+            }
         }
     }
 
     /// One 效果 row: the panel's own `sliderRow`, plus the frame probe the layout tests measure. The
     /// probe is a background so it cannot change the row's size (`CropRowProbe`'s pattern).
-    private func effectsSliderRow(_ row: ToneRow) -> some View {
+    private func effectsSliderRow(_ row: ToneRow,
+                                  accessibilityPrefix: String = "inspector.effects") -> some View {
         sliderRow(row.title, binding(row.keyPath, quantum: row.quantum), row.range, row.format,
                   shape: row.shape,
                   decimals: row.decimals,
                   rounding: row.rounding,
                   editable: row.editable,
-                  accessibilityID: "inspector.effects.\(row.title)",
+                  accessibilityID: "\(accessibilityPrefix).\(row.title)",
                   onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
             if !editing { session.commitEdit() }
         }
@@ -1567,6 +1580,132 @@ public struct InspectorView: View {
     /// The 校正 card's rows in draw order: the two CA ratios (S0) and the four vignette rows (116 —
     /// linear-domain lens-vignetting correction), all drawn red.
     public static var correctionRows: [ToneRow] { caRows + vignetteRows }
+
+    // MARK: - 125: the card specification
+
+    /// **One row table per card** — position, reset scope and block order in the same place.
+    ///
+    /// 125's rule: moving a slider from one card to another is moving one `ToneRow` between two specs.
+    /// The card body (`toneCard`) draws `blocks` in order with a divider between them, and
+    /// `PanelResets.group(_ card:)` resets exactly `rows.map(\.keyPath)` back to `EditModel.neutral` in
+    /// one snapshot. Neither the view nor the reset switch names a field.
+    ///
+    /// Only the cards whose body is a `ToneRow` table are specs: Light, Color, 校正 and 效果. 黑电平,
+    /// 白平衡, 细节, HSL, 色彩分级 and 黑白 have their own bindings (maps, switches, a body baseline)
+    /// and keep their own bodies; their group verbs are unchanged.
+    public struct PanelCardSpec: Equatable {
+
+        /// The semantic block a row belongs to. The block order is the draw order, and every block
+        /// after the first starts after a divider (校正: 色差 ─ 暗角; 效果: 纹理… ─ 颗粒).
+        public enum BlockGroup: String, Equatable, Sendable {
+            case tone
+            case ca
+            case vignette
+            case presence
+            case grain
+        }
+
+        public struct Block: Equatable {
+            public var group: BlockGroup
+            public var rows: [ToneRow]
+
+            public init(group: BlockGroup, rows: [ToneRow]) {
+                self.group = group
+                self.rows = rows
+            }
+        }
+
+        /// How one row is drawn — the only per-card difference left in the four spec cards.
+        public enum RowStyle: Equatable {
+            /// A direct document binding (Light, Color, 校正's vignette block).
+            case plain
+            /// 色差's slider↔α mapping and its frame probe.
+            case chromaticAberration
+            /// A plain binding plus `EffectsRowProbe` (the effects card's layout contract).
+            case effects
+        }
+
+        public var section: Section
+        /// The `PanelResets.Group` this card is. `PanelResets.group(_:)` dispatches spec cards through
+        /// this field, so the enum case and the table cannot name different scopes.
+        public var group: PanelResets.Group
+        public var blocks: [Block]
+
+        public init(section: Section, group: PanelResets.Group, blocks: [Block]) {
+            self.section = section
+            self.group = group
+            self.blocks = blocks
+        }
+
+        /// Every row in draw order — the whole card, for rendering and for the title reset.
+        public var rows: [ToneRow] { blocks.flatMap(\.rows) }
+
+        /// The document fields this card owns. `PanelResets.group(_ card:)` writes exactly these.
+        public var keyPaths: [WritableKeyPath<EditModel, Double>] { rows.map(\.keyPath) }
+
+        /// Which block drew `row` (`nil` only if the row is not in this card).
+        public func block(containing row: ToneRow) -> Block? {
+            blocks.first { $0.rows.contains(row) }
+        }
+
+        public func rowStyle(for row: ToneRow) -> RowStyle {
+            switch section {
+            case .effects:
+                return .effects
+            case .correction:
+                return block(containing: row)?.group == .ca ? .chromaticAberration : .plain
+            default:
+                return .plain
+            }
+        }
+
+        /// The number field's identifier prefix. 色差 keeps `inspector.detail` (its UI id predates
+        /// 096, and `ChromaticAberrationCardTests` drives the rendered field by it); everything else
+        /// names the card it is on, so moving a row moves its identifier too.
+        public func accessibilityPrefix(for row: ToneRow) -> String {
+            switch section {
+            case .effects:
+                return "inspector.effects"
+            case .correction:
+                return block(containing: row)?.group == .ca ? "inspector.detail" : "inspector.correction"
+            case .light:
+                return "inspector.light"
+            case .color:
+                return "inspector.color"
+            default:
+                return "inspector.\(section.rawValue)"
+            }
+        }
+
+        /// `accessibilityPrefix + title` — what a hosted panel's number field carries, and what the
+        /// exhaustiveness test maps back to `row.keyPath`.
+        public func accessibilityID(for row: ToneRow) -> String {
+            "\(accessibilityPrefix(for: row)).\(row.title)"
+        }
+
+        // MARK: the shipped cards
+
+        public static let lightCard = PanelCardSpec(
+            section: .light, group: .light,
+            blocks: [Block(group: .tone, rows: InspectorView.lightRows)])
+
+        public static let colorCard = PanelCardSpec(
+            section: .color, group: .color,
+            blocks: [Block(group: .tone, rows: InspectorView.colorRows)])
+
+        public static let correctionCard = PanelCardSpec(
+            section: .correction, group: .correction,
+            blocks: [Block(group: .ca, rows: InspectorView.caRows),
+                     Block(group: .vignette, rows: InspectorView.vignetteRows)])
+
+        public static let effectsCard = PanelCardSpec(
+            section: .effects, group: .effects,
+            blocks: [Block(group: .presence, rows: InspectorView.detailFXRows),
+                     Block(group: .grain, rows: InspectorView.grainRows)])
+
+        /// The four spec cards, in panel order.
+        public static let all: [PanelCardSpec] = [.lightCard, .colorCard, .correctionCard, .effectsCard]
+    }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
     ///
@@ -2884,6 +3023,24 @@ public struct PanelResets {
         return session.commitEdit(label: axis.title)
     }
 
+    /// 125: **the whole card, derived from its spec.** Every row's field back to
+    /// `EditModel.neutral` in one `applyEdit` and one history entry; `false` when nothing moved.
+    ///
+    /// There are no field names here on purpose. A row that moves between two `PanelCardSpec`s moves
+    /// its reset scope with it — the bug 116 left behind (暗角 moved cards but this verb still reset
+    /// only `optics`) cannot be expressed: the scope *is* `card.rows`.
+    @discardableResult
+    public func group(_ card: InspectorView.PanelCardSpec) -> Bool {
+        let neutral = EditModel.neutral
+        guard card.rows.contains(where: {
+            session.edit[keyPath: $0.keyPath] != neutral[keyPath: $0.keyPath]
+        }) else { return false }
+        session.applyEdit { model in
+            for row in card.rows { model[keyPath: row.keyPath] = neutral[keyPath: row.keyPath] }
+        }
+        return session.commitEdit(label: card.section.title, coalesce: false)
+    }
+
     /// Double-click on a card's title: the whole card back to its defaults in **one** snapshot.
     @discardableResult
     public func group(_ group: Group) -> Bool {
@@ -2894,36 +3051,13 @@ public struct PanelResets {
             return WhiteBalanceCommands(session: session, asShot: loupe?.asShotWhiteBalance)
                 .resetToAsShot()
 
-        case .light:
-            // The card's own scope, taken from the card's own table (`lightRows`) — so adding a
-            // seventh slider to Light resets it without touching this function. (The two absolute
-            // levels it used to clear are gone with schema 11.)
-            let rows = InspectorView.lightRows
-            let neutral = EditModel.neutral
-            let changed = rows.contains {
-                session.edit[keyPath: $0.keyPath] != neutral[keyPath: $0.keyPath]
-            }
-            guard changed else { return false }
-            session.applyEdit { model in
-                for row in rows { model[keyPath: row.keyPath] = neutral[keyPath: row.keyPath] }
-            }
-            // 白平衡 is *not* in this group: it is its own card and its own double-click. One
-            // `applyEdit` + one `commitEdit` = one snapshot, which is the whole point.
-            return session.commitEdit(label: group.title, coalesce: false)
-
-        case .color:
-            // 076: **vibrance and saturation only.** The eight bands are the HSL card's (S3.6), with
-            // their own title reset (`resets.hsl()`); letting this verb write them would make a
-            // double-click on Color undo work done on another card.
-            guard session.edit.color.vibrance != 0 || session.edit.color.saturation != 0 else {
+        case .light, .color, .correction, .effects:
+            // 125: the card's own table decides its scope — no field names here. Moving a row between
+            // cards moves its reset with it, and one `applyEdit` + one `commitEdit` stays one snapshot.
+            guard let card = InspectorView.PanelCardSpec.all.first(where: { $0.group == group }) else {
                 return false
             }
-            session.applyEdit { model in
-                model.color.vibrance = 0
-                model.color.saturation = 0
-            }
-            // 077: 双击复位是命令，不参与合并。
-            return session.commitEdit(label: group.title, coalesce: false)
+            return self.group(card)
 
         case .blackAndWhite:
             // 2026-10-28: the card's **own** two things — the switch and the eight mixes — back to
@@ -2955,39 +3089,6 @@ public struct PanelResets {
             let committed = session.commitEdit(label: group.title, coalesce: false)
             loupe?.endDetailAdjustment()
             return committed
-
-        case .correction:
-            // The **card's** scope, not a group's: 096's 色差 (optics) plus 116's four 暗角 numbers,
-            // which moved here from 效果 but kept their `effects.*` fields. Resetting only `optics`
-            // was the migration miss the user hit on 2026-10-29 (「双击校正不能让暗角的任何滑块归位」),
-            // so the vignette rows now come from the same table the card draws them from.
-            let vigRows = InspectorView.vignetteRows
-            let neutralEdit = EditModel.neutral
-            let vignetteChanged = vigRows.contains {
-                session.edit[keyPath: $0.keyPath] != neutralEdit[keyPath: $0.keyPath]
-            }
-            guard !session.edit.optics.isIdentity || vignetteChanged else { return false }
-            session.applyEdit { model in
-                model.optics = .identity
-                for row in vigRows { model[keyPath: row.keyPath] = neutralEdit[keyPath: row.keyPath] }
-            }
-            return session.commitEdit(label: group.title, coalesce: false)
-
-        case .effects:
-            // The card's own rows, and **only** those: 纹理/清晰度/去雾 and the four grain numbers.
-            // 116 moved 暗角 to 校正, so a double-click here must not reach into another card's
-            // sliders (the same rule as `.color` vs `.colorGrading`). The default values come from
-            // `EditModel.neutral` — grain's are not all zero, and a literal would flatten them.
-            let rows = InspectorView.detailFXRows + InspectorView.grainRows
-            let neutralEdit = EditModel.neutral
-            let changed = rows.contains {
-                session.edit[keyPath: $0.keyPath] != neutralEdit[keyPath: $0.keyPath]
-            }
-            guard changed else { return false }
-            session.applyEdit { model in
-                for row in rows { model[keyPath: row.keyPath] = neutralEdit[keyPath: row.keyPath] }
-            }
-            return session.commitEdit(label: group.title, coalesce: false)
 
         case .colorGrading:
             // 2026-10-28 (P0 色彩分级): the card's own nine numbers, back to `ColorGradingGroup.identity`
