@@ -57,18 +57,21 @@ final class MaskRotationPixelsTests: XCTestCase {
                         angle: 7, probe: NormalizedPoint(0.08, 0.08)), 229.3),
             // Landscape and portrait at the same angle: the shear factor is W/H one way round and
             // its reciprocal the other, so a fix that only works for landscape is not a fix.
+            // 126: the probes sit a little further inside than before — with the picture turning
+            // `R(+θ)` now, a corner-ish probe at 45° is clipped by the frame edge and its centroid
+            // would measure the edge, not the mapping.
             (FrameProbe(name: "1200×800 @ 45°", width: 1200, height: 800, crop: full(),
-                        angle: 45, probe: NormalizedPoint(0.30, 0.10)), 126.5),
+                        angle: 45, probe: NormalizedPoint(0.30, 0.30)), 126.5),
             (FrameProbe(name: "800×1200 @ 45° (portrait)", width: 800, height: 1200, crop: full(),
-                        angle: 45, probe: NormalizedPoint(0.30, 0.90)), 126.5),
+                        angle: 45, probe: NormalizedPoint(0.30, 0.70)), 126.5),
             // The shear judgement: one photograph, two crops, one angle. The 16:9 frame sheared by
             // 1.78 (165 px at this probe); the square frame cannot shear at all — so "both ≤ 1 px"
             // is a statement about the *cause*, not about two lucky sizes.
             (FrameProbe(name: "1600×900 (16:9) @ 30°", width: 1600, height: 900, crop: full(),
-                        angle: 30, probe: NormalizedPoint(0.25, 0.10)), 165.1),
+                        angle: 30, probe: NormalizedPoint(0.25, 0.30)), 165.1),
             (FrameProbe(name: "900×900 (1:1 crop of the same frame) @ 30°", width: 1600, height: 900,
                         crop: NormalizedRect(x: 0.21875, y: 0, width: 0.5625, height: 1),
-                        angle: 30, probe: NormalizedPoint(0.25, 0.10)), 0.0),
+                        angle: 30, probe: NormalizedPoint(0.25, 0.30)), 0.0),
         ]
     }
 
@@ -147,11 +150,12 @@ final class MaskRotationPixelsTests: XCTestCase {
         let fx = Double(frame.width), fy = Double(frame.height)
         let rx = (s.x - crop.x) / max(crop.width, 1e-9) - 0.5
         let ry = (s.y - crop.y) / max(crop.height, 1e-9) - 0.5
-        // `R(−θ)` on a **pixel** offset about the frame's centre, then back to index space (a pixel
-        // index i has its centre at i + 0.5, which is the −0.5 at the end).
+        // `R(+θ)` on a **pixel** offset about the frame's centre — the forward direction of S0's
+        // canvas→source walk (`s0_geometry` consumes `R(−θ)` since 126, so the picture turns this
+        // way). Then back to index space (a pixel index i has its centre at i + 0.5).
         let px = rx * fx, py = ry * fy
-        let ox = px * cs + py * sn
-        let oy = -px * sn + py * cs
+        let ox = px * cs - py * sn
+        let oy = px * sn + py * cs
         return (ox + 0.5 * fx - 0.5, oy + 0.5 * fy - 0.5)
     }
 

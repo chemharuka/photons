@@ -1283,7 +1283,10 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         // source → position inside the crop (0…1), the inverse of `src = crop.xy + r·crop.zw`.
         let rx = (p.x - crop.left) / max(crop.width, 1e-9) - 0.5
         let ry = (p.y - crop.top) / max(crop.height, 1e-9) - 0.5
-        // Un-rotate (`s0_geometry` applies `R(θ)`, so the forward direction applies `R(−θ)`).
+        // Un-rotate: `s0_geometry` now applies the **inverse** turn (`R(−θ)`, canvas → source), so the
+        // forward direction — which is what a bounds/handle map needs — is `R(+θ)`. 126: this used to
+        // be the other way round because S0 consumed `+sin`; keeping it would put every mask bound 2θ
+        // off the picture the kernel actually draws.
         //
         // In **pixels**, about the frame's centre — the same turn `s0_geometry` and
         // `s1_5_mask_atlas` compile from `frame_turn.metal`. Turning `(rx, ry)` directly is
@@ -1296,11 +1299,11 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         if rotates {
             let fx = Double(content.width), fy = Double(content.height)
             let px = rx * fx, py = ry * fy
-            ox = (px * cosTheta + py * sinTheta) / fx
-            oy = (-px * sinTheta + py * cosTheta) / fy
+            ox = (px * cosTheta - py * sinTheta) / fx
+            oy = (px * sinTheta + py * cosTheta) / fy
         } else {
-            ox = rx * cosTheta + ry * sinTheta
-            oy = -rx * sinTheta + ry * cosTheta
+            ox = rx * cosTheta - ry * sinTheta
+            oy = rx * sinTheta + ry * cosTheta
         }
         var u = ox + 0.5
         var v = oy + 0.5
