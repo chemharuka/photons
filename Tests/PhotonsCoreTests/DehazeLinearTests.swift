@@ -22,10 +22,14 @@ import PhotonsCore
 ///      fades out above the veil's reach (`L ≥ 2A` is untouched). The pre-130 per-channel formula is
 ///      kept behind `RenderOptions.legacyDehazePerChannel` so the blue-highlight measurement can be
 ///      shown to be the formula's doing.
-///   4. **单调**: amount 0 → 50 → 100 moves the dark channel down monotonically and never increases
+///   4. **135 — 强档不再压黑**: the airlight is capped at `κ·p99(L)` (`κ = 0.95`, the percentile
+///      clipped at white, the cap engages only when `A` is materially above it), so `amount = 100`
+///      on the +2 EV DJI frame keeps its mean/median/low tail. The synthetic veil still loses ≥ 50 %
+///      of its dark channel and doubles its RMS contrast, so the cap is not "turn dehaze off".
+///   5. **单调**: amount 0 → 50 → 100 moves the dark channel down monotonically and never increases
 ///      the fraction of 255 codes.
-///   5. **行颜色**: the 去雾 row is `.linear` (scene-linear red).
-///   6. **开销**: the three passes fit the frame budget (60 Mpx under `PHOTONS_BENCH=1`).
+///   6. **行颜色**: the 去雾 row is `.linear` (scene-linear red).
+///   7. **开销**: the four passes fit the frame budget (60 Mpx under `PHOTONS_BENCH=1`).
 final class DehazeLinearTests: XCTestCase {
 
     private var benchmarks: Bool { ProcessInfo.processInfo.environment["PHOTONS_BENCH"] == "1" }
@@ -94,6 +98,34 @@ final class DehazeLinearTests: XCTestCase {
         let result = try graph.render(edit, options: options)
         if let t = result.output { graph.recycle(output: t) }
         return (try XCTUnwrap(result.display), result.trace)
+    }
+
+    /// 133/135 — the measurement render: S4's linear frame first, then the same global tone map
+    /// `photonsctl render --tone-map global` uses, then the OETF. The acceptance numbers in 135 are
+    /// display codes from this path, not from the hard-clamped `DisplayImage`.
+    private func renderToneMapped(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
+        var linearDisplay = DisplayOptions(primaries: .sRGB, bitDepth: 8, headroom: 1)
+        linearDisplay.linearOutput = true
+        let result = try graph.render(edit, options: RenderOptions(
+            scale: 1, display: linearDisplay, useCache: false, wantsPixels: true))
+        let frame = try XCTUnwrap(result.display)
+        let pixels = LinearPixels(frame).displaySDR(bitDepth: 8, toneMap: .global)
+        if let t = result.output { graph.recycle(output: t) }
+        return pixels
+    }
+
+    /// Mean / median / 5th percentile over all R,G,B display codes — the table 135 is measured with.
+    private func displayStats(_ image: DisplayImage) -> (mean: Double, p50: Double, p5: Double) {
+        var values = [Double]()
+        values.reserveCapacity((image.rgba.count / 4) * 3)
+        for i in stride(from: 0, to: image.rgba.count, by: 4) {
+            for c in 0..<3 { values.append(Double(image.rgba[i + c])) }
+        }
+        values.sort()
+        let n = Double(values.count)
+        return (values.reduce(0, +) / n,
+                values[Int(0.50 * (n - 1))],
+                values[Int(0.05 * (n - 1))])
     }
 
     // MARK: - measurement
@@ -433,18 +465,62 @@ final class DehazeLinearTests: XCTestCase {
                                  String(format: "dehaze 20 的高光 B−R 必须 ≤ +0.08（实测 %+.3f）", s20.blueShift))
         XCTAssertLessThanOrEqual(s20.saturation, 0.10,
                                  String(format: "dehaze 20 的高光饱和必须 ≤ 0.10（实测 %.3f）", s20.saturation))
-        // Counterproof on the same frame: the old formula reproduces the reported 0.27 / 0.27.
-        XCTAssertGreaterThanOrEqual(sLegacy.blueShift, 0.20,
-                                    String(format: "旧公式必须复现蓝色高光（实测 %+.3f）", sLegacy.blueShift))
-        XCTAssertGreaterThanOrEqual(sLegacy.saturation, 0.20,
-                                    String(format: "旧公式必须复现饱和膨胀（实测 %.3f）", sLegacy.saturation))
-        // Dehaze must still be doing something.
-        XCTAssertGreaterThanOrEqual(c20 / c0, 1.15,
-                                    String(format: "dehaze 20 的 RMS 对比度必须 ≥ 1.15×（实测 %.2fx）", c20 / c0))
+        // Counterproof on the same frame: the old formula still rotates the ratios at 135's capped
+        // airlight. The absolute rotation is smaller than the +0.27 the user reported — that number
+        // was measured at the *raw* block-maximum A (2.28 on this frame), and 135 deliberately caps
+        // A at 0.95 — but the old formula still moves both ratios by ~1.7× the shipped path's.
+        XCTAssertGreaterThanOrEqual(sLegacy.blueShift, 0.06,
+                                    String(format: "旧公式必须在同一 A 下仍旋转蓝色（实测 %+.3f）", sLegacy.blueShift))
+        XCTAssertGreaterThanOrEqual(sLegacy.saturation, 0.06,
+                                    String(format: "旧公式必须仍膨胀饱和（实测 %.3f）", sLegacy.saturation))
+        XCTAssertGreaterThan(sLegacy.blueShift, s20.blueShift * 1.4,
+                             "旧公式的 B−R 必须明显大于 130/135 的路径")
+        // Dehaze must still be doing something. 135's cap gives up part of the over-correction at
+        // amount 20 on this frame (1.09× instead of 1.15×); the synthetic veil test is the
+        // effectiveness guard, because it is a frame the dark-channel prior is actually right about.
+        XCTAssertGreaterThanOrEqual(c20 / c0, 1.05,
+                                    String(format: "dehaze 20 的 RMS 对比度必须 ≥ 1.05×（实测 %.2fx）", c20 / c0))
     }
 
-    // MARK: - 6. 单调
+    // MARK: - 6. 135 — 强档不再压黑（有素材才跑）
 
+    /// The user's frame at `dehaze = 100` used to be 46.8 % negative light and wrote black
+    /// (`mean 0.028`, `p50/p5 = 0`). 135's airlight cap must leave a usable picture: mean ≥ 0.60,
+    /// p50 ≥ 0.35, p5 ≥ 0.08 on the tone-mapped display, and the 60 → 100 step must not be a cliff.
+    func testStrongAmountDoesNotCrushTheDJIFrameToBlack() throws {
+        let path = NSString(string: "~/Desktop/US/DJI_air3_2250_D.dng").expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("需要 ~/Desktop/US/DJI_air3_2250_D.dng（用户的 DJI Air 3 原片）")
+        }
+        let decoded = try RAWDecoder().decode(URL(fileURLWithPath: path),
+                                              options: DecodeOptions(scale: 0.25))
+        let graph = try makeGraph(decoded, identity: "dehaze-dji-strong")
+        var base = EditModel.neutral
+        base.light.exposure = 2.0
+        var sixty = base
+        sixty.effects.dehaze = 60
+        var full = base
+        full.effects.dehaze = 100
+
+        let s0 = displayStats(try renderToneMapped(graph, base))
+        let s60 = displayStats(try renderToneMapped(graph, sixty))
+        let s100 = displayStats(try renderToneMapped(graph, full))
+        print(String(format: "STRONG · mean %.4f→%.4f→%.4f · p50 %.3f→%.3f→%.3f · p5 %.3f→%.3f→%.3f",
+                     s0.mean, s60.mean, s100.mean, s0.p50, s60.p50, s100.p50,
+                     s0.p5, s60.p5, s100.p5))
+
+        XCTAssertGreaterThanOrEqual(s100.mean, 0.60,
+                                    String(format: "amount 100 的均值必须 ≥ 0.60（实测 %.4f）", s100.mean))
+        XCTAssertGreaterThanOrEqual(s100.p50, 0.35,
+                                    String(format: "amount 100 的 p50 必须 ≥ 0.35（实测 %.3f）", s100.p50))
+        XCTAssertGreaterThanOrEqual(s100.p5, 0.08,
+                                    String(format: "amount 100 的 p5 必须 ≥ 0.08（实测 %.3f）", s100.p5))
+        XCTAssertGreaterThanOrEqual(s60.mean, s100.mean, "amount 60 的均值不许低于 100")
+        XCTAssertLessThanOrEqual(s0.mean - s60.mean, 0.15, "0 → 60 不许有断崖")
+        XCTAssertLessThanOrEqual(s60.mean - s100.mean, 0.15, "60 → 100 不许有断崖")
+    }
+
+    // MARK: - 7. 单调
     func testAmountIsMonotonicAndDoesNotClipMore() throws {
         let graph = try makeGraph(foggy(landscape(bright: 1.0)))
         var half = EditModel.neutral
@@ -466,7 +542,7 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertLessThanOrEqual(w100, w0 + 1e-9, "…and 100 no more than 50")
     }
 
-    // MARK: - 7. keys
+    // MARK: - 8. keys
 
     func testDehazeOwnsItsOwnLinkAndStage() {
         var e = EditModel.neutral
@@ -489,9 +565,9 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertTrue(links(e).pipeline.contains(.dehaze))
     }
 
-    // MARK: - 8. 开销
+    // MARK: - 9. 开销
 
-    func testThreePassesStayInsideTheFrameBudget() throws {
+    func testFourPassesStayInsideTheFrameBudget() throws {
         let width = benchmarks ? 6000 : 1500
         let height = benchmarks ? 10000 : 2731
         let graph = try makeGraph(flat(0.35, width: width, height: height))
@@ -518,8 +594,8 @@ final class DehazeLinearTests: XCTestCase {
         print(String(format: "COST · %d×%d (%.2f Mpx) · neutral %.2f · 去雾 %.2f (+%.2f) ms%@",
                      width, height, Double(width * height) / 1e6, neutral, dehazed, delta,
                      benchmarks ? " [PHOTONS_BENCH]" : ""))
-        // The three passes are one full-resolution apply and two 1/16-th-sized passes; the ceiling is
-        // the same order S3.9's single chain has, with room for a shared machine.
-        XCTAssertLessThan(delta, 40.0, "60 Mpx 去雾三 pass 必须 ≤ 40 ms（实测 \(delta) ms）")
+        // The three original passes plus 135's 1-threadgroup percentile scan; the ceiling is the same
+        // order S3.9's single chain has, with room for a shared machine.
+        XCTAssertLessThan(delta, 40.0, "60 Mpx 去雾四 pass 必须 ≤ 40 ms（实测 \(delta) ms）")
     }
 }

@@ -44,14 +44,16 @@ using namespace metal;
 //
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
-// **Three passes, as the stage is specified:**
+// **Four passes (117's three, plus 135's bound):**
 //
 //   1. `s1_9_dehaze_dark`     — one texel per q × q block, the block's `min_c min I_c`. q = 4.
-//   2. `s1_9_dehaze_airlight` — **one thread** scans the block texture for the largest block minimum
-//                               (a cheap, deterministic stand-in for He's top 0.1 %), clamps it to
-//                               `[1e-4, 8]` and writes a 1 × 1 texture. No CPU readback: `apply`
-//                               samples it on the GPU.
-//   3. `s1_9_dehaze_apply`    — samples the block texture bilinearly, builds `t`, and applies the
+//   2. `s1_9_dehaze_airlight` — **one threadgroup** scans the block texture for the largest block
+//                               minimum (a cheap, deterministic stand-in for He's top 0.1 %), clamps
+//                               it to `[1e-4, 8]` and writes a 1 × 1 texture. No CPU readback.
+//   3. `s1_9_dehaze_limit`    — 135: the airlight's physical **upper** bound, `min(A_raw, κ·p99(L))`
+//                               (`κ = 0.95`, `p99` clipped at white; the cap engages only when the
+//                               estimate is materially above the bright end), in a second 1 × 1 texture.
+//   4. `s1_9_dehaze_apply`    — samples the block texture bilinearly, builds `t`, and applies the
 //                               recovery. `max(out, 0)`, **no upper clamp** (HDR is the point).
 //
 // `A < 0.02` is treated as "no haze": the picture has no veil to remove, so the pass is a copy — adding
@@ -70,7 +72,8 @@ struct DehazeParams {
     int4 c;
     // qH, pad, pad, pad
     int4 d;
-    // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch (tests only), pad, pad
+    // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
+    // units of p99(L)), pad
     float4 e;
 };
 
@@ -127,14 +130,89 @@ kernel void s1_9_dehaze_airlight(texture2d<float, access::read> dark [[texture(0
     }
 }
 
+/// 135 — the airlight's **upper bound**: `A = A_raw` while `A_raw ≤ 1.02·p99(L)`, else `κ·p99(L)`.
+///
+/// The +2 EV DJI frame that exposed 135 has `A_raw = 2.283` while the picture's own 99th percentile
+/// luminance is `2.035`: the brightest block minimum can sit above almost every pixel's brightness,
+/// and then `A(1 − t) > L` for a large share of the frame, so `J = (L − A(1−t))/t` is negative and
+/// the clamp writes black (46.8 % of the pixels at `amount = 100`, measured). A veil cannot be
+/// brighter than the scene's own bright end; capping `A` there is a one-line physical bound and
+/// leaves the dark-channel/airlight estimates themselves untouched.
+///
+/// `p99(L)` is estimated on the GPU from a deterministic 1/64…1/65 536-stride sample of the content
+/// rectangle with a 12-step bisection over `[0, 1]`, the model's own white point: a value above white
+/// is a highlight, not a veil, so the tail is clipped there before the percentile is taken (`p99` is
+/// therefore `1` on any frame with ≥1 % of its pixels at or above white). The result is a 1 × 1
+/// texture that the apply pass samples. One threadgroup, no atomics, no readback. `κ = 0.95`
+/// (`p.e.z`), i.e. "the airlight may reach 95 % of the bright end". The 2 % deadband means an
+/// estimate that merely grazes the percentile keeps its measured value: the synthetic veil's bright
+/// band sits 0.1 % above its p99, and a blanket 5 % cut there costs the dark channel 16 points.
+constant uint DEHAZE_LIMIT_LANES = 256;
+
+kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
+                              texture2d<float, access::read> airlight [[texture(1)]],
+                              texture2d<float, access::write> limited [[texture(2)]],
+                              constant DehazeParams &p [[buffer(0)]],
+                              uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float scratch[DEHAZE_LIMIT_LANES];
+    threadgroup float tailCount;
+
+    int w = p.c.x, h = p.c.y;
+    int x0 = clamp(int(round(p.b.x)), 0, max(w - 1, 0));
+    int y0 = clamp(int(round(p.b.y)), 0, max(h - 1, 0));
+    int cw = clamp(int(round(p.b.z)), 1, max(w - x0, 1));
+    int ch = clamp(int(round(p.b.w)), 1, max(h - y0, 1));
+    int n = cw * ch;
+
+    // At most ~65 k samples: enough that the 1 % tail is measured from ~650 pixels, cheap enough
+    // that the pass is invisible next to the two full-resolution passes around it.
+    int stride = max(1, n / 65536);
+    int samples = (n + stride - 1) / stride;
+
+    float lo = 0.0, hi = 1.0;
+    for (int it = 0; it < 12; ++it) {
+        float mid = 0.5 * (lo + hi);
+        int above = 0;
+        for (int s = int(tid); s < samples; s += int(DEHAZE_LIMIT_LANES)) {
+            int i = s * stride;
+            int x = x0 + i % cw;
+            int y = y0 + i / cw;
+            float L = dot(src.read(uint2(x, y)).rgb, kWorkingLumaWeights);
+            if (L >= mid) { above += 1; }
+        }
+        scratch[tid] = float(above);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint step = DEHAZE_LIMIT_LANES / 2; step > 0; step >>= 1) {
+            if (tid < step) { scratch[tid] += scratch[tid + step]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (tid == 0) { tailCount = scratch[0]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tailCount > 0.01 * float(samples)) { lo = mid; } else { hi = mid; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    float A = airlight.read(uint2(0, 0)).r;
+    float kappa = clamp(p.e.z, 0.0, 1.0);
+    float ceiling = (samples > 0) ? lo : A;
+    // Cap only when the estimate is *materially* above the picture's bright end. `min` with a 2 %
+    // margin: a block minimum that merely grazes the 99th percentile (the synthetic veil's bright
+    // band sits 0.1 % above it) is inside the bright end and keeps its measured value; the +2 EV
+    // sky (A = 2.28 against a white-clipped p99 of 1.0) is not. Applying the κ margin unconditionally
+    // would darken every A by 2 %, which is measurable on the synthetic veil: its dark channel then
+    // drops 42 % instead of the required 50 %.
+    if (kappa > 0.0 && A > ceiling * 1.02) { A = kappa * ceiling; }
+    limited.write(float4(clamp(A, 1e-4, 8.0), 0.0, 0.0, 1.0), uint2(0, 0));
+}
+
 /// The recovery: `t = max(1 − ω·D, t0)`, then (130) the He inversion on **luminance only** with the
 /// `w = 1 − smoothstep(A, kA, L)` fog-amount fade, and one common gain on all three channels;
 /// `out = mix(I, J, amount)`. Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
-/// No upper clamp: `J ≤ I/t0` is the physical bound, and S4's headroom is what decides how much of
-/// that tail is written.
+/// **135** reads the capped airlight from `limited` (texture 2). No upper clamp:
+/// `J ≤ I/t0` is the physical bound, and S4's headroom decides how much of that tail is written.
 kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::sample> dark [[texture(1)]],
-                              texture2d<float, access::read> airlight [[texture(2)]],
+                              texture2d<float, access::read> limited [[texture(2)]],
                               texture2d<float, access::write> dst [[texture(3)]],
                               constant DehazeParams &p [[buffer(0)]],
                               uint2 gid [[thread_position_in_grid]]) {
@@ -154,7 +232,7 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
     float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(qW)),
                        (float(gid.y) + 0.5) / (float(q) * float(qH)));
     float D = max(dark.sample(linearSampler, uv).r, 0.0);
-    float A = airlight.read(uint2(0, 0)).r;
+    float A = limited.read(uint2(0, 0)).r;
 
     float amount = clamp(p.a.x, -1.0, 1.0);
     float omega = clamp(p.a.y, 0.0, 1.0);
