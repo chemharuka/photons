@@ -3535,8 +3535,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// untouched Apple defaults (sharpness 0.5, colour NR 0.5) can manufacture a dozen single-pixel
     /// overshoots at strong edges. When that decode fails — or there is no source URL, as with the
     /// synthetic buffers the tests use — the display buffer is measured instead, with one log line.
-    /// The estimator is still the minimum, but guarded: fewer than 50 candidates below −0.008 means
-    /// the extreme is not a scene signal, so the 0.1st percentile is used instead.
+    /// The estimator **is the minimum** — 用户 2026-10-29 14:20 明确「不加守卫」：不做任何按像素数
+    /// 切换估计量的分支。干净解码之后最负的那颗就是电平该补的量，哪怕只有一颗。
     @discardableResult
     public func autoBlackOffset() -> Double? {
         guard let session, session.mode == .loupe, let display = decoded else { return nil }
@@ -3550,12 +3550,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
 
         let candidates = measured.blackCandidates(sampleStride: 5)
-        let rawValue = Self.autoBlackRawValue(min: candidates.min, p001: candidates.p001,
-                                              extremeCount: candidates.extremeCount)
+        let rawValue = candidates.min
         let offset = Self.autoBlackOffset(for: rawValue)
-        print(String(format: "AUTO BLACK · min %.6f · p0.1 %.6f · 候选 %d · 超额 %d → %.4f",
-                     candidates.min, candidates.p001, candidates.count,
-                     candidates.extremeCount, offset))
+        print(String(format: "AUTO BLACK · min %.6f · 候选 %d → %.4f",
+                     candidates.min, candidates.count, offset))
         if offset == LightGroup.blackOffsetRange.lowerBound
             || offset == LightGroup.blackOffsetRange.upperBound {
             print(String(format: "AUTO BLACK · min %.6f → offset 钳到 ±0.01", candidates.min))
@@ -3580,8 +3578,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 派单 105's guard: even at a measurement decode a few single-pixel overshoots can survive, and
     /// one of them must not decide the whole black point. Fewer than 50 candidates below −0.008 is
     /// treated as "noise, not signal".
+    /// 估计量就是最小值（105 复核：用户要求不加守卫）。
     static func autoBlackRawValue(min: Float, p001: Float, extremeCount: Int) -> Float {
-        extremeCount < 50 ? p001 : min
+        _ = p001
+        _ = extremeCount
+        return min
     }
 
     /// The value `autoBlackOffset()` writes, as a pure function (the tests ask it without a decode).

@@ -326,18 +326,17 @@ final class BlackLevelCardTests: XCTestCase {
 
     // MARK: - 5. 105 测量专用解码 + 守卫 + 回退
 
-    /// 派单 105 的估计量守卫：−0.008 更负的点不足 50 个时用 p0.1，够多时仍用 min。
-    func testTheEstimatorFallsBackToThePointOnePercentileWhenOnlyAFewOutliersAreLeft() {
-        // 只有 14 颗单像素过冲：min −0.019，p0.1 −0.0042 → 用 p0.1，滑块不会顶到钳位。
+    /// 派单 105 复核（用户 2026-10-29 14:20「不加守卫」）：估计量**就是最小值**，
+    /// 不管只有一颗极端像素还是五万颗，都不切到 p0.1 之类的另一个量。
+    func testTheEstimatorIsTheMinimumAndNothingElse() {
         XCTAssertEqual(LoupeController.autoBlackRawValue(min: -0.019, p001: -0.0042,
-                                                         extremeCount: 14), -0.0042)
-        XCTAssertEqual(LoupeController.autoBlackOffset(for: LoupeController.autoBlackRawValue(
-            min: -0.019, p001: -0.0042, extremeCount: 14)), 0.005)
-        // 50 颗及以上是场景信号：仍用 min。
+                                                         extremeCount: 14), -0.019)
         XCTAssertEqual(LoupeController.autoBlackRawValue(min: -0.006, p001: -0.004,
                                                          extremeCount: 50), -0.006)
-        // 没有候选：两者都是 0，自动值是 0。
         XCTAssertEqual(LoupeController.autoBlackRawValue(min: 0, p001: 0, extremeCount: 0), 0)
+        // 一颗极端像素也照样用 min（这正是用户要的：干净解码之后最负的那颗就是电平该补的量）。
+        XCTAssertEqual(LoupeController.autoBlackOffset(for: LoupeController.autoBlackRawValue(
+            min: -0.0129, p001: -0.0031, extremeCount: 1)), 0.013)
     }
 
     /// 派单 105 验收 3 —— L1030415 的自动黑电平不再顶到 ±0.01 钳位。
