@@ -361,12 +361,25 @@ final class DetailTests: XCTestCase {
                        "recipe=\(DecodeRecipe.current);ver=auto;scale=1.0000;dt=nr30,c40,s60,d10")
         XCTAssertEqual(doc.decodeInputs.appending(to: "photo"), "photo|dt=nr30,c40,s60,d10")
 
-        // Both decode inputs, in the one spelling: the white balance first (派单 011), then detail.
+        // 148: **the white balance is not a decode input any more** (143). The decoder is always left
+        // at the file's as-shot balance and the document's Kelvin/tint is an S1 gain, so no decode
+        // spelling may grow a `wb=` segment — a 100 K drag must not orphan a 5 s development.
         var both = doc
         both.light.temperature = 5500
         both.light.tint = 0
         XCTAssertEqual(both.decodeInputs.appending(to: "photo"),
-                       "photo|wb=5500K/+0|dt=nr30,c40,s60,d10")
+                       "photo|dt=nr30,c40,s60,d10")
+        XCTAssertEqual(both.decodeKey, doc.decodeKey, "a white-balance change must not move the decode key")
+        XCTAssertFalse(both.decodesDifferently(from: doc))
+        XCTAssertEqual(both.splitFrom(doc), .render, "143: WB is an S1 gain, i.e. a render change")
+
+        // …and the **render** key is where it has to appear, or the drag would be answered with the
+        // previous frame. The material is the S1 slot itself (`temp=`/`tint=`); the downstream links
+        // are seeded by its digest in `RenderKeyChain.links`.
+        XCTAssertEqual(both.keyMaterial(.sceneLinear, algorithmVersion: false),
+                       "ev=0.00000;temp=5500.00000;tint=0.00000;hlr=0.00000;wh=0.00000;bl=0.00000")
+        XCTAssertNotEqual(both.keyMaterial(.sceneLinear), doc.keyMaterial(.sceneLinear),
+                          "a Kelvin change must move S1's material")
     }
 
     /// A detail change is a **new development**, and it must be classified as one by the one decision
