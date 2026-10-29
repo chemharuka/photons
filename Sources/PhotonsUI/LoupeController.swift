@@ -1233,6 +1233,131 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// never pays for ImageIO again.
     public private(set) var currentDecodeScale: Float = 0.5
 
+    // MARK: 118 — the simulated white-balance preview
+
+    /// One drag's virtual white balance: the linear gain a `WhiteBalanceSolver.gain` predicts between
+    /// the pair the frame on screen was decoded under (`reference`) and the pair the hand is asking
+    /// for (`target`).
+    ///
+    /// This is **view state**. It never reaches `EditModel`, a `RenderKey`, a decode key, the history
+    /// or an export: the document keeps the old pair until the hand lets go, which is what makes the
+    /// pixels a simulation rather than an edit.
+    public struct WhiteBalancePreviewState: Equatable, Sendable {
+        /// Linear-light RGB multipliers, already normalized on green by the solver.
+        public internal(set) var gain: SIMD3<Double>
+        /// The pair being previewed (`nil` axes still mean as shot).
+        public internal(set) var target: WhiteBalance
+        /// The illuminant the displayed frame was decoded under — fixed at drag start, so twenty
+        /// ticks compute twenty gains from one baseline instead of compounding errors.
+        public internal(set) var reference: WhiteBalanceSolver.Reference
+        /// Set on release: the frame whose `editRevision` is at least this one is the real render,
+        /// and presenting it is what clears the preview. `nil` while the hand is still moving.
+        public internal(set) var awaitingRevision: Int?
+
+        /// The same gain in the shader's precision.
+        public var simdGain: SIMD3<Float> {
+            SIMD3(Float(gain.x), Float(gain.y), Float(gain.z))
+        }
+    }
+
+    /// The live simulated preview, or `nil` when the canvas is showing a real frame.
+    public private(set) var whiteBalancePreview: WhiteBalancePreviewState?
+    public var isWhiteBalancePreviewActive: Bool { whiteBalancePreview != nil }
+    /// Called when a real frame lands and the preview is cleared — the inspector's 「模拟预览」 badge
+    /// listens to this instead of polling the loupe.
+    public var onWhiteBalancePreviewSettled: (() -> Void)?
+
+    /// Start a drag. A no-op while a preview is already live: the frame on screen still belongs to the
+    /// **first** baseline even if the document has already been committed and the new frame is on its
+    /// way, so re-baselining would flash the old white balance back.
+    public func beginWhiteBalancePreview() {
+        guard whiteBalancePreview == nil else { return }
+        let current = previewDocumentWhiteBalance
+        let shot = previewAsShotWhiteBalance
+        whiteBalancePreview = WhiteBalancePreviewState(
+            gain: SIMD3(1, 1, 1),
+            target: current,
+            reference: WhiteBalanceSolver.Reference(current, fallback: shot),
+            awaitingRevision: nil)
+    }
+
+    /// One slider tick. Computes the gain from the drag's fixed reference and repaints the frame
+    /// already on the canvas; it never asks for a render and never touches the document.
+    public func updateWhiteBalancePreview(temperature: Double?, tint: Double?) {
+        if whiteBalancePreview == nil { beginWhiteBalancePreview() }
+        guard var preview = whiteBalancePreview else { return }
+        let shot = previewAsShotWhiteBalance
+        let target = WhiteBalance(temperature: temperature, tint: tint).clamped()
+        // `nil` is as shot, not zero: the file's own pair is what the preview moves *away* from.
+        let kelvin = target.temperature ?? shot.temperature ?? 6500
+        let tintValue = target.tint ?? shot.tint ?? 0
+        let gain = WhiteBalanceSolver.gain(temperature: kelvin, tint: tintValue,
+                                           reference: preview.reference)
+        preview.gain = SIMD3(gain.r, gain.g, gain.b)
+        preview.target = target
+        preview.awaitingRevision = nil
+        whiteBalancePreview = preview
+        rePresentWhiteBalancePreview()
+    }
+
+    /// The hand let go. `revision` is the document revision the committed pair produced: the preview
+    /// stays on screen (old frame × gain) until a frame carrying that revision or newer is presented.
+    /// `nil` means nothing was written, so there is no frame to wait for and the preview ends now.
+    public func releaseWhiteBalancePreview(awaiting revision: Int?) {
+        guard var preview = whiteBalancePreview else { return }
+        guard let revision else {
+            cancelWhiteBalancePreview()
+            return
+        }
+        preview.awaitingRevision = revision
+        whiteBalancePreview = preview
+    }
+
+    /// Drop the preview immediately and put the real frame back. Used when a release wrote nothing.
+    public func cancelWhiteBalancePreview() {
+        guard whiteBalancePreview != nil else { return }
+        finishWhiteBalancePreview()
+        rePresentWhiteBalancePreview()
+    }
+
+    /// One clearing path: state, the inspector's badge callback (released after firing, so the
+    /// controller does not keep a SwiftUI view alive past the gesture) and the pixels it owns.
+    private func finishWhiteBalancePreview() {
+        let settled = onWhiteBalancePreviewSettled
+        onWhiteBalancePreviewSettled = nil
+        whiteBalancePreview = nil
+        settled?()
+    }
+
+    private var previewDocumentWhiteBalance: WhiteBalance {
+        if let session { return session.edit.light.whiteBalance }
+        return frameSource?.edit.light.whiteBalance ?? .asShot
+    }
+
+    private var previewAsShotWhiteBalance: WhiteBalance {
+        asShotWhiteBalance
+            ?? lastFrame?.capabilities?.asShotWhiteBalance
+            ?? session?.capabilities?.asShotWhiteBalance
+            ?? .asShot
+    }
+
+    /// Draw the frame already on the canvas again, this time through the preview gain. One present,
+    /// no render: this is the whole "drag" path — the document and every cache key stay where they
+    /// were.
+    private func rePresentWhiteBalancePreview() {
+        guard let presenter, let frozen = frozenFrame else { return }
+        let canvas = viewportPixels
+        let window = frozen.window.stretched(to: canvas, from: frozen.canvas)
+        let backdropWindow = frozen.backdropWindow.stretched(to: canvas, from: frozen.canvas)
+        let drawn = backdropTexture(for: window)
+        presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.photoRect,
+                      frameCanvas: frozen.frameCanvas, window: window,
+                      placement: frozen.placement,
+                      backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
+                      serial: 0, zoom: frozen.zoom, frozen: true,
+                      whiteBalanceGain: whiteBalancePreview?.simdGain)
+    }
+
     // Pan/zoom single-flight: a drag emits 60–120 events/s, a window frame costs more than that.
     private var viewInFlight = false
     private var viewPending = false
@@ -4018,6 +4143,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
                       edit: edit, hashPixels: true)
     }
 
+    /// Put a frame through the **real** present path without a render request. Tests use it to
+    /// observe `lastPresentRequest` — the geometry and the 118 preview gain the layer was handed —
+    /// because a `framebufferOnly` drawable cannot be read back. It is the same `present(frame:)` the
+    /// render queue calls, not a copy.
+    func presentForTesting(_ frame: FrameResult, state: LoupeViewState? = nil) {
+        present(frame: frame, renderMilliseconds: 0, state: state ?? viewState)
+    }
+
     // MARK: pan / pinch render loop (single-flight)
 
     /// A pan/zoom request. Collapsed like the edit path: at most one frame in flight, and the newest
@@ -4406,6 +4539,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         detailGesturing = false
         detailPreview = false
         pendingDetailPreviewIdentity = nil
+        // 118: a preview belongs to the photo and the frame it was computed against. Switching the
+        // picture (or leaving the loupe) must not leave a gain waiting for a revision nobody will
+        // present; the inspector's badge goes with it.
+        if whiteBalancePreview != nil { finishWhiteBalancePreview() }
         // Nothing that was in flight belongs to the camera that is now on screen: a bridge would
         // carry the old picture over the new one, and a held frame is for a photo nobody is looking at.
         cancelZoomBridge()
@@ -5359,6 +5496,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private static let presentRecordLimit = 256
     /// The last present: what the layer was handed, and what the frame inside it was made for.
     public var lastPresented: PresentRecord? { presentRecords.last }
+    /// The exact request handed to the present pass (geometry **and** the 118 preview gain). Public
+    /// read-only because a test cannot read a `framebufferOnly` drawable back, and "the gain reached
+    /// the pass" is a fact about this value, not about the drawing.
+    public private(set) var lastPresentRequest: PresentRequest?
     /// Where the photograph sits on the canvas, in drawable pixels, as the layer was last given it.
     public var presentedPictureQuad: ImageRect? { lastPresented?.pictureQuad }
 
@@ -5384,10 +5525,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                window: PresentWindow, placement: FramePlacement,
                                backdrop: MTLTexture?, backdropWindow: PresentWindow,
                                canvas: ImageSize, serial: Int, zoom: Double, frozen: Bool = false,
+                               whiteBalanceGain: SIMD3<Float>? = nil,
                                completion: (() -> Void)? = nil) -> Bool {
         let request = PresentRequest(picture: texture, photoRect: photoRect, window: window,
                                      canvas: canvas, backdrop: backdrop,
-                                     backdropWindow: backdropWindow)
+                                     backdropWindow: backdropWindow,
+                                     whiteBalanceGain: whiteBalanceGain)
+        // The request is the exact thing the layer is asked to draw (geometry + preview gain), kept
+        // for tests that cannot read a `framebufferOnly` drawable back — and for the failure path,
+        // which needs the geometry it tried.
+        lastPresentRequest = request
         let ok = presenter.present(request, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
                                    drawableSize: canvas, onComplete: completion)
@@ -5578,7 +5725,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                frameCanvas: frozen.frameCanvas, window: window,
                                placement: frozen.placement,
                                backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
-                               serial: 0, zoom: frozen.zoom, frozen: true)
+                               serial: 0, zoom: frozen.zoom, frozen: true,
+                               whiteBalanceGain: whiteBalancePreview?.simdGain)
         if ok { frozenDrawCount += 1 }
         return ok
     }
@@ -5618,6 +5766,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return
         }
         let graphAtFrame = graphOverride ?? graph
+        // 118: the new frame landed. If it carries the revision the release committed — or anything
+        // newer — this is the real white balance, so the simulation is dropped **before** the draw:
+        // one atomic switch from old-frame×gain to the new frame, never a flash of the old pair.
+        if let awaiting = whiteBalancePreview?.awaitingRevision, frame.editRevision >= awaiting {
+            finishWhiteBalancePreview()
+        }
+        // A preview that is still live (dragging, or released but the real frame has not arrived yet)
+        // is applied at the display hand-off. It is not part of the frame's pixels, its key or its
+        // hash.
+        let previewGain = frame.mode == .edited ? whiteBalancePreview?.simdGain : nil
         // Task 028: the mask UI measures its normalised geometry against the frame the renderer
         // actually ingested (upright, EXIF orientation already applied). Published here — on the main
         // thread, next to the pixels it belongs to — because the catalog row's `PixelWidth/PixelHeight`
@@ -5676,7 +5834,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                frameCanvas: frame.canvas, window: settledWindow,
                                placement: settledPlacement, backdrop: drawn,
                                backdropWindow: settledBackdropWindow, canvas: canvas, serial: 0,
-                               zoom: frame.zoom, frozen: staleCanvas) { [weak self] in            guard let self else { return }
+                               zoom: frame.zoom, frozen: staleCanvas,
+                               whiteBalanceGain: previewGain) { [weak self] in            guard let self else { return }
             guard let replaced, let oldGraph = replaced.graph else { return }
             self.queue.async { oldGraph.recycle(output: replaced.texture) }
         }

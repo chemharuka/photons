@@ -22,7 +22,7 @@ final class BatchExportCancelTests: XCTestCase {
     private func image(width: Int = 16, height: Int = 16) -> DisplayImage {
         DisplayImage(width: width, height: height,
                      rgba: [Float16](repeating: 0.5, count: width * height * 4),
-                     primaries: .sRGB, bitDepth: 8)
+                     primaries: .displayP3, bitDepth: 8)
     }
 
     private func files() throws -> [URL] {

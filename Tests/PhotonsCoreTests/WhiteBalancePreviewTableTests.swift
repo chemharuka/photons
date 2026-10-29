@@ -85,6 +85,34 @@ final class WhiteBalancePreviewTableTests: XCTestCase {
         XCTAssertFalse(t.describes(camera: ""))
     }
 
+    /// The shipped table is what an uncalibrated body uses, so its anchor must be exact and its
+    /// direction must be right: cooler targets need *more* red and *less* blue.
+    func testShippedTableIsAnchoredAtSixThousandAndPointsTheRightWay() throws {
+        let t = WhiteBalancePreviewTable.shipped
+        let anchor = try XCTUnwrap(t.node(.init(temperature: 6000, tint: 0)))
+        XCTAssertEqual(anchor.0, 1, accuracy: 1e-9)
+        XCTAssertEqual(anchor.1, 1, accuracy: 1e-9)
+        XCTAssertEqual(anchor.2, 1, accuracy: 1e-9)
+
+        // Setting a **lower** Kelvin means telling the camera the light is warmer, so the correction
+        // takes red *down* and blue *up* (measured: 4500 K node ≈ 0.66 R / 1.3 B against 6000).
+        let cool = try XCTUnwrap(t.gain(from: .init(temperature: 6000, tint: 0),
+                                         to: .init(temperature: 4500, tint: 0)))
+        XCTAssertLessThan(cool.r, 0.8, "a cooler setting needs less red")
+        XCTAssertGreaterThan(cool.b, 1.15, "a cooler setting needs more blue")
+
+        let warm = try XCTUnwrap(t.gain(from: .init(temperature: 6000, tint: 0),
+                                        to: .init(temperature: 9000, tint: 0)))
+        XCTAssertGreaterThan(warm.r, 1.15)
+        XCTAssertLessThan(warm.b, 0.9)
+
+        // A ratio of nodes, so going back and forth cancels to 1 even though the nodes themselves are
+        // stored relative to a different reference.
+        let back = try XCTUnwrap(t.gain(from: .init(temperature: 4500, tint: 0),
+                                        to: .init(temperature: 6000, tint: 0)))
+        XCTAssertEqual(cool.r * back.r, 1, accuracy: 1e-9)
+    }
+
     func testSaveAndLoadRoundTrip() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("wbtable-\(UUID().uuidString)", isDirectory: true)

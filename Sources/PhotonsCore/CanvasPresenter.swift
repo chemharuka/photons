@@ -241,6 +241,13 @@ public struct PresentRequest {
     public let backdropQuad: ImageRect?
     /// The texels of `backdrop` its quad reads — picture coordinates (058).
     public let backdropWindow: PresentWindow
+    /// 118: a **display-only** linear-light RGB gain, or `nil` for the untouched picture.
+    ///
+    /// White balance is a decode input, so a drag cannot re-render in time. The loupe multiplies the
+    /// frame already on the canvas by the same `WhiteBalanceSolver.gain` the decode is predicted with,
+    /// in linear light, on the last hand-off of the on-screen path. Nothing else reads this number:
+    /// it is not in a `RenderKey`, a cache key, a document or a history snapshot.
+    public let whiteBalanceGain: SIMD3<Float>?
 
     /// The request every call site builds: the geometry is inverted from the frame's own window.
     ///
@@ -250,7 +257,8 @@ public struct PresentRequest {
     /// makes the quad resolution-independent.
     public init(picture: MTLTexture, photoRect: ImageRect, window: PresentWindow,
                 canvas: ImageSize, backdrop: MTLTexture? = nil,
-                backdropWindow: PresentWindow = .whole) {
+                backdropWindow: PresentWindow = .whole,
+                whiteBalanceGain: SIMD3<Float>? = nil) {
         let texture = ImageSize(width: picture.width, height: picture.height)
         let quad = window.canvasRect(of: photoRect, texture: texture, canvas: canvas)
         var backdropQuad: ImageRect?
@@ -261,7 +269,8 @@ public struct PresentRequest {
             backdropQuad = derived.isEmpty ? nil : derived
         }
         self.init(picture: picture, canvas: canvas, pictureQuad: quad, window: window,
-                  backdrop: backdrop, backdropQuad: backdropQuad, backdropWindow: backdropWindow)
+                  backdrop: backdrop, backdropQuad: backdropQuad, backdropWindow: backdropWindow,
+                  whiteBalanceGain: whiteBalanceGain)
     }
 
     /// Explicit geometry — for a caller that has the quads and not the windows (a test that wants to
@@ -269,7 +278,8 @@ public struct PresentRequest {
     /// the two cannot be independent numbers in practice.
     public init(picture: MTLTexture, canvas: ImageSize, pictureQuad: ImageRect,
                 window: PresentWindow, backdrop: MTLTexture? = nil,
-                backdropQuad: ImageRect? = nil, backdropWindow: PresentWindow = .whole) {
+                backdropQuad: ImageRect? = nil, backdropWindow: PresentWindow = .whole,
+                whiteBalanceGain: SIMD3<Float>? = nil) {
         self.picture = picture
         self.canvas = canvas
         self.pictureQuad = pictureQuad
@@ -277,6 +287,14 @@ public struct PresentRequest {
         self.backdrop = backdropQuad == nil ? nil : backdrop
         self.backdropQuad = backdropQuad
         self.backdropWindow = backdropWindow
+        // An identity gain is `nil`: the shader's no-preview branch is then the pre-118 path byte for
+        // byte, which is what every recorded present hash and the `backdrop == nil` baselines expect.
+        if let whiteBalanceGain,
+           whiteBalanceGain.x != 1 || whiteBalanceGain.y != 1 || whiteBalanceGain.z != 1 {
+            self.whiteBalanceGain = whiteBalanceGain
+        } else {
+            self.whiteBalanceGain = nil
+        }
     }
 
     /// Nothing to draw on the picture: a degenerate window, or a quad the canvas does not hold. The
@@ -555,11 +573,15 @@ public final class CanvasPresenter {
                                                   pixelFormat: format)
         enc.setRenderPipelineState(pipeline)
         let canvas = request.canvas
+        // 118: the preview gain rides in `misc.yzw` — three floats the struct already carries, so the
+        // CPU/GPU contract does not change shape. `(1, 1, 1)` is the identity and makes the fragment
+        // take the pre-118 branch, which is what keeps every recorded present hash exact.
+        let gain = request.whiteBalanceGain ?? SIMD3<Float>(1, 1, 1)
         for quad in quads {
             var params = PresentParams(quad: Self.normalised(quad.rect, canvas: canvas),
                                        window: SIMD4(quad.window.u0, quad.window.v0,
                                                      quad.window.du, quad.window.dv),
-                                       misc: SIMD4(linearize ? 1 : 0, 0, 0, 0))
+                                       misc: SIMD4(linearize ? 1 : 0, gain.x, gain.y, gain.z))
             enc.setFragmentTexture(quad.texture, index: 0)
             enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
@@ -587,7 +609,9 @@ public final class CanvasPresenter {
         var quad: SIMD4<Float>
         /// The uv window the quad reads: `xy` = origin, `zw` = size, normalised texture coordinates.
         var window: SIMD4<Float>
-        /// `x` = linearize; the rest is padding so the field stays a `float4`.
+        /// `x` = linearize; `yzw` = the 118 preview gain in linear light (`1,1,1` = none). The gains
+        /// borrow three unused floats rather than adding a fourth `float4`, so stride stays 48 and
+        /// `present.metal`'s layout contract does not move.
         var misc: SIMD4<Float>
 
         init(quad: SIMD4<Float>, window: SIMD4<Float>, misc: SIMD4<Float>) {

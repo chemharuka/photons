@@ -247,26 +247,34 @@ public enum BatchExporter {
             // 2. size — the preset's rule, applied to the pixels we were handed.
             var image = rendered
             switch preset.sizingMode {
+            case .none:
+                // 原尺寸: no resize at all. A 099 preset can still carry a `longEdge` beside this mode;
+                // honouring it would resize an export the user asked to be full size (111 review).
+                break
             case .longEdge:
                 if let longEdge = preset.longEdge {
-                    image = DisplayResample.fitLongEdge(image, to: longEdge)
-                    if max(rendered.width, rendered.height) > longEdge {
+                    let current = max(rendered.width, rendered.height)
+                    let target = preset.noUpscale ? min(longEdge, current) : longEdge
+                    image = DisplayResample.fitLongEdge(image, to: target,
+                                                        allowUpscale: !preset.noUpscale)
+                    if current > target {
                         warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
                                         + "resampled to \(image.width)×\(image.height)")
                     }
                 }
             case .percent:
                 if let percent = preset.percent {
-                    let longEdge = max(1, Int((Double(max(rendered.width, rendered.height))
-                                               * Double(percent) / 100).rounded()))
-                    image = DisplayResample.fitLongEdge(image, to: longEdge)
-                    if max(rendered.width, rendered.height) > longEdge {
+                    let current = max(rendered.width, rendered.height)
+                    let effective = preset.noUpscale ? min(percent, 100) : percent
+                    let longEdge = max(1, Int((Double(current)
+                                               * Double(effective) / 100).rounded()))
+                    image = DisplayResample.fitLongEdge(image, to: longEdge,
+                                                        allowUpscale: !preset.noUpscale)
+                    if current > longEdge {
                         warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
                                         + "resampled to \(image.width)×\(image.height)")
                     }
                 }
-            case .none:
-                break
             }
             // 3. output sharpening, at the final pixel size (that is the point of it).
             if let sharpen = preset.sharpen, sharpen.isEnabled {
@@ -497,9 +505,10 @@ final class OutputNameAllocator {
 /// normal path never pays for this.
 public enum DisplayResample {
 
-    public static func fitLongEdge(_ image: DisplayImage, to longEdge: Int) -> DisplayImage {
+    public static func fitLongEdge(_ image: DisplayImage, to longEdge: Int,
+                                   allowUpscale: Bool = false) -> DisplayImage {
         let current = max(image.width, image.height)
-        guard longEdge > 0, current > longEdge else { return image }
+        guard longEdge > 0, allowUpscale || current > longEdge else { return image }
         let s = Double(longEdge) / Double(current)
         let tw = max(1, Int((Double(image.width) * s).rounded()))
         let th = max(1, Int((Double(image.height) * s).rounded()))

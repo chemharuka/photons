@@ -114,7 +114,7 @@ final class ExportMetadataTests: XCTestCase {
             }
         }
         return DisplayImage(width: width, height: height, rgba: rgba,
-                            primaries: .sRGB, bitDepth: 8)
+                            primaries: .displayP3, bitDepth: 8)
     }
 
     /// An SDR base plus the linear exit (values above 1) so `Exporter.write` takes the gain-map path.
@@ -132,7 +132,7 @@ final class ExportMetadataTests: XCTestCase {
             }
         }
         let slices = DisplayImage(width: width, height: height, rgba: linear,
-                                  primaries: .sRGB, bitDepth: 16)
+                                  primaries: .displayP3, bitDepth: 16)
         return sdr.withLinear(LinearPixels(slices))
     }
 

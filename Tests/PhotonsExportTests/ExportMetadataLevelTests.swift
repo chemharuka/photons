@@ -22,7 +22,7 @@ final class ExportMetadataLevelTests: XCTestCase {
     private func image() -> DisplayImage {
         DisplayImage(width: 24, height: 18,
                      rgba: [Float16](repeating: 0.5, count: 24 * 18 * 4),
-                     primaries: .sRGB, bitDepth: 8)
+                     primaries: .displayP3, bitDepth: 8)
     }
 
     private func edited() -> ExportItem {

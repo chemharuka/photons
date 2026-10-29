@@ -41,12 +41,17 @@ public enum ExportConflict: String, Codable, Sendable, CaseIterable {
     }
 }
 
-/// How the output size is chosen. `longEdge` keeps the old ceiling; `percent` scales the cropped
-/// picture's long edge by a percentage; `none` exports at the crop's own size.
+/// How the output size is chosen. `original` is the default (the user's 2026-10-29 口径): export the
+/// crop at its own size unless a long edge/percentage is asked for. `longEdge` is the historical
+/// ceiling; `percent` scales the cropped picture's long edge by a percentage.
 public enum ExportSizingMode: String, Codable, Sendable, CaseIterable {
     case longEdge
     case percent
+    /// The crop's own size. The raw spelling stays `"none"` so a 099 preset file keeps round-tripping;
+    /// `original` is the 111 name the sheet and the tests use.
     case none
+
+    public static var original: ExportSizingMode { .none }
 
     public var displayName: String {
         switch self {
@@ -74,7 +79,7 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
 
 // MARK: - errors
 
-public enum ExportPresetError: LocalizedError {
+public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case unknownFormat(String)
     case badQuality(Double)
     case badBitDepth(Int)
@@ -82,6 +87,7 @@ public enum ExportPresetError: LocalizedError {
     case badPercent(Int)
     case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
+    case badHDRKind(ExportFormat, HDRKind)
     case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
     case emptyNameTemplate
@@ -94,15 +100,23 @@ public enum ExportPresetError: LocalizedError {
         case .badQuality(let q):
             return "quality must be 0…1, got \(q)"
         case .badBitDepth(let b):
-            return "bit depth must be 8 or 16, got \(b)"
+            return "bit depth must be 8, 10 or 16, got \(b)"
         case .badLongEdge(let px):
             return "longEdge must be a positive pixel count, got \(px)"
         case .badPercent(let p):
-            return "percent must be 10…100, got \(p)"
+            return "percent must be at least 10, got \(p)"
         case .badSharpeningRadius(let r):
             return "output sharpening radius must be 0.3…3, got \(r)"
         case .hdrRequiresHEIC(let f):
             return "HDR export needs HEIC (gain maps live in the HEIF container), got \(f)"
+        case .badHDRKind(let format, let kind):
+            let allowed = format.hdrKinds.map(\.rawValue).joined(separator: ", ")
+            if kind == .gainMap {
+                return "\(format.rawValue.uppercased()) cannot carry a gain map "
+                    + "(HDR gain maps need HEIC or AVIF); allowed HDR kinds: \(allowed)"
+            }
+            return "\(format.rawValue.uppercased()) cannot carry HDR kind '\(kind.rawValue)' "
+                + "(allowed: \(allowed))"
         case .hdrGainMapNeedsMacOS15(let g):
             return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
@@ -113,16 +127,44 @@ public enum ExportPresetError: LocalizedError {
             return "could not read the preset at \(url.path): \(why)"
         }
     }
+
+    /// `"\(error)"` must say what `localizedDescription` says — several tests (and the CLI) print the
+    /// error that way, and a bare enum case name would hide "HEIC" from the user.
+    public var description: String { errorDescription ?? "\(self)" }
 }
 
-// MARK: - HDR export (100)
+// MARK: - HDR export (100 / 111)
 
-/// HDR export = a normal SDR HEIC plus a **gain map** auxiliary image that lets a reader reconstruct
-/// the extended-range picture. Only HEIC can carry one, so `ExportPreset.validated()` rejects it on
-/// every other format instead of silently writing an SDR file.
+/// 111 — the three ways an HDR file can carry more than SDR.
 ///
-/// The structure mirrors the two working spellings of ISO 21496-1 / Apple's HDR gain map:
-/// ISO RGB (per-channel ratio, `HDRToneMap/1.0` XMP inside `ISOGainMap`) and Apple monochrome
+/// `gainMap` is 100's SDR base + auxiliary ratio image; `hlg`/`pq` write the BT.2100 transfer curve
+/// directly (see `HDREncoding`). `none` is a plain SDR export (109's tone-mapped base, unchanged).
+public enum HDRKind: String, Codable, Sendable, CaseIterable {
+    case none
+    case gainMap
+    case hlg
+    case pq
+
+    public var displayName: String {
+        switch self {
+        case .none: return "SDR"
+        case .gainMap: return "增益图"
+        case .hlg: return "HLG"
+        case .pq: return "PQ"
+        }
+    }
+
+    public var isHDR: Bool { self != .none }
+}
+
+/// HDR export = one of three kinds:
+///
+///   · **gain map** — a normal SDR image plus an auxiliary image that lets a reader reconstruct the
+///     extended-range picture. Only HEIC/AVIF can carry one.
+///   · **HLG / PQ** — the extended-range linear render packed with the BT.2100 transfer curve.
+///
+/// The structure of the gain map mirrors the two working spellings of ISO 21496-1 / Apple's HDR gain
+/// map: ISO RGB (per-channel ratio, `HDRToneMap/1.0` XMP inside `ISOGainMap`) and Apple monochrome
 /// (`HDRGainMap/1.0` + MakerNote 33/48). `mono` is the ISO single-channel spelling. The reason there
 /// are three and not one is that a reader's decoder is chosen by the auxiliary type and the
 /// metadata namespace, not by preference.
@@ -152,11 +194,20 @@ public struct HDRExport: Sendable, Codable, Equatable {
         case manual(Double)
     }
 
-    public var enabled: Bool
+    /// 111 — which HDR path this preset asks for. Pre-111 files only had `enabled`, which decodes to
+    /// `.gainMap` (or `.none`), so an old preset keeps exporting the picture it always did.
+    public var kind: HDRKind
     public var gainMap: GainMap
     /// Half-size gain map (`-H` in toGainMapHDR). The SDR base is never resized.
     public var halfSize: Bool
     public var headroom: Headroom
+
+    /// 100's spelling: `true` = gain map, `false` = off. Kept as a computed property so the 106 UI
+    /// and the pre-111 tests can keep toggling a checkbox.
+    public var enabled: Bool {
+        get { kind != .none }
+        set { kind = newValue ? (kind == .none ? .gainMap : kind) : .none }
+    }
 
     /// ISO 21496-1 (`ISOGainMap` + `HDRToneMap/1.0`) is written through ImageIO's auxiliary-data API,
     /// which only exists on macOS 15; Apple's spelling (`HDRGainMap` + MakerNote) has been there since
@@ -176,12 +227,39 @@ public struct HDRExport: Sendable, Codable, Equatable {
         }
     }
 
-    public init(enabled: Bool = true, gainMap: GainMap = HDRExport.defaultGainMap,
+    public init(enabled: Bool = true, kind: HDRKind? = nil,
+                gainMap: GainMap = HDRExport.defaultGainMap,
                 halfSize: Bool = false, headroom: Headroom = .auto) {
-        self.enabled = enabled
+        self.kind = kind ?? (enabled ? .gainMap : .none)
         self.gainMap = gainMap
         self.halfSize = halfSize
         self.headroom = headroom
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, kind, gainMap, halfSize, headroom
+    }
+
+    /// Pre-111 files have `enabled` and no `kind`; decode that as `gainMap` (or `none`). Writing keeps
+    /// both keys so an old reader still sees the checkbox it knows.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawKind = try c.decodeIfPresent(HDRKind.self, forKey: .kind)
+        let enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.kind = rawKind ?? (enabled ? .gainMap : .none)
+        self.gainMap = try c.decodeIfPresent(GainMap.self, forKey: .gainMap)
+            ?? HDRExport.defaultGainMap
+        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? false
+        self.headroom = try c.decodeIfPresent(Headroom.self, forKey: .headroom) ?? .auto
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(kind != .none, forKey: .enabled)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(gainMap, forKey: .gainMap)
+        try c.encode(halfSize, forKey: .halfSize)
+        try c.encode(headroom, forKey: .headroom)
     }
 }
 
@@ -226,7 +304,8 @@ public struct ExportPreset: Sendable, Equatable {
     /// 8 or 16 bits per channel. Coerced to 8 for formats that cannot carry 16 (JPEG, AVIF).
     public var bitDepth: Int
     public var colorSpace: OutputPrimaries
-    /// 100 — HEIC + gain map. `nil`/disabled = the exact pre-HDR export path.
+    /// 100/111 — the HDR path (`kind` = gain map / HLG / PQ). `nil`/disabled = the exact pre-HDR
+    /// export path.
     public var hdr: HDRExport?
     /// Embed `crs:`/`photons:` XMP into the exported copy (a sidecar when the container cannot
     /// carry it). Off by default: a JPEG for the web should not carry a 4 KB metadata blob unless
@@ -236,9 +315,12 @@ public struct ExportPreset: Sendable, Equatable {
     public var sharpen: OutputSharpening?
     /// `{name}` `{date}` `{seq}` `{rating}`; see `ExportNaming`.
     public var nameTemplate: String
-    /// Which size rule `longEdge`/`percent` obey. `longEdge` keeps presets written before 099.
+    /// Which size rule `longEdge`/`percent` obey. `original` is 111's default: the crop's own size.
     public var sizingMode: ExportSizingMode
-    /// Percent of the cropped picture's long edge, 10…100. Only used by `.percent`.
+    /// 111 — never interpolate beyond the rendered pixel count. Applies to `longEdge` and `percent`;
+    /// a percent above 100 is capped at 100 when this is on.
+    public var noUpscale: Bool
+    /// Percent of the cropped picture's long edge, at least 10. Only used by `.percent`.
     public var percent: Int?
     /// Relative output folder under the destination. `""` = write straight into it; supports
     /// `{date}` (`yyyy-MM-dd`) and `{camera}`.
@@ -255,10 +337,12 @@ public struct ExportPreset: Sendable, Equatable {
                 bitDepth: Int = 8,
                 colorSpace: OutputPrimaries = .displayP3,
                 hdr: HDRExport? = nil,
+                hdrKind: HDRKind? = nil,
                 writeXMP: Bool = false,
                 sharpen: OutputSharpening? = nil,
                 nameTemplate: String = "{name}",
-                sizingMode: ExportSizingMode = .longEdge,
+                sizingMode: ExportSizingMode? = nil,
+                noUpscale: Bool = true,
                 percent: Int? = nil,
                 subfolder: String = "",
                 conflict: ExportConflict = .rename,
@@ -269,11 +353,23 @@ public struct ExportPreset: Sendable, Equatable {
         self.quality = quality
         self.bitDepth = bitDepth
         self.colorSpace = colorSpace
-        self.hdr = hdr
+        if let hdrKind {
+            var h = hdr ?? HDRExport()
+            h.kind = hdrKind
+            self.hdr = hdrKind == .none && hdr == nil ? nil : h
+        } else {
+            self.hdr = hdr
+        }
         self.writeXMP = writeXMP
         self.sharpen = sharpen
         self.nameTemplate = nameTemplate
+        // 111 review: the size **mode** is derived from the arguments when the caller does not name
+        // one — `longEdge: 160` still means 「长边 160」 (as it did before 111), while an explicit
+        // `.original` now really means no resize. Without this, `.none` had to secretly honour a
+        // `longEdge`, which made "原尺寸" resize full-size exports.
         self.sizingMode = sizingMode
+            ?? (longEdge != nil ? .longEdge : (percent != nil ? .percent : .original))
+        self.noUpscale = noUpscale
         self.percent = percent
         self.subfolder = subfolder
         self.conflict = conflict
@@ -282,31 +378,66 @@ public struct ExportPreset: Sendable, Equatable {
 
     // MARK: derived
 
-    /// What the encoder is actually allowed to write. JPEG/AVIF cannot carry 16 bits per channel, so
-    /// a preset that asks for it is downgraded here instead of failing per image (the alternative
-    /// would be a batch that exports 19 of 20 files and then complains about the twentieth).
+    /// 111 — the requested HDR type (`nil` `hdr` = SDR). Reading is safe on a preset that predates
+    /// the split; writing `.none` clears the optional instead of leaving an inert block behind.
+    public var hdrKind: HDRKind {
+        get { hdr?.kind ?? .none }
+        set {
+            if newValue == .none {
+                hdr = nil
+            } else {
+                var h = hdr ?? HDRExport()
+                h.kind = newValue
+                hdr = h
+            }
+        }
+    }
+
+    /// What the encoder is actually allowed to write.
+    ///
+    /// 111 forces the legal depth for the HDR kind instead of trusting `bitDepth`: HEIC/AVIF top out
+    /// at 10 bits, TIFF/PNG PQ/HLG are 16, JPEG is 8. A gain map's depth is the **SDR base's** depth
+    /// (8 or 10); the gain map itself is fixed at 4:2:0 / 8 bit by `GainMapHEIC`. Plain SDR keeps
+    /// 099's rule: 16 only where the container really carries it, otherwise 8.
     public var effectiveBitDepth: Int {
-        bitDepth == 16 && format.supports16Bit ? 16 : 8
+        switch hdrKind {
+        case .hlg, .pq:
+            if format.supports10Bit { return 10 }
+            if format.supports16Bit { return 16 }
+            return 8
+        case .gainMap:
+            if format.supports10Bit { return bitDepth >= 10 ? 10 : 8 }
+            if format.supports16Bit { return bitDepth == 16 ? 16 : 8 }
+            return 8
+        case .none:
+            if bitDepth == 16 && format.supports16Bit { return 16 }
+            if format.supports10Bit && bitDepth >= 10 { return 10 }
+            return 8
+        }
     }
 
     public var exportOptions: ExportOptions {
         ExportOptions(format: format, quality: quality, bitDepth: effectiveBitDepth,
-                      hdr: hdr?.enabled == true ? hdr : nil)
+                      hdr: hdrKind == .none ? nil : hdr)
     }
 
-    /// True when this preset asks for the HDR path (HEIC + gain map).
-    public var isHDR: Bool { hdr?.enabled == true && format == .heic }
+    /// True when this preset asks for any HDR path the renderer has to feed a linear frame to.
+    public var isHDR: Bool {
+        hdrKind != .none && format.supports(hdrKind)
+    }
 
     /// Scale to render at. `longEdge` is the historical ceiling; `percent` is the same picture at a
-    /// fraction of its long edge; `none` is whatever the crop already is.
+    /// fraction of its long edge; `original` is whatever the crop already is. A non-nil `longEdge`
+    /// is still honoured in `original` mode (a saved preset from 099 carries one), while `noUpscale`
+    /// keeps both rules from interpolating past the source.
     public func renderScale(content: ImageSize) -> Double {
         switch sizingMode {
-        case .longEdge:
-            return ExportSizing.scale(content: content, longEdge: longEdge)
+        case .longEdge, .none:
+            return ExportSizing.scale(content: content, longEdge: longEdge,
+                                      noUpscale: noUpscale)
         case .percent:
-            return ExportSizing.scale(content: content, percent: percent ?? 100)
-        case .none:
-            return 1
+            return ExportSizing.scale(content: content, percent: percent ?? 100,
+                                      noUpscale: noUpscale)
         }
     }
 
@@ -330,8 +461,19 @@ public struct ExportPreset: Sendable, Equatable {
                      size,
                      conflict.displayName]
         // 100 + 099 的并集：HDR 打开时摘要多一段，关掉时逐字与 099 的断言相同。
-        if let hdr, hdr.enabled, format == .heic {
+        switch hdrKind {
+        case .gainMap where format.supports(.gainMap):
+            let hdr = hdr ?? HDRExport()
             parts.append("HDR " + hdr.gainMap.displayName + (hdr.halfSize ? " 半尺寸" : ""))
+        case .hlg, .pq:
+            parts.append("HDR " + hdrKind.displayName)
+        case .none, .gainMap:
+            break
+        }
+        // 111 — an explicit size target plus `noUpscale` is worth saying out loud.
+        if noUpscale && ((sizingMode == .longEdge && longEdge != nil)
+                         || (sizingMode == .percent && percent != nil)) {
+            parts.append("未放大")
         }
         return parts.joined(separator: " · ")
     }
@@ -340,24 +482,30 @@ public struct ExportPreset: Sendable, Equatable {
 
     public func validated() throws -> ExportPreset {
         guard (0...1).contains(quality) else { throw ExportPresetError.badQuality(quality) }
-        guard bitDepth == 8 || bitDepth == 16 else { throw ExportPresetError.badBitDepth(bitDepth) }
+        guard bitDepth == 8 || bitDepth == 10 || bitDepth == 16 else {
+            throw ExportPresetError.badBitDepth(bitDepth)
+        }
         guard !nameTemplate.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw ExportPresetError.emptyNameTemplate
         }
         if let longEdge, longEdge <= 0 { throw ExportPresetError.badLongEdge(longEdge) }
-        if let percent, !(10...100).contains(percent) { throw ExportPresetError.badPercent(percent) }
+        // 111 — a percent above 100 is legal when the user allowed upscaling; `noUpscale` caps it at
+        // render time instead of rejecting the file.
+        if let percent, percent < 10 { throw ExportPresetError.badPercent(percent) }
         if let sharpen, !(0.3...3.0).contains(sharpen.radius) {
             throw ExportPresetError.badSharpeningRadius(sharpen.radius)
         }
         if let hdr, hdr.enabled {
-            guard format == .heic else {
-                throw ExportPresetError.hdrRequiresHEIC(format.rawValue)
+            guard format.supports(hdr.kind) else {
+                throw ExportPresetError.badHDRKind(format, hdr.kind)
             }
-            if case .manual(let h) = hdr.headroom, h < 1.05 {
-                throw ExportPresetError.badHDRHeadroom(h)
-            }
-            if !hdr.isWritableHere {
-                throw ExportPresetError.hdrGainMapNeedsMacOS15(hdr.gainMap.displayName)
+            if hdr.kind == .gainMap {
+                if case .manual(let h) = hdr.headroom, h < 1.05 {
+                    throw ExportPresetError.badHDRHeadroom(h)
+                }
+                if !hdr.isWritableHere {
+                    throw ExportPresetError.hdrGainMapNeedsMacOS15(hdr.gainMap.displayName)
+                }
             }
         }
         return self
@@ -398,7 +546,7 @@ extension ExportPreset: Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
-        case sizingMode, percent, subfolder, conflict, metadataLevel
+        case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -420,7 +568,8 @@ extension ExportPreset: Codable {
         self.sharpen = try c.decodeIfPresent(OutputSharpening.self, forKey: .sharpen)
         self.nameTemplate = try c.decodeIfPresent(String.self, forKey: .nameTemplate) ?? "{name}"
         self.sizingMode = try c.decodeIfPresent(String.self, forKey: .sizingMode)
-            .flatMap(ExportSizingMode.init(rawValue:)) ?? .longEdge
+            .flatMap(ExportSizingMode.init(rawValue:)) ?? .original
+        self.noUpscale = try c.decodeIfPresent(Bool.self, forKey: .noUpscale) ?? true
         self.percent = try c.decodeIfPresent(Int.self, forKey: .percent)
         self.subfolder = try c.decodeIfPresent(String.self, forKey: .subfolder) ?? ""
         self.conflict = try c.decodeIfPresent(String.self, forKey: .conflict)
@@ -446,7 +595,8 @@ extension ExportPreset: Codable {
         try c.encode(writeXMP, forKey: .writeXMP)
         try c.encodeIfPresent(sharpen, forKey: .sharpen)
         try c.encode(nameTemplate, forKey: .nameTemplate)
-        if sizingMode != .longEdge { try c.encode(sizingMode.rawValue, forKey: .sizingMode) }
+        if sizingMode != .original { try c.encode(sizingMode.rawValue, forKey: .sizingMode) }
+        if !noUpscale { try c.encode(false, forKey: .noUpscale) }
         try c.encodeIfPresent(percent, forKey: .percent)
         if !subfolder.isEmpty { try c.encode(subfolder, forKey: .subfolder) }
         if conflict != .rename { try c.encode(conflict.rawValue, forKey: .conflict) }
@@ -486,20 +636,22 @@ extension OutputPrimaries {
 
 public enum ExportSizing {
     /// The render `scale` that turns `content` (the crop at 1:1) into a picture whose long edge is
-    /// `longEdge`. Capped at 1: upscaling a RAW beyond its own pixels invents detail, and a preset
-    /// asking for 8000 px on a 6000 px file is a preset, not a licence to interpolate.
-    public static func scale(content: ImageSize, longEdge: Int?) -> Double {
+    /// `longEdge`. With `noUpscale` (the default) it is capped at 1: upscaling a RAW beyond its own
+    /// pixels invents detail. `noUpscale = false` is the user explicitly asking for that interpolation.
+    public static func scale(content: ImageSize, longEdge: Int?, noUpscale: Bool = true) -> Double {
         guard let longEdge, longEdge > 0 else { return 1 }
         let current = max(content.width, content.height)
-        guard current > 0, current > longEdge else { return 1 }
-        return Double(longEdge) / Double(current)
+        guard current > 0 else { return 1 }
+        let scale = Double(longEdge) / Double(current)
+        return noUpscale ? min(1, scale) : scale
     }
 
-    /// Percent of the current long edge. Never above 1: `validated()` caps percent at 100, and a
-    /// stray 150 must not turn into an upscale here.
-    public static func scale(content: ImageSize, percent: Int) -> Double {
+    /// Percent of the current long edge. `noUpscale` caps a request above 100 % at 100 %; otherwise
+    /// the user gets the enlargement they asked for.
+    public static func scale(content: ImageSize, percent: Int, noUpscale: Bool = true) -> Double {
         guard percent > 0 else { return 1 }
-        return min(1, Double(percent) / 100)
+        let scale = Double(percent) / 100
+        return noUpscale ? min(1, scale) : scale
     }
 
     /// The integer size the renderer will produce for `content` at `scale` — the same rounding

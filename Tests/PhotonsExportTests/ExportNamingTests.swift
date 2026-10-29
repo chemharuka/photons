@@ -33,7 +33,7 @@ final class ExportNamingTests: XCTestCase {
     private func image(width: Int = 24, height: Int = 18) -> DisplayImage {
         DisplayImage(width: width, height: height,
                      rgba: [Float16](repeating: 1, count: width * height * 4),
-                     primaries: .sRGB, bitDepth: 8)
+                     primaries: .displayP3, bitDepth: 8)
     }
 
     // MARK: filename tokens
