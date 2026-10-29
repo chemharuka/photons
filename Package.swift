@@ -36,7 +36,7 @@ let package = Package(
             "PhotonsCore",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
-        .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog"]),
+        .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsDepth"]),
         // `PhotonsExport` is here because the export sheet (M5) drives `BatchExporter` from the
         // window: the engine is the only implementation of "render + name + encode + report", and a
         // second copy inside the UI would be the beginning of two exports that disagree.
