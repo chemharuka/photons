@@ -590,12 +590,17 @@ public final class RenderResult {
     /// calls per pixel (~1.5 ms at a 43 k-pixel grid) — `Histogram.measure` now spreads the rows over
     /// the cores, and this is the receipt that says which half moved.
     public let histogramCost: HistogramCost
+    /// 143b — the **applied** white-balance gains, as S1 multiplied them (green-normalised, `1,1,1`
+    /// for as shot). Carried out of the render so "the preview and the settled frame used the same
+    /// triple" is a fact about the frame, not a recomputation the caller could get subtly wrong.
+    public let whiteBalanceGain: SIMD3<Double>
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, window: ImageRect,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
-         histogramSample: LinearSample? = nil, histogramCost: HistogramCost = .zero) {
+         histogramSample: LinearSample? = nil, histogramCost: HistogramCost = .zero,
+         whiteBalanceGain: SIMD3<Double> = SIMD3(1, 1, 1)) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -610,6 +615,7 @@ public final class RenderResult {
         self.histogramMilliseconds = histogramMilliseconds
         self.histogramSample = histogramSample
         self.histogramCost = histogramCost
+        self.whiteBalanceGain = whiteBalanceGain
     }
 }
 
@@ -1825,6 +1831,16 @@ public final class RenderGraph {
         // parameters-cleared document instead, which is the refutation.
         let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
+        // 143b — the gain is computed **once** for the frame, and both the S1 params and the result
+        // carry it. The preview renders a document whose pair is the drag's target, so the two paths
+        // cannot disagree about the numbers they applied.
+        let appliedWhiteBalance: SIMD3<Double>
+        if edit.light.whiteBalance.isAsShot {
+            appliedWhiteBalance = SIMD3(1, 1, 1)
+        } else {
+            let g = whiteBalanceGain(for: edit.light.whiteBalance)
+            appliedWhiteBalance = SIMD3(g.r, g.g, g.b)
+        }
         // 117: the airlight probe is per frame. A stale value from an earlier probed render must not
         // look like this frame's estimate, and a frame without the flag reports `nil`.
         dehazeAirlightProbe = nil
@@ -2353,7 +2369,8 @@ public final class RenderGraph {
                                 showsMask: showsMask, histogram: histogramPayload,
                                 histogramMilliseconds: histogramMilliseconds,
                                 histogramSample: histogramSample,
-                                histogramCost: histogramCost)
+                                histogramCost: histogramCost,
+                                whiteBalanceGain: appliedWhiteBalance)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect,
@@ -2362,7 +2379,8 @@ public final class RenderGraph {
                             showsMask: showsMask, histogram: histogramPayload,
                             histogramMilliseconds: histogramMilliseconds,
                             histogramSample: histogramSample,
-                            histogramCost: histogramCost)
+                            histogramCost: histogramCost,
+                            whiteBalanceGain: appliedWhiteBalance)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
@@ -3120,8 +3138,7 @@ public final class RenderGraph {
             let documentWhiteBalance = edit.light.whiteBalance
             let whiteBalance = documentWhiteBalance.isAsShot
                 ? (r: 1.0, g: 1.0, b: 1.0)
-                : WhiteBalanceEstimate.gain(for: documentWhiteBalance,
-                                            asShot: measuredAsShotIlluminant)
+                : self.whiteBalanceGain(for: documentWhiteBalance)
             let whiteBalanceIsIdentity = whiteBalance.r == 1 && whiteBalance.g == 1
                 && whiteBalance.b == 1
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
