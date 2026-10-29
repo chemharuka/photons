@@ -91,19 +91,11 @@ public enum MultiscaleContrast {
 
     /// The gain the kernel applies to a pixel whose linear luma is `Y`, given its three bands.
     ///
-    /// **147 — the pivot is read on the unexposed scale.** S1 multiplies the frame by
-    /// `exposureGain = 2^EV` before this stage, so a fixed `P` slid relative to the mid-grey at every
-    /// exposure and the coarse term `k_c·(B_c − P)` changed direction (measured p50 0.849 → 1.510).
-    /// The kernel divides the luma by `exposureGain` *before* the `1e-6` floor and the log, which is
-    /// this function's `G0 = log2(max(Y / g, 1e-6))`; `P` stays the constant above. `g == 1` is the
-    /// old arithmetic bit for bit.
-    ///
     /// `contrast == 0` is the exact identity (`kBands == 0` and `2^0 == 1`), which is what makes the
     /// stage's absence equivalent to its presence at zero.
-    public static func gainRatio(Y: Double, bands: Bands, contrast: Double,
-                                 exposureGain: Double = 1) -> Double {
+    public static func gainRatio(Y: Double, bands: Bands, contrast: Double) -> Double {
         guard contrast != 0, Y.isFinite else { return 1 }
-        let G = log2(max(Y / max(exposureGain, 1e-9), 1e-6))
+        let G = log2(max(Y, 1e-6))
         let k = scaleGains(t: contrast / 100)
         let gPrime = pivotEV + k.coarse * (bands.coarse - pivotEV)
             + k.mid * bands.mid + k.fine * bands.fine

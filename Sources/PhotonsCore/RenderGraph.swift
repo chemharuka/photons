@@ -4114,7 +4114,8 @@ public final class RenderGraph {
                                                Float(min(max(m.refine, 0), 1)), guidedPx),
                                    rect: SIMD4(Int32(raster.x0), Int32(raster.y0),
                                                Int32(raster.x1), Int32(raster.y1))))
-            adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled))
+            adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled,
+                                     globalGain: Float(edit.light.exposureGain)))
             colorAdjust.append(colorAdjustDesc(m.adjustments, enabled: m.isEnabled))
         }
         // Metal requires a bound buffer even when the count is zero; one neutral entry keeps the
@@ -4243,7 +4244,7 @@ public final class RenderGraph {
         }
     }
 
-    private func adjustDesc(_ a: LocalAdjustments, enabled: Bool) -> LocalAdjustU {
+    private func adjustDesc(_ a: LocalAdjustments, enabled: Bool, globalGain: Float) -> LocalAdjustU {
         let gain = a.gain
         // 056: `hasSceneLinearWork`, not `!isIdentity` — a mask whose only sliders are hue/saturation
         // has nothing for S1.6 to do, and sending it through `local_adjust` would round pixels at the
@@ -4260,7 +4261,13 @@ public final class RenderGraph {
             // axis' own end points exactly as 0107's `S2Contrast.travel` does (8 EV of tone map over
             // display white 0 EV and the black end −8 EV ⇒ 1.0 EV). Passed, not baked into the kernel,
             // for the same reason S2 takes it from the CPU: an axis that moves must move both stages.
-            c: SIMD4(Float(a.blacks), Float(Self.localContrastTravelEV), 0, active ? 1 : 0))
+            //
+            // 147 — `.z` is the gain product the mask's whites/contrast windows divide out: S1's global
+            // exposure × this mask's own local exposure. Without it a masked `+0.5 EV` and a global
+            // `+0.5 EV` read the windows on different luminances (measured: 4 codes apart, the pin at
+            // `LocalColorStageTests:577`).
+            c: SIMD4(Float(a.blacks), Float(Self.localContrastTravelEV),
+                     globalGain * Float(pow(2.0, a.exposure)), active ? 1 : 0))
     }
 
     /// 079 §2.1.2 — `S2Contrast.travel`'s derivation (`8/(whiteEV − blackEV)`, feat/contrast-0107

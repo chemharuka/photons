@@ -92,7 +92,7 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     //    are the global ones (派单 008 A): `blacks +` opens the shadows, `whites +` moves the white
     //    point up. The old affine ±0.15 level here is gone: it changed the *slope* of the whole masked
     //    picture, so `blacks +100` moved a 50 % grey by +25 codes instead of leaving it alone.
-    v = s1_end_points<true>(v, d.c.x, d.b.w);
+    v = s1_end_points<true>(v, d.c.x, d.b.w, d.c.z);
 
     // ③ contrast — S2's seam (`tone_shape.metal#tone_contrast`). A displacement in EV with a held band
     //    around the measured median and a shoulder that lands on display white, so it cannot clip:

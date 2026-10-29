@@ -36,15 +36,6 @@ using namespace metal;
 // There is **no upper clamp**: `exp2` and a multiply, like S2's region lifts, so an HDR sample can be
 // expanded past display white and S4's headroom decides what is written.
 //
-// **147 — the decomposition is read on the unexposed light.** Both statistics packs and the apply
-// pass take `Y0 = s1_8_g_luma(rgb) / g` (`p.c.y` = S1's already-applied exposure gain) and use
-// `G0 = log2(max(Y0, 1e-6))`. The pivot `P` therefore stays at −3.5 EV *relative to the scene*, and
-// the coarse term `k_c·(B_c − P)` no longer changes sign with the EV slider (the audit measured
-// p50 0.849 → 1.510). Dividing **before** the log (and before the 1e-6 floor) is what makes the shift
-// exact: `log2((g·Y0)/g) == log2(Y0)` bit for bit, while `log2(g·Y0) − log2 g` is one `log2` ULP
-// away. The ratio `2^(G′ − G0)` still multiplies the **exposed** `rgb`, so the stage commutes with
-// exposure; `g == 1` divides by one and keeps the pre-147 bytes.
-//
 // The numbers below are the `.metal` copy of `MultiscaleContrast` (Swift). A test parses this file
 // and asserts the two copies are equal, the way `ContrastLogDomainTests` did for `CT_*`.
 
@@ -53,7 +44,7 @@ struct ContrastParams {
     float4 a;
     // k_c, k_m, k_f, gate lower knee
     float4 b;
-    // gate upper knee, 147: log2 of S1's exposure gain g (0 at g = 1), pad, pad
+    // gate upper knee, pad, pad, pad
     float4 c;
     // Rec2020 luma weights, pad
     float4 luma;
@@ -82,11 +73,8 @@ constant int MC_R_C_CAP = 96;
 constant int MC_R_M_CAP = 24;
 constant int MC_BLOCK = 4;
 
-/// Luminance on the **unexposed** scale (147): divide by S1's gain *before* the `1e-6` floor and the
-/// log, so `g == 1` is exact and a power-of-two exposure is an exact exponent shift of the same
-/// numbers, not a second rounding.
-static inline float s1_8_g_luma(float3 rgb, float gain) {
-    return max(dot(max(rgb, 0.0), kWorkingLumaWeights) / max(gain, 1e-6), 1e-6);
+static inline float s1_8_g_luma(float3 rgb) {
+    return max(dot(max(rgb, 0.0), kWorkingLumaWeights), 1e-6);
 }
 
 // ── statistics: one texel per q × q block ───────────────────────────────────────────────────────
@@ -116,7 +104,7 @@ kernel void s1_8_g_contrast_pack(texture2d<float, access::read> src [[texture(0)
             int y = min(int(gid.y) * q + dy, h - 1);
             for (int dx = 0; dx < q; ++dx) {
                 int x = min(int(gid.x) * q + dx, w - 1);
-                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb, p.c.y));
+                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb));
                 sumG += G; sumGG += G * G;
                 n += 1;
             }
@@ -132,7 +120,7 @@ kernel void s1_8_g_contrast_pack(texture2d<float, access::read> src [[texture(0)
             int y = min(int(gid.y) * q + dy, h - 1);
             for (int dx = 0; dx < q; ++dx) {
                 int x = min(int(gid.x) * q + dx, w - 1);
-                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb, p.c.y));
+                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb));
                 float2 uv = float2((float(x) + 0.5) / (float(q) * float(qW)),
                                    (float(y) + 0.5) / (float(q) * float(qH)));
                 float4 c = aux.sample(linearSampler, uv);
@@ -249,12 +237,8 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
         return;
     }
 
-    // 147 — the whole decomposition runs on the **unexposed** log-light `G0 = log2(Y/g)`: the
-    // exposure slider shifts every `G` by a constant, which used to move `B_c` against the fixed
-    // pivot `P` and flip the gain's direction (p50 0.849 → 1.510). The division happens inside
-    // `s1_8_g_luma`, before the floor and the log, so the same scene pixel is the same `G0` at every
-    // exposure; the ratio is applied to the exposed `px.rgb`, so `g == 1` is bit-identical.
-    float G = log2(s1_8_g_luma(px.rgb, p.c.y));
+    float Y = s1_8_g_luma(px.rgb);
+    float G = log2(Y);
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
     int q = max(p.d.z, 1);

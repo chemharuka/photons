@@ -83,7 +83,7 @@ public enum StageAlgorithmVersion {
     /// `exposure == 0` (g = 1) is bit-identical to 1.
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
-    public static let contrast = 2
+    public static let contrast = 1
     /// **5** — 124: 高光 covers the whole HDR range. The high→white closure moved from
     /// `smoothstep(−1.2, 0.0, L)` to `smoothstep(+4.0, +6.0, L)`, so a document with
     /// `highlights != 0` now moves every pixel above −0.9 EV, including values above display white

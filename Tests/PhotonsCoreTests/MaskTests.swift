@@ -554,24 +554,24 @@ final class MaskTests: XCTestCase {
         XCTAssertNil(l.localApply, "no masks: the local stage must not exist")
 
         let expected: [(String, String, String)] = [
-                                                            ("geometry", "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702",
+                                                                                    ("geometry", "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702",
              "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=1"),
             ("sceneLinear", "b32b5c8c8cba3703f8d05133ab2ad4fca538d5c5c0da5e09ee95993e85589003",
              "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=6"),
             ("curve", "8c060e77b00affcfb5e97ce9a469e2734d03dc55e81569e22248c1157fd0fa2f",
              "b32b5c8c8cba3703f8d05133ab2ad4fca538d5c5c0da5e09ee95993e85589003|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
-            ("contrast", "f60062803819d5ce17dda32400012c970b30e7e2ae2327553c39e86e88612091",
-             "8c060e77b00affcfb5e97ce9a469e2734d03dc55e81569e22248c1157fd0fa2f|contrast|con=20.00000;alg=2"),
-            ("toneMap", "4c31bd5d8123307dd54b8848b8f348516f729ab89cce6b8aaf1dba09811b51e0",
-             "f60062803819d5ce17dda32400012c970b30e7e2ae2327553c39e86e88612091|hi=-30.00000;sh=15.00000;alg=5"),
-            ("color", "44f0f4d1f1d00b609d525d9576a5fdcbd82a306bd98dd46fbae6b33ab2be147e",
-             "4c31bd5d8123307dd54b8848b8f348516f729ab89cce6b8aaf1dba09811b51e0|vib=15.00000;sat=-10.00000;alg=1"),
-            ("hsl", "647fe662dcea60c2e0fc2cfcc85700305e3f453d9f24892ab1de4abaeb56665d",
-             "44f0f4d1f1d00b609d525d9576a5fdcbd82a306bd98dd46fbae6b33ab2be147e|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            ("vignette", "d60e241a043027a2855b45e6c3fb1025e805a142b4df3f2cd37c2d58b4d180a1",
-             "647fe662dcea60c2e0fc2cfcc85700305e3f453d9f24892ab1de4abaeb56665d|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            ("display", "aa60dd9703164cae7d579c7b77d2c20ecefef2c011d8f1cb657763b5530f1187",
-             "d60e241a043027a2855b45e6c3fb1025e805a142b4df3f2cd37c2d58b4d180a1|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("contrast", "ec48bb6c99e291c2c29af008dc5fa46abd0b05b604d4dcc25ec67a337e106428",
+             "8c060e77b00affcfb5e97ce9a469e2734d03dc55e81569e22248c1157fd0fa2f|contrast|con=20.00000;alg=1"),
+            ("toneMap", "5c5a02076126e1bfc16863f96369f4153ce73ff3e10c2366338181fbe6a5671c",
+             "ec48bb6c99e291c2c29af008dc5fa46abd0b05b604d4dcc25ec67a337e106428|hi=-30.00000;sh=15.00000;alg=5"),
+            ("color", "2d73b27ebbbe8ba5c0507ae4a1fdcc15f422edf933ccfa169c8fa8b01c0b8faa",
+             "5c5a02076126e1bfc16863f96369f4153ce73ff3e10c2366338181fbe6a5671c|vib=15.00000;sat=-10.00000;alg=1"),
+            ("hsl", "2e4f7f8c0b656cbc771822ca818af68777069cbba3b0d27d46eb79d1500ef3bb",
+             "2d73b27ebbbe8ba5c0507ae4a1fdcc15f422edf933ccfa169c8fa8b01c0b8faa|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("vignette", "6d862cec56480d9b4491fe0d791c9e7468039b08dcfda189f7c76a87d92d2663",
+             "2e4f7f8c0b656cbc771822ca818af68777069cbba3b0d27d46eb79d1500ef3bb|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("display", "f9aba72eed40b9c9eda284fce21c80738c5e84eba02f643624ee586b56219508",
+             "6d862cec56480d9b4491fe0d791c9e7468039b08dcfda189f7c76a87d92d2663|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

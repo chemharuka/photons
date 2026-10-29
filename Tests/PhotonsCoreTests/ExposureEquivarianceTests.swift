@@ -204,6 +204,13 @@ final class ExposureEquivarianceTests: XCTestCase {
     }
 
     func testContrastCommutesWithExposureOnReferenceFrames() throws {
+        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
+        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
+        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
+        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
+        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
+        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
+        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
         var available = 0
         for (name, path) in Self.frames {
             guard FileManager.default.fileExists(atPath: path) else {
@@ -349,6 +356,13 @@ final class ExposureEquivarianceTests: XCTestCase {
     }
 
     func testContrastMetricsAreExposureInvariant() throws {
+        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
+        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
+        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
+        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
+        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
+        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
+        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
         let path = Self.frames[0].1
         guard FileManager.default.fileExists(atPath: path) else {
             throw XCTSkip("需要 L1030437")
@@ -378,6 +392,13 @@ final class ExposureEquivarianceTests: XCTestCase {
     }
 
     func testContrastGainMatchesTheClosedForm() throws {
+        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
+        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
+        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
+        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
+        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
+        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
+        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
         // A flat grey with `s = 2` EV above the pivot: the guided filter's base is the constant
         // itself, so the coarse term is exact and the closed form is `2^((k_c − 1) s)`.
         let pivot = MultiscaleContrast.pivotEV
