@@ -48,7 +48,8 @@ final class ExportPresetTests: XCTestCase {
     func testLegacyJSONTakesEveryNewDefault() throws {
         let legacy = Data(#"{"format":"jpg"}"#.utf8)
         let decoded = try JSONDecoder().decode(ExportPreset.self, from: legacy).validated()
-        XCTAssertEqual(decoded.sizingMode, .longEdge)
+        XCTAssertEqual(decoded.sizingMode, .original)
+        XCTAssertTrue(decoded.noUpscale)
         XCTAssertNil(decoded.percent)
         XCTAssertEqual(decoded.subfolder, "")
         XCTAssertEqual(decoded.conflict, .rename)
@@ -65,9 +66,10 @@ final class ExportPresetTests: XCTestCase {
 
     // MARK: validation
 
-    func testValidatedRejectsPercentOutsideTenToHundred() {
+    func testValidatedRejectsPercentBelowTen() {
         XCTAssertThrowsError(try ExportPreset(sizingMode: .percent, percent: 5).validated())
-        XCTAssertThrowsError(try ExportPreset(sizingMode: .percent, percent: 101).validated())
+        // 111 — above 100 % is legal when upscaling is allowed; `noUpscale` caps it instead.
+        XCTAssertNoThrow(try ExportPreset(sizingMode: .percent, noUpscale: false, percent: 101).validated())
     }
 
     func testValidatedRejectsNonPositiveLongEdge() {
@@ -93,22 +95,30 @@ final class ExportPresetTests: XCTestCase {
         XCTAssertEqual(ExportPreset(longEdge: 2400).renderScale(content: content), 0.4, accuracy: 1e-12)
         XCTAssertEqual(ExportPreset(sizingMode: .percent, percent: 50).renderScale(content: content),
                        0.5, accuracy: 1e-12)
-        XCTAssertEqual(ExportPreset(longEdge: 100, sizingMode: .none).renderScale(content: content),
+        XCTAssertEqual(ExportPreset(sizingMode: .original).renderScale(content: content),
                        1, accuracy: 1e-12)
-        // A percent above 100 is clamped by the shared rule as well (validation rejects it earlier).
+        // `noUpscale` caps a percent above 100; turning it off is an explicit enlargement.
         XCTAssertEqual(ExportPreset(sizingMode: .percent, percent: 150).renderScale(content: content),
                        1, accuracy: 1e-12)
+        XCTAssertEqual(ExportPreset(sizingMode: .percent, noUpscale: false, percent: 150).renderScale(content: content),
+                       1.5, accuracy: 1e-12)
+    }
+
+    func testDefaultSizingIsOriginalAndDoesNotUpscale() {
+        let preset = ExportPreset()
+        XCTAssertEqual(preset.sizingMode, .original)
+        XCTAssertTrue(preset.noUpscale)
     }
 
     func testSummaryNamesFormatDepthSpaceSizeAndConflict() {
         XCTAssertEqual(ExportPreset(format: .jpeg, longEdge: 2400, bitDepth: 8,
                                     colorSpace: .sRGB, conflict: .rename).summary,
-                       "JPEG · 8 位 · sRGB · 长边 2400 · 重命名")
+                       "JPEG · 8 位 · sRGB · 长边 2400 · 重命名 · 未放大")
         XCTAssertEqual(ExportPreset(format: .tiff, bitDepth: 16, colorSpace: .displayP3,
                                     sizingMode: .percent, percent: 60, conflict: .skip).summary,
-                       "TIFF · 16 位 · Display P3 · 长边 60% · 跳过")
-        XCTAssertEqual(ExportPreset(format: .png, longEdge: 1234,
-                                    sizingMode: .none, conflict: .overwrite).summary,
+                       "TIFF · 16 位 · Display P3 · 长边 60% · 跳过 · 未放大")
+        XCTAssertEqual(ExportPreset(format: .png,
+                                    sizingMode: .original, conflict: .overwrite).summary,
                        // 默认色彩空间 2026-10-29 改为 Display P3（用户口径），这一条就是那个默认值。
                        "PNG · 8 位 · Display P3 · 原尺寸 · 覆盖")
     }

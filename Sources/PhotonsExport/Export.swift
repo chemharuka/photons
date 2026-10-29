@@ -14,7 +14,7 @@ public enum ExportFormat: String, Sendable, CaseIterable {
     /// re-encodes (docs/xmp-mapping.md §4.2).
     case png
     /// AVIF is free on macOS 14+: ImageIO ships the encoder, so it costs no dependency
-    /// (docs/architecture-decisions.md §11.5). 8-bit only in practice.
+    /// (docs/architecture-decisions.md §11.5). 8–10 bits per channel in practice.
     case avif
 
     public var utType: UTType {
@@ -41,13 +41,35 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         self == .jpeg || self == .heic || self == .avif
     }
 
-    /// Formats that can carry 16 bits per channel. AVIF is nominally 10/12-bit; asking ImageIO for
-    /// 16 bpc on this path produces a file that reads back as 8, so it is not offered.
+    /// Formats that can really carry 16 bits per channel. Measured on this machine: HEIC/AVIF accept
+    /// 16 bpc but read back as 10 (HEIF has no 16-bit primary item), so only TIFF and PNG offer it.
     public var supports16Bit: Bool {
+        self == .tiff || self == .png
+    }
+
+    /// HEIF-based containers top out at 10 bits per channel (see `supports16Bit`).
+    public var supports10Bit: Bool {
+        self == .heic || self == .avif
+    }
+
+    /// 111 — the HDR kinds this container can honestly carry.
+    ///
+    /// This table is the single source of truth for `ExportPreset.validated()`, the UI picker and the
+    /// tests. `gainMap` stays HEIC/AVIF-only because a gain map is an auxiliary image (TIFF/PNG have
+    /// no such container); `hlg`/`pq` are offered for every non-JPEG container.
+    public var hdrKinds: [HDRKind] {
         switch self {
-        case .jpeg, .avif: return false
-        case .heic, .tiff, .png: return true
+        case .jpeg:
+            return [.none]
+        case .heic, .avif:
+            return [.none, .gainMap, .hlg, .pq]
+        case .tiff, .png:
+            return [.none, .hlg, .pq]
         }
+    }
+
+    public func supports(_ kind: HDRKind) -> Bool {
+        hdrKinds.contains(kind)
     }
 
     /// Containers ImageIO can rewrite in place with XMP (`XMPWriter.canEmbed`). AVIF is absent:
@@ -60,8 +82,8 @@ public enum ExportFormat: String, Sendable, CaseIterable {
 public struct ExportOptions: Sendable {
     public var format: ExportFormat
     public var quality: Double        // 0…1, lossy formats only
-    public var bitDepth: Int          // 8 or 16
-    /// 100 — HEIC + gain map. `nil` = the pre-HDR encoder path, byte for byte.
+    public var bitDepth: Int          // 8, 10 or 16
+    /// 100/111 — the HDR path. `nil` = the pre-HDR encoder path, byte for byte.
     public var hdr: HDRExport?
 
     public init(format: ExportFormat = .jpeg, quality: Double = 0.95, bitDepth: Int = 8,
@@ -142,17 +164,22 @@ public enum Exporter {
             return cg
         }
 
-        guard bitDepth == 16 else {
+        guard bitDepth == 8 || bitDepth == 10 || bitDepth == 16 else {
             throw ExportError.badBitDepth("image", bitDepth)
         }
+        // 10-bit is stored in 16-bit words: CGImage's 10-bpc spelling is not accepted with the
+        // sRGB space on this OS, and ImageIO's HEIC/AVIF writer reads back 10 bits either way.
+        let storageDepth = bitDepth == 10 ? 16 : bitDepth
+        let maxValue: Float = storageDepth == 16 ? 65535 : 255
         var words = [UInt16](repeating: 0, count: count)
         for i in 0..<count {
-            words[i] = UInt16(min(max(Float(image.rgba[i]), 0), 1) * 65535 + 0.5)
+            words[i] = UInt16(min(max(Float(image.rgba[i]), 0), 1) * maxValue + 0.5)
         }
         let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
                                 | CGBitmapInfo.byteOrder16Little.rawValue)
         guard let provider = CGDataProvider(data: Data(words.withUnsafeBufferPointer { Data(buffer: $0) }) as CFData),
-              let cg = CGImage(width: w, height: h, bitsPerComponent: 16, bitsPerPixel: 64,
+              let cg = CGImage(width: w, height: h, bitsPerComponent: storageDepth,
+                               bitsPerPixel: storageDepth * 4,
                                bytesPerRow: w * 8, space: space, bitmapInfo: info,
                                provider: provider, decode: nil, shouldInterpolate: false,
                                intent: .defaultIntent) else {
@@ -161,25 +188,52 @@ public enum Exporter {
         return cg
     }
 
-    /// Write `image`. When `options.hdr` is enabled **and** the image carries a linear companion
-    /// (rendered through `s4_display_linear`), this routes to `GainMapHEIC`, which writes the same SDR
-    /// base plus a gain-map auxiliary image. Otherwise it is the untouched pre-100 encoder.
+    /// Write `image`. When `options.hdr` asks for a gain map **and** the image carries a linear
+    /// companion (rendered through `s4_display_linear`), this routes to `GainMapHEIC`, which writes
+    /// the same SDR base plus a gain-map auxiliary image. `hlg`/`pq` route to `HDREncoding`, which
+    /// converts the linear companion to Rec.2020 with the requested transfer curve. Otherwise it is
+    /// the untouched pre-100 encoder.
     ///
     /// - Returns: non-fatal HDR notes (an SDR fallback, a clipped headroom). Empty on the normal path.
     @discardableResult
     public static func write(_ image: DisplayImage, to url: URL, options: ExportOptions,
                              metadata: ExportMetadataContext = ExportMetadataContext()) throws -> [String] {
-        if let hdr = options.hdr, hdr.enabled, options.format == .heic, let linear = image.linear {
-            let result = try GainMapHEIC.write(sdr: image, linear: linear, to: url,
-                                               options: HDRGainMapOptions(gainMap: hdr.gainMap,
-                                                                          halfSize: hdr.halfSize,
-                                                                          headroom: hdr.headroom,
-                                                                          quality: options.quality,
-                                                                          bitDepth: options.bitDepth),
-                                               metadata: metadata)
-            return result.warnings
+        if let hdr = options.hdr, hdr.enabled {
+            switch hdr.kind {
+            case .gainMap:
+                if let linear = image.linear {
+                    if options.format == .heic {
+                        let result = try GainMapHEIC.write(
+                            sdr: image, linear: linear, to: url,
+                            options: HDRGainMapOptions(gainMap: hdr.gainMap,
+                                                       halfSize: hdr.halfSize,
+                                                       headroom: hdr.headroom,
+                                                       quality: options.quality,
+                                                       bitDepth: options.bitDepth),
+                            metadata: metadata)
+                        return result.warnings
+                    }
+                    // ImageIO's AVIF writer refuses `AddAuxiliaryDataInfo`
+                    // (`CGImageDestinationFinalize` returns false), so no AVIF gain map can be
+                    // produced through the only encoder this project allows. Write the honest SDR
+                    // file and say so instead of mislabelling a HEIC at a `.avif` path.
+                    if options.format == .avif {
+                        var sdrOptions = options
+                        sdrOptions.hdr = nil
+                        try write(image.withLinear(nil), to: url, options: sdrOptions,
+                                  metadata: metadata)
+                        return ["AVIF gain maps are not writable by ImageIO — wrote an SDR AVIF"]
+                    }
+                }
+            case .hlg, .pq:
+                return try HDREncoding.write(image, to: url, options: options, metadata: metadata)
+            case .none:
+                break
+            }
         }
-        guard options.bitDepth == 8 || (options.bitDepth == 16 && options.format.supports16Bit) else {
+        guard options.bitDepth == 8
+                || (options.bitDepth == 10 && options.format.supports10Bit)
+                || (options.bitDepth == 16 && options.format.supports16Bit) else {
             throw ExportError.badBitDepth(options.format.rawValue, options.bitDepth)
         }
         let cg = try cgImage(image, bitDepth: options.bitDepth)
@@ -216,7 +270,7 @@ public enum Exporter {
 
     /// Rewrites `url` through `CGImageDestinationCopyImageSource` with an empty metadata object.
     /// Used only for `.none` PNG, whose writer cannot be told to omit EXIF in the first place.
-    private static func stripMetadata(at url: URL) throws {
+    static func stripMetadata(at url: URL) throws {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               CGImageSourceGetCount(source) > 0 else { return }
         let tmp = url.deletingLastPathComponent()
@@ -247,7 +301,12 @@ public enum Exporter {
 
     /// Encode in memory (determinism tests compare digests without touching the filesystem).
     public static func data(_ image: DisplayImage, options: ExportOptions) throws -> Data {
-        let cg = try cgImage(image, bitDepth: options.bitDepth)
+        let cg: CGImage
+        if let kind = options.hdr?.kind, kind == .hlg || kind == .pq {
+            cg = try HDREncoding.cgImage(for: image, kind: kind)
+        } else {
+            cg = try cgImage(image, bitDepth: options.bitDepth)
+        }
         let buffer = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(buffer as CFMutableData,
                                                           options.format.utType.identifier as CFString,
