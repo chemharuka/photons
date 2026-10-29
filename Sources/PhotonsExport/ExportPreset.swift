@@ -341,7 +341,7 @@ public struct ExportPreset: Sendable, Equatable {
                 writeXMP: Bool = false,
                 sharpen: OutputSharpening? = nil,
                 nameTemplate: String = "{name}",
-                sizingMode: ExportSizingMode = .original,
+                sizingMode: ExportSizingMode? = nil,
                 noUpscale: Bool = true,
                 percent: Int? = nil,
                 subfolder: String = "",
@@ -363,7 +363,12 @@ public struct ExportPreset: Sendable, Equatable {
         self.writeXMP = writeXMP
         self.sharpen = sharpen
         self.nameTemplate = nameTemplate
+        // 111 review: the size **mode** is derived from the arguments when the caller does not name
+        // one — `longEdge: 160` still means 「长边 160」 (as it did before 111), while an explicit
+        // `.original` now really means no resize. Without this, `.none` had to secretly honour a
+        // `longEdge`, which made "原尺寸" resize full-size exports.
         self.sizingMode = sizingMode
+            ?? (longEdge != nil ? .longEdge : (percent != nil ? .percent : .original))
         self.noUpscale = noUpscale
         self.percent = percent
         self.subfolder = subfolder
@@ -446,8 +451,9 @@ public struct ExportPreset: Sendable, Equatable {
     public var summary: String {
         let size: String
         switch sizingMode {
-        case .longEdge, .none: size = longEdge.map { "长边 \($0)" } ?? "原尺寸"
+        case .longEdge: size = longEdge.map { "长边 \($0)" } ?? "原尺寸"
         case .percent: size = "长边 \(percent ?? 100)%"
+        case .none: size = "原尺寸"
         }
         var parts = [format.rawValue.uppercased(),
                      "\(effectiveBitDepth) 位",
@@ -465,7 +471,8 @@ public struct ExportPreset: Sendable, Equatable {
             break
         }
         // 111 — an explicit size target plus `noUpscale` is worth saying out loud.
-        if noUpscale && (longEdge != nil || (sizingMode == .percent && percent != nil)) {
+        if noUpscale && ((sizingMode == .longEdge && longEdge != nil)
+                         || (sizingMode == .percent && percent != nil)) {
             parts.append("未放大")
         }
         return parts.joined(separator: " · ")

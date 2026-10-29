@@ -50,7 +50,7 @@ final class ExportSheetModelTests: XCTestCase {
         sheet.preset.sizingMode = .longEdge
         sheet.preset.conflict = .rename
         XCTAssertEqual(sheet.summaryLine,
-                       "将导出 3 张 → JPEG · 8 位 · sRGB · 长边 2400 · 重命名")
+                       "将导出 3 张 → JPEG · 8 位 · sRGB · 长边 2400 · 重命名 · 未放大")
 
         sheet.preset.format = .tiff
         sheet.preset.bitDepth = 16
@@ -59,7 +59,7 @@ final class ExportSheetModelTests: XCTestCase {
         sheet.preset.percent = 60
         sheet.preset.conflict = .skip
         XCTAssertEqual(sheet.summaryLine,
-                       "将导出 3 张 → TIFF · 16 位 · Display P3 · 长边 60% · 跳过")
+                       "将导出 3 张 → TIFF · 16 位 · Display P3 · 长边 60% · 跳过 · 未放大")
 
         sheet.preset.format = .png
         sheet.preset.bitDepth = 8
@@ -173,8 +173,9 @@ final class ExportSheetModelTests: XCTestCase {
 
         sheet.setHDR(false)
         XCTAssertFalse(sheet.summaryLine.contains("HDR"))
+        // 111: the default preset still carries a 2048 long edge, and `noUpscale` is now said out loud.
         XCTAssertEqual(sheet.summaryLine,
-                       "将导出 2 张 → HEIC · 8 位 · Display P3 · 长边 2048 · 重命名")
+                       "将导出 2 张 → HEIC · 8 位 · Display P3 · 长边 2048 · 重命名 · 未放大")
     }
 
     // MARK: - 106 layout (measured on the real hosted sheet)

@@ -247,7 +247,11 @@ public enum BatchExporter {
             // 2. size — the preset's rule, applied to the pixels we were handed.
             var image = rendered
             switch preset.sizingMode {
-            case .longEdge, .none:
+            case .none:
+                // 原尺寸: no resize at all. A 099 preset can still carry a `longEdge` beside this mode;
+                // honouring it would resize an export the user asked to be full size (111 review).
+                break
+            case .longEdge:
                 if let longEdge = preset.longEdge {
                     let current = max(rendered.width, rendered.height)
                     let target = preset.noUpscale ? min(longEdge, current) : longEdge
