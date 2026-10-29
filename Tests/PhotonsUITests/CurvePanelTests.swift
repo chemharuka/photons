@@ -294,7 +294,68 @@ final class CurvePanelTests: XCTestCase {
         print("clamp · \(written.map { String(format: "%.4f", $0.x) })")
     }
 
-    // MARK: - 4. delete, and the endpoints that refuse
+    /// 派单 137 — a point may be dragged **below its left neighbour**; y is not clamped back.
+    ///
+    /// Two claims, with the negative control that keeps them from being vacuous:
+    ///   · an inverted two-point curve is written as dragged (the last point's y stays 0, below the
+    ///     first point's y), the preview descends, and one drag is still one history entry;
+    ///   · an up-then-down (mixed) candidate is **refused by name** before anything is written, so the
+    ///     document/table keep the last legal shape instead of a fold.
+    func testDraggingBelowThePreviousPointKeepsYAndMixedDirectionIsRefused() {
+        let session = CatalogSession()
+        let start = [CurvePoint(0, 1), CurvePoint(2, 1)]
+        session.applyEdit { $0.curve.white = start }
+        session.commitEdit(label: "起点")
+        let model = CurveEditorModel(session: session, channel: .white)
+        let base = session.history.count
+
+        let origin = model.beginDrag(at: 1)
+        XCTAssertTrue(model.drag(index: 1, to: CurvePoint(2, 0), from: origin!, lock: .free))
+        XCTAssertEqual(session.edit.curve.white[1].y, 0, accuracy: 1e-12,
+                       "y 必须保持用户拖到的值，不能被夹回")
+        XCTAssertLessThan(session.edit.curve.white[1].y, session.edit.curve.white[0].y)
+        XCTAssertEqual(CurveLUT.direction(of: session.edit.curve.white), .decreasing)
+        XCTAssertTrue(zip(model.preview, model.preview.dropFirst()).allSatisfy { $1 <= $0 },
+                      "反相预览必须整体非递增")
+        XCTAssertEqual(session.history.count, base, "拖动中不写历史")
+        XCTAssertTrue(model.endDrag())
+        XCTAssertEqual(session.history.count, base + 1, "一次拖动 = 一条历史")
+
+        // Endpoints may swap heights: first up to the top, then last down to the bottom.
+        let swapped = CatalogSession()
+        swapped.applyEdit { $0.curve.white = [CurvePoint(0, 0), CurvePoint(2, 2)] }
+        swapped.commitEdit(label: "起点")
+        let swapModel = CurveEditorModel(session: swapped, channel: .white)
+        XCTAssertTrue(swapModel.drag(index: 0, to: CurvePoint(0, 2),
+                                     from: CurvePoint(0, 0), lock: .free))
+        XCTAssertTrue(swapModel.drag(index: 1, to: CurvePoint(2, 0),
+                                     from: CurvePoint(2, 2), lock: .free))
+        XCTAssertEqual(swapped.edit.curve.white[0].y, 2, accuracy: 1e-12)
+        XCTAssertEqual(swapped.edit.curve.white[1].y, 0, accuracy: 1e-12)
+        XCTAssertEqual(CurveLUT.direction(of: swapped.edit.curve.white), .decreasing)
+
+        // The negative control: up-then-down is mixed, so the write never happens.
+        let mixedSession = CatalogSession()
+        let increasing = [CurvePoint(0, 0), CurvePoint(1, 0.5), CurvePoint(2, 1)]
+        mixedSession.applyEdit { $0.curve.white = increasing }
+        mixedSession.commitEdit(label: "起点")
+        let mixedModel = CurveEditorModel(session: mixedSession, channel: .white)
+        let mixedBase = mixedSession.history.count
+        let candidate = mixedModel.proposedDrag(index: 1, to: CurvePoint(1, 2),
+                                                from: CurvePoint(1, 0.5), lock: .free)
+        XCTAssertEqual(candidate.flatMap { CurveLUT.shapeError(of: $0) }, .mixedDirection)
+        XCTAssertFalse(CurveShapeError.mixedDirection.hint.isEmpty)
+        XCTAssertFalse(mixedModel.drag(index: 1, to: CurvePoint(1, 2),
+                                       from: CurvePoint(1, 0.5), lock: .free),
+                       "mixed direction must be refused, not silently flattened")
+        XCTAssertEqual(mixedSession.edit.curve.white, increasing, "the last legal shape stays")
+        XCTAssertEqual(mixedSession.history.count, mixedBase, "a refused drag writes no history")
+
+        print("invert · last y \(session.edit.curve.white[1].y) · swapped "
+              + "\(swapped.edit.curve.white.map(\.y)) · mixed refused with "
+              + "\(CurveShapeError.mixedDirection.hint)")
+    }
+
 
     /// 双击内部的点 → 删掉，一条历史；双击两个端点 → 点数不变、没有历史、不报错。
     func testDoubleClickDeletesAnInteriorPointAndTheEndpointsRefuseSilently() {

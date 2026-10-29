@@ -664,9 +664,10 @@ public enum CurveEditor {
     /// a steep segment is a legitimate midtone S, not an overshoot) and rule 4 never reads it.
     /// Both ends of the tail move on the plot, so both are clamped: dragging the white point up is
     /// capped at `prev.y + 2·Δx`, and dragging the point *before* it down is floored at
-    /// `last.y − 2·Δx`. A descending tail (`slope < 0`) is left alone — the kernel already flattens it
-    /// to a ceiling (`HDRCurve.tailSlopeFloor`), and taking the white point below its neighbour has
-    /// been legal since 061.
+    /// `last.y − 2·Δx`. A descending tail (`slope < 0`) is limited the same way by absolute value —
+    /// `−2` is the floor — because 派单 137 lets an inverted curve keep its descending continuation;
+    /// it is no longer flattened to a ceiling. Taking the white point below its neighbour has been
+    /// legal since 061 and now actually renders the descent.
     public static func clampTail(_ y: Double, x: Double, index: Int, in points: [CurvePoint]) -> Double {
         guard points.count >= 2 else { return y }
         let last = points.count - 1
@@ -871,6 +872,11 @@ public struct CurveEditorModel {
     ///
     /// Not a second interpolation. `CurveLUT.buildOne` is what `RenderGraph` uploads, monotone-cubic
     /// overshoot clamp and identity fallback included, so the line on screen is the line in the pixels.
+    ///
+    /// 137: for an **inverted W** the drawn shape and the uploaded table intentionally differ — the
+    /// panel must draw the points the user placed, while `CurveLUT.buildTable` gives the renderer the
+    /// identity for a luminance gain (a negative gain is not physical). `buildOne`, not `buildTable`,
+    /// is therefore the right call here; R/G/B have no such substitution.
     public var preview: [Float] { CurveLUT.buildOne(points) }
 
     /// Which of the four tables are the identity — what the kernel's copy branch keys on.
@@ -921,16 +927,33 @@ public struct CurveEditorModel {
     }
 
     /// One mouse-move: `applyEdit` only — **no** snapshot, however many of these fire.
+    ///
+    /// 派单 137: a move that would leave the list **mixed-direction** (one segment up, another down)
+    /// is refused here, before anything is written. The document therefore keeps the last legal shape
+    /// the table was built from, and the panel can show `CurveLUT.shapeError`'s reason. Every other
+    /// move — including one that takes a point below its neighbour on a consistently descending
+    /// curve — is written exactly as dragged; there is no y clamp.
     @discardableResult
     public func drag(index: Int, to target: CurvePoint, from origin: CurvePoint,
                      lock: CurveAxisLock) -> Bool {
         let current = points
-        guard current.indices.contains(index) else { return false }
-        var next = current
-        next[index] = CurveEditor.movedPoint(target, index: index, in: current, from: origin, lock: lock)
-        guard next != current else { return false }
+        guard let next = proposedDrag(index: index, to: target, from: origin, lock: lock),
+              next != current else { return false }
+        guard CurveLUT.shapeError(of: next) == nil else { return false }
         write(next)
         return true
+    }
+
+    /// The point list this drag *would* write, without writing it. The view uses this to put the
+    /// named shape error in the read-out row; `drag` uses it to refuse the write.
+    public func proposedDrag(index: Int, to target: CurvePoint, from origin: CurvePoint,
+                             lock: CurveAxisLock) -> [CurvePoint]? {
+        let current = points
+        guard current.indices.contains(index) else { return nil }
+        var next = current
+        next[index] = CurveEditor.movedPoint(target, index: index, in: current,
+                                             from: origin, lock: lock)
+        return next
     }
 
     /// Mouse up: the one snapshot for the whole drag. A press that never moved commits nothing
@@ -1112,6 +1135,10 @@ public struct CurvePanel: View {
     /// not become "delete the point I just made".
     @State private var justInserted: (index: Int, time: TimeInterval)?
 
+    /// 派单 137 — why the last drag was refused (mixed direction), shown in the read-out row without
+    /// changing the card's height. Cleared when the next press starts or a legal move lands.
+    @State private var shapeHint: String?
+
     private struct Press {
         /// The point under the press, `nil` in the empty area.
         let index: Int?
@@ -1134,7 +1161,8 @@ public struct CurvePanel: View {
         let table = model.preview
         // 069: the reading is a function of the point and of nothing else — not of the view, so
         // zooming cannot change what a point says (`testTheReadoutIsTheSameTextInBothViews`).
-        let reading = press.flatMap { p -> String? in
+        // 137: a refused mixed-direction drag takes the same row, so the hint costs no height.
+        let reading = shapeHint ?? press.flatMap { p -> String? in
             guard let index = p.index, points.indices.contains(index) else { return nil }
             return CurvePointReadout.text(for: points[index])
         }
@@ -1355,6 +1383,7 @@ public struct CurvePanel: View {
 
     private func pressed(_ value: DragGesture.Value, geometry: CurvePlotGeometry) {
         if press == nil {
+            shapeHint = nil
             let hit = geometry.hitIndex(model.points, at: value.startLocation)
             press = Press(index: hit, location: value.startLocation,
                           origin: hit.flatMap { model.beginDrag(at: $0) }, travelled: 0)
@@ -1372,6 +1401,14 @@ public struct CurvePanel: View {
                                 geometry.v(atY: value.location.y))
         let lock = CurveAxisLock.from(translation: value.translation,
                                       shift: NSEvent.modifierFlags.contains(.shift))
+        // 137: a mixed-direction list is refused **with a reason** rather than silently flattened. The
+        // table keeps the last legal shape; the row says why this move did not land.
+        if let next = model.proposedDrag(index: index, to: target, from: origin, lock: lock),
+           let error = CurveLUT.shapeError(of: next) {
+            shapeHint = error.hint
+            return
+        }
+        shapeHint = nil
         // `applyEdit` only — ten of these make one history entry, because nothing commits until `released`.
         model.drag(index: index, to: target, from: origin, lock: lock)
     }

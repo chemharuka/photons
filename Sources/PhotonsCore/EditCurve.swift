@@ -8,6 +8,23 @@ import Foundation
 /// can never make the curve fold back on itself — a fold would invert tones and is the classic
 /// spline artifact in tone curves.
 ///
+/// **派单 137 — a curve may descend as a whole.** Fritsch–Carlson's "no fold" property is about the
+/// *shape* (the table never turns back on itself), not about the sign of the slope. A film negative
+/// inverted through a tone curve is a legitimate non-increasing shape: right point below left point,
+/// every adjacent sample descending. `buildOne` therefore sorts the points, inspects the sign of all
+/// adjacent `Δv`, and dispatches:
+///
+///   · all `Δv ≥ 0` → the historical non-decreasing path, **byte for byte**;
+///   · all `Δv ≤ 0` with at least one `Δv < 0` → reflect `v → 1 − v`, run that same path, reflect the
+///     table back (`v → 1 − v`). The no-fold guarantee is inherited, not re-derived;
+///   · mixed signs (up then down, or down then up) → `CurveShapeError.mixedDirection`. The table falls
+///     back to the identity for a hand-written document; the editor refuses the write and shows the
+///     reason, so the picture keeps the last legal shape.
+///
+/// The **axis is untouched** (派单 030/062): `u = log1p`/sRGB/`log2` still samples `0…1` in increasing
+/// order. Only the sampled `v` descends — a falling table on an increasing axis, never a reversed
+/// axis.
+///
 /// ## 派单 030: the same tables, a different axis, four times the resolution
 ///
 /// The y axis is no longer a display value but the **log-light coordinate** of `HDRCurveAxis`
@@ -39,10 +56,24 @@ public enum CurveLUT {
         var out = [Float](repeating: 0, count: tableCount * size)
         let tables = group.tables
         for (t, points) in tables.enumerated() {
-            let table = buildOne(points)
+            let table = buildTable(points, index: t)
             for i in 0..<size { out[t * size + i] = table[i] }
         }
         return out
+    }
+
+    /// One of the four tables, by its buffer slot (0 = W, 1 = R, 2 = G, 3 = B).
+    ///
+    /// **W is a luminance gain, so it may never be negative** (派单 137). A non-increasing W point list
+    /// is a valid shape in the document — the editor must not throw it away — but multiplying the
+    /// pixel by a descending gain would subtract light and can produce negative values, which has no
+    /// physical meaning. The cell's rule is therefore: an inverted W is stored (and drawn as the user
+    /// drew it) but its **table is the identity**, and the inversion is carried by R/G/B. The same
+    /// function is what the renderer's partial rebuild calls, so a drag and a full build cannot
+    /// disagree about which table W is.
+    public static func buildTable(_ points: [CurvePoint], index: Int) -> [Float] {
+        if index == 0, direction(of: points) == .decreasing { return identityTable() }
+        return buildOne(points)
     }
 
     /// Identity table: `v == x` at every sample.
@@ -82,10 +113,12 @@ public enum CurveLUT {
     /// `(lut[N−1] − lut[N−2]) · (N−1)` — exactly 1 for the identity table, < 1 for a roll-off, 0 for
     /// a ceiling the user drew at the right end, and **up to 2** for a steepened HDR tail (派单 080:
     /// the clamp used to stop at 1, which silently threw away every slope the user drew above it).
-    /// The kernel clamps it into `[0, HDRCurve.tailSlopeLimit]` — the value here is the **raw**
-    /// estimate that goes into the uniform, and both sides clamp with the same two numbers
-    /// (`HDRCurve.clampTailSlope`), so a test can compare them. Only the tail is extrapolated: for
-    /// `u ≤ 1` this number is never read, which is why the other segments need no ceiling of their own.
+    /// A non-increasing table's tail is **negative** (派单 137): the kernel clamps the raw estimate
+    /// into `[−HDRCurve.tailSlopeLimit, +HDRCurve.tailSlopeLimit]`, so an inverted curve keeps its
+    /// descending continuation instead of being flattened to a ceiling. Both sides clamp with the
+    /// same two numbers (`HDRCurve.clampTailSlope`), so a test can compare them. Only the tail is
+    /// extrapolated: for `u ≤ 1` this number is never read, which is why the other segments need no
+    /// ceiling of their own.
     public static func slopes(_ tables: [Float]) -> [Float] {
         guard tables.count == tableCount * size else {
             return [Float](repeating: 1, count: tableCount)
@@ -170,6 +203,32 @@ public enum CurveLUT {
         return out
     }
 
+    /// The direction of the points as `buildOne` will see them — sorted by x, then de-duplicated.
+    public static func direction(of rawPoints: [CurvePoint]) -> CurveDirection {
+        direction(ofPrepared: prepared(rawPoints))
+    }
+
+    private static func direction(ofPrepared pts: [CurvePoint]) -> CurveDirection {
+        guard pts.count >= 2 else { return .increasing }
+        var up = false
+        var down = false
+        for i in 0..<(pts.count - 1) {
+            let dy = pts[i + 1].v - pts[i].v
+            if dy > 0 { up = true } else if dy < 0 { down = true }
+        }
+        if up && down { return .mixed }
+        return down ? .decreasing : .increasing
+    }
+
+    /// The named reason a point list cannot be built, or `nil` when it can.
+    public static func shapeError(of points: [CurvePoint]) -> CurveShapeError? {
+        direction(of: points) == .mixed ? .mixedDirection : nil
+    }
+
+    private static func prepared(_ rawPoints: [CurvePoint]) -> [CurvePoint] {
+        dedupe(rawPoints.sorted { $0.x < $1.x }, axis: CurvePoint.maximum)
+    }
+
     /// One table from control points: normalise, then Fritsch–Carlson, then **enforce** monotonicity.
     ///
     /// **The two ends are constants, not extrapolations (061).** A point list need not start at `x = 0`
@@ -187,10 +246,18 @@ public enum CurveLUT {
     /// last bit (`HDRCurveTests` and `CurvePanelTests` compare the arrays, not a tolerance).
     ///
     /// Layer 2 of §5.4: Fritsch–Carlson guarantees the *interpolant* is monotone between monotone
-    /// data, but a user can still hand us y values that go down (the editor forbids it, documents do
-    /// not). The tabulated `min(diff) > 0` check is the object-level promise the kernel relies on —
-    /// a curve that folds is not "a bit wrong", it inverts tones — so a fold falls back to the
-    /// identity, the same failure path `pts.count < 2` already takes.
+    /// data, but a document or a caller can still hand us y values that go both up and down. The
+    /// tabulated fold check is the object-level promise the kernel relies on — a curve that folds is
+    /// not "a bit wrong", it inverts tones — so a fold falls back to the identity, the same failure
+    /// path `pts.count < 2` already takes.
+    ///
+    /// 派单 137: "monotone" now means **one direction**, not "non-decreasing". A list whose adjacent
+    /// `Δv` are all ≤ 0 (and not all 0) takes the same Fritsch–Carlson path with `v` reflected
+    /// (`v → 1 − v`) and the finished table reflected back. The no-fold check is therefore inherited:
+    /// the reflected table is non-decreasing exactly where the historical one is, and the final table
+    /// is non-increasing. Mixed signs return the identity here (a hand-written document still renders
+    /// deterministically); the editor rejects such a write with `CurveShapeError.mixedDirection`, so
+    /// in the product the last legal shape stays on screen.
     /// - Parameter n: table length. `CurveLUT.size` (4096) everywhere in the product; a test may ask
     ///   for 1024 or 65536 to measure what the resolution is worth (`HDRCurveTests`, 030 §6).
     public static func buildOne(_ rawPoints: [CurvePoint], size requested: Int? = nil) -> [Float] {
@@ -200,19 +267,43 @@ public enum CurveLUT {
         // so this is the axis-derived window `dedupeWindow`, not `==` (two points a few nanometres
         // apart are one point, and a segment that short makes the spline spike — see `dedupe`). The
         // last point written wins (the newest hand edit), as the old 1e-6 window did.
-        var pts = rawPoints.sorted { $0.x < $1.x }
-        pts = dedupe(pts, axis: CurvePoint.maximum)
+        let pts = prepared(rawPoints)
 
         guard pts.count >= 2 else { return identity }
 
-        let n = pts.count
-        let h = (0..<(n - 1)).map { pts[$0 + 1].u - pts[$0].u }
+        switch direction(ofPrepared: pts) {
+        case .mixed:
+            // A hand-written document can hold an up-then-down list. There is no "last legal shape"
+            // to recover inside a pure build, so the deterministic answer is the identity (the same
+            // fallback the fold check has always taken). The panel never writes this shape.
+            return identity
+        case .increasing:
+            return monotoneTable(u: pts.map(\.u), v: pts.map(\.v),
+                                 tableSize: tableSize, identity: identity)
+        case .decreasing:
+            // `1 − v` turns a descending list into an ascending one without changing any spacing, so
+            // this is the *same* interpolant — not a second algorithm. Reflect the finished table
+            // back; Float rounding preserves the reversed order because subtraction is monotone.
+            let reflected = monotoneTable(u: pts.map(\.u), v: pts.map { 1 - $0.v },
+                                          tableSize: tableSize, identity: identity)
+            return reflected.map { Float(min(max(1 - Double($0), 0), 1)) }
+        }
+    }
+
+    /// The historical non-decreasing table, on plain `u`/`v` arrays so the descending path can hand
+    /// it a reflected `v` without constructing points (and without a card-coordinate round trip).
+    private static func monotoneTable(u: [Double], v: [Double], tableSize: Int,
+                                      identity: [Float]) -> [Float] {
+        let n = u.count
+        guard n >= 2 else { return identity }
+
+        let h = (0..<(n - 1)).map { u[$0 + 1] - u[$0] }
         // The same window in the engine's coordinate (`u = x / maximum`) — `1e-6`, independent of how
         // wide the card is. After `dedupe` no surviving gap can be this small, so this is the identity
         // fallback for input `dedupe` cannot order (a non-finite coordinate), not a live filter.
         let uWindow = dedupeWindow() / CurvePoint.maximum
         guard h.allSatisfy({ $0 > uWindow }) else { return identity }
-        let delta = (0..<(n - 1)).map { (pts[$0 + 1].v - pts[$0].v) / h[$0] }
+        let delta = (0..<(n - 1)).map { (v[$0 + 1] - v[$0]) / h[$0] }
 
         // Fritsch–Carlson tangents.
         var m = [Double](repeating: 0, count: n)
@@ -242,16 +333,16 @@ public enum CurveLUT {
         var seg = 0
         for i in 0..<tableSize {
             let x = Double(i) / Double(tableSize - 1)
-            if x <= pts[0].u {
-                out[i] = Float(pts[0].v)
+            if x <= u[0] {
+                out[i] = Float(v[0])
                 continue
             }
-            if x >= pts[n - 1].u {
-                out[i] = Float(pts[n - 1].v)
+            if x >= u[n - 1] {
+                out[i] = Float(v[n - 1])
                 continue
             }
-            while seg < n - 2 && x > pts[seg + 1].u { seg += 1 }
-            let t = (x - pts[seg].u) / h[seg]
+            while seg < n - 2 && x > u[seg + 1] { seg += 1 }
+            let t = (x - u[seg]) / h[seg]
             let t2 = t * t
             let t3 = t2 * t
             let h00 = 2 * t3 - 3 * t2 + 1
@@ -260,15 +351,46 @@ public enum CurveLUT {
             let h11 = t3 - t2
             // Split into two sums: one expression of six products is past what the type checker
             // will do in reasonable time.
-            let a = h00 * pts[seg].v + h10 * h[seg] * m[seg]
-            let b = h01 * pts[seg + 1].v + h11 * h[seg] * m[seg + 1]
+            let a = h00 * v[seg] + h10 * h[seg] * m[seg]
+            let b = h01 * v[seg + 1] + h11 * h[seg] * m[seg + 1]
             let y = a + b
             out[i] = Float(min(max(y, 0), 1))
         }
 
-        // §5.4 layer 2: the table must not fold. Tolerance 0 — equal neighbours are monotone,
-        // a single descending step is not.
+        // §5.4 layer 2: the *reflected* table must not fold either. Tolerance 0 — equal neighbours are
+        // monotone, a single step in the wrong direction is not. (The final reflection in `buildOne`
+        // preserves this exactly, so the descending table inherits the check.)
         guard zip(out, out.dropFirst()).allSatisfy({ $1 >= $0 }) else { return identity }
         return out
     }
+}
+
+/// A point list's **overall direction** after the same sort/de-dupe `CurveLUT.buildOne` performs.
+///
+/// Flat lists answer `.increasing`: that is the historical path and its table is both non-decreasing
+/// and non-increasing, so it needs no second representation. `.mixed` is exactly the shape the old
+/// code silently flattened: one adjacent step up and another down.
+public enum CurveDirection: Sendable, Equatable {
+    case increasing
+    case decreasing
+    case mixed
+}
+
+/// Why a point list is not a curve this engine can build (派单 137).
+///
+/// Named, not a bare `false`, because the panel has to tell the user *why* a drag did not land:
+/// "先升后降" is a different message from "点太少" or an out-of-range coordinate.
+public enum CurveShapeError: Error, Equatable, CustomStringConvertible {
+    case mixedDirection
+
+    public var description: String {
+        switch self {
+        case .mixedDirection:
+            return "曲线只能整体递增或整体递减，不能先升后降（或先降后升）"
+        }
+    }
+
+    /// The one-line hint the panel shows in its read-out row. Kept next to the error so the word
+    /// the model rejects with and the word the user reads cannot drift.
+    public var hint: String { description }
 }

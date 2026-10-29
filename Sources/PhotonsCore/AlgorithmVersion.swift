@@ -55,8 +55,12 @@ public enum StageAlgorithmVersion {
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
     public static let localApply = 3
-    /// Unchanged (030's HDR curve).
-    public static let curve = 1
+    /// **2** — 137: a curve may descend as a whole (film-negative inversion). A document whose curve
+    /// was already non-decreasing keeps its table byte for byte, but a document holding an inverted
+    /// curve used to render the identity (buildOne's fold fallback) and now renders the inverted
+    /// table, so the same stored points produce different pixels. The stage's generation moves;
+    /// the positive-curve pixels do not.
+    public static let curve = 2
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
     public static let contrast = 1
