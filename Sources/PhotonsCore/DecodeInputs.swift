@@ -157,6 +157,10 @@ public struct RenderInputs: Sendable, Equatable {
         RenderStage.order
             .filter { $0 != .localColor || edit.hasLocalColor }
             .filter { $0 != .hsl || edit.hasHSL }
+            // 140: and S3.6b is the seventh. A document without a sampled-and-adjusted point keeps
+            // this key byte for byte — `s3.6b-point-colour=point=none` is not a segment any cached
+            // render was written against.
+            .filter { $0 != .pointColour || edit.hasPointColor }
             // 2026-10-28: S3.7 is the third conditional stage, so a document with no grain keeps this
             // key **byte for byte** — without the filter every existing document's `renderInputs.key`
             // would grow a `s3.7-grain=gamt=0…` segment and miss every cached thumbnail once.

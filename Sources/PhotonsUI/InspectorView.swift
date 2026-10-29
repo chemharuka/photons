@@ -66,6 +66,13 @@ public struct InspectorView: View {
         /// sliders*, not a list of independent parameters, and the 色彩 workspace (073) exists to give
         /// them a home of their own. It is the same 24 document numbers Lightroom's HSL panel writes.
         case hsl
+        /// 140 — **点颜色**: one sampled colour, a hue window and three adjustments (S3.6b).
+        ///
+        /// Directly after HSL (`RenderStage.order` is `.hsl, .pointColour, .grade`): both select a
+        /// colour region on the display-referred frame, one by eight named bands and one by a sample.
+        /// Its own card for 076's reason — a dropper, a sample block and five window/adjustment rows
+        /// are a panel of their own, and a double-click on HSL must not undo a point-colour sample.
+        case pointColor
         /// 2026-10-28 (P0 色彩分级) — **色彩分级**: 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
         ///
         /// Directly after HSL, which is the pipeline's own order (`RenderStage.order` is … `.hsl,
@@ -137,6 +144,7 @@ public struct InspectorView: View {
             case .color: return "Color"
             case .blackAndWhite: return "黑白"
             case .hsl: return "HSL"
+            case .pointColor: return "点颜色"
             case .colorGrading: return "色彩分级"
             case .detail: return "细节"
             case .correction: return "校正"
@@ -222,6 +230,11 @@ public struct InspectorView: View {
     /// One line under the sliders: what the dropper did, or why it did nothing.
     @State private var hint: String?
     @State private var eyedropperArmed = false
+    /// 140 — the point-colour dropper's own armed flag and one-line hint. Separate from the white
+    /// balance dropper because they write different fields; the loupe has one one-shot handler, so
+    /// arming one cancels the other rather than silently replacing its callback.
+    @State private var pointDropperArmed = false
+    @State private var pointHint: String?
     /// The 自动黑电平 icon's hover state: the only thing about it that changes on pointer-over
     /// (no frame, no fill — see `autoBlackLevelButton`).
     @State private var autoBlackHovered = false
@@ -348,6 +361,8 @@ public struct InspectorView: View {
             blackAndWhiteCard
         case .hsl:
             hslCard
+        case .pointColor:
+            pointColorCard
         case .colorGrading:
             colorGradingCard
         case .detail:
@@ -821,6 +836,140 @@ public struct InspectorView: View {
                 }
             }
         })
+    }
+
+    /// 140 — **点颜色**: a dropper, the sampled colour block, and five rows.
+    ///
+    /// The rows are `PointColorAxis.allCases` (范围 / 过渡 / 色相 / 饱和 / 亮度), drawn through the
+    /// panel's one `sliderRow`; the first two are the window (degrees), the last three are the HSL
+    /// card's own unitless ±100. `.knob` is the right accent: S3.6b runs on the display-referred
+    /// frame, like S3.6/S3.8, not on the decode (yellow) or scene-light (red).
+    ///
+    /// **A sample alone does not make a pass.** The hint 「先吸取一个颜色」 is the UI's explanation of
+    /// the same predicate the pipeline uses (`PointColor.isActive`): with no sample, or with all three
+    /// adjustments at 0, the document has no S3.6b, so dragging 范围 before sampling still does
+    /// nothing to the picture — by construction, not by a neutral multiplication.
+    private var pointColorCard: some View {
+        let point = session.edit.color.point
+        return card(Section.pointColor.title, reset: { resets.pointColor() }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Button {
+                        togglePointColorDropper()
+                    } label: {
+                        Image(systemName: "eyedropper")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(loupe == nil)
+                    .help("点颜色吸管：点击画布上要调的颜色（Esc 取消）")
+                    .accessibilityIdentifier("inspector.pointColor.dropper")
+                    .foregroundStyle(pointDropperArmed
+                                     ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+
+                    Text(pointDropperArmed
+                         ? "点击画布取色 · Esc 取消"
+                         : (pointHint ?? (point?.isSampled == true ? "已取样" : "吸管")))
+                        .font(.system(size: 10))
+                        .foregroundStyle(pointDropperArmed ? AnyShapeStyle(.primary)
+                                                          : AnyShapeStyle(.secondary))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    PointColorSwatchView(point: point)
+                }
+                if point?.isSampled != true {
+                    Text("先吸取一个颜色（取样后调范围 / 过渡 / 色相 / 饱和 / 亮度）")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(PointColorAxis.allCases) { axis in
+                    sliderRow(axis.title, pointColorBinding(axis), axis.range, axis.format,
+                              shape: .knob,
+                              decimals: 0,
+                              rounding: .outward,
+                              editable: true,
+                              accessibilityID: "inspector.pointColor.\(axis.rawValue)",
+                              onReset: { resets.pointColorField(axis) }) { editing in
+                        if !editing { session.commitEdit(label: "点颜色 \(axis.title)") }
+                    }
+                    .background(PointColorProbeHost(rowID: axis.rawValue, point: point))
+                }
+            }
+        }
+        .background(PointColorProbeHost(rowID: PointColorProbe.cardID, point: point))
+        .onChange(of: session.anchorID) { _, _ in
+            // 「切照片解除」: an armed one-shot belongs to the photo it was armed on.
+            if pointDropperArmed {
+                loupe?.cancelEyedropper()
+                pointDropperArmed = false
+                pointHint = nil
+            }
+        }
+        .onChange(of: loupe?.isEyedropperArmed) { _, armed in
+            // Esc is handled by the canvas (`LoupeCanvasView.keyDown`), which disarms the loupe
+            // without calling this card. Follow the loupe's own flag so the button does not stay
+            // highlighted after the user cancelled.
+            if armed == false, pointDropperArmed { pointDropperArmed = false }
+        }
+    }
+
+    /// `color.point[axis]`, creating the optional object on the first drag. Reading a `nil` point
+    /// answers the card's own defaults (30° / 30° / 0 / 0 / 0), so the sliders are live before a
+    /// sample — they just produce no stage until one exists.
+    private func pointColorBinding(_ axis: PointColorAxis) -> Binding<Double> {
+        Binding(get: {
+            (session.edit.color.point ?? PointColor())[axis]
+        }, set: { value in
+            let stored = Self.quantized(value, quantum: 1)
+            session.applyEdit { model in
+                var point = model.color.point ?? PointColor()
+                point[axis] = stored
+                model.color.point = point
+            }
+        })
+    }
+
+    /// Arm the one-shot point dropper. One loupe handler exists, so arming this one disarms the
+    /// white-balance dropper (and vice versa) instead of leaving two armed flags pointing at one slot.
+    private func togglePointColorDropper() {
+        guard let loupe else { return }
+        if pointDropperArmed {
+            loupe.cancelEyedropper()
+            pointDropperArmed = false
+            pointHint = nil
+            return
+        }
+        if eyedropperArmed {
+            loupe.cancelEyedropper()
+            eyedropperArmed = false
+            hint = nil
+        }
+        pointDropperArmed = true
+        pointHint = "点击画布上要调的颜色…"
+        loupe.armEyedropper { outcome in applyPointColorDropper(outcome) }
+    }
+
+    /// The dropper's answer: one sample = one history row. It writes only `sampleHue`/`sampleChroma`
+    /// (`PointColorCommands`), never an adjustment, so an empty document's frame does not move.
+    private func applyPointColorDropper(_ outcome: LoupeController.DropperOutcome) {
+        switch outcome {
+        case .sampled(let sample):
+            pointDropperArmed = false
+            let lch = PointColor.sample(fromDecodedLinear: sample.rgb)
+            guard lch.chroma > HSLBands.chromaFloor else {
+                pointHint = "取样点接近灰色，没有可用的色相"
+                return
+            }
+            if PointColorCommands(session: session).sample(sample.rgb) {
+                pointHint = String(format: "已吸取 · H %.0f° · C %.3f", lch.hue, lch.chroma)
+            } else {
+                pointHint = "这个颜色已经取过了"
+            }
+        case .outsideImage, .notReady:
+            pointDropperArmed = loupe?.isEyedropperArmed ?? false
+            pointHint = outcome.hint
+        }
     }
 
     /// 2026-10-28 (P0 色彩分级) — **色彩分级**: three wheels, 阴影 / 中间调 / 高光, each 色相 + 饱和 + 亮度.
@@ -2801,6 +2950,10 @@ public struct PanelResets {
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
         case colorGrading
+        /// 140: 点颜色 — the optional sample and its five numbers, one double-click. The reset is
+        /// `nil` (the card's default), not a zeroed object: unsampled and “sample at 0° / C 0” are
+        /// the same state to the pipeline, and `nil` is the one that keeps the JSON byte-identical.
+        case pointColor
 
         /// The card title this group is — the name the user double-clicked, and the undo label.
         public var title: String {
@@ -2813,6 +2966,7 @@ public struct PanelResets {
             case .correction: return InspectorView.Section.correction.title
             case .effects: return InspectorView.Section.effects.title
             case .colorGrading: return InspectorView.Section.colorGrading.title
+            case .pointColor: return InspectorView.Section.pointColor.title
             }
         }
     }
@@ -3099,6 +3253,14 @@ public struct PanelResets {
             guard !session.edit.colorGrading.isIdentity else { return false }
             session.applyEdit { $0.colorGrading = .identity }
             return session.commitEdit(label: group.title, coalesce: false)
+
+        case .pointColor:
+            // 140: the card's own object back to `nil` — unsampled, window 30°/30°, three zeros. The
+            // other colour cards keep their work: a double-click here must not clear HSL's bands or
+            // Color's saturation (076's rule, read from the new card's side).
+            guard session.edit.color.point != nil else { return false }
+            session.applyEdit { $0.color.point = nil }
+            return session.commitEdit(label: group.title, coalesce: false)
         }
     }
 
@@ -3210,6 +3372,32 @@ public struct PanelResets {
             model[keyPath: row.region.wheel][row.axis] = row.defaultValue
         }
         return session.commitEdit(label: row.title, coalesce: false)
+    }
+
+    // MARK: 点颜色 (S3.6b, 140)
+
+    /// Double-click on the card's title: the whole point-colour object back to `nil` in one snapshot
+    /// (the `group(.pointColor)` case, exposed with the card's own verb like `hsl()`).
+    @discardableResult
+    public func pointColor() -> Bool {
+        group(.pointColor)
+    }
+
+    /// Double-click on one of the point card's five rows: **that** field back to `PointColor()`'s own
+    /// default (30° / 30° / 0 / 0 / 0), one snapshot, `coalesce: false` — a reset is a discrete command,
+    /// not the continuation of the drag before it.
+    ///
+    /// A `nil` point has nothing to reset: the card is already showing its defaults. The sampled hue
+    /// and chroma are **not** row-resettable — they are not sliders, and “reset the sample” is the
+    /// card's own title double-click (`group(.pointColor)`).
+    @discardableResult
+    public func pointColorField(_ axis: PointColorAxis) -> Bool {
+        guard var point = session.edit.color.point else { return false }
+        let fallback = PointColor()
+        guard point[axis] != fallback[axis] else { return false }
+        point[axis] = fallback[axis]
+        session.applyEdit { $0.color.point = point }
+        return session.commitEdit(label: "点颜色 \(axis.title)", coalesce: false)
     }
 }
 

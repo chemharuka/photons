@@ -235,6 +235,19 @@ enum EditParameters {
         t.field("saturation") { areEqual($0.saturation, $1.saturation) }
         t.field("bands") { areEqual($0.bands, $1.bands) }
         t.field("global") { areEqual($0.global, $1.global) }
+        // 140: S3.6b's optional object. Compared at the same tolerance as every other colour field,
+        // so a sample/drag is a real document change (and a JSON round trip is not).
+        t.field("point") { p0, p1 in
+            switch (p0.point, p1.point) {
+            case (nil, nil): return true
+            case let (a?, b?):
+                return areEqual(a.sampleHue, b.sampleHue) && areEqual(a.sampleChroma, b.sampleChroma)
+                    && areEqual(a.range, b.range) && areEqual(a.feather, b.feather)
+                    && areEqual(a.hue, b.hue) && areEqual(a.saturation, b.saturation)
+                    && areEqual(a.luminance, b.luminance)
+            default: return false
+            }
+        }
         return t
     }()
 

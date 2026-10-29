@@ -94,12 +94,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // card, so the order still comes from `Section.allCases`.
             return [.crop, .angle]
         case .colour:
-            // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it — same subject
-            // (colour), different partition (luminance instead of hue), and the 调整 panel is already
-            // nine cards long. 2026-10-28 (user): 黑白 moved here from 调整 as well, so the three
-            // colour-partition cards — luminance switch (S3.4), hue bands (S3.6), luminance wheels
-            // (S3.8) — sit together. Order still comes from `Section.allCases`.
-            return [.hsl, .colorGrading, .blackAndWhite]
+            // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it. 140: 点颜色
+            // sits between HSL and 色彩分级, the pipeline's own `.hsl, .pointColour, .grade` order.
+            // 2026-10-28 (user): 黑白 moved here from 调整 as well.
+            return [.hsl, .pointColor, .colorGrading, .blackAndWhite]
         case .masks:
             return [.masks]
         case .history:

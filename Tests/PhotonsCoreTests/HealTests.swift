@@ -471,7 +471,7 @@ final class HealTests: XCTestCase {
         let data = try JSONEncoder().encode(doc)
         let back = try JSONDecoder().decode(EditModel.self, from: data)
         XCTAssertEqual(back.healSpots, doc.healSpots)
-        XCTAssertEqual(EditModel.currentSchemaVersion, 10)
+        XCTAssertEqual(EditModel.currentSchemaVersion, 12)
 
         // A document with no spot writes **no** `healSpots` key, and a schema-9 blob re-encodes byte
         // for byte — the schema 7/8/9 rule, read a fourth time.

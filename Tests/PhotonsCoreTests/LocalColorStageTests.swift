@@ -303,9 +303,9 @@ final class LocalColorStageTests: XCTestCase {
         XCTAssertEqual(links(coloured).pipeline.lastIndex(of: .localColor)!,
                        links(coloured).pipeline.firstIndex(of: .color)! + 1,
                        "S3.5 must sit immediately after S3")
-        XCTAssertEqual(links(coloured).pipeline.firstIndex(of: .vignette)!,
-                       links(coloured).pipeline.firstIndex(of: .localColor)! + 1,
-                       "…and immediately before the vignette")
+        XCTAssertLessThan(links(coloured).pipeline.firstIndex(of: .vignette)!,
+                          links(coloured).pipeline.firstIndex(of: .color)!,
+                          "116: the vignette is the last linear pass, before S2/S3")
 
         // Identity is by value: 0/0 is not colour, a disabled mask is not colour, and neither is a
         // document with no masks at all.
@@ -329,7 +329,7 @@ final class LocalColorStageTests: XCTestCase {
         let withColour = try graph.render(coloured, options: RenderOptions(scale: 1, useCache: false))
         XCTAssertEqual(withColour.trace.executed.map(\.rawValue).joined(separator: " "),
                        "s0-geometry s1-scene-linear s1.5-mask-atlas s1.6-local s1.7-hdr-curve "
-                       + "s2-tone-map s3-color s3.5-local-color s3-vignette s4-display")
+                       + "s3-vignette s2-tone-map s3-color s3.5-local-color s4-display")
         XCTAssertNotNil(withColour.keys.localColor)
         print("TRACE exposure only: \(plain.trace.csv)")
         print("TRACE with local colour: \(withColour.trace.csv)")

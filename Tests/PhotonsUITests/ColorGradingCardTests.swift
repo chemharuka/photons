@@ -31,8 +31,8 @@ final class ColorGradingCardTests: XCTestCase {
     // MARK: - 1. 卡片清单、位置、行的表
 
     func testTheCardIsNineRowsAfterHSLInTheColourWorkspace() throws {
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .colorGrading, .blackAndWhite])
-        XCTAssertEqual(InspectorView.sections(in: .colour).map(\.title), ["HSL", "色彩分级", "黑白"])
+        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .pointColor, .colorGrading, .blackAndWhite])
+        XCTAssertEqual(InspectorView.sections(in: .colour).map(\.title), ["HSL", "点颜色", "色彩分级", "黑白"])
         XCTAssertEqual(InspectorView.Section.colorGrading.title, "色彩分级", "标题 = 卡名 = 撤销标签")
 
         // Nine rows, three per wheel, in the panel's order.

@@ -52,9 +52,10 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(InspectorView.sections(in: .adjust),
                        InspectorView.scrollingSections.filter {
                            $0 != .masks && $0 != .crop && $0 != .angle && $0 != .hsl && $0 != .history
+                               && $0 != .pointColor
                                && $0 != .colorGrading && $0 != .blackAndWhite
                        },
-                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 色彩分级 / 黑白 / 历史记录交给各自的工作区")
+                       "调整 = 既有面板的卡片，只把蒙版 / 裁切 / HSL / 点颜色 / 色彩分级 / 黑白 / 历史记录交给各自的工作区")
 
         let titles = Dictionary(uniqueKeysWithValues: InspectorWorkspace.allCases.map {
             ($0, InspectorView.cardTitles(in: $0))
@@ -67,7 +68,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
         XCTAssertEqual(titles[.transform], ["裁切", "旋转"])
-        XCTAssertEqual(titles[.colour], ["HSL", "色彩分级", "黑白"],
+        XCTAssertEqual(titles[.colour], ["HSL", "点颜色", "色彩分级", "黑白"],
                        "色彩工作区：HSL → 色彩分级 → 黑白（用户：黑白放在色彩分级下方）")
         XCTAssertEqual(titles[.history], ["历史记录"])
 
@@ -113,9 +114,10 @@ final class InspectorWorkspaceTests: XCTestCase {
 
         // 卡片枚举：Decode 删除后 9 张；裁切（变换）、HSL（色彩）、历史记录（077）各加一张 → 12 张；
         // 2026-10-28 效果（暗角 + 颗粒）再一张 → 13 张，黑白（S3.4）→ 14 张，色彩分级（S3.8）→ 15 张；
-        // 081 (2026-10-28) 删掉 预设 卡 → 14 张；087 加 角度 卡 → 15 张；096 加 校正 卡 → 16 张。
+        // 081 (2026-10-28) 删掉 预设 卡 → 14 张；087 加 角度 卡 → 15 张；096 加 校正 卡 → 16 张；
+        // 140 加 点颜色 卡 → 17 张。
         // 直方图仍排第一 —— 这张测试钉的是过滤，不是重排。
-        XCTAssertEqual(InspectorView.Section.allCases.count, 16)
+        XCTAssertEqual(InspectorView.Section.allCases.count, 17)
         XCTAssertEqual(Array(InspectorView.sectionTitles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         // 077：历史记录排在最后（蒙版仍是它前面最后一张参数卡）。
         XCTAssertEqual(InspectorView.sectionTitles.suffix(2), ["蒙版", "历史记录"])
