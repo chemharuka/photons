@@ -133,7 +133,9 @@ public enum GainMapHEIC {
     /// values are extended-range linear light, while `sdr` is display-encoded (OETF applied).
     @discardableResult
     public static func write(sdr: DisplayImage, linear: LinearPixels, to url: URL,
-                             options: HDRGainMapOptions = HDRGainMapOptions()) throws -> HDRWriteResult {
+                             options: HDRGainMapOptions = HDRGainMapOptions(),
+                             metadata: ExportMetadataContext = ExportMetadataContext())
+        throws -> HDRWriteResult {
         guard sdr.width == linear.width, sdr.height == linear.height else {
             throw GainMapHEICError.gainMapFailed(
                 "SDR base is \(sdr.width)×\(sdr.height) but the linear render is "
@@ -146,7 +148,8 @@ public enum GainMapHEIC {
         if fullPeak < sdrThreshold {
             try Exporter.write(sdr, to: url,
                                options: ExportOptions(format: .heic, quality: options.quality,
-                                                      bitDepth: options.bitDepth))
+                                                      bitDepth: options.bitDepth),
+                               metadata: metadata)
             return HDRWriteResult(
                 headroom: 1,
                 isHDR: false,
@@ -161,13 +164,15 @@ public enum GainMapHEIC {
         switch options.gainMap {
         case .apple:
             if #available(macOS 14.1, *) {
-                try writeApple(sdr: sdr, map: map, headroom: used, to: url, options: options)
+                try writeApple(sdr: sdr, map: map, headroom: used, to: url, options: options,
+                               metadata: metadata)
             } else {
                 throw GainMapHEICError.writeFailed(url, "Apple gain maps need macOS 14.1")
             }
         case .iso, .mono:
             if #available(macOS 15.0, *) {
-                try writeISO(sdr: sdr, map: map, headroom: used, to: url, options: options)
+                try writeISO(sdr: sdr, map: map, headroom: used, to: url, options: options,
+                             metadata: metadata)
             } else {
                 throw GainMapHEICError.writeFailed(url, "ISO gain maps need macOS 15")
             }
@@ -196,7 +201,8 @@ public enum GainMapHEIC {
 
     @available(macOS 15.0, *)
     private static func writeISO(sdr: DisplayImage, map: GainMapPixels, headroom: Double,
-                                 to url: URL, options: HDRGainMapOptions) throws {
+                                 to url: URL, options: HDRGainMapOptions,
+                                 metadata: ExportMetadataContext) throws {
         let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
@@ -205,8 +211,14 @@ public enum GainMapHEIC {
                                                          1, nil) else {
             throw GainMapHEICError.writeFailed(url, "no HEIC destination")
         }
-        var properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: options.quality]
-        CGImageDestinationAddImage(dest, baseCG, properties as CFDictionary)
+        var properties = metadata.properties(outputWidth: sdr.width, outputHeight: sdr.height,
+                                             format: .heic)
+        properties[kCGImageDestinationLossyCompressionQuality] = options.quality
+        if let xmp = metadata.xmpMetadata(outputWidth: sdr.width, outputHeight: sdr.height) {
+            CGImageDestinationAddImageAndMetadata(dest, baseCG, xmp, properties as CFDictionary)
+        } else {
+            CGImageDestinationAddImage(dest, baseCG, properties as CFDictionary)
+        }
 
         let isMono = options.gainMap == .mono
         let pixelFormat = isMono ? kCVPixelFormatType_OneComponent8 : kCVPixelFormatType_32ARGB
@@ -274,7 +286,8 @@ public enum GainMapHEIC {
 
     @available(macOS 14.1, *)
     private static func writeApple(sdr: DisplayImage, map: GainMapPixels, headroom: Double,
-                                   to url: URL, options: HDRGainMapOptions) throws {
+                                   to url: URL, options: HDRGainMapOptions,
+                                   metadata: ExportMetadataContext) throws {
         let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth)
         guard let gainCG = map.appleCGImage() else {
             throw GainMapHEICError.gainMapFailed("could not build the Apple gain map bitmap")
@@ -297,7 +310,13 @@ public enum GainMapHEIC {
         default:
             maker = ["33": 0.0, "48": (1.60101 - stops) / 0.101]
         }
-        let properties: [String: Any] = [kCGImagePropertyMakerAppleDictionary as String: maker]
+        var properties: [String: Any] = [:]
+        for (key, value) in metadata.properties(outputWidth: sdr.width,
+                                                outputHeight: sdr.height,
+                                                format: .heic) {
+            properties[key as String] = value
+        }
+        properties[kCGImagePropertyMakerAppleDictionary as String] = maker
         let baseCI = CIImage(cgImage: baseCG, options: [.properties: properties])
         let gainCI = CIImage(cgImage: gainCG)
 
@@ -314,6 +333,42 @@ public enum GainMapHEIC {
             try context.writeHEIFRepresentation(of: baseCI, to: url, format: format,
                                                 colorSpace: space, options: ciOptions)
         } catch {
+            throw GainMapHEICError.writeFailed(url, error.localizedDescription)
+        }
+        // `writeHEIFRepresentation` honours `CIImage.properties` but not
+        // `kCGImageDestinationMetadata`, so the XMP packet is merged into the finished container.
+        // Copy-image-source keeps the primary image and its gain-map auxiliary image untouched.
+        if let xmp = metadata.xmpMetadata(outputWidth: sdr.width, outputHeight: sdr.height) {
+            try mergeXMP(xmp, into: url)
+        }
+    }
+
+    /// Merge `metadata` into an existing container without re-encoding the pixels (or dropping the
+    /// auxiliary gain map). Used only on the Apple path, whose writer has no XMP option.
+    private static func mergeXMP(_ metadata: CGImageMetadata, into url: URL) throws {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw GainMapHEICError.writeFailed(url, "cannot reopen the written HEIC")
+        }
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).xmp-\(UUID().uuidString).heic")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL,
+                                                         UTType.heic.identifier as CFString,
+                                                         1, nil) else {
+            throw GainMapHEICError.writeFailed(url, "no HEIC destination for the XMP merge")
+        }
+        let options: [CFString: Any] = [kCGImageDestinationMetadata: metadata,
+                                        kCGImageDestinationMergeMetadata: true]
+        var error: Unmanaged<CFError>?
+        guard CGImageDestinationCopyImageSource(dest, source, options as CFDictionary, &error) else {
+            let why = error.map { ($0.takeRetainedValue() as Error).localizedDescription }
+                ?? "copy failed"
+            try? FileManager.default.removeItem(at: tmp)
+            throw GainMapHEICError.writeFailed(url, why)
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
             throw GainMapHEICError.writeFailed(url, error.localizedDescription)
         }
     }

@@ -165,14 +165,16 @@ public enum Exporter {
     ///
     /// - Returns: non-fatal HDR notes (an SDR fallback, a clipped headroom). Empty on the normal path.
     @discardableResult
-    public static func write(_ image: DisplayImage, to url: URL, options: ExportOptions) throws -> [String] {
+    public static func write(_ image: DisplayImage, to url: URL, options: ExportOptions,
+                             metadata: ExportMetadataContext = ExportMetadataContext()) throws -> [String] {
         if let hdr = options.hdr, hdr.enabled, options.format == .heic, let linear = image.linear {
             let result = try GainMapHEIC.write(sdr: image, linear: linear, to: url,
                                                options: HDRGainMapOptions(gainMap: hdr.gainMap,
                                                                           halfSize: hdr.halfSize,
                                                                           headroom: hdr.headroom,
                                                                           quality: options.quality,
-                                                                          bitDepth: options.bitDepth))
+                                                                          bitDepth: options.bitDepth),
+                                               metadata: metadata)
             return result.warnings
         }
         guard options.bitDepth == 8 || (options.bitDepth == 16 && options.format.supports16Bit) else {
@@ -187,15 +189,58 @@ public enum Exporter {
                                                          1, nil) else {
             throw ExportError.destinationFailed(url)
         }
-        var properties: [CFString: Any] = [:]
+        var properties = metadata.properties(outputWidth: image.width, outputHeight: image.height,
+                                             format: options.format)
         if options.format.supportsQuality {
             properties[kCGImageDestinationLossyCompressionQuality] = options.quality
         }
-        CGImageDestinationAddImage(dest, cg, properties as CFDictionary)
+        if let xmp = metadata.xmpMetadata(outputWidth: image.width,
+                                          outputHeight: image.height) {
+            CGImageDestinationAddImageAndMetadata(dest, cg, xmp, properties as CFDictionary)
+        } else {
+            CGImageDestinationAddImage(dest, cg, properties as CFDictionary)
+        }
         guard CGImageDestinationFinalize(dest) else {
             throw ExportError.finalizeFailed(url)
         }
+        // PNG's writer always adds its own EXIF block (colour space + dimensions) even when asked
+        // for nothing, and unlike JPEG it rejects the `NSNull` marker. A copy-image-source pass with
+        // an empty metadata object removes it without re-encoding the pixels.
+        if metadata.level == .none && options.format == .png {
+            try stripMetadata(at: url)
+        }
         return []
+    }
+
+    /// Rewrites `url` through `CGImageDestinationCopyImageSource` with an empty metadata object.
+    /// Used only for `.none` PNG, whose writer cannot be told to omit EXIF in the first place.
+    private static func stripMetadata(at url: URL) throws {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetCount(source) > 0 else { return }
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).strip-\(UUID().uuidString).png")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL,
+                                                         ExportFormat.png.utType.identifier as CFString,
+                                                         1, nil) else {
+            throw ExportError.encodeFailed("cannot reopen \(url.lastPathComponent) to strip metadata")
+        }
+        let empty = CGImageMetadataCreateMutable()
+        var error: Unmanaged<CFError>?
+        guard CGImageDestinationCopyImageSource(dest, source,
+                                                [kCGImageDestinationMetadata: empty] as CFDictionary,
+                                                &error) else {
+            let why = error.map { ($0.takeRetainedValue() as Error).localizedDescription }
+                ?? "copy failed"
+            try? FileManager.default.removeItem(at: tmp)
+            throw ExportError.encodeFailed("could not strip metadata: \(why)")
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw ExportError.encodeFailed("could not replace \(url.lastPathComponent): "
+                                           + error.localizedDescription)
+        }
     }
 
     /// Encode in memory (determinism tests compare digests without touching the filesystem).

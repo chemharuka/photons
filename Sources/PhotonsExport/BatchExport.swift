@@ -284,12 +284,24 @@ public enum BatchExporter {
                 return outcome
             }
 
-            // 5. encode.
-            try Exporter.write(image, to: url, options: preset.exportOptions)
+            // 5. encode. Metadata travels with the first encode so the output's EXIF pixel size is
+            //    the size we are actually writing (and 16-bit PNG keeps its depth: nothing re-encodes
+            //    it afterwards).
+            let pngAt16 = preset.format == .png && preset.effectiveBitDepth == 16
+            let embedsXMP = preset.metadataLevel == .all && preset.writeXMP
+                && item.edit != nil && preset.format.supportsXMPEmbedding && !pngAt16
+            let metadata = ExportMetadataContext(level: preset.metadataLevel,
+                                                 source: SourceMetadata.read(from: item.sourceURL),
+                                                 edit: item.edit,
+                                                 author: item.author,
+                                                 copyright: item.copyright,
+                                                 embedXMP: embedsXMP)
+            try Exporter.write(image, to: url, options: preset.exportOptions, metadata: metadata)
             let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
 
             // 6. metadata, when the preset asked for it. A failed packet does not discard a written
-            //    image. `.none` wins over the stored `writeXMP` flag on purpose.
+            //    image. `.none` wins over the stored `writeXMP` flag on purpose. When the encoder
+            //    already embedded the packet, the copy *is* the metadata carrier (no second write).
             switch preset.metadataLevel {
             case .none:
                 break
@@ -301,11 +313,15 @@ public enum BatchExporter {
                 }
             case .all:
                 if preset.writeXMP {
-                    do {
-                        outcome.xmpURL = try writeXMP(item: item, to: url, preset: preset,
-                                                      warnings: &warnings)
-                    } catch {
-                        warnings.append("XMP not written: \(error.localizedDescription)")
+                    if embedsXMP {
+                        outcome.xmpURL = url
+                    } else {
+                        do {
+                            outcome.xmpURL = try writeXMP(item: item, to: url, preset: preset,
+                                                          warnings: &warnings)
+                        } catch {
+                            warnings.append("XMP not written: \(error.localizedDescription)")
+                        }
                     }
                 }
             }
