@@ -548,13 +548,25 @@ private struct S1Params {
 }
 
 private struct S2Params {
-    var a: SIMD4<Float>   // contrast, travel, pad, pad
     // 085 — dShadow, dMid, dHighlight (all EV, already gated by `S2Regions.travelEV`), identity.
     var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
     // it the region lifts treat the matte's 0 as a picture pixel and the viewport's background bars
     // light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
     var c: SIMD4<Float>
+}
+
+/// 098 — mirror of `ContrastParams` in `Kernels/s1_8_contrast.metal`, byte for byte. One struct for
+/// every pass of the stage; each kernel reads the fields it needs.
+private struct ContrastParamsU {
+    var a: SIMD4<Float>    // t (= contrast/100), pivot EV, coarse ε, mid ε
+    var b: SIMD4<Float>    // k_c, k_m, k_f, gate lower knee
+    var c: SIMD4<Float>    // gate upper knee, pad, pad, pad
+    var luma: SIMD4<Float> // Rec2020 luma weights, pad
+    var rect: SIMD4<Float> // contentOrigin.xy, contentSize.xy (canvas pixels)
+    var d: SIMD4<Int32>    // canvasW, canvasH, q, coarse radius in the 1/q domain
+    var e: SIMD4<Int32>    // qW, qH, segment length, mid radius in the 1/q domain
+    var f: SIMD4<Int32>    // mode (0 = G statistics, 1 = D1 statistics), pad, pad, pad
 }
 
 /// Mirror of `HDRCurveParams` in `s1_7_hdr_curve.metal`, byte for byte (派单 030).
@@ -2781,15 +2793,10 @@ public final class RenderGraph {
             try encodeHeal(cb: cb, into: out, from: src, edit: edit, plan: plan, options: options)
 
         case .toneMap:
-            // 0107: two entry points, chosen by whether the document has a contrast setting at all.
-            // The one without it contains none of the log2/exp2 arithmetic, so `contrast == 0` is the
-            // pass it always was (see the `kContrast` note in the kernel).
-            let toneFunction = edit.light.contrast == 0 ? "s2_tone_map" : "s2_tone_map_contrast"
-            let p = try kernels.pipeline(file: "s2_tone_map", function: toneFunction)
-            // Only what bends the 0…1 range: contrast and the three region lifts. Blacks/whites are a
-            // level and moved to S1 (派单 019), so they no longer appear here — neither in the identity
-            // test nor in `keyMaterial(.toneMap)`.
-            let identity = edit.light.contrast == 0 && edit.light.highlights == 0
+            // 098: contrast moved to S1.8, so this stage is one entry point again: the three region
+            // lifts and the final clamp. It reads whatever the curve (or S1.8) produced.
+            let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
+            let identity = edit.light.highlights == 0
                 && edit.light.midtones == 0 && edit.light.shadows == 0
             // 085: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
             // kernel only weights and exponentiates.
@@ -2797,9 +2804,6 @@ public final class RenderGraph {
                                        midtones: edit.light.midtones,
                                        highlights: edit.light.highlights)
             var params = S2Params(
-                // `.y` is the bend's full-scale travel in EV — 8/(white − black) of the axis, the
-                // derived replacement for the old hard-coded `2.0` (0107, `S2Contrast.travelEV`).
-                a: SIMD4(Float(edit.light.contrast), Float(S2Contrast.travelEV), 0, 0),
                 b: SIMD4(Float(d.shadow), Float(d.mid), Float(d.high), identity ? 1 : 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
@@ -2810,6 +2814,12 @@ public final class RenderGraph {
             enc.setBytes(&params, length: MemoryLayout<S2Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
+
+        case .contrast:
+            // S1.8 — 098: the multiscale, edge-aware decomposition of Y in the scene-linear domain.
+            // Encoded **only** for documents whose contrast is non-zero (`hasContrastStage`), so a
+            // neutral document has no pass to be neutral in.
+            try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan)
 
         case .curve:
             // S1.7 — the one curve, in the log-light domain (派单 030). It reads the scene-linear
@@ -3006,6 +3016,140 @@ public final class RenderGraph {
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
         }
+    }
+
+    // MARK: - S1.8 contrast (098)
+
+    /// The stage: coarse guided filter → mid guided filter on the coarse residual → one full-resolution
+    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the three gains.
+    ///
+    /// The second filter's **input statistics** are built at `1/q` from the coarse coefficient map,
+    /// so the frame is only read at full resolution twice (pack + apply), not once per band.
+    private func encodeContrast(cb: MTLCommandBuffer, into out: MTLTexture,
+                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let q = MultiscaleContrast.block
+        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+        let frameShort = Double(min(plan.frameSize.x, plan.frameSize.y))
+        let radiusC = Int32(MultiscaleContrast.radiusQ(
+            fraction: MultiscaleContrast.coarseRadiusFraction,
+            cap: MultiscaleContrast.coarseRadiusCap, shortEdge: frameShort))
+        let radiusM = Int32(MultiscaleContrast.radiusQ(
+            fraction: MultiscaleContrast.midRadiusFraction,
+            cap: MultiscaleContrast.midRadiusCap, shortEdge: frameShort))
+        let gains = MultiscaleContrast.scaleGains(t: edit.light.contrast / 100)
+        let lw = ColorPrimaries.working.luminanceWeights
+
+        var params = ContrastParamsU(
+            a: SIMD4(Float(edit.light.contrast / 100), Float(MultiscaleContrast.pivotEV),
+                     Float(MultiscaleContrast.coarseEpsilon),
+                     Float(MultiscaleContrast.midEpsilon)),
+            b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
+                     Float(MultiscaleContrast.gateLo)),
+            c: SIMD4(Float(MultiscaleContrast.gateHi), 0, 0, 0),
+            luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
+            rect: SIMD4(plan.origin.x, plan.origin.y,
+                        Float(plan.content.width), Float(plan.content.height)),
+            d: SIMD4(Int32(w), Int32(h), Int32(q), radiusC),
+            e: SIMD4(Int32(qW), Int32(qH), 32, radiusM),
+            f: SIMD4(0, 0, 0, 0))
+
+        let base = try scratch("contrast-g-base", width: qW, height: qH, format: .rgba32Float)
+        let tmp = try scratch("contrast-g-tmp", width: qW, height: qH, format: .rgba32Float)
+        let boxedC = try scratch("contrast-g-coarse", width: qW, height: qH, format: .rgba32Float)
+        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba16Float)
+        let statsM = try scratch("contrast-g-mid", width: qW, height: qH, format: .rgba32Float)
+        let boxedM = try scratch("contrast-g-mid-boxed", width: qW, height: qH, format: .rgba32Float)
+        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba16Float)
+
+        // 1. Pack G's block statistics at full resolution.
+        let pack = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_pack")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(pack)
+        e0.setTexture(src, index: 0)
+        e0.setTexture(base, index: 1)
+        // Mode 0 never reads these two; bind the textures the later passes will write rather than
+        // aliasing `base` as both a read and a write binding.
+        e0.setTexture(coeffC, index: 2)
+        e0.setTexture(statsM, index: 3)
+        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e0, pack, ImageSize(width: qW, height: qH))
+        e0.endEncoding()
+
+        // 2. Coarse guided filter: box the statistics, then solve (a, b, gate).
+        params.e.w = radiusC
+        try contrastBox(cb: cb, from: base, tmp: tmp, to: boxedC, params: &params, qW: qW, qH: qH)
+        params.f.x = 0
+        let coeffPipe = try kernels.pipeline(file: "s1_8_contrast",
+                                             function: "s1_8_g_contrast_coeff")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(coeffPipe)
+        e1.setTexture(boxedC, index: 0)
+        e1.setTexture(coeffC, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e1, coeffPipe, ImageSize(width: qW, height: qH))
+        e1.endEncoding()
+
+        // 3. The mid band's input: `D1 = G − (a_c·G + b_c)` per pixel, packed as block statistics.
+        // The residual has to be sampled per pixel: its block mean from the *block* mean of G is
+        // always zero, because the self-guided base passes through that mean.
+        params.f.x = 1
+        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e2.setComputePipelineState(pack)
+        e2.setTexture(src, index: 0)
+        e2.setTexture(statsM, index: 1)
+        e2.setTexture(coeffC, index: 2)
+        e2.setTexture(statsM, index: 3)
+        e2.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e2, pack, ImageSize(width: qW, height: qH))
+        e2.endEncoding()
+
+        // 4. Mid guided filter on `D1`.
+        params.e.w = radiusM
+        try contrastBox(cb: cb, from: statsM, tmp: tmp, to: boxedM, params: &params, qW: qW, qH: qH)
+        params.f.x = 1
+        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e3.setComputePipelineState(coeffPipe)
+        e3.setTexture(boxedM, index: 0)
+        e3.setTexture(coeffM, index: 1)
+        e3.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e3, coeffPipe, ImageSize(width: qW, height: qH))
+        e3.endEncoding()
+
+        // 5. Full-resolution apply: one gain for all three channels.
+        let apply = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_apply")
+        guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e4.setComputePipelineState(apply)
+        e4.setTexture(src, index: 0)
+        e4.setTexture(coeffC, index: 1)
+        e4.setTexture(coeffM, index: 2)
+        e4.setTexture(out, index: 3)
+        e4.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e4, apply, plan.canvas)
+        e4.endEncoding()
+    }
+
+    /// The separable box mean of one statistics map: `from → tmp → to`.
+    private func contrastBox(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture,
+                             to: MTLTexture, params: inout ContrastParamsU,
+                             qW: Int, qH: Int) throws {
+        let h = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_h")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(h)
+        e0.setTexture(from, index: 0)
+        e0.setTexture(tmp, index: 1)
+        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatchSegments(e0, qW: qW, qH: qH)
+        e0.endEncoding()
+
+        let v = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_v")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(v)
+        e1.setTexture(tmp, index: 0)
+        e1.setTexture(to, index: 1)
+        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatchSegments(e1, qW: qW, qH: qH)
+        e1.endEncoding()
     }
 
     // MARK: - S3.8 纹理 / 清晰度 / 去雾 (2026-10-28, P0-6)

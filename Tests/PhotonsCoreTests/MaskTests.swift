@@ -566,29 +566,33 @@ final class MaskTests: XCTestCase {
              "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=2"),
             ("curve", "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862",
              "b132ce255825acb03824afe5c3cb87c382100d30c8dfa9e963da787e8445a259|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=1"),
-            ("toneMap", "202b13ef7ddf16faf5546ad8f49bcb7d82ff70424a495807affcd6da241df0b3",
-             "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862|con=20.00000;hi=-30.00000;sh=15.00000;alg=3"),
-            ("color", "526ab1472c5e8509ea2cf1fadb6e18cfa16ddfe927aa9ffc15d5b719d5ab1e60",
-             "202b13ef7ddf16faf5546ad8f49bcb7d82ff70424a495807affcd6da241df0b3|vib=15.00000;sat=-10.00000;alg=1"),
+            ("contrast", "97fccab085a1e87ab349e1fa3e4816c94be0cef6cb82b380945f15137b5bd84e",
+             "f680100fedaf169429f7c466e2338a02302a99eb9eea39537f014bf5f8014862|contrast|con=20.00000;alg=1"),
+            ("toneMap", "14c359713c582410aefc9197e02011fffc1b4c1fe7fe21a151a0f2b954bb028e",
+             "97fccab085a1e87ab349e1fa3e4816c94be0cef6cb82b380945f15137b5bd84e|hi=-30.00000;sh=15.00000;alg=4"),
+            ("color", "d00caa929ce732b3afe408e4ad9b2fb37fe5f02e6485b5d78d279eed76405f8c",
+             "14c359713c582410aefc9197e02011fffc1b4c1fe7fe21a151a0f2b954bb028e|vib=15.00000;sat=-10.00000;alg=1"),
             // 076: the eight bands left S3 for S3.6, so this fixture — which carries one
             // deliberately non-default band — gains an eighth link between S3 and the vignette.
-            ("hsl", "e43c038f52eb33b05c93ec00fbec82a866a8ea4547d5688f812e9e381c9298e1",
-             "526ab1472c5e8509ea2cf1fadb6e18cfa16ddfe927aa9ffc15d5b719d5ab1e60|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            ("vignette", "1b8c811fb305d9751ad59ab8c45c7bba6e2031ea3783a0b6f8ab4ce8c58bd8fe",
-             "e43c038f52eb33b05c93ec00fbec82a866a8ea4547d5688f812e9e381c9298e1|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=1"),
-            ("display", "8ce585de385edf9bd52e737540c17e172a4d7135b84c8d45c0c731c465f33967",
-             "1b8c811fb305d9751ad59ab8c45c7bba6e2031ea3783a0b6f8ab4ce8c58bd8fe|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("hsl", "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af",
+             "d00caa929ce732b3afe408e4ad9b2fb37fe5f02e6485b5d78d279eed76405f8c|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("vignette", "9d716e48946966ee71731c7d4ad9d7be93291c4d4af7a31afc6e9fdb534ffaa1",
+             "117f8414f47d3783db127c8acb2853ba3f79d1c929b7c525f2543859abe788af|vig=-40.00000;mid=45.00000;fea=60.00000;rou=30.00000;alg=1"),
+            ("display", "b3d7cc4d9ff4649371f73b8dfaa2fdf74125eb06a2a10b0dd30023dbcef7127c",
+             "9d716e48946966ee71731c7d4ad9d7be93291c4d4af7a31afc6e9fdb534ffaa1|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
             "geometry": l.geometry, "sceneLinear": l.sceneLinear, "toneMap": l.toneMap,
-            "curve": l.curve, "color": l.color, "hsl": l.hsl ?? "",
+            "curve": l.curve, "contrast": l.contrast ?? "", "color": l.color,
+            "hsl": l.hsl ?? "",
             "vignette": l.vignette, "display": l.display,
         ]
         let keys = RenderKeyChain.keys(l, identity: "keyvec-fixture")
         let keyByStage: [String: String] = [
             "geometry": keys.geometry, "sceneLinear": keys.sceneLinear, "toneMap": keys.toneMap,
-            "curve": keys.curve, "color": keys.color, "hsl": keys.hsl ?? "",
+            "curve": keys.curve, "contrast": keys.contrast ?? "", "color": keys.color,
+            "hsl": keys.hsl ?? "",
             "vignette": keys.vignette,
             "display": keys.display,
         ]
@@ -1089,6 +1093,7 @@ final class MaskTests: XCTestCase {
                        Set(RenderStage.order.filter {
                            $0 != .localColor && $0 != .hsl && $0 != .grain && $0 != .bw
                                && $0 != .grade && $0 != .detailFX && $0 != .heal
+                               && $0 != .contrast   // 098: no contrast value ⇒ no S1.8
                        }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")

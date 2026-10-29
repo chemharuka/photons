@@ -773,19 +773,19 @@ final class ToneMapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(guarded, S2Regions.minSlope - 1e-6)
     }
 
-    /// 074 R2 also has to hold up **with the other sliders in play**: contrast +22 (0.22 EV of bend
-    /// since 0107) must not fold the shadow lift, and the combination must still be monotone. (The
-    /// contrast curve itself was 074's R1 and moved to the log2 domain in 0107 —
-    /// `ContrastLogDomainTests` — so this only asserts that the region lifts do not make it worse.)
-    func testTheRegionLiftsSurviveContrast() throws {
+    /// 074 R2 also has to hold up **with the other slider at full travel**: shadows +100 with
+    /// highlights −100 must not fold the region-lift chain. (098 moved contrast to S1.8, so this
+    /// harness no longer has a contrast to combine with — the monotonicity claim is about the three
+    /// windows and their common gate.)
+    func testTheRegionLiftsSurviveFullTravel() throws {
         let harness = try S2KernelHarness()
         var grid: [Float] = []
         var v: Float = 1e-6
         while v <= 4 { grid.append(v); v *= 1.02 }
-        for (label, contrast, shadows, highlights) in
-            [("contrast +22 & shadows +100", 22.0 as Float, 100.0 as Float, 0.0 as Float),
-             ("contrast +22 & highlights −100", 22, 0, -100)] {
-            let out = try harness.run(grid, highlights: highlights, shadows: shadows, contrast: contrast)
+        for (label, shadows, highlights) in
+            [("shadows +100", 100.0 as Float, 0.0 as Float),
+             ("highlights −100", 0, -100)] {
+            let out = try harness.run(grid, highlights: highlights, shadows: shadows)
             var worst = Double.infinity
             for i in 0..<(grid.count - 1) {
                 let dy = log2(Double(max(out[i + 1], 1e-30))) - log2(Double(max(out[i], 1e-30)))
@@ -802,7 +802,6 @@ final class ToneMapTests: XCTestCase {
 
 private struct S2KernelHarness {
     struct Params {
-        var a: SIMD4<Float>   // contrast, travel, pad, pad
         var b: SIMD4<Float>   // dShadow, dMid, dHighlight, identity
         var c: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
     }
@@ -810,10 +809,6 @@ private struct S2KernelHarness {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLComputePipelineState
-    /// 0107: the entry point that contains the contrast bend. `s2_tone_map` has none of it (it is the
-    /// pass every `contrast == 0` document runs), so a test that wants contrast has to ask for this one
-    /// — the kernel picks the entry point, exactly as `RenderGraph` does.
-    let contrastPipeline: MTLComputePipelineState
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
@@ -826,18 +821,17 @@ private struct S2KernelHarness {
         let source = try KernelLibrary.expandingLocalIncludes(of: url)
         let library = try device.makeLibrary(source: source, options: nil)
         let fn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map"))
-        let cfn = try XCTUnwrap(library.makeFunction(name: "s2_tone_map_contrast"))
         self.device = device
         self.pipeline = try device.makeComputePipelineState(function: fn)
-        self.contrastPipeline = try device.makeComputePipelineState(function: cfn)
         guard let q = device.makeCommandQueue() else { throw XCTSkip("no command queue") }
         self.queue = q
-        XCTAssertEqual(MemoryLayout<Params>.stride, 48, "S2Params' mirror must be as wide as Metal's")
+        XCTAssertEqual(MemoryLayout<Params>.stride, 32, "S2Params' mirror must be as wide as Metal's")
     }
 
     func run(_ values: [Float], highlights: Float = 0, midtones: Float = 0,
              shadows: Float = 0, contrast: Float = 0) throws -> [Float] {
-        let pso = contrast == 0 ? pipeline : contrastPipeline
+        // 098: contrast is S1.8 now; S2 has one entry point and reads no contrast number.
+        let pso = pipeline
         let travel = S2Regions.travelEV(shadows: Double(shadows), midtones: Double(midtones),
                                         highlights: Double(highlights))
         let w = values.count, h = 1
@@ -853,8 +847,7 @@ private struct S2KernelHarness {
             src.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                         withBytes: buf.baseAddress!, bytesPerRow: w * 16)
         }
-        var p = Params(a: SIMD4(contrast, Float(S2Contrast.travelEV), 0, 0),
-                       b: SIMD4(Float(travel.shadow), Float(travel.mid), Float(travel.high), 0),
+        var p = Params(b: SIMD4(Float(travel.shadow), Float(travel.mid), Float(travel.high), 0),
                        c: SIMD4(0, 0, Float(w), Float(h)))
         let cb = try XCTUnwrap(queue.makeCommandBuffer())
         let enc = try XCTUnwrap(cb.makeComputeCommandEncoder())

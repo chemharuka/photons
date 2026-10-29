@@ -296,6 +296,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// pre-S3.8 stage list, key chain and pixels byte for byte: the pass is not encoded at all.
     public var hasDetailFX: Bool { effects.hasDetailFX }
 
+    /// 098: does S1.8 exist for this document? Judged **by value** — `light.contrast != 0` — exactly
+    /// the way `hasDetailFX` judges S3.9. A document with contrast 0 keeps the pre-098 stage list, key
+    /// chain and pixels byte for byte: the pass is not encoded at all.
+    public var hasContrastStage: Bool { light.contrast != 0 }
+
     /// 2026-10-28 (P0-4): does S3.4 exist for this document? Judged **by value** — the 黑白 switch,
     /// not "the color group exists" and not "a mix is non-zero": a mix with the switch off is a value
     /// waiting for the switch, and it renders nothing (Lightroom behaves the same way, and it is what
@@ -459,8 +464,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 || light.blackOffset != old.light.blackOffset {
                 s.insert(.sceneLinear)
             }
-            if light.contrast != old.light.contrast
-                || light.highlights != old.light.highlights
+            if light.contrast != old.light.contrast { s.insert(.contrast) }
+            if light.highlights != old.light.highlights
                 || light.midtones != old.light.midtones
                 || light.shadows != old.light.shadows {
                 s.insert(.toneMap)
@@ -664,15 +669,18 @@ public struct EditModel: Sendable, Equatable, Codable {
             return "localcolor=\(localColorMaterial)"
 
         case .toneMap:
-            // Contrast and the three region lifts only — the whites/blacks levels moved into the
-            // `.sceneLinear` material with the maths (派单 019), so a level change must not be able to
-            // miss a cached S1 output by landing in this key instead.
+            // 098: contrast left this stage for S1.8, so its material is the three region lifts only.
+            // A contrast drag must not be able to miss a cached S2 output by landing here instead.
             //
             // 085: `md` is appended **only when non-zero**, the `asp`/`car`/`q` discipline, so a
             // document that never touched 中间调 keeps its pre-085 tone-map material byte for byte.
-            var m = "con=\(k(light.contrast));hi=\(k(light.highlights));sh=\(k(light.shadows))"
+            var m = "hi=\(k(light.highlights));sh=\(k(light.shadows))"
             if light.midtones != 0 { m += ";md=\(k(light.midtones))" }
             return m
+
+        case .contrast:
+            // 098: S1.8's own material — the contrast number and nothing else.
+            return "con=\(k(light.contrast))"
 
         case .curve:
             return curve.keyString
