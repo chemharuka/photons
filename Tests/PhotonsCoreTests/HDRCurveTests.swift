@@ -1078,7 +1078,11 @@ final class HDRCurveTests: XCTestCase {
         // the curve is seeded by S1.6 (checked below through the chain, not the enum order).
         XCTAssertEqual(order[curveIndex - 1], .heal, "the curve must read S1.9's output when a spot exists")
         XCTAssertEqual(order[curveIndex - 2], .localApply, "…and S1.9 reads S1.6's")
-        XCTAssertEqual(order[curveIndex + 1], .toneMap, "S2 must read the curve's output")
+        // 098：对比度从 S2 里拆出来做成 S1.8 独立阶段（Y-only 多尺度 guided filter），
+        // 所以紧跟在曲线后面的是 `.contrast`，不是 `.toneMap`；S2 读的是对比度阶段的输出。
+        // 「曲线是 S2 的输入」这条语义没变，只是中间多了一站。
+        XCTAssertEqual(order[curveIndex + 1], .contrast, "098: S1.8 sits between the curve and S2")
+        XCTAssertEqual(order[curveIndex + 2], .toneMap, "…and S2 still reads what the curve chain produced")
         XCTAssertEqual(RenderStage.allCases.firstIndex(of: .curve), 2)
         XCTAssertEqual(RenderStage.curve.short, "s1.7")
         XCTAssertEqual(RenderStage.curve.rawValue, "s1.7-hdr-curve")
