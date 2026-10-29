@@ -109,6 +109,7 @@ final class ExportPresetTests: XCTestCase {
                        "TIFF · 16 位 · Display P3 · 长边 60% · 跳过")
         XCTAssertEqual(ExportPreset(format: .png, longEdge: 1234,
                                     sizingMode: .none, conflict: .overwrite).summary,
-                       "PNG · 8 位 · sRGB · 原尺寸 · 覆盖")
+                       // 默认色彩空间 2026-10-29 改为 Display P3（用户口径），这一条就是那个默认值。
+                       "PNG · 8 位 · Display P3 · 原尺寸 · 覆盖")
     }
 }

@@ -174,7 +174,7 @@ final class ExportSheetModelTests: XCTestCase {
         sheet.setHDR(false)
         XCTAssertFalse(sheet.summaryLine.contains("HDR"))
         XCTAssertEqual(sheet.summaryLine,
-                       "将导出 2 张 → HEIC · 8 位 · sRGB · 长边 2048 · 重命名")
+                       "将导出 2 张 → HEIC · 8 位 · Display P3 · 长边 2048 · 重命名")
     }
 
     // MARK: - 106 layout (measured on the real hosted sheet)

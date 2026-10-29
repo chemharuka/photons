@@ -281,11 +281,16 @@ extension PixelRect {
 public enum OutputPrimaries: String, Sendable, Codable, CaseIterable {
     case sRGB
     case displayP3
+    /// BT.2020 primaries with the sRGB transfer function (what `CGColorSpace.itur_2020` tags).
+    /// The working space is already Rec.2020, so this output is the **identity** matrix in S4 — the
+    /// widest thing a 16-bit TIFF/PNG (or a 10-bit HEIC) can carry without inventing colour.
+    case rec2020
 
     public var displayName: String {
         switch self {
         case .sRGB: return "sRGB"
         case .displayP3: return "Display P3"
+        case .rec2020: return "Rec2020"
         }
     }
 }

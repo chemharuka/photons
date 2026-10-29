@@ -242,7 +242,7 @@ public final class ExportSheetModel {
     /// and both of these are pure values.
     public nonisolated static var defaultPreset: ExportPreset {
         ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.85,
-                     colorSpace: .sRGB, hdr: HDRExport(), writeXMP: false, nameTemplate: "{name}")
+                     colorSpace: .displayP3, hdr: HDRExport(), writeXMP: false, nameTemplate: "{name}")
     }
 
     public nonisolated static var defaultOutputDirectory: URL {
@@ -703,7 +703,8 @@ public struct ExportSheetView: View {
                 Spacer(minLength: 8)
                 Picker("", selection: $model.preset.colorSpace) {
                     Text("sRGB").tag(OutputPrimaries.sRGB)
-                    Text("Display P3").tag(OutputPrimaries.displayP3)
+                    Text("P3").tag(OutputPrimaries.displayP3)
+                    Text("Rec2020").tag(OutputPrimaries.rec2020)
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()

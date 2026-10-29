@@ -4502,6 +4502,7 @@ public final class RenderGraph {
         switch target {
         case .sRGB: return .sRGB
         case .displayP3: return .displayP3
+        case .rec2020: return .rec2020
         }
     }
 

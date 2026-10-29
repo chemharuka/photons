@@ -253,7 +253,7 @@ public struct ExportPreset: Sendable, Equatable {
                 longEdge: Int? = nil,
                 quality: Double = 0.92,
                 bitDepth: Int = 8,
-                colorSpace: OutputPrimaries = .sRGB,
+                colorSpace: OutputPrimaries = .displayP3,
                 hdr: HDRExport? = nil,
                 writeXMP: Bool = false,
                 sharpen: OutputSharpening? = nil,
@@ -408,13 +408,13 @@ extension ExportPreset: Codable {
             throw ExportPresetError.unknownFormat(rawFormat)
         }
         let rawSpace = try c.decodeIfPresent(String.self, forKey: .colorSpace)
-            ?? OutputPrimaries.sRGB.rawValue
+            ?? OutputPrimaries.displayP3.rawValue
         self.name = try c.decodeIfPresent(String.self, forKey: .name)
         self.format = format
         self.longEdge = try c.decodeIfPresent(Int.self, forKey: .longEdge)
         self.quality = try c.decodeIfPresent(Double.self, forKey: .quality) ?? 0.92
         self.bitDepth = try c.decodeIfPresent(Int.self, forKey: .bitDepth) ?? 8
-        self.colorSpace = OutputPrimaries(presetName: rawSpace) ?? .sRGB
+        self.colorSpace = OutputPrimaries(presetName: rawSpace) ?? .displayP3
         self.hdr = try c.decodeIfPresent(HDRExport.self, forKey: .hdr)
         self.writeXMP = try c.decodeIfPresent(Bool.self, forKey: .writeXMP) ?? false
         self.sharpen = try c.decodeIfPresent(OutputSharpening.self, forKey: .sharpen)
@@ -476,6 +476,7 @@ extension OutputPrimaries {
             .replacingOccurrences(of: "-", with: "") {
         case "srgb": self = .sRGB
         case "displayp3", "p3": self = .displayP3
+        case "rec2020", "bt2020", "itur2020", "recitu rbt20201": self = .rec2020
         default: return nil
         }
     }
