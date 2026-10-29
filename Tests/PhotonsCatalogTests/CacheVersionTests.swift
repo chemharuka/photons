@@ -174,8 +174,10 @@ final class CacheVersionTests: XCTestCase {
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
+        XCTAssertEqual(StageAlgorithmVersion.curve, 2,
+                       "137: inverted curves render the descending table instead of the identity")
         // …and the ones that did not, so a bump stays a statement about one stage.
-        for stage in [RenderStage.geometry, .curve, .color, .grain, .display] {
+        for stage in [RenderStage.geometry, .color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
                            "\(stage.rawValue) did not change and must not be re-versioned")
         }

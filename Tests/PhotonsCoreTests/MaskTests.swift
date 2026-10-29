@@ -558,27 +558,29 @@ final class MaskTests: XCTestCase {
              "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=1"),
             ("sceneLinear", "f4c35a348bf3bd8029ef5196a9d4b435cbf61b75285f0de8be16419943d5ef0f",
              "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=3"),
-            ("curve", "3228c70ab6abff8623412178fcd0d8fd95e2ccc4396669a5b9b5630281de0393",
-             "f4c35a348bf3bd8029ef5196a9d4b435cbf61b75285f0de8be16419943d5ef0f|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=1"),
-            ("contrast", "12b729903d544b6d6184c57dd11505ca45dea3d2a82f198289366296646fb642",
-             "3228c70ab6abff8623412178fcd0d8fd95e2ccc4396669a5b9b5630281de0393|contrast|con=20.00000;alg=1"),
+            ("curve", "f47d74916132124759d299386ef57bfe3fdf94808b66c20d4939631817ec7559",
+             "f4c35a348bf3bd8029ef5196a9d4b435cbf61b75285f0de8be16419943d5ef0f|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
+            ("contrast", "93a6c2213a51b2b377b6b9f112d0ff59e9419c6514ff58a7a11365c4e667ebbf",
+             "f47d74916132124759d299386ef57bfe3fdf94808b66c20d4939631817ec7559|contrast|con=20.00000;alg=1"),
             // 124: toneMap 4 → 5 (高光 reaches the HDR range) moved this link and every link below it.
             // 127: sceneLinear 2 → 3 (whites is a global multiplicative level) moved this link *and*
             // everything below it — the one-time re-recording P1f documents.
-            ("toneMap", "506a178cc3b99f0d6ac716189bb6d9b6bd09a0605692d26c13cd05aea2482958",
-             "12b729903d544b6d6184c57dd11505ca45dea3d2a82f198289366296646fb642|hi=-30.00000;sh=15.00000;alg=5"),
-            ("color", "87cdfaa7ba2dc38d9544b31db78a25fcdf964e4b48f93b8d42c30c36ee84072a",
-             "506a178cc3b99f0d6ac716189bb6d9b6bd09a0605692d26c13cd05aea2482958|vib=15.00000;sat=-10.00000;alg=1"),
+            // 137: curve 1 → 2 (inverted curves now render the descending table) moved the curve link
+            // and every link below it; positive curves' pixels did not move.
+            ("toneMap", "9ac81be12a598030987dfd85b908efb65a36b89e7cb8d55a0312dd1c049a21f1",
+             "93a6c2213a51b2b377b6b9f112d0ff59e9419c6514ff58a7a11365c4e667ebbf|hi=-30.00000;sh=15.00000;alg=5"),
+            ("color", "96c26d61afc3377f384b9682e168e2b708ecbcbf2c5ead8327178e7a1bd31ab6",
+             "9ac81be12a598030987dfd85b908efb65a36b89e7cb8d55a0312dd1c049a21f1|vib=15.00000;sat=-10.00000;alg=1"),
             // 076: the eight bands left S3 for S3.6, so this fixture — which carries one
             // deliberately non-default band — gains an eighth link between S3 and the vignette.
-            ("hsl", "46c83fd2ec9c572075bb9eb74996b3f9f35fb538dc40d93398d614b422bb90fb",
-             "87cdfaa7ba2dc38d9544b31db78a25fcdf964e4b48f93b8d42c30c36ee84072a|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "f3b4c9c12b92e3d2bd7f5370820f465d78ee42f61d1ae72abea7a3bc527e239d",
+             "96c26d61afc3377f384b9682e168e2b708ecbcbf2c5ead8327178e7a1bd31ab6|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 134: 圆度删除、半径按半对角线归一、`AlgorithmVersion.vignette` 3，所以这一段键**故意**变了，
             // 链条下游的 display 也跟着变（它把 vignette 的摘要串在自己前面）。
-            ("vignette", "295c2b71463e2f08d677ae9cd09a9b6a7bbfb57af7f430a70984011e6b1ce67a",
-             "46c83fd2ec9c572075bb9eb74996b3f9f35fb538dc40d93398d614b422bb90fb|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            ("display", "3e7a1b0a5b822b0f12931a951494a5470fc4ddf7dc7c9707ae59db58490bc431",
-             "295c2b71463e2f08d677ae9cd09a9b6a7bbfb57af7f430a70984011e6b1ce67a|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("vignette", "8ea904c428a0fe41dcf4cdf25832fdfe24a767f55a693eb802894e0748778798",
+             "f3b4c9c12b92e3d2bd7f5370820f465d78ee42f61d1ae72abea7a3bc527e239d|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("display", "ed591f93e75ee733679dad35927c695a341fd623ffcfb0655a355ff57c9e4c8a",
+             "8ea904c428a0fe41dcf4cdf25832fdfe24a767f55a693eb802894e0748778798|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

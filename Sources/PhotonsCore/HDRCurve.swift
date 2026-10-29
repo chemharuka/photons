@@ -189,9 +189,15 @@ public enum HDRCurve {
     /// all (`HDRCurveTests` measures that at 200 points per table).
     public static let tailSlopeLimit: Double = 2
 
-    /// The other end of rule 4's clamp: a **descending** last segment is flattened to a ceiling, not
-    /// allowed to invert. Unchanged from the pre-080 `clamp(slope, 0, 1)`.
-    public static let tailSlopeFloor: Double = 0
+    /// The other end of rule 4's clamp: a descending last segment continues **down**, up to
+    /// `−tailSlopeLimit`.
+    ///
+    /// 派单 137: this used to be 0, which turned every inverted curve's tail into a ceiling above
+    /// +4 EV even though the table itself was allowed to descend. The ticket asks for the limit to be
+    /// **symmetric by absolute value** — the same `2` — so the floor is `−tailSlopeLimit`, not a second
+    /// constant. The table's own samples are clamped into `0…1` by `buildOne`; this only governs the
+    /// extrapolation past `u = 1`.
+    public static let tailSlopeFloor: Double = -tailSlopeLimit
 
     /// `slope` as the kernel uses it: `clamp(slope, tailSlopeFloor, tailSlopeLimit)`.
     ///
