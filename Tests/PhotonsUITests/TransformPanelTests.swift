@@ -45,7 +45,7 @@ final class TransformPanelTests: XCTestCase {
     func testTheTransformWorkspaceShowsTheCropCardFirst() throws {
         XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop, .angle],
                        "变换工作区认领裁切 + 角度两张卡（唯一一张「工作区 → 卡片」表）")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "变换"],
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"],
                        "卡片清单的第一张必须是裁切，第二张是变换卡（093 改名）")
         XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop", "angle"])
         // 调整工作区不受影响：裁切是它自己的工作区的卡片。
@@ -60,7 +60,7 @@ final class TransformPanelTests: XCTestCase {
         panel.state.select(.transform)
         try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
-        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "变换"])
+        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "旋转"])
         let card = try XCTUnwrap(panel.row(CropCardID.card), "裁切卡自己没有 frame")
         let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "角度卡自己没有 frame")
         print(String(format: "CARD · 变换第一张 = %@ · frame (%.1f, %.1f, %.1f×%.1f)",
@@ -233,11 +233,13 @@ final class TransformPanelTests: XCTestCase {
         editorView.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         pump(0.15)
 
-        XCTAssertEqual(loupe.cropTool.draft.straighten, 1.5, accuracy: 1e-9,
-                       "敲进去的 1.5 没有进草稿")
+        XCTAssertEqual(loupe.cropTool.angleUIValue, 1.5, accuracy: 1e-9,
+                       "敲进去的 1.5 是 UI 的正向角度")
+        XCTAssertEqual(loupe.cropTool.draft.straighten, -1.5, accuracy: 1e-9,
+                       "123: UI 正角 → 文档符号由 TransformSession.setAngle 决定")
         // 087: 转动 is live — one typed value writes the document and commits one row.
-        XCTAssertEqual(session.edit.geometry.rotationDegrees, 1.5, accuracy: 1e-9,
-                       "转动已经实时，文档的角度也该是 1.5：\(session.edit.geometry.rotationDegrees)")
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, -1.5, accuracy: 1e-9,
+                       "123: 滑块向右 = 画面顺时针（文档存反向角）：\(session.edit.geometry.rotationDegrees)")
         XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
                        "一次输入 = 一条历史（松手 / 回车）")
         print("ANGLE · typed 1.5 → live document rotationDegrees "
@@ -316,8 +318,8 @@ final class TransformPanelTests: XCTestCase {
         // 086: the second 「裁切」 is now 「宽高比」; the card title itself is untouched.
         XCTAssertEqual(CropSection.crop.title, "宽高比")
         XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
         let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
@@ -458,6 +460,66 @@ final class TransformPanelTests: XCTestCase {
         }
         print("ROWS · " + report.joined(separator: " ‖ "))
         loupe.cancelCropTool()
+    }
+
+    // MARK: - 123: 三条退出路径走同一个 finish，确认后回 .adjust
+
+    func testConfirmLeavesCropModeReturnsToAdjustAndOnlyWritesWhenChanged() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let root = try XCTUnwrap(editor.rootView)
+        let session = editor.session
+        let loupe = root.loupeController
+
+        root.inspectorWorkspaces.select(.transform)
+        pump(0.2)
+        XCTAssertTrue(loupe.isCropToolActive)
+        XCTAssertEqual(root.inspectorWorkspaces.selection, .transform)
+        let historyBefore = session.history.snapshots.count
+
+        // ↵ with no edit: the tool closes, the workspace returns, no history row.
+        XCTAssertFalse(loupe.applyCropTool(), "an unchanged draft must not claim a write")
+        pump(0.2)
+        XCTAssertFalse(loupe.isCropping)
+        XCTAssertFalse(loupe.isCropToolActive)
+        XCTAssertEqual(root.inspectorWorkspaces.selection, .adjust,
+                       "123: 确认后工作区回到 .adjust")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore,
+                       "123: 无改动不加历史")
+
+        // 完成 with a real edit: one row, same exit.
+        root.inspectorWorkspaces.select(.transform)
+        pump(0.2)
+        loupe.cropTool.setAngle(uiValue: 5)
+        XCTAssertTrue(loupe.completeCropTool())
+        pump(0.2)
+        XCTAssertFalse(loupe.isCropping)
+        XCTAssertEqual(root.inspectorWorkspaces.selection, .adjust)
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, -5, accuracy: 1e-9,
+                       "123: 完成写入的是 TransformSession 的符号")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
+                       "123: 有改动加一条历史")
+
+        // Structural half of acceptance 2: the controller and the renderer's document now carry the
+        // same `CropGeometry` — no second angle, no second sign.
+        let rendered = CropGeometry(geometry: session.edit.geometry, source: loupe.cropSourceSize)
+        XCTAssertEqual(loupe.cropTool.cropGeometry, rendered,
+                       "123: overlay/session and the render input must be one CropGeometry")
+        XCTAssertEqual(loupe.cropTool.cropGeometry.rotationDegrees,
+                       loupe.cropTool.transformSession.cropGeometry.rotationDegrees)
+
+        // Esc still goes through the same `finish(_:)`, but writes nothing and does not move the
+        // workspace back.
+        root.inspectorWorkspaces.select(.transform)
+        pump(0.2)
+        loupe.cropTool.setAngle(uiValue: 12)
+        loupe.finishCropTool(.cancel)
+        pump(0.2)
+        XCTAssertFalse(loupe.isCropping)
+        XCTAssertEqual(session.edit.geometry.rotationDegrees, -5, accuracy: 1e-9,
+                       "Esc 不写文档")
+        XCTAssertEqual(session.history.snapshots.count, historyBefore + 1,
+                       "Esc 不加历史")
     }
 
     // MARK: - harness

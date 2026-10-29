@@ -240,6 +240,16 @@ static inline void s0_body(texture2d<float, access::read> src,
     // not) to show the same assertion going red.
     float2 cropped = p.c.xy + r * p.c.zw;
     if (HAS_TURN) { cropped = frame_unturn_uv(cropped, int(p.g.z + 0.5)); }
+    // 123 — rotated past the picture is **background**, not the edge smeared outward. The old
+    // clamp-to-edge pulled the border colour into the corners; the honest answer for a pixel whose
+    // source position is outside the photograph is transparent. This lives only in the rotating
+    // instantiation, so `rotationDegrees == 0` keeps the recorded bytes (the non-rotating path never
+    // runs this expression and keeps its clamp-to-edge behaviour for crop/scale).
+    if (HAS_ROTATION && (cropped.x < 0.0 || cropped.x > 1.0
+                         || cropped.y < 0.0 || cropped.y > 1.0)) {
+        dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
+        return;
+    }
     float2 px = cropped * float2(srcSize);
 
     // ── lens plane warp (097) ────────────────────────────────────────────────────────────────────

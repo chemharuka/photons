@@ -143,7 +143,7 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
-            case .angle: return "变换"
+            case .angle: return "旋转"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
@@ -263,6 +263,16 @@ public struct InspectorView: View {
         // and leaving it cancels the draft (082). Idempotent, so the workspace root's own wiring and
         // this one cannot fight.
         .task { loupe?.setCropWorkspaceActive(workspaces.selection.showsCropCard) }
+        .task {
+            // 123 — a confirmed transform returns the panel to 调整, even when the panel is hosted
+            // on its own (a test window without `WorkspaceRootView`).
+            loupe?.onTransformConfirmed = { [workspaces] in
+                switch workspaces.selection {
+                case .transform: workspaces.select(.adjust)
+                default: break
+                }
+            }
+        }
         .onChange(of: workspaces.selection) { _, workspace in
             loupe?.setCropWorkspaceActive(workspace.showsCropCard)
         }

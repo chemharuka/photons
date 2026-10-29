@@ -54,11 +54,11 @@ final class CropCardSectionsTests: XCTestCase {
         _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
 
         // The enum is the one spelling, and its order is the stacked order.
-        XCTAssertEqual(InspectorView.Section.angle.title, "变换", "093: 第二张卡的卡名是「变换」")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "变换"])
+        XCTAssertEqual(InspectorView.Section.angle.title, "旋转", "123: 第二张卡的卡名是「旋转」")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"])
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "rotation", "mirror"])
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["转动", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
 
         // …and the panel really drew four headers, in that order, top to bottom.
         var drawn: [(title: String, rect: CGRect)] = []
@@ -71,7 +71,7 @@ final class CropCardSectionsTests: XCTestCase {
             drawn.append((section.title, rect))
             print("082 §4 · 小标题「\(section.title)」 \(NSStringFromRect(rect))")
         }
-        XCTAssertEqual(drawn.map(\.title), ["宽高比", "转动", "旋转", "镜像"])
+        XCTAssertEqual(drawn.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
         for (a, b) in zip(drawn, drawn.dropFirst()) {
             XCTAssertGreaterThan(b.rect.minY, a.rect.minY,
                                  "082 §4: 「\(b.title)」必须在「\(a.title)」下面")

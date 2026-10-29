@@ -176,9 +176,18 @@ final class MaskRotationPixelsTests: XCTestCase {
     /// Where the picture's dot actually is, in canvas pixel indices — the ground truth, read off the
     /// frame S0 produced rather than off any formula.
     private func pictureCentroid(_ image: DisplayImage) -> (x: Double, y: Double) {
-        // Anything brighter than the flat background is the dot. The corner is background on every
-        // one of these frames (a rotated frame clamps its edge texels to the same flat value).
-        let bg = Double(image.rgba[(2 * image.width + 2) * 4])
+        // 123: a rotated frame now writes **background (0)** outside the photograph, while the
+        // photograph itself is the flat 0.05 fixture. The old "corner pixel is the background" read
+        // operated on the clamp-to-edge frame; take the darkest non-zero pixel instead, so the
+        // background estimate is the picture's own flat field and the transparent corners are
+        // ignored rather than counted as content.
+        var bg = Double.infinity
+        for i in stride(from: 0, to: image.width * image.height * 4, by: 4) {
+            let luma = (Double(image.rgba[i]) + Double(image.rgba[i + 1])
+                        + Double(image.rgba[i + 2])) / 3
+            if luma > 1e-4 { bg = min(bg, luma) }
+        }
+        guard bg.isFinite else { return (0, 0) }
         var sx = 0.0, sy = 0.0, sw = 0.0
         for y in 0..<image.height {
             let row = y * image.width

@@ -259,15 +259,15 @@ public enum CropTool {
         let c = crop.clamped()
         let centreX = Double(max(source.width, 1)) / 2
         let centreY = Double(max(source.height, 1)) / 2
-        let theta = quadRotationDegrees.isFinite ? quadRotationDegrees * .pi / 180 : 0
-        let cosT = cos(theta), sinT = sin(theta)
+        let rotation = CropGeometry.RotationMatrix(degrees: quadRotationDegrees.isFinite ? quadRotationDegrees : 0)
         func imagePoint(_ u: Double, _ v: Double) -> (x: Double, y: Double) {
             let dx = u * Double(source.width) - centreX
             let dy = v * Double(source.height) - centreY
             // R(−θ): the image is shown un-turned, so the rectangle (axis-aligned in the turned space)
-            // reads as a quad turned the other way. Same y-down pixel-space convention as `CropMath`.
-            return (centreX + dx * cosT + dy * sinT,
-                    centreY - dx * sinT + dy * cosT)
+            // reads as a quad turned the other way. The matrix lives in `CropGeometry` (123), so this
+            // file no longer carries a second `cos`/`sin`.
+            let turned = rotation.invert(x: dx, y: dy)
+            return (centreX + turned.x, centreY + turned.y)
         }
         func view(_ u: Double, _ v: Double) -> CGPoint {
             // **Frame space, not source space** (see `LoupeMapping.frameView`): the crop rect is a
