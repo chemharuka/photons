@@ -505,10 +505,10 @@ final class ExposureEquivarianceTests: XCTestCase {
         "whites·0": "ca29dd99716d62f978a01f429fac8bc8f6b2637752dc688d70a82684efed8f80",
         "whites·50": "df77d410c7c3fcdc4b78054d46c13ba7dda559ccc0f30ca96639ba13582669eb",
         "whites·100": "171d3efc32fed68f151157287de9d053e1c6c8221b5625c0671f1631e092f755",
-        "contrast·-100": "2612acb3f49e493e15694a491c96736972b8b52a870610a0114a086ee601ca14",
-        "contrast·-50": "70dbae57785430f3dee6042a1f17a96751ab861b86d9afeb0df02145f805d378",
-        "contrast·50": "db75c0a43f3ce746f54479eb10ced5898b74a3e606905b9a1b11bdf9e1742d1d",
-        "contrast·100": "914849e5602179a5722dd5a5cc0527b7a5203589784afd93a21550fd9525a947",
+        "contrast·-100": "370c5ea47dd9a302204a7d79909666c47ee31f606f35b6b77e23a087a36f89ac",
+        "contrast·-50": "b199f90f66fcc83a3b7a41fcd859d16e4b4f170f958486cb1cb24cbe9ca019df",
+        "contrast·50": "057b4eec975c47083d450cda8997a8fb1f92575e2d30e9a4b0f7ec14dd94f389",
+        "contrast·100": "2afccef28b69ce60655413d16346f2b21e9e6ba59fca8cc25bde727ef6c79e6a",
         "atlas": "37b8deb9a4e691b043429ec50673dcac3d63a14d39987f6e99fe5a8ad35b0eae",
     ]
 
@@ -546,7 +546,7 @@ final class ExposureEquivarianceTests: XCTestCase {
             let key = "contrast·\(Int(c))"
             print("E0 · \(key) · \(sha)")
             XCTAssertEqual(sha, Self.e0SHASHA[key],
-                           "147 不许动 E = 0 的 contrast（g = 1 必须是逐字节恒等）")
+                           "159 换域后 E = 0 的 contrast 重钉；whites/atlas 仍是 147 的逐字节值")
         }
         var maskEdit = EditModel.neutral
         maskEdit.masks = [
