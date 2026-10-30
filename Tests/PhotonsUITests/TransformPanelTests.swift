@@ -318,7 +318,7 @@ final class TransformPanelTests: XCTestCase {
         // 086: the second 「裁切」 is now 「宽高比」; the card title itself is untouched.
         XCTAssertEqual(CropSection.crop.title, "宽高比")
         XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
         XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
