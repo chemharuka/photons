@@ -1018,6 +1018,13 @@ guard let cmd = argv.first else {
     exit(0)
 }
 
+func cmdProbeHDR(_ a: Args) throws {
+    guard #available(macOS 15.0, *) else { die("probe-hdr needs macOS 15 (ISO gain map API)") }
+    let result = HDRProbe.run(keepFiles: a.has("--keep"))
+    for line in result.lines { note(line) }
+    if let dir = result.outputDirectory { note("files        \(dir.path)") }
+}
+
 let rest = parseArgs(Array(argv.dropFirst()))
 do {
     switch cmd {
@@ -1035,6 +1042,7 @@ do {
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)
     case "export":   try cmdExport(rest)
+    case "probe-hdr": try cmdProbeHDR(rest)
     case "thumbs":   try cmdThumbs(rest)
     case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")
