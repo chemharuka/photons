@@ -450,6 +450,26 @@ public final class CropToolController {
         draft = Draft(geometry: session.edit.geometry)
     }
 
+    /// 169 §2b — the crop session was opened on photo A and the user clicked photo B **without
+    /// leaving 裁切**. The tool stays armed, but every piece of context has to be B's:
+    ///
+    ///   · the draft is re-seeded from B's document (A's crop rect is not B's);
+    ///   · `entryGeometry` is B's too, or Esc would roll B back to A's geometry;
+    ///   · the tool session is reopened on B's history (the photo switch already replaced it).
+    ///
+    /// This is the re-arm half of the one entry point; it never writes the document.
+    @discardableResult
+    public func reseedForPhotoChange() -> Bool {
+        guard isActive, let session else { return false }
+        endDrag()
+        draft = Draft(geometry: session.edit.geometry)
+        entryGeometry = session.edit.geometry
+        if !session.isToolSessionActive {
+            session.beginToolSession("裁切", label: "裁切与旋转")
+        }
+        return true
+    }
+
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
     ///
     /// 088 — a tick is a **draft** write only: the canvas keeps the document's pixels (and its
@@ -777,26 +797,7 @@ public final class CropToolController {
     /// not to the frame the crop is drawn in), so two corners are enough for the pull-back, and the
     /// result is exactly the rect whose four corners land on the canvas' four corners.
     public func safeCropRect(mapping: LoupeMapping, source: ImageSize? = nil) -> CropRect {
-        let src = source ?? sourceSize
-        let w = Double(max(src.width, 1)), h = Double(max(src.height, 1))
-        let a = mapping.framePoint(viewX: 0, viewY: 0)
-        let b = mapping.framePoint(viewX: Double(mapping.viewport.width),
-                                   viewY: Double(mapping.viewport.height))
-        var left = min(a.x, b.x) / w, right = max(a.x, b.x) / w
-        var top = min(a.y, b.y) / h, bottom = max(a.y, b.y) / h
-
-        // 132 (user 2026-10-29): there is **no photo bound** any more. The crop is the output frame
-        // and may sit outside the photograph; the pixels outside are black, and the frame turns red.
-        // The only bound is the canvas itself, which is what `framePoint` already says. (The old
-        // `0…1²` intersection is what made 「框可以出画面」 impossible to express in the model.)
-        left = max(left, -1e6); top = max(top, -1e6)
-        right = min(right, 1e6); bottom = min(bottom, 1e6)
-        guard right > left + 1e-9, bottom > top + 1e-9 else {
-            // Nothing of the frame is on screen (a degenerate projection): the whole frame is the only
-            // answer that keeps the arithmetic finite; `effectiveCrop` then fits it to the picture.
-            return .full
-        }
-        return CropRect(left: left, top: top, right: right, bottom: bottom)
+        CropWorkspaceLayout.canvasBounds(mapping: mapping, source: source ?? sourceSize)
     }
 
     /// 162 §2.3 — **the hard boundary**: the visible canvas, in normalized frame coordinates.

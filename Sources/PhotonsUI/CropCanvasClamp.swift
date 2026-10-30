@@ -66,16 +66,13 @@ public struct CropCanvasClamp: Equatable, Sendable {
     /// crop frame is exactly inscribed in the canvas**. Never a constant — it is the two dimensions'
     /// tightest ratio, so a smaller canvas or a bigger frame lowers it by itself.
     ///
+    /// 169 §0: the arithmetic now lives in `CropWorkspaceLayout` (the workspace's one layout truth);
+    /// this spelling delegates so the camera clamp and the layout cannot answer differently.
+    ///
     /// `0` for a degenerate input (no canvas, no frame): the caller reads that as "no camera is legal"
     /// rather than dividing by zero.
     public static func maxZoom(canvas: CGSize, frame: CGRect) -> Double {
-        let cw = Double(canvas.width), ch = Double(canvas.height)
-        let fw = Double(frame.width), fh = Double(frame.height)
-        guard cw > 0, ch > 0, fw > 0, fh > 0, cw.isFinite, ch.isFinite, fw.isFinite, fh.isFinite else {
-            return 0
-        }
-        let z = min(cw / fw, ch / fh)
-        return z.isFinite && z > 0 ? z : 0
+        CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame)
     }
 
     /// The zoom a request is allowed to reach. Above the limit it **stops at the limit** (no bounce,
