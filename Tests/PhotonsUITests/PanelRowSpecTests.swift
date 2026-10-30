@@ -27,11 +27,11 @@ final class PanelRowSpecTests: XCTestCase {
         let specs = InspectorView.PanelCardSpec.all
         let rows = specs.flatMap { spec in spec.rows.map { (spec, $0) } }
 
-        // The spec union is exactly the four tone tables — no table row outside a spec, no row twice.
+        // The spec union is exactly the five tone tables — no table row outside a spec, no row twice.
         let expected = InspectorView.lightRows + InspectorView.colorRows
-            + InspectorView.correctionRows + InspectorView.effectsRows
+            + InspectorView.correctionRows + InspectorView.detailFXRows + InspectorView.effectsRows
         XCTAssertEqual(rows.map(\.1.keyPath), expected.map(\.keyPath),
-                       "spec 的行必须就是四张卡的全部行表")
+                       "spec 的行必须就是五张卡的全部行表")
         let ids = rows.map { $0.0.accessibilityID(for: $0.1) }
         XCTAssertEqual(Set(ids).count, ids.count, "同一行被两张卡声明（或 id 重复）")
         XCTAssertEqual(Set(rows.map(\.1.keyPath)).count, rows.count,
@@ -43,7 +43,8 @@ final class PanelRowSpecTests: XCTestCase {
         defer { panel.window.contentView = nil }
         let caIDs = Set(InspectorView.caRows.map { "inspector.detail.\($0.title)" })
         let scoped = panel.numberFieldIDs.filter { id in
-            ["inspector.light.", "inspector.color.", "inspector.correction.", "inspector.effects."]
+            ["inspector.light.", "inspector.color.", "inspector.correction.",
+             "inspector.detailFX.", "inspector.effects."]
                 .contains { id.hasPrefix($0) } || caIDs.contains(id)
         }
         XCTAssertEqual(Set(scoped), Set(ids),

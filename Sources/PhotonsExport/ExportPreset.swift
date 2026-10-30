@@ -114,6 +114,8 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
     case badHDRKind(ExportFormat, HDRKind)
+    case hdrNeedsBitDepth(ExportFormat, HDRKind, Int, Int)
+    case hdrColorSpaceMismatch(OutputPrimaries, OutputPrimaries, HDRKind)
     case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
     case emptyNameTemplate
@@ -139,10 +141,16 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             let allowed = format.hdrKinds.map(\.rawValue).joined(separator: ", ")
             if kind == .gainMap {
                 return "\(format.rawValue.uppercased()) cannot carry a gain map "
-                    + "(HDR gain maps need HEIC or AVIF); allowed HDR kinds: \(allowed)"
+                    + "(HDR gain maps need HEIC, JPEG or AVIF); allowed HDR kinds: \(allowed)"
             }
             return "\(format.rawValue.uppercased()) cannot carry HDR kind '\(kind.rawValue)' "
                 + "(allowed: \(allowed))"
+        case .hdrNeedsBitDepth(let format, let kind, let got, let want):
+            return "\(format.rawValue.uppercased()) \(kind.displayName) needs \(want)-bit "
+                + "(got \(got)-bit) — pick \(want)-bit or a different HDR kind"
+        case .hdrColorSpaceMismatch(let base, let target, let kind):
+            return "HDR \(kind.displayName) on a \(base.displayName) base must stay in that "
+                + "family (sRGB↔Rec.709, Display P3, Rec.2020↔BT.2100), not \(target.displayName)"
         case .hdrGainMapNeedsMacOS15(let g):
             return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
@@ -186,8 +194,9 @@ public enum HDRKind: String, Codable, Sendable, CaseIterable {
 /// HDR export = one of three kinds:
 ///
 ///   · **gain map** — a normal SDR image plus an auxiliary image that lets a reader reconstruct the
-///     extended-range picture. Only HEIC/AVIF can carry one.
-///   · **HLG / PQ** — the extended-range linear render packed with the BT.2100 transfer curve.
+///     extended-range picture. HEIC, JPEG and AVIF can carry one (163 measured all three).
+///   · **HLG / PQ** — the extended-range linear render packed with the base family's BT.2100-style
+///     transfer curve (Rec.709_PQ/HLG, DisplayP3_PQ/HLG or Rec.2100_PQ/HLG; see `HDREncoding`).
 ///
 /// The structure of the gain map mirrors the two working spellings of ISO 21496-1 / Apple's HDR gain
 /// map: ISO RGB (per-channel ratio, `HDRToneMap/1.0` XMP inside `ISOGainMap`) and Apple monochrome
@@ -224,9 +233,17 @@ public struct HDRExport: Sendable, Codable, Equatable {
     /// `.gainMap` (or `.none`), so an old preset keeps exporting the picture it always did.
     public var kind: HDRKind
     public var gainMap: GainMap
-    /// Half-size gain map (`-H` in toGainMapHDR). The SDR base is never resized.
+    /// Half-size gain map (`-H` in toGainMapHDR). **Default on** (163): the gain map is a smooth
+    /// ratio field, so halving its edge costs almost nothing visually and quarters its bytes. The SDR
+    /// base is never resized, except that 163 §1.6 trims an odd right/bottom edge by 1 px so the map
+    /// can be exactly `floor(base / 2)` (reported as a note; full size keeps odd pixels).
     public var halfSize: Bool
     public var headroom: Headroom
+    /// 163 §1.5 — an optional explicit target family. `nil` (the normal path) means "same family as
+    /// the preset's `colorSpace`", so P3 + PQ is P3_PQ, never Rec.2100. A preset that spells a
+    /// different target (e.g. P3 base + Rec.2020 curve) is rejected by `validated()` instead of being
+    /// silently rewritten.
+    public var targetColorSpace: OutputPrimaries?
 
     /// 100's spelling: `true` = gain map, `false` = off. Kept as a computed property so the 106 UI
     /// and the pre-111 tests can keep toggling a checkbox.
@@ -255,15 +272,17 @@ public struct HDRExport: Sendable, Codable, Equatable {
 
     public init(enabled: Bool = true, kind: HDRKind? = nil,
                 gainMap: GainMap = HDRExport.defaultGainMap,
-                halfSize: Bool = false, headroom: Headroom = .auto) {
+                halfSize: Bool = true, headroom: Headroom = .auto,
+                targetColorSpace: OutputPrimaries? = nil) {
         self.kind = kind ?? (enabled ? .gainMap : .none)
         self.gainMap = gainMap
         self.halfSize = halfSize
         self.headroom = headroom
+        self.targetColorSpace = targetColorSpace
     }
 
     enum CodingKeys: String, CodingKey {
-        case enabled, kind, gainMap, halfSize, headroom
+        case enabled, kind, gainMap, halfSize, headroom, targetColorSpace
     }
 
     /// Pre-111 files have `enabled` and no `kind`; decode that as `gainMap` (or `none`). Writing keeps
@@ -275,8 +294,12 @@ public struct HDRExport: Sendable, Codable, Equatable {
         self.kind = rawKind ?? (enabled ? .gainMap : .none)
         self.gainMap = try c.decodeIfPresent(GainMap.self, forKey: .gainMap)
             ?? HDRExport.defaultGainMap
-        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? false
+        // 163 — a preset that never carried `halfSize` takes the new default (half size); an explicit
+        // `false` from the old UI still means full size, so a user's choice is never rewritten.
+        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? true
         self.headroom = try c.decodeIfPresent(Headroom.self, forKey: .headroom) ?? .auto
+        self.targetColorSpace = try c.decodeIfPresent(OutputPrimaries.self,
+                                                      forKey: .targetColorSpace)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -286,6 +309,7 @@ public struct HDRExport: Sendable, Codable, Equatable {
         try c.encode(gainMap, forKey: .gainMap)
         try c.encode(halfSize, forKey: .halfSize)
         try c.encode(headroom, forKey: .headroom)
+        try c.encodeIfPresent(targetColorSpace, forKey: .targetColorSpace)
     }
 }
 
@@ -534,6 +558,16 @@ public struct ExportPreset: Sendable, Equatable {
         if let hdr, hdr.enabled {
             guard format.supports(hdr.kind) else {
                 throw ExportPresetError.badHDRKind(format, hdr.kind)
+            }
+            if let required = format.hdrTransferBitDepth(for: hdr.kind), bitDepth != required {
+                // 163 §1.3 — never coerce here: a 8-bit PNG + PQ is a preset the user (or a stale
+                // file) asked for, and the sheet's own writer is the only place that may lock it.
+                throw ExportPresetError.hdrNeedsBitDepth(format, hdr.kind, bitDepth, required)
+            }
+            if let target = hdr.targetColorSpace, target != colorSpace {
+                // 163 §1.5 — the HDR curve is chosen by the base family; an explicit cross-family
+                // target is an error, not something the writer may quietly "fix".
+                throw ExportPresetError.hdrColorSpaceMismatch(colorSpace, target, hdr.kind)
             }
             if hdr.kind == .gainMap {
                 if case .manual(let h) = hdr.headroom, h < 1.05 {

@@ -389,30 +389,62 @@ enum RangeOrdering {
 }
 
 /// §4.5 — OKLab L with two-sided feather.
+///
+/// **167 — the axis is the whole HDR range, `0…hdrMax`.** The kernel used to fold through
+/// `oklab(clamp(linearRGB, 0, 1))`, so every pixel at or above display white arrived as `L = 1`
+/// and the upper half of the window had no resolution. It now folds the unclamped light, which
+/// extends the same OKLab axis to `cbrt(16) = 2.5198` — the +4 EV end of HDR. `low`, `high` and
+/// both feathers are all in that one unit. The depth window keeps its own `0…1` axis.
 public struct LuminanceRangeShape: Sendable, Equatable, Codable {
+    /// The top of the luminance axis: OKLab `L` of neutral light at +4 EV (`cbrt(16)`).
+    ///
+    /// The one constant both sides read — `s1_5_mask_atlas.metal`'s predicate and the range bar —
+    /// so `2.5198` is never typed twice. This is the default for **new** masks only; a v1 document's
+    /// numbers are never rewritten (see `v1DecodeDefaults`).
+    public static let hdrMax: Double = cbrt(16.0)
+
     public var low: Double
     public var high: Double
     public var lowFeather: Double
     public var highFeather: Double
+    /// Encoding generation of the coordinate: `1` (implicit in old documents) = SDR `0…1`,
+    /// `2` = HDR `0…hdrMax`. A v1 document decodes **verbatim** — no value is migrated — and
+    /// re-encodes as v2 so the generation is recorded; the numbers are untouched.
+    public var v: Int
 
     public static let `default` = LuminanceRangeShape()
 
-    public init(low: Double = 0, high: Double = 1,
+    /// The defaults a v1 document falls back to for fields it omits. Deliberately **separate** from
+    /// `default`: a v1 document's `high` was the SDR `1.0`, not the new `hdrMax`. Sharing `default`
+    /// here would turn "an old document missing `high`" into an HDR select-all, which the user's
+    /// no-migration decision forbids.
+    private static let v1DecodeDefaults = LuminanceRangeShape(low: 0, high: 1.0,
+                                                              lowFeather: 0.10, highFeather: 0.10)
+
+    public init(low: Double = 0, high: Double = LuminanceRangeShape.hdrMax,
                 lowFeather: Double = 0.10, highFeather: Double = 0.10) {
         self.low = low
         self.high = high
         self.lowFeather = lowFeather
         self.highFeather = highFeather
+        self.v = 2
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
-        var v = LuminanceRangeShape.default
-        v.low = c.val("low", v.low)
-        v.high = c.val("high", v.high)
-        v.lowFeather = c.val("lowFeather", v.lowFeather)
-        v.highFeather = c.val("highFeather", v.highFeather)
-        self = v
+        // 167 — no `v` ⇒ v1, the old SDR coordinate. **No numeric migration**: the five stored
+        // fields are kept verbatim, so a v1 `high = 1.0` stays `1.0`. The old window's upper edge is
+        // `1 − smoothstep(high − highFeather, high + highFeather, L)`, so `1.0` never meant "white
+        // and above" — rewriting it to `hdrMax` would silently change a deliberate cut. Only the
+        // generation is promoted, so the next encode records v2.
+        let version = c.val("v", 1)
+        var value = version < 2 ? LuminanceRangeShape.v1DecodeDefaults : LuminanceRangeShape.default
+        value.low = c.val("low", value.low)
+        value.high = c.val("high", value.high)
+        value.lowFeather = c.val("lowFeather", value.lowFeather)
+        value.highFeather = c.val("highFeather", value.highFeather)
+        value.v = max(version, 2)
+        self = value
     }
 
     public var isOrdered: Bool { !(low > high) }
@@ -432,17 +464,20 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
 
     /// Click: put `value` at the centre of the current window, keeping its width and both feathers.
     ///
-    /// The two edges are clamped to the sampling axis (`0…1`), so a click near an end narrows the
-    /// window rather than moving it off the axis. An inverted pair (`low > high`) keeps its signed
-    /// width, which keeps the mirror operation a mirror — the UI never repairs the order here
+    /// The two edges are clamped to the sampling axis (`0…hdrMax`), so a click near an end narrows
+    /// the window rather than moving it off the axis. An inverted pair (`low > high`) keeps its
+    /// signed width, which keeps the mirror operation a mirror — the UI never repairs the order here
     /// (`ordered` owns that rule).
     public func centring(on value: Double) -> LuminanceRangeShape {
-        let v = min(max(value, 0), 1)
+        let top = LuminanceRangeShape.hdrMax
+        let v = min(max(value, 0), top)
         let raw = high - low
-        let width = raw >= 0.999 ? LuminanceRangeShape.pickerDefaultWidth : raw
+        // A window covering (almost) the whole axis is not a window the user can see; the picker
+        // opens 0.25 wide around the sample instead. The sentinel is the axis end, not `1.0`.
+        let width = raw >= top * 0.999 ? LuminanceRangeShape.pickerDefaultWidth : raw
         var next = self
-        next.low = min(max(v - width / 2, 0), 1)
-        next.high = min(max(v + width / 2, 0), 1)
+        next.low = min(max(v - width / 2, 0), top)
+        next.high = min(max(v + width / 2, 0), top)
         return next
     }
 
@@ -450,7 +485,7 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     /// verbatim. This is the "set one end, then the other" gesture; the order may become inverted,
     /// which `ordered` defines rather than the UI.
     public func movingNearerEdge(to value: Double) -> LuminanceRangeShape {
-        let v = min(max(value, 0), 1)
+        let v = min(max(value, 0), LuminanceRangeShape.hdrMax)
         var next = self
         if abs(v - low) <= abs(v - high) {
             next.low = v
@@ -613,17 +648,18 @@ public enum OKLabMetric {
     /// **The luminance picker's coordinate**, and the reason it is here instead of in the UI.
     ///
     /// `s1_5_mask_atlas.metal`'s `luminance_range_alpha` (case 4, around line 352) computes
-    /// `L = oklab(clamp(linearRGB, 0, 1)).x` from the **S1 output in working primaries**. The
-    /// eyedropper reads the resident decode buffer, which is linear **sRGB** (`ColorPrimaries.decoded`,
-    /// `LinearImage.averageRGB`), so the sample is converted into the working primaries and each
-    /// channel is clamped exactly as the kernel clamps before the fold. Without the clamp a highlight
-    /// above display white would sample as `L > 1` and the picker would centre a window the kernel can
-    /// never reach.
+    /// `L = oklab(linearRGB).x` from the **S1 output in working primaries**. The eyedropper reads the
+    /// resident decode buffer, which is linear **sRGB** (`ColorPrimaries.decoded`,
+    /// `LinearImage.averageRGB`), so the sample is converted into the working primaries and folded
+    /// the same way. 167 removed the kernel's `clamp(…, 0, 1)`, so the picker must not clamp either:
+    /// a highlight above display white samples as `L > 1`, up to `LuminanceRangeShape.hdrMax`, and a
+    /// window centred on it is reachable by the kernel.
     public static func maskLuminance(fromDecodedSRGB r: Double, _ g: Double, _ b: Double) -> Double {
         let toWorking = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
         let w = toWorking.applying(to: SIMD3(r, g, b))
-        let lab = fromLinear(min(max(w.x, 0), 1), min(max(w.y, 0), 1), min(max(w.z, 0), 1))
-        return min(max(lab.L, 0), 1)
+        // Negative light is still clamped exactly as the kernel's OKLab fold clamps it.
+        let lab = fromLinear(max(w.x, 0), max(w.y, 0), max(w.z, 0))
+        return min(max(lab.L, 0), LuminanceRangeShape.hdrMax)
     }
 
     /// **The colour picker's storage triple**: decoded scene-linear sRGB → sRGB-encoded 0…1.

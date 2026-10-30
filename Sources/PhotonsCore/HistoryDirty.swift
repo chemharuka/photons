@@ -298,6 +298,9 @@ enum EditParameters {
         t.field("colorNR") { areEqual($0.colorNR, $1.colorNR) }
         t.field("sharpness") { areEqual($0.sharpness, $1.sharpness) }
         t.field("detail") { areEqual($0.detail, $1.detail) }
+        // 164 — 去摩尔纹. Load-bearing: without it `applyEdit` short-circuits and the new row writes
+        // nothing at all.
+        t.field("moire") { areEqual($0.moire, $1.moire) }
         return t
     }()
 
@@ -319,6 +322,12 @@ enum EditParameters {
         // `applyEdit` short-circuited. `EffectsCardTests.testDetailFXRowsWriteTheDocument` holds them.
         t.field("texture") { areEqual($0.texture, $1.texture) }
         t.field("clarity") { areEqual($0.clarity, $1.clarity) }
+        // 164 — the two non-Bayer denoises. Load-bearing exactly like the three above: without them
+        // `applyEdit` short-circuits and the new sliders write nothing.
+        t.field("nonBayerLuminanceNR") {
+            areEqual($0.nonBayerLuminanceNR, $1.nonBayerLuminanceNR)
+        }
+        t.field("nonBayerColorNR") { areEqual($0.nonBayerColorNR, $1.nonBayerColorNR) }
         t.field("dehaze") { areEqual($0.dehaze, $1.dehaze) }
         // 120b — the depth-assisted dehaze strength. Without this line `applyEdit` sees the group as
         // unchanged and a drag of the new row writes nothing (the EffectsCardTests' 2026-10-29 bug).

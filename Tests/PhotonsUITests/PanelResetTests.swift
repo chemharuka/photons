@@ -585,8 +585,9 @@ final class PanelResetTests: XCTestCase {
     /// behaviour, and they were exactly what made moving a row比改表更难.
     func testEveryToneCardHasOneSpecAndOneResetGroup() {
         let specs = InspectorView.PanelCardSpec.all
-        XCTAssertEqual(specs.map(\.section), [.light, .color, .correction, .effects])
-        XCTAssertEqual(specs.map(\.group.rawValue), ["light", "color", "correction", "effects"],
+        XCTAssertEqual(specs.map(\.section), [.light, .color, .correction, .detailFX, .effects])
+        XCTAssertEqual(specs.map(\.group.rawValue),
+                       ["light", "color", "correction", "detailFX", "effects"],
                        "one spec card per tone group, in panel order")
         XCTAssertEqual(Set(specs.map(\.group)).count, specs.count, "no group is claimed by two cards")
 
@@ -604,7 +605,7 @@ final class PanelResetTests: XCTestCase {
         // The group list itself is still the eight cards 047 + 2026-10-28 built.
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "blackAndWhite", "detail", "correction",
-                        "effects", "colorGrading", "pointColor"])
+                        "detailFX", "effects", "colorGrading", "pointColor"])
     }
 
     // MARK: - helpers

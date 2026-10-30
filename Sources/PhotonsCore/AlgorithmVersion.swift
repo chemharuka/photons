@@ -75,13 +75,26 @@ public enum StageAlgorithmVersion {
     /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
     /// old expression verbatim and does not.
     ///
+    /// **5** — 167: the luminance window is read on the **whole HDR axis**, `0…cbrt(16)` (+4 EV),
+    /// instead of `OKLab L of clamp(linearRGB, 0, 1)`. A document with a `luminanceRange` mask now
+    /// selects pixels above display white that the old predicate folded to `L = 1` (and, with the
+    /// default `high = hdrMax`, stops discarding them), so the same stored numbers render different
+    /// pixels; every other shape is byte-identical.
+    ///
+    /// **v1 documents are NOT migrated** (user, 2026-10-30 20:10): the decoder keeps the five stored
+    /// numbers verbatim and only stamps `v = 2`, so an old document keeps `high = 1.0` and its SDR
+    /// selection is bit-identical. The one visible difference is above display white: the old kernel
+    /// folded those pixels to `L = 1` and gave them `alpha = 0.5` (an artefact of the clamp, not an
+    /// intent), while the new axis reads their real `L` and `high = 1.0` closes the window there
+    /// (`alpha = 0`). Users who want the highlights back drag the handle up. See
+    /// `LuminanceRangeShape` for why `default` and the v1 decode fallback are separate constants.
     /// **4** — 120b: the atlas may read the depth map (kind 6, `MaskShape.depthRange`). A document
     /// that carries no depth mask has no new shape to evaluate and is bit-identical; a document with
     /// one renders pixels it could not render before (zeros when no map is supplied), which is still
     /// "different pixels for the same stored parameters" and therefore a bump. The bump is
     /// conditional in effect (`hasDepthRangeMask` also gates the depth key suffix) but the generation
     /// number is per stage, so it moves once for everyone.
-    public static let maskAtlas = 4
+    public static let maskAtlas = 5
     /// **4** — 159: contrast left S1.6 for S2.5 (after the tone map). A mask that carries a contrast
     /// value no longer runs the scene-linear `tone_contrast` here; the same stored number is applied
     /// by the display-domain residual operator, so the pixels inside such a mask change. A mask whose
@@ -133,8 +146,13 @@ public enum StageAlgorithmVersion {
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
 
+    /// **2** — 164: the 细节 card's two non-Bayer denoises (display-referred luminance guided-filter
+    /// mix and OKLab chroma suppression) joined S3.9's apply pass. Both branches are skipped at 0, so
+    /// a document with the two new fields untouched is byte-identical to 1; a document that sets one
+    /// of them renders pixels it could not render before.
+    ///
     /// **1** — S3.9's first arithmetic (2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
-    public static let detailFX = 1
+    public static let detailFX = 2
     /// **2** — 117: 去雾 left S3.9 for S1.9 (`s1_9_dehaze.metal`). The domain changed from
     /// display-referred codes with `A = 1` to scene-linear light with a measured airlight, so every
     /// document with `effects.dehaze != 0` changes pixels even though its stored number did not.

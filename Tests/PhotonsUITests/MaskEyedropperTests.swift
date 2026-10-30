@@ -117,9 +117,9 @@ final class MaskEyedropperTests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(shape.low, rightValue + 1e-12, "low must cover the sample")
         XCTAssertGreaterThanOrEqual(shape.high, rightValue - 1e-12, "high must cover the sample")
-        // A full-range window (the default) opens 0.25 wide, centred on the sample.
+        // A full-range window (the default, 0…L_MAX) opens 0.25 wide, centred on the sample.
         XCTAssertEqual(shape.low, 0.775, accuracy: 0.02)
-        XCTAssertEqual(shape.high, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(shape.high, 1.025, accuracy: 0.02)
 
         let dump = try atlas(session.edit, image)
         let right = alpha(dump, mask.id, x: rightX, y: image.height / 2)

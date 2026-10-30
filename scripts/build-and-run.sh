@@ -33,6 +33,15 @@ fi
 
 make app
 
+# 图标来自 Resources/AppIcon.icon（Icon Composer 文档）+ 由 scripts/appicon.py 烘出的经典 icns。
+# 26+ 用 .icon 的液态玻璃，低版本自动回退到 bundle 里的 AppIcon.icns。
+ICNS="$APP/Contents/Resources/AppIcon.icns"
+if [ -f "$ICNS" ]; then
+  print "icon    AppIcon.icns  $(stat -f%z "$ICNS" | numfmt --to=iec 2>/dev/null || stat -f%z "$ICNS") bytes"
+else
+  print -u2 "icon    缺失 $ICNS"
+fi
+
 REV="$(/usr/libexec/PlistBuddy -c 'Print :PhotonsGitRevision' "$APP/Contents/Info.plist" 2>/dev/null || git rev-parse --short HEAD)"
 print "built  $REV  ($(git rev-parse --abbrev-ref HEAD))"
 

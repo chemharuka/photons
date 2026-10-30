@@ -39,9 +39,9 @@ final class ChromaticAberrationCardTests: XCTestCase {
     // MARK: - 1. the two rows, as data
 
     func testTheTwoCaRowsLiveInTheCorrectionCardInSliderUnitsWithTheLinearAccent() throws {
-        // 096: 校正 is in 调整, between 细节 and 效果 — the card the rows moved to.
+        // 096/164: 校正 is in 调整, between 开发 and 细节 — the card the rows moved to.
         XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.correction))
-        XCTAssertEqual(InspectorView.Section.detail.title, "细节")
+        XCTAssertEqual(InspectorView.Section.detail.title, "开发")
         XCTAssertEqual(InspectorView.Section.correction.title, "校正")
         XCTAssertEqual(InspectorView.caRows.map(\.title), ["色差 R", "色差 B"])
         XCTAssertEqual(InspectorView.caRows.map(\.title), ["色差 R", "色差 B"],
@@ -301,9 +301,9 @@ final class ChromaticAberrationCardTests: XCTestCase {
         try waitFor(panel) { $0.probes.count == 4 }
 
         let card = try XCTUnwrap(panel.cardFrame, "校正卡没有 frame")
-        let detail = try XCTUnwrap(panel.detailCardFrame, "细节卡没有 frame")
+        let detail = try XCTUnwrap(panel.detailCardFrame, "开发卡没有 frame")
         XCTAssertGreaterThan(card.width, 200)
-        XCTAssertGreaterThanOrEqual(card.minY, detail.maxY - 0.5, "校正卡紧跟在细节卡下方")
+        XCTAssertGreaterThanOrEqual(card.minY, detail.maxY - 0.5, "校正卡紧跟在开发卡下方")
         let rows = try InspectorView.caRows.map { row -> (String, CGRect) in
             let frame = try XCTUnwrap(panel.rowFrame(row.title), "「\(row.title)」没有画出来")
             return (row.title, frame)
@@ -590,7 +590,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
 
     private func host(session: CatalogSession, width: CGFloat) throws -> Panel {
         _ = NSApplication.shared
-        // 调整 is the default workspace, and 细节 is its sixth card — the card this task added to.
+        // 调整 is the default workspace, and 开发 is its sixth card — the card this task added to.
         let host = NSHostingView(rootView: InspectorView(session: session))
         host.frame = NSRect(x: 0, y: 0, width: width, height: Self.panelHeight)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],

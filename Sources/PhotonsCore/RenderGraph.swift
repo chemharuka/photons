@@ -926,6 +926,7 @@ private struct DetailFXParamsU {
     var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
+    var f: SIMD4<Float>    // 164: non-Bayer luma amount, chroma amount (0…1), pad, pad
 }
 
 /// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117).
@@ -3734,9 +3735,15 @@ public final class RenderGraph {
         }
         let textureRadius = radiusQ(0.0015, cap: 4)      // ≈ 4 px at a 2731 px frame
         let clarityRadius = radiusQ(0.02, cap: 24)       // ≈ 55 px at a 2731 px frame
+        // 164 — the non-Bayer luma denoise's window: the smallest the 1/q statistics can express
+        // (≈ 1–3 px at display scale, 4 px at a 2731 px frame), so it averages flat noise and not
+        // structure. One more box pair at q resolution, never a full-resolution pass.
+        let denoiseRadius = radiusQ(0.0009, cap: 3)
 
         let textureAmount = Float(edit.effects.texture) / 100
         let clarityAmount = Float(edit.effects.clarity) / 100
+        let lumaNR = Float(edit.effects.nonBayerLuminanceNR) / 100
+        let chromaNR = Float(edit.effects.nonBayerColorNR) / 100
 
         var params = DetailFXParamsU(
             a: SIMD4(textureAmount, clarityAmount, 0, 0),
@@ -3747,9 +3754,13 @@ public final class RenderGraph {
             // gradual transition and stops every step — which is where an unsharp mask draws its halo.
             e: SIMD4(0.015, 0.06, 0, 0),
             b: SIMD4(Int32(w), Int32(h), Int32(q), 0),
-            c: SIMD4(Int32(qW), Int32(qH), 32, 0))
+            c: SIMD4(Int32(qW), Int32(qH), 32, 0),
+            f: SIMD4(lumaNR, chromaNR, 0, 0))
 
         let bandsActive = textureAmount != 0 || clarityAmount != 0
+        // 164: the new denoises share the same stage. A chroma-only drag needs no coefficient map,
+        // but still needs the apply pass; the map arguments bind the source as the inert fallback.
+        let denoiseActive = lumaNR != 0 || chromaNR != 0
         var current = src
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
@@ -3757,15 +3768,18 @@ public final class RenderGraph {
         // radii differ), one coefficient map per band, then a single apply that adds both residuals.
         // Splitting the apply in two would read the frame a second time for nothing — measured at
         // 4.10 Mpx, that second read was ~1.2 ms of the frame.
-        if bandsActive {
+        if bandsActive || denoiseActive {
             params.a.x = textureAmount
             // Full deflection is 0.8 × the residual, not 1.0: at 1.0 the additive boost shifts the
             // frame's mean by ~1.1 % (measured on the fixture's dark/bright step), which is a
             // brightness change on a control that promises none. 0.8 keeps the +100 high-pass gain at
             // ~+67 % (the acceptance asks for +30 %) and the mean inside 1 %.
             params.a.y = clarityAmount * 0.8
+            params.f.x = lumaNR
+            params.f.y = chromaNR
             try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
-                              textureRadius: textureRadius, clarityRadius: clarityRadius)
+                              textureRadius: textureRadius, clarityRadius: clarityRadius,
+                              denoiseRadius: denoiseRadius)
             current = out
         }
 
@@ -3793,7 +3807,8 @@ public final class RenderGraph {
     /// because "a step edge" is the same test at both scales.
     private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
                                params: inout DetailFXParamsU, qW: Int, qH: Int,
-                               textureRadius: Int32, clarityRadius: Int32) throws {
+                               textureRadius: Int32, clarityRadius: Int32,
+                               denoiseRadius: Int32) throws {
         let base = try scratch("detailfx-stats", width: qW, height: qH, format: .rgba32Float)
         let tmp = try scratch("detailfx-stats-tmp", width: qW, height: qH, format: .rgba32Float)
 
@@ -3803,16 +3818,28 @@ public final class RenderGraph {
         dispatch(e0, pack, ImageSize(width: qW, height: qH))
         e0.endEncoding()
 
-        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2).
+        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2),
+        // band 2 = 164 non-Bayer 降噪 (smallest radius, ε = 4e-3 — the same fine band's statistics).
+        //
+        // 164: when 纹理 is active its coefficient map is already the fine-band base at the right
+        // radius, so the luma denoise **reuses it** instead of paying a second box/coefficient chain.
         var coeffTex: MTLTexture?
         var coeffCla: MTLTexture?
-        for band in [0, 1] {
-            let active = band == 0 ? params.a.x != 0 : params.a.y != 0
+        var coeffNR: MTLTexture?
+        for band in [0, 1, 2] {
+            let active: Bool
+            switch band {
+            case 0: active = params.a.x != 0
+            case 1: active = params.a.y != 0
+            // The luma denoise needs its own map only when 纹理 did not make one (params.f.x > 0
+            // and no band 0 map yet). `coeffTex` is assigned by this loop's first iteration.
+            default: active = params.f.x > 0 && coeffTex == nil
+            }
             if !active { continue }
             let stats = try scratch("detailfx-stats-\(band)", width: qW, height: qH,
                                     format: .rgba32Float)
-            params.b.w = band == 0 ? textureRadius : clarityRadius
-            params.d.x = band == 0 ? 0.004 : 0.01
+            params.b.w = band == 0 ? textureRadius : (band == 1 ? clarityRadius : denoiseRadius)
+            params.d.x = band == 0 || band == 2 ? 0.004 : 0.01
             try detailFXBox(cb: cb, from: base, tmp: tmp, to: stats, params: &params, qW: qW, qH: qH,
                             horizontal: "s3_8_guide_box_h", vertical: "s3_8_guide_box_v")
 
@@ -3823,19 +3850,28 @@ public final class RenderGraph {
             e1.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
             dispatch(e1, cp, ImageSize(width: qW, height: qH))
             e1.endEncoding()
-            if band == 0 { coeffTex = coeff } else { coeffCla = coeff }
+            switch band {
+            case 0: coeffTex = coeff
+            case 1: coeffCla = coeff
+            default: coeffNR = coeff
+            }
         }
+        // Reuse 纹理's fine-band map for the luma denoise when it exists (see the loop's band 2).
+        if coeffNR == nil, params.f.x > 0 { coeffNR = coeffTex }
 
         let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_apply")
-        let fallback = coeffTex ?? coeffCla
-        guard let enc = cb.makeComputeCommandEncoder(), let first = fallback else {
+        // A chroma-only drag has no coefficient map at all; the source is a valid sampleable texture
+        // and every amount that would read it is 0, so it is the honest inert binding.
+        let fallback = coeffTex ?? coeffCla ?? coeffNR ?? source
+        guard let enc = cb.makeComputeCommandEncoder() else {
             throw RenderError.commandBufferFailed
         }
         enc.setComputePipelineState(apply)
         enc.setTexture(source, index: 0)
-        enc.setTexture(coeffTex ?? first, index: 1)
-        enc.setTexture(coeffCla ?? first, index: 2)
+        enc.setTexture(coeffTex ?? fallback, index: 1)
+        enc.setTexture(coeffCla ?? fallback, index: 2)
         enc.setTexture(destination, index: 3)
+        enc.setTexture(coeffNR ?? fallback, index: 4)
         enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
         dispatch(enc, apply, ImageSize(width: Int(params.b.x), height: Int(params.b.y)))
         enc.endEncoding()

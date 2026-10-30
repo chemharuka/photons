@@ -509,7 +509,11 @@ final class ExposureEquivarianceTests: XCTestCase {
         "contrast·-50": "b199f90f66fcc83a3b7a41fcd859d16e4b4f170f958486cb1cb24cbe9ca019df",
         "contrast·50": "057b4eec975c47083d450cda8997a8fb1f92575e2d30e9a4b0f7ec14dd94f389",
         "contrast·100": "2afccef28b69ce60655413d16346f2b21e9e6ba59fca8cc25bde727ef6c79e6a",
-        "atlas": "37b8deb9a4e691b043429ec50673dcac3d63a14d39987f6e99fe5a8ad35b0eae",
+        // 167: the atlas digest below moved **only** because the luma predicate's axis no longer
+        // folds HDR light to `L = 1`; at E = 0 the global gain is still exactly 1, so this remains a
+        // check of 147's "unexposed tick" invariant for the same document. Old → new:
+        // 37b8deb9…b0eae → 2b0a593e…9eee (introduced by b6166e4, 147).
+        "atlas": "2b0a593e14b510ca2580e50d4b0ad144d12b77b1d000c9ddbbf04b34134d9eee",
     ]
 
     private static let leftColourSRGB: [Double] = {

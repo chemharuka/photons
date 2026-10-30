@@ -32,13 +32,14 @@ enum CopySettingsSheet {
     // MARK: 156 — the three-column grid
 
     static let columnCount = 3
-    static let columnWidth: CGFloat = 260
+    static let columnWidth: CGFloat = 200
     static let columnSpacing: CGFloat = 24
     static let rowHeight: CGFloat = 24
     static let contentInset: CGFloat = 16
     static let cornerRadius: CGFloat = 10
 
-    /// 3 × 260 + 2 × 24 = 828; the panel is this plus the two 16 pt insets (≈ 860).
+    /// 3 × 200 + 2 × 24 = 648; the panel is this plus the two 16 pt insets (≈ 680).
+    /// 2026-10-30（用户）：三列选单不需要那么宽 —— 260 pt/列显得空，收到 200 pt。
     static var gridWidth: CGFloat {
         CGFloat(columnCount) * columnWidth + CGFloat(columnCount - 1) * columnSpacing
     }
@@ -78,7 +79,8 @@ final class CopySettingsAccessoryView: NSView {
         var informativeText: String {
             switch self {
             case .copy:
-                return "勾选要复制的卡片。只复制所选卡片里非默认的字段；目标照片没被点名的卡片一个字段都不会动。"
+                // 2026-10-30（用户）：这行说明太长，改成一句结论。
+                return "不包含默认值"
             case .paste:
                 return "勾选要粘贴的卡片。目标照片里没被点名的卡片一个字段都不会动。"
             }
@@ -241,10 +243,9 @@ final class CopySettingsAccessoryView: NSView {
         ])
 
         root.addArrangedSubview(separator())
+        // 2026-10-30（用户）：底部「将复制：xx · xx」整行删除 —— 勾选状态本身就是答案。
         statusLabel = NSTextField(labelWithString: "")
-        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLabel.textColor = .secondaryLabelColor
-        root.addArrangedSubview(statusLabel)
+        statusLabel.isHidden = true
 
         // 081 §1: 全选 / 全不选 / 组合预设 are the sheet's **footer**, under the rows — the checklist is
         // the subject, the shortcuts are not. The primary button (复制（记住本次选择）) and
@@ -390,6 +391,7 @@ final class CopySettingsAccessoryView: NSView {
         } else {
             presetPopUp.selectItem(at: 0)
         }
+        // statusLabel 不再参与布局（见构造里的注释），这里只更新值，供测试读取。
         statusLabel.stringValue = selection.summary
     }
 

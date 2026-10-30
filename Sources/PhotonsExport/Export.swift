@@ -70,17 +70,16 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         available(writableUTIs: writableUTIs)
     }
 
-    /// 109 §1 / 108 — the bit depths the container can honestly store, narrowest first.
+    /// 109 §1 / 108 / 163 — the bit depths the container can honestly store, narrowest first.
     ///
-    /// AVIF is deliberately 8-only in the sheet: ImageIO's AVIF writer accepts 10 bpc but the
-    /// project has no fixture that reads it back as 10, so offering it would promise a file the
-    /// encoder does not reliably produce yet.
+    /// AVIF was 8-only while the project had no fixture that read 10 back. The 163 probe writes a
+    /// 16-bit-storage `CGImage` and reads `kCGImagePropertyDepth = 10` + `bitsPerComponent = 10`, so
+    /// AVIF now offers 10 like HEIC.
     public var bitDepths: [Int] {
         switch self {
         case .jpeg: return [8]
-        case .heic: return [8, 10]
+        case .heic, .avif: return [8, 10]
         case .tiff, .png: return [8, 16]
-        case .avif: return [8]
         }
     }
 
@@ -105,7 +104,8 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         self == .tiff || self == .png
     }
 
-    /// HEIF-based containers top out at 10 bits per channel (see `supports16Bit`).
+    /// HEIF-based containers top out at 10 bits per channel (see `supports16Bit`). AVIF's ImageIO
+    /// encoder really produces 10 when handed 16-bit storage (163 probe).
     public var supports10Bit: Bool {
         self == .heic || self == .avif
     }
@@ -113,12 +113,14 @@ public enum ExportFormat: String, Sendable, CaseIterable {
     /// 111 — the HDR kinds this container can honestly carry.
     ///
     /// This table is the single source of truth for `ExportPreset.validated()`, the UI picker and the
-    /// tests. `gainMap` stays HEIC/AVIF-only because a gain map is an auxiliary image (TIFF/PNG have
-    /// no such container); `hlg`/`pq` are offered for every non-JPEG container.
+    /// tests. `gainMap` is available for HEIC/JPEG/AVIF (163 measured that ImageIO's JPEG writer takes
+    /// the ISO auxiliary image and Core Image's JPEG representation takes Apple's); TIFF/PNG have no
+    /// auxiliary-image container. `hlg`/`pq` are offered for every non-JPEG container (8-bit JPEG has
+    /// neither transfer curve).
     public var hdrKinds: [HDRKind] {
         switch self {
         case .jpeg:
-            return [.none]
+            return [.none, .gainMap]
         case .heic, .avif:
             return [.none, .gainMap, .hlg, .pq]
         case .tiff, .png:
@@ -128,6 +130,24 @@ public enum ExportFormat: String, Sendable, CaseIterable {
 
     public func supports(_ kind: HDRKind) -> Bool {
         hdrKinds.contains(kind)
+    }
+
+    /// 163 — the only bit depth a `pq`/`hlg` primary item may carry: HEIF tops out at 10, the lossless
+    /// containers are honest at 16. `nil` when the container cannot write that curve at all (JPEG).
+    public func hdrTransferBitDepth(for kind: HDRKind) -> Int? {
+        guard kind == .hlg || kind == .pq else { return nil }
+        switch self {
+        case .heic, .avif: return 10
+        case .png, .tiff: return 16
+        case .jpeg: return nil
+        }
+    }
+
+    /// 163 — the depths the sheet may offer for `kind`. PQ/HLG are locked to the one legal value
+    /// instead of silently clamping a stale 8-bit preset at write time.
+    public func bitDepths(for kind: HDRKind) -> [Int] {
+        if let locked = hdrTransferBitDepth(for: kind) { return [locked] }
+        return bitDepths
     }
 
     /// Containers ImageIO can rewrite in place with XMP (`XMPWriter.canEmbed`). AVIF is absent:
@@ -199,8 +219,9 @@ public enum Exporter {
         }
     }
 
-    public static func cgImage(_ image: DisplayImage, bitDepth: Int) throws -> CGImage {
-        guard let space = colorSpace(for: image.primaries) else {
+    public static func cgImage(_ image: DisplayImage, bitDepth: Int,
+                               space override: CGColorSpace? = nil) throws -> CGImage {
+        guard let space = override ?? colorSpace(for: image.primaries) else {
             throw ExportError.encodeFailed("color space unavailable: \(image.primaries.displayName)")
         }
         let w = image.width, h = image.height
@@ -248,9 +269,10 @@ public enum Exporter {
 
     /// Write `image`. When `options.hdr` asks for a gain map **and** the image carries a linear
     /// companion (rendered through `s4_display_linear`), this routes to `GainMapHEIC`, which writes
-    /// the same SDR base plus a gain-map auxiliary image. `hlg`/`pq` route to `HDREncoding`, which
-    /// converts the linear companion to Rec.2020 with the requested transfer curve. Otherwise it is
-    /// the untouched pre-100 encoder.
+    /// the same SDR base plus a gain-map auxiliary image (HEIC, JPEG or AVIF). `hlg`/`pq` route to
+    /// `HDREncoding`, which converts the linear companion to the **base family's** PQ/HLG space
+    /// (Rec.709 / Display P3 / Rec.2020 — see its table). Otherwise it is the untouched pre-100
+    /// encoder.
     ///
     /// - Returns: non-fatal HDR notes (an SDR fallback, a clipped headroom). Empty on the normal path.
     @discardableResult
@@ -260,7 +282,7 @@ public enum Exporter {
             switch hdr.kind {
             case .gainMap:
                 if let linear = image.linear {
-                    if options.format == .heic {
+                    if options.format == .heic || options.format == .jpeg {
                         let result = try GainMapHEIC.write(
                             sdr: image, linear: linear, to: url,
                             options: HDRGainMapOptions(gainMap: hdr.gainMap,
@@ -268,19 +290,29 @@ public enum Exporter {
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
                                                        bitDepth: options.bitDepth),
-                            metadata: metadata)
+                            metadata: metadata,
+                            format: options.format)
                         return result.warnings
                     }
-                    // ImageIO's AVIF writer refuses `AddAuxiliaryDataInfo`
-                    // (`CGImageDestinationFinalize` returns false), so no AVIF gain map can be
-                    // produced through the only encoder this project allows. Write the honest SDR
-                    // file and say so instead of mislabelling a HEIC at a `.avif` path.
+                    // 163 probe: AVIF takes the ISO gain map (contentHeadroom reads back 4.00) but
+                    // not Apple's spelling (aux written, headroom 1.00). Write ISO for an Apple
+                    // request and say why — never mislabel an SDR file as HDR.
                     if options.format == .avif {
-                        var sdrOptions = options
-                        sdrOptions.hdr = nil
-                        try write(image.withLinear(nil), to: url, options: sdrOptions,
-                                  metadata: metadata)
-                        return ["AVIF gain maps are not writable by ImageIO — wrote an SDR AVIF"]
+                        let apple = hdr.gainMap == .apple
+                        let result = try GainMapHEIC.write(
+                            sdr: image, linear: linear, to: url,
+                            options: HDRGainMapOptions(gainMap: apple ? .iso : hdr.gainMap,
+                                                       halfSize: hdr.halfSize,
+                                                       headroom: hdr.headroom,
+                                                       quality: options.quality,
+                                                       bitDepth: options.bitDepth),
+                            metadata: metadata,
+                            format: .avif)
+                        if apple {
+                            return ["AVIF cannot carry Apple's gain map (ImageIO reads it as SDR); "
+                                    + "wrote the ISO RGB gain map instead"] + result.warnings
+                        }
+                        return result.warnings
                     }
                 }
             case .hlg, .pq:

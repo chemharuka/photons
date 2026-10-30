@@ -178,6 +178,9 @@ public struct Preset: Sendable, Equatable, Codable {
             // group for (whole-document presets do not carry CA either). The card is copy/paste only;
             // naming a group here would promise a fragment the encoder cannot write.
             case .correction: return []
+            // 164: 纹理 / 清晰度 / 非 Bayer 降噪 are `EffectsGroup` fields, so the preset envelope's
+            // effects group is the one that can carry them (the storage group, not the panel card).
+            case .detailFX: return [.effects]
             case .effects: return [.effects]
             case .masks: return []
             }

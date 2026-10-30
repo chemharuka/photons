@@ -128,6 +128,45 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.preset.sdrToneMapping, .none)
     }
 
+    /// 168 §1 — PQ/HLG are single-picture HDR paths: neither a gain-map row nor an SDR tone-map row.
+    /// Before this the view's `else` (keyed only on `showsGainMapRows`) painted 色调映射 under them.
+    func testPQAndHLGHideTheToneMappingRow() {
+        let sheet = model()
+        sheet.setHDR(true)
+
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDRKind(.hlg)
+        XCTAssertEqual(sheet.hdrKind, .hlg)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDR(false)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertTrue(sheet.showsToneMappingRow, "HDR 关必须有色调映射行")
+    }
+
+    /// 168 §3 — a typed quality writes only a legal 0.10–1.00 value, with two decimals in the box.
+    /// An empty/non-numeric/out-of-range string leaves the previous legal value untouched.
+    func testTypedQualityCommitsLegalValuesAndRejectsTheRest() {
+        let sheet = model()
+        XCTAssertEqual(sheet.qualityText, "0.85", "161 的默认质量仍是 0.85")
+
+        XCTAssertTrue(sheet.commitQuality("0.92"))
+        XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12)
+        XCTAssertEqual(sheet.qualityText, "0.92")
+
+        for bad in ["1.5", "abc", "", "  ", "0.05", "nan"] {
+            XCTAssertFalse(sheet.commitQuality(bad), bad)
+            XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12,
+                           "非法值 \(bad) 不许回写文档")
+        }
+        XCTAssertEqual(sheet.qualityText, "0.92")
+    }
+
     /// §4.3 — RGB + Apple is not reachable; each legal pair lands on the right `GainMap`.
     func testGainMapModelAndVersionMapToTheThreeSpellings() {
         let sheet = model()
@@ -185,6 +224,8 @@ final class ExportSheetModelTests: XCTestCase {
 
         sheet.preset = ExportSheetModel.defaultPreset
         sheet.preset.format = .jpeg
+        // 163 — JPEG can carry a gain map now; this test pins the SDR summary, so turn HDR off.
+        sheet.preset.hdr = nil
         sheet.preset.longEdge = 2400
         sheet.preset.bitDepth = 8
         sheet.preset.colorSpace = .sRGB
@@ -253,7 +294,7 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.preset.hdr?.enabled, true, "HDR defaults to on")
         // 109's default draft names ISO explicitly (it is the macOS 15+ spelling).
         XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
-        XCTAssertEqual(sheet.preset.hdr?.halfSize, false)
+        XCTAssertEqual(sheet.preset.hdr?.halfSize, true)
         XCTAssertEqual(sheet.preset.hdr?.headroom, .auto)
 
         XCTAssertNotNil(sheet.preset.exportOptions.hdr)
@@ -261,29 +302,40 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertNoThrow(try sheet.preset.validated())
     }
 
-    /// §A: the row is HEIC-only. Switching away records "off" in the preset (so `validated()` accepts
-    /// it) but the user's real choice survives and comes back with HEIC — both directions.
-    func testHDRIsHEICOnlyAndTheUsersChoiceSurvivesTheFormatRoundTrip() {
+    /// §A + 163: JPEG carries a gain map too, so HEIC ↔ JPEG keeps the switch and the gain-map
+    /// choices. A container that cannot carry the remembered kind (PNG/TIFF + gain map) turns HDR off
+    /// until the user picks a kind that container supports; an explicit "off" survives every trip.
+    func testHDRGainMapSurvivesHEICAndJPEGButNotAContainerWithoutAuxImages() {
         let sheet = model()
         sheet.hdrGainMap = .apple
         sheet.hdrHalfSize = true
         XCTAssertTrue(sheet.hdrEnabled)
 
-        // HEIC → JPEG: greyed/off, and a JPEG preset validates.
+        // HEIC → JPEG: same gain map, same half-size choice, and a JPEG preset validates.
         sheet.selectFormat(.jpeg)
         XCTAssertEqual(sheet.preset.format, .jpeg)
-        XCTAssertFalse(sheet.hdrEnabled)
-        XCTAssertEqual(sheet.preset.hdr?.enabled, false)
-        XCTAssertNil(sheet.preset.exportOptions.hdr, "off means the SDR encoder path")
+        XCTAssertTrue(sheet.hdrEnabled, "163: JPEG carries a gain map")
+        XCTAssertEqual(sheet.preset.hdr?.enabled, true)
+        XCTAssertEqual(sheet.hdrGainMap, .apple)
+        XCTAssertTrue(sheet.hdrHalfSize)
+        XCTAssertNotNil(sheet.preset.exportOptions.hdr, "the JPEG writer takes the gain-map path")
         XCTAssertNoThrow(try sheet.preset.validated())
 
-        // …and JPEG → HEIC restores both the switch and the menu choices.
+        // …and JPEG → HEIC keeps both the switch and the menu choices.
         sheet.selectFormat(.heic)
         XCTAssertTrue(sheet.hdrEnabled)
         XCTAssertEqual(sheet.preset.hdr?.enabled, true)
         XCTAssertEqual(sheet.hdrGainMap, .apple)
         XCTAssertTrue(sheet.hdrHalfSize)
         XCTAssertEqual(sheet.preset.exportOptions.hdr?.gainMap, .apple)
+
+        // PNG has no auxiliary-image container: the remembered gain map pauses, and coming back
+        // restores it because the user never turned HDR off.
+        sheet.selectFormat(.png)
+        XCTAssertFalse(sheet.hdrEnabled)
+        sheet.selectFormat(.heic)
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrGainMap, .apple)
 
         // The other order: the user turns HDR off, leaves HEIC, comes back — it stays off.
         sheet.setHDR(false)
@@ -350,29 +402,98 @@ final class ExportSheetModelTests: XCTestCase {
                        "空态文案必须和按钮同一行")
     }
 
-    /// §A (the visible half): the HDR row stays in place and greys out for non-HEIC formats; the
+    /// §A (the visible half): the HDR row keeps its height across format/toggle changes; the
     /// gain-map controls follow the toggle (109 replaced 106's menu with two segmented groups).
+    /// 163 — JPEG is a gain-map container too, so the row stays lit there.
     func testTheHDRRowStaysPutAndTheGainMapControlsFollowTheFormat() throws {
         let sheet = model()
         let hosted = try host(height: 760, model: sheet)
 
         let heicRow = try frame(of: .hdrRow, in: hosted.host)
         XCTAssertGreaterThan(heicRow.height, 0, "the HDR row is in the sheet")
-        XCTAssertTrue(sheet.hdrEnabled, "HEIC is the one format that supports HDR")
+        XCTAssertTrue(sheet.hdrEnabled, "HEIC supports HDR")
         XCTAssertTrue(sheet.showsGainMapRows)
 
         sheet.selectFormat(.jpeg)
         pump(hosted.host)
         XCTAssertEqual(try frame(of: .hdrRow, in: hosted.host).height, heicRow.height,
-                       accuracy: 0.5, "the row stays put, it just greys out")
-        XCTAssertFalse(sheet.hdrEnabled, "the row must be off before the user can hit 导出")
+                       accuracy: 0.5, "the row stays put")
+        XCTAssertTrue(sheet.hdrEnabled, "163: JPEG carries a gain map")
+        XCTAssertTrue(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDR(false)
+        pump(hosted.host)
+        XCTAssertEqual(try frame(of: .hdrRow, in: hosted.host).height, heicRow.height,
+                       accuracy: 0.5, "the off state keeps the row height")
         XCTAssertFalse(sheet.showsGainMapRows)
         XCTAssertTrue(sheet.showsToneMappingRow)
 
-        sheet.selectFormat(.heic)
+        sheet.setHDR(true)
         pump(hosted.host)
-        XCTAssertTrue(sheet.hdrEnabled, "the remembered choice came back with HEIC")
+        XCTAssertTrue(sheet.hdrEnabled)
         XCTAssertTrue(sheet.showsGainMapRows)
+    }
+
+    /// 163 §1.3 — choosing PQ/HLG writes the container's one legal depth in the same step, and the
+    /// sheet never offers a second depth while that curve is selected.
+    func testSelectingPQOrHLGLocksTheBitDepthAndUpdatesThePicker() throws {
+        let sheet = model()
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        XCTAssertEqual(sheet.bitDepths, [8, 10])
+
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+        XCTAssertEqual(sheet.bitDepths, [10])
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // A HEIF row moves to PNG: still PQ, now the lossless depth.
+        sheet.selectFormat(.png)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        XCTAssertEqual(sheet.bitDepths, [16])
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        sheet.selectFormat(.heic)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+
+        // JPEG has no PQ row at all: the format switch turns HDR off rather than leaving an illegal
+        // preset behind.
+        sheet.selectFormat(.jpeg)
+        XCTAssertEqual(sheet.hdrKind, .none)
+        XCTAssertFalse(sheet.hdrEnabled)
+        XCTAssertNoThrow(try sheet.preset.validated())
+    }
+
+    // MARK: - 163 §1.6 half-size even-pixel hint
+
+    /// The warning is conditional: odd output shows the exact crop, even output builds no view at
+    /// all, and the full-size switch removes it. `predictedSizeText` agrees with the crop.
+    func testHalfSizeCropHintAppearsOnlyForOddOutput() {
+        let sheet = model()
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
+        XCTAssertEqual(sheet.halfSizeCropHint,
+                       "半尺寸需要偶数像素：当前 6001×4001，将裁到 6000×4000（右/下各 1 px）")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
+                       "6000×4000")
+
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000)]
+        XCTAssertNil(sheet.halfSizeCropHint, "even output must not leave an empty line")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6000, height: 4000)),
+                       "6000×4000")
+
+        sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
+        sheet.hdrHalfSize = false
+        XCTAssertNil(sheet.halfSizeCropHint, "full-size export keeps 6001×4001")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
+                       "6001×4001")
+
+        sheet.hdrHalfSize = true
+        sheet.setHDRKind(.hlg)
+        XCTAssertNil(sheet.halfSizeCropHint, "only a gain map has a half-size map")
     }
 
     // MARK: - hosting helpers

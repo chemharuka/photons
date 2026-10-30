@@ -1,7 +1,8 @@
 #include <metal_stdlib>
+#include "oklch_bands.metal"
 using namespace metal;
 
-// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079).
+// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079); 164 adds the two **non-Bayer** denoises.
 //
 // The 效果 card's second block, in the place Lightroom puts the two Presence detail controls: the
 // picture's detail is shaped here — and only then does S3c darken the corners, so the vignette's own
@@ -37,6 +38,21 @@ using namespace metal;
 // Everything is in the **display-referred** domain (post S2/S3, pre S4), like S3c/S3.7. The stage
 // exists only when at least one amount is non-zero (`RenderStage.pipeline(hasDetailFX:)`), so a
 // neutral document never reaches this file: 中性 is "not encoded", not "encoded and multiplied by 0".
+//
+// 164 — **非 Bayer 降噪 / 非 Bayer 彩色降噪**, the new 细节 card's two numbers:
+//
+//   · **luminance** reuses this file's own guided-filter residual at the smallest radius (the
+//     texture band's statistics, one box pair), and mixes the luma **towards** the base layer:
+//     `I' = I + amt·(base − I)`. At a flat patch `base` is the local mean, so noise is averaged; at a
+//     structural edge `a → 1` so `base → I`, and the gradient gate holds the residual off. The
+//     correction is applied equally to the three channels, so it moves luminance only.
+//   · **chroma** converts to OKLab, scales `C` by `1 − 0.9·amt`, converts back, and restores the
+//     **Rec.709 luminance** with one common gain. A grey card arrives at `C ≈ 1e-8` and is skipped
+//     (`C <= 1e-6`), so it cannot gain a tint; a coloured pixel keeps its `Y` by construction.
+//
+// Both are inside the **same** full-resolution apply pass as 纹理/清晰度 (one extra coefficient map,
+// no extra frame read), and both branches are skipped entirely at 0, which is what keeps the
+// pre-164 frame byte for byte when the two new sliders are untouched.
 
 // MARK: - parameters
 
@@ -53,6 +69,8 @@ struct DetailFXParams {
     int4 b;
     // qW, qH, segment length, pad
     int4 c;
+    // 164: non-Bayer luma amount, non-Bayer chroma amount (0…1), pad, pad
+    float4 f;
 };
 
 static inline float s3_8_luma(float3 rgb, float3 w) {
@@ -190,10 +208,15 @@ kernel void s3_8_guide_coeff(texture2d<float, access::read> stats [[texture(0)]]
 ///
 /// The residual is added to **all three channels equally**, so the boost moves luminance and leaves
 /// the chroma ratios alone; clamping happens once, at the end.
+///
+/// 164: the third coefficient map (index 4) is the non-Bayer **luminance** denoise; its amount is
+/// `p.f.x`. The **chroma** denoise (`p.f.y`) needs no map — it is one OKLab round trip. Both are
+/// guarded by `> 0`, so an untouched 细节 card executes exactly the pre-164 instruction stream.
 kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
                              texture2d<float, access::sample> coeffTex [[texture(1)]],
                              texture2d<float, access::sample> coeffCla [[texture(2)]],
                              texture2d<float, access::write> dst [[texture(3)]],
+                             texture2d<float, access::sample> coeffNR [[texture(4)]],
                              constant DetailFXParams &p [[buffer(0)]],
                              uint2 gid [[thread_position_in_grid]]) {
     int w = p.b.x, h = p.b.y;
@@ -214,6 +237,34 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     float amountCla = clamp(p.a.y, -1.0, 1.0);
     float delta = amountTex * clamp(t.z, 0.0, 1.0) * (I - baseTex)
                 + amountCla * clamp(c.z, 0.0, 1.0) * (I - baseCla);
-    dst.write(float4(clamp(rgb + delta, 0.0, 4.0), px.a), gid);
+
+    // 164 — non-Bayer luminance denoise: mix the luma towards the same guided base.
+    float amountNR = clamp(p.f.x, 0.0, 1.0);
+    if (amountNR > 0.0) {
+        float4 n = coeffNR.sample(linearSampler, uv);
+        float baseNR = clamp(n.x * I + n.y, 0.0, 2.0);
+        delta += amountNR * clamp(n.z, 0.0, 1.0) * (baseNR - I);
+    }
+    float3 outRGB = clamp(rgb + delta, 0.0, 4.0);
+
+    // 164 — non-Bayer chroma denoise: scale OKLab C only, holding L and hue. A neutral pixel has
+    // C ≈ 1e-8 and is skipped entirely, so a grey card cannot be tinted by the fold's rounding.
+    float amountCNR = clamp(p.f.y, 0.0, 1.0);
+    if (amountCNR > 0.0) {
+        float3 lab = oklab_raw(outRGB);
+        float chroma = length(lab.yz);
+        if (chroma > 1e-6) {
+            float hue = atan2(lab.z, lab.y) * (180.0 / M_PI_F);
+            float scaled = chroma * (1.0 - 0.9 * amountCNR);
+            float3 reduced = oklch_to_linear(lab.x, scaled, hue);
+            // Hold the **Rec.709 luminance**, not merely OKLab L: a common gain puts `Y` back where
+            // it was, so the control moves chroma and leaves the luma untouched by construction.
+            float y0 = s3_8_luma(outRGB, p.luma.xyz);
+            float y1 = s3_8_luma(reduced, p.luma.xyz);
+            if (y1 > 1e-6) { reduced *= max(y0, 0.0) / y1; }
+            outRGB = clamp(reduced, 0.0, 4.0);
+        }
+    }
+    dst.write(float4(outRGB, px.a), gid);
 }
 

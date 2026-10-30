@@ -282,6 +282,17 @@ public final class ExportSheetModel {
         didSet { resetFinishedReportAfterConfigurationChange() }
     }
 
+    /// 163 §1.6 — the selected pictures' **crop content** sizes (before the preset's scale). The
+    /// controller fills this alongside `natives`; the sheet uses it to update the even-pixel warning
+    /// live as the user changes size/percentage. It is not persisted.
+    public var selectionContents: [ImageSize] = []
+
+    /// 168 §2 — the selected pictures' **own** pixel sizes, straight from the catalog's
+    /// `width`/`height` (never a thumbnail). The 长边 default comes from the first entry, because a
+    /// batch export describes one size for all of them and the first picture is the one the user is
+    /// looking at. Filled by `ExportSheetController.refreshItems`, beside `selectionContents`.
+    public var selectionNatives: [ImageSize] = []
+
     /// `internal(set)` so the footer/layout tests can put the model in a phase without starting a
     /// real render; the app only writes it in `run`/`cancel`/`finish`.
     public internal(set) var phase: Phase = .idle
@@ -334,6 +345,7 @@ public final class ExportSheetModel {
         let startingPreset = preset ?? remembered?.preset ?? Self.defaultPreset
         self.preset = startingPreset
         self.hdrPreferredEnabled = startingPreset.hdr?.enabled ?? true
+        self.hdrPreferredKind = startingPreset.hdrKind == .none ? .gainMap : startingPreset.hdrKind
         self.outputDirectory = outputDirectory ?? remembered?.directoryURL
             ?? Self.defaultOutputDirectory
         self.writableUTIs = writableUTIs ?? ExportFormat.writableUTIs
@@ -394,10 +406,15 @@ public final class ExportSheetModel {
     /// The user's last HDR checkbox choice. Kept here (not in a fresh `@State`) so a format round
     /// trip — HEIC → JPEG → HEIC — restores what they picked instead of resetting to `true`.
     public private(set) var hdrPreferredEnabled: Bool
+    /// The last HDR *kind* the user picked (163). A format switch that cannot carry it turns HDR off
+    /// without forgetting the choice, and coming back to a capable container restores that kind —
+    /// not a generic gain map.
+    public private(set) var hdrPreferredKind: HDRKind
 
-    /// What the checkbox shows. Non-HEIC is always off (the row is greyed out there too).
+    /// What the checkbox shows. Every writable container has at least one HDR kind (JPEG: gain map;
+    /// PNG/TIFF: PQ/HLG; HEIC/AVIF: all), so the row is only off when the user turns it off.
     public var hdrEnabled: Bool {
-        guard preset.format == .heic else { return false }
+        guard !availableHDRKinds.isEmpty else { return false }
         return preset.hdr?.enabled ?? hdrPreferredEnabled
     }
 
@@ -406,8 +423,37 @@ public final class ExportSheetModel {
         set { updateHDR { $0.gainMap = newValue } }
     }
 
+    /// 163 §1.3 — which HDR path the sheet is offering (增益图 / HLG / PQ). `gainMap` is the default;
+    /// the row only shows while HDR is on.
+    public var hdrKind: HDRKind {
+        get { preset.hdrKind }
+        set { setHDRKind(newValue) }
+    }
+
+    /// The kinds this container may carry, in display order. JPEG offers only the gain map (no 8-bit
+    /// PQ/HLG); PNG/TIFF offer only the two transfer curves; HEIC/AVIF offer all three.
+    public var availableHDRKinds: [HDRKind] {
+        preset.format.hdrKinds.filter { $0 != .none }
+    }
+
+    /// 163 §1.3 — choosing PQ/HLG locks the bit depth to the container's one legal value (HEIF 10,
+    /// PNG/TIFF 16) in the same write, so the UI can never leave a `validated()`-illegal pair behind.
+    public func setHDRKind(_ kind: HDRKind) {
+        if kind == .none {
+            setHDR(false)
+            return
+        }
+        guard preset.format.supports(kind) else { return }
+        hdrPreferredKind = kind
+        updateHDR { $0.kind = kind }
+        if let locked = preset.format.hdrTransferBitDepth(for: kind) {
+            preset.bitDepth = locked
+        }
+        if kind != .none { hdrPreferredEnabled = true }
+    }
+
     public var hdrHalfSize: Bool {
-        get { preset.hdr?.halfSize ?? false }
+        get { preset.hdr?.halfSize ?? true }
         set { updateHDR { $0.halfSize = newValue } }
     }
 
@@ -446,7 +492,8 @@ public final class ExportSheetModel {
     }
 
     /// 109 §1 — HDR on shows the gain-map row and hides tone mapping; HDR off is the reverse.
-    public var showsGainMapRows: Bool { hdrEnabled }
+    /// 163 — PQ/HLG are single-picture paths, so the gain-map row only appears for `.gainMap`.
+    public var showsGainMapRows: Bool { hdrEnabled && preset.hdrKind == .gainMap }
     public var showsToneMappingRow: Bool { !hdrEnabled }
 
     /// 109 §3 — only an SDR export consults this.
@@ -460,21 +507,29 @@ public final class ExportSheetModel {
     }
 
     /// 109 §1 / 108 — the bit-depth row's legal values for the current format.
-    public var bitDepths: [Int] { preset.format.bitDepths }
+    /// 163 §1.3 — while PQ/HLG is selected this is the single locked value, not a menu.
+    public var bitDepths: [Int] {
+        hdrEnabled ? preset.format.bitDepths(for: preset.hdrKind) : preset.format.bitDepths
+    }
 
     public func selectBitDepth(_ depth: Int) {
         guard bitDepths.contains(depth) else { return }
         preset.bitDepth = depth
     }
 
-    /// The 文件设置 picker's door: going non-HEIC turns HDR off (and `validated()` would reject it
-    /// anyway), coming back re-applies the remembered choice. A depth the new container cannot store
-    /// is clamped instead of left behind as an invisible illegal value.
+    /// The 文件设置 picker's door: a format that cannot carry the current HDR kind turns HDR off
+    /// (and `validated()` would reject it anyway), coming back re-applies the remembered choice. A
+    /// depth the new container cannot store is clamped instead of left behind as an invisible
+    /// illegal value.
     public func selectFormat(_ format: ExportFormat) {
         guard availableFormats.contains(format) else { return }
         preset.format = format
         preset.bitDepth = format.clampedBitDepth(preset.bitDepth)
-        applyHDR(enabled: format == .heic ? hdrPreferredEnabled : false)
+        let canKeep = hdrPreferredEnabled && format.supports(hdrPreferredKind)
+        applyHDR(enabled: canKeep)
+        if canKeep, let locked = format.hdrTransferBitDepth(for: hdrPreferredKind) {
+            preset.bitDepth = locked
+        }
     }
 
     /// The HDR checkbox. Writes through to the preset the batch will use.
@@ -484,7 +539,20 @@ public final class ExportSheetModel {
     }
 
     private func applyHDR(enabled: Bool) {
-        updateHDR { $0.enabled = enabled }
+        guard enabled else {
+            updateHDR { $0.enabled = false }
+            return
+        }
+        let kind = preset.format.supports(hdrPreferredKind)
+            ? hdrPreferredKind : (availableHDRKinds.first ?? .none)
+        guard kind != .none else {
+            updateHDR { $0.enabled = false }
+            return
+        }
+        updateHDR { $0.kind = kind }
+        if let locked = preset.format.hdrTransferBitDepth(for: kind) {
+            preset.bitDepth = locked
+        }
     }
 
     private func updateHDR(_ body: (inout HDRExport) -> Void) {
@@ -495,20 +563,57 @@ public final class ExportSheetModel {
 
     // MARK: sizing (161 §1–§3)
 
-    /// The 尺寸模式 popup's one write path. Setting the mode is not enough on its own: the old draft
+    /// 161 §1–§3 — the 尺寸模式 popup's one write path. Setting the mode is not enough on its own: the old draft
     /// carries a `longEdge`, and `ExportPreset.renderScale` still honours it in `.none` mode. That was
     /// the "选原尺寸却出 2048" break — the popup wrote `.none`, but the renderer kept the 2048 ceiling.
     /// Clearing it here makes `原尺寸` mean scale 1 for the whole path (prediction, render, batch).
+    ///
+    /// 168 §2 — switching **to** 长边 starts from the current picture's own long edge (catalog pixels,
+    /// not a thumbnail), not the old hard-coded 2048. An already-set value is kept: switching photos
+    /// or re-entering the mode must not throw away what the user typed.
     public func selectSizingMode(_ mode: ExportSizingMode) {
         preset.sizingMode = mode
         switch mode {
         case .none:
             preset.longEdge = nil
         case .longEdge:
-            if preset.longEdge == nil { preset.longEdge = 2048 }
+            if preset.longEdge == nil { preset.longEdge = currentLongEdge ?? 2048 }
         case .percent:
             if preset.percent == nil { preset.percent = 100 }
         }
+    }
+
+    /// 168 §2 — the first selected picture's long edge, in catalog pixels. `nil` when the catalog has
+    /// no real dimensions for the selection (then `selectSizingMode` keeps a neutral fallback).
+    ///
+    /// `selectionNatives` is the primary source (the asset's own pixels). `selectionContents` is the
+    /// same catalog measurement after the crop, and is the fallback for a caller that only filled
+    /// that one — still real pixels, never a thumbnail.
+    public var currentLongEdge: Int? {
+        let sizes = selectionNatives.isEmpty ? selectionContents : selectionNatives
+        guard let first = sizes.first else { return nil }
+        let edge = max(first.width, first.height)
+        return edge > 0 ? edge : nil
+    }
+
+    /// 168 §3 — the quality field's resting text (two decimals), and the one parser both the view
+    /// and the tests use. Out-of-range and non-numeric input is **rejected**, not clamped: typing
+    /// `1.5` must leave the previous legal value alone, not silently write `1.0`.
+    public var qualityText: String { String(format: "%.2f", preset.quality) }
+
+    public static func parseQuality(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let value = Double(trimmed), value.isFinite,
+              (0.10 ... 1.00).contains(value) else { return nil }
+        return (value * 100).rounded() / 100
+    }
+
+    /// Write a typed quality, or leave the preset untouched. `true` means the text was legal.
+    @discardableResult
+    public func commitQuality(_ text: String) -> Bool {
+        guard let value = Self.parseQuality(text) else { return false }
+        if value != preset.quality { preset.quality = value }
+        return true
     }
 
     /// The exact struct handed to `BatchExporter`. A defensive normalisation as well as the panel
@@ -522,11 +627,34 @@ public final class ExportSheetModel {
 
     /// What the output pixels will be for a crop of `native`. The sheet's prediction and the batch's
     /// render both go through `ExportSizing`, so this is a forecast, not a restatement.
+    /// 163 §1.6 — a half-size gain map trims an odd edge, so the forecast shows the real output.
     public func predictedSizeText(native: ImageSize) -> String {
         let preset = effectivePreset
-        let size = ExportSizing.outputSize(content: native,
+        var size = ExportSizing.outputSize(content: native,
                                            scale: preset.renderScale(content: native))
+        if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
+            size = GainMapSizing.plan(size, halfSize: true).output
+        }
         return "\(size.width)×\(size.height)"
+    }
+
+    /// 163 §1.6 — the conditional grey line under the half-size control. `nil` when the control is
+    /// off, the HDR kind is not a gain map, or every selected output is already even (no blank row).
+    public var halfSizeCropHint: String? {
+        guard hdrEnabled, preset.hdrKind == .gainMap,
+              (preset.hdr?.halfSize ?? true), !selectionContents.isEmpty else { return nil }
+        var odd: [(input: ImageSize, crop: HalfSizeCrop)] = []
+        for content in selectionContents {
+            let size = ExportSizing.outputSize(content: content,
+                                               scale: preset.renderScale(content: content))
+            let plan = GainMapSizing.plan(size, halfSize: true)
+            if plan.crop.isNeeded { odd.append((size, plan.crop)) }
+        }
+        guard let first = odd.first else { return nil }
+        if odd.count == 1 {
+            return first.crop.hint(current: first.input)
+        }
+        return "半尺寸需要偶数像素：\(odd.count) 张照片将裁到偶数边（右/下各 1 px）"
     }
 
     // MARK: status line (161 §4)
@@ -826,6 +954,24 @@ public final class ExportSheetModel {
 
 // MARK: - view
 
+/// 168 §1 — the 色调映射 row's own layout anchor.
+///
+/// `ExportLayoutProbe.Kind` lives in `ExportHDRControls.swift`, outside this task's file set, so the
+/// row carries a small marker of its own rather than editing that enum. The hosted-view test asks
+/// "is this view in the tree?" — the same evidence the region probes give, without eyeballing.
+final class ExportToneMappingRowProbe: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+}
+
+struct ExportToneMappingRowProbeHost: NSViewRepresentable {
+    func makeNSView(context: Context) -> ExportToneMappingRowProbe {
+        ExportToneMappingRowProbe()
+    }
+
+    func updateNSView(_ probe: ExportToneMappingRowProbe, context: Context) {}
+}
+
 /// The sheet's contents. A leaf: every control writes `model.preset` (the exact struct the batch
 /// will use) and nothing else, so what the sheet shows is what the files get.
 public struct ExportSheetView: View {
@@ -834,6 +980,10 @@ public struct ExportSheetView: View {
     @State private var selectedPreset = ""
     @State private var showingSavePreset = false
     @State private var newPresetName = ""
+    /// 168 §3 — the quality box's buffer. It lives in the view only while editing; a legal `↵` or
+    /// focus loss commits through the model, an illegal one puts this back to the model's value.
+    @State private var qualityText = ""
+    @FocusState private var qualityFieldFocused: Bool
 
     public init(model: ExportSheetModel) {
         self.model = model
@@ -884,6 +1034,12 @@ public struct ExportSheetView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("存到 \(model.presetStore.directory.path)")
+        }
+        .onAppear { qualityText = model.qualityText }
+        // A slider drag (or a preset load) repaints the box; a field being typed into keeps its
+        // buffer, so a re-render cannot swallow a character.
+        .onChange(of: model.preset.quality) { _, _ in
+            if !qualityFieldFocused { qualityText = model.qualityText }
         }
     }
 
@@ -1031,18 +1187,30 @@ public struct ExportSheetView: View {
             HStack(spacing: 8) {
                 Toggle(isOn: hdrEnabledBinding) {
                     Text("HDR 输出").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(model.preset.format == .heic
-                                         ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                        .foregroundStyle(model.availableHDRKinds.isEmpty
+                                         ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
-                .disabled(model.phase == .running || model.preset.format != .heic)
+                .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
                 Spacer(minLength: 8)
-                if model.preset.format != .heic {
-                    Text("只有 HEIC 能带 HDR")
+                if model.availableHDRKinds.isEmpty {
+                    Text("此格式不支持 HDR")
                         .font(.system(size: 9)).foregroundStyle(.tertiary)
+                } else if model.hdrEnabled {
+                    Picker("", selection: hdrKindBinding) {
+                        ForEach(model.availableHDRKinds, id: \.self) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 190)
+                    .disabled(model.phase == .running)
                 }
             }
+            .frame(height: 20)
             .background(ExportLayoutProbeHost(kind: .hdrRow))
 
             if model.showsGainMapRows {
@@ -1077,9 +1245,19 @@ public struct ExportSheetView: View {
                     .disabled(model.phase == .running)
                     .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
                 }
-            } else {
+                // 163 §1.6 — only when half-size is on and an output edge is odd. `nil` builds no
+                // view at all, so an even picture does not leave an empty line behind.
+                if let hint = model.halfSizeCropHint {
+                    Text(hint)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if model.showsToneMappingRow {
+                // 168 §1 — HDR on with PQ/HLG is neither a gain-map row nor an SDR tone-map row;
+                // `showsGainMapRows` alone would let this `else` paint 色调映射 under HDR.
                 HStack(spacing: 8) {
-                    Text("tone mapping").font(.system(size: 10, weight: .medium))
+                    Text("色调映射").font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     Picker("", selection: sdrToneMappingBinding) {
@@ -1094,6 +1272,7 @@ public struct ExportSheetView: View {
                     .disabled(model.phase == .running)
                     .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
                 }
+                .background(ExportToneMappingRowProbeHost())
             }
 
             HStack(spacing: 8) {
@@ -1103,11 +1282,22 @@ public struct ExportSheetView: View {
                     .controlSize(.small)
                     .frame(width: 140)
                     .disabled(model.phase == .running || !model.preset.format.supportsQuality)
-                Text(String(format: "%.2f", model.preset.quality))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(model.preset.format.supportsQuality
-                                     ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                    .frame(width: 38, alignment: .trailing)
+                // 168 §3 — the same 10 pt row type as the rest of 文件设置, fixed width (a moving
+                // readout makes the slider wobble), two decimals. Typing is committed on ↵ or focus
+                // loss; an illegal string leaves the preset alone and puts the last legal value back.
+                TextField("0.85", text: $qualityText)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 46)
+                    .focused($qualityFieldFocused)
+                    .onSubmit { commitQuality() }
+                    .onChange(of: qualityFieldFocused) { _, focused in
+                        if !focused { commitQuality() }
+                    }
+                    .disabled(model.phase == .running || !model.preset.format.supportsQuality)
+                    .accessibilityIdentifier("export.quality")
+                    .help("可键入 0.10–1.00，回车提交；非法值保持上一个合法值")
             }
             // 109 §2b — three direct buttons; P3 is the default (user's 2026-10-29 口径).
             HStack(spacing: 8) {
@@ -1177,6 +1367,14 @@ public struct ExportSheetView: View {
                         model.preset.longEdge = max(1, Int(typed.rounded()))
                     }
                     Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Toggle(isOn: $model.preset.noUpscale) {
+                        Text("不扩大").font(.system(size: 10))
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .disabled(model.phase == .running)
+                    .accessibilityIdentifier("export.size.noUpscale")
+                    .help("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大")
                 }
             case .percent:
                 HStack(spacing: 8) {
@@ -1342,6 +1540,10 @@ public struct ExportSheetView: View {
                                              : AnyShapeStyle(.secondary))
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            // 168 §2 — the 不扩大 note rides on the outcome's warnings; hover the
+                            // row to read the whole sentence instead of only "1 条警告".
+                            .help(row.warnings.isEmpty ? row.detail
+                                                       : row.warnings.joined(separator: "\n"))
                     }
                     .padding(.vertical, 2)
                     .padding(.horizontal, 4)
@@ -1420,6 +1622,13 @@ public struct ExportSheetView: View {
 
     // MARK: bindings
 
+    /// 168 §3 — commit the quality box: a legal value writes the preset; anything else (empty,
+    /// non-numeric, out of 0.10–1.00) is discarded and the box goes back to the preset's value.
+    private func commitQuality() {
+        _ = model.commitQuality(qualityText)
+        qualityText = model.qualityText
+    }
+
     private var presetSelection: Binding<String> {
         Binding(get: { selectedPreset },
                 set: { name in
@@ -1443,6 +1652,10 @@ public struct ExportSheetView: View {
 
     private var gainMapVersionBinding: Binding<GainMapVersion> {
         Binding(get: { model.gainMapVersion }, set: { model.setGainMapVersion($0) })
+    }
+
+    private var hdrKindBinding: Binding<HDRKind> {
+        Binding(get: { model.hdrKind }, set: { model.setHDRKind($0) })
     }
 
     private var hdrHalfSizeBinding: Binding<Bool> {
@@ -1610,6 +1823,16 @@ public final class ExportSheetController: NSObject {
             }
         }
         natives = sizes
+        // 163 §1.6 — the half-size warning needs each selected picture's cropped content size, not
+        // the sensor size (a rotated crop is a different rectangle). The preset's scale is applied
+        // later by `halfSizeCropHint`, so this stays valid as the user changes size.
+        model.selectionContents = items.compactMap { item in
+            guard let native = sizes[item.id] else { return nil }
+            return (item.edit ?? .neutral).geometry.outputPixels(in: native)
+        }
+        // 168 §2 — the 长边 default wants the catalog's real pixels (not the cropped content, and
+        // never a thumbnail), in selection order so "第一张" is the same picture the sheet names.
+        model.selectionNatives = items.compactMap { sizes[$0.id] }
         model.selectionCount = items.count
     }
 

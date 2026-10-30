@@ -1085,6 +1085,12 @@ public final class CatalogSession {
         edit = MaskViewState.restoring(model, keeping: edit.showMaskID)
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        // 165: ⌘Z / ⇧⌘Z / a history-row jump replaces the whole snapshot — the same "the user is
+        // looking at the result, there was no pointer entry" case as a paste. The open photo's
+        // backdrop must follow at once instead of waiting for the pointer to leave and come back.
+        if let id = loadedEditAssetID ?? anchorAsset?.id {
+            invalidateBackdrops(for: [id])
+        }
     }
 
     /// Write the stack's current document to the catalog. One transaction, `saveDevelop`'s.
@@ -1370,6 +1376,30 @@ public final class CatalogSession {
     /// The reports of the last paste, one per target photo.
     public private(set) var lastPasteReports: [SettingsPasteReport] = []
 
+    // MARK: backdrop invalidation (165)
+    //
+    // `editRevision` says "the document moved" and the loupe answers with a new sharp frame. That is
+    // not enough for the low-resolution whole picture: an ordinary edit deliberately only *marks* the
+    // backdrop stale (039), and only a photo switch or a pointer entry into the canvas rebuilds it.
+    // ⌘V and ⌘Z are not ordinary edits — the user is already looking at their result, and neither
+    // command involves a pointer entry. These two properties are the command-scoped signal the loupe
+    // observes, so it can rebuild **the photo that changed** immediately without turning every slider
+    // tick into a backdrop render.
+    //
+    // A paste onto other photos writes their `develop_json` directly (no editor, no frame); the ids
+    // are still reported so the scope is explicit and a future photo-keyed cache has one place to be
+    // cleared. The loupe holds only the open photo's texture, so those ids cost no request.
+    /// Bumped by a command that moved a document outside the frame/pointer path (paste, history).
+    public private(set) var backdropInvalidationRevision = 0
+    /// The photos the last such command touched. The loupe acts only when the photo on screen is in it.
+    public private(set) var backdropInvalidationAssetIDs: Set<String> = []
+
+    private func invalidateBackdrops(for assetIDs: Set<String>) {
+        guard !assetIDs.isEmpty else { return }
+        backdropInvalidationAssetIDs = assetIDs
+        backdropInvalidationRevision &+= 1
+    }
+
     public var canCopySettings: Bool { anchorAsset != nil }
 
     public var canPasteSettings: Bool {
@@ -1451,10 +1481,13 @@ public final class CatalogSession {
 
         var reports: [SettingsPasteReport] = []
         var failures: [String] = []
+        // 165: the photos whose document this paste actually moved, for the backdrop signal below.
+        var changedTargets: Set<String> = []
         for id in targets {
             if id == loadedEditAssetID {
                 if let report = pasteIntoLiveDocument(payload) {
                     reports.append(report)
+                    if report.changed { changedTargets.insert(id) }
                 } else {
                     failures.append("当前照片在工具会话里：先应用或取消裁切/蒙版工具再粘贴")
                 }
@@ -1467,6 +1500,7 @@ public final class CatalogSession {
                                                        label: "粘贴设置",
                                                        destinationAspect: frameAspect(of: id))
                 reports.append(report)
+                if report.changed { changedTargets.insert(id) }
             } catch {
                 failures.append("\(id.prefix(8))：\(error.localizedDescription)")
             }
@@ -1475,6 +1509,9 @@ public final class CatalogSession {
         lastSettingsError = failures.isEmpty
             ? (reports.contains(where: \.changed) ? nil : "目标照片已经是这些值：没有改动")
             : failures.joined(separator: "；")
+        // 165: a paste is a command, not a slider tick. Rebuild the open photo's bottom image now;
+        // the other targets are only named, never rendered (their backdrops are made when opened).
+        invalidateBackdrops(for: changedTargets)
         settingsRevision &+= 1
         return reports
     }

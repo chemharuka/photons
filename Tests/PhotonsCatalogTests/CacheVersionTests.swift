@@ -175,6 +175,8 @@ final class CacheVersionTests: XCTestCase {
                        "159: a mask's contrast left S1.6 for S2.5")
         XCTAssertEqual(StageAlgorithmVersion.contrast, 2,
                        "159: contrast is the display-domain residual operator (S2.5)")
+        XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 5,
+                       "167: the luminance predicate reads the whole HDR axis, not clamp(light, 0, 1)")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         XCTAssertEqual(StageAlgorithmVersion.curve, 2,

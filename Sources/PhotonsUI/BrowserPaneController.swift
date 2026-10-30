@@ -169,6 +169,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         configureOutline()
         configureAlbumMenu()
         photosTable.allowsMultipleSelection = true
+        // 2026-10-30（用户）：「双击左侧的照片列表不能进入单图编辑界面」。
+        // 网格与胶片条用的是 `NSClickGestureRecognizer`，而左侧是 `NSTableView` —— 它需要显式的
+        // `doubleAction` + `target` 才会响应双击，这里以前从没接过，所以双击等于没发生。
+        photosTable.target = self
+        photosTable.doubleAction = #selector(openPhotoRowInLoupe(_:))
 
         // 右键：the same two verbs the grid and the filmstrip offer, on the same menu object. The
         // list resolves the click through `clickedRow`, which AppKit keeps current for us.
@@ -544,6 +549,28 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private var backingScale: CGFloat {
         view.window?.backingScaleFactor ?? 2
     }
+
+    /// 双击照片行 = 在单图（loupe）里打开它。与网格/胶片条的双击同义：只选中这一张，再切到单图模式。
+    ///
+    /// `clickedRow` 是 AppKit 在派发 `doubleAction` 前设好的；键盘触发（`performDoubleClick`）时
+    /// 它是 −1，此时退回 `selectedRow`，所以两种入口都能用。
+    @objc private func openPhotoRowInLoupe(_ sender: Any?) {
+        let row = photosTable.clickedRow >= 0 ? photosTable.clickedRow : photosTable.selectedRow
+        openRowInLoupe(row)
+    }
+
+    /// The body of the double-click, addressable from tests (`clickedRow` is AppKit's business).
+    /// Returns whether it actually opened something — a row outside the list does nothing.
+    @discardableResult
+    public func openRowInLoupe(_ row: Int) -> Bool {
+        guard let session, let asset = session.assets[safe: row] else { return false }
+        session.selectOnly(asset.id)
+        session.mode = .loupe
+        return true
+    }
+
+    /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
+    public var photoListForTesting: NSTableView { photosTable }
 
     // MARK: right-click (same verbs as the grid and the strip)
 

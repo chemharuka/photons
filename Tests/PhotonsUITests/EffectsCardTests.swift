@@ -37,41 +37,47 @@ final class EffectsCardTests: XCTestCase {
 
         let sections = InspectorView.sections(in: .adjust)
         let curve = try XCTUnwrap(sections.firstIndex(of: .curve))
-        let detail = try XCTUnwrap(sections.firstIndex(of: .detail))
+        let develop = try XCTUnwrap(sections.firstIndex(of: .detail))
         let correction = try XCTUnwrap(sections.firstIndex(of: .correction))
+        let detailFX = try XCTUnwrap(sections.firstIndex(of: .detailFX))
         let effects = try XCTUnwrap(sections.firstIndex(of: .effects))
-        // 曲线 sits above 细节 (2026-10-28, user); 096 put 校正 between 细节 and 效果, so 效果 is the
-        // card after 校正. 081's only change here is that 预设 is gone.
-        XCTAssertEqual(detail, curve + 1, "曲线在细节之上")
-        XCTAssertEqual(correction, detail + 1, "校正在细节之下")
-        XCTAssertEqual(effects, correction + 1, "效果紧跟在校正之后")
+        // 曲线 sits above 开发 (2026-10-28, user); 096/164 put 校正 between 开发 and the new 细节
+        // card, and 效果 is the last editing card. 081's only change here is that 预设 is gone.
+        XCTAssertEqual(develop, curve + 1, "曲线在开发之上")
+        XCTAssertEqual(correction, develop + 1, "校正在开发之下")
+        XCTAssertEqual(detailFX, correction + 1, "细节紧跟在校正之后")
+        XCTAssertEqual(effects, detailFX + 1, "效果紧跟在细节之后")
         // 081 (2026-10-28): 预设 卡已删，所以 效果 就是调整工作区的最后一张卡。
         XCTAssertEqual(effects, sections.count - 1, "效果是调整工作区的最后一张卡（预设卡已删）")
         XCTAssertFalse(titles.contains("预设"), "预设 不再是卡片：它搬到了顶部菜单与复制对话框")
 
-        // 116: 暗角 moved to 校正 (it corrects a lens defect, it does not add atmosphere), so this
-        // card is two blocks: the Presence triple (S3.8), then the four grain rows.
+        // 164: 效果 is only 去雾 + 颗粒; 纹理/清晰度 moved to 细节 and 暗角 stayed on 校正.
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
-                       ["纹理", "清晰度", "去雾", "去雾深度",
+                       ["去雾", "去雾深度",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
-        // …and the three vignette rows are now the 校正 card's second block, in linear-domain red.
+        XCTAssertEqual(InspectorView.detailFXRows.map(\.title),
+                       ["纹理", "清晰度", "非 Bayer 降噪", "非 Bayer 彩色降噪"])
+        // …and the three vignette rows are the 校正 card's second block, in linear-domain red.
         // 134 removed 圆度: the contour is circular by construction.
         XCTAssertEqual(InspectorView.correctionRows.map(\.title),
                        ["色差 R", "色差 B", "暗角", "暗角中点", "暗角羽化"])
         XCTAssertTrue(InspectorView.vignetteRows.allSatisfy { $0.shape == .linear },
                       "暗角在线性域，行必须是红色（.linear）")
         // 117: 去雾 is scene-linear (S1.9), so its row is red as well.
-        XCTAssertEqual(InspectorView.detailFXRows.first { $0.title == "去雾" }?.shape, .linear,
+        XCTAssertEqual(InspectorView.effectsRows.first { $0.title == "去雾" }?.shape, .linear,
                        "去雾在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 3)
         XCTAssertEqual(InspectorView.detailFXRows.count, 4)
+        XCTAssertEqual(InspectorView.effectsRows.count, 6)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
 
         // Every row's travel is the kernel's own (a slider the shader cannot honour lies):
         XCTAssertEqual(InspectorView.vignetteRows.map(\.range),
                        [-100 ... 100, 0 ... 100, 0 ... 100])
         XCTAssertEqual(InspectorView.detailFXRows.map(\.range),
-                       [-100 ... 100, -100 ... 100, -100 ... 100, 0 ... 100])
+                       [-100 ... 100, -100 ... 100, 0 ... 100, 0 ... 100])
+        XCTAssertEqual(InspectorView.effectsRows.map(\.range),
+                       [-100 ... 100, 0 ... 100, 0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
         XCTAssertEqual(InspectorView.grainRows.map(\.range),
                        [0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
 
@@ -183,27 +189,27 @@ final class EffectsCardTests: XCTestCase {
         let session = CatalogSession()
         session.loadEditForAnchor()
         let before = session.history.count
-        let start = session.edit.effects.vignetteAmount
+        let start = session.edit.effects.grain
         XCTAssertEqual(start, 0)
 
-        // A drag from 0 to −40 in five ticks.
-        for value in [-8.0, -16, -24, -32, -40] {
-            session.applyEdit { $0.effects.vignetteAmount = value }
+        // A drag from 0 to 40 in five ticks.
+        for value in [8.0, 16, 24, 32, 40] {
+            session.applyEdit { $0.effects.grain = value }
         }
-        XCTAssertTrue(session.commitEdit(label: "暗角"), "一次拖动提交一条")
+        XCTAssertTrue(session.commitEdit(label: "颗粒数量"), "一次拖动提交一条")
         XCTAssertEqual(session.history.count, before + 1, "五个 tick 只能是一条历史")
-        XCTAssertEqual(session.edit.effects.vignetteAmount, -40)
-        XCTAssertEqual(session.history.currentSnapshot?.label, "暗角")
+        XCTAssertEqual(session.edit.effects.grain, 40)
+        XCTAssertEqual(session.history.currentSnapshot?.label, "颗粒数量")
 
         XCTAssertTrue(session.undo(), "⌘Z 必须能撤回")
-        XCTAssertEqual(session.edit.effects.vignetteAmount, start, "⌘Z 回到拖动前")
+        XCTAssertEqual(session.edit.effects.grain, start, "⌘Z 回到拖动前")
         print("HISTORY · 5 ticks → +1 条（\(session.history.count - before)）· undo → "
-              + "\(session.edit.effects.vignetteAmount)")
+              + "\(session.edit.effects.grain)")
     }
 
     // MARK: - 4. 整卡复位
 
-    /// Double-click on 「效果」: all eight numbers back to the **model's** defaults in one entry —
+    /// Double-click on 「效果」: this card's numbers back to the **model's** defaults in one entry —
     /// including the three whose default is not 0 (颗粒大小 25, 粗糙度 50). A literal 0 here would be
     /// a different picture (and would make 颗粒大小's row disagree with `EffectsGroup.identity`).
     func testTheCardResetPutsEveryNumberBackInOneEntry() throws {
@@ -220,6 +226,8 @@ final class EffectsCardTests: XCTestCase {
             $0.effects.grainSeed = 12
             $0.effects.texture = 55
             $0.effects.clarity = -60
+            $0.effects.nonBayerLuminanceNR = 30
+            $0.effects.nonBayerColorNR = 20
             $0.effects.dehaze = 70
         }
         XCTAssertTrue(session.commitEdit(label: "拖动"))
@@ -228,13 +236,15 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertTrue(resets.group(.effects), "整卡复位必须真的写了一次")
         XCTAssertEqual(session.edit.effects.grainSize, 25, "颗粒大小回 25，不是 0")
         XCTAssertEqual(session.edit.effects.grainRoughness, 50, "粗糙度回 50，不是 0")
-        // 116 moved the three 暗角 numbers to 校正, so this card's double-click must **not** reach them
-        // (the 122 rule: a card resets its own sliders and nobody else's). 校正's own double-click
-        // resets them — `PanelResetTests` pins that half.
+        // 116/164: the three 暗角 numbers are 校正's, and 纹理/清晰度/non-Bayer are 细节's, so this
+        // card's double-click must **not** reach them (the 122 rule: a card resets its own sliders
+        // and nobody else's).
         XCTAssertEqual(session.edit.effects.vignetteAmount, -50, "暗角属于校正卡，效果卡的复位不该碰它")
         XCTAssertEqual(session.edit.effects.vignetteMidpoint, 30, "暗角中点也不该被效果卡复位")
-        XCTAssertEqual(session.edit.effects.texture, 0, "纹理回 0")
-        XCTAssertEqual(session.edit.effects.clarity, 0, "清晰度回 0")
+        XCTAssertEqual(session.edit.effects.texture, 55, "纹理属于细节卡，效果卡的复位不该碰它")
+        XCTAssertEqual(session.edit.effects.clarity, -60, "清晰度属于细节卡，效果卡的复位不该碰它")
+        XCTAssertEqual(session.edit.effects.nonBayerLuminanceNR, 30, "非 Bayer 降噪属于细节卡")
+        XCTAssertEqual(session.edit.effects.nonBayerColorNR, 20, "非 Bayer 彩色降噪属于细节卡")
         XCTAssertEqual(session.edit.effects.dehaze, 0, "去雾回 0")
         XCTAssertEqual(session.history.count, before + 1, "整卡 = 一条历史")
         XCTAssertEqual(session.history.currentSnapshot?.label, "效果")
@@ -254,10 +264,8 @@ final class EffectsCardTests: XCTestCase {
     /// 根因不在界面：`EditParameters.areEqual(EffectsGroup)` 漏了这三个字段，`applyEdit` 于是在
     /// `isSemanticallyIdentical` 上短路返回，文档根本没被写过 —— 和文件里 grain 那三行注释记的是
     /// 同一个坑。这条测试逐个字段写入 + 断言文档真的变了，且历史里真的多了一行。
-    func testDetailFXRowsWriteTheDocument() throws {
-        for (name, keyPath) in [("纹理", \EditModel.effects.texture),
-                                ("清晰度", \EditModel.effects.clarity),
-                                ("去雾", \EditModel.effects.dehaze),
+    func testEffectRowsWriteTheDocument() throws {
+        for (name, keyPath) in [("去雾", \EditModel.effects.dehaze),
                                 ("去雾深度", \EditModel.effects.dehazeDepth)] {
             let session = CatalogSession()
             session.loadEditForAnchor()
@@ -269,7 +277,7 @@ final class EffectsCardTests: XCTestCase {
             XCTAssertTrue(session.commitEdit(label: name), "\(name) 必须产生一条历史")
             XCTAssertEqual(session.history.count, before + 1, "\(name) 应只多一行")
 
-            // 负值同样要能写进去：三个滑杆的行程是 −100…100。
+            // 负值同样要能写进去：去雾的行程是 −100…100（文档层不做行程裁切）。
             session.applyEdit { $0[keyPath: keyPath] = -35 }
             XCTAssertEqual(session.edit[keyPath: keyPath], -35, "\(name) 的负向也必须落地")
         }
@@ -295,18 +303,20 @@ final class EffectsCardTests: XCTestCase {
 
     /// The card gets its reset and its rows from the **same** `PanelCardSpec`. Moving a row to another
     /// card's spec is the only edit: this test holds that the effects card's scope is exactly the
-    /// 纹理/清晰度/去雾 + 颗粒 table, and that no row is drawn outside a spec.
+    /// 去雾 + 颗粒 table, and that no row is drawn outside a spec.
     func testTheCardIsWiredThroughThePanelOneRowSpec() {
         let spec = InspectorView.PanelCardSpec.effectsCard
         XCTAssertEqual(spec.section, .effects)
         XCTAssertEqual(spec.group, .effects)
         XCTAssertEqual(spec.rows.map(\.title), InspectorView.effectsRows.map(\.title),
                        "效果卡画的正是 `effectsRows`")
-        XCTAssertEqual(spec.blocks.map(\.group), [.presence, .grain])
+        XCTAssertEqual(spec.blocks.map(\.group), [.dehaze, .grain])
         XCTAssertTrue(spec.rows.allSatisfy { spec.rowStyle(for: $0) == .effects },
                       "每一行都由这张卡的 spec 决定样式（含 frame probe）")
         XCTAssertFalse(spec.rows.contains { $0.title == "暗角" },
                        "暗角属于校正卡；效果卡的复位范围里不应出现它")
+        XCTAssertFalse(spec.rows.contains { $0.title == "纹理" },
+                       "纹理属于细节卡；效果卡的复位范围里不应出现它")
         XCTAssertEqual(spec.accessibilityPrefix(for: spec.rows[0]), "inspector.effects")
     }
 
