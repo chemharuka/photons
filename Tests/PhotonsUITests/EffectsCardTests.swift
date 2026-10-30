@@ -56,7 +56,7 @@ final class EffectsCardTests: XCTestCase {
                        ["去雾", "去雾深度",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
         XCTAssertEqual(InspectorView.detailFXRows.map(\.title),
-                       ["纹理", "清晰度", "非 Bayer 降噪", "非 Bayer 彩色降噪"])
+                       ["纹理", "清晰度", "去噪", "去彩噪"])
         // …and the three vignette rows are the 校正 card's second block, in linear-domain red.
         // 134 removed 圆度: the contour is circular by construction.
         XCTAssertEqual(InspectorView.correctionRows.map(\.title),
@@ -236,15 +236,15 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertTrue(resets.group(.effects), "整卡复位必须真的写了一次")
         XCTAssertEqual(session.edit.effects.grainSize, 25, "颗粒大小回 25，不是 0")
         XCTAssertEqual(session.edit.effects.grainRoughness, 50, "粗糙度回 50，不是 0")
-        // 116/164: the three 暗角 numbers are 校正's, and 纹理/清晰度/non-Bayer are 细节's, so this
+        // 116/164: the three 暗角 numbers are 校正's, and 纹理/清晰度/去噪 are 细节's, so this
         // card's double-click must **not** reach them (the 122 rule: a card resets its own sliders
         // and nobody else's).
         XCTAssertEqual(session.edit.effects.vignetteAmount, -50, "暗角属于校正卡，效果卡的复位不该碰它")
         XCTAssertEqual(session.edit.effects.vignetteMidpoint, 30, "暗角中点也不该被效果卡复位")
         XCTAssertEqual(session.edit.effects.texture, 55, "纹理属于细节卡，效果卡的复位不该碰它")
         XCTAssertEqual(session.edit.effects.clarity, -60, "清晰度属于细节卡，效果卡的复位不该碰它")
-        XCTAssertEqual(session.edit.effects.nonBayerLuminanceNR, 30, "非 Bayer 降噪属于细节卡")
-        XCTAssertEqual(session.edit.effects.nonBayerColorNR, 20, "非 Bayer 彩色降噪属于细节卡")
+        XCTAssertEqual(session.edit.effects.nonBayerLuminanceNR, 30, "去噪属于细节卡")
+        XCTAssertEqual(session.edit.effects.nonBayerColorNR, 20, "去彩噪属于细节卡")
         XCTAssertEqual(session.edit.effects.dehaze, 0, "去雾回 0")
         XCTAssertEqual(session.history.count, before + 1, "整卡 = 一条历史")
         XCTAssertEqual(session.history.currentSnapshot?.label, "效果")

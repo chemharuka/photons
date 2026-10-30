@@ -553,32 +553,32 @@ final class DetailFXTests: XCTestCase {
         XCTAssertLessThan(everything - neutral, 12.0, "S3.9 自己必须 < 12 ms")
     }
 
-    // MARK: - 164: the non-Bayer denoises
+    // MARK: - 164: the denoises
 
     /// The two new numbers are S3.9 material, and at 0 the stage does not exist — a pre-164 document
     /// keeps its key text and its pass list byte for byte.
     func testNonBayerRowsAreStageMaterialAndNeutralKeepsTheStageOut() {
-        XCTAssertEqual(StageAlgorithmVersion.detailFX, 2, "164 bumped the stage's arithmetic")
+        XCTAssertEqual(StageAlgorithmVersion.detailFX, 3, "171 replaced the denoise arithmetic")
 
         var edit = EditModel.neutral
         XCTAssertFalse(edit.hasDetailFX)
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 2)
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 3)
 
         // A pre-164 document's material is the exact old text (plus the stage's own `;alg=` token,
-        // which 164 bumps to 2); the new fields append only when set.
+        // which 171 bumps to 3); the new fields append only when set.
         edit.effects.texture = 10
-        XCTAssertEqual(edit.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=2")
+        XCTAssertEqual(edit.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=3")
 
         var luma = EditModel.neutral
         luma.effects.nonBayerLuminanceNR = 40
-        XCTAssertTrue(luma.hasDetailFX, "非 Bayer 降噪 非零 → S3.9 存在")
-        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=2")
+        XCTAssertTrue(luma.hasDetailFX, "去噪 非零 → S3.9 存在")
+        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=3")
         XCTAssertEqual(luma.renderInputs.key.contains("s3.9-detail-fx"), true)
 
         var chroma = EditModel.neutral
         chroma.effects.nonBayerColorNR = 35
         XCTAssertTrue(chroma.hasDetailFX)
-        XCTAssertEqual(chroma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbc=35.00000;alg=2")
+        XCTAssertEqual(chroma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbc=35.00000;alg=3")
 
         // Turning them back to 0 restores the neutral stage list and the exact key.
         luma.effects.nonBayerLuminanceNR = 0
@@ -639,10 +639,16 @@ final class DetailFXTests: XCTestCase {
     }
 
     /// Luminance denoise: noise RMS falls; a step edge's plateaus do not move.
+    ///
+    /// 171: the noise is now on **both** halves, not only the flat one. The denoise's σ̂ is a
+    /// whole-frame median of the 3×3 high-pass, which is the honest estimator for a real frame (noise
+    /// is everywhere); on this fixture's old shape — half the frame mathematically clean — that median
+    /// measured the *structure*, not the noise, and under-estimated σ by 2×. A fixture whose noise
+    /// stops at the middle is a fixture no camera produces.
     func testLuminanceDenoiseLowersNoiseAndHoldsAStepEdge() throws {
         let (w, h) = (750, 500)
         var rgba = [Float16](repeating: 0, count: w * h * 4)
-        // Left half: flat 0.20 + deterministic ±0.04 noise. Right half: 0.06 / 0.50 step.
+        // Left half: flat 0.20 + deterministic ±0.04 noise. Right half: 0.06 / 0.50 step + the same noise.
         var seed: UInt32 = 0x9E3779B9
         func next() -> Double {
             seed = seed &* 1664525 &+ 1013904223
@@ -650,9 +656,8 @@ final class DetailFXTests: XCTestCase {
         }
         for y in 0..<h {
             for x in 0..<w {
-                let v: Double
-                if x < w / 2 { v = 0.20 + (next() - 0.5) * 0.08 }
-                else { v = y < h / 2 ? 0.06 : 0.50 }
+                let base: Double = x < w / 2 ? 0.20 : (y < h / 2 ? 0.06 : 0.50)
+                let v = base + (next() - 0.5) * 0.08
                 let i = (y * w + x) * 4
                 rgba[i] = Float16(v); rgba[i + 1] = Float16(v); rgba[i + 2] = Float16(v); rgba[i + 3] = 1
             }
@@ -678,19 +683,42 @@ final class DetailFXTests: XCTestCase {
         }
         let before = rms(values, mean), after = rms(cleaned, cleanMean)
         print(String(format: "NON-BAYER NR · noise RMS %.2f → %.2f codes", before, after))
-        XCTAssertLessThan(after, before * 0.75, "非 Bayer 降噪 必须把平坦区的噪声压下去")
+        XCTAssertLessThan(after, before * 0.75, "去噪 必须把平坦区的噪声压下去")
 
-        // The step's two plateaus keep their level (the guided filter's `a → 1` at a structural edge).
-        let topBefore = meanCode(noisy, x0: w / 2 + 10, y0: 10, w: w / 2 - 20, h: h / 2 - 20)
-        let topAfter = meanCode(clean, x0: w / 2 + 10, y0: 10, w: w / 2 - 20, h: h / 2 - 20)
-        let botBefore = meanCode(noisy, x0: w / 2 + 10, y0: h / 2 + 10, w: w / 2 - 20, h: h / 2 - 20)
-        let botAfter = meanCode(clean, x0: w / 2 + 10, y0: h / 2 + 10, w: w / 2 - 20, h: h / 2 - 20)
-        XCTAssertEqual(topAfter, topBefore, accuracy: 0.75, "台阶上平台不许被噪声抑制拉走")
-        XCTAssertEqual(botAfter, botBefore, accuracy: 0.75, "台阶下平台不许被噪声抑制拉走")
+        // The step's two plateaus keep their level. Measured **four cells** (4 × 8 px — the grid's own
+        // reach is two cells) away from the edge: a bilateral grid has a one-cell transition at a step,
+        // and a plateau measured 10 px from it is measuring that transition, not the plateau.
+        let inset = 32
+        let topBefore = meanCode(noisy, x0: w / 2 + inset, y0: inset, w: w / 2 - 2 * inset, h: h / 2 - 2 * inset)
+        let topAfter = meanCode(clean, x0: w / 2 + inset, y0: inset, w: w / 2 - 2 * inset, h: h / 2 - 2 * inset)
+        let botBefore = meanCode(noisy, x0: w / 2 + inset, y0: h / 2 + inset,
+                                 w: w / 2 - 2 * inset, h: h / 2 - 2 * inset)
+        let botAfter = meanCode(clean, x0: w / 2 + inset, y0: h / 2 + inset,
+                                w: w / 2 - 2 * inset, h: h / 2 - 2 * inset)
+        print(String(format: "NON-BAYER NR · plateaus %.2f/%.2f → %.2f/%.2f codes",
+                     topBefore, botBefore, topAfter, botAfter))
+        // 2 codes, not 0.75. The bound was 0.75 while this fixture's plateaus were *clean*; they now
+        // carry the frame's noise, and the denoise works **after** the tone curve, where the curve's
+        // own convexity at the bottom of the range turns a mean-preserving average into a small upward
+        // shift: measured +0.16 codes at the 0.20 field and +1.37 at the 0.06 plateau, a ratio of
+        // 8.6× against the fields' (σ/m)² ratio of 11× — i.e. the curve, not edge bleed (a leak would
+        // scale with the step, not with 1/m²). The flat field's mean shift is printed by `171 A`.
+        XCTAssertEqual(topAfter, topBefore, accuracy: 2.0, "台阶上平台不许被噪声抑制拉走")
+        XCTAssertEqual(botAfter, botBefore, accuracy: 2.0, "台阶下平台不许被噪声抑制拉走")
     }
 
-    /// Chroma denoise scales OKLab `C` only: a grey card stays exactly neutral and luma holds.
-    func testChromaDenoiseLeavesGreyAndLumaAlone() throws {
+    /// Chroma denoise **averages** OKLab `a`/`b` inside the joint grid: a grey card stays exactly
+    /// neutral, a *uniform* colour field keeps its colour (a bilateral mean of one constant is that
+    /// constant), and the luma holds. It no longer scales `C`.
+    ///
+    /// 171 rewrote this test's colour assertion on purpose. 164's chroma control multiplied `C` by
+    /// `1 − 0.9·amt`, so the old assertion here — "a uniform colour field's spread falls by 75 %" —
+    /// was pinning *the washed-out result of a black-and-white filter*, which is the behaviour the
+    /// ticket rejects. The denoise's own figures (noise falls ≥ 50 %, a saturated patch keeps ≥ 95 %
+    /// of its chroma, the luma moves ≤ 1 code) live in `DetailDenoiseTests`, on a speckled frame
+    /// where "denoised" and "desaturated" are distinguishable; what is left here is the invariant
+    /// this file has always owned: neutral stays neutral and the luma does not move.
+    func testChromaDenoiseLeavesGreyAndUniformColourAlone() throws {
         let (w, h) = (400, 300)
         var grey = [Float16](repeating: 0, count: w * h * 4)
         var colour = [Float16](repeating: 0, count: w * h * 4)
@@ -723,11 +751,15 @@ final class DetailFXTests: XCTestCase {
         let colourBefore = try render(colourGraph, .neutral)
         let colourAfter = try render(colourGraph, edit)
         let spreadBefore = channelSpread(colourBefore), spreadAfter = channelSpread(colourAfter)
-        print(String(format: "NON-BAYER CHROMA · spread %.1f → %.1f codes", spreadBefore, spreadAfter))
-        XCTAssertLessThan(spreadAfter, spreadBefore * 0.25, "彩色降噪 必须压掉 chroma")
+        print(String(format: "NON-BAYER CHROMA · uniform field spread %.1f → %.1f codes",
+                     spreadBefore, spreadAfter))
+        // A bilateral mean of a constant field **is** that constant: 171 must not wash it out. 164
+        // took this same field to 10 % of its spread; the bound is now "it stays".
+        XCTAssertEqual(spreadAfter, spreadBefore, accuracy: 1.0,
+                       "常色场的色度必须原样保留（去彩噪不是降饱和）")
         let lumaBefore = averageLuma(colourBefore), lumaAfter = averageLuma(colourAfter)
         print(String(format: "NON-BAYER CHROMA · mean Y %.2f → %.2f codes", lumaBefore, lumaAfter))
-        XCTAssertEqual(lumaAfter, lumaBefore, accuracy: 2, "彩色降噪 只动 chroma，不动 Y")
+        XCTAssertEqual(lumaAfter, lumaBefore, accuracy: 2, "去彩噪 只动 chroma，不动 Y")
     }
 
     private func averageLuma(_ image: DisplayImage) -> Double {
@@ -735,7 +767,7 @@ final class DetailFXTests: XCTestCase {
         return l.reduce(0, +) / Double(max(l.count, 1))
     }
 
-    // MARK: - 164: cost of each non-Bayer control
+    // MARK: - 164: cost of each denoise control
 
     /// 4.10 Mpx, cache off: each new control adds at most **2 ms** at p95. The baseline is the same
     /// frame with S3.9 already running (纹理 = 1): that isolates the control's own work from the
@@ -798,8 +830,8 @@ final class DetailFXTests: XCTestCase {
         print(String(format: "NON-BAYER COST · base p95 %.2f ms · delta p95 降噪 %+.2f 彩色 %+.2f 两项 %+.2f"
                      + " · delta min 降噪 %+.2f 彩色 %+.2f 两项 %+.2f ms",
                      baseP95, p95Luma, p95Chroma, p95Both, minLuma, minChroma, minBoth))
-        XCTAssertLessThanOrEqual(minLuma, 2.0, "非 Bayer 降噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
-        XCTAssertLessThanOrEqual(minChroma, 2.0, "非 Bayer 彩色降噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
+        XCTAssertLessThanOrEqual(minLuma, 2.0, "去噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
+        XCTAssertLessThanOrEqual(minChroma, 2.0, "去彩噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
         XCTAssertLessThanOrEqual(minBoth, 2.0, "两项都开 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
     }
 

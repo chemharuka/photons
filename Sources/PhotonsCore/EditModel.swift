@@ -2058,12 +2058,12 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// **byte for byte**; the uniform is this number / 100. The stage still exists by `dehaze`, not by
     /// this field: a depth strength with no dehaze has nothing to modulate (and no depth map is read).
     public var dehazeDepth: Double
-    /// 164 — **非 Bayer 降噪** (0…100, default 0): S3.9's display-referred luminance denoise. The
+    /// 164 — **去噪** (0…100, default 0): S3.9's display-referred luminance denoise. The
     /// guided filter's residual (the same statistics 纹理/清晰度 use) is subtracted from the luma at a
     /// 1–3 px radius, so flat noise is averaged while structural edges keep their step. 0 is the
     /// pre-164 frame byte for byte (the stage is not encoded when everything is 0).
     public var nonBayerLuminanceNR: Double
-    /// 164 — **非 Bayer 彩色降噪** (0…100, default 0): S3.9's OKLab chroma suppression. It scales
+    /// 164 — **去彩噪** (0…100, default 0): S3.9's OKLab chroma suppression. It scales
     /// `C` only (hue and `L` are held), so a grey card stays neutral and the luma is untouched.
     public var nonBayerColorNR: Double
 
@@ -2081,8 +2081,8 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
     public var hasGrain: Bool { grain > 0 }
 
-    /// Does S3.9 exist for this document? Judged **by value**: 纹理 / 清晰度 / 非 Bayer 降噪 /
-    /// 非 Bayer 彩色降噪 non-zero (117 removed 去雾 from this stage). A document with all four at 0
+    /// Does S3.9 exist for this document? Judged **by value**: 纹理 / 清晰度 / 去噪 /
+    /// 去彩噪 non-zero (117 removed 去雾 from this stage). A document with all four at 0
     /// keeps the pre-S3.9 chain byte for byte — the strongest form of 「中性零变化」, the pass is not
     /// encoded rather than encoded and multiplied by zero.
     public var hasDetailFX: Bool {
@@ -2097,7 +2097,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// modulate, and appending a depth key for it would invalidate a cached neutral frame for nothing.
     public var usesDepthDehaze: Bool { dehaze != 0 && dehazeDepth != 0 }
 
-    /// S3.9's material — 纹理 / 清晰度 and the two non-Bayer denoises, and nothing else. A clarity
+    /// S3.9's material — 纹理 / 清晰度 and the two denoises, and nothing else. A clarity
     /// drag must not miss a cached vignette (S3c reads neither) and a vignette drag must not re-run
     /// S3.9. 去雾 has its own string now that it is its own stage. The newer fields append only when
     /// non-zero (the `asp`/`car` discipline): a pre-164 document keeps the exact `tx=…;cl=…` text.

@@ -935,7 +935,15 @@ private struct DetailFXParamsU {
     var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
-    var f: SIMD4<Float>    // 164: non-Bayer luma amount, chroma amount (0…1), pad, pad
+    var f: SIMD4<Float>    // 164: denoise luma amount, chroma amount (0…1), pad, pad
+}
+
+/// Mirror of `Kernels/s3_9_denoise.metal`, byte for byte (171). The three passes (sigma, splat,
+/// blur) read different fields of the same object, exactly like `DetailFXParamsU`.
+private struct DenoiseParamsU {
+    var canvas: SIMD4<Int32> // w, h, cell, zBins
+    var grid: SIMD4<Int32>   // gW, gH, axis (0 = x, 1 = y), pad
+    var n: SIMD4<Float>      // luma amount, chroma amount, pad, pad
 }
 
 /// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117).
@@ -1361,6 +1369,10 @@ public final class RenderGraph {
     /// 120b — the same stand-in for the depth binding. `MaskAtlasParams.h.x` is 0 in that case, so a
     /// depth mask covers nothing rather than sampling the dummy's zero as "everything".
     private var depthDummyTexture: MTLTexture?
+    /// 171 — the bilateral grid's two bindings when the denoise is off. The apply kernel never reads
+    /// them at amount 0, but `setTexture(nil)` is not a legal binding.
+    private var denoiseDummy2DTexture: MTLTexture?
+    private var denoiseDummy3DTexture: MTLTexture?
 
     /// The atlas is a side output, so it lives beside the stage cache instead of in it: one slot,
     /// keyed by `maskAtlasKey`. `ids` is the slice order the atlas was built in.
@@ -3684,6 +3696,10 @@ public final class RenderGraph {
     // instead of two full ones.
     private static let detailFXBlock = 4
 
+    /// 171 — the bilateral grid's cell edge (pixels per grid texel) and z-axis resolution (luma bins).
+    private static let denoiseCell = 8
+    private static let denoiseZBins = 40
+
     /// The stage: up to two chains, in the panel's order (纹理 → 清晰度).
     ///
     /// Each chain reads the previous chain's texture, so only the first sees `src` and only the last
@@ -3705,10 +3721,6 @@ public final class RenderGraph {
         }
         let textureRadius = radiusQ(0.0015, cap: 4)      // ≈ 4 px at a 2731 px frame
         let clarityRadius = radiusQ(0.02, cap: 24)       // ≈ 55 px at a 2731 px frame
-        // 164 — the non-Bayer luma denoise's window: the smallest the 1/q statistics can express
-        // (≈ 1–3 px at display scale, 4 px at a 2731 px frame), so it averages flat noise and not
-        // structure. One more box pair at q resolution, never a full-resolution pass.
-        let denoiseRadius = radiusQ(0.0009, cap: 3)
 
         let textureAmount = Float(edit.effects.texture) / 100
         let clarityAmount = Float(edit.effects.clarity) / 100
@@ -3728,10 +3740,69 @@ public final class RenderGraph {
             f: SIMD4(lumaNR, chromaNR, 0, 0))
 
         let bandsActive = textureAmount != 0 || clarityAmount != 0
-        // 164: the new denoises share the same stage. A chroma-only drag needs no coefficient map,
-        // but still needs the apply pass; the map arguments bind the source as the inert fallback.
+        // 171: the two denoises share this stage but not the guided filter — they are a joint
+        // bilateral grid of their own. The grid is built from the **stage input**, before the
+        // texture/clarity residual is added, so σ is a fact about the frame, not about the drag.
         let denoiseActive = lumaNR != 0 || chromaNR != 0
         var current = src
+
+        let cell = RenderGraph.denoiseCell
+        let zBins = RenderGraph.denoiseZBins
+        let gW = max(1, (w + cell - 1) / cell)
+        let gH = max(1, (h + cell - 1) / cell)
+        var nrGrid: MTLTexture?
+        var nrSigma: MTLTexture?
+        if denoiseActive {
+            var dp = DenoiseParamsU(
+                canvas: SIMD4(Int32(w), Int32(h), Int32(cell), Int32(zBins)),
+                grid: SIMD4(Int32(gW), Int32(gH), 0, 0),
+                n: SIMD4(lumaNR, chromaNR, 0, 0))
+
+            nrSigma = try scratch("detailfx-nr-sigma", width: 1, height: 1, format: .rgba32Float)
+            let gridA = try scratch3D("detailfx-nr-grid-a", width: gW, height: gH, depth: zBins,
+                                      format: .rgba16Float)
+            let gridB = try scratch3D("detailfx-nr-grid-b", width: gW, height: gH, depth: zBins,
+                                      format: .rgba16Float)
+            nrGrid = gridA
+
+            // P0 — one threadgroup estimates the frame's noise σ.
+            let sigma = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_sigma")
+            guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e0.setComputePipelineState(sigma)
+            e0.setTexture(src, index: 0)
+            e0.setTexture(nrSigma!, index: 1)
+            e0.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
+            e0.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            e0.endEncoding()
+
+            // P1 — splat full resolution into the grid (z five-tap happens in the same threadgroup).
+            let splat = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_splat")
+            guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e1.setComputePipelineState(splat)
+            e1.setTexture(src, index: 0)
+            e1.setTexture(nrSigma!, index: 1)
+            e1.setTexture(gridA, index: 2)
+            e1.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
+            e1.dispatchThreadgroups(MTLSize(width: gW, height: gH, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            e1.endEncoding()
+
+            // P2 — the x and y five-taps in one tiled pass (16 × 16 outputs per threadgroup, one z
+            // slice each). Two separate dispatches moved the whole grid twice; this moves it once.
+            let blur = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_blur_xy")
+            let blurGroups = MTLSize(width: (gW + 15) / 16, height: (gH + 15) / 16, depth: zBins)
+            let blurThreads = MTLSize(width: 16, height: 16, depth: 1)
+            guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e2.setComputePipelineState(blur)
+            e2.setTexture(gridA, index: 0)
+            e2.setTexture(gridB, index: 1)
+            e2.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
+            e2.dispatchThreadgroups(blurGroups, threadsPerThreadgroup: blurThreads)
+            e2.endEncoding()
+            // The blurred grid is the one the slice reads.
+            nrGrid = gridB
+        }
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
         // apply. One statistics pack (the 4×4 block means), one separable box per band (the two
@@ -3749,7 +3820,7 @@ public final class RenderGraph {
             params.f.y = chromaNR
             try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
                               textureRadius: textureRadius, clarityRadius: clarityRadius,
-                              denoiseRadius: denoiseRadius)
+                              nrGrid: nrGrid, nrSigma: nrSigma)
             current = out
         }
 
@@ -3778,38 +3849,36 @@ public final class RenderGraph {
     private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
                                params: inout DetailFXParamsU, qW: Int, qH: Int,
                                textureRadius: Int32, clarityRadius: Int32,
-                               denoiseRadius: Int32) throws {
+                               nrGrid: MTLTexture?, nrSigma: MTLTexture?) throws {
         let base = try scratch("detailfx-stats", width: qW, height: qH, format: .rgba32Float)
         let tmp = try scratch("detailfx-stats-tmp", width: qW, height: qH, format: .rgba32Float)
 
+        let hasBands = params.a.x != 0 || params.a.y != 0
         let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_pack")
-        let e0 = try encoder(cb, pack, in: source, out: base)
-        e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
-        dispatch(e0, pack, ImageSize(width: qW, height: qH))
-        e0.endEncoding()
-
-        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2),
-        // band 2 = 164 non-Bayer 降噪 (smallest radius, ε = 4e-3 — the same fine band's statistics).
-        //
-        // 164: when 纹理 is active its coefficient map is already the fine-band base at the right
-        // radius, so the luma denoise **reuses it** instead of paying a second box/coefficient chain.
         var coeffTex: MTLTexture?
         var coeffCla: MTLTexture?
-        var coeffNR: MTLTexture?
-        for band in [0, 1, 2] {
+        // 171 — a denoise-only drag has no guided band at all: no pack, no box pair, no coefficient
+        // map. It used to pay the whole band chain for nothing (the pack is at 1/q resolution but it
+        // is still a full-frame read).
+        if hasBands {
+            let e0 = try encoder(cb, pack, in: source, out: base)
+            e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(e0, pack, ImageSize(width: qW, height: qH))
+            e0.endEncoding()
+        }
+
+        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2).
+        for band in [0, 1] {
             let active: Bool
             switch band {
             case 0: active = params.a.x != 0
-            case 1: active = params.a.y != 0
-            // The luma denoise needs its own map only when 纹理 did not make one (params.f.x > 0
-            // and no band 0 map yet). `coeffTex` is assigned by this loop's first iteration.
-            default: active = params.f.x > 0 && coeffTex == nil
+            default: active = params.a.y != 0
             }
             if !active { continue }
             let stats = try scratch("detailfx-stats-\(band)", width: qW, height: qH,
                                     format: .rgba32Float)
-            params.b.w = band == 0 ? textureRadius : (band == 1 ? clarityRadius : denoiseRadius)
-            params.d.x = band == 0 || band == 2 ? 0.004 : 0.01
+            params.b.w = band == 0 ? textureRadius : clarityRadius
+            params.d.x = band == 0 ? 0.004 : 0.01
             try detailFXBox(cb: cb, from: base, tmp: tmp, to: stats, params: &params, qW: qW, qH: qH,
                             horizontal: "s3_8_guide_box_h", vertical: "s3_8_guide_box_v")
 
@@ -3822,17 +3891,17 @@ public final class RenderGraph {
             e1.endEncoding()
             switch band {
             case 0: coeffTex = coeff
-            case 1: coeffCla = coeff
-            default: coeffNR = coeff
+            default: coeffCla = coeff
             }
         }
-        // Reuse 纹理's fine-band map for the luma denoise when it exists (see the loop's band 2).
-        if coeffNR == nil, params.f.x > 0 { coeffNR = coeffTex }
 
         let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_apply")
         // A chroma-only drag has no coefficient map at all; the source is a valid sampleable texture
-        // and every amount that would read it is 0, so it is the honest inert binding.
-        let fallback = coeffTex ?? coeffCla ?? coeffNR ?? source
+        // and every amount that would read it is 0, so it is the honest inert binding. The denoise
+        // bindings always get a legal 1×1 texture when the grid was not built.
+        let fallback = coeffTex ?? coeffCla ?? source
+        let grid = try nrGrid ?? denoiseDummy3D()
+        let sigma = try nrSigma ?? denoiseDummy2D()
         guard let enc = cb.makeComputeCommandEncoder() else {
             throw RenderError.commandBufferFailed
         }
@@ -3841,7 +3910,8 @@ public final class RenderGraph {
         enc.setTexture(coeffTex ?? fallback, index: 1)
         enc.setTexture(coeffCla ?? fallback, index: 2)
         enc.setTexture(destination, index: 3)
-        enc.setTexture(coeffNR ?? fallback, index: 4)
+        enc.setTexture(grid, index: 5)
+        enc.setTexture(sigma, index: 6)
         enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
         dispatch(enc, apply, ImageSize(width: Int(params.b.x), height: Int(params.b.y)))
         enc.endEncoding()
@@ -4220,6 +4290,55 @@ public final class RenderGraph {
                             withBytes: raw.baseAddress!, bytesPerRow: 2)
         }
         depthDummyTexture = texture
+        return texture
+    }
+
+    /// 171 — the 1×1 stand-ins for the denoise's two bindings. Same rule as the depth dummy: a valid
+    /// texture must be bound even when the amount is 0 and the kernel never reads it.
+    private func denoiseDummy2D() throws -> MTLTexture {
+        if let hit = denoiseDummy2DTexture { return hit }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2D
+        desc.pixelFormat = .rgba32Float
+        desc.width = 1
+        desc.height = 1
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("denoise dummy 2d")
+        }
+        let zero = SIMD4<Float>(0, 0, 0, 0)
+        withUnsafeBytes(of: zero) { raw in
+            texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                            withBytes: raw.baseAddress!, bytesPerRow: 16)
+        }
+        denoiseDummy2DTexture = texture
+        return texture
+    }
+
+    private func denoiseDummy3D() throws -> MTLTexture {
+        if let hit = denoiseDummy3DTexture { return hit }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type3D
+        desc.pixelFormat = .rgba16Float
+        desc.width = 1
+        desc.height = 1
+        desc.depth = 1
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("denoise dummy 3d")
+        }
+        var zero = [Float16](repeating: 0, count: 4)
+        zero.withUnsafeBytes { raw in
+            texture.replace(region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                              size: MTLSize(width: 1, height: 1, depth: 1)),
+                            mipmapLevel: 0, slice: 0, withBytes: raw.baseAddress!,
+                            bytesPerRow: 8, bytesPerImage: 8)
+        }
+        denoiseDummy3DTexture = texture
         return texture
     }
 
@@ -4790,6 +4909,29 @@ public final class RenderGraph {
         desc.width = max(1, width)
         desc.height = max(1, height)
         desc.arrayLength = max(1, arrayLength)
+        desc.mipmapLevelCount = 1
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        guard let t = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed(key)
+        }
+        scratchTextures[key] = t
+        return t
+    }
+
+    /// 171 — the 3-D sibling of `scratch` for the bilateral grid. The key carries the depth, so two
+    /// grids of the same width and height but a different z resolution cannot alias.
+    private func scratch3D(_ label: String, width: Int, height: Int, depth: Int,
+                           format: MTLPixelFormat) throws -> MTLTexture {
+        let key = "\(label):\(width)x\(height)x\(depth):\(format.rawValue):3d"
+        if let hit = scratchTextures[key] { return hit }
+        if scratchTextures.count > 16 { scratchTextures.removeAll() }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type3D
+        desc.pixelFormat = format
+        desc.width = max(1, width)
+        desc.height = max(1, height)
+        desc.depth = max(1, depth)
         desc.mipmapLevelCount = 1
         desc.usage = [.shaderRead, .shaderWrite]
         desc.storageMode = .private

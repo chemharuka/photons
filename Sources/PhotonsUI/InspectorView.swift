@@ -106,8 +106,8 @@ public struct InspectorView: View {
         /// S0 / S1.9 render parameters, not decoder amounts, so they read as their own card rather
         /// than as a tail of 开发.
         case correction
-        /// 164 — **细节** (the new card): 纹理 / 清晰度 (moved from 效果) + 非 Bayer 降噪 /
-        /// 非 Bayer 彩色降噪 (new, S3.9). The user's split (2026-10-30): 开发 is the RAW decode flow,
+        /// 164 — **细节** (the new card): 纹理 / 清晰度 (moved from 效果) + 去噪 /
+        /// 去彩噪 (new, S3.9). The user's split (2026-10-30): 开发 is the RAW decode flow,
         /// 细节 is the display-referred detail/noise work, 效果 is only 去雾 + 颗粒.
         ///
         /// It sits directly after 校正 and before 效果 — the panel's own order, and the one the
@@ -1171,7 +1171,7 @@ public struct InspectorView: View {
         toneCard(cardSpec(.correction))
     }
 
-    /// 164 — **细节**: 纹理 / 清晰度 (moved here from 效果) and the two new non-Bayer denoises.
+    /// 164 — **细节**: 纹理 / 清晰度 (moved here from 效果) and the two new denoises.
     ///
     /// A spec card like 校正: every row is a `ToneRow` over `effects`, so a double-click on the
     /// title resets exactly these four numbers (`PanelResets.Group.detailFX`) and nothing on 开发,
@@ -1774,18 +1774,18 @@ public struct InspectorView: View {
                 keyPath: \.effects.clarity),
     ]
 
-    /// 164 — the new 细节 card's two **non-Bayer** rows: S3.9's display-referred luminance and
+    /// 164 — the new 细节 card's two **denoise** rows: S3.9's display-referred luminance and
     /// chroma noise reduction. 0 is the pre-164 frame byte for byte (the stage is not encoded when
     /// everything is 0), and the rows are `.knob` because they act on the decoded/render frame,
     /// not in the scene-linear or decoder domains.
     public static let nonBayerRows: [ToneRow] = [
-        ToneRow(title: "非 Bayer 降噪", range: 0 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "去噪", range: 0 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.nonBayerLuminanceNR),
-        ToneRow(title: "非 Bayer 彩色降噪", range: 0 ... 100, format: "%.0f", shape: .knob,
+        ToneRow(title: "去彩噪", range: 0 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.nonBayerColorNR),
     ]
 
-    /// The new 细节 card's rows in draw order: 纹理 / 清晰度, then the two non-Bayer denoises.
+    /// The new 细节 card's rows in draw order: 纹理 / 清晰度, then the two denoises.
     public static var detailFXRows: [ToneRow] { textureClarityRows + nonBayerRows }
 
     /// 2026-10-28 (P0-6) / 117 / 164 — the 效果 card's 去雾 block: S1.9 (117 moved it to the
@@ -1828,7 +1828,7 @@ public struct InspectorView: View {
     public struct PanelCardSpec: Equatable {
 
         /// The semantic block a row belongs to. The block order is the draw order, and every block
-        /// after the first starts after a divider (校正: 色差 ─ 暗角; 细节: 纹理/清晰度 ─ 非 Bayer 降噪;
+        /// after the first starts after a divider (校正: 色差 ─ 暗角; 细节: 纹理/清晰度 ─ 去噪;
         /// 效果: 去雾 ─ 颗粒).
         public enum BlockGroup: String, Equatable, Sendable {
             case tone
@@ -1933,7 +1933,7 @@ public struct InspectorView: View {
             blocks: [Block(group: .ca, rows: InspectorView.caRows),
                      Block(group: .vignette, rows: InspectorView.vignetteRows)])
 
-        /// 164 — the new 细节 card: 纹理 / 清晰度 (moved from 效果) then the two non-Bayer denoises.
+        /// 164 — the new 细节 card: 纹理 / 清晰度 (moved from 效果) then the two denoises.
         public static let detailFXCard = PanelCardSpec(
             section: .detailFX, group: .detailFX,
             blocks: [Block(group: .presence, rows: InspectorView.textureClarityRows),
@@ -3045,7 +3045,7 @@ public struct PanelResets {
         case detail
         /// 2026-10-28 (096): 校正 — 色差 R / 色差 B, one double-click.
         case correction
-        /// 164: 细节 — 纹理 / 清晰度 / 非 Bayer 降噪 / 非 Bayer 彩色降噪, one double-click.
+        /// 164: 细节 — 纹理 / 清晰度 / 去噪 / 去彩噪, one double-click.
         case detailFX
         /// 2026-10-28: 效果 — 去雾 / 去雾深度 + 颗粒, one double-click (164 removed the detail rows).
         case effects

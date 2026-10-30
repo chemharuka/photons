@@ -88,7 +88,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// and no decoder/detail/effect leaf. Between 开发 and 细节, exactly where the inspector draws it.
     case correction
     /// 164 — **细节** (the new card): 纹理 / 清晰度 (`effects.texture` / `effects.clarity`) and the
-    /// two non-Bayer denoises (`effects.nonBayer*`). S3.9, display-referred. Its own row so 「只勾
+    /// two denoises (`effects.nonBayer*`). S3.9, display-referred. Its own row so 「只勾
     /// 细节」 cannot move 开发, 校正 or 效果.
     case detailFX
     /// 效果 — 去雾 / 去雾深度 + 颗粒, and nothing else since 164 moved 纹理 / 清晰度 to 细节.
@@ -100,7 +100,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// 白平衡 → 黑电平 → Light → Color → 黑白 → HSL → 色彩分级 → 曲线 → 开发 → 校正 → 细节 → 效果
     /// → 裁切 → 蒙版.
     /// (曲线 above 开发 since 2026-10-28 — the user's own panel order; 校正 between 开发 and 细节
-    /// since 096/164, and 164's new 细节 card carries 纹理/清晰度 + the two non-Bayer denoises.)
+    /// since 096/164, and 164's new 细节 card carries 纹理/清晰度 + the two denoises.)
     ///
     /// A test (`CopySheetCardTests`) compares it against `InspectorView.cardTitles(in: .adjust)` +
     /// the two cards that live in other workspaces, so a card that moves in the panel moves here or
@@ -181,7 +181,7 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     case sharpening, sharpeningRadius, noiseLuminance, noiseColor, lensCorrections
     case caRed, caBlue
     case curveWhite, curveRed, curveGreen, curveBlue
-    /// 164: 纹理 / 清晰度 / 非 Bayer 降噪 / 非 Bayer 彩色降噪 belong to the new 细节 card.
+    /// 164: 纹理 / 清晰度 / 去噪 / 去彩噪 belong to the new 细节 card.
     case texture, clarity, nonBayerLuminance, nonBayerColor
     /// 暗角 stays on the 校正 card (it always did — 164 only corrected a stale comment).
     case vignette
@@ -249,8 +249,8 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .grain: return "颗粒"
         case .texture: return "纹理"
         case .clarity: return "清晰度"
-        case .nonBayerLuminance: return "非 Bayer 降噪"
-        case .nonBayerColor: return "非 Bayer 彩色降噪"
+        case .nonBayerLuminance: return "去噪"
+        case .nonBayerColor: return "去彩噪"
         case .dehaze: return "去雾"
         case .crop: return "裁切"
         case .straighten: return "拉直"
@@ -651,7 +651,7 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     /// 2026-10-28 (P0-6) / 164: S3.9's numbers. Sparse like every other leaf — a copy of a
     /// vignette-only look carries no `texture`, so pasting it leaves the target's 纹理 alone.
     ///
-    /// 164 puts `texture` / `clarity` and the two non-Bayer denoises on the **细节** card while
+    /// 164 puts `texture` / `clarity` and the two denoises on the **细节** card while
     /// keeping them in this same patch: a section is a field-level view, not a storage group.
     public var texture: Double?
     public var clarity: Double?
@@ -921,7 +921,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
     /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
-    /// + detail 5 + 校正 5 (色差 R/B + 暗角 3) + 细节 4 (纹理/清晰度 + 非 Bayer ×2) + 效果 5
+    /// + detail 5 + 校正 5 (色差 R/B + 暗角 3) + 细节 4 (纹理/清晰度 + 去噪/去彩噪 ×2) + 效果 5
     /// (颗粒 1 + 去雾/去雾深度 + …) — 164's split changed the reading, not the storage.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
@@ -973,8 +973,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if optics != nil { out.insert(.correction) }
         if let e = effects {
             // 164: one patch, three cards. The vignette has always been drawn on 校正 (096's card
-            // comment was wrong for a while and is now corrected); 纹理/清晰度 + the two non-Bayer
-            // denoises are the new 细节 card; 去雾/颗粒 stay on 效果.
+            // comment was wrong for a while and is now corrected); 纹理/清晰度 + the two denoise
+            // rows are the new 细节 card; 去雾/颗粒 stay on 效果.
             if e.vignetteAmount != nil || e.vignetteMidpoint != nil || e.vignetteFeather != nil {
                 out.insert(.correction)
             }
@@ -1121,7 +1121,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             out.optics = p.isEmpty ? nil : p
         }
 
-        // 164: 暗角 lives on 校正 (its effect fields), 纹理/清晰度 + non-Bayer on 细节, 去雾/颗粒 on
+        // 164: 暗角 lives on 校正 (its effect fields), 纹理/清晰度 + 去噪/去彩噪 on 细节, 去雾/颗粒 on
         // 效果. One EffectsPatch can therefore be filled by two different sections; build it once.
         if let e = effects {
             var p = EffectsPatch()

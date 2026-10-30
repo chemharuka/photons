@@ -2,7 +2,7 @@
 #include "oklch_bands.metal"
 using namespace metal;
 
-// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079); 164 adds the two **non-Bayer** denoises.
+// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079); 164 adds the two **denoise** controls.
 //
 // The 效果 card's second block, in the place Lightroom puts the two Presence detail controls: the
 // picture's detail is shaped here — and only then does S3c darken the corners, so the vignette's own
@@ -39,7 +39,7 @@ using namespace metal;
 // exists only when at least one amount is non-zero (`RenderStage.pipeline(hasDetailFX:)`), so a
 // neutral document never reaches this file: 中性 is "not encoded", not "encoded and multiplied by 0".
 //
-// 164 — **非 Bayer 降噪 / 非 Bayer 彩色降噪**, the new 细节 card's two numbers:
+// 164 — **去噪 / 去彩噪**, the new 细节 card's two numbers:
 //
 //   · **luminance** reuses this file's own guided-filter residual at the smallest radius (the
 //     texture band's statistics, one box pair), and mixes the luma **towards** the base layer:
@@ -69,7 +69,7 @@ struct DetailFXParams {
     int4 b;
     // qW, qH, segment length, pad
     int4 c;
-    // 164: non-Bayer luma amount, non-Bayer chroma amount (0…1), pad, pad
+    // 164: denoise luma amount, denoise chroma amount (0…1), pad, pad
     float4 f;
 };
 
@@ -209,14 +209,47 @@ kernel void s3_8_guide_coeff(texture2d<float, access::read> stats [[texture(0)]]
 /// The residual is added to **all three channels equally**, so the boost moves luminance and leaves
 /// the chroma ratios alone; clamping happens once, at the end.
 ///
-/// 164: the third coefficient map (index 4) is the non-Bayer **luminance** denoise; its amount is
-/// `p.f.x`. The **chroma** denoise (`p.f.y`) needs no map — it is one OKLab round trip. Both are
-/// guarded by `> 0`, so an untouched 细节 card executes exactly the pre-164 instruction stream.
+/// 171: the denoise is a **joint bilateral grid** (see `s3_9_denoise.metal`), not a third guided
+/// band. `nrGrid` (index 5) is the blurred grid, `nrSigma` (index 6) the frame's noise estimate.
+/// The luma amount is `p.f.x`; the chroma amount `p.f.y`. Both branches are guarded by `> 0`, so an
+/// untouched 细节 card executes exactly the pre-164 instruction stream.
+#define S3_9_CELL 8
+
+/// Manual trilinear read. `texture3d` linear filtering is not available everywhere — when it is not,
+/// Metal silently falls back to nearest, which would turn the slice into a stair-stepped lookup — so
+/// the eight corners are fetched and lerped by hand. `c` is in texel coordinates; corners clamp.
+static inline float4 s3_9_grid_read(texture3d<float, access::read> g, float3 c, uint3 dim) {
+    float3 f = floor(c);
+    float3 t = c - f;
+    int3 i0 = int3(f);
+    int3 i1 = i0 + 1;
+    int3 m = int3(dim) - 1;
+
+    int3 a = clamp(i0, int3(0), m);
+    int3 b = clamp(i1, int3(0), m);
+
+    float4 c000 = g.read(uint3(a.x, a.y, a.z));
+    float4 c100 = g.read(uint3(b.x, a.y, a.z));
+    float4 c010 = g.read(uint3(a.x, b.y, a.z));
+    float4 c110 = g.read(uint3(b.x, b.y, a.z));
+    float4 c001 = g.read(uint3(a.x, a.y, b.z));
+    float4 c101 = g.read(uint3(b.x, a.y, b.z));
+    float4 c011 = g.read(uint3(a.x, b.y, b.z));
+    float4 c111 = g.read(uint3(b.x, b.y, b.z));
+
+    float4 c00 = mix(c000, c100, t.x);
+    float4 c10 = mix(c010, c110, t.x);
+    float4 c01 = mix(c001, c101, t.x);
+    float4 c11 = mix(c011, c111, t.x);
+    return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
+}
+
 kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
                              texture2d<float, access::sample> coeffTex [[texture(1)]],
                              texture2d<float, access::sample> coeffCla [[texture(2)]],
                              texture2d<float, access::write> dst [[texture(3)]],
-                             texture2d<float, access::sample> coeffNR [[texture(4)]],
+                             texture3d<float, access::read> nrGrid [[texture(5)]],
+                             texture2d<float, access::read> nrSigma [[texture(6)]],
                              constant DetailFXParams &p [[buffer(0)]],
                              uint2 gid [[thread_position_in_grid]]) {
     int w = p.b.x, h = p.b.y;
@@ -238,25 +271,40 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     float delta = amountTex * clamp(t.z, 0.0, 1.0) * (I - baseTex)
                 + amountCla * clamp(c.z, 0.0, 1.0) * (I - baseCla);
 
-    // 164 — non-Bayer luminance denoise: mix the luma towards the same guided base.
+    // 171 — **one** grid slice serves both controls: the grid is joint, so the pixel's own luma
+    // picks the same cell for the luma mix and for a/b. A neutral document never reaches here (the
+    // stage is not encoded at all), and the `> 0` guard keeps the pre-171 instruction stream intact.
     float amountNR = clamp(p.f.x, 0.0, 1.0);
-    if (amountNR > 0.0) {
-        float4 n = coeffNR.sample(linearSampler, uv);
-        float baseNR = clamp(n.x * I + n.y, 0.0, 2.0);
-        delta += amountNR * clamp(n.z, 0.0, 1.0) * (baseNR - I);
+    float amountCNR = clamp(p.f.y, 0.0, 1.0);
+    float abar = 0.0, bbar = 0.0;
+    if (amountNR > 0.0 || amountCNR > 0.0) {
+        float r = clamp((0.4 + 0.6 * amountNR) * nrSigma.read(uint2(0, 0)).x, 0.010, 0.050);
+        uint3 dim = uint3(nrGrid.get_width(), nrGrid.get_height(), nrGrid.get_depth());
+        float3 gc = float3((float(gid.x) + 0.5) / float(S3_9_CELL) - 0.5,
+                           (float(gid.y) + 0.5) / float(S3_9_CELL) - 0.5,
+                           clamp(I / r, 0.0, 39.0));
+        float4 slice = s3_9_grid_read(nrGrid, gc, dim);
+        float wsum = max(slice.w, 1e-6);
+        abar = slice.y / wsum;
+        bbar = slice.z / wsum;
+        // luminance: add the difference from the pixel's own luma to all three channels, so the
+        // chroma ratios stay put and only the luma moves.
+        if (amountNR > 0.0) { delta += amountNR * (slice.x / wsum - I); }
     }
     float3 outRGB = clamp(rgb + delta, 0.0, 4.0);
 
-    // 164 — non-Bayer chroma denoise: scale OKLab C only, holding L and hue. A neutral pixel has
-    // C ≈ 1e-8 and is skipped entirely, so a grey card cannot be tinted by the fold's rounding.
-    float amountCNR = clamp(p.f.y, 0.0, 1.0);
+    // 171 — chroma denoise: mix OKLab a/b towards the grid's mean. A neutral pixel has C ≈ 1e-8 and
+    // is skipped entirely, so a grey card cannot be tinted by the fold's rounding. A common Rec.709
+    // gain puts the luma back where it was.
     if (amountCNR > 0.0) {
         float3 lab = oklab_raw(outRGB);
         float chroma = length(lab.yz);
         if (chroma > 1e-6) {
-            float hue = atan2(lab.z, lab.y) * (180.0 / M_PI_F);
-            float scaled = chroma * (1.0 - 0.9 * amountCNR);
-            float3 reduced = oklch_to_linear(lab.x, scaled, hue);
+            float a2 = mix(lab.y, abar, amountCNR);
+            float b2 = mix(lab.z, bbar, amountCNR);
+            float C = length(float2(a2, b2));
+            float hue = atan2(b2, a2) * (180.0 / M_PI_F);
+            float3 reduced = oklch_to_linear(lab.x, C, hue);
             // Hold the **Rec.709 luminance**, not merely OKLab L: a common gain puts `Y` back where
             // it was, so the control moves chroma and leaves the luma untouched by construction.
             float y0 = s3_8_luma(outRGB, p.luma.xyz);

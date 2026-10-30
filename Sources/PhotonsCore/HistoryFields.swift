@@ -327,7 +327,7 @@ extension EditHistory {
         // history panel rather than as a nameless 效果 row.
         num("effects.texture", .effects, before.effects.texture, after.effects.texture)
         num("effects.clarity", .effects, before.effects.clarity, after.effects.clarity)
-        // 164 — S3.9's two non-Bayer denoises, so the history reads 「非 Bayer 降噪 +40」.
+        // 164 — S3.9's two denoises, so the history reads 「去噪 +40」.
         num("effects.nonBayerLuminanceNR", .effects,
             before.effects.nonBayerLuminanceNR, after.effects.nonBayerLuminanceNR)
         num("effects.nonBayerColorNR", .effects,
@@ -568,8 +568,8 @@ extension EditHistory {
         "effects.grainSeed": "颗粒种子",
         "effects.texture": "纹理",
         "effects.clarity": "清晰度",
-        "effects.nonBayerLuminanceNR": "非 Bayer 降噪",
-        "effects.nonBayerColorNR": "非 Bayer 彩色降噪",
+        "effects.nonBayerLuminanceNR": "去噪",
+        "effects.nonBayerColorNR": "去彩噪",
         "effects.dehaze": "去雾",
         "effects.dehazeDepth": "去雾深度",
         "optics.caRed": "横向色差 R",
