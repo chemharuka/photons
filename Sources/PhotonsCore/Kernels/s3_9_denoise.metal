@@ -150,29 +150,49 @@ kernel void s3_9_nr_splat(texture2d<float, access::read> src [[texture(0)]],
 
     // The z five-tap, in-cell: [1,4,6,4,1]/16 with the bin index clamped at both ends. The sums stay
     // **premultiplied** (Σ L, not the mean), so the slice can divide by Σ w on its own.
+    //
+    // 171 — the chroma channels get a **wider** z kernel than the luma ones: [1,2,3,4,3,2,1]/16, still
+    // summing to 16. That is the ticket's `r_sigma_C = 1.5 · r_sigma` in the only form a *joint* grid
+    // admits (one bin width per axis, so "chroma tolerates a 1.5× wider value window" becomes a 1.5×
+    // wider kernel: ±3 bins instead of ±2). It costs six adds in the threadgroup, no memory, and it is
+    // what lifts `DetailDenoiseTests`' D requirement (chroma σ ↓≥ 50 %) without loosening the luma's
+    // edge stop — see REPORT.md for the before/after.
+    const float zLuma[5] = { 1.0, 4.0, 6.0, 4.0, 1.0 };
+    const float zChroma[7] = { 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0 };
+
     if (tid < S3_9_Z) {
         int z = int(tid);
-        int zm2 = clamp(z - 2, 0, S3_9_Z - 1);
-        int zm1 = clamp(z - 1, 0, S3_9_Z - 1);
-        int zp1 = clamp(z + 1, 0, S3_9_Z - 1);
-        int zp2 = clamp(z + 2, 0, S3_9_Z - 1);
+        float4 s = float4(0.0);
+        float2 chroma = float2(0.0);
+        float chromaW = 0.0;
+        for (int k = -3; k <= 3; ++k) {
+            int zc = clamp(z + k, 0, S3_9_Z - 1);
+            float wc = zChroma[k + 3];
+            chroma += wc * float2(s3_9_acc_load(&acc[40 + zc]), s3_9_acc_load(&acc[80 + zc]));
+            chromaW += wc * s3_9_acc_load(&acc[120 + zc]);
+            if (k >= -2 && k <= 2) {
+                int zl = clamp(z + k, 0, S3_9_Z - 1);
+                s += zLuma[k + 2] * float4(s3_9_acc_load(&acc[zl]), 0.0, 0.0,
+                                           s3_9_acc_load(&acc[120 + zl]));
+            }
+        }
+        s /= 16.0;
+        chroma /= 16.0;
+        chromaW /= 16.0;
 
-        float4 s = (float4(s3_9_acc_load(&acc[zm2]), s3_9_acc_load(&acc[40 + zm2]),
-                           s3_9_acc_load(&acc[80 + zm2]), s3_9_acc_load(&acc[120 + zm2]))
-                  + 4.0 * float4(s3_9_acc_load(&acc[zm1]), s3_9_acc_load(&acc[40 + zm1]),
-                                 s3_9_acc_load(&acc[80 + zm1]), s3_9_acc_load(&acc[120 + zm1]))
-                  + 6.0 * float4(s3_9_acc_load(&acc[z]), s3_9_acc_load(&acc[40 + z]),
-                                 s3_9_acc_load(&acc[80 + z]), s3_9_acc_load(&acc[120 + z]))
-                  + 4.0 * float4(s3_9_acc_load(&acc[zp1]), s3_9_acc_load(&acc[40 + zp1]),
-                                 s3_9_acc_load(&acc[80 + zp1]), s3_9_acc_load(&acc[120 + zp1]))
-                  + float4(s3_9_acc_load(&acc[zp2]), s3_9_acc_load(&acc[40 + zp2]),
-                           s3_9_acc_load(&acc[80 + zp2]), s3_9_acc_load(&acc[120 + zp2]))) / 16.0;
-
-        float sumW = s.w;
+        float sumW = s.w;                       // Σ count, un-scaled: it is a count, not a value
         float sumL = s.x / S3_9_Q;
-        float sumA = s.y / S3_9_Q - 0.5 * sumW;
-        float sumB = s.z / S3_9_Q - 0.5 * sumW;
-        grid.write(float4(sumL, sumA, sumB, sumW), uint3(gid.x, gid.y, uint(z)));
+        // The chroma numerator and denominator must come from the **same** window, but the grid only
+        // carries one weight channel, and the x/y blur divides by that one. So the wide-window mean is
+        // formed here and re-premultiplied by `sumW`: the spatial pass then averages
+        // `aMean_wide · w` against `w`, which is exactly the weighted mean of the cells' wide means.
+        float aMean = 0.0, bMean = 0.0;
+        if (chromaW > 1e-6) {
+            aMean = (chroma.x / S3_9_Q - 0.5 * chromaW) / chromaW;
+            bMean = (chroma.y / S3_9_Q - 0.5 * chromaW) / chromaW;
+        }
+        grid.write(float4(sumL, aMean * sumW, bMean * sumW, sumW),
+                   uint3(gid.x, gid.y, uint(z)));
     }
 }
 
@@ -180,6 +200,10 @@ kernel void s3_9_nr_splat(texture2d<float, access::read> src [[texture(0)]],
 
 /// One invocation per grid texel: the five-tap along `p.grid.z` (0 = x, 1 = y), edge-clamped. The z
 /// axis was already smoothed at splat time, so it is not touched here.
+///
+/// 171 — this is the **fallback / probe** form (one axis per dispatch). The shipped path uses
+/// `s3_9_nr_blur_xy` below, which does both axes in one pass; the two are the same arithmetic, which
+/// is what `DenoiseKernelProbeTests` checks.
 kernel void s3_9_nr_blur(texture3d<float, access::read> src [[texture(0)]],
                          texture3d<float, access::write> dst [[texture(1)]],
                          constant DenoiseParams &p [[buffer(0)]],
@@ -199,4 +223,61 @@ kernel void s3_9_nr_blur(texture3d<float, access::read> src [[texture(0)]],
         sum += wt[k] * src.read(uint3(c));
     }
     dst.write(sum / 16.0, gid);
+}
+
+/// 171 — the **shipped** grid blur: x and y five-taps in a single dispatch, out of threadgroup
+/// memory. Two separate passes read and wrote the whole 3-D grid twice (two 20 MB round trips at
+/// 4.10 Mpx); this one loads a 16 × 16 tile plus a two-texel halo once and writes once, which is
+/// where the denoise's marginal cost came from at the acceptance's +2 ms budget.
+///
+/// The arithmetic is identical to `s3_9_nr_blur` run along x then y: `[1,4,6,4,1]/16`, edge-clamped.
+/// The z axis is not touched (the splat already did it).
+#define S3_9_TILE 16
+#define S3_9_LOAD (S3_9_TILE + 4)         // one tile plus a two-texel halo each way
+
+kernel void s3_9_nr_blur_xy(texture3d<float, access::read> src [[texture(0)]],
+                            texture3d<float, access::write> dst [[texture(1)]],
+                            constant DenoiseParams &p [[buffer(0)]],
+                            uint3 tg [[threadgroup_position_in_grid]],
+                            uint3 lid [[thread_position_in_threadgroup]]) {
+    int gW = p.grid.x, gH = p.grid.y;
+    int z = int(tg.z);
+    int x0 = int(tg.x) * S3_9_TILE - 2;    // the tile's top-left **input** texel
+    int y0 = int(tg.y) * S3_9_TILE - 2;
+
+    threadgroup float4 tile[S3_9_LOAD * S3_9_LOAD];       // 20 × 20 inputs
+    threadgroup float4 rows[S3_9_LOAD * S3_9_TILE];       // 16 × 20 after the x pass
+
+    const float wt[5] = { 1.0, 4.0, 6.0, 4.0, 1.0 };
+    const uint lane = lid.y * S3_9_TILE + lid.x;
+    const uint threads = S3_9_TILE * S3_9_TILE;
+
+    for (uint i = lane; i < uint(S3_9_LOAD * S3_9_LOAD); i += threads) {
+        int tx = int(i) % S3_9_LOAD, ty = int(i) / S3_9_LOAD;
+        int sx = clamp(x0 + tx, 0, gW - 1);
+        int sy = clamp(y0 + ty, 0, gH - 1);
+        tile[i] = src.read(uint3(uint(sx), uint(sy), uint(z)));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // x five-tap: `rows[ty][tx]`, ty spans the halo (so the y pass has its inputs).
+    for (uint i = lane; i < uint(S3_9_LOAD * S3_9_TILE); i += threads) {
+        int tx = int(i) % S3_9_TILE, ty = int(i) / S3_9_TILE;
+        float4 s = float4(0.0);
+        for (int k = 0; k < 5; ++k) {
+            s += wt[k] * tile[ty * S3_9_LOAD + clamp(tx + 2 + k - 2, 0, S3_9_LOAD - 1)];
+        }
+        rows[i] = s / 16.0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int ox = int(tg.x) * S3_9_TILE + int(lid.x);
+    int oy = int(tg.y) * S3_9_TILE + int(lid.y);
+    if (ox >= gW || oy >= gH) { return; }
+
+    float4 s = float4(0.0);
+    for (int k = 0; k < 5; ++k) {
+        s += wt[k] * rows[clamp(int(lid.y) + k, 0, S3_9_LOAD - 1) * S3_9_TILE + int(lid.x)];
+    }
+    dst.write(s / 16.0, uint3(uint(ox), uint(oy), uint(z)));
 }

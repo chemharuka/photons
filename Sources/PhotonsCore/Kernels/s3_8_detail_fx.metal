@@ -271,41 +271,35 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     float delta = amountTex * clamp(t.z, 0.0, 1.0) * (I - baseTex)
                 + amountCla * clamp(c.z, 0.0, 1.0) * (I - baseCla);
 
-    // 171 — luminance denoise: slice the bilateral grid and add the difference from the pixel's own
-    // luma to all three channels (luminance only, the chroma ratios stay put).
+    // 171 — **one** grid slice serves both controls: the grid is joint, so the pixel's own luma
+    // picks the same cell for the luma mix and for a/b. A neutral document never reaches here (the
+    // stage is not encoded at all), and the `> 0` guard keeps the pre-171 instruction stream intact.
     float amountNR = clamp(p.f.x, 0.0, 1.0);
-    if (amountNR > 0.0) {
+    float amountCNR = clamp(p.f.y, 0.0, 1.0);
+    float abar = 0.0, bbar = 0.0;
+    if (amountNR > 0.0 || amountCNR > 0.0) {
         float r = clamp((0.4 + 0.6 * amountNR) * nrSigma.read(uint2(0, 0)).x, 0.010, 0.050);
         uint3 dim = uint3(nrGrid.get_width(), nrGrid.get_height(), nrGrid.get_depth());
-        float3 c = float3((float(gid.x) + 0.5) / float(S3_9_CELL) - 0.5,
-                          (float(gid.y) + 0.5) / float(S3_9_CELL) - 0.5,
-                          clamp(I / r, 0.0, 39.0));
-        float4 slice = s3_9_grid_read(nrGrid, c, dim);
+        float3 gc = float3((float(gid.x) + 0.5) / float(S3_9_CELL) - 0.5,
+                           (float(gid.y) + 0.5) / float(S3_9_CELL) - 0.5,
+                           clamp(I / r, 0.0, 39.0));
+        float4 slice = s3_9_grid_read(nrGrid, gc, dim);
         float wsum = max(slice.w, 1e-6);
-        float Lbar = slice.x / wsum;
-        delta += amountNR * (Lbar - I);
+        abar = slice.y / wsum;
+        bbar = slice.z / wsum;
+        // luminance: add the difference from the pixel's own luma to all three channels, so the
+        // chroma ratios stay put and only the luma moves.
+        if (amountNR > 0.0) { delta += amountNR * (slice.x / wsum - I); }
     }
     float3 outRGB = clamp(rgb + delta, 0.0, 4.0);
 
-    // 171 — chroma denoise: run the same slice at the pixel's own luma and mix its a/b towards the
-    // grid's mean. A neutral pixel has C ≈ 1e-8 and is skipped entirely, so a grey card cannot be
-    // tinted by the fold's rounding. A common Rec.709 gain puts the luma back where it was.
-    float amountCNR = clamp(p.f.y, 0.0, 1.0);
+    // 171 — chroma denoise: mix OKLab a/b towards the grid's mean. A neutral pixel has C ≈ 1e-8 and
+    // is skipped entirely, so a grey card cannot be tinted by the fold's rounding. A common Rec.709
+    // gain puts the luma back where it was.
     if (amountCNR > 0.0) {
         float3 lab = oklab_raw(outRGB);
         float chroma = length(lab.yz);
         if (chroma > 1e-6) {
-            float amtL = clamp(p.f.x, 0.0, 1.0);
-            float r = clamp((0.4 + 0.6 * amtL) * nrSigma.read(uint2(0, 0)).x, 0.010, 0.050);
-            float Ic = s3_8_luma(outRGB, p.luma.xyz);
-            uint3 dim = uint3(nrGrid.get_width(), nrGrid.get_height(), nrGrid.get_depth());
-            float3 c = float3((float(gid.x) + 0.5) / float(S3_9_CELL) - 0.5,
-                              (float(gid.y) + 0.5) / float(S3_9_CELL) - 0.5,
-                              clamp(Ic / r, 0.0, 39.0));
-            float4 slice = s3_9_grid_read(nrGrid, c, dim);
-            float wsum = max(slice.w, 1e-6);
-            float abar = slice.y / wsum;
-            float bbar = slice.z / wsum;
             float a2 = mix(lab.y, abar, amountCNR);
             float b2 = mix(lab.z, bbar, amountCNR);
             float C = length(float2(a2, b2));

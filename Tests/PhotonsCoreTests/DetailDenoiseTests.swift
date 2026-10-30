@@ -328,6 +328,13 @@ final class DetailDenoiseTests: XCTestCase {
         let reduction = 1 - sigmaAfter / sigmaBefore
         print(String(format: "171 A · flat σ %.2f → %.2f codes (↓%.1f%%)",
                      sigmaBefore, sigmaAfter, 100 * reduction))
+        var meanBefore = 0.0, meanAfter = 0.0
+        for y in fy0..<fy1 { for x in fx0..<fx1 {
+            meanBefore += lumaBefore[y * w + x]; meanAfter += lumaAfter[y * w + x]
+        } }
+        let n = Double((fx1 - fx0) * (fy1 - fy0))
+        print(String(format: "171 A · flat mean %.3f → %.3f codes (Δ%+.3f)",
+                     meanBefore / n, meanAfter / n, (meanAfter - meanBefore) / n))
         XCTAssertGreaterThanOrEqual(reduction, 0.50, "A: 平坦区噪声 σ 必须 ↓≥50%")
 
         // B — this render's step, and a Gaussian calibrated to exactly this noise reduction.

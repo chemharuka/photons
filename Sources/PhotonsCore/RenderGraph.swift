@@ -3764,20 +3764,20 @@ public final class RenderGraph {
                                     threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             e1.endEncoding()
 
-            // P2 / P3 — the separable x then y five-tap.
-            let blur = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_blur")
-            let blurGroups = MTLSize(width: (gW + 7) / 8, height: (gH + 7) / 8, depth: zBins)
-            let blurThreads = MTLSize(width: 8, height: 8, depth: 1)
-            for (axis, from, to) in [(Int32(0), gridA, gridB), (Int32(1), gridB, gridA)] {
-                dp.grid.z = axis
-                guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-                e2.setComputePipelineState(blur)
-                e2.setTexture(from, index: 0)
-                e2.setTexture(to, index: 1)
-                e2.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-                e2.dispatchThreadgroups(blurGroups, threadsPerThreadgroup: blurThreads)
-                e2.endEncoding()
-            }
+            // P2 — the x and y five-taps in one tiled pass (16 × 16 outputs per threadgroup, one z
+            // slice each). Two separate dispatches moved the whole grid twice; this moves it once.
+            let blur = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_blur_xy")
+            let blurGroups = MTLSize(width: (gW + 15) / 16, height: (gH + 15) / 16, depth: zBins)
+            let blurThreads = MTLSize(width: 16, height: 16, depth: 1)
+            guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e2.setComputePipelineState(blur)
+            e2.setTexture(gridA, index: 0)
+            e2.setTexture(gridB, index: 1)
+            e2.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
+            e2.dispatchThreadgroups(blurGroups, threadsPerThreadgroup: blurThreads)
+            e2.endEncoding()
+            // The blurred grid is the one the slice reads.
+            nrGrid = gridB
         }
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
@@ -3829,15 +3829,21 @@ public final class RenderGraph {
         let base = try scratch("detailfx-stats", width: qW, height: qH, format: .rgba32Float)
         let tmp = try scratch("detailfx-stats-tmp", width: qW, height: qH, format: .rgba32Float)
 
+        let hasBands = params.a.x != 0 || params.a.y != 0
         let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_pack")
-        let e0 = try encoder(cb, pack, in: source, out: base)
-        e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
-        dispatch(e0, pack, ImageSize(width: qW, height: qH))
-        e0.endEncoding()
-
-        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2).
         var coeffTex: MTLTexture?
         var coeffCla: MTLTexture?
+        // 171 — a denoise-only drag has no guided band at all: no pack, no box pair, no coefficient
+        // map. It used to pay the whole band chain for nothing (the pack is at 1/q resolution but it
+        // is still a full-frame read).
+        if hasBands {
+            let e0 = try encoder(cb, pack, in: source, out: base)
+            e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
+            dispatch(e0, pack, ImageSize(width: qW, height: qH))
+            e0.endEncoding()
+        }
+
+        // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2).
         for band in [0, 1] {
             let active: Bool
             switch band {
