@@ -553,7 +553,7 @@ final class DetailFXTests: XCTestCase {
         XCTAssertLessThan(everything - neutral, 12.0, "S3.9 自己必须 < 12 ms")
     }
 
-    // MARK: - 164: the non-Bayer denoises
+    // MARK: - 164: the denoises
 
     /// The two new numbers are S3.9 material, and at 0 the stage does not exist — a pre-164 document
     /// keeps its key text and its pass list byte for byte.
@@ -571,7 +571,7 @@ final class DetailFXTests: XCTestCase {
 
         var luma = EditModel.neutral
         luma.effects.nonBayerLuminanceNR = 40
-        XCTAssertTrue(luma.hasDetailFX, "非 Bayer 降噪 非零 → S3.9 存在")
+        XCTAssertTrue(luma.hasDetailFX, "去噪 非零 → S3.9 存在")
         XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=2")
         XCTAssertEqual(luma.renderInputs.key.contains("s3.9-detail-fx"), true)
 
@@ -678,7 +678,7 @@ final class DetailFXTests: XCTestCase {
         }
         let before = rms(values, mean), after = rms(cleaned, cleanMean)
         print(String(format: "NON-BAYER NR · noise RMS %.2f → %.2f codes", before, after))
-        XCTAssertLessThan(after, before * 0.75, "非 Bayer 降噪 必须把平坦区的噪声压下去")
+        XCTAssertLessThan(after, before * 0.75, "去噪 必须把平坦区的噪声压下去")
 
         // The step's two plateaus keep their level (the guided filter's `a → 1` at a structural edge).
         let topBefore = meanCode(noisy, x0: w / 2 + 10, y0: 10, w: w / 2 - 20, h: h / 2 - 20)
@@ -735,7 +735,7 @@ final class DetailFXTests: XCTestCase {
         return l.reduce(0, +) / Double(max(l.count, 1))
     }
 
-    // MARK: - 164: cost of each non-Bayer control
+    // MARK: - 164: cost of each denoise control
 
     /// 4.10 Mpx, cache off: each new control adds at most **2 ms** at p95. The baseline is the same
     /// frame with S3.9 already running (纹理 = 1): that isolates the control's own work from the
@@ -798,8 +798,8 @@ final class DetailFXTests: XCTestCase {
         print(String(format: "NON-BAYER COST · base p95 %.2f ms · delta p95 降噪 %+.2f 彩色 %+.2f 两项 %+.2f"
                      + " · delta min 降噪 %+.2f 彩色 %+.2f 两项 %+.2f ms",
                      baseP95, p95Luma, p95Chroma, p95Both, minLuma, minChroma, minBoth))
-        XCTAssertLessThanOrEqual(minLuma, 2.0, "非 Bayer 降噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
-        XCTAssertLessThanOrEqual(minChroma, 2.0, "非 Bayer 彩色降噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
+        XCTAssertLessThanOrEqual(minLuma, 2.0, "去噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
+        XCTAssertLessThanOrEqual(minChroma, 2.0, "去彩噪 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
         XCTAssertLessThanOrEqual(minBoth, 2.0, "两项都开 的最便宜一帧增幅必须 ≤ 2 ms（p95 见上）")
     }
 

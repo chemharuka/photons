@@ -141,7 +141,7 @@ public enum StageAlgorithmVersion {
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
 
-    /// **2** — 164: the 细节 card's two non-Bayer denoises (display-referred luminance guided-filter
+    /// **2** — 164: the 细节 card's two denoises (display-referred luminance guided-filter
     /// mix and OKLab chroma suppression) joined S3.9's apply pass. Both branches are skipped at 0, so
     /// a document with the two new fields untouched is byte-identical to 1; a document that sets one
     /// of them renders pixels it could not render before.

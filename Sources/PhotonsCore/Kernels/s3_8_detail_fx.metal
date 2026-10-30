@@ -2,7 +2,7 @@
 #include "oklch_bands.metal"
 using namespace metal;
 
-// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079); 164 adds the two **non-Bayer** denoises.
+// S3.9 — 纹理 / 清晰度 (2026-10-28, P0-6; 078 B4 / 079); 164 adds the two **denoise** controls.
 //
 // The 效果 card's second block, in the place Lightroom puts the two Presence detail controls: the
 // picture's detail is shaped here — and only then does S3c darken the corners, so the vignette's own
@@ -39,7 +39,7 @@ using namespace metal;
 // exists only when at least one amount is non-zero (`RenderStage.pipeline(hasDetailFX:)`), so a
 // neutral document never reaches this file: 中性 is "not encoded", not "encoded and multiplied by 0".
 //
-// 164 — **非 Bayer 降噪 / 非 Bayer 彩色降噪**, the new 细节 card's two numbers:
+// 164 — **去噪 / 去彩噪**, the new 细节 card's two numbers:
 //
 //   · **luminance** reuses this file's own guided-filter residual at the smallest radius (the
 //     texture band's statistics, one box pair), and mixes the luma **towards** the base layer:
@@ -69,7 +69,7 @@ struct DetailFXParams {
     int4 b;
     // qW, qH, segment length, pad
     int4 c;
-    // 164: non-Bayer luma amount, non-Bayer chroma amount (0…1), pad, pad
+    // 164: denoise luma amount, denoise chroma amount (0…1), pad, pad
     float4 f;
 };
 
@@ -209,7 +209,7 @@ kernel void s3_8_guide_coeff(texture2d<float, access::read> stats [[texture(0)]]
 /// The residual is added to **all three channels equally**, so the boost moves luminance and leaves
 /// the chroma ratios alone; clamping happens once, at the end.
 ///
-/// 164: the third coefficient map (index 4) is the non-Bayer **luminance** denoise; its amount is
+/// 164: the third coefficient map (index 4) is the **luminance** denoise; its amount is
 /// `p.f.x`. The **chroma** denoise (`p.f.y`) needs no map — it is one OKLab round trip. Both are
 /// guarded by `> 0`, so an untouched 细节 card executes exactly the pre-164 instruction stream.
 kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
@@ -238,7 +238,7 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     float delta = amountTex * clamp(t.z, 0.0, 1.0) * (I - baseTex)
                 + amountCla * clamp(c.z, 0.0, 1.0) * (I - baseCla);
 
-    // 164 — non-Bayer luminance denoise: mix the luma towards the same guided base.
+    // 164 — luminance denoise: mix the luma towards the same guided base.
     float amountNR = clamp(p.f.x, 0.0, 1.0);
     if (amountNR > 0.0) {
         float4 n = coeffNR.sample(linearSampler, uv);
@@ -247,7 +247,7 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     }
     float3 outRGB = clamp(rgb + delta, 0.0, 4.0);
 
-    // 164 — non-Bayer chroma denoise: scale OKLab C only, holding L and hue. A neutral pixel has
+    // 164 — chroma denoise: scale OKLab C only, holding L and hue. A neutral pixel has
     // C ≈ 1e-8 and is skipped entirely, so a grey card cannot be tinted by the fold's rounding.
     float amountCNR = clamp(p.f.y, 0.0, 1.0);
     if (amountCNR > 0.0) {

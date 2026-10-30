@@ -322,7 +322,7 @@ enum EditParameters {
         // `applyEdit` short-circuited. `EffectsCardTests.testDetailFXRowsWriteTheDocument` holds them.
         t.field("texture") { areEqual($0.texture, $1.texture) }
         t.field("clarity") { areEqual($0.clarity, $1.clarity) }
-        // 164 — the two non-Bayer denoises. Load-bearing exactly like the three above: without them
+        // 164 — the two denoises. Load-bearing exactly like the three above: without them
         // `applyEdit` short-circuits and the new sliders write nothing.
         t.field("nonBayerLuminanceNR") {
             areEqual($0.nonBayerLuminanceNR, $1.nonBayerLuminanceNR)

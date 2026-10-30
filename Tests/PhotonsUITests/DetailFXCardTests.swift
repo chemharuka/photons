@@ -5,7 +5,7 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 164 — the **new 细节 card**: 纹理 / 清晰度 (moved from 效果) and the two non-Bayer denoises.
+/// 164 — the **new 细节 card**: 纹理 / 清晰度 (moved from 效果) and the two denoises.
 ///
 /// 开发 holds the RAW decode amounts (031's four + 去摩尔纹); 效果 keeps only 去雾 + 颗粒. These tests
 /// pin the card's contents, its reset scope, and that the two new sliders reach the document.
@@ -24,10 +24,10 @@ final class DetailFXCardTests: XCTestCase {
 
         XCTAssertEqual(InspectorView.Section.detailFX.title, "细节")
         XCTAssertEqual(InspectorView.detailFXRows.map(\.title),
-                       ["纹理", "清晰度", "非 Bayer 降噪", "非 Bayer 彩色降噪"])
+                       ["纹理", "清晰度", "去噪", "去彩噪"])
         XCTAssertEqual(EditSnapshotSection.detailFX.title, "细节")
         XCTAssertEqual(EditSnapshotSection.detailFX.children.map(\.title),
-                       ["纹理", "清晰度", "非 Bayer 降噪", "非 Bayer 彩色降噪"])
+                       ["纹理", "清晰度", "去噪", "去彩噪"])
     }
 
     func testTheSpecOwnsExactlyThisCardsRows() {
@@ -108,7 +108,7 @@ final class DetailFXCardTests: XCTestCase {
                                              children: [.nonBayerLuminance])
         let payload = EditSnapshot.capture(source).filtered(to: onlyLuma)
         XCTAssertEqual(payload.sections, [.detailFX])
-        XCTAssertEqual(payload.fieldCount, 1, "只勾非 Bayer 降噪 = 一叶")
+        XCTAssertEqual(payload.fieldCount, 1, "只勾去噪 = 一叶")
         XCTAssertEqual(payload.effects?.nonBayerLuminanceNR, 40)
         XCTAssertNil(payload.effects?.nonBayerColorNR)
         XCTAssertNil(payload.effects?.texture)

@@ -926,7 +926,7 @@ private struct DetailFXParamsU {
     var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
-    var f: SIMD4<Float>    // 164: non-Bayer luma amount, chroma amount (0…1), pad, pad
+    var f: SIMD4<Float>    // 164: denoise luma amount, chroma amount (0…1), pad, pad
 }
 
 /// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117).
@@ -3681,7 +3681,7 @@ public final class RenderGraph {
         }
         let textureRadius = radiusQ(0.0015, cap: 4)      // ≈ 4 px at a 2731 px frame
         let clarityRadius = radiusQ(0.02, cap: 24)       // ≈ 55 px at a 2731 px frame
-        // 164 — the non-Bayer luma denoise's window: the smallest the 1/q statistics can express
+        // 164 — the luma denoise's window: the smallest the 1/q statistics can express
         // (≈ 1–3 px at display scale, 4 px at a 2731 px frame), so it averages flat noise and not
         // structure. One more box pair at q resolution, never a full-resolution pass.
         let denoiseRadius = radiusQ(0.0009, cap: 3)
@@ -3765,7 +3765,7 @@ public final class RenderGraph {
         e0.endEncoding()
 
         // band 0 = 纹理 (small radius, ε = 4e-3), band 1 = 清晰度 (mid radius, ε = 1e-2),
-        // band 2 = 164 non-Bayer 降噪 (smallest radius, ε = 4e-3 — the same fine band's statistics).
+        // band 2 = 164 去噪 (smallest radius, ε = 4e-3 — the same fine band's statistics).
         //
         // 164: when 纹理 is active its coefficient map is already the fine-band base at the right
         // radius, so the luma denoise **reuses it** instead of paying a second box/coefficient chain.
