@@ -142,7 +142,7 @@ final class CacheVersionTests: XCTestCase {
         // so every stage's key moved **once**, on the day the mechanism arrived — that is the
         // documented one-time migration. What must never happen again is S0 moving because *S2* was
         // bumped, so S2's generation may not appear anywhere in S0's material or S1's:
-        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=1"), true)
+        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=2"), true)
         XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=5"), "S0 does not carry S2's generation")
         XCTAssertFalse(new.toneMap.isEmpty)
         XCTAssertNotEqual(old.geometry, new.geometry,
@@ -553,6 +553,6 @@ final class CacheVersionTests: XCTestCase {
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=7"))
-        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=1"))
+        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=2"))
     }
 }

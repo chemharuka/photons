@@ -40,8 +40,14 @@ public enum StageAlgorithmVersion {
 
     // One number per stage, in `RenderStage.order`. 2 = "the maths changed after graph-v1 was set".
 
-    /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic).
-    public static let geometry = 1
+    /// **2** — 183: S0's map is no longer `crop ∘ rotate ∘ flip` alone; a document may carry a 3×3
+    /// keystone (`geometry.perspectiveVertical/Horizontal`) that the same pass applies to the sample
+    /// coordinate, and the canvas it allocates is the inscribed rectangle of the warped quad. A
+    /// document at 0/0 renders **byte-identical** pixels (the kernel's warp block is skipped and the
+    /// canvas is unchanged), but the stage's arithmetic now includes the warp, and the same stored
+    /// numbers would have produced different pixels on a build that did not — so the generation moves.
+    /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic, before the keystone).
+    public static let geometry = 2
     /// **7** — 129: S1's instantiation switch for the blacks level now sits where the level term is
     /// zero (`|blacks| > 20`, `smoothstep(0.2, 1, |blacks|/100)`), not at 073C's original 50. The
     /// kernel arithmetic is unchanged; documents with **20 < |blacks| ≤ 50** now take the hybrid

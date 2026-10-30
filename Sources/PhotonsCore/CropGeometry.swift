@@ -76,7 +76,8 @@ public struct CropGeometry: Sendable, Equatable {
         self.canvas = CropMath.canvasSize(crop: crop, in: source,
                                           straightenDegrees: geometry.straightenDegrees,
                                           quarterTurns: geometry.quarterTurns,
-                                          allowsOutsideSource: true)
+                                          allowsOutsideSource: true,
+                                          perspective: geometry.perspective)
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(geometry.quarterTurns)
         self.flipHorizontal = geometry.flipHorizontal
         self.flipVertical = geometry.flipVertical
