@@ -3584,17 +3584,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The order is the gesture's depth: the crop tool first, because while it is on the canvas is a
     /// crop frame and nothing else (Phos gates every other canvas gesture on `cropMode` for the same
     /// reason, `local/src/swift-raw/Zenodeng_Phos/Sources/Phos/WorkspaceCanvasInput.swift:32`); then
-    /// the eyedropper's one-shot; then a mask's creation, its grips and its adjust drag; then the
-    /// paint drag; then double-click; and last the pan. `LoupeCanvasView.mouseDown` switches on
+    /// a mask's creation — an explicit 新建 outranks a sticky 修复/吸管 arm; then the eyedropper's
+    /// one-shot, the mask's grips and its adjust drag; then the paint drag; then double-click; and
+    /// last the pan. `LoupeCanvasView.mouseDown` switches on
     /// exactly this value, so a test can ask "who owns this click?" without synthesising an `NSEvent`
     /// — and the answer cannot drift from the shipped path.
     public func gestureOwner(atViewPoint point: CGPoint, clickCount: Int = 1) -> LoupeCanvasGesture {
         if isCropToolActive {
             return LoupeCanvasGesture.crop(clickCount: clickCount, hit: cropHit(atViewPoint: point))
         }
+        if isShapeCreateArmed { return .maskCreate }
         if isEyedropperArmed { return .eyedropper }
         if session?.healTool == true { return .healClick }
-        if isShapeCreateArmed { return .maskCreate }
         if isMaskHandleArmed(atViewPoint: point) { return .maskHandle }
         if isShapeDragArmed { return .maskShape }
         if maskCanvas.isArmed { return .paint }
