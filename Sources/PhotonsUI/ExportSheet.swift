@@ -241,9 +241,17 @@ public final class ExportSheetModel {
                                        "输出锐化", "元数据", "导出"]
 
     /// What the user is editing. Passed to `BatchExporter` verbatim at run time.
-    public var preset: ExportPreset
+    ///
+    /// 161 §4 — this is the one `touch()` entry the whole sheet goes through: a write here (or to
+    /// `outputDirectory` / `selectionCount` below) while the previous run's 完成 report is still on
+    /// screen returns the sheet to 「将导出 N 张 → …」. The controls do not each implement that.
+    public var preset: ExportPreset {
+        didSet { resetFinishedReportAfterConfigurationChange() }
+    }
     /// Where the files go. Chosen with a folder picker in the sheet; a sane default otherwise.
-    public var outputDirectory: URL
+    public var outputDirectory: URL {
+        didSet { resetFinishedReportAfterConfigurationChange() }
+    }
 
     /// Named presets, one file each (see `ExportPresetStore`).
     public let presetStore: ExportPresetStore
@@ -260,10 +268,23 @@ public final class ExportSheetModel {
         ExportFormat.available(writableUTIs: writableUTIs)
     }
 
-    /// How many photos the sheet will export — set when it is presented, shown as "将导出 N 张".
-    public var selectionCount: Int = 0
+    /// 161 §5 — the last draft the user actually exported, and the close-time writer. `draftStore` is
+    /// injected (`UserDefaults.standard` in the app) so the tests can run against an in-memory store.
+    public let draftStore: ExportDraftPersistence.Store
+    /// Set when the remembered blob could not be decoded. The bad blob is removed; the defaults are
+    /// used, and the notice is how that is *recorded* rather than silently forgotten.
+    public private(set) var draftNotice: String?
+    private var lastSuccessfulDraft: ExportDraftPersistence.Draft?
+    private var pendingRunDraft: ExportDraftPersistence.Draft?
 
-    public private(set) var phase: Phase = .idle
+    /// How many photos the sheet will export — set when it is presented, shown as "将导出 N 张".
+    public var selectionCount: Int = 0 {
+        didSet { resetFinishedReportAfterConfigurationChange() }
+    }
+
+    /// `internal(set)` so the footer/layout tests can put the model in a phase without starting a
+    /// real render; the app only writes it in `run`/`cancel`/`finish`.
+    public internal(set) var phase: Phase = .idle
     public private(set) var total = 0
     public private(set) var rendered = 0
     public private(set) var rows: [ExportRow] = []
@@ -280,31 +301,87 @@ public final class ExportSheetModel {
     /// view asks rather than reaching into the catalog itself.
     public var onExportRequest: (() -> Void)?
 
-    public init(preset: ExportPreset = ExportSheetModel.defaultPreset,
-                outputDirectory: URL = ExportSheetModel.defaultOutputDirectory,
+    /// - Parameters:
+    ///   - preset: an explicit draft. `nil` means "use the remembered draft, or the factory default".
+    ///   - outputDirectory: an explicit destination. `nil` means "the remembered one, or the default".
+    ///   - draftStore: the `UserDefaults`-shaped store; injected by tests.
+    ///
+    /// 161 §5: the sheet is created once per window and opened repeatedly, so its first values are
+    /// the **last draft that was exported** (or saved on close), not a hard-coded 2048 long edge.
+    public init(preset: ExportPreset? = nil,
+                outputDirectory: URL? = nil,
                 presetStore: ExportPresetStore? = nil,
-                writableUTIs: Set<String>? = nil) {
-        self.preset = preset
-        self.hdrPreferredEnabled = preset.hdr?.enabled ?? true
-        self.outputDirectory = outputDirectory
+                writableUTIs: Set<String>? = nil,
+                draftStore: ExportDraftPersistence.Store? = nil) {
+        let draftStore = draftStore ?? UserDefaults.standard
+        self.draftStore = draftStore
+
+        let recalled = ExportDraftPersistence.recall(from: draftStore)
+        var notice: String?
+        var remembered: ExportDraftPersistence.Draft?
+        switch recalled {
+        case .missing:
+            break
+        case .draft(let draft):
+            remembered = draft
+        case .unreadable:
+            // 161 §5 M2 — never crash and never silently keep a blob we cannot read. Remove it and
+            // say so; the next successful export writes a clean one.
+            ExportDraftPersistence.clear(in: draftStore)
+            notice = "导出设置记忆已损坏，已恢复默认设置"
+        }
+
+        let startingPreset = preset ?? remembered?.preset ?? Self.defaultPreset
+        self.preset = startingPreset
+        self.hdrPreferredEnabled = startingPreset.hdr?.enabled ?? true
+        self.outputDirectory = outputDirectory ?? remembered?.directoryURL
+            ?? Self.defaultOutputDirectory
         self.writableUTIs = writableUTIs ?? ExportFormat.writableUTIs
         let store = presetStore ?? ExportPresetStore()
         self.presetStore = store
         self.presetNames = store.names
+        self.draftNotice = notice
     }
 
-    /// "网络 2048" — a HEIC that is safe to hand to anyone, not a TIFF of the original.
-    ///
-    /// 109's defaults: HEIC + HDR gain map + quality 0.95 + P3. The 109 sheet is the one surface that
-    /// owns this draft, so the values live here rather than in `ExportPreset()` (whose JPEG default
-    /// is the CLI/API default).
+    /// The factory draft (161 §1/§9): the picture's **own** size, quality 0.85, HEIC + HDR gain map +
+    /// P3. The sheet is the one surface that owns this draft, so the values live here rather than in
+    /// `ExportPreset()` (whose JPEG default is the CLI/API default).
     ///
     /// `nonisolated`: a default argument is evaluated at the call site, which is not the main actor,
     /// and both of these are pure values.
     public nonisolated static var defaultPreset: ExportPreset {
+        ExportPreset(name: "默认", format: .heic, quality: 0.85,
+                     bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
+                     hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}",
+                     sizingMode: ExportSizingMode.none)
+    }
+
+    /// 161 §1 — the old factory draft, still selectable in the preset popup. It has its own name and
+    /// purpose (a HEIC safe to hand to anyone), so it keeps its 2048 long edge and 0.95 quality; only
+    /// the **default** moved.
+    public nonisolated static var network2048Preset: ExportPreset {
         ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.95,
                      bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
                      hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}")
+    }
+
+    /// Built-in presets shown beside the user's saved files. They are read-only: saving/deleting only
+    /// ever touches `presetStore`'s directory.
+    public nonisolated static var builtInPresets: [ExportPreset] { [network2048Preset] }
+
+    public nonisolated static var builtInPresetNames: [String] { builtInPresets.compactMap(\.name) }
+
+    /// The popup's rows: built-ins first, then the saved files that are not already named there.
+    public var presetPickerNames: [String] {
+        var names = Self.builtInPresetNames
+        for name in presetNames where !names.contains(name) { names.append(name) }
+        return names
+    }
+
+    /// A built-in is read-only only while there is no saved file of the same name; a user who saved
+    /// their own 网络 2048 owns that file and may delete it.
+    public func isBuiltInPreset(_ name: String) -> Bool {
+        Self.builtInPresetNames.contains(name) && !presetNames.contains(name)
     }
 
     public nonisolated static var defaultOutputDirectory: URL {
@@ -416,6 +493,60 @@ public final class ExportSheetModel {
         preset.hdr = hdr
     }
 
+    // MARK: sizing (161 §1–§3)
+
+    /// The 尺寸模式 popup's one write path. Setting the mode is not enough on its own: the old draft
+    /// carries a `longEdge`, and `ExportPreset.renderScale` still honours it in `.none` mode. That was
+    /// the "选原尺寸却出 2048" break — the popup wrote `.none`, but the renderer kept the 2048 ceiling.
+    /// Clearing it here makes `原尺寸` mean scale 1 for the whole path (prediction, render, batch).
+    public func selectSizingMode(_ mode: ExportSizingMode) {
+        preset.sizingMode = mode
+        switch mode {
+        case .none:
+            preset.longEdge = nil
+        case .longEdge:
+            if preset.longEdge == nil { preset.longEdge = 2048 }
+        case .percent:
+            if preset.percent == nil { preset.percent = 100 }
+        }
+    }
+
+    /// The exact struct handed to `BatchExporter`. A defensive normalisation as well as the panel
+    /// write: a saved/legacy preset with `sizingMode == .none` *and* a stale `longEdge` must not
+    /// render at 2048 just because it did not pass through `selectSizingMode`.
+    public var effectivePreset: ExportPreset {
+        var out = preset
+        if out.sizingMode == .none { out.longEdge = nil }
+        return out
+    }
+
+    /// What the output pixels will be for a crop of `native`. The sheet's prediction and the batch's
+    /// render both go through `ExportSizing`, so this is a forecast, not a restatement.
+    public func predictedSizeText(native: ImageSize) -> String {
+        let preset = effectivePreset
+        let size = ExportSizing.outputSize(content: native,
+                                           scale: preset.renderScale(content: native))
+        return "\(size.width)×\(size.height)"
+    }
+
+    // MARK: status line (161 §4)
+
+    /// Every configuration change lands here (through `preset`/`outputDirectory`/`selectionCount`'s
+    /// `didSet`). It only acts on a finished report: during `.running` the report is live and must not
+    /// be cleared, and an untouched sheet keeps its 完成 line.
+    private func resetFinishedReportAfterConfigurationChange() {
+        guard phase == .finished else { return }
+        phase = .idle
+        total = 0
+        rendered = 0
+        rows = []
+        report = nil
+        errorText = nil
+        startedAt = 0
+        finishedAt = 0
+        cancellation = nil
+    }
+
     // MARK: derived
 
     public var progress: Double {
@@ -451,6 +582,39 @@ public final class ExportSheetModel {
     public var canRun: Bool {
         phase != .running && selectionCount > 0
             && !preset.nameTemplate.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// 161 §7 — the footer as data. The view builds its buttons from this list, so "取消 only while
+    /// running, 关闭 every other phase" is one rule the test can assert without an AppKit leaf
+    /// (SwiftUI's buttons are drawn by the framework and are not `NSButton`s under `swift test`).
+    public struct FooterItem: Identifiable, Equatable {
+        public enum Kind: String, Equatable { case reveal, close, cancel, export }
+        public var kind: Kind
+        public var title: String
+        public var isEnabled: Bool
+        public var id: Kind { kind }
+    }
+
+    public var footerItems: [FooterItem] {
+        if phase == .running {
+            // 关闭 is not built at all while files are being written: hiding the sheet would not
+            // stop the batch ("关了但还在写文件").
+            return [FooterItem(kind: .cancel, title: "取消", isEnabled: true),
+                    FooterItem(kind: .export, title: "导出", isEnabled: false)]
+        }
+        var items: [FooterItem] = []
+        if phase == .finished {
+            if writtenCount > 0 {
+                items.append(FooterItem(kind: .reveal, title: "在 Finder 中显示", isEnabled: true))
+            }
+            // §7's finished order: 在 Finder 中显示 → 再导出一次 → 关闭.
+            items.append(FooterItem(kind: .export, title: "再导出一次", isEnabled: canRun))
+            items.append(FooterItem(kind: .close, title: "关闭", isEnabled: true))
+        } else {
+            items.append(FooterItem(kind: .close, title: "关闭", isEnabled: true))
+            items.append(FooterItem(kind: .export, title: "导出", isEnabled: canRun))
+        }
+        return items
     }
 
     /// The footer's one line: the empty prompt, live progress, or the finished report. Errors win —
@@ -491,8 +655,13 @@ public final class ExportSheetModel {
         let token = CancellationToken()
         cancellation = token
 
-        let preset = self.preset
+        // Snapshot at the click, not at completion: the sheet is disabled during the run, and the
+        // rows' sizes must describe the preset the files were actually written with.
+        let preset = effectivePreset
         let directory = outputDirectory
+        // 161 §5 — what a successful run remembers. The draft is the *run's* snapshot, so a field
+        // the user changes after the report appears cannot leak into "last used".
+        pendingRunDraft = ExportDraftPersistence.Draft(preset: preset, outputDirectory: directory)
         let render: (ExportItem, ExportPreset) throws -> DisplayImage = { item, preset in
             let image = try UIExportRenderer.render(item: item, preset: preset,
                                                     native: natives[item.id])
@@ -525,7 +694,9 @@ public final class ExportSheetModel {
         }
     }
 
-    private func finish(with report: BatchExportReport) {
+    /// Internal (not private) so the persistence/status tests can feed it a real `BatchExporter` report
+    /// without a RAW fixture; the app reaches it from the worker's main-queue hop.
+    func finish(with report: BatchExportReport) {
         self.report = report
         finishedAt = CFAbsoluteTimeGetCurrent()
         cancellation = nil
@@ -559,6 +730,32 @@ public final class ExportSheetModel {
             return row
         }
         phase = .finished
+
+        // 161 §5 — write the draft once, on a run that actually produced files. A failed or fully
+        // cancelled run leaves the previous "last used" draft alone (M3).
+        if writtenCount > 0 {
+            // `pendingRunDraft` is the run's own snapshot in production. The fallback keeps the
+            // persistence tests honest when they feed `finish` a report directly.
+            let draft = pendingRunDraft ?? ExportDraftPersistence.Draft(
+                preset: effectivePreset, outputDirectory: outputDirectory)
+            lastSuccessfulDraft = draft
+            ExportDraftPersistence.save(preset: draft.preset,
+                                        outputDirectory: draft.directoryURL,
+                                        to: draftStore)
+        }
+        pendingRunDraft = nil
+    }
+
+    /// 161 §5 — the second write point: when the sheet closes. It saves the **last exported** draft
+    /// (M3), not whatever the user typed after the report appeared and did not export. A sheet that
+    /// never exported anything saves its current draft, which is what makes a preference survive a
+    /// close without a run.
+    public func saveDraftOnClose() {
+        let draft = lastSuccessfulDraft ?? ExportDraftPersistence.Draft(
+            preset: effectivePreset, outputDirectory: outputDirectory)
+        ExportDraftPersistence.save(preset: draft.preset,
+                                    outputDirectory: draft.directoryURL,
+                                    to: draftStore)
     }
 
     public func revealInFinder() {
@@ -580,7 +777,15 @@ public final class ExportSheetModel {
             hdrPreferredEnabled = preset.hdr?.enabled ?? true
             if preset.format == .heic { applyHDR(enabled: hdrPreferredEnabled) }
             presetError = nil
+            return
         } catch {
+            // A built-in has no file; fall back to it by name before surfacing the file error.
+            if let builtIn = Self.builtInPresets.first(where: { $0.name == name }) {
+                preset = builtIn
+                hdrPreferredEnabled = builtIn.hdr?.enabled ?? true
+                presetError = nil
+                return
+            }
             presetError = error.localizedDescription
         }
     }
@@ -635,7 +840,7 @@ public struct ExportSheetView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             Form {
                 locationSection
@@ -648,20 +853,25 @@ public struct ExportSheetView: View {
             }
             .formStyle(.grouped)
             .disabled(model.phase == .running)
-            // The seven sections always get their **natural** height: at 320 they were squeezed and
-            // the form scrolled internally, which looked like 「格式选择全都没了，只剩位置/文件命名」.
-            // The seven sections want ~1078 pt (a grouped Form row is ~44 pt), more than any sheet
-            // should occupy, so this scrolls — but with the indicator **always visible**: before this,
-            // the squeezed 320 pt form hid its scrollbar and looked like 「格式选择全都没了」.
-            .layoutPriority(2)
+            // 161 §6 — the scroll region is the one that eats the remaining height. Before this the
+            // form only had `layoutPriority(2)` and the (empty) results region kept a 140 pt floor,
+            // so the sheet showed a large blank strip between the scroll view and the footer. The
+            // form still scrolls: its seven sections want ~1078 pt, more than the sheet can hold.
+            .frame(maxHeight: .infinity)
+            .layoutPriority(1)
             .scrollIndicators(.visible)
             .background(ExportLayoutProbeHost(kind: .form))
-            results
+            // Only built when there is something to show: an empty results region would be exactly
+            // the blank gap §6 is about. With rows it takes a bounded height and the form shrinks.
+            if !model.rows.isEmpty {
+                results
+            }
             footer
         }
         .padding(18)
         // 620×900 is the sheet's size (`ExportSheetController.present`): tall enough for all seven
-        // sections plus a results region that still has room to grow.
+        // sections plus a results region that still has room to grow. Not content height — the form
+        // must stay scrollable.
         .frame(width: 620, height: 900, alignment: .topLeading)
         .background(.regularMaterial)
         .alert("存储预设", isPresented: $showingSavePreset) {
@@ -692,6 +902,11 @@ public struct ExportSheetView: View {
                 Text(presetError)
                     .font(.system(size: 10))
                     .foregroundStyle(Color.red)
+            }
+            if let draftNotice = model.draftNotice {
+                Text(draftNotice)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -761,7 +976,9 @@ public struct ExportSheetView: View {
                 Spacer(minLength: 8)
                 Picker("", selection: presetSelection) {
                     Text("—").tag("")
-                    ForEach(model.presetNames, id: \.self) { name in
+                    // Built-ins (网络 2048) plus the user's saved files. Selecting one copies it into
+                    // the draft; editing afterwards changes only the draft, never the preset file.
+                    ForEach(model.presetPickerNames, id: \.self) { name in
                         Text(name).tag(name)
                     }
                 }
@@ -781,7 +998,8 @@ public struct ExportSheetView: View {
                     selectedPreset = ""
                 }
                 .controlSize(.mini)
-                .disabled(model.phase == .running || selectedPreset.isEmpty)
+                .disabled(model.phase == .running || selectedPreset.isEmpty
+                          || model.isBuiltInPreset(selectedPreset))
             }
         } header: {
             sectionHeader("文件命名")
@@ -935,7 +1153,9 @@ public struct ExportSheetView: View {
                 Text("尺寸模式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Picker("", selection: sizingModeBinding) {
-                    ForEach(ExportSizingMode.allCases, id: \.self) { mode in
+                    // 161 §2 — UI order is 原尺寸 / 长边 / 比例. `allCases` is the stored order and
+                    // must not be reordered; `displayOrder` is the one the popup reads.
+                    ForEach(ExportSizingMode.displayOrder, id: \.self) { mode in
                         Text(mode.displayName).tag(mode)
                     }
                 }
@@ -1098,45 +1318,43 @@ public struct ExportSheetView: View {
     /// 106 §B — the remaining height between the form and the footer is the results region.
     /// The empty prompt is *not* in here any more: the scroll view holds rows only, so the prompt
     /// lives on the footer line (the two used to look crammed together because of the 170 pt cap).
+    /// 161 §6 — a bounded, content-sized list. `body` only builds this when there is at least one
+    /// row; the height grows with the rows (capped at 176 pt, beyond which it scrolls) and the form
+    /// above gives that height back. Empty is zero height, not a 140 pt blank strip.
     private var results: some View {
-        Group {
-            if model.rows.isEmpty {
-                Color.clear
-            } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(model.rows) { row in
-                            HStack(spacing: 6) {
-                                Image(systemName: row.state.symbol)
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(color(for: row.state))
-                                    .frame(width: 12)
-                                Text(row.name)
-                                    .font(.system(size: 10,
-                                                  weight: row.isFailure ? .semibold : .regular))
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                Text(row.detail)
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .foregroundStyle(row.isFailure
-                                                     ? AnyShapeStyle(Color.red)
-                                                     : AnyShapeStyle(.secondary))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .padding(.vertical, 2)
-                            .padding(.horizontal, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(row.isFailure ? Color.red.opacity(0.08) : Color.clear)
-                            )
-                        }
+        ScrollView {
+            VStack(spacing: 2) {
+                ForEach(model.rows) { row in
+                    HStack(spacing: 6) {
+                        Image(systemName: row.state.symbol)
+                            .font(.system(size: 9))
+                            .foregroundStyle(color(for: row.state))
+                            .frame(width: 12)
+                        Text(row.name)
+                            .font(.system(size: 10,
+                                          weight: row.isFailure ? .semibold : .regular))
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(row.detail)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(row.isFailure
+                                             ? AnyShapeStyle(Color.red)
+                                             : AnyShapeStyle(.secondary))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(row.isFailure ? Color.red.opacity(0.08) : Color.clear)
+                    )
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
+        .frame(height: max(28, min(176, 10 + CGFloat(model.rows.count) * 18)))
         .layoutPriority(0)
         .background(ExportLayoutProbeHost(kind: .results, rowCount: model.rows.count))
     }
@@ -1154,28 +1372,36 @@ public struct ExportSheetView: View {
                 .help(model.footerStatus)
                 .background(ExportLayoutProbeHost(kind: .status))
             Spacer(minLength: 8)
-            if model.phase == .finished && model.writtenCount > 0 {
-                Button("在 Finder 中显示") { model.revealInFinder() }
-                    .controlSize(.small)
+            // 161 §7 — one list from the model: 取消 exists only in `.running`; 关闭 exists in every
+            // other phase and is never offered beside a running batch.
+            ForEach(model.footerItems) { item in
+                if item.kind == .export {
+                    Button(item.title) { perform(item.kind) }
+                        .controlSize(.small)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!item.isEnabled)
+                } else {
+                    Button(item.title) { perform(item.kind) }
+                        .controlSize(.small)
+                        .disabled(!item.isEnabled)
+                }
             }
-            Button("关闭") { model.onClose?() }
-                .controlSize(.small)
-            Button("取消") { model.cancel() }
-                .controlSize(.small)
-                .disabled(model.phase != .running)
-            Button(model.phase == .finished ? "再导出一次" : "导出") {
-                // The controller owns item assembly (it has the session); this is the UI door.
-                model.onExportRequest?()
-            }
-            .controlSize(.small)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!model.canRun)
         }
         .frame(maxWidth: .infinity)
         .background(ExportLayoutProbeHost(kind: .footer))
     }
 
     // MARK: building blocks
+
+    private func perform(_ kind: ExportSheetModel.FooterItem.Kind) {
+        switch kind {
+        case .reveal: model.revealInFinder()
+        case .close: model.onClose?()
+        case .cancel: model.cancel()
+        // The controller owns item assembly (it has the session); this is the UI door.
+        case .export: model.onExportRequest?()
+        }
+    }
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
@@ -1233,13 +1459,9 @@ public struct ExportSheetView: View {
     }
 
     private var sizingModeBinding: Binding<ExportSizingMode> {
-        Binding(get: { model.preset.sizingMode },
-                set: { mode in
-                    model.preset.sizingMode = mode
-                    if mode == .percent, model.preset.percent == nil {
-                        model.preset.percent = 100
-                    }
-                })
+        // 161 §3 — one model entry point, not an ad-hoc `preset.sizingMode = mode` in the view: the
+        // setter also clears the stale `longEdge` that made 原尺寸 render at 2048.
+        Binding(get: { model.preset.sizingMode }, set: { model.selectSizingMode($0) })
     }
 
     private var metadataLevelBinding: Binding<ExportMetadataLevel> {
@@ -1308,8 +1530,9 @@ public final class ExportSheetController: NSObject {
 
     public init(session: CatalogSession, outputDirectory: URL? = nil) {
         self.session = session
-        let model = ExportSheetModel(outputDirectory: outputDirectory
-                                     ?? ExportSheetModel.defaultOutputDirectory)
+        // `nil` lets the model use 161 §5's remembered directory (or the factory default). An
+        // explicit directory still wins — that is the caller asking for this run's destination.
+        let model = ExportSheetModel(outputDirectory: outputDirectory)
         self.model = model
         self.hosting = NSHostingController(rootView: ExportSheetView(model: model))
         super.init()
@@ -1344,6 +1567,9 @@ public final class ExportSheetController: NSObject {
     }
 
     public func dismiss() {
+        // 161 §5 — the close-time write. It saves the last *exported* draft when there is one (M3),
+        // so unexported edits cannot overwrite what the next sheet should start from.
+        model.saveDraftOnClose()
         guard let window = sheetWindow else { return }
         if let parent = window.sheetParent {
             parent.endSheet(window)

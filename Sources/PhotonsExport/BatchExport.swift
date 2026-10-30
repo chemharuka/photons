@@ -117,9 +117,10 @@ enum BatchMath {
 
 // MARK: - cancellation
 
-/// A one-way flag the sheet's 取消 button sets. Checked before each queued item starts; an item
-/// already rendering is allowed to finish (so its file is complete, never half written), and the
-/// rest come back as `cancelled` outcomes.
+/// A one-way flag the sheet's 取消 button sets. Checked before each queued item starts, again after
+/// its render returns, and once more immediately before the write (161 §8): an in-flight render may
+/// finish, but its pixels are discarded instead of becoming a file. Files already written stay on
+/// disk. No partial file is ever left behind.
 public final class CancellationToken: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -191,7 +192,7 @@ public enum BatchExporter {
                 collector.enter()
                 let outcome = exportOne(item: item, index: index, preset: preset,
                                         directory: outputDirectory, allocator: allocator,
-                                        render: render)
+                                        cancel: cancel, render: render)
                 collector.leave(outcome)
             }
         }
@@ -216,6 +217,7 @@ public enum BatchExporter {
                                   preset: ExportPreset,
                                   directory: URL,
                                   allocator: OutputNameAllocator,
+                                  cancel: CancellationToken? = nil,
                                   render: (ExportItem, ExportPreset) throws -> DisplayImage)
         -> BatchExportOutcome {
 
@@ -236,6 +238,14 @@ public enum BatchExporter {
             }
 
             let rendered = try render(item, preset)
+            // 161 §8 — the cancellation the sheet's 取消 button sets can land while this item is
+            // already rendering (with concurrency 2 a small batch may have every item in flight).
+            // The first check above only stopped *queued* items; without this one the render that
+            // was in flight still fell through to the encoder and the user saw files appear after
+            // pressing 取消. The pixels are dropped here, before any resample/encode/write.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
+            }
             if rendered.width <= 0 || rendered.height <= 0 {
                 throw BatchExportError.noPixels(item.name)
             }
@@ -292,6 +302,13 @@ public enum BatchExporter {
                 return outcome
             }
 
+            // 161 §8 — a second read immediately before the write: a cancel that landed between the
+            // render check above and here (sharpening / name allocation on a large image) must not
+            // add one more file after the user's click. Already-written files stay on disk.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
+            }
+
             // 5. encode. Metadata travels with the first encode so the output's EXIF pixel size is
             //    the size we are actually writing (and 16-bit PNG keeps its depth: nothing re-encodes
             //    it afterwards).
@@ -338,6 +355,10 @@ public enum BatchExporter {
             outcome.fileBytes = bytes
             outcome.pixelSize = image.size
         } catch {
+            // A cancel that interrupted the render itself is not a failure of the picture.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
+            }
             outcome.error = error.localizedDescription
         }
         outcome.seconds = CFAbsoluteTimeGetCurrent() - t0

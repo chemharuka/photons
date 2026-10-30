@@ -26,9 +26,28 @@ final class ExportSheetModelTests: XCTestCase {
         if let scratch { try? FileManager.default.removeItem(at: scratch) }
     }
 
+    /// An isolated `UserDefaults`-shaped store: without it the sheet would read the developer's real
+    /// export memory and the test would depend on what was exported on this machine.
+    final class MemoryDraftStore: ExportDraftPersistence.Store {
+        var values: [String: Data] = [:]
+        var writes = 0
+        func exportDraftData(forKey key: String) -> Data? { values[key] }
+        func setExportDraftData(_ data: Data?, forKey key: String) {
+            if let data { values[key] = data; writes += 1 } else { values.removeValue(forKey: key) }
+        }
+    }
+
+    private var draftStore: MemoryDraftStore!
+
+    override func setUp() {
+        super.setUp()
+        draftStore = MemoryDraftStore()
+    }
+
     private func model(writableUTIs: Set<String>? = nil) -> ExportSheetModel {
         ExportSheetModel(presetStore: ExportPresetStore(directory: scratch),
-                         writableUTIs: writableUTIs)
+                         writableUTIs: writableUTIs,
+                         draftStore: draftStore)
     }
 
     // MARK: sections
@@ -55,17 +74,32 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(partial.preset.format, .heic)
     }
 
-    /// §4.4 — the default draft, field by field (user's 2026-10-29 口径).
-    func testDefaultDraftIsHEICHDRP3At095() {
+    /// §4.4 + 161 §1/§9 — the default draft, field by field. It is the picture's own size now, at
+    /// quality 0.85 (the user's 2026-10-30 口径), and no longer the 2048 「网络 2048」 draft.
+    func testDefaultDraftIsHEICHDRP3At085AndOriginalSize() {
         let preset = ExportSheetModel.defaultPreset
         XCTAssertEqual(preset.format, .heic)
         XCTAssertEqual(preset.hdr?.enabled, true)
         XCTAssertEqual(preset.hdr?.gainMap, .iso)
-        XCTAssertEqual(preset.quality, 0.95)
+        XCTAssertEqual(preset.quality, 0.85)
         XCTAssertEqual(preset.colorSpace, .displayP3)
         XCTAssertEqual(preset.bitDepth, 8)
         XCTAssertEqual(preset.sdrToneMapping, .global)
         XCTAssertEqual(preset.conflict, .rename)
+        XCTAssertEqual(preset.sizingMode, .none)
+        XCTAssertNil(preset.longEdge)
+        XCTAssertEqual(preset.name, "默认")
+
+        // 网络 2048 is still a selectable preset with its own quality/size.
+        XCTAssertEqual(ExportSheetModel.network2048Preset.longEdge, 2048)
+        XCTAssertEqual(ExportSheetModel.network2048Preset.quality, 0.95)
+        XCTAssertTrue(ExportSheetModel.builtInPresetNames.contains("网络 2048"))
+    }
+
+    /// 161 §2 — the popup order is 原尺寸 / 长边 / 比例, while `allCases` keeps the stored order.
+    func testSizingModesDisplayOriginalFirstWithoutChangingStorageOrder() {
+        XCTAssertEqual(ExportSizingMode.displayOrder, [.none, .longEdge, .percent])
+        XCTAssertEqual(ExportSizingMode.allCases, [.longEdge, .percent, .none])
     }
 
     /// §4.5 — the summary says P3 (the 099 summary assertion moved with the default).
@@ -183,6 +217,7 @@ final class ExportSheetModelTests: XCTestCase {
     func testSaveLoadAndDeleteAPreset() throws {
         let sheet = model()
         sheet.preset = ExportSheetModel.defaultPreset
+        sheet.selectSizingMode(.longEdge)
         sheet.preset.longEdge = 2400
         sheet.preset.conflict = .skip
 
@@ -192,7 +227,7 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
 
         sheet.preset = ExportSheetModel.defaultPreset
-        XCTAssertEqual(sheet.preset.longEdge, 2048)
+        XCTAssertNil(sheet.preset.longEdge, "161: the factory draft is 原尺寸, not 2048")
         sheet.loadPreset(named: "网络 2048")
         XCTAssertEqual(sheet.preset.longEdge, 2400)
         XCTAssertEqual(sheet.preset.conflict, .skip)
@@ -280,55 +315,39 @@ final class ExportSheetModelTests: XCTestCase {
 
         sheet.setHDR(false)
         XCTAssertFalse(sheet.summaryLine.contains("HDR"))
-        // 111: the default preset still carries a 2048 long edge, and `noUpscale` is now said out loud.
+        // 161 §1: the factory draft is now 原尺寸 (no long edge to report).
         XCTAssertEqual(sheet.summaryLine,
-                       "将导出 2 张 → HEIC · 8 位 · Display P3 · 长边 2048 · 重命名 · 未放大")
+                       "将导出 2 张 → HEIC · 8 位 · Display P3 · 原尺寸 · 重命名")
     }
 
     // MARK: - 106 layout (measured on the real hosted sheet)
 
-    /// §B: the scroll region is the flexible one — 760 pt gives it at least 35 % of the window, a
-    /// taller window gives it the extra ~240 pt, and the form/footer keep their heights. The empty
-    /// prompt is on the footer row, outside the results region, and empty results build no scroll view.
-    /// The sheet is a fixed 620×900 now: the seven 文件设置-era sections must get their natural
-    /// height (they used to be squeezed to 320 pt, which read as 「格式选择全都没了」), and the results
-    /// region takes what is left with a floor of 120 pt.
-    func testTheSevenSectionsGetTheirHeightAndResultsTakeTheRest() throws {
+    /// §B + 161 §6: the scroll region is the flexible one, and with no rows there is no results
+    /// region at all — the form takes the space instead of leaving a blank strip above the footer.
+    /// The sheet is a fixed 620×900: the seven 文件设置-era sections must keep scrolling (they want
+    /// ~1078 pt), and the empty prompt stays on the footer's row.
+    func testTheSevenSectionsGetTheirHeightAndTheEmptyResultsRegionIsGone() throws {
         let sheet = try host(height: 900)
-        let resultsFrame = try frame(of: .results, in: sheet.host)
         let formFrame = try frame(of: .form, in: sheet.host)
         let footerFrame = try frame(of: .footer, in: sheet.host)
         let status = try frame(of: .status, in: sheet.host)
-        let resultsProbe = try probe(of: .results, in: sheet.host)
 
-        print(String(format: "layout · form %.1f · results %.1f · footer %.1f (footer maxY %.1f of %.1f)",
-                     formFrame.height, resultsFrame.height, footerFrame.height,
+        print(String(format: "layout · form %.1f · footer %.1f (footer maxY %.1f of %.1f)",
+                     formFrame.height, footerFrame.height,
                      footerFrame.maxY, sheet.host.bounds.maxY))
 
         // 1. the form is not squeezed: much more than the old 320 pt clamp.
         XCTAssertGreaterThanOrEqual(formFrame.height, 600,
                                     "文件设置 那一组又被压扁了：form 只有 \(formFrame.height) pt")
-        // 2. results keeps a usable floor and does not overflow the sheet.
-        XCTAssertGreaterThanOrEqual(resultsFrame.height, 140,
-                                    "results 只有 \(resultsFrame.height) pt")
-        XCTAssertLessThanOrEqual(resultsFrame.maxY, sheet.host.bounds.maxY)
-        // 3. order: form → results → footer.
-        XCTAssertGreaterThan(resultsFrame.minY, formFrame.maxY, "results 必须排在 form 下面")
-        XCTAssertLessThan(resultsFrame.maxY, footerFrame.maxY)
+        // 2. no empty results region grows a scroll view or a probe of its own.
+        XCTAssertNil(descendants(of: sheet.host).compactMap { $0 as? ExportLayoutProbe }
+            .first { $0.kind == .results }, "空态不该再有 results 区域")
+        // 3. the form's bottom is close to the footer: the blank space is inside the scroll view.
+        XCTAssertLessThanOrEqual(footerFrame.minY - formFrame.maxY, 12,
+                                 "form 与 footer 之间夹了空白")
         // 4. the empty prompt is on the footer's row and outside any scroll view.
-        XCTAssertEqual(resultsProbe.rowCount, 0)
         XCTAssertEqual(status.midY, footerFrame.midY, accuracy: 2,
                        "空态文案必须和按钮同一行")
-        let scrollsInResults = descendants(of: sheet.host)
-            .compactMap { $0 as? NSScrollView }
-            .filter { scroll in
-                scroll.convert(scroll.bounds, to: sheet.host)
-                    .intersects(resultsFrame.insetBy(dx: 1, dy: 1))
-            }
-        XCTAssertTrue(scrollsInResults.isEmpty,
-                      "空态时 results 里不该有滚动视图")
-        XCTAssertFalse(status.intersects(resultsFrame),
-                       "「还没有导出…」 还在 results 里，没有挪到按钮那一行")
     }
 
     /// §A (the visible half): the HDR row stays in place and greys out for non-HEIC formats; the

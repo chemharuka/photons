@@ -45,6 +45,9 @@ public enum ExportConflict: String, Codable, Sendable, CaseIterable {
 /// crop at its own size unless a long edge/percentage is asked for. `longEdge` is the historical
 /// ceiling; `percent` scales the cropped picture's long edge by a percentage.
 public enum ExportSizingMode: String, Codable, Sendable, CaseIterable {
+    // The **declaration order is the wire/storage order**, not the UI order: `allCases` feeds
+    // round-trip tests and any future CLI listing, so these three lines must not be reordered to fix a
+    // popup. The sheet uses `displayOrder` below (161).
     case longEdge
     case percent
     /// The crop's own size. The raw spelling stays `"none"` so a 099 preset file keeps round-tripping;
@@ -52,6 +55,11 @@ public enum ExportSizingMode: String, Codable, Sendable, CaseIterable {
     case none
 
     public static var original: ExportSizingMode { .none }
+
+    /// 161 — what the sheet shows, left to right: 原尺寸 / 长边 / 比例. Kept beside `allCases` so the
+    /// next person who wants to "fix" the popup has one obvious place to look instead of editing the
+    /// stored order.
+    public static var displayOrder: [ExportSizingMode] { [.none, .longEdge, .percent] }
 
     public var displayName: String {
         switch self {
