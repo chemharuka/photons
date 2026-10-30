@@ -204,6 +204,23 @@ public final class CatalogSession {
     /// Mode of the next spot.
     public var healMode: HealMode = .heal
 
+    /// 自动取源：**view state**，不进文档、不进快照、不进 cache key。默认开。
+    public var autoHealSource: Bool = true
+
+    /// 搜索读的那张图。由 loupe 在解码落地后装上（`decoded?.oriented()`）；测试里可以是 nil，
+    /// 此时搜索返回 `.searchSkipped` 并退回 `(2r, 0)` —— 也就是 184 之前的行为。
+    /// 已知限度：这是未裁切的正立图，裁切时环带量的是裁切前的内容（源仍合法，只是不最优）。
+    public var healFrameProvider: (() -> LinearImage?)?
+
+    /// 最近一次新点取源的结果（面板/测试读它；`nil` = 还没有新点）。
+    public private(set) var lastHealSource: HealSourceResult?
+
+    /// Internal door for `MaskCanvasController.addHealSpot` (same module): the setter stays private
+    /// so a view cannot pretend a search happened.
+    func setLastHealSource(_ result: HealSourceResult?) {
+        lastHealSource = result
+    }
+
     /// The **upright** pixel size of the photo on screen, as the renderer actually ingested it
     /// (`RenderGraph.sourceSize`, i.e. after EXIF orientation was applied — task 028).
     ///

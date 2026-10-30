@@ -666,7 +666,7 @@ public struct MaskListPanel: View {
                 .controlSize(.mini)
                 .tint(session.healTool ? Color.accentColor : Color.secondary)
                 .accessibilityIdentifier("inspector.heal.tool")
-                .help("点画布 = 在点击处加一个修复点；源点自动取右边一个半径")
+                .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径")
 
                 Text("\(session.edit.healSpots.count)/\(HealSpot.maxCount)")
                     .font(.system(size: 9, design: .monospaced))
@@ -681,6 +681,19 @@ public struct MaskListPanel: View {
                 .controlSize(.mini)
                 .labelsHidden()
                 .frame(width: 86)
+            }
+            Toggle("自动取源", isOn: Binding(get: { session.autoHealSource },
+                                            set: { session.autoHealSource = $0 }))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 10))
+                .controlSize(.mini)
+                .accessibilityIdentifier("inspector.heal.autoSource")
+                .help("搜索缺陷周围 2–4 个半径的环形带，取边界最像的一块做源；关掉 = 老行为（右移一个半径）")
+            if let source = session.lastHealSource {
+                Text(healSourceStatus(source))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("inspector.heal.sourceStatus")
             }
             ForEach(session.edit.healSpots) { spot in
                 healRow(spot)
@@ -716,6 +729,19 @@ public struct MaskListPanel: View {
             .help("删除这个修复点")
         }
         .accessibilityIdentifier("inspector.heal.row.\(spot.id)")
+    }
+
+    /// One line of truth about where the last new spot's source came from — the search never
+    /// silently falls back, so the panel says which answer the user actually got.
+    private func healSourceStatus(_ source: HealSourceResult) -> String {
+        switch source.status {
+        case .found:
+            return String(format: "源：自动（%.1f 个半径）", source.distanceInRadii)
+        case .noCandidateAccepted:
+            return "源：带内无可用源，用默认"
+        case .searchSkipped:
+            return "源：默认"
+        }
     }
 
     private var healModeBinding: Binding<HealMode> {
