@@ -289,16 +289,22 @@ public enum CropMath {
         return ImageSize(width: p.width, height: p.height)
     }
 
-    /// The output canvas: the crop's pixel size, grown to the **bounding box of the rotated crop**
-    /// (132).
+    /// The output canvas: the crop's pixel size at a right angle, and the **exact bounding box of the
+    /// rotated crop** at every other angle (162).
     ///
     /// `quarterTurns` is applied to `source` first — `source` is the file's own frame, exactly like
     /// `GeometryGroup.orientedSource` — because `crop` is measured in the turned frame.
     ///
-    /// **θ = 0 returns `outputSize` itself** (same function, same arguments, first line): the canvas
-    /// of every un-straightened document is bit-for-bit what it was before this task, which is what
-    /// keeps every θ = 0 key, golden and thumbnail byte-identical. Only a non-zero angle reaches the
-    /// `|w·cos| + |h·sin|` arithmetic, and the rounding is `renderSize`'s: `.rounded()`, `max(1, …)`.
+    /// **θ is a multiple of 90° (0 / 90 / 180 / 270, and any quarter-turn document) ⇒ the canvas is
+    /// `outputSize` itself.** A right angle does not rotate the rectangle at all — it only renames its
+    /// axes — so it must not grow the canvas by a padding pixel or a rounding border. This is the
+    /// user's 162 rule: 只有真的旋转才扩画布.
+    ///
+    /// **Any other angle ⇒ `|w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, rounded up exactly once.**
+    /// `ceil` is the only rounding: `.rounded()` can land *below* the continuous box (1° on a
+    /// 5400×3600 crop is 5462.006 wide, and `rounded()` gives 5462 — a canvas that misses the rotated
+    /// corner). The `1e-9` snap keeps floating-point noise at an integer boundary from adding a whole
+    /// pixel (`400.00000000000006` is 400, not 401), and there is no extra `+1`.
     public static func canvasSize(crop: CropRect, in source: ImageSize,
                                   straightenDegrees: Double,
                                   quarterTurns: Int,
@@ -307,11 +313,18 @@ public enum CropMath {
             ? ImageSize(width: source.height, height: source.width)
             : source
         let out = outputSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource)
-        guard straightenDegrees.isFinite, straightenDegrees != 0 else { return out }
+        guard straightenDegrees.isFinite else { return out }
+        // 162 §2.1 — 0 / 90 / 180 / 270: the crop's own pixel size, bit for bit. (`/ 90` and a
+        // tolerance rather than `==`, so −0.0 and 360 count and 89.999999999 does not.)
+        let quarter = straightenDegrees / 90
+        if abs(quarter - quarter.rounded()) < 1e-9 { return out }
         let (cosine, sine) = cosSin(straightenDegrees)
         let w = Double(out.width), h = Double(out.height)
-        return ImageSize(width: max(1, Int((w * cosine + h * sine).rounded())),
-                         height: max(1, Int((w * sine + h * cosine).rounded())))
+        func ceilPixel(_ value: Double) -> Int {
+            max(1, Int((value - 1e-9).rounded(.up)))
+        }
+        return ImageSize(width: ceilPixel(w * cosine + h * sine),
+                         height: ceilPixel(w * sine + h * cosine))
     }
 
     /// Size the renderer allocates at `scale` relative to the crop (1 = 1:1 pixels).

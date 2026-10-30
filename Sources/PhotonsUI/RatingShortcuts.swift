@@ -37,6 +37,11 @@ public enum RatingShortcuts {
             case "4": return .colorLabel(ColorLabel.green.rawValue)
             case "5": return .colorLabel(ColorLabel.blue.rawValue)
             case "6": return .colorLabel(ColorLabel.purple.rawValue)
+            // ⌥0 — **clear** the label (131). It has to be here, not only in the 照片 ▸ 色标 menu:
+            // the grid, the filmstrip and the loupe canvas all route their `keyDown` through this table,
+            // and an `NSMenuItem` alone does not reach them — ⌥1…⌥6 worked while ⌥0 did nothing
+            // (user report 2026-10-30 12:40, reproduced by `ColorLabelShortcutTests`).
+            case "0": return .colorLabel(nil)
             default: return nil
             }
         }

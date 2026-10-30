@@ -284,7 +284,7 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertTrue(selection.contains(.masks))
         // 081: the summary names the twelve **cards**, in the panel's order.
         XCTAssertEqual(selection.summary,
-                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 效果 · 裁切 · 蒙版")
+                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 校正 · 效果 · 裁切 · 蒙版")
 
         selection.selectNone()
         XCTAssertTrue(selection.isEmpty)

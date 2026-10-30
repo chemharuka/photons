@@ -308,9 +308,13 @@ public final class EditorWindowController: NSWindowController {
     ///
     /// The modal is behind `presentCopySheet` so a test can answer it without one — the same seam
     /// `askPresetName` gives the naming dialog.
-    var presentCopySheet: (CopySettingsAccessoryView.Purpose, CopySettingsSelection)
-        -> CopySettingsAccessoryView.Outcome? = { purpose, selection in
-            CopySettingsAccessoryView.run(selection: selection, purpose: purpose)
+    ///
+    /// 156: `lazy` so the shipped closure can pass **this controller's window** into the sheet
+    /// (`beginSheet`), making the dialog attached to the editor rather than centred on the screen.
+    lazy var presentCopySheet: (CopySettingsAccessoryView.Purpose, CopySettingsSelection)
+        -> CopySettingsAccessoryView.Outcome? = { [weak self] purpose, selection in
+            guard let window = self?.window else { return nil }
+            return CopySettingsAccessoryView.run(selection: selection, purpose: purpose, on: window)
         }
 
     @objc public func copySettingsAction(_ sender: Any?) {

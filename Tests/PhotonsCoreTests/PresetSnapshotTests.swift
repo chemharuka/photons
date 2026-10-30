@@ -71,16 +71,17 @@ final class PresetSnapshotTests: XCTestCase {
         let document = richEdit()
         let snapshot = EditSnapshot.capture(document)
         // crop 4 edges + straighten 1 + aspect lock 1 + light 9 + rgb curve 1 + saturation 1
-        // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 80 leaves.
+        // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 82 leaves.
         print("sparse snapshot: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
               + "  groups \(snapshot.groups.map(\.rawValue).sorted())")
         // 081: light gained 黑电平 (`blackOffset`) and 色彩分级 joined as nine leaves;
-        // 090 adds 中间调 to the tone leaves; 134 removes 圆度 → 80.
-        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 80,
+        // 090 adds 中间调 to the tone leaves; 134 removes 圆度; 156 adds 校正 (色差 R/B) → 82.
+        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 82,
                        "9 geometry (4 crop edges + angle + 2 flips + lock + quarterTurns)"
                        + " + 11 light (7 tone + 2 balance + 高光恢复 + 黑电平) + 4 curve"
                        + " + 35 color (2 + switch + 8 bands × 4) + 9 色彩分级"
-                       + " + 5 detail + 7 effects (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3)")
+                       + " + 5 detail + 2 校正 (色差 R/B)"
+                       + " + 7 effects (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3)")
         XCTAssertEqual(snapshot.fieldCount, 22,
                        "crop 4 + straighten 1 + aspect 1 + light 9 + rgb curve 1 + saturation 1"
                        + " + one band 3 + sharpening 1 + vignette 1")

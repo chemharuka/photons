@@ -91,8 +91,11 @@ final class CropOverlayAlertTests: XCTestCase {
               + "history +\(session.history.snapshots.count - history) · revision +\(session.editRevision - revision)")
     }
 
-    /// 132 §3 3 — a frame dragged 10 % past the right edge is **applied as-is**: one commit, one
-    /// history row, and the stored rect keeps its width and its right edge outside 1.
+    /// 132 §3 3 / 162 §2.3 — a frame dragged past the right edge of the **photograph** is applied
+    /// as-is: one commit, one history row, and the stored rect keeps its width and its right edge
+    /// outside 1. It stays inside the **canvas** (162): the old 1.1 example was outside the 90 %
+    /// workspace's letterbox too (its hard bound is 1.0556), which is precisely what the user's third
+    /// report forbids. 1.04 is outside the camera pixels and inside the canvas.
     func testAFrameOutsideThePictureIsAppliedWithoutSnappingBack() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.close() }
@@ -101,19 +104,19 @@ final class CropOverlayAlertTests: XCTestCase {
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
         CropUITestSupport.pump(0.05)
 
-        let outside = CropRect(x: 0.5, y: 0.2, width: 0.6, height: 0.6)   // right = 1.1
+        let outside = CropRect(x: 0.5, y: 0.2, width: 0.54, height: 0.6)   // right = 1.04
         loupe.cropTool.draft.crop = outside
         loupe.refreshCropTool()
-        XCTAssertEqual(loupe.cropTool.effectiveCrop().right, 1.1, accuracy: 1e-9,
-                       "the model must not pull the frame back")
+        XCTAssertEqual(loupe.cropTool.effectiveCrop().right, 1.04, accuracy: 1e-9,
+                       "the model must not pull the frame back onto the photograph")
         let history = session.history.snapshots.count
         let revision = session.editRevision
         XCTAssertTrue(loupe.applyCropTool(), "应用 must commit the frame where it is")
         XCTAssertEqual(session.history.snapshots.count, history + 1, "one apply = one history row")
         XCTAssertEqual(session.editRevision, revision + 1)
         let stored = session.edit.geometry.cropRect
-        XCTAssertEqual(stored.right, 1.1, accuracy: 1e-9, "the outside edge was clamped")
-        XCTAssertEqual(stored.width, 0.6, accuracy: 1e-9, "the width moved")
+        XCTAssertEqual(stored.right, 1.04, accuracy: 1e-9, "the outside edge was clamped")
+        XCTAssertEqual(stored.width, 0.54, accuracy: 1e-9, "the width moved")
         print("132 §3 · stored crop r \(stored.right) w \(stored.width) · history +\(session.history.snapshots.count - history)")
     }
 

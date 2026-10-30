@@ -162,6 +162,21 @@ final class BatchExportTests: XCTestCase {
         XCTAssertEqual(img.height, 240)
     }
 
+    /// 161 §3 — the exporter is the *correct* half of the old bug: `.none` ignores a stale
+    /// `longEdge`. (The panel used to render at 2048 before the batch ever saw the pixels; that half
+    /// is pinned in `ExportSheetSizingTests`.)
+    func testOriginalSizeModeIgnoresAStaleLongEdge() throws {
+        let preset = ExportPreset(name: "网络 2048", format: .png, longEdge: 2048,
+                                  sizingMode: ExportSizingMode.none)
+        let report = BatchExporter.run(items: [item("original")], preset: preset,
+                                       outputDirectory: out,
+                                       render: { _, _ in self.image(width: 320, height: 240) })
+        let img = try readBack(try XCTUnwrap(report.written.first?.fileURL))
+        XCTAssertEqual(img.width, 320, "原尺寸不能被残留的 2048 长边缩掉")
+        XCTAssertEqual(img.height, 240)
+        XCTAssertEqual(report.written.first?.pixelSize, ImageSize(width: 320, height: 240))
+    }
+
     func testQualityChangesTheFileAndStaysLossy() throws {
         func run(_ q: Double) throws -> Int {
             let report = BatchExporter.run(items: [item("q")],
