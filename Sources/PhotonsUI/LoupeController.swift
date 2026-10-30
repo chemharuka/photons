@@ -1741,6 +1741,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 self.scheduleRender()
             }
         })
+        // 165: a command outside the edit path (⌘V, ⌘Z, ⇧⌘Z, a history-row jump) wrote a document.
+        // The frame path's own invalidation only marks a backdrop stale (039), so the command signal
+        // is what asks for the replacement immediately — for the photo on screen only.
+        bridge.observe({ [weak self] in
+            _ = self?.session?.backdropInvalidationRevision
+        }, { [weak self] in
+            guard let self, let session = self.session else { return }
+            self.noteBackdropInvalidation(for: session.backdropInvalidationAssetIDs)
+        })
         // The clipping warning is a display preference, not an edit: it has its own signal, so
         // arming it never looks like a document change to the renderer (`editRevision` stays put).
         bridge.observe({ [weak self] in
@@ -5003,6 +5012,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func invalidateBackdrop() {
         backdrop.invalidate()
         fullPictureBox.store(nil)
+    }
+
+    /// 165: a command (⌘V / ⌘Z / ⇧⌘Z / a history-row jump) moved the document outside the pointer
+    /// path. 039's rule for an *edit* is "mark it stale, the next pointer entry pays"; a command is
+    /// different — the user is already looking at the result and did not move the pointer — so the
+    /// bottom image for the document on screen is rebuilt now, in one generation, through the same
+    /// two steps 144's settle uses (`invalidateBackdrop` + `backdropWanted` + `serveWantedBackdrop`).
+    ///
+    /// Only the photo on screen qualifies. A paste onto unopened photos writes their rows and names
+    /// them in `assetIDs`; their backdrops do not exist yet and are made when they are opened
+    /// (`notePhotoIdentity`), so returning here is what keeps "paste to 5, open 1" from rendering 5.
+    private func noteBackdropInvalidation(for assetIDs: Set<String>) {
+        guard presenter != nil else { return }
+        guard let currentID = session?.loadedEditAssetID ?? session?.anchorAsset?.id,
+              assetIDs.contains(currentID) else { return }
+        guard let key = backdropKey else { return }
+        // A generation for this exact source is already on its way: it is the replacement.
+        if backdrop.inFlight == key { return }
+        guard backdrop.needsGeneration(for: key) else { return }
+        invalidateBackdrop()
+        backdropWanted = true
+        serveWantedBackdrop()
     }
 
     /// 144: a frame landed for another source than the cached backdrop names.
