@@ -1785,6 +1785,21 @@ public struct InspectorView: View {
                 keyPath: \.effects.nonBayerColorNR),
     ]
 
+    /// 185 — the 细节 card's third block: S3.10's four numbers.
+    ///
+    /// The card's title resets all of them with the block above it (`PanelResets.group(.detailFX)`
+    /// walks `rows.map(\.keyPath)`), so the four new rows need no reset of their own.
+    public static let sharpenRows: [ToneRow] = [
+        ToneRow(title: "锐化数量", range: 0 ... 150, format: "%.0f", shape: .knob,
+                keyPath: \.sharpen.amount),
+        ToneRow(title: "锐化半径", range: 0.5 ... 3.0, format: "%.1f", shape: .knob,
+                keyPath: \.sharpen.radius),
+        ToneRow(title: "锐化细节", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.sharpen.detail),
+        ToneRow(title: "锐化蒙版", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.sharpen.masking),
+    ]
+
     /// The new 细节 card's rows in draw order: 纹理 / 清晰度, then the two denoises.
     public static var detailFXRows: [ToneRow] { textureClarityRows + nonBayerRows }
 
@@ -1838,6 +1853,10 @@ public struct InspectorView: View {
             case noise
             case dehaze
             case grain
+            /// 185 — the 细节 card's 自研锐化 block (S3.10). Its own group, not `.presence`: the four
+            /// numbers are a different stage with a different stage key, and a 纹理 drag must be able
+            /// to say so.
+            case sharpen
         }
 
         public struct Block: Equatable {
@@ -1934,10 +1953,13 @@ public struct InspectorView: View {
                      Block(group: .vignette, rows: InspectorView.vignetteRows)])
 
         /// 164 — the new 细节 card: 纹理 / 清晰度 (moved from 效果) then the two denoises.
+        /// 185 — plus the 自研锐化 block (S3.10), third: the decoder's own 锐化 pair stays on 开发
+        /// (it is a `CIRAWFilter` input), so putting these four here is what keeps the two apart.
         public static let detailFXCard = PanelCardSpec(
             section: .detailFX, group: .detailFX,
             blocks: [Block(group: .presence, rows: InspectorView.textureClarityRows),
-                     Block(group: .noise, rows: InspectorView.nonBayerRows)])
+                     Block(group: .noise, rows: InspectorView.nonBayerRows),
+                     Block(group: .sharpen, rows: InspectorView.sharpenRows)])
 
         /// 164 — 效果 keeps only 去雾 / 去雾深度 and 颗粒.
         public static let effectsCard = PanelCardSpec(

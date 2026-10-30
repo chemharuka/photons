@@ -696,6 +696,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// gestures a drag is.
     public let maskCanvas: MaskCanvasController
 
+    /// 185 — **⌥ 蒙版预览**: hold ⌥ and the canvas shows S3.10's masking mask instead of the picture.
+    ///
+    /// Owned here because the gesture is a canvas gesture, and deliberately **not** a field of
+    /// `CatalogSession`: nothing in the document, the history or the key chain may learn about it
+    /// (`SharpenMaskPreview` explains why at length).
+    public let sharpenMaskPreview = SharpenMaskPreview()
+
     /// 旋转/裁切 (task 035). Owned here because the frame is a canvas gesture; the draft it edits is
     /// view state and never enters `EditModel` until 应用.
     public let cropTool: CropToolController
@@ -1606,6 +1613,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
         canvasView.autoresizingMask = [.width, .height]
         canvasView.controller = self
         canvasView.maskPainter = maskCanvas
+        // 185: ⌥ shows the sharpen mask. The toggle re-presents the frozen frame, so the preview
+        // appears on the key-down rather than at the next render, and `presentCanvas` swaps the
+        // contents of one overlay layer — the picture, the geometry and the keys are untouched.
+        sharpenMaskPreview.install()
+        sharpenMaskPreview.onToggle = { [weak self] _ in
+            guard let self else { return }
+            if self.sharpenMaskPreview.isShowing {
+                self.rePresentFrozen()
+            } else {
+                self.sharpenMaskPreview.hide(in: self.canvasView.metalLayer)
+            }
+        }
         container.addSubview(canvasView)
         // Over the canvas, under the readout: the clipping wash, the shape-drag rubber band, and the
         // selected mask's control points. All three are `hitTest → nil`, so every click still belongs
@@ -5979,6 +5998,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // (the brightness slider moves it and posts no notification). One property read that ends in
         // "nothing changed" nine times out of ten — the histogram card's ceiling is the consumer.
         onFramePresented?()
+        // 185 — the ⌥ overlay rides on the frame that is actually on screen: same canvas, same size,
+        // so the mask lines up to the pixel. It is computed from `texture` and never from a key, which
+        // is why holding ⌥ cannot evict a cached frame.
+        if sharpenMaskPreview.isShowing, let graph, let session {
+            sharpenMaskPreview.refresh(in: canvasView.metalLayer, graph: graph,
+                                       texture: texture, edit: session.edit)
+        } else {
+            sharpenMaskPreview.hide(in: canvasView.metalLayer)
+        }
         return true
     }
 
