@@ -128,6 +128,27 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.preset.sdrToneMapping, .none)
     }
 
+    /// 168 §1 — PQ/HLG are single-picture HDR paths: neither a gain-map row nor an SDR tone-map row.
+    /// Before this the view's `else` (keyed only on `showsGainMapRows`) painted 色调映射 under them.
+    func testPQAndHLGHideTheToneMappingRow() {
+        let sheet = model()
+        sheet.setHDR(true)
+
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDRKind(.hlg)
+        XCTAssertEqual(sheet.hdrKind, .hlg)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDR(false)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertTrue(sheet.showsToneMappingRow, "HDR 关必须有色调映射行")
+    }
+
     /// §4.3 — RGB + Apple is not reachable; each legal pair lands on the right `GainMap`.
     func testGainMapModelAndVersionMapToTheThreeSpellings() {
         let sheet = model()

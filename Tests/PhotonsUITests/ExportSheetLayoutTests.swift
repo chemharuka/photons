@@ -84,6 +84,39 @@ final class ExportSheetLayoutTests: XCTestCase {
         descendants(of: host).contains { ($0 as? ExportLayoutProbe)?.kind == kind }
     }
 
+    /// 168 §1 — the 色调映射 row's own marker (the probe enum lives outside this task's files).
+    private func hasToneMappingRow(in host: NSView) -> Bool {
+        descendants(of: host).contains { $0 is ExportToneMappingRowProbe }
+    }
+
+    /// 168 §1 — the hosted view must not paint 色调映射 under HDR + PQ/HLG, and must paint it under
+    /// SDR. This is the actual view, not just `showsToneMappingRow`: the bug was the view ignoring
+    /// that predicate.
+    func testToneMappingRowFollowsHDRKindInTheView() throws {
+        let sheet = model()
+        let hosted = try host(height: 900, model: sheet)
+
+        // Default draft: HDR gain map — the gain-map row, no tone mapping.
+        XCTAssertTrue(hasProbe(.hdrRow, in: hosted.host))
+        XCTAssertFalse(hasToneMappingRow(in: hosted.host))
+
+        sheet.setHDR(true)
+        sheet.setHDRKind(.pq)
+        pump(hosted.host)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+        XCTAssertFalse(hasToneMappingRow(in: hosted.host), "HDR + PQ 不许有色调映射行")
+
+        sheet.setHDRKind(.hlg)
+        pump(hosted.host)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+        XCTAssertFalse(hasToneMappingRow(in: hosted.host), "HDR + HLG 不许有色调映射行")
+
+        sheet.setHDR(false)
+        pump(hosted.host)
+        XCTAssertTrue(sheet.showsToneMappingRow)
+        XCTAssertTrue(hasToneMappingRow(in: hosted.host), "HDR 关必须有色调映射行")
+    }
+
     @discardableResult
     private func finish(withRows rows: Int, on sheet: ExportSheetModel) -> BatchExportReport {
         let outcomes = (0..<rows).map { index in

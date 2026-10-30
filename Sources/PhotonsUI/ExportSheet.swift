@@ -911,6 +911,24 @@ public final class ExportSheetModel {
 
 // MARK: - view
 
+/// 168 §1 — the 色调映射 row's own layout anchor.
+///
+/// `ExportLayoutProbe.Kind` lives in `ExportHDRControls.swift`, outside this task's file set, so the
+/// row carries a small marker of its own rather than editing that enum. The hosted-view test asks
+/// "is this view in the tree?" — the same evidence the region probes give, without eyeballing.
+final class ExportToneMappingRowProbe: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+}
+
+struct ExportToneMappingRowProbeHost: NSViewRepresentable {
+    func makeNSView(context: Context) -> ExportToneMappingRowProbe {
+        ExportToneMappingRowProbe()
+    }
+
+    func updateNSView(_ probe: ExportToneMappingRowProbe, context: Context) {}
+}
+
 /// The sheet's contents. A leaf: every control writes `model.preset` (the exact struct the batch
 /// will use) and nothing else, so what the sheet shows is what the files get.
 public struct ExportSheetView: View {
@@ -1182,9 +1200,11 @@ public struct ExportSheetView: View {
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            } else {
+            } else if model.showsToneMappingRow {
+                // 168 §1 — HDR on with PQ/HLG is neither a gain-map row nor an SDR tone-map row;
+                // `showsGainMapRows` alone would let this `else` paint 色调映射 under HDR.
                 HStack(spacing: 8) {
-                    Text("tone mapping").font(.system(size: 10, weight: .medium))
+                    Text("色调映射").font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     Picker("", selection: sdrToneMappingBinding) {
@@ -1199,6 +1219,7 @@ public struct ExportSheetView: View {
                     .disabled(model.phase == .running)
                     .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
                 }
+                .background(ExportToneMappingRowProbeHost())
             }
 
             HStack(spacing: 8) {
