@@ -8,9 +8,11 @@ import PhotonsCore
 //
 // The S4 exit gives us extended-range **linear** pixels in the preset's primaries. Writing PQ or HLG
 // is then a colour-space conversion, not a hand-written ST 2084 / BT.2100 curve: Core Image maps the
-// linear source to `itur_2100_PQ` / `itur_2100_HLG` and we let ImageIO pack the result. The curve
-// constants therefore live in exactly one place (CoreGraphics' colour management), and a future
-// change to the target space is a one-line edit here.
+// linear source to the same family's PQ/HLG space (Rec.709_PQ, DisplayP3_PQ, Rec.2100_PQ; the HLG
+// column is analogous) and we let ImageIO pack the result. The pairing is toGainMapHDR's table
+// (`main.swift:78-100`); a P3 base never silently becomes Rec.2100. The curve constants therefore
+// live in exactly one place (CoreGraphics' colour management), and a future change to the target
+// space is a one-line edit here.
 //
 // Outputs:
 //   · HEIC / AVIF — RGBA16 handed to ImageIO, which stores the 10-bit HEVC/AV1 primary item
@@ -30,11 +32,46 @@ public enum HDREncoding {
     }
 
     /// Rec.2020 with the requested transfer function. `nil` for every non-PQ/HLG kind.
-    public static func targetColorSpace(for kind: HDRKind) -> CGColorSpace? {
-        switch kind {
-        case .pq: return CGColorSpace(name: CGColorSpace.itur_2100_PQ)
-        case .hlg: return CGColorSpace(name: CGColorSpace.itur_2100_HLG)
-        case .none, .gainMap: return nil
+    ///
+    /// 163 §1.5 — the curve's **primaries come from the base family**, exactly like toGainMapHDR's
+    /// `main.swift:78-100` table:
+    ///
+    /// | base              | SDR space                 | PQ                  | HLG                  |
+    /// |-------------------|---------------------------|---------------------|----------------------|
+    /// | sRGB / Rec.709    | `itur_709`                | `itur_709_PQ`       | `itur_709_HLG`       |
+    /// | Display P3        | `displayP3`               | `displayP3_PQ`      | `displayP3_HLG`      |
+    /// | Rec.2020          | `itur_2020_sRGBGamma`     | `itur_2100_PQ`      | `itur_2100_HLG`      |
+    ///
+    /// A P3 base never silently becomes Rec.2100; that was the pre-163 behaviour this replaces.
+    public static func targetColorSpace(for primaries: OutputPrimaries,
+                                        kind: HDRKind) -> CGColorSpace? {
+        switch (primaries, kind) {
+        case (.sRGB, .pq): return CGColorSpace(name: CGColorSpace.itur_709_PQ)
+        case (.sRGB, .hlg): return CGColorSpace(name: CGColorSpace.itur_709_HLG)
+        case (.displayP3, .pq): return CGColorSpace(name: CGColorSpace.displayP3_PQ)
+        case (.displayP3, .hlg): return CGColorSpace(name: CGColorSpace.displayP3_HLG)
+        case (.rec2020, .pq): return CGColorSpace(name: CGColorSpace.itur_2100_PQ)
+        case (.rec2020, .hlg): return CGColorSpace(name: CGColorSpace.itur_2100_HLG)
+        case (_, .none), (_, .gainMap): return nil
+        }
+    }
+
+    /// The SDR base a gain map / PQ / HLG export is tagged with. Plain SDR exports keep the historic
+    /// `Exporter.colorSpace(for:)` tags (byte identity); only the HDR pair uses this table.
+    public static func sdrColorSpace(for primaries: OutputPrimaries) -> CGColorSpace? {
+        switch primaries {
+        case .sRGB: return CGColorSpace(name: CGColorSpace.itur_709)
+        case .displayP3: return CGColorSpace(name: CGColorSpace.displayP3)
+        case .rec2020: return CGColorSpace(name: CGColorSpace.itur_2020_sRGBGamma)
+        }
+    }
+
+    /// The linear counterpart of the SDR family space (the ISO gain map's `colr`/aux colour space).
+    public static func linearSDRColorSpace(for primaries: OutputPrimaries) -> CGColorSpace? {
+        switch primaries {
+        case .sRGB: return CGColorSpace(name: CGColorSpace.linearSRGB)
+        case .displayP3: return CGColorSpace(name: CGColorSpace.linearDisplayP3)
+        case .rec2020: return CGColorSpace(name: CGColorSpace.linearITUR_2020)
         }
     }
 
@@ -59,7 +96,7 @@ public enum HDREncoding {
             throw ExportError.encodeFailed(
                 "linear color space unavailable: \(image.primaries.displayName)")
         }
-        guard let target = targetColorSpace(for: kind) else {
+        guard let target = targetColorSpace(for: image.primaries, kind: kind) else {
             throw ExportError.encodeFailed("\(kind.displayName) color space unavailable")
         }
 

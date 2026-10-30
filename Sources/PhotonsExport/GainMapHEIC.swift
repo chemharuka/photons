@@ -229,7 +229,8 @@ public enum GainMapHEIC {
                                  to url: URL, options: HDRGainMapOptions,
                                  metadata: ExportMetadataContext,
                                  format: ExportFormat) throws {
-        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth)
+        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
@@ -254,7 +255,7 @@ public enum GainMapHEIC {
         let isMono = options.gainMap == .mono
         let pixelFormat = isMono ? kCVPixelFormatType_OneComponent8 : kCVPixelFormatType_32ARGB
         let colorSpace = isMono ? CGColorSpace(name: CGColorSpace.linearGray)
-                                : CGColorSpace(name: CGColorSpace.linearITUR_2020)
+                                : HDREncoding.linearSDRColorSpace(for: sdr.primaries)
         let description: [String: Any] = [
             "PixelFormat": pixelFormat,
             "Width": String(map.width),
@@ -319,7 +320,8 @@ public enum GainMapHEIC {
     private static func writeAppleHEIF(sdr: DisplayImage, map: GainMapPixels, headroom: Double,
                                        to url: URL, options: HDRGainMapOptions,
                                        metadata: ExportMetadataContext) throws {
-        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth)
+        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
         guard let gainCG = map.appleCGImage() else {
             throw GainMapHEICError.gainMapFailed("could not build the Apple gain map bitmap")
         }
@@ -340,7 +342,7 @@ public enum GainMapHEIC {
         let baseCI = CIImage(cgImage: baseCG, options: [.properties: properties])
         let gainCI = CIImage(cgImage: gainCG)
 
-        guard let space = Exporter.colorSpace(for: sdr.primaries) else {
+        guard let space = HDREncoding.sdrColorSpace(for: sdr.primaries) else {
             throw GainMapHEICError.gainMapFailed(
                 "color space unavailable: \(sdr.primaries.displayName)")
         }
@@ -389,7 +391,8 @@ public enum GainMapHEIC {
     private static func writeAppleJPEG(sdr: DisplayImage, map: GainMapPixels, headroom: Double,
                                        to url: URL, options: HDRGainMapOptions,
                                        metadata: ExportMetadataContext) throws {
-        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth)
+        let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
         guard let gainCG = map.appleCGImage() else {
             throw GainMapHEICError.gainMapFailed("could not build the Apple gain map bitmap")
         }
@@ -405,7 +408,7 @@ public enum GainMapHEIC {
 
         let baseCI = CIImage(cgImage: baseCG, options: [.properties: properties])
         let gainCI = CIImage(cgImage: gainCG)
-        guard let space = Exporter.colorSpace(for: sdr.primaries) else {
+        guard let space = HDREncoding.sdrColorSpace(for: sdr.primaries) else {
             throw GainMapHEICError.gainMapFailed(
                 "color space unavailable: \(sdr.primaries.displayName)")
         }

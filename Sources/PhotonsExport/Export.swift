@@ -219,8 +219,9 @@ public enum Exporter {
         }
     }
 
-    public static func cgImage(_ image: DisplayImage, bitDepth: Int) throws -> CGImage {
-        guard let space = colorSpace(for: image.primaries) else {
+    public static func cgImage(_ image: DisplayImage, bitDepth: Int,
+                               space override: CGColorSpace? = nil) throws -> CGImage {
+        guard let space = override ?? colorSpace(for: image.primaries) else {
             throw ExportError.encodeFailed("color space unavailable: \(image.primaries.displayName)")
         }
         let w = image.width, h = image.height
@@ -268,9 +269,10 @@ public enum Exporter {
 
     /// Write `image`. When `options.hdr` asks for a gain map **and** the image carries a linear
     /// companion (rendered through `s4_display_linear`), this routes to `GainMapHEIC`, which writes
-    /// the same SDR base plus a gain-map auxiliary image. `hlg`/`pq` route to `HDREncoding`, which
-    /// converts the linear companion to Rec.2020 with the requested transfer curve. Otherwise it is
-    /// the untouched pre-100 encoder.
+    /// the same SDR base plus a gain-map auxiliary image (HEIC, JPEG or AVIF). `hlg`/`pq` route to
+    /// `HDREncoding`, which converts the linear companion to the **base family's** PQ/HLG space
+    /// (Rec.709 / Display P3 / Rec.2020 — see its table). Otherwise it is the untouched pre-100
+    /// encoder.
     ///
     /// - Returns: non-fatal HDR notes (an SDR fallback, a clipped headroom). Empty on the normal path.
     @discardableResult
