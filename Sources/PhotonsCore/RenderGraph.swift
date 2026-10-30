@@ -867,20 +867,11 @@ private struct HSLParamsU {
     var g: SIMD4<Float>   // 101 — global: hue, saturation, luminance (slider units), pad
 }
 
-/// Mirror of `Kernels/s3_6b_point_colour.metal`, byte for byte (140/158).
+/// Mirror of `Kernels/s3_6b_point_colour.metal`, byte for byte (140).
 private struct PointColorParamsU {
     var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    var b: SIMD4<Float>   // swatch count, chroma floor (0.5 ×), pad, pad
-    var m0: SIMD4<Float>  // working → sRGB primaries, row 0
-    var m1: SIMD4<Float>  // row 1
-    var m2: SIMD4<Float>  // row 2
-}
-
-/// One point-colour swatch as the kernel reads it (158).
-private struct PointColorSwatchU {
-    var sample: SIMD4<Float>  // sampleY, sampleU, sampleV, active
-    var window: SIMD4<Float>  // dY, dU, dV, feather
-    var adjust: SIMD4<Float>  // hue, saturation, luminance, pad
+    var b: SIMD4<Float>   // sampleHue, sampleChroma, range, feather
+    var c: SIMD4<Float>   // hue, saturation, luminance, active (1 when the stage should compute)
 }
 
 /// Mirror of `Kernels/s3_4_bw.metal` (2026-10-28, P0-4). The band table is the **same**
@@ -3384,38 +3375,23 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .pointColour:
-            // 140/158 — 点颜色: a YUV neighbourhood box per swatch on display-referred data. Encoded
-            // **only** when at least one swatch has a sample and a non-zero adjustment
-            // (`RenderStage.pipeline`). Every swatch is uploaded, in document order; the kernel
-            // applies them sequentially, each seeing the previous one's output.
+            // 140 — 点颜色: one sampled OKLCh hue window on display-referred data. Encoded **only**
+            // when the card has both a sample and a non-zero adjustment (`RenderStage.pipeline`), so a
+            // document that never used it has no pass to be neutral in. The kernel is a separate
+            // instantiation, not a branch inside S3.6: a band drag must not compile this arithmetic
+            // and a point-colour drag must not re-run S3.6.
             let p = try kernels.pipeline(file: "s3_6b_point_colour",
                                          function: "s3_6b_point_colour")
-            let pointColours = edit.color.point?.swatches ?? []
-            let workingToSRGB = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
+            let point = edit.color.point ?? PointColor()
             var params = PointColorParamsU(
                 a: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)),
-                b: SIMD4(Float(pointColours.count),
-                         Float(0.5 * PointColor.chromaFloorYCbCr), 0, 0),
-                m0: SIMD4(Float(workingToSRGB[0, 0]), Float(workingToSRGB[0, 1]),
-                          Float(workingToSRGB[0, 2]), 0),
-                m1: SIMD4(Float(workingToSRGB[1, 0]), Float(workingToSRGB[1, 1]),
-                          Float(workingToSRGB[1, 2]), 0),
-                m2: SIMD4(Float(workingToSRGB[2, 0]), Float(workingToSRGB[2, 1]),
-                          Float(workingToSRGB[2, 2]), 0))
-            var swatches = pointColours.prefix(PointColorSet.maxSwatches).map { swatch in
-                PointColorSwatchU(
-                    sample: SIMD4(Float(swatch.sampleY), Float(swatch.sampleU),
-                                  Float(swatch.sampleV), swatch.isActive ? 1 : 0),
-                    window: SIMD4(Float(swatch.lumaHalfWidth), Float(swatch.chromaHalfWidth),
-                                  Float(swatch.chromaHalfWidth), Float(swatch.featherScale)),
-                    adjust: SIMD4(Float(swatch.hue), Float(swatch.saturation),
-                                  Float(swatch.luminance), 0))
-            }
+                b: SIMD4(Float(point.sampleHue), Float(point.sampleChroma),
+                         Float(point.range), Float(point.feather)),
+                c: SIMD4(Float(point.hue), Float(point.saturation), Float(point.luminance),
+                         point.isActive ? 1 : 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<PointColorParamsU>.stride, index: 0)
-            enc.setBytes(&swatches, length: MemoryLayout<PointColorSwatchU>.stride * swatches.count,
-                         index: 1)
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 

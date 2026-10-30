@@ -2,77 +2,37 @@
 #include "oklch_bands.metal"
 using namespace metal;
 
-// S3.6b — **点颜色 (Point Color)**: up to eight sampled colours, each with a **Rec.709 full-range
-// YCbCr neighbourhood box** and three adjustments (140, reshaped by 158). Display-referred, pixel-in /
-// pixel-out, directly after S3.6.
+// S3.6b — **点颜色 (Point Color)**: one sampled OKLCh colour, a hue window around it, three
+// adjustments (140). Display-referred, pixel-in / pixel-out, directly after S3.6.
 //
-// ## The window (158)
+// The weight is the same family as S3.6's band weight and S3.4/S3.6's neutral gate, not a second
+// colour theory:
 //
-//   w = wy · wu · wv · [c_pixel ≥ 0.5 · chromaFloor]
-//   w_axis = 1 − smoothstep(d_axis, d_axis + feather, |pixel_axis − sample_axis|)
+//   w = (1 − smoothstep(range, range + feather, |wrap(h − sampleHue)|)) · hsl_chroma_gate(C)
 //
-// The three axes are multiplied with equal weight, not summed: the box is a region, not a score. The
-// luminance radius is the tightest (`d1 = 0.06` ≈ ±15/255); U/V are wider (`d2 = d3 = 0.10` ≈ ±13/255)
-// because human chroma acuity is lower. The shoulder is half the radius, so the box is C¹ and exactly
-// zero at its edge.
+// `wrap` is the circular shortest angle, so 0°/360° is not a special case. The chroma gate is the
+// **shared** `hsl_chroma_gate` helper (`oklch_bands.metal`), so a grey pixel gets exactly 0 and is
+// written back bit for bit — the same invariant the eight bands hold. range and feather are clamped
+// so `range + feather ≤ 180`: a wider window would select the opposite hue too, which is the whole
+// wheel, not a range.
 //
-// The pale-colour guard is a hard floor: a pixel whose own chroma `hypot(U−0.5, V−0.5)` is below
-// `0.5 · chromaFloorYCbCr` (≈ 2.5/255) gets weight 0. A neutral pixel (U = V = 0.5) is therefore
-// written back bit for bit, and a nearly-grey patch cannot be tinted by accident.
+// The adjustment is **multiplied by w**, never gated by membership alone. That is what makes the
+// window's shoulder C¹: at `range + feather` the hue rotation, chroma scale and lightness lift all
+// reach exactly zero together, so a 1°-per-pixel hue sweep has no step at either edge.
 //
-// ## Multiple swatches (158)
-//
-// Every swatch in the document renders, **in array order**, each evaluating its box on the *current*
-// pixel (the previous swatch's output) and applying its own three adjustments. `active` in the
-// document is a UI selection only and is not uploaded. The stage exists only for documents with at
-// least one sampled-and-adjusted swatch (`RenderStage.pipeline(hasPointColor:)`), so a document that
-// never used the card renders the pre-140 graph byte for byte.
-//
-// The adjustment is multiplied by `w`, never gated by membership alone: at the shoulder the hue
-// rotation, chroma scale and lightness lift all reach exactly zero together, so a smooth gradient
-// through the box boundary has no step.
+// The stage only exists for documents that need it (`RenderStage.pipeline(hasPointColor:)`), so a
+// document with no sample or all three sliders at 0 renders the pre-140 graph byte for byte. The
+// `active` word is a belt-and-braces guard for a caller that encodes the pass by hand.
 
 struct PointColorParams {
-    float4 a;    // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    float4 b;    // swatch count, 0.5 · chromaFloorYCbCr, pad, pad
-    float4 m0;   // working → sRGB primaries, row 0
-    float4 m1;   // row 1
-    float4 m2;   // row 2
+    float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    float4 b;   // sampleHue (deg), sampleChroma, range (deg), feather (deg)
+    float4 c;   // hue, saturation, luminance (slider units), active
 };
-
-struct PointColorSwatch {
-    float4 sample;   // sampleY, sampleU, sampleV, active
-    float4 window;   // dY, dU, dV, feather
-    float4 adjust;   // hue, saturation, luminance, pad
-};
-
-static inline float point_srgb_encode(float v) {
-    return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
-}
-
-/// Linear working primaries → Rec.709 full-range YCbCr (U/V centred on 0.5), the same arithmetic as
-/// `PointColor.yuv(fromLinearWorking:)` on the host.
-static inline float3 point_yuv(float3 rgb, constant PointColorParams &p) {
-    float3 lin = float3(dot(p.m0.xyz, rgb), dot(p.m1.xyz, rgb), dot(p.m2.xyz, rgb));
-    float3 enc = float3(point_srgb_encode(lin.x),
-                        point_srgb_encode(lin.y),
-                        point_srgb_encode(lin.z));
-    float y = 0.2126 * enc.x + 0.7152 * enc.y + 0.0722 * enc.z;
-    return float3(y, (enc.z - y) / 1.8556 + 0.5, (enc.x - y) / 1.5748 + 0.5);
-}
-
-static inline float point_box_weight(float delta, float d, float shoulder) {
-    float x = fabs(delta);
-    if (x <= d) { return 1.0; }
-    if (shoulder <= 0.0 || x >= d + shoulder) { return 0.0; }
-    float t = (x - d) / shoulder;
-    return 1.0 - t * t * (3.0 - 2.0 * t);
-}
 
 kernel void s3_6b_point_colour(texture2d<float, access::read> src [[texture(0)]],
                                texture2d<float, access::write> dst [[texture(1)]],
                                constant PointColorParams &p [[buffer(0)]],
-                               constant PointColorSwatch *swatches [[buffer(1)]],
                                uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
     if (p.a.z <= 0.0 || p.a.w <= 0.0) {              // no content (degenerate window)
@@ -88,63 +48,53 @@ kernel void s3_6b_point_colour(texture2d<float, access::read> src [[texture(0)]]
         dst.write(c, gid);                            // the matte, written back unchanged
         return;
     }
-    if (p.b.x <= 0.0) {
+    if (p.c.w <= 0.0) {
         dst.write(c, gid);
         return;
     }
 
-    // The pixel's own chroma is box-independent; the pale floor can short-circuit the whole loop.
-    float3 current = point_yuv(c.rgb, p);
-    if (length(float2(current.y - 0.5, current.z - 0.5)) < p.b.y) {
-        dst.write(c, gid);
-        return;
-    }
-
-    int count = int(min(p.b.x, 8.0));
-    bool changed = false;
-    bool yuvValid = true;
-    // Keep the pixel in OKLCh between swatches. A swatch's three operations are an addition on h, a
-    // scale on C and a scale on L, so re-folding linear RGB through `oklab_raw` for every overlapping
-    // box would be redundant work (and is what made eight swatches measurably heavier).
     float3 lab = oklab_raw(c.rgb);
     float L = lab.x;
-    float C = length(lab.yz);
-    float H = atan2(lab.z, lab.y) * (180.0 / M_PI_F);
-    if (H < 0.0) { H += 360.0; }
-
-    for (int i = 0; i < count; ++i) {
-        PointColorSwatch s = swatches[i];
-        if (s.sample.w <= 0.0) { continue; }          // a sample-only swatch has no adjustment
-
-        // Each swatch sees the previous one's output (显式堆叠, no renormalisation). The YUV of the
-        // current pixel only changes when a previous swatch actually wrote something, so the
-        // (matrix + 3×OETF) conversion is cached across non-matching boxes — the common case.
-        if (!yuvValid) {
-            float3 lin = max(oklch_to_linear(L, C, H), 0.0);
-            current = point_yuv(lin, p);
-            yuvValid = true;
-        }
-        float cpx = length(float2(current.y - 0.5, current.z - 0.5));
-        if (cpx < p.b.y) { continue; }                // a previous swatch may have faded it
-
-        float wy = point_box_weight(current.x - s.sample.x, s.window.x, 0.5 * s.window.x * s.window.w);
-        float wu = point_box_weight(current.y - s.sample.y, s.window.y, 0.5 * s.window.y * s.window.w);
-        float wv = point_box_weight(current.z - s.sample.z, s.window.z, 0.5 * s.window.z * s.window.w);
-        float w = wy * wu * wv;
-        if (w <= 0.0) { continue; }
-
-        // The three sliders are the HSL card's units: 0.3° of hue per unit, a multiplicative chroma
-        // and ±1 stop of perceptual lightness per 100. Every one is scaled by the box weight.
-        H += w * s.adjust.x * 0.3;
-        C = max(C * (1.0 + w * s.adjust.y / 100.0), 0.0);
-        L *= exp2(w * s.adjust.z / 100.0);
-        changed = true;
-        yuvValid = false;
+    float2 ab = lab.yz;
+    float chroma = length(ab);
+    float gate = hsl_chroma_gate(chroma);
+    if (gate <= 0.0) {                                // a grey has no hue: bit-exact write-back
+        dst.write(c, gid);
+        return;
     }
-    if (changed) {
-        // A hue rotation can leave the working gamut; a negative channel is not a colour. Nothing is
-        // clamped at the top, so a display-referred highlight keeps its headroom (S4 is the only clamp).
-        c.rgb = max(oklch_to_linear(L, C, H), 0.0);
+
+    float hue = atan2(ab.y, ab.x) * (180.0 / M_PI_F);
+    if (hue < 0.0) { hue += 360.0; }
+
+    // Circular shortest difference from the sampled hue.
+    float delta = hue - p.b.x;
+    delta = fmod(delta, 360.0);
+    if (delta > 180.0) { delta -= 360.0; }
+    if (delta < -180.0) { delta += 360.0; }
+    float d = fabs(delta);
+
+    float inner = clamp(p.b.z, 0.0, 180.0);
+    float shoulder = clamp(p.b.w, 0.0, 180.0 - inner);
+    float window = 0.0;
+    if (d <= inner) {
+        window = 1.0;
+    } else if (shoulder > 0.0 && d < inner + shoulder) {
+        float t = (d - inner) / shoulder;
+        window = 1.0 - t * t * (3.0 - 2.0 * t);
     }
-    dst.write(c, gid);
+    float w = window * gate;
+    if (w <= 0.0) {
+        dst.write(c, gid);
+        return;
+    }
+
+    // The three sliders are the HSL card's units: 0.3° of hue per unit, a multiplicative chroma and
+    // ±1 stop of perceptual lightness per 100. Every one is scaled by the window weight.
+    float h2 = hue + w * p.c.x * 0.3;
+    float c2 = max(chroma * (1.0 + w * p.c.y / 100.0), 0.0);
+    float l2 = L * exp2(w * p.c.z / 100.0);
+    float3 out = oklch_to_linear(l2, c2, h2);
+    // A hue rotation can leave the working gamut; a negative channel is not a colour. Nothing is
+    // clamped at the top, so a display-referred highlight keeps its headroom (S4 is the only clamp).
+    dst.write(float4(max(out, 0.0), c.a), gid);
 }
