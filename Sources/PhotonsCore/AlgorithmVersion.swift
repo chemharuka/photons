@@ -121,9 +121,13 @@ public enum StageAlgorithmVersion {
     public static let localColor = 1
     /// Unchanged (S3.6's OKLCh bands).
     public static let hsl = 1
+    /// **2** — 158: the window is a Rec.709 full-range **YUV box** (`d1 = 0.06`, `d2 = d3 = 0.10`,
+    /// half-radius soft shoulder) with an explicit pale-colour floor, and a document may carry up to
+    /// eight swatches applied in order. Same stored hue-window parameters now select different pixels,
+    /// so the stage generation moves. A sample-only document is still no stage (bit-identical).
     /// **1** — S3.6b's first arithmetic (140, 点颜色): one sampled OKLCh hue window × the S3.6
-    /// chroma gate, three adjustments scaled by the window weight. Starts at 1.
-    public static let pointColour = 1
+    /// chroma gate, three adjustments scaled by the window weight.
+    public static let pointColour = 2
     /// **1** — S3.8's first arithmetic (2026-10-28, P0 色彩分级): three luminance windows ×
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
