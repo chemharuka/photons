@@ -3276,9 +3276,9 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .contrast:
-            // S1.8 — 098: the multiscale, edge-aware decomposition of Y in the scene-linear domain.
-            // Encoded **only** for documents whose contrast is non-zero (`hasContrastStage`), so a
-            // neutral document has no pass to be neutral in.
+            // S2.5 — 159: the multiscale, edge-aware decomposition of Y in the **display-referred**
+            // domain, after S2 and before S3. Encoded **only** for documents whose contrast is
+            // non-zero (`hasContrastStage`), so a neutral document has no pass to be neutral in.
             try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan)
 
         case .curve:
@@ -3514,10 +3514,14 @@ public final class RenderGraph {
         }
     }
 
-    // MARK: - S1.8 contrast (098)
+    // MARK: - S2.5 contrast (159; 098's file, display-referred)
 
     /// The stage: coarse guided filter → mid guided filter on the coarse residual → one full-resolution
-    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the three gains.
+    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the two residual gains.
+    ///
+    /// It reads the **tone-mapped display light** S2 wrote (white = 1 = 0 EV), not scene light: 142
+    /// measured that a scene-linear gain anchored to a fixed level makes `exposure × contrast`
+    /// non-commutative, and that moving it after the tone map is what makes the two commute.
     ///
     /// The second filter's **input statistics** are built at `1/q` from the coarse coefficient map,
     /// so the frame is only read at full resolution twice (pack + apply), not once per band.
@@ -3540,12 +3544,15 @@ public final class RenderGraph {
             a: SIMD4(Float(edit.light.contrast / 100), Float(MultiscaleContrast.pivotEV),
                      Float(MultiscaleContrast.coarseEpsilon),
                      Float(MultiscaleContrast.midEpsilon)),
-            b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
+            b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),
                      Float(MultiscaleContrast.gateLo)),
+            // 147/159 — `.y` is `log2(exposureGain)`: the decomposition runs on the **unexposed**
+            // display log (`G − log2 g`), so a power-of-two exposure gives bit-identical filter
+            // inputs and an identical residual gain (A1/A2). `.z` is the gain itself, which scales
+            // the A5 black floor with the picture. Neither divides anything out of the gain.
             c: SIMD4(Float(MultiscaleContrast.gateHi),
-                     // 147 — S1's exposure gain, so the kernel's `luma / g` is the unexposed
-                     // coordinate. `g == 1` divides by one and keeps the pre-147 bytes.
-                     Float(edit.light.exposureGain), 0, 0),
+                     Float(log2(max(Double(edit.light.exposureGain), 1e-6))),
+                     Float(edit.light.exposureGain), 0),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(plan.origin.x, plan.origin.y,
                         Float(plan.content.width), Float(plan.content.height)),
@@ -3556,11 +3563,10 @@ public final class RenderGraph {
         let base = try scratch("contrast-g-base", width: qW, height: qH, format: .rgba32Float)
         let tmp = try scratch("contrast-g-tmp", width: qW, height: qH, format: .rgba32Float)
         let boxedC = try scratch("contrast-g-coarse", width: qW, height: qH, format: .rgba32Float)
-        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba16Float)
+        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba32Float)
         let statsM = try scratch("contrast-g-mid", width: qW, height: qH, format: .rgba32Float)
         let boxedM = try scratch("contrast-g-mid-boxed", width: qW, height: qH, format: .rgba32Float)
-        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba16Float)
-
+        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba32Float)
         // 1. Pack G's block statistics at full resolution.
         let pack = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_pack")
         guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3574,6 +3580,7 @@ public final class RenderGraph {
         e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
         dispatch(e0, pack, ImageSize(width: qW, height: qH))
         e0.endEncoding()
+
 
         // 2. Coarse guided filter: box the statistics, then solve (a, b, gate).
         params.e.w = radiusC

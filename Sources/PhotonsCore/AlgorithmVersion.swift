@@ -91,13 +91,14 @@ public enum StageAlgorithmVersion {
     /// table, so the same stored points produce different pixels. The stage's generation moves;
     /// the positive-curve pixels do not.
     public static let curve = 2
-    /// **2** — 147: the decomposition runs on `G0 = log2(Y) − log2(exposureGain)`, i.e. the pivot is
-    /// read on the unexposed light, so exposure shifts the picture without moving the bands against
-    /// the pivot. A document with `contrast != 0` and `exposure != 0` now renders different pixels;
-    /// `exposure == 0` (g = 1) is bit-identical to 1.
+    /// **2** — 159: contrast moved out of the scene-linear chain into S2.5 (after the tone map and
+    /// before S3), where the multiscale gain is built from the decomposition's **residuals** on the
+    /// display values. Same stored number, different pixels: the level anchor that made 142's
+    /// `exposure × contrast` non-commutative is gone, and the retuned display-domain constants
+    /// (`MC_W_M/W_F`, gate, ε) change the local response. `contrast == 0` never reaches the stage.
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
-    public static let contrast = 1
+    public static let contrast = 2
     /// **5** — 124: 高光 covers the whole HDR range. The high→white closure moved from
     /// `smoothstep(−1.2, 0.0, L)` to `smoothstep(+4.0, +6.0, L)`, so a document with
     /// `highlights != 0` now moves every pixel above −0.9 EV, including values above display white

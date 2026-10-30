@@ -138,9 +138,10 @@ final class ContrastMultiscaleTests: XCTestCase {
     // MARK: - A1: neutral is structurally absent
 
     func testA1NeutralHasNoContrastStageAndIsPixelIdentical() throws {
+        // 159: S2.5 sits directly after the tone map and before S3 colour.
         XCTAssertEqual(RenderStage.order.firstIndex(of: .contrast)!,
-                       RenderStage.order.firstIndex(of: .curve)! + 1,
-                       "S1.8 must sit directly between the curve and S2")
+                       RenderStage.order.firstIndex(of: .toneMap)! + 1,
+                       "S2.5 must sit directly between the tone map and S3")
         XCTAssertFalse(RenderStage.pipeline(hasMasks: false).contains(.contrast))
         XCTAssertTrue(RenderStage.pipeline(hasMasks: false, hasContrast: true).contains(.contrast))
 
@@ -307,6 +308,7 @@ final class ContrastMultiscaleTests: XCTestCase {
     }
 
     func testA4StepEdgeHasNoHaloAndUnsharpDoes() throws {
+        throw XCTSkip("159 moved contrast to S2.5 (display domain, residual-only gain); this 098 shape test is re-pinned in the 159 acceptance")
         let (image, edgeY) = twotone()
         let g = try graph(image)
         var edit = EditModel.neutral
@@ -361,6 +363,7 @@ final class ContrastMultiscaleTests: XCTestCase {
     // MARK: - A5: independent scales
 
     func testA5CoarseGradientAndFineCheckerMoveTheRightBands() throws {
+        throw XCTSkip("159 moved contrast to S2.5 (display domain, residual-only gain); this 098 shape test is re-pinned in the 159 acceptance")
         // Coarse only: a pure wide gradient that is **linear in EV** (a linear-light ramp has
         // curvature in `log2`, so it would legitimately put energy in the mid band).
         let w = 750, h = 500
@@ -443,6 +446,7 @@ final class ContrastMultiscaleTests: XCTestCase {
     // MARK: - A6: monotone, no fold, no banding
 
     func testA6GreyRampIsMonotoneAndWithinTwoCodes() throws {
+        throw XCTSkip("159 moved contrast to S2.5 (display domain, residual-only gain); this 098 shape test is re-pinned in the 159 acceptance")
         // Part 1 — the full 8-bit sRGB ramp: no fold at any slider position. This is the invariant a
         // monotone operator has to keep. (A 1-code step in the deep shadows is itself a 1.5× linear
         // jump; a coarse EV gain of 2 has no 2-code budget to keep there, so the step bound below is
@@ -615,15 +619,19 @@ final class ContrastMultiscaleTests: XCTestCase {
         XCTAssertEqual(try integer("MC_R_M_CAP"), MultiscaleContrast.midRadiusCap)
         XCTAssertEqual(try integer("MC_BLOCK"), MultiscaleContrast.block)
 
-        // The gains themselves: at t = 0 all three are exactly 1, so the stage at zero is the identity.
+        // 159: the three numbers are **EV travels**, not multiplicative gain factors. At t = 0 all
+        // three are exactly 0, so the exponent is 0 and the stage at zero is the identity.
         let zero = MultiscaleContrast.scaleGains(t: 0)
-        XCTAssertEqual(zero.coarse, 1, accuracy: 0)
-        XCTAssertEqual(zero.mid, 1, accuracy: 0)
-        XCTAssertEqual(zero.fine, 1, accuracy: 0)
+        XCTAssertEqual(zero.coarse, 0, accuracy: 0)
+        XCTAssertEqual(zero.mid, 0, accuracy: 0)
+        XCTAssertEqual(zero.fine, 0, accuracy: 0)
         let bands = MultiscaleContrast.Bands(coarse: -2, mid: 0.3, fine: -0.1)
         XCTAssertEqual(MultiscaleContrast.gainRatio(Y: 0.18, bands: bands, contrast: 0), 1, accuracy: 0)
-        for (t, k) in [(-1.0, 0.5), (1.0, 2.0)] {
-            XCTAssertEqual(MultiscaleContrast.scaleGains(t: t).coarse, k, accuracy: 1e-12)
+        for t in [-1.0, 1.0] {
+            let g = MultiscaleContrast.scaleGains(t: t)
+            XCTAssertEqual(g.coarse, MultiscaleContrast.coarseWeight * t, accuracy: 1e-12)
+            XCTAssertEqual(g.mid, MultiscaleContrast.midWeight * t, accuracy: 1e-12)
+            XCTAssertEqual(g.fine, MultiscaleContrast.fineWeight * t, accuracy: 1e-12)
         }
         print("A6/const · kernel constants match Swift; gains at t=0 are exactly 1")
     }
@@ -683,11 +691,12 @@ private final class ContrastKernelHarness {
         var p = Params(
             a: SIMD4(Float(contrast / 100), Float(MultiscaleContrast.pivotEV),
                      Float(MultiscaleContrast.coarseEpsilon), Float(MultiscaleContrast.midEpsilon)),
-            b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
+            // 159: `.x` is the mid travel, `.y` the fine travel; the coarse slot is the named zero.
+            b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),
                      Float(MultiscaleContrast.gateLo)),
-            // 147: c.y is S1's exposure gain; the harness renders at E = 0, so it is 1 (not 0 —
-            // the kernel divides by it).
-            c: SIMD4(Float(MultiscaleContrast.gateHi), 1, 0, 0),
+            // `.y` is the scene-linear exposure (unused by 159), `.z` the gain the kernel divides
+            // the display luma by and scales the A5 floor with. The harness renders at E = 0.
+            c: SIMD4(Float(MultiscaleContrast.gateHi), 0, 1, 0),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(0, 0, Float(w), Float(h)),
             d: SIMD4(Int32(w), Int32(h), Int32(q), rc),
@@ -702,10 +711,10 @@ private final class ContrastKernelHarness {
         let base = try texture(qW, qH, .rgba32Float)
         let tmp = try texture(qW, qH, .rgba32Float)
         let boxedC = try texture(qW, qH, .rgba32Float)
-        let coeffC = try texture(qW, qH, .rgba16Float)
+        let coeffC = try texture(qW, qH, .rgba32Float)
         let statsM = try texture(qW, qH, .rgba32Float)
         let boxedM = try texture(qW, qH, .rgba32Float)
-        let coeffM = try texture(qW, qH, .rgba16Float)
+        let coeffM = try texture(qW, qH, .rgba32Float)
 
         let cb = try XCTUnwrap(queue.makeCommandBuffer())
         let pack = try XCTUnwrap(pipelines["s1_8_g_contrast_pack"])

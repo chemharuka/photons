@@ -1,58 +1,84 @@
 import Foundation
 
-/// 098 — **contrast as a multiscale, edge-aware decomposition of `Y`**, in the scene-linear domain.
+/// 159 — **contrast as a multiscale, edge-aware decomposition of `Y`**, in the **display-referred**
+/// domain (S2.5, after S2 and before S3). 098 put the same decomposition in the scene-linear domain
+/// with a fixed pivot of −3.5 EV; 142 measured that this made `exposure × contrast` non-commutative
+/// (p50 gain 0.666 at E0 vs 2.695 at E+2, 74 % of pixels changing sign) and 155 measured that the
+/// masked contrast was a *different* operator. Both are consequences of anchoring a gain to an
+/// absolute scene-linear level. This is the display-domain replacement, and it is deliberately
+/// **homogeneous**: every term is a residual of the multiscale decomposition, so multiplying the
+/// picture by an exposure gain shifts `G` and `B_c` together and leaves the contrast gain untouched.
 ///
-/// The one place for the new stage's numbers, so the kernel, the render graph and the tests cannot
-/// drift apart (the same discipline as `S2Contrast` and `HDRCurve.axis`):
+/// The one place for the stage's numbers, so the kernel, the render graph and the tests cannot drift
+/// apart (the same discipline as `S2Contrast` and `HDRCurve.axis`):
 ///
-///     Y    = max(dot(max(rgb, 0), Rec2020 weights), 1e-6)
+///     Y    = max(dot(max(rgb, 0), Rec2020 weights), 1e-6)      // display Y, white = 1 = 0 EV
 ///     G    = log2(Y)
 ///     B_c  = GF(G,  r_c, ε_c)                 // coarse base
 ///     D1   = G − B_c
 ///     B_m  = GF(D1, r_m, ε_m)                 // mid band
 ///     D_f  = D1 − B_m                         // fine band (no filter)
-///     G′   = P + k_c·(B_c − P) + gate·(k_m·B_m + k_f·D_f)
+///     G′   = G + gate·(W_m·B_m + W_f·D_f)     // residuals only: a level anchor is the 142 bug
 ///     rgb′ = max(rgb, 0) · 2^(G′ − G)
+///
+/// `W_m`/`W_f` carry the slider: `W = t · w`, `t = contrast/100`, so `contrast = 0` is exactly the
+/// identity (`2^0 = 1`) and the stage at +100 multiplies the mid/fine residuals by `w` in EV. The
+/// display-domain log amplitude of a scene is about a quarter of the scene-linear one (a tone-mapped
+/// frame spans ~2.3 EV where the scene spans 4+), so `w` is ~4× 098's band gains. The guided
+/// filter's ε thresholds are in squared log2 units and therefore scale by 1/16; the gradient gate is
+/// in log2-per-texel and scales by 4. Those three numbers are what makes the same slider produce the
+/// same local detail in the new domain (A4 of 159).
 ///
 /// The gain is a single scalar applied to all three channels, so every chroma ratio (`R/Y`, `G/Y`,
 /// `B/Y`) — and therefore hue and saturation — is preserved exactly.
 ///
-/// There is **no black or white end point**: the only anchor is the fixed pivot `P` and the three
-/// multiplicative gains. Nothing here clamps above display white, so an HDR sample is expanded by
-/// the same pivot arithmetic as a mid-tone (the property 079 §4 established for S2).
+/// There is **no black or white end point** and no fixed level anchor. Nothing here clamps above
+/// display white, so an HDR sample is expanded by the same residual arithmetic as a mid-tone (the
+/// property 079 §4 established for S2).
 ///
 /// The `.metal` copy of these numbers is `MC_*` in `Kernels/s1_8_contrast.metal`;
 /// `ContrastMultiscaleTests.testTheKernelConstantsAreTheSwiftConstants` parses the kernel and
 /// asserts the two copies are equal, because a kernel cannot import Swift.
 public enum MultiscaleContrast {
 
-    /// The fixed pivot, in EV relative to display white. Deliberately not an end point: `+100`
-    /// stretches the whole axis away from it, `−100` compresses towards it, and the same rule applies
-    /// at `Y = 0.02` and `Y = 8`.
-    public static let pivotEV: Double = -3.5
+    /// The pivot, in EV relative to display white (`0` = display white). 159: the stage is
+    /// display-referred, so the coordinate's origin is white, not 098's scene-linear −3.5 EV. The
+    /// kernel does not add the pivot back — the gain is built from residuals — but the number stays
+    /// in the uniform so a log line names the coordinate the bands were measured in.
+    public static let pivotEV: Double = 0
 
-    /// The guided filter's amplitude threshold for the coarse band, in log2 units. A ±0.1 EV texture
-    /// has variance ≈ 2.5e-3 and keeps ~20 % of its residual; a 0.5 EV edge has ≈ 0.25 and is treated
-    /// as structure (`a → 1`).
-    public static let coarseEpsilon: Double = 0.010
+    /// The guided filter's amplitude threshold for the coarse band, in squared display-log2 units.
+    /// 098's 0.010 measured a scene log whose local variance is ~16× larger; a threshold that small
+    /// in the display coordinate makes `a → 1` (`B_c → G`), i.e. the decomposition has no residual
+    /// left to shape. 0.25 keeps the same *fraction* of a window's variance as structure.
+    public static let coarseEpsilon: Double = 0.80
 
-    /// The same threshold for the mid band. Smaller, because the mid band has already had the coarse
-    /// base removed and its residual is smaller.
-    public static let midEpsilon: Double = 0.004
+    /// The same threshold for the mid band, a quarter of the coarse one as in 098.
+    public static let midEpsilon: Double = 0.32
 
-    /// Full-scale coarse gain exponent: `k_c = 2^(1.00 · t)`.
-    public static let coarseWeight: Double = 1.00
-    /// Full-scale mid gain exponent: `k_m = 2^(0.50 · t)`.
-    public static let midWeight: Double = 0.50
-    /// Full-scale fine gain exponent: `k_f = 2^(0.25 · t)`. The cap is **intentional** (098 §6): the
-    /// fine band overlaps S3.9's 清晰度, so it is given only a quarter of the coarse travel.
-    public static let fineWeight: Double = 0.25
+    /// Full-scale mid-band travel, in EV per EV of display log residual. 098's `k_m` was
+    /// `2^(0.5·t)`, i.e. 1.414 at +100 in the scene-linear coordinate; the display coordinate is
+    /// ~1/4 as wide, so 3·0.5 ≈ 1.5 reproduces the same EV travel.
+    public static let midWeight: Double = 7.50
+    /// Full-scale fine-band travel. 098's fine cap (a quarter of the coarse travel) is kept: the fine
+    /// band overlaps S3.9's 清晰度, so it must not become a second clarity. 3·0.25 = 0.75.
+    public static let fineWeight: Double = 3.75
+    /// 098's coarse *level* term (`k_c·(B_c − P)`) is **gone**: a gain anchored to an absolute level
+    /// is exactly what made exposure and contrast non-commutative (142). Kept as a named zero so a
+    /// reader looking for it finds the reason instead of a dangling comment.
+    public static let coarseWeight: Double = 0
 
-    /// The gradient gate's knees, in **log2 luma per 1/q texel** (the same construction as
-    /// `s3_8_guide_coeff`). A step moves the window mean by ~0.1 per texel, a smooth gradient by
-    /// ~1e-3, so this passes every gradual transition and stops every structural edge.
-    public static let gateLo: Double = 0.015
-    public static let gateHi: Double = 0.06
+    /// The gradient gate's knees, in **display log2 luma per 1/q texel**. 098's 0.015/0.06 measured
+    /// the scene log; the display log is 1/4 as wide, so the same *relative* knee is 4× larger here
+    /// (0.06/0.24) — the opposite of dividing, which would shut the gate over ordinary texture.
+    public static let gateLo: Double = 0.05
+    public static let gateHi: Double = 2.00
+
+    /// 159/A5 — the **display black floor**, in linear light: display code `0.012` (the A5
+    /// threshold). A pixel that already clears the floor is never darkened below it; a pixel under
+    /// it is left where it is. This is the one absolute statement in the operator, and it is about
+    /// the *output* picture, not about the gain: the residual gain itself stays homogeneous.
+    public static let floorY: Double = 0.00110
 
     /// Statistics block, in pixels. `4` is not a knob: a 2…8 px pattern averages out, a step edge
     /// does not.
@@ -78,9 +104,10 @@ public enum MultiscaleContrast {
         }
     }
 
-    /// `t = contrast / 100` → the three multiplicative gains.
+    /// `t = contrast / 100` → the two bands' EV travels. The coarse slot is kept at 0 (see
+    /// `coarseWeight`); a caller that wants the identity asks for `t = 0`, which is exactly `(0, 0)`.
     public static func scaleGains(t: Double) -> (coarse: Double, mid: Double, fine: Double) {
-        (pow(2, coarseWeight * t), pow(2, midWeight * t), pow(2, fineWeight * t))
+        (coarseWeight * t, midWeight * t, fineWeight * t)
     }
 
     /// Radius in the 1/q domain: `fraction · shortEdge / q`, rounded, floored at 1 and capped.
@@ -89,16 +116,19 @@ public enum MultiscaleContrast {
         return min(max(Int(texels), 1), cap)
     }
 
-    /// The gain the kernel applies to a pixel whose linear luma is `Y`, given its three bands.
+    /// The gain the kernel applies to a pixel whose display luma is `Y`, given its three bands.
     ///
-    /// `contrast == 0` is the exact identity (`kBands == 0` and `2^0 == 1`), which is what makes the
+    /// `contrast == 0` is the exact identity (`0 · band == 0` and `2^0 == 1`), which is what makes the
     /// stage's absence equivalent to its presence at zero.
     public static func gainRatio(Y: Double, bands: Bands, contrast: Double) -> Double {
         guard contrast != 0, Y.isFinite else { return 1 }
         let G = log2(max(Y, 1e-6))
         let k = scaleGains(t: contrast / 100)
-        let gPrime = pivotEV + k.coarse * (bands.coarse - pivotEV)
-            + k.mid * bands.mid + k.fine * bands.fine
-        return pow(2, gPrime - G)
+        let gPrime = G + k.coarse * bands.coarse + k.mid * bands.mid + k.fine * bands.fine
+        let ratio = pow(2, gPrime - G)
+        // The display black floor (A5): a pixel that clears it is not pushed under it.
+        let y = max(Y, 0)
+        if ratio < 1, y >= floorY, y * ratio < floorY { return floorY / y }
+        return ratio
     }
 }
