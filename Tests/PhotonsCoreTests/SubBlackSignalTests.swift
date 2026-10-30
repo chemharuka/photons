@@ -177,7 +177,7 @@ final class SubBlackSignalTests: XCTestCase {
         // render as code 3 — so the invariant is stated at the granularity the invariant has: no
         // 8-bit code may rise. A real brightening (the failure this test was written for) moves a
         // whole code and still fails.
-        XCTAssertLessThanOrEqual((means[5] * 255).rounded(), (neutralMeans[5] * 255).rounded(),
+        XCTAssertLessThanOrEqual(means[5] * 255, neutralMeans[5] * 255 + 0.01,
                                  "an ordinary edit brightened a +0.001 sample")
         XCTAssertLessThanOrEqual(means[5] * 255, 4,
                                  "a +0.001 sample must not render as grey")
