@@ -73,6 +73,22 @@ final class MaskRangeBarTests: XCTestCase {
               + "\(moved.high - moved.low) == \(start.high - start.low)")
     }
 
+    // V5′ — a newly created luminance mask starts on the whole HDR axis
+
+    func testNewMaskStartsAtTheWholeHDRDomain() throws {
+        let session = CatalogSession()
+        let mask = try XCTUnwrap(session.addMask(kind: .luminanceRange))
+        let component = mask.components.count - 1
+        guard case .luminanceRange(let start) = session.edit.masks
+            .first(where: { $0.id == mask.id })!.components[component].shape else {
+            return XCTFail("addMask(.luminanceRange) did not create a luminance range")
+        }
+        XCTAssertEqual(start.low, 0)
+        XCTAssertEqual(start.high, LuminanceRangeShape.hdrMax, accuracy: 1e-12,
+                       "a new mask must select the whole HDR axis")
+        print("RANGE new · \(start.low)…\(start.high) == 0…hdrMax")
+    }
+
     // ⑪ one drag = one history entry
 
     func testOneDragIsOneHistoryEntry() throws {

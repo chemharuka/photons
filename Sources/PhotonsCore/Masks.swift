@@ -399,8 +399,8 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     /// The top of the luminance axis: OKLab `L` of neutral light at +4 EV (`cbrt(16)`).
     ///
     /// The one constant both sides read — `s1_5_mask_atlas.metal`'s predicate and the range bar —
-    /// so `2.5198` is never typed twice. SDR documents that used `high = 1.0` mean "to and beyond
-    /// white"; the v1→v2 migration below maps that sentinel to this value.
+    /// so `2.5198` is never typed twice. This is the default for **new** masks only; a v1 document's
+    /// numbers are never rewritten (see `v1DecodeDefaults`).
     public static let hdrMax: Double = cbrt(16.0)
 
     public var low: Double
@@ -408,11 +408,18 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     public var lowFeather: Double
     public var highFeather: Double
     /// Encoding generation of the coordinate: `1` (implicit in old documents) = SDR `0…1`,
-    /// `2` = HDR `0…hdrMax`. A decoded v1 document is migrated **once**, in memory, and re-encodes
-    /// as v2, so loading it again is a no-op.
+    /// `2` = HDR `0…hdrMax`. A v1 document decodes **verbatim** — no value is migrated — and
+    /// re-encodes as v2 so the generation is recorded; the numbers are untouched.
     public var v: Int
 
     public static let `default` = LuminanceRangeShape()
+
+    /// The defaults a v1 document falls back to for fields it omits. Deliberately **separate** from
+    /// `default`: a v1 document's `high` was the SDR `1.0`, not the new `hdrMax`. Sharing `default`
+    /// here would turn "an old document missing `high`" into an HDR select-all, which the user's
+    /// no-migration decision forbids.
+    private static let v1DecodeDefaults = LuminanceRangeShape(low: 0, high: 1.0,
+                                                              lowFeather: 0.10, highFeather: 0.10)
 
     public init(low: Double = 0, high: Double = LuminanceRangeShape.hdrMax,
                 lowFeather: Double = 0.10, highFeather: Double = 0.10) {
@@ -425,20 +432,18 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
-        var value = LuminanceRangeShape.default
+        // 167 — no `v` ⇒ v1, the old SDR coordinate. **No numeric migration**: the five stored
+        // fields are kept verbatim, so a v1 `high = 1.0` stays `1.0`. The old window's upper edge is
+        // `1 − smoothstep(high − highFeather, high + highFeather, L)`, so `1.0` never meant "white
+        // and above" — rewriting it to `hdrMax` would silently change a deliberate cut. Only the
+        // generation is promoted, so the next encode records v2.
+        let version = c.val("v", 1)
+        var value = version < 2 ? LuminanceRangeShape.v1DecodeDefaults : LuminanceRangeShape.default
         value.low = c.val("low", value.low)
         value.high = c.val("high", value.high)
         value.lowFeather = c.val("lowFeather", value.lowFeather)
         value.highFeather = c.val("highFeather", value.highFeather)
-        // 167 — no `v` ⇒ v1, the old SDR coordinate. In v1 `high == 1.0` was the "white and above"
-        // sentinel; now that the axis reaches +4 EV the same intent is `hdrMax`. A narrower upper
-        // edge was a deliberate mid-tone cut and stays verbatim, as do `low` and both feathers.
-        var version = c.val("v", 1)
-        if version < 2 {
-            if value.high == 1.0 { value.high = LuminanceRangeShape.hdrMax }
-            version = 2
-        }
-        value.v = version
+        value.v = max(version, 2)
         self = value
     }
 

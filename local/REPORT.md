@@ -146,3 +146,85 @@ coverage 与 analytic 参考也全绿。
 - UI 定向套件（RangeBar / Eyedropper / SliderRow / Handle）：**0 失败**。
 - 没有使用 `XCTSkip` 代替重钉；只更新了 167 引入后已经陈旧的 E0 atlas digest，并在上面给出
   introducing commit 与 old→new。
+
+## 10. 改为「不迁移」后（2026-10-30 20:10 拍板）· V2′ / V3′ / V5′ 实测
+
+用户决定：**不迁移**。v1 文档（无 `v`）解码时五个字段原样保留（`high = 1.0` 仍是 1.0），
+重新编码写 `v = 2`，数值不变；v1 缺字段的回退默认值用 v1 自己的 `high = 1.0`，与
+`LuminanceRangeShape.default`（新蒙版，`high = hdrMax`）分开；新蒙版仍默认全轴。
+
+### 10.1 解码（`testLuminanceRangeV1DocumentsDecodeVerbatim`）
+
+```
+V1 DECODE · full high 1.0 · narrow high 0.6 · v1 missing high 1.0 · v2 missing high 2.5198420997897464 · v 2
+```
+
+- `{low:0, high:1.0, f:.10/.10}` → `high == 1.0`，`v == 2`。
+- `{low:0.4, high:0.6}` → 两值原样；省略的 feather 落到 v1 默认 `0.10`。
+- 缺 `high` 且无 `v` → `1.0`（不会变成 HDR 全选）；同缺 `high` 但 `v == 2` → `hdrMax`。
+- 重新编码含 `"v":2`，再解码不变。`testLuminanceRangeV1DocumentsMigrateOnce` 已删除。
+
+### 10.2 V2′（`testV1FullRangeDocumentAgainstTheOldClampedKernel`）
+
+0…+4 EV 中性面片，`{low:0, high:1.0, f:.10/.10}` 原样解码；旧参考实现保留
+`clamp(light, 0, 1)`：
+
+```
+V2′ old 0=0.5000 · +1=0.5000 · +2=0.5000 · +3=0.5000 · +4=0.5000
+V2′ new 0=0.5000 · +1=0.0000 · +2=0.0000 · +3=0.0000 · +4=0.0000
+V2′ digest old 1719c8cde412ad396875d1ec9dd0abb9ff55124502e40873a90105c220ea3015
+             new 46630b46a4bd9cf17fb3b14ff20bbae349500ef974568da52d48a4c3c954941d
+```
+
+**必须更正上一版报告的一处事实**：旧窗口（上沿 `1 − smoothstep(hi−hiF, hi+hiF, L)`）在
+`hi = 1, hiF = 0.10` 时，`L = 1` 的 alpha 是 **0.5**，不是 0；0.9…1 是从 1 渐隐到 0.5，
+不是渐隐到 0。0 出现在 `L ≥ 1.1`（未 clamp 时）。因此：
+
+- 在显示白点（0 EV，`L = 1`）上，新旧内核**逐位相等**（都是 0.5）；
+- 白点以上**不可能**再相等：旧参考把 `light` clamp 到 1，所有高光都变成 `L = 1`（alpha 0.5）；
+  新内核读到 `L = cbrt(2^stop) > 1`，而文档保留下来的 `high = 1.0` 把窗口关掉（alpha 0）。
+  要让 0…+4 EV 全 range 逐字节相等，只能让新内核重新把高光折回 `L = 1`——那正是 167 去掉的 clamp。
+- 所以「不迁移」仍然是对的：v1 文档保留原数，且**不会**开始选中高光；半选中高光的是旧 clamp，
+  不是迁移。V2′ 因此钉的是「白点相等 + 白点以上按实测发散」，不再声称全 range 相等。
+
+### 10.3 V3′（`testV1MidToneDocumentRendersTheOldSelectionByteForByte`）
+
+`{low:0.4, high:0.6}`（feather 落到 v1 默认 0.10，窗口 0.3…0.7）在三条平坦 SDR 带
+`L = 0.2 / 0.5 / 0.8` 上：
+
+```
+V3′ L 0.2/0.5/0.8 → 0.0000 / 1.0000 / 0.0000
+V3′ digest old 8c3a082dd97f51f5270f807efbc97515e982cd6c3b59b26ac1ee394ce1303330
+             new 8c3a082dd97f51f5270f807efbc97515e982cd6c3b59b26ac1ee394ce1303330
+```
+
+逐字节相等。这里用平坦带而不是连续 ramp：atlas 是 `rgba16Float`，连续 ramp 会把大量像素放在
+8-bit 舍入边界半个 ULP 内，GPU 的 float fold 与 CPU 的 double fold 会翻 32–48/768 个码值
+（实测 `maxdiff ≈ 4.88e-4`），那不是旧/新窗口的差异。平坦带上的 0/1 能被半浮点精确表示，
+8-bit digest 才是真正的「逐字节」比较。
+
+### 10.4 V5′（`testNewLuminanceMaskDefaultsToTheWholeHDRDomain` + UI）
+
+```
+RANGE new · 0.0…2.5198420997897464 == 0…hdrMax
+V5′ default high 2.5198420997897464 · 0=1.0000 · +1=1.0000 · +2=1.0000 · +3=1.0000 · +4=0.5000
+```
+
+新建蒙版默认 `low = 0, high = hdrMax`（UI 的 `addMask(.luminanceRange)` 也实测如此）。
+默认窗口覆盖 0…+4 EV 全部（alpha > 0）；0…+3 EV 为 1；+4 EV 正好落在轴端，按既有的
+**居中 feather** 规则给 0.5（与旧的 `1.0` 端点在 SDR 轴上的行为同一条 `two_sided_window`）。
+若要 +4 EV 也严格为 1，需要把默认 `high` 放到 `hdrMax + highFeather` 之外，或改 feather 语义，
+两者都超出本单（且会动深度共用窗口），没有做。
+
+### 10.5 测试与文件
+
+- `swift build --build-tests`（debug）：通过。
+- 定向套件：`MaskTests (59, 1 个既有 bench skip)`、`MaskRangeBarTests (8)`、
+  `MaskEyedropperTests (8)`、`ExposureEquivarianceTests (10, 3 个既有 skip)`、
+  `DepthMaskTests (5)`、`WindowTests (14)`、`CacheVersionTests (8)`、`BlackLevelTests (13)`：
+  **0 失败**。没有新增 `XCTSkip`、没有改阈值、没有重录 golden。
+- 改动文件：`Sources/PhotonsCore/Masks.swift`、`Tests/PhotonsCoreTests/MaskTests.swift`、
+  `Tests/PhotonsUITests/MaskRangeBarTests.swift`、本报告。`s1_5_mask_atlas.metal` 与
+  `MaskRangeBar.swift` 无需改动，未动。
+- `AlgorithmVersion.swift` 的 `maskAtlas = 5` 说明里仍有一句「the migrated v1→v2 document…」，
+  因本单限定只改上述文件，未编辑；该句已不成立（现在是「v1 原样保留」）。
