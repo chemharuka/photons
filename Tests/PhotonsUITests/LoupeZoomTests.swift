@@ -459,9 +459,15 @@ final class LoupeZoomTests: XCTestCase {
         var sawInside = 0, sawOutside = 0
         for degrees in [0.0, 7.0] {
             let f = framing(degrees: degrees, crop: crop)
-            let frame = ImageSize(width: Int((f.cropWidthPixels * 1).rounded()),
-                                  height: Int((f.cropHeightPixels * 1).rounded()))
-            XCTAssertNil(f.outputWindow(of: .fit), "fit is the whole frame, so it names no window")
+            // 176: the window indexes the **expanded canvas** — the picture's own grid plus the canvas
+            // origin `((canvas − frame)/2)` on every side, exactly as `RenderGraph` indexes it. Both are
+            // `CropMath`'s numbers here, not the implementation's.
+            let sourcePixels = ImageSize(width: Int(source.width), height: Int(source.height))
+            let canvas = CropMath.canvasSize(crop: crop, in: sourcePixels,
+                                             straightenDegrees: degrees, quarterTurns: 0)
+            let margin = CropMath.canvasOrigin(crop: crop, in: sourcePixels,
+                                               straightenDegrees: degrees, quarterTurns: 0)
+            XCTAssertNil(f.outputWindow(of: .fit), "fit is the whole output, so it names no window")
             for zoom in [1.0, 2.5, 4.0] {
                 for centre in [(3000.0, 2000.0), (1200.0, 700.0), (5200.0, 3500.0)] {
                     let state = actual(zoom: zoom, x: centre.0, y: centre.1)
@@ -475,15 +481,21 @@ final class LoupeZoomTests: XCTestCase {
                     XCTAssertEqual(Double(window.width), Double(viewport.width), accuracy: 1.0)
                     XCTAssertEqual(Double(window.height), Double(viewport.height), accuracy: 1.0)
                     let inside = window.x >= 0 && window.y >= 0
-                        && window.x + window.width <= frame.width
-                        && window.y + window.height <= frame.height
+                        && window.x + window.width <= canvas.width
+                        && window.y + window.height <= canvas.height
                     if inside {
                         sawInside += 1
-                        // crop rect (source pixels) → content pixels, relative to the crop's origin.
-                        XCTAssertEqual(Double(window.x), (rect.left * f.sourceWidth - f.cropOriginX) * zoom,
+                        // crop rect (source pixels) → content pixels relative to the crop's origin,
+                        // then the canvas origin on top of it (176) — the quantity the old assertion
+                        // named on its own, now plus the margin the renderer composes every frame at.
+                        XCTAssertEqual(Double(window.x),
+                                       ((rect.left * f.sourceWidth - f.cropOriginX) * zoom).rounded()
+                                           + (Double(margin.x) * zoom).rounded(),
                                        accuracy: 1.0 * zoom,
                                        "θ=\(degrees) z=\(zoom): window origin x drifted")
-                        XCTAssertEqual(Double(window.y), (rect.top * f.sourceHeight - f.cropOriginY) * zoom,
+                        XCTAssertEqual(Double(window.y),
+                                       ((rect.top * f.sourceHeight - f.cropOriginY) * zoom).rounded()
+                                           + (Double(margin.y) * zoom).rounded(),
                                        accuracy: 1.0 * zoom,
                                        "θ=\(degrees) z=\(zoom): window origin y drifted")
                         XCTAssertEqual(Double(window.width), rect.width * f.sourceWidth * zoom,
@@ -497,9 +509,9 @@ final class LoupeZoomTests: XCTestCase {
                         XCTAssertLessThanOrEqual(rect.right, 1 + 1e-9)
                         XCTAssertLessThanOrEqual(rect.bottom, 1 + 1e-9)
                         XCTAssertTrue(window.x < 0 || window.y < 0
-                                        || window.x + window.width > frame.width
-                                        || window.y + window.height > frame.height,
-                                      "an out-of-frame window must be reported as such")
+                                        || window.x + window.width > canvas.width
+                                        || window.y + window.height > canvas.height,
+                                      "an out-of-canvas window must be reported as such")
                     }
                 }
             }

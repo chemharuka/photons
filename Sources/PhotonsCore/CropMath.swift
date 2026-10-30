@@ -327,6 +327,31 @@ public enum CropMath {
                          height: ceilPixel(w * sine + h * cosine))
     }
 
+    /// Where the crop's own frame starts inside the **expanded canvas**, in canvas pixels:
+    /// `((canvas − frame) / 2)`, the margin a rotated crop is centred in (176).
+    ///
+    /// This is the number a `RenderOptions.outputWindow` has to carry on top of the picture's own
+    /// pixels: the canvas is bigger than the picture at every non-right angle, so a window naming
+    /// picture pixels would cut the frame at the picture's pivot rather than the canvas' — the very
+    /// mismatch between the loupe's full-size frame and the real render that 176 fixes.
+    ///
+    /// Integer division, because a window is an integer rect on that canvas: the continuous
+    /// half-pixel (`(canvas − frame)` odd) stays in the render, where the projection lives. `(0, 0)`
+    /// at every right angle, because `canvasSize` returns `outputSize` itself there.
+    public static func canvasOrigin(crop: CropRect, in source: ImageSize,
+                                    straightenDegrees: Double, quarterTurns: Int,
+                                    allowsOutsideSource: Bool = false) -> (x: Int, y: Int) {
+        let canvas = canvasSize(crop: crop, in: source,
+                                straightenDegrees: straightenDegrees,
+                                quarterTurns: quarterTurns,
+                                allowsOutsideSource: allowsOutsideSource)
+        let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
+            ? ImageSize(width: source.height, height: source.width)
+            : source
+        let frame = outputSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource)
+        return ((canvas.width - frame.width) / 2, (canvas.height - frame.height) / 2)
+    }
+
     /// Size the renderer allocates at `scale` relative to the crop (1 = 1:1 pixels).
     public static func renderSize(_ crop: CropRect, in source: ImageSize,
                                   scale: Double = 1) -> ImageSize {

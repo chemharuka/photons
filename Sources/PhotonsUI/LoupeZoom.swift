@@ -829,25 +829,54 @@ public struct LoupeFraming: Equatable, Sendable {
         return ImageSize(width: Int(content.width.rounded()), height: Int(content.height.rounded()))
     }
 
-    /// The window as `RenderOptions.outputWindow`: **content pixels** of the full crop frame at the
-    /// state's `scale`. `nil` for `fit`, which is the whole frame by definition.
+    /// The window as `RenderOptions.outputWindow`: **content pixels** of the whole output at the
+    /// state's `scale`, i.e. of the **expanded canvas** when the document is straightened. `nil` for
+    /// `fit`, which is the whole output by definition.
     ///
     /// This is the render-side description of a 1:1 window: the frame is cropped/straightened/flipped
     /// once, and this rect is the part of *that* picture the viewport shows. One source pixel is
     /// `zoom` content pixels, so the arithmetic is the source-pixel window minus the crop's origin,
     /// scaled by `zoom` — no rotation of its own, because the window lives in the frame, not in the
-    /// source (`ZoomedEditCarriesTheWindow…` pins the two descriptions against each other).
-    public func outputWindow(of state: LoupeViewState) -> ImageRect? {
+    /// source — **plus the canvas origin** `((canvas − frame)/2)` (176): at θ ≠ 0 the picture sits
+    /// centred in a larger canvas, and a window that named picture pixels would cut the frame at the
+    /// picture's pivot while `RenderGraph` composes every other frame at the canvas'. That mismatch is
+    /// what put the crop workspace's full-size frame 211 px off the real render at 45°.
+    ///
+    /// `decodeScale` is the rung the picture is decoded at: `CropMath.canvasSize` rounds up *once*, on
+    /// the grid the render actually allocates, so the margin is measured there and then scaled with the
+    /// window (a 25 % decode of a 9520 px file has a 2803 px canvas, not 11211/4).
+    public func outputWindow(of state: LoupeViewState, decodeScale: Double = 1) -> ImageRect? {
         guard state.mode == .actual else { return nil }
         let z = zoom(of: state)
         guard z.isFinite, z > 0 else { return nil }
         let size = windowSize(of: state)
         let centre = windowCenter(of: state)
-        let left = (centre.x - size.width / 2 - cropOriginX) * z
-        let top = (centre.y - size.height / 2 - cropOriginY) * z
-        return ImageRect(x: Int(left.rounded()), y: Int(top.rounded()),
+        let margin = canvasOrigin(decodeScale: decodeScale, zoom: z)
+        let left = ((centre.x - size.width / 2 - cropOriginX) * z).rounded()
+        let top = ((centre.y - size.height / 2 - cropOriginY) * z).rounded()
+        return ImageRect(x: Int(left) + margin.x, y: Int(top) + margin.y,
                          width: Int((size.width * z).rounded()),
                          height: Int((size.height * z).rounded()))
+    }
+
+    /// 176 — the picture's place inside the expanded canvas, in **device pixels** at `zoom`.
+    ///
+    /// `(0, 0)` at every right angle (`CropMath.canvasOrigin` is exactly zero there, and the render's
+    /// baseline *is* the frame). Integer canvas pixels, one definition, in `CropMath` — the same
+    /// quantity `RenderGraph.plan` subtracts from the window (`inset`), so the loupe never grows a
+    /// second copy of the canvas arithmetic.
+    private func canvasOrigin(decodeScale: Double, zoom: Double) -> (x: Int, y: Int) {
+        guard straightenDegrees != 0 else { return (0, 0) }
+        let ds = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
+        let decoded = ImageSize(width: max(1, Int((sourceWidth * ds).rounded())),
+                                height: max(1, Int((sourceHeight * ds).rounded())))
+        // `sourceWidth`/`crop` are already the turned frame, so no quarter turn enters here.
+        let origin = CropMath.canvasOrigin(crop: crop, in: decoded,
+                                           straightenDegrees: straightenDegrees,
+                                           quarterTurns: 0)
+        let pxPerDecoded = zoom / ds
+        return (Int((Double(origin.x) * pxPerDecoded).rounded()),
+                Int((Double(origin.y) * pxPerDecoded).rounded()))
     }
 
     /// The document the renderer should be given for this state, **as an output window** routed
