@@ -999,6 +999,7 @@ public struct ExportSheetView: View {
                 sizeSection
                 sharpenSection
                 metadataSection
+                watermarkSection
                 exportSection
             }
             .formStyle(.grouped)
@@ -1484,6 +1485,62 @@ public struct ExportSheetView: View {
             }
         } header: {
             sectionHeader("元数据")
+        }
+    }
+
+    // MARK: 水印
+
+    private var watermarkSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("文字").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                TextField("水印文字", text: $model.preset.watermarkText)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 220)
+                    .accessibilityIdentifier("export.watermark.text")
+                    .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("位置").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("", selection: $model.preset.watermarkPosition) {
+                    ForEach(WatermarkPosition.allCases, id: \.self) { position in
+                        Text(position.displayName).tag(position)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 110)
+                .accessibilityIdentifier("export.watermark.position")
+                .disabled(model.phase == .running)
+            }
+            HStack(spacing: 8) {
+                Text("不透明度").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Slider(value: $model.preset.watermarkOpacity, in: 0 ... 100, step: 5)
+                    .controlSize(.small)
+                    .frame(width: 150)
+                    .disabled(model.phase == .running)
+                SliderNumberField(value: model.preset.watermarkOpacity,
+                                  range: 0 ... 100, format: "%.0f",
+                                  decimals: 0, fontSize: 10, width: 44,
+                                  accessibilityID: "export.watermark.opacity") { typed in
+                    model.preset.watermarkOpacity = min(100, max(0, typed))
+                }
+                .disabled(model.phase == .running)
+                Text("%").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            if !model.preset.isWatermarkActive {
+                Text("不画水印")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        } header: {
+            sectionHeader("水印")
         }
     }
 

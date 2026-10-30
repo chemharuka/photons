@@ -85,6 +85,23 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// 180 — 文字水印落在哪个角。四角固定，没有任意坐标（规格 §1 明确不做）。
+public enum WatermarkPosition: String, Codable, Sendable, CaseIterable {
+    // 声明顺序 = UI 顺序 = 存储拼写；不要为了弹窗好看去重排。
+    case topLeft, topRight, bottomLeft, bottomRight
+
+    public static var `default`: WatermarkPosition { .bottomRight }
+
+    public var displayName: String {
+        switch self {
+        case .topLeft: return "左上"
+        case .topRight: return "右上"
+        case .bottomLeft: return "左下"
+        case .bottomRight: return "右下"
+        }
+    }
+}
+
 /// 109 — what an **SDR** export does with values above display white.
 ///
 /// `.none` is the historical path: `s4_display` clamps at 1 before the OETF, byte for byte. `.global`
@@ -118,6 +135,7 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case hdrColorSpaceMismatch(OutputPrimaries, OutputPrimaries, HDRKind)
     case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
+    case badWatermarkOpacity(Double)
     case emptyNameTemplate
     case unreadable(URL, String)
 
@@ -155,6 +173,8 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
             return "HDR manual headroom must be ≥ 1.05, got \(h)"
+        case .badWatermarkOpacity(let o):
+            return "watermark opacity must be 0…100, got \(o)"
         case .emptyNameTemplate:
             return "nameTemplate is empty — the files would all be called '.jpg'"
         case .unreadable(let url, let why):
@@ -382,6 +402,13 @@ public struct ExportPreset: Sendable, Equatable {
     /// `all` = the full develop packet; `copyright` = author/copyright only; `none` = no XMP.
     public var metadataLevel: ExportMetadataLevel
 
+    /// 180 — 导出时画在最终像素上的文字水印。`""`（默认）= 完全不画，一个字节都不改。
+    public var watermarkText: String
+    /// 180 — 四角之一。默认右下（与 LR 一致）。
+    public var watermarkPosition: WatermarkPosition
+    /// 180 — 0…100，0 = 不画。默认 60。
+    public var watermarkOpacity: Double
+
     public init(name: String? = nil,
                 format: ExportFormat = .jpeg,
                 longEdge: Int? = nil,
@@ -399,7 +426,10 @@ public struct ExportPreset: Sendable, Equatable {
                 percent: Int? = nil,
                 subfolder: String = "",
                 conflict: ExportConflict = .rename,
-                metadataLevel: ExportMetadataLevel = .all) {
+                metadataLevel: ExportMetadataLevel = .all,
+                watermarkText: String = "",
+                watermarkPosition: WatermarkPosition = .bottomRight,
+                watermarkOpacity: Double = 60) {
         self.name = name
         self.format = format
         self.longEdge = longEdge
@@ -428,9 +458,18 @@ public struct ExportPreset: Sendable, Equatable {
         self.subfolder = subfolder
         self.conflict = conflict
         self.metadataLevel = metadataLevel
+        self.watermarkText = watermarkText
+        self.watermarkPosition = watermarkPosition
+        self.watermarkOpacity = watermarkOpacity
     }
 
     // MARK: derived
+
+    /// 180 — 真的会画吗。空白字符按空处理（用户敲一个空格不算水印）。
+    public var isWatermarkActive: Bool {
+        watermarkOpacity > 0
+            && !watermarkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// 111 — the requested HDR type (`nil` `hdr` = SDR). Reading is safe on a preset that predates
     /// the split; writing `.none` clears the optional instead of leaving an inert block behind.
@@ -535,6 +574,12 @@ public struct ExportPreset: Sendable, Equatable {
                          || (sizingMode == .percent && percent != nil)) {
             parts.append("未放大")
         }
+        // 180 — only when the watermark really paints: an inactive preset's summary stays byte-for-byte
+        // what 099/111 asserted.
+        if isWatermarkActive {
+            parts.append("水印 " + watermarkPosition.displayName + " "
+                         + String(Int(watermarkOpacity.rounded())) + "%")
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -554,6 +599,9 @@ public struct ExportPreset: Sendable, Equatable {
         if let percent, percent < 10 { throw ExportPresetError.badPercent(percent) }
         if let sharpen, !(0.3...3.0).contains(sharpen.radius) {
             throw ExportPresetError.badSharpeningRadius(sharpen.radius)
+        }
+        guard (0...100).contains(watermarkOpacity) else {
+            throw ExportPresetError.badWatermarkOpacity(watermarkOpacity)
         }
         if let hdr, hdr.enabled {
             guard format.supports(hdr.kind) else {
@@ -618,6 +666,7 @@ extension ExportPreset: Codable {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
         case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel
         case sdrToneMapping
+        case watermarkText, watermarkPosition, watermarkOpacity
     }
 
     public init(from decoder: Decoder) throws {
@@ -649,6 +698,10 @@ extension ExportPreset: Codable {
             .flatMap(ExportConflict.init(rawValue:)) ?? .rename
         self.metadataLevel = try c.decodeIfPresent(String.self, forKey: .metadataLevel)
             .flatMap(ExportMetadataLevel.init(rawValue:)) ?? .all
+        self.watermarkText = try c.decodeIfPresent(String.self, forKey: .watermarkText) ?? ""
+        self.watermarkPosition = try c.decodeIfPresent(String.self, forKey: .watermarkPosition)
+            .flatMap(WatermarkPosition.init(rawValue:)) ?? .default
+        self.watermarkOpacity = try c.decodeIfPresent(Double.self, forKey: .watermarkOpacity) ?? 60
     }
 
     /// New-in-099 keys are written only when they are not the default. That is what makes a preset
@@ -677,6 +730,12 @@ extension ExportPreset: Codable {
         if !subfolder.isEmpty { try c.encode(subfolder, forKey: .subfolder) }
         if conflict != .rename { try c.encode(conflict.rawValue, forKey: .conflict) }
         if metadataLevel != .all { try c.encode(metadataLevel.rawValue, forKey: .metadataLevel) }
+        // 180 — default values are omitted, so a pre-180 preset re-encodes to the same bytes.
+        if !watermarkText.isEmpty { try c.encode(watermarkText, forKey: .watermarkText) }
+        if watermarkPosition != .bottomRight {
+            try c.encode(watermarkPosition.rawValue, forKey: .watermarkPosition)
+        }
+        if watermarkOpacity != 60 { try c.encode(watermarkOpacity, forKey: .watermarkOpacity) }
     }
 }
 
