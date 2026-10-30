@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "primaries.metal"
 #include "oklch_bands.metal"
 using namespace metal;
 
@@ -51,7 +52,7 @@ kernel void s3_9_nr_sigma(texture2d<float, access::read> src [[texture(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     int w = p.canvas.x, h = p.canvas.y;
-    const float3 lw = float3(0.2126, 0.7152, 0.0722);
+    const float3 lw = kDisplayRec709LumaWeights;   // display-referred codes → BT.709 (primaries.metal)
     const float binWidth = 0.25 / 256.0;
 
     for (uint s = tid; s < 4096; s += 256) {
@@ -112,7 +113,7 @@ kernel void s3_9_nr_splat(texture2d<float, access::read> src [[texture(0)]],
                           uint3 tid3 [[thread_position_in_threadgroup]],
                           uint3 tgSize3 [[threads_per_threadgroup]]) {
     int w = p.canvas.x, h = p.canvas.y, cell = max(p.canvas.z, 1);
-    const float3 lw = float3(0.2126, 0.7152, 0.0722);
+    const float3 lw = kDisplayRec709LumaWeights;   // display-referred codes → BT.709 (primaries.metal)
     uint tid = tid3.x + tid3.y * tgSize3.x + tid3.z * tgSize3.x * tgSize3.y;
     uint tgSize = tgSize3.x * tgSize3.y * tgSize3.z;
 

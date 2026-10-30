@@ -251,12 +251,17 @@ final class LayoutContractTests: XCTestCase {
         let vignette = try XCTUnwrap(order.firstIndex(of: .vignette))
         let contrast = try XCTUnwrap(order.firstIndex(of: .contrast))
         let dehaze = try XCTUnwrap(order.firstIndex(of: .dehaze))
+        let toneMap = try XCTUnwrap(order.firstIndex(of: .toneMap))
+        let curve = try XCTUnwrap(order.firstIndex(of: .curve))
         // 116 把暗角搬进线性链末尾，117 把去雾插在它与对比度之间 —— 相邻关系因此不再成立。
-        // What survives is the *position*: dehaze directly follows contrast, the vignette directly
+        // What survives is the *position*: dehaze directly follows the curve, the vignette directly
         // follows dehaze (the linear tail), and both sit before the tone map and the grade.
+        // 159 (contrast → S2.5) breaks 117's "dehaze follows contrast": contrast now sits between the
+        // tone map and S3, so the linear tail starts at the curve and contrast closes the display end.
         let detail = try XCTUnwrap(order.firstIndex(of: .detailFX))
         XCTAssertEqual(detail, grade + 1, "S3.9 紧跟 S3.8：\(order.map(\.short))")
-        XCTAssertEqual(dehaze, contrast + 1, "117: 去雾紧跟对比度：\(order.map(\.short))")
+        XCTAssertEqual(dehaze, curve + 1, "117/159: 去雾紧跟曲线（对比度已搬到 S2.5）：\(order.map(\.short))")
+        XCTAssertEqual(contrast, toneMap + 1, "159: 对比度紧跟 S2，位于 S3 之前：\(order.map(\.short))")
         XCTAssertEqual(vignette, dehaze + 1, "117: 去雾在对比度与暗角之间：\(order.map(\.short))")
         XCTAssertLessThan(vignette, grade, "116: 暗角在线性链，色彩分级在显示链")
         XCTAssertLessThan(hsl, grade)

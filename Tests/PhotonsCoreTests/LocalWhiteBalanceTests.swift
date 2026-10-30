@@ -144,9 +144,10 @@ final class LocalWhiteBalanceTests: XCTestCase {
 
     /// ④ 进键 — **no new field**, so the document's own key text does not move: `keyString` prints the
     /// same eleven tokens it always did, and a document that has never used a WB slider keeps the key
-    /// it had. What *does* move is the **stage** version (`localApply` 2 → 3): the same parameters draw
-    /// different pixels now, which is exactly what `StageAlgorithmVersion` exists to say, and it
-    /// invalidates the mask stage (and the thumbnails that contain it) without touching the document.
+    /// it had. What *does* move is the **stage** version (`localApply` 2 → 3 for the WB gain, then
+    /// 3 → 4 when 159 moved a mask's contrast out of S1.6): the same parameters draw different pixels
+    /// now, which is exactly what `StageAlgorithmVersion` exists to say, and it invalidates the mask
+    /// stage (and the thumbnails that contain it) without touching the document.
     func testTheKeyTextIsUnchangedWhileTheStageVersionMoves() {
         let a = LocalAdjustments(amount: 100, exposure: 1, temperature: 30, tint: 12,
                                  contrast: 5, highlights: 6, shadows: 7,
@@ -156,9 +157,9 @@ final class LocalWhiteBalanceTests: XCTestCase {
                        + ";con=5.00000;hi=6.00000;sh=7.00000;wh=8.00000;bl=9.00000"
                        + ";hue=10.00000;sat=11.00000",
                        "the mask's document key must not gain a token for a derived gain")
-        XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
-                       "S1.6's pixels changed for the same parameters")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 3)
+        XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
+                       "S1.6's pixels changed for the same parameters (159: contrast left S1.6 for S2.5)")
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 4)
         // And the gain is derived, not stored: decoding a document that carries only the WB pair
         // reproduces the same three numbers.
         let json = Data(#"{"amount":100,"temperature":30,"tint":12}"#.utf8)

@@ -19,3 +19,15 @@ using namespace metal;
 // Deliberately not a `#define`: the value is used as a `float3` in a `dot`, and a typed constant is
 // what makes the parse in the test unambiguous.
 constant float3 kWorkingLumaWeights = float3(0.2627, 0.6780, 0.0593);
+
+// The **BT.709** weights, for the kernels that read *display-referred* codes (S3 and below the tone
+// map), where the numbers are already sRGB/BT.709 and the working primaries' weights would measure
+// the wrong brightness (+23.57 % on saturated red reading 709 codes with 2020 weights).
+//
+// This is not a loophole in "the weights belong in primaries.metal": that rule exists so a kernel
+// cannot keep a *stale* copy of the working weights, and this constant is the opposite — the 709
+// numbers, named for the domain that uses them, declared once. `SaturatedColourTests`'
+// `testNoKernelCarriesItsOwnLumaWeights` parses every kernel and fails on a bare `0.2126`, so a
+// display-referred kernel has to come here instead of typing the triple again (171's denoise grid
+// was the first; it measures its edge-stopping luma on the S3 codes it actually reads).
+constant float3 kDisplayRec709LumaWeights = float3(0.2126, 0.7152, 0.0722);

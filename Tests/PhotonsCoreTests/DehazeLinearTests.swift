@@ -235,9 +235,12 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertFalse(untouched.renderInputs.key.contains("s1.9-dehaze"),
                        "中性文档的 renderInputs 键里也不许出现这一段")
 
-        // The mount point: directly after S1.8 and before the vignette, which is before S2.
+        // The mount point: directly after the curve and before the vignette, which is before S2.
+        // 159 moved contrast out of the linear chain (it now runs after the tone map, as S2.5), so
+        // 117's "directly after S1.8" becomes "directly after the curve" — the tail's other two
+        // neighbours are unchanged.
         let order = RenderStage.order
-        XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .dehaze)) - 1], .contrast)
+        XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .dehaze)) - 1], .curve)
         XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .dehaze)) + 1], .vignette)
         XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .vignette)) + 1], .toneMap)
         XCTAssertEqual(RenderStage.dehaze.rawValue, "s1.9-dehaze")
