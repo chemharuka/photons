@@ -23,19 +23,26 @@ final class DetailFXCardTests: XCTestCase {
         XCTAssertEqual(Array(titles[(correction + 1)...(correction + 2)]), ["细节", "效果"])
 
         XCTAssertEqual(InspectorView.Section.detailFX.title, "细节")
+        // 185: the card's third block is 自研锐化 (S3.10) — four rows, and the decoder's own 锐化 pair
+        // deliberately stays on 开发.
         XCTAssertEqual(InspectorView.detailFXRows.map(\.title),
                        ["纹理", "清晰度", "去噪", "去彩噪"])
+        XCTAssertEqual(InspectorView.sharpenRows.map(\.title),
+                       ["锐化数量", "锐化半径", "锐化细节", "锐化蒙版"])
         XCTAssertEqual(EditSnapshotSection.detailFX.title, "细节")
         XCTAssertEqual(EditSnapshotSection.detailFX.children.map(\.title),
-                       ["纹理", "清晰度", "去噪", "去彩噪"])
+                       ["纹理", "清晰度", "去噪", "去彩噪",
+                        "锐化数量", "锐化半径", "锐化细节", "锐化蒙版"])
     }
 
     func testTheSpecOwnsExactlyThisCardsRows() {
         let spec = InspectorView.PanelCardSpec.detailFXCard
         XCTAssertEqual(spec.section, .detailFX)
         XCTAssertEqual(spec.group, .detailFX)
-        XCTAssertEqual(spec.blocks.map(\.group), [.presence, .noise])
-        XCTAssertEqual(spec.rows.map(\.keyPath), InspectorView.detailFXRows.map(\.keyPath))
+        // 185 — 自研锐化 is the card's third block (S3.10), after 纹理/清晰度 and the two denoises.
+        XCTAssertEqual(spec.blocks.map(\.group), [.presence, .noise, .sharpen])
+        XCTAssertEqual(spec.rows.map(\.keyPath),
+                       (InspectorView.detailFXRows + InspectorView.sharpenRows).map(\.keyPath))
         XCTAssertFalse(spec.rows.contains { $0.title == "去雾" }, "去雾属于效果卡")
         XCTAssertFalse(spec.rows.contains { $0.title == "暗角" }, "暗角属于校正卡")
         XCTAssertEqual(spec.accessibilityPrefix(for: spec.rows[0]), "inspector.detailFX")

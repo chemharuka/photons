@@ -1141,6 +1141,7 @@ final class MaskTests: XCTestCase {
                                && $0 != .grade && $0 != .detailFX && $0 != .heal
                                && $0 != .dehaze   // 117: no dehaze value ⇒ no S1.9
                                && $0 != .contrast   // 098: no contrast value ⇒ no S1.8
+                               && $0 != .sharpen    // 185: no sharpAmount ⇒ no S3.10
                        }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")

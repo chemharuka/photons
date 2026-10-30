@@ -102,36 +102,52 @@ static inline float s3_10_code_allowance(float I, float codes) {
 /// window*, and a sharpen that may not leave it is a sharpen with no halo — the same argument
 /// `S3_9_LOCAL_ALLOWANCE_CODES` makes for a mask's local 锐化, with the allowance scaled by the amount
 /// here because this slider has 150 of them where that one has 100.
-kernel void s3_10_sharpen_pack(texture2d<float, access::read> src [[texture(0)]],
+kernel void s3_10_sharpen_pack(texture2d<float, access::read> lum [[texture(0)]],
                                texture2d<float, access::write> bounds [[texture(1)]],
                                constant SharpenParams &p [[buffer(0)]],
                                uint2 gid [[thread_position_in_grid]]) {
-    int qW = p.c.x, qH = p.c.y, q = max(p.b.z, 1);
+    int qW = p.c.x, qH = p.c.y;
     if (int(gid.x) >= qW || int(gid.y) >= qH) { return; }
-    int w = p.b.x, h = p.b.y;
-    float3 lw = p.e.xyz;
-    float lo = 1.0e9, hi = -1.0e9;
-    for (int dy = 0; dy < q; ++dy) {
-        int y = min(int(gid.y) * q + dy, h - 1);
-        for (int dx = 0; dx < q; ++dx) {
-            int x = min(int(gid.x) * q + dx, w - 1);
-            float I = s3_10_luma(src.read(uint2(x, y)).rgb, lw);
-            lo = min(lo, I); hi = max(hi, I);
-        }
-    }
+    // `lum` is the half-resolution plane, so a 2 × 2 read of it is the 4 × 4 block of the frame this
+    // texel describes. Reading the plane instead of the frame is what makes this pass cheap: the
+    // frame-wide version moved eleven million texels at stride four and cost 4 ms of a 5.5 ms stage.
+    int hw = (p.b.x + 1) / 2, hh = (p.b.y + 1) / 2;
+    int x = int(gid.x) * 2, y = int(gid.y) * 2;
+    float4 a = lum.read(uint2(min(x, hw - 1), min(y, hh - 1)));
+    float4 b = lum.read(uint2(min(x + 1, hw - 1), min(y, hh - 1)));
+    float4 c = lum.read(uint2(min(x, hw - 1), min(y + 1, hh - 1)));
+    float4 d = lum.read(uint2(min(x + 1, hw - 1), min(y + 1, hh - 1)));
+    float lo = min(min(a.y, b.y), min(c.y, d.y));
+    float hi = max(max(a.z, b.z), max(c.z, d.z));
     bounds.write(float4(lo, hi, 0.0, 1.0), gid);
 }
 
 // MARK: - 2. plane, separable Gaussian
 
-/// The luma plane, once. The blur would otherwise read three channels per tap nineteen times; this
-/// pass makes every later tap a single 32-bit read.
+/// The luma plane at **half resolution**: one texel per 2 × 2 block, the mean of its four luma
+/// samples.
+///
+/// Half, because a USM's base layer is by definition the low band — nothing in `G_σ` with σ ≥ 0.25 px
+/// survives a 2 × 2 average, and the apply pass samples this plane bilinearly, so the base it
+/// reconstructs is the smooth field it always was. The two blur passes then move a quarter of the
+/// bytes, which on this hardware is the whole cost (`blur_v` was 3 ms of the 4.10 Mpx frame at full
+/// resolution, and the stage has to fit in 1.2 ms).
 kernel void s3_10_sharpen_luma(texture2d<float, access::read> src [[texture(0)]],
                                texture2d<float, access::write> lum [[texture(1)]],
                                constant SharpenParams &p [[buffer(0)]],
                                uint2 gid [[thread_position_in_grid]]) {
-    if (int(gid.x) >= p.b.x || int(gid.y) >= p.b.y) { return; }
-    lum.write(float4(s3_10_luma(src.read(gid).rgb, p.e.xyz), 0.0, 0.0, 1.0), gid);
+    int w = p.b.x, h = p.b.y;
+    int hw = (w + 1) / 2, hh = (h + 1) / 2;
+    if (int(gid.x) >= hw || int(gid.y) >= hh) { return; }
+    int x = int(gid.x) * 2, y = int(gid.y) * 2;
+    float a = s3_10_luma(src.read(uint2(x, y)).rgb, p.e.xyz);
+    float b = s3_10_luma(src.read(uint2(min(x + 1, w - 1), y)).rgb, p.e.xyz);
+    float c = s3_10_luma(src.read(uint2(x, min(y + 1, h - 1))).rgb, p.e.xyz);
+    float d = s3_10_luma(src.read(uint2(min(x + 1, w - 1), min(y + 1, h - 1))).rgb, p.e.xyz);
+    // `.r` is the mean every later pass reads; `.g`/`.b` are this 2 × 2 cell's own range, which is the
+    // 4 × 4 block the limiter wants and the reason `s3_10_sharpen_pack` never touches the frame.
+    lum.write(float4((a + b + c + d) * 0.25,
+                     min(min(a, b), min(c, d)), max(max(a, b), max(c, d)), 1.0), gid);
 }
 
 /// Horizontal Gaussian at **both** scales in one dispatch: the two kernels share every tap, so reading
@@ -142,9 +158,9 @@ kernel void s3_10_sharpen_blur_h(texture2d<float, access::read> lum [[texture(0)
                                  texture2d<float, access::write> fineH [[texture(2)]],
                                  constant SharpenParams &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    int w = p.b.x, h = p.b.y;
+    int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
-    float sW = max(p.a.y, 0.05);
+    float sW = max(p.a.y, 0.05) * 0.5;
     float sF = max(sW * 0.5, 0.05);
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
@@ -177,8 +193,8 @@ kernel void s3_10_sharpen_blur_v(texture2d<float, access::read> wideH [[texture(
                                  uint2 tid [[thread_position_in_threadgroup]],
                                  uint2 tgid [[threadgroup_position_in_grid]],
                                  uint2 tg [[threads_per_threadgroup]]) {
-    int w = p.b.x, h = p.b.y;
-    float sW = max(p.a.y, 0.05);
+    int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
+    float sW = max(p.a.y, 0.05) * 0.5;
     float sF = max(sW * 0.5, 0.05);
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
@@ -227,8 +243,8 @@ kernel void s3_10_sharpen_blur_v(texture2d<float, access::read> wideH [[texture(
 /// The mask is computed **here** rather than in a pass of its own: it is two extra reads of `wide` at the
 /// pixel the thread is already on, where a separate pass would be a whole frame and another texture.
 kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]],
-                                texture2d<float, access::read> wide [[texture(1)]],
-                                texture2d<float, access::read> fine [[texture(2)]],
+                                texture2d<float, access::sample> wide [[texture(1)]],
+                                texture2d<float, access::sample> fine [[texture(2)]],
                                 texture2d<float, access::sample> bounds [[texture(3)]],
                                 texture2d<float, access::write> dst [[texture(4)]],
                                 constant SharpenParams &p [[buffer(0)]],
@@ -251,18 +267,30 @@ kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]
     float I = s3_10_luma(rgb, p.e.xyz);
 
     int x = int(gid.x), y = int(gid.y);
-    float Gs = wide.read(gid).r;
-    float Gf = fine.read(gid).r;
+    // The blurred planes are half resolution (see `s3_10_sharpen_luma`), so both the base and the
+    // mask's gradient are **sampled** — bilinearly, which is exactly the reconstruction a base layer
+    // wants and keeps the result independent of the downsample's phase.
+    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
+    float u = (float(x) + 0.5) / float(p.b.x);
+    float v = (float(y) + 0.5) / float(p.b.y);
+    // One **half-res texel** (two frame pixels) each way: the plane is half resolution, and a gradient
+    // measured across half a texel of a blurred step is four times smaller than the step — enough to
+    // leave the mask half-closed on an edge it should be open on.
+    float2 du = float2(2.0 / float(p.b.x), 0.0);
+    float2 dv = float2(0.0, 2.0 / float(p.b.y));
+    float2 uv0 = float2(u, v);
+    float Gs = wide.sample(linearSampler, uv0).r;
+    float Gf = fine.sample(linearSampler, uv0).r;
 
     float t = clamp(p.a.z, 0.0, 1.0);
     float d = (Gf - Gs) + t * (I - Gf);
 
     // The edge mask: the gradient of the **blurred** luma, so noise (which a Gaussian averages away)
     // cannot open it. A 0.44 step reads 0.44; 2 code noise reads ~0.008, under `g0`.
-    int xm = max(x - 1, 0), xp = min(x + 1, w - 1);
-    int ym = max(y - 1, 0), yp = min(y + 1, h - 1);
-    float gx = 0.5 * (wide.read(uint2(xp, y)).r - wide.read(uint2(xm, y)).r);
-    float gy = 0.5 * (wide.read(uint2(x, yp)).r - wide.read(uint2(x, ym)).r);
+    // Forward differences from the centre sample already in hand: two fetches instead of four, and the
+    // magnitude of a 1 px step on the blurred plane is the same either way (a step is monotone there).
+    float gx = wide.sample(linearSampler, uv0 + du).r - Gs;
+    float gy = wide.sample(linearSampler, uv0 + dv).r - Gs;
     float g = max(abs(gx), abs(gy));
     float m = smoothstep(max(p.e.w, 0.0), max(p.f.x, p.e.w + 1e-4), g);
     float omega = mix(1.0, m, clamp(p.a.w, 0.0, 1.0));
@@ -281,7 +309,6 @@ kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]
     // In a **constant** block `hi == lo`, so both halves are 0 and nothing moves: the 3 px-from-an-edge
     // bound of §3 is the range half's work, not a separate guard.
     int q = max(p.b.z, 1);
-    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
     float2 uv = float2((float(x) + 0.5) / (float(q) * float(p.c.x)),
                        (float(y) + 0.5) / (float(q) * float(p.c.y)));
     float4 bnd = bounds.sample(linearSampler, uv);
@@ -301,17 +328,25 @@ kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]
 /// It reads the same `wide` plane the apply pass masks with, so the preview **is** the mask the render
 /// uses, not a second derivation of it. Called by `RenderGraph.sharpenMaskPreview` outside the key
 /// chain: no key, no cache entry, no document field (§「Alt 预览」).
-kernel void s3_10_sharpen_mask(texture2d<float, access::read> wide [[texture(0)]],
+kernel void s3_10_sharpen_mask(texture2d<float, access::sample> wide [[texture(0)]],
                                texture2d<float, access::write> dst [[texture(1)]],
                                constant SharpenParams &p [[buffer(0)]],
                                uint2 gid [[thread_position_in_grid]]) {
     int w = p.b.x, h = p.b.y;
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
     int x = int(gid.x), y = int(gid.y);
-    int xm = max(x - 1, 0), xp = min(x + 1, w - 1);
-    int ym = max(y - 1, 0), yp = min(y + 1, h - 1);
-    float gx = 0.5 * (wide.read(uint2(xp, y)).r - wide.read(uint2(xm, y)).r);
-    float gy = 0.5 * (wide.read(uint2(x, yp)).r - wide.read(uint2(x, ym)).r);
+    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
+    float2 uv0 = float2((float(x) + 0.5) / float(p.b.x), (float(y) + 0.5) / float(p.b.y));
+    // One **half-res texel** (two frame pixels) each way: the plane is half resolution, and a gradient
+    // measured across half a texel of a blurred step is four times smaller than the step — enough to
+    // leave the mask half-closed on an edge it should be open on.
+    float2 du = float2(2.0 / float(p.b.x), 0.0);
+    float2 dv = float2(0.0, 2.0 / float(p.b.y));
+    // Forward differences from the centre sample already in hand: two fetches instead of four, and the
+    // magnitude of a 1 px step on the blurred plane is the same either way (a step is monotone there).
+    float centre = wide.sample(linearSampler, uv0).r;
+    float gx = wide.sample(linearSampler, uv0 + du).r - centre;
+    float gy = wide.sample(linearSampler, uv0 + dv).r - centre;
     float g = max(abs(gx), abs(gy));
     float m = smoothstep(max(p.e.w, 0.0), max(p.f.x, p.e.w + 1e-4), g);
     dst.write(float4(m, m, m, 1.0), gid);
