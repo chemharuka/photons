@@ -238,13 +238,18 @@ public struct PointColor: Sendable, Equatable, Codable {
     /// The display-referred frame is **linear working (Rec.2020)** light; Rec.709 YCbCr is defined on
     /// display-encoded sRGB codes, so this converts primaries first and applies the sRGB OETF before
     /// the luma matrix. That is also what makes the `≈ ±15/255` reading of `d1` true.
+    ///
+    /// The luma is measured on the **Rec.709 / sRGB encoded** triple, so its weights are the working
+    /// primaries' (`ColorPrimaries.working.luminanceWeights`, `kWorkingLumaWeights` in the kernel) —
+    /// never a hard-coded Rec.709 copy.
     public static func yuv(fromLinearWorking rgb: SIMD3<Double>) -> SIMD3<Double> {
         let linear = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
             .applying(to: rgb)
         let r = srgbEncode(linear.x)
         let g = srgbEncode(linear.y)
         let b = srgbEncode(linear.z)
-        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        let w = ColorPrimaries.working.luminanceWeights
+        let y = w.x * r + w.y * g + w.z * b
         let u = (b - y) / 1.8556 + 0.5
         let v = (r - y) / 1.5748 + 0.5
         return SIMD3(y, u, v)
@@ -257,7 +262,8 @@ public struct PointColor: Sendable, Equatable, Codable {
         let cr = yuv.z - 0.5
         let b = y + 1.8556 * cb
         let r = y + 1.5748 * cr
-        let g = (y - 0.2126 * r - 0.0722 * b) / 0.7152
+        let w = ColorPrimaries.working.luminanceWeights
+        let g = (y - w.x * r - w.z * b) / w.y
         let linear = SIMD3(srgbDecode(r), srgbDecode(g), srgbDecode(b))
         return ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
             .applying(to: linear)

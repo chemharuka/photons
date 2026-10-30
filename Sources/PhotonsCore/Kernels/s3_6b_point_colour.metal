@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 #include "oklch_bands.metal"
+#include "primaries.metal"
 using namespace metal;
 
 // S3.6b — **点颜色 (Point Color)**: up to eight sampled colours, each with a **Rec.709 full-range
@@ -52,12 +53,15 @@ static inline float point_srgb_encode(float v) {
 
 /// Linear working primaries → Rec.709 full-range YCbCr (U/V centred on 0.5), the same arithmetic as
 /// `PointColor.yuv(fromLinearWorking:)` on the host.
+///
+/// The luma is measured on the **Rec.709 / sRGB encoded** triple, so its three weights are the
+/// working primaries' (`kWorkingLumaWeights`, from `primaries.metal`) — not a literal here.
 static inline float3 point_yuv(float3 rgb, constant PointColorParams &p) {
     float3 lin = float3(dot(p.m0.xyz, rgb), dot(p.m1.xyz, rgb), dot(p.m2.xyz, rgb));
     float3 enc = float3(point_srgb_encode(lin.x),
                         point_srgb_encode(lin.y),
                         point_srgb_encode(lin.z));
-    float y = 0.2126 * enc.x + 0.7152 * enc.y + 0.0722 * enc.z;
+    float y = dot(enc, kWorkingLumaWeights);
     return float3(y, (enc.z - y) / 1.8556 + 0.5, (enc.x - y) / 1.5748 + 0.5);
 }
 
@@ -93,14 +97,44 @@ kernel void s3_6b_point_colour(texture2d<float, access::read> src [[texture(0)]]
         return;
     }
 
+    int count = int(min(p.b.x, 8.0));
+
+    // Y is the cheapest axis and the only one the boxes need first, so it is measured once, exactly
+    // as `point_yuv` would (the three matrix rows, the three OETFs, then the same `dot`). The rest of
+    // the conversion — U/V, the pale floor, OKLab and `atan2` — is deferred until a box has admitted
+    // the pixel: the common case is a pixel outside every swatch's luma radius.
+    float3 lin = float3(dot(p.m0.xyz, c.rgb), dot(p.m1.xyz, c.rgb), dot(p.m2.xyz, c.rgb));
+    float3 enc = float3(point_srgb_encode(lin.x),
+                        point_srgb_encode(lin.y),
+                        point_srgb_encode(lin.z));
+    float y = dot(enc, kWorkingLumaWeights);
+
+    // A swatch can only carry weight when |Y − sampleY| ≤ radius + shoulder. The test is inclusive on
+    // purpose: it may admit a pixel, never drop one the per-axis weights would keep.
+    bool inAnyBox = false;
+    for (int i = 0; i < count; ++i) {
+        PointColorSwatch s = swatches[i];
+        if (s.sample.w <= 0.0) { continue; }          // a sample-only swatch has no adjustment
+        if (fabs(y - s.sample.x) <= s.window.x + 0.5 * s.window.x * s.window.w) {
+            inAnyBox = true;
+            break;
+        }
+    }
+    if (!inAnyBox) {
+        dst.write(c, gid);                            // outside every box, so nothing can change it
+        return;
+    }
+
+    float u = (enc.z - y) / 1.8556 + 0.5;
+    float v = (enc.x - y) / 1.5748 + 0.5;
+
     // The pixel's own chroma is box-independent; the pale floor can short-circuit the whole loop.
-    float3 current = point_yuv(c.rgb, p);
-    if (length(float2(current.y - 0.5, current.z - 0.5)) < p.b.y) {
+    if (length(float2(u - 0.5, v - 0.5)) < p.b.y) {
         dst.write(c, gid);
         return;
     }
 
-    int count = int(min(p.b.x, 8.0));
+    float3 current = float3(y, u, v);
     bool changed = false;
     bool yuvValid = true;
     // Keep the pixel in OKLCh between swatches. A swatch's three operations are an addition on h, a
@@ -120,8 +154,8 @@ kernel void s3_6b_point_colour(texture2d<float, access::read> src [[texture(0)]]
         // current pixel only changes when a previous swatch actually wrote something, so the
         // (matrix + 3×OETF) conversion is cached across non-matching boxes — the common case.
         if (!yuvValid) {
-            float3 lin = max(oklch_to_linear(L, C, H), 0.0);
-            current = point_yuv(lin, p);
+            float3 shifted = max(oklch_to_linear(L, C, H), 0.0);
+            current = point_yuv(shifted, p);
             yuvValid = true;
         }
         float cpx = length(float2(current.y - 0.5, current.z - 0.5));
