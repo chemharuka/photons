@@ -74,20 +74,26 @@ public struct RenderOptions: Sendable {
     public var canvas: ImageSize?
     /// Output pixels relative to crop pixels. 1 = 1:1, 0.25 = quarter-size preview.
     public var scale: Double
-    /// Render only this part of the frame, in **content pixels** — the cropped picture's own pixel
-    /// grid at `scale` (`LoupeFraming` computes it for a 1:1 loupe window).
+    /// Render only this part of the canvas, in **content pixels** — the whole output's own pixel grid
+    /// at `scale` (`LoupeFraming.outputWindow` computes it for a 1:1 loupe window).
     ///
-    /// `nil` (the default) is the whole frame and is what every pre-window caller gets: thumbnails,
+    /// The grid it indexes is the *whole output*: the cropped picture's own pixels when there is no
+    /// angle, and the **expanded canvas** — the rotated crop's bounding box, `CropMath.canvasSize` —
+    /// when there is one (176). That is why the loupe adds the canvas origin `(canvas − frame)/2` to
+    /// the window it hands over: a straightened picture sits centred in a bigger canvas, and a window
+    /// that named picture pixels would cut the frame at a different pivot from the real render.
+    ///
+    /// `nil` (the default) is the whole output and is what every pre-window caller gets: thumbnails,
     /// fit, export. A window is *not* a crop: S0 still rotates/crops/flips the **whole frame** and
     /// then takes the window out of it, so
     ///
     ///   · a window render is the whole-frame render with a rectangle cut out of it — the same
-    ///     projection to within a texel of rounding, not a different one (a crop-shaped window at
-    ///     9° straighten was ~0.29 % off, because S0 rotated in crop space);
+    ///     projection, not a different one (a crop-shaped window at 9° straighten was ~0.29 % off,
+    ///     because S0 rotated in crop space);
     ///   · S3c's vignette and the mask descriptors' feather normalize to the **whole frame**, so a
     ///     vignette or a feather keeps its physical size at 1:1 instead of shrinking to the window.
     ///
-    /// The rect is clamped into the frame and a window covering the whole frame is normalized to
+    /// The rect is clamped into that grid and a window covering the whole of it is normalized to
     /// `nil`, so "1:1 on an image smaller than the viewport" costs no extra key.
     ///
     /// One honest limitation: the mask atlas is a canvas-sized texture, so a **neighbourhood**
@@ -1480,16 +1486,18 @@ public final class RenderGraph {
         let origin: SIMD2<Float>
         /// Edge-spelled crop, already resolved from `aspectLock` and clamped: what S0 samples.
         let crop: CropRect
-        /// The whole cropped frame's own pixel grid at this render's `scale`. `RenderOptions.outputWindow`
-        /// is expressed in it, and it is the frame every spatially normalized parameter belongs to.
+        /// The whole cropped picture's own pixel grid at this render's `scale`. Every spatially
+        /// normalized parameter belongs to it. (`RenderOptions.outputWindow` indexes the *canvas*,
+        /// which is this grid plus the AABB margin — see `window` and `inset` in `plan`.)
         let frame: ImageSize
-        /// The part of `frame` this render produces, or `nil` for the whole frame (the pre-window
-        /// behaviour, and what every caller that does not name a window gets).
+        /// The part of the canvas this render produces, or `nil` for all of it (the pre-window
+        /// behaviour, and what every caller that does not name a window gets). 176: the grid is the
+        /// whole output — `canvasSize`'s AABB at θ ≠ 0, `frame` otherwise.
         let window: ImageRect?
-        /// `frame` and `window.origin` in **content pixels** — the units S0/S1.5/S3c address a pixel
-        /// in. They differ from `frame`'s own units only when letterboxing rescaled the content rect
-        /// (`content < requested`), which is the same proportional squeeze the whole-frame path has
-        /// always applied.
+        /// `frame` and the window's origin in **content pixels** — the units S0/S1.5/S3c address a
+        /// pixel in. They differ from `frame`'s own units only when letterboxing rescaled the content
+        /// rect (`content < requested`), which is the same proportional squeeze the whole-frame path
+        /// has always applied.
         let frameSize: SIMD2<Float>
         let frameOrigin: SIMD2<Float>
         /// `frame` in canvas pixels: what mask radii (feather, guided) normalize against (§4.6), so a
@@ -1566,44 +1574,62 @@ public final class RenderGraph {
         // which is why the window is resolved after it and not before.
         let frame = ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
                               height: Int((Double(cropPixels.height) * scale).rounded()))
-        let whole = ImageRect(x: 0, y: 0, width: frame.width, height: frame.height)
-        // A window covering the frame *is* no window: normalizing here means "1:1 on a picture smaller
-        // than the viewport" shares the whole-frame key instead of minting one for a full-frame cut.
-        //
-        // A window that reaches **outside** the frame is not clamped into it — it is the loupe's
-        // canvas-space camera (`LoupeFraming.windowSize` is the viewport at the zoom, unclipped), and
-        // clamping it would silently re-frame the picture: the render would come back smaller than
-        // the canvas and the canvas would letterbox it, which is a jump, not a crop. Those pixels are
-        // background instead (`backgroundOutside`), and a window wholly inside the frame keeps the
-        // `clamped(in:)` rule it has always had.
-        let requestedWindow = options.outputWindow
-        let backgroundOutside = requestedWindow.map { w in
-            w.x < 0 || w.y < 0
-                || w.x + w.width > frame.width || w.y + w.height > frame.height
-        } ?? false
-        let window = requestedWindow
-            .map { backgroundOutside ? $0 : $0.clamped(in: frame) }
-            .flatMap { $0 == whole ? nil : $0 }
-
-        let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? frame
-
-        // ── 132: the canvas is the bounding box of the rotated crop ────────────────────────────────
+        // ── 132 / 176: the canvas is the bounding box of the rotated crop, window or not ──────────
         //
         // With no window this render *is* the output picture, so an angle grows the canvas instead of
         // turning the picture inside a fixed one: `canvasSize` returns `outputSize` itself at θ = 0
         // (same function, same arguments), which is what keeps every un-straightened key and golden
         // byte-identical. At θ ≠ 0 S0's pixel-space rotation runs about the canvas' centre
-        // (`p.f.zw = origin + (frameSize − content)/2`, see below) and its existing
-        // "rotated past the picture is background" branch paints the corners 0/0/0.
+        // (`f.zw = origin + (window − inset)·k`, see below) and its existing "rotated past the
+        // picture is background" branch paints the corners 0/0/0.
         //
-        // A **window** render keeps the pre-132 geometry: a 1:1 window is already a canvas-space
-        // camera that can look past the photograph, and `WindowTests`' θ ≠ 0 cases pin its bytes.
-        let rotatedCanvas = (edit.geometry.straightenDegrees != 0 && window == nil)
+        // 176 — a **window** render is that same canvas seen through a smaller hole. The window
+        // indexes the *baseline* (the whole output at this scale: the AABB when there is an angle,
+        // the picture otherwise), the picture sits inside the baseline at
+        // `inset = (baseline − frame)/2`, and S0 is handed the picture's place in the canvas. At
+        // θ = 0 the baseline *is* the frame and the inset is 0, so that is the pre-176
+        // `origin + window·k`, bit for bit; at θ ≠ 0 the window is cut out of the same pivot the
+        // settled `fit` frame and `photonsctl render` use. Before 176 this branch was gated on
+        // `window == nil`, so a zoomed crop workspace composed its full-size frame on the
+        // photograph's own canvas — the crop's pivot instead of the AABB' — and the two pictures
+        // disagreed by up to 59 code values (24.8 % of pixels by more than 2).
+        let expandedCanvas: ImageSize? = edit.geometry.straightenDegrees != 0
             ? CropMath.canvasSize(crop: crop, in: sourceSize,
                                   straightenDegrees: edit.geometry.straightenDegrees,
                                   quarterTurns: edit.geometry.quarterTurns,
                                   allowsOutsideSource: true)
             : nil
+        // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
+        let baseline = expandedCanvas.map {
+            ImageSize(width: max(1, Int((Double($0.width) * scale).rounded())),
+                      height: max(1, Int((Double($0.height) * scale).rounded())))
+        } ?? frame
+        // Where the picture's own frame starts inside the baseline, in baseline pixels. Zero — and
+        // therefore free — for every un-straightened document.
+        let inset = SIMD2<Float>((Float(baseline.width) - Float(frame.width)) / 2,
+                                 (Float(baseline.height) - Float(frame.height)) / 2)
+        let baselineRect = ImageRect(x: 0, y: 0, width: baseline.width, height: baseline.height)
+
+        // A window covering the baseline *is* no window: normalizing here means "1:1 on a picture
+        // smaller than the viewport" shares the whole-frame key instead of minting one for a
+        // full-frame cut.
+        //
+        // A window that reaches **outside** the baseline is not clamped into it — it is the loupe's
+        // canvas-space camera (`LoupeFraming.windowSize` is the viewport at the zoom, unclipped), and
+        // clamping it would silently re-frame the picture: the render would come back smaller than
+        // the canvas and the canvas would letterbox it, which is a jump, not a crop. Those pixels are
+        // background instead (`backgroundOutside`), and a window wholly inside the baseline keeps the
+        // `clamped(in:)` rule it has always had.
+        let requestedWindow = options.outputWindow
+        let backgroundOutside = requestedWindow.map { w in
+            w.x < 0 || w.y < 0
+                || w.x + w.width > baseline.width || w.y + w.height > baseline.height
+        } ?? false
+        let window = requestedWindow
+            .map { backgroundOutside ? $0 : $0.clamped(in: baseline) }
+            .flatMap { $0 == baselineRect ? nil : $0 }
+
+        let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? baseline
 
         let canvas: ImageSize
         let content: ImageSize
@@ -1612,80 +1638,70 @@ public final class RenderGraph {
         let frameOrigin: SIMD2<Float>
         let frameInCanvas: ImageSize
         let drawnRect: ImageRect
-        if let rotatedCanvas {
-            // The output at this scale, before the viewport letterboxes it.
-            let baseline = ImageSize(
-                width: max(1, Int((Double(rotatedCanvas.width) * scale).rounded())),
-                height: max(1, Int((Double(rotatedCanvas.height) * scale).rounded())))
-            canvas = options.canvas ?? baseline
-            // A caller's canvas smaller than the output shrinks the whole picture — never just its
-            // content — so the picture and any overlay keep one scale.
-            let fit = min(1, min(Double(canvas.width) / Double(baseline.width),
-                                 Double(canvas.height) / Double(baseline.height)))
-            content = ImageSize(width: max(1, Int((Double(baseline.width) * fit).rounded())),
-                                height: max(1, Int((Double(baseline.height) * fit).rounded())))
-            origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
-                                  Float((canvas.height - content.height) / 2))
-            let kx = Float(Double(content.width) / Double(baseline.width))
-            let ky = Float(Double(content.height) / Double(baseline.height))
-            frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
-            // S0: `r = R⁻¹(local + f.zw − f.xy/2)/f.xy + 0.5`. This makes `local = content/2` the
-            // centre of the rotation, i.e. the canvas centre — the crop stays centred and the
-            // margins around it are the rotated-out empty pixels.
-            frameOrigin = origin + (frameSize
-                - SIMD2<Float>(Float(content.width), Float(content.height))) / 2
-            // The mask/spot maps normalize against the **frame** grid, not the AABB: the AABB is
-            // the frame plus empty margins, and a mask shape at 0.5, 0.5 must stay on the crop's
-            // centre.
-            frameInCanvas = ImageSize(width: max(1, Int(frameSize.x.rounded())),
-                                      height: max(1, Int(frameSize.y.rounded())))
-            // The picture *is* the whole AABB (the rotated photograph plus its black corners); the
-            // present quad must cover it, or it would cut the four corners off again.
+
+        canvas = options.canvas ?? requested
+        if canvas == requested {
+            content = requested
+        } else if expandedCanvas != nil {
+            // 132: an angle's output never upscales into a caller's canvas — that canvas is a
+            // viewport, and a straightened picture inside it must keep one scale (the crop
+            // workspace's 90 % fit is the same rule, spelled `neverUpscalesContent` just below).
+            let fit = min(1, min(Double(canvas.width) / Double(max(requested.width, 1)),
+                                 Double(canvas.height) / Double(max(requested.height, 1))))
+            content = ImageSize(width: max(1, Int((Double(requested.width) * fit).rounded())),
+                                height: max(1, Int((Double(requested.height) * fit).rounded())))
+        } else if options.neverUpscalesContent {
+            // 132 §9: keep the requested size when it fits; only a genuinely smaller canvas
+            // shrinks the picture.
+            let fits = Double(canvas.width) >= Double(requested.width)
+                && Double(canvas.height) >= Double(requested.height)
+            content = fits ? requested : ImageSize.fit(requested, in: canvas)
+        } else {
+            content = ImageSize.fit(requested, in: canvas)
+        }
+        origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
+                              Float((canvas.height - content.height) / 2))
+
+        // Content pixels per requested pixel: 1 unless letterboxing rescaled the content rect.
+        // Pre-scaling the frame here is what lets the kernels stay one add and one divide per pixel.
+        let kx = Float(Double(content.width) / Double(max(requested.width, 1)))
+        let ky = Float(Double(content.height) / Double(max(requested.height, 1)))
+        frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
+        // Where the window's pixel 0 is, in requested pixels at the content's scale.
+        let windowOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
+        // …and where the picture is: the window's place inside the baseline, less the picture's own
+        // inset into it (0 at θ = 0), plus the baseline's place in a letterboxed canvas (132's
+        // `origin`, which the window branch never had to add because a window *was* the canvas).
+        frameOrigin = expandedCanvas == nil
+            ? windowOrigin
+            : origin + windowOrigin - SIMD2<Float>(inset.x * kx, inset.y * ky)
+        frameInCanvas = (window == nil && expandedCanvas == nil)
+            ? content
+            : ImageSize(width: max(1, Int(frameSize.x.rounded())),
+                        height: max(1, Int(frameSize.y.rounded())))
+
+        // Where the photograph was **drawn**, in canvas pixels — the one place this is worked out
+        // (048).
+        //
+        // S0 writes content pixel `gid` at frame pixel `gid + 0.5 − origin + frameOrigin`
+        // (`s0_geometry.metal`), so the frame (i.e. the photograph) occupies content pixels
+        // `[−frameOrigin, frameSize − frameOrigin)` and canvas pixels
+        // `origin − frameOrigin + frameSize` — origin top-left, row-major, the same space the
+        // texture is read back in and `histogram_sample.metal` indexes. With a window that reaches
+        // past the picture (`backgroundOutside`) the picture sits *off-centre* inside `content` and
+        // the canvas holds background around it, so `origin + content` is the window, not the
+        // picture, and measuring over it counts that background into bin 0.
+        //
+        // Clipped, not moved (`intersected(in:)`): the part of the picture outside the canvas was
+        // not drawn, so it is not part of what a measurement can count.
+        //
+        // 132: the exception is the whole AABB — there the picture *is* the content rect (the
+        // rotated photograph plus its black corners), and the margin is part of what is drawn.
+        if window == nil, expandedCanvas != nil {
             drawnRect = ImageRect(x: Int(origin.x.rounded()), y: Int(origin.y.rounded()),
                                   width: content.width, height: content.height)
                 .intersected(in: canvas)
         } else {
-            canvas = options.canvas ?? requested
-            if canvas == requested {
-                content = requested
-            } else if options.neverUpscalesContent {
-                // 132 §9: keep the requested size when it fits; only a genuinely smaller canvas
-                // shrinks the picture.
-                let fits = Double(canvas.width) >= Double(requested.width)
-                    && Double(canvas.height) >= Double(requested.height)
-                content = fits ? requested : ImageSize.fit(requested, in: canvas)
-            } else {
-                content = ImageSize.fit(requested, in: canvas)
-            }
-            origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
-                                  Float((canvas.height - content.height) / 2))
-
-            // Content pixels per frame pixel: 1 unless letterboxing rescaled the content rect.
-            // Pre-scaling the frame here is what lets the kernels stay one add and one divide per pixel.
-            let kx = Float(Double(content.width) / Double(requested.width))
-            let ky = Float(Double(content.height) / Double(requested.height))
-            frameSize = SIMD2<Float>(Float(frame.width) * kx, Float(frame.height) * ky)
-            frameOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
-            frameInCanvas = window == nil ? content
-                : ImageSize(width: Int((Double(frameSize.x)).rounded()),
-                            height: Int((Double(frameSize.y)).rounded()))
-
-            // Where the photograph was **drawn**, in canvas pixels — the one place this is worked out
-            // (048).
-            //
-            // S0 writes content pixel `gid` at frame pixel `gid + 0.5 − origin + frameOrigin`
-            // (`s0_geometry.metal`), so the frame (i.e. the photograph) occupies content pixels
-            // `[−frameOrigin, frameSize − frameOrigin)` and canvas pixels
-            // `origin − frameOrigin + frameSize` — origin top-left, row-major, the same space the
-            // texture is read back in and `histogram_sample.metal` indexes. With no window,
-            // `frameOrigin == 0` and this is exactly `origin + content`, which is what every pre-048
-            // caller assumed; with a window that reaches past the frame (`backgroundOutside`) the
-            // picture sits *off-centre* inside `content` and the canvas holds background around it,
-            // so `origin + content` is the window, not the picture, and measuring over it counts
-            // that background into bin 0.
-            //
-            // Clipped, not moved (`intersected(in:)`): the part of the picture outside the canvas was
-            // not drawn, so it is not part of what a measurement can count.
             let pictureRaw = ImageRect(x: Int((origin.x - frameOrigin.x).rounded()),
                                        y: Int((origin.y - frameOrigin.y).rounded()),
                                        width: Int((Double(frameSize.x)).rounded()),

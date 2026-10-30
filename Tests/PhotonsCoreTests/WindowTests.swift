@@ -239,14 +239,22 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(a.display, links(edit, window: ImageRect(x: 37, y: 21, width: 200, height: 150)).display)
     }
 
-    /// "1:1 on a picture smaller than the viewport" asks for the whole frame; that must not mint a
+    /// "1:1 on a picture smaller than the viewport" asks for the whole output; that must not mint a
     /// second cache entry (or a second set of pixels) for what is the fit frame.
+    ///
+    /// 176: "the whole" is the whole **canvas**. A window indexes the expanded canvas now, so at 3°
+    /// the rect that covers everything is the rotated crop's bounding box (167×129), not the
+    /// 160×120 picture — the same reason `outputWindow` adds `(canvas − frame)/2`.
     func testWindowCoveringTheFrameNormalizesToNoWindow() throws {
         let image = texturedImage(width: 160, height: 120)
         let graph = try makeGraph(image)
         var edit = EditModel.neutral
         edit.geometry.rotationDegrees = 3
-        let whole = ImageRect(x: 0, y: 0, width: 160, height: 120)
+        let canvas = CropMath.canvasSize(crop: .full, in: size(image),
+                                         straightenDegrees: 3, quarterTurns: 0)
+        let whole = ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+        XCTAssertNotEqual(ImageSize(width: whole.width, height: whole.height), size(image),
+                          "the fixture only proves anything if the canvas is bigger than the picture")
 
         let plain = try graph.render(edit, options: RenderOptions(scale: 1, useCache: false, wantsPixels: true))
         let windowed = try graph.render(edit, options: RenderOptions(scale: 1,
@@ -254,8 +262,12 @@ final class WindowTests: XCTestCase {
                                                                     useCache: false,
                                                                     wantsPixels: true))
         XCTAssertEqual(windowed.keys.geometry, plain.keys.geometry)
-        XCTAssertEqual(windowed.window, whole)
-        XCTAssertEqual(try XCTUnwrap(windowed.display).sha256(), try XCTUnwrap(plain.display).sha256())
+        // Normalized to *no* window, so the receipt names the whole frame — the picture's own rect —
+        // while the canvas is the expanded one the window covered (176).
+        XCTAssertEqual(windowed.window, ImageRect(x: 0, y: 0, width: 160, height: 120))
+        XCTAssertEqual(windowed.canvas, ImageSize(width: canvas.width, height: canvas.height))
+        XCTAssertEqual(try XCTUnwrap(windowed.display).sha256(), try XCTUnwrap(plain.display).sha256(),
+                       "a window covering the whole canvas must be the fit frame, byte for byte")
     }
 
     /// A window may hang over the frame edge, and the part that misses the picture is **background**
@@ -325,9 +337,12 @@ final class WindowTests: XCTestCase {
         let part = try render(graph, edit, window: window)
         XCTAssertEqual(part.size, ImageSize(width: window.width, height: window.height))
 
-        // 132: a straightened output is the rotated crop's bounding box, so the crop (the frame)
-        // is centred in it. Window pixels still equal whole-frame pixels at the same physical place.
-        let wholeOffset = ((whole.width - frame.width) / 2, (whole.height - frame.height) / 2)
+        // 132/176: a straightened output is the rotated crop's bounding box, and a **window** is an
+        // index into that box — the same grid the whole render's canvas is. So the anchor is the
+        // window's own (x, y) with **no** compensating offset: before 176 the window named picture
+        // pixels and this test had to add (canvas − frame)/2 by hand; now the renderer does, and the
+        // comparison is exact rather than half-pixel-tolerant.
+        let wholeOffset = (0, 0)
         let exact = pixelError(whole: whole, part: part, x: window.x, y: window.y,
                                wholeOffset: wholeOffset)
         print(String(format: "WINDOW vs WHOLE FRAME (9° straighten, %@ → %dx%d at +%d+%d): mean %.6f  max %.6f",
@@ -500,8 +515,9 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(part.width, window.width)
         XCTAssertEqual(part.height, window.height)
 
-        let frame = edit.geometry.outputPixels(in: size(image))
-        let wholeOffset = ((full.width - frame.width) / 2, (full.height - frame.height) / 2)
+        // 176: the window indexes the canvas, so the whole atlas' canvas coordinate is the window's
+        // own (x, y) — no (canvas − frame)/2 to add here any more.
+        let wholeOffset = (0, 0)
         var worst = 0.0
         for y in 0..<part.height {
             for x in 0..<part.width {
@@ -570,16 +586,19 @@ final class WindowTests: XCTestCase {
         let wholeCanvas = CropGeometry(geometry: edit.geometry, source: size(image)).canvas
         let ox = Double(wholeCanvas.width - frame.width) / 2
         let oy = Double(wholeCanvas.height - frame.height) / 2
+        // 176: both canvases are now the **same grid** — the whole render's AABB and the window's
+        // canvas differ only by the window's own origin, so `ox`/`oy` (the picture's margin inside the
+        // AABB) no longer enter the mapping. They stay above only for the printed context.
         func lowEdge(_ value: Double) -> Int { Int(value.rounded(.up)) }
         func highEdge(_ value: Double) -> Int { Int(value.rounded(.down)) }
         print("WINDOW mask bounds: frame [\(wholeBounds.x0),\(wholeBounds.y0)]–[\(wholeBounds.x1),\(wholeBounds.y1)]"
               + " → canvas [\(windowBounds.x0),\(windowBounds.y0)]–[\(windowBounds.x1),\(windowBounds.y1)]"
               + " · frame \(frame.keyString) wholeCanvas \(wholeCanvas.keyString) offset \(ox),\(oy)")
         // whole canvas = margin + frame; window canvas = frame − window origin.
-        XCTAssertEqual(windowBounds.x0, max(0, lowEdge(Double(wholeBounds.x0) - ox - Double(window.x))))
-        XCTAssertEqual(windowBounds.y0, max(0, lowEdge(Double(wholeBounds.y0) - oy - Double(window.y))))
-        XCTAssertEqual(windowBounds.x1, min(window.width, highEdge(Double(wholeBounds.x1) - ox - Double(window.x))))
-        XCTAssertEqual(windowBounds.y1, min(window.height, highEdge(Double(wholeBounds.y1) - oy - Double(window.y))))
+        XCTAssertEqual(windowBounds.x0, max(0, lowEdge(Double(wholeBounds.x0) - Double(window.x))))
+        XCTAssertEqual(windowBounds.y0, max(0, lowEdge(Double(wholeBounds.y0) - Double(window.y))))
+        XCTAssertEqual(windowBounds.x1, min(window.width, highEdge(Double(wholeBounds.x1) - Double(window.x))))
+        XCTAssertEqual(windowBounds.y1, min(window.height, highEdge(Double(wholeBounds.y1) - Double(window.y))))
     }
 
     // MARK: - 4. keys, traces, cost

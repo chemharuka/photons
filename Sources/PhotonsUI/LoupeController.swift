@@ -5608,8 +5608,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                          decodeScale: ds,
                                          edit: cameraEdit,
                                          fitScale: fitScale)
+            // 176: the window indexes the **expanded canvas** (the rotated crop's bounding box), so it
+            // carries the canvas origin `(canvas − frame)/2` — measured on this rung's grid, which is
+            // why the decode scale goes with it.
             return Shot(projected: projected,
-                        window: projected.outputWindow(of: state),
+                        window: projected.outputWindow(of: state, decodeScale: ds),
                         scale: max(0.01, projected.renderScale(of: state, decodeScale: ds)),
                         pixels: projected.windowPixels(of: state))
         }
