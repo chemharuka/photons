@@ -660,7 +660,7 @@ final class DetailTests: XCTestCase {
         XCTAssertEqual(Double(filter.sharpnessAmount), 1, accuracy: 1e-6)
         XCTAssertEqual(Double(filter.detailAmount), 3, accuracy: 1e-6,
                        "042: 细节 tops out at Apple's 3.0, not at 1.0")
-        XCTAssertEqual(applied.summary, "nr=1.00 c=1.00 sh=1.00 d=3.00")
+        XCTAssertEqual(applied.summary, "nr=1.00 c=1.00 sh=1.00 d=3.00 m=–")
     }
 
     // MARK: - 4. the pixels

@@ -96,6 +96,41 @@ final class DetailFXCardTests: XCTestCase {
         }
     }
 
+    func testTheTwoNonBayerRowsCopyAndPasteIndividually() {
+        var source = EditModel.neutral
+        source.effects.texture = 20
+        source.effects.clarity = -10
+        source.effects.nonBayerLuminanceNR = 40
+        source.effects.nonBayerColorNR = 60
+        source.effects.grain = 12
+
+        let onlyLuma = CopySettingsSelection(sections: [.detailFX],
+                                             children: [.nonBayerLuminance])
+        let payload = EditSnapshot.capture(source).filtered(to: onlyLuma)
+        XCTAssertEqual(payload.sections, [.detailFX])
+        XCTAssertEqual(payload.fieldCount, 1, "只勾非 Bayer 降噪 = 一叶")
+        XCTAssertEqual(payload.effects?.nonBayerLuminanceNR, 40)
+        XCTAssertNil(payload.effects?.nonBayerColorNR)
+        XCTAssertNil(payload.effects?.texture)
+        XCTAssertNil(payload.effects?.grain, "颗粒属于效果卡，不在这个载荷里")
+
+        var target = EditModel.neutral
+        target.effects.texture = 5
+        target.effects.nonBayerColorNR = 7
+        let merged = payload.applied(to: target)
+        XCTAssertEqual(merged.effects.nonBayerLuminanceNR, 40)
+        XCTAssertEqual(merged.effects.nonBayerColorNR, 7, "目标自己的彩色降噪不动")
+        XCTAssertEqual(merged.effects.texture, 5)
+        XCTAssertEqual(merged.effects.grain, 0)
+
+        let onlyChroma = CopySettingsSelection(sections: [.detailFX],
+                                               children: [.nonBayerColor])
+        let chromaPayload = EditSnapshot.capture(source).filtered(to: onlyChroma)
+        XCTAssertEqual(chromaPayload.fieldCount, 1)
+        XCTAssertEqual(chromaPayload.effects?.nonBayerColorNR, 60)
+        XCTAssertNil(chromaPayload.effects?.nonBayerLuminanceNR)
+    }
+
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let hit = view as? T { return hit }
         for sub in view.subviews {
