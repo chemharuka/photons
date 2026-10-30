@@ -5,16 +5,15 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 140 — **点颜色** on a hosted panel: where the card sits, its five rows, what one gesture costs the
-/// history, what a double-click resets, and whether the swatch really shows the sample.
+/// 158 — **点颜色** on a hosted panel: the swatch strip, multiple samples, selection, double-click
+/// deletion, and the history contract.
 ///
-///   1. **一张卡、五行**: 范围 / 过渡 / 色相 / 饱和 / 亮度, in the 色彩 workspace between HSL and
-///      色彩分级 (`RenderStage.order`'s `.hsl, .pointColour, .grade`).
-///   2. **画出来了**: five rows and the sample block are inside the card at the three panel widths.
+///   1. **一张卡、五行**: 范围 / 过渡 / 色相 / 饱和 / 亮度, between HSL and 色彩分级.
+///   2. **色框条**: the five rows and the strip are inside the card; U1–U4 read the strip's probe.
 ///   3. **一根滑杆 = 一条历史**: a drag writes the document and commits once; a reset is its own row.
-///   4. **复位**: one row's double-click clears one number, the title clears the whole object to `nil`.
-///   5. **色块显示采样色**: the probe reports the sample and the sRGB the view actually fills with.
-///   6. **吸管**: one sample = one history row and writes only `sampleHue`/`sampleChroma`.
+///   4. **复位**: one row's double-click clears one number, the title clears the whole set to `nil`.
+///   5. **切换不写历史**: selecting a swatch changes which slider values show, not the snapshot count.
+///   6. **吸管**: one sample = one appended swatch = one history row; a pale sample is refused.
 @MainActor
 final class PointColorPanelTests: XCTestCase {
 
@@ -36,12 +35,12 @@ final class PointColorPanelTests: XCTestCase {
         XCTAssertEqual(PointColorAxis.allCases.map(\.fieldKey),
                        ["color.point.range", "color.point.feather",
                         "color.point.hue", "color.point.saturation", "color.point.luminance"])
-        XCTAssertEqual(PointColorAxis.range.range, 0 ... 120, "范围以度为单位")
-        XCTAssertEqual(PointColorAxis.feather.range, 0 ... 120, "过渡以度为单位")
+        XCTAssertEqual(PointColorAxis.range.range, 0 ... 120)
+        XCTAssertEqual(PointColorAxis.feather.range, 0 ... 120)
         XCTAssertEqual(PointColorAxis.hue.range, -100 ... 100)
         XCTAssertEqual(PointColorAxis.saturation.range, -100 ... 100)
         XCTAssertEqual(PointColorAxis.luminance.range, -100 ... 100)
-        XCTAssertEqual(PointColorAxis.range.defaultValue, 30, "默认 30°：一吸就选中")
+        XCTAssertEqual(PointColorAxis.range.defaultValue, 30, "默认 30 = 感知常量 1×")
         XCTAssertEqual(PointColorAxis.feather.defaultValue, 30)
         XCTAssertEqual(PointColorAxis.hue.defaultValue, 0)
         XCTAssertEqual(PointColorAxis.saturation.defaultValue, 0)
@@ -54,10 +53,10 @@ final class PointColorPanelTests: XCTestCase {
 
     // MARK: - 2. the card is drawn
 
-    func testTheHostedCardDrawsItsFiveRowsAndSwatchInsideTheCard() throws {
+    func testTheHostedCardDrawsItsFiveRowsAndStripInsideTheCard() throws {
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
-        try waitFor(panel) { $0.probes.count == 7 }       // card + swatch + five rows
+        try waitFor(panel) { $0.probes.count == 7 }       // card + strip + five rows
 
         let card = try XCTUnwrap(panel.cardFrame, "没有卡片 frame")
         XCTAssertGreaterThan(card.width, 200)
@@ -75,8 +74,11 @@ final class PointColorPanelTests: XCTestCase {
         for (a, b) in zip(sorted, sorted.dropFirst()) {
             XCTAssertLessThanOrEqual(a.maxY, b.minY + 0.5, "两根行压在一起了")
         }
-        let swatch = try XCTUnwrap(panel.rowFrame(PointColorProbe.swatchID), "色块没有画出来")
-        XCTAssertGreaterThan(swatch.width, 20)
+        let strip = try XCTUnwrap(panel.rowFrame(PointColorProbe.swatchID), "色框条没有画出来")
+        XCTAssertGreaterThan(strip.width, 60)
+        let probe = try XCTUnwrap(panel.probes.first { $0.rowID == PointColorProbe.swatchID })
+        XCTAssertEqual(probe.swatchCount, 0)
+        XCTAssertTrue(probe.showsTransparentSlot, "U1: 未选择时只有一个透明槽")
         print("POINT CARD · card \(card) · rows \(rows.map { "\($0.0)@\(Int($0.1.minY))" })")
     }
 
@@ -101,30 +103,131 @@ final class PointColorPanelTests: XCTestCase {
             .joined(separator: " · "))
     }
 
+    // MARK: - U1/U2/U3/U4 the swatch strip
+
+    func testU1U2SamplingAppendsAndSelects() throws {
+        let session = CatalogSession()
+        let commands = PointColorCommands(session: session)
+        let base = session.history.count
+
+        XCTAssertEqual(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)),
+                       .appended(0), "U1: 第一次吸 ⇒ 1 个色框")
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 1)
+        XCTAssertEqual(session.edit.color.point?.active, 0)
+        XCTAssertEqual(session.history.count, base + 1, "一次取样 = 一条历史")
+
+        XCTAssertEqual(commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8)),
+                       .appended(1), "U2: 再吸 ⇒ 第 2 个，且新的是选中态")
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 2)
+        XCTAssertEqual(session.edit.color.point?.active, 1)
+        XCTAssertEqual(session.history.count, base + 2)
+
+        let panel = try host(session: session, width: 330)
+        defer { panel.window.contentView = nil }
+        try waitFor(panel) { $0.probes.count == 7 }
+        let probe = try XCTUnwrap(panel.probes.first { $0.rowID == PointColorProbe.swatchID })
+        XCTAssertEqual(probe.swatchCount, 2)
+        XCTAssertEqual(probe.activeIndex, 1, "U2: 新吸的色框是选中态（蓝描边）")
+        XCTAssertFalse(probe.showsTransparentSlot)
+        print("POINT U1/U2 · 2 swatches, active \(probe.activeIndex)")
+    }
+
+    func testU3DoubleDeletingWalksBackOneSwatchAtATime() throws {
+        let session = CatalogSession()
+        let commands = PointColorCommands(session: session)
+        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 2)
+        XCTAssertEqual(session.edit.color.point?.active, 1)
+
+        // Double-click the second: one gone, selection falls back to the previous (index 0).
+        XCTAssertTrue(commands.delete(at: 1))
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 1, "每一步只减 1")
+        XCTAssertEqual(session.edit.color.point?.active, 0)
+
+        // Second double-click on the remaining first: the set is empty and the slot is transparent.
+        XCTAssertTrue(commands.delete(at: 0))
+        XCTAssertNil(session.edit.color.point)
+        let panel = try host(session: session, width: 330)
+        defer { panel.window.contentView = nil }
+        try waitFor(panel) { $0.probes.count == 7 }
+        let probe = try XCTUnwrap(panel.probes.first { $0.rowID == PointColorProbe.swatchID })
+        XCTAssertTrue(probe.showsTransparentSlot, "U3: 删完回到未选择态（透明槽）")
+        XCTAssertEqual(probe.swatchCount, 0)
+        print("POINT U3 · delete 2 → 1 → 0, selection falls back each time")
+    }
+
+    func testU4DeletingTheFirstLeavesTheOldSecondSelected() throws {
+        let session = CatalogSession()
+        let commands = PointColorCommands(session: session)
+        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        let firstYUV = session.edit.color.point?.swatches[0].sampleY
+        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        let secondYUV = session.edit.color.point?.swatches[1].sampleY
+        XCTAssertNotEqual(firstYUV, secondYUV)
+
+        XCTAssertTrue(commands.delete(at: 0), "U4: 双击第 1 个")
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 1)
+        XCTAssertEqual(session.edit.color.point?.active, 0, "原来的第二个成为选中的")
+        XCTAssertEqual(session.edit.color.point?.swatches[0].sampleY, secondYUV)
+        print("POINT U4 · deleting the first promotes the old second")
+    }
+
+    // MARK: - U5 selection is not an edit
+
+    func testU5SwitchingSwatchesChangesTheSlidersButNotHistory() throws {
+        let session = CatalogSession()
+        let commands = PointColorCommands(session: session)
+        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        session.applyEdit { model in
+            guard var set = model.color.point else { return }
+            set.swatches[0].hue = 40
+            set.swatches[1].hue = -30
+            model.color.point = set
+        }
+        session.commitEdit(label: "点颜色 色相")
+        let base = session.history.snapshots.count
+
+        XCTAssertTrue(commands.select(0))
+        XCTAssertEqual(session.edit.color.point?.active, 0)
+        XCTAssertEqual(session.edit.color.point?.activeSwatch?.hue, 40,
+                       "U5: 滑杆值换成该 swatch 的参数")
+        XCTAssertEqual(session.history.snapshots.count, base, "U5: 切换不是编辑，不新增历史")
+
+        XCTAssertTrue(commands.select(1))
+        XCTAssertEqual(session.edit.color.point?.activeSwatch?.hue, -30)
+        XCTAssertEqual(session.history.snapshots.count, base)
+        print("POINT U5 · selection moves the rows, history stays at \(base)")
+    }
+
     // MARK: - 3. rows write the document, one gesture = one row
 
-    func testARowWritesOnlyItsOwnNumberAndOneDragIsOneHistoryRow() throws {
+    func testARowWritesOnlyTheSelectedSwatchAndOneDragIsOneHistoryRow() throws {
         let session = CatalogSession()
-        var point = PointColor(sampleHue: 20, sampleChroma: 0.08)
-        point.range = 45
-        session.applyEdit { $0.color.point = point }
+        var first = PointColor(sampleHue: 20, sampleChroma: 0.08)
+        first.range = 45
+        var second = PointColor(sampleHue: 200, sampleChroma: 0.08)
+        second.range = 35
+        session.applyEdit {
+            $0.color.point = PointColorSet(swatches: [first, second], active: 1)
+        }
         session.commitEdit(label: "点颜色")
         let base = session.history.count
 
         session.applyEdit { model in
-            var p = model.color.point ?? PointColor()
-            p[.hue] = 24
-            model.color.point = p
+            guard var set = model.color.point else { return }
+            set.swatches[1][.hue] = 24
+            model.color.point = set
         }
         session.commitEdit(label: "点颜色 色相")
-        XCTAssertEqual(session.edit.color.point?.hue, 24)
-        XCTAssertEqual(session.edit.color.point?.range, 45, "别的行不许被顺手改了")
-        XCTAssertEqual(session.edit.color.point?.saturation, 0)
-        XCTAssertEqual(session.edit.color.point?.sampleHue, 20, "采样色不是滑杆")
+        XCTAssertEqual(session.edit.color.point?.swatches[1].hue, 24)
+        XCTAssertEqual(session.edit.color.point?.swatches[1].range, 35, "别的字段不许被顺手改了")
+        XCTAssertEqual(session.edit.color.point?.swatches[0].range, 45, "别的 swatch 不许被顺手改了")
+        XCTAssertEqual(session.edit.color.point?.swatches[0].hue, 0)
         XCTAssertEqual(session.history.count, base + 1)
         XCTAssertEqual(session.history.snapshots.last?.label, "点颜色 色相")
 
-        // Every axis round-trips through the same subscript the binding uses.
         var p = PointColor()
         p[.range] = 55; p[.feather] = 12; p[.hue] = -30
         p[.saturation] = 40; p[.luminance] = -20
@@ -138,7 +241,7 @@ final class PointColorPanelTests: XCTestCase {
 
     // MARK: - 4. reset
 
-    func testOneRowResetClearsOneNumberAndTheTitleClearsTheObject() throws {
+    func testOneRowResetClearsOneNumberAndTheTitleClearsTheSet() throws {
         let session = CatalogSession()
         var point = PointColor(sampleHue: 30, sampleChroma: 0.1)
         point.range = 45
@@ -146,15 +249,15 @@ final class PointColorPanelTests: XCTestCase {
         point.hue = 25
         point.saturation = -15
         point.luminance = 10
-        session.applyEdit { $0.color.point = point }
+        session.applyEdit { $0.color.point = PointColorSet(swatches: [point], active: 0) }
         session.commitEdit(label: "点颜色")
         let base = session.history.count
         let resets = PanelResets(session: session)
 
         XCTAssertTrue(resets.pointColorField(.range))
-        XCTAssertEqual(session.edit.color.point?.range, PointColor.defaultRange)
-        XCTAssertEqual(session.edit.color.point?.feather, 20, "只清这一根")
-        XCTAssertEqual(session.edit.color.point?.hue, 25)
+        XCTAssertEqual(session.edit.color.point?.activeSwatch?.range, PointColor.defaultRange)
+        XCTAssertEqual(session.edit.color.point?.activeSwatch?.feather, 20, "只清这一根")
+        XCTAssertEqual(session.edit.color.point?.activeSwatch?.hue, 25)
         XCTAssertEqual(session.history.count, base + 1, "一根行复位 = 一条历史")
         XCTAssertFalse(resets.pointColorField(.range), "已经在该行的默认值上，不许造空快照")
         XCTAssertEqual(session.history.count, base + 1)
@@ -167,13 +270,13 @@ final class PointColorPanelTests: XCTestCase {
         print("POINT RESET · \(session.history.snapshots.map(\.label))")
     }
 
-    // MARK: - 5. the swatch shows the sample
+    // MARK: - 5. the strip shows the active sample
 
-    func testTheSwatchReportsTheSampledColour() throws {
+    func testTheStripReportsTheSampledColour() throws {
         let session = CatalogSession()
         var point = PointColor(sampleHue: 24.78, sampleChroma: 0.08)
         point.hue = 20
-        session.applyEdit { $0.color.point = point }
+        session.applyEdit { $0.color.point = PointColorSet(swatches: [point], active: 0) }
         session.commitEdit(label: "点颜色")
 
         let panel = try host(session: session, width: 330)
@@ -181,8 +284,8 @@ final class PointColorPanelTests: XCTestCase {
         try waitFor(panel) { $0.probes.count == 7 }
         let probe = try XCTUnwrap(panel.probes.first { $0.rowID == PointColorProbe.swatchID })
         XCTAssertTrue(probe.isSampled)
-        XCTAssertEqual(probe.sampleHue, 24.78, accuracy: 1e-9)
-        XCTAssertEqual(probe.sampleChroma, 0.08, accuracy: 1e-9)
+        XCTAssertEqual(probe.sampleHue, point.sampleHue, accuracy: 1e-9)
+        XCTAssertEqual(probe.sampleChroma, point.sampleChroma, accuracy: 1e-9)
         let expected = PointColorSwatchView.srgb(for: point)
         XCTAssertEqual(probe.swatchRed, expected.r, accuracy: 1e-9)
         XCTAssertEqual(probe.swatchGreen, expected.g, accuracy: 1e-9)
@@ -195,24 +298,27 @@ final class PointColorPanelTests: XCTestCase {
 
     // MARK: - 6. the dropper
 
-    func testSamplingWritesTheSampleInOneHistoryRow() throws {
+    func testSamplingAppendsOneHistoryRowAndRefusesPalePixels() throws {
         let session = CatalogSession()
         let base = session.history.count
         let commands = PointColorCommands(session: session)
 
-        XCTAssertTrue(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)))
-        XCTAssertEqual(session.history.count, base + 1, "一次取样 = 一条历史")
+        XCTAssertEqual(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)), .appended(0),
+                       "一次取样 = 一条历史")
+        XCTAssertEqual(session.history.count, base + 1)
         XCTAssertEqual(session.history.snapshots.last?.label, "点颜色 取样")
-        let stored = try XCTUnwrap(session.edit.color.point)
+        let stored = try XCTUnwrap(session.edit.color.point?.swatches.first)
         XCTAssertTrue(stored.isSampled)
-        XCTAssertGreaterThan(stored.sampleChroma, 0.1, "红样本必须有彩度")
+        XCTAssertGreaterThan(stored.sampleChroma, 0.05, "红样本必须有彩度")
         XCTAssertEqual(stored.hue, 0, "取样不改任何调整滑杆")
         XCTAssertEqual(stored.saturation, 0)
         XCTAssertEqual(stored.luminance, 0)
 
-        XCTAssertFalse(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)),
-                       "同一个颜色再点一次不许造空快照")
-        XCTAssertEqual(session.history.count, base + 1)
+        // A near-grey sample: below chromaFloorYCbCr, so nothing is written and no swatch is added.
+        let pale = RGBSample(r: 0.18, g: 0.18, b: 0.181)
+        XCTAssertEqual(commands.sample(pale), .rejectedLowChroma)
+        XCTAssertEqual(session.edit.color.point?.swatches.count, 1, "淡色不许创建色框")
+        XCTAssertEqual(session.history.count, base + 1, "拒绝不产生历史")
         print("POINT DROPPER · sample H \(String(format: "%.1f", stored.sampleHue))°"
               + " C \(String(format: "%.3f", stored.sampleChroma))")
     }
@@ -228,13 +334,17 @@ final class PointColorPanelTests: XCTestCase {
                       "每行的双击复位必须走 PanelResets")
         XCTAssertTrue(card.contains("if !editing { session.commitEdit(label: \"点颜色 \\(axis.title)\") }"),
                       "拖动结束必须提交一行")
-        XCTAssertTrue(card.contains("PointColorSwatchView(point: point)"), "色块")
-        XCTAssertTrue(card.contains("先吸取一个颜色"), "未取色时给出提示")
+        XCTAssertTrue(card.contains("PointColorSwatchStrip"), "色框条")
+        XCTAssertFalse(card.contains("先吸取一个颜色"), "158: 删掉旧的说明文字")
+        XCTAssertFalse(card.contains("PointColorSwatchView(point:"), "大色块移进色框条")
         XCTAssertTrue(card.contains("sliderRow("), "每一行都是面板唯一的那根行")
         XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: card), 0, "卡里不许自己造滑杆")
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
         XCTAssertTrue(source.contains("loupe.armEyedropper"), "吸管走 LoupeController")
-        XCTAssertTrue(card.contains("Esc 取消"), "交叉光标之外还有文字说明")
+        let strip = try String(contentsOf: Self.stripSource, encoding: .utf8)
+        XCTAssertTrue(strip.contains("TapGesture(count: 2)"), "双击删除")
+        XCTAssertTrue(strip.contains("exclusively(before:"), "双击不能先触发单击")
+        print("POINT FURNITURE · strip + 5 rows + dropper")
     }
 
     // MARK: - host
@@ -304,6 +414,10 @@ final class PointColorPanelTests: XCTestCase {
 
     private static var inspectorSource: URL {
         repoRoot.appendingPathComponent("Sources/PhotonsUI/InspectorView.swift")
+    }
+
+    private static var stripSource: URL {
+        repoRoot.appendingPathComponent("Sources/PhotonsUI/PointColorPanel.swift")
     }
 
     private static func body(of signature: String, upTo endMarker: String,

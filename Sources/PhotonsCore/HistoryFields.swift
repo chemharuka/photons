@@ -253,19 +253,27 @@ extension EditHistory {
         // number (`FieldValue.flag`, the same shape `light.lensCorrections` uses).
         flag("color.blackAndWhite", .color, before.color.blackAndWhite, after.color.blackAndWhite)
 
-        // 140 — 点颜色: the sample, the window and the three adjustments, in the card's order. A
-        // `nil` document is the card's own default (`PointColor()`), so sampling from an empty card
-        // reads as “采样色相 / 采样彩度” rather than as six fields entering from nowhere.
-        if before.color.point != nil || after.color.point != nil {
-            let p0 = before.color.point ?? PointColor()
-            let p1 = after.color.point ?? PointColor()
-            num("color.point.sampleHue", .color, p0.sampleHue, p1.sampleHue)
-            num("color.point.sampleChroma", .color, p0.sampleChroma, p1.sampleChroma)
-            num("color.point.range", .color, p0.range, p1.range)
-            num("color.point.feather", .color, p0.feather, p1.feather)
-            num("color.point.hue", .color, p0.hue, p1.hue)
-            num("color.point.saturation", .color, p0.saturation, p1.saturation)
-            num("color.point.luminance", .color, p0.luminance, p1.luminance)
+        // 140/158 — 点颜色: every swatch's sample, window and three adjustments, in array order.
+        // `active` is deliberately absent: switching the card's selected swatch moves no pixel and is
+        // not an edit row. An absent list reads as no swatches.
+        let pointsBefore = before.color.point?.swatches ?? []
+        let pointsAfter = after.color.point?.swatches ?? []
+        if !pointsBefore.isEmpty || !pointsAfter.isEmpty {
+            let count = max(pointsBefore.count, pointsAfter.count)
+            let missing = PointColor()
+            for i in 0..<count {
+                let p0 = pointsBefore.indices.contains(i) ? pointsBefore[i] : missing
+                let p1 = pointsAfter.indices.contains(i) ? pointsAfter[i] : missing
+                let prefix = "color.point[\(i)]"
+                num("\(prefix).sampleY", .color, p0.sampleY, p1.sampleY)
+                num("\(prefix).sampleU", .color, p0.sampleU, p1.sampleU)
+                num("\(prefix).sampleV", .color, p0.sampleV, p1.sampleV)
+                num("\(prefix).range", .color, p0.range, p1.range)
+                num("\(prefix).feather", .color, p0.feather, p1.feather)
+                num("\(prefix).hue", .color, p0.hue, p1.hue)
+                num("\(prefix).saturation", .color, p0.saturation, p1.saturation)
+                num("\(prefix).luminance", .color, p0.luminance, p1.luminance)
+            }
         }
 
         // 2026-10-28 (P0 色彩分级) — S3.8's nine numbers, in panel order: 阴影 → 中间调 → 高光, and
@@ -493,6 +501,7 @@ extension EditHistory {
         if let exact = parameterNames[key] { return exact }
         if let point = curvePointName(key) { return point }
         if let band = bandName(key) { return band }
+        if let point = pointFieldName(key) { return point }
         if let mask = maskFieldName(key) { return mask }
         if let heal = healFieldName(key) { return heal }
         return key
@@ -625,6 +634,28 @@ extension EditHistory {
         default: name = String(axis)
         }
         return "HSL[\(index)] \(name)"
+    }
+
+    /// `color.point[1].hue` → 「点颜色[2] 色相」 (158: swatches are numbered as the card numbers them).
+    private static func pointFieldName(_ key: String) -> String? {
+        let prefix = "color.point["
+        guard key.hasPrefix(prefix), let close = key.lastIndex(of: "]") else { return nil }
+        let index = key[key.index(key.startIndex, offsetBy: prefix.count)..<close]
+        let axis = key[key.index(after: close)...].dropFirst()   // after "]."
+        let name: String
+        switch axis {
+        case "sampleY": name = "采样 Y"
+        case "sampleU": name = "采样 U"
+        case "sampleV": name = "采样 V"
+        case "range": name = "范围"
+        case "feather": name = "过渡"
+        case "hue": name = "色相"
+        case "saturation": name = "饱和"
+        case "luminance": name = "亮度"
+        default: name = String(axis)
+        }
+        let number = (Int(index) ?? 0) + 1
+        return "点颜色[\(number)] \(name)"
     }
 
     /// `masks.m-1.feather` → 「蒙版 羽化」.

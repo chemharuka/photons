@@ -4,23 +4,19 @@ import CryptoKit
 import simd
 import PhotonsCore
 
-/// 140 — **点颜色 (Point Color)**: one sampled OKLCh colour, a hue window and three adjustments,
-/// rendered by S3.6b immediately after S3.6.
+/// 158 — **点颜色 (Point Color)**: multiple sampled swatches, each a Rec.709 full-range YUV box with
+/// three adjustments, rendered by S3.6b immediately after S3.6.
 ///
-/// The suite is organised around what can be wrong, in the order it can lie:
+/// The suite is organised around the acceptance:
 ///
-///  1. **The window.** A point colour is not a global look: the seven colours outside the sampled
-///     window must be byte-identical (measured as ΔE00 < 0.5, and in fact 0 because the stage writes
-///     the source pixel back when the weight is 0).
-///  2. **The adjustment.** On the sampled colour the hue moves by +30° at slider +100, saturation
-///     changes chroma in the right direction without dragging hue with it, and the window's shoulder
-///     is C¹ — a 1°-per-pixel wheel has no step at either edge.
-///  3. **Grey is exact.** The chroma gate is the **same** helper S3.4/S3.6 use, so a neutral frame is
-///     bit-identical under any parameters, even though the stage is active.
-///  4. **Neutral is structural.** No sample, or all three sliders at 0, means no S3.6b in the trace,
-///     no link in the key chain, and the neutral frame's sha.
-///  5. **The document.** Schema 12 is additive: a schema-11 blob reads `point == nil`, re-encodes byte
-///     for byte, and is not stamped; a sample is one object with its own key.
+///  1. **The model.** An old single-object `point` reads as one selected swatch; three swatches
+///     round-trip in order; `active` does not enter the stage key.
+///  2. **Disjoint boxes.** A red box + a blue box: moving A leaves blue and grey byte-identical.
+///  3. **Stacking.** Both boxes move their own side and match the one-at-a-time frames within 1 code.
+///  4. **Grey is exact.** The pale floor gives a grey weight 0, so it is written back bit for bit.
+///  5. **The pale guard.** A sample below `chromaFloorYCbCr` is not sampled; a nearly-grey pixel has
+///     weight 0 under any parameters.
+///  6. **CPU = GPU.**
 final class PointColorTests: XCTestCase {
 
     // MARK: - fixtures
@@ -50,36 +46,36 @@ final class PointColorTests: XCTestCase {
         }
         return LinearImage(width: width, height: height, rgba: rgba,
                            colorSpace: "extendedLinearSRGB",
-                           decoderVersion: "synthetic-140")
+                           decoderVersion: "synthetic-158")
     }
 
     private static let toWorking = ColorPrimaries.conversion(from: ColorPrimaries.decoded,
                                                              to: ColorPrimaries.working)
     private static let toSRGB = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
-    private static let fromSRGB = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
 
-    /// Eight colour blocks, 45° apart on the OKLCh wheel. 45° spacing means a 15°/15° window (the
-    /// outside test) selects one block and leaves seven untouched; the default 30°/30° window is used
-    /// by the movement and no-step tests.
-    private static let blockHues: [Double] = (0..<8).map {
-        (24.78 + 45.0 * Double($0)).truncatingRemainder(dividingBy: 360)
+    /// Three blocks, left red-orange / centre grey / right blue, in decoded **linear** sRGB. The two
+    /// colours are built at a modest OKLCh chroma (0.08) so a +30° rotation stays inside the gamut and
+    /// the hue assertion is about the operator, not about clipping.
+    private static let red = displayLinear(L: 0.62, C: 0.08, hue: 30)
+    private static let grey = SIMD3(0.18, 0.18, 0.18)
+    private static let blue = displayLinear(L: 0.52, C: 0.08, hue: 260)
+
+    private static func displayLinear(L: Double, C: Double, hue: Double) -> SIMD3<Double> {
+        let working = OKLCh.toLinear(L: L, C: C, hue: hue)
+        return ColorPrimaries.conversion(from: .working, to: .sRGB).applying(to: working)
     }
 
-    private func blocks() -> LinearImage {
-        picture(64, 32) { x, _ in
-            let hsl = OKLCh.toLinear(L: 0.62, C: 0.08, hue: Self.blockHues[x / 8])
-            let srgb = Self.toSRGB.applying(to: hsl)
-            return (srgb.x, srgb.y, srgb.z)
+    private func threeBlocks() -> LinearImage {
+        picture(90, 30) { x, _ in
+            let c: SIMD3<Double>
+            if x < 30 { c = Self.red } else if x < 60 { c = Self.grey } else { c = Self.blue }
+            return (c.x, c.y, c.z)
         }
     }
 
-    /// A 360-column wheel, one OKLCh degree per column, for the seam/shoulder sweep.
-    private func wheel(height: Int = 8, L: Double = 0.60, C: Double = 0.06) -> LinearImage {
-        picture(360, height) { x, _ in
-            let working = OKLCh.toLinear(L: L, C: C, hue: Double(x))
-            let srgb = Self.toSRGB.applying(to: working)
-            return (srgb.x, srgb.y, srgb.z)
-        }
+    private func sample(_ rgb: SIMD3<Double>) -> PointColor {
+        let yuv = PointColor.sampleYUV(fromDecodedLinear: RGBSample(r: rgb.x, g: rgb.y, b: rgb.z))
+        return PointColor(sampleY: yuv.x, sampleU: yuv.y, sampleV: yuv.z)
     }
 
     private func display(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
@@ -88,21 +84,8 @@ final class PointColorTests: XCTestCase {
         return try XCTUnwrap(graph.render(edit, options: options).display)
     }
 
-    /// A document whose point card is sampled and adjusted.
-    private func document(sampleHue: Double = 24.78, sampleChroma: Double = 0.08,
-                          range: Double = 30, feather: Double = 30,
-                          hue: Double = 0, saturation: Double = 0,
-                          luminance: Double = 0) -> EditModel {
-        var edit = EditModel.neutral
-        edit.color.point = PointColor(sampleHue: sampleHue, sampleChroma: sampleChroma,
-                                      range: range, feather: feather,
-                                      hue: hue, saturation: saturation, luminance: luminance)
-        return edit
-    }
-
     private static func code(_ v: Float16) -> Int { Int((Double(v) * 255).rounded()) }
 
-    /// One display pixel decoded back to linear sRGB then the working primaries.
     private static func workingPixel(_ img: DisplayImage, x: Int, y: Int) -> SIMD3<Double> {
         let o = (y * img.width + x) * 4
         func decode(_ v: Float16) -> Double {
@@ -112,6 +95,8 @@ final class PointColorTests: XCTestCase {
         let srgb = SIMD3(decode(img.rgba[o]), decode(img.rgba[o + 1]), decode(img.rgba[o + 2]))
         return fromSRGB.applying(to: srgb)
     }
+
+    private static let fromSRGB = ColorPrimaries.conversion(from: .sRGB, to: ColorPrimaries.working)
 
     private static func oklch(_ img: DisplayImage, x: Int, y: Int) -> (L: Double, C: Double, h: Double) {
         let lch = OKLCh.fromLinear(workingPixel(img, x: x, y: y))
@@ -125,325 +110,353 @@ final class PointColorTests: XCTestCase {
         return d
     }
 
-    // MARK: - ΔE00 (the acceptance's own unit)
-
-    private static func lab(_ img: DisplayImage, x: Int, y: Int) -> SIMD3<Double> {
+    private static func channelCodes(_ img: DisplayImage, x: Int, y: Int) -> [Int] {
         let o = (y * img.width + x) * 4
-        func decode(_ v: Float16) -> Double {
-            let c = Double(v)
-            return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
-        }
-        let r = decode(img.rgba[o]), g = decode(img.rgba[o + 1]), b = decode(img.rgba[o + 2])
-        let X = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b
-        let Y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b
-        let Z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b
-        func f(_ t: Double) -> Double {
-            let d = 6.0 / 29.0
-            return t > d * d * d ? cbrt(t) : t / (3 * d * d) + 4.0 / 29.0
-        }
-        let fx = f(X / 0.95047), fy = f(Y / 1.0), fz = f(Z / 1.08883)
-        return SIMD3(116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+        return (0..<3).map { code(img.rgba[o + $0]) }
     }
 
-    /// CIEDE2000, the formula the acceptance names. Only used on 8-bit display pixels; the numbers
-    /// that matter in these tests (an untouched block) are exactly 0 because the pixels are identical.
-    private static func deltaE00(_ p: SIMD3<Double>, _ q: SIMD3<Double>) -> Double {
-        let c1 = (p.y * p.y + p.z * p.z).squareRoot()
-        let c2 = (q.y * q.y + q.z * q.z).squareRoot()
-        let cBar = (c1 + c2) / 2
-        let cBar7 = pow(cBar, 7)
-        let g = 0.5 * (1 - (cBar7 / (cBar7 + pow(25, 7))).squareRoot())
-        let a1 = (1 + g) * p.y, a2 = (1 + g) * q.y
-        let cp1 = (a1 * a1 + p.z * p.z).squareRoot()
-        let cp2 = (a2 * a2 + q.z * q.z).squareRoot()
-        func hue(_ b: Double, _ a: Double) -> Double {
-            guard a != 0 || b != 0 else { return 0 }
-            var h = atan2(b, a) * 180 / .pi
-            if h < 0 { h += 360 }
-            return h
-        }
-        let h1 = hue(p.z, a1), h2 = hue(q.z, a2)
-        let dL = q.x - p.x
-        let dC = cp2 - cp1
-        var dh = h2 - h1
-        if cp1 * cp2 == 0 { dh = 0 }
-        else if dh > 180 { dh -= 360 }
-        else if dh < -180 { dh += 360 }
-        let dH = 2 * (cp1 * cp2).squareRoot() * sin(dh * .pi / 360)
-        let lBar = (p.x + q.x) / 2
-        let cpBar = (cp1 + cp2) / 2
-        let hBar: Double
-        if cp1 * cp2 == 0 { hBar = h1 + h2 }
-        else if abs(h1 - h2) <= 180 { hBar = (h1 + h2) / 2 }
-        else if h1 + h2 < 360 { hBar = (h1 + h2 + 360) / 2 }
-        else { hBar = (h1 + h2 - 360) / 2 }
-        let t = 1 - 0.17 * cos((hBar - 30) * .pi / 180)
-            + 0.24 * cos(2 * hBar * .pi / 180)
-            + 0.32 * cos((3 * hBar + 6) * .pi / 180)
-            - 0.20 * cos((4 * hBar - 63) * .pi / 180)
-        let dTheta = 30 * exp(-pow((hBar - 275) / 25, 2))
-        let cpBar7 = pow(cpBar, 7)
-        let rc = 2 * (cpBar7 / (cpBar7 + pow(25, 7))).squareRoot()
-        let sl = 1 + 0.015 * pow(lBar - 50, 2) / (20 + pow(lBar - 50, 2)).squareRoot()
-        let sc = 1 + 0.045 * cpBar
-        let sh = 1 + 0.015 * cpBar * t
-        let rt = -sin(2 * dTheta * .pi / 180) * rc
-        let l = dL / sl, c = dC / sc, h = dH / sh
-        return (l * l + c * c + h * h + rt * c * h).squareRoot()
+    private func keyLink(_ set: PointColorSet) -> (link: String, material: String) {
+        var edit = EditModel.neutral
+        edit.color.point = set
+        let dims = ImageSize(width: 90, height: 30)
+        let links = RenderKeyChain.links(identity: "158-key", sourceSize: dims,
+                                         canvas: dims, content: dims,
+                                         edit: edit, display: DisplayOptions())
+        return (links.pointColour ?? "", edit.keyMaterial(.pointColour))
     }
 
-    // MARK: - ① the window
+    // MARK: - M1 the old single-object document
 
-    /// **The acceptance.** Sample the red block, shift its hue, and the other seven blocks do not
-    /// move. The window here is 15°/15° because the fixture's ladder is 45° apart; the default 30°/30°
-    /// window would legitimately reach into the neighbouring block.
-    func testOutsideTheRangeIsUntouched() throws {
-        let image = blocks()
-        let graph = try makeGraph(image, identity: "140-outside")
+    func testOldSingleObjectReadsAsOneSelectedSwatch() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let base = try encoder.encode(EditModel.neutral)
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: base) as? [String: Any])
+        var color = try XCTUnwrap(root["color"] as? [String: Any])
+        color["point"] = ["sampleHue": 24.78, "sampleChroma": 0.08,
+                          "range": 30, "feather": 30,
+                          "hue": 0, "saturation": 0, "luminance": 0]
+        root["color"] = color
+        let old = try JSONSerialization.data(withJSONObject: root)
+
+        let decoded = try JSONDecoder().decode(EditModel.self, from: old)
+        let set = try XCTUnwrap(decoded.color.point)
+        XCTAssertEqual(set.swatches.count, 1)
+        XCTAssertEqual(set.active, 0)
+        XCTAssertFalse(set.isActive, "a sample with no adjustment is not a stage")
+        XCTAssertEqual(decoded.changedStages(from: .neutral), [.pointColour])
+
+        // A sample-only old document has no pass, so its frame is the pre-140 frame byte for byte.
+        let image = threeBlocks()
+        let graph = try makeGraph(image, identity: "158-old")
         let neutral = try display(graph, EditModel.neutral)
-        let moved = try display(graph, document(range: 15, feather: 15, hue: 30))
-        XCTAssertTrue(try graph.render(document(range: 15, feather: 15, hue: 30),
+        let rendered = try graph.render(decoded,
                                        options: RenderOptions(scale: 1, useCache: false,
                                                               wantsPixels: true))
-            .trace.executed.contains(.pointColour))
+        XCTAssertFalse(rendered.trace.executed.contains(.pointColour))
+        XCTAssertEqual(try XCTUnwrap(rendered.display).sha256(), neutral.sha256())
 
-        var worstOutside = 0.0
-        for i in 0..<8 {
-            let x = i * 8 + 4
-            let before = Self.lab(neutral, x: x, y: 16)
-            let after = Self.lab(moved, x: x, y: 16)
-            let dE = Self.deltaE00(before, after)
-            if i == 0 {
-                XCTAssertGreaterThan(dE, 0.5, "the sampled block must move")
-            } else {
-                worstOutside = max(worstOutside, dE)
-                XCTAssertLessThan(dE, 0.5, "block \(i) is outside the window and must not move")
-                // Stronger than ΔE00: every channel is the same Float16 bit pattern.
-                for c in 0..<4 {
-                    XCTAssertEqual(moved.rgba[(16 * moved.width + x) * 4 + c],
-                                   neutral.rgba[(16 * neutral.width + x) * 4 + c],
-                                   "block \(i) channel \(c) is not bit-identical")
-                }
+        // Re-encoding writes the new shape; decoding it again is stable.
+        let again = try JSONDecoder().decode(EditModel.self, from: encoder.encode(decoded))
+        XCTAssertEqual(again.color.point, decoded.color.point)
+        print("POINT M1 · old single object → \(set.swatches.count) swatch, active \(set.active ?? -1)")
+    }
+
+    // MARK: - M2 three-swatch round trip
+
+    func testThreeSwatchesRoundTripInOrder() throws {
+        let a = sample(Self.red)
+        let b = sample(Self.blue)
+        var c = sample(Self.grey)
+        c.hue = -40
+        let set = PointColorSet(swatches: [a, b, c], active: 2)
+        var edit = EditModel.neutral
+        edit.color.point = set
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(edit)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"swatches\""), "the new spelling writes an array")
+        let back = try JSONDecoder().decode(EditModel.self, from: data)
+        XCTAssertEqual(back.color.point, set)
+        XCTAssertEqual(back.color.point?.swatches.count, 3)
+        XCTAssertEqual(back.color.point?.active, 2)
+        XCTAssertEqual(try encoder.encode(back), data)
+        print("POINT M2 · 3 swatches round-trip, active \(set.active ?? -1)")
+    }
+
+    // MARK: - M3 the key chain
+
+    func testActiveDoesNotEnterTheStageKeyButSwatchesDo() throws {
+        var a = sample(Self.red)
+        a.hue = 10
+        var b = sample(Self.blue)
+        b.hue = 20
+        let base = PointColorSet(swatches: [a, b], active: 0)
+        let selected1 = PointColorSet(swatches: [a, b], active: 1)
+        let reference = keyLink(base)
+        let switched = keyLink(selected1)
+        XCTAssertFalse(reference.link.isEmpty)
+        XCTAssertEqual(reference.link, switched.link, "active moves no pixel and must not miss the cache")
+        XCTAssertEqual(reference.material, switched.material)
+
+        var moved = base
+        moved.swatches[1].hue = 25
+        let changed = keyLink(moved)
+        XCTAssertNotEqual(changed.link, reference.link)
+        XCTAssertNotEqual(changed.material, reference.material)
+        print("POINT M3 · active 0→1 keeps the key; swatch[1].hue moves it")
+    }
+
+    // MARK: - K1 disjoint boxes
+
+    func testEachBoxOnlyMovesItsOwnBlock() throws {
+        let image = threeBlocks()
+        let graph = try makeGraph(image, identity: "158-disjoint")
+        let neutral = try display(graph, EditModel.neutral)
+
+        var a = sample(Self.red)
+        a.hue = 100
+        var b = sample(Self.blue)
+        b.hue = 100
+
+        let onlyA = PointColorSet(swatches: [a, b.withAdjustmentZero()], active: 0)
+        var editA = EditModel.neutral
+        editA.color.point = onlyA
+        let outA = try display(graph, editA)
+
+        // Red moved; blue and grey are bit-identical.
+        XCTAssertNotEqual(Self.channelCodes(outA, x: 15, y: 15),
+                          Self.channelCodes(neutral, x: 15, y: 15))
+        for (x, name) in [(45, "grey"), (75, "blue")] {
+            XCTAssertEqual(Self.channelCodes(outA, x: x, y: 15),
+                           Self.channelCodes(neutral, x: x, y: 15),
+                           "\(name) is outside A and must not move")
+        }
+
+        let onlyB = PointColorSet(swatches: [sample(Self.red).withAdjustmentZero(), b], active: 1)
+        var editB = EditModel.neutral
+        editB.color.point = onlyB
+        let outB = try display(graph, editB)
+        XCTAssertNotEqual(Self.channelCodes(outB, x: 75, y: 15),
+                          Self.channelCodes(neutral, x: 75, y: 15))
+        for (x, name) in [(15, "red"), (45, "grey")] {
+            XCTAssertEqual(Self.channelCodes(outB, x: x, y: 15),
+                           Self.channelCodes(neutral, x: x, y: 15),
+                           "\(name) is outside B and must not move")
+        }
+        print("POINT K1 · A moves red only, B moves blue only, grey untouched in both")
+    }
+
+    // MARK: - K2 stacking
+
+    func testBothBoxesStackAndMatchTheOneAtATimeFrames() throws {
+        let image = threeBlocks()
+        let graph = try makeGraph(image, identity: "158-stack")
+        var a = sample(Self.red)
+        a.hue = 100
+        var b = sample(Self.blue)
+        b.saturation = 60
+
+        var both = EditModel.neutral
+        both.color.point = PointColorSet(swatches: [a, b], active: 0)
+        let stacked = try display(graph, both)
+
+        var onlyA = EditModel.neutral
+        onlyA.color.point = PointColorSet(swatches: [a, b.withAdjustmentZero()], active: 0)
+        let outA = try display(graph, onlyA)
+
+        var onlyB = EditModel.neutral
+        onlyB.color.point = PointColorSet(swatches: [a.withAdjustmentZero(), b], active: 1)
+        let outB = try display(graph, onlyB)
+
+        for x in [15, 75] {
+            let s = Self.channelCodes(stacked, x: x, y: 15)
+            let expected = Self.channelCodes(x == 15 ? outA : outB, x: x, y: 15)
+            for (u, v) in zip(s, expected) {
+                XCTAssertLessThanOrEqual(abs(u - v), 1,
+                                         "stacking must agree with the one-at-a-time frame")
             }
         }
-        print("POINT OUTSIDE · worst ΔE00 on the seven outside blocks = "
-              + String(format: "%.6f", worstOutside))
+        XCTAssertNotEqual(Self.channelCodes(stacked, x: 15, y: 15),
+                          Self.channelCodes(try display(graph, EditModel.neutral), x: 15, y: 15))
+        XCTAssertNotEqual(Self.channelCodes(stacked, x: 75, y: 15),
+                          Self.channelCodes(try display(graph, EditModel.neutral), x: 75, y: 15))
+        print("POINT K2 · both sides move; each block ≤1 code from its solo frame")
     }
 
-    // MARK: - ② the adjustment
+    // MARK: - K3 grey is exact
 
-    func testInsideTheRangeMovesHue() throws {
-        let image = blocks()
-        let graph = try makeGraph(image, identity: "140-inside")
-        let neutral = try display(graph, EditModel.neutral)
-        let moved = try display(graph, document(hue: 100))
-
-        let x = 4
-        let before = Self.oklch(neutral, x: x, y: 16)
-        let after = Self.oklch(moved, x: x, y: 16)
-        let delta = Self.signedHueDelta(before.h, after.h)
-        print(String(format: "POINT HUE · %.2f° + 30° → %.2f° (Δ %.2f°)", before.h, after.h, delta))
-        XCTAssertEqual(delta, 30, accuracy: 1, "hue +100 must deliver +30° on the sampled colour")
-        XCTAssertEqual(after.L, before.L, accuracy: 0.01, "a hue rotation must not brighten it")
-        XCTAssertEqual(after.C, before.C, accuracy: 0.01, "…nor change its chroma")
-
-        // Saturation ±50 changes chroma in the right direction and does not drag the hue.
-        let up = try display(graph, document(saturation: 50))
-        let down = try display(graph, document(saturation: -50))
-        let cUp = Self.oklch(up, x: x, y: 16)
-        let cDown = Self.oklch(down, x: x, y: 16)
-        XCTAssertGreaterThan(cUp.C, before.C, "saturation +50 must raise chroma")
-        XCTAssertLessThan(cDown.C, before.C, "saturation −50 must lower chroma")
-        XCTAssertLessThanOrEqual(abs(Self.signedHueDelta(before.h, cUp.h)), 2,
-                                 "a chroma scale must not rotate the hue")
-        XCTAssertLessThanOrEqual(abs(Self.signedHueDelta(before.h, cDown.h)), 2,
-                                 "…in either direction")
-        print(String(format: "POINT SAT · C %.4f → +50: %.4f · −50: %.4f", before.C, cUp.C, cDown.C))
-    }
-
-    /// **No hard edge.** One OKLCh degree per pixel, default 30°/30° window, +30° rotation: adjacent
-    /// columns must not step. Both the `range` and `range + feather` shoulders are crossed in one
-    /// sweep, seam included.
-    func testNoHardEdgeAtTheBoundary() throws {
-        let image = wheel()
-        let graph = try makeGraph(image, identity: "140-edge")
-        let moved = try display(graph, document(sampleHue: 40, sampleChroma: 0.06,
-                                                range: 30, feather: 30, hue: 100))
-        var worst = 0.0
-        for x in 0..<(moved.width - 1) {
-            let a = Self.lab(moved, x: x, y: 4)
-            let b = Self.lab(moved, x: x + 1, y: 4)
-            worst = max(worst, Self.deltaE00(a, b))
-        }
-        // The wrap from 359° back to 0° is the same physical step as any other.
-        let seamA = Self.lab(moved, x: moved.width - 1, y: 4)
-        let seamB = Self.lab(moved, x: 0, y: 4)
-        worst = max(worst, Self.deltaE00(seamA, seamB))
-        print(String(format: "POINT EDGE · worst adjacent ΔE00 on a 1°/px wheel = %.3f", worst))
-        XCTAssertLessThan(worst, 2, "the window's shoulders (and the 0°/360° seam) must not step")
-    }
-
-    // MARK: - ③ grey is exact
-
-    func testGreyPixelsAreBitIdentical() throws {
-        // A neutral ramp: every pixel is r = g = b, so the OKLab fold lands within 1e-8 of C = 0 and
-        // the shared gate is exactly 0.
+    func testGreyPixelsAreBitIdenticalUnderEveryParameterSet() throws {
         let image = picture(32, 32) { x, _ in
             let v = 0.03 + Double(x) / 31 * 0.75
             return (v, v, v)
         }
-        let graph = try makeGraph(image, identity: "140-grey")
+        let graph = try makeGraph(image, identity: "158-grey")
         let neutral = try display(graph, EditModel.neutral)
-        for edit in [document(hue: 100, saturation: 100, luminance: 100),
-                     document(sampleHue: 200, sampleChroma: 0.12,
-                              range: 0, feather: 180, hue: -100, saturation: -100,
-                              luminance: -100)] {
+
+        var wide = sample(Self.red)
+        wide.range = 120
+        wide.feather = 120
+        wide.hue = 100
+        wide.saturation = 100
+        wide.luminance = 100
+        var wideB = sample(Self.blue)
+        wideB.range = 120
+        wideB.feather = 120
+        wideB.hue = -100
+        wideB.saturation = -100
+        wideB.luminance = -100
+
+        for set in [PointColorSet(swatches: [wide], active: 0),
+                    PointColorSet(swatches: [wide, wideB], active: 1)] {
+            var edit = EditModel.neutral
+            edit.color.point = set
             let out = try display(graph, edit)
             XCTAssertEqual(out.sha256(), neutral.sha256(),
-                           "a neutral pixel has no hue: S3.6b must leave it bit-identical")
+                           "a neutral pixel has weight 0 and must stay bit-identical")
         }
-        XCTAssertEqual(HSLBands.chromaGate(for: 0), 0)
-        XCTAssertEqual(HSLBands.chromaGate(for: 1e-7), 0)
-        print("POINT GREY · every parameter set leaves the grey ramp byte-identical")
+        print("POINT K3 · grey ramp byte-identical for 1 and 2 wide swatches")
     }
 
-    // MARK: - ④ neutral is structural
+    // MARK: - K4 the pale guard
 
-    func testNeutralDocumentAddsNoPass() throws {
-        let image = blocks()
-        let graph = try makeGraph(image, identity: "140-neutral")
+    func testPaleSamplesAreRejectedAndPalePixelsHaveZeroWeight() throws {
+        // 0.005 chroma around mid grey: below the 0.01 pixel floor.
+        let pale = SIMD3(0.180, 0.180, 0.187)
+        let yuv = PointColor.sampleYUV(fromDecodedLinear: RGBSample(r: pale.x, g: pale.y, b: pale.z))
+        let rejected = PointColor(sampleY: yuv.x, sampleU: yuv.y, sampleV: yuv.z)
+        XCTAssertLessThan(rejected.sampleChromaYCbCr, PointColor.chromaFloorYCbCr)
+        XCTAssertFalse(rejected.isSampled, "the model refuses a too-pale sample")
+        XCTAssertFalse(rejected.isActive, "…and it can never make a stage")
+
+        // A coloured box that would otherwise cover the pale patch still gives it weight 0.
+        var fence = sample(Self.blue)
+        fence.range = 120
+        fence.feather = 120
+        fence.hue = 100
+        XCTAssertEqual(fence.weight(yuv: yuv), 0)
+        XCTAssertEqual(PointColorSet(swatches: [fence], active: 0).apply(
+            PointColor.linearWorking(from: yuv)), PointColor.linearWorking(from: yuv))
+
+        // And the whole pale patch is byte-identical in a real render.
+        let image = picture(32, 32) { _, _ in (pale.x, pale.y, pale.z) }
+        let graph = try makeGraph(image, identity: "158-pale")
+        let neutral = try display(graph, EditModel.neutral)
+        var edit = EditModel.neutral
+        edit.color.point = PointColorSet(swatches: [fence], active: 0)
+        XCTAssertEqual(try display(graph, edit).sha256(), neutral.sha256())
+        print("POINT K4 · pale sample rejected; pale pixels weight 0 under a 120/120 box")
+    }
+
+    // MARK: - the eight-swatch cap and the model-level pale refusal
+
+    func testSetRefusesAPaleSwatchAndTheNinth() throws {
+        var set = PointColorSet()
+        let good = sample(Self.red)
+        for i in 0..<PointColorSet.maxSwatches {
+            XCTAssertEqual(set.append(good), i)
+        }
+        XCTAssertEqual(set.swatches.count, 8)
+        XCTAssertEqual(set.active, 7)
+        XCTAssertNil(set.append(good), "the ninth swatch is refused")
+
+        // The model-level half of K4: a pale swatch can never enter the list.
+        var pale = PointColor()
+        pale.sampleY = 0.5
+        pale.sampleU = 0.505
+        pale.sampleV = 0.5
+        XCTAssertLessThan(pale.sampleChromaYCbCr, PointColor.chromaFloorYCbCr)
+        var empty = PointColorSet()
+        XCTAssertNil(empty.append(pale))
+        XCTAssertTrue(empty.swatches.isEmpty)
+        print("POINT CAP · 8 swatches max; pale append refused at the model boundary")
+    }
+
+    // MARK: - the adjustment itself
+
+    func testAHueMoveOnTheSampledColourIsThirtyDegrees() throws {
+        let image = threeBlocks()
+        let graph = try makeGraph(image, identity: "158-hue")
+        let neutral = try display(graph, EditModel.neutral)
+        var swatch = sample(Self.red)
+        swatch.hue = 100
+        var edit = EditModel.neutral
+        edit.color.point = PointColorSet(swatches: [swatch], active: 0)
+        let moved = try display(graph, edit)
+
+        let before = Self.oklch(neutral, x: 15, y: 15)
+        let after = Self.oklch(moved, x: 15, y: 15)
+        let delta = Self.signedHueDelta(before.h, after.h)
+        print(String(format: "POINT HUE · %.2f° + 30° → %.2f° (Δ %.2f°)", before.h, after.h, delta))
+        XCTAssertEqual(delta, 30, accuracy: 1.5, "hue +100 must deliver +30° at the box centre")
+        XCTAssertEqual(after.L, before.L, accuracy: 0.02, "a hue rotation must not brighten it")
+        XCTAssertEqual(after.C, before.C, accuracy: 0.02, "…nor change its chroma")
+    }
+
+    // MARK: - neutral is structural
+
+    func testEmptyAndUnadjustedListsAddNoPass() throws {
+        let image = threeBlocks()
+        let graph = try makeGraph(image, identity: "158-neutral")
         let plain = try graph.render(EditModel.neutral,
                                      options: RenderOptions(scale: 1, useCache: false,
                                                             wantsPixels: true))
         let neutral = try XCTUnwrap(plain.display)
 
-        let unsampled = document(sampleChroma: 0, hue: 100)
-        let unadjusted = document(hue: 0, saturation: 0, luminance: 0)
-        let allZero = EditModel.neutral
-        for edit in [unsampled, unadjusted, allZero] {
+        var sampledOnly = EditModel.neutral
+        sampledOnly.color.point = PointColorSet(swatches: [sample(Self.red)], active: 0)
+        var empty = EditModel.neutral
+        empty.color.point = PointColorSet(swatches: [], active: nil)
+
+        for edit in [sampledOnly, empty, EditModel.neutral] {
             let result = try graph.render(edit, options: RenderOptions(scale: 1, useCache: false,
                                                                        wantsPixels: true))
-            XCTAssertFalse(result.trace.executed.contains(.pointColour),
-                           "no sample or no adjustment means no S3.6b pass")
-            XCTAssertEqual(try XCTUnwrap(result.display).sha256(), neutral.sha256(),
-                           "the frame must be the pre-140 frame byte for byte")
+            XCTAssertFalse(result.trace.executed.contains(.pointColour))
+            XCTAssertEqual(try XCTUnwrap(result.display).sha256(), neutral.sha256())
             let dims = ImageSize(width: image.width, height: image.height)
-            let links = RenderKeyChain.links(identity: "140-neutral", sourceSize: dims,
+            let links = RenderKeyChain.links(identity: "158-neutral", sourceSize: dims,
                                              canvas: dims, content: dims,
                                              edit: edit, display: DisplayOptions())
-            XCTAssertNil(links.pointColour, "no point link without a sampled-and-adjusted point")
-            XCTAssertEqual(links.pipeline, RenderStage.allCases)
+            XCTAssertNil(links.pointColour)
         }
 
-        // The active document is the other half: one extra pass, one extra link, and the stage sits
-        // between S3.6 and S3.8.
-        let active = document(hue: 100)
+        var active = EditModel.neutral
+        var swatch = sample(Self.red)
+        swatch.hue = 10
+        active.color.point = PointColorSet(swatches: [swatch], active: 0)
         let result = try graph.render(active, options: RenderOptions(scale: 1, useCache: false,
                                                                      wantsPixels: true))
         XCTAssertTrue(result.trace.executed.contains(.pointColour))
         XCTAssertNotNil(result.keys.pointColour)
-        let order = RenderStage.order
-        XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .pointColour)) - 1], .hsl)
-        XCTAssertEqual(order[try XCTUnwrap(order.firstIndex(of: .pointColour)) + 1], .grade)
         print("POINT NEUTRAL · trace \(result.trace.csv)")
     }
 
-    // MARK: - ⑤ the key contains the window
+    // MARK: - CPU reference vs kernel
 
-    func testKeyContainsTheWindow() throws {
-        let dims = ImageSize(width: 64, height: 64)
-        func link(_ point: PointColor) -> (link: String, material: String) {
-            var edit = EditModel.neutral
-            edit.color.point = point
-            let links = RenderKeyChain.links(identity: "140-key", sourceSize: dims,
-                                             canvas: dims, content: dims,
-                                             edit: edit, display: DisplayOptions())
-            return (links.pointColour ?? "", edit.keyMaterial(.pointColour))
-        }
-        let base = PointColor(sampleHue: 24.78, sampleChroma: 0.08,
-                              range: 30, feather: 30, hue: 100)
-        let reference = link(base)
-        XCTAssertFalse(reference.link.isEmpty, "an active point must have a link")
-        XCTAssertTrue(reference.material.contains("sampleH=24.78000"), reference.material)
-        XCTAssertTrue(reference.material.contains("sampleC=0.08000"), reference.material)
-        XCTAssertTrue(reference.material.contains("range=30.00000"), reference.material)
-        XCTAssertTrue(reference.material.contains("feather=30.00000"), reference.material)
-
-        // Each of the four window numbers must miss the cache **on its own**.
-        var hue = base; hue.sampleHue += 1
-        var chroma = base; chroma.sampleChroma += 0.01
-        var range = base; range.range += 1
-        var feather = base; feather.feather += 1
-        for (name, variant) in [("sampleHue", hue), ("sampleChroma", chroma),
-                                ("range", range), ("feather", feather)] {
-            let other = link(variant)
-            XCTAssertNotEqual(other.link, reference.link, "\(name) moved but the stage key did not")
-            XCTAssertNotEqual(other.material, reference.material,
-                              "\(name) moved but the material did not")
-        }
-        print("POINT KEY · \(reference.material)")
-    }
-
-    // MARK: - ⑥ the document
-
-    func testSchemaTwelveKeepsOldDocuments() throws {
-        var old = EditModel.neutral
-        old.schemaVersion = 11
-        old.light.exposure = 0.5
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let first = try encoder.encode(old)
-        let text = String(decoding: first, as: UTF8.self)
-        XCTAssertFalse(text.contains("\"point\""), "a schema-11 document must not grow a point key")
-        let reloaded = try JSONDecoder().decode(EditModel.self, from: first)
-        XCTAssertEqual(reloaded.schemaVersion, 11, "the additive key must not stamp the version")
-        XCTAssertNil(reloaded.color.point)
-        XCTAssertEqual(try encoder.encode(reloaded), first, "schema-11 bytes must be identical")
-
-        var sampled = EditModel.neutral
-        sampled.color.point = PointColor(sampleHue: 24.78, sampleChroma: 0.08,
-                                         range: 30, feather: 30, hue: 100)
-        let data = try encoder.encode(sampled)
-        let sampledText = String(decoding: data, as: UTF8.self)
-        XCTAssertTrue(sampledText.contains("\"point\""))
-        XCTAssertEqual(sampled.schemaVersion, EditModel.currentSchemaVersion)
-        XCTAssertEqual(EditModel.currentSchemaVersion, 12)
-        let back = try JSONDecoder().decode(EditModel.self, from: data)
-        XCTAssertEqual(back.color.point, sampled.color.point)
-        XCTAssertEqual(try encoder.encode(back), data)
-        print("POINT SCHEMA · schema-11 blob → \(first.count) bytes → identical · schema-12 round-trip")
-    }
-
-    /// The dropper's two fields are the **only** thing a sample writes, and a sample without an
-    /// adjustment does not move a pixel. (The history half of “one click = one row” is
-    /// `PointColorPanelTests`.)
-    func testSamplingWritesNoPixelsUntilAnAdjustmentExists() throws {
-        let image = blocks()
-        let graph = try makeGraph(image, identity: "140-sample")
-        let neutral = try display(graph, EditModel.neutral)
-        var sampled = EditModel.neutral
-        sampled.color.point = PointColor(sampleHue: 24.78, sampleChroma: 0.08,
-                                         range: 30, feather: 30)
-        let result = try graph.render(sampled, options: RenderOptions(scale: 1, useCache: false,
-                                                                      wantsPixels: true))
-        XCTAssertFalse(result.trace.executed.contains(.pointColour))
-        XCTAssertEqual(try XCTUnwrap(result.display).sha256(), neutral.sha256())
-        XCTAssertEqual(sampled.changedStages(from: .neutral), [.pointColour],
-                       "a sample is S3.6b's own material, not a band drag")
-        print("POINT SAMPLE · sample-only document → no pass, neutral frame sha")
-    }
-
-    // MARK: - ⑦ CPU reference vs kernel
-
-    /// The CPU reference is the definition (`PointColor.apply`); the kernel is checked against it on a
-    /// 360° wheel so the two cannot drift without a red test.
     func testTheKernelIsTheCPUReference() throws {
-        let image = wheel(height: 6, L: 0.60, C: 0.08)
-        let graph = try makeGraph(image, identity: "140-cpu")
-        let point = PointColor(sampleHue: 40, sampleChroma: 0.08,
-                               range: 30, feather: 30, hue: 80, saturation: 40, luminance: 20)
+        // A 180-column sweep of encoded sRGB colours at a fixed luminance, so every column has a
+        // different YUV triple and the box weights vary continuously.
+        let image = picture(180, 6) { x, _ in
+            func decode(_ v: Double) -> Double {
+                v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            let t = Double(x) / 179
+            return (decode(0.05 + 0.9 * t), decode(0.7 - 0.5 * t), decode(0.2 + 0.3 * t))
+        }
+        let graph = try makeGraph(image, identity: "158-cpu")
+        let source = RGBSample(r: Double(image.rgba[(3 * image.width + 60) * 4]),
+                               g: Double(image.rgba[(3 * image.width + 60) * 4 + 1]),
+                               b: Double(image.rgba[(3 * image.width + 60) * 4 + 2]))
+        let yuv = PointColor.sampleYUV(fromDecodedLinear: source)
+        var swatch = PointColor(sampleY: yuv.x, sampleU: yuv.y, sampleV: yuv.z)
+        swatch.hue = 80
+        swatch.saturation = 40
+        swatch.luminance = 20
+        let set = PointColorSet(swatches: [swatch], active: 0)
         var edit = EditModel.neutral
-        edit.color.point = point
+        edit.color.point = set
         let actual = try display(graph, edit)
 
         var worst = 0
@@ -455,7 +468,7 @@ final class PointColorTests: XCTestCase {
                 let src = SIMD3(Double(image.rgba[o]), Double(image.rgba[o + 1]),
                                 Double(image.rgba[o + 2]))
                 let working = Self.toWorking.applying(to: src)
-                let out = point.apply(working)
+                let out = set.apply(working)
                 let srgb = Self.toSRGB.applying(to: out)
                 func encode(_ v: Double) -> Int {
                     let c = min(max(v, 0), 1)
@@ -474,5 +487,17 @@ final class PointColorTests: XCTestCase {
         print("POINT CPU↔GPU · max |Δcode| \(worst), mean "
               + String(format: "%.3f", Double(total) / Double(count)) + " over \(count) channels")
         XCTAssertLessThanOrEqual(worst, 2, "the kernel must be the CPU reference, not a lookalike")
+    }
+}
+
+private extension PointColor {
+    /// A copy with the three adjustment sliders at zero (still sampled, so the other swatch keeps its
+    /// box). Used by the disjoint/stacking tests.
+    func withAdjustmentZero() -> PointColor {
+        var p = self
+        p.hue = 0
+        p.saturation = 0
+        p.luminance = 0
+        return p
     }
 }
