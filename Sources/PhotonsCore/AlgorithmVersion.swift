@@ -42,6 +42,13 @@ public enum StageAlgorithmVersion {
 
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic).
     public static let geometry = 1
+    /// **8** — 179: 原色校准 joined S1 (`CalibrationGroup`). The stage's exit now multiplies by a
+    /// 3×3 primaries matrix and applies the shadows' green↔magenta tint, so a document whose seven
+    /// calibration numbers are **not** all 0 renders pixels it could not render before. A document
+    /// with all seven at 0 takes the calibration-free instantiation and is **bit-identical to 7**
+    /// (and its key material does not even carry a `;cal` token) — the bump is the statement that the
+    /// stage's arithmetic grew a term, not that every frame moved.
+    ///
     /// **7** — 129: S1's instantiation switch for the blacks level now sits where the level term is
     /// zero (`|blacks| > 20`, `smoothstep(0.2, 1, |blacks|/100)`), not at 073C's original 50. The
     /// kernel arithmetic is unchanged; documents with **20 < |blacks| ≤ 50** now take the hybrid
@@ -65,7 +72,7 @@ public enum StageAlgorithmVersion {
     /// shadows scale with the white end; 073C's blacks travel and 073B's EV shoulder are unchanged.
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
-    public static let sceneLinear = 7
+    public static let sceneLinear = 8
     /// **3** — 147: a mask's `luminanceRange`/`colorRange` predicate reads the S1 sample divided by
     /// the global exposure gain, so the selection no longer drifts with the EV slider. A document
     /// with a picture-reading mask and `exposure != 0` now renders different pixels; `exposure == 0`

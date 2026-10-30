@@ -154,6 +154,11 @@ final class WindowTests: XCTestCase {
     /// The `geometry` link and the `curve`/`color`/`vignette`/`display` *materials* are otherwise
     /// untouched, and `outputWindow: nil` is the whole frame, so it must append nothing at all.
     ///
+    /// 179 is the fifth: 原色校准 joined S1, so `StageAlgorithmVersion.sceneLinear` moved 7 → 8 and
+    /// the `sceneLinear` row — plus every digest below it, because the chain seeds each link with the
+    /// previous one — moved **once**. No material text changed shape: the sceneLinear row's only
+    /// difference is the version digit, which is the whole claim (nothing else re-keyed).
+    ///
     /// P1f (079 §2.7.1) is the fourth migration, and it is the same rows again: every link's material
     /// now ends with `;alg=N` (`StageAlgorithmVersion`), so each text gained one token and every digest
     /// below it moved. The window's own spelling is unchanged — `win=` is appended *after* the material,
@@ -181,22 +186,22 @@ final class WindowTests: XCTestCase {
         let expected: [(String, String, String)] = [
                                                 ("geometry", "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702",
              "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=1"),
-            ("sceneLinear", "0db8c210e59e76a95dbe692701532c1f11898231cd7c9117635d1a07f2d19939",
-             "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=7"),
-            ("curve", "1e7da90d403e96d8519018cc7225749caff6b6223b6591ce29f06fedbe107cc7",
-             "0db8c210e59e76a95dbe692701532c1f11898231cd7c9117635d1a07f2d19939|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
-            ("contrast", "ae2e89e99a0899d961064b488506ccb0496261d6c793a1ee53105a8810ace09b",
-             "1e7da90d403e96d8519018cc7225749caff6b6223b6591ce29f06fedbe107cc7|contrast|con=20.00000;alg=1"),
-            ("toneMap", "19d93b2dbf7d434598bdd7aebc2a25fa77b9a46245be0a682b9e5b7b46cadbad",
-             "ae2e89e99a0899d961064b488506ccb0496261d6c793a1ee53105a8810ace09b|hi=-30.00000;sh=15.00000;alg=5"),
-            ("color", "6032d58b305e3b950add116fb105f899369d6151c136d2e6ddcb5bec0b5e0909",
-             "19d93b2dbf7d434598bdd7aebc2a25fa77b9a46245be0a682b9e5b7b46cadbad|vib=15.00000;sat=-10.00000;alg=1"),
-            ("hsl", "a86ef9575b1107e403b3ff6957f4bd0f586cc3f5947d71251299d0f25bdbfc96",
-             "6032d58b305e3b950add116fb105f899369d6151c136d2e6ddcb5bec0b5e0909|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            ("vignette", "14e9ab9840cb6b7d9bce240b4d9ab2c260161ab8017d57f8972d203c81b2657b",
-             "a86ef9575b1107e403b3ff6957f4bd0f586cc3f5947d71251299d0f25bdbfc96|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            ("display", "ed43c9746358aab13308cb79d1412e8c4648779ab269932258a42f636959cc4c",
-             "14e9ab9840cb6b7d9bce240b4d9ab2c260161ab8017d57f8972d203c81b2657b|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("sceneLinear", "43e46e8fc8b54d42730a30fccf745fc3ecf64df66a61577c0bc81f5bceb30d82",
+             "011a573fb91f98d31cf0f09a1ffb7f49319270da7c98aae48a47681aa2092702|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
+            ("curve", "5b01cde7398f8e6d927343887e94e5d8ab59efe95f938c7fe56c34f5c5d5c111",
+             "43e46e8fc8b54d42730a30fccf745fc3ecf64df66a61577c0bc81f5bceb30d82|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
+            ("contrast", "101c599aff92b506f08d7f14c46f7d856387b472067d22fa9bc335d5df79f787",
+             "5b01cde7398f8e6d927343887e94e5d8ab59efe95f938c7fe56c34f5c5d5c111|contrast|con=20.00000;alg=1"),
+            ("toneMap", "53b6bafff72a383e2ecfd171f5f09aa8498d343ab10e3e591a9cf5a6468b9fcc",
+             "101c599aff92b506f08d7f14c46f7d856387b472067d22fa9bc335d5df79f787|hi=-30.00000;sh=15.00000;alg=5"),
+            ("color", "74484e98fa322ada243da7dcef0bb5aef718bedcd79930a3d9efc646662171de",
+             "53b6bafff72a383e2ecfd171f5f09aa8498d343ab10e3e591a9cf5a6468b9fcc|vib=15.00000;sat=-10.00000;alg=1"),
+            ("hsl", "f79dd481de1519fcdf48f554f0d5a9611f2a614d10a88dba50facea8eeb7a503",
+             "74484e98fa322ada243da7dcef0bb5aef718bedcd79930a3d9efc646662171de|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("vignette", "f0e17aa2e4559214607c26812a547c28553d64807b087df17ffc96c39bf8511e",
+             "f79dd481de1519fcdf48f554f0d5a9611f2a614d10a88dba50facea8eeb7a503|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("display", "2af7e6d2f515fb946b4e6f6c2b9c7690631c14eb95187f58bfc4d0f147e945bc",
+             "f0e17aa2e4559214607c26812a547c28553d64807b087df17ffc96c39bf8511e|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

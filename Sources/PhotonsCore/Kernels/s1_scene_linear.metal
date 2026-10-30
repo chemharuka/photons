@@ -156,6 +156,42 @@ struct S1Params {
     float4 e;
 };
 
+// 179 — 原色校准 (CalibrationGroup): a 3×3 primaries matrix plus the shadows' tint, in its **own**
+// buffer (index 1), bound only by the `_cal` entry points.
+//
+// Why a second buffer rather than five more fields in `S1Params`: the requirement is that a document
+// with all seven numbers at 0 does not put the matrix in a uniform *at all*. `S1Params` is written for
+// every document; this struct exists only when `CalibrationGroup.isIdentity` is false, and the
+// kernels that do not declare it do not have it in their argument list.
+//
+// The rows are three `float4`s, `xyz` used, `w` unused — a **row-major** spelling, because a
+// `float4x4` in Metal is column-major and one transposed matrix here is a wrong picture that no test
+// with a grey patch would see.
+struct CalParams {
+    float4 r0;   // M row 0
+    float4 r1;   // M row 1
+    float4 r2;   // M row 2
+    // x = shadow tint, −1…+1 (`CalibrationGroup.clampedShadowTint`). 3 pad.
+    float4 t;
+};
+
+// Rec.2020 luminance weights (BT.2020-2 Table 3, the working primaries) — the tint's axis, and the
+// quantity it holds constant. Not `tone_shape.metal`'s `kEndPointLumaWeights`: that one reads
+// *encoded sRGB* numbers for the blacks/whites knee coordinate (073B §4.9), which is a different
+// question in a different domain.
+constant float3 kCalibrationLuma = float3(0.2627, 0.6780, 0.0593);
+
+// `CalibrationGroup.shadowTintScale`: the green channel's change at full travel in the deepest shadows.
+constant float kCalibrationShadowTintScale = 0.5;
+
+// The tint's window, in log2 light relative to the 0.18 pivot: full weight at −5 EV (Y = 0.0056) and
+// exactly 0 at −0.5 EV (Y = 0.127). Above that nothing moves — which is why a 0.18 grey cannot take a
+// cast from this control, and why `Y > 0.2` is bit-still.
+static inline float calibration_smoothstep(float e0, float e1, float x) {
+    float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 // The two ends of the blacks knee (`B_EV/B_LO_EV/B_HI_EV`), 073C's level half
 // (`B_LEV/LEV_LO_EV/LEV_HI_EV/LEV_KNEE`), the whites travel (`W_*`) and the C¹ toe used to live here.
 // They live in `tone_shape.metal` now (079 §2.1.2): S1.6's masked end points have to be the *same*
@@ -170,10 +206,11 @@ struct S1Params {
 // (`|blacks| > 50`) is exactly where `m` is 0, so the two instantiations agree bit for bit at the
 // boundary and the untouched one keeps 073B's source verbatim.
 
-template <bool kKnee, bool kHybrid, bool kTrim>
+template <bool kKnee, bool kHybrid, bool kTrim, bool kCalib>
 static inline void s1_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S1Params &p,
+                           constant CalParams *cpPtr,
                            uint2 gid) {
     float4 c = src.read(gid);
     if (p.b.y > 0.5) {
@@ -230,6 +267,36 @@ static inline void s1_body(texture2d<float, access::read> src,
         v = below + shoulder - knee;
     }
 
+    // ⑥ 179 — 原色校准, at this stage's **exit**: the 3×3 primaries matrix, then the shadows' tint.
+    //
+    // `kCalib` is a compile-time flag, so the calibration-free instantiations contain none of this
+    // (071's lesson: "the arithmetic with a unit matrix in it" is still arithmetic the compiler may
+    // schedule). The runtime `st != 0` inside is fine here — this code exists *only* in the `_cal`
+    // instantiations, which a document with all seven numbers at 0 never reaches.
+    //
+    // No clamp after the matrix: every entry of M is ≥ 0 (the CPU gamut-maps each column into the
+    // cube), so a non-negative input stays non-negative, and a *negative* input is S1's own
+    // sub-black band (071's trim) which S2 is written to carry (`s2_tone_map` clamps at its end, not
+    // at its start). Clamping here would quietly delete that band for calibrated documents only.
+    if (kCalib) {
+        constant CalParams &cp = *cpPtr;
+        v = float3(dot(cp.r0.xyz, v), dot(cp.r1.xyz, v), dot(cp.r2.xyz, v));
+
+        float st = cp.t.x;
+        if (st != 0.0) {
+            float y0 = dot(v, kCalibrationLuma);
+            // A pixel at or below zero has no log coordinate; it also has no shadow *hue* to tint.
+            if (y0 > 0.0) {
+                float w = 1.0 - calibration_smoothstep(-5.0, -0.5, log2(max(y0, 1e-7) / 0.18));
+                v.y *= max(1.0 - kCalibrationShadowTintScale * st * w, 0.0);
+                // Luminance is **kept**: the tint moves the colour, not the exposure. The same
+                // invariant LightCraft's `calibrate` holds (`c * y0 / y1`).
+                float y1 = max(dot(v, kCalibrationLuma), 1e-9);
+                v *= y0 / y1;
+            }
+        }
+    }
+
     dst.write(float4(v, c.a), gid);
 }
 
@@ -239,7 +306,7 @@ kernel void s1_scene_linear(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             constant S1Params &p [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, false>(src, dst, p, gid);
+    s1_body<false, false, false, false>(src, dst, p, nullptr, gid);
 }
 
 // 071: the same body with the offset in it.
@@ -247,7 +314,7 @@ kernel void s1_scene_linear_trim(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<false, false, true>(src, dst, p, gid);
+    s1_body<false, false, true, false>(src, dst, p, nullptr, gid);
 }
 
 // 073B: the black/white end points. Picked only when `blacks != 0 || whites != 0`.
@@ -255,14 +322,14 @@ kernel void s1_scene_linear_knee(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  constant S1Params &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, false>(src, dst, p, gid);
+    s1_body<true, false, false, false>(src, dst, p, nullptr, gid);
 }
 
 kernel void s1_scene_linear_knee_trim(texture2d<float, access::read> src [[texture(0)]],
                                       texture2d<float, access::write> dst [[texture(1)]],
                                       constant S1Params &p [[buffer(0)]],
                                       uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, false, true>(src, dst, p, gid);
+    s1_body<true, false, true, false>(src, dst, p, nullptr, gid);
 }
 
 // 073C: the second half of the blacks travel — the same EV toe plus the black-point level move.
@@ -272,12 +339,68 @@ kernel void s1_scene_linear_hybrid(texture2d<float, access::read> src [[texture(
                                    texture2d<float, access::write> dst [[texture(1)]],
                                    constant S1Params &p [[buffer(0)]],
                                    uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, true, false>(src, dst, p, gid);
+    s1_body<true, true, false, false>(src, dst, p, nullptr, gid);
 }
 
 kernel void s1_scene_linear_hybrid_trim(texture2d<float, access::read> src [[texture(0)]],
                                         texture2d<float, access::write> dst [[texture(1)]],
                                         constant S1Params &p [[buffer(0)]],
                                         uint2 gid [[thread_position_in_grid]]) {
-    s1_body<true, true, true>(src, dst, p, gid);
+    s1_body<true, true, true, false>(src, dst, p, nullptr, gid);
+}
+
+// ── 179 — the six `_cal` twins ────────────────────────────────────────────────────────────────────
+//
+// One for each entry point above, differing only in `kCalib = true` and in declaring the calibration
+// uniform at `buffer(1)`. They are separate *kernels*, not a runtime `if`, for the reason the file has
+// six entry points already: the calibration-free documents must not carry the matrix's arithmetic in
+// their compiled body, and a document with all seven numbers at 0 has no `CalParams` written for it
+// at all (see `RenderGraph`'s S1 case).
+
+kernel void s1_scene_linear_cal(texture2d<float, access::read> src [[texture(0)]],
+                                texture2d<float, access::write> dst [[texture(1)]],
+                                constant S1Params &p [[buffer(0)]],
+                                constant CalParams &cp [[buffer(1)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    s1_body<false, false, false, true>(src, dst, p, &cp, gid);
+}
+
+kernel void s1_scene_linear_trim_cal(texture2d<float, access::read> src [[texture(0)]],
+                                     texture2d<float, access::write> dst [[texture(1)]],
+                                     constant S1Params &p [[buffer(0)]],
+                                     constant CalParams &cp [[buffer(1)]],
+                                     uint2 gid [[thread_position_in_grid]]) {
+    s1_body<false, false, true, true>(src, dst, p, &cp, gid);
+}
+
+kernel void s1_scene_linear_knee_cal(texture2d<float, access::read> src [[texture(0)]],
+                                     texture2d<float, access::write> dst [[texture(1)]],
+                                     constant S1Params &p [[buffer(0)]],
+                                     constant CalParams &cp [[buffer(1)]],
+                                     uint2 gid [[thread_position_in_grid]]) {
+    s1_body<true, false, false, true>(src, dst, p, &cp, gid);
+}
+
+kernel void s1_scene_linear_knee_trim_cal(texture2d<float, access::read> src [[texture(0)]],
+                                          texture2d<float, access::write> dst [[texture(1)]],
+                                          constant S1Params &p [[buffer(0)]],
+                                          constant CalParams &cp [[buffer(1)]],
+                                          uint2 gid [[thread_position_in_grid]]) {
+    s1_body<true, false, true, true>(src, dst, p, &cp, gid);
+}
+
+kernel void s1_scene_linear_hybrid_cal(texture2d<float, access::read> src [[texture(0)]],
+                                       texture2d<float, access::write> dst [[texture(1)]],
+                                       constant S1Params &p [[buffer(0)]],
+                                       constant CalParams &cp [[buffer(1)]],
+                                       uint2 gid [[thread_position_in_grid]]) {
+    s1_body<true, true, false, true>(src, dst, p, &cp, gid);
+}
+
+kernel void s1_scene_linear_hybrid_trim_cal(texture2d<float, access::read> src [[texture(0)]],
+                                            texture2d<float, access::write> dst [[texture(1)]],
+                                            constant S1Params &p [[buffer(0)]],
+                                            constant CalParams &cp [[buffer(1)]],
+                                            uint2 gid [[thread_position_in_grid]]) {
+    s1_body<true, true, true, true>(src, dst, p, &cp, gid);
 }
