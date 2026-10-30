@@ -55,20 +55,32 @@ public struct DetailSettings: Sendable, Hashable, Codable {
     public var colorNR: Double?
     public var sharpness: Double?
     public var detail: Double?
+    /// 164 — **去摩尔纹** (`CIRAWFilter.moireReductionAmount`, 0…3). Slider position 0…30, i.e.
+    /// `amount = position / 10`, the same ruler as 细节. `nil` = leave Apple's own amount alone
+    /// (measured: 0.55 on v8, 0.0 on 8.dng; v9 reports `isMoireReductionSupported == false`).
+    public var moire: Double?
 
     /// 四根滑杆都不动 = 四个 `nil` = 与 031 之前的解码**逐字节相同**。
     public static let identity = DetailSettings()
+
+    /// 164 — 去摩尔纹's travel, in the document's position units. 30 positions = amount 3.
+    public static let moireRange: ClosedRange<Double> = 0 ... 30
+    /// 164 — positions per amount: 10 (30 / 3).
+    public static let moirePositionPerAmount: Double = 10
+    /// 164 — Apple's own ceiling (`moireReductionAmount` is 0…3; `CIRAWFilter.h:156-162`).
+    public static let moireMaxAmount: Double = 3
 
     /// 042 的迁移用到的旧出行（schema-5 的细节滑杆是 0…100）。只给读文档的那一侧看，见
     /// `DetailAxis.decodeCeiling` 与 `migratePreSchema6Detail()`。
     static let legacyDetailCeiling: Double = 100
 
     public init(luminanceNR: Double? = nil, colorNR: Double? = nil,
-                sharpness: Double? = nil, detail: Double? = nil) {
+                sharpness: Double? = nil, detail: Double? = nil, moire: Double? = nil) {
         self.luminanceNR = luminanceNR
         self.colorNR = colorNR
         self.sharpness = sharpness
         self.detail = detail
+        self.moire = moire
     }
 
     /// 按轴取放，供面板与 `DetailAxis` 共用（`keyPath` 只有一份）。
@@ -79,10 +91,20 @@ public struct DetailSettings: Sendable, Hashable, Codable {
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        let rawMoire: Double? = (try? c.decodeIfPresent(Double.self,
+                                                        forKey: AnyCodingKey("moire"))) ?? nil
+        let moire: Double?
+        if let v = rawMoire, v.isFinite, v > 0 {
+            moire = min(max(v, DetailSettings.moireRange.lowerBound),
+                        DetailSettings.moireRange.upperBound)
+        } else {
+            moire = nil
+        }
         self.init(luminanceNR: Self.position(in: c, .luminanceNR),
                   colorNR: Self.position(in: c, .colorNR),
                   sharpness: Self.position(in: c, .sharpness),
-                  detail: Self.position(in: c, .detail))
+                  detail: Self.position(in: c, .detail),
+                  moire: moire)
     }
 
     /// 文档里的每个字段都必须有显式默认值（D9）：缺键 = `nil` = 默认位置，不是解码失败、也不是 NaN。
@@ -93,6 +115,8 @@ public struct DetailSettings: Sendable, Hashable, Codable {
         try c.encodeIfPresent(colorNR, forKey: AnyCodingKey("colorNR"))
         try c.encodeIfPresent(sharpness, forKey: AnyCodingKey("sharpness"))
         try c.encodeIfPresent(detail, forKey: AnyCodingKey("detail"))
+        // 164 — additive: a document that never touched 去摩尔纹 has no key and re-encodes byte for byte.
+        try c.encodeIfPresent(moire, forKey: AnyCodingKey("moire"))
     }
 
     /// 读一个位置并钳到**这根轴**的出行。负数读成 `nil`（见下）。
@@ -149,6 +173,11 @@ public struct DetailSettings: Sendable, Hashable, Codable {
             guard let v = self[axis], v.isFinite else { out[axis] = nil; continue }
             out[axis] = min(max(v, axis.range.lowerBound), axis.range.upperBound)
         }
+        if let v = moire, v.isFinite {
+            out.moire = min(max(v, Self.moireRange.lowerBound), Self.moireRange.upperBound)
+        } else {
+            out.moire = nil
+        }
         return out
     }
 
@@ -160,6 +189,12 @@ public struct DetailSettings: Sendable, Hashable, Codable {
             let q = (v / axis.step).rounded() * axis.step
             out[axis] = min(max(q, axis.range.lowerBound), axis.range.upperBound)
         }
+        if let v = moire, v.isFinite {
+            out.moire = min(max(v.rounded(), Self.moireRange.lowerBound),
+                            Self.moireRange.upperBound)
+        } else {
+            out.moire = nil
+        }
         return out
     }
 
@@ -168,6 +203,21 @@ public struct DetailSettings: Sendable, Hashable, Codable {
     /// 面板上显示的位置：文档里的位置，或（`nil` 的那一半）这个机身的默认位置。
     public func position(_ axis: DetailAxis, in baseline: DetailBaseline) -> Double {
         self[axis] ?? axis.defaultPosition(in: baseline)
+    }
+
+    /// 164 — 去摩尔纹's position: the document's number, else this file's own amount × 30.
+    /// (Measured: v8 reports 0.55 → position 17; `8.dng` and v9 report 0.0 → 0.)
+    public func moirePosition(in baseline: DetailBaseline) -> Double {
+        moire ?? baseline.moireDefaultPosition
+    }
+
+    /// 164 — one 去摩尔纹 drag / typed value: quantize to whole positions, and write `nil` back when
+    /// the thumb lands on this file's own default (the same rule every `DetailAxis` follows).
+    public mutating func setMoirePosition(_ value: Double, in baseline: DetailBaseline) {
+        guard value.isFinite else { moire = nil; return }
+        let clamped = min(max(value.rounded(), Self.moireRange.lowerBound),
+                          Self.moireRange.upperBound)
+        moire = clamped == baseline.moireDefaultPosition ? nil : clamped
     }
 
     /// 一次拖动 / 一次输入的结果：量化到那根轴的 `step`、钳到它的出行，**落在默认位置上就写回 `nil`**。
@@ -181,15 +231,18 @@ public struct DetailSettings: Sendable, Hashable, Codable {
         self[axis] = clamped == axis.defaultPosition(in: baseline) ? nil : clamped
     }
 
-    /// 这一个值给解码缓存键 / rung identity 的部分：`dt=nr·,c30,s·,d·`。
+    /// 这一个值给解码缓存键 / rung identity 的部分：`dt=nr·,c30,s·,d·`（+ `,m17` when 去摩尔纹 is set）。
     ///
     /// `·` 是「这个滑杆停在该机身的默认位置」（文档里的 `nil`）。`nil`（全默认）而不是空串：默认
     /// 文档必须**什么都不追加**，否则每一个已经写在磁盘上的线性缓冲、每一个 rung identity 都会
-    /// 变，而像素一个都没变（与白平衡 as shot 同一条纪律）。
+    /// 变，而像素一个都没变（与白平衡 as shot 同一条纪律）。164 的 `m` 只在**非 nil** 时追加，所以
+    /// 一份 pre-164 的四轴文档仍拼出原来的 `dt=…` 文本，缓冲继续命中。
     public var decodeComponent: String? {
         guard !isIdentity else { return nil }
         func f(_ v: Double?) -> String { v.map { String(format: DetailAxis.positionFormat, $0) } ?? "·" }
-        return "dt=nr\(f(luminanceNR)),c\(f(colorNR)),s\(f(sharpness)),d\(f(detail))"
+        var m = "dt=nr\(f(luminanceNR)),c\(f(colorNR)),s\(f(sharpness)),d\(f(detail))"
+        if let moire { m += ",m\(f(moire))" }
+        return m
     }
 
     /// 一行给检查器/报告：`NR 30 · 色彩 默认 · 细节 默认 · 锐化 60`。
@@ -236,7 +289,20 @@ public struct DetailSettings: Sendable, Hashable, Codable {
             colorNR: Self.decodeAmount(slider: c.colorNR, axis: .colorNR, baseline: baseline.colorNR),
             sharpness: Self.decodeAmount(slider: c.sharpness, axis: .sharpness,
                                          baseline: baseline.sharpness),
-            detail: Self.decodeAmount(slider: c.detail, axis: .detail, baseline: baseline.detail))
+            detail: Self.decodeAmount(slider: c.detail, axis: .detail, baseline: baseline.detail),
+            moire: Self.moireDecodeAmount(slider: c.moire, baseline: baseline.moire))
+    }
+
+    /// 164 — 去摩尔纹's position → `CIRAWFilter.moireReductionAmount`.
+    ///
+    /// Same arithmetic as `decodeAmount`: `nil` means "leave Apple's own amount alone", and a position
+    /// equal to the file's own default position (baseline × 30, within half a step) is also `nil`.
+    public static func moireDecodeAmount(slider: Double?, baseline: Double) -> Double? {
+        guard let slider, slider.isFinite else { return nil }
+        let s = min(max(slider, moireRange.lowerBound), moireRange.upperBound)
+        let b = min(max(baseline.isFinite ? baseline : 0, 0), 1)
+        guard abs(s - b * moireRange.upperBound) >= 0.5 else { return nil }
+        return min(max(s / moirePositionPerAmount, 0), moireMaxAmount)
     }
 }
 
@@ -368,17 +434,29 @@ public struct DetailBaseline: Sendable, Equatable {
     public var colorNR: Double
     public var sharpness: Double
     public var detail: Double
+    /// 164 — `moireReductionAmount` with nothing assigned (v8: 0.55; `8.dng`: 0; v9: unsupported/0).
+    public var moire: Double
 
     /// The four values measured on this machine with nothing assigned (Leica L1030433). Used by the
     /// tests and by any caller that has no filter to ask; a develop always reads the live filter.
     public static let measured = DetailBaseline(luminanceNR: 0, colorNR: 0.5,
-                                               sharpness: 0.5, detail: 0)
+                                               sharpness: 0.5, detail: 0, moire: 0.55)
 
-    public init(luminanceNR: Double, colorNR: Double, sharpness: Double, detail: Double) {
+    public init(luminanceNR: Double, colorNR: Double, sharpness: Double, detail: Double,
+                moire: Double = 0) {
         self.luminanceNR = luminanceNR
         self.colorNR = colorNR
         self.sharpness = sharpness
         self.detail = detail
+        self.moire = moire
+    }
+
+    /// 164 — 去摩尔纹's default position: the file's own amount × 30, rounded and clamped.
+    public var moireDefaultPosition: Double {
+        let b = moire.isFinite ? moire : 0
+        return min(max((b * DetailSettings.moireRange.upperBound).rounded(),
+                       DetailSettings.moireRange.lowerBound),
+                   DetailSettings.moireRange.upperBound)
     }
 
     /// The four slider positions this body sits at with nothing assigned: `0 / 50 / 0 / 50` on a
@@ -395,23 +473,26 @@ public struct DetailDecodeValues: Sendable, Equatable {
     public var colorNR: Double?
     public var sharpness: Double?
     public var detail: Double?
+    /// 164 — `moireReductionAmount`; `nil` = leave Apple's own amount alone.
+    public var moire: Double?
 
     public init(luminanceNR: Double? = nil, colorNR: Double? = nil,
-                sharpness: Double? = nil, detail: Double? = nil) {
+                sharpness: Double? = nil, detail: Double? = nil, moire: Double? = nil) {
         self.luminanceNR = luminanceNR
         self.colorNR = colorNR
         self.sharpness = sharpness
         self.detail = detail
+        self.moire = moire
     }
 
     /// Nothing to assign: the filter keeps Apple's own four values (the default document).
     public var isEmpty: Bool {
-        luminanceNR == nil && colorNR == nil && sharpness == nil && detail == nil
+        luminanceNR == nil && colorNR == nil && sharpness == nil && detail == nil && moire == nil
     }
 
-    /// `nr=0.30 c=– sh=– d=–` for a log line or a test failure message.
+    /// `nr=0.30 c=– sh=– d=– m=–` for a log line or a test failure message.
     public var summary: String {
         func f(_ v: Double?) -> String { v.map { String(format: "%.2f", $0) } ?? "–" }
-        return "nr=\(f(luminanceNR)) c=\(f(colorNR)) sh=\(f(sharpness)) d=\(f(detail))"
+        return "nr=\(f(luminanceNR)) c=\(f(colorNR)) sh=\(f(sharpness)) d=\(f(detail)) m=\(f(moire))"
     }
 }

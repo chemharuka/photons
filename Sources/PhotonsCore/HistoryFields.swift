@@ -299,6 +299,9 @@ extension EditHistory {
             before.detailSettings.sharpness, after.detailSettings.sharpness)
         opt("detailSettings.detail", .detail,
             before.detailSettings.detail, after.detailSettings.detail)
+        // 164 — 去摩尔纹, a fifth decoder amount on the same (开发) card.
+        opt("detailSettings.moire", .detail,
+            before.detailSettings.moire, after.detailSettings.moire)
         if before.decoderVersion != after.decoderVersion {
             add("decoderVersion", .detail,
                 .text(before.decoderVersion ?? "默认"), .text(after.decoderVersion ?? "默认"))
@@ -316,6 +319,11 @@ extension EditHistory {
         // history panel rather than as a nameless 效果 row.
         num("effects.texture", .effects, before.effects.texture, after.effects.texture)
         num("effects.clarity", .effects, before.effects.clarity, after.effects.clarity)
+        // 164 — S3.9's two non-Bayer denoises, so the history reads 「非 Bayer 降噪 +40」.
+        num("effects.nonBayerLuminanceNR", .effects,
+            before.effects.nonBayerLuminanceNR, after.effects.nonBayerLuminanceNR)
+        num("effects.nonBayerColorNR", .effects,
+            before.effects.nonBayerColorNR, after.effects.nonBayerColorNR)
         num("effects.dehaze", .effects, before.effects.dehaze, after.effects.dehaze)
         num("effects.dehazeDepth", .effects,
             before.effects.dehazeDepth, after.effects.dehazeDepth)
@@ -540,6 +548,7 @@ extension EditHistory {
         "detailSettings.colorNR": "色彩降噪",
         "detailSettings.sharpness": "锐度",
         "detailSettings.detail": "细节",
+        "detailSettings.moire": "去摩尔纹",
         "decoderVersion": "解码版本",
         "effects.vignetteAmount": "暗角",
         "effects.vignetteMidpoint": "暗角中点",
@@ -550,6 +559,8 @@ extension EditHistory {
         "effects.grainSeed": "颗粒种子",
         "effects.texture": "纹理",
         "effects.clarity": "清晰度",
+        "effects.nonBayerLuminanceNR": "非 Bayer 降噪",
+        "effects.nonBayerColorNR": "非 Bayer 彩色降噪",
         "effects.dehaze": "去雾",
         "effects.dehazeDepth": "去雾深度",
         "optics.caRed": "横向色差 R",

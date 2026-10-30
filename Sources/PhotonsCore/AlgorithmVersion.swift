@@ -141,8 +141,13 @@ public enum StageAlgorithmVersion {
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
 
+    /// **2** — 164: the 细节 card's two non-Bayer denoises (display-referred luminance guided-filter
+    /// mix and OKLab chroma suppression) joined S3.9's apply pass. Both branches are skipped at 0, so
+    /// a document with the two new fields untouched is byte-identical to 1; a document that sets one
+    /// of them renders pixels it could not render before.
+    ///
     /// **1** — S3.9's first arithmetic (2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
-    public static let detailFX = 1
+    public static let detailFX = 2
     /// **2** — 117: 去雾 left S3.9 for S1.9 (`s1_9_dehaze.metal`). The domain changed from
     /// display-referred codes with `A = 1` to scene-linear light with a measured airlight, so every
     /// document with `effects.dehaze != 0` changes pixels even though its stored number did not.
