@@ -1,6 +1,7 @@
 import Foundation
 import PhotonsCore
 import CoreGraphics
+import CoreText
 import ImageIO
 
 // MARK: - one item
@@ -308,6 +309,15 @@ public enum BatchExporter {
                     outcome.croppedForHalfSize = plan.crop
                     warnings.append(plan.crop.exportNote(source: plan.input))
                 }
+            }
+
+            // 180 — 水印画在最终像素上（编码前）。HDR 增益图导出只画在 SDR 基础图上：
+            // `Watermark.apply` 只改 `rgba`，`linear` 原样透传，所以增益图（linear/base 的比值）
+            // 在水印像素上是 0 增益 ⇒ 水印待在 SDR 电平里，不会跑到 HDR 头部空间。
+            if let plan = Watermark.plan(for: image.size, text: preset.watermarkText,
+                                         position: preset.watermarkPosition,
+                                         opacity: preset.watermarkOpacity) {
+                image = Watermark.apply(image, plan)
             }
 
             // 4. a name nobody else in this batch (or, under `rename`, on disk) already owns.
@@ -654,5 +664,154 @@ public enum DisplaySharpen {
         }
         return DisplayImage(width: w, height: h, rgba: out,
                             primaries: image.primaries, bitDepth: image.bitDepth)
+    }
+}
+
+// MARK: - watermark (180)
+
+public struct WatermarkPlan: Sendable, Equatable {
+    public var text: String
+    public var fontSize: Double
+    public var padding: Int
+    /// 文字最终落到的像素矩形：原点左上、像素单位、半开区间（与 `rgba` 的行序一致）。
+    public var textRect: CGRect
+    /// 允许改动的最大矩形 = 画布四边各内缩 `padding`。任何被改的像素必须在它里面。
+    public var allowedRect: CGRect
+    public var opacity: Double            // 0…100
+    public var position: WatermarkPosition
+}
+
+public enum Watermark {
+    /// 规格 §2 写死的两条比例。
+    static let fontSizeFraction = 0.03
+    static let paddingFraction = 0.02
+
+    /// `nil` = 不画（空文本 / opacity ≤ 0 / 文字放不进内边距矩形）。
+    public static func plan(for size: ImageSize, text: String,
+                            position: WatermarkPosition = .bottomRight,
+                            opacity: Double = 60) -> WatermarkPlan? {
+        // 空白字符按空处理：敲一个空格不该让文件出现一个「看不见的水印」。
+        guard opacity > 0,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              size.width > 0, size.height > 0 else { return nil }
+
+        let longEdge = Double(max(size.width, size.height))
+        let fontSize = max(1, (longEdge * fontSizeFraction).rounded())
+        let padding = max(0, Int((longEdge * paddingFraction).rounded()))
+        let allowed = CGRect(x: CGFloat(padding), y: CGFloat(padding),
+                             width: CGFloat(size.width - 2 * padding),
+                             height: CGFloat(size.height - 2 * padding))
+        guard allowed.width > 0, allowed.height > 0 else { return nil }
+
+        let line = self.line(text, fontSize: fontSize)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
+        let textW = Int(ceil(width))
+        let textH = max(1, Int(ceil(ascent + descent)))
+        guard textW > 0 else { return nil }
+
+        let w = size.width, h = size.height
+        let x: Int
+        let y: Int
+        switch position {
+        case .topLeft:
+            x = padding
+            y = padding
+        case .topRight:
+            x = w - padding - textW
+            y = padding
+        case .bottomLeft:
+            x = padding
+            y = h - padding - textH
+        case .bottomRight:
+            x = w - padding - textW
+            y = h - padding - textH
+        }
+        guard x >= padding, y >= padding,
+              x + textW <= w - padding, y + textH <= h - padding else { return nil }
+
+        return WatermarkPlan(text: text, fontSize: fontSize, padding: padding,
+                             textRect: CGRect(x: CGFloat(x), y: CGFloat(y),
+                                              width: CGFloat(textW), height: CGFloat(textH)),
+                             allowedRect: allowed, opacity: opacity, position: position)
+    }
+
+    /// 只改 RGB（白色字按 coverage × opacity 混合），alpha / `linear` / `primaries` / `bitDepth` 原样。
+    public static func apply(_ image: DisplayImage, _ plan: WatermarkPlan) -> DisplayImage {
+        let w = image.width, h = image.height
+        let textW = Int(plan.textRect.width)
+        let textH = Int(plan.textRect.height)
+        guard w > 0, h > 0, textW > 0, textH > 0 else { return image }
+
+        // 8 位灰度掩膜。buffer 的第 0 行就是图像的顶行：CGBitmapContext 的内存行序自上而下，
+        // 与 `rgba` 一致，所以混合时 `canvasY = textRect.y + row` 直接对应，不需要翻。
+        var mask = [UInt8](repeating: 0, count: textW * textH)
+        let ascentLine = line(plan.text, fontSize: plan.fontSize)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        _ = CTLineGetTypographicBounds(ascentLine, &ascent, &descent, &leading)
+
+        let drew = mask.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(data: raw.baseAddress, width: textW, height: textH,
+                                          bitsPerComponent: 8, bytesPerRow: textW,
+                                          space: CGColorSpaceCreateDeviceGray(),
+                                          bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+                return false
+            }
+            // 先清 0，再用白字画；`kCTForegroundColorFromContextAttributeName` 让 CTLineDraw
+            // 使用上下文的填充色，而不是每个字形自己的颜色。
+            context.setFillColor(gray: 0, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: textW, height: textH))
+            context.setFillColor(gray: 1, alpha: 1)
+            context.setAllowsAntialiasing(true)
+            context.setShouldAntialias(true)
+            context.textPosition = CGPoint(x: 0, y: descent)
+            CTLineDraw(ascentLine, context)
+            return true
+        }
+        guard drew else { return image }
+
+        var out = image.rgba
+        let x0 = Int(plan.textRect.minX)
+        let y0 = Int(plan.textRect.minY)
+        let opacity = plan.opacity / 100
+        for row in 0..<textH {
+            let canvasY = y0 + row
+            guard canvasY >= 0, canvasY < h else { continue }
+            let maskRow = row * textW
+            for col in 0..<textW {
+                let canvasX = x0 + col
+                guard canvasX >= 0, canvasX < w else { continue }
+                let coverage = Double(mask[maskRow + col]) / 255
+                let a = coverage * opacity
+                if a <= 0 { continue }        // 未覆盖的像素必须逐位不变
+                let o = (canvasY * w + canvasX) * 4
+                for c in 0..<3 {
+                    let v = Double(Float(image.rgba[o + c]))
+                    let mixed = v * (1 - a) + a    // 白字
+                    out[o + c] = Float16(min(max(mixed, 0), 1))
+                }
+            }
+        }
+        return DisplayImage(width: w, height: h, rgba: out, primaries: image.primaries,
+                            bitDepth: image.bitDepth, linear: image.linear)
+    }
+
+    /// 测试要看字形（豆腐块检测、ink bbox），所以这两条留 internal 而不是 private。
+    static func font(size: Double) -> CTFont {
+        CTFontCreateUIFontForLanguage(.system, CGFloat(size), nil)
+            ?? CTFontCreateWithName("Helvetica" as CFString, CGFloat(size), nil)
+    }
+
+    static func line(_ text: String, fontSize: Double) -> CTLine {
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font(size: fontSize),
+            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+        ]
+        return CTLineCreateWithAttributedString(
+            NSAttributedString(string: text, attributes: attributes))
     }
 }
