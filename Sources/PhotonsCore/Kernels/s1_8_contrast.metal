@@ -244,9 +244,24 @@ kernel void s1_8_g_contrast_coeff(texture2d<float, access::read> stats [[texture
 // `contrast` is the slider value (−100…100). The band weights are the constants above, so the
 // mask's number rides the same travel as the global one. The ±3 EV bound is a shape cap, not a
 // clamp on the picture: inside it the gain is the residual arithmetic exactly.
-static inline float s2_5_contrast_gain(float Bm, float Df, float gate, float contrast) {
+static inline float s2_5_contrast_gain(float Bm, float Df, float gate, float contrast,
+                                        float G, float logExposure) {
     float t = contrast / 100.0;
     float d = clamp(gate * (t * MC_W_M * Bm + t * MC_W_F * Df), -3.0, 3.0);
+    // The **white shoulder** (0107's `4u(1−u)` lesson): a positive gain fades to 0 at display
+    // white, and is then capped at the light that still fits under it (`Y_output ≤ 0.98`). Nothing
+    // below white can be pushed onto the ceiling. Darkening is not faded or capped — a highlight
+    // that should come down must come down. The cap is read in the **unexposed** display log, the
+    // same coordinate the decomposition uses, so a global exposure does not change which pixels
+    // are near the shoulder (A3). At E = 0 this is the absolute white; at E > 0 the picture is
+    // allowed into the extended range, which is what the export's tone map is for.
+    if (d > 0.0) {
+        d *= 1.0 - smoothstep(-1.0, 0.0, G);
+        // The cap is only for pixels **below** white. A sample already above it is HDR picture:
+        // expanding it is the 079 property S4's headroom exists for, and the export tone map is
+        // what brings it back.
+        if (G < log2(0.98)) { d = min(d, max(0.0, log2(0.98) - G)); }
+    }
     return exp2(d);
 }
 
@@ -310,7 +325,7 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
     float Bm, Df, gate;
     s2_5_bands(cC, cM, G, Bm, Df, gate);
 
-    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x);
+    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x, G, p.c.y);
     dst.write(float4(s2_5_finish(px, ratio, p.c.z, p.luma.xyz), px.a), gid);
 }
 
@@ -350,14 +365,14 @@ kernel void s1_8_g_contrast_apply_masked(texture2d<float, access::read> src [[te
 
     // Global contrast first (the document's own slider), then each mask's contrast multiplied in
     // with its coverage — 「先全局、后局部」, the same order every other masked control uses.
-    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x);
+    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x, G, p.c.y);
     for (uint i = 0; i < uint(max(p.f.y, 0)); ++i) {
         LocalAdjustDesc d = adjust[i];
         if (d.b.x == 0.0 || d.a.w <= 0.0) { continue; }
         float a = atlas.read(gid, i).r;
         float wgt = clamp(a * d.a.w, 0.0, 1.0);
         if (wgt <= 0.0) { continue; }
-        float gMask = s2_5_contrast_gain(Bm, Df, gate, d.b.x);
+        float gMask = s2_5_contrast_gain(Bm, Df, gate, d.b.x, G, p.c.y);
         // A full-coverage mask is the global slider, not a `mix` of it: at `wgt == 1` use the gain
         // itself, because `1 + (g − 1)` rounds and the extreme gains here would show that rounding.
         ratio *= (wgt >= 1.0 ? gMask : mix(1.0, gMask, wgt));

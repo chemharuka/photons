@@ -124,11 +124,23 @@ public enum MultiscaleContrast {
         guard contrast != 0, Y.isFinite else { return 1 }
         let G = log2(max(Y, 1e-6))
         let k = scaleGains(t: contrast / 100)
-        let gPrime = G + k.coarse * bands.coarse + k.mid * bands.mid + k.fine * bands.fine
-        let ratio = pow(2, gPrime - G)
+        var d = k.coarse * bands.coarse + k.mid * bands.mid + k.fine * bands.fine
+        // The white shoulder: a positive gain fades to 0 at display white (0 EV), so it cannot
+        // push a pixel that is below white over it. Darkening is not faded.
+        if d > 0 {
+            d *= 1 - smoothstep(-1, 0, G)
+            if G < log2(0.98) { d = min(d, max(0, log2(0.98) - G)) }
+        }
+        let ratio = pow(2, d)
         // The display black floor (A5): a pixel that clears it is not pushed under it.
         let y = max(Y, 0)
         if ratio < 1, y >= floorY, y * ratio < floorY { return floorY / y }
         return ratio
+    }
+
+    private static func smoothstep(_ lo: Double, _ hi: Double, _ x: Double) -> Double {
+        guard hi > lo else { return x >= hi ? 1 : 0 }
+        let t = min(max((x - lo) / (hi - lo), 0), 1)
+        return t * t * (3 - 2 * t)
     }
 }

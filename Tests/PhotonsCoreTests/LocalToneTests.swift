@@ -292,6 +292,7 @@ final class LocalToneTests: XCTestCase {
     /// (the seam) → S2 (identity) → S4 (encode), and a grey has the same value in every channel and in
     /// the luma, so the kernel's per-pixel gain is a number the CPU can reproduce to the code.
     func testMaskedContrastIsTheSeamNotThePower() throws {
+        throw XCTSkip("159: masked and global contrast are one display-domain operator now; this 079 seam-shape test is re-pinned by ContrastLocalTests B1")
         let w = 64, h = 64
         var rgba = [Float16](repeating: 0, count: w * h * 4)
         for y in 0..<h {
