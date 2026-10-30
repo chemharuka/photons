@@ -49,7 +49,7 @@ using namespace metal;
 //           double exposure); across strokes paint = `src + dst·(1−src)`, erase = `dst·(1−src)`.
 //   colour  d = min_i ‖OKLab(p) − OKLab(sample_i)‖ in the metric space of OKLabMetric
 //           alpha = 1 − smoothstep(tol, tol + smooth·(0.5 − tol), d)   (§4.4)
-//   luma    L = OKLab L of clamp(p, 0, 1)
+//   luma    L = OKLab L of p (unclamped; 167 extends the axis to cbrt(16) = +4 EV)
 //           alpha = smoothstep(lo − loF, lo + loF, L) · (1 − smoothstep(hi − hiF, hi + hiF, L))
 //                                                                   (§4.5)
 //   depth   d = depthTexture.sample(uv).r, 0 = farthest, 1 = nearest (120b; the texture is the
@@ -383,9 +383,13 @@ static inline float two_sided_window(float x, MaskShapeDesc d) {
 }
 
 static inline float luminance_range_alpha(float3 linearRGB, MaskShapeDesc d) {
-    // Headroom above 1 is "digital white" and participates as 1, otherwise a highlight's value
-    // would jump with the decode tier (§4.5).
-    float L = oklab(clamp(linearRGB, 0.0, 1.0)).x;
+    // 167 — **the whole HDR axis**, `0…cbrt(16)` (host: `LuminanceRangeShape.hdrMax`). Until 167
+    // this folded `clamp(linearRGB, 0, 1)`, so every pixel at or above display white arrived as
+    // `L = 1.0` and `high` above 1 selected nothing: the window had no resolution in the HDR half.
+    // The unclamped fold extends the same OKLab axis to +4 EV; negative light is clamped inside
+    // `oklab` exactly as before, so the dark side is unchanged. Depth (kind 6) still calls
+    // `two_sided_window` on its own normalised `0…1` sample — do not extend that one.
+    float L = oklab(linearRGB).x;
     return two_sided_window(L, d);
 }
 

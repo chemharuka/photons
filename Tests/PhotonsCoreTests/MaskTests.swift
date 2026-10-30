@@ -255,11 +255,12 @@ final class MaskTests: XCTestCase {
         return 1 - smoothstep(tol, upper, best)
     }
 
-    /// §4.5: OKLab L (headroom clamped to 1) with a two-sided feather, inverted pairs repaired.
+    /// §4.5: OKLab L with a two-sided feather, inverted pairs repaired. 167: the light is folded
+    /// **unclamped**, so this reference and the kernel share the HDR axis as well as the SDR one.
     private func luminanceRangeAlpha(r: Double, g: Double, b: Double, _ s: LuminanceRangeShape) -> Double {
         let o = s.ordered
-        let clamped = Self.workingLinear(min(max(r, 0), 1), min(max(g, 0), 1), min(max(b, 0), 1))
-        let L = OKLabMetric.fromLinear(clamped.0, clamped.1, clamped.2).L
+        let linear = Self.workingLinear(max(r, 0), max(g, 0), max(b, 0))
+        let L = OKLabMetric.fromLinear(linear.0, linear.1, linear.2).L
         let loF = max(o.lowFeather, 0), hiF = max(o.highFeather, 0)
         let inLow = smoothstep(o.low - loF, max(o.low + loF, o.low - loF + 1e-5), L)
         let inHigh = 1 - smoothstep(o.high - hiF, max(o.high + hiF, o.high - hiF + 1e-5), L)
@@ -1510,6 +1511,159 @@ final class MaskTests: XCTestCase {
         XCTAssertEqual(sample(dump, 0, 80, 32), 0.0000, accuracy: 1.5 / 255)
     }
 
+    /// 167 — the luminance window reaches the HDR half of the axis: neutral patches at 0, +1, +2,
+    /// +3 and +4 EV, with `low = 1.6, high = 2.6, feather = 0`.
+    ///
+    /// The exact `low = 1.6` excludes the +2 EV patch: its OKLab `L` is `cbrt(4) = 1.5874`, just
+    /// below the edge (that is the "boundary" the task notes). The second window (`low = 1.55`) is
+    /// the same three-patch case with the edge moved below `cbrt(4)`, so the intended
+    /// "+2/+3/+4 selected, +1/0 not" is visible as well. Every alpha is printed.
+    func testLuminanceRangeExtendsIntoTheHDRDomain() throws {
+        let stops: [Double] = [1, 2, 4, 8, 16]   // 0, +1, +2, +3, +4 EV
+        let patch = 20, height = 16
+        var rgba = [Float16](repeating: 0, count: stops.count * patch * height * 4)
+        for (i, value) in stops.enumerated() {
+            for y in 0..<height {
+                for x in 0..<patch {
+                    let o = ((y * stops.count * patch) + i * patch + x) * 4
+                    rgba[o] = Float16(value); rgba[o + 1] = Float16(value)
+                    rgba[o + 2] = Float16(value); rgba[o + 3] = 1
+                }
+            }
+        }
+        let image = LinearImage(width: stops.count * patch, height: height, rgba: rgba,
+                                colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+
+        func alpha(_ shape: LuminanceRangeShape) throws -> [Double] {
+            let dump = try atlas(doc(.luminanceRange(shape), feather: 0), image)
+            return (0..<stops.count).map {
+                sample(dump, 0, $0 * patch + patch / 2, height / 2)
+            }
+        }
+
+        let spec = LuminanceRangeShape(low: 1.6, high: 2.6, lowFeather: 0, highFeather: 0)
+        let specAlpha = try alpha(spec)
+        print("HDR V1 · low 1.6 high 2.6 · " +
+              zip(["0", "+1", "+2", "+3", "+4"], specAlpha)
+                .map { "\($0)=\(String(format: "%.4f", $1))" }.joined(separator: " · "))
+        XCTAssertEqual(specAlpha[0], 0, accuracy: 1.5 / 255, "0 EV is below the window")
+        XCTAssertEqual(specAlpha[1], 0, accuracy: 1.5 / 255, "+1 EV is below the window")
+        XCTAssertEqual(specAlpha[2], 0, accuracy: 1.5 / 255,
+                       "+2 EV L = cbrt(4) = 1.5874 < 1.6, so the exact spec edge excludes it")
+        XCTAssertEqual(specAlpha[3], 1, accuracy: 1.5 / 255, "+3 EV (L = 2.0) is selected")
+        XCTAssertEqual(specAlpha[4], 1, accuracy: 1.5 / 255, "+4 EV (L = 2.5198) is selected")
+
+        let three = LuminanceRangeShape(low: 1.55, high: 2.6, lowFeather: 0, highFeather: 0)
+        let threeAlpha = try alpha(three)
+        print("HDR V1 · low 1.55 high 2.6 · " +
+              zip(["0", "+1", "+2", "+3", "+4"], threeAlpha)
+                .map { "\($0)=\(String(format: "%.4f", $1))" }.joined(separator: " · "))
+        XCTAssertEqual(threeAlpha[0], 0, accuracy: 1.5 / 255)
+        XCTAssertEqual(threeAlpha[1], 0, accuracy: 1.5 / 255)
+        XCTAssertEqual(threeAlpha[2], 1, accuracy: 1.5 / 255, "cbrt(4) = 1.5874 > 1.55")
+        XCTAssertEqual(threeAlpha[3], 1, accuracy: 1.5 / 255)
+        XCTAssertEqual(threeAlpha[4], 1, accuracy: 1.5 / 255)
+    }
+
+    /// 167 — v1 documents (no `v`) migrate **once**: `high == 1.0` (the old "white and above"
+    /// sentinel) becomes `hdrMax`; a narrower upper edge, `low` and both feathers stay verbatim. The
+    /// re-encoded document is v2, so decoding it again cannot move it a second time.
+    func testLuminanceRangeV1DocumentsMigrateOnce() throws {
+        func v1(_ json: String) throws -> LuminanceRangeShape {
+            try JSONDecoder().decode(LuminanceRangeShape.self, from: Data(json.utf8))
+        }
+
+        let full = try v1(#"{"low":0,"high":1.0,"lowFeather":0.10,"highFeather":0.10}"#)
+        XCTAssertEqual(full.high, LuminanceRangeShape.hdrMax, accuracy: 1e-12)
+        XCTAssertEqual(full.low, 0)
+        XCTAssertEqual(full.lowFeather, 0.10, accuracy: 1e-12)
+        XCTAssertEqual(full.highFeather, 0.10, accuracy: 1e-12)
+        XCTAssertEqual(full.v, 2)
+
+        let narrow = try v1(#"{"low":0.4,"high":0.6,"lowFeather":0.05,"highFeather":0.07}"#)
+        XCTAssertEqual(narrow.high, 0.6, accuracy: 1e-12, "a mid-tone cut stays a mid-tone cut")
+        XCTAssertEqual(narrow.low, 0.4, accuracy: 1e-12)
+        XCTAssertEqual(narrow.lowFeather, 0.05, accuracy: 1e-12)
+        XCTAssertEqual(narrow.highFeather, 0.07, accuracy: 1e-12)
+        XCTAssertEqual(narrow.v, 2)
+
+        // Re-encode → v2, and a v2 `high = 1.0` is a literal mid-tone cut, not the old sentinel.
+        let encoded = try JSONEncoder().encode(full)
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"v\":2"), "the migrated document must encode its generation")
+        let again = try JSONDecoder().decode(LuminanceRangeShape.self, from: encoded)
+        XCTAssertEqual(again, full, "decoding a v2 document must be a no-op")
+        let literal = LuminanceRangeShape(low: 0, high: 1.0)
+        let literalAgain = try JSONDecoder().decode(LuminanceRangeShape.self,
+                                                    from: JSONEncoder().encode(literal))
+        XCTAssertEqual(literalAgain.high, 1.0, accuracy: 1e-12,
+                       "only v1's 1.0 is a sentinel; v2's is a real edge")
+        print("MIGRATE 167 · v1 full → \(full.high) · v1 narrow stays \(narrow.high) · v2 literal 1.0 stays 1.0")
+    }
+
+    /// 167 — V2/V3 of the acceptance: the old SDR selection is byte-identical **inside the region the
+    /// old window actually resolved**. The pre-167 predicate clamped the light before the fold; on a
+    /// document whose pixels never leave the SDR half that clamp is the identity, so the migrated
+    /// window must reproduce the old alpha exactly. (Above display white the old clamp is precisely
+    /// what 167 removes; that extension is V1's subject.)
+    func testV1DocumentsRenderTheOldSDRSelectionByteForByte() throws {
+        func oldAlpha(_ r: Double, _ g: Double, _ b: Double, _ s: LuminanceRangeShape) -> Double {
+            let clamped = Self.workingLinear(min(max(r, 0), 1), min(max(g, 0), 1), min(max(b, 0), 1))
+            let L = OKLabMetric.fromLinear(clamped.0, clamped.1, clamped.2).L
+            let o = s.ordered
+            let loF = max(o.lowFeather, 0), hiF = max(o.highFeather, 0)
+            let inLow = smoothstep(o.low - loF, max(o.low + loF, o.low - loF + 1e-5), L)
+            let inHigh = 1 - smoothstep(o.high - hiF, max(o.high + hiF, o.high - hiF + 1e-5), L)
+            return min(max(inLow * inHigh, 0), 1)
+        }
+
+        // V2: {0, 1.0, .10, .10} on a flat SDR patch whose L is below the old window's inner edge.
+        let fullV1 = try JSONDecoder().decode(
+            LuminanceRangeShape.self,
+            from: Data(#"{"low":0,"high":1.0,"lowFeather":0.10,"highFeather":0.10}"#.utf8))
+        let flat = flatImage(0.4, width: 24, height: 16)
+        let fullDump = try atlas(doc(.luminanceRange(fullV1), feather: 0), flat)
+        var oldFull: [Float] = [], newFull: [Float] = []
+        for i in 0..<(flat.width * flat.height) {
+            let r = Double(flat.rgba[i * 4])
+            oldFull.append(Float(oldAlpha(r, r, r, LuminanceRangeShape(low: 0, high: 1.0,
+                                                                      lowFeather: 0.10,
+                                                                      highFeather: 0.10))))
+            newFull.append(fullDump.slices[0][i])
+        }
+        XCTAssertEqual(quantisedDigest(newFull), quantisedDigest(oldFull),
+                       "V2: a v1 full-range document must not change the SDR selection")
+
+        // V3: {0.4, 0.7} — a deliberate mid-tone cut — on a 0…0.4 ramp (L ≈ 0…0.737, still SDR).
+        let narrowV1 = try JSONDecoder().decode(
+            LuminanceRangeShape.self,
+            from: Data(#"{"low":0.4,"high":0.7,"lowFeather":0,"highFeather":0}"#.utf8))
+        var rgba = [Float16](repeating: 0, count: 48 * 16 * 4)
+        for y in 0..<16 {
+            for x in 0..<48 {
+                let v = Float(0.4 * Double(x) / 47)
+                let o = (y * 48 + x) * 4
+                rgba[o] = Float16(v); rgba[o + 1] = Float16(v); rgba[o + 2] = Float16(v); rgba[o + 3] = 1
+            }
+        }
+        let sdrRamp = LinearImage(width: 48, height: 16, rgba: rgba,
+                                  colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
+        let narrowDump = try atlas(doc(.luminanceRange(narrowV1), feather: 0), sdrRamp)
+        var oldNarrow: [Float] = [], newNarrow: [Float] = []
+        for i in 0..<(sdrRamp.width * sdrRamp.height) {
+            let r = Double(sdrRamp.rgba[i * 4])
+            oldNarrow.append(Float(oldAlpha(r, r, r, LuminanceRangeShape(low: 0.4, high: 0.7,
+                                                                        lowFeather: 0,
+                                                                        highFeather: 0))))
+            newNarrow.append(narrowDump.slices[0][i])
+        }
+        XCTAssertEqual(quantisedDigest(newNarrow), quantisedDigest(oldNarrow),
+                       "V3: a v1 mid-tone cut must not change the SDR selection")
+        print("MIGRATE V2 old \(quantisedDigest(oldFull)) new \(quantisedDigest(newFull))")
+        print("MIGRATE V3 old \(quantisedDigest(oldNarrow)) new \(quantisedDigest(newNarrow))")
+    }
+
+
     /// `low > high` is a mirror, not an empty selection: the descriptor is repaired by swapping the
     /// bounds (and their feathers) once, in the host table (§4.5).
     func testLuminanceRangeRepairsAnInvertedPair() throws {
@@ -1531,12 +1685,12 @@ final class MaskTests: XCTestCase {
     }
 
     /// 139: the picker's two window gestures are pure Core helpers, and their coordinate is the
-    /// kernel's own OKLab L on clamped working-linear light.
+    /// kernel's own OKLab L on working-linear light. 167 moved that coordinate to the HDR axis.
     func testLuminancePickerHelpersUseTheKernelCoordinate() {
         // A full-range window opens 0.25 wide, centred; a narrower one keeps its width.
         let opened = LuminanceRangeShape.default.centring(on: 0.9)
         XCTAssertEqual(opened.low, 0.775, accuracy: 1e-12)
-        XCTAssertEqual(opened.high, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(opened.high, 1.025, accuracy: 1e-12)
         let kept = LuminanceRangeShape(low: 0.10, high: 0.40).centring(on: 0.60)
         XCTAssertEqual(kept.low, 0.45, accuracy: 1e-12)
         XCTAssertEqual(kept.high, 0.75, accuracy: 1e-12)
@@ -1551,7 +1705,7 @@ final class MaskTests: XCTestCase {
         XCTAssertEqual(crossed.low, 0.2, accuracy: 1e-12)
         XCTAssertEqual(crossed.high, 0.9, accuracy: 1e-12)
 
-        // The picker's luminance is the kernel's: OKLab L of clamp(working linear, 0, 1).
+        // The picker's luminance is the kernel's: OKLab L of the unclamped working-linear fold.
         let mid = OKLabMetric.maskLuminance(fromDecodedSRGB: 0.5, 0.5, 0.5)
         let working = ColorPrimaries.conversion(from: .sRGB, to: .working)
             .applying(to: SIMD3(0.5, 0.5, 0.5))
@@ -1561,8 +1715,12 @@ final class MaskTests: XCTestCase {
                                          lowFeather: 0, highFeather: 0)
         XCTAssertGreaterThanOrEqual(luminanceRangeAlpha(r: 0.5, g: 0.5, b: 0.5, narrow), 0.95,
                                     "a ±0.02 window centred on the picker's value covers the pixel")
-        // Above display white the kernel clamps each channel first; the picker must do the same.
-        XCTAssertLessThanOrEqual(OKLabMetric.maskLuminance(fromDecodedSRGB: 4, 4, 4), 1 + 1e-12)
+        // 167: above display white the picker reaches the HDR axis (cbrt(4) = 1.5874), capped only
+        // at the axis end.
+        XCTAssertEqual(OKLabMetric.maskLuminance(fromDecodedSRGB: 4, 4, 4), cbrt(4.0),
+                       accuracy: 1e-6)
+        XCTAssertLessThanOrEqual(OKLabMetric.maskLuminance(fromDecodedSRGB: 100, 100, 100),
+                                 LuminanceRangeShape.hdrMax + 1e-12)
         print("PICKER CORE · mid L \(mid) · opened \(opened.low)…\(opened.high)")
     }
 
