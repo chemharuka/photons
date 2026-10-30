@@ -82,6 +82,7 @@ extension InspectorView {
                                   accessory: { EmptyView() }) {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
                 cropAngleSection(tool)
+                cropPerspectiveSection()
                 cropRotationSection(geometry: geometry, tool: tool)
                 cropMirrorSection(geometry: geometry, tool: tool)
             }
@@ -158,6 +159,59 @@ extension InspectorView {
                           })
             }
             .background(CropRowProbeHost(rowID: CropCardID.angle))
+        }
+    }
+
+    // MARK: 透视
+
+    /// 透视 — 垂直 / 水平两条滑杆（183）。两个字段都是**文档**（`GeometryGroup` 的那一对），
+    /// 拖动时逐 tick 写、松手提交一行历史；0 是恒等，所以从未碰过的编辑不会多出行。
+    @ViewBuilder
+    private func cropPerspectiveSection() -> some View {
+        VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            CropSectionHeader(title: "透视", isFirst: false, reset: {
+                session.applyEdit {
+                    $0.geometry.perspectiveVertical = 0
+                    $0.geometry.perspectiveHorizontal = 0
+                }
+                _ = session.commitEdit(label: "透视", coalesce: false)
+            })
+            sliderRow("垂直",
+                      Binding(get: { session.edit.geometry.perspectiveVertical },
+                              set: { value in
+                                  session.applyEdit { $0.geometry.perspectiveVertical = value }
+                              }),
+                      -PerspectiveMap.limit ... PerspectiveMap.limit,
+                      "%+.0f",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.vertical",
+                      onReset: {
+                          session.applyEdit { $0.geometry.perspectiveVertical = 0 }
+                          _ = session.commitEdit(label: "透视", coalesce: false)
+                      },
+                      onEditingChanged: { editing in
+                          if !editing { session.commitEdit(label: "透视", coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: "perspective.vertical"))
+            sliderRow("水平",
+                      Binding(get: { session.edit.geometry.perspectiveHorizontal },
+                              set: { value in
+                                  session.applyEdit { $0.geometry.perspectiveHorizontal = value }
+                              }),
+                      -PerspectiveMap.limit ... PerspectiveMap.limit,
+                      "%+.0f",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.horizontal",
+                      onReset: {
+                          session.applyEdit { $0.geometry.perspectiveHorizontal = 0 }
+                          _ = session.commitEdit(label: "透视", coalesce: false)
+                      },
+                      onEditingChanged: { editing in
+                          if !editing { session.commitEdit(label: "透视", coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: "perspective.horizontal"))
         }
     }
 

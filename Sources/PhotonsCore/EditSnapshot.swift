@@ -467,18 +467,25 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     /// the crop must carry the turn, or the rect would land in a frame it was not measured in. Kept
     /// `nil` when 0 so every pre-9 snapshot keeps its bytes.
     public var quarterTurns: Int?
+    /// 183: 透视 — the two keystone knobs. They ride with `.straighten` (the angle half of the
+    /// geometry card) and stay `nil` when 0, exactly like `rotationDegrees`.
+    public var perspectiveVertical: Double?
+    public var perspectiveHorizontal: Double?
 
     public init() {}
 
     public var fieldCount: Int {
         [cropX != nil, cropY != nil, cropWidth != nil, cropHeight != nil,
          rotationDegrees != nil, flipHorizontal != nil, flipVertical != nil,
-         aspectLock != nil, quarterTurns != nil].filter { $0 }.count
+         aspectLock != nil, quarterTurns != nil,
+         perspectiveVertical != nil, perspectiveHorizontal != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
     /// Leaf count of the whole group in a full document (see `EditSnapshot.fullDocumentFieldCount`).
+    /// 183's two perspective leaves are optional extras: they stay outside this historical
+    /// denominator (and its `84` assertion) but do count in `fieldCount` when carried.
     public static let fullFieldCount = 9
 }
 
@@ -789,6 +796,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.geometry.rotationDegrees, 0) { geometry.rotationDegrees = edit.geometry.rotationDegrees }
         if edit.geometry.flipHorizontal { geometry.flipHorizontal = true }
         if edit.geometry.flipVertical { geometry.flipVertical = true }
+        // 183: 0 is identity, so an untouched pair is not carried (and adds no history row).
+        if differs(edit.geometry.perspectiveVertical, 0) {
+            geometry.perspectiveVertical = edit.geometry.perspectiveVertical
+        }
+        if differs(edit.geometry.perspectiveHorizontal, 0) {
+            geometry.perspectiveHorizontal = edit.geometry.perspectiveHorizontal
+        }
         if edit.geometry.aspectLock != .original { geometry.aspectLock = edit.geometry.aspectLock }
         s.geometry = geometry.isEmpty ? nil : geometry
 
@@ -1022,7 +1036,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 p.cropWidth = g.cropWidth
                 p.cropHeight = g.cropHeight
             }
-            if on(.straighten) { p.rotationDegrees = g.rotationDegrees }
+            if on(.straighten) {
+                p.rotationDegrees = g.rotationDegrees
+                // 183: the two perspective knobs ride with the 角度 section.
+                p.perspectiveVertical = g.perspectiveVertical
+                p.perspectiveHorizontal = g.perspectiveHorizontal
+            }
             if on(.flips) {
                 p.flipHorizontal = g.flipHorizontal
                 p.flipVertical = g.flipVertical
@@ -1197,6 +1216,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.cropWidth { out.geometry.crop.width = v }
             if let v = p.cropHeight { out.geometry.crop.height = v }
             if let v = p.rotationDegrees { out.geometry.rotationDegrees = v }
+            if let v = p.perspectiveVertical { out.geometry.perspectiveVertical = v }
+            if let v = p.perspectiveHorizontal { out.geometry.perspectiveHorizontal = v }
             if let v = p.flipHorizontal { out.geometry.flipHorizontal = v }
             if let v = p.flipVertical { out.geometry.flipVertical = v }
             if let v = p.aspectLock { out.geometry.aspectLock = v }
