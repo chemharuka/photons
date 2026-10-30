@@ -10,6 +10,7 @@
 | `Sources/PhotonsUI/CropToolController.swift` | `safeCropRect` 改为调用布局；新增 `reseedForPhotoChange()` |
 | `Sources/PhotonsUI/CropCanvasClamp.swift` | `maxZoom` 改为调用布局 |
 | `Tests/PhotonsUITests/Crop{WindowResize,FirstStraightenDrag,PhotoSwitchKeepsTheFrame}Tests.swift` | 三条新 RED→GREEN |
+| `Tests/PhotonsUITests/CropQuarterTurnKeepsTheFrameTests.swift` | 第 2 轮新增：90° 旋转（含「进裁切第一下就转」）RED→GREEN |
 
 `Package.swift`、`Resources/`、导出/蒙版/contrast/dehaze/点颜色/深度均未触碰。
 
@@ -249,3 +250,146 @@ swift build --build-tests     # Build complete!
 
 所有 UI 测试均带 `PHOTONS_TEST_RAW=$HOME/Desktop/test/L1030433.dng`，编译只用
 `swift build --build-tests`（debug），未运行 `make verify|test|app`，未 push / merge / rebase。
+
+---
+
+# 第 2 轮（169 TASK2）：点击 90° 旋转 + 「绑定死」复核
+
+> 说明：TASK2 写的是 `LoupeController.turn(clockwise:)`，本分支的实际入口名是
+> `LoupeController.rotateQuarter(clockwise:)`（同一段 `:3856-3895`，`rotateQuarterClockwise()` 是它的
+> 具名门）。测试打的是真实入口 `rotateQuarter(clockwise: true)`，不是另造一个别名。
+
+## 9. 90° 旋转路径为什么现在是安全的
+
+### 9.1 这条路径实际做了什么
+
+`LoupeController.rotateQuarter(clockwise:)` 的现行顺序：
+
+```
+endToolSession("裁切与旋转")          // 只动 history，不动 cropTool.isActive / draft
+applyEdit { model.turn(clockwise:) } // 文档写：quarterTurns 与 crop 一起转
+commitEdit(...)                      // 一条离散历史
+beginToolSession("裁切", ...)         // 只动 history，不重新武装
+if cropTool.isActive { refreshCropTool() }  // → armCropFrame(.refresh)
+requestEditRender()
+```
+
+`cropTool.isActive` 在这条路径上**从头到尾没有变**：两个 session 调用只开/关历史，`applyEdit` /
+`commitEdit` 不碰工具，观察回调 `handleCropPhotoChange()` 也不会把它关掉。原因是第 1 轮已经修好的
+那一行：`beginCropTool()` 在打开工具的同一轮把 `lastHandledAnchorID` 同步成当前照片
+（`LoupeController.swift:3641`）。于是 `applyEdit` 引起的 `editRevision` 变化在
+`handleCropPhotoChange()` 里看到的是 `anchor == lastHandledAnchorID`，不会把「文档写」误判成
+「换图」，因此不会 `detach()`。
+
+旋转之后 `refreshCropTool()` 走 `armCropFrame(.refresh)`：
+
+1. `active = cropTool.isActive` 仍为 true → 覆盖层保持可见（可见性只有这一个写入点）；
+2. `cropSourceSize` 由 `orientedSource(source)` 按新的 `quarterTurns` 换轴；
+3. `cropWorkspaceEntryLayout()` 用 `(source, 新 quarterTurns, straighten, canvas)` 重新问一次
+   `CropWorkspaceLayout`，画布/图片/框/缩放全部同一轮取新值；
+4. `syncCropOverlay()` 重新投影四角，所以长宽比随 90° 交换，框仍在画布内。
+
+### 9.2 RED 证据（在**第 1 轮修复之前**的 `042b90f` 上跑新测试）
+
+为不改动当前工作区，用临时 detached worktree（跑完已删除）：
+
+```
+git worktree add --detach .../169-red-parent 042b90f
+cp Tests/PhotonsUITests/CropQuarterTurnKeepsTheFrameTests.swift .../169-red-parent/Tests/PhotonsUITests/
+cd .../169-red-parent
+PHOTONS_TEST_RAW=$HOME/Desktop/test/L1030433.dng \
+  swift test --filter 'CropQuarterTurnKeepsTheFrameTests'
+```
+
+完整输出：`local/out/169-quarter-turn-red.txt`。**2 tests / 6 failures**，两条都是同一个根因：
+
+| 测试 | 失败行（`169-quarter-turn-red.txt`） | 代表输出 |
+|---|---|---|
+| `testTurningWithTheFrameUpKeepsItOnEveryQuarter` | `:60-64`（输出行 22–24） | `after press 1: the 90° turn closed 裁切 mode` / `the overlay is hidden or not on screen after the turn` / `the overlay is drawing nothing after the turn` |
+| `testTurningImmediatelyAfterEnteringCropKeepsTheFrame` | `:60-64`（输出行 13–15） | `first action = turn: the 90° turn closed 裁切 mode` / 同上 |
+
+这正是用户报的「点击旋转后也会丢失裁剪框」：修复前第一次 `applyEdit{turn}` 被误判成换图而
+`detach()`。第 1 轮的 `beginCropTool` 同步 `lastHandledAnchorID` 之后，这条路径不再有 detach 分支。
+
+### 9.3 GREEN 证据（当前工作区）
+
+`local/out/169-round2-required.txt` 中：
+
+```
+Test Suite 'CropQuarterTurnKeepsTheFrameTests' passed
+  Executed 2 tests, with 0 failures
+```
+
+实测四步（同一份日志，框的宽高比随 90° 交换、四步都 ⊆ 1022×904 画布）：
+
+```
+entry (0 presses) · frame {51.10,145.92,919.80,612.17} · source 9520x6336
+after press 1     · frame {240.26,45.20,541.49,813.60} · source 6336x9520
+after press 2     · frame {51.10,145.92,919.80,612.17} · source 9520x6336
+after press 3     · frame {240.26,45.20,541.49,813.60} · source 6336x9520
+after press 4     · frame {51.10,145.92,919.80,612.17} · source 9520x6336
+```
+
+第二条测试不 settle、进裁切后的**第一个动作**就是旋转，同样四步全绿。
+
+## 10. `cropOverlay` 写入点表（「绑定死」复核）
+
+### 10.1 `isHidden` 的写入：全仓只剩一个入口
+
+`grep -rn "cropOverlay\.isHidden\|cropBar\.isHidden" Sources Tests` 的结果：
+
+- **写**：只有 `LoupeController.armCropFrame(_:)` 的
+  `cropOverlay.isHidden = !active`（`:4135`）与 `cropBar.isHidden = !active`（`:4136`）；
+  `active = cropTool.isActive` 是唯一输入。
+- **读**：`isCropOverlayOnScreenForTesting`（`:4050`，测试自证）、`layoutCropBar` 的
+  `guard !cropBar.isHidden`（`:4303`，只读）；测试文件里的 `loupe.cropBar.isHidden` 也全是读。
+- `loadView` 里原先两处直接写 `isHidden = true` 已在第 1 轮删除，现在只调用一次
+  `armCropFrame(.mounted)`（`:1650`）。
+
+### 10.2 `cropOverlay` 的每一处写入 → 现在由谁负责
+
+| 写入 | 位置 | 现在由谁负责 / 值从哪来 |
+|---|---|---|
+| `cropOverlay.isHidden` | `LoupeController.swift:4135` | `armCropFrame(_:)` 唯一写；`!cropTool.isActive` |
+| `cropOverlay.layout = nil`（工具关） | `:4152` | `armCropFrame` 的 `guard active` 失败分支 |
+| `cropOverlay.active = nil`（工具关） | `:4153` | 同上 |
+| `cropOverlay.layout = nil`（兜底） | `:4271` | `syncCropOverlay` 在 `cropTool.isActive == false` 时 |
+| `cropOverlay.active = nil`（兜底） | `:4272` | 同上 |
+| `cropOverlay.layout`（bridge 中） | `:4286` | `syncCropOverlay` → `cropToolLayout(bridge:progress:)`，用 bridge 自己的相似变换 |
+| `cropOverlay.active`（bridge 中） | `:4288` | `cropTool.isDragging ? cropTool.lastHandle : nil` |
+| `cropOverlay.layout`（静止） | `:4295` | `syncCropOverlay` → `cropToolLayout()`，每次现算 |
+| `cropOverlay.active`（静止） | `:4296` | `cropTool.isDragging ? cropTool.lastHandle : nil` |
+| `cropOverlay.frame`（仅挂载） | `:1611` | `loadView` 把覆盖层铺满 `container.bounds`；尺寸随 `autoresizingMask`，不是框的几何 |
+| `cropOverlay.layout` 的记录（只读快照） | `:2411` | `recordCropOverlayFollowFrame` 的观测日志（测试/metrics），生产不把它当布局真相 |
+
+`syncCropOverlay` 的调用者也全部是「输入变了」的时刻：`setViewState`（`:2171`）、bridge 结束
+（`:2445`、`:2596`）、`armCropFrame`（`:4159`）。没有任何一条路径靠「补写一次 isHidden」来恢复。
+
+### 10.3 框的位置/尺寸没有可写缓存副本
+
+- `cropFrameRect(source:)`（`:4204`）是**计算属性式函数**，每次从 `cropTool.effectiveCrop(source:)`
+  现算四边；`cropZoomLimit` / `clampedToCropCanvas` 也每次现问它。
+- `cropWorkspaceEntryLayout(viewport:)`（`:4171`）每次构造 `CropWorkspaceLayout`，返回的
+  `Entry` 只是调用栈上的值，`layoutCropBar(_:)` 当帧用完即丢。
+- `CropToolController.safeCropRect` 与 `CropCanvasClamp.maxZoom` 都只委托纯函数，不再各算一份。
+- `CropToolController.draft` 是用户正在编辑的**输入状态**（crop/角度/锁），不是
+  `CropWorkspaceLayout` 的输出缓存；`cropOverlay.layout` 是视图当帧要画的东西，由
+  `syncCropOverlay` 每帧重写，生产代码不反向读它来做布局。
+- 因此活跃状态下的框是 `(cropTool.isActive, 文档 geometry, 画布 bounds)` 的纯函数结果；
+  不存在「被隐藏 / 没武装 / 丢了」这种可停留的独立状态。
+
+## 11. 第 2 轮收工验证
+
+```
+swift build --build-tests
+# Build complete!（local/out/169-round2-build.txt）
+
+PHOTONS_TEST_RAW=$HOME/Desktop/test/L1030433.dng \
+swift test --filter 'CropZoomEntryTests|CropCanvasExpandTests|CropBoundsTests|CropToolProjectionTests|CropBarLayoutTests|CropToolTests|QuarterTurnTests|TransformPanelTests|CropWindowResizeTests|CropFirstStraightenDragTests|CropPhotoSwitchKeepsTheFrameTests|CropQuarterTurnKeepsTheFrameTests'
+```
+
+`local/out/169-round2-required.txt`：**PhotonsUITests 48/0 + PhotonsCoreTests 11/0 = 59 tests / 0 failures**
+（第 1 轮的 57 条 + 本轮新增 2 条）。
+
+本轮没有新增 `XCTSkip`、没有放宽阈值、没有删断言；除新增测试文件与 `local/` 外，源码未改。
+
