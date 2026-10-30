@@ -468,7 +468,11 @@ extension CatalogSession {
             return .colorRange(ColorRangeShape(samples: [[0.5, 0.5, 0.5]],
                                                tolerance: 0.30, smoothness: 0.50))
         case .luminanceRange:
-            return .luminanceRange(LuminanceRangeShape(low: 0.0, high: 1.0,
+            // 167: the default is the **whole HDR axis**, not 0…1. A literal `high: 1.0` here would
+            // make a new luminance mask stop at the white point; `LuminanceRangeShape.default` is
+            // the one place that knows the axis end.
+            return .luminanceRange(LuminanceRangeShape(low: 0.0,
+                                                       high: LuminanceRangeShape.hdrMax,
                                                        lowFeather: 0.10, highFeather: 0.10))
         case .depthRange:
             // The whole depth axis, with the documented default feathers. With no depth map the

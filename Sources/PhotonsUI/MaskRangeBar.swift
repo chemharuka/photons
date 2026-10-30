@@ -12,9 +12,23 @@ import PhotonsCore
 // while the hand moves and `commit: true` on mouse-up — one drag, one history entry. The
 // `MaskSliderRow` rows and the eyedropper are the other two entrances to exactly the same fields.
 //
-// The axis is the sampler's own axis: OKLab L of clamped working-linear light, 0…1. That is the
-// quantity `s1_5_mask_atlas.metal`'s `luminance_range_alpha` compares, so the bar's ends and the
-// picker's value cannot mean different things.
+// 167 — the axis is the sampler's own HDR axis: OKLab `L` of **unclamped** working-linear light,
+// `0…LuminanceRangeShape.hdrMax` (`cbrt(16) = 2.5198`, +4 EV). It is the same quantity
+// `s1_5_mask_atlas.metal`'s `luminance_range_alpha` compares, so the bar's ends and the picker's
+// value cannot mean different things. The SDR half still names display codes
+// (`0 63 127 191 255`) at their own OKLab coordinates; the HDR half names `+1 … +4` EV.
+
+/// One label under the bar. `value` is on the luminance axis (`0…hdrMax`) and `label` is what the
+/// user reads — a display code in the SDR half, an EV stop in the HDR half.
+public struct MaskRangeBarTick: Equatable, Sendable {
+    public let value: Double
+    public let label: String
+
+    public init(value: Double, label: String) {
+        self.value = value
+        self.label = label
+    }
+}
 
 /// What the hand grabbed. Pure geometry, so the hit test and the drag maths are testable without a
 /// window (the SwiftUI view is a thin shell over these functions).
@@ -47,9 +61,34 @@ public enum MaskRangeBarGeometry {
     /// smaller than 0.002 — otherwise a window dragged to a point could never be grabbed again.
     public static let minimumHitWidth: Double = 10
 
+    /// The bar's axis top. One constant, from Core, never a second literal here.
+    public static var axisMax: Double { LuminanceRangeShape.hdrMax }
+
+    /// The ticks the axis draws, in ascending order. The SDR half is the five display codes the
+    /// curve card also draws (`CurveAxisTicks.codes`), each at its own OKLab `L`; the HDR half is
+    /// `+1 … +4`, at `cbrt(2^stop)` — the same neutral-light fold the kernel reads.
+    public static let axisTicks: [MaskRangeBarTick] = {
+        let codes = [0, 63, 127, 191, 255].map { code -> MaskRangeBarTick in
+            let encoded = Double(code) / 255
+            return MaskRangeBarTick(value: OKLabMetric.fromSRGB(encoded, encoded, encoded).L,
+                                    label: "\(code)")
+        }
+        let stops = (1...4).map { stop -> MaskRangeBarTick in
+            MaskRangeBarTick(value: cbrt(pow(2.0, Double(stop))), label: "+\(stop)")
+        }
+        return codes + stops
+    }()
+
+    /// Pointer x → document value (`0…hdrMax`).
     public static func value(atX x: Double, width: Double) -> Double {
         guard width > 0 else { return 0 }
-        return min(max(x / width, 0), 1)
+        return min(max(x / width, 0), 1) * axisMax
+    }
+
+    /// Document value → pointer x. The inverse of `value(atX:width:)`.
+    public static func xPosition(forValue value: Double, width: Double) -> Double {
+        guard width > 0 else { return 0 }
+        return min(max(value / axisMax, 0), 1) * width
     }
 
     /// The bar's two handles, in document units (the value the engine sees, not "percent of bar").
@@ -59,8 +98,8 @@ public enum MaskRangeBarGeometry {
 
     public static func hit(atX x: Double, width: Double, shape: LuminanceRangeShape) -> MaskRangeBarHit? {
         guard width > 0 else { return nil }
-        let lowX = shape.low * width
-        let highX = shape.high * width
+        let lowX = xPosition(forValue: shape.low, width: width)
+        let highX = xPosition(forValue: shape.high, width: width)
         let radius = max(minimumHitWidth / 2, 0.5)
         let dLow = abs(x - lowX)
         let dHigh = abs(x - highX)
@@ -79,10 +118,10 @@ public enum MaskRangeBarGeometry {
 
         let lowOnLeft = shape.low <= shape.high
         if x <= lower {
-            let feather = (lowOnLeft ? shape.lowFeather : shape.highFeather) * width
+            let feather = (lowOnLeft ? shape.lowFeather : shape.highFeather) / axisMax * width
             if x >= lower - feather { return lowOnLeft ? .lowFeather : .highFeather }
         } else if x >= upper {
-            let feather = (lowOnLeft ? shape.highFeather : shape.lowFeather) * width
+            let feather = (lowOnLeft ? shape.highFeather : shape.lowFeather) / axisMax * width
             if x <= upper + feather { return lowOnLeft ? .highFeather : .lowFeather }
         }
         return nil
@@ -106,11 +145,12 @@ public enum MaskRangeBarGeometry {
         case .highHandle:
             next.high = v
         case .lowFeather:
-            next.lowFeather = min(max(abs(v - drag.startShape.low), 0), 1)
+            next.lowFeather = min(max(abs(v - drag.startShape.low), 0), axisMax)
         case .highFeather:
-            next.highFeather = min(max(abs(v - drag.startShape.high), 0), 1)
+            next.highFeather = min(max(abs(v - drag.startShape.high), 0), axisMax)
         case .body:
-            next = translated(drag.startShape, by: (x - drag.startX) / max(width, 1e-9))
+            next = translated(drag.startShape,
+                              by: (x - drag.startX) / max(width, 1e-9) * axisMax)
         }
         return next
     }
@@ -123,14 +163,15 @@ public enum MaskRangeBarGeometry {
     public static func translated(_ shape: LuminanceRangeShape,
                                   by delta: Double) -> LuminanceRangeShape {
         var next = shape
+        let top = axisMax
         let w = shape.high - shape.low
         let proposedLow = shape.low + delta
         let proposedHigh = shape.high + delta
         if proposedLow < 0 {
             next.low = 0
-            next.high = min(1, max(0, w))
-        } else if proposedHigh > 1 {
-            let pair = exactPair(high: 1, width: w)
+            next.high = min(top, max(0, w))
+        } else if proposedHigh > top {
+            let pair = exactPair(high: top, width: w)
             next.low = max(0, pair.low)
             next.high = pair.high
         } else {
@@ -246,15 +287,36 @@ public struct MaskRangeBar: View {
             }
             .frame(height: 28)
 
+            // 167 — the axis itself: display codes on the SDR half, EV stops on the HDR half. Same
+            // 9 pt monospaced tertiary treatment as the curve card's ticks (`CurveAxisTicks`).
+            Canvas { context, size in
+                Self.drawTicks(context: &context, size: size)
+            }
+            .frame(height: 11)
+
             HStack(spacing: 0) {
                 Text(String(format: "%.2f", LuminanceRangeShape.default.low))
                 Spacer(minLength: 2)
-                Text("亮度 0…1（与吸管同一量纲）")
+                Text(String(format: "亮度 0…%.2f（与吸管同一量纲）", LuminanceRangeShape.hdrMax))
                 Spacer(minLength: 2)
                 Text(String(format: "%.2f", LuminanceRangeShape.default.high))
             }
             .font(.system(size: 8, design: .monospaced))
             .foregroundStyle(.tertiary)
+        }
+    }
+
+    private static func drawTicks(context: inout GraphicsContext, size: CGSize) {
+        let w = size.width
+        guard w > 1 else { return }
+        for (i, tick) in MaskRangeBarGeometry.axisTicks.enumerated() {
+            let x = MaskRangeBarGeometry.xPosition(forValue: tick.value, width: Double(w))
+            let text = Text(tick.label)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.secondary)
+            let anchor: UnitPoint = i == 0 ? .topLeading
+                : (i == MaskRangeBarGeometry.axisTicks.count - 1 ? .topTrailing : .top)
+            context.draw(context.resolve(text), at: CGPoint(x: x, y: 0), anchor: anchor)
         }
     }
 
@@ -264,10 +326,10 @@ public struct MaskRangeBar: View {
         let w = size.width
         guard w > 1, h > 1 else { return }
         let track = CGRect(x: 0, y: 5, width: w, height: h - 10)
-        let lower = min(shape.low, shape.high) * w
-        let upper = max(shape.low, shape.high) * w
-        let lowX = shape.low * w
-        let highX = shape.high * w
+        let lowX = MaskRangeBarGeometry.xPosition(forValue: shape.low, width: Double(w))
+        let highX = MaskRangeBarGeometry.xPosition(forValue: shape.high, width: Double(w))
+        let lower = min(lowX, highX)
+        let upper = max(lowX, highX)
 
         context.fill(Path(roundedRect: track, cornerRadius: 4),
                      with: .color(Color.primary.opacity(0.07)))
@@ -279,10 +341,12 @@ public struct MaskRangeBar: View {
         }
 
         // Feather zones: diagonal hatching, so they read as "transition" rather than another fill.
-        let lowFeather = CGRect(x: max(0, lowX - shape.lowFeather * w), y: track.minY,
-                                width: min(lowX, max(0, shape.lowFeather * w)), height: track.height)
+        let lowFeatherWidth = shape.lowFeather / MaskRangeBarGeometry.axisMax * Double(w)
+        let highFeatherWidth = shape.highFeather / MaskRangeBarGeometry.axisMax * Double(w)
+        let lowFeather = CGRect(x: max(0, lowX - lowFeatherWidth), y: track.minY,
+                                width: min(lowX, max(0, lowFeatherWidth)), height: track.height)
         let highFeather = CGRect(x: highX, y: track.minY,
-                                 width: max(0, min(w - highX, shape.highFeather * w)),
+                                 width: max(0, min(Double(w) - highX, highFeatherWidth)),
                                  height: track.height)
         for rect in [lowFeather, highFeather] where rect.width > 0.5 {
             context.drawLayer { layer in

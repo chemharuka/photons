@@ -558,9 +558,10 @@ public struct MaskShapeSliderRow: Sendable {
             ]
 
         case .luminanceRange:
+            let top = LuminanceRangeShape.hdrMax
             return [
                 MaskShapeSliderRow(
-                    title: "下限", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    title: "下限", range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
                     label: "亮度下限",
                     read: { if case .luminanceRange(let l) = $0 { return l.low } else { return .nan } },
                     apply: { shape, value in
@@ -568,20 +569,20 @@ public struct MaskShapeSliderRow: Sendable {
                         // 139: no ordering clamp here. `low > high` is a mirror with its own
                         // documented meaning (`LuminanceRangeShape.ordered`); a second repair in the
                         // UI is how two rules start disagreeing.
-                        return .luminanceRange(LuminanceRangeShape(low: min(max(value, 0), 1),
+                        return .luminanceRange(LuminanceRangeShape(low: min(max(value, 0), top),
                                                                    high: l.high,
                                                                    lowFeather: l.lowFeather,
                                                                    highFeather: l.highFeather))
                     },
                     defaultValue: LuminanceRangeShape.default.low),
                 MaskShapeSliderRow(
-                    title: "上限", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    title: "上限", range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
                     label: "亮度上限",
                     read: { if case .luminanceRange(let l) = $0 { return l.high } else { return .nan } },
                     apply: { shape, value in
                         guard case .luminanceRange(let l) = shape else { return shape }
                         return .luminanceRange(LuminanceRangeShape(low: l.low,
-                                                                   high: min(max(value, 0), 1),
+                                                                   high: min(max(value, 0), top),
                                                                    lowFeather: l.lowFeather,
                                                                    highFeather: l.highFeather))
                     },
