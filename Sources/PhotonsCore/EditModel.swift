@@ -656,6 +656,17 @@ public struct EditModel: Sendable, Equatable, Codable {
             // non-zero the *frame* changes shape, which is why this is in the geometry link and not
             // a side channel — every stage after S0 has different pixels.
             if geometry.quarterTurns != 0 { s += ";q=\(geometry.quarterTurns)" }
+            // 183: the two keystones, **only when non-zero** (`asp`/`car`/`q` discipline). A document
+            // that never touched them keeps the pre-183 geometry material byte for byte — the pinned
+            // key vectors depend on exactly that — and `;alg=2` is the only textual change it sees.
+            // Tenths of a slider unit, like 084's `;car=25`: `%.5f` cannot tell 0.000005 from 0.00001,
+            // and two adjacent knob positions must not share a key.
+            if geometry.perspectiveVertical != 0 {
+                s += ";pvy=\(Int((geometry.perspectiveVertical * 10).rounded()))"
+            }
+            if geometry.perspectiveHorizontal != 0 {
+                s += ";phx=\(Int((geometry.perspectiveHorizontal * 10).rounded()))"
+            }
             // 029: lateral CA. Appended **only when non-zero**, exactly like `asp`, so every document
             // that has never touched the CA sliders keeps the pre-029 geometry material byte for
             // byte — the seven pinned keys and every recorded golden depend on that.
@@ -842,6 +853,23 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// field, and its default is the identity).
     public var quarterTurns: Int
 
+    /// 183 — **透视 / 梯形校正**, the two knobs of the 变换 card. −100…100, 0 = the identity.
+    ///
+    /// The value is a *keystone strength*, one number per axis, and the geometry it drives is
+    /// `CropMath.PerspectiveMap`: a 3×3 homography in the frame's own pixel space that
+    /// **fixes the near edge** and scales the far edge. `+` corrects a picture shot *from below*
+    /// (vertical) / *from the left* (horizontal), i.e. it pulls the near end in and pushes the far
+    /// end out — the same direction the user sees a building straighten.
+    ///
+    /// Full travel is **6°** of convergence on a square frame (3° at ±50), which is what makes
+    /// `perspectiveVertical = +50` a one-drag fix for the 3° card in the acceptance.
+    ///
+    /// Stored as given; `perspective` is the map S0 actually consumes (clamped, and `nil` at 0/0).
+    /// 0 keeps the pre-183 bytes **and** the pre-183 key: the two keys are written only when the
+    /// document is actually keystoned, the `quarterTurns`/`asp`/`car` discipline.
+    public var perspectiveVertical: Double
+    public var perspectiveHorizontal: Double
+
     public static let identity = GeometryGroup(crop: .full, rotationDegrees: 0,
                                                flipHorizontal: false, flipVertical: false,
                                                aspectLock: .original, quarterTurns: 0)
@@ -851,13 +879,17 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                 flipHorizontal: Bool = false,
                 flipVertical: Bool = false,
                 aspectLock: AspectLock = .original,
-                quarterTurns: Int = 0) {
+                quarterTurns: Int = 0,
+                perspectiveVertical: Double = 0,
+                perspectiveHorizontal: Double = 0) {
         self.crop = crop
         self.rotationDegrees = rotationDegrees
         self.flipHorizontal = flipHorizontal
         self.flipVertical = flipVertical
         self.aspectLock = aspectLock
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
+        self.perspectiveVertical = perspectiveVertical
+        self.perspectiveHorizontal = perspectiveHorizontal
     }
 
     /// `n % 4` into `0…3` — the one place a turn count is made legal.
@@ -881,6 +913,9 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         v.aspectLock = c.val("aspectLock", v.aspectLock)
         v.quarterTurns = GeometryGroup.normalizedQuarterTurns(
             c.val("quarterTurns", v.quarterTurns))
+        // 183: absent on every document written before this task, which reads as 0 (= no warp).
+        v.perspectiveVertical = c.val("perspectiveVertical", v.perspectiveVertical)
+        v.perspectiveHorizontal = c.val("perspectiveHorizontal", v.perspectiveHorizontal)
         self = v
     }
 
@@ -901,6 +936,14 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         try c.encode(flipVertical, forKey: AnyCodingKey("flipVertical"))
         try c.encode(aspectLock, forKey: AnyCodingKey("aspectLock"))
         if quarterTurns != 0 { try c.encode(quarterTurns, forKey: AnyCodingKey("quarterTurns")) }
+        // 183: only a keystoned document grows these two keys — a neutral document re-encodes byte
+        // for byte, which `render-edit-neutral`'s pinned blob depends on.
+        if perspectiveVertical != 0 {
+            try c.encode(perspectiveVertical, forKey: AnyCodingKey("perspectiveVertical"))
+        }
+        if perspectiveHorizontal != 0 {
+            try c.encode(perspectiveHorizontal, forKey: AnyCodingKey("perspectiveHorizontal"))
+        }
     }
 
     // MARK: explicit crop / straighten semantics
@@ -925,8 +968,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// its width is a fraction of the turned width). This is the same two calls with the turned
     /// size in the second one, kept in one place so no caller can forget the swap.
     public func outputPixels(in source: ImageSize) -> ImageSize {
-        CropMath.outputSize(renderCrop(source: source), in: orientedSource(source),
-                            allowsOutsideSource: true)
+        CropMath.frameSize(renderCrop(source: source), in: orientedSource(source),
+                           allowsOutsideSource: true, perspective: perspective)
     }
 
     /// One quarter turn, as a mutation of the document's geometry: the frame turns and the crop
@@ -984,6 +1027,16 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// Straighten angle as S0 uses it: the stored value clamped to ±`straightenLimit`.
     public var straightenDegrees: Double {
         min(max(rotationDegrees, -GeometryGroup.straightenLimit), GeometryGroup.straightenLimit)
+    }
+
+    /// 183 — the keystone map S0 consumes, or `nil` when both knobs are at 0.
+    ///
+    /// `nil` is the pre-183 render path **and** the pre-183 key: the kernel's warp block is skipped
+    /// entirely (the flag in `S0Params` is 0), the canvas is the crop's own pixel size, and the key
+    /// material grows no token. The clamp lives in `PerspectiveMap` (finite, ±100).
+    public var perspective: PerspectiveMap? {
+        guard perspectiveVertical != 0 || perspectiveHorizontal != 0 else { return nil }
+        return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal)
     }
 
     /// The rect the renderer feeds to S0: the stored crop, re-shaped by `aspectLock` when the lock

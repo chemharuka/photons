@@ -236,7 +236,295 @@ extension AspectLock: Codable {
     }
 }
 
+// MARK: - 183 · perspective / keystone
+
+/// **透视 / 梯形校正** — the two knobs as one 3×3 homography, in the frame's own **normalized**
+/// coordinates (y down, the same box S0's `p.c` lives in), plus the closed form that says how much
+/// canvas the warp needs.
+///
+/// ## The map
+///
+/// Each axis is a *keystone* in the classic sense: a projective scale whose denominator is linear in
+/// the distance from the **near edge**, so the near edge is a fixed line and the far edge is scaled.
+/// With the near edge fixed and `v` the knob's strength (negative = the far end grows):
+///
+///     vertical   (near = bottom, s = 1 − y)     w = 1 + v·s
+///                x ↦ (x − ½)/w + ½              y ↦ 1 − s/w
+///
+///     horizontal (near = left,   ξ = x)         w = 1 + v·ξ
+///                x ↦ ξ/w                       y ↦ ½ + (y − ½)/w
+///
+/// Both are exact homographies (`[[1,0,0],[0,1,0],[0,v,1]]`-shaped), the composition is
+/// `M = M_horizontal · M_vertical` (**vertical first** — pinned by `PerspectiveTests`), and the
+/// fixed point is the **near edge's midpoint**: `(½, 1)` for the vertical knob, `(0, ½)` for the
+/// horizontal one, and `(0, 1)` — the bottom-left corner, where both near edges meet — for the pair.
+/// A line at the near edge's half-width `c` with slope `m` becomes vertical exactly when `v = m/c`,
+/// which is why `+50` rectifies the 3° acceptance card to 0.00° rather than to "about" 0°.
+///
+/// ## The strength
+///
+/// `|slider| = 100` ⇒ 6° of convergence on a square frame (`v = ∓0.21`; `tan 6° = 0.105 = v/2`),
+/// so `±50` is 3°. The number is a *tangent*, not an angle, which is what makes the correction
+/// exact for a straight line rather than exact only near zero.
+///
+/// ## The canvas
+///
+/// The warped picture is a convex quadrilateral; the canvas is the **largest axis-aligned rectangle
+/// inscribed in it that keeps the fixed corner** (`nearCorner`) — the whole point of 近端不动 is that
+/// the near end cannot drift, so the rect is anchored there and grown. `canvasSize` solves that in
+/// closed form (see `inscribedRect`), never by search: for each of the quad's four edges the "inside"
+/// half-plane gives one linear inequality `α·w + β·h ≤ c` on the rect's width and height, and the
+/// product `w·h` is maximised over the (at most four) candidates — the pairwise intersections of the
+/// binding lines and each line's own tangency point. `w = c/(2α), h = c/(2β)`.
+public struct PerspectiveMap: Sendable, Equatable {
+
+    /// The slider's range, and the one place it is clamped.
+    public static let limit = 100.0
+    /// `v` at full travel: 6° of convergence on a square frame (`2·tan 6°`).
+    public static let tangentPerUnit = 0.21
+
+    public var vertical: Double      // clamped −100…100
+    public var horizontal: Double
+
+    public init(vertical: Double, horizontal: Double) {
+        self.vertical = PerspectiveMap.clamp(vertical)
+        self.horizontal = PerspectiveMap.clamp(horizontal)
+    }
+
+    /// A value read from a document, made legal: finite and inside ±100.
+    static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, -limit), limit)
+    }
+
+    /// 0/0 — no warp, no canvas change, no uniform, no key token.
+    public var isIdentity: Bool { vertical == 0 && horizontal == 0 }
+
+    /// `true` when this map changes no pixel — the one predicate the renderer, the key and the UI ask.
+    public var hasWarp: Bool { !isIdentity }
+
+    /// The map's own parameters, `v = −slider/100 · 0.21`: **negative** at a positive slider, because
+    /// `w = 1 + v·s` has to *grow* with the distance from the near edge for the far end to expand.
+    public var verticalStrength: Double { -vertical / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
+    public var horizontalStrength: Double { -horizontal / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
+
+    /// The far end's scale: `1/(1+v)`. `> 1` at a positive slider (the far edge grows), `< 1` when
+    /// the knob is dragged the other way (a picture that already looks correct gets more keystone).
+    public var verticalFarScale: Double { 1 / (1 + verticalStrength) }
+    public var horizontalFarScale: Double { 1 / (1 + horizontalStrength) }
+
+    // MARK: the homography
+
+    /// The forward map, `frame → warped frame`, as a row-major 3×3 on `(x, y, 1)`.
+    ///
+    /// `M = M_horizontal · M_vertical`, both written out rather than multiplied so the numbers here
+    /// are the ones the doc comment derives:
+    ///
+    ///     M_vertical   = [1, −v_v/2,  v_v/2 ; 0, 1−v_v, v_v ; 0, −v_v, 1+v_v]
+    ///     M_horizontal = [1, 0, 0 ; v_h/2, 1, 0 ; v_h, 0, 1]
+    public var forwardMatrix: [[Double]] {
+        let vv = verticalStrength
+        let vh = horizontalStrength
+        let m1: [[Double]] = [[1, -0.5 * vv, 0.5 * vv],
+                              [0, 1 - vv, vv],
+                              [0, -vv, 1 + vv]]
+        let m2: [[Double]] = [[1, 0, 0],
+                              [0.5 * vh, 1, 0],
+                              [vh, 0, 1]]
+        return PerspectiveMap.multiply(m2, m1)
+    }
+
+    /// The sampling map, `warped frame → frame`: what S0 multiplies the sample coordinate by.
+    public var inverseMatrix: [[Double]] { PerspectiveMap.invert(forwardMatrix) }
+
+    /// `frame → warped frame` for one normalized point (y down, as everywhere in S0).
+    public func forward(x: Double, y: Double) -> (x: Double, y: Double) {
+        PerspectiveMap.apply(forwardMatrix, x: x, y: y)
+    }
+
+    /// `warped frame → frame` for one normalized point.
+    public func inverse(x: Double, y: Double) -> (x: Double, y: Double) {
+        PerspectiveMap.apply(inverseMatrix, x: x, y: y)
+    }
+
+    // MARK: the canvas (inscribed rectangle, closed form)
+
+    /// The warped picture's four corners in **warped normalized** coordinates, in the frame's own
+    /// order (top-left, top-right, bottom-right, bottom-left) — the quadrilateral whose inscribed
+    /// rectangle is the canvas.
+    public func warpedQuad() -> [(x: Double, y: Double)] {
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { forward(x: $0.0, y: $0.1) }
+    }
+
+    /// The canvas: the largest axis-aligned rectangle inside the warped quad that keeps the fixed
+    /// corner, in normalized units of the **warped** frame (`width ≤ 1` or `> 1` — the far end may
+    /// push past the old frame).
+    ///
+    /// The quad is convex and contains the fixed corner `(0, 1)` (bottom-left). Measuring from it with
+    /// `u = x`, `t = 1 − y` (both ≥ 0 inside), the rect is `[0, w] × [0, h]` and each edge contributes
+    /// one inequality `α·w + β·h ≤ c` with `α, β ≥ 0` (the outward normal's positive parts), because
+    /// the rect's four corners are `(0,0), (w,0), (0,h), (w,h)`. Maximising `w·h` over that (convex,
+    /// at most four-line) region is exact: the optimum is a pairwise intersection of the binding lines
+    /// or one line's own tangency `(c/2α, c/2β)`, so the answer is the best of ≤ 10 candidates — no
+    /// search, and `testClosedFormAgreesWithAGridSearch` checks every one of them against a 200×200
+    /// grid to 1e-6.
+    ///
+    /// Degenerate inputs (a knob combination that leaves less than a pixel) are clamped to `minimum`
+    /// and reported through `canvas(...)`'s `degenerate` flag — never a zero-sized canvas (§5).
+    public func canvasSize() -> DSize {
+        let r = inscribedRect()
+        return DSize(width: r.width, height: r.height)
+    }
+
+    /// `canvasSize` in the units the caller works in: the crop's pixel size in, the canvas' out.
+    ///
+    /// `minimum` is 1 px, and a degenerate answer is *clamped to it* rather than thrown: a canvas is
+    /// an allocation, and the caller has no better answer than "the smallest picture" (the report
+    /// names the case).
+    public func canvasSize(_ frame: DSize, minimum: Double = 1) -> DSize {
+        let r = inscribedRect()
+        let w = frame.width * r.width
+        let h = frame.height * r.height
+        let mw = w.isFinite ? max(w, minimum) : minimum
+        let mh = h.isFinite ? max(h, minimum) : minimum
+        return DSize(width: mw, height: mh)
+    }
+
+    /// Is this canvas a clamped (degenerate) one? A separate predicate so the caller — and the test —
+    /// can name the case without a second formula.
+    public func isDegenerate(_ frame: DSize, minimum: Double = 1) -> Bool {
+        let r = inscribedRect()
+        return !(frame.width * r.width >= minimum) || !(frame.height * r.height >= minimum)
+    }
+
+    /// The inscribed rectangle in normalized units of the **frame** (not the warped one): `width` and
+    /// `height` are what the canvas is, `x`/`y` where its top-left sits.
+    ///
+    /// At a positive slider the near edge is the narrow side, so the rect hugs it (`x = 0`,
+    /// `y = 1 − height`) and the **fixed point `(½, 1)` is inside** — which is what 近端不动 means for
+    /// the picture. At a negative slider the far end is the narrow side and the rect is centred, so
+    /// the near *corners* crop while the fixed point stays put.
+    public func inscribedRect() -> (x: Double, y: Double, width: Double, height: Double) {
+        // Work in (u, t) = (x, 1 − y), i.e. right and *up from the near (bottom) edge*. The quad is
+        // convex; `left(t)`/`right(t)` are its two boundaries at height `t`, each a single straight
+        // line between two vertices, so both are piecewise linear with the vertices' `t` as kinks.
+        let quad = warpedQuad().map { (u: $0.x, t: 1 - $0.y) }
+        func bounds(at t: Double) -> (left: Double, right: Double) {
+            var lo = Double.infinity, hi = -Double.infinity
+            var found = false
+            for i in 0..<4 {
+                let a = quad[i], b = quad[(i + 1) % 4]
+                let d = b.t - a.t
+                guard abs(d) > 1e-12 else { continue }
+                let lambda = (t - a.t) / d
+                guard lambda >= -1e-9, lambda <= 1 + 1e-9 else { continue }
+                let u = a.u + lambda * (b.u - a.u)
+                lo = min(lo, u); hi = max(hi, u); found = true
+            }
+            return found ? (lo, hi) : (0, 0)
+        }
+
+        // Candidate heights: every vertex's own `t` (the quad can reach past the frame's 0…1 at a
+        // positive slider, which is the whole point of the inscribed rect). Between two of them
+        // `left` and `right` are single lines, so the extremes are at the knots. (A maximal
+        // rectangle's ends land on a knot for every map in range: the width falls at most
+        // `1 − 1/(1+0.21) = 17 %`, so the unconstrained optimum `h = 1/(2·slope)` is always past the
+        // quad. The grid-search test checks that claim to 1e-3 of area over the whole knob grid.)
+        var knots = quad.map(\.t)
+        knots.sort()
+        knots = knots.reduce(into: []) { acc, t in
+            if acc.last.map({ abs($0 - t) > 1e-9 }) ?? true { acc.append(t) }
+        }
+
+        // Candidate bands. The knot-aligned ones are exact whenever the width falls or is constant
+        // across the band (every single-knob map — the acceptance's four notches). When both knobs are
+        // engaged the quad is skewed and the width can *grow* with height, which puts the optimum
+        // strictly inside a piece: there `area(b) = (b − a)(R(b) − L_max)` is a quadratic in `b`, so
+        // its stationary point is closed form too (`b* = (L_max − r0 + r1·a) / (2·r1)`).
+        var bands: [(Double, Double)] = []
+        for i in 0..<knots.count {
+            for j in (i + 1)..<knots.count { bands.append((knots[i], knots[j])) }
+        }
+        for i in 0..<knots.count {
+            let a = knots[i]
+            for j in (i + 1)..<knots.count {
+                let p = knots[j], q = knots[(j + 1) % knots.count]
+                guard q > p else { continue }
+                let rp = bounds(at: p).right, rq = bounds(at: q).right
+                let slope = (rq - rp) / (q - p)
+                guard slope < -1e-9 else { continue }
+                var lMax = -Double.infinity
+                for t in knots[i...j] { lMax = max(lMax, bounds(at: t).left) }
+                let r0 = rp - slope * p
+                let bStar = (lMax - r0 + slope * a) / (2 * slope)
+                if bStar > p + 1e-12, bStar < q - 1e-12, bStar > a {
+                    bands.append((a, min(bStar, q)))
+                }
+            }
+        }
+
+        var best = (x: 0.0, y: 0.0, w: 0.0, h: 0.0, area: 0.0)
+        for (t0, t1) in bands {
+            let height = t1 - t0
+            guard height > 0 else { continue }
+            // The widest rect over the whole band: every sample's `[left, right]` must contain it, so
+            // its left is the largest `left` and its right the smallest `right` in there — evaluated
+            // at the band's ends and at every vertex height inside it (each boundary is one line
+            // between vertices, so those are the extremes).
+            var lo = -Double.infinity, hi = Double.infinity
+            var samples = [t0, t1]
+            samples.append(contentsOf: knots.filter { $0 > t0 + 1e-12 && $0 < t1 - 1e-12 })
+            for t in samples {
+                let b = bounds(at: t)
+                lo = max(lo, b.left)
+                hi = min(hi, b.right)
+            }
+            let width = hi - lo
+            guard width > 1e-12 else { continue }
+            if width * height > best.area {
+                best = (x: lo, y: 1 - t1, w: width, h: height, area: width * height)
+            }
+        }
+
+        guard best.area > 0 else {
+            return (x: 0, y: 0, width: 1, height: 1)
+        }
+        return (x: best.x, y: best.y, width: best.w, height: best.h)
+    }
+
+    // MARK: the 3×3 arithmetic
+
+    public static func multiply(_ a: [[Double]], _ b: [[Double]]) -> [[Double]] {
+        (0..<3).map { i in (0..<3).map { j in (0..<3).reduce(0.0) { $0 + a[i][$1] * b[$1][j] } } }
+    }
+
+    static func apply(_ m: [[Double]], x: Double, y: Double) -> (x: Double, y: Double) {
+        let w = m[2][0] * x + m[2][1] * y + m[2][2]
+        guard abs(w) > 1e-12 else { return (x, y) }
+        return ((m[0][0] * x + m[0][1] * y + m[0][2]) / w,
+                (m[1][0] * x + m[1][1] * y + m[1][2]) / w)
+    }
+
+    /// Adjugate inverse: the matrices here are well conditioned (the denominator is `1 ± 0.21`), and
+    /// `PerspectiveTests` pins `M·M⁻¹ = I` to 1e-12 for the whole slider grid.
+    public static func invert(_ m: [[Double]]) -> [[Double]] {
+        let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1]
+        let c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2]
+        let c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0]
+        let det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02
+        guard abs(det) > 1e-12 else { return [[1, 0, 0], [0, 1, 0], [0, 0, 1]] }
+        let d = 1 / det
+        return [[c00 * d, (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * d,
+                 (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * d],
+                [c01 * d, (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * d,
+                 (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * d],
+                [c02 * d, (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * d,
+                 (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * d]]
+    }
+}
+
 // MARK: - crop math (pure, no GPU, no Metal)
+
 
 /// The arithmetic behind crop / straighten / aspect lock, kept out of the renderer so it can be
 /// checked against closed-form values instead of against pixels (docs/architecture-decisions.md
@@ -308,11 +596,16 @@ public enum CropMath {
     public static func canvasSize(crop: CropRect, in source: ImageSize,
                                   straightenDegrees: Double,
                                   quarterTurns: Int,
-                                  allowsOutsideSource: Bool = false) -> ImageSize {
+                                  allowsOutsideSource: Bool = false,
+                                  perspective: PerspectiveMap? = nil) -> ImageSize {
         let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
             ? ImageSize(width: source.height, height: source.width)
             : source
-        let out = outputSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource)
+        // 183: the picture's own pixel size is the crop's, warped — the *inscribed rectangle* of the
+        // keystoned quad, and nothing else. At 0/0 the optional is `nil` and this is the pre-183 line
+        // byte for byte.
+        let out = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
+                            perspective: perspective)
         guard straightenDegrees.isFinite else { return out }
         // 162 §2.1 — 0 / 90 / 180 / 270: the crop's own pixel size, bit for bit. (`/ 90` and a
         // tolerance rather than `==`, so −0.0 and 360 count and 89.999999999 does not.)
@@ -340,16 +633,34 @@ public enum CropMath {
     /// at every right angle, because `canvasSize` returns `outputSize` itself there.
     public static func canvasOrigin(crop: CropRect, in source: ImageSize,
                                     straightenDegrees: Double, quarterTurns: Int,
-                                    allowsOutsideSource: Bool = false) -> (x: Int, y: Int) {
+                                    allowsOutsideSource: Bool = false,
+                                    perspective: PerspectiveMap? = nil) -> (x: Int, y: Int) {
         let canvas = canvasSize(crop: crop, in: source,
                                 straightenDegrees: straightenDegrees,
                                 quarterTurns: quarterTurns,
-                                allowsOutsideSource: allowsOutsideSource)
+                                allowsOutsideSource: allowsOutsideSource,
+                                perspective: perspective)
         let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
             ? ImageSize(width: source.height, height: source.width)
             : source
-        let frame = outputSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource)
+        let frame = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
+                              perspective: perspective)
         return ((canvas.width - frame.width) / 2, (canvas.height - frame.height) / 2)
+    }
+
+    /// The picture's own pixel grid at 1:1 — the crop's pixel rect **after the keystone** (183).
+    ///
+    /// This is `outputSize` plus nothing but the warped canvas: at 0/0 (`perspective == nil`) it is
+    /// `outputSize` itself, which is why every caller can route through it unconditionally.
+    public static func frameSize(_ crop: CropRect, in source: ImageSize,
+                                 allowsOutsideSource: Bool = false,
+                                 perspective: PerspectiveMap? = nil) -> ImageSize {
+        let out = outputSize(crop, in: source, allowsOutsideSource: allowsOutsideSource)
+        guard let perspective, perspective.hasWarp else { return out }
+        let warped = perspective.canvasSize(DSize(width: Double(out.width),
+                                                  height: Double(out.height)))
+        return ImageSize(width: max(1, Int(warped.width.rounded())),
+                         height: max(1, Int(warped.height.rounded())))
     }
 
     /// Size the renderer allocates at `scale` relative to the crop (1 = 1:1 pixels).

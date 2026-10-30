@@ -64,10 +64,18 @@ struct S0Params {
     // (kr0..kr3); column 3 is the normalized warp centre (x, y). Only `HAS_LENS_WARP` instances read
     // it, so the default entry points never see this field's arithmetic.
     float4x4 lens;
+    // 183 — the keystone, as three rows of (m0, m1, m2): the **sampling** homography
+    // canvas-normalized → frame-normalized. `h0.w` is the enable flag: 0 for every document that
+    // never touched the two knobs, and then the `if` below is never entered and no arithmetic runs
+    // (which is what keeps the recorded bytes still). Row-major on purpose: a `float3x3` would be
+    // three padded columns, and the dot products below are one `fma` chain each.
+    float4 h0;
+    float4 h1;
+    float4 h2;
 };
-// 7 × float4 + float4x4 = 176 bytes. `RenderGraph.swift`'s mirror must stay the same size — a
+// 10 × float4 + float4x4 = 224 bytes. `RenderGraph.swift`'s mirror must stay the same size — a
 // mismatch reads the wrong uniform and **does not fail**, which is why `ChromaticAberrationTests`
-// asserts 176 on both sides.
+// asserts 224 on both sides.
 
 static inline float4 sample_bilinear(texture2d<float, access::read> src,
                                      float2 px,
@@ -239,6 +247,30 @@ static inline void s0_body(texture2d<float, access::read> src,
     // pins it, and its second half renders exactly that broken document (the frame turned, the rect
     // not) to show the same assertion going red.
     float2 cropped = p.c.xy + r * p.c.zw;
+
+    // ── 183 · the keystone ──────────────────────────────────────────────────────────────────────
+    // A 3×3 homography between the **canvas' normalized box** and the picture's own, applied to the
+    // sample coordinate and nothing else — no second pass, no second texture. It sits here, after the
+    // crop and **before the 90° un-turn**, because the warp belongs to the picture the user sees: the
+    // crop rect, the flips and the straighten are all measured in that frame, so the keystone has to
+    // be the last thing between them and the file's pixels.
+    //
+    // `p.h0.w == 0` (every document that never touched the knobs) skips the block, so the recorded
+    // bytes cannot move; the branch is uniform across the grid, so the cost of a keystoned frame is
+    // one `fma` chain and one divide per pixel.
+    //
+    // Order with the rotation is fixed and pinned by `PerspectiveTests`: the rotation is undone
+    // *first* (the shader's `r` is already the position in the picture), then the keystone — i.e. the
+    // picture is keystoned and then turned, never the other way round.
+    if (p.h0.w > 0.5) {
+        float w = p.h2.x * cropped.x + p.h2.y * cropped.y + p.h2.z;
+        // The canvas is the inscribed rectangle, so `w` is the frame's denominator and never 0 for a
+        // position inside the canvas; the guard is for a window that reaches past it.
+        if (abs(w) < 1e-9) { dst.write(float4(0.0), gid); return; }
+        cropped = float2((p.h0.x * cropped.x + p.h0.y * cropped.y + p.h0.z) / w,
+                         (p.h1.x * cropped.x + p.h1.y * cropped.y + p.h1.z) / w);
+    }
+
     if (HAS_TURN) { cropped = frame_unturn_uv(cropped, int(p.g.z + 0.5)); }
     // 123 — rotated past the picture is **background**, not the edge smeared outward. The old
     // clamp-to-edge pulled the border colour into the corners; the honest answer for a pixel whose

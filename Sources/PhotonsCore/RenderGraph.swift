@@ -804,6 +804,13 @@ struct S0Params {
     /// 097: columns 0/1/2 = R/G/B radial coefficients (kr0…kr3), column 3 = normalized centre.
     /// Read only by the `_lens` entry points; identity for every other document.
     var lens: simd_float4x4
+    /// 183 — the keystone's **sampling** homography, `canvas-normalized → frame-normalized`, row
+    /// major, three rows of `(m0, m1, m2)`. `h0.w` is the enable flag: 0 for every document that never
+    /// touched the two knobs, and then the kernel's block is skipped entirely (no arithmetic runs, so
+    /// the recorded bytes cannot move).
+    var h0: SIMD4<Float>
+    var h1: SIMD4<Float>
+    var h2: SIMD4<Float>
 }
 
 private struct S1Params {
@@ -1604,8 +1611,12 @@ public final class RenderGraph {
         let orientedSource = edit.geometry.orientedSource(sourceSize)
         // 132: a crop may extend past the photograph. `allowsOutsideSource` only changes the answer
         // for such a crop; every in-range document takes the same arithmetic as before.
-        let cropPixels = CropMath.outputSize(crop, in: orientedSource,
-                                             allowsOutsideSource: true)
+        // 183: the picture's own pixel size is that rect **after the keystone** — the largest
+        // axis-aligned rectangle inside the warped quad, from `CropMath`. At 0/0 the optional is nil
+        // and this is `outputSize` itself, so every pre-183 document is byte-identical.
+        let cropPixels = CropMath.frameSize(crop, in: orientedSource,
+                                            allowsOutsideSource: true,
+                                            perspective: edit.geometry.perspective)
         let scale = max(0.01, options.scale)
         // The frame: the full cropped picture at this scale. Its pixel grid is what a window indexes,
         // which is why the window is resolved after it and not before.
@@ -1634,7 +1645,8 @@ public final class RenderGraph {
             ? CropMath.canvasSize(crop: crop, in: sourceSize,
                                   straightenDegrees: edit.geometry.straightenDegrees,
                                   quarterTurns: edit.geometry.quarterTurns,
-                                  allowsOutsideSource: true)
+                                  allowsOutsideSource: true,
+                                  perspective: edit.geometry.perspective)
             : nil
         // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
         let baseline = expandedCanvas.map {
@@ -1774,6 +1786,7 @@ public final class RenderGraph {
             && edit.geometry.rotationDegrees == 0
             && edit.geometry.quarterTurns == 0
             && !edit.geometry.flipHorizontal && !edit.geometry.flipVertical
+            && edit.geometry.perspective == nil
             && content == sourceSize && canvas == sourceSize
             && window == nil
         let caOn = !edit.optics.isIdentity
@@ -3178,6 +3191,13 @@ public final class RenderGraph {
             // kernel can carry the flag without moving any recorded byte.
             let outsideCrop = plan.crop.left < 0 || plan.crop.top < 0
                 || plan.crop.right > 1 || plan.crop.bottom > 1
+            // ── 183: the keystone's sampling map ────────────────────────────────────────────────
+            // The canvas is `inscribedRect()` of the warped quad, i.e. only that fraction of the
+            // warped picture, so S0's `uv` (0…1 over the canvas) has to be stretched by the rect's
+            // own extent before the homography — which is exactly a column scaling of the inverse
+            // matrix, done here so the kernel stays a plain 3×3.
+            let perspective = edit.geometry.perspective
+            let keystone = RenderGraph.keystoneMatrix(perspective)
             var params = S0Params(
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
@@ -3198,7 +3218,8 @@ public final class RenderGraph {
                 // predates it). 0/0/0/0 for the CA-off, un-turned path, byte-identical.
                 g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue),
                          Float(edit.geometry.quarterTurns), outsideCrop ? 1 : 0),
-                lens: Self.lensMatrix(plan.s0LensWarp ? input.lensProfile : nil))
+                lens: Self.lensMatrix(plan.s0LensWarp ? input.lensProfile : nil),
+                h0: keystone.0, h1: keystone.1, h2: keystone.2)
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S0Params>.stride, index: 0)
             // 075 — the **exit matrix**: what the decoder wrote (linear sRGB) → the graph's working
@@ -5460,6 +5481,31 @@ public final class RenderGraph {
     /// The 4×4 identity, in the same (column-major) shape `primariesMatrix` returns.
     static var identityMatrix: simd_float4x4 {
         simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 1, 0), SIMD4(0, 0, 0, 1)))
+    }
+
+    /// 183 — the keystone's three uniform rows: `(m00, m01, m02, flag)`, `(m10, m11, m12, 0)`,
+    /// `(m20, m21, m22, 0)`, mapping **canvas-normalized → frame-normalized**.
+    ///
+    /// The two column scales are what makes the kernel a plain 3×3: S0's `uv` runs 0…1 over the
+    /// *canvas*, which is only `inscribedRect()`'s fraction of the warped picture, so the matrix is
+    /// `M⁻¹ · diag(width, height, 1)`. `nil` (both knobs at 0) is the identity with the flag clear —
+    /// and the kernel skips the block on the flag, so no arithmetic runs and no recorded byte moves.
+    static func keystoneMatrix(_ perspective: PerspectiveMap?)
+        -> (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>) {
+        guard let perspective, perspective.hasWarp else {
+            return (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 1, 0))
+        }
+        let rect = perspective.inscribedRect()
+        let m = perspective.inverseMatrix
+        // `M⁻¹ · A` with `A` the canvas box's own placement in the warped picture:
+        // `(u, v) ↦ (rect.x + u·w, rect.y + v·h)`. One multiply per row, so the kernel stays 3×3.
+        func row(_ i: Int, _ flag: Float) -> SIMD4<Float> {
+            SIMD4(Float(m[i][0] * rect.width),
+                  Float(m[i][1] * rect.height),
+                  Float(m[i][0] * rect.x + m[i][1] * rect.y + m[i][2]),
+                  flag)
+        }
+        return (row(0, 1), row(1, 0), row(2, 0))
     }
 }
 

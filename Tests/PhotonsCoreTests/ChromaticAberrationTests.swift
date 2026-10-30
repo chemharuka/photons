@@ -8,7 +8,7 @@ import Metal
 /// What this file pins, in the order the task states them:
 ///
 ///   · the uniform block the Swift side writes is the one the `.metal` side reads
-///     (7 × float4 + float4x4 = 176; 097 added the per-plane lens matrix);
+///     (10 × float4 + float4x4 = 224; 097 added the per-plane lens matrix, 183 the keystone rows);
 ///   · α = 0 is byte-identical to the pre-029 graph — the hashes below were recorded **before** the
 ///     CA code existed, so they are evidence, not a self-fulfilling recording;
 ///   · the pure-CA path is the identity copy with red and blue resampled: green's channel hash is
@@ -113,10 +113,11 @@ final class ChromaticAberrationTests: XCTestCase {
     /// it reads the wrong uniform — so the number is asserted on both sides, and the `.metal` file is
     /// parsed rather than trusted.
     func testS0ParamsIsSevenFloat4OnBothSides() throws {
-        XCTAssertEqual(MemoryLayout<S0Params>.stride, 176, "S0Params must be 7 × float4 + float4x4 (097)")
-        XCTAssertEqual(MemoryLayout<S0Params>.size, 176)
+        XCTAssertEqual(MemoryLayout<S0Params>.stride, 224,
+                       "S0Params must be 10 × float4 + float4x4 (097 lens + 183 keystone)")
+        XCTAssertEqual(MemoryLayout<S0Params>.size, 224)
         XCTAssertEqual(MemoryLayout<S0Params>.alignment, 16)
-        XCTAssertEqual(MemoryLayout<S0Params>.stride / MemoryLayout<SIMD4<Float>>.stride, 11)
+        XCTAssertEqual(MemoryLayout<S0Params>.stride / MemoryLayout<SIMD4<Float>>.stride, 14)
         // Field offsets, in the order the `.metal` struct declares them: `g` (the CA ratios) last.
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.a), 0)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.b), 16)
@@ -126,18 +127,22 @@ final class ChromaticAberrationTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.f), 80)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.g), 96)
         XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.lens), 112)
+        // 183: the keystone's three rows, after the lens matrix.
+        XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.h0), 176)
+        XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.h1), 192)
+        XCTAssertEqual(MemoryLayout<S0Params>.offset(of: \.h2), 208)
 
         let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s0_geometry.metal")
         let source = try String(contentsOf: url, encoding: .utf8)
         let start = try XCTUnwrap(source.range(of: "struct S0Params {"))
         let end = try XCTUnwrap(source.range(of: "};", range: start.upperBound..<source.endIndex))
         let block = String(source[start.lowerBound..<end.lowerBound])
-        XCTAssertEqual(block.components(separatedBy: "float4").count - 1, 8,
-                       "the kernel struct must declare 7 float4 fields and one float4x4:\n\(block)")
+        XCTAssertEqual(block.components(separatedBy: "float4").count - 1, 11,
+                       "the kernel struct must declare 10 float4 fields and one float4x4:\n\(block)")
         XCTAssertTrue(block.contains("float4 g;"), "the CA field is missing from the kernel")
         XCTAssertTrue(block.contains("float4x4 lens;"), "the 097 lens field is missing from the kernel")
         XCTAssertTrue(block.contains("pureCA"), "e.z must be documented as pureCA in the kernel")
-        XCTAssertTrue(source.contains("176"), "the kernel must state the shared stride (176 = 7×16 + 64)")
+        XCTAssertTrue(source.contains("224"), "the kernel must state the shared stride (224 = 10×16 + 64)")
     }
 
     // MARK: - α = 0 changes nothing
@@ -165,7 +170,7 @@ final class ChromaticAberrationTests: XCTestCase {
         let params = neutral.keyMaterial(.geometry, algorithmVersion: false)
         XCTAssertEqual(params, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
         let material = neutral.keyMaterial(.geometry)
-        XCTAssertEqual(material, params + ";alg=1")
+        XCTAssertEqual(material, params + ";alg=2")
         XCTAssertEqual(neutral.keyMaterial(.geometry, algorithmVersion: false), params,
                        "the parameters are byte-identical to the pre-P1f material")
         XCTAssertFalse(material.contains("car="))
@@ -175,13 +180,13 @@ final class ChromaticAberrationTests: XCTestCase {
         redOnly.optics.caRed = 0.002
         // 084: the token is integer tenths of a slider unit, not `k()`: 0.002 = position 40 = 400.
         XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=400")
-        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=1")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=2")
 
         var both = redOnly
         both.optics.caBlue = -0.0015
         XCTAssertEqual(both.keyMaterial(.geometry, algorithmVersion: false),
                        params + ";car=400;cab=-300")
-        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=1")
+        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=2")
 
         // Only non-zero is appended: setting a slider back to zero is the old document again.
         var backToZero = both

@@ -174,6 +174,10 @@ enum EditParameters {
         // is not render material: without this the lock would refuse to toggle.
         t.field("aspectLock") { $0.aspectLock == $1.aspectLock }
         t.field("quarterTurns") { $0.quarterTurns == $1.quarterTurns }
+        // 183: the two keystone knobs. `applyEdit` drops any change this table cannot see, so a field
+        // missing here is a slider that writes nothing (`FieldCoverageTests` says so by name).
+        t.field("perspectiveVertical") { areEqual($0.perspectiveVertical, $1.perspectiveVertical) }
+        t.field("perspectiveHorizontal") { areEqual($0.perspectiveHorizontal, $1.perspectiveHorizontal) }
         return t
     }()
 

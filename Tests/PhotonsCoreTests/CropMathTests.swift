@@ -187,14 +187,14 @@ final class CropMathTests: XCTestCase {
         // the text *after* it. `algorithmVersion: false` is the same material without the token — the
         // pre-P1f spelling, which is where the "no segment" claim is asserted byte for byte.
         XCTAssertEqual(edit.keyMaterial(.geometry),
-                       "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=1",
+                       "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=2",
                        "the unconstrained lock must not add a key segment")
         XCTAssertEqual(edit.keyMaterial(.geometry, algorithmVersion: false),
                        "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
                        "and the parameters themselves are byte-identical to the pre-P1f material")
         edit.geometry.aspectLock = .square
         XCTAssertNotEqual(edit.keyMaterial(.geometry),
-                          "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=1",
+                          "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=2",
                           "a constraining lock must invalidate S0")
         XCTAssertTrue(edit.keyMaterial(.geometry).contains(";asp=square"))
     }
