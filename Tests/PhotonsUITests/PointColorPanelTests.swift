@@ -25,9 +25,9 @@ final class PointColorPanelTests: XCTestCase {
 
     func testTheCardIsFiveRowsBetweenHSLAndColorGrading() throws {
         XCTAssertEqual(InspectorWorkspace.colour.cards,
-                       [.hsl, .pointColor, .colorGrading, .blackAndWhite])
+                       [.hsl, .pointColor, .colorGrading, .calibration, .blackAndWhite])
         XCTAssertEqual(InspectorView.sections(in: .colour).map(\.title),
-                       ["HSL", "点颜色", "色彩分级", "黑白"])
+                       ["HSL", "点颜色", "色彩分级", "校准", "黑白"])
         XCTAssertEqual(InspectorView.Section.pointColor.title, "点颜色", "标题 = 卡名 = 撤销标签")
 
         XCTAssertEqual(PointColorAxis.allCases.count, 5)

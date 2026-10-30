@@ -30,8 +30,10 @@ final class HSLPanelTests: XCTestCase {
     func testTheColourWorkspaceIsTheHSLCardAndNothingElse() {
         // 2026-10-28: the workspace holds three cards — HSL, 色彩分级, then 黑白 (the user put it below
         // the grading card) — and HSL is still the one this suite is about.
-        XCTAssertEqual(InspectorWorkspace.colour.cards, [.hsl, .pointColor, .colorGrading, .blackAndWhite])
-        XCTAssertEqual(InspectorView.cardTitles(in: .colour), ["HSL", "点颜色", "色彩分级", "黑白"],
+        XCTAssertEqual(InspectorWorkspace.colour.cards,
+                       [.hsl, .pointColor, .colorGrading, .calibration, .blackAndWhite])
+        XCTAssertEqual(InspectorView.cardTitles(in: .colour),
+                       ["HSL", "点颜色", "色彩分级", "校准", "黑白"],
                        "the colour workspace: 黑白, then HSL, then 色彩分级")
         XCTAssertEqual(InspectorView.Section.hsl.title, "HSL")
         XCTAssertTrue(InspectorWorkspace.colour.hasCards)
@@ -85,7 +87,8 @@ final class HSLPanelTests: XCTestCase {
     func testTheCardFitsAtEveryWidth() throws {
         for width in Self.widths {
             let panel = try host(width: width, state: .init(.colour))
-            XCTAssertEqual(panel.cardIDs, ["hsl", "pointColor", "colorGrading", "blackAndWhite"],
+            XCTAssertEqual(panel.cardIDs,
+                           ["hsl", "pointColor", "colorGrading", "calibration", "blackAndWhite"],
                            "\(width) pt: the colour workspace shows HSL then 色彩分级")
 
             let probes = panel.bandProbes
@@ -110,8 +113,9 @@ final class HSLPanelTests: XCTestCase {
             // since 2026-10-28 黑白 lives in this workspace, so every number here is typeable.
             XCTAssertEqual(fields.count, 3 + InspectorView.colorGradingRowCount
                                               + InspectorView.bwRows.count
-                                              + PointColorAxis.allCases.count,
-                           "\(width) pt: HSL 三行 + 点颜色五行 + 九行分级 + 八行黑白混合必须都能键入")
+                                              + PointColorAxis.allCases.count
+                                              + InspectorView.calibrationRows.count,
+                           "\(width) pt: HSL 三行 + 点颜色五行 + 九行分级 + 七行校准 + 八行黑白混合必须都能键入")
             for f in panel.numberFieldFrames {
                 XCTAssertGreaterThanOrEqual(f.minX, -0.5, "\(width) pt: a row starts off-panel")
                 XCTAssertLessThanOrEqual(f.maxX, width + 0.5, "\(width) pt: a row runs past the panel")
@@ -294,7 +298,9 @@ final class HSLPanelTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.45))
         host.layoutSubtreeIfNeeded()
         let panel = Panel(host: host, window: window, session: session, state: state)
-        XCTAssertEqual(panel.cardIDs, ["hsl", "pointColor", "colorGrading", "blackAndWhite"], "the panel did not open on the HSL card")
+        XCTAssertEqual(panel.cardIDs,
+                       ["hsl", "pointColor", "colorGrading", "calibration", "blackAndWhite"],
+                       "the panel did not open on the HSL card")
         return panel
     }
 }

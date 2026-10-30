@@ -82,6 +82,13 @@ public struct InspectorView: View {
         /// own group and its own double-click — a reset here must not undo a band drag and vice versa.
         ///
         case colorGrading
+        /// 179 — **校准**: 阴影色调 + 红/绿/蓝 各自的 色相/饱和 (七行, S1 出口的 3×3 基色矩阵).
+        ///
+        /// 它在**色彩工作区**，紧跟 色彩分级 之后：两张卡都是「按某种分类整体移动颜色」的卡
+        /// （色彩分级按亮度分区、校准按基色），而校准的七个数字作用在 scene-linear 的 S1 出口，
+        /// 是这张工作区里唯一一个**管线最上游**的调色卡。自己的卡、自己的双击复位 —— 双击它不能
+        /// 撤销色彩分级的一轮拖拽（076 的规则，反着读）。
+        case calibration
         /// 2026-10-28 — **黑白** (S3.4): the switch and the eight 黑白混合 rows.
         ///
         /// The user put it **below 色彩分级** in the 色彩 workspace («黑白卡片放在颜色分级下方»), so the
@@ -158,6 +165,7 @@ public struct InspectorView: View {
             case .hsl: return "HSL"
             case .pointColor: return "点颜色"
             case .colorGrading: return "色彩分级"
+            case .calibration: return "校准"
             case .detail: return "开发"
             case .correction: return "校正"
             case .detailFX: return "细节"
@@ -378,6 +386,8 @@ public struct InspectorView: View {
             pointColorCard
         case .colorGrading:
             colorGradingCard
+        case .calibration:
+            calibrationCard
         case .detail:
             detailCard
         case .correction:
@@ -1173,6 +1183,16 @@ public struct InspectorView: View {
         toneCard(cardSpec(.correction))
     }
 
+    /// 179 — **校准**: 阴影色调 + 红/绿/蓝 各自的 色相/饱和, drawn entirely from its spec card.
+    ///
+    /// Seven plain rows over `calibration.*` — the document stores the panel's own −100…+100, so
+    /// there is no slider↔parameter mapping here (which is what 校正's rows need and this card does
+    /// not). A double-click on a row name resets that number, on the card title resets all seven:
+    /// both come from `PanelCardSpec` + `PanelResets.Group.calibration`, one table.
+    private var calibrationCard: some View {
+        toneCard(cardSpec(.calibration))
+    }
+
     /// 164 — **细节**: 纹理 / 清晰度 (moved here from 效果) and the two new non-Bayer denoises.
     ///
     /// A spec card like 校正: every row is a `ToneRow` over `effects`, so a double-click on the
@@ -1223,6 +1243,29 @@ public struct InspectorView: View {
     /// The colour is `.linear` (red `#FF375F`) — 071's third class, "arithmetic on the scene-linear
     /// buffer". S0 samples the decoded linear image radially; it is the same class as the 黑电平 trim
     /// and not a display-domain render control (Light's six rows).
+    /// 179 — **校准**'s seven rows: 阴影色调, then a 色相/饱和 pair per primary.
+    ///
+    /// `.linear` is 071's third class — "arithmetic on the scene-linear buffer" — the same accent the
+    /// 色差 rows and 黑电平 carry: the matrix multiplies S1's output, and the shadow tint's window is
+    /// read on scene-linear luminance. The panel's unit **is** the document's (a hue is a hue), so
+    /// `+30` here is `+30` in the file and `+30°` on the wheel; nothing on this card is a ratio.
+    public static let calibrationRows: [ToneRow] = [
+        ToneRow(title: "阴影色调", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.shadowTint),
+        ToneRow(title: "红 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.redHue),
+        ToneRow(title: "红 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.redSat),
+        ToneRow(title: "绿 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.greenHue),
+        ToneRow(title: "绿 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.greenSat),
+        ToneRow(title: "蓝 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.blueHue),
+        ToneRow(title: "蓝 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+                shape: .linear, keyPath: \.calibration.blueSat),
+    ]
+
     public static let caRows: [ToneRow] = [
         ToneRow(title: "色差 R", range: OpticsGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.optics.caRed),
@@ -1941,6 +1984,12 @@ public struct InspectorView: View {
             blocks: [Block(group: .presence, rows: InspectorView.textureClarityRows),
                      Block(group: .noise, rows: InspectorView.nonBayerRows)])
 
+        /// 179 — 校准: one block, seven rows (阴影色调 then R/G/B 的 色相+饱和). No divider: the
+        /// card is one idea, and `BlockGroup.tone` is the draw order's neutral bucket.
+        public static let calibrationCard = PanelCardSpec(
+            section: .calibration, group: .calibration,
+            blocks: [Block(group: .tone, rows: InspectorView.calibrationRows)])
+
         /// 164 — 效果 keeps only 去雾 / 去雾深度 and 颗粒.
         public static let effectsCard = PanelCardSpec(
             section: .effects, group: .effects,
@@ -1948,8 +1997,8 @@ public struct InspectorView: View {
                      Block(group: .grain, rows: InspectorView.grainRows)])
 
         /// The five spec cards, in panel order.
-        public static let all: [PanelCardSpec] = [.lightCard, .colorCard, .correctionCard,
-                                                  .detailFXCard, .effectsCard]
+        public static let all: [PanelCardSpec] = [.lightCard, .colorCard, .calibrationCard,
+                                                  .correctionCard, .detailFXCard, .effectsCard]
     }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
@@ -3053,6 +3102,8 @@ public struct PanelResets {
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
         case colorGrading
+        /// 179: 校准 — the seven numbers, one double-click (`PanelCardSpec.calibrationCard`'s scope).
+        case calibration
         /// 140: 点颜色 — the optional sample and its five numbers, one double-click. The reset is
         /// `nil` (the card's default), not a zeroed object: unsampled and “sample at 0° / C 0” are
         /// the same state to the pipeline, and `nil` is the one that keeps the JSON byte-identical.
@@ -3070,6 +3121,7 @@ public struct PanelResets {
             case .detailFX: return InspectorView.Section.detailFX.title
             case .effects: return InspectorView.Section.effects.title
             case .colorGrading: return InspectorView.Section.colorGrading.title
+            case .calibration: return InspectorView.Section.calibration.title
             case .pointColor: return InspectorView.Section.pointColor.title
             }
         }
@@ -3317,7 +3369,7 @@ public struct PanelResets {
             return WhiteBalanceCommands(session: session, asShot: loupe?.asShotWhiteBalance)
                 .resetToAsShot()
 
-        case .light, .color, .correction, .detailFX, .effects:
+        case .light, .color, .calibration, .correction, .detailFX, .effects:
             // 125: the card's own table decides its scope — no field names here. Moving a row between
             // cards moves its reset with it, and one `applyEdit` + one `commitEdit` stays one snapshot.
             guard let card = InspectorView.PanelCardSpec.all.first(where: { $0.group == group }) else {

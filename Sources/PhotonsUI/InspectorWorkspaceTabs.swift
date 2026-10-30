@@ -99,7 +99,9 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it. 140: 点颜色
             // sits between HSL and 色彩分级, the pipeline's own `.hsl, .pointColour, .grade` order.
             // 2026-10-28 (user): 黑白 moved here from 调整 as well.
-            return [.hsl, .pointColor, .colorGrading, .blackAndWhite]
+            // 179: 校准 follows 色彩分级 — both cards move colour by a *classification* of it
+            // (luminance regions / primaries), and this is the workspace whose subject is colour.
+            return [.hsl, .pointColor, .colorGrading, .calibration, .blackAndWhite]
         case .masks:
             return [.masks]
         case .history:

@@ -91,25 +91,25 @@ final class BlackLevelTests: XCTestCase {
         edit.light.highlightRecovery = 0.4
         edit.light.whites = 10
         edit.light.blacks = -5
-        // P1f: `;alg=7` is S1's algorithm-version token (`StageAlgorithmVersion` — 129 moved the blacks
+        // P1f: `;alg=8` is S1's algorithm-version token (179 added 原色校准 to the stage) (`StageAlgorithmVersion` — 129 moved the blacks
         // level's dispatch boundary to |blacks| = 20), appended to every stage's material. The
         // *parameters* are still byte-identical to main@73eca0b, which is what `algorithmVersion: false`
         // asserts.
         let preBlackOffset = "ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"
         XCTAssertEqual(edit.keyMaterial(.sceneLinear, algorithmVersion: false), preBlackOffset,
                        "blackOffset = 0 时参数部分必须与 main@73eca0b 逐字节相同")
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=7",
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=8",
                        "唯一的差别是算法版本号")
 
         // 非零才追加，而且追加的是**内核真正加的那个数**（clamped）。
         edit.light.blackOffset = 0.007
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.00700;alg=7")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.00700;alg=8")
         edit.light.blackOffset = -0.01
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=-0.01000;alg=7")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=-0.01000;alg=8")
         edit.light.blackOffset = 0.4                      // 越界：键与内核都说 +0.01
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.01000;alg=7")
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";boff=0.01000;alg=8")
         edit.light.blackOffset = 0
-        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=7",
+        XCTAssertEqual(edit.keyMaterial(.sceneLinear), preBlackOffset + ";alg=8",
                        "清零之后键必须回到原样")
 
         // 只差这一个参数的两份文档，键必须不同 —— 否则缓存会串。

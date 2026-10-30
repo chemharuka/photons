@@ -81,6 +81,11 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     case hsl
     /// 色彩分级 — the nine wheel numbers (S3.8).
     case colorGrading
+    /// 179 — **校准**: 阴影色调 + 红/绿/蓝 各自的 色相/饱和 (`calibration.*`). Its own card in the
+    /// colour workspace, so its own row here: 「只勾校准」 must carry the seven numbers and nothing of
+    /// 色彩分级 / HSL. S1's exit, scene-linear — the one card in the colour workspace whose numbers are
+    /// a 3×3 primaries matrix rather than a display-referred tweak.
+    case calibration
     case detail
     /// 校正 — 色差 R / 色差 B (`optics.caRed` / `optics.caBlue`, 096/116) plus 暗角 / 暗角中点 /
     /// 暗角羽化 (`effects.vignette*`, which the panel has always drawn on this card). Its own card
@@ -107,7 +112,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// the test goes red.
     public static let panelOrder: [EditSnapshotSection] = [
         .whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .hsl, .colorGrading,
-        .curve, .detail, .correction, .detailFX, .effects, .geometry, .masks,
+        .calibration, .curve, .detail, .correction, .detailFX, .effects, .geometry, .masks,
     ]
 
     /// Every section a paste can write — all of them, masks included since P1-5.
@@ -135,6 +140,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
         case .blackAndWhite: return "黑白"
         case .hsl: return "HSL"
         case .colorGrading: return "色彩分级"
+        case .calibration: return "校准"
         case .detail: return "开发"
         case .correction: return "校正"
         case .detailFX: return "细节"
@@ -624,6 +630,33 @@ public struct OpticsPatch: Sendable, Equatable, Codable {
     public static let fullFieldCount = 2
 }
 
+/// 校准 — the seven numbers of `CalibrationGroup` (179).
+///
+/// Seven leaves, not a matrix: the matrix is derived (`CalibrationGroup.matrix()`), and a clipboard
+/// that carried nine coefficients would be a *different document* on the next build's arithmetic.
+/// The numbers are the panel's own −100…+100, so no unit conversion happens on either side — the same
+/// rule 黑电平 breaks deliberately and 校正 follows.
+public struct CalibrationPatch: Sendable, Equatable, Codable {
+    public var shadowTint: Double?
+    public var redHue: Double?
+    public var redSat: Double?
+    public var greenHue: Double?
+    public var greenSat: Double?
+    public var blueHue: Double?
+    public var blueSat: Double?
+
+    public init() {}
+
+    public var fieldCount: Int {
+        [shadowTint != nil, redHue != nil, redSat != nil, greenHue != nil, greenSat != nil,
+         blueHue != nil, blueSat != nil].filter { $0 }.count
+    }
+
+    public var isEmpty: Bool { fieldCount == 0 }
+
+    public static let fullFieldCount = 7
+}
+
 public struct DetailPatch: Sendable, Equatable, Codable {
     public var sharpening: Double?
     public var sharpeningRadius: Double?
@@ -758,6 +791,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// 081: 色彩分级 — absent in every payload written before the card had its own patch.
     public var colorGrading: ColorGradingPatch?
     public var detail: DetailPatch?
+    /// 179 — 校准's seven numbers. Absent in every payload written before the card existed, and
+    /// absent means "the destination keeps its own calibration" — which is what an old copy did.
+    public var calibration: CalibrationPatch?
     /// 156: 校正 — the two CA ratios. Absent in every payload written before the card was carried;
     /// absent means "the destination keeps its own CA", which is what an old copy did.
     public var optics: OpticsPatch?
@@ -875,6 +911,18 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.optics.caBlue, 0) { optics.caBlue = edit.optics.caBlue }
         s.optics = optics.isEmpty ? nil : optics
 
+        // 179: 校准. Seven slider numbers, 0 is neutral, so only a moved one travels (「只带非默认
+        // 字段」). The document stores the panel's own −100…+100, so no unit conversion here.
+        var calibration = CalibrationPatch()
+        if differs(edit.calibration.shadowTint, 0) { calibration.shadowTint = edit.calibration.shadowTint }
+        if differs(edit.calibration.redHue, 0) { calibration.redHue = edit.calibration.redHue }
+        if differs(edit.calibration.redSat, 0) { calibration.redSat = edit.calibration.redSat }
+        if differs(edit.calibration.greenHue, 0) { calibration.greenHue = edit.calibration.greenHue }
+        if differs(edit.calibration.greenSat, 0) { calibration.greenSat = edit.calibration.greenSat }
+        if differs(edit.calibration.blueHue, 0) { calibration.blueHue = edit.calibration.blueHue }
+        if differs(edit.calibration.blueSat, 0) { calibration.blueSat = edit.calibration.blueSat }
+        s.calibration = calibration.isEmpty ? nil : calibration
+
         var effects = EffectsPatch()
         if differs(edit.effects.vignetteAmount, 0) { effects.vignetteAmount = edit.effects.vignetteAmount }
         if differs(edit.effects.vignetteMidpoint, 50) { effects.vignetteMidpoint = edit.effects.vignetteMidpoint }
@@ -910,6 +958,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (colorGrading?.fieldCount ?? 0)
             + (detail?.fieldCount ?? 0) + (optics?.fieldCount ?? 0)
+            + (calibration?.fieldCount ?? 0)
             + (effects?.fieldCount ?? 0)
     }
 
@@ -927,6 +976,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + ColorGradingPatch.fullFieldCount
         + DetailPatch.fullFieldCount + OpticsPatch.fullFieldCount
+        + CalibrationPatch.fullFieldCount
         + EffectsPatch.fullFieldCount
 
     /// Groups with at least one field present, for a "copied: Light, Color" line.
@@ -940,6 +990,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if color != nil { out.insert(.color) }
         if colorGrading != nil { out.insert(.colorGrading) }
         if detail != nil { out.insert(.detail) }
+        // 179: the calibration rides in S1 (`.light` is the group whose `stages` contain
+        // `.sceneLinear`), so a copy line says 「Light」 — the card is a view of that stage.
+        if calibration != nil { out.insert(.light) }
         if effects != nil { out.insert(.effects) }
         if maskCount > 0 { out.insert(.masks) }
         return out
@@ -970,6 +1023,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         if colorGrading != nil { out.insert(.colorGrading) }
         if detail != nil { out.insert(.detail) }
+        if calibration != nil { out.insert(.calibration) }
         if optics != nil { out.insert(.correction) }
         if let e = effects {
             // 164: one patch, three cards. The vignette has always been drawn on 校正 (096's card
@@ -1112,6 +1166,20 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if on(.noiseColor) { p.noiseColor = d.noiseColor }
             if on(.lensCorrections) { p.lensCorrections = d.lensCorrections }
             out.detail = p.isEmpty ? nil : p
+        }
+
+        // 179: 校准 is one card and seven numbers, so checking it copies all seven — there is no
+        // child row to narrow (a hue without its saturation is a different look, not a finer copy).
+        if sections.contains(.calibration), let cal = calibration {
+            var p = CalibrationPatch()
+            p.shadowTint = cal.shadowTint
+            p.redHue = cal.redHue
+            p.redSat = cal.redSat
+            p.greenHue = cal.greenHue
+            p.greenSat = cal.greenSat
+            p.blueHue = cal.blueHue
+            p.blueSat = cal.blueSat
+            out.calibration = p.isEmpty ? nil : p
         }
 
         if sections.contains(.correction), let o = optics {
@@ -1266,6 +1334,17 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.caBlue { out.optics.caBlue = v }
         }
 
+        // 179 — sparse like every other patch: a copied 阴影色调 leaves the destination's hues alone.
+        if let p = calibration {
+            if let v = p.shadowTint { out.calibration.shadowTint = v }
+            if let v = p.redHue { out.calibration.redHue = v }
+            if let v = p.redSat { out.calibration.redSat = v }
+            if let v = p.greenHue { out.calibration.greenHue = v }
+            if let v = p.greenSat { out.calibration.greenSat = v }
+            if let v = p.blueHue { out.calibration.blueHue = v }
+            if let v = p.blueSat { out.calibration.blueSat = v }
+        }
+
         if let p = effects {
             if let v = p.vignetteAmount { out.effects.vignetteAmount = v }
             if let v = p.vignetteMidpoint { out.effects.vignetteMidpoint = v }
@@ -1312,6 +1391,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // 156: absent in every payload written before 校正 was carried — absent means "keep the
         // destination's own CA". No schema bump: the key is additive and its default is 0.
         self.optics = c.val("optics", OpticsPatch?.none)
+        // 179: absent means "keep the destination's own calibration". Additive and defaulted to 0, so
+        // no schema bump.
+        self.calibration = c.val("calibration", CalibrationPatch?.none)
         self.effects = c.val("effects", EffectsPatch?.none)
         // P1-5: absent in every v1 payload, and absent means "the destination keeps its own masks".
         self.masks = c.val("masks", MasksPatch?.none)

@@ -31,6 +31,11 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
     /// a preset either carries it or does not touch it. (Its own group because `EditModel` gives it one:
     /// `RenderGroup.colorGrading`, S3.8.)
     case colorGrading
+    /// 179 — 校准's seven numbers. Its own group because `EditModel` gives it one: it is stored on
+    /// the document, editable on its own card, and a preset that carries 白平衡 must not silently
+    /// carry a primaries matrix. (`renderGroup` reports `.light` — that is the *render* grouping,
+    /// whose `stages` contain `.sceneLinear`, and it is what the inspector uses to colour a row.)
+    case calibration
     case detail
     case effects
 
@@ -42,6 +47,7 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
         case .curve: return .curve
         case .color: return .color
         case .colorGrading: return .colorGrading
+        case .calibration: return .light
         case .detail: return .detail
         case .effects: return .effects
         }
@@ -173,6 +179,7 @@ public struct Preset: Sendable, Equatable, Codable {
             case .curve: return [.curve]
             case .color, .blackAndWhite, .hsl: return [.color]
             case .colorGrading: return [.colorGrading]
+            case .calibration: return [.calibration]
             case .detail: return [.detail]
             // 156: 校正's two leaves live in `OpticsGroup`, which the preset envelope has never had a
             // group for (whole-document presets do not carry CA either). The card is copy/paste only;
@@ -201,6 +208,7 @@ public struct Preset: Sendable, Equatable, Codable {
             case .curve: out.curve = edit.curve
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
+            case .calibration: out.calibration = edit.calibration
             case .detail: out.detail = edit.detail
             case .effects: out.effects = edit.effects
             }
@@ -231,6 +239,7 @@ public struct Preset: Sendable, Equatable, Codable {
             case .curve: out.curve = edit.curve
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
+            case .calibration: out.calibration = edit.calibration
             case .detail: out.detail = edit.detail
             case .effects: out.effects = edit.effects
             }
@@ -281,6 +290,8 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color: try fragment.encode(edit.color, forKey: AnyCodingKey(group.rawValue))
             case .colorGrading:
                 try fragment.encode(edit.colorGrading, forKey: AnyCodingKey(group.rawValue))
+            case .calibration:
+                try fragment.encode(edit.calibration, forKey: AnyCodingKey(group.rawValue))
             case .detail: try fragment.encode(edit.detail, forKey: AnyCodingKey(group.rawValue))
             case .effects: try fragment.encode(edit.effects, forKey: AnyCodingKey(group.rawValue))
             }
@@ -314,6 +325,9 @@ public struct Preset: Sendable, Equatable, Codable {
             if groups.contains(.color) { edit.color = fragment.val("color", edit.color) }
             if groups.contains(.colorGrading) {
                 edit.colorGrading = fragment.val("colorGrading", edit.colorGrading)
+            }
+            if groups.contains(.calibration) {
+                edit.calibration = fragment.val("calibration", edit.calibration)
             }
             if groups.contains(.detail) { edit.detail = fragment.val("detail", edit.detail) }
             if groups.contains(.effects) { edit.effects = fragment.val("effects", edit.effects) }

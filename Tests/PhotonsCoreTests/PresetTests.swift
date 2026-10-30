@@ -245,10 +245,13 @@ final class PresetTests: XCTestCase {
         // group. A spot is a repair of this picture's blemishes at these coordinates, not a look; a
         // preset carrying one into another photograph would copy a disk of that photograph's
         // neighbour onto it. (Same reason Lightroom's presets do not carry spot removal.)
+        // 179: 校准 is a preset group of its own (seven numbers the user dialled in) but it has no
+        // `RenderGroup` of its own — it rides S1, so `renderGroup` reports `.light`. The set of
+        // *rendered* groups a preset can reach is therefore still everything except masks and heal.
         XCTAssertEqual(mapped, Set(RenderGroup.allCases).subtracting([.masks, .heal]),
                        "every document group is presetable except masks and heal")
-        // 6 → 7 with 2026-10-28's 色彩分级 (S3.8): a develop group like the rest, so a preset can carry it.
-        XCTAssertEqual(PresetGroup.allCases.count, 7)
+        // 6 → 7 with 2026-10-28's 色彩分级 (S3.8); 7 → 8 with 179's 校准.
+        XCTAssertEqual(PresetGroup.allCases.count, 8)
     }
 
     func testPresetGroupParsingAcceptsTokensAndReportsUnknown() {
