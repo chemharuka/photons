@@ -353,6 +353,8 @@ extension CatalogSession {
         if kind.isDragCreated {
             pendingMaskShape = kind
             pendingSemanticKind = semanticKind ?? pendingSemanticKind
+            // 粘滞的「修复」武装必须在用户显式选择新建蒙版时清掉，否则下一次点击又被它吃掉。
+            healTool = false
             maskTool = .off
             return nil
         }
@@ -377,6 +379,8 @@ extension CatalogSession {
         commitEdit(label: "新建\(kind.label)蒙版")
         pendingMaskShape = nil
         setSelectedMaskID(mask.id)
+        // 粘滞的「修复」武装必须在用户显式选择新建蒙版时清掉，否则下一次点击又被它吃掉。
+        healTool = false
         maskTool = kind == .brush ? .brush : .off
         return mask
     }
@@ -405,6 +409,8 @@ extension CatalogSession {
         commitEdit(label: "新建\(kind.label)蒙版")
         pendingMaskShape = nil
         setSelectedMaskID(mask.id)
+        // 粘滞的「修复」武装必须在用户显式选择新建蒙版时清掉，否则下一次点击又被它吃掉。
+        healTool = false
         maskTool = .off
         return mask
     }
