@@ -5,6 +5,15 @@
 //
 // Licence: the weights are Apache-2.0 (`apple/coreml-depth-anything-v2-small`); see
 // `Resources/Depth-Anything-V2-LICENSE.txt` and `THIRD_PARTY_NOTICES.md`. Never claim endorsement.
+//
+// 2026-10-30 — the shipped package is **our own re-export of the same Small checkpoint at
+// 1036×784** (fp16 output), not Apple's 518×392 package: 0.81 MP instead of 0.20 MP, which is what
+// makes a depth *edge* land where the picture's edge is. Speed went the other way and is the reason
+// every call site pins `.cpuAndGPU`: on this Mac the 1036 model predicts in **192 ms on the GPU**
+// versus **1244 ms on the ANE** (the ANE dispatch of a 0.8 MP ViT is a loss), while the old 518
+// model was 34 ms on the ANE. `computeUnits: .all` would silently pick the ANE and make it 6.5×
+// slower. Depth is computed once per photo and cached, so ~200 ms off the interaction path is the
+// right trade for a 4× finer map.
 import CoreML
 import CoreVideo
 import Foundation
@@ -66,11 +75,14 @@ public enum DepthError: Error, CustomStringConvertible {
 
 /// Loads `DepthAnythingV2SmallF16.mlmodelc` from the app bundle and runs one inference per image.
 ///
-/// The input geometry is read from `MLModelDescription` at load time — never hard-code 518×396. The
-/// model card's 518 is an *evaluation* size; the description is the only truth.
+/// The input geometry is read from `MLModelDescription` at load time — never hard-code 518×392. The
+/// shipped package is our 1036×784 re-export; the description is still the only truth, because the
+/// whole point of reading it is that swapping the geometry is a resource change, not a code change.
 public final class DepthModel: @unchecked Sendable {
-    /// Bumped whenever the weights change. Part of every depth cache key; keep the weight SHA in it.
-    public static let revision = "dav2s-f16@cfef6f6"
+    /// Bumped whenever the weights **or the input geometry** change. Part of every depth cache key,
+    /// so a re-export at a new resolution can never hit a map computed at the old one. Keep the
+    /// weight SHA prefix in it.
+    public static let revision = "dav2s-f16-1036x784@00b3af8c"
 
     /// Name Core ML compiles the shipped `.mlpackage` to, and the file the app bundle carries.
     public static let modelName = "DepthAnythingV2SmallF16"
@@ -100,7 +112,12 @@ public final class DepthModel: @unchecked Sendable {
     }
 
     /// Loads a compiled `.mlmodelc` from an explicit URL (the CLI's `--model`).
-    public init(modelURL: URL, computeUnits: MLComputeUnits = .all) throws {
+    ///
+    /// Default is **`.cpuAndGPU`, not `.all`**: at 1036×784 `.all` dispatches to the ANE and predicts
+    /// in 1244 ms; the GPU does the same work in 192 ms (measured 2026-10-30, 12 reps, warm p50).
+    /// `.all` would be right for the 518 package the app used to ship (34 ms ANE) — which is exactly
+    /// why this default is pinned here rather than left to Core ML's preference.
+    public init(modelURL: URL, computeUnits: MLComputeUnits = .cpuAndGPU) throws {
         let fm = FileManager.default
         guard fm.fileExists(atPath: modelURL.path) else {
             throw DepthError.modelMissing(modelURL.lastPathComponent)
@@ -187,6 +204,16 @@ public final class DepthModel: @unchecked Sendable {
     /// happens here, from `MLImageConstraint` — the caller supplies the picture at whatever size it
     /// decoded (or rendered) it.
     public func infer(pixelBuffer: CVPixelBuffer) throws -> DepthMap {
+        // `PHOTONS_DEPTH_TIMING=1` splits the three legs (resize / predict / read-back) on stderr.
+        // Kept in the shipped code because "infer is slow" was once blamed on the model when the cost
+        // was really the resize — the numbers have to be one variable away, not a rebuild.
+        let timing = ProcessInfo.processInfo.environment["PHOTONS_DEPTH_TIMING"] != nil
+        func stamp(_ label: String, _ start: Double) {
+            guard timing else { return }
+            FileHandle.standardError.write(Data(String(format: "depth.%@ %.1f ms\n",
+                                                     label, (CFAbsoluteTimeGetCurrent() - start) * 1000).utf8))
+        }
+        var t = CFAbsoluteTimeGetCurrent()
         let provider: MLFeatureProvider
         if let layout = inputArray {
             provider = try arrayProvider(from: pixelBuffer, layout: layout)
@@ -194,6 +221,8 @@ public final class DepthModel: @unchecked Sendable {
             let resized = try PixelBufferResize.resize(pixelBuffer, width: inputWidth,
                                                        height: inputHeight,
                                                        pixelFormat: inputPixelFormat)
+            stamp("resize", t)
+            t = CFAbsoluteTimeGetCurrent()
             let value = MLFeatureValue(pixelBuffer: resized)
             guard value.type == .image else {
                 throw DepthError.featureMismatch("input '\(inputName)' rejected the pixel buffer")
@@ -207,6 +236,9 @@ public final class DepthModel: @unchecked Sendable {
         } catch {
             throw DepthError.inferenceFailed("\(error)")
         }
+        stamp("predict", t)
+        t = CFAbsoluteTimeGetCurrent()
+        defer { stamp("readback", t) }
         guard let feature = prediction.featureValue(for: outputName) else {
             throw DepthError.featureMismatch("prediction has no output '\(outputName)'")
         }
@@ -302,10 +334,35 @@ public final class DepthModel: @unchecked Sendable {
             throw DepthError.featureMismatch("unsupported depth output array shape \(shape)")
         }
         let width = layout.width, height = layout.height
+        let strides = array.strides.map { $0.intValue }
+        let steps = layout.elementStrides(strides)
         var values = [Float16](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                values[y * width + x] = Float16(array[layout.index(channel: 0, x: x, y: y)].floatValue)
+
+        // **Bulk read through the array's own strides.** The per-sample `array[[NSNumber…]]`
+        // subscript boxes one NSNumber per element; on a 1036×784 map that cost **420 ms**, i.e.
+        // two thirds of the whole `infer` call (measured 2026-10-30, `PHOTONS_DEPTH_TIMING=1`).
+        // Reading raw memory is ~2 ms and is the same numbers — a re-converted model that returns an
+        // `MLMultiArray` instead of an image feature must not pay a boxed-index tax on every photo.
+        func read<T: BinaryFloatingPoint>(_ pointer: UnsafePointer<T>) {
+            for y in 0..<height {
+                let rowBase = steps.channel * 0 + y * steps.row
+                for x in 0..<width {
+                    values[y * width + x] = Float16(pointer[rowBase + x * steps.column])
+                }
+            }
+        }
+        switch array.dataType {
+        case .float16:
+            read(array.dataPointer.assumingMemoryBound(to: Float16.self))
+        case .float32:
+            read(array.dataPointer.assumingMemoryBound(to: Float.self))
+        case .double:
+            read(array.dataPointer.assumingMemoryBound(to: Double.self))
+        default:
+            for y in 0..<height {
+                for x in 0..<width {
+                    values[y * width + x] = Float16(array[layout.index(channel: 0, x: x, y: y)].floatValue)
+                }
             }
         }
         return DepthMap(width: width, height: height, values: values)
@@ -351,6 +408,18 @@ public final class DepthModel: @unchecked Sendable {
                 }
             default:
                 return nil
+            }
+        }
+
+        /// Element strides from the array's own `strides`, so the bulk read never boxes an index.
+        /// `channel` is the offset of one channel* step (0 is what every caller uses: the depth
+        /// models here are single-channel).
+        func elementStrides(_ strides: [Int]) -> (channel: Int, row: Int, column: Int) {
+            func back(_ n: Int) -> Int { strides.count - n >= 0 ? strides[strides.count - n] : 0 }
+            switch kind {
+            case .hw:  return (0, back(2), back(1))
+            case .chw: return (back(3), back(2), back(1))
+            case .hwc: return (back(1), back(3), back(2))
             }
         }
 

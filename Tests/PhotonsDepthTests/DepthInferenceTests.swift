@@ -63,12 +63,23 @@ final class DepthInferenceTests: XCTestCase {
         let description = raw.modelDescription
         let input = try XCTUnwrap(description.inputDescriptionsByName.values.first?.imageConstraint,
                                   "the shipped model is an image model")
-        let output = try XCTUnwrap(description.outputDescriptionsByName.values.first?.imageConstraint)
-
         XCTAssertEqual(model.inputWidth, input.pixelsWide)
         XCTAssertEqual(model.inputHeight, input.pixelsHigh)
-        XCTAssertEqual(model.outputWidth, output.pixelsWide)
-        XCTAssertEqual(model.outputHeight, output.pixelsHigh)
+        // 2026-10-30 — the 1036×784 re-export returns a **multi-array** (`[1,1,784,1036]`, fp16),
+        // where Apple's 518 package returned an image. `DepthModel` reads both, so the assertion is
+        // "the output geometry travels from the description either way", not "it is an image".
+        let outputImage = description.outputDescriptionsByName.values.first?.imageConstraint
+        let outputArray = description.outputDescriptionsByName.values.first?.multiArrayConstraint
+        if let outputImage {
+            XCTAssertEqual(model.outputWidth, outputImage.pixelsWide)
+            XCTAssertEqual(model.outputHeight, outputImage.pixelsHigh)
+        } else {
+            let array = try XCTUnwrap(outputArray, "the shipped model has an image or array output")
+            let shape = array.shape.map { $0.intValue }
+            let layout = try XCTUnwrap(DepthModel.ArrayLayout(shape: shape))
+            XCTAssertEqual(model.outputWidth, layout.width)
+            XCTAssertEqual(model.outputHeight, layout.height)
+        }
         XCTAssertGreaterThan(model.inputWidth, 0)
         XCTAssertGreaterThan(model.inputHeight, 0)
         // The description is not the model card's 518×396; pinning the real numbers here would make

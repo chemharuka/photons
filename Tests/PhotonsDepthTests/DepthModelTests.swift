@@ -5,8 +5,13 @@ import XCTest
 /// The real coverage — inference size, cache key, dehaze assist, depth mask — belongs to task 120.
 final class DepthModelTests: XCTestCase {
     func testRevisionIsPinnedToTheWeights() {
-        XCTAssertTrue(DepthModel.revision.hasPrefix("dav2s-f16@"),
+        // The cache key depends on this string naming the exact weight revision **and geometry**:
+        // 2026-10-30 the shipped package became our own 1036×784 re-export, so a map computed by
+        // the old 518 model must never be hit by the new one.
+        XCTAssertTrue(DepthModel.revision.hasPrefix("dav2s-f16-1036x784@"),
                       "the cache key depends on this string naming the exact weight revision")
+        XCTAssertTrue(DepthModel.revision.contains("00b3af8c"),
+                      "the re-export's weight SHA prefix belongs in the revision")
     }
 
     func testAnAppWithoutTheCompiledModelReportsItByName() {

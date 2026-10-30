@@ -6,6 +6,7 @@ import PhotonsDepth
 import CoreVideo
 import CryptoKit
 import CoreGraphics
+import CoreML
 import ImageIO
 
 // photonsctl — the acceptance harness. Deliberately dependency-free (no
@@ -32,7 +33,7 @@ let valueFlags: Set<String> = [
     "--mode", "--root", "--rename", "--test-interrupt-after",
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
-    "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model",
+    "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model", "--units",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -377,13 +378,24 @@ func cmdDepth(_ a: Args) throws {
     defer {
         if let tmp = depthModelTemporaryDirectory { try? FileManager.default.removeItem(at: tmp) }
     }
+    // 2026-10-30 — 1036×784 wants the GPU, not the ANE (192 ms vs 1244 ms). `--units` exists so the
+    // three paths can be re-measured on any machine without a rebuild.
+    let unitsName = a.value("--units") ?? "gpu"
+    let units: MLComputeUnits
+    switch unitsName {
+    case "all", "auto": units = .all
+    case "cpu": units = .cpuOnly
+    case "gpu": units = .cpuAndGPU
+    case "ane": units = .cpuAndNeuralEngine
+    default: die("bad --units '\(unitsName)' (want all|cpu|gpu|ane)")
+    }
     let model: DepthModel
     do {
-        model = try DepthModel(modelURL: modelURL)
+        model = try DepthModel(modelURL: modelURL, computeUnits: units)
     } catch {
         die("\(error)")
     }
-    note("model       \(modelURL.lastPathComponent)  input \(model.inputWidth)×\(model.inputHeight)")
+    note("model       \(modelURL.lastPathComponent)  input \(model.inputWidth)×\(model.inputHeight)  units \(unitsName)")
 
     let opts = decodeOptions(a)
     let decoder = makeDecoder()
@@ -962,7 +974,8 @@ guard let cmd = argv.first else {
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
       photonsctl histogram <raw> [--edit <json>] [--roi x,y,w,h] [--bins 256] [--json|--csv]
       photonsctl detail <raw> [--version V] [--scale F]   # 派单 031 降噪/细节解码参数实测
-      photonsctl depth  <raw> [--scale F] [--out map.tiff] [--model path]   # 120: 深度图（近 = 亮）
+      photonsctl depth  <raw> [--scale F] [--out map.tiff] [--model path] [--units gpu|ane|cpu|all]
+                                                                        # 120: 深度图（近 = 亮）
 
       photonsctl library create  <pkg.photonslibrary>
       photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
