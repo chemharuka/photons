@@ -14,13 +14,13 @@ import PhotonsCatalog
 ///      asks first; a cancelled sheet leaves `copiedSettings` nil. The 反证 is the old behaviour: one
 ///      line that calls `copySettingsFromAnchor()` directly would make `copiedSettings` non-nil before
 ///      any click, and the first assertion fails.
-///   ② **卡片粒度** (`testTheSheetHasTwelveCardRows…`) — 12 rows,标题 == 卡片名, and 勾 白平衡 + 黑电平 +
+///   ② **卡片粒度** (`testTheSheetHasThirteenCardRows…`) — 13 rows,标题 == 卡片名, and 勾 白平衡 + 黑电平 +
 ///      Light then pasting to B moves exactly `temperature/tint/blackOffset/exposure/contrast` while
 ///      `saturation` / HSL / 黑白 / 效果 are **byte-identical** (the structs compare equal). The 反证
 ///      lives in the same class: if `light` were one section (078's shape), checking 黑电平 alone would
 ///      move 曝光 too — `testOnlyBlackLevelMovesNothingElse` is that assertion.
 ///   ③ **子项开关** (`testTurningOnShowsChildrenDrawsEveryParameterAndNarrowsToOne`) — `showsChildren =
-///      true` → 12 + Σchildren rows, and checking 曝光 alone pastes only 曝光 (对比 unchanged).
+///      true` → 13 + Σchildren rows, and checking 曝光 alone pastes only 曝光 (对比 unchanged).
 ///   ⑥ **预设卡消失、菜单还在** (`testThePresetCardIsGoneAndTheMenuBarHasATopLevelPresetMenu`).
 ///   ⑦ **保存为预设** (`testSavingTwoCardsAsAPresetStoresThoseCardsAndAppliesOnlyThem`).
 @MainActor
@@ -165,37 +165,37 @@ final class CopySheetCardTests: XCTestCase {
         _ = session
     }
 
-    // MARK: - ② 12 card rows, titles == the panel's card names
+    // MARK: - ② 13 card rows, titles == the panel's card names
 
-    func testTheSheetHasTwelveCardRowsInPanelOrderAndTheirTitlesAreTheCards() throws {
+    func testTheSheetHasThirteenCardRowsInPanelOrderAndTheirTitlesAreTheCards() throws {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
         view.layoutSubtreeIfNeeded()
 
         let cardRows = view.rows.filter(\.isCard)
-        print("081 rows: \(cardRows.count) cards · titles \(cardRows.map(\.title))")
-        XCTAssertEqual(cardRows.count, 12, "十二张卡：白平衡…蒙版")
+        print("156 rows: \(cardRows.count) cards · titles \(cardRows.map(\.title))")
+        XCTAssertEqual(cardRows.count, 13, "十三张卡：白平衡…蒙版（156 补上校正）")
         XCTAssertEqual(cardRows.map(\.title),
                        ["白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
-                        "曲线", "细节", "效果", "裁切", "蒙版"])
+                        "曲线", "细节", "校正", "效果", "裁切", "蒙版"])
         // The row order *is* the inspector's render order — not a second list (曲线 above 细节 since
-        // 2026-10-28). 调整's cards are 白平衡…效果, 黑白/HSL/色彩分级 are 色彩's, and 裁切/蒙版 are the
-        // other two workspaces' single cards.
+        // 2026-10-28; 校正 between 细节 and 效果 since 096). 调整's cards are compared in full: 156
+        // added 校正 to the clipboard, so a missing card in either list is now a red test.
         let adjust = InspectorView.cardTitles(in: .adjust)
         let cardTitles = cardRows.map(\.title)
-        // 096: 校正 卡（色差 R/B）不进复制表 —— 它的字段仍在既有组里，和 变换 卡的处境一样；
-        // 所以「对话框的行 = 检查器的卡」这条只对**进了复制表的卡**成立。
-        XCTAssertEqual(cardTitles.filter { adjust.contains($0) && $0 != "校正" },
-                       adjust.filter { $0 != "校正" },
+        XCTAssertEqual(cardTitles.filter { adjust.contains($0) }, adjust,
                        "对话框里属于调整工作区的行序必须跟着检查器的卡序：\(cardTitles) vs \(adjust)")
+        XCTAssertTrue(cardTitles.contains("校正"), "156: 校正 卡必须在复制表里：\(cardTitles)")
         // 087: 角度 card's fields (转动 / 旋转 / 镜像) live in `EditSnapshotSection.crop`, so the
         // copy sheet has no separate 角度 row even though the inspector draws a second card.
+        // 140: 点颜色 is not carried yet (its fields have no snapshot section); that is a different
+        // ticket. Every other card of every workspace must be present.
         XCTAssertEqual(Set(cardRows.map(\.title)),
                        Set([adjust, InspectorView.cardTitles(in: .colour),
                             InspectorView.cardTitles(in: .transform),
                             InspectorView.cardTitles(in: .masks)].flatMap { $0 })
-                           .subtracting(["旋转", "校正", "点颜色"]))
+                           .subtracting(["旋转", "点颜色"]))
         // 默认不画子项。
-        XCTAssertEqual(view.rows.count, 12, "默认只有卡级行（081 §2）")
+        XCTAssertEqual(view.rows.count, 13, "默认只有卡级行（081 §2）")
     }
 
     // MARK: - ② 卡片粒度: 白平衡 + 黑电平 + Light
@@ -272,14 +272,14 @@ final class CopySheetCardTests: XCTestCase {
         XCTAssertFalse(CopySettingsSheet.showsChildren, "默认不展示子项（一个常量，不是注释）")
         let childCount = EditSnapshotChild.allCases.count
         let rows = CopySettingsAccessoryView.rows(showsChildren: true)
-        print("081 rows with children: \(rows.count) = 12 + \(childCount)")
-        XCTAssertEqual(rows.count, 12 + childCount)
+        print("156 rows with children: \(rows.count) = 13 + \(childCount)")
+        XCTAssertEqual(rows.count, 13 + childCount)
         XCTAssertEqual(rows.filter { !$0.isCard }.count, childCount)
         XCTAssertEqual(EditSnapshotSection.panelOrder.flatMap(\.children).count, childCount)
 
         let view = CopySettingsAccessoryView(selection: .none, purpose: .copy, showsChildren: true)
         view.layoutSubtreeIfNeeded()
-        XCTAssertEqual(view.rows.count, 12 + childCount, "打开开关后子项真的画出来了")
+        XCTAssertEqual(view.rows.count, 13 + childCount, "打开开关后子项真的画出来了")
         XCTAssertEqual(view.childCheckboxes.count, childCount)
         XCTAssertEqual(view.childCheckboxes[.exposure]?.title, "曝光")
 
