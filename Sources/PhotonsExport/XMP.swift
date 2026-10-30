@@ -66,15 +66,22 @@ public struct XMPWriteContext: Sendable {
     public var includeSettingsBlob: Bool
     /// Above this many bytes the blob is not pushed into a container (docs/xmp-mapping.md X-15).
     public var embeddedBlobLimit: Int
+    /// 186 — which keys this packet may keep, and whether GPS is stripped.
+    public var policy: ExportMetadataPolicy
+    public var removeLocation: Bool
 
     public init(asShot: WhiteBalanceAnchor? = nil,
                 exifOrientation: Int? = nil,
                 includeSettingsBlob: Bool = true,
-                embeddedBlobLimit: Int = 64 * 1024) {
+                embeddedBlobLimit: Int = 64 * 1024,
+                policy: ExportMetadataPolicy = .all,
+                removeLocation: Bool = false) {
         self.asShot = asShot
         self.exifOrientation = exifOrientation
         self.includeSettingsBlob = includeSettingsBlob
         self.embeddedBlobLimit = embeddedBlobLimit
+        self.policy = policy
+        self.removeLocation = removeLocation
     }
 }
 
@@ -296,7 +303,11 @@ public enum XMPWriter {
                                     context: XMPWriteContext = XMPWriteContext())
         throws -> (metadata: CGImageMetadata, report: XMPExportReport) {
         let mutable = try mutableCopy(of: existing)
-        let report = try apply(edit, to: mutable, context: context)
+        var report = try apply(edit, to: mutable, context: context)
+        let removed = scrub(mutable, policy: context.policy, removeLocation: context.removeLocation)
+        if !removed.isEmpty {
+            report.notes.append("186: dropped \(removed.count) key(s): \(removed.joined(separator: ", "))")
+        }
         return (mutable, report)
     }
 
@@ -510,6 +521,80 @@ public enum XMPWriter {
         return report
     }
 
+    // MARK: 186 — policy filter
+
+    /// Keys a policy keeps. `.all` keeps everything (ours and the source's); `.copyrightOnly` keeps
+    /// the rights line and the credit line only; `.none` keeps nothing — BatchExport never reaches
+    /// the writer with it, but the filter is total on purpose so the table has no hole.
+    static func keeps(_ path: String, _ policy: ExportMetadataPolicy) -> Bool {
+        switch policy {
+        case .all: return true
+        case .copyrightOnly: return path == "dc:rights" || path == "photoshop:Credit"
+        case .none: return false
+        }
+    }
+
+    /// GPS is mirrored into XMP as `exif:GPS*` (Lightroom's spelling) on top of the container's own
+    /// GPS dictionary; `removeLocation` has to remove both.
+    public static func isLocationKey(_ path: String) -> Bool {
+        path.hasPrefix("exif:GPS")
+    }
+
+    /// Remove what the policy does not keep. Returns the removed paths, sorted, so a test names them
+    /// instead of trusting "looks right". **`policy == .all && !removeLocation` returns `[]` without
+    /// touching anything** — that is what keeps today's bytes today's bytes.
+    @discardableResult
+    public static func scrub(_ metadata: CGMutableImageMetadata,
+                             policy: ExportMetadataPolicy = .all,
+                             removeLocation: Bool = false) -> [String] {
+        guard policy != .all || removeLocation else { return [] }
+        var removed: [String] = []
+        for path in XMPReadback.paths(metadata) {
+            let drop = isLocationKey(path) ? removeLocation : !keeps(path, policy)
+            guard drop else { continue }
+            if CGImageMetadataRemoveTagWithPath(metadata, nil, path as CFString) {
+                removed.append(path)
+            }
+        }
+        return removed.sorted()
+    }
+
+    /// 186 — a copy of `existing` with the GPS mirrors gone. `BatchExport` scrubs the *source* packet
+    /// with this before the encode, because the packet that lands in the file is built from it.
+    public static func metadataWithoutLocation(_ existing: CGImageMetadata) -> CGImageMetadata? {
+        guard let copy = CGImageMetadataCreateMutableCopy(existing) else { return nil }
+        scrub(copy, removeLocation: true)
+        return copy
+    }
+
+    /// 186 — `.copyrightOnly`'s packet: `dc:rights` + `photoshop:Credit` and nothing else. Built
+    /// through the same metadata object as every other packet, so "only these two" is enforced by
+    /// `scrub` instead of a hand-written XML template that could drift from the filter.
+    public static func copyrightOnlyPacket(author: String?, rights: String?)
+        throws -> (data: Data, keys: [String]) {
+        let metadata = CGImageMetadataCreateMutable()
+        try registerNamespaces(metadata)
+        var err: Unmanaged<CFError>?
+        _ = CGImageMetadataRegisterNamespaceForPrefix(metadata,
+                                                      "http://ns.adobe.com/photoshop/1.0/" as CFString,
+                                                      "photoshop" as CFString, &err)
+        if let rights, !rights.isEmpty {
+            guard CGImageMetadataSetValueWithPath(metadata, nil, "dc:rights" as CFString,
+                                                  rights as CFString) else {
+                throw XMPExportError.setValueFailed("dc:rights")
+            }
+        }
+        if let author, !author.isEmpty {
+            guard CGImageMetadataSetValueWithPath(metadata, nil, "photoshop:Credit" as CFString,
+                                                  author as CFString) else {
+                throw XMPExportError.setValueFailed("photoshop:Credit")
+            }
+        }
+        scrub(metadata, policy: .copyrightOnly)
+        let core = try xmpData(metadata)
+        return (wrap(core, padding: 0), XMPReadback.paths(metadata))
+    }
+
     // MARK: key plumbing
 
     /// Write a value, or remove the key when it is `nil`. Removal is what makes R1 hold when a new
@@ -673,6 +758,10 @@ public enum XMPWriter {
         let existing = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
         let metadata = try mutableCopy(of: existing)
         var report = try apply(edit, to: metadata, context: context)
+        let removed = scrub(metadata, policy: context.policy, removeLocation: context.removeLocation)
+        if !removed.isEmpty {
+            report.notes.append("186: dropped \(removed.count) key(s): \(removed.joined(separator: ", "))")
+        }
 
         let dir = url.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).xmp-tmp-\(UUID().uuidString).\(ext)")

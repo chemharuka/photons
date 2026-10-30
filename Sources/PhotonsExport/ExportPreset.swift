@@ -85,6 +85,41 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// 186 — what an export may carry, in the spelling the export sheet and the spec use.
+/// `metadataLevel` stays the stored spelling (099 wrote `copyright`), so a preset from before 186
+/// decodes to `.all` without a migration and re-encodes byte for byte. This enum is the *name* the
+/// filter reads; there is deliberately no second stored field.
+public enum ExportMetadataPolicy: String, Codable, Sendable, CaseIterable {
+    case all
+    case copyrightOnly
+    case none
+
+    public var displayName: String {
+        switch self {
+        case .all: return "全部"
+        case .copyrightOnly: return "仅版权"
+        case .none: return "无"
+        }
+    }
+
+    /// The stored spelling. `copyright` (099) and `copyrightOnly` (186) are the same policy.
+    public var level: ExportMetadataLevel {
+        switch self {
+        case .all: return .all
+        case .copyrightOnly: return .copyright
+        case .none: return .none
+        }
+    }
+
+    public init(_ level: ExportMetadataLevel) {
+        switch level {
+        case .all: self = .all
+        case .copyright: self = .copyrightOnly
+        case .none: self = .none
+        }
+    }
+}
+
 /// 180 — 文字水印落在哪个角。四角固定，没有任意坐标（规格 §1 明确不做）。
 public enum WatermarkPosition: String, Codable, Sendable, CaseIterable {
     // 声明顺序 = UI 顺序 = 存储拼写；不要为了弹窗好看去重排。
@@ -401,6 +436,9 @@ public struct ExportPreset: Sendable, Equatable {
     public var conflict: ExportConflict
     /// `all` = the full develop packet; `copyright` = author/copyright only; `none` = no XMP.
     public var metadataLevel: ExportMetadataLevel
+    /// 186 — 剥掉地理位置（EXIF 的 GPS 字典 + XMP 的 `exif:GPS*` 镜像）。默认 `false`：今天的导出
+    /// 带 GPS，这正是「旧预设逐字节不变」的前提。
+    public var removeLocation: Bool
 
     /// 180 — 导出时画在最终像素上的文字水印。`""`（默认）= 完全不画，一个字节都不改。
     public var watermarkText: String
@@ -427,6 +465,7 @@ public struct ExportPreset: Sendable, Equatable {
                 subfolder: String = "",
                 conflict: ExportConflict = .rename,
                 metadataLevel: ExportMetadataLevel = .all,
+                removeLocation: Bool = false,
                 watermarkText: String = "",
                 watermarkPosition: WatermarkPosition = .bottomRight,
                 watermarkOpacity: Double = 60) {
@@ -458,6 +497,7 @@ public struct ExportPreset: Sendable, Equatable {
         self.subfolder = subfolder
         self.conflict = conflict
         self.metadataLevel = metadataLevel
+        self.removeLocation = removeLocation
         self.watermarkText = watermarkText
         self.watermarkPosition = watermarkPosition
         self.watermarkOpacity = watermarkOpacity
@@ -543,6 +583,12 @@ public struct ExportPreset: Sendable, Equatable {
     /// No XMP at all when the metadata level says so, even if the flag is still set on disk.
     public var effectiveWriteXMP: Bool {
         metadataLevel == .none ? false : writeXMP
+    }
+
+    /// 186 — the policy name for the filter code. `metadataLevel` is the one stored field.
+    public var metadataPolicy: ExportMetadataPolicy {
+        get { ExportMetadataPolicy(metadataLevel) }
+        set { metadataLevel = newValue.level }
     }
 
     /// One line the sheet and the CLI can both print: format · bit depth · colour space · size ·
@@ -664,7 +710,7 @@ extension ExportPreset: Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
-        case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel
+        case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel, removeLocation
         case sdrToneMapping
         case watermarkText, watermarkPosition, watermarkOpacity
     }
@@ -698,6 +744,7 @@ extension ExportPreset: Codable {
             .flatMap(ExportConflict.init(rawValue:)) ?? .rename
         self.metadataLevel = try c.decodeIfPresent(String.self, forKey: .metadataLevel)
             .flatMap(ExportMetadataLevel.init(rawValue:)) ?? .all
+        self.removeLocation = try c.decodeIfPresent(Bool.self, forKey: .removeLocation) ?? false
         self.watermarkText = try c.decodeIfPresent(String.self, forKey: .watermarkText) ?? ""
         self.watermarkPosition = try c.decodeIfPresent(String.self, forKey: .watermarkPosition)
             .flatMap(WatermarkPosition.init(rawValue:)) ?? .default
@@ -730,6 +777,8 @@ extension ExportPreset: Codable {
         if !subfolder.isEmpty { try c.encode(subfolder, forKey: .subfolder) }
         if conflict != .rename { try c.encode(conflict.rawValue, forKey: .conflict) }
         if metadataLevel != .all { try c.encode(metadataLevel.rawValue, forKey: .metadataLevel) }
+        // 186 — `removeLocation` default false is omitted too, so a pre-186 preset stays byte-identical.
+        if removeLocation { try c.encode(true, forKey: .removeLocation) }
         // 180 — default values are omitted, so a pre-180 preset re-encodes to the same bytes.
         if !watermarkText.isEmpty { try c.encode(watermarkText, forKey: .watermarkText) }
         if watermarkPosition != .bottomRight {
