@@ -375,6 +375,38 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertTrue(sheet.showsGainMapRows)
     }
 
+    /// 163 §1.3 — choosing PQ/HLG writes the container's one legal depth in the same step, and the
+    /// sheet never offers a second depth while that curve is selected.
+    func testSelectingPQOrHLGLocksTheBitDepthAndUpdatesThePicker() throws {
+        let sheet = model()
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        XCTAssertEqual(sheet.bitDepths, [8, 10])
+
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+        XCTAssertEqual(sheet.bitDepths, [10])
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // A HEIF row moves to PNG: still PQ, now the lossless depth.
+        sheet.selectFormat(.png)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        XCTAssertEqual(sheet.bitDepths, [16])
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        sheet.selectFormat(.heic)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+
+        // JPEG has no PQ row at all: the format switch turns HDR off rather than leaving an illegal
+        // preset behind.
+        sheet.selectFormat(.jpeg)
+        XCTAssertEqual(sheet.hdrKind, .none)
+        XCTAssertFalse(sheet.hdrEnabled)
+        XCTAssertNoThrow(try sheet.preset.validated())
+    }
+
     // MARK: - hosting helpers
 
     private struct Hosted {

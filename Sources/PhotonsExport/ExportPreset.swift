@@ -114,6 +114,7 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
     case badHDRKind(ExportFormat, HDRKind)
+    case hdrNeedsBitDepth(ExportFormat, HDRKind, Int, Int)
     case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
     case emptyNameTemplate
@@ -143,6 +144,9 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             }
             return "\(format.rawValue.uppercased()) cannot carry HDR kind '\(kind.rawValue)' "
                 + "(allowed: \(allowed))"
+        case .hdrNeedsBitDepth(let format, let kind, let got, let want):
+            return "\(format.rawValue.uppercased()) \(kind.displayName) needs \(want)-bit "
+                + "(got \(got)-bit) — pick \(want)-bit or a different HDR kind"
         case .hdrGainMapNeedsMacOS15(let g):
             return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
@@ -538,6 +542,11 @@ public struct ExportPreset: Sendable, Equatable {
         if let hdr, hdr.enabled {
             guard format.supports(hdr.kind) else {
                 throw ExportPresetError.badHDRKind(format, hdr.kind)
+            }
+            if let required = format.hdrTransferBitDepth(for: hdr.kind), bitDepth != required {
+                // 163 §1.3 — never coerce here: a 8-bit PNG + PQ is a preset the user (or a stale
+                // file) asked for, and the sheet's own writer is the only place that may lock it.
+                throw ExportPresetError.hdrNeedsBitDepth(format, hdr.kind, bitDepth, required)
             }
             if hdr.kind == .gainMap {
                 if case .manual(let h) = hdr.headroom, h < 1.05 {

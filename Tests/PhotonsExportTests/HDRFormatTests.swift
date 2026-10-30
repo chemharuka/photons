@@ -103,14 +103,60 @@ final class HDRFormatTests: XCTestCase {
                 XCTAssertEqual(k, kind)
             }
         }
-        // Every legal cell validates.
+        // Every legal cell validates. 163 — PQ/HLG cells carry the one depth their container allows,
+        // because `validated()` now refuses the silent-clamp mistake rather than accepting it.
         for format in ExportFormat.allCases {
             for kind in format.hdrKinds {
-                XCTAssertNoThrow(try ExportPreset(format: format,
+                let depth = format.hdrTransferBitDepth(for: kind) ?? 8
+                XCTAssertNoThrow(try ExportPreset(format: format, bitDepth: depth,
                                                   hdr: HDRExport(kind: kind)).validated(),
-                                 "\(format.rawValue) + \(kind.rawValue) must be accepted")
+                                 "\(format.rawValue) + \(kind.rawValue) at \(depth)-bit must be accepted")
             }
         }
+    }
+
+    /// 163 §1.3 — the four container shapes at their one legal depth, and the same four stale at 8-bit.
+    func testPQHLGRequireTheFormatsExactBitDepth() throws {
+        let allowed: [(ExportFormat, HDRKind, Int)] = [
+            (.heic, .pq, 10), (.avif, .hlg, 10), (.png, .pq, 16), (.tiff, .hlg, 16),
+        ]
+        for (format, kind, bits) in allowed {
+            XCTAssertNoThrow(try ExportPreset(format: format, bitDepth: bits,
+                                              hdr: HDRExport(kind: kind)).validated(),
+                             "\(format.rawValue) \(kind.rawValue) at \(bits)-bit")
+        }
+        let rejected: [(ExportFormat, HDRKind, Int)] = [
+            (.heic, .pq, 8), (.avif, .hlg, 8), (.png, .pq, 8), (.tiff, .hlg, 8),
+        ]
+        for (format, kind, bits) in rejected {
+            XCTAssertThrowsError(try ExportPreset(format: format, bitDepth: bits,
+                                                  hdr: HDRExport(kind: kind)).validated(),
+                                 "\(format.rawValue) \(kind.rawValue) at \(bits)-bit must be rejected") {
+                guard case ExportPresetError.hdrNeedsBitDepth(let f, let k, let got, let want) = $0 else {
+                    return XCTFail("expected hdrNeedsBitDepth, got \($0)")
+                }
+                XCTAssertEqual(f, format)
+                XCTAssertEqual(k, kind)
+                XCTAssertEqual(got, bits)
+                XCTAssertEqual(want, format == .png || format == .tiff ? 16 : 10)
+            }
+        }
+        // The other wrong direction: a 16-bit HEIF PQ request is just as illegal as 8-bit PNG.
+        XCTAssertThrowsError(try ExportPreset(format: .heic, bitDepth: 16,
+                                              hdr: HDRExport(kind: .pq)).validated())
+        // JPEG has neither curve, so it fails at the kind check before the depth check.
+        for kind in [HDRKind.pq, .hlg] {
+            XCTAssertThrowsError(try ExportPreset(format: .jpeg, bitDepth: 8,
+                                                  hdr: HDRExport(kind: kind)).validated()) {
+                guard case ExportPresetError.badHDRKind = $0 else {
+                    return XCTFail("expected badHDRKind, got \($0)")
+                }
+            }
+        }
+        // The sheet's picker is derived from the same rule.
+        XCTAssertEqual(ExportFormat.heic.bitDepths(for: .pq), [10])
+        XCTAssertEqual(ExportFormat.png.bitDepths(for: .hlg), [16])
+        XCTAssertEqual(ExportFormat.jpeg.bitDepths(for: .pq), [8])
     }
 
     // MARK: - 2. bit-depth enforcement

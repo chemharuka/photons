@@ -334,6 +334,7 @@ public final class ExportSheetModel {
         let startingPreset = preset ?? remembered?.preset ?? Self.defaultPreset
         self.preset = startingPreset
         self.hdrPreferredEnabled = startingPreset.hdr?.enabled ?? true
+        self.hdrPreferredKind = startingPreset.hdrKind == .none ? .gainMap : startingPreset.hdrKind
         self.outputDirectory = outputDirectory ?? remembered?.directoryURL
             ?? Self.defaultOutputDirectory
         self.writableUTIs = writableUTIs ?? ExportFormat.writableUTIs
@@ -394,16 +395,48 @@ public final class ExportSheetModel {
     /// The user's last HDR checkbox choice. Kept here (not in a fresh `@State`) so a format round
     /// trip — HEIC → JPEG → HEIC — restores what they picked instead of resetting to `true`.
     public private(set) var hdrPreferredEnabled: Bool
+    /// The last HDR *kind* the user picked (163). A format switch that cannot carry it turns HDR off
+    /// without forgetting the choice, and coming back to a capable container restores that kind —
+    /// not a generic gain map.
+    public private(set) var hdrPreferredKind: HDRKind
 
-    /// What the checkbox shows. Non-HEIC is always off (the row is greyed out there too).
+    /// What the checkbox shows. JPEG has no HDR path, so the row is greyed out there too.
     public var hdrEnabled: Bool {
-        guard preset.format == .heic else { return false }
+        guard !availableHDRKinds.isEmpty else { return false }
         return preset.hdr?.enabled ?? hdrPreferredEnabled
     }
 
     public var hdrGainMap: HDRExport.GainMap {
         get { preset.hdr?.gainMap ?? .iso }
         set { updateHDR { $0.gainMap = newValue } }
+    }
+
+    /// 163 §1.3 — which HDR path the sheet is offering (增益图 / HLG / PQ). `gainMap` is the default;
+    /// the row only shows while HDR is on.
+    public var hdrKind: HDRKind {
+        get { preset.hdrKind }
+        set { setHDRKind(newValue) }
+    }
+
+    /// The kinds this container may carry, in display order. JPEG appears only as `none` (HDR off).
+    public var availableHDRKinds: [HDRKind] {
+        preset.format.hdrKinds.filter { $0 != .none }
+    }
+
+    /// 163 §1.3 — choosing PQ/HLG locks the bit depth to the container's one legal value (HEIF 10,
+    /// PNG/TIFF 16) in the same write, so the UI can never leave a `validated()`-illegal pair behind.
+    public func setHDRKind(_ kind: HDRKind) {
+        if kind == .none {
+            setHDR(false)
+            return
+        }
+        guard preset.format.supports(kind) else { return }
+        hdrPreferredKind = kind
+        updateHDR { $0.kind = kind }
+        if let locked = preset.format.hdrTransferBitDepth(for: kind) {
+            preset.bitDepth = locked
+        }
+        if kind != .none { hdrPreferredEnabled = true }
     }
 
     public var hdrHalfSize: Bool {
@@ -446,7 +479,8 @@ public final class ExportSheetModel {
     }
 
     /// 109 §1 — HDR on shows the gain-map row and hides tone mapping; HDR off is the reverse.
-    public var showsGainMapRows: Bool { hdrEnabled }
+    /// 163 — PQ/HLG are single-picture paths, so the gain-map row only appears for `.gainMap`.
+    public var showsGainMapRows: Bool { hdrEnabled && preset.hdrKind == .gainMap }
     public var showsToneMappingRow: Bool { !hdrEnabled }
 
     /// 109 §3 — only an SDR export consults this.
@@ -460,21 +494,29 @@ public final class ExportSheetModel {
     }
 
     /// 109 §1 / 108 — the bit-depth row's legal values for the current format.
-    public var bitDepths: [Int] { preset.format.bitDepths }
+    /// 163 §1.3 — while PQ/HLG is selected this is the single locked value, not a menu.
+    public var bitDepths: [Int] {
+        hdrEnabled ? preset.format.bitDepths(for: preset.hdrKind) : preset.format.bitDepths
+    }
 
     public func selectBitDepth(_ depth: Int) {
         guard bitDepths.contains(depth) else { return }
         preset.bitDepth = depth
     }
 
-    /// The 文件设置 picker's door: going non-HEIC turns HDR off (and `validated()` would reject it
-    /// anyway), coming back re-applies the remembered choice. A depth the new container cannot store
-    /// is clamped instead of left behind as an invisible illegal value.
+    /// The 文件设置 picker's door: a format that cannot carry the current HDR kind turns HDR off
+    /// (and `validated()` would reject it anyway), coming back re-applies the remembered choice. A
+    /// depth the new container cannot store is clamped instead of left behind as an invisible
+    /// illegal value.
     public func selectFormat(_ format: ExportFormat) {
         guard availableFormats.contains(format) else { return }
         preset.format = format
         preset.bitDepth = format.clampedBitDepth(preset.bitDepth)
-        applyHDR(enabled: format == .heic ? hdrPreferredEnabled : false)
+        let canKeep = hdrPreferredEnabled && format.supports(hdrPreferredKind)
+        applyHDR(enabled: canKeep)
+        if canKeep, let locked = format.hdrTransferBitDepth(for: hdrPreferredKind) {
+            preset.bitDepth = locked
+        }
     }
 
     /// The HDR checkbox. Writes through to the preset the batch will use.
@@ -484,7 +526,20 @@ public final class ExportSheetModel {
     }
 
     private func applyHDR(enabled: Bool) {
-        updateHDR { $0.enabled = enabled }
+        guard enabled else {
+            updateHDR { $0.enabled = false }
+            return
+        }
+        let kind = preset.format.supports(hdrPreferredKind)
+            ? hdrPreferredKind : (availableHDRKinds.first ?? .none)
+        guard kind != .none else {
+            updateHDR { $0.enabled = false }
+            return
+        }
+        updateHDR { $0.kind = kind }
+        if let locked = preset.format.hdrTransferBitDepth(for: kind) {
+            preset.bitDepth = locked
+        }
     }
 
     private func updateHDR(_ body: (inout HDRExport) -> Void) {
@@ -1031,18 +1086,30 @@ public struct ExportSheetView: View {
             HStack(spacing: 8) {
                 Toggle(isOn: hdrEnabledBinding) {
                     Text("HDR 输出").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(model.preset.format == .heic
-                                         ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                        .foregroundStyle(model.availableHDRKinds.isEmpty
+                                         ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
-                .disabled(model.phase == .running || model.preset.format != .heic)
+                .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
                 Spacer(minLength: 8)
-                if model.preset.format != .heic {
-                    Text("只有 HEIC 能带 HDR")
+                if model.availableHDRKinds.isEmpty {
+                    Text("JPEG 不支持 HDR（PQ/HLG 需要 10/16 位）")
                         .font(.system(size: 9)).foregroundStyle(.tertiary)
+                } else if model.hdrEnabled {
+                    Picker("", selection: hdrKindBinding) {
+                        ForEach(model.availableHDRKinds, id: \.self) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 190)
+                    .disabled(model.phase == .running)
                 }
             }
+            .frame(height: 20)
             .background(ExportLayoutProbeHost(kind: .hdrRow))
 
             if model.showsGainMapRows {
@@ -1443,6 +1510,10 @@ public struct ExportSheetView: View {
 
     private var gainMapVersionBinding: Binding<GainMapVersion> {
         Binding(get: { model.gainMapVersion }, set: { model.setGainMapVersion($0) })
+    }
+
+    private var hdrKindBinding: Binding<HDRKind> {
+        Binding(get: { model.hdrKind }, set: { model.setHDRKind($0) })
     }
 
     private var hdrHalfSizeBinding: Binding<Bool> {

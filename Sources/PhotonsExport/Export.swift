@@ -130,6 +130,24 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         hdrKinds.contains(kind)
     }
 
+    /// 163 — the only bit depth a `pq`/`hlg` primary item may carry: HEIF tops out at 10, the lossless
+    /// containers are honest at 16. `nil` when the container cannot write that curve at all (JPEG).
+    public func hdrTransferBitDepth(for kind: HDRKind) -> Int? {
+        guard kind == .hlg || kind == .pq else { return nil }
+        switch self {
+        case .heic, .avif: return 10
+        case .png, .tiff: return 16
+        case .jpeg: return nil
+        }
+    }
+
+    /// 163 — the depths the sheet may offer for `kind`. PQ/HLG are locked to the one legal value
+    /// instead of silently clamping a stale 8-bit preset at write time.
+    public func bitDepths(for kind: HDRKind) -> [Int] {
+        if let locked = hdrTransferBitDepth(for: kind) { return [locked] }
+        return bitDepths
+    }
+
     /// Containers ImageIO can rewrite in place with XMP (`XMPWriter.canEmbed`). AVIF is absent:
     /// ImageIO's AVIF path drops the packet, so the writer falls back to a sidecar.
     public var supportsXMPEmbedding: Bool {
