@@ -79,8 +79,15 @@ public enum StageAlgorithmVersion {
     /// instead of `OKLab L of clamp(linearRGB, 0, 1)`. A document with a `luminanceRange` mask now
     /// selects pixels above display white that the old predicate folded to `L = 1` (and, with the
     /// default `high = hdrMax`, stops discarding them), so the same stored numbers render different
-    /// pixels; every other shape is byte-identical. The migrated v1→v2 document is what keeps old
-    /// SDR intent intact (`LuminanceRangeShape` decoder).
+    /// pixels; every other shape is byte-identical.
+    ///
+    /// **v1 documents are NOT migrated** (user, 2026-10-30 20:10): the decoder keeps the five stored
+    /// numbers verbatim and only stamps `v = 2`, so an old document keeps `high = 1.0` and its SDR
+    /// selection is bit-identical. The one visible difference is above display white: the old kernel
+    /// folded those pixels to `L = 1` and gave them `alpha = 0.5` (an artefact of the clamp, not an
+    /// intent), while the new axis reads their real `L` and `high = 1.0` closes the window there
+    /// (`alpha = 0`). Users who want the highlights back drag the handle up. See
+    /// `LuminanceRangeShape` for why `default` and the v1 decode fallback are separate constants.
     /// **4** — 120b: the atlas may read the depth map (kind 6, `MaskShape.depthRange`). A document
     /// that carries no depth mask has no new shape to evaluate and is bit-identical; a document with
     /// one renders pixels it could not render before (zeros when no map is supplied), which is still
