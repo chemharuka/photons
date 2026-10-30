@@ -415,9 +415,14 @@ final class CropOverlayFollowTests: XCTestCase {
 
         // Normal mode first: the rectangle this control has always had.
         let restingFrame = loupe.zoomSlider.frame
-        let normal = loupe.zoomSlider.convert(loupe.zoomSlider.bounds, to: root)
-        _ = normal
-        print("② normal · slider \(NSStringFromRect(restingFrame)) (loupe coords)")
+        // 182 — the pill's place is a *canvas-relative* corner, so the resting state is recorded as
+        // the two gaps it keeps from the canvas' top-right corner (16 pt each, `Metrics.edgeInset`)
+        // rather than as an absolute x: the harness' window width, and therefore the canvas' width,
+        // is not the same at the start and at the end of this test (see the comment at the end).
+        let restingRightGap = loupe.view.bounds.maxX - restingFrame.maxX
+        let restingTopGap = loupe.view.bounds.maxY - restingFrame.maxY
+        print("② normal · slider \(NSStringFromRect(restingFrame)) (loupe coords) · canvas "
+              + "\(NSStringFromRect(loupe.view.bounds)) · gaps \(restingRightGap)/\(restingTopGap) pt")
 
         CropUITestSupport.openCropTool(loupe, editor.session)
         CropUITestSupport.pump(0.02)
@@ -461,7 +466,18 @@ final class CropOverlayFollowTests: XCTestCase {
         try reportPlacement(root, window, size: "1200×780 (minimum)")
 
         // Leaving the tool changes nothing about where the pill is: one corner in every mode
-        // (2026-10-27 用户要求普通模式也放上方), so entering and leaving 裁切 no longer moves it at all.
+        // (2026-10-27 用户要求普通模式也放上方), so entering and leaving 裁切 does not move it.
+        //
+        // 182 — "does not move it" has to be read in the canvas' own coordinates. This harness' window
+        // is not the same width at the two ends of the test: `setFrameAutosaveName` restores the frame
+        // when the window is first ordered front, and AppKit clamps it to the **screen** — the xctest
+        // process gets a 1609 pt-wide screen, the saved frame is `55 52 1600 940`, and 55 + 1600 = 1655
+        // exceeds it by 46, so the window is ordered front 1554 pt wide. The `setContentSize(1600, 940)`
+        // below *is* honoured, so the canvas starts the test 976 pt wide (1554 − 212 − 1 − 364 − 1) and
+        // ends it 1022 pt wide: the old value-for-value comparison of an absolute x reported that
+        // 46 pt canvas delta (1022 − 976 = 46 = 1655 − 1609) as a pill that had moved. It had not —
+        // it is 16 pt in from the canvas' right edge in both: 976 − 16 − 210 = 750 and
+        // 1022 − 16 − 210 = 796 (both measured, `right gap 16.0 pt` in every line above).
         loupe.cancelCropTool()
         CropUITestSupport.pump(0.02)
         root.layoutSubtreeIfNeeded()
@@ -472,8 +488,19 @@ final class CropOverlayFollowTests: XCTestCase {
         root.needsLayout = true
         root.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)
-        XCTAssertEqual(loupe.zoomSlider.frame, restingFrame,
-                       "②: the pill never moved — same rectangle in 裁切 and out of it, value for value")
+        print("② after the round trip · slider \(NSStringFromRect(loupe.zoomSlider.frame)) (loupe "
+              + "coords) · canvas \(NSStringFromRect(loupe.view.bounds)) · gaps "
+              + "\(loupe.view.bounds.maxX - loupe.zoomSlider.frame.maxX)/"
+              + "\(loupe.view.bounds.maxY - loupe.zoomSlider.frame.maxY) pt "
+              + "(resting \(restingFrame) in \(restingRightGap)/\(restingTopGap) pt gaps)")
+        XCTAssertEqual(loupe.zoomSlider.frame.size, restingFrame.size,
+                       "②: the pill never moved — same size, value for value")
+        XCTAssertEqual(loupe.view.bounds.maxX - loupe.zoomSlider.frame.maxX, restingRightGap,
+                       accuracy: 0.5,
+                       "②: nor did its 16 pt gap to the canvas' right edge (裁切 and out of it)")
+        XCTAssertEqual(loupe.view.bounds.maxY - loupe.zoomSlider.frame.maxY, restingTopGap,
+                       accuracy: 0.5,
+                       "②: nor its 16 pt gap to the canvas' top")
     }
 
     /// ② — **ordinary mode**, at both window sizes the task names: the pill is in the canvas'
