@@ -298,6 +298,9 @@ enum EditParameters {
         t.field("colorNR") { areEqual($0.colorNR, $1.colorNR) }
         t.field("sharpness") { areEqual($0.sharpness, $1.sharpness) }
         t.field("detail") { areEqual($0.detail, $1.detail) }
+        // 164 — 去摩尔纹. Load-bearing: without it `applyEdit` short-circuits and the new row writes
+        // nothing at all.
+        t.field("moire") { areEqual($0.moire, $1.moire) }
         return t
     }()
 

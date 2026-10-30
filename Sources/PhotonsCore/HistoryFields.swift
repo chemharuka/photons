@@ -299,6 +299,9 @@ extension EditHistory {
             before.detailSettings.sharpness, after.detailSettings.sharpness)
         opt("detailSettings.detail", .detail,
             before.detailSettings.detail, after.detailSettings.detail)
+        // 164 — 去摩尔纹, a fifth decoder amount on the same (开发) card.
+        opt("detailSettings.moire", .detail,
+            before.detailSettings.moire, after.detailSettings.moire)
         if before.decoderVersion != after.decoderVersion {
             add("decoderVersion", .detail,
                 .text(before.decoderVersion ?? "默认"), .text(after.decoderVersion ?? "默认"))
@@ -545,6 +548,7 @@ extension EditHistory {
         "detailSettings.colorNR": "色彩降噪",
         "detailSettings.sharpness": "锐度",
         "detailSettings.detail": "细节",
+        "detailSettings.moire": "去摩尔纹",
         "decoderVersion": "解码版本",
         "effects.vignetteAmount": "暗角",
         "effects.vignetteMidpoint": "暗角中点",

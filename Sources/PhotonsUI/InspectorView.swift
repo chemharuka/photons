@@ -1139,6 +1139,21 @@ public struct InspectorView: View {
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
+            // 164 — 去摩尔纹: a fifth decoder amount (CIRAWFilter.moireReductionAmount). It is not a
+            // `DetailAxis` case: the four-axis table is 031/040/042's contract and stays untouched.
+            // v9 reports `isMoireReductionSupported == false`, so the row is greyed there exactly
+            // like 色彩降噪 / 细节.
+            sliderRow("去摩尔纹",
+                      moireBinding(baseline),
+                      DetailSettings.moireRange,
+                      "%.0f",
+                      shape: .bar,
+                      editable: true,
+                      enabled: axes.moire,
+                      accessibilityID: "inspector.detail.moire",
+                      onReset: { resets.moire() }) { editing in
+                if editing { beginDetailDrag() } else { commitDetail(title: "去摩尔纹") }
+            }
         }
         // 096: the 色差 rows moved to `correctionCard`; this frame probe is the negative control for
         // the CA layout test (「两根行不在这张卡里」), not the rows' own card anchor.
@@ -1555,6 +1570,15 @@ public struct InspectorView: View {
         Binding(get: { session.edit.detailSettings.position(axis, in: baseline) },
                 set: { newValue in
                     session.applyEdit { $0.detailSettings.setPosition(newValue, axis, in: baseline) }
+                })
+    }
+
+    /// 164 — the 去摩尔纹 row's binding. Same live-write / commit-on-release shape as the four
+    /// decoder rows; the model writes `nil` when the thumb lands on the file's own default amount.
+    private func moireBinding(_ baseline: DetailBaseline) -> Binding<Double> {
+        Binding(get: { session.edit.detailSettings.moirePosition(in: baseline) },
+                set: { newValue in
+                    session.applyEdit { $0.detailSettings.setMoirePosition(newValue, in: baseline) }
                 })
     }
 
@@ -3120,6 +3144,16 @@ public struct PanelResets {
         guard session.edit.detailSettings[axis] != nil else { return false }
         session.applyEdit { $0.detailSettings[axis] = nil }
         let committed = session.commitEdit(label: axis.title, coalesce: false)
+        loupe?.endDetailAdjustment()
+        return committed
+    }
+
+    /// 164 — double-click on 去摩尔纹: back to **this file's own amount** (`nil`), one history entry.
+    @discardableResult
+    public func moire() -> Bool {
+        guard session.edit.detailSettings.moire != nil else { return false }
+        session.applyEdit { $0.detailSettings.moire = nil }
+        let committed = session.commitEdit(label: "去摩尔纹", coalesce: false)
         loupe?.endDetailAdjustment()
         return committed
     }

@@ -191,8 +191,7 @@ final class DetailSectionTests: XCTestCase {
         }
     }
 
-    func testTheRenderedCardExposesTheFourControls() {
-        let host = Self.host()
+    func testTheRenderedCardExposesTheFourControls() {        let host = Self.host()
         let ids = Self.identifiers(in: host)
         print("DETAIL card ids: \(ids.filter { $0.contains("detail") })")
         guard ids.contains(where: { $0.hasPrefix("inspector.card.") }) else {
@@ -207,6 +206,8 @@ final class DetailSectionTests: XCTestCase {
             XCTAssertTrue(ids.contains("inspector.detail.\(axis.rawValue)"),
                           "the \(axis.rawValue) control is missing; ids: \(ids)")
         }
+        // 164 — the fifth decoder row; its id is the model's own spelling, not a DetailAxis rawValue.
+        XCTAssertTrue(ids.contains("inspector.detail.moire"), "去摩尔纹 行没有画出来；ids: \(ids)")
 
         // The card's four numbers, as rendered: with no decode yet the panel uses the measured
         // baseline, so it must read 0 / 50 / 0 / 50 before the first development lands.
@@ -221,6 +222,24 @@ final class DetailSectionTests: XCTestCase {
                            String(format: "%.0f", axis.defaultPosition(in: .measured)),
                            "\(axis.rawValue) opened on \(node.value), not on its default position")
         }
+    }
+
+    /// 164 — 去摩尔纹 as a document edit: one write, one history row, and a double-click back to the
+    /// file's own amount (`nil`).
+    func testMoireWritesTheDocumentAndResetsToOneSnapshot() {
+        let session = CatalogSession()
+        session.loadEditForAnchor()
+        let resets = PanelResets(session: session)
+
+        session.applyEdit { $0.detailSettings.moire = 12 }
+        XCTAssertEqual(session.edit.detailSettings.moire, 12, "去摩尔纹 必须写进文档")
+        XCTAssertTrue(session.commitEdit(label: "去摩尔纹"))
+        let before = session.history.count
+
+        XCTAssertTrue(resets.moire())
+        XCTAssertNil(session.edit.detailSettings.moire, "双击 = 回到 Apple 自己的值")
+        XCTAssertEqual(session.history.count, before + 1)
+        XCTAssertFalse(resets.moire(), "已经是默认就不许再写一条")
     }
 
     // MARK: - helpers
