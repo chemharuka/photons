@@ -3411,6 +3411,17 @@ public struct PanelResets {
                 return true
             }
 
+        case .perspective:
+            // 183: 透视 — both keystone knobs back to 0 (the homography becomes the identity again).
+            // Nothing else in the geometry group moves.
+            return cropGeometryVerb(label: section.title) { geometry in
+                guard geometry.perspectiveVertical != 0 || geometry.perspectiveHorizontal != 0
+                else { return false }
+                geometry.perspectiveVertical = 0
+                geometry.perspectiveHorizontal = 0
+                return true
+            }
+
         case .rotation:
             // 旋转: back to 0° **by turning the rect back with it** — `GeometryGroup.turn` is the only
             // place that knows a quarter turn also rewrites the crop rect and inverts the lock, so

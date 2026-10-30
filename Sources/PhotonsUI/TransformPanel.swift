@@ -169,7 +169,7 @@ extension InspectorView {
     @ViewBuilder
     private func cropPerspectiveSection() -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-            CropSectionHeader(title: "透视", isFirst: false, reset: {
+            CropSectionHeader(title: CropSection.perspective.title, isFirst: false, reset: {
                 session.applyEdit {
                     $0.geometry.perspectiveVertical = 0
                     $0.geometry.perspectiveHorizontal = 0
@@ -282,6 +282,7 @@ extension InspectorView {
 public enum CropSection: String, CaseIterable, Sendable, Hashable {
     case crop
     case angle
+    case perspective
     case rotation
     case mirror
 
@@ -291,13 +292,16 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         // `InspectorView.Section.crop.title` and is not this enum, so it does not move with this.
         case .crop: return "宽高比"
         case .angle: return "角度"
+        // 183: 透视 — the two keystone knobs. It is a first-class section (not a bare header inside
+        // the panel) so that "nothing else calls itself a section" (082 §4) stays checkable.
+        case .perspective: return "透视"
         case .rotation: return "旋转"
         case .mirror: return "镜像"
         }
     }
 
-    /// The order they are stacked in, top to bottom (all four, across both cards).
-    public static var displayOrder: [CropSection] { [.crop, .angle, .rotation, .mirror] }
+    /// The order they are stacked in, top to bottom (all five, across both cards).
+    public static var displayOrder: [CropSection] { [.crop, .angle, .perspective, .rotation, .mirror] }
 
     /// 087: the second card's three sections, in the user's order.
     public static var angleCardOrder: [CropSection] { [.angle, .rotation, .mirror] }

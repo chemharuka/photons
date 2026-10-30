@@ -181,8 +181,12 @@ final class CacheVersionTests: XCTestCase {
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         XCTAssertEqual(StageAlgorithmVersion.curve, 2,
                        "137: inverted curves render the descending table instead of the identity")
+        // 183: the keystone knobs are a 3×3 homography inside S0, so the same crop now draws
+        // different pixels — the geometry stage moves to generation 2.
+        XCTAssertEqual(StageAlgorithmVersion.geometry, 2,
+                       "183: perspective is a homography in S0")
         // …and the ones that did not, so a bump stays a statement about one stage.
-        for stage in [RenderStage.geometry, .color, .grain, .display] {
+        for stage in [RenderStage.color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
                            "\(stage.rawValue) did not change and must not be re-versioned")
         }

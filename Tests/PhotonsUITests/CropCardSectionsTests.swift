@@ -56,8 +56,8 @@ final class CropCardSectionsTests: XCTestCase {
         // The enum is the one spelling, and its order is the stacked order.
         XCTAssertEqual(InspectorView.Section.angle.title, "旋转", "123: 第二张卡的卡名是「旋转」")
         XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"])
-        XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "rotation", "mirror"])
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "perspective", "rotation", "mirror"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
         XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
 
         // …and the panel really drew its headers in that order, top to bottom. 122 A (user 2026-10-29):
@@ -73,7 +73,9 @@ final class CropCardSectionsTests: XCTestCase {
             drawn.append((section.title, rect))
             print("082 §4 · 小标题「\(section.title)」 \(NSStringFromRect(rect))")
         }
-        XCTAssertEqual(drawn.map(\.title), ["宽高比", "旋转", "镜像"])
+        // 183: 透视 是第五个分区（宽高比 / 角度 / 透视 / 旋转 / 镜像），它走 `CropSection` 而不是
+        // 面板里硬写的小标题 —— 这条断言就是"其他东西不许自称分区"（082 §4）的执行点。
+        XCTAssertEqual(drawn.map(\.title), ["宽高比", "透视", "旋转", "镜像"])
         for (a, b) in zip(drawn, drawn.dropFirst()) {
             XCTAssertGreaterThan(b.rect.minY, a.rect.minY,
                                  "082 §4: 「\(b.title)」必须在「\(a.title)」下面")
@@ -81,8 +83,8 @@ final class CropCardSectionsTests: XCTestCase {
         // Nothing else calls itself a section.
         let allSectionProbes = panel.probes.filter { $0.rowID.hasPrefix("section.") }
         // 122 A: 角度 has no header of its own any more (the card itself is 「旋转」).
-        XCTAssertEqual(allSectionProbes.count, 3,
-                       "082 §4: 三个分区小标题，多出来的是 \(allSectionProbes.map(\.rowID))")
+        XCTAssertEqual(allSectionProbes.count, 4,
+                       "082 §4: 四个分区小标题（角度没有自己的小标题），多出来的是 \(allSectionProbes.map(\.rowID))")
     }
 
     /// 244 pt of content: every row has a real width, nothing leaves the card, the section gaps are
