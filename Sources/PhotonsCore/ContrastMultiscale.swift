@@ -24,10 +24,15 @@ import Foundation
 /// `W_m`/`W_f` carry the slider: `W = t · w`, `t = contrast/100`, so `contrast = 0` is exactly the
 /// identity (`2^0 = 1`) and the stage at +100 multiplies the mid/fine residuals by `w` in EV. The
 /// display-domain log amplitude of a scene is about a quarter of the scene-linear one (a tone-mapped
-/// frame spans ~2.3 EV where the scene spans 4+), so `w` is ~4× 098's band gains. The guided
-/// filter's ε thresholds are in squared log2 units and therefore scale by 1/16; the gradient gate is
-/// in log2-per-texel and scales by 4. Those three numbers are what makes the same slider produce the
-/// same local detail in the new domain (A4 of 159).
+/// frame spans ~2.3 EV where the scene spans 4+), so a pure ×4 on 098's band travels is the *floor*:
+/// the shipped pair is ×15 (`0.50 → 7.50`, `0.25 → 3.75`), because the display-domain ε (0.80/0.32)
+/// leaves a much larger fraction of the window's variance in the residual than 098's 0.010/0.004 did,
+/// and the weight has to grow with the residual it has to move. The ε thresholds are squared log2
+/// units and are ×80 098's (0.010/0.004 → 0.80/0.32), which is the "keep the residual" half of the
+/// same rule; the gradient gate is log2-per-texel and is *not* on that rule (0.015/0.06 → 0.05/2.00,
+/// see `gateLo`). Those numbers are what make the same slider produce the same local detail in the
+/// new domain — A4/A5 of 159 pin them, `testA4StepEdgeResponseIsConfinedAndDoesNotRing` /
+/// `testA5CoarseGradientIsUntouchedAndBothBandsExpand` re-take the measurement.
 ///
 /// The gain is a single scalar applied to all three channels, so every chroma ratio (`R/Y`, `G/Y`,
 /// `B/Y`) — and therefore hue and saturation — is preserved exactly.
@@ -57,11 +62,18 @@ public enum MultiscaleContrast {
     public static let midEpsilon: Double = 0.32
 
     /// Full-scale mid-band travel, in EV per EV of display log residual. 098's `k_m` was
-    /// `2^(0.5·t)`, i.e. 1.414 at +100 in the scene-linear coordinate; the display coordinate is
-    /// ~1/4 as wide, so 3·0.5 ≈ 1.5 reproduces the same EV travel.
+    /// `2^(0.5·t)`, i.e. **0.50 EV of travel at +100** in the scene-linear coordinate. The display
+    /// log is ~1/4 as wide, so 0.50 × 4 = 2.00 is where equal-EV travel would put it; that is only
+    /// the floor, because the residual this weight acts on is *smaller* here: with ε = 0.80 the
+    /// guided filter keeps a far bigger fraction of the window than 098's 0.010 did, so `B_m` — the
+    /// band the mid weight multiplies — is a quarter of the band, not half of it. 0.50 × 15 = 7.50
+    /// is the travel that reproduces 098's *visible* mid-band response; A4/A5 of 159 measure that
+    /// response (mid- and fine-scale detail must expand, a coarse-only gradient must not move).
     public static let midWeight: Double = 7.50
-    /// Full-scale fine-band travel. 098's fine cap (a quarter of the coarse travel) is kept: the fine
-    /// band overlaps S3.9's 清晰度, so it must not become a second clarity. 3·0.25 = 0.75.
+    /// Full-scale fine-band travel. 098's band ratio is kept exactly: its fine travel was 0.25 to a
+    /// 0.50 mid, i.e. **half** the mid band, and 7.50 / 2 = 3.75 carries that 2:1 ratio through the
+    /// ×15 above. The fine band overlaps S3.9's 清晰度, so it must not become a second clarity —
+    /// that is why the cap is half the mid rather than equal to it.
     public static let fineWeight: Double = 3.75
     /// 098's coarse *level* term (`k_c·(B_c − P)`) is **gone**: a gain anchored to an absolute level
     /// is exactly what made exposure and contrast non-commutative (142). Kept as a named zero so a
@@ -70,7 +82,13 @@ public enum MultiscaleContrast {
 
     /// The gradient gate's knees, in **display log2 luma per 1/q texel**. 098's 0.015/0.06 measured
     /// the scene log; the display log is 1/4 as wide, so the same *relative* knee is 4× larger here
-    /// (0.06/0.24) — the opposite of dividing, which would shut the gate over ordinary texture.
+    /// — 0.06/0.24, not 0.06/4 — because dividing would shut the gate over ordinary texture. That
+    /// ×4 is still the floor: the gate reads the gradient of the *window mean* in the q domain, and a
+    /// real display step (A4's 0.06 → 0.50 linear = 3 EV) is ~0.8 per texel after the q = 4 block
+    /// mean, i.e. **above 0.24** — a 0.24 upper knee would close the gate on exactly the edges the
+    /// decomposition is supposed to leave alone. The shipped pair is 0.05/2.00: closed only for a
+    /// jump of a full 2 stops per texel, so this is the one number in the block that is not the ×4
+    /// rule, and the reason is the gate's input, not the domain width.
     public static let gateLo: Double = 0.05
     public static let gateHi: Double = 2.00
 
