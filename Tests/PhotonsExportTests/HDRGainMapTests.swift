@@ -124,7 +124,7 @@ final class HDRGainMapTests: XCTestCase {
 
     // MARK: - 2. the preset
 
-    func testHDRIsHEICOnlyAndRoundTripsThroughThePresetFile() throws {
+    func testHDRGainMapRoundTripsAndJPEGIsAllowedButPNGIsNot() throws {
         let hdr = HDRExport(enabled: true, gainMap: .apple, halfSize: true,
                             headroom: .manual(3.5))
         let preset = ExportPreset(format: .heic, colorSpace: .displayP3, hdr: hdr)
@@ -132,8 +132,11 @@ final class HDRGainMapTests: XCTestCase {
         let back = try ExportPreset.load(from: try writePreset(preset))
         XCTAssertEqual(back, preset)
 
-        XCTAssertThrowsError(try ExportPreset(format: .jpeg, hdr: hdr).validated()) { error in
-            XCTAssertTrue("\(error)".contains("HEIC"))
+        // 163 — JPEG carries a gain map (ISO and Apple both measured writable).
+        XCTAssertNoThrow(try ExportPreset(format: .jpeg, hdr: hdr).validated())
+        // TIFF/PNG have no auxiliary-image container, so the same request is still an error.
+        XCTAssertThrowsError(try ExportPreset(format: .png, hdr: hdr).validated()) { error in
+            XCTAssertTrue("\(error)".contains("PNG"))
         }
         XCTAssertThrowsError(try ExportPreset(format: .heic,
                                              hdr: HDRExport(headroom: .manual(1.0))).validated())
@@ -156,7 +159,8 @@ final class HDRGainMapTests: XCTestCase {
         let (sdr, linear) = try renderPair(value: 4)
         let url = tempURL("iso.heic")
         let result = try GainMapHEIC.write(sdr: sdr, linear: linear, to: url,
-                                           options: HDRGainMapOptions(gainMap: .iso, quality: 1.0))
+                                           options: HDRGainMapOptions(gainMap: .iso, halfSize: false,
+                                                                      quality: 1.0))
         XCTAssertTrue(result.isHDR)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         // ImageIO transcodes the RGB aux to a 4:2:0 HEVC item; what the container carries is the
@@ -203,6 +207,49 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(psnr, 40, "half-size ISO reconstruction PSNR \(psnr) dB")
     }
 
+    /// 163 §1.1 — the *default* export (no explicit `halfSize`) is a half-size map. The default was
+    /// full size before 163; this test reads the written item back so the default cannot drift.
+    @available(macOS 15.0, *)
+    func testDefaultGainMapIsHalfSizeAndCanStillBeFullSize() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let base = sdr.withLinear(linear)
+
+        let defaults = tempURL("default-half.heic")
+        try Exporter.write(base, to: defaults,
+                           options: ExportOptions(format: .heic, quality: 1.0, bitDepth: 8,
+                                                  hdr: HDRExport(kind: .gainMap, gainMap: .iso)))
+        let defaultAux = try auxInfo(defaults, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let defaultDescription = try XCTUnwrap(
+            defaultAux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(defaultDescription["Width"]), (sdr.width + 1) / 2)
+        XCTAssertEqual(intValue(defaultDescription["Height"]), (sdr.height + 1) / 2)
+
+        let full = tempURL("explicit-full.heic")
+        try Exporter.write(base, to: full,
+                           options: ExportOptions(format: .heic, quality: 1.0, bitDepth: 8,
+                                                  hdr: HDRExport(kind: .gainMap, gainMap: .iso,
+                                                                 halfSize: false)))
+        let fullAux = try auxInfo(full, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let fullDescription = try XCTUnwrap(
+            fullAux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(fullDescription["Width"]), sdr.width)
+        XCTAssertEqual(intValue(fullDescription["Height"]), sdr.height)
+    }
+
+    /// 163 §1.1 — an odd edge rounds **up** (`ceil(base / 2)`), not down. Checked on the pixel buffer
+    /// directly because HEIF's 4:2:0 auxiliary item may pad odd sizes.
+    func testHalfSizeUsesCeilForOddDimensions() throws {
+        let (sdr, linear) = try renderPair(value: 4, w: 95, h: 63)
+        let map = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
+                                    mode: .iso, halfSize: true)
+        XCTAssertEqual(map.width, 48)
+        XCTAssertEqual(map.height, 32)
+        let full = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
+                                     mode: .iso, halfSize: false)
+        XCTAssertEqual(full.width, 95)
+        XCTAssertEqual(full.height, 63)
+    }
+
     @available(macOS 15.0, *)
     func testISOMonoMapIsOneComponent() throws {
         let (sdr, linear) = try renderPair(value: 4)
@@ -223,7 +270,8 @@ final class HDRGainMapTests: XCTestCase {
         let (sdr, linear) = try renderPair(value: 4, gray: true)
         let url = tempURL("apple.heic")
         let result = try GainMapHEIC.write(sdr: sdr, linear: linear, to: url,
-                                           options: HDRGainMapOptions(gainMap: .apple, quality: 1.0))
+                                           options: HDRGainMapOptions(gainMap: .apple, halfSize: false,
+                                                                      quality: 1.0))
         XCTAssertTrue(result.isHDR)
         // toGainMapHDR's `-g` spelling carries the headroom in **MakerNote 33/48**, not in a `tmap`
         // item (measured on its own `bin/toGainMapHDR -g` output: HDRGainMap aux + MakerApple,
@@ -248,7 +296,116 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(psnr, 40, "Apple reconstruction PSNR \(psnr) dB")
     }
 
-    // MARK: - 5. SDR fallback
+    // MARK: - 5. JPEG gain maps (163)
+
+    /// 163 §1.2 — ISO gain map in a JPEG, written through the same `Exporter.write` door the app uses.
+    @available(macOS 15.0, *)
+    func testJPEGISOGainMapIsWrittenAndReadsBackAsHDR() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("iso.jpg")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .jpeg, quality: 1.0, bitDepth: 8,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .iso, halfSize: true)))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil) as? [CFString: Any])
+        XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 8)
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2,
+                       "163: the default half-size map reaches JPEG too")
+        XCTAssertEqual(intValue(description["PixelFormat"]),
+                       Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// 163 §1.2 — Apple's spelling: Core Image's JPEG representation + MakerApple 33/48.
+    func testJPEGAppleGainMapCarriesMakerNoteAndHeadroom() throws {
+        let (sdr, linear) = try renderPair(value: 4, gray: true)
+        let url = tempURL("apple.jpg")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .jpeg, quality: 1.0, bitDepth: 8,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .apple, halfSize: true)))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil) as? [String: Any])
+        let maker = try XCTUnwrap(props[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any])
+        XCTAssertNotNil(maker["33"])
+        XCTAssertNotNil(maker["48"])
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeHDRGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// 163 §1.2 / G2 — HDR off is the pre-163 JPEG encoder, byte for byte.
+    func testDisabledJPEGHDRIsTheOldEncoderByteForByte() throws {
+        let (sdr, _) = try renderPair(value: 4)
+        var options = ExportOptions(format: .jpeg, quality: 0.8, bitDepth: 8)
+        let plain = tempURL("plain.jpg")
+        try Exporter.write(sdr, to: plain, options: options)
+
+        options.hdr = HDRExport(enabled: false)
+        let disabled = tempURL("disabled.jpg")
+        try Exporter.write(sdr.withLinear(nil), to: disabled, options: options)
+
+        XCTAssertEqual(try Data(contentsOf: plain), try Data(contentsOf: disabled))
+    }
+
+    // MARK: - 6. AVIF gain maps (163 §1.4)
+
+    /// ISO's auxiliary image works in AVIF exactly as it does in HEIC (probe: finalize true,
+    /// contentHeadroom 4.00). The 10-bit base is kept.
+    @available(macOS 15.0, *)
+    func testAVIFISOGainMapIsWrittenAndReadsBackAsHDR() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("iso.avif")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .avif, quality: 0.99, bitDepth: 10,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .iso, halfSize: true)))
+        let depth = (try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil)
+            as? [CFString: Any])[kCGImagePropertyDepth] as? NSNumber)?.intValue
+        XCTAssertEqual(depth, 10, "a gain map must not cost AVIF its 10-bit base")
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// Apple's spelling is stored but reads back as SDR in AVIF (probe: headroom 1.00). The writer
+    /// falls back to ISO and says so — it must not write an SDR file labelled as HDR.
+    @available(macOS 15.0, *)
+    func testAVIFAppleGainMapFallsBackToISOWithAWarning() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("apple.avif")
+        let warnings = try Exporter.write(
+            sdr.withLinear(linear), to: url,
+            options: ExportOptions(
+                format: .avif, quality: 0.99, bitDepth: 10,
+                hdr: HDRExport(kind: .gainMap, gainMap: .apple, halfSize: true)))
+        XCTAssertTrue(warnings.contains { $0.contains("AVIF") && $0.contains("ISO") },
+                      "\(warnings)")
+        XCTAssertNotNil(CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0,
+            kCGImageAuxiliaryDataTypeISOGainMap))
+        XCTAssertNil(CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0,
+            kCGImageAuxiliaryDataTypeHDRGainMap))
+        XCTAssertGreaterThan(try XCTUnwrap(GainMapHEIC.readHeadroom(at: url)), 1.05)
+    }
+
+    // MARK: - 7. SDR fallback
 
     @available(macOS 15.0, *)
     func testAnSDRSourceFallsBackToAPlainHEICWithAWarning() throws {

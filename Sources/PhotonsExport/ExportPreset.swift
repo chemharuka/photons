@@ -114,6 +114,7 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
     case badHDRKind(ExportFormat, HDRKind)
+    case hdrNeedsBitDepth(ExportFormat, HDRKind, Int, Int)
     case hdrGainMapNeedsMacOS15(String)
     case badHDRHeadroom(Double)
     case emptyNameTemplate
@@ -139,10 +140,13 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             let allowed = format.hdrKinds.map(\.rawValue).joined(separator: ", ")
             if kind == .gainMap {
                 return "\(format.rawValue.uppercased()) cannot carry a gain map "
-                    + "(HDR gain maps need HEIC or AVIF); allowed HDR kinds: \(allowed)"
+                    + "(HDR gain maps need HEIC, JPEG or AVIF); allowed HDR kinds: \(allowed)"
             }
             return "\(format.rawValue.uppercased()) cannot carry HDR kind '\(kind.rawValue)' "
                 + "(allowed: \(allowed))"
+        case .hdrNeedsBitDepth(let format, let kind, let got, let want):
+            return "\(format.rawValue.uppercased()) \(kind.displayName) needs \(want)-bit "
+                + "(got \(got)-bit) — pick \(want)-bit or a different HDR kind"
         case .hdrGainMapNeedsMacOS15(let g):
             return "\(g) gain maps need macOS 15 (ImageIO's ISOGainMap); pick Apple for macOS 14"
         case .badHDRHeadroom(let h):
@@ -224,7 +228,9 @@ public struct HDRExport: Sendable, Codable, Equatable {
     /// `.gainMap` (or `.none`), so an old preset keeps exporting the picture it always did.
     public var kind: HDRKind
     public var gainMap: GainMap
-    /// Half-size gain map (`-H` in toGainMapHDR). The SDR base is never resized.
+    /// Half-size gain map (`-H` in toGainMapHDR). **Default on** (163): the gain map is a smooth
+    /// ratio field, so halving its edge costs almost nothing visually and quarters its bytes. The SDR
+    /// base is never resized. The width/height are `ceil(base / 2)`.
     public var halfSize: Bool
     public var headroom: Headroom
 
@@ -255,7 +261,7 @@ public struct HDRExport: Sendable, Codable, Equatable {
 
     public init(enabled: Bool = true, kind: HDRKind? = nil,
                 gainMap: GainMap = HDRExport.defaultGainMap,
-                halfSize: Bool = false, headroom: Headroom = .auto) {
+                halfSize: Bool = true, headroom: Headroom = .auto) {
         self.kind = kind ?? (enabled ? .gainMap : .none)
         self.gainMap = gainMap
         self.halfSize = halfSize
@@ -275,7 +281,9 @@ public struct HDRExport: Sendable, Codable, Equatable {
         self.kind = rawKind ?? (enabled ? .gainMap : .none)
         self.gainMap = try c.decodeIfPresent(GainMap.self, forKey: .gainMap)
             ?? HDRExport.defaultGainMap
-        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? false
+        // 163 — a preset that never carried `halfSize` takes the new default (half size); an explicit
+        // `false` from the old UI still means full size, so a user's choice is never rewritten.
+        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? true
         self.headroom = try c.decodeIfPresent(Headroom.self, forKey: .headroom) ?? .auto
     }
 
@@ -534,6 +542,11 @@ public struct ExportPreset: Sendable, Equatable {
         if let hdr, hdr.enabled {
             guard format.supports(hdr.kind) else {
                 throw ExportPresetError.badHDRKind(format, hdr.kind)
+            }
+            if let required = format.hdrTransferBitDepth(for: hdr.kind), bitDepth != required {
+                // 163 §1.3 — never coerce here: a 8-bit PNG + PQ is a preset the user (or a stale
+                // file) asked for, and the sheet's own writer is the only place that may lock it.
+                throw ExportPresetError.hdrNeedsBitDepth(format, hdr.kind, bitDepth, required)
             }
             if hdr.kind == .gainMap {
                 if case .manual(let h) = hdr.headroom, h < 1.05 {
