@@ -60,7 +60,8 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
         case .detail: return []
         // 2026-10-28: the Effects card is three stages — S3.8 (纹理/清晰度/去雾), S3c (vignette) and
         // S3.7 (grain), in pipeline order.
-        case .effects: return [.detailFX, .vignette, .grain]
+        // 185: 细节 owns S3.9 **and** S3.10 (自研锐化) — two stages, both drawn on that card.
+        case .effects: return [.detailFX, .sharpen, .vignette, .grain]
         case .geometry: return [.geometry]
         case .masks: return [.maskAtlas, .localApply, .localColor]
         // 2026-10-28 (078 P0-1): one stage — S1.9.

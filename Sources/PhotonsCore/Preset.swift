@@ -202,7 +202,11 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
             case .detail: out.detail = edit.detail
-            case .effects: out.effects = edit.effects
+            case .effects:
+                out.effects = edit.effects
+                // 185: 自研锐化 is stored in its own group but belongs to the 细节 card, whose storage
+                // group this is (the 164 `texture`/`clarity` rule) — a 细节 preset must carry it.
+                out.sharpen = edit.sharpen
             }
         }
         out.masks = []
@@ -232,7 +236,9 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
             case .detail: out.detail = edit.detail
-            case .effects: out.effects = edit.effects
+            case .effects:
+                out.effects = edit.effects
+                out.sharpen = edit.sharpen
             }
         }
         return out

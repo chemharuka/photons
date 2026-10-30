@@ -955,6 +955,17 @@ private struct DetailFXParamsU {
     var h: SIMD4<Int32>
 }
 
+/// Mirror of `Kernels/s3_10_sharpen.metal`, byte for byte (185). Six `float4`/`int4`, i.e. 96 bytes:
+/// the layout the five passes all read.
+private struct SharpenParams {
+    var a: SIMD4<Float>   // amount (0…1.5) · radius σ (px) · detail (0…1) · masking (0…1)
+    var b: SIMD4<Int32>   // canvasW · canvasH · q (block) · useFine
+    var c: SIMD4<Int32>   // qW · qH · contentOriginX · contentOriginY
+    var d: SIMD4<Int32>   // contentW · contentH · 0 · 0
+    var e: SIMD4<Float>   // luma weights · mask knee g0
+    var f: SIMD4<Float>   // mask knee g1 · allowance (codes) · 0 · 0
+}
+
 /// Mirror of `Kernels/s3_9_denoise.metal`, byte for byte (171). The three passes (sigma, splat,
 /// blur) read different fields of the same object, exactly like `DetailFXParamsU`.
 private struct DenoiseParamsU {
@@ -3543,6 +3554,12 @@ public final class RenderGraph {
             // a subset of the mid one. 去雾 is S1.9 now (117).
             try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan, table: table)
 
+        case .sharpen:
+            // S3.10 — 自研锐化 (185). Encoded **only** when `sharpAmount > 0`
+            // (`RenderStage.pipeline(hasSharpen:)`), so a document at 0 has no pass to be neutral in
+            // and its frame, trace and key chain are the pre-185 ones byte for byte.
+            try encodeSharpen(cb: cb, into: out, from: src, edit: edit, plan: plan)
+
         case .dehaze:
             // S1.9 — 117: 去雾 in the scene-linear domain. Encoded **only** when `effects.dehaze != 0`
             // (`RenderStage.pipeline(hasDehaze:)`), so a neutral document has no pass to be neutral in.
@@ -4099,6 +4116,186 @@ public final class RenderGraph {
         dispatchSegments(e1, qW: qW, qH: qH)
         e1.endEncoding()
     }
+
+    // MARK: - S3.10 自研锐化 (185)
+    //
+    // Five encodes, of which two are conditional on 细节:
+    //
+    //   · `s3_10_sharpen_pack`   — one texel per 4×4 block: (lo, hi) of the luma. The limiter's window.
+    //   · `s3_10_sharpen_luma`   — the luma plane, once. Every blur tap after this is one 32-bit read.
+    //   · `s3_10_sharpen_blur_h` — both scales in one dispatch (the taps are shared).
+    //   · `s3_10_sharpen_blur_v` — both scales, vertically.
+    //   · `s3_10_sharpen_apply`  — the USM, the mask (from the wide plane's gradient) and the limiter.
+    //
+    // A 细节 of 0 skips the fine plane's accumulation entirely (the kernel's `p.b.w` guard): the band's
+    // weight is exactly zero, so the numbers would be thrown away.
+    private static let sharpenBlock = 4
+
+    /// The stage. Reads the display-referred image S3.9 produced and writes the sharpened one.
+    private func encodeSharpen(cb: MTLCommandBuffer, into out: MTLTexture,
+                               from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let q = RenderGraph.sharpenBlock
+        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+
+        // Clamped on the document's own ranges, so a hand-edited file cannot ask the kernel for a
+        // negative σ or a 20-code allowance.
+        let amount = Float(min(max(edit.sharpen.amount, 0), 150)) / 100
+        let radius = Float(min(max(edit.sharpen.radius, 0.5), 3.0))
+        let detail = Float(min(max(edit.sharpen.detail, 0), 100)) / 100
+        let masking = Float(min(max(edit.sharpen.masking, 0), 100)) / 100
+        // The fine plane is **always** built: the ≥ σ/2 px band is `G_fine − G_wide`, so 细节 = 0
+        // needs it exactly as much as 细节 = 100 does (it is the band that survives).
+        let usesFine = true
+
+        var params = SharpenParams(
+            a: SIMD4(amount, radius, detail, masking),
+            b: SIMD4(Int32(w), Int32(h), Int32(q), usesFine ? 1 : 0),
+            // The content rect, not the canvas: a sharpen is picture detail, and the letterbox must
+            // stay exactly 0 (派单 008 C's rule, the one S2/S3/S3.5/S3.9 carry).
+            c: SIMD4(Int32(qW), Int32(qH), Int32(plan.origin.x), Int32(plan.origin.y)),
+            d: SIMD4(Int32(plan.content.width), Int32(plan.content.height), 0, 0),
+            // `e.w`/`f.x` are the mask's knee: 0.02…0.08 luma per px. A 0.44 step reads 0.44 and opens
+            // the mask fully; the fixture's 2-code noise reads ~0.008 and does not open it at all,
+            // which is what makes `masking = 100` leave a flat area's noise alone to within ±2 %.
+            e: SIMD4(0.2126, 0.7152, 0.0722, 0.02),
+            // 8 codes: §3's 「amount = 100 时 4 px 边过冲 ≤ 8 码」 is this number, at full strength.
+            f: SIMD4(0.08, 8, 0, 0))
+
+        let bounds = try scratch("sharpen-bounds", width: qW, height: qH, format: .rgba16Float)
+        let lum = try scratch("sharpen-luma", width: w, height: h, format: .r32Float)
+        let hWide = try scratch("sharpen-hw", width: w, height: h, format: .r32Float)
+        let hFine = try scratch("sharpen-hf", width: w, height: h, format: .r32Float)
+        let wide = try scratch("sharpen-w", width: w, height: h, format: .r32Float)
+        let fine = try scratch("sharpen-f", width: w, height: h, format: .r32Float)
+
+        let pack = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_pack")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(pack)
+        e0.setTexture(src, index: 0)
+        e0.setTexture(bounds, index: 1)
+        e0.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(e0, pack, ImageSize(width: qW, height: qH))
+        e0.endEncoding()
+
+        let lumaPass = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_luma")
+        let el = try encoder(cb, lumaPass, in: src, out: lum)
+        el.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(el, lumaPass, ImageSize(width: w, height: h))
+        el.endEncoding()
+
+        let blurH = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_blur_h")
+        guard let eh = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        eh.setComputePipelineState(blurH)
+        eh.setTexture(lum, index: 0)
+        eh.setTexture(hWide, index: 1)
+        eh.setTexture(hFine, index: 2)
+        eh.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(eh, blurH, ImageSize(width: w, height: h))
+        eh.endEncoding()
+
+        let blurV = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_blur_v")
+        guard let ev = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        ev.setComputePipelineState(blurV)
+        ev.setTexture(hWide, index: 0)
+        ev.setTexture(hFine, index: 1)
+        ev.setTexture(wide, index: 2)
+        ev.setTexture(fine, index: 3)
+        ev.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatchSharpenTile(ev, ImageSize(width: w, height: h))
+        ev.endEncoding()
+
+        let apply = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_apply")
+        guard let ea = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        ea.setComputePipelineState(apply)
+        ea.setTexture(src, index: 0)
+        ea.setTexture(wide, index: 1)
+        // Without a fine plane the wide one is bound in its slot: `detail == 0` multiplies the fine
+        // band by exactly 0, so the value is never used — and never reads an uninitialised texture.
+        ea.setTexture(usesFine ? fine : wide, index: 2)
+        ea.setTexture(bounds, index: 3)
+        ea.setTexture(out, index: 4)
+        ea.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(ea, apply, plan.canvas)
+        ea.endEncoding()
+    }
+
+    /// 185 — **the ⌥ preview**: the `masking` mask itself, 0…1 as grey, computed from a canvas the
+    /// caller already holds.
+    ///
+    /// Deliberately **outside** the render graph's key chain, its stage cache and the document: no
+    /// `EditModel` field carries it, `RenderKeyChain.links` never sees it, and this function writes to a
+    /// scratch texture and reads it back. Holding ⌥ therefore cannot invalidate a cached frame, cannot
+    /// dirty a document and cannot change a history entry — it is a display, not an edit.
+    public func sharpenMaskPreview(from canvas: MTLTexture, edit: EditModel) throws -> DisplayImage {
+        let w = canvas.width, h = canvas.height
+        var params = SharpenParams(
+            a: SIMD4(0, Float(min(max(edit.sharpen.radius, 0.5), 3.0)), 0,
+                     Float(min(max(edit.sharpen.masking, 0), 100)) / 100),
+            b: SIMD4(Int32(w), Int32(h), Int32(RenderGraph.sharpenBlock), 0),
+            c: SIMD4(Int32(w), Int32(h), 0, 0),
+            d: SIMD4(Int32(w), Int32(h), 0, 0),
+            e: SIMD4(0.2126, 0.7152, 0.0722, 0.02),
+            f: SIMD4(0.08, 8, 0, 0))
+        let lum = try scratch("sharpen-preview-luma", width: w, height: h, format: .r32Float)
+        let hWide = try scratch("sharpen-preview-hw", width: w, height: h, format: .r32Float)
+        let hFine = try scratch("sharpen-preview-hf", width: w, height: h, format: .r32Float)
+        let wide = try scratch("sharpen-preview-w", width: w, height: h, format: .r32Float)
+        let fine = try scratch("sharpen-preview-f", width: w, height: h, format: .r32Float)
+        let mask = try scratch("sharpen-preview-mask", width: w, height: h, format: .rgba16Float)
+
+        guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
+        let lumaPass = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_luma")
+        let el = try encoder(cb, lumaPass, in: canvas, out: lum)
+        el.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(el, lumaPass, ImageSize(width: w, height: h))
+        el.endEncoding()
+
+        let blurH = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_blur_h")
+        guard let eh = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        eh.setComputePipelineState(blurH)
+        eh.setTexture(lum, index: 0)
+        eh.setTexture(hWide, index: 1)
+        eh.setTexture(hFine, index: 2)
+        eh.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(eh, blurH, ImageSize(width: w, height: h))
+        eh.endEncoding()
+
+        let blurV = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_blur_v")
+        guard let ev = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        ev.setComputePipelineState(blurV)
+        ev.setTexture(hWide, index: 0)
+        ev.setTexture(hFine, index: 1)
+        ev.setTexture(wide, index: 2)
+        ev.setTexture(fine, index: 3)
+        ev.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatchSharpenTile(ev, ImageSize(width: w, height: h))
+        ev.endEncoding()
+
+        let maskPass = try kernels.pipeline(file: "s3_10_sharpen", function: "s3_10_sharpen_mask")
+        guard let em = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        em.setComputePipelineState(maskPass)
+        em.setTexture(wide, index: 0)
+        em.setTexture(mask, index: 1)
+        em.setBytes(&params, length: MemoryLayout<SharpenParams>.stride, index: 0)
+        dispatch(em, maskPass, ImageSize(width: w, height: h))
+        em.endEncoding()
+
+        cb.commit()
+        cb.waitUntilCompleted()
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        mask.getBytes(&rgba, bytesPerRow: w * 8, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        return DisplayImage(width: w, height: h, rgba: rgba, primaries: .sRGB, bitDepth: 8)
+    }
+
+/// The contact sheet's `32 × 8` tile for the S3.10 vertical blur — the same shape the kernel declares
+/// (`S3_10_TILE_W`/`S3_10_TILE_H`), and the reason that pass touches the frame once and not once per
+/// tap.
+private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageSize) {
+    let w = size.width, h = size.height
+    enc.dispatchThreadgroups(MTLSize(width: (w + 31) / 32, height: (h + 7) / 8, depth: 1),
+                             threadsPerThreadgroup: MTLSize(width: 32, height: 8, depth: 1))
+}
 
     /// One thread per 32-texel segment, 32 threads per group — the `s1_7_mask_neighbourhood` dispatch,
     /// which is what lets a running sum/min walk a segment instead of a pixel.
@@ -5083,7 +5280,7 @@ public final class RenderGraph {
                          arrayLength: Int = 1, asArray: Bool = false) throws -> MTLTexture {
         let key = "\(label):\(width)x\(height):\(format.rawValue):\(arrayLength):\(asArray)"
         if let hit = scratchTextures[key] { return hit }
-        if scratchTextures.count > 16 { scratchTextures.removeAll() }
+        if scratchTextures.count > 64 { scratchTextures.removeAll() }
         let desc = MTLTextureDescriptor()
         // A one-slice array is still an array: binding a `type2D` texture where the kernel declares
         // `texture2d_array` is not an error Metal reports, it is an error it renders as zeros.
@@ -5108,7 +5305,7 @@ public final class RenderGraph {
                            format: MTLPixelFormat) throws -> MTLTexture {
         let key = "\(label):\(width)x\(height)x\(depth):\(format.rawValue):3d"
         if let hit = scratchTextures[key] { return hit }
-        if scratchTextures.count > 16 { scratchTextures.removeAll() }
+        if scratchTextures.count > 64 { scratchTextures.removeAll() }
         let desc = MTLTextureDescriptor()
         desc.textureType = .type3D
         desc.pixelFormat = format

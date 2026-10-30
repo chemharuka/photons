@@ -209,6 +209,12 @@ public enum StageAlgorithmVersion {
     /// content-aware source search — is what bumps this, because it changes the pixels of the same
     /// document without changing a stored number.
     public static let heal = 1
+    /// **1** — S3.10's first arithmetic (185, 自研锐化): an unsharp mask on the display-referred pixels
+    /// with a two-scale split (细节 weights the < σ/2 px band), a gradient-of-the-blur edge mask
+    /// (蒙版) and the block-range limiter that bounds the halo. Start at 1 when a stage is introduced;
+    /// the bump rule is the one every comment above spells out (the same stored numbers must produce
+    /// different pixels to move this number).
+    public static let sharpen = 1
     /// **3** — 134: the radius is normalised to half the **diagonal** (the corner is 1.0 at every
     /// aspect ratio), the contour is always circular (the `roundness` field is gone), and `midpoint`
     /// now spans centre → corner (`inner = mid/100`, was `mix(0.25, 1.05, …)` measured in half the
@@ -241,6 +247,7 @@ public enum StageAlgorithmVersion {
         case .pointColour: return pointColour
         case .grade: return grade
         case .detailFX: return detailFX
+        case .sharpen: return sharpen
         case .dehaze: return dehaze
         case .vignette: return vignette
         case .grain: return grain
