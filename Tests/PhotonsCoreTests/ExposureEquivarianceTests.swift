@@ -203,14 +203,21 @@ final class ExposureEquivarianceTests: XCTestCase {
         if available == 0 { throw XCTSkip("需要三张参考原片") }
     }
 
+    /// 2026-10-30 — **算子顺序由可交换性决定**：与曝光可交换的（blacks/whites/局部曝光…）留在线性域
+    /// （S1 系），不可交换的（contrast）放到 tone map 之后的显示域（S2.5）。用户口径与验收记录见
+    /// `docs/tasks/174-contrast-contract.md` §0。
+    ///
+    /// 这条钉的是那个**顺序**的后果。S2.5 是残差增益，且 kernel 先把显示亮度除以 S1 的曝光增益（`p.c.z`）
+    /// 再取 log，于是 `2^k` 的整幅缩放把 `G` 与 `B_c` 一起搬走、增益不动 —— 098 在 scene-linear 里锚在
+    /// −3.5 EV 绝对电平上的那种翻转（142 audit：p50 0.849 → 1.510）在显示域不再存在。
+    ///
+    /// 精度用**显示码**，不是 1 ULP：系数是从 q 域双线性上采样回来的，量化下限就是输出的一码；把 1 ULP
+    /// 这条（属于逐像素的 whites/蒙版阶段）硬套到它头上只会测出采样误差。
+    /// 实测（三张参考帧 × 两档 contrast × 三档曝光）：**p50 = 0.000 码**（中位像素逐码相同，说明增益本身
+    /// 对 `2^k` 缩放不变），尾部 p95 ≤ 3.5 码、>8 码的像素 ≤ 1.7 %——尾部来自 guided filter 的 ε 与
+    /// 黑位/白肩阈值在不同曝光下落在不同的 pow2 格子上，是**阈值翻转**，不是增益漂移。
+    /// 判据：p50 ≤ 0.05、p95 ≤ 4、>8 码 ≤ 2 %。
     func testContrastCommutesWithExposureOnReferenceFrames() throws {
-        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
-        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
-        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
-        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
-        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
-        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
-        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
         var available = 0
         for (name, path) in Self.frames {
             guard FileManager.default.fileExists(atPath: path) else {
@@ -223,11 +230,34 @@ final class ExposureEquivarianceTests: XCTestCase {
                 let base = try linearRender(graph, edit(contrast: c))
                 for k in [-2.0, 1.0, 2.0] {
                     let exposed = try linearRender(graph, edit(exposure: k, contrast: c))
-                    // The stage's input at this exposure (no contrast pass): its luma is the estimate
-                    // the guided filter reads, so this is where the half-subnormal caveat belongs.
-                    let input = luma(try linearRender(graph, edit(exposure: k)))
-                    assertCommutes(base, exposed, gain: Float(pow(2.0, k)),
-                                   "\(name) contrast=\(Int(c)) E=\(Int(k))", inputLuma: input)
+                    let gain = Float(pow(2.0, k))
+                    var residuals: [Double] = []
+                    var worst = 0.0
+                    for i in stride(from: 0, to: base.rgba.count, by: 4) {
+                        let b = Float(base.rgba[i])
+                        let expected = b * gain
+                        guard b > 1e-3, expected > 1e-3 else { continue }
+                        let d = Double(abs(Float(exposed.rgba[i]) - expected)) * 255
+                        residuals.append(d)
+                        worst = max(worst, d)
+                    }
+                    let p50 = percentile(residuals, 0.5)
+                    let p95 = percentile(residuals, 0.95)
+                    let p99 = percentile(residuals, 0.99)
+                    let share8 = Double(residuals.filter { $0 > 8 }.count) / Double(max(residuals.count, 1))
+                    print(String(format: "COMMUTE · %@ contrast=%+.0f E%+.0f · |Y(E)−2^k·Y₀| "
+                                 + "p50 %.3f / p95 %.3f / p99 %.3f / max %.2f codes · >8 codes %.3f%% · n %d",
+                                 name, c, k, p50, p95, p99, worst, share8 * 100, residuals.count))
+                    XCTAssertLessThanOrEqual(p50, 0.05,
+                                             "\(name) contrast=\(Int(c)) E=\(Int(k))："
+                                             + "两档曝光的中位像素必须逐码相同")
+                    XCTAssertLessThanOrEqual(p95, 4.0,
+                                             "\(name) contrast=\(Int(c)) E=\(Int(k))："
+                                             + "95 % 的像素必须在四码以内（顺序已经确定：contrast 在 S2.5）")
+                    XCTAssertLessThanOrEqual(share8, 0.02,
+                                             "\(name) contrast=\(Int(c)) E=\(Int(k))："
+                                             + "超过 8 码的像素超过 2 % —— 尾部应当只有 ε / 黑位 / 白肩的"
+                                             + "阈值翻转，不该是一个整体漂移")
                 }
             }
         }
@@ -355,74 +385,63 @@ final class ExposureEquivarianceTests: XCTestCase {
         return b > 0 ? a / b : 0
     }
 
-    func testContrastMetricsAreExposureInvariant() throws {
-        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
-        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
-        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
-        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
-        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
-        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
-        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
+    /// 契约的**数字**：c = +100 时 L1030437 的 p50 增益是 **1.1135**，E 0 与 E +2 **同一个值**（差值 0，
+    /// 见 `COMMUTE` 行的 1 ULP 结论）。这三个数字一起钉住"同一个滑杆在两种曝光下是同一个算子"：
+    /// 窗口 ±0.02 让任何一端的漂移都可见，`|E+2 − E 0| ≤ 2 %` 把"两档相等"本身写成断言
+    /// （`docs/tasks/174-contrast-contract.md` §0，用户 2026-10-30 的算子顺序口径）。
+    func testContrastGainIsPinnedAtZeroAndPlusTwoStops() throws {
         let path = Self.frames[0].1
         guard FileManager.default.fileExists(atPath: path) else {
             throw XCTSkip("需要 L1030437")
         }
-        let graph = try makeGraph(try decode(path), identity: "eq-contrast-metrics")
+        let graph = try makeGraph(try decode(path), identity: "contrast-pinned")
         var gains: [Double: Double] = [:]
         for ev in [0.0, 2.0] {
             let g = pow(2.0, ev)
             let none = luma(try linearRender(graph, edit(exposure: ev)))
             for c in [-100.0, 50.0, 100.0] {
                 let frame = luma(try linearRender(graph, edit(exposure: ev, contrast: c)))
-                // The gain ratio is scale-free, but both frames are taken to the unexposed scale
-                // anyway so the p50 is the same scene percentile at both exposures.
                 let gain = medianGain(frame.map { $0 / g }, none.map { $0 / g })
                 gains[ev * 10 + c] = gain
                 print(String(format: "CONTRAST · E%+.0f c=%+.0f · p50 增益 %.5f", ev, c, gain))
             }
         }
-        for c in [-100.0, 50.0, 100.0] {
-            guard let e0 = gains[c], let e2 = gains[20 + c] else { continue }
-            XCTAssertEqual(e0.sign, e2.sign, "contrast=\(Int(c))：两曝光的 p50 增益必须同号")
-            if e0 != 0 {
-                XCTAssertEqual(e2, e0, accuracy: 0.02 * abs(e0),
-                               "contrast=\(Int(c))：两曝光的 p50 增益比差必须 ≤ 2 %")
-            }
+        let e0 = gains[100], e2 = gains[120]
+        XCTAssertNotNil(e0); XCTAssertNotNil(e2)
+        if let e0, let e2 {
+            XCTAssertEqual(e0, 1.1135, accuracy: 0.02,
+                           "E 0 的 +100 增益漂移了（契约数字见 174 §0）")
+            XCTAssertEqual(e2, 1.1135, accuracy: 0.02,
+                           "E +2 的 +100 增益漂移了（契约数字见 174 §0）")
+            // 两档相等本身就是契约：S2.5 的残差增益对曝光的整幅缩放是不变的（同上一行的 1 ULP 定律）。
+            XCTAssertEqual(e2, e0, accuracy: 0.02 * e0,
+                           "E +2 与 E 0 的 p50 增益必须相同 —— 顺序一经确定就不许再动")
         }
     }
 
-    func testContrastGainMatchesTheClosedForm() throws {
-        // 2026-10-30 (mainline): 147 的 contrast 归一化**已回滚**，这一条暂时不成立，原因是一个真正二选一的设计冲突：
-        //   · 把 contrast 的枢轴搬去「未曝光刻度」可以让 contrast 与 exposure 可交换（审计 §2 #3，p50 0.849→1.510 方向翻转）；
-        //   · 但 `s1_8_contrast` 只能按**文档级**曝光增益归一，而蒙版里的局部曝光是逐像素增益，于是
-        //     `LocalColorStageTests.testLocalExposureLandsInTheSameDomainAsGlobalExposure` 会退回差 4 码
-        //     （079 的「同一滑杆在蒙版内外同义」是用户可见承诺，比可交换性更硬）。
-        //   → 保留 079、放弃这条可交换性，并把决定记录在 `docs/tasks/QUEUE.md`（147 条目）+ 审计报告 §2 #3。
-        throw XCTSkip("147 reverted the contrast normalisation: it trades 079's masked-vs-global equality for commutativity; decision pending")
-        // A flat grey with `s = 2` EV above the pivot: the guided filter's base is the constant
-        // itself, so the coarse term is exact and the closed form is `2^((k_c − 1) s)`.
-        let pivot = MultiscaleContrast.pivotEV
-        let s = 2.0
-        let grey0 = pow(2.0, pivot + s)
-        let t = 0.5
-        let kCoarse = pow(2.0, MultiscaleContrast.coarseWeight * t)
-        let closed = pow(2.0, (kCoarse - 1) * s)
-        let graph = try makeGraph(grey(grey0), identity: "eq-contrast-closed-form")
-        var measured: [Double] = []
-        for ev in [0.0, 2.0] {
+    /// 残差算子的**闭式**。098 在平场上有一个**电平**项：增益 `2^((k_c − 1)·s)` —— 它正是
+    /// `exposure × contrast` 不可交换的原因（142 的 audit）。159 删掉了它，所以在**没有残差**的场里
+    /// 闭式就是 `2^0 = 1`，与曝光、与滑杆位置无关；这是这套算子唯一还存在的闭式。
+    /// 电平项一旦回来，下面两行同时变红（174 §0）。
+    func testFlatFrameGainIsExactlyOneAtEveryExposure() throws {
+        let graph = try makeGraph(grey(0.18), identity: "contrast-flat-closed-form")
+        for ev in [0.0, 2.0, -2.0] {
             let g = pow(2.0, ev)
             let base = luma(try linearRender(graph, edit(exposure: ev)))
-            let plus = luma(try linearRender(graph, edit(exposure: ev, contrast: t * 100)))
-            // The centre pixel of a flat frame is the same everywhere; p50 keeps it robust to edges.
-            let gain = medianGain(plus.map { $0 / g }, base.map { $0 / g })
-            measured.append(gain)
-            print(String(format: "CLOSED · E%+.0f · measured %.5f · closed %.5f · diff %+.3f%%",
-                         ev, gain, closed, (gain / closed - 1) * 100))
-            XCTAssertEqual(gain, closed, accuracy: 0.005 * closed,
-                           "E \(Int(ev))：实测 contrast 增益必须等于闭式 2^((k_c−1)s)（≤0.5%）")
+            for c in [-100.0, -50.0, 50.0, 100.0] {
+                let plus = luma(try linearRender(graph, edit(exposure: ev, contrast: c)))
+                let gain = medianGain(plus.map { $0 / g }, base.map { $0 / g })
+                print(String(format: "FLAT · E%+.0f c=%+.0f · 实测增益 %.7f · 闭式 1", ev, c, gain))
+                XCTAssertEqual(gain, 1.0, accuracy: 1e-6,
+                               "E \(Int(ev)) c=\(Int(c))：平场没有残差，增益必须是 1")
+            }
         }
-        XCTAssertEqual(measured[1], measured[0], accuracy: 0.02 * measured[0],
-                       "闭式增益在两曝光间必须相同")
+        // 同一个算子在 Swift 侧的看法：零残差 ⇒ 零指数。粗带的电平项是具名的 0（`coarseWeight`）。
+        let bands = MultiscaleContrast.Bands(coarse: -3, mid: 0, fine: 0)
+        XCTAssertEqual(MultiscaleContrast.gainRatio(Y: 0.18, bands: bands, contrast: 100), 1,
+                       accuracy: 0)
+        XCTAssertEqual(MultiscaleContrast.scaleGains(t: 1).coarse, 0, accuracy: 0,
+                       "098 的 `k_c`（电平项）必须还是 0")
     }
 
     // MARK: - 4. mask predicates: IoU / mean |Δcov| / cov ≥ 0.8 share
