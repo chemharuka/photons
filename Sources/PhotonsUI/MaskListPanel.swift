@@ -60,10 +60,14 @@ public struct MaskListPanel: View {
             healSection
             if let mask = selectedMask {
                 maskSection(mask)
-                adjustmentsSection(mask)
+                // 2026-10-30（用户）：「亮度选择 / 色彩选择这些应该放在更加上方的位置」。
+                // 形状与它的选择控件（吸管、亮度范围条、颜色样本与范围）原来排在**最下面**，
+                // 用户以为功能没做。现在紧跟名称/类型，在 反转 / 混合 / 调整 之前：
+                // 先选「选哪块画面」，再调「这块画面对它做什么」。
+                shapeSection(for: mask)
                 // The brush numbers belong to a brush mask; a gradient's own parameters are below.
                 if selectedIsBrush { dividers }
-                shapeSection(for: mask)
+                adjustmentsSection(mask)
             }
         }
         .padding(.horizontal, WorkspaceLayout.cardInsetH)
@@ -398,8 +402,16 @@ public struct MaskListPanel: View {
     /// mask was sampled from, they are not a control.
     @ViewBuilder private func shapeParameters(for mask: Mask, component: Int,
                                               shape: MaskShape) -> some View {
-        if case .luminanceRange = shape {
+        if case .luminanceRange(let l0) = shape {
             maskEyedropperRow(.luminance)
+            // 2026-10-30（用户）：「新增功能放在最底下了」—— 范围条原来排在 下限/上限 数字行**下面**，
+            // 看起来像是附属物。它是这两个数字的可视化入口，应该紧跟吸管、在数字行**上面**：
+            // 先看范围（图形），再微调数值。
+            MaskRangeBar(shape: l0) { next, commit in
+                session.setMaskComponentShape(
+                    mask.id, component: component, shape: .luminanceRange(next),
+                    commit: commit, label: "亮度范围条", coalesce: false)
+            }
         }
         if case .depthRange = shape, !session.depthAvailable {
             // 120b — a missing measurement is not "everything selected". Say it in the section, not
@@ -421,14 +433,6 @@ public struct MaskListPanel: View {
         }
         ForEach(MaskShapeSliderRow.rows(for: shape), id: \.title) { row in
             shapeRow(row, for: mask, component: component, shape: shape)
-        }
-        // 139 ②: the bar sits under the 下限/上限 rows and edits the same two numbers.
-        if case .luminanceRange(let l) = shape {
-            MaskRangeBar(shape: l) { next, commit in
-                session.setMaskComponentShape(
-                    mask.id, component: component, shape: .luminanceRange(next),
-                    commit: commit, label: "亮度范围条", coalesce: false)
-            }
         }
     }
 

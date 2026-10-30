@@ -91,8 +91,13 @@ final class CopySheetLayoutTests: XCTestCase {
             }
         }
 
-        // Width is 3 × 260 + 2 × 24 = 828 of content, plus the two insets.
-        XCTAssertEqual(CopySettingsSheet.gridWidth, 828, accuracy: 0.001)
+        // Width is 3 × 200 + 2 × 24 = 648 of content, plus the two insets.
+        //
+        // 2026-10-30（用户）：「⌘C 进入复制窗口后，宽度太宽了，三行选单不用那么宽」——
+        // 列宽 260 → 200，这个断言跟着从 828 改到 648。不是放宽阈值，是规格变了：
+        // 用户认为三行选单不需要那么宽。行文字是否放得下由 `testNoTruncatedRows` 那类用例管，
+        // 这条只管列宽与总宽。
+        XCTAssertEqual(CopySettingsSheet.gridWidth, 648, accuracy: 0.001)
         XCTAssertEqual(panel.frame.width,
                        CopySettingsSheet.gridWidth + 2 * CopySettingsSheet.contentInset,
                        accuracy: 1)
