@@ -341,11 +341,20 @@ public enum BatchExporter {
             // 5. encode. Metadata travels with the first encode so the output's EXIF pixel size is
             //    the size we are actually writing (and 16-bit PNG keeps its depth: nothing re-encodes
             //    it afterwards).
+            var source = SourceMetadata.read(from: item.sourceURL)
+            if preset.removeLocation, var stripped = source {
+                // The EXIF GPS dictionary and the XMP mirrors travel separately; both go.
+                stripped.gps = [:]
+                if let xmp = stripped.xmp {
+                    stripped.xmp = XMPWriter.metadataWithoutLocation(xmp) ?? xmp
+                }
+                source = stripped
+            }
             let pngAt16 = preset.format == .png && preset.effectiveBitDepth == 16
             let embedsXMP = preset.metadataLevel == .all && preset.writeXMP
                 && item.edit != nil && preset.format.supportsXMPEmbedding && !pngAt16
             let metadata = ExportMetadataContext(level: preset.metadataLevel,
-                                                 source: SourceMetadata.read(from: item.sourceURL),
+                                                 source: source,
                                                  edit: item.edit,
                                                  author: item.author,
                                                  copyright: item.copyright,
@@ -407,37 +416,9 @@ public enum BatchExporter {
             return nil
         }
         let sidecar = url.deletingPathExtension().appendingPathExtension("xmp")
-        try XMPWriter.writeAtomically(copyrightPacket(author: author, rights: rights), to: sidecar)
+        let (data, _) = try XMPWriter.copyrightOnlyPacket(author: author, rights: rights)
+        try XMPWriter.writeAtomically(data, to: sidecar)
         return sidecar
-    }
-
-    private static func copyrightPacket(author: String?, rights: String?) -> Data {
-        func escape(_ s: String) -> String {
-            s.replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-                .replacingOccurrences(of: "\"", with: "&quot;")
-        }
-        var body = ""
-        if let author, !author.isEmpty {
-            body += "<dc:creator><rdf:Seq><rdf:li>\(escape(author))</rdf:li></rdf:Seq></dc:creator>\n"
-        }
-        if let rights, !rights.isEmpty {
-            body += "<dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">\(escape(rights))"
-                + "</rdf:li></rdf:Alt></dc:rights>\n"
-        }
-        let xml = """
-        <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
-        <x:xmpmeta xmlns:x="adobe:ns:meta/">
-         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-          <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
-        \(body)  </rdf:Description>
-         </rdf:RDF>
-        </x:xmpmeta>
-        <?xpacket end="w"?>
-
-        """
-        return Data(xml.utf8)
     }
 
     /// Embed into the exported copy where ImageIO can carry a packet (JPEG/HEIC/TIFF/PNG), sidecar
@@ -453,12 +434,15 @@ public enum BatchExporter {
             return nil
         }
         let pngAt16 = preset.format == .png && preset.effectiveBitDepth == 16
+        var context = XMPWriteContext()
+        context.policy = preset.metadataPolicy
+        context.removeLocation = preset.removeLocation
         if preset.format.supportsXMPEmbedding && !pngAt16 && XMPWriter.canEmbed(url) {
-            try XMPWriter.embed(edit, into: url)
+            try XMPWriter.embed(edit, into: url, context: context)
             return url
         }
         let sidecar = url.deletingPathExtension().appendingPathExtension("xmp")
-        try XMPWriter.writeSidecar(for: edit, to: sidecar)
+        try XMPWriter.writeSidecar(for: edit, to: sidecar, context: context)
         let why = pngAt16 ? "16-bit PNG is re-encoded by ImageIO's embed path"
                           : "\(preset.format.rawValue) cannot carry XMP"
         warnings.append("\(why) — wrote \(sidecar.lastPathComponent)")

@@ -1483,6 +1483,18 @@ public struct ExportSheetView: View {
                      : "由上面的档位决定，不能再单独开关")
                     .font(.system(size: 9)).foregroundStyle(.tertiary)
             }
+            HStack(spacing: 8) {
+                Toggle(isOn: $model.preset.removeLocation) {
+                    Text("移除位置信息").font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .disabled(model.phase == .running || model.preset.metadataPolicy == .none)
+                Spacer(minLength: 8)
+                Text("GPS 不写入导出（EXIF 与 XMP 两处）")
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
         } header: {
             sectionHeader("元数据")
         }
