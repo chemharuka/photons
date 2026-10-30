@@ -19,9 +19,10 @@ import PhotonsCore
 // MARK: - 修复画笔 (078 P0-1)
 //
 // The smallest panel that can drive S1.9, and no more: arm the tool, click the canvas, and a spot
-// lands at the click with its source one radius to the right (`HealSpot.defaultSourceOffset`). The
-// list below lets the user delete a spot and change its radius; there are **no drag handles** and no
-// hand-placed source point in this version, which is stated here rather than discovered.
+// lands at the click with its source automatically searched for (or, with auto source off, one
+// radius to the right — `HealSpot.defaultSourceOffset`). The list below lets the user delete a spot
+// and change its radius; there are **no drag handles** and no hand-placed source point in this
+// version, which is stated here rather than discovered.
 
 extension CatalogSession {
 
@@ -40,14 +41,20 @@ extension CatalogSession {
         guard framePoint.x >= 0, framePoint.x <= 1,
               framePoint.y >= 0, framePoint.y <= 1 else { return nil }
         let r = radius ?? healRadius
+        let source: HealSourceResult
+        if autoHealSource, let image = healFrameProvider?() {
+            source = HealSpot.searchSource(in: image, center: framePoint, radius: r)
+        } else {
+            source = .skipped(radius: r)
+        }
         let spot = HealSpot(center: framePoint, radius: r,
-                            sourceOffset: HealSpot.defaultSourceOffset(radius: r),
-                            mode: healMode)
+                            sourceOffset: source.offset, mode: healMode)
         var landed: HealSpot?
         applyEdit { landed = $0.addHealSpot(spot) }
         guard let landed else { return nil }
         commitEdit(label: "修复", coalesce: false)
         selectedHealSpotID = landed.id
+        setLastHealSource(source)
         return landed
     }
 

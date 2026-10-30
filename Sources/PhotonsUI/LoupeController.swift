@@ -1576,6 +1576,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         self.cropTool = CropToolController(session: session)
         super.init(nibName: nil, bundle: nil)
 
+        // 184: the heal source search reads the decoded, upright buffer. Installing the closure once
+        // (not per frame) keeps this out of the frame path; `decoded` is read when the user clicks.
+        session.healFrameProvider = { [weak self] in self?.decoded?.oriented() }
+
         // 045 × 039: the histogram's whole-picture source **is** the backdrop cache — same render,
         // two purposes. `nil` when no backdrop for the current document exists, and always digest
         // gated: measuring a frame rendered from another edit is worse than not updating at all.
