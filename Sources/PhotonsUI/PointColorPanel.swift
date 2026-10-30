@@ -28,8 +28,9 @@ public enum PointColorAxis: String, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// The window rows are degrees; the three adjustment rows keep the panel's ±100 travel (0.3° of
-    /// hue, a chroma multiplier and a stop of lightness, exactly like the HSL card).
+    /// The window rows are the card's 0…120 travel (158: they scale the YUV box around its perceptual
+    /// defaults); the three adjustment rows keep the panel's ±100 travel (0.3° of hue, a chroma
+    /// multiplier and a stop of lightness, exactly like the HSL card).
     public var range: ClosedRange<Double> {
         switch self {
         case .range, .feather: return 0 ... 120
@@ -87,13 +88,11 @@ extension PointColor {
 
 // MARK: - the sample command
 
-/// The dropper's write path, in one place: convert the decoded buffer sample to OKLCh hue/chroma,
-/// write the two sample fields, commit **one** history row.
+/// The dropper's write path, in one place: convert the decoded buffer sample to Rec.709 YCbCr, append
+/// one swatch, select it, and commit **one** history row.
 ///
-/// It never touches `hue`/`saturation`/`luminance`. That is the acceptance's “采样前后帧 SHA 不变（只有
-/// 参数变）”: with the three adjustments still at their defaults the document has no active S3.6b, so
-/// the sampled frame is the frame before the click. A later slider drag is the first edit that moves
-/// pixels.
+/// It never touches the three adjustment sliders. The sample alone is therefore not an active stage
+/// (S3.6b's `isActive` needs an adjustment too), so the sampled frame is the frame before the click.
 @MainActor
 public struct PointColorCommands {
     public let session: CatalogSession
@@ -102,24 +101,148 @@ public struct PointColorCommands {
         self.session = session
     }
 
-    /// Sample one decoded-RGB pixel. Returns `false` (and writes nothing) when the sample is exactly
-    /// the one already stored, so a stray click cannot mint an empty snapshot.
+    /// What one eyedropper click did. The caller turns this into the card's one-line status.
+    public enum SampleOutcome: Equatable, Sendable {
+        case appended(Int)
+        case rejectedLowChroma
+        case full
+    }
+
+    /// Sample one decoded-RGB pixel and **append** it. Returns `.rejectedLowChroma` (writing nothing)
+    /// when `hypot(U − 0.5, V − 0.5) < PointColor.chromaFloorYCbCr` — the user's "不能选择饱和度很
+    /// 淡的区域" rule. At eight swatches the UI refuses the ninth.
     @discardableResult
-    public func sample(_ rgb: RGBSample) -> Bool {
-        let lch = PointColor.sample(fromDecodedLinear: rgb)
-        var point = session.edit.color.point ?? PointColor()
-        guard point.sampleHue != lch.hue || point.sampleChroma != lch.chroma else { return false }
-        point.sampleHue = lch.hue
-        point.sampleChroma = lch.chroma
-        session.applyEdit { $0.color.point = point }
-        return session.commitEdit(label: "点颜色 取样", coalesce: false)
+    public func sample(_ rgb: RGBSample) -> SampleOutcome {
+        let yuv = PointColor.sampleYUV(fromDecodedLinear: rgb)
+        let swatch = PointColor(sampleY: yuv.x, sampleU: yuv.y, sampleV: yuv.z)
+        guard swatch.isSampled else { return .rejectedLowChroma }
+
+        var set = session.edit.color.point ?? PointColorSet()
+        guard let index = set.append(swatch) else { return .full }
+        session.applyEdit { $0.color.point = set }
+        session.commitEdit(label: "点颜色 取样", coalesce: false)
+        return .appended(index)
+    }
+
+    /// Switch which swatch the sliders edit. **No history row** (U5): selection moves no pixel.
+    @discardableResult
+    public func select(_ index: Int?) -> Bool {
+        guard var set = session.edit.color.point, !set.swatches.isEmpty else { return false }
+        let old = set.active
+        set.select(index)
+        guard set.active != old else { return false }
+        session.applyEdit { $0.color.point = set }
+        return true
+    }
+
+    /// Delete exactly one swatch (double-click). One history row; selecting the fallback is part of
+    /// the same row. Deleting the last swatch removes the optional entirely.
+    @discardableResult
+    public func delete(at index: Int) -> Bool {
+        guard var set = session.edit.color.point, set.remove(at: index) else { return false }
+        let next: PointColorSet? = set.swatches.isEmpty ? nil : set
+        session.applyEdit { $0.color.point = next }
+        session.commitEdit(label: "点颜色 删除色框", coalesce: false)
+        return true
+    }
+}
+
+// MARK: - the swatch strip (158)
+
+/// The horizontal strip: one box per swatch, the selected one outlined in the system accent, a small
+/// 1…8 index in each box's top-left corner, and the dropper at the end. With no swatches it shows one
+/// transparent dashed slot (未选择).
+///
+/// Click selects (sliders follow, no history); double-click deletes **that** swatch. The exclusive
+/// gesture means a double-click never also fires the single-click selection, so the fallback index is
+/// computed from the click that actually happened (U3).
+public struct PointColorSwatchStrip: View {
+    public let set: PointColorSet?
+    public let dropperArmed: Bool
+    public let onSelect: (Int) -> Void
+    public let onDelete: (Int) -> Void
+    public let onDropper: () -> Void
+
+    public init(set: PointColorSet?, dropperArmed: Bool,
+                onSelect: @escaping (Int) -> Void,
+                onDelete: @escaping (Int) -> Void,
+                onDropper: @escaping () -> Void) {
+        self.set = set
+        self.dropperArmed = dropperArmed
+        self.onSelect = onSelect
+        self.onDelete = onDelete
+        self.onDropper = onDropper
+    }
+
+    public var body: some View {
+        HStack(spacing: 5) {
+            if let set, !set.swatches.isEmpty {
+                ForEach(Array(set.swatches.enumerated()), id: \.offset) { item in
+                    box(item.element, index: item.offset,
+                        selected: set.active == item.offset)
+                        .gesture(
+                            TapGesture(count: 2)
+                                .onEnded { onDelete(item.offset) }
+                                .exclusively(before:
+                                    TapGesture(count: 1)
+                                        .onEnded { onSelect(item.offset) })
+                        )
+                }
+            } else {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.clear)
+                    .frame(width: 30, height: 18)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                            .foregroundStyle(.secondary.opacity(0.7))
+                    }
+                    .help("尚未取样")
+                    .accessibilityIdentifier("inspector.pointColor.emptySwatch")
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: onDropper) {
+                Image(systemName: "eyedropper")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .help("点颜色吸管：点击画布上要调的颜色（Esc 取消）")
+            .accessibilityIdentifier("inspector.pointColor.dropper")
+            .foregroundStyle(dropperArmed
+                             ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("inspector.pointColor.swatches")
+    }
+
+    private func box(_ swatch: PointColor, index: Int, selected: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(PointColorSwatchView.color(for: swatch))
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .strokeBorder(selected ? Color(nsColor: .controlAccentColor)
+                                       : Color.white.opacity(0.28),
+                              lineWidth: selected ? 2 : 0.75)
+            Text("\(index + 1)")
+                .font(.system(size: 7, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 2)
+                .padding(.vertical, 0.5)
+                .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 2))
+                .padding(1.5)
+        }
+        .frame(width: 30, height: 18)
+        .help(PointColorSwatchView.summary(swatch))
+        .accessibilityIdentifier("inspector.pointColor.swatch.\(index)")
     }
 }
 
 // MARK: - the swatch
 
-/// The one colour block on the card: the sampled hue/chroma at a fixed OKLCh lightness, rendered
-/// opaque so the user can see *which* colour the window is centred on.
+/// One colour block: the sampled hue/chroma at a fixed OKLCh lightness, rendered opaque so the user
+/// can see *which* colour a swatch is centred on.
 public struct PointColorSwatchView: View {
     public let point: PointColor?
 
@@ -130,7 +253,7 @@ public struct PointColorSwatchView: View {
     public var body: some View {
         RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(Self.color(for: point))
-            .frame(width: 30, height: 16)
+            .frame(width: 30, height: 18)
             .overlay {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
@@ -141,8 +264,8 @@ public struct PointColorSwatchView: View {
     }
 
     /// The swatch's sRGB components. The lightness is fixed: only the sample's **hue and chroma** are
-    /// stored, so the block has to choose a lightness to display them at. 0.72 keeps a dark red and a
-    /// bright red distinguishable without pretending the swatch is the photographed pixel.
+    /// displayed, so the block has to choose a lightness. 0.72 keeps a dark red and a bright red
+    /// distinguishable without pretending the swatch is the photographed pixel.
     public static func srgb(for point: PointColor) -> (r: Double, g: Double, b: Double) {
         let chroma = min(max(point.sampleChroma, 0), 0.4)
         let working = OKLCh.toLinear(L: 0.72, C: chroma, hue: point.sampleHue)
@@ -170,8 +293,9 @@ public struct PointColorSwatchView: View {
 // MARK: - the probe
 
 /// The card and its five rows, as frames a hosted-panel test can measure — the
-/// `ColorGradingProbe`/`BlackAndWhiteProbe` pattern. The swatch also reports the sample and the
-/// displayed sRGB, which is how 「色块显示采样色」 becomes a fact instead of a screenshot.
+/// `ColorGradingProbe`/`BlackAndWhiteProbe` pattern. The strip probe also reports the swatch count,
+/// the selected index and whether the transparent slot is showing, which is how U1–U4 become facts
+/// instead of screenshots.
 ///
 /// Inert in production (`hitTest` answers `nil`, nothing is drawn).
 final class PointColorProbe: NSView {
@@ -186,6 +310,11 @@ final class PointColorProbe: NSView {
     private(set) var swatchRed: Double = 0
     private(set) var swatchGreen: Double = 0
     private(set) var swatchBlue: Double = 0
+    /// 158: the strip's state.
+    private(set) var swatchCount: Int = 0
+    /// -1 = nothing selected (the transparent slot is showing).
+    private(set) var activeIndex: Int = -1
+    private(set) var showsTransparentSlot = true
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -196,6 +325,14 @@ final class PointColorProbe: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var isOpaque: Bool { false }
+
+    func update(_ id: String, set: PointColorSet?) {
+        rowID = id
+        swatchCount = set?.swatches.count ?? 0
+        activeIndex = set?.active ?? -1
+        showsTransparentSlot = swatchCount == 0
+        update(id, point: set?.activeSwatch ?? set?.swatches.first)
+    }
 
     func update(_ id: String, point: PointColor?) {
         rowID = id
@@ -218,14 +355,27 @@ final class PointColorProbe: NSView {
 struct PointColorProbeHost: NSViewRepresentable {
     let rowID: String
     let point: PointColor?
+    let set: PointColorSet?
+
+    init(rowID: String, point: PointColor?) {
+        self.rowID = rowID
+        self.point = point
+        self.set = nil
+    }
+
+    init(rowID: String, set: PointColorSet?) {
+        self.rowID = rowID
+        self.point = set?.activeSwatch
+        self.set = set
+    }
 
     func makeNSView(context: Context) -> PointColorProbe {
         let probe = PointColorProbe()
-        probe.update(rowID, point: point)
+        if let set { probe.update(rowID, set: set) } else { probe.update(rowID, point: point) }
         return probe
     }
 
     func updateNSView(_ probe: PointColorProbe, context: Context) {
-        probe.update(rowID, point: point)
+        if let set { probe.update(rowID, set: set) } else { probe.update(rowID, point: point) }
     }
 }
