@@ -124,7 +124,7 @@ final class HDRGainMapTests: XCTestCase {
 
     // MARK: - 2. the preset
 
-    func testHDRIsHEICOnlyAndRoundTripsThroughThePresetFile() throws {
+    func testHDRGainMapRoundTripsAndJPEGIsAllowedButPNGIsNot() throws {
         let hdr = HDRExport(enabled: true, gainMap: .apple, halfSize: true,
                             headroom: .manual(3.5))
         let preset = ExportPreset(format: .heic, colorSpace: .displayP3, hdr: hdr)
@@ -132,8 +132,11 @@ final class HDRGainMapTests: XCTestCase {
         let back = try ExportPreset.load(from: try writePreset(preset))
         XCTAssertEqual(back, preset)
 
-        XCTAssertThrowsError(try ExportPreset(format: .jpeg, hdr: hdr).validated()) { error in
-            XCTAssertTrue("\(error)".contains("HEIC"))
+        // 163 — JPEG carries a gain map (ISO and Apple both measured writable).
+        XCTAssertNoThrow(try ExportPreset(format: .jpeg, hdr: hdr).validated())
+        // TIFF/PNG have no auxiliary-image container, so the same request is still an error.
+        XCTAssertThrowsError(try ExportPreset(format: .png, hdr: hdr).validated()) { error in
+            XCTAssertTrue("\(error)".contains("PNG"))
         }
         XCTAssertThrowsError(try ExportPreset(format: .heic,
                                              hdr: HDRExport(headroom: .manual(1.0))).validated())
@@ -293,7 +296,69 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(psnr, 40, "Apple reconstruction PSNR \(psnr) dB")
     }
 
-    // MARK: - 5. SDR fallback
+    // MARK: - 5. JPEG gain maps (163)
+
+    /// 163 §1.2 — ISO gain map in a JPEG, written through the same `Exporter.write` door the app uses.
+    @available(macOS 15.0, *)
+    func testJPEGISOGainMapIsWrittenAndReadsBackAsHDR() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("iso.jpg")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .jpeg, quality: 1.0, bitDepth: 8,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .iso, halfSize: true)))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil) as? [CFString: Any])
+        XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 8)
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2,
+                       "163: the default half-size map reaches JPEG too")
+        XCTAssertEqual(intValue(description["PixelFormat"]),
+                       Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// 163 §1.2 — Apple's spelling: Core Image's JPEG representation + MakerApple 33/48.
+    func testJPEGAppleGainMapCarriesMakerNoteAndHeadroom() throws {
+        let (sdr, linear) = try renderPair(value: 4, gray: true)
+        let url = tempURL("apple.jpg")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .jpeg, quality: 1.0, bitDepth: 8,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .apple, halfSize: true)))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil) as? [String: Any])
+        let maker = try XCTUnwrap(props[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any])
+        XCTAssertNotNil(maker["33"])
+        XCTAssertNotNil(maker["48"])
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeHDRGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// 163 §1.2 / G2 — HDR off is the pre-163 JPEG encoder, byte for byte.
+    func testDisabledJPEGHDRIsTheOldEncoderByteForByte() throws {
+        let (sdr, _) = try renderPair(value: 4)
+        var options = ExportOptions(format: .jpeg, quality: 0.8, bitDepth: 8)
+        let plain = tempURL("plain.jpg")
+        try Exporter.write(sdr, to: plain, options: options)
+
+        options.hdr = HDRExport(enabled: false)
+        let disabled = tempURL("disabled.jpg")
+        try Exporter.write(sdr.withLinear(nil), to: disabled, options: options)
+
+        XCTAssertEqual(try Data(contentsOf: plain), try Data(contentsOf: disabled))
+    }
+
+    // MARK: - 6. SDR fallback
 
     @available(macOS 15.0, *)
     func testAnSDRSourceFallsBackToAPlainHEICWithAWarning() throws {

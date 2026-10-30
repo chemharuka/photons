@@ -113,12 +113,14 @@ public enum ExportFormat: String, Sendable, CaseIterable {
     /// 111 — the HDR kinds this container can honestly carry.
     ///
     /// This table is the single source of truth for `ExportPreset.validated()`, the UI picker and the
-    /// tests. `gainMap` stays HEIC/AVIF-only because a gain map is an auxiliary image (TIFF/PNG have
-    /// no such container); `hlg`/`pq` are offered for every non-JPEG container.
+    /// tests. `gainMap` is available for HEIC/JPEG/AVIF (163 measured that ImageIO's JPEG writer takes
+    /// the ISO auxiliary image and Core Image's JPEG representation takes Apple's); TIFF/PNG have no
+    /// auxiliary-image container. `hlg`/`pq` are offered for every non-JPEG container (8-bit JPEG has
+    /// neither transfer curve).
     public var hdrKinds: [HDRKind] {
         switch self {
         case .jpeg:
-            return [.none]
+            return [.none, .gainMap]
         case .heic, .avif:
             return [.none, .gainMap, .hlg, .pq]
         case .tiff, .png:
@@ -278,7 +280,7 @@ public enum Exporter {
             switch hdr.kind {
             case .gainMap:
                 if let linear = image.linear {
-                    if options.format == .heic {
+                    if options.format == .heic || options.format == .jpeg {
                         let result = try GainMapHEIC.write(
                             sdr: image, linear: linear, to: url,
                             options: HDRGainMapOptions(gainMap: hdr.gainMap,
@@ -286,7 +288,8 @@ public enum Exporter {
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
                                                        bitDepth: options.bitDepth),
-                            metadata: metadata)
+                            metadata: metadata,
+                            format: options.format)
                         return result.warnings
                     }
                     // ImageIO's AVIF writer refuses `AddAuxiliaryDataInfo`

@@ -81,16 +81,20 @@ final class HDRFormatTests: XCTestCase {
     // MARK: - 1. the combination table
 
     func testFormatHDRKindTable() {
-        XCTAssertEqual(ExportFormat.jpeg.hdrKinds, [.none])
+        XCTAssertEqual(ExportFormat.jpeg.hdrKinds, [.none, .gainMap])
         XCTAssertEqual(ExportFormat.heic.hdrKinds, [.none, .gainMap, .hlg, .pq])
         XCTAssertEqual(ExportFormat.avif.hdrKinds, [.none, .gainMap, .hlg, .pq])
         XCTAssertEqual(ExportFormat.tiff.hdrKinds, [.none, .hlg, .pq])
         XCTAssertEqual(ExportFormat.png.hdrKinds, [.none, .hlg, .pq])
+        // 163 — a JPEG gain map validates; only its 8-bit SDR base is allowed, and there is no
+        // PQ/HLG cell (an 8-bit JPEG has neither transfer curve).
+        XCTAssertNoThrow(try ExportPreset(format: .jpeg,
+                                          hdr: HDRExport(kind: .gainMap)).validated())
     }
 
     func testValidatedRejectsEveryIllegalCombination() {
         let illegal: [(ExportFormat, HDRKind)] = [
-            (.jpeg, .gainMap), (.jpeg, .hlg), (.jpeg, .pq), (.tiff, .gainMap), (.png, .gainMap),
+            (.jpeg, .hlg), (.jpeg, .pq), (.tiff, .gainMap), (.png, .gainMap),
         ]
         for (format, kind) in illegal {
             XCTAssertThrowsError(try ExportPreset(format: format,

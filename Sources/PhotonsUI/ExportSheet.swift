@@ -400,7 +400,8 @@ public final class ExportSheetModel {
     /// not a generic gain map.
     public private(set) var hdrPreferredKind: HDRKind
 
-    /// What the checkbox shows. JPEG has no HDR path, so the row is greyed out there too.
+    /// What the checkbox shows. Every writable container has at least one HDR kind (JPEG: gain map;
+    /// PNG/TIFF: PQ/HLG; HEIC/AVIF: all), so the row is only off when the user turns it off.
     public var hdrEnabled: Bool {
         guard !availableHDRKinds.isEmpty else { return false }
         return preset.hdr?.enabled ?? hdrPreferredEnabled
@@ -418,7 +419,8 @@ public final class ExportSheetModel {
         set { setHDRKind(newValue) }
     }
 
-    /// The kinds this container may carry, in display order. JPEG appears only as `none` (HDR off).
+    /// The kinds this container may carry, in display order. JPEG offers only the gain map (no 8-bit
+    /// PQ/HLG); PNG/TIFF offer only the two transfer curves; HEIC/AVIF offer all three.
     public var availableHDRKinds: [HDRKind] {
         preset.format.hdrKinds.filter { $0 != .none }
     }
@@ -1094,7 +1096,7 @@ public struct ExportSheetView: View {
                 .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
                 Spacer(minLength: 8)
                 if model.availableHDRKinds.isEmpty {
-                    Text("JPEG 不支持 HDR（PQ/HLG 需要 10/16 位）")
+                    Text("此格式不支持 HDR")
                         .font(.system(size: 9)).foregroundStyle(.tertiary)
                 } else if model.hdrEnabled {
                     Picker("", selection: hdrKindBinding) {

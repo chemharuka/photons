@@ -140,7 +140,7 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             let allowed = format.hdrKinds.map(\.rawValue).joined(separator: ", ")
             if kind == .gainMap {
                 return "\(format.rawValue.uppercased()) cannot carry a gain map "
-                    + "(HDR gain maps need HEIC or AVIF); allowed HDR kinds: \(allowed)"
+                    + "(HDR gain maps need HEIC, JPEG or AVIF); allowed HDR kinds: \(allowed)"
             }
             return "\(format.rawValue.uppercased()) cannot carry HDR kind '\(kind.rawValue)' "
                 + "(allowed: \(allowed))"
