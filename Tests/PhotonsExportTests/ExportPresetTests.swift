@@ -144,10 +144,11 @@ final class ExportPresetTests: XCTestCase {
         XCTAssertEqual(ExportFormat.jpeg.bitDepths, [8])
         XCTAssertEqual(ExportFormat.png.bitDepths, [8, 16])
         XCTAssertEqual(ExportFormat.tiff.bitDepths, [8, 16])
-        XCTAssertEqual(ExportFormat.avif.bitDepths, [8])
+        XCTAssertEqual(ExportFormat.avif.bitDepths, [8, 10])
         XCTAssertEqual(ExportFormat.jpeg.clampedBitDepth(16), 8)
         XCTAssertEqual(ExportFormat.heic.clampedBitDepth(16), 10)
-        XCTAssertEqual(ExportFormat.avif.clampedBitDepth(10), 8)
+        XCTAssertEqual(ExportFormat.avif.clampedBitDepth(10), 10)
+        XCTAssertEqual(ExportFormat.avif.clampedBitDepth(16), 10)
         XCTAssertEqual(ExportFormat.png.clampedBitDepth(10), 16)
     }
 

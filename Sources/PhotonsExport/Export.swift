@@ -70,17 +70,16 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         available(writableUTIs: writableUTIs)
     }
 
-    /// 109 §1 / 108 — the bit depths the container can honestly store, narrowest first.
+    /// 109 §1 / 108 / 163 — the bit depths the container can honestly store, narrowest first.
     ///
-    /// AVIF is deliberately 8-only in the sheet: ImageIO's AVIF writer accepts 10 bpc but the
-    /// project has no fixture that reads it back as 10, so offering it would promise a file the
-    /// encoder does not reliably produce yet.
+    /// AVIF was 8-only while the project had no fixture that read 10 back. The 163 probe writes a
+    /// 16-bit-storage `CGImage` and reads `kCGImagePropertyDepth = 10` + `bitsPerComponent = 10`, so
+    /// AVIF now offers 10 like HEIC.
     public var bitDepths: [Int] {
         switch self {
         case .jpeg: return [8]
-        case .heic: return [8, 10]
+        case .heic, .avif: return [8, 10]
         case .tiff, .png: return [8, 16]
-        case .avif: return [8]
         }
     }
 
@@ -105,7 +104,8 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         self == .tiff || self == .png
     }
 
-    /// HEIF-based containers top out at 10 bits per channel (see `supports16Bit`).
+    /// HEIF-based containers top out at 10 bits per channel (see `supports16Bit`). AVIF's ImageIO
+    /// encoder really produces 10 when handed 16-bit storage (163 probe).
     public var supports10Bit: Bool {
         self == .heic || self == .avif
     }
@@ -292,16 +292,25 @@ public enum Exporter {
                             format: options.format)
                         return result.warnings
                     }
-                    // ImageIO's AVIF writer refuses `AddAuxiliaryDataInfo`
-                    // (`CGImageDestinationFinalize` returns false), so no AVIF gain map can be
-                    // produced through the only encoder this project allows. Write the honest SDR
-                    // file and say so instead of mislabelling a HEIC at a `.avif` path.
+                    // 163 probe: AVIF takes the ISO gain map (contentHeadroom reads back 4.00) but
+                    // not Apple's spelling (aux written, headroom 1.00). Write ISO for an Apple
+                    // request and say why — never mislabel an SDR file as HDR.
                     if options.format == .avif {
-                        var sdrOptions = options
-                        sdrOptions.hdr = nil
-                        try write(image.withLinear(nil), to: url, options: sdrOptions,
-                                  metadata: metadata)
-                        return ["AVIF gain maps are not writable by ImageIO — wrote an SDR AVIF"]
+                        let apple = hdr.gainMap == .apple
+                        let result = try GainMapHEIC.write(
+                            sdr: image, linear: linear, to: url,
+                            options: HDRGainMapOptions(gainMap: apple ? .iso : hdr.gainMap,
+                                                       halfSize: hdr.halfSize,
+                                                       headroom: hdr.headroom,
+                                                       quality: options.quality,
+                                                       bitDepth: options.bitDepth),
+                            metadata: metadata,
+                            format: .avif)
+                        if apple {
+                            return ["AVIF cannot carry Apple's gain map (ImageIO reads it as SDR); "
+                                    + "wrote the ISO RGB gain map instead"] + result.warnings
+                        }
+                        return result.warnings
                     }
                 }
             case .hlg, .pq:

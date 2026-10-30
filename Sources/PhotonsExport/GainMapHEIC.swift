@@ -240,7 +240,10 @@ public enum GainMapHEIC {
         var properties = metadata.properties(outputWidth: sdr.width, outputHeight: sdr.height,
                                              format: format)
         if format.supportsQuality {
-            properties[kCGImageDestinationLossyCompressionQuality] = options.quality
+            // AVIF's HDR path rejects quality 1.0 (same reason as `HDREncoding`); 0.99 is still
+            // visually lossless and keeps the auxiliary-image container writable.
+            let quality = format == .avif ? min(options.quality, 0.99) : options.quality
+            properties[kCGImageDestinationLossyCompressionQuality] = quality
         }
         if let xmp = metadata.xmpMetadata(outputWidth: sdr.width, outputHeight: sdr.height) {
             CGImageDestinationAddImageAndMetadata(dest, baseCG, xmp, properties as CFDictionary)

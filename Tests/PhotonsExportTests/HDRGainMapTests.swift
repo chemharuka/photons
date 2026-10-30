@@ -358,7 +358,54 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: plain), try Data(contentsOf: disabled))
     }
 
-    // MARK: - 6. SDR fallback
+    // MARK: - 6. AVIF gain maps (163 §1.4)
+
+    /// ISO's auxiliary image works in AVIF exactly as it does in HEIC (probe: finalize true,
+    /// contentHeadroom 4.00). The 10-bit base is kept.
+    @available(macOS 15.0, *)
+    func testAVIFISOGainMapIsWrittenAndReadsBackAsHDR() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("iso.avif")
+        try Exporter.write(sdr.withLinear(linear), to: url,
+                           options: ExportOptions(
+                               format: .avif, quality: 0.99, bitDepth: 10,
+                               hdr: HDRExport(kind: .gainMap, gainMap: .iso, halfSize: true)))
+        let depth = (try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0, nil)
+            as? [CFString: Any])[kCGImagePropertyDepth] as? NSNumber)?.intValue
+        XCTAssertEqual(depth, 10, "a gain map must not cost AVIF its 10-bit base")
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
+        let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
+        XCTAssertGreaterThan(read, 1.05)
+        XCTAssertEqual(read, expected, accuracy: expected * 0.05)
+    }
+
+    /// Apple's spelling is stored but reads back as SDR in AVIF (probe: headroom 1.00). The writer
+    /// falls back to ISO and says so — it must not write an SDR file labelled as HDR.
+    @available(macOS 15.0, *)
+    func testAVIFAppleGainMapFallsBackToISOWithAWarning() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let url = tempURL("apple.avif")
+        let warnings = try Exporter.write(
+            sdr.withLinear(linear), to: url,
+            options: ExportOptions(
+                format: .avif, quality: 0.99, bitDepth: 10,
+                hdr: HDRExport(kind: .gainMap, gainMap: .apple, halfSize: true)))
+        XCTAssertTrue(warnings.contains { $0.contains("AVIF") && $0.contains("ISO") },
+                      "\(warnings)")
+        XCTAssertNotNil(CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0,
+            kCGImageAuxiliaryDataTypeISOGainMap))
+        XCTAssertNil(CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil)), 0,
+            kCGImageAuxiliaryDataTypeHDRGainMap))
+        XCTAssertGreaterThan(try XCTUnwrap(GainMapHEIC.readHeadroom(at: url)), 1.05)
+    }
+
+    // MARK: - 7. SDR fallback
 
     @available(macOS 15.0, *)
     func testAnSDRSourceFallsBackToAPlainHEICWithAWarning() throws {

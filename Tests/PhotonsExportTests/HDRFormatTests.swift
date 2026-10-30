@@ -225,6 +225,17 @@ final class HDRFormatTests: XCTestCase {
         }
     }
 
+    /// 163 §1.4 — AVIF's ImageIO writer really stores 10-bit primaries. The old "AVIF is 8-only"
+    /// comment was a guess; this reads the file back.
+    func testAVIFTenBitSDRIsWrittenAndReadBack() throws {
+        let out = try write(ExportPreset(format: .avif, bitDepth: 10, colorSpace: .sRGB),
+                            "sdr-10.avif", metadata: ExportMetadataContext(level: .none))
+        XCTAssertEqual(try depth(out), 10)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(out as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(image.bitsPerComponent, 10)
+    }
+
     // MARK: - 4. gain map still means 4:2:0 / 8-bit
 
     @available(macOS 15.0, *)
