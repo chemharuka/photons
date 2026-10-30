@@ -55,6 +55,9 @@ public struct BatchExportOutcome: Sendable {
     /// Non-fatal notes (XMP fell back to a sidecar, the preset's long edge was larger than the
     /// picture, …). A warning never turns a written file into a failure.
     public var warnings: [String]
+    /// 163 §1.6 — how many pixels the right/bottom edges lost to make a half-size gain map legal.
+    /// `.none` for full-size maps and for even sources.
+    public var croppedForHalfSize: HalfSizeCrop = .none
     /// Non-nil = this item failed. The batch keeps going.
     public var error: String?
     /// The conflict policy said "skip": no file was written and the name was left alone.
@@ -117,9 +120,10 @@ enum BatchMath {
 
 // MARK: - cancellation
 
-/// A one-way flag the sheet's 取消 button sets. Checked before each queued item starts; an item
-/// already rendering is allowed to finish (so its file is complete, never half written), and the
-/// rest come back as `cancelled` outcomes.
+/// A one-way flag the sheet's 取消 button sets. Checked before each queued item starts, again after
+/// its render returns, and once more immediately before the write (161 §8): an in-flight render may
+/// finish, but its pixels are discarded instead of becoming a file. Files already written stay on
+/// disk. No partial file is ever left behind.
 public final class CancellationToken: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -191,7 +195,7 @@ public enum BatchExporter {
                 collector.enter()
                 let outcome = exportOne(item: item, index: index, preset: preset,
                                         directory: outputDirectory, allocator: allocator,
-                                        render: render)
+                                        cancel: cancel, render: render)
                 collector.leave(outcome)
             }
         }
@@ -216,6 +220,7 @@ public enum BatchExporter {
                                   preset: ExportPreset,
                                   directory: URL,
                                   allocator: OutputNameAllocator,
+                                  cancel: CancellationToken? = nil,
                                   render: (ExportItem, ExportPreset) throws -> DisplayImage)
         -> BatchExportOutcome {
 
@@ -236,6 +241,14 @@ public enum BatchExporter {
             }
 
             let rendered = try render(item, preset)
+            // 161 §8 — the cancellation the sheet's 取消 button sets can land while this item is
+            // already rendering (with concurrency 2 a small batch may have every item in flight).
+            // The first check above only stopped *queued* items; without this one the render that
+            // was in flight still fell through to the encoder and the user saw files appear after
+            // pressing 取消. The pixels are dropped here, before any resample/encode/write.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
+            }
             if rendered.width <= 0 || rendered.height <= 0 {
                 throw BatchExportError.noPixels(item.name)
             }
@@ -257,6 +270,11 @@ public enum BatchExporter {
                     let target = preset.noUpscale ? min(longEdge, current) : longEdge
                     image = DisplayResample.fitLongEdge(image, to: target,
                                                         allowUpscale: !preset.noUpscale)
+                    // 168 §2 — say out loud that 不扩大 clamped the request, so a 4000 request on a
+                    // 3000 px picture is not quietly reported as "4000" by the result row.
+                    if preset.noUpscale, longEdge > current {
+                        warnings.append("长边 \(longEdge) 请求 → 源 \(current)，按不扩大输出 \(current)")
+                    }
                     if current > target {
                         warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
                                         + "resampled to \(image.width)×\(image.height)")
@@ -281,6 +299,17 @@ public enum BatchExporter {
                 image = DisplaySharpen.apply(image, sharpen)
             }
 
+            // 3b. 163 §1.6 — a half-size gain map needs an even base. Trim right/bottom after the
+            //     final size/sharpening, so the file, the map and the report all describe one picture.
+            if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
+                let plan = GainMapSizing.plan(image.size, halfSize: true)
+                if plan.crop.isNeeded {
+                    image = GainMapSizing.crop(image, plan.crop)
+                    outcome.croppedForHalfSize = plan.crop
+                    warnings.append(plan.crop.exportNote(source: plan.input))
+                }
+            }
+
             // 4. a name nobody else in this batch (or, under `rename`, on disk) already owns.
             let base = ExportNaming.baseName(template: preset.nameTemplate, item: item,
                                              sequence: index + 1)
@@ -290,6 +319,13 @@ public enum BatchExporter {
                 outcome.seconds = CFAbsoluteTimeGetCurrent() - t0
                 outcome.warnings = warnings
                 return outcome
+            }
+
+            // 161 §8 — a second read immediately before the write: a cancel that landed between the
+            // render check above and here (sharpening / name allocation on a large image) must not
+            // add one more file after the user's click. Already-written files stay on disk.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
             }
 
             // 5. encode. Metadata travels with the first encode so the output's EXIF pixel size is
@@ -338,6 +374,10 @@ public enum BatchExporter {
             outcome.fileBytes = bytes
             outcome.pixelSize = image.size
         } catch {
+            // A cancel that interrupted the render itself is not a failure of the picture.
+            if cancel?.isCancelled == true {
+                return cancelledOutcome(index: index, item: item)
+            }
             outcome.error = error.localizedDescription
         }
         outcome.seconds = CFAbsoluteTimeGetCurrent() - t0

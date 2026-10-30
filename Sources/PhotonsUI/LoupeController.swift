@@ -655,6 +655,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// presenting — the generation gate drops it, and this field is why the follow-up renders
         /// the right thing without reading the controller from the render queue.
         var mode: LoupeFrameMode = .edited
+        /// 162 §2.2 — the crop workspace's fit multiplier, snapshotted on the main actor with the
+        /// camera. The render queue must not read `cropTool.isActive` itself (that is a main-actor
+        /// view state); this is the render half of the same entry zoom.
+        var fitScale: Double = 1
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -1225,9 +1229,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var editInFlight = false
     private var editPending = false
     private var lastHandledRevision = 0
-    /// The photo the 裁切 frame was opened on — a change drops the tool rather than crop one picture
-    /// with another's framing.
+    /// The photo the 裁切 frame belongs to. `nil` until the loupe has seen an anchor; then it is
+    /// kept in step with the session on every observation. A *change* while the frame is up is what
+    /// re-arms or drops the tool — never a difference caused by this field lagging the session.
     private var lastHandledAnchorID: String?
+    /// 169 §2b — the 变换 workspace still wants a frame. Set by `setCropWorkspaceActive`, read by the
+    /// photo-change path: staying on 裁切 and clicking another picture re-arms instead of dropping.
+    private var cropWorkspaceWantsFrame = false
     public private(set) var editRenderCount = 0
     /// How many edit renders the debounce actually **started**.
     ///
@@ -1604,15 +1612,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
             overlay.autoresizingMask = [.width, .height]
             container.addSubview(overlay)
         }
-        cropOverlay.isHidden = true
+        // 169 §0: visibility is owned by `armCropFrame` (called at the end of this method), so this
+        // file does not write the crop chrome's `isHidden` a second way.
         // The mask chrome belongs to the inspector's 蒙版 workspace, so it starts away — and
         // `setMasksWorkspaceActive` is what puts it up (2026-10-27: 「退出蒙版菜单栏后应该隐藏」).
         draftOverlay.isHidden = true
         maskHandlesOverlay.isHidden = true
         // The tool strip. Above the overlays (it takes clicks), below the zoom pill (which stays the
-        // topmost chrome), and hidden until 裁切 mode is on.
+        // topmost chrome), and hidden until 裁切 mode is on — `refreshCropTool` (the arm entry) sets
+        // both visibilities.
         container.addSubview(cropBar)
-        cropBar.isHidden = true
         // 082: the bar is **three read-only numbers** now — no apply/cancel, no slider, no flips. The
         // controls (and the draft's own write paths) live in the 裁切 card, so there is nothing for
         // the canvas to wire back beyond the controller it reads.
@@ -1637,6 +1646,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         layoutZoomSlider()
         view = container
         highlightOverlay.isArmed = session?.highlightWarning ?? false
+        // 169 §0 — the arm entry initialises the crop chrome (hidden while the tool is off).
+        armCropFrame(.mounted)
     }
 
     public override func viewDidLoad() {
@@ -1721,10 +1732,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // One observer, two jobs: a document change re-renders the current decode (cheap,
             // ~ms); a photo change needs a new decode (expensive, the 0.5 → 1.0 ladder).
             let revision = self.session?.editRevision ?? 0
-            // 裁切 mode belongs to the photo it was opened on, and to the loupe: a different picture
-            // (or another module) drops the frame rather than cropping one photo with another's
-            // framing (task 035).
-            self.dropCropToolIfStale()
+            // 169: a photo switch in 裁切 keeps the frame (and re-arms it for the new picture); a
+            // switch outside the workspace drops it. The decision is one function.
+            self.handleCropPhotoChange()
             if revision != self.lastHandledRevision {
                 self.lastHandledRevision = revision
                 self.requestEditRender()
@@ -1736,6 +1746,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 if self.session?.mode != .loupe { self.cancelPendingFrames() }
                 self.scheduleRender()
             }
+        })
+        // 165: a command outside the edit path (⌘V, ⌘Z, ⇧⌘Z, a history-row jump) wrote a document.
+        // The frame path's own invalidation only marks a backdrop stale (039), so the command signal
+        // is what asks for the replacement immediately — for the photo on screen only.
+        bridge.observe({ [weak self] in
+            _ = self?.session?.backdropInvalidationRevision
+        }, { [weak self] in
+            guard let self, let session = self.session else { return }
+            self.noteBackdropInvalidation(for: session.backdropInvalidationAssetIDs)
         })
         // The clipping warning is a display preference, not an edit: it has its own signal, so
         // arming it never looks like a document change to the renderer (`editRevision` stays put).
@@ -2847,7 +2866,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decoded: ImageSize(width: image.width, height: image.height),
                                 decodeScale: decodedScale,
                                 edit: edit,
-                                fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1)
+                                fitScale: currentCropWorkspaceFitScale)
         }
         if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
             // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
@@ -2860,7 +2879,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decoded: source,
                                 decodeScale: 1,
                                 edit: edit,
-                                fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1)
+                                fitScale: currentCropWorkspaceFitScale)
         }
         return nil
     }
@@ -3617,6 +3636,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return false
         }
         guard cropTool.begin() else { return false }
+        // 169: the bookkeeping starts on the photo the frame was opened on. Without this, the first
+        // document write (the first straighten release) looked like a photo switch and detached.
+        lastHandledAnchorID = session.anchorID
         // The camera is remembered and restored on exit: a precision tool is a temporary fit over the
         // session viewport (`local/src/swift-raw/Zenodeng_Phos/WINDOW_INTEGRATION.md:14`).
         cropEntryState = viewState
@@ -3629,13 +3651,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 轻微角度；按 45° 的最坏情况预留会让画面常年小 29 %，不成比例）。`framing()` 在本工具
         // active 时给出 `fitScale = 0.90`，所以这一句同时把普通 fit 之外的那 10 % 留了出来。
         zoomToFit()
-        refreshCropTool()
+        armCropFrame(.entered)
         requestEditRender()
         return true
     }
 
     /// 132 §9: the crop workspace's 取景 = 普通 fit × 0.90 (see `LoupeFraming.fitScale`).
     static let cropWorkspaceFitScale = 0.90
+
+    /// 169 §0 — the fit multiplier the **live** document calls for: 90 % for a small straighten, and
+    /// the whole-canvas refit (1) once the angle passes `CropRefitDegrees`, which is the rule
+    /// `LoupeFraming.fitZoom` documents. One property so the projection, the render job and the
+    /// public `makeFrame` spelling cannot disagree about it.
+    var currentCropWorkspaceFitScale: Double {
+        guard cropTool.isActive else { return 1 }
+        let angle = abs(session?.edit.geometry.straightenDegrees ?? 0)
+        return angle > LoupeFraming.cropRefitDegrees ? 1 : Self.cropWorkspaceFitScale
+    }
 
     /// 082 — the card's section resets (and its title) write the document; the frame on screen is the
     /// draft, so it is re-seeded from the new document and re-laid-out in the same turn.
@@ -3675,6 +3707,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func setCropWorkspaceActive(_ active: Bool) -> Bool {
         guard workspaceDrivesCropMode else { return false }
+        // 169 §2b — the workspace's intent is remembered, because a photo switch has no tab change
+        // to tell it what to do.
+        cropWorkspaceWantsFrame = active
         if active { return enterCropToolIfNeeded() }
         // 086 keeps 082's leaving half: a workspace switch is not 「应用」, so it cancels the draft
         // rather than committing it, and the frame goes away with the card.
@@ -3730,17 +3765,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
         requestEditRender()
     }
 
-    /// The photo changed, or the loupe is not the module on screen: the frame goes away without
-    /// writing and without counting as a 取消 (the user did not press Esc).
-    private func dropCropToolIfStale() {
-        guard cropTool.isActive else { return }
+    /// 169 — **the photo-change decision**, in one place.
+    ///
+    /// `lastHandledAnchorID` is bookkeeping, not a trigger: it starts `nil` (the loupe exists before
+    /// a photo is selected) and is synced whenever the tool opens. A document write (the first
+    /// straighten release) must not look like a photo switch — that mismatch is the old
+    /// 「第一次拖动旋转就丢框」. Only an actual anchor change or leaving the loupe acts.
+    private func handleCropPhotoChange() {
         let anchor = session?.anchorID
-        let stale = anchor != lastHandledAnchorID || session?.mode != .loupe
-        guard stale else { return }
-        cropTool.detach()
-        cropEntryState = nil
+        let leftLoupe = session?.mode != .loupe
+        let changedPhoto = anchor != lastHandledAnchorID
+        guard changedPhoto || leftLoupe else { return }
         lastHandledAnchorID = anchor
-        refreshCropTool()
+
+        guard cropTool.isActive else { return }
+
+        // Outside 裁切, or the module went away: the frame goes away without writing (task 035).
+        guard changedPhoto, !leftLoupe, cropWorkspaceWantsFrame else {
+            cropTool.detach()
+            cropEntryState = nil
+            refreshCropTool()
+            return
+        }
+
+        // Staying on 裁切 and clicking another photo: the frame belongs to the new picture, so it is
+        // re-seeded and re-armed in the same turn — no tab switch needed.
+        cropEntryState = nil
+        zoomToFit()
+        armCropFrame(.photoChanged)
     }
 
     // MARK: 变换 ▸ 水平翻转 / 垂直翻转 (072 §F)
@@ -4053,7 +4105,32 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.
+    ///
+    /// 169 §0 — this is now a **thin caller** of `armCropFrame`, the one entry that decides whether
+    /// the chrome is visible and re-seeds the draft for the photo it belongs to. Every other caller
+    /// (mode change, tab switch, resize, photo switch, draft tick) goes through the same function.
     public func refreshCropTool() {
+        armCropFrame(.refresh)
+    }
+
+    /// Why the frame is being armed. Only `.photoChanged` re-seeds the draft; the others are
+    /// re-projections of the draft that is already open.
+    enum CropArmReason {
+        /// Mounted into a view / no photo yet — the inert case.
+        case mounted
+        /// The tool was just opened (`CropToolController.begin` seeded the draft).
+        case entered
+        /// A camera/draft/layout change: re-project, never re-seed.
+        case refresh
+        /// 169 §2b — the anchor moved while the workspace stayed on 裁切.
+        case photoChanged
+    }
+
+    /// 169 §0 — **the only writer of the crop chrome's visibility**, and the only gate that arms a
+    /// frame. Entering the workspace, a tab switch, a window resize, a photo switch and every draft
+    /// tick call it; nothing else writes `cropOverlay.isHidden` / `cropBar.isHidden`.
+    @discardableResult
+    private func armCropFrame(_ reason: CropArmReason) -> Bool {
         let active = cropTool.isActive
         cropOverlay.isHidden = !active
         cropBar.isHidden = !active
@@ -4074,14 +4151,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard active else {
             cropOverlay.layout = nil
             cropOverlay.active = nil
-            return
+            return false
+        }
+        if reason == .photoChanged {
+            cropTool.reseedForPhotoChange()
         }
         syncCropOverlay()
         cropBar.sync()
-        layoutCropBar()
+        // 169 §0 — one layout truth: the bar's canvas and the frame's canvas are the same answer.
+        layoutCropBar(cropWorkspaceEntryLayout())
         // ④ — the draft's own geometry (拉直 / 裁切 / 翻转) is part of the document the low-resolution
         // whole picture is made from, so a change to it retires the cached one.
         noteBackdropKeyMoved()
+        return true
+    }
+
+    /// 169 §0 — the workspace's layout for the camera the overlay is drawing **right now**. The
+    /// pure function owns the arithmetic; this is only the session → input adapter.
+    func cropWorkspaceEntryLayout(viewport: ImageSize? = nil) -> CropWorkspaceLayout.Entry? {
+        guard let framing = framing(viewport: viewport) else { return nil }
+        let stored = session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
+        let layout = CropWorkspaceLayout(
+            source: stored,
+            quarterTurns: session?.edit.geometry.quarterTurns ?? 0,
+            straighten: session?.edit.geometry.straightenDegrees ?? 0,
+            canvas: CGRect(x: 0, y: 0,
+                           width: Double(framing.viewport.width),
+                           height: Double(framing.viewport.height)))
+        return layout.entry(crop: cropTool.draft.crop)
     }
 
     // MARK: 082 (追加) — 裁切模式的相机边界：任何时候「裁切框 ⊆ 画布」
@@ -4122,7 +4219,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
-        let limit = CropCanvasClamp.maxZoom(canvas: canvas, frame: frame)
+        let limit = CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame)
         guard limit > 0 else { return nil }
         return min(limit, LoupeViewState.maximumZoom)
     }
@@ -4139,7 +4236,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
               let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return state }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
-        let limit = min(CropCanvasClamp.maxZoom(canvas: canvas, frame: frame),
+        let limit = min(CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame),
                         LoupeViewState.maximumZoom)
         guard limit > 0 else { return state }
         var next = state
@@ -4199,9 +4296,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
     }
 
-    private func layoutCropBar() {
-        guard !cropBar.isHidden else { return }
-        cropBar.layout(in: container.bounds)
+    /// 169 §0 — the bar is laid out against the **layout's** canvas, not a second reading of
+    /// `container.bounds`. The overlay, the bar and the camera clamp therefore answer from one place.
+    /// The layout is in the projection's pixels (device pixels); AppKit frames are points.
+    private func layoutCropBar(_ entry: CropWorkspaceLayout.Entry?) {
+        guard !cropBar.isHidden, let entry else { return }
+        let scale = backingScale > 0 ? backingScale : 1
+        cropBar.layout(in: CGRect(x: 0, y: 0,
+                                  width: entry.canvas.width / scale,
+                                  height: entry.canvas.height / scale))
     }
 
     // MARK: edit re-render (50 ms debounce, single-flight)
@@ -4512,6 +4615,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 viewport: source.viewport, edit: source.edit, state: source.state,
                                 target: target, generation: gen, changedAt: changedAt)
             job.mode = frameMode
+            job.fitScale = currentCropWorkspaceFitScale
             return job
         }
         guard let session, session.mode == .loupe,
@@ -4528,6 +4632,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 080: the mode is snapshotted with the camera and the document, so the frame the queue
         // renders is the frame the user asked for even if `\` is pressed again while it is in flight.
         job.mode = frameMode
+        job.fitScale = currentCropWorkspaceFitScale
         return job
     }
 
@@ -4606,6 +4711,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             let frame = try makeFrame(url: job.url, cacheIdentity: job.baseIdentity,
                                       viewport: job.viewport, decodeScale: rung.scale,
                                       edit: job.edit, state: job.state, mode: job.mode,
+                                      fitScale: job.fitScale,
                                       hashPixels: hashesFrames, resolve: .residentOnly)
             decodeMilliseconds = rung.milliseconds
             return frame
@@ -4998,6 +5104,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
         fullPictureBox.store(nil)
     }
 
+    /// 165: a command (⌘V / ⌘Z / ⇧⌘Z / a history-row jump) moved the document outside the pointer
+    /// path. 039's rule for an *edit* is "mark it stale, the next pointer entry pays"; a command is
+    /// different — the user is already looking at the result and did not move the pointer — so the
+    /// bottom image for the document on screen is rebuilt now, in one generation, through the same
+    /// two steps 144's settle uses (`invalidateBackdrop` + `backdropWanted` + `serveWantedBackdrop`).
+    ///
+    /// Only the photo on screen qualifies. A paste onto unopened photos writes their rows and names
+    /// them in `assetIDs`; their backdrops do not exist yet and are made when they are opened
+    /// (`notePhotoIdentity`), so returning here is what keeps "paste to 5, open 1" from rendering 5.
+    private func noteBackdropInvalidation(for assetIDs: Set<String>) {
+        guard presenter != nil else { return }
+        guard let currentID = session?.loadedEditAssetID ?? session?.anchorAsset?.id,
+              assetIDs.contains(currentID) else { return }
+        guard let key = backdropKey else { return }
+        // A generation for this exact source is already on its way: it is the replacement.
+        if backdrop.inFlight == key { return }
+        guard backdrop.needsGeneration(for: key) else { return }
+        invalidateBackdrop()
+        backdropWanted = true
+        serveWantedBackdrop()
+    }
+
     /// 144: a frame landed for another source than the cached backdrop names.
     ///
     /// Returns `true` when a texture was released. It deliberately **does not** render: an edit still
@@ -5368,6 +5496,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                       viewport: viewport, decodeScale: decodeScale,
                       edit: edit ?? session?.edit ?? .neutral,
                       state: state ?? viewState, mode: mode,
+                      fitScale: currentCropWorkspaceFitScale,
                       hashPixels: hashPixels)
     }
 
@@ -5379,7 +5508,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                           hashPixels: Bool = false, useCache: Bool = true) throws -> FrameResult {
         try makeFrame(url: url, cacheIdentity: url.lastPathComponent,
                       viewport: viewport, decodeScale: decodeScale, edit: edit,
-                      state: state, mode: mode, hashPixels: hashPixels, useCache: useCache)
+                      state: state, mode: mode,
+                      fitScale: currentCropWorkspaceFitScale,
+                      hashPixels: hashPixels, useCache: useCache)
     }
 
     /// Whether a frame may develop the rung it wants.
@@ -5396,6 +5527,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func makeFrame(url: URL, cacheIdentity baseIdentity: String, viewport: ImageSize,
                            decodeScale: Float, edit model: EditModel, state: LoupeViewState,
                            mode: LoupeFrameMode = .edited,
+                           fitScale: Double = 1,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing,
                            useCache: Bool = true, measurement: Bool = true) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
@@ -5467,10 +5599,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // 1:1 (or beyond) is an **output window** into the frame: S0 cropped/straightened/flipped
             // the whole frame and hands back that rectangle, so the projection, the vignette and the
             // mask feather are the frame's, not the window's. `fit` names no window.
+            //
+            // 162 §2.2 — the crop workspace's 90 % fit is part of the **render** projection, not only
+            // of the overlay's `framing()`. Without `fitScale` here the frame was drawn at 90 % while
+            // the pixels stayed at the ordinary fit: the user's 「裁剪框 90% 但画面没跟着缩放到 90%」.
             let projected = LoupeFraming(viewport: viewport,
                                          decoded: ImageSize(width: image.width, height: image.height),
                                          decodeScale: ds,
-                                         edit: cameraEdit)
+                                         edit: cameraEdit,
+                                         fitScale: fitScale)
             return Shot(projected: projected,
                         window: projected.outputWindow(of: state),
                         scale: max(0.01, projected.renderScale(of: state, decodeScale: ds)),
@@ -5994,8 +6131,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func rePresentFrozen() -> Bool {
         guard let frozen = frozenFrame, let presenter else { return false }
         let canvas = viewportPixels
-        let window = frozen.window.stretched(to: canvas, from: frozen.canvas)
-        let backdropWindow = frozen.backdropWindow.stretched(to: canvas, from: frozen.canvas)
+        var window = frozen.window.stretched(to: canvas, from: frozen.canvas)
+        var backdropWindow = frozen.backdropWindow.stretched(to: canvas, from: frozen.canvas)
+        // 169 §1 — 裁切 is a *precision* view of the whole picture: a window drag must scale the
+        // picture and the crop frame by the **same** ratio in every pass. 067's frozen present keeps
+        // the picture's pixel geometry (correct for the loupe, where a drag must not stretch the
+        // photo), which left the frame re-projected against the new viewport while the picture was
+        // still the old one — 「画布不动但裁切框被限制 90%，松手才一起跳」. In the crop workspace only,
+        // re-present the frozen picture through the ratio of the two projections, about the picture's
+        // own centre, and hand the overlay the same geometry (it already uses the new framing).
+        if cropTool.isActive,
+           let scaled = cropFrozenScale(frozen, canvas: canvas) {
+            window = scaled.window
+            backdropWindow = scaled.backdrop
+        }
         // The gate is geometric and is asked about the **stretched** window: a frame that covered the
         // canvas at the old size may no longer cover it at the new one, and that is exactly when the
         // backdrop is wanted. `nil` (nothing cached for this document) leaves the clear colour.
@@ -6007,6 +6156,67 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                serial: 0, zoom: frozen.zoom, frozen: true)
         if ok { frozenDrawCount += 1 }
         return ok
+    }
+
+    /// 169 §1 — the frozen picture's new window, as the ratio between the **new** projection's
+    /// picture rect and the one that is already on the layer. `nil` when the two agree (a pan, or a
+    /// resize that did not move the picture) or the geometry is degenerate.
+    ///
+    /// Uniform by construction (`min` of the two axis ratios): a frozen texture must never be
+    /// stretched (「变扁」), and the workspace's fit is uniform anyway. The origin centres the old
+    /// picture on the new one, so the frame — which the overlay projects from the same new viewport —
+    /// lands on it edge for edge.
+    private func cropFrozenScale(_ frozen: FrozenFrame, canvas: ImageSize)
+        -> (window: PresentWindow, backdrop: PresentWindow)? {
+        guard let framing = framing() else { return nil }
+        let mapping = framing.mapping(of: viewState)
+        let a = mapping.frameView(frameX: 0, frameY: 0)
+        let b = mapping.frameView(frameX: framing.sourceWidth, frameY: framing.sourceHeight)
+        let newRect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                             width: abs(b.x - a.x), height: abs(b.y - a.y))
+        let q = frozen.photoRect
+        let texW = Double(max(frozen.frameCanvas.width, 1))
+        let texH = Double(max(frozen.frameCanvas.height, 1))
+        let oldCanvasW = Double(max(frozen.canvas.width, 1))
+        let oldCanvasH = Double(max(frozen.canvas.height, 1))
+        guard let shown = frozen.window.canvasRect(ofTexture: Double(q.x) / texW,
+                                                   Double(q.y) / texH,
+                                                   Double(q.width) / texW,
+                                                   Double(q.height) / texH) else {
+            return nil
+        }
+        let oldRect = CGRect(x: shown.x * oldCanvasW, y: shown.y * oldCanvasH,
+                             width: shown.width * oldCanvasW, height: shown.height * oldCanvasH)
+        guard oldRect.width > 1e-6, oldRect.height > 1e-6,
+              newRect.width > 1e-6, newRect.height > 1e-6 else { return nil }
+        let rx = Double(newRect.width) / Double(oldRect.width)
+        let ry = Double(newRect.height) / Double(oldRect.height)
+        guard rx.isFinite, ry.isFinite, rx > 0, ry > 0 else { return nil }
+        let r = min(rx, ry)
+        guard abs(r - 1) > 1e-9 else { return nil }
+        let originX = Double(newRect.midX) - r * Double(oldRect.midX)
+        let originY = Double(newRect.midY) - r * Double(oldRect.midY)
+        return (Self.scaledWindow(frozen.window, scale: r, originX: originX, originY: originY,
+                                  canvas: canvas, oldCanvas: frozen.canvas),
+                Self.scaledWindow(frozen.backdropWindow, scale: r,
+                                  originX: originX, originY: originY,
+                                  canvas: canvas, oldCanvas: frozen.canvas))
+    }
+
+    /// Apply the canvas map `p_old = (p_new − origin) / r` to a window that was expressed on the old
+    /// canvas. `PresentWindow`'s own `stretched` does the `r == 1` case (a pure resize of the canvas
+    /// around the picture); this is its uniform-scale sibling.
+    private static func scaledWindow(_ window: PresentWindow, scale r: Double,
+                                     originX: Double, originY: Double,
+                                     canvas: ImageSize, oldCanvas: ImageSize) -> PresentWindow {
+        let ow = Double(max(oldCanvas.width, 1)), oh = Double(max(oldCanvas.height, 1))
+        let nw = Double(max(canvas.width, 1)), nh = Double(max(canvas.height, 1))
+        guard r.isFinite, r > 0 else { return window }
+        let u0 = Double(window.u0) - originX * Double(window.du) / (r * ow)
+        let v0 = Double(window.v0) - originY * Double(window.dv) / (r * oh)
+        let du = Double(window.du) * nw / (r * ow)
+        let dv = Double(window.dv) * nh / (r * oh)
+        return PresentWindow(u0: Float(u0), v0: Float(v0), du: Float(du), dv: Float(dv))
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,

@@ -378,9 +378,9 @@ func cmdDepth(_ a: Args) throws {
     defer {
         if let tmp = depthModelTemporaryDirectory { try? FileManager.default.removeItem(at: tmp) }
     }
-    // 2026-10-30 — 1036×784 wants the GPU, not the ANE (192 ms vs 1244 ms). `--units` exists so the
-    // three paths can be re-measured on any machine without a rebuild.
-    let unitsName = a.value("--units") ?? "gpu"
+    // On the shipped 518×392 package the ANE wins (33 ms against 55 ms on the GPU); a finer or a
+    // bigger model can flip that, so `--units` lets the three paths be re-measured without a rebuild.
+    let unitsName = a.value("--units") ?? "all"
     let units: MLComputeUnits
     switch unitsName {
     case "all", "auto": units = .all
@@ -1018,6 +1018,13 @@ guard let cmd = argv.first else {
     exit(0)
 }
 
+func cmdProbeHDR(_ a: Args) throws {
+    guard #available(macOS 15.0, *) else { die("probe-hdr needs macOS 15 (ISO gain map API)") }
+    let result = HDRProbe.run(keepFiles: a.has("--keep"))
+    for line in result.lines { note(line) }
+    if let dir = result.outputDirectory { note("files        \(dir.path)") }
+}
+
 let rest = parseArgs(Array(argv.dropFirst()))
 do {
     switch cmd {
@@ -1035,6 +1042,7 @@ do {
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)
     case "export":   try cmdExport(rest)
+    case "probe-hdr": try cmdProbeHDR(rest)
     case "thumbs":   try cmdThumbs(rest)
     case "fixtures": try cmdFixtures(rest)
     default:       die("unknown command '\(cmd)' (try: photonsctl)")

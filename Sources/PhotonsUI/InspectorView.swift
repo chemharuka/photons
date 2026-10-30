@@ -95,16 +95,28 @@ public struct InspectorView: View {
         /// shape the picture, so they come before the decoder's amounts; the order inside the panel is
         /// the user's, and the pipeline's own order is a separate fact (`RenderStage.order`).
         case curve
-        /// 派单 031: 降噪 / 色彩降噪 / 细节 / 锐化 — four **decoder** amounts, next to Color because they
-        /// are the same panel in Lightroom, and below the curve because they act on the decoded pixels
-        /// the curve then reprofiles.
+        /// 派单 031 — **开发**: the RAW decode pipeline. 降噪 / 色彩降噪 / 细节 / 锐化 are
+        /// **decoder** amounts assigned to `CIRAWFilter` before it produces pixels; 去摩尔纹 is the
+        /// fifth (`moireReductionAmount`, 164). The card was called 「细节」 until 164, when the user
+        /// renamed it to say what it is (「细节卡片名称改成『开发』，意思是 RAW 处理流程」) and moved
+        /// the display-referred detail controls to the new `.detailFX` card.
         case detail
-        /// 2026-10-28 (096): **校正** — 色差 R / 色差 B, moved out of 细节 and placed between
-        /// 细节 and 效果 (the user's ask: 「色散从细节中移出，单独放置到校正卡片中，校正卡片目前放在
-        /// 「细节」「效果」的中间」). The rows are S0 render parameters, not decoder amounts, so they read
-        /// as their own card rather than as a tail of 细节.
+        /// 2026-10-28 (096): **校正** — 色差 R / 色差 B plus 暗角 / 暗角中点 / 暗角羽化, between
+        /// 开发 and 细节 (the user's ask: 「色散从细节中移出，单独放置到校正卡片中」). The rows are
+        /// S0 / S1.9 render parameters, not decoder amounts, so they read as their own card rather
+        /// than as a tail of 开发.
         case correction
-        /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
+        /// 164 — **细节** (the new card): 纹理 / 清晰度 (moved from 效果) + 非 Bayer 降噪 /
+        /// 非 Bayer 彩色降噪 (new, S3.9). The user's split (2026-10-30): 开发 is the RAW decode flow,
+        /// 细节 is the display-referred detail/noise work, 效果 is only 去雾 + 颗粒.
+        ///
+        /// It sits directly after 校正 and before 效果 — the panel's own order, and the one the
+        /// ticket names: 开发 → 校正 → 细节 → 效果.
+        case detailFX
+        /// 2026-10-28: **效果** — 去雾 (S1.9) + 颗粒 (S3.7), Lightroom's Effects card.
+        /// 暗角 (S3c) **不在**效果卡 —— 它在 **校正** 卡（与色差 R/B 同卡，
+        /// `correctionRows = caRows + vignetteRows`）。2026-10-30 用户指出「多个文档口径不统一」，
+        /// 这里按 `PanelCardSpec.correctionCard` 的实现写，别再改回「暗角在效果」。
         ///
         /// After 曲线, and the position is the pipeline's own order rather than a preference:
         /// Light → Color → 细节/解码 → 曲线 → 效果 are the render stages in execution order, and the last
@@ -146,8 +158,9 @@ public struct InspectorView: View {
             case .hsl: return "HSL"
             case .pointColor: return "点颜色"
             case .colorGrading: return "色彩分级"
-            case .detail: return "细节"
+            case .detail: return "开发"
             case .correction: return "校正"
+            case .detailFX: return "细节"
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
@@ -369,6 +382,8 @@ public struct InspectorView: View {
             detailCard
         case .correction:
             correctionCard
+        case .detailFX:
+            detailFXCard
         case .curve:
             curveCard
         case .effects:
@@ -1125,6 +1140,21 @@ public struct InspectorView: View {
                     if editing { beginDetailDrag() } else { commitDetail(title: row.title) }
                 }
             }
+            // 164 — 去摩尔纹: a fifth decoder amount (CIRAWFilter.moireReductionAmount). It is not a
+            // `DetailAxis` case: the four-axis table is 031/040/042's contract and stays untouched.
+            // v9 reports `isMoireReductionSupported == false`, so the row is greyed there exactly
+            // like 色彩降噪 / 细节.
+            sliderRow("去摩尔纹",
+                      moireBinding(baseline),
+                      DetailSettings.moireRange,
+                      "%.0f",
+                      shape: .bar,
+                      editable: true,
+                      enabled: axes.moire,
+                      accessibilityID: "inspector.detail.moire",
+                      onReset: { resets.moire() }) { editing in
+                if editing { beginDetailDrag() } else { commitDetail(title: "去摩尔纹") }
+            }
         }
         // 096: the 色差 rows moved to `correctionCard`; this frame probe is the negative control for
         // the CA layout test (「两根行不在这张卡里」), not the rows' own card anchor.
@@ -1139,6 +1169,15 @@ public struct InspectorView: View {
     /// stay as they were on 细节.
     private var correctionCard: some View {
         toneCard(cardSpec(.correction))
+    }
+
+    /// 164 — **细节**: 纹理 / 清晰度 (moved here from 效果) and the two new non-Bayer denoises.
+    ///
+    /// A spec card like 校正: every row is a `ToneRow` over `effects`, so a double-click on the
+    /// title resets exactly these four numbers (`PanelResets.Group.detailFX`) and nothing on 开发,
+    /// 校正 or 效果. The stage is S3.9, in the display-referred frame, between 色彩分级 and 暗角.
+    private var detailFXCard: some View {
+        toneCard(cardSpec(.detailFX))
     }
 
     /// 「已自动应用配置文件」 when the photo's own file carries lens corrections.
@@ -1281,14 +1320,14 @@ public struct InspectorView: View {
         }
     }
 
-    /// 2026-10-28 — **效果**: 暗角, 纹理 / 清晰度 / 去雾 and 颗粒 — Lightroom's Effects card, and the
+    /// 2026-10-28 — **效果**: 纹理 / 清晰度 / 去雾 + 颗粒 — Lightroom's Effects card, and the
     /// Presence triple 078 P0-6 was missing.
     ///
+    /// **暗角的三行不在这张卡里**（2026-10-30 更正）：它们在 **校正** 卡，
+    /// `correctionRows = caRows + vignetteRows`，见 `PanelCardSpec.correctionCard`。
+    /// 这里原先的注释把暗角算进了效果卡，与实现不符；用户指出「多个文档口径不统一」后按代码改正。
+    ///
     /// ```text
-    /// 暗角        −100…100       S3c: negative darkens the corners
-    /// 暗角中点      0…100         half-diagonal radius; 100 = the corner
-    /// 暗角羽化      0…100         how soft the transition is
-    /// ─────────────────────────
     /// 纹理       −100…100       S3.8: the guided-filter residual in the 2…8 px band
     /// 清晰度     −100…100       S3.8: the same residual at a few percent of the frame
     /// 去雾       −100…100       S3.8: dark channel prior; negative adds the veil back
@@ -1535,6 +1574,15 @@ public struct InspectorView: View {
                 })
     }
 
+    /// 164 — the 去摩尔纹 row's binding. Same live-write / commit-on-release shape as the four
+    /// decoder rows; the model writes `nil` when the thumb lands on the file's own default amount.
+    private func moireBinding(_ baseline: DetailBaseline) -> Binding<Double> {
+        Binding(get: { session.edit.detailSettings.moirePosition(in: baseline) },
+                set: { newValue in
+                    session.applyEdit { $0.detailSettings.setMoirePosition(newValue, in: baseline) }
+                })
+    }
+
     /// Drag start: the loupe rebuilds from the preview rung only (派单 031).
     private func beginDetailDrag() {
         loupe?.beginDetailAdjustment()
@@ -1673,7 +1721,7 @@ public struct InspectorView: View {
                 keyPath: \.color.saturation, decimals: 1),
     ]
 
-    /// 2026-10-28 — the 效果 card's 暗角 block: **S3c's three uniforms, in the kernel's own order**
+    /// 2026-10-28 — the 校正 card's 暗角 block: **S3c's three uniforms, in the kernel's own order**
     /// (`s3_vignette.metal`: amount, midpoint, feather), with the kernel's own travels.
     ///
     /// Nothing is added that the shader does not read: 高光对比 / 颜色优先 / 样式 are Lightroom's
@@ -1712,19 +1760,41 @@ public struct InspectorView: View {
                 keyPath: \.effects.grainSeed, quantum: 1),
     ]
 
-    /// 2026-10-28 (P0-6) — the 效果 card's **纹理 / 清晰度 / 去雾** block: S3.9's 纹理/清晰度 and
-    /// S1.9's 去雾 (117 moved dehaze to the scene-linear chain), Lightroom's Presence triple, in the
-    /// panel's order.
+    /// 2026-10-28 (P0-6), 164 — the **开发** card's four decoder rows are drawn from
+    /// `DetailAxis.panelOrder` (031 / 040 / 042); 去摩尔纹 is the fifth decoder amount and has its
+    /// own row (`moireRow`) because it is not one of the four `DetailAxis` cases (164 keeps that
+    /// table's four-axis contract intact for every test and for the baseline arithmetic).
     ///
-    /// The travels are the kernel's: −100…100 for all three. 0 means the band is not touched — and when
-    /// all three are 0 neither stage is encoded at all, so the frame is the pre-change frame byte for
-    /// byte. `effects.detailFXRows` is what the card iterates, so a row that is drawn but not in the
-    /// table (or the reverse) cannot exist.
-    public static let detailFXRows: [ToneRow] = [
+    /// 164 moved the old 纹理 / 清晰度 / 去雾 block out of this table: 纹理 / 清晰度 are the new
+    /// **细节** card's first block, 去雾 / 去雾深度 are the **效果** card's first block.
+    public static let textureClarityRows: [ToneRow] = [
         ToneRow(title: "纹理", range: -100 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.texture),
         ToneRow(title: "清晰度", range: -100 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.clarity),
+    ]
+
+    /// 164 — the new 细节 card's two **non-Bayer** rows: S3.9's display-referred luminance and
+    /// chroma noise reduction. 0 is the pre-164 frame byte for byte (the stage is not encoded when
+    /// everything is 0), and the rows are `.knob` because they act on the decoded/render frame,
+    /// not in the scene-linear or decoder domains.
+    public static let nonBayerRows: [ToneRow] = [
+        ToneRow(title: "非 Bayer 降噪", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.nonBayerLuminanceNR),
+        ToneRow(title: "非 Bayer 彩色降噪", range: 0 ... 100, format: "%.0f", shape: .knob,
+                keyPath: \.effects.nonBayerColorNR),
+    ]
+
+    /// The new 细节 card's rows in draw order: 纹理 / 清晰度, then the two non-Bayer denoises.
+    public static var detailFXRows: [ToneRow] { textureClarityRows + nonBayerRows }
+
+    /// 2026-10-28 (P0-6) / 117 / 164 — the 效果 card's 去雾 block: S1.9 (117 moved it to the
+    /// scene-linear chain), Lightroom's Presence triple's last row plus 120b's depth assist.
+    ///
+    /// The travel is the kernel's: −100…100 (0…100 for the depth strength). 0 means the veil is not
+    /// touched — and when both are 0 S1.9 is not encoded at all, so the frame is the pre-117 frame
+    /// byte for byte.
+    public static let dehazeRows: [ToneRow] = [
         // 117: 去雾 runs in the scene-linear chain (S1.9), so its row carries the linear-domain red
         // (071's class) like the vignette rows in 校正.
         ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .linear,
@@ -1735,9 +1805,9 @@ public struct InspectorView: View {
                 keyPath: \.effects.dehazeDepth, requiresDepth: true),
     ]
 
-    /// The card's seven rows in draw order — the two blocks and the divider between them. One list,
-    /// so a test can hold 「七根滑杆」 and the card cannot draw a row the table does not have.
-    public static var effectsRows: [ToneRow] { detailFXRows + grainRows }
+    /// The 效果 card's rows in draw order — 164 leaves it two blocks and **no detail rows**:
+    /// 去雾 (S1.9) then 颗粒 (S3.7).
+    public static var effectsRows: [ToneRow] { dehazeRows + grainRows }
 
     /// The 校正 card's rows in draw order: the two CA ratios (S0) and the three vignette rows (116 —
     /// linear-domain lens-vignetting correction), all drawn red.
@@ -1758,12 +1828,15 @@ public struct InspectorView: View {
     public struct PanelCardSpec: Equatable {
 
         /// The semantic block a row belongs to. The block order is the draw order, and every block
-        /// after the first starts after a divider (校正: 色差 ─ 暗角; 效果: 纹理… ─ 颗粒).
+        /// after the first starts after a divider (校正: 色差 ─ 暗角; 细节: 纹理/清晰度 ─ 非 Bayer 降噪;
+        /// 效果: 去雾 ─ 颗粒).
         public enum BlockGroup: String, Equatable, Sendable {
             case tone
             case ca
             case vignette
             case presence
+            case noise
+            case dehaze
             case grain
         }
 
@@ -1860,13 +1933,21 @@ public struct InspectorView: View {
             blocks: [Block(group: .ca, rows: InspectorView.caRows),
                      Block(group: .vignette, rows: InspectorView.vignetteRows)])
 
+        /// 164 — the new 细节 card: 纹理 / 清晰度 (moved from 效果) then the two non-Bayer denoises.
+        public static let detailFXCard = PanelCardSpec(
+            section: .detailFX, group: .detailFX,
+            blocks: [Block(group: .presence, rows: InspectorView.textureClarityRows),
+                     Block(group: .noise, rows: InspectorView.nonBayerRows)])
+
+        /// 164 — 效果 keeps only 去雾 / 去雾深度 and 颗粒.
         public static let effectsCard = PanelCardSpec(
             section: .effects, group: .effects,
-            blocks: [Block(group: .presence, rows: InspectorView.detailFXRows),
+            blocks: [Block(group: .dehaze, rows: InspectorView.dehazeRows),
                      Block(group: .grain, rows: InspectorView.grainRows)])
 
-        /// The four spec cards, in panel order.
-        public static let all: [PanelCardSpec] = [.lightCard, .colorCard, .correctionCard, .effectsCard]
+        /// The five spec cards, in panel order.
+        public static let all: [PanelCardSpec] = [.lightCard, .colorCard, .correctionCard,
+                                                  .detailFXCard, .effectsCard]
     }
 
     /// 052: how a resting readout turns a document value into the digits beside the slider.
@@ -2964,7 +3045,9 @@ public struct PanelResets {
         case detail
         /// 2026-10-28 (096): 校正 — 色差 R / 色差 B, one double-click.
         case correction
-        /// 2026-10-28: 效果 — 暗角 + 颗粒, seven numbers (134 removed 圆度), one double-click.
+        /// 164: 细节 — 纹理 / 清晰度 / 非 Bayer 降噪 / 非 Bayer 彩色降噪, one double-click.
+        case detailFX
+        /// 2026-10-28: 效果 — 去雾 / 去雾深度 + 颗粒, one double-click (164 removed the detail rows).
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
         case colorGrading
@@ -2982,6 +3065,7 @@ public struct PanelResets {
             case .blackAndWhite: return InspectorView.Section.blackAndWhite.title
             case .detail: return InspectorView.Section.detail.title
             case .correction: return InspectorView.Section.correction.title
+            case .detailFX: return InspectorView.Section.detailFX.title
             case .effects: return InspectorView.Section.effects.title
             case .colorGrading: return InspectorView.Section.colorGrading.title
             case .pointColor: return InspectorView.Section.pointColor.title
@@ -3061,6 +3145,16 @@ public struct PanelResets {
         guard session.edit.detailSettings[axis] != nil else { return false }
         session.applyEdit { $0.detailSettings[axis] = nil }
         let committed = session.commitEdit(label: axis.title, coalesce: false)
+        loupe?.endDetailAdjustment()
+        return committed
+    }
+
+    /// 164 — double-click on 去摩尔纹: back to **this file's own amount** (`nil`), one history entry.
+    @discardableResult
+    public func moire() -> Bool {
+        guard session.edit.detailSettings.moire != nil else { return false }
+        session.applyEdit { $0.detailSettings.moire = nil }
+        let committed = session.commitEdit(label: "去摩尔纹", coalesce: false)
         loupe?.endDetailAdjustment()
         return committed
     }
@@ -3221,7 +3315,7 @@ public struct PanelResets {
             return WhiteBalanceCommands(session: session, asShot: loupe?.asShotWhiteBalance)
                 .resetToAsShot()
 
-        case .light, .color, .correction, .effects:
+        case .light, .color, .correction, .detailFX, .effects:
             // 125: the card's own table decides its scope — no field names here. Moving a row between
             // cards moves its reset with it, and one `applyEdit` + one `commitEdit` stays one snapshot.
             guard let card = InspectorView.PanelCardSpec.all.first(where: { $0.group == group }) else {

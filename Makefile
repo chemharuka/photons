@@ -11,6 +11,10 @@ GOLDEN_DIR ?= Tests/Golden
 EDIT_DIR ?= Tests/Fixtures
 CONFIG ?= release
 BIN := .build/$(CONFIG)/photonsctl
+# 图标：Resources/AppIcon.icon（Icon Composer 文档）→ 经典 icns（14–15 自动回退用的那份）。
+# 需要带 Pillow 的 python；优先用绘图 venv，其次系统 python3。
+ICON_PYTHON ?= $(shell for p in "$$HOME/workspace/.venv-plot/bin/python" "$$(command -v python3)"; do "$$p" -c 'import PIL' >/dev/null 2>&1 && { echo "$$p"; break; }; done)
+APPICON := Resources/AppIcon.icns
 CACHE_DIR ?= $(HOME)/Library/Caches/Photons/linear
 VIEWPORT ?= 2560x1600
 
@@ -102,6 +106,13 @@ record: build
 	$(BIN) render "$(RAW)" --edit $(EDIT_DIR)/edit-push.json --out /tmp/photons-record-2.jpg --scale 0.25 --golden record
 
 ## M3 — the app bundle. `make verify` is unchanged by this: it stays one command.
+$(APPICON): scripts/appicon.py $(shell find Resources/AppIcon.icon -type f 2>/dev/null)
+	@test -n "$(ICON_PYTHON)" || { echo "需要带 Pillow 的 python 才能生成 $(APPICON)"; exit 1; }
+	@$(ICON_PYTHON) scripts/appicon.py
+
+# `app` **不再依赖** $(APPICON)：仓库里那份 icns 只是 actool 不可用时的回退，
+# 正常情况下 `scripts/bundle-app.sh` 会用 `xcrun actool` 现场编译 .icon（见那里的注释），
+# 所以 `make app` 不需要 Pillow，也不需要先跑 python。要手工重烘回退版才 `make $(APPICON)`。
 app: build
 	@scripts/bundle-app.sh $(CONFIG)
 	@plutil -lint .build/Photons.app/Contents/Info.plist >/dev/null && echo "info.plist  OK"

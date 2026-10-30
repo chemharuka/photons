@@ -1,15 +1,15 @@
 {
-  "createdAt" : "2026-10-29T14:15:38Z",
-  "decoderVersion" : "8",
-  "edit" : "edit-crop-rot",
-  "fileSHA256" : "914e2e13ea66000518de2f2beec28146bb9be3f4064271ffb6e88cc9a6fd7564",
-  "height" : 1031,
-  "note" : "Recorded by photonsctl render. Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.",
-  "osVersion" : "Version 27.2 (Build 26B118)",
-  "pixelSHA256" : "4cf700cfead4d5bed8545b5eb81b4766f9fa35a4fe25dad4392daa277609c588",
-  "raw" : "L1030433.dng",
-  "rawSHA256" : "3c33888215a1969a3d9fb82fddf6c9bcfd389dc5b647737dd0d78826a832ebd1",
-  "scale" : 0.25,
-  "stageKeys" : "s0=c4b5113f s1=45788d99 s1.7=f64001f8 s2=cf5e9fb7 s3-color=77eca846 s3-vignette=95a3ca65 s4=9a2d8e31",
-  "width" : 1333
+  "createdAt": "2026-10-29T14:15:38Z",
+  "decoderVersion": "8",
+  "edit": "edit-crop-rot",
+  "fileSHA256": "914e2e13ea66000518de2f2beec28146bb9be3f4064271ffb6e88cc9a6fd7564",
+  "height": 1031,
+  "note": "162: canvas 1333\u21921334 wide (ceil once around the rotated crop instead of rounded; height 1031 unchanged). Recorded by photonsctl render. Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.",
+  "osVersion": "Version 27.2 (Build 26B118)",
+  "pixelSHA256": "a0059a02cc6c271f4e96c931dfe9d61ff25e3da03e880844f7528e568996fa6b",
+  "raw": "L1030433.dng",
+  "rawSHA256": "3c33888215a1969a3d9fb82fddf6c9bcfd389dc5b647737dd0d78826a832ebd1",
+  "scale": 0.25,
+  "stageKeys": "s0=c4b5113f s1=45788d99 s1.7=f64001f8 s2=cf5e9fb7 s3-color=77eca846 s3-vignette=95a3ca65 s4=9a2d8e31",
+  "width": 1334
 }

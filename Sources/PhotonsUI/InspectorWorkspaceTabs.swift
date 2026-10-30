@@ -86,8 +86,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
             // The card wrote the other cards rather than adding a parameter, so it is now a top-level
             // menu (`MainMenu`) plus the copy sheet's 保存为预设…, and 调整 ends at 效果.
             // Membership is listed in the panel's own render order (`Section.allCases`: 曲线 above
-            // 细节 since 2026-10-28), because `UISmokeWorkspaceSwitchTests` compares titles to this.
-            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail, .correction, .effects]
+            // 开发 since 2026-10-28), because `UISmokeWorkspaceSwitchTests` compares titles to this.
+            // 164: 开发 (was 细节) → 校正 → 细节 (new) → 效果.
+            return [.whiteBalance, .blackLevel, .light, .color, .curve, .detail, .correction,
+                    .detailFX, .effects]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. 087 added the
             // 角度 card right after it (转动 / 旋转 / 镜像), and both are `Section`s like every other

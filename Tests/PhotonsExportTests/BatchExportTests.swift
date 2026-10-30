@@ -162,6 +162,47 @@ final class BatchExportTests: XCTestCase {
         XCTAssertEqual(img.height, 240)
     }
 
+    /// 168 §2 — 不扩大 clamps the request to the source and the outcome says so; turning the
+    /// checkbox off is the explicit permission to enlarge. Scaled down so the test stays light.
+    func testNoUpscaleClampsTheRequestAndRecordsWhy() throws {
+        let report = BatchExporter.run(items: [item("small")],
+                                       preset: ExportPreset(format: .jpeg, longEdge: 80,
+                                                            noUpscale: true),
+                                       outputDirectory: out,
+                                       render: { _, _ in self.image(width: 60, height: 40) })
+        let outcome = try XCTUnwrap(report.written.first)
+        XCTAssertEqual(outcome.pixelSize, ImageSize(width: 60, height: 40))
+        XCTAssertTrue(outcome.warnings.contains {
+            $0.contains("长边 80 请求") && $0.contains("源 60")
+                && $0.contains("按不扩大输出 60")
+        }, outcome.warnings.joined(separator: " | "))
+    }
+
+    func testAllowingUpscaleHonoursTheRequestedLongEdge() throws {
+        let report = BatchExporter.run(items: [item("small")],
+                                       preset: ExportPreset(format: .jpeg, longEdge: 80,
+                                                            noUpscale: false),
+                                       outputDirectory: out,
+                                       render: { _, _ in self.image(width: 60, height: 40) })
+        let outcome = try XCTUnwrap(report.written.first)
+        XCTAssertEqual(outcome.pixelSize, ImageSize(width: 80, height: 53))
+    }
+
+    /// 161 §3 — the exporter is the *correct* half of the old bug: `.none` ignores a stale
+    /// `longEdge`. (The panel used to render at 2048 before the batch ever saw the pixels; that half
+    /// is pinned in `ExportSheetSizingTests`.)
+    func testOriginalSizeModeIgnoresAStaleLongEdge() throws {
+        let preset = ExportPreset(name: "网络 2048", format: .png, longEdge: 2048,
+                                  sizingMode: ExportSizingMode.none)
+        let report = BatchExporter.run(items: [item("original")], preset: preset,
+                                       outputDirectory: out,
+                                       render: { _, _ in self.image(width: 320, height: 240) })
+        let img = try readBack(try XCTUnwrap(report.written.first?.fileURL))
+        XCTAssertEqual(img.width, 320, "原尺寸不能被残留的 2048 长边缩掉")
+        XCTAssertEqual(img.height, 240)
+        XCTAssertEqual(report.written.first?.pixelSize, ImageSize(width: 320, height: 240))
+    }
+
     func testQualityChangesTheFileAndStaysLossy() throws {
         func run(_ q: Double) throws -> Int {
             let report = BatchExporter.run(items: [item("q")],

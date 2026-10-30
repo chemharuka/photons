@@ -80,7 +80,7 @@ final class CopySettingsSectionsTests: XCTestCase {
         // 蒙版 is a section since P1-5: A has one mask, so the payload carries one — but a mask is a
         // nested document, not a leaf, and does not enter that count.
         XCTAssertEqual(snapshot.sections,
-                       [.whiteBalance, .light, .curve, .color, .geometry, .effects, .masks])
+                       [.whiteBalance, .light, .curve, .color, .geometry, .correction, .masks])
         XCTAssertEqual(snapshot.maskCount, 1)
         XCTAssertEqual(snapshot.masks?.masks.map(\.id), ["A-mask"])
 
@@ -282,9 +282,9 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(selection.matchingPreset, .all)
         // P1-5: 蒙版 is a row like any other — 全部 carries it, and the summary says so.
         XCTAssertTrue(selection.contains(.masks))
-        // 081: the summary names the twelve **cards**, in the panel's order.
+        // 081: the summary names the **cards**, in the panel's order (164 added 细节/开发).
         XCTAssertEqual(selection.summary,
-                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 效果 · 裁切 · 蒙版")
+                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 开发 · 校正 · 细节 · 效果 · 裁切 · 蒙版")
 
         selection.selectNone()
         XCTAssertTrue(selection.isEmpty)

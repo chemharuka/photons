@@ -555,7 +555,9 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 2026-10-28 (P0-6): the card's third block is a third stage — S3.9 reads 纹理/清晰度 and
             // none of the vignette/grain numbers, so a clarity drag must dirty S3.9 alone.
             if effects.texture != old.effects.texture
-                || effects.clarity != old.effects.clarity {
+                || effects.clarity != old.effects.clarity
+                || effects.nonBayerLuminanceNR != old.effects.nonBayerLuminanceNR
+                || effects.nonBayerColorNR != old.effects.nonBayerColorNR {
                 s.insert(.detailFX)
             }
             // 117: 去雾 is S1.9 now, in the linear chain — its own stage and its own dirty bit, so a
@@ -2056,6 +2058,14 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// **byte for byte**; the uniform is this number / 100. The stage still exists by `dehaze`, not by
     /// this field: a depth strength with no dehaze has nothing to modulate (and no depth map is read).
     public var dehazeDepth: Double
+    /// 164 — **非 Bayer 降噪** (0…100, default 0): S3.9's display-referred luminance denoise. The
+    /// guided filter's residual (the same statistics 纹理/清晰度 use) is subtracted from the luma at a
+    /// 1–3 px radius, so flat noise is averaged while structural edges keep their step. 0 is the
+    /// pre-164 frame byte for byte (the stage is not encoded when everything is 0).
+    public var nonBayerLuminanceNR: Double
+    /// 164 — **非 Bayer 彩色降噪** (0…100, default 0): S3.9's OKLab chroma suppression. It scales
+    /// `C` only (hue and `L` are held), so a grey card stays neutral and the luma is untouched.
+    public var nonBayerColorNR: Double
 
     public static let identity = EffectsGroup()
 
@@ -2071,10 +2081,13 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
     public var hasGrain: Bool { grain > 0 }
 
-    /// Does S3.9 exist for this document? Judged **by value**: 纹理 or 清晰度 non-zero (117 removed
-    /// 去雾 from this stage). A document with both at 0 keeps the pre-S3.9 chain byte for byte — the
-    /// strongest form of 「中性零变化」, the pass is not encoded rather than encoded and multiplied by zero.
-    public var hasDetailFX: Bool { texture != 0 || clarity != 0 }
+    /// Does S3.9 exist for this document? Judged **by value**: 纹理 / 清晰度 / 非 Bayer 降噪 /
+    /// 非 Bayer 彩色降噪 non-zero (117 removed 去雾 from this stage). A document with all four at 0
+    /// keeps the pre-S3.9 chain byte for byte — the strongest form of 「中性零变化」, the pass is not
+    /// encoded rather than encoded and multiplied by zero.
+    public var hasDetailFX: Bool {
+        texture != 0 || clarity != 0 || nonBayerLuminanceNR != 0 || nonBayerColorNR != 0
+    }
 
     /// 117: does S1.9 (去雾) exist for this document? Its own stage, its own link.
     public var hasDehaze: Bool { dehaze != 0 }
@@ -2084,11 +2097,15 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// modulate, and appending a depth key for it would invalidate a cached neutral frame for nothing.
     public var usesDepthDehaze: Bool { dehaze != 0 && dehazeDepth != 0 }
 
-    /// S3.9's material — 纹理 and 清晰度 and nothing else. A clarity drag must not miss a cached
-    /// vignette (S3c reads neither) and a vignette drag must not re-run S3.9. 去雾 has its own string
-    /// now that it is its own stage.
+    /// S3.9's material — 纹理 / 清晰度 and the two non-Bayer denoises, and nothing else. A clarity
+    /// drag must not miss a cached vignette (S3c reads neither) and a vignette drag must not re-run
+    /// S3.9. 去雾 has its own string now that it is its own stage. The newer fields append only when
+    /// non-zero (the `asp`/`car` discipline): a pre-164 document keeps the exact `tx=…;cl=…` text.
     public var detailFXKeyString: String {
-        "tx=\(k(texture));cl=\(k(clarity))"
+        var m = "tx=\(k(texture));cl=\(k(clarity))"
+        if nonBayerLuminanceNR != 0 { m += ";nbl=\(k(nonBayerLuminanceNR))" }
+        if nonBayerColorNR != 0 { m += ";nbc=\(k(nonBayerColorNR))" }
+        return m
     }
 
     /// S1.9's material — the dehaze amount and, when it is non-zero, 120b's depth strength. The depth
@@ -2104,7 +2121,8 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
                 texture: Double = 0, clarity: Double = 0, dehaze: Double = 0,
-                dehazeDepth: Double = 0) {
+                dehazeDepth: Double = 0,
+                nonBayerLuminanceNR: Double = 0, nonBayerColorNR: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
@@ -2116,6 +2134,8 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         self.clarity = clarity
         self.dehaze = dehaze
         self.dehazeDepth = dehazeDepth
+        self.nonBayerLuminanceNR = nonBayerLuminanceNR
+        self.nonBayerColorNR = nonBayerColorNR
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2132,6 +2152,8 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.clarity = c.val("clarity", v.clarity)
         v.dehaze = c.val("dehaze", v.dehaze)
         v.dehazeDepth = c.val("dehazeDepth", v.dehazeDepth)
+        v.nonBayerLuminanceNR = c.val("nonBayerLuminanceNR", v.nonBayerLuminanceNR)
+        v.nonBayerColorNR = c.val("nonBayerColorNR", v.nonBayerColorNR)
         self = v
     }
 
@@ -2152,6 +2174,13 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
         if dehazeDepth != 0 { try c.encode(dehazeDepth, forKey: AnyCodingKey("dehazeDepth")) }
+        // 164: additive, absent at 0 — a pre-164 document re-encodes byte for byte.
+        if nonBayerLuminanceNR != 0 {
+            try c.encode(nonBayerLuminanceNR, forKey: AnyCodingKey("nonBayerLuminanceNR"))
+        }
+        if nonBayerColorNR != 0 {
+            try c.encode(nonBayerColorNR, forKey: AnyCodingKey("nonBayerColorNR"))
+        }
     }
 
     /// S3c's material — the three vignette numbers and nothing else. A grain drag must not miss a

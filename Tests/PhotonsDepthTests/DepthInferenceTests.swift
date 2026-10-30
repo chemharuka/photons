@@ -65,9 +65,9 @@ final class DepthInferenceTests: XCTestCase {
                                   "the shipped model is an image model")
         XCTAssertEqual(model.inputWidth, input.pixelsWide)
         XCTAssertEqual(model.inputHeight, input.pixelsHigh)
-        // 2026-10-30 — the 1036×784 re-export returns a **multi-array** (`[1,1,784,1036]`, fp16),
-        // where Apple's 518 package returned an image. `DepthModel` reads both, so the assertion is
-        // "the output geometry travels from the description either way", not "it is an image".
+        // `DepthModel` accepts an image output (what Apple's package ships) *and* a multi-array
+        // output (what our own re-exports return), so the assertion is "the output geometry travels
+        // from the description either way", not "it is an image".
         let outputImage = description.outputDescriptionsByName.values.first?.imageConstraint
         let outputArray = description.outputDescriptionsByName.values.first?.multiArrayConstraint
         if let outputImage {

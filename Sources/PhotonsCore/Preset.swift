@@ -174,6 +174,13 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color, .blackAndWhite, .hsl: return [.color]
             case .colorGrading: return [.colorGrading]
             case .detail: return [.detail]
+            // 156: 校正's two leaves live in `OpticsGroup`, which the preset envelope has never had a
+            // group for (whole-document presets do not carry CA either). The card is copy/paste only;
+            // naming a group here would promise a fragment the encoder cannot write.
+            case .correction: return []
+            // 164: 纹理 / 清晰度 / 非 Bayer 降噪 are `EffectsGroup` fields, so the preset envelope's
+            // effects group is the one that can carry them (the storage group, not the panel card).
+            case .detailFX: return [.effects]
             case .effects: return [.effects]
             case .masks: return []
             }

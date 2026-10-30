@@ -60,21 +60,16 @@ ledger, `content_hash`/`quick_hash` pair) was designed from those readings and i
 
 ## Bundled model weights — Depth Anything V2 (Small, Core ML)
 
-`Resources/DepthAnythingV2SmallF16.mlpackage` (50 MB, F16) is redistributed under the
+`Resources/DepthAnythingV2SmallF16.mlpackage` (48 MB, F16) is redistributed unchanged under the
 **Apache License 2.0** (full text: `Resources/Depth-Anything-V2-LICENSE.txt`).
 
 - Model: **Depth Anything V2** (Small) — Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu,
   Jiashi Feng, Hengshuang Zhao. <https://github.com/DepthAnything/Depth-Anything-V2>
-- Upstream Core ML conversion: **`apple/coreml-depth-anything-v2-small`** on Hugging Face, revision
-  `cfef6f6` (Apache-2.0 as published by Apple).
-- **Modified by us (2026-10-30)**: the shipped package is our own export of the same Small
-  checkpoint at **1036×784** with fp16 output, produced with `coremltools 9` from the upstream
-  PyTorch weights. Apple's original package is locked to 518×392, which was too coarse for a depth
-  mask edge. No weight value was touched and no dataset was added; the licence and this attribution
-  travel with it, and the fact of modification is stated here as Apache-2.0 §4(b) requires.
-  `DepthModel.revision` carries the re-export (`dav2s-f16-1036x784@00b3af8c`).
-- Redistribution conditions met: the licence ships with the app, the attribution above is kept, the
-  modification is declared, and nothing claims endorsement by Apple or the authors.
+- Core ML conversion: **`apple/coreml-depth-anything-v2-small`** on Hugging Face, revision `cfef6f6`
+  (weights `DepthAnythingV2SmallF16.mlpackage`, weight.bin SHA-256 recorded by
+  `DepthModel.revision`). Apache-2.0 as published by Apple.
+- Redistribution conditions met: the licence ships with the app, the attribution above is kept, no file
+  inside the package was modified, and nothing claims endorsement by Apple or the authors.
 - Compiled per bundle by `scripts/depth-model.sh` (`xcrun coremlcompiler compile`), because SwiftPM
   cannot process an `.mlpackage` directory.
 

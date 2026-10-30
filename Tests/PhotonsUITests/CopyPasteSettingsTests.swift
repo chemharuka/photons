@@ -401,7 +401,7 @@ final class CopyPasteSettingsTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.selection.sections, Set(EditSnapshotSection.copyable))
         XCTAssertEqual(view.statusLabel.stringValue,
-                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 细节 · 效果 · 裁切 · 蒙版")
+                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 曲线 · 开发 · 校正 · 细节 · 效果 · 裁切 · 蒙版")
         XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 1, "全部 is the first preset row")
 
         // 全不选 / 全选 buttons.

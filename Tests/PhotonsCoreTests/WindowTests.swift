@@ -562,18 +562,24 @@ final class WindowTests: XCTestCase {
         // window origin are the canvas bounds — clipped to the window where the mask runs past it.
         // 132: the whole render's canvas is the rotated bounding box, so the frame is offset by
         // (canvas − frame)/2; the window render is unchanged and its canvas is still the window.
+        // 162: the bounding box is now `ceil`ed, so that offset can be a **half pixel** (here y is
+        // 20.5). A pixel interval that starts at 140.5 starts at pixel 141 and one that ends at 198.5
+        // ends at 198 — `ceil` for the low edge, `floor` for the high edge, exactly the half-open
+        // canvas grid the renderer writes.
         let frame = edit.geometry.outputPixels(in: size(image))
         let wholeCanvas = CropGeometry(geometry: edit.geometry, source: size(image)).canvas
-        let ox = (wholeCanvas.width - frame.width) / 2
-        let oy = (wholeCanvas.height - frame.height) / 2
+        let ox = Double(wholeCanvas.width - frame.width) / 2
+        let oy = Double(wholeCanvas.height - frame.height) / 2
+        func lowEdge(_ value: Double) -> Int { Int(value.rounded(.up)) }
+        func highEdge(_ value: Double) -> Int { Int(value.rounded(.down)) }
         print("WINDOW mask bounds: frame [\(wholeBounds.x0),\(wholeBounds.y0)]–[\(wholeBounds.x1),\(wholeBounds.y1)]"
               + " → canvas [\(windowBounds.x0),\(windowBounds.y0)]–[\(windowBounds.x1),\(windowBounds.y1)]"
               + " · frame \(frame.keyString) wholeCanvas \(wholeCanvas.keyString) offset \(ox),\(oy)")
         // whole canvas = margin + frame; window canvas = frame − window origin.
-        XCTAssertEqual(windowBounds.x0, max(0, wholeBounds.x0 - ox - window.x))
-        XCTAssertEqual(windowBounds.y0, max(0, wholeBounds.y0 - oy - window.y))
-        XCTAssertEqual(windowBounds.x1, min(window.width, wholeBounds.x1 - ox - window.x))
-        XCTAssertEqual(windowBounds.y1, min(window.height, wholeBounds.y1 - oy - window.y))
+        XCTAssertEqual(windowBounds.x0, max(0, lowEdge(Double(wholeBounds.x0) - ox - Double(window.x))))
+        XCTAssertEqual(windowBounds.y0, max(0, lowEdge(Double(wholeBounds.y0) - oy - Double(window.y))))
+        XCTAssertEqual(windowBounds.x1, min(window.width, highEdge(Double(wholeBounds.x1) - ox - Double(window.x))))
+        XCTAssertEqual(windowBounds.y1, min(window.height, highEdge(Double(wholeBounds.y1) - oy - Double(window.y))))
     }
 
     // MARK: - 4. keys, traces, cost

@@ -46,8 +46,10 @@ final class RotatedCanvasTests: XCTestCase {
                                          quarterTurns: 0)
         let c = abs(cos(9.7 * Double.pi / 180)), s = abs(sin(9.7 * Double.pi / 180))
         let w = Double(out.width), h = Double(out.height)
-        XCTAssertEqual(canvas.width, Int((w * c + h * s).rounded()))
-        XCTAssertEqual(canvas.height, Int((w * s + h * c).rounded()))
+        // 162: one `ceil`, not `.rounded()` — the canvas has to *contain* the rotated corners. The
+        // old expectation (rounded) is 1 px short on a wide crop at 9.7°, the under-cover G1 fixes.
+        XCTAssertEqual(canvas.width, Int((w * c + h * s).rounded(.up)))
+        XCTAssertEqual(canvas.height, Int((w * s + h * c).rounded(.up)))
     }
 
     func testQuarterTurnIsAppliedBeforeTheAngle() {

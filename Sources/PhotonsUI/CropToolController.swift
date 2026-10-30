@@ -450,6 +450,26 @@ public final class CropToolController {
         draft = Draft(geometry: session.edit.geometry)
     }
 
+    /// 169 §2b — the crop session was opened on photo A and the user clicked photo B **without
+    /// leaving 裁切**. The tool stays armed, but every piece of context has to be B's:
+    ///
+    ///   · the draft is re-seeded from B's document (A's crop rect is not B's);
+    ///   · `entryGeometry` is B's too, or Esc would roll B back to A's geometry;
+    ///   · the tool session is reopened on B's history (the photo switch already replaced it).
+    ///
+    /// This is the re-arm half of the one entry point; it never writes the document.
+    @discardableResult
+    public func reseedForPhotoChange() -> Bool {
+        guard isActive, let session else { return false }
+        endDrag()
+        draft = Draft(geometry: session.edit.geometry)
+        entryGeometry = session.edit.geometry
+        if !session.isToolSessionActive {
+            session.beginToolSession("裁切", label: "裁切与旋转")
+        }
+        return true
+    }
+
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
     ///
     /// 088 — a tick is a **draft** write only: the canvas keeps the document's pixels (and its
@@ -777,27 +797,23 @@ public final class CropToolController {
     /// not to the frame the crop is drawn in), so two corners are enough for the pull-back, and the
     /// result is exactly the rect whose four corners land on the canvas' four corners.
     public func safeCropRect(mapping: LoupeMapping, source: ImageSize? = nil) -> CropRect {
-        let src = source ?? sourceSize
-        let w = Double(max(src.width, 1)), h = Double(max(src.height, 1))
-        let a = mapping.framePoint(viewX: 0, viewY: 0)
-        let b = mapping.framePoint(viewX: Double(mapping.viewport.width),
-                                   viewY: Double(mapping.viewport.height))
-        var left = min(a.x, b.x) / w, right = max(a.x, b.x) / w
-        var top = min(a.y, b.y) / h, bottom = max(a.y, b.y) / h
-
-        // 132 (user 2026-10-29): there is **no photo bound** any more. The crop is the output frame
-        // and may sit outside the photograph; the pixels outside are black, and the frame turns red.
-        // The only bound is the canvas itself, which is what `framePoint` already says. (The old
-        // `0…1²` intersection is what made 「框可以出画面」 impossible to express in the model.)
-        left = max(left, -1e6); top = max(top, -1e6)
-        right = min(right, 1e6); bottom = min(bottom, 1e6)
-        guard right > left + 1e-9, bottom > top + 1e-9 else {
-            // Nothing of the frame is on screen (a degenerate projection): the whole frame is the only
-            // answer that keeps the arithmetic finite; `effectiveCrop` then fits it to the picture.
-            return .full
-        }
-        return CropRect(left: left, top: top, right: right, bottom: bottom)
+        CropWorkspaceLayout.canvasBounds(mapping: mapping, source: source ?? sourceSize)
     }
+
+    /// 162 §2.3 — **the hard boundary**: the visible canvas, in normalized frame coordinates.
+    ///
+    /// This is the only bound a drag/keyboard step has to respect. It is *not* `0…1²`: the canvas can
+    /// be larger than the photograph (a zoomed-out camera shows the black band around it), and a crop
+    /// is allowed to cover that band. `sourcePixelBounds` below is the photograph itself — a readout
+    /// and warning concept, never a clamp.
+    public func canvasBounds(mapping: LoupeMapping, source: ImageSize? = nil) -> CropRect {
+        safeCropRect(mapping: mapping, source: source)
+    }
+
+    /// The camera's own pixels (`0…1²`). **Not a hard boundary** since 162: a crop may cover the
+    /// rotated-out / letterboxed band outside the sensor, and the pixels there render as zero. The
+    /// overlay reads it only to paint the frame red (`frameExceedsPicture`).
+    public var sourcePixelBounds: CropRect { .full }
 
     /// Pull the draft's rect into `safeCropRect` — the **model-layer** floor of ⑦.
     ///
@@ -825,48 +841,48 @@ public final class CropToolController {
         if delta.isFinite, delta != 0 {
             return clampRotatedQuadToView(mapping: mapping, source: src, degrees: delta)
         }
-        let room = safeCropRect(mapping: mapping, source: src)
+        let room = canvasBounds(mapping: mapping, source: src)
         let before = draft.crop.clamped(allowsOutsideSource: true)
-
-        // Shrink **uniformly** — one scale for both axes — so the frame keeps its shape
-        // (⑦.5's 宽高比不变). The minimum span is a floor on that same scale, and only when the room
-        // is big enough to hold it; when it is not, the room wins and the frame is simply smaller.
-        let span = CropTool.minimumSpan(source: src)
-        var scale = min(1, min(room.width / max(before.width, 1e-9),
-                               room.height / max(before.height, 1e-9)))
-        if room.width >= span.width, room.height >= span.height {
-            let floor = min(1, max(span.width / max(before.width, 1e-9),
-                                   span.height / max(before.height, 1e-9)))
-            scale = max(scale, floor)
-        }
-        var candidate = CropRect(left: before.centerX - before.width * scale / 2,
-                                 top: before.centerY - before.height * scale / 2,
-                                 right: before.centerX + before.width * scale / 2,
-                                 bottom: before.centerY + before.height * scale / 2)
-        if draft.lock.ratio != nil {
-            candidate = CropTool.constrain(candidate, lock: draft.lock, source: src, anchor: .center)
-        }
-        // Shrink (never resize a crop that already fits) so a frame larger than the canvas can be
-        // seen — but 132: **do not move it back**. A frame that is smaller than the canvas may sit
-        // partly outside it (the user dragged it there, §7.4 「不弹回」); the overlay turns red when that
-        // puts it outside the photograph. Only a frame bigger than the canvas is shrunk, which is ⑦'s
-        // original purpose (「框要看得见」).
-        let fw = min(candidate.width, room.width), fh = min(candidate.height, room.height)
-        var next = CropRect(left: candidate.left, top: candidate.top,
-                            right: candidate.left + fw, bottom: candidate.top + fh)
-        // A frame whose **centre** left the canvas is not a drag the user can see any more (a panned
-        // camera moved the picture out from under it). That is the one case ⑦'s old "move it back"
-        // still applies; a frame the hand put partly outside stays there (§7.4 「不弹回」).
-        let cx = (next.left + next.right) / 2, cy = (next.top + next.bottom) / 2
-        if cx < room.left || cx > room.right || cy < room.top || cy > room.bottom {
-            let left = min(max(next.left, room.left), max(room.left, room.right - next.width))
-            let top = min(max(next.top, room.top), max(room.top, room.bottom - next.height))
-            next = CropRect(left: left, top: top,
-                            right: left + next.width, bottom: top + next.height)
-        }
+        let next = clampedToCanvas(before, bounds: room, source: src, lock: draft.lock)
         guard next != before else { return false }
         draft.crop = next
         return true
+    }
+
+    /// 162 §2.3 — the **hard** clamp: every edge inside `bounds` (the visible canvas), with the
+    /// frame's aspect kept. This is what makes 「框不能出画布」 true for a drag as well as for a
+    /// camera change.
+    ///
+    /// A frame larger than the canvas is shrunk **uniformly** (the ratio is the user's rule), and a
+    /// frame that fits is only *moved* — its size is untouched, so ⑦'s 「不弹回」 still means "the
+    /// crop you drew stays the size you drew it". `bounds` is not `0…1²`; the source-pixel rectangle
+    /// is deliberately not consulted here (162: 框可以出相机像素).
+    private func clampedToCanvas(_ rect: CropRect, bounds: CropRect,
+                                 source: ImageSize, lock: AspectLock) -> CropRect {
+        let c = rect.clamped(allowsOutsideSource: true)
+        guard bounds.width > 1e-9, bounds.height > 1e-9 else { return c }
+        let scale = min(1, bounds.width / max(c.width, 1e-9),
+                        bounds.height / max(c.height, 1e-9))
+        var width = c.width * scale
+        var height = c.height * scale
+        // A degenerate bound (a window narrower than the tool's own floor) still has to produce a
+        // legal rect; the canvas wins because it is the hard edge.
+        width = min(max(width, min(CropTool.minimumSpan(source: source).width, bounds.width)),
+                    bounds.width)
+        height = min(max(height, min(CropTool.minimumSpan(source: source).height, bounds.height)),
+                     bounds.height)
+        if let ratio = lock.ratio, width > 0, height > 0 {
+            // Re-apply the ratio after the minimum-span floor, inside the canvas.
+            let normalized = ratio * Double(source.height) / Double(max(source.width, 1))
+            if width / height > normalized { width = height * normalized } else { height = width / normalized }
+            if width > bounds.width { width = bounds.width; height = width / normalized }
+            if height > bounds.height { height = bounds.height; width = height * normalized }
+        }
+        let left = min(max(c.centerX - width / 2, bounds.left),
+                       max(bounds.left, bounds.right - width))
+        let top = min(max(c.centerY - height / 2, bounds.top),
+                      max(bounds.top, bounds.bottom - height))
+        return CropRect(left: left, top: top, right: left + width, bottom: top + height)
     }
 
     /// 092 — the Δθ ≠ 0 half of `clampToView`: fit the **bounding box of the turned quad** into the
@@ -881,20 +897,11 @@ public final class CropToolController {
                                         degrees: Double) -> Bool {
         // 132: the turned-quad clamp existed to keep the *photo-bound* frame on the canvas. With the
         // frame allowed outside the photograph and the camera re-fitting the whole canvas (see
-        // `LoupeFraming.fitZoom`), shrinking the draft here is exactly the 「第一次改角度框就没了」
-        // report: the binary search below can land on `CropRect.clamped()`'s 0.001 floor. So the
-        // default path does nothing; the old behaviour is still reachable through the flag.
+        // `LoupeFraming.fitZoom`), shrinking the draft here was the 「第一次改角度框就没了」 report.
+        // 162: the **canvas** is still a hard bound at an angle — the frame's turned quad may cover the
+        // blank/camera-outside pixels, but its AABB may not leave the viewport. The photo-bound shrink
+        // stays opt-in (`clampsToRotatedFrame`), unchanged from 132.
         let before = draft.crop.clamped(allowsOutsideSource: true)
-        guard clampsToRotatedFrame else {
-            // The frame stays where the hand put it — but a ratio lock is a document constraint, not
-            // part of the old photo-bound clamp, so it is still honoured.
-            guard draft.lock.ratio != nil else { return false }
-            let locked = CropTool.constrain(before, lock: draft.lock, source: source,
-                                            anchor: .center)
-            guard locked != before else { return false }
-            draft.crop = locked
-            return true
-        }
         let angle = CropTool.clampStraighten(draft.straighten)
         func seen(_ rect: CropRect) -> CropRect {
             let c = rect.clamped(allowsOutsideSource: true)
@@ -925,10 +932,18 @@ public final class CropToolController {
 
         /// The rect at uniform scale `s` (about the frame's centre, so the ratio is untouched), then
         /// moved so its quad's centre is as central on the canvas as that size allows. The move is
-        /// asked for in **view** space and converted back through the drags' own inverse; clamping the
-        /// stored rect to `0…1²` afterwards is what keeps it a rect of the frame.
+        /// asked for in **view** space and converted back through the drags' own inverse; 162 replaced
+        /// the old `0…1²` clamp with the **canvas** bound (the camera-outside band is legal).
         func candidate(_ s: Double) -> CropRect {
-            let width = base.width * s, height = base.height * s
+            var width = base.width * s, height = base.height * s
+            // 162: the ratio lock is a document constraint and must survive the canvas clamp; applying
+            // it to the *size* here (about the same centre) keeps it without `CropTool.constrain`'s
+            // `0…1²` clamp, which would forbid the camera-outside band.
+            if let ratio = draft.lock.ratio,
+               let normalizedAspect = CropTool.normalizedAspect(ratio, source: source) {
+                if width / height > normalizedAspect { width = height * normalizedAspect }
+                else { height = width / normalizedAspect }
+            }
             let raw = CropRect(x: base.centerX - width / 2, y: base.centerY - height / 2,
                                width: width, height: height).clamped(allowsOutsideSource: true)
             let box = quadBounds(raw)
@@ -939,7 +954,10 @@ public final class CropToolController {
                                                rotationDegrees: degrees) else { return raw }
             var moved = CropRect(x: centre.x - width / 2, y: centre.y - height / 2,
                                  width: width, height: height).clamped(allowsOutsideSource: true)
-            if draft.lock.ratio != nil {
+            // 162: at a draft angle the ratio is already preserved by the uniform scale/move; pulling
+            // the rect through `CropTool.constrain` would clamp it to the **camera pixels** (0…1²) and
+            // make 「框可以出相机像素」 impossible. Keep that only for the opt-in photo-bound path.
+            if clampsToRotatedFrame, draft.lock.ratio != nil {
                 moved = CropTool.constrain(moved, lock: draft.lock, source: source, anchor: .center)
             }
             return seen(moved)
@@ -954,9 +972,9 @@ public final class CropToolController {
                 && Double(box.center.y) + box.halfHeight <= canvasHeight + tolerance
         }
 
-        // The derived inscribed frame already fits and no ratio has to be re-applied: nothing to
-        // clamp, so the stored rect (the user's intent) stays untouched — reducing the angle to 0°
-        // then gives the whole frame back.
+        // The frame already fits and carries no lock to re-apply: nothing to clamp, so the stored rect
+        // (the user's intent) stays untouched — reducing the angle to 0° then gives the whole frame
+        // back. A lock still has to reshape the rect even when it already fits.
         if draft.lock.ratio == nil, fits(base) { return false }
 
         var next = candidate(1)
@@ -1046,6 +1064,10 @@ public final class CropToolController {
             return
         }
         draft.crop = next
+        // 162 §2.3 — a drag is the one path that can put the frame outside the canvas; the hard
+        // boundary is applied on the tick itself (not only on the next camera change), so the stored
+        // rect and the drawn rect are the same legal four edges at all times.
+        _ = clampToView(mapping: mapping, source: source)
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.

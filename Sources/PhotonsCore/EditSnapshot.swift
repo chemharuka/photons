@@ -82,20 +82,32 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// 色彩分级 — the nine wheel numbers (S3.8).
     case colorGrading
     case detail
+    /// 校正 — 色差 R / 色差 B (`optics.caRed` / `optics.caBlue`, 096/116) plus 暗角 / 暗角中点 /
+    /// 暗角羽化 (`effects.vignette*`, which the panel has always drawn on this card). Its own card
+    /// in the panel, so its own row here: 「只勾校正」 must carry the two CA ratios and the vignette
+    /// and no decoder/detail/effect leaf. Between 开发 and 细节, exactly where the inspector draws it.
+    case correction
+    /// 164 — **细节** (the new card): 纹理 / 清晰度 (`effects.texture` / `effects.clarity`) and the
+    /// two non-Bayer denoises (`effects.nonBayer*`). S3.9, display-referred. Its own row so 「只勾
+    /// 细节」 cannot move 开发, 校正 or 效果.
+    case detailFX
+    /// 效果 — 去雾 / 去雾深度 + 颗粒, and nothing else since 164 moved 纹理 / 清晰度 to 细节.
     case effects
     /// 蒙版 — the mask list, re-identified and re-anchored on paste (P1-5).
     case masks
 
     /// The checklist order — `InspectorView.Section.allCases`' render order, not a second list.
-    /// 白平衡 → 黑电平 → Light → Color → 黑白 → HSL → 色彩分级 → 曲线 → 细节 → 效果 → 裁切 → 蒙版.
-    /// (曲线 above 细节 since 2026-10-28 — the user's own panel order.)
+    /// 白平衡 → 黑电平 → Light → Color → 黑白 → HSL → 色彩分级 → 曲线 → 开发 → 校正 → 细节 → 效果
+    /// → 裁切 → 蒙版.
+    /// (曲线 above 开发 since 2026-10-28 — the user's own panel order; 校正 between 开发 and 细节
+    /// since 096/164, and 164's new 细节 card carries 纹理/清晰度 + the two non-Bayer denoises.)
     ///
     /// A test (`CopySheetCardTests`) compares it against `InspectorView.cardTitles(in: .adjust)` +
     /// the two cards that live in other workspaces, so a card that moves in the panel moves here or
     /// the test goes red.
     public static let panelOrder: [EditSnapshotSection] = [
         .whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .hsl, .colorGrading,
-        .curve, .detail, .effects, .geometry, .masks,
+        .curve, .detail, .correction, .detailFX, .effects, .geometry, .masks,
     ]
 
     /// Every section a paste can write — all of them, masks included since P1-5.
@@ -123,7 +135,9 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
         case .blackAndWhite: return "黑白"
         case .hsl: return "HSL"
         case .colorGrading: return "色彩分级"
-        case .detail: return "细节"
+        case .detail: return "开发"
+        case .correction: return "校正"
+        case .detailFX: return "细节"
         case .effects: return "效果"
         case .masks: return "蒙版"
         }
@@ -165,8 +179,13 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     case hslHue, hslSaturation, hslLuminance
     case gradeShadows, gradeMidtones, gradeHighlights
     case sharpening, sharpeningRadius, noiseLuminance, noiseColor, lensCorrections
+    case caRed, caBlue
     case curveWhite, curveRed, curveGreen, curveBlue
-    case vignette, grain, texture, clarity, dehaze
+    /// 164: 纹理 / 清晰度 / 非 Bayer 降噪 / 非 Bayer 彩色降噪 belong to the new 细节 card.
+    case texture, clarity, nonBayerLuminance, nonBayerColor
+    /// 暗角 stays on the 校正 card (it always did — 164 only corrected a stale comment).
+    case vignette
+    case grain, dehaze
     case crop, straighten, flips, aspectLock, quarterTurns
 
     /// The card this parameter belongs to. Declaration order of `allCases` is the panel order of
@@ -183,8 +202,10 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .gradeShadows, .gradeMidtones, .gradeHighlights: return .colorGrading
         case .sharpening, .sharpeningRadius, .noiseLuminance, .noiseColor, .lensCorrections:
             return .detail
+        case .caRed, .caBlue, .vignette: return .correction
         case .curveWhite, .curveRed, .curveGreen, .curveBlue: return .curve
-        case .vignette, .grain, .texture, .clarity, .dehaze: return .effects
+        case .texture, .clarity, .nonBayerLuminance, .nonBayerColor: return .detailFX
+        case .grain, .dehaze: return .effects
         case .crop, .straighten, .flips, .aspectLock, .quarterTurns: return .geometry
         }
     }
@@ -218,6 +239,8 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .noiseLuminance: return "降噪"
         case .noiseColor: return "色彩降噪"
         case .lensCorrections: return "镜头校正"
+        case .caRed: return "色差 R"
+        case .caBlue: return "色差 B"
         case .curveWhite: return "白色"
         case .curveRed: return "红"
         case .curveGreen: return "绿"
@@ -226,6 +249,8 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .grain: return "颗粒"
         case .texture: return "纹理"
         case .clarity: return "清晰度"
+        case .nonBayerLuminance: return "非 Bayer 降噪"
+        case .nonBayerColor: return "非 Bayer 彩色降噪"
         case .dehaze: return "去雾"
         case .crop: return "裁切"
         case .straighten: return "拉直"
@@ -258,7 +283,7 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
             switch self {
             case .all: return "全部"
             case .basic: return "基本：白平衡 + 黑电平 + 曝光 + 曲线"
-            case .color: return "颜色：颜色 + 黑白 + HSL + 色彩分级 + 细节 + 效果"
+            case .color: return "颜色：颜色 + 黑白 + HSL + 色彩分级 + 开发 + 细节 + 效果"
             case .geometry: return "几何：裁切"
             case .whiteBalance: return "仅白平衡"
             case .none: return "全不选"
@@ -273,7 +298,7 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
             case .basic: return [.whiteBalance, .blackLevel, .light, .curve]
             // 081: the three colour cards are colour. Leaving them out of 「颜色」 meant the popup had
             // no combination that carried 黑白 at all.
-            case .color: return [.color, .blackAndWhite, .hsl, .colorGrading, .detail, .effects]
+            case .color: return [.color, .blackAndWhite, .hsl, .colorGrading, .detail, .detailFX, .effects]
             case .geometry: return [.geometry]
             case .whiteBalance: return [.whiteBalance]
             case .none: return []
@@ -581,6 +606,24 @@ public struct ColorPatch: Sendable, Equatable, Codable {
     public var hasBlackAndWhiteMix: Bool { (bands ?? []).contains { $0.mix != nil } }
 }
 
+/// 校正 — the two lateral-CA ratios (`OpticsGroup.caRed` / `caBlue`, 029 / 096).
+///
+/// Two leaves, not the whole `OpticsGroup`: the group has exactly these two fields today, and a
+/// snapshot is a leaf table. The conversion the panel uses (slider −100…+100 ↔ α ±0.005) is a
+/// **view** fact (`OpticsGroup.alpha(fromSlider:)`); the clipboard stores α, like the document.
+public struct OpticsPatch: Sendable, Equatable, Codable {
+    public var caRed: Double?
+    public var caBlue: Double?
+
+    public init() {}
+
+    public var fieldCount: Int { [caRed != nil, caBlue != nil].filter { $0 }.count }
+
+    public var isEmpty: Bool { fieldCount == 0 }
+
+    public static let fullFieldCount = 2
+}
+
 public struct DetailPatch: Sendable, Equatable, Codable {
     public var sharpening: Double?
     public var sharpeningRadius: Double?
@@ -605,10 +648,15 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     public var vignetteMidpoint: Double?
     public var vignetteFeather: Double?
     public var grain: Double?
-    /// 2026-10-28 (P0-6): S3.8's three numbers. Sparse like every other leaf — a copy of a
+    /// 2026-10-28 (P0-6) / 164: S3.9's numbers. Sparse like every other leaf — a copy of a
     /// vignette-only look carries no `texture`, so pasting it leaves the target's 纹理 alone.
+    ///
+    /// 164 puts `texture` / `clarity` and the two non-Bayer denoises on the **细节** card while
+    /// keeping them in this same patch: a section is a field-level view, not a storage group.
     public var texture: Double?
     public var clarity: Double?
+    public var nonBayerLuminanceNR: Double?
+    public var nonBayerColorNR: Double?
     public var dehaze: Double?
 
     public init() {}
@@ -616,12 +664,13 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     public var fieldCount: Int {
         [vignetteAmount != nil, vignetteMidpoint != nil, vignetteFeather != nil,
          grain != nil,
-         texture != nil, clarity != nil, dehaze != nil].filter { $0 }.count
+         texture != nil, clarity != nil, nonBayerLuminanceNR != nil, nonBayerColorNR != nil,
+         dehaze != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 7
+    public static let fullFieldCount = 9
 }
 
 /// 色彩分级 — the nine wheel numbers (S3.8), one optional `GradeWheel` per region.
@@ -709,6 +758,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// 081: 色彩分级 — absent in every payload written before the card had its own patch.
     public var colorGrading: ColorGradingPatch?
     public var detail: DetailPatch?
+    /// 156: 校正 — the two CA ratios. Absent in every payload written before the card was carried;
+    /// absent means "the destination keeps its own CA", which is what an old copy did.
+    public var optics: OpticsPatch?
     public var effects: EffectsPatch?
     public var masks: MasksPatch?
 
@@ -816,6 +868,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if edit.detail.lensCorrections { detail.lensCorrections = true }
         s.detail = detail.isEmpty ? nil : detail
 
+        // 156: 校正 — the two lateral-CA ratios. 0 is the neutral ratio, so only a real correction
+        // travels (「只带非默认字段」); the document stores α, not the panel's −100…+100 position.
+        var optics = OpticsPatch()
+        if differs(edit.optics.caRed, 0) { optics.caRed = edit.optics.caRed }
+        if differs(edit.optics.caBlue, 0) { optics.caBlue = edit.optics.caBlue }
+        s.optics = optics.isEmpty ? nil : optics
+
         var effects = EffectsPatch()
         if differs(edit.effects.vignetteAmount, 0) { effects.vignetteAmount = edit.effects.vignetteAmount }
         if differs(edit.effects.vignetteMidpoint, 50) { effects.vignetteMidpoint = edit.effects.vignetteMidpoint }
@@ -823,6 +882,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.effects.grain, 0) { effects.grain = edit.effects.grain }
         if differs(edit.effects.texture, 0) { effects.texture = edit.effects.texture }
         if differs(edit.effects.clarity, 0) { effects.clarity = edit.effects.clarity }
+        if differs(edit.effects.nonBayerLuminanceNR, 0) {
+            effects.nonBayerLuminanceNR = edit.effects.nonBayerLuminanceNR
+        }
+        if differs(edit.effects.nonBayerColorNR, 0) {
+            effects.nonBayerColorNR = edit.effects.nonBayerColorNR
+        }
         if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
         s.effects = effects.isEmpty ? nil : effects
 
@@ -844,7 +909,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (colorGrading?.fieldCount ?? 0)
-            + (detail?.fieldCount ?? 0) + (effects?.fieldCount ?? 0)
+            + (detail?.fieldCount ?? 0) + (optics?.fieldCount ?? 0)
+            + (effects?.fieldCount ?? 0)
     }
 
     /// How many masks the payload carries. 0 = a paste leaves the destination's list alone.
@@ -855,16 +921,20 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
     /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
-    /// + detail 5 + effects 7 (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3).
+    /// + detail 5 + 校正 5 (色差 R/B + 暗角 3) + 细节 4 (纹理/清晰度 + 非 Bayer ×2) + 效果 5
+    /// (颗粒 1 + 去雾/去雾深度 + …) — 164's split changed the reading, not the storage.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + ColorGradingPatch.fullFieldCount
-        + DetailPatch.fullFieldCount + EffectsPatch.fullFieldCount
+        + DetailPatch.fullFieldCount + OpticsPatch.fullFieldCount
+        + EffectsPatch.fullFieldCount
 
     /// Groups with at least one field present, for a "copied: Light, Color" line.
     public var groups: Set<RenderGroup> {
         var out: Set<RenderGroup> = []
         if geometry != nil { out.insert(.geometry) }
+        // 校正 rides in `optics`, whose document group is `.geometry` (EditModel's dirty bit).
+        if optics != nil { out.insert(.geometry) }
         if light != nil { out.insert(.light) }
         if curve != nil { out.insert(.curve) }
         if color != nil { out.insert(.color) }
@@ -877,7 +947,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
 
     // MARK: sections (081: 卡片粒度)
 
-    /// What this payload carries, in `EditSnapshotSection` terms — twelve cards out of six patches.
+    /// What this payload carries, in `EditSnapshotSection` terms — thirteen cards out of seven patches.
     ///
     /// Two patches are shared by three sections each, so this is the **field-level reading** and not a
     /// key list: `light` reports `.whiteBalance` / `.blackLevel` / `.light` separately, and `color`
@@ -900,7 +970,20 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         if colorGrading != nil { out.insert(.colorGrading) }
         if detail != nil { out.insert(.detail) }
-        if effects != nil { out.insert(.effects) }
+        if optics != nil { out.insert(.correction) }
+        if let e = effects {
+            // 164: one patch, three cards. The vignette has always been drawn on 校正 (096's card
+            // comment was wrong for a while and is now corrected); 纹理/清晰度 + the two non-Bayer
+            // denoises are the new 细节 card; 去雾/颗粒 stay on 效果.
+            if e.vignetteAmount != nil || e.vignetteMidpoint != nil || e.vignetteFeather != nil {
+                out.insert(.correction)
+            }
+            if e.texture != nil || e.clarity != nil
+                || e.nonBayerLuminanceNR != nil || e.nonBayerColorNR != nil {
+                out.insert(.detailFX)
+            }
+            if e.grain != nil || e.dehaze != nil { out.insert(.effects) }
+        }
         if maskCount > 0 { out.insert(.masks) }
         return out
     }
@@ -1031,19 +1114,34 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             out.detail = p.isEmpty ? nil : p
         }
 
-        if sections.contains(.effects), let e = effects {
+        if sections.contains(.correction), let o = optics {
+            var p = OpticsPatch()
+            if on(.caRed) { p.caRed = o.caRed }
+            if on(.caBlue) { p.caBlue = o.caBlue }
+            out.optics = p.isEmpty ? nil : p
+        }
+
+        // 164: 暗角 lives on 校正 (its effect fields), 纹理/清晰度 + non-Bayer on 细节, 去雾/颗粒 on
+        // 效果. One EffectsPatch can therefore be filled by two different sections; build it once.
+        if let e = effects {
             var p = EffectsPatch()
-            // 暗角 is one row on the card and three numbers in the patch: the child governs all
-            // three, because a vignette with a copied amount and an uncopied feather is another look.
-            if on(.vignette) {
+            if sections.contains(.correction), on(.vignette) {
+                // 暗角 is one row on the card and three numbers in the patch: the child governs all
+                // three, because a vignette with a copied amount and an uncopied feather is another look.
                 p.vignetteAmount = e.vignetteAmount
                 p.vignetteMidpoint = e.vignetteMidpoint
                 p.vignetteFeather = e.vignetteFeather
             }
-            if on(.grain) { p.grain = e.grain }
-            if on(.texture) { p.texture = e.texture }
-            if on(.clarity) { p.clarity = e.clarity }
-            if on(.dehaze) { p.dehaze = e.dehaze }
+            if sections.contains(.detailFX) {
+                if on(.texture) { p.texture = e.texture }
+                if on(.clarity) { p.clarity = e.clarity }
+                if on(.nonBayerLuminance) { p.nonBayerLuminanceNR = e.nonBayerLuminanceNR }
+                if on(.nonBayerColor) { p.nonBayerColorNR = e.nonBayerColorNR }
+            }
+            if sections.contains(.effects) {
+                if on(.grain) { p.grain = e.grain }
+                if on(.dehaze) { p.dehaze = e.dehaze }
+            }
             out.effects = p.isEmpty ? nil : p
         }
 
@@ -1163,6 +1261,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.lensCorrections { out.detail.lensCorrections = v }
         }
 
+        if let p = optics {
+            if let v = p.caRed { out.optics.caRed = v }
+            if let v = p.caBlue { out.optics.caBlue = v }
+        }
+
         if let p = effects {
             if let v = p.vignetteAmount { out.effects.vignetteAmount = v }
             if let v = p.vignetteMidpoint { out.effects.vignetteMidpoint = v }
@@ -1170,6 +1273,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.grain { out.effects.grain = v }
             if let v = p.texture { out.effects.texture = v }
             if let v = p.clarity { out.effects.clarity = v }
+            if let v = p.nonBayerLuminanceNR { out.effects.nonBayerLuminanceNR = v }
+            if let v = p.nonBayerColorNR { out.effects.nonBayerColorNR = v }
             if let v = p.dehaze { out.effects.dehaze = v }
         }
 
@@ -1204,6 +1309,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // "the destination keeps its own grade", which is exactly what a pre-081 copy did.
         self.colorGrading = c.val("colorGrading", ColorGradingPatch?.none)
         self.detail = c.val("detail", DetailPatch?.none)
+        // 156: absent in every payload written before 校正 was carried — absent means "keep the
+        // destination's own CA". No schema bump: the key is additive and its default is 0.
+        self.optics = c.val("optics", OpticsPatch?.none)
         self.effects = c.val("effects", EffectsPatch?.none)
         // P1-5: absent in every v1 payload, and absent means "the destination keeps its own masks".
         self.masks = c.val("masks", MasksPatch?.none)

@@ -485,17 +485,19 @@ public final class RAWDecoder {
             // body baseline is already 0 (where the slider→amount mapping would say "nothing to
             // assign"). Zero is the value that removes Apple's default sharpening / colour NR, so it
             // must be written unconditionally — not merely "left at a baseline that happens to be 0".
-            values = DetailDecodeValues(luminanceNR: 0, colorNR: 0, sharpness: 0, detail: 0)
+            // 164: 去摩尔纹 joins them — a measurement wants no moiré smoothing either.
+            values = DetailDecodeValues(luminanceNR: 0, colorNR: 0, sharpness: 0, detail: 0, moire: 0)
         } else {
             // The seam's veto, **axis by axis**: an amount whose axis the effective decoder does not
             // honour is never written, and reads back as `nil` in `detailApplied` — "we did not ask",
-            // not "we asked and nothing happened". Under v9 that is 色彩降噪 + 细节 only; 降噪 and
-            // 锐化 are still assigned (Apple's flags say supported and the pixels move — see
+            // not "we asked and nothing happened". Under v9 that is 色彩降噪 + 细节 + 去摩尔纹 only;
+            // 降噪 and 锐化 are still assigned (Apple's flags say supported and the pixels move — see
             // `DetailAxes`).
             if !axes.nr { values.luminanceNR = nil }
             if !axes.cnr { values.colorNR = nil }
             if !axes.detail { values.detail = nil }
             if !axes.sharpness { values.sharpness = nil }
+            if !axes.moire { values.moire = nil }
         }
 
         func assign(_ name: String, _ wanted: Double?,
@@ -520,6 +522,9 @@ public final class RAWDecoder {
         try assign("detailAmount", values.detail,
                    { filter.detailAmount },
                    { filter.detailAmount = $0 })
+        try assign("moireReductionAmount", values.moire,
+                   { filter.moireReductionAmount },
+                   { filter.moireReductionAmount = $0 })
         return values
     }
 
@@ -529,18 +534,20 @@ public final class RAWDecoder {
         DetailBaseline(luminanceNR: Double(filter.luminanceNoiseReductionAmount),
                        colorNR: Double(filter.colorNoiseReductionAmount),
                        sharpness: Double(filter.sharpnessAmount),
-                       detail: Double(filter.detailAmount))
+                       detail: Double(filter.detailAmount),
+                       moire: Double(filter.moireReductionAmount))
     }
 
     /// 派单 105: the effective measurement recipe as one line — what the **filter reports after the
     /// assignments**, not what we meant to assign. A test can therefore prove that 0 / 0 / 0 / 0 and
     /// `lens=off` really reached the decoder instead of trusting the call site.
     static func measurementRecipe(_ filter: CIRAWFilter) -> String {
-        String(format: "sharpness=%.3f cnr=%.3f lnr=%.3f detail=%.3f lens=%@ scale=%.3f ev=%.3f",
+        String(format: "sharpness=%.3f cnr=%.3f lnr=%.3f detail=%.3f moire=%.3f lens=%@ scale=%.3f ev=%.3f",
                Double(filter.sharpnessAmount),
                Double(filter.colorNoiseReductionAmount),
                Double(filter.luminanceNoiseReductionAmount),
                Double(filter.detailAmount),
+               Double(filter.moireReductionAmount),
                filter.isLensCorrectionEnabled ? "on" : "off",
                Double(filter.scaleFactor),
                Double(filter.exposure))
