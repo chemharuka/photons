@@ -27,9 +27,11 @@ final class PanelRowSpecTests: XCTestCase {
         let specs = InspectorView.PanelCardSpec.all
         let rows = specs.flatMap { spec in spec.rows.map { (spec, $0) } }
 
-        // The spec union is exactly the five tone tables — no table row outside a spec, no row twice.
+        // The spec union is exactly the tone tables — no table row outside a spec, no row twice.
+        // 185: 锐化四参是 S3.10 的行表（`sharpenRows`），挂在「细节」卡的第三个 block 上。
         let expected = InspectorView.lightRows + InspectorView.colorRows
-            + InspectorView.correctionRows + InspectorView.detailFXRows + InspectorView.effectsRows
+            + InspectorView.correctionRows + InspectorView.detailFXRows
+            + InspectorView.sharpenRows + InspectorView.effectsRows
         XCTAssertEqual(rows.map(\.1.keyPath), expected.map(\.keyPath),
                        "spec 的行必须就是五张卡的全部行表")
         let ids = rows.map { $0.0.accessibilityID(for: $0.1) }
