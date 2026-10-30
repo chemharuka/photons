@@ -104,7 +104,10 @@ public struct InspectorView: View {
         /// 「细节」「效果」的中间」). The rows are S0 render parameters, not decoder amounts, so they read
         /// as their own card rather than as a tail of 细节.
         case correction
-        /// 2026-10-28: **效果** — 暗角 (S3c) + 颗粒 (S3.7), Lightroom's Effects card.
+        /// 2026-10-28: **效果** — 纹理 / 清晰度 / 去雾 (S3.8) + 颗粒 (S3.7).
+        /// 暗角 (S3c) **不在**这里 —— 它在 **校正** 卡（与色差 R/B 同卡，`correctionRows = caRows + vignetteRows`）。
+        /// 2026-10-30 更正：这一段注释曾写「暗角在效果」，与 `PanelCardSpec.correctionCard` 的实现不符，
+        /// 用户提出「多个文档口径不统一」后按代码事实改回。
         ///
         /// After 曲线, and the position is the pipeline's own order rather than a preference:
         /// Light → Color → 细节/解码 → 曲线 → 效果 are the render stages in execution order, and the last
@@ -1283,14 +1286,14 @@ public struct InspectorView: View {
         }
     }
 
-    /// 2026-10-28 — **效果**: 暗角, 纹理 / 清晰度 / 去雾 and 颗粒 — Lightroom's Effects card, and the
+    /// 2026-10-28 — **效果**: 纹理 / 清晰度 / 去雾 + 颗粒 — Lightroom's Effects card, and the
     /// Presence triple 078 P0-6 was missing.
     ///
+    /// **暗角的三行不在这张卡里**（2026-10-30 更正）：它们在 **校正** 卡，
+    /// `correctionRows = caRows + vignetteRows`，见 `PanelCardSpec.correctionCard`。
+    /// 这里原先的注释把暗角算进了效果卡，与实现不符；用户指出「多个文档口径不统一」后按代码改正。
+    ///
     /// ```text
-    /// 暗角        −100…100       S3c: negative darkens the corners
-    /// 暗角中点      0…100         half-diagonal radius; 100 = the corner
-    /// 暗角羽化      0…100         how soft the transition is
-    /// ─────────────────────────
     /// 纹理       −100…100       S3.8: the guided-filter residual in the 2…8 px band
     /// 清晰度     −100…100       S3.8: the same residual at a few percent of the frame
     /// 去雾       −100…100       S3.8: dark channel prior; negative adds the veil back
