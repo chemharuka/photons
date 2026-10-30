@@ -224,7 +224,9 @@ public struct HDRExport: Sendable, Codable, Equatable {
     /// `.gainMap` (or `.none`), so an old preset keeps exporting the picture it always did.
     public var kind: HDRKind
     public var gainMap: GainMap
-    /// Half-size gain map (`-H` in toGainMapHDR). The SDR base is never resized.
+    /// Half-size gain map (`-H` in toGainMapHDR). **Default on** (163): the gain map is a smooth
+    /// ratio field, so halving its edge costs almost nothing visually and quarters its bytes. The SDR
+    /// base is never resized. The width/height are `ceil(base / 2)`.
     public var halfSize: Bool
     public var headroom: Headroom
 
@@ -255,7 +257,7 @@ public struct HDRExport: Sendable, Codable, Equatable {
 
     public init(enabled: Bool = true, kind: HDRKind? = nil,
                 gainMap: GainMap = HDRExport.defaultGainMap,
-                halfSize: Bool = false, headroom: Headroom = .auto) {
+                halfSize: Bool = true, headroom: Headroom = .auto) {
         self.kind = kind ?? (enabled ? .gainMap : .none)
         self.gainMap = gainMap
         self.halfSize = halfSize
@@ -275,7 +277,9 @@ public struct HDRExport: Sendable, Codable, Equatable {
         self.kind = rawKind ?? (enabled ? .gainMap : .none)
         self.gainMap = try c.decodeIfPresent(GainMap.self, forKey: .gainMap)
             ?? HDRExport.defaultGainMap
-        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? false
+        // 163 — a preset that never carried `halfSize` takes the new default (half size); an explicit
+        // `false` from the old UI still means full size, so a user's choice is never rewritten.
+        self.halfSize = try c.decodeIfPresent(Bool.self, forKey: .halfSize) ?? true
         self.headroom = try c.decodeIfPresent(Headroom.self, forKey: .headroom) ?? .auto
     }
 

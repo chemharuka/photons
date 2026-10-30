@@ -407,7 +407,7 @@ public final class ExportSheetModel {
     }
 
     public var hdrHalfSize: Bool {
-        get { preset.hdr?.halfSize ?? false }
+        get { preset.hdr?.halfSize ?? true }
         set { updateHDR { $0.halfSize = newValue } }
     }
 

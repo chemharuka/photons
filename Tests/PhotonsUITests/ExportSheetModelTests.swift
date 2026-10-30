@@ -253,7 +253,7 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.preset.hdr?.enabled, true, "HDR defaults to on")
         // 109's default draft names ISO explicitly (it is the macOS 15+ spelling).
         XCTAssertEqual(sheet.preset.hdr?.gainMap, .iso)
-        XCTAssertEqual(sheet.preset.hdr?.halfSize, false)
+        XCTAssertEqual(sheet.preset.hdr?.halfSize, true)
         XCTAssertEqual(sheet.preset.hdr?.headroom, .auto)
 
         XCTAssertNotNil(sheet.preset.exportOptions.hdr)

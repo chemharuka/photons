@@ -156,7 +156,8 @@ final class HDRGainMapTests: XCTestCase {
         let (sdr, linear) = try renderPair(value: 4)
         let url = tempURL("iso.heic")
         let result = try GainMapHEIC.write(sdr: sdr, linear: linear, to: url,
-                                           options: HDRGainMapOptions(gainMap: .iso, quality: 1.0))
+                                           options: HDRGainMapOptions(gainMap: .iso, halfSize: false,
+                                                                      quality: 1.0))
         XCTAssertTrue(result.isHDR)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         // ImageIO transcodes the RGB aux to a 4:2:0 HEVC item; what the container carries is the
@@ -203,6 +204,49 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(psnr, 40, "half-size ISO reconstruction PSNR \(psnr) dB")
     }
 
+    /// 163 §1.1 — the *default* export (no explicit `halfSize`) is a half-size map. The default was
+    /// full size before 163; this test reads the written item back so the default cannot drift.
+    @available(macOS 15.0, *)
+    func testDefaultGainMapIsHalfSizeAndCanStillBeFullSize() throws {
+        let (sdr, linear) = try renderPair(value: 4)
+        let base = sdr.withLinear(linear)
+
+        let defaults = tempURL("default-half.heic")
+        try Exporter.write(base, to: defaults,
+                           options: ExportOptions(format: .heic, quality: 1.0, bitDepth: 8,
+                                                  hdr: HDRExport(kind: .gainMap, gainMap: .iso)))
+        let defaultAux = try auxInfo(defaults, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let defaultDescription = try XCTUnwrap(
+            defaultAux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(defaultDescription["Width"]), (sdr.width + 1) / 2)
+        XCTAssertEqual(intValue(defaultDescription["Height"]), (sdr.height + 1) / 2)
+
+        let full = tempURL("explicit-full.heic")
+        try Exporter.write(base, to: full,
+                           options: ExportOptions(format: .heic, quality: 1.0, bitDepth: 8,
+                                                  hdr: HDRExport(kind: .gainMap, gainMap: .iso,
+                                                                 halfSize: false)))
+        let fullAux = try auxInfo(full, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let fullDescription = try XCTUnwrap(
+            fullAux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(fullDescription["Width"]), sdr.width)
+        XCTAssertEqual(intValue(fullDescription["Height"]), sdr.height)
+    }
+
+    /// 163 §1.1 — an odd edge rounds **up** (`ceil(base / 2)`), not down. Checked on the pixel buffer
+    /// directly because HEIF's 4:2:0 auxiliary item may pad odd sizes.
+    func testHalfSizeUsesCeilForOddDimensions() throws {
+        let (sdr, linear) = try renderPair(value: 4, w: 95, h: 63)
+        let map = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
+                                    mode: .iso, halfSize: true)
+        XCTAssertEqual(map.width, 48)
+        XCTAssertEqual(map.height, 32)
+        let full = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
+                                     mode: .iso, halfSize: false)
+        XCTAssertEqual(full.width, 95)
+        XCTAssertEqual(full.height, 63)
+    }
+
     @available(macOS 15.0, *)
     func testISOMonoMapIsOneComponent() throws {
         let (sdr, linear) = try renderPair(value: 4)
@@ -223,7 +267,8 @@ final class HDRGainMapTests: XCTestCase {
         let (sdr, linear) = try renderPair(value: 4, gray: true)
         let url = tempURL("apple.heic")
         let result = try GainMapHEIC.write(sdr: sdr, linear: linear, to: url,
-                                           options: HDRGainMapOptions(gainMap: .apple, quality: 1.0))
+                                           options: HDRGainMapOptions(gainMap: .apple, halfSize: false,
+                                                                      quality: 1.0))
         XCTAssertTrue(result.isHDR)
         // toGainMapHDR's `-g` spelling carries the headroom in **MakerNote 33/48**, not in a `tmap`
         // item (measured on its own `bin/toGainMapHDR -g` output: HDRGainMap aux + MakerApple,

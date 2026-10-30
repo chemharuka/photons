@@ -46,7 +46,7 @@ public struct HDRGainMapOptions: Sendable {
     public var quality: Double
     public var bitDepth: Int
 
-    public init(gainMap: HDRExport.GainMap = .iso, halfSize: Bool = false,
+    public init(gainMap: HDRExport.GainMap = .iso, halfSize: Bool = true,
                 headroom: HDRExport.Headroom = .auto, quality: Double = 0.95, bitDepth: Int = 8) {
         self.gainMap = gainMap
         self.halfSize = halfSize
@@ -429,8 +429,10 @@ struct GainMapPixels {
             }
         }
 
-        let tw = halfSize ? max(1, w / 2) : w
-        let th = halfSize ? max(1, h / 2) : h
+        // 163 — the spec's size is `ceil(base / 2)` per axis, not a floor, so an odd edge still keeps
+        // the last row/column's ratio instead of dropping it.
+        let tw = halfSize ? max(1, (w + 1) / 2) : w
+        let th = halfSize ? max(1, (h + 1) / 2) : h
         let reduced = halfSize ? GainMapPixels.reduce(full, w: w, h: h, channels: channels)
                                 : full
         self.width = tw
@@ -448,9 +450,10 @@ struct GainMapPixels {
         self.data = Data(bytes)
     }
 
-    /// 2×2 box average, per channel.
+    /// 2×2 box average, per channel, with `ceil` output dimensions (163): the last output row/column
+    /// averages the one input row/column that still exists instead of dropping it.
     private static func reduce(_ src: [Float], w: Int, h: Int, channels: Int) -> [Float] {
-        let tw = max(1, w / 2), th = max(1, h / 2)
+        let tw = max(1, (w + 1) / 2), th = max(1, (h + 1) / 2)
         var out = [Float](repeating: 0, count: tw * th * channels)
         for y in 0..<th {
             for x in 0..<tw {
