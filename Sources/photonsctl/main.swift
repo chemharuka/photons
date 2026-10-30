@@ -378,9 +378,9 @@ func cmdDepth(_ a: Args) throws {
     defer {
         if let tmp = depthModelTemporaryDirectory { try? FileManager.default.removeItem(at: tmp) }
     }
-    // 2026-10-30 — 1036×784 wants the GPU, not the ANE (192 ms vs 1244 ms). `--units` exists so the
-    // three paths can be re-measured on any machine without a rebuild.
-    let unitsName = a.value("--units") ?? "gpu"
+    // On the shipped 518×392 package the ANE wins (33 ms against 55 ms on the GPU); a finer or a
+    // bigger model can flip that, so `--units` lets the three paths be re-measured without a rebuild.
+    let unitsName = a.value("--units") ?? "all"
     let units: MLComputeUnits
     switch unitsName {
     case "all", "auto": units = .all
