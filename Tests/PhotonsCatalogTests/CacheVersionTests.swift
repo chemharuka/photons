@@ -173,6 +173,8 @@ final class CacheVersionTests: XCTestCase {
                        "129: the blacks level's dispatch boundary moved to |blacks| = 20")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
                        "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
+        XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 5,
+                       "167: the luminance predicate reads the whole HDR axis, not clamp(light, 0, 1)")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         XCTAssertEqual(StageAlgorithmVersion.curve, 2,

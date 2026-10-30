@@ -75,13 +75,19 @@ public enum StageAlgorithmVersion {
     /// parameters, different pixels — every document with `feather > 0` moves; `feather == 0` keeps the
     /// old expression verbatim and does not.
     ///
+    /// **5** — 167: the luminance window is read on the **whole HDR axis**, `0…cbrt(16)` (+4 EV),
+    /// instead of `OKLab L of clamp(linearRGB, 0, 1)`. A document with a `luminanceRange` mask now
+    /// selects pixels above display white that the old predicate folded to `L = 1` (and, with the
+    /// default `high = hdrMax`, stops discarding them), so the same stored numbers render different
+    /// pixels; every other shape is byte-identical. The migrated v1→v2 document is what keeps old
+    /// SDR intent intact (`LuminanceRangeShape` decoder).
     /// **4** — 120b: the atlas may read the depth map (kind 6, `MaskShape.depthRange`). A document
     /// that carries no depth mask has no new shape to evaluate and is bit-identical; a document with
     /// one renders pixels it could not render before (zeros when no map is supplied), which is still
     /// "different pixels for the same stored parameters" and therefore a bump. The bump is
     /// conditional in effect (`hasDepthRangeMask` also gates the depth key suffix) but the generation
     /// number is per stage, so it moves once for everyone.
-    public static let maskAtlas = 4
+    public static let maskAtlas = 5
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
     public static let localApply = 3
