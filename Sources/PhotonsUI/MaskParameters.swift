@@ -168,6 +168,10 @@ public enum MaskLevelParameter: String, CaseIterable, Sendable {
 ///     `6500 K + 30 K/unit`, so it is *not* a kelvin slider (that is the global Light card's);
 ///   · `contrast` / `highlights` / `shadows` / `whites` / `blacks` / `hue` / `saturation` —
 ///     "−100…100", and `s1_6_local.metal` divides each by 100 before use.
+///   · 181 — 纹理 (−100…100) and 锐化 (0…100). Both are **S3.9's**, applied in the display-referred
+///     domain from the S1.5 atlas, because the global 效果 card's 纹理 lives there (079: one slider
+///     number, one operation). The ranges are the document's own (`LocalAdjustments.texture`
+///     −100…100, `.sharpen` 0…100); the kernel divides by 100.
 public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
     case amount
     case exposure
@@ -180,6 +184,8 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
     case tint
     case hue
     case saturation
+    case texture
+    case sharpen
 
     public var label: String {
         switch self {
@@ -194,6 +200,8 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
         case .tint: return "色调"
         case .hue: return "色相"
         case .saturation: return "饱和"
+        case .texture: return "纹理"
+        case .sharpen: return "锐化"
         }
     }
 
@@ -210,12 +218,15 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
         case .tint: return \.tint
         case .hue: return \.hue
         case .saturation: return \.saturation
+        case .texture: return \.texture
+        case .sharpen: return \.sharpen
         }
     }
 
     public var range: ClosedRange<Double> {
         switch self {
         case .amount: return 0 ... 100          // §2: 0…100, default 100
+        case .sharpen: return 0 ... 100         // §2: 0…100 — a negative sharpen is 纹理's − half
         case .exposure: return -4 ... 4         // §2: −4…4 EV
         default: return -100 ... 100            // §2: −100…100 for the other nine
         }
@@ -226,6 +237,8 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
         case .amount: return "%.0f"
         case .exposure: return "%+.2f EV"
         case .temperature, .tint: return "%+.0f"
+        case .texture: return "%+.0f"
+        case .sharpen: return "%.0f"
         default: return "%+.0f"
         }
     }
@@ -258,7 +271,10 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
             // 056: colour moved to S3.5, **after** the tone map, so a local slider means what the
             // global one means (same `color_hsl.metal`, same numbers — measured equal to 0 codes).
             return "−100…100；在 tone map 之后的显示参考域施加，与全局同名滑杆同一份算法"
-
+        case .texture:
+            return "−100…100；在 tone map 之后的显示参考域，用与全局「纹理」同一个导向滤波残差、同一个门控，按蒙版覆盖度 lerp（不是第二套算法）"
+        case .sharpen:
+            return "0…100；1 px 半径的 USM（与「纹理」的频带无关，那是纹理/清晰度的活），提升被夹在窗口自身的最小/最大 ±1.5 码内（实测 1.49 码，判定线 2 码），所以锐化边缘而不是画光晕"
         }
     }
 }
