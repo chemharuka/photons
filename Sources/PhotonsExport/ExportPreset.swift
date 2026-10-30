@@ -235,7 +235,8 @@ public struct HDRExport: Sendable, Codable, Equatable {
     public var gainMap: GainMap
     /// Half-size gain map (`-H` in toGainMapHDR). **Default on** (163): the gain map is a smooth
     /// ratio field, so halving its edge costs almost nothing visually and quarters its bytes. The SDR
-    /// base is never resized. The width/height are `ceil(base / 2)`.
+    /// base is never resized, except that 163 §1.6 trims an odd right/bottom edge by 1 px so the map
+    /// can be exactly `floor(base / 2)` (reported as a note; full size keeps odd pixels).
     public var halfSize: Bool
     public var headroom: Headroom
     /// 163 §1.5 — an optional explicit target family. `nil` (the normal path) means "same family as

@@ -282,6 +282,11 @@ public final class ExportSheetModel {
         didSet { resetFinishedReportAfterConfigurationChange() }
     }
 
+    /// 163 §1.6 — the selected pictures' **crop content** sizes (before the preset's scale). The
+    /// controller fills this alongside `natives`; the sheet uses it to update the even-pixel warning
+    /// live as the user changes size/percentage. It is not persisted.
+    public var selectionContents: [ImageSize] = []
+
     /// `internal(set)` so the footer/layout tests can put the model in a phase without starting a
     /// real render; the app only writes it in `run`/`cancel`/`finish`.
     public internal(set) var phase: Phase = .idle
@@ -579,11 +584,34 @@ public final class ExportSheetModel {
 
     /// What the output pixels will be for a crop of `native`. The sheet's prediction and the batch's
     /// render both go through `ExportSizing`, so this is a forecast, not a restatement.
+    /// 163 §1.6 — a half-size gain map trims an odd edge, so the forecast shows the real output.
     public func predictedSizeText(native: ImageSize) -> String {
         let preset = effectivePreset
-        let size = ExportSizing.outputSize(content: native,
+        var size = ExportSizing.outputSize(content: native,
                                            scale: preset.renderScale(content: native))
+        if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
+            size = GainMapSizing.plan(size, halfSize: true).output
+        }
         return "\(size.width)×\(size.height)"
+    }
+
+    /// 163 §1.6 — the conditional grey line under the half-size control. `nil` when the control is
+    /// off, the HDR kind is not a gain map, or every selected output is already even (no blank row).
+    public var halfSizeCropHint: String? {
+        guard hdrEnabled, preset.hdrKind == .gainMap,
+              (preset.hdr?.halfSize ?? true), !selectionContents.isEmpty else { return nil }
+        var odd: [(input: ImageSize, crop: HalfSizeCrop)] = []
+        for content in selectionContents {
+            let size = ExportSizing.outputSize(content: content,
+                                               scale: preset.renderScale(content: content))
+            let plan = GainMapSizing.plan(size, halfSize: true)
+            if plan.crop.isNeeded { odd.append((size, plan.crop)) }
+        }
+        guard let first = odd.first else { return nil }
+        if odd.count == 1 {
+            return first.crop.hint(current: first.input)
+        }
+        return "半尺寸需要偶数像素：\(odd.count) 张照片将裁到偶数边（右/下各 1 px）"
     }
 
     // MARK: status line (161 §4)
@@ -1146,6 +1174,14 @@ public struct ExportSheetView: View {
                     .disabled(model.phase == .running)
                     .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
                 }
+                // 163 §1.6 — only when half-size is on and an output edge is odd. `nil` builds no
+                // view at all, so an even picture does not leave an empty line behind.
+                if let hint = model.halfSizeCropHint {
+                    Text(hint)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else {
                 HStack(spacing: 8) {
                     Text("tone mapping").font(.system(size: 10, weight: .medium))
@@ -1683,6 +1719,13 @@ public final class ExportSheetController: NSObject {
             }
         }
         natives = sizes
+        // 163 §1.6 — the half-size warning needs each selected picture's cropped content size, not
+        // the sensor size (a rotated crop is a different rectangle). The preset's scale is applied
+        // later by `halfSizeCropHint`, so this stays valid as the user changes size.
+        model.selectionContents = items.compactMap { item in
+            guard let native = sizes[item.id] else { return nil }
+            return (item.edit ?? .neutral).geometry.outputPixels(in: native)
+        }
         model.selectionCount = items.count
     }
 

@@ -55,6 +55,9 @@ public struct BatchExportOutcome: Sendable {
     /// Non-fatal notes (XMP fell back to a sidecar, the preset's long edge was larger than the
     /// picture, …). A warning never turns a written file into a failure.
     public var warnings: [String]
+    /// 163 §1.6 — how many pixels the right/bottom edges lost to make a half-size gain map legal.
+    /// `.none` for full-size maps and for even sources.
+    public var croppedForHalfSize: HalfSizeCrop = .none
     /// Non-nil = this item failed. The batch keeps going.
     public var error: String?
     /// The conflict policy said "skip": no file was written and the name was left alone.
@@ -289,6 +292,17 @@ public enum BatchExporter {
             // 3. output sharpening, at the final pixel size (that is the point of it).
             if let sharpen = preset.sharpen, sharpen.isEnabled {
                 image = DisplaySharpen.apply(image, sharpen)
+            }
+
+            // 3b. 163 §1.6 — a half-size gain map needs an even base. Trim right/bottom after the
+            //     final size/sharpening, so the file, the map and the report all describe one picture.
+            if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
+                let plan = GainMapSizing.plan(image.size, halfSize: true)
+                if plan.crop.isNeeded {
+                    image = GainMapSizing.crop(image, plan.crop)
+                    outcome.croppedForHalfSize = plan.crop
+                    warnings.append(plan.crop.exportNote(source: plan.input))
+                }
             }
 
             // 4. a name nobody else in this batch (or, under `rename`, on disk) already owns.

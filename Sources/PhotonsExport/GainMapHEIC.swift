@@ -136,7 +136,8 @@ public enum GainMapHEIC {
     /// and the Apple spelling through Core Image's JPEG representation. `format` defaults to HEIC so
     /// every pre-163 call site keeps its exact behaviour.
     @discardableResult
-    public static func write(sdr: DisplayImage, linear: LinearPixels, to url: URL,
+    public static func write(sdr inputSDR: DisplayImage, linear inputLinear: LinearPixels,
+                             to url: URL,
                              options: HDRGainMapOptions = HDRGainMapOptions(),
                              metadata: ExportMetadataContext = ExportMetadataContext(),
                              format: ExportFormat = .heic)
@@ -144,6 +145,19 @@ public enum GainMapHEIC {
         guard format.supports(.gainMap) else {
             throw GainMapHEICError.writeFailed(
                 url, "\(format.rawValue.uppercased()) cannot carry a gain map")
+        }
+        // 163 §1.6 — a half-size map needs an even base. Trim right/bottom *before* any pixel math,
+        // so the map is exactly half and the base is the file the reader sees.
+        var sdr = inputSDR
+        var linear = inputLinear
+        var cropWarnings: [String] = []
+        if options.halfSize {
+            let plan = GainMapSizing.plan(sdr.size, halfSize: true)
+            if plan.crop.isNeeded {
+                sdr = GainMapSizing.crop(sdr, plan.crop)
+                linear = GainMapSizing.crop(linear, plan.crop)
+                cropWarnings.append(plan.crop.exportNote(source: plan.input))
+            }
         }
         guard sdr.width == linear.width, sdr.height == linear.height else {
             throw GainMapHEICError.gainMapFailed(
@@ -162,7 +176,7 @@ public enum GainMapHEIC {
             return HDRWriteResult(
                 headroom: 1,
                 isHDR: false,
-                warnings: ["HDR gain map skipped: source headroom "
+                warnings: cropWarnings + ["HDR gain map skipped: source headroom "
                            + String(format: "%.3f", fullPeak)
                            + " is below \(sdrThreshold) (SDR) — wrote an SDR "
                            + format.rawValue.uppercased()])
@@ -203,7 +217,7 @@ public enum GainMapHEIC {
             }
         }
 
-        var warnings: [String] = []
+        var warnings = cropWarnings
         if used < fullPeak * 0.999 {
             warnings.append("headroom clipped: measured peak "
                             + String(format: "%.3f", fullPeak)
@@ -516,10 +530,10 @@ struct GainMapPixels {
             }
         }
 
-        // 163 — the spec's size is `ceil(base / 2)` per axis, not a floor, so an odd edge still keeps
-        // the last row/column's ratio instead of dropping it.
-        let tw = halfSize ? max(1, (w + 1) / 2) : w
-        let th = halfSize ? max(1, (h + 1) / 2) : h
+        // 163 §1.6 — the base has already been made even (`GainMapSizing`), so the map is exactly
+        // `floor(base / 2)` per axis. The 2×2 box average then has no clamped edge row/column.
+        let tw = halfSize ? max(1, w / 2) : w
+        let th = halfSize ? max(1, h / 2) : h
         let reduced = halfSize ? GainMapPixels.reduce(full, w: w, h: h, channels: channels)
                                 : full
         self.width = tw
@@ -537,10 +551,9 @@ struct GainMapPixels {
         self.data = Data(bytes)
     }
 
-    /// 2×2 box average, per channel, with `ceil` output dimensions (163): the last output row/column
-    /// averages the one input row/column that still exists instead of dropping it.
+    /// 2×2 box average, per channel. Base dimensions are even by construction (163 §1.6).
     private static func reduce(_ src: [Float], w: Int, h: Int, channels: Int) -> [Float] {
-        let tw = max(1, (w + 1) / 2), th = max(1, (h + 1) / 2)
+        let tw = max(1, w / 2), th = max(1, h / 2)
         var out = [Float](repeating: 0, count: tw * th * channels)
         for y in 0..<th {
             for x in 0..<tw {

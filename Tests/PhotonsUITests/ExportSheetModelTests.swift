@@ -428,6 +428,35 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertNoThrow(try sheet.preset.validated())
     }
 
+    // MARK: - 163 §1.6 half-size even-pixel hint
+
+    /// The warning is conditional: odd output shows the exact crop, even output builds no view at
+    /// all, and the full-size switch removes it. `predictedSizeText` agrees with the crop.
+    func testHalfSizeCropHintAppearsOnlyForOddOutput() {
+        let sheet = model()
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
+        XCTAssertEqual(sheet.halfSizeCropHint,
+                       "半尺寸需要偶数像素：当前 6001×4001，将裁到 6000×4000（右/下各 1 px）")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
+                       "6000×4000")
+
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000)]
+        XCTAssertNil(sheet.halfSizeCropHint, "even output must not leave an empty line")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6000, height: 4000)),
+                       "6000×4000")
+
+        sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
+        sheet.hdrHalfSize = false
+        XCTAssertNil(sheet.halfSizeCropHint, "full-size export keeps 6001×4001")
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
+                       "6001×4001")
+
+        sheet.hdrHalfSize = true
+        sheet.setHDRKind(.hlg)
+        XCTAssertNil(sheet.halfSizeCropHint, "only a gain map has a half-size map")
+    }
+
     // MARK: - hosting helpers
 
     private struct Hosted {
