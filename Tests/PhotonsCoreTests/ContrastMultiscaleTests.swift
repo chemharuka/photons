@@ -689,7 +689,7 @@ private final class ContrastKernelHarness {
         let gains = MultiscaleContrast.scaleGains(t: contrast / 100)
         let lw = ColorPrimaries.working.luminanceWeights
         var p = Params(
-            a: SIMD4(Float(contrast / 100), Float(MultiscaleContrast.pivotEV),
+            a: SIMD4(Float(contrast), Float(MultiscaleContrast.pivotEV),
                      Float(MultiscaleContrast.coarseEpsilon), Float(MultiscaleContrast.midEpsilon)),
             // 159: `.x` is the mid travel, `.y` the fine travel; the coarse slot is the named zero.
             b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),

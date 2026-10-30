@@ -66,6 +66,15 @@ struct ContrastParams {
     int4 f;
 };
 
+/// The mask descriptor S1.6 also uses (`s1_6_local.metal#LocalAdjustDesc`), declared here because a
+/// kernel cannot include another kernel. Byte-for-byte the same three `float4`s; `.b.x` is the
+/// mask's contrast slider and `.a.w` its amount.
+struct LocalAdjustDesc {
+    float4 a;
+    float4 b;
+    float4 c;
+};
+
 // ── the Swift constants' `.metal` copy (`MultiscaleContrast`) ─────────────────────────────────
 constant float MC_PIVOT_EV = 0.0;
 constant float MC_EPS_C = 0.80;
@@ -226,8 +235,49 @@ kernel void s1_8_g_contrast_coeff(texture2d<float, access::read> stats [[texture
     coeff.write(float4(a, b, gate, 1.0), gid);
 }
 
-/// Full-resolution reconstruction: both coefficient maps bilinearly upsampled, the two residual
-/// bands rebuilt from `G`, and **one** gain applied to all three channels.
+// ── the shared operator (159) ────────────────────────────────────────────────────────────────────
+//
+// One body for the global slider and for a mask's slider (079's 「同一滑杆蒙版内外同义」). The
+// mask path differs only in *how many* contrast numbers are evaluated and in the coverage weight
+// that mixes their gains: a full-canvas mask therefore runs this exact arithmetic once.
+//
+// `contrast` is the slider value (−100…100). The band weights are the constants above, so the
+// mask's number rides the same travel as the global one. The ±3 EV bound is a shape cap, not a
+// clamp on the picture: inside it the gain is the residual arithmetic exactly.
+static inline float s2_5_contrast_gain(float Bm, float Df, float gate, float contrast) {
+    float t = contrast / 100.0;
+    float d = clamp(gate * (t * MC_W_M * Bm + t * MC_W_F * Df), -3.0, 3.0);
+    return exp2(d);
+}
+
+/// A5's black floor, shared by both paths. A pixel that clears the floor is held at it; a pixel
+/// already under it is never darkened further (it keeps its input value), so the fraction under the
+/// display-code threshold cannot grow. The floor rides S1's exposure gain (`p.c.z`) so it scales
+/// with the picture and the gain stays exposure-invariant.
+static inline float3 s2_5_finish(float4 px, float ratio, float exposureGain, float3 lw) {
+    float3 outRGB = max(px.rgb, 0.0) * ratio;
+    float floorY = MC_FLOOR_Y * (exposureGain > 0.0 ? exposureGain : 1.0);
+    float yIn = dot(max(px.rgb, 0.0), lw);
+    float yOut = dot(outRGB, lw);
+    if (yOut < floorY && yOut > 0.0) {
+        float target = min(yIn, floorY);
+        if (yOut < target) { outRGB *= target / yOut; }
+    }
+    return outRGB;
+}
+
+/// The bands of one pixel, rebuilt from the two upsampled coefficient maps.
+static inline void s2_5_bands(float4 cC, float4 cM, float G,
+                              thread float &Bm, thread float &Df, thread float &gate) {
+    float Bc = cC.x * G + cC.y;
+    float D1 = G - Bc;
+    Bm = cM.x * D1 + cM.y;
+    Df = D1 - Bm;
+    gate = clamp(cM.z, 0.0, 1.0);
+}
+
+/// Full-resolution reconstruction, **global** path: both coefficient maps bilinearly upsampled,
+/// the two residual bands rebuilt from `G`, and one gain applied to all three channels.
 kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0)]],
                                   texture2d<float, access::sample> coeffC [[texture(1)]],
                                   texture2d<float, access::sample> coeffM [[texture(2)]],
@@ -237,7 +287,6 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
     int w = p.d.x, h = p.d.y;
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
     float4 px = src.read(gid);
-    // Matte and alpha-0 pixels are written back unchanged: no photograph, no contrast.
     if (px.a == 0.0) { dst.write(px, gid); return; }
     float2 g = float2(gid);
     if (g.x < p.rect.x || g.y < p.rect.y
@@ -246,14 +295,10 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
         return;
     }
 
-    // Display-referred (159): `Y` is already the tone-mapped light, white = 1 = 0 EV. There is no
-    // exposure divide any more — the stage reads S2's values, and the gain is a pure function of
-    // their residuals, so an exposure gain shifts `G` and `B_c` together and cancels.
+    // Display-referred (159): `Y` is tone-mapped light, white = 1 = 0 EV. The decomposition runs on
+    // the **unexposed** display log (`Y / 2^E`), so S1's power-of-two exposure gives bit-identical
+    // filter inputs and an identical residual gain (A1/A2).
     float Y = s1_8_g_luma(px.rgb);
-    // 147/159 — the decomposition coordinate is the **unexposed** display log. S1's exposure gain
-    // is a power of two, so `Y / g` is the same half-float value at every E and the filter's inputs
-    // are bit-identical; the residual gain is therefore identical too (A1/A2 exactly, not "within
-    // the tone map's residual").
     float G = log2(Y / max(p.c.z, 1e-6));
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
@@ -262,46 +307,60 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
                        (float(gid.y) + 0.5) / (float(q) * float(p.e.y)));
     float4 cC = coeffC.sample(linearSampler, uv);
     float4 cM = coeffM.sample(linearSampler, uv);
+    float Bm, Df, gate;
+    s2_5_bands(cC, cM, G, Bm, Df, gate);
 
-    float Bc = cC.x * G + cC.y;
-    float D1 = G - Bc;
-    float Bm = cM.x * D1 + cM.y;
-    float Df = D1 - Bm;
+    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x);
+    dst.write(float4(s2_5_finish(px, ratio, p.c.z, p.luma.xyz), px.a), gid);
+}
 
-    // Residual-only gain (159): the display-white pivot `p.a.y` is 0 and is not added back. The two
-    // travels in `p.b.xy` already carry `contrast/100` from the CPU, so `contrast = 0` is `2^0 = 1`.
-    //
-    // Residual-only gain (159): the display-white pivot `p.a.y` is 0 and is not added back. The two
-    // travels in `p.b.xy` already carry `contrast/100` from the CPU, so `contrast = 0` is `2^0 = 1`.
-    //
-    // A5 — the black floor. A residual gain is proportional to its residual, so a smooth dark
-    // region can be scaled down. `MC_FLOOR_Y` is the linear light of display code 0.012 (the A5
-    // threshold): a pixel that already clears it is never pushed below it. Pixels under the floor
-    // are left where they are (a sub-black sample is not made blacker by this test). That is an
-    // absolute statement about the display picture, so it does not change the gain of any pixel
-    // above the near-black band.
-    float gate = clamp(cM.z, 0.0, 1.0);
-    // A contrast slider is a *shape*, not an amplifier without a ceiling: the residual exponent is
-    // bounded to ±3 EV at full travel. Beyond that a decomposition outlier (a strong, isolated
-    // edge) would multiply a highlight by 30×, which is neither a picture nor a huristic the
-    // exposure test can hold. Inside the bound the gain is exactly the residual arithmetic.
-    float d = clamp(gate * (p.b.x * Bm + p.b.y * Df), -3.0, 3.0);
-    float Gp = G + d;
-    float ratio = exp2(Gp - G);
-
-    float3 outRGB = max(px.rgb, 0.0) * ratio;
-    // The floor rides S1's exposure gain (`p.c.z`) so that `Y` and the floor scale together: same
-    // relative shadow at every E, which is what keeps A1 exact where the floor engages.
-    float exposureGain = p.c.z > 0.0 ? p.c.z : 1.0;
-    float floorY = MC_FLOOR_Y * exposureGain;
-    float yIn = dot(max(px.rgb, 0.0), p.luma.xyz);
-    float yOut = dot(outRGB, p.luma.xyz);
-    // Two-sided: a pixel that clears the floor is held at it, and a pixel already under it is
-    // never darkened further (it keeps its input value). So the fraction of the picture under the
-    // A5 code threshold cannot grow, while every pixel above it keeps the full contrast gain.
-    if (yOut < floorY && yOut > 0.0) {
-        float target = min(yIn, floorY);
-        if (yOut < target) { outRGB *= target / yOut; }
+/// Full-resolution reconstruction, **masked** path. Same bands, same `s2_5_contrast_gain`, and the
+/// gains are mixed linearly by each mask's coverage × amount: a full-canvas mask with
+/// `contrast = c` and no global contrast is bit-identical to the global slider at `c` (B1).
+kernel void s1_8_g_contrast_apply_masked(texture2d<float, access::read> src [[texture(0)]],
+                                         texture2d<float, access::sample> coeffC [[texture(1)]],
+                                         texture2d<float, access::sample> coeffM [[texture(2)]],
+                                         texture2d<float, access::write> dst [[texture(3)]],
+                                         texture2d_array<float, access::read> atlas [[texture(5)]],
+                                         constant ContrastParams &p [[buffer(0)]],
+                                         constant LocalAdjustDesc *adjust [[buffer(1)]],
+                                         uint2 gid [[thread_position_in_grid]]) {
+    int w = p.d.x, h = p.d.y;
+    if (int(gid.x) >= w || int(gid.y) >= h) { return; }
+    float4 px = src.read(gid);
+    if (px.a == 0.0) { dst.write(px, gid); return; }
+    float2 g = float2(gid);
+    if (g.x < p.rect.x || g.y < p.rect.y
+        || g.x >= p.rect.x + p.rect.z || g.y >= p.rect.y + p.rect.w) {
+        dst.write(px, gid);
+        return;
     }
-    dst.write(float4(outRGB, px.a), gid);
+
+    float Y = s1_8_g_luma(px.rgb);
+    float G = log2(Y / max(p.c.z, 1e-6));
+
+    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
+    int q = max(p.d.z, 1);
+    float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(p.e.x)),
+                       (float(gid.y) + 0.5) / (float(q) * float(p.e.y)));
+    float4 cC = coeffC.sample(linearSampler, uv);
+    float4 cM = coeffM.sample(linearSampler, uv);
+    float Bm, Df, gate;
+    s2_5_bands(cC, cM, G, Bm, Df, gate);
+
+    // Global contrast first (the document's own slider), then each mask's contrast multiplied in
+    // with its coverage — 「先全局、后局部」, the same order every other masked control uses.
+    float ratio = s2_5_contrast_gain(Bm, Df, gate, p.a.x);
+    for (uint i = 0; i < uint(max(p.f.y, 0)); ++i) {
+        LocalAdjustDesc d = adjust[i];
+        if (d.b.x == 0.0 || d.a.w <= 0.0) { continue; }
+        float a = atlas.read(gid, i).r;
+        float wgt = clamp(a * d.a.w, 0.0, 1.0);
+        if (wgt <= 0.0) { continue; }
+        float gMask = s2_5_contrast_gain(Bm, Df, gate, d.b.x);
+        // A full-coverage mask is the global slider, not a `mix` of it: at `wgt == 1` use the gain
+        // itself, because `1 + (g − 1)` rounds and the extreme gains here would show that rounding.
+        ratio *= (wgt >= 1.0 ? gMask : mix(1.0, gMask, wgt));
+    }
+    dst.write(float4(s2_5_finish(px, ratio, p.c.z, p.luma.xyz), px.a), gid);
 }

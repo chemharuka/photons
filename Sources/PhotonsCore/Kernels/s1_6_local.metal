@@ -94,10 +94,10 @@ static inline float3 local_adjust(float3 v, LocalAdjustDesc d) {
     //    picture, so `blacks +100` moved a 50 % grey by +25 codes instead of leaving it alone.
     v = s1_end_points<true>(v, d.c.x, d.b.w, d.c.z);
 
-    // ③ contrast — S2's seam (`tone_shape.metal#tone_contrast`). A displacement in EV with a held band
-    //    around the measured median and a shoulder that lands on display white, so it cannot clip:
-    //    the masked highlights used to go white at `+100` (14.4 % of a frame on the ceiling).
-    v = tone_contrast(v, d.b.x, d.c.y);
+    // ③ contrast is **not here** any more (159). It left the scene-linear domain for S2.5, after the
+    //    tone map, where global and masked contrast are one residual operator (`s1_8_contrast.metal`).
+    //    S1.6 still receives the mask's contrast number in `d.b.x` so the atlas/descriptor layout is
+    //    unchanged, but the display-domain pass owns the pixels.
 
     // ④ shadows/highlights — S2's **three-window** chain (085), with 中间调 pinned at 0 because a
     //    local adjustment has no midtone slider yet. Same windows, same travel, same monotonicity

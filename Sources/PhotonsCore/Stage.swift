@@ -258,6 +258,18 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     }
 }
 
+// MARK: - the mask contrast predicate (159)
+
+extension EditModel {
+    /// 159 — does S2.5 have **local** work? Judged by value, like every conditional stage: an
+    /// enabled mask whose `contrast` is non-zero and whose amount is not zero. Contrast left S1.6
+    /// for S2.5, so this — not `LocalAdjustments.hasSceneLinearWork` — is what makes the stage exist
+    /// for a contrast-only mask.
+    public var hasLocalContrast: Bool {
+        activeMasks.contains { $0.adjustments.amount > 0 && $0.adjustments.contrast != 0 }
+    }
+}
+
 // MARK: - geometry of a render pass
 
 public struct ImageSize: Sendable, Equatable, Hashable, Codable {
@@ -629,7 +641,7 @@ public enum RenderKeyChain {
         // change is no longer a scene-linear change.
         var contrast: String?
         var colorSeed = toneMap
-        if edit.hasContrastStage {
+        if edit.hasContrastStage || edit.hasLocalContrast {
             let link = KeyBuilder(KeyBuilder.digest(of: toneMap))
                 .add("contrast")
                 .add(mat(.contrast))

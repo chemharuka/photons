@@ -82,9 +82,13 @@ public enum StageAlgorithmVersion {
     /// conditional in effect (`hasDepthRangeMask` also gates the depth key suffix) but the generation
     /// number is per stage, so it moves once for everyone.
     public static let maskAtlas = 4
+    /// **4** — 159: contrast left S1.6 for S2.5 (after the tone map). A mask that carries a contrast
+    /// value no longer runs the scene-linear `tone_contrast` here; the same stored number is applied
+    /// by the display-domain residual operator, so the pixels inside such a mask change. A mask whose
+    /// contrast is 0 is bit-identical to 3 (the arithmetic it used to run was the identity).
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
-    public static let localApply = 3
+    public static let localApply = 4
     /// **2** — 137: a curve may descend as a whole (film-negative inversion). A document whose curve
     /// was already non-decreasing keeps its table byte for byte, but a document holding an inverted
     /// curve used to render the identity (buildOne's fold fallback) and now renders the inverted
