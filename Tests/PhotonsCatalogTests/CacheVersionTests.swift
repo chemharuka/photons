@@ -71,18 +71,18 @@ final class CacheVersionTests: XCTestCase {
             .add(identity).add(size).add(size).add(size).add(stripped(.geometry)).canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry)).add(stripped(.sceneLinear)).canonical
         let curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear)).add(stripped(.curve)).canonical
-        // 098: S1.8 sits between the curve and S2; a contrast document has one more link, and the
-        // "strip the version" chain must have the same *shape* as production or ⑤ would be comparing
-        // two different graphs rather than one graph with and without its algorithm token.
-        var toneSeed = curve
-        if edit.hasContrastStage {
-            toneSeed = KeyBuilder(KeyBuilder.digest(of: curve))
+        // 159: contrast sits **after** the tone map, so the "strip the version" chain has the new
+        // shape: curve → toneMap → [contrast →] color. It must be the same graph as production with
+        // only the `;alg=` tokens removed, or ⑤ would compare two different graphs.
+        let toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(stripped(.toneMap)).canonical
+        var colorSeed = toneMap
+        if edit.hasContrastStage || edit.hasLocalContrast {
+            colorSeed = KeyBuilder(KeyBuilder.digest(of: toneMap))
                 .add("contrast")
                 .add(stripped(.contrast))
                 .canonical
         }
-        let toneMap = KeyBuilder(KeyBuilder.digest(of: toneSeed)).add(stripped(.toneMap)).canonical
-        let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(stripped(.color)).canonical
+        let color = KeyBuilder(KeyBuilder.digest(of: colorSeed)).add(stripped(.color)).canonical
         let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(stripped(.vignette)).canonical
         let display = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(DisplayOptions().keyString).add(size).canonical
@@ -171,8 +171,10 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 7,
                        "129: the blacks level's dispatch boundary moved to |blacks| = 20")
-        XCTAssertEqual(StageAlgorithmVersion.localApply, 3,
-                       "079 A3: S1.6's WB is WhiteBalanceSolver.gain, not the encoded fit")
+        XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
+                       "159: a mask's contrast left S1.6 for S2.5")
+        XCTAssertEqual(StageAlgorithmVersion.contrast, 2,
+                       "159: contrast is the display-domain residual operator (S2.5)")
         XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 5,
                        "167: the luminance predicate reads the whole HDR axis, not clamp(light, 0, 1)")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,

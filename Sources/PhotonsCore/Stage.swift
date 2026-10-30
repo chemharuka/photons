@@ -39,12 +39,18 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is **deleted**; this is the one curve. `grep -rn "s3_curve" Sources` must find nothing but
     /// this sentence.
     case curve = "s1.7-hdr-curve"
-    /// 098 — **contrast**, as a multiscale edge-aware decomposition of `Y` in the **scene-linear**
-    /// domain. Sits after the curve (it reads the curve's output) and before S2 (which now only does
-    /// its three region lifts).
+    /// 159 — **contrast**, a multiscale edge-aware decomposition of `Y` in the **display-referred**
+    /// domain (S2.5). 098 introduced it as S1.8 in scene light, after the curve and before S2; 142
+    /// measured that this made `exposure × contrast` non-commutative (a gain anchored to an absolute
+    /// scene level is not invariant under a change of level) and that the masked contrast was a
+    /// different operator. S2.5 sits **after the tone map and before S3 colour**, reads the display
+    /// values S2 produced (white = 1 = 0 EV), and builds its gain from the decomposition's residuals
+    /// only, so an exposure gain shifts `G` and `B_c` together and cancels exactly.
     ///
-    /// **Conditional** like the mask/effect stages: it exists only when `light.contrast != 0`, so a
-    /// neutral document keeps its pre-098 trace, key chain and pixels byte for byte.
+    /// **Conditional** like the mask/effect stages: it exists only when `light.contrast != 0` (or a
+    /// mask carries a contrast value, from step 2 of 159), so a neutral document keeps its trace, key
+    /// chain and pixels byte for byte. The raw value keeps its 098 spelling `s1.8-contrast` for
+    /// recorded traces; `short` says `s2.5`, which is where it now runs.
     case contrast = "s1.8-contrast"
     /// 117 — **去雾**, in the scene-linear domain, at the end of the linear chain.
     ///
@@ -158,13 +164,16 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// saturation never visits S3.5, one whose bands are all 0 never visits S3.6, and one whose grain
     /// amount is 0 never visits S3.7.
     public static var order: [RenderStage] {
-        // 116 — the vignette moved to the **end of the linear chain** (after S1.8, before S2): it is a
+        // 116 — the vignette moved to the **end of the linear chain** (before S2): it is a
         // lens-vignetting *correction*, so it multiplies light, not tone-mapped codes.
-        // 117 — dehaze joins that same linear tail, between contrast and the vignette: it removes a
+        // 117 — dehaze joins that same linear tail, between the curve and the vignette: it removes a
         // veil from scene light, and the vignette must see the recovered light, not the veil.
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .contrast, .dehaze,
-         .vignette, .toneMap, .color, .bw, .localColor, .hsl, .pointColour, .grade, .detailFX,
-         .grain, .display]
+        // 159 — contrast left the linear chain entirely: it now runs **after S2 and before S3**, on
+        // the tone-mapped display values. A residual-only gain there is invariant under S1's exposure
+        // gain, which is what 142 asked for; in scene light its level anchor was not.
+        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .dehaze,
+         .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl, .pointColour, .grade,
+         .detailFX, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -218,7 +227,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .localApply: return "s1.6"
         case .heal: return "s1.9"
         case .curve: return "s1.7"
-        case .contrast: return "s1.8"
+        case .contrast: return "s2.5"
         case .dehaze: return "s1.9-dz"
         case .toneMap: return "s2"
         case .color: return "s3-color"
@@ -246,6 +255,18 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .vignette, .grain, .detailFX, .dehaze: return "effects"
         case .display: return "output"
         }
+    }
+}
+
+// MARK: - the mask contrast predicate (159)
+
+extension EditModel {
+    /// 159 — does S2.5 have **local** work? Judged by value, like every conditional stage: an
+    /// enabled mask whose `contrast` is non-zero and whose amount is not zero. Contrast left S1.6
+    /// for S2.5, so this — not `LocalAdjustments.hasSceneLinearWork` — is what makes the stage exist
+    /// for a contrast-only mask.
+    public var hasLocalContrast: Bool {
+        activeMasks.contains { $0.adjustments.amount > 0 && $0.adjustments.contrast != 0 }
     }
 }
 
@@ -597,24 +618,13 @@ public enum RenderKeyChain {
         // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6/S1.9, which
         // is the whole reason the curve has its own stage instead of riding on S1's key (§3.2 of 030).
         curve = KeyBuilder(KeyBuilder.digest(of: curveSeed)).add(mat(.curve)).canonical
-        // 098: S1.8 sits between the curve and S2 and exists only when contrast is non-zero. Neutral
-        // leaves the link `nil`, so S2 is seeded by the curve and every existing chain stays intact.
-        var contrast: String?
-        var toneMapSeed = curve
-        if edit.hasContrastStage {
-            let link = KeyBuilder(KeyBuilder.digest(of: curve))
-                .add("contrast")
-                .add(mat(.contrast))
-                .canonical
-            contrast = link
-            toneMapSeed = link
-        }
-        // 117: S1.9 sits between S1.8 and the vignette in `RenderStage.order`, i.e. at the end of the
-        // linear chain; S2 therefore reads the dehaze link when it exists. Neutral leaves the link
-        // `nil` and S2 seeded by the contrast (or curve) link exactly as before.
+        // 117: S1.9 (dehaze) sits between the curve and the vignette in `RenderStage.order`, i.e. at
+        // the end of the linear chain; S2 therefore reads the dehaze link when it exists. Neutral
+        // leaves the link `nil` and S2 seeded by the curve link exactly as before.
         var dehaze: String?
+        var toneMapSeed = curve
         if edit.hasDehaze {
-            let link = KeyBuilder(KeyBuilder.digest(of: toneMapSeed))
+            let link = KeyBuilder(KeyBuilder.digest(of: curve))
                 .add("dehaze")
                 .add(mat(.dehaze))
                 .canonical
@@ -623,7 +633,24 @@ public enum RenderKeyChain {
         }
         toneMap = KeyBuilder(KeyBuilder.digest(of: toneMapSeed)).add(mat(.toneMap)).canonical
 
-        let color = KeyBuilder(KeyBuilder.digest(of: toneMap)).add(mat(.color)).canonical
+        // 159: contrast sits **after S2 and before S3** now, so it is seeded by the tone-map digest
+        // and seeds S3. It exists only when the document actually carries a contrast value; neutral
+        // leaves the link `nil`, so S3 is seeded by `toneMap` and every no-contrast chain is the M1
+        // one. A contrast drag therefore misses S2.5 and everything below it and **hits** S0–S2 —
+        // the opposite of 098's chain, and the reason `HDRCurveTests.testDirtyStages` says a contrast
+        // change is no longer a scene-linear change.
+        var contrast: String?
+        var colorSeed = toneMap
+        if edit.hasContrastStage || edit.hasLocalContrast {
+            let link = KeyBuilder(KeyBuilder.digest(of: toneMap))
+                .add("contrast")
+                .add(mat(.contrast))
+                .canonical
+            contrast = link
+            colorSeed = link
+        }
+
+        let color = KeyBuilder(KeyBuilder.digest(of: colorSeed)).add(mat(.color)).canonical
         // 2026-10-28 (P0-4): S3.4 sits between S3 and S3.5 and exists **only** when the 黑白 switch is
         // on. When it is not, the link is `nil` and the next link is seeded by `color` — so every
         // colour document keeps its pre-S3.4 key chain byte for byte, which is exactly the §3.2

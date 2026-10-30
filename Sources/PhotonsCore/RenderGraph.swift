@@ -3314,10 +3314,11 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .contrast:
-            // S1.8 — 098: the multiscale, edge-aware decomposition of Y in the scene-linear domain.
-            // Encoded **only** for documents whose contrast is non-zero (`hasContrastStage`), so a
-            // neutral document has no pass to be neutral in.
-            try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan)
+            // S2.5 — 159: the multiscale, edge-aware decomposition of Y in the **display-referred**
+            // domain, after S2 and before S3. Encoded **only** for documents whose contrast is
+            // non-zero (`hasContrastStage`), so a neutral document has no pass to be neutral in.
+            try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan,
+                               table: table, atlas: atlasCache?.texture)
 
         case .curve:
             // S1.7 — the one curve, in the log-light domain (派单 030). It reads the scene-linear
@@ -3567,15 +3568,20 @@ public final class RenderGraph {
         }
     }
 
-    // MARK: - S1.8 contrast (098)
+    // MARK: - S2.5 contrast (159; 098's file, display-referred)
 
     /// The stage: coarse guided filter → mid guided filter on the coarse residual → one full-resolution
-    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the three gains.
+    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the two residual gains.
+    ///
+    /// It reads the **tone-mapped display light** S2 wrote (white = 1 = 0 EV), not scene light: 142
+    /// measured that a scene-linear gain anchored to a fixed level makes `exposure × contrast`
+    /// non-commutative, and that moving it after the tone map is what makes the two commute.
     ///
     /// The second filter's **input statistics** are built at `1/q` from the coarse coefficient map,
     /// so the frame is only read at full resolution twice (pack + apply), not once per band.
     private func encodeContrast(cb: MTLCommandBuffer, into out: MTLTexture,
-                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+                                from src: MTLTexture, edit: EditModel, plan: Plan,
+                                table: MaskTable?, atlas: MTLTexture?) throws {
         let w = plan.canvas.width, h = plan.canvas.height
         let q = MultiscaleContrast.block
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
@@ -3590,30 +3596,33 @@ public final class RenderGraph {
         let lw = ColorPrimaries.working.luminanceWeights
 
         var params = ContrastParamsU(
-            a: SIMD4(Float(edit.light.contrast / 100), Float(MultiscaleContrast.pivotEV),
+            a: SIMD4(Float(edit.light.contrast), Float(MultiscaleContrast.pivotEV),
                      Float(MultiscaleContrast.coarseEpsilon),
                      Float(MultiscaleContrast.midEpsilon)),
-            b: SIMD4(Float(gains.coarse), Float(gains.mid), Float(gains.fine),
+            b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),
                      Float(MultiscaleContrast.gateLo)),
+            // 147/159 — `.y` is `log2(exposureGain)`: the decomposition runs on the **unexposed**
+            // display log (`G − log2 g`), so a power-of-two exposure gives bit-identical filter
+            // inputs and an identical residual gain (A1/A2). `.z` is the gain itself, which scales
+            // the A5 black floor with the picture. Neither divides anything out of the gain.
             c: SIMD4(Float(MultiscaleContrast.gateHi),
-                     // 147 — S1's exposure gain, so the kernel's `luma / g` is the unexposed
-                     // coordinate. `g == 1` divides by one and keeps the pre-147 bytes.
-                     Float(edit.light.exposureGain), 0, 0),
+                     Float(log2(max(Double(edit.light.exposureGain), 1e-6))),
+                     Float(edit.light.exposureGain), 0),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(plan.origin.x, plan.origin.y,
                         Float(plan.content.width), Float(plan.content.height)),
             d: SIMD4(Int32(w), Int32(h), Int32(q), radiusC),
             e: SIMD4(Int32(qW), Int32(qH), 32, radiusM),
+            // `.x` packs the two filters; `.y` is the mask count the masked apply loops over.
             f: SIMD4(0, 0, 0, 0))
 
         let base = try scratch("contrast-g-base", width: qW, height: qH, format: .rgba32Float)
         let tmp = try scratch("contrast-g-tmp", width: qW, height: qH, format: .rgba32Float)
         let boxedC = try scratch("contrast-g-coarse", width: qW, height: qH, format: .rgba32Float)
-        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba16Float)
+        let coeffC = try scratch("contrast-g-coeff-c", width: qW, height: qH, format: .rgba32Float)
         let statsM = try scratch("contrast-g-mid", width: qW, height: qH, format: .rgba32Float)
         let boxedM = try scratch("contrast-g-mid-boxed", width: qW, height: qH, format: .rgba32Float)
-        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba16Float)
-
+        let coeffM = try scratch("contrast-g-coeff-m", width: qW, height: qH, format: .rgba32Float)
         // 1. Pack G's block statistics at full resolution.
         let pack = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_pack")
         guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3627,6 +3636,7 @@ public final class RenderGraph {
         e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
         dispatch(e0, pack, ImageSize(width: qW, height: qH))
         e0.endEncoding()
+
 
         // 2. Coarse guided filter: box the statistics, then solve (a, b, gate).
         params.e.w = radiusC
@@ -3668,17 +3678,61 @@ public final class RenderGraph {
         dispatch(e3, coeffPipe, ImageSize(width: qW, height: qH))
         e3.endEncoding()
 
-        // 5. Full-resolution apply: one gain for all three channels.
-        let apply = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_apply")
+        // 5. Full-resolution apply: one gain for all three channels. A document whose masks carry
+        // contrast takes the **masked** entry point; it computes the same `s2_5_contrast_gain` and
+        // mixes the per-mask gains by coverage (B1: a full-canvas mask is the global slider).
+        // **One kernel for both paths.** B1 asks a full-canvas mask to equal the global slider to
+        // ≤1 code, and the global and masked arithmetic must therefore be the *same compiled body*,
+        // not two entry points whose fp16 rounding can differ by one ULP. A global document binds
+        // the dummy atlas with mask count 0; the loop is empty and the gain is untouched.
+        let apply = try kernels.pipeline(file: "s1_8_contrast",
+                                         function: "s1_8_g_contrast_apply_masked")
         guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         e4.setComputePipelineState(apply)
         e4.setTexture(src, index: 0)
         e4.setTexture(coeffC, index: 1)
         e4.setTexture(coeffM, index: 2)
         e4.setTexture(out, index: 3)
+        if let table, let atlas {
+            params.f.y = Int32(table.adjust.count)
+            e4.setTexture(atlas, index: 5)
+            e4.setBuffer(table.adjustBuffer, offset: 0, index: 1)
+        } else {
+            params.f.y = 0
+            e4.setTexture(try contrastDummyAtlas(), index: 5)
+            e4.setBuffer(try contrastDummyAdjust(), offset: 0, index: 1)
+        }
         e4.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
         dispatch(e4, apply, plan.canvas)
         e4.endEncoding()
+    }
+
+    /// A 1×1 array texture and a zeroed descriptor buffer for the global-only contrast dispatch.
+    /// The kernel's masked entry point declares both arguments; an empty mask list never reads
+    /// them, but Metal validation still wants a binding. Cached: this is per-graph, not per-frame.
+    private var contrastDummy: (atlas: MTLTexture, adjust: MTLBuffer)?
+
+    private func contrastDummyAtlas() throws -> MTLTexture {
+        if let d = contrastDummy { return d.atlas }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float,
+                                                           width: 1, height: 1, mipmapped: false)
+        desc.textureType = .type2DArray
+        desc.arrayLength = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .private
+        guard let tex = device.makeTexture(descriptor: desc),
+              let buf = device.makeBuffer(length: 64, options: .storageModePrivate) else {
+            throw RenderError.commandBufferFailed
+        }
+        contrastDummy = (tex, buf)
+        return tex
+    }
+
+    private func contrastDummyAdjust() throws -> MTLBuffer {
+        if let d = contrastDummy { return d.adjust }
+        _ = try contrastDummyAtlas()
+        guard let d = contrastDummy else { throw RenderError.commandBufferFailed }
+        return d.adjust
     }
 
     /// The separable box mean of one statistics map: `from → tmp → to`.
@@ -4559,8 +4613,11 @@ public final class RenderGraph {
         let gain = a.gain
         // 056: `hasSceneLinearWork`, not `!isIdentity` — a mask whose only sliders are hue/saturation
         // has nothing for S1.6 to do, and sending it through `local_adjust` would round pixels at the
-        // neutral settings instead of copying them.
-        let active = enabled && a.hasSceneLinearWork
+        // neutral settings instead of copying them. 159 adds contrast to that list: it is S2.5's
+        // slider now, so a contrast-only mask must leave S1.6's identity branch alone.
+        let sceneLinearWork = a.amount > 0 && (a.exposure != 0 || a.temperature != 0 || a.tint != 0
+            || a.highlights != 0 || a.shadows != 0 || a.whites != 0 || a.blacks != 0)
+        let active = enabled && sceneLinearWork
         // 085 — the local lifts take the same gated EV travels as the global ones (中间调 pinned at 0:
         // a local adjustment has no midtone slider yet). Same windows + same travel + same gate is what
         // makes "the masked slider is the global slider" a measurement rather than a hope.

@@ -1144,15 +1144,12 @@ final class HDRCurveTests: XCTestCase {
         // the curve is seeded by S1.6 (checked below through the chain, not the enum order).
         XCTAssertEqual(order[curveIndex - 1], .heal, "the curve must read S1.9's output when a spot exists")
         XCTAssertEqual(order[curveIndex - 2], .localApply, "…and S1.9 reads S1.6's")
-        // 098：对比度从 S2 里拆出来做成 S1.8 独立阶段（Y-only 多尺度 guided filter），
-        // 所以紧跟在曲线后面的是 `.contrast`，不是 `.toneMap`；S2 读的是对比度阶段的输出。
-        // 「曲线是 S2 的输入」这条语义没变，只是中间多了一站。
-        XCTAssertEqual(order[curveIndex + 1], .contrast, "098: S1.8 sits between the curve and S2")
-        // 117: 去雾 joined the linear tail between contrast and the vignette, so S2 still reads what
-        // the curve chain produced (through one more station).
-        XCTAssertEqual(order[curveIndex + 2], .dehaze, "117: S1.9 reads S1.8 and sits before the vignette")
-        XCTAssertEqual(order[curveIndex + 3], .vignette, "…the vignette is the last linear pass")
-        XCTAssertEqual(order[curveIndex + 4], .toneMap, "…and S2 reads the whole linear chain")
+        // 159: contrast left the linear chain for S2.5, so after the curve come dehaze → vignette →
+        // tone map; S3 colour reads the contrast stage, not S2.
+        XCTAssertEqual(order[curveIndex + 1], .dehaze, "117: S1.9 sits at the end of the linear tail")
+        XCTAssertEqual(order[curveIndex + 2], .vignette, "…the vignette is the last linear pass")
+        XCTAssertEqual(order[curveIndex + 3], .toneMap, "…and S2 reads the whole linear chain")
+        XCTAssertEqual(order[curveIndex + 4], .contrast, "159: S2.5 (display contrast) follows S2")
         XCTAssertEqual(RenderStage.allCases.firstIndex(of: .curve), 2)
         XCTAssertEqual(RenderStage.curve.short, "s1.7")
         XCTAssertEqual(RenderStage.curve.rawValue, "s1.7-hdr-curve")
@@ -1205,6 +1202,13 @@ final class HDRCurveTests: XCTestCase {
         var curved = base
         curved.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.4), CurvePoint(u: 1, v: 1)]
         XCTAssertEqual(curved.changedStages(from: base), [.curve])
+
+        // 159: a contrast change is no longer a scene-linear change. It dirties S2.5 and only S2.5;
+        // the key chain then invalidates S3 and below (each link is seeded by the previous digest).
+        var punchy = base
+        punchy.light.contrast = 20
+        XCTAssertEqual(punchy.changedStages(from: base), [.contrast],
+                       "159: contrast is S2.5, not part of the scene-linear pass")
 
         // 148: a real decode input (the detail panel is assigned inside `CIRAWFilter`) is still every
         // stage's source pixels. This is the assertion the old `warm` case was trying to make.
