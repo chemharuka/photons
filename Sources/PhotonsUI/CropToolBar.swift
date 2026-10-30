@@ -95,12 +95,14 @@ final class CropToolBar: NSView {
         pill.layer?.masksToBounds = true
         addSubview(pill)
 
-        // The three readout fields: fixed width, left-aligned, one font (§D1). Nothing else is added —
-        // no button, no slider, no popup (082).
+        // The three readout fields: fixed width, **centred** readouts, one font (§D1 + N6). Nothing else
+        // is added — no button, no slider, no popup (082). Centring matters because the width is sized to
+        // the worst string each field can print, so a short readout (`0°`) would otherwise hug the left
+        // edge of its box and the three numbers would look unequally spaced.
         for field in [angleField, ratioField, pixelField] {
             field.font = Self.infoFont
             field.textColor = .secondaryLabelColor
-            field.alignment = .left
+            field.alignment = .center
             field.lineBreakMode = .byClipping
             // The width is applied in `placeSegments()`; this view lays itself out by frames, not Auto
             // Layout, so a cell's intrinsic padding cannot widen a 39 pt field to 43.

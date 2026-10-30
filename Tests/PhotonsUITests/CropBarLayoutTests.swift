@@ -110,12 +110,13 @@ final class CropBarLayoutTests: XCTestCase {
         XCTAssertGreaterThan(Set(texts).count, 1, "the drafts print different numbers")
         print("D1 · \(Set(texts).count) distinct readouts, all in \(snapshots.count) identical field rects")
 
-        // No clipping: each field is at least its worst string plus the 2 pt headroom, and left-aligned.
+        // No clipping: each field is at least its worst string plus the 2 pt headroom, and **centred**
+        // (N6: the three readouts are each centred in their own box, 2026-10-30).
         let worst = CropToolBar.infoWidths()
         XCTAssertGreaterThanOrEqual(first.angle.width, worst.angle)
         XCTAssertGreaterThanOrEqual(first.ratio.width, worst.ratio)
         XCTAssertGreaterThanOrEqual(first.pixels.width, worst.pixels)
-        XCTAssertEqual(bar.angleControl.alignment, .left)
+        XCTAssertEqual(bar.angleControl.alignment, .center)
         XCTAssertLessThan(abs(worst.angle - (ceil((CropToolController.WorstCase.angle as NSString)
             .size(withAttributes: [.font: CropToolBar.infoFont]).width) + CropToolBar.infoHeadroom)), 1e-6)
 
