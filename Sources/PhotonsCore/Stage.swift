@@ -131,6 +131,22 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is non-zero, so a document with all three at 0 keeps its pre-S3.9 trace, key chain and pixels
     /// byte for byte. Numbered after S3.8 (the grade) — merge order: grade took the 8.
     case detailFX = "s3.9-detail-fx"
+    /// 185 — **自研锐化**: 数量 / 半径 / 细节 / 蒙版, an unsharp mask on the display-referred pixels.
+    ///
+    /// **S3.10, between S3.9 and S3c**, for the same reason S3.9 sits there: it shapes detail, and the
+    /// vignette then darkens the corners — putting it after S3c would let the vignette's own falloff be
+    /// read as detail by the blur (`s3_10_sharpen.metal`'s mask is a gradient of it). It is the last
+    /// *arithmetic* on detail before the two effect stages, and the last pass that can be described as
+    /// 「锐化」 without a re-decode.
+    ///
+    /// Not to be confused with `DetailGroup.sharpening`, which is a decoder input (the body's own
+    /// baseline sharpening, forwarded to `CIRAWFilter` and kept on the 开发 card). That one is a fact
+    /// about the file; this one is an edit, and it has its own group, stage, key and dirty bit.
+    ///
+    /// **Conditional** like S3.4/S3.5/S3.6/S3.7/S3.9: it exists only when `sharpAmount > 0`, so a
+    /// document that never touched the card keeps its pre-185 trace, key chain and pixels byte for
+    /// byte — and, at amount 0, so does one that *did* touch the other three numbers.
+    case sharpen = "s3.10-sharpen"
     /// S3c — **镜头暗角校正**. 116 moved it out of S3 into the linear chain (after S1.8): a vignette is
     /// compensating illumination falloff, so it belongs on light, not on tone-mapped codes. The raw
     /// value keeps its old spelling so recorded traces stay readable.
@@ -173,7 +189,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         // gain, which is what 142 asked for; in scene light its level anchor was not.
         [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .dehaze,
          .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl, .pointColour, .grade,
-         .detailFX, .grain, .display]
+         .detailFX, .sharpen, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -190,9 +206,10 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
                                 hasGrain: Bool = false,
                                 hasBW: Bool = false, hasGrade: Bool = false,
                                 hasDetailFX: Bool = false, hasHeal: Bool = false,
-                                hasContrast: Bool = false, hasDehaze: Bool = false) -> [RenderStage] {
+                                hasContrast: Bool = false, hasDehaze: Bool = false,
+                                hasSharpen: Bool = false) -> [RenderStage] {
         guard hasMasks || hasHSL || hasPointColor || hasGrain || hasBW || hasGrade || hasDetailFX
-                || hasHeal || hasContrast || hasDehaze else {
+                || hasHeal || hasContrast || hasDehaze || hasSharpen else {
             return allCases
         }
         return order.filter { stage in
@@ -205,6 +222,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
             case .pointColour: return hasPointColor
             case .grade: return hasGrade
             case .detailFX: return hasDetailFX
+            case .sharpen: return hasSharpen
             case .dehaze: return hasDehaze
             case .grain: return hasGrain
             case .contrast: return hasContrast
@@ -237,6 +255,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .pointColour: return "s3.6b"
         case .grade: return "s3.8"
         case .detailFX: return "s3.9"
+        case .sharpen: return "s3.10"
         case .vignette: return "s3-vignette"
         case .grain: return "s3.7"
         case .display: return "s4"
@@ -252,7 +271,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .heal: return "heal"
         case .curve: return "curve"
         case .color, .bw, .hsl, .pointColour, .grade: return "color"
-        case .vignette, .grain, .detailFX, .dehaze: return "effects"
+        case .vignette, .grain, .detailFX, .dehaze, .sharpen: return "effects"
         case .display: return "output"
         }
     }
@@ -496,6 +515,10 @@ public enum RenderKeyChain {
         /// when all three detail numbers are 0, in which case S3.9 does not exist for this render at all
         /// (2026-10-28, P0-6) and `vignette` is seeded exactly as before.
         public var detailFX: String?
+        /// `H(detailFX-or-grade-or-…-or-color key | "sharpen" | sharpenMaterial)`; `nil` when
+        /// `sharpAmount == 0` (185), in which case S3.10 does not exist for this render at all and
+        /// `vignette` is seeded exactly as before.
+        public var sharpen: String?
         public var vignette: String
         /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0, in which case
         /// S3.7 does not exist for this render at all (2026-10-28) and `display` is seeded by
@@ -513,6 +536,7 @@ public enum RenderKeyChain {
         public var hasPointColourStage: Bool { pointColour != nil }
         public var hasGradeStage: Bool { grade != nil }
         public var hasDetailFXStage: Bool { detailFX != nil }
+        public var hasSharpenStage: Bool { sharpen != nil }
         public var hasGrainStage: Bool { grain != nil }
 
         /// The stages this link set describes — the same answer `StageKeys.pipeline` gives, available
@@ -523,7 +547,8 @@ public enum RenderKeyChain {
                                  hasGrain: hasGrainStage,
                                  hasBW: hasBWStage, hasGrade: hasGradeStage,
                                  hasDetailFX: hasDetailFXStage, hasHeal: hasHealStage,
-                                 hasContrast: hasContrastStage, hasDehaze: hasDehazeStage)
+                                 hasContrast: hasContrastStage, hasDehaze: hasDehazeStage,
+                                 hasSharpen: hasSharpenStage)
         }
     }
 
@@ -730,6 +755,19 @@ public enum RenderKeyChain {
             detailFX = link
             vignetteSeed = link
         }
+        // 185: S3.10 (自研锐化) sits between S3.9 and the vignette and exists **only** when
+        // `sharpAmount > 0`. Neutral leaves the link `nil` and the vignette seeded exactly as before,
+        // so a document that never touched the card — or one that moved 半径/细节/蒙版 with the amount
+        // at 0 — keeps its whole chain byte for byte (the seventh stage to use the §3.2 discipline).
+        var sharpen: String?
+        if edit.hasSharpen {
+            let link = KeyBuilder(KeyBuilder.digest(of: vignetteSeed))
+                .add("sharpen")
+                .add(mat(.sharpen))
+                .canonical
+            sharpen = link
+            vignetteSeed = link
+        }
         let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(mat(.vignette)).canonical
         // 2026-10-28: S3.7 sits between the vignette and the display transform and exists **only** when
         // the grain amount is above zero. When it does not, the link is `nil` and the display key is
@@ -759,6 +797,7 @@ public enum RenderKeyChain {
                      color: color, bw: bw,
                      localColor: localColor,
                      hsl: hsl, pointColour: pointColour, grade: grade, detailFX: detailFX,
+                     sharpen: sharpen,
                      vignette: vignette, grain: grain, display: displayKey.canonical)
     }
 
@@ -780,6 +819,7 @@ public enum RenderKeyChain {
                   pointColour: links.pointColour.map(KeyBuilder.digest(of:)),
                   grade: links.grade.map(KeyBuilder.digest(of:)),
                   detailFX: links.detailFX.map(KeyBuilder.digest(of:)),
+                  sharpen: links.sharpen.map(KeyBuilder.digest(of:)),
                   vignette: KeyBuilder.digest(of: links.vignette),
                   grain: links.grain.map(KeyBuilder.digest(of:)),
                   display: KeyBuilder.digest(of: links.display))
@@ -838,6 +878,9 @@ public struct StageKeys: Sendable, Equatable {
     /// `H(grade-or-hsl-or-localColor-or-bw-or-color key | "detailfx" | detailFXMaterial)`; `nil` when
     /// all three detail numbers are 0 (2026-10-28, P0-6), in which case the stage does not exist.
     public var detailFX: String?
+    /// `H(detailFX-or-grade-… key | "sharpen" | sharpenMaterial)`; `nil` when `sharpAmount == 0`
+    /// (185), in which case the stage does not exist for this render.
+    public var sharpen: String?
     public var vignette: String
     /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0 (2026-10-28), in
     /// which case the stage does not exist for this render.
@@ -851,7 +894,7 @@ public struct StageKeys: Sendable, Equatable {
                 bw: String? = nil, localColor: String? = nil,
                 hsl: String? = nil,
                 pointColour: String? = nil,
-                grade: String? = nil, detailFX: String? = nil,
+                grade: String? = nil, detailFX: String? = nil, sharpen: String? = nil,
                 vignette: String, grain: String? = nil, display: String) {
         self.inputIdentity = inputIdentity
         self.geometry = geometry
@@ -870,6 +913,7 @@ public struct StageKeys: Sendable, Equatable {
         self.pointColour = pointColour
         self.grade = grade
         self.detailFX = detailFX
+        self.sharpen = sharpen
         self.vignette = vignette
         self.grain = grain
         self.display = display
@@ -885,6 +929,7 @@ public struct StageKeys: Sendable, Equatable {
     public var hasPointColourStage: Bool { pointColour != nil }
     public var hasGradeStage: Bool { grade != nil }
     public var hasDetailFXStage: Bool { detailFX != nil }
+    public var hasSharpenStage: Bool { sharpen != nil }
     public var hasGrainStage: Bool { grain != nil }
 
     /// Key for a stage. The mask stages answer `""` when they do not exist for this render, which is
@@ -907,6 +952,7 @@ public struct StageKeys: Sendable, Equatable {
         case .pointColour: return pointColour ?? ""
         case .grade: return grade ?? ""
         case .detailFX: return detailFX ?? ""
+        case .sharpen: return sharpen ?? ""
         case .vignette: return vignette
         case .grain: return grain ?? ""
         case .display: return display
@@ -922,7 +968,7 @@ public struct StageKeys: Sendable, Equatable {
                              hasGrain: hasGrainStage, hasBW: hasBWStage,
                              hasGrade: hasGradeStage, hasDetailFX: hasDetailFXStage,
                              hasHeal: hasHealStage, hasContrast: hasContrastStage,
-                             hasDehaze: hasDehazeStage)
+                             hasDehaze: hasDehazeStage, hasSharpen: hasSharpenStage)
     }
 
     public var shortTrace: String {

@@ -183,6 +183,9 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     case curveWhite, curveRed, curveGreen, curveBlue
     /// 164: 纹理 / 清晰度 / 去噪 / 去彩噪 belong to the new 细节 card.
     case texture, clarity, nonBayerLuminance, nonBayerColor
+    /// 185: S3.10's four (自研锐化) belong to the same 细节 card — and are *not* the decoder pair
+    /// `sharpening`/`sharpeningRadius` above, which stay on 开发 as the body's own baseline.
+    case sharpenAmount, sharpenRadius, sharpenDetail, sharpenMasking
     /// 暗角 stays on the 校正 card (it always did — 164 only corrected a stale comment).
     case vignette
     case grain, dehaze
@@ -205,6 +208,7 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .caRed, .caBlue, .vignette: return .correction
         case .curveWhite, .curveRed, .curveGreen, .curveBlue: return .curve
         case .texture, .clarity, .nonBayerLuminance, .nonBayerColor: return .detailFX
+        case .sharpenAmount, .sharpenRadius, .sharpenDetail, .sharpenMasking: return .detailFX
         case .grain, .dehaze: return .effects
         case .crop, .straighten, .flips, .aspectLock, .quarterTurns: return .geometry
         }
@@ -251,6 +255,10 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .clarity: return "清晰度"
         case .nonBayerLuminance: return "去噪"
         case .nonBayerColor: return "去彩噪"
+        case .sharpenAmount: return "锐化数量"
+        case .sharpenRadius: return "锐化半径"
+        case .sharpenDetail: return "锐化细节"
+        case .sharpenMasking: return "锐化蒙版"
         case .dehaze: return "去雾"
         case .crop: return "裁切"
         case .straighten: return "拉直"
@@ -665,6 +673,13 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
     public var nonBayerLuminanceNR: Double?
     public var nonBayerColorNR: Double?
     public var dehaze: Double?
+    /// 185 — S3.10's four numbers (自研锐化). Same patch as `texture`/`clarity` and for the same
+    /// reason: the 细节 card is a *section*, not a storage group, so the leaves travel in the patch
+    /// that owns the card rather than in a struct of their own.
+    public var sharpenAmount: Double?
+    public var sharpenRadius: Double?
+    public var sharpenDetail: Double?
+    public var sharpenMasking: Double?
 
     public init() {}
 
@@ -672,12 +687,14 @@ public struct EffectsPatch: Sendable, Equatable, Codable {
         [vignetteAmount != nil, vignetteMidpoint != nil, vignetteFeather != nil,
          grain != nil,
          texture != nil, clarity != nil, nonBayerLuminanceNR != nil, nonBayerColorNR != nil,
-         dehaze != nil].filter { $0 }.count
+         dehaze != nil,
+         sharpenAmount != nil, sharpenRadius != nil, sharpenDetail != nil,
+         sharpenMasking != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 9
+    public static let fullFieldCount = 13
 }
 
 /// 色彩分级 — the nine wheel numbers (S3.8), one optional `GradeWheel` per region.
@@ -903,6 +920,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             effects.nonBayerColorNR = edit.effects.nonBayerColorNR
         }
         if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
+        // 185 — S3.10. `detail` and `masking` are compared against the group's own resting values, so
+        // a document that only touched 蒙版 still carries that leaf (and 数量 = 0 carries nothing).
+        if differs(edit.sharpen.amount, 0) { effects.sharpenAmount = edit.sharpen.amount }
+        if differs(edit.sharpen.radius, 1.0) { effects.sharpenRadius = edit.sharpen.radius }
+        if differs(edit.sharpen.detail, 25) { effects.sharpenDetail = edit.sharpen.detail }
+        if differs(edit.sharpen.masking, 0) { effects.sharpenMasking = edit.sharpen.masking }
         s.effects = effects.isEmpty ? nil : effects
 
         // Masks: present when the document has any. `showMaskID` is view state and stays out (see
@@ -993,7 +1016,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 out.insert(.correction)
             }
             if e.texture != nil || e.clarity != nil
-                || e.nonBayerLuminanceNR != nil || e.nonBayerColorNR != nil {
+                || e.nonBayerLuminanceNR != nil || e.nonBayerColorNR != nil
+                || e.sharpenAmount != nil || e.sharpenRadius != nil
+                || e.sharpenDetail != nil || e.sharpenMasking != nil {
                 out.insert(.detailFX)
             }
             if e.grain != nil || e.dehaze != nil { out.insert(.effects) }
@@ -1156,6 +1181,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if on(.clarity) { p.clarity = e.clarity }
                 if on(.nonBayerLuminance) { p.nonBayerLuminanceNR = e.nonBayerLuminanceNR }
                 if on(.nonBayerColor) { p.nonBayerColorNR = e.nonBayerColorNR }
+                // 185 — S3.10's four leaves, one child each.
+                if on(.sharpenAmount) { p.sharpenAmount = e.sharpenAmount }
+                if on(.sharpenRadius) { p.sharpenRadius = e.sharpenRadius }
+                if on(.sharpenDetail) { p.sharpenDetail = e.sharpenDetail }
+                if on(.sharpenMasking) { p.sharpenMasking = e.sharpenMasking }
             }
             if sections.contains(.effects) {
                 if on(.grain) { p.grain = e.grain }
@@ -1297,6 +1327,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.nonBayerLuminanceNR { out.effects.nonBayerLuminanceNR = v }
             if let v = p.nonBayerColorNR { out.effects.nonBayerColorNR = v }
             if let v = p.dehaze { out.effects.dehaze = v }
+            if let v = p.sharpenAmount { out.sharpen.amount = v }
+            if let v = p.sharpenRadius { out.sharpen.radius = v }
+            if let v = p.sharpenDetail { out.sharpen.detail = v }
+            if let v = p.sharpenMasking { out.sharpen.masking = v }
         }
 
         if let p = masks, !p.masks.isEmpty {

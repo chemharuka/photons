@@ -340,6 +340,12 @@ extension EditHistory {
         num("effects.dehaze", .effects, before.effects.dehaze, after.effects.dehaze)
         num("effects.dehazeDepth", .effects,
             before.effects.dehazeDepth, after.effects.dehazeDepth)
+        // 185 — S3.10's four numbers, so the history panel reads 「锐化数量 +80」 rather than a
+        // nameless 细节 row, and a 半径/细节/蒙版 drag is visible as its own leaf.
+        num("sharpen.amount", .effects, before.sharpen.amount, after.sharpen.amount)
+        num("sharpen.radius", .effects, before.sharpen.radius, after.sharpen.radius)
+        num("sharpen.detail", .effects, before.sharpen.detail, after.sharpen.detail)
+        num("sharpen.masking", .effects, before.sharpen.masking, after.sharpen.masking)
         // 2026-10-28 — S3.7's shape and seed. The seed is reported as the integer the kernel
         // hashes, so a row can never claim a change the pixels cannot see.
         num("effects.grainSize", .effects, before.effects.grainSize, after.effects.grainSize)
@@ -579,6 +585,12 @@ extension EditHistory {
         "effects.nonBayerColorNR": "去彩噪",
         "effects.dehaze": "去雾",
         "effects.dehazeDepth": "去雾深度",
+        // 185 — S3.10. Deliberately distinct from the decoder's 锐化 pair below: this is the
+        // 显示域 pass, and a history row that said 「锐化」 for both would hide which of the two moved.
+        "sharpen.amount": "锐化数量",
+        "sharpen.radius": "锐化半径",
+        "sharpen.detail": "锐化细节",
+        "sharpen.masking": "锐化蒙版",
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
         "masks.order": "蒙版顺序",

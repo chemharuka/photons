@@ -163,6 +163,22 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// this file cannot honour reports the fallback (`已退回 v8`) instead of pretending.
     public var decoderVersion: String?
     public var effects: EffectsGroup
+    /// 185 — **自研锐化** (S3.10): 数量 / 半径 / 细节 / 蒙版, in the display-referred domain.
+    ///
+    /// Its own group, not four more numbers inside `EffectsGroup`, for the reason §2.2 of the brief
+    /// gives and this code has to keep true: `DetailGroup.sharpening` / `sharpeningRadius` are a
+    /// **decoder** input (`CIRAWFilter`, the body's own baseline sharpening — read at decode time,
+    /// impossible to preview at 4 ms, and still forwarded unchanged here), while these four are a
+    /// **render** input (a pass on the tone-mapped pixels, previewable, and composable with the
+    /// export's output sharpening in S4). Two numbers called 「锐化」 that answer two different
+    /// questions should not live in one struct: the panel draws the decoder pair on 开发 and these
+    /// four on 细节, and the key material keeps them in two stages (`.detail` has no branch at all —
+    /// it never renders — while `.sharpen` is S3.10).
+    ///
+    /// Neutral (all four at `identity`) ⇒ the group is **not encoded** in the document, no key token
+    /// is appended, and S3.10 does not exist for the document at all: the strongest form of
+    /// 「中性零变化」, the pass is absent rather than encoded and multiplied by zero.
+    public var sharpen: SharpenGroup
     /// Optics: lateral chromatic aberration (029). Its own group, **not** a field in `DetailGroup`:
     /// `keyMaterial` has no `.detail` branch, so a slider parked there would change no key and would
     /// silently render nothing.
@@ -198,6 +214,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 detailSettings: DetailSettings = .identity,
                 decoderVersion: String? = nil,
                 effects: EffectsGroup = .identity,
+                sharpen: SharpenGroup = .identity,
                 optics: OpticsGroup = .identity,
                 masks: [Mask] = [],
                 showMaskID: String? = nil,
@@ -213,6 +230,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.detailSettings = detailSettings
         self.decoderVersion = decoderVersion
         self.effects = effects
+        self.sharpen = sharpen
         self.optics = optics
         self.masks = masks
         self.showMaskID = showMaskID
@@ -294,6 +312,8 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.color = .identity
         v.colorGrading = .identity
         v.effects = .identity
+        // 185: the display-domain sharpen is an edit like any other, so 「参数清零」 clears it too.
+        v.sharpen = .identity
         v.optics = .identity
         v.masks = []
         v.showMaskID = nil
@@ -325,6 +345,15 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// longer `effects.hasDetailFX` alone. Still judged **by value**: a mask with both fields at 0
     /// contributes nothing and the stage does not exist for it.
     public var hasDetailFX: Bool { effects.hasDetailFX || hasLocalDetail }
+
+    /// 185: does S3.10 exist for this document? Judged **by value** — `sharpAmount > 0`. The other
+    /// three only shape a pass that already exists (a radius with amount 0 sharpens nothing, and a
+    /// masking of 100 at amount 0 masks nothing), so they cannot summon the stage.
+    ///
+    /// A document at amount 0 keeps the pre-185 stage list, key chain and pixels byte for byte: the
+    /// pass is not encoded at all (§2.1 of the brief — the `hasDetailFX` value test, not a multiplied
+    /// by zero uniform).
+    public var hasSharpen: Bool { sharpen.amount > 0 }
 
     /// 117: does S1.9 exist for this document? Judged **by value** — `effects.dehaze != 0`. It is a
     /// separate stage at the end of the linear chain, so it has its own link and its own condition.
@@ -375,6 +404,10 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.detailSettings = c.val("detailSettings", v.detailSettings)
         v.decoderVersion = c.val("decoderVersion", v.decoderVersion)
         v.effects = c.val("effects", v.effects)
+        // 185: an absent key reads as the neutral group — four defaults, `hasSharpen == false`, no
+        // S3.10 link (schema 9's additive rule, read for the last time). A pre-185 document therefore
+        // keeps its whole key chain and its pixels byte for byte.
+        v.sharpen = c.val("sharpen", v.sharpen)
         v.optics = c.val("optics", v.optics)
         v.masks = c.val("masks", v.masks)
         v.showMaskID = c.val("showMaskID", v.showMaskID)
@@ -450,6 +483,11 @@ public struct EditModel: Sendable, Equatable, Codable {
         try c.encode(detailSettings, forKey: AnyCodingKey("detailSettings"))
         try c.encodeIfPresent(decoderVersion, forKey: AnyCodingKey("decoderVersion"))
         try c.encode(effects, forKey: AnyCodingKey("effects"))
+        // 185: written **only when non-neutral** (the `colorGrading`/`healSpots` rule), so every
+        // document from before S3.10 re-encodes byte for byte and an absent key reads as the identity.
+        if !sharpen.isIdentity {
+            try c.encode(sharpen, forKey: AnyCodingKey("sharpen"))
+        }
         try c.encode(optics, forKey: AnyCodingKey("optics"))
         try c.encode(masks, forKey: AnyCodingKey("masks"))
         try c.encodeIfPresent(showMaskID, forKey: AnyCodingKey("showMaskID"))
@@ -568,6 +606,9 @@ public struct EditModel: Sendable, Equatable, Codable {
             if effects.dehaze != old.effects.dehaze
                 || effects.dehazeDepth != old.effects.dehazeDepth { s.insert(.dehaze) }
         }
+        // 185: S3.10 is its own stage and its own dirty bit — a 数量 drag must not re-run S3.9, and a
+        // 纹理 drag must not re-run S3.10 (neither reads the other's numbers).
+        if sharpen != old.sharpen { s.insert(.sharpen) }
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
         if optics != old.optics { s.insert(.geometry) }
@@ -790,6 +831,16 @@ public struct EditModel: Sendable, Equatable, Codable {
             let local = localDetailMaterial
             if !local.isEmpty { m += ";mloc=[\(local)]" }
             return m
+
+        case .sharpen:
+            // 185: S3.10's own material — the four numbers and nothing else. A 数量 drag must miss
+            // S3.9 (which reads none of them) and a 纹理 drag must miss S3.10; naming the values it
+            // reads is the same belt-and-braces shape `.hsl`/`.grain`/`.grade` use.
+            //
+            // The decoder's 机身基线 pair (`detail.sharpening`) is deliberately **absent** here: it is
+            // not this stage's input at all (it enters at decode, `DecodeInputs`), so putting it in
+            // this material would make a decode-only change evict a cached S3.10 for nothing.
+            return sharpen.keyString
 
         case .dehaze:
             // 117: S1.9's own material — the dehaze amount and nothing else.
@@ -2255,6 +2306,72 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// their seed can never share a cached grain.
     public var grainKeyString: String {
         "gamt=\(k(grain));gsz=\(k(grainSize));grou=\(k(grainRoughness));gseed=\(grainSeedValue)"
+    }
+}
+
+/// 185 — **自研锐化** (S3.10): 数量 / 半径 / 细节 / 蒙版.
+///
+/// Four numbers, one unsharp mask in the display-referred domain (`Kernels/s3_10_sharpen.metal`).
+/// The ranges are the kernel's ranges — a slider the panel can produce and the shader cannot honour
+/// would be a slider that lies:
+///
+///   · `amount` 0…150 — USM strength (`A = amount/100`). **0 means S3.10 does not exist** for the
+///     document: no pass, no key token, no pixel. This is the whole neutrality contract.
+///   · `radius` 0.5…3.0 px — the Gaussian's σ, in **content pixels** of the render's own grid, so a
+///     0.5-scale fit preview and a 1:1 window sharpen the same picture detail (「按缩放归一」).
+///   · `detail` 0…100 — the weight of the < σ/2 px band. 0 = only structures ≥ about σ/2 px; 100 =
+///     the plain USM (`I + A·(I − G_σ)`), 1 px texture included.
+///   · `masking` 0…100 — how much of the boost the edge mask is allowed to withhold. 0 = sharpen
+///     everything (noise included), 100 = only the strong edges, so a flat area keeps its noise
+///     exactly as it was.
+///
+/// **Not the decoder's 机身基线.** `DetailGroup.sharpening` / `sharpeningRadius` are a
+/// `CIRAWFilter` input — the body's own sharpening, applied at decode, kept on the 开发 card, and
+/// forwarded by this build unchanged (§2.2). These four are a render pass on the tone-mapped pixels:
+/// previewable without a re-decode, and separate from S4's output sharpening at export.
+public struct SharpenGroup: Sendable, Equatable, Codable {
+    public var amount: Double     // 0…150
+    public var radius: Double     // 0.5…3.0 px (σ, content pixels)
+    public var detail: Double     // 0…100
+    public var masking: Double    // 0…100
+
+    public static let identity = SharpenGroup()
+
+    /// The slider ranges, one place, so the panel and a clamp cannot disagree.
+    public static let amountRange = 0.0 ... 150.0
+    public static let radiusRange = 0.5 ... 3.0
+
+    public init(amount: Double = 0, radius: Double = 1.0,
+                detail: Double = 25, masking: Double = 0) {
+        self.amount = amount
+        self.radius = radius
+        self.detail = detail
+        self.masking = masking
+    }
+
+    /// All four at their resting values. `detail` and `masking` have non-zero defaults because they
+    /// are *shape* parameters of a pass that does not exist at amount 0 — they are stored, not
+    /// applied, and they cannot summon the stage (`EditModel.hasSharpen` is the amount alone).
+    public var isIdentity: Bool {
+        amount == 0 && radius == 1.0 && detail == 25 && masking == 0
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = SharpenGroup.identity
+        v.amount = c.val("amount", v.amount)
+        v.radius = c.val("radius", v.radius)
+        v.detail = c.val("detail", v.detail)
+        v.masking = c.val("masking", v.masking)
+        self = v
+    }
+
+    /// S3.10's material — the four numbers the kernel reads, and nothing else. `%.4f` on the radius
+    /// because two radii a hundredth of a pixel apart must not share a cached pass; the other three
+    /// are whole numbers on their sliders.
+    public var keyString: String {
+        String(format: "sha=%.4f;shr=%.2f;shd=%.1f;shm=%.1f",
+               amount, radius, detail, masking)
     }
 }
 

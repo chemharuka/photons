@@ -275,7 +275,9 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(EditHistory.dirtyStages(for: [.geometry]), [.geometry])
         // 2026-10-28: the Effects card is three stages — S3.8 (纹理/清晰度/去雾), S3c (暗角) and
         // S3.7 (颗粒), in `RenderStage.order`'s order.
-        XCTAssertEqual(EditHistory.dirtyStages(for: [.effects]), [.detailFX, .vignette, .grain])
+        // 185: and S3.10 (自研锐化) runs between S3.9 and the vignette, so the 细节 card feeds it too.
+        XCTAssertEqual(EditHistory.dirtyStages(for: [.effects]),
+                       [.detailFX, .sharpen, .vignette, .grain])
         XCTAssertEqual(EditHistory.dirtyStages(for: [.detail]), [])   // stored, not rendered
         // 056: the masks group feeds S3.5 as well — a mask's hue/saturation moved there.
         XCTAssertEqual(EditHistory.dirtyStages(for: [.masks]), [.maskAtlas, .localApply, .localColor])
