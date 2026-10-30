@@ -14,31 +14,35 @@ import PhotonsCore
 @MainActor
 final class DetailSectionTests: XCTestCase {
 
-    func testTheDetailCardSitsBetweenColorAndPresets() {
+    func testTheDevelopCardSitsBetweenCurveAndCorrection() {
         let titles = InspectorView.sectionTitles
-        guard let detail = titles.firstIndex(of: "细节") else {
+        guard let develop = titles.firstIndex(of: "开发") else {
+            return XCTFail("no 开发 card in \(titles)")
+        }
+        // 076/2026-10-28: the colour-partition chain sits above 曲线; 164 only renamed the decoder
+        // card (细节 → 开发) and left it in the slot it has held since 2026-10-28.
+        XCTAssertEqual(titles.firstIndex(of: "曲线").map { $0 + 1 }, develop,
+                       "开发 belongs directly under 曲线; got \(titles)")
+        // …and 黑白 sits between 色彩分级 and 曲线, so every offset below 曲线 gained one row:
+        // 曲线 (直接压在 开发 上) is +1, 黑白 +2, 色彩分级 +3, 点颜色 +4, HSL +5, Color +6.
+        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 3 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "点颜色").map { $0 + 4 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 5 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 6 }, develop)
+        XCTAssertEqual(titles.filter { $0 == "开发" }.count, 1, "one 开发 card, not two")
+
+        // 164: the new 细节 card sits between 校正 and 效果.
+        guard let detailFX = titles.firstIndex(of: "细节") else {
             return XCTFail("no 细节 card in \(titles)")
         }
-        // 076: HSL sits between Color and 细节 (it is the 色彩 workspace's card, declared next to
-        // Color); 2026-10-28: 黑白 (S3.4) sits directly under Color, so 细节 is now three rows under
-        // Color rather than one.
-        // 2026-10-28 (P0 色彩分级): 色彩分级 (S3.8) is the 色彩 workspace's second card and sits
-        // between HSL and 细节, so 细节 is now four rows under Color rather than three.
-        // 2026-10-28 (user): 曲线 moved above 细节, so the curve is the card that now sits directly
-        // above it; the colour-partition chain above the curve is unchanged.
-        XCTAssertEqual(titles.firstIndex(of: "曲线").map { $0 + 1 }, detail,
-                       "细节 belongs directly under 曲线; got \(titles)")
-        // …and 黑白 sits between 色彩分级 and 曲线, so every offset below 曲线 gained one row:
-        // 曲线 (直接压在 细节 上) is +1, 黑白 +2, 色彩分级 +3, 点颜色 +4, HSL +5, Color +6.
-        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 3 }, detail)
-        XCTAssertEqual(titles.firstIndex(of: "点颜色").map { $0 + 4 }, detail)
-        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 5 }, detail)
-        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 6 }, detail)
+        XCTAssertEqual(titles.firstIndex(of: "校正").map { $0 + 1 }, detailFX)
+        XCTAssertEqual(titles.firstIndex(of: "效果").map { $0 - 1 }, detailFX)
         XCTAssertEqual(titles.filter { $0 == "细节" }.count, 1, "one 细节 card, not two")
 
-        // The pinned head is untouched, and the new card scrolls with the rest.
+        // The pinned head is untouched, and both cards scroll with the rest.
         XCTAssertEqual(Array(titles.prefix(3)), ["直方图", "白平衡", "黑电平"])
         XCTAssertTrue(InspectorView.scrollingSections.contains(.detail))
+        XCTAssertTrue(InspectorView.scrollingSections.contains(.detailFX))
     }
 
     /// 096: the 色差 rows left this card. The detail table is still exactly the four decoder rows,
@@ -49,11 +53,13 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertEqual(InspectorView.Section.correction.title, "校正")
         XCTAssertTrue(InspectorWorkspace.adjust.cards.contains(.correction))
         let sections = InspectorView.sections(in: .adjust)
-        let detail = sections.firstIndex(of: .detail)
+        let develop = sections.firstIndex(of: .detail)
         let correction = sections.firstIndex(of: .correction)
+        let detailFX = sections.firstIndex(of: .detailFX)
         let effects = sections.firstIndex(of: .effects)
-        XCTAssertEqual(correction, detail.map { $0 + 1 }, "校正紧跟在细节之后：\(sections)")
-        XCTAssertEqual(effects, correction.map { $0 + 1 }, "效果紧跟在校正之后：\(sections)")
+        XCTAssertEqual(correction, develop.map { $0 + 1 }, "校正紧跟在开发之后：\(sections)")
+        XCTAssertEqual(detailFX, correction.map { $0 + 1 }, "细节紧跟在校正之后：\(sections)")
+        XCTAssertEqual(effects, detailFX.map { $0 + 1 }, "效果紧跟在细节之后：\(sections)")
     }
 
     /// 040/042: four rows, each with **its own** travel — 细节 0…30 (amount 0…3, Apple's

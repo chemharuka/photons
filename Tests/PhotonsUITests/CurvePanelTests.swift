@@ -755,21 +755,22 @@ final class CurvePanelTests: XCTestCase {
 
     // MARK: - 10. where the card sits
 
-    /// 曲线卡在「细节」之后；其它卡的相对位置一条没动；标题双击接的是 `PanelResets.curve()`。
+    /// 曲线卡在「开发」之后；其它卡的相对位置一条没动；标题双击接的是 `PanelResets.curve()`。
     func testTheCurveCardSitsDirectlyUnderDetailAndLeavesEveryOtherCardInPlace() throws {
         let titles = InspectorView.sectionTitles
-        let detail = try XCTUnwrap(titles.firstIndex(of: "细节"))
+        let develop = try XCTUnwrap(titles.firstIndex(of: "开发"))
         let curve = try XCTUnwrap(titles.firstIndex(of: "曲线"))
-        // 2026-10-28 (user): 「曲线移动到在细节上方」 — the curve is the card immediately above 细节.
-        XCTAssertEqual(detail - 1, curve, "曲线必须在细节之前，实际 \(titles)")
+        // 2026-10-28 (user): 「曲线移动到在细节上方」 — 164 renamed that card 开发; 曲线 is still
+        // immediately above it.
+        XCTAssertEqual(develop - 1, curve, "曲线必须在开发之前，实际 \(titles)")
 
         // 076 把 HSL 插在 Color 之后（它属于「色彩」工作区），077 把历史记录放在最后，2026-10-28
         // 把效果插在曲线之后（暗角 + 颗粒是最后两段渲染），同一天又把黑白插在 Color 之后（S3.4 紧跟
-        // S3）—— 其它卡的相对顺序一条都没动。
+        // S3）—— 其它卡的相对顺序一条都没动。164 只改名并把新 细节 插在 校正 与 效果 之间。
         // 081 (2026-10-28): 预设 卡已删（搬成顶级菜单），所以列表里不再有它。
         XCTAssertEqual(titles.filter { $0 != "曲线" },
                        ["直方图", "白平衡", "黑电平", "Light", "Color", "HSL", "点颜色", "色彩分级",
-                        "黑白", "细节", "校正", "效果", "裁切", "旋转", "蒙版", "历史记录"],
+                        "黑白", "开发", "校正", "细节", "效果", "裁切", "旋转", "蒙版", "历史记录"],
                        "插入一张卡，其它卡的相对顺序一条都不许变")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.curve), "曲线跟随滚动，不属于钉住区")
         XCTAssertFalse(InspectorView.scrollingSections.contains(.histogram))
@@ -785,8 +786,8 @@ final class CurvePanelTests: XCTestCase {
         // 047 的四张参数卡清单没有被曲线改写：Group 还是那四个 + 2026-10-28 的效果卡 + 黑白卡。
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "blackAndWhite", "detail", "correction",
-                        "effects", "colorGrading", "pointColor"])
-        print("layout · \(titles) · 曲线 index \(detail + 1)")
+                        "detailFX", "effects", "colorGrading", "pointColor"])
+        print("layout · \(titles) · 曲线 index \(curve)")
     }
 
     // MARK: - 11. 064: the value box is inset one radius, so every circle is whole

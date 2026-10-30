@@ -20,17 +20,20 @@ final class EditSnapshotCorrectionTests: XCTestCase {
 
     // MARK: ① the section itself
 
-    func testCorrectionSitsBetweenDetailAndEffectsAndHasThePanelsTwoRows() throws {
+    func testCorrectionSitsBetweenDetailAndDetailFXAndHasThePanelsCaAndVignetteRows() throws {
         let order = EditSnapshotSection.panelOrder
         let detail = try XCTUnwrap(order.firstIndex(of: .detail))
         let correction = try XCTUnwrap(order.firstIndex(of: .correction))
+        let detailFX = try XCTUnwrap(order.firstIndex(of: .detailFX))
         let effects = try XCTUnwrap(order.firstIndex(of: .effects))
-        XCTAssertEqual(correction, detail + 1, "校正紧跟在细节之后：\(order)")
-        XCTAssertEqual(effects, correction + 1, "效果紧跟在校正之后：\(order)")
+        XCTAssertEqual(correction, detail + 1, "校正紧跟在开发之后：\(order)")
+        XCTAssertEqual(detailFX, correction + 1, "细节紧跟在校正之后：\(order)")
+        XCTAssertEqual(effects, detailFX + 1, "效果紧跟在细节之后：\(order)")
 
         XCTAssertEqual(EditSnapshotSection.correction.title, "校正")
-        XCTAssertEqual(EditSnapshotSection.correction.children.map(\.title), ["色差 R", "色差 B"])
-        XCTAssertEqual(EditSnapshotSection.correction.children, [.caRed, .caBlue])
+        XCTAssertEqual(EditSnapshotSection.correction.children.map(\.title),
+                       ["色差 R", "色差 B", "暗角"])
+        XCTAssertEqual(EditSnapshotSection.correction.children, [.caRed, .caBlue, .vignette])
         XCTAssertTrue(EditSnapshotSection.correction.isCopyable)
 
         // The key is additive and defaulted; bumping this number would change what an old payload
