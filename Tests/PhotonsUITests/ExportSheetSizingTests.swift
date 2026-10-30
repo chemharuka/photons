@@ -92,8 +92,62 @@ final class ExportSheetSizingTests: XCTestCase {
                        "4000×3000")
     }
 
-    // MARK: §4 — the summary goes back to the parameters
+    // MARK: 168 §2 — 长边 default and 不扩大
 
+    /// Switching to 长边 starts from the picture's own long edge, not the old hard-coded 2048.
+    func testSelectingLongEdgeDefaultsToTheCurrentPicturesLongEdge() {
+        let sheet = model()
+        sheet.selectionNatives = [ImageSize(width: 6000, height: 4000)]
+
+        sheet.selectSizingMode(.longEdge)
+
+        XCTAssertEqual(sheet.preset.longEdge, 6000)
+        XCTAssertNotEqual(sheet.preset.longEdge, 2048)
+    }
+
+    /// A batch uses the first selected picture's size; a portrait frame's long edge is its height.
+    func testTheLongEdgeDefaultUsesTheFirstPictureAndItsLongerSide() {
+        let sheet = model()
+        sheet.selectionNatives = [ImageSize(width: 4000, height: 6000),
+                                  ImageSize(width: 8000, height: 5000)]
+
+        sheet.selectSizingMode(.longEdge)
+
+        XCTAssertEqual(sheet.preset.longEdge, 6000)
+    }
+
+    /// A caller that only filled the cropped content sizes still gets a real-pixel default.
+    func testTheLongEdgeDefaultFallsBackToTheSelectionContents() {
+        let sheet = model()
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000)]
+
+        sheet.selectSizingMode(.longEdge)
+
+        XCTAssertEqual(sheet.preset.longEdge, 6000)
+    }
+
+    /// Re-entering 长边 does not throw away a value the user already changed.
+    func testAnAlreadyEditedLongEdgeSurvivesAnotherSelection() {
+        let sheet = model()
+        sheet.selectionNatives = [ImageSize(width: 6000, height: 4000)]
+        sheet.selectSizingMode(.longEdge)
+        sheet.preset.longEdge = 3200
+
+        sheet.selectionNatives = [ImageSize(width: 8000, height: 5000)]
+        sheet.selectSizingMode(.longEdge)
+
+        XCTAssertEqual(sheet.preset.longEdge, 3200)
+    }
+
+    /// 不扩大 is on by default; the checkbox writes the same `noUpscale` the batch reads.
+    func testNoUpscaleIsOnByDefaultAndWritable() {
+        let sheet = model()
+        XCTAssertTrue(sheet.preset.noUpscale)
+        sheet.preset.noUpscale = false
+        XCTAssertFalse(sheet.preset.noUpscale)
+    }
+
+    // MARK: §4 — the summary goes back to the parameters
     private func report(written: Int) -> BatchExportReport {
         let outcomes = (0..<written).map { index in
             BatchExportOutcome(index: index, id: "i\(index)", sourceName: "i\(index)",

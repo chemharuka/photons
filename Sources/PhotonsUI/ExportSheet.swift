@@ -287,6 +287,12 @@ public final class ExportSheetModel {
     /// live as the user changes size/percentage. It is not persisted.
     public var selectionContents: [ImageSize] = []
 
+    /// 168 §2 — the selected pictures' **own** pixel sizes, straight from the catalog's
+    /// `width`/`height` (never a thumbnail). The 长边 default comes from the first entry, because a
+    /// batch export describes one size for all of them and the first picture is the one the user is
+    /// looking at. Filled by `ExportSheetController.refreshItems`, beside `selectionContents`.
+    public var selectionNatives: [ImageSize] = []
+
     /// `internal(set)` so the footer/layout tests can put the model in a phase without starting a
     /// real render; the app only writes it in `run`/`cancel`/`finish`.
     public internal(set) var phase: Phase = .idle
@@ -557,20 +563,57 @@ public final class ExportSheetModel {
 
     // MARK: sizing (161 §1–§3)
 
-    /// The 尺寸模式 popup's one write path. Setting the mode is not enough on its own: the old draft
+    /// 161 §1–§3 — the 尺寸模式 popup's one write path. Setting the mode is not enough on its own: the old draft
     /// carries a `longEdge`, and `ExportPreset.renderScale` still honours it in `.none` mode. That was
     /// the "选原尺寸却出 2048" break — the popup wrote `.none`, but the renderer kept the 2048 ceiling.
     /// Clearing it here makes `原尺寸` mean scale 1 for the whole path (prediction, render, batch).
+    ///
+    /// 168 §2 — switching **to** 长边 starts from the current picture's own long edge (catalog pixels,
+    /// not a thumbnail), not the old hard-coded 2048. An already-set value is kept: switching photos
+    /// or re-entering the mode must not throw away what the user typed.
     public func selectSizingMode(_ mode: ExportSizingMode) {
         preset.sizingMode = mode
         switch mode {
         case .none:
             preset.longEdge = nil
         case .longEdge:
-            if preset.longEdge == nil { preset.longEdge = 2048 }
+            if preset.longEdge == nil { preset.longEdge = currentLongEdge ?? 2048 }
         case .percent:
             if preset.percent == nil { preset.percent = 100 }
         }
+    }
+
+    /// 168 §2 — the first selected picture's long edge, in catalog pixels. `nil` when the catalog has
+    /// no real dimensions for the selection (then `selectSizingMode` keeps a neutral fallback).
+    ///
+    /// `selectionNatives` is the primary source (the asset's own pixels). `selectionContents` is the
+    /// same catalog measurement after the crop, and is the fallback for a caller that only filled
+    /// that one — still real pixels, never a thumbnail.
+    public var currentLongEdge: Int? {
+        let sizes = selectionNatives.isEmpty ? selectionContents : selectionNatives
+        guard let first = sizes.first else { return nil }
+        let edge = max(first.width, first.height)
+        return edge > 0 ? edge : nil
+    }
+
+    /// 168 §3 — the quality field's resting text (two decimals), and the one parser both the view
+    /// and the tests use. Out-of-range and non-numeric input is **rejected**, not clamped: typing
+    /// `1.5` must leave the previous legal value alone, not silently write `1.0`.
+    public var qualityText: String { String(format: "%.2f", preset.quality) }
+
+    public static func parseQuality(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let value = Double(trimmed), value.isFinite,
+              (0.10 ... 1.00).contains(value) else { return nil }
+        return (value * 100).rounded() / 100
+    }
+
+    /// Write a typed quality, or leave the preset untouched. `true` means the text was legal.
+    @discardableResult
+    public func commitQuality(_ text: String) -> Bool {
+        guard let value = Self.parseQuality(text) else { return false }
+        if value != preset.quality { preset.quality = value }
+        return true
     }
 
     /// The exact struct handed to `BatchExporter`. A defensive normalisation as well as the panel
@@ -937,6 +980,10 @@ public struct ExportSheetView: View {
     @State private var selectedPreset = ""
     @State private var showingSavePreset = false
     @State private var newPresetName = ""
+    /// 168 §3 — the quality box's buffer. It lives in the view only while editing; a legal `↵` or
+    /// focus loss commits through the model, an illegal one puts this back to the model's value.
+    @State private var qualityText = ""
+    @FocusState private var qualityFieldFocused: Bool
 
     public init(model: ExportSheetModel) {
         self.model = model
@@ -987,6 +1034,12 @@ public struct ExportSheetView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("存到 \(model.presetStore.directory.path)")
+        }
+        .onAppear { qualityText = model.qualityText }
+        // A slider drag (or a preset load) repaints the box; a field being typed into keeps its
+        // buffer, so a re-render cannot swallow a character.
+        .onChange(of: model.preset.quality) { _, _ in
+            if !qualityFieldFocused { qualityText = model.qualityText }
         }
     }
 
@@ -1229,11 +1282,22 @@ public struct ExportSheetView: View {
                     .controlSize(.small)
                     .frame(width: 140)
                     .disabled(model.phase == .running || !model.preset.format.supportsQuality)
-                Text(String(format: "%.2f", model.preset.quality))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(model.preset.format.supportsQuality
-                                     ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                    .frame(width: 38, alignment: .trailing)
+                // 168 §3 — the same 10 pt row type as the rest of 文件设置, fixed width (a moving
+                // readout makes the slider wobble), two decimals. Typing is committed on ↵ or focus
+                // loss; an illegal string leaves the preset alone and puts the last legal value back.
+                TextField("0.85", text: $qualityText)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 46)
+                    .focused($qualityFieldFocused)
+                    .onSubmit { commitQuality() }
+                    .onChange(of: qualityFieldFocused) { _, focused in
+                        if !focused { commitQuality() }
+                    }
+                    .disabled(model.phase == .running || !model.preset.format.supportsQuality)
+                    .accessibilityIdentifier("export.quality")
+                    .help("可键入 0.10–1.00，回车提交；非法值保持上一个合法值")
             }
             // 109 §2b — three direct buttons; P3 is the default (user's 2026-10-29 口径).
             HStack(spacing: 8) {
@@ -1303,6 +1367,14 @@ public struct ExportSheetView: View {
                         model.preset.longEdge = max(1, Int(typed.rounded()))
                     }
                     Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Toggle(isOn: $model.preset.noUpscale) {
+                        Text("不扩大").font(.system(size: 10))
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .disabled(model.phase == .running)
+                    .accessibilityIdentifier("export.size.noUpscale")
+                    .help("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大")
                 }
             case .percent:
                 HStack(spacing: 8) {
@@ -1468,6 +1540,10 @@ public struct ExportSheetView: View {
                                              : AnyShapeStyle(.secondary))
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            // 168 §2 — the 不扩大 note rides on the outcome's warnings; hover the
+                            // row to read the whole sentence instead of only "1 条警告".
+                            .help(row.warnings.isEmpty ? row.detail
+                                                       : row.warnings.joined(separator: "\n"))
                     }
                     .padding(.vertical, 2)
                     .padding(.horizontal, 4)
@@ -1545,6 +1621,13 @@ public struct ExportSheetView: View {
     }
 
     // MARK: bindings
+
+    /// 168 §3 — commit the quality box: a legal value writes the preset; anything else (empty,
+    /// non-numeric, out of 0.10–1.00) is discarded and the box goes back to the preset's value.
+    private func commitQuality() {
+        _ = model.commitQuality(qualityText)
+        qualityText = model.qualityText
+    }
 
     private var presetSelection: Binding<String> {
         Binding(get: { selectedPreset },
@@ -1747,6 +1830,9 @@ public final class ExportSheetController: NSObject {
             guard let native = sizes[item.id] else { return nil }
             return (item.edit ?? .neutral).geometry.outputPixels(in: native)
         }
+        // 168 §2 — the 长边 default wants the catalog's real pixels (not the cropped content, and
+        // never a thumbnail), in selection order so "第一张" is the same picture the sheet names.
+        model.selectionNatives = items.compactMap { sizes[$0.id] }
         model.selectionCount = items.count
     }
 

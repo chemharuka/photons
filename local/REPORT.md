@@ -228,3 +228,108 @@ V5′ default high 2.5198420997897464 · 0=1.0000 · +1=1.0000 · +2=1.0000 · +
   `MaskRangeBar.swift` 无需改动，未动。
 - `AlgorithmVersion.swift` 的 `maskAtlas = 5` 说明里仍有一句「the migrated v1→v2 document…」，
   因本单限定只改上述文件，未编辑；该句已不成立（现在是「v1 原样保留」）。
+
+---
+
+# 168 · 导出面板三处 — lane `export-panel-2`
+
+分支 `feat/export-panel-2-1030`，worktree `/Users/luyao/photons-wt/export-panel-2`。
+两个 commit：
+
+1. `fix(export): HDR 选 PQ/HLG 时不再画色调映射行，标签改中文`
+2. `feat(export): 长边默认取当前照片，新增不扩大；质量可键入`
+
+只改了 `Sources/PhotonsUI/ExportSheet.swift`、`Sources/PhotonsExport/BatchExport.swift` 与对应测试；
+没有动 `Package.swift`、`Resources/`、蒙版/contrast/dehaze/点颜色/裁剪/深度。
+
+## 1 · 色调映射行（V1）
+
+- 视图 `else` → `else if model.showsToneMappingRow`（`showsToneMappingRow` 仍是 161/109 的
+  `!hdrEnabled`，没有新属性）。
+- 标签 `tone mapping` → `色调映射`。
+- 探针：`ExportLayoutProbe.Kind` 在 `ExportHDRControls.swift`（本单文件锁外），因此在
+  `ExportSheet.swift` 里加了一个等价的 `ExportToneMappingRowProbeHost`；hosted view 测试找的是
+  “该视图在不在树里”，与区域探针同一证据，不靠肉眼。
+
+`ExportSheetLayoutTests.testToneMappingRowFollowsHDRKindInTheView`（实跑通过）：
+
+```
+默认 HDR 增益图：有 hdrRow 探针，没有色调映射探针
+HDR + PQ      ：showsToneMappingRow == false，视图无色调映射探针
+HDR + HLG     ：showsToneMappingRow == false，视图无色调映射探针
+HDR 关        ：showsToneMappingRow == true，视图有色调映射探针
+```
+
+`ExportSheetModelTests.testPQAndHLGHideTheToneMappingRow` 同时钉住谓词本身（PQ/HLG → false，
+`setHDR(false)` → true）。
+
+## 2 · 长边默认与「不扩大」（V2 / V3）
+
+- `ExportSheetModel.selectionNatives`：controller 在 `refreshItems()` 里从 Catalog 的
+  `asset.width/height` 填（不是 `selectionContents` 的裁切结果，更不是缩略图），顺序与 items 一致。
+- `selectSizingMode(.longEdge)` 在 `longEdge == nil` 时取 `currentLongEdge`（第一张的 `max(w,h)`）；
+  已有值不覆盖，所以切换照片/重进模式不会重置用户改过的数。
+- 新增复选框「不扩大」绑定 `preset.noUpscale`（默认 `true`），只在长边模式显示；原尺寸/比例未改。
+- `BatchExport.swift` 的 `.longEdge` 分支在 `noUpscale && 请求 > 当前` 时写一条结果警告：
+  `长边 8000 请求 → 源 6000，按不扩大输出 6000`。结果行保留「N 条警告」，悬停可读全文。
+
+实跑：
+
+```
+testSelectingLongEdgeDefaultsToTheCurrentPicturesLongEdge
+  selectionNatives = 6000×4000 → 切长边 → longEdge == 6000（不是 2048）
+testTheLongEdgeDefaultUsesTheFirstPictureAndItsLongerSide
+  第一张 4000×6000，第二张 8000×5000 → longEdge == 6000
+testTheLongEdgeDefaultFallsBackToTheSelectionContents
+  只填 selectionContents = 6000×4000 → longEdge == 6000
+testAnAlreadyEditedLongEdgeSurvivesAnotherSelection
+  用户改成 3200 后换到 8000×5000 → 仍是 3200
+testNoUpscaleIsOnByDefaultAndWritable
+  默认 true；取消后 false
+testNoUpscaleClampsTheRequestAndRecordsWhy
+  60×40 源、请求长边 80、noUpscale=true → 输出 60×40
+  警告含「长边 80 请求」「源 60」「按不扩大输出 60」
+testAllowingUpscaleHonoursTheRequestedLongEdge
+  同样的源，noUpscale=false → 输出 80×53
+```
+
+（V3 用 60/80 而不是 6000/8000，只为避免测试里分配几百 MB 的放大图；夹取公式是
+`min(请求, 源)`，大图同一路径。）
+
+## 3 · 质量输入框（V4）
+
+- 只读 `Text` → `TextField`：`.font(.system(size: 10, weight: .medium))`、固定宽 46、右对齐、
+  两位小数 `0.85`；回车与失焦都提交。
+- 解析在模型里（`ExportSheetModel.parseQuality` / `commitQuality`）：只接受有限数字且
+  `0.10…1.00`；空、`abc`、`1.5`、`0.05` 全部拒绝，**不回写、不夹到 0 或 1**，视图恢复
+  `qualityText`（上一个合法值）。默认仍是 161 的 `0.85`。
+
+`ExportSheetModelTests.testTypedQualityCommitsLegalValuesAndRejectsTheRest`（实跑通过）：
+
+```
+初始                     0.85 → "0.85"
+键入 "0.92"              preset.quality == 0.92，显示 "0.92"
+键入 "1.5"/"abc"/""/空格/"0.05"/"nan"
+                         全部返回 false，quality 仍为 0.92，显示仍为 "0.92"
+```
+
+## 4 · 回归（V5）
+
+`PHOTONS_TEST_RAW=$HOME/Desktop/test/L1030433.dng swift test --filter '<下面的套件>'`，
+`swift build --build-tests` 先通过，测试带构建跑，0 失败：
+
+| 套件 | 条数 | 结果 |
+|---|---:|---|
+| ExportSheetModelTests | 20 | 0 失败 |
+| ExportSheetSizingTests | 12 | 0 失败 |
+| ExportSheetLayoutTests | 3 | 0 失败 |
+| ExportSheetFooterTests | 3 | 0 失败 |
+| ExportSheetDraftPersistenceTests | 5 | 0 失败 |
+| ExportPresetTests | 15 | 0 失败 |
+| BatchExportTests | 26 | 0 失败 |
+| BatchExportCancelTests | 5 | 0 失败 |
+
+161 的九条未回退：原尺寸默认/顺序/记忆/留白/取消按钮/0.85 默认都在上述套件里；
+`testTheFirstSheetIsOriginalSizeAtQuality085`、`testThePopupOrderIsOriginalLongEdgePercentAndStorageOrderIsUntouched`、
+`testSelectingOriginalClearsTheLongEdgeAndPredictsTheNativeSize`、`testRunSnapshotNormalisesANonePresetWithAStaleLongEdge`
+仍绿。无新增 `XCTSkip`，未改阈值；本单没有出现陈旧断言需要重钉。
