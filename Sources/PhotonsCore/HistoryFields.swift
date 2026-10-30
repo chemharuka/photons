@@ -584,6 +584,7 @@ extension EditHistory {
         "adj.amount": "强度", "adj.exposure": "曝光", "adj.temperature": "色温", "adj.tint": "色调",
         "adj.contrast": "对比", "adj.highlights": "高光", "adj.shadows": "阴影",
         "adj.whites": "白色", "adj.blacks": "黑色", "adj.hue": "色相", "adj.saturation": "饱和",
+        "adj.texture": "纹理", "adj.sharpen": "锐化",
     ]
 
     /// `curve.white[3].y` → 「白[3].y」.

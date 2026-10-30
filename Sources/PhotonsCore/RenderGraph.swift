@@ -942,6 +942,10 @@ private struct DetailFXParamsU {
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
     var f: SIMD4<Float>    // 164: denoise luma amount, chroma amount (0…1), pad, pad
+    /// 181 — local detail: `maskCount, contentOriginX, contentOriginY, 0` and
+    /// `contentWidth, contentHeight, 0, 0`. Mirror of `DetailFXParams.g` / `.h`.
+    var g: SIMD4<Int32>
+    var h: SIMD4<Int32>
 }
 
 /// Mirror of `Kernels/s3_9_denoise.metal`, byte for byte (171). The three passes (sigma, splat,
@@ -1072,6 +1076,14 @@ private struct LocalColorU {
     var a: SIMD4<Float>   // hue (units), saturation (units), amountScale (0…1), enabled
 }
 
+/// 181 — mirror of `MaskDetailDesc` in `s3_8_detail_fx.metal`: one mask that carries a local
+/// 纹理/锐化 value. Compacted (a mask with both at 0 is absent), so `b.x` — the atlas slice — is the
+/// only thing naming which slice it reads.
+private struct MaskDetailU {
+    var a: SIMD4<Float>   // texture (−1…1), sharpen (0…1), amount scale (0…1), enabled
+    var b: SIMD4<Int32>   // atlas slice, 0, 0, 0
+}
+
 /// 056 — mirror of `LocalColorParams` in `s3_5_local_color.metal`.
 private struct LocalColorParamsU {
     var a: SIMD4<Int32>   // anyActive, maskCount, pad, pad
@@ -1108,6 +1120,9 @@ private struct MaskTable {
     let adjust: [LocalAdjustU]
     /// 056 — S3.5's per-mask descriptors, same atlas order as `adjust`.
     let colorAdjust: [LocalColorU]
+    /// 181 — S3.9's per-mask local detail, **compacted**: only masks that carry a value, in atlas
+    /// order, each carrying its own slice index.
+    let detailAdjust: [MaskDetailU]
     let strokes: [MaskStrokeDescU]
     let points: [SIMD4<Float>]
     let colours: [SIMD4<Float>]
@@ -1117,6 +1132,7 @@ private struct MaskTable {
     let shapeBuffer: MTLBuffer
     let adjustBuffer: MTLBuffer
     let colorAdjustBuffer: MTLBuffer
+    let detailAdjustBuffer: MTLBuffer
     let strokeBuffer: MTLBuffer
     let pointBuffer: MTLBuffer
     let colourBuffer: MTLBuffer
@@ -3504,7 +3520,7 @@ public final class RenderGraph {
             // The two detail operators are chained in the order the panel names them (texture →
             // clarity), each writing the next texture: texture before clarity because the fine band is
             // a subset of the mid one. 去雾 is S1.9 now (117).
-            try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan)
+            try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan, table: table)
 
         case .dehaze:
             // S1.9 — 117: 去雾 in the scene-linear domain. Encoded **only** when `effects.dehaze != 0`
@@ -3775,7 +3791,8 @@ public final class RenderGraph {
     /// Each chain reads the previous chain's texture, so only the first sees `src` and only the last
     /// writes `out`. A document with one number set pays one chain, not two. 去雾 is S1.9 now.
     private func encodeDetailFX(cb: MTLCommandBuffer, into out: MTLTexture,
-                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+                                from src: MTLTexture, edit: EditModel, plan: Plan,
+                                table: MaskTable?) throws {
         let w = plan.canvas.width, h = plan.canvas.height
         let q = RenderGraph.detailFXBlock
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
@@ -3797,6 +3814,11 @@ public final class RenderGraph {
         let lumaNR = Float(edit.effects.nonBayerLuminanceNR) / 100
         let chromaNR = Float(edit.effects.nonBayerColorNR) / 100
 
+        // 181 — the masks that carry a local 纹理/锐化, compacted, with their atlas slices. An empty
+        // list is the identity: no loop, no atlas read, the pre-181 uniform **and** frame.
+        let localDetail = table?.detailAdjust.filter { $0.a.w > 0.5 } ?? []
+        let hasLocalDetail = !localDetail.isEmpty
+
         var params = DetailFXParamsU(
             a: SIMD4(textureAmount, clarityAmount, 0, 0),
             luma: SIMD4(0.2126, 0.7152, 0.0722, 0),
@@ -3807,9 +3829,23 @@ public final class RenderGraph {
             e: SIMD4(0.015, 0.06, 0, 0),
             b: SIMD4(Int32(w), Int32(h), Int32(q), 0),
             c: SIMD4(Int32(qW), Int32(qH), 32, 0),
-            f: SIMD4(lumaNR, chromaNR, 0, 0))
+            f: SIMD4(lumaNR, chromaNR, 0, 0),
+            // The content rect, not the canvas: a mask's detail stops at the picture's edge exactly
+            // where S2/S3/S3.5 stop (派单 008 C's rule).
+            g: SIMD4(hasLocalDetail ? Int32(localDetail.count) : 0,
+                     Int32(plan.origin.x), Int32(plan.origin.y), 0),
+            h: SIMD4(Int32(plan.content.width), Int32(plan.content.height), 0, 0))
 
-        let bandsActive = textureAmount != 0 || clarityAmount != 0
+        // 181 — a **local** 纹理 needs the same band the global control reads (it *is* the same
+        // operator), even when the global amount is 0: the coefficient map must exist. A local
+        // **锐化** does not — it runs on its own 1 px 3×3 window from the source (`LocalSharpWindow`) —
+        // so a sharpen-only drag does not pay for the band chain.
+        let needsTextureBand = localDetail.contains { $0.a.x != 0 }
+        // …and a local **锐化** needs `pack` for its clip window (the block range), even though its
+        // base is its own 1 px 3×3.
+        let needsDetailWindow = localDetail.contains { $0.a.y > 0 }
+        let bandsActive = textureAmount != 0 || clarityAmount != 0 || needsTextureBand
+            || needsDetailWindow
         // 171: the two denoises share this stage but not the guided filter — they are a joint
         // bilateral grid of their own. The grid is built from the **stage input**, before the
         // texture/clarity residual is added, so σ is a fact about the frame, not about the drag.
@@ -3879,7 +3915,9 @@ public final class RenderGraph {
         // radii differ), one coefficient map per band, then a single apply that adds both residuals.
         // Splitting the apply in two would read the frame a second time for nothing — measured at
         // 4.10 Mpx, that second read was ~1.2 ms of the frame.
-        if bandsActive || denoiseActive {
+        // 181 — a **local** 锐化 has no band chain of its own (it runs on a 1 px 3×3 window inside the
+        // apply), so the apply pass must be encoded for it even when every global amount is 0.
+        if bandsActive || denoiseActive || hasLocalDetail {
             params.a.x = textureAmount
             // Full deflection is 0.8 × the residual, not 1.0: at 1.0 the additive boost shifts the
             // frame's mean by ~1.1 % (measured on the fixture's dark/bright step), which is a
@@ -3890,7 +3928,12 @@ public final class RenderGraph {
             params.f.y = chromaNR
             try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
                               textureRadius: textureRadius, clarityRadius: clarityRadius,
-                              nrGrid: nrGrid, nrSigma: nrSigma)
+                              nrGrid: nrGrid, nrSigma: nrSigma,
+                              needsTextureBand: needsTextureBand,
+                              needsDetailWindow: needsDetailWindow,
+                              atlas: hasLocalDetail ? atlasCache?.texture : nil,
+                              detail: localDetail,
+                              detailBuffer: hasLocalDetail ? table?.detailAdjustBuffer : nil)
             current = out
         }
 
@@ -3919,11 +3962,21 @@ public final class RenderGraph {
     private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
                                params: inout DetailFXParamsU, qW: Int, qH: Int,
                                textureRadius: Int32, clarityRadius: Int32,
-                               nrGrid: MTLTexture?, nrSigma: MTLTexture?) throws {
+                               nrGrid: MTLTexture?, nrSigma: MTLTexture?,
+                               needsTextureBand: Bool, needsDetailWindow: Bool,
+                               atlas: MTLTexture?, detail: [MaskDetailU],
+                               detailBuffer: MTLBuffer?) throws {
         let base = try scratch("detailfx-stats", width: qW, height: qH, format: .rgba32Float)
+        // 181 — the clip window of a local 锐化 (`S3_9_LOCAL_ALLOWANCE_CODES`): the picture's own
+        // block range, rgba16Float because it is *sampled* linearly and Metal does not filter 32-bit
+        // formats.
+        let bounds = try scratch("detailfx-bounds", width: qW, height: qH, format: .rgba16Float)
         let tmp = try scratch("detailfx-stats-tmp", width: qW, height: qH, format: .rgba32Float)
 
-        let hasBands = params.a.x != 0 || params.a.y != 0
+        // `pack` also produces the block range a local 锐化 is clipped to, so it runs for a
+        // sharpen-only drag as well (`needsDetailWindow`) — without it the clip window would be an
+        // uninitialised texture and the "2 codes" bound would be a bound on garbage.
+        let hasBands = params.a.x != 0 || params.a.y != 0 || needsTextureBand || needsDetailWindow
         let pack = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_pack")
         var coeffTex: MTLTexture?
         var coeffCla: MTLTexture?
@@ -3932,6 +3985,7 @@ public final class RenderGraph {
         // is still a full-frame read).
         if hasBands {
             let e0 = try encoder(cb, pack, in: source, out: base)
+            e0.setTexture(bounds, index: 2)
             e0.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
             dispatch(e0, pack, ImageSize(width: qW, height: qH))
             e0.endEncoding()
@@ -3941,7 +3995,7 @@ public final class RenderGraph {
         for band in [0, 1] {
             let active: Bool
             switch band {
-            case 0: active = params.a.x != 0
+            case 0: active = params.a.x != 0 || needsTextureBand
             default: active = params.a.y != 0
             }
             if !active { continue }
@@ -3982,6 +4036,21 @@ public final class RenderGraph {
         enc.setTexture(destination, index: 3)
         enc.setTexture(grid, index: 5)
         enc.setTexture(sigma, index: 6)
+        // 181 — the atlas. When no mask carries a local value the kernel's loop does not exist, but
+        // Metal still wants a legal binding: a 1×1 array stands in for the atlas the way
+        // `denoiseDummy2D` stands in for σ.
+        if let atlas {
+            enc.setTexture(atlas, index: 4)
+        } else {
+            enc.setTexture(try detailFXAtlasDummy(), index: 4)
+        }
+        enc.setTexture(bounds, index: 7)
+        var detailDummy = MaskDetailU(a: .zero, b: .zero)
+        if let detailBuffer {
+            enc.setBuffer(detailBuffer, offset: 0, index: 1)
+        } else {
+            enc.setBytes(&detailDummy, length: MemoryLayout<MaskDetailU>.stride, index: 1)
+        }
         enc.setBytes(&params, length: MemoryLayout<DetailFXParamsU>.stride, index: 0)
         dispatch(enc, apply, ImageSize(width: Int(params.b.x), height: Int(params.b.y)))
         enc.endEncoding()
@@ -4387,6 +4456,13 @@ public final class RenderGraph {
         return texture
     }
 
+    /// 181 — a 1×1, one-slice atlas for the apply pass's index-4 binding when no mask carries a local
+    /// detail value. A `type2D` texture bound where the kernel declares `texture2d_array` is not an
+    /// error Metal reports — it renders as zeros — so the stand-in is an array (see `scratch`).
+    private func detailFXAtlasDummy() throws -> MTLTexture {
+        try scratch("detailfx-atlas-dummy", width: 1, height: 1, format: .r16Float, asArray: true)
+    }
+
     private func denoiseDummy3D() throws -> MTLTexture {
         if let hit = denoiseDummy3DTexture { return hit }
         let desc = MTLTextureDescriptor()
@@ -4431,6 +4507,7 @@ public final class RenderGraph {
         // a 1:1 window that pans keeps the selection fixed while moving the box that holds it.
         let cacheKey = selection + "##" + apply + "##" + content.keyString
             + "##" + semantics.keyMaterial
+            + "##" + edit.localDetailMaterial
             + "##" + plan.canvas.keyString
             + "##" + "\(plan.origin.x),\(plan.origin.y),\(plan.frameOrigin.x),\(plan.frameOrigin.y)"
         if let hit = maskTables[cacheKey] { return hit }
@@ -4439,6 +4516,7 @@ public final class RenderGraph {
         var shapes: [MaskShapeDescU] = []
         var adjust: [LocalAdjustU] = []
         var colorAdjust: [LocalColorU] = []
+        var detailAdjust: [MaskDetailU] = []
         var strokes: [MaskStrokeDescU] = []
         var points: [SIMD4<Float>] = []
         var colours: [SIMD4<Float>] = []
@@ -4472,6 +4550,14 @@ public final class RenderGraph {
             adjust.append(adjustDesc(m.adjustments, enabled: m.isEnabled,
                                      globalGain: Float(edit.light.exposureGain)))
             colorAdjust.append(colorAdjustDesc(m.adjustments, enabled: m.isEnabled))
+            if m.isEnabled, m.adjustments.contributesLocalDetail {
+                detailAdjust.append(MaskDetailU(
+                    a: SIMD4(Float(m.adjustments.texture) / 100,
+                             Float(m.adjustments.sharpen) / 100,
+                             Float(min(max(m.adjustments.amount, 0), 100)) / 100,
+                             1),
+                    b: SIMD4(Int32(maskIndex), 0, 0, 0)))
+            }
         }
         // Metal requires a bound buffer even when the count is zero; one neutral entry keeps the
         // binding valid without inventing a mask.
@@ -4479,6 +4565,7 @@ public final class RenderGraph {
         if shapes.isEmpty { shapes.append(MaskShapeDescU(meta: .zero, p0: .zero, p1: .zero)) }
         if adjust.isEmpty { adjust.append(LocalAdjustU(a: SIMD4(1, 1, 1, 0), b: .zero, c: SIMD4(0, 0, 0, 0))) }
         if colorAdjust.isEmpty { colorAdjust.append(LocalColorU(a: .zero)) }
+        if detailAdjust.isEmpty { detailAdjust.append(MaskDetailU(a: .zero, b: .zero)) }
         if strokes.isEmpty {
             strokes.append(MaskStrokeDescU(meta: .zero, misc: .zero, bmin: .zero, bmax: .zero))
         }
@@ -4488,12 +4575,14 @@ public final class RenderGraph {
         let table = MaskTable(ids: active.map(\.id),
                               masks: masks, shapes: shapes, adjust: adjust,
                               colorAdjust: colorAdjust,
+                              detailAdjust: detailAdjust,
                               strokes: strokes, points: points, colours: colours,
                               dependency: dependency,
                               maskBuffer: try buffer(masks, "mask descs"),
                               shapeBuffer: try buffer(shapes, "mask shapes"),
                               adjustBuffer: try buffer(adjust, "mask adjustments"),
                               colorAdjustBuffer: try buffer(colorAdjust, "mask local colour"),
+                              detailAdjustBuffer: try buffer(detailAdjust, "mask local detail"),
                               strokeBuffer: try buffer(strokes, "mask strokes"),
                               pointBuffer: try buffer(points, "mask brush points"),
                               colourBuffer: try buffer(colours, "mask colour samples"))

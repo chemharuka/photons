@@ -558,27 +558,27 @@ final class DetailFXTests: XCTestCase {
     /// The two new numbers are S3.9 material, and at 0 the stage does not exist — a pre-164 document
     /// keeps its key text and its pass list byte for byte.
     func testNonBayerRowsAreStageMaterialAndNeutralKeepsTheStageOut() {
-        XCTAssertEqual(StageAlgorithmVersion.detailFX, 3, "171 replaced the denoise arithmetic")
+        XCTAssertEqual(StageAlgorithmVersion.detailFX, 4, "181 added the mask local detail loop")
 
         var edit = EditModel.neutral
         XCTAssertFalse(edit.hasDetailFX)
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 3)
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 4)
 
         // A pre-164 document's material is the exact old text (plus the stage's own `;alg=` token,
-        // which 171 bumps to 3); the new fields append only when set.
+        // which 181 bumps to 4); the new fields append only when set.
         edit.effects.texture = 10
-        XCTAssertEqual(edit.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=3")
+        XCTAssertEqual(edit.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=4")
 
         var luma = EditModel.neutral
         luma.effects.nonBayerLuminanceNR = 40
         XCTAssertTrue(luma.hasDetailFX, "去噪 非零 → S3.9 存在")
-        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=3")
+        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=4")
         XCTAssertEqual(luma.renderInputs.key.contains("s3.9-detail-fx"), true)
 
         var chroma = EditModel.neutral
         chroma.effects.nonBayerColorNR = 35
         XCTAssertTrue(chroma.hasDetailFX)
-        XCTAssertEqual(chroma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbc=35.00000;alg=3")
+        XCTAssertEqual(chroma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbc=35.00000;alg=4")
 
         // Turning them back to 0 restores the neutral stage list and the exact key.
         luma.effects.nonBayerLuminanceNR = 0

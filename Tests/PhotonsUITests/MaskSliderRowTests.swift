@@ -32,9 +32,9 @@ final class MaskSliderRowTests: XCTestCase {
         XCTAssertEqual(MaskSliderRow.all.map(\.title),
                        ["不透明度", "羽化", "精修",
                         "强度", "曝光", "对比", "高光", "阴影", "白色", "黑色",
-                        "色温", "色调", "色相", "饱和"],
-                       "the mask rows are the mask-level three plus the eleven local ones, in draw order")
-        XCTAssertEqual(MaskSliderRow.all.count, 14)
+                        "色温", "色调", "色相", "饱和", "纹理", "锐化"],
+                       "the mask rows are the mask-level three plus the thirteen local ones, in draw order")
+        XCTAssertEqual(MaskSliderRow.all.count, 16)
 
         for row in MaskSliderRow.all {
             let session = CatalogSession()
