@@ -321,7 +321,10 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// non-zero — exactly the way `hasGrain` judges S3.7. 117 moved 去雾 out of this stage, so it no
     /// longer contributes. A document whose two are 0 keeps the pre-S3.9 stage list, key chain and
     /// pixels byte for byte: the pass is not encoded at all.
-    public var hasDetailFX: Bool { effects.hasDetailFX }
+    /// 181 — S3.9 exists for a document whose *masks* carry a local detail value too, so this is no
+    /// longer `effects.hasDetailFX` alone. Still judged **by value**: a mask with both fields at 0
+    /// contributes nothing and the stage does not exist for it.
+    public var hasDetailFX: Bool { effects.hasDetailFX || hasLocalDetail }
 
     /// 117: does S1.9 exist for this document? Judged **by value** — `effects.dehaze != 0`. It is a
     /// separate stage at the end of the linear chain, so it has its own link and its own condition.
@@ -769,7 +772,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             return colorGrading.keyString
         case .detailFX:
             // 2026-10-28 (P0-6): S3.9's own material — 纹理 and 清晰度 and nothing else.
-            return effects.detailFXKeyString
+            // 181: a mask's local 纹理/锐化 are S3.9's too, so they belong here and **not** in
+            // `maskApplyMaterial` (S1.6 reads neither). The list is empty when no mask carries a
+            // value, so every pre-181 key string is unchanged.
+            var m = effects.detailFXKeyString
+            let local = localDetailMaterial
+            if !local.isEmpty { m += ";mloc=[\(local)]" }
+            return m
 
         case .dehaze:
             // 117: S1.9's own material — the dehaze amount and nothing else.

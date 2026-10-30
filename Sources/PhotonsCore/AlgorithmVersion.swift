@@ -157,6 +157,10 @@ public enum StageAlgorithmVersion {
     /// (hue offset, chroma scale, light gain). Start at 1 when a stage is introduced.
     public static let grade = 1
 
+    /// **4** — 181: a mask can carry 局部纹理 / 局部锐化, applied in the same apply pass from the same
+    /// guided band. A document whose masks carry neither is bit-identical to 3 (the loop does not
+    /// exist: `maskCount == 0`), but the same stored mask numbers now produce pixels they could not
+    /// produce before, so the generation moves.
     /// **3** — 171: the two denoises are no longer "a guided-base mean" and "a chroma scale". They
     /// are **one joint bilateral grid** (`s3_9_denoise.metal`: splat → 5-tap blur → trilinear
     /// slice), built from a measured noise estimate, and the chroma control averages OKLab `a`/`b`
@@ -170,7 +174,7 @@ public enum StageAlgorithmVersion {
     /// of them renders pixels it could not render before.
     ///
     /// **1** — S3.9's first arithmetic (2026-10-28, P0-6): 纹理 / 清晰度 / 去雾. Starts at 1.
-    public static let detailFX = 3
+    public static let detailFX = 4
     /// **2** — 117: 去雾 left S3.9 for S1.9 (`s1_9_dehaze.metal`). The domain changed from
     /// display-referred codes with `A = 1` to scene-linear light with a measured airlight, so every
     /// document with `effects.dehaze != 0` changes pixels even though its stored number did not.

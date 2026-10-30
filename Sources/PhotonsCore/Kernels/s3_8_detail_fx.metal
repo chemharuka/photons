@@ -71,6 +71,20 @@ struct DetailFXParams {
     int4 c;
     // 164: denoise luma amount, denoise chroma amount (0…1), pad, pad
     float4 f;
+    // 181 — S3.9's **local** detail. `g.x` is how many masks carry a local 纹理/锐化 value; `g.yz`
+    // and `h.xy` are the content rect, because a mask's detail must not touch the letterbox (the
+    // same guard S2/S3/S3.5 carry). `g.x == 0` is the whole identity: the loop does not exist.
+    int4 g;   // maskCount, contentOriginX, contentOriginY, 0
+    int4 h;   // contentWidth, contentHeight, 0, 0
+};
+
+/// 181 — one mask that carries a local detail value, in atlas order **compacted** (a mask with both
+/// fields at 0 is not in the list, so `maskCount` is a value and not a headcount). `b.x` is the S1.5
+/// atlas slice, which is still the document's mask order — the compaction is this list's, not the
+/// atlas's.
+struct MaskDetailDesc {
+    float4 a;   // texture (−1…1), sharpen (0…1), amount scale (0…1), enabled
+    int4 b;     // atlas slice, 0, 0, 0
 };
 
 static inline float s3_8_luma(float3 rgb, float3 w) {
@@ -84,6 +98,7 @@ static inline float s3_8_luma(float3 rgb, float3 w) {
 /// edge does not.
 kernel void s3_8_guide_pack(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> packed [[texture(1)]],
+                            texture2d<float, access::write> bounds [[texture(2)]],
                             constant DetailFXParams &p [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
     int qW = p.c.x, qH = p.c.y, q = max(p.b.z, 1);
@@ -92,6 +107,7 @@ kernel void s3_8_guide_pack(texture2d<float, access::read> src [[texture(0)]],
     float3 lw = p.luma.xyz;
 
     float sumI = 0.0, sumII = 0.0;
+    float lo = 1.0e9, hi = -1.0e9;
     int n = 0;
     for (int dy = 0; dy < q; ++dy) {
         int y = min(int(gid.y) * q + dy, h - 1);
@@ -99,11 +115,18 @@ kernel void s3_8_guide_pack(texture2d<float, access::read> src [[texture(0)]],
             int x = min(int(gid.x) * q + dx, w - 1);
             float I = s3_8_luma(max(src.read(uint2(x, y)).rgb, 0.0), lw);
             sumI += I; sumII += I * I;
+            lo = min(lo, I); hi = max(hi, I);
             n += 1;
         }
     }
     float inv = 1.0 / float(max(n, 1));
     packed.write(float4(sumI * inv, sumII * inv, 0.0, 1.0), gid);
+    // 181 — the block's own **range**, one texel per q × q. It is the *clip window* a local 锐化 may
+    // not leave (± `S3_9_LOCAL_ALLOWANCE_CODES` codes), not its base: the base is a 1 px 3×3 mean
+    // (`s3_9_local_window`), but a halo is what a boost does **outside** the base's support — 3…6 px
+    // away — so the window that bounds it has to be at least that wide. A 4 px block, bilinearly
+    // upsampled, is that window for a sixteenth of the frame.
+    bounds.write(float4(lo, hi, 0.0, 1.0), gid);
 }
 
 /// Separable box mean of the two statistics channels. Running sum (two reads per output whatever
@@ -215,6 +238,43 @@ kernel void s3_8_guide_coeff(texture2d<float, access::read> stats [[texture(0)]]
 /// untouched 细节 card executes exactly the pre-164 instruction stream.
 #define S3_9_CELL 8
 
+/// 181 — how far a local 锐化 may leave the block range it is clipped to, in **codes** (1/255 of the
+/// displayed value). The contract is ≤ 2 codes on a one-pixel edge; 1.5 is what is shipped, and the
+/// suite measures **1.49** on both fixtures. The same-radius plain unsharp draws 32.26 codes there
+/// (`DetailFXTests`), so this is the difference between a sharpen and a halo.
+///
+/// Expressed in codes, not in linear units, because the two are wildly different things at the two
+/// ends of the picture: the sRGB OETF's slope is `0.4396·v^(−0.5833)`, so a constant linear allowance
+/// would be ~25 codes in the shadows and ~2 in the highlights. `s3_9_code_allowance` inverts that
+/// slope, so "1.5 codes" means 1.5 codes wherever the edge happens to be.
+#define S3_9_LOCAL_ALLOWANCE_CODES 1.5f
+
+static inline float s3_9_code_allowance(float I) {
+    float v = max(I, 0.0031308);                      // the OETF's linear segment: slope 12.92
+    return (S3_9_LOCAL_ALLOWANCE_CODES / 255.0) / (0.4396 * pow(v, -0.5833));
+}
+
+/// 181 — the **1 px radius** base the local 锐化 unsharp-masks against: the mean of `I`'s 3×3
+/// neighbourhood. One pixel, deliberately, and **not** the 纹理 band's 5 px radius — a mask's 纹理
+/// *is* the global 纹理 operator (one number, one operation), while 锐化 is its own control and the
+/// card already has 纹理/清晰度 for the two wide bands.
+///
+/// The clip window is **not** this 3×3: a halo is what a boost does outside the base's support, so the
+/// bound has to be at least that wide (see `bounds` in `s3_8_guide_pack`).
+static inline float s3_9_local_base(texture2d<float, access::read> src, uint2 gid,
+                                    int w, int h, float3 lw, float I) {
+    float sum = I;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) { continue; }
+            int x = clamp(int(gid.x) + dx, 0, w - 1);
+            int y = clamp(int(gid.y) + dy, 0, h - 1);
+            sum += s3_8_luma(max(src.read(uint2(x, y)).rgb, 0.0), lw);
+        }
+    }
+    return sum / 9.0;
+}
+
 /// Manual trilinear read. `texture3d` linear filtering is not available everywhere — when it is not,
 /// Metal silently falls back to nearest, which would turn the slice into a stair-stepped lookup — so
 /// the eight corners are fetched and lerped by hand. `c` is in texel coordinates; corners clamp.
@@ -248,9 +308,14 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
                              texture2d<float, access::sample> coeffTex [[texture(1)]],
                              texture2d<float, access::sample> coeffCla [[texture(2)]],
                              texture2d<float, access::write> dst [[texture(3)]],
+                             // 181 — the S1.5 atlas (coverage, R16F, one slice per enabled mask)
+                             // and the 1/q block range the local 锐化 is clipped to.
+                             texture2d_array<float, access::read> atlas [[texture(4)]],
                              texture3d<float, access::read> nrGrid [[texture(5)]],
                              texture2d<float, access::read> nrSigma [[texture(6)]],
+                             texture2d<float, access::sample> boundsTex [[texture(7)]],
                              constant DetailFXParams &p [[buffer(0)]],
+                             constant MaskDetailDesc *maskDetail [[buffer(1)]],
                              uint2 gid [[thread_position_in_grid]]) {
     int w = p.b.x, h = p.b.y;
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
@@ -270,6 +335,60 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     float amountCla = clamp(p.a.y, -1.0, 1.0);
     float delta = amountTex * clamp(t.z, 0.0, 1.0) * (I - baseTex)
                 + amountCla * clamp(c.z, 0.0, 1.0) * (I - baseCla);
+
+    // 181 — **局部纹理 / 局部锐化**, from the same band coefficients and the same atlas S1.5 wrote.
+    //
+    // 纹理 is the global operator with a *weight*: `w · amt · gate · (I − base)` is exactly the
+    // global `amt · gate · (I − base)` at `w = 1`, so a full-canvas mask at amount 100 is the 效果
+    // card's own number (079: one slider, one operation, whichever surface reads it). `w` is the
+    // lerp weight `coverage · amount`, not a scale of the residual — the local pixel is `mix(I, I +
+    // d, w)` for an additive `d`, the rule S1.6 and S3.5 already use.
+    //
+    // 锐化 has no global twin — the card's sharpen is a **decoder** input (031/042) — so this one is
+    // an unsharp mask at the *纹理* band's radius and base, clipped to the block's own min/max ± one
+    // code. The clip is the whole difference between a sharpening and a halo: the same-radius plain
+    // unsharp measured 32.26 codes of overshoot on the suite's step edge (`DetailFXTests`), a
+    // 2-code bound is the contract.
+    //
+    // `p.g.x == 0` means no mask carries a value, and then this text compiles to nothing executed:
+    // the pre-181 instruction stream, frame and key stay byte for byte.
+    if (p.g.x > 0
+        && gid.x >= uint(p.g.y) && gid.y >= uint(p.g.z)
+        && gid.x < uint(p.g.y + p.h.x) && gid.y < uint(p.g.z + p.h.y)) {
+        float sharpBase = I;
+        float4 sharpBounds = float4(I, I, I, I);
+        bool windowReady = false;
+        for (int i = 0; i < p.g.x; ++i) {
+            MaskDetailDesc d = maskDetail[i];
+            if (d.a.w < 0.5) { continue; }
+            float w = clamp(atlas.read(gid, uint(max(d.b.x, 0))).r * d.a.z, 0.0, 1.0);
+            if (w <= 0.0) { continue; }
+            float lt = clamp(d.a.x, -1.0, 1.0);
+            float ls = clamp(d.a.y, 0.0, 1.0);
+            if (lt != 0.0) {
+                delta += w * lt * clamp(t.z, 0.0, 1.0) * (I - baseTex);
+            }
+            if (ls > 0.0) {
+                // The 3×3 window is the *same* for every mask at this pixel, so it is built once
+                // (lazily — a document whose masks carry only 纹理 pays nothing for it).
+                if (!windowReady) {
+                    sharpBase = s3_9_local_base(src, gid, w, h, p.luma.xyz, I);
+                    // Bilinearly upsampled block range: the picture's own levels over a ≥4 px window,
+                    // which is where a halo would show. Sampled once per pixel, not once per mask.
+                    sharpBounds = boundsTex.sample(linearSampler, uv);
+                    windowReady = true;
+                }
+                // `s·(I − mean)`, clipped inside the window's own range ± `S3_9_LOCAL_ALLOWANCE_CODES`:
+                // the clip is what keeps a step edge's shoulders out of the halo business, and it is
+                // the only reason a 2-code bound is a fact rather than a hope.
+                float allowance = s3_9_code_allowance(I);
+                float lo = min(sharpBounds.x, I);
+                float hi = max(sharpBounds.y, I);
+                float sharpened = I + ls * (I - sharpBase);
+                delta += w * (clamp(sharpened, lo - allowance, hi + allowance) - I);
+            }
+        }
+    }
 
     // 171 — **one** grid slice serves both controls: the grid is joint, so the pixel's own luma
     // picks the same cell for the luma mix and for a/b. A neutral document never reaches here (the

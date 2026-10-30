@@ -53,6 +53,19 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
     public var blacks: Double
     public var hue: Double
     public var saturation: Double
+    /// 181 — 局部**纹理** (−100…100): the high-frequency residual of the picture's own guided filter,
+    /// boosted (or suppressed) **inside the mask**. Deliberately the *same* band, ε, gate and
+    /// expression the global 效果 card's 纹理 runs, in the *same* stage (S3.9, display-referred) —
+    /// 079's promise is that one slider number is one operation whether a mask or the card names it.
+    /// It is **not** an S1.6 field: the global control lives after the tone map, so a scene-linear
+    /// copy would be a second meaning for one number (the 147→159 lesson,
+    /// `docs/tasks/174-contrast-contract.md` §0).
+    public var texture: Double
+    /// 181 — 局部**锐化** (0…100): an unsharp mask at the 纹理 band's own radius, weighted by the
+    /// atlas's coverage. Its boost is clipped to the window's own min/max ± one code
+    /// (`s3_8_guide_apply`'s `S3_9_LOCAL_OVERSHOOT`), so 「锐化」 sharpens an edge instead of drawing
+    /// a halo on it.
+    public var sharpen: Double
 
     public static let identity = LocalAdjustments()
 
@@ -60,7 +73,8 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
                 temperature: Double = 0, tint: Double = 0,
                 contrast: Double = 0, highlights: Double = 0, shadows: Double = 0,
                 whites: Double = 0, blacks: Double = 0,
-                hue: Double = 0, saturation: Double = 0) {
+                hue: Double = 0, saturation: Double = 0,
+                texture: Double = 0, sharpen: Double = 0) {
         self.amount = amount
         self.exposure = exposure
         self.temperature = temperature
@@ -72,6 +86,8 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
         self.blacks = blacks
         self.hue = hue
         self.saturation = saturation
+        self.texture = texture
+        self.sharpen = sharpen
     }
 
     public init(from decoder: any Decoder) throws {
@@ -88,7 +104,39 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
         v.blacks = c.val("blacks", v.blacks)
         v.hue = c.val("hue", v.hue)
         v.saturation = c.val("saturation", v.saturation)
+        // 181 — additive keys, no schema stamp (the 7/8/9/10 precedent): a document that never
+        // touched the two sliders has no key and decodes to 0. The clamp is ours because the kernel
+        // trusts the value; `NaN`/`±inf` read as 0 (D9: a damaged key is a missing key).
+        v.texture = Self.bounded(c.val("texture", 0.0), -100, 100)
+        v.sharpen = Self.bounded(c.val("sharpen", 0.0), 0, 100)
         self = v
+    }
+
+    /// A decoded number pulled into the field's own travel; a non-finite one reads as the default.
+    private static func bounded(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
+        guard v.isFinite else { return 0 }
+        return min(max(v, lo), hi)
+    }
+
+    /// **Hand-written, not synthesised**, for one reason: the two 181 keys are written only when they
+    /// are not their default. A document that never touched them re-encodes byte for byte (the
+    /// `BlackLevelTests` invariant), and the eleven pre-181 keys keep their names, types and
+    /// unconditional presence, so no existing document changes on a save.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(amount, forKey: AnyCodingKey("amount"))
+        try c.encode(exposure, forKey: AnyCodingKey("exposure"))
+        try c.encode(temperature, forKey: AnyCodingKey("temperature"))
+        try c.encode(tint, forKey: AnyCodingKey("tint"))
+        try c.encode(contrast, forKey: AnyCodingKey("contrast"))
+        try c.encode(highlights, forKey: AnyCodingKey("highlights"))
+        try c.encode(shadows, forKey: AnyCodingKey("shadows"))
+        try c.encode(whites, forKey: AnyCodingKey("whites"))
+        try c.encode(blacks, forKey: AnyCodingKey("blacks"))
+        try c.encode(hue, forKey: AnyCodingKey("hue"))
+        try c.encode(saturation, forKey: AnyCodingKey("saturation"))
+        if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
+        if sharpen != 0 { try c.encode(sharpen, forKey: AnyCodingKey("sharpen")) }
     }
 
     /// True when S1.6 must take the real identity branch (`dst = src`, bit-exact — M1-6 discipline).
@@ -102,6 +150,12 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
     /// True when a mask carries a hue or a saturation value — the **only** predicate that makes the
     /// S3.5 stage exist for a render (派单 056 §验收 7: by value, not by "there is a mask").
     public var contributesLocalColor: Bool { hue != 0 || saturation != 0 }
+
+    /// 181 — does this mask carry a local detail value? The **only** predicate that makes S3.9's local
+    /// loop exist for a mask (judged by value, like `contributesLocalColor`). Deliberately separate
+    /// from `isIdentity`, which answers "does S1.6 have work" and must not react to a number S1.6
+    /// never reads.
+    public var contributesLocalDetail: Bool { texture != 0 || sharpen != 0 }
 
     /// True when **S1.6** has real work: the scene-linear gain and the tone shaping, minus hue and
     /// saturation, which moved to S3.5. A mask whose only sliders are hue/saturation must leave
@@ -136,6 +190,9 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
         return (ev * Float(wb.r), ev * Float(wb.g), ev * Float(wb.b))
     }
 
+    /// `amount` + the ten pre-181 sliders — **and nothing else**: 181's `texture`/`sharpen` are S3.9's,
+    /// and a stage's key names only what that stage reads. They ride in `EditModel.localDetailMaterial`
+    /// (S3.9's own material) instead.
     public var keyString: String {
         "amt=\(k(amount));ev=\(k(exposure));temp=\(k(temperature));tint=\(k(tint))"
             + ";con=\(k(contrast));hi=\(k(highlights));sh=\(k(shadows))"
@@ -1051,6 +1108,22 @@ extension EditModel {
     public var localColorMaterial: String {
         activeMasks.filter { $0.adjustments.contributesLocalColor }
             .map { "m=\($0.id);hue=\(k($0.adjustments.hue));sat=\(k($0.adjustments.saturation))"
+                   + ";amt=\(k($0.adjustments.amount))" }
+            .joined(separator: "#")
+    }
+
+    /// 181 — does any **enabled** mask carry a local 纹理/锐化 value?
+    public var hasLocalDetail: Bool {
+        masks.contains { $0.isEnabled && $0.adjustments.contributesLocalDetail }
+    }
+
+    /// The `mloc=[…]` material of S3.9: only the masks that actually carry a local detail value, only
+    /// the three numbers that stage consumes, id sorted. **Empty string when nothing carries one**,
+    /// which is what keeps S3.9's key string byte-identical for every 0-value mask (the
+    /// `asp`/`car`/`nbl` discipline).
+    public var localDetailMaterial: String {
+        activeMasks.filter { $0.adjustments.contributesLocalDetail }
+            .map { "m=\($0.id);tx=\(k($0.adjustments.texture));sh=\(k($0.adjustments.sharpen))"
                    + ";amt=\(k($0.adjustments.amount))" }
             .joined(separator: "#")
     }
