@@ -221,8 +221,8 @@ final class HDRGainMapTests: XCTestCase {
         let defaultAux = try auxInfo(defaults, type: kCGImageAuxiliaryDataTypeISOGainMap)
         let defaultDescription = try XCTUnwrap(
             defaultAux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
-        XCTAssertEqual(intValue(defaultDescription["Width"]), (sdr.width + 1) / 2)
-        XCTAssertEqual(intValue(defaultDescription["Height"]), (sdr.height + 1) / 2)
+        XCTAssertEqual(intValue(defaultDescription["Width"]), sdr.width / 2)
+        XCTAssertEqual(intValue(defaultDescription["Height"]), sdr.height / 2)
 
         let full = tempURL("explicit-full.heic")
         try Exporter.write(base, to: full,
@@ -236,18 +236,33 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertEqual(intValue(fullDescription["Height"]), sdr.height)
     }
 
-    /// 163 §1.1 — an odd edge rounds **up** (`ceil(base / 2)`), not down. Checked on the pixel buffer
-    /// directly because HEIF's 4:2:0 auxiliary item may pad odd sizes.
-    func testHalfSizeUsesCeilForOddDimensions() throws {
+    /// 163 §1.6 — an odd base is trimmed right/bottom before the map is computed, so the map is
+    /// exactly `floor(base / 2)` and the written base is even too.
+    @available(macOS 15.0, *)
+    func testHalfSizeUsesFloorAndCropsAnOddBase() throws {
         let (sdr, linear) = try renderPair(value: 4, w: 95, h: 63)
         let map = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
                                     mode: .iso, halfSize: true)
-        XCTAssertEqual(map.width, 48)
-        XCTAssertEqual(map.height, 32)
+        XCTAssertEqual(map.width, 47)
+        XCTAssertEqual(map.height, 31)
         let full = try GainMapPixels(sdr: sdr, linear: linear, headroom: 4,
                                      mode: .iso, halfSize: false)
         XCTAssertEqual(full.width, 95)
         XCTAssertEqual(full.height, 63)
+
+        let url = tempURL("odd-half.heic")
+        let result = try GainMapHEIC.write(sdr: sdr, linear: linear, to: url,
+                                           options: HDRGainMapOptions(gainMap: .iso, halfSize: true,
+                                                                      quality: 1.0))
+        XCTAssertTrue(result.warnings.contains { $0.contains("已裁 (1,1)") }, "\(result.warnings)")
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let base = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(base.width, 94)
+        XCTAssertEqual(base.height, 62)
+        let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
+        let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
+        XCTAssertEqual(intValue(description["Width"]), 47)
+        XCTAssertEqual(intValue(description["Height"]), 31)
     }
 
     @available(macOS 15.0, *)
@@ -312,7 +327,7 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 8)
         let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
         let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
-        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2,
+        XCTAssertEqual(intValue(description["Width"]), sdr.width / 2,
                        "163: the default half-size map reaches JPEG too")
         XCTAssertEqual(intValue(description["PixelFormat"]),
                        Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
@@ -337,7 +352,7 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertNotNil(maker["48"])
         let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeHDRGainMap)
         let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
-        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        XCTAssertEqual(intValue(description["Width"]), sdr.width / 2)
         let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
         let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
         XCTAssertGreaterThan(read, 1.05)
@@ -376,7 +391,7 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertEqual(depth, 10, "a gain map must not cost AVIF its 10-bit base")
         let aux = try auxInfo(url, type: kCGImageAuxiliaryDataTypeISOGainMap)
         let description = try XCTUnwrap(aux[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any])
-        XCTAssertEqual(intValue(description["Width"]), (sdr.width + 1) / 2)
+        XCTAssertEqual(intValue(description["Width"]), sdr.width / 2)
         let expected = GainMapHEIC.resolvedHeadroom(linear: linear, manual: .auto).used
         let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: url))
         XCTAssertGreaterThan(read, 1.05)
