@@ -655,6 +655,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// presenting — the generation gate drops it, and this field is why the follow-up renders
         /// the right thing without reading the controller from the render queue.
         var mode: LoupeFrameMode = .edited
+        /// 162 §2.2 — the crop workspace's fit multiplier, snapshotted on the main actor with the
+        /// camera. The render queue must not read `cropTool.isActive` itself (that is a main-actor
+        /// view state); this is the render half of the same entry zoom.
+        var fitScale: Double = 1
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -4512,6 +4516,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 viewport: source.viewport, edit: source.edit, state: source.state,
                                 target: target, generation: gen, changedAt: changedAt)
             job.mode = frameMode
+            job.fitScale = cropTool.isActive ? Self.cropWorkspaceFitScale : 1
             return job
         }
         guard let session, session.mode == .loupe,
@@ -4528,6 +4533,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 080: the mode is snapshotted with the camera and the document, so the frame the queue
         // renders is the frame the user asked for even if `\` is pressed again while it is in flight.
         job.mode = frameMode
+        job.fitScale = cropTool.isActive ? Self.cropWorkspaceFitScale : 1
         return job
     }
 
@@ -4606,6 +4612,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             let frame = try makeFrame(url: job.url, cacheIdentity: job.baseIdentity,
                                       viewport: job.viewport, decodeScale: rung.scale,
                                       edit: job.edit, state: job.state, mode: job.mode,
+                                      fitScale: job.fitScale,
                                       hashPixels: hashesFrames, resolve: .residentOnly)
             decodeMilliseconds = rung.milliseconds
             return frame
@@ -5368,6 +5375,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                       viewport: viewport, decodeScale: decodeScale,
                       edit: edit ?? session?.edit ?? .neutral,
                       state: state ?? viewState, mode: mode,
+                      fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1,
                       hashPixels: hashPixels)
     }
 
@@ -5379,7 +5387,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                           hashPixels: Bool = false, useCache: Bool = true) throws -> FrameResult {
         try makeFrame(url: url, cacheIdentity: url.lastPathComponent,
                       viewport: viewport, decodeScale: decodeScale, edit: edit,
-                      state: state, mode: mode, hashPixels: hashPixels, useCache: useCache)
+                      state: state, mode: mode,
+                      fitScale: cropTool.isActive ? Self.cropWorkspaceFitScale : 1,
+                      hashPixels: hashPixels, useCache: useCache)
     }
 
     /// Whether a frame may develop the rung it wants.
@@ -5396,6 +5406,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func makeFrame(url: URL, cacheIdentity baseIdentity: String, viewport: ImageSize,
                            decodeScale: Float, edit model: EditModel, state: LoupeViewState,
                            mode: LoupeFrameMode = .edited,
+                           fitScale: Double = 1,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing,
                            useCache: Bool = true, measurement: Bool = true) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
@@ -5467,10 +5478,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // 1:1 (or beyond) is an **output window** into the frame: S0 cropped/straightened/flipped
             // the whole frame and hands back that rectangle, so the projection, the vignette and the
             // mask feather are the frame's, not the window's. `fit` names no window.
+            //
+            // 162 §2.2 — the crop workspace's 90 % fit is part of the **render** projection, not only
+            // of the overlay's `framing()`. Without `fitScale` here the frame was drawn at 90 % while
+            // the pixels stayed at the ordinary fit: the user's 「裁剪框 90% 但画面没跟着缩放到 90%」.
             let projected = LoupeFraming(viewport: viewport,
                                          decoded: ImageSize(width: image.width, height: image.height),
                                          decodeScale: ds,
-                                         edit: cameraEdit)
+                                         edit: cameraEdit,
+                                         fitScale: fitScale)
             return Shot(projected: projected,
                         window: projected.outputWindow(of: state),
                         scale: max(0.01, projected.renderScale(of: state, decodeScale: ds)),
