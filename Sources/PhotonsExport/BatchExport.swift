@@ -270,6 +270,11 @@ public enum BatchExporter {
                     let target = preset.noUpscale ? min(longEdge, current) : longEdge
                     image = DisplayResample.fitLongEdge(image, to: target,
                                                         allowUpscale: !preset.noUpscale)
+                    // 168 §2 — say out loud that 不扩大 clamped the request, so a 4000 request on a
+                    // 3000 px picture is not quietly reported as "4000" by the result row.
+                    if preset.noUpscale, longEdge > current {
+                        warnings.append("长边 \(longEdge) 请求 → 源 \(current)，按不扩大输出 \(current)")
+                    }
                     if current > target {
                         warnings.append("renderer returned \(rendered.width)×\(rendered.height); "
                                         + "resampled to \(image.width)×\(image.height)")

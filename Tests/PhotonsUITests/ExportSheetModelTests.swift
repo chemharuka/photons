@@ -128,6 +128,45 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.preset.sdrToneMapping, .none)
     }
 
+    /// 168 §1 — PQ/HLG are single-picture HDR paths: neither a gain-map row nor an SDR tone-map row.
+    /// Before this the view's `else` (keyed only on `showsGainMapRows`) painted 色调映射 under them.
+    func testPQAndHLGHideTheToneMappingRow() {
+        let sheet = model()
+        sheet.setHDR(true)
+
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDRKind(.hlg)
+        XCTAssertEqual(sheet.hdrKind, .hlg)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertFalse(sheet.showsToneMappingRow)
+
+        sheet.setHDR(false)
+        XCTAssertFalse(sheet.showsGainMapRows)
+        XCTAssertTrue(sheet.showsToneMappingRow, "HDR 关必须有色调映射行")
+    }
+
+    /// 168 §3 — a typed quality writes only a legal 0.10–1.00 value, with two decimals in the box.
+    /// An empty/non-numeric/out-of-range string leaves the previous legal value untouched.
+    func testTypedQualityCommitsLegalValuesAndRejectsTheRest() {
+        let sheet = model()
+        XCTAssertEqual(sheet.qualityText, "0.85", "161 的默认质量仍是 0.85")
+
+        XCTAssertTrue(sheet.commitQuality("0.92"))
+        XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12)
+        XCTAssertEqual(sheet.qualityText, "0.92")
+
+        for bad in ["1.5", "abc", "", "  ", "0.05", "nan"] {
+            XCTAssertFalse(sheet.commitQuality(bad), bad)
+            XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12,
+                           "非法值 \(bad) 不许回写文档")
+        }
+        XCTAssertEqual(sheet.qualityText, "0.92")
+    }
+
     /// §4.3 — RGB + Apple is not reachable; each legal pair lands on the right `GainMap`.
     func testGainMapModelAndVersionMapToTheThreeSpellings() {
         let sheet = model()
