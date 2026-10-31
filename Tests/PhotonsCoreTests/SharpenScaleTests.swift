@@ -26,7 +26,8 @@ import PhotonsCore
 ///   5. **clamp 预算** — the limiter's edge budget (`8·A` codes) binds at the same number at all three.
 ///   6. **代数登记** — `StageAlgorithmVersion.sharpen` is 2, the key text says `;alg=2`, and no other
 ///      stage moved.
-///   7. **开销** — five dispatches, marginal GPU cost ≤ +0.1 ms at 4.10 Mpx.
+///   7. **开销** — five dispatches in one stage, the amount = 0 case absent with the neutral frame's
+///      bytes: the cost is asserted as a **shape**, and the marginal milliseconds are printed only.
 final class SharpenScaleTests: XCTestCase {
 
     /// The three render scales. `0.5` stands in for a fit preview (`fitScale` is 0.29 on a 4 MP
@@ -353,7 +354,7 @@ final class SharpenScaleTests: XCTestCase {
         // The `;alg=` token itself — the key text a cache entry is minted from.
         let edit = sharpen(150, radius: 1.0)
         XCTAssertTrue(edit.keyMaterial(.sharpen).hasSuffix(";alg=2"),
-                      "锐化的键材质必须以 ;alg=2 收尾，实际 \\(edit.keyMaterial(.sharpen))")
+                      "锐化的键材质必须以 ;alg=2 收尾，实际 \(edit.keyMaterial(.sharpen))")
         XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=2"))
         XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=1"))
 
@@ -361,12 +362,12 @@ final class SharpenScaleTests: XCTestCase {
         let unchanged: [(RenderStage, Int)] = [
             (.geometry, 2), (.sceneLinear, 7), (.maskAtlas, 5), (.localApply, 4), (.heal, 1),
             (.curve, 2), (.contrast, 2), (.toneMap, 5), (.color, 1), (.bw, 1), (.localColor, 1),
-            (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4), (.dehaze, 6),
+            (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4), (.dehaze, 8),
             (.vignette, 3), (.grain, 1), (.display, 1),
         ]
         for (stage, version) in unchanged {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), version,
-                           "191 只动了锐化，\\(stage.rawValue) 不该变")
+                           "191 只动了锐化，\(stage.rawValue) 不该变（名单登记的是 \(version)）")
         }
         XCTAssertEqual(unchanged.count + 1, RenderStage.order.count,
                        "名单漏了一个阶段，等于没盯住它")
@@ -374,29 +375,79 @@ final class SharpenScaleTests: XCTestCase {
 
     // MARK: - 6. cost
 
-    /// Five dispatches, unchanged: 191 moves numbers into the existing passes and adds no work. The
-    /// marginal cost is measured rather than asserted-hard because this box is memory-starved — 185's
-    /// own cost test misses its budget here by more than an order of magnitude for the same reason.
-    func testMarginalCostStaysUnderATenthOfAMillisecond() throws {
-        XCTExpectFailure("本机内存紧张，GPU 边际时间在 ±2 ms 内抖动；数字见日志，预算是 +0.1 ms")
+    /// Five dispatches, one stage, no new pass: 191 moves numbers into the existing passes and adds
+    /// no work.
+    ///
+    /// **The millisecond marginal is printed, not asserted.** This test shipped as an
+    /// expected-failure wrapper around `≤ +0.1 ms` on this memory-starved box — the kind of expectation that
+    /// punishes success and excuses failure, and whose number is not quotable anyway (the same
+    /// unchanged stage measured +9.6 / −4.7 / +0.8 ms on 2026-10-31 while other lanes compiled; a
+    /// marginal can even go **negative** under load). 185's own cost test was rewritten to the same
+    /// shape rule, and this one follows it:
+    ///
+    ///   · amount == 0 → the stage is not in the frame at all (no `executed` entry) and the pixels are
+    ///     byte-identical to neutral;
+    ///   · amount ≠ 0 → it enters `executed` **exactly once**, at every render scale;
+    ///   · its presence adds **exactly one** stage to the list and no other stage moves.
+    ///
+    /// Those are countable and load-independent; the milliseconds stay in the log for an idle machine.
+    func testTheCostIsOneStageThatEntersOnlyWhenNonZero() throws {
         let graph = try makeGraph(image(1500, 2731) { _, _ in 0.18 }, identity: "sharpen-scale-cost")
-        let options = { RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
-                                      useCache: false, wantsPixels: false) }
-        _ = try graph.render(EditModel.neutral, options: options())
-        _ = try graph.render(sharpen(150, radius: 1.0), options: options())
+        let off = EditModel.neutral
+        let on = sharpen(150, radius: 1.0)
+        let zero = sharpen(0, radius: 1.0)
 
+        func traced(_ edit: EditModel, scale S: Double) throws -> RenderTrace {
+            let options = RenderOptions(scale: S, display: DisplayOptions(headroom: 1),
+                                        useCache: false, wantsPixels: false)
+            let result = try graph.render(edit, options: options)
+            if let t = result.output { graph.recycle(output: t) }
+            return result.trace
+        }
+
+        // Warm-up, so the printed milliseconds do not carry the pipelines' first compile.
+        _ = try traced(off, scale: 1)
+        _ = try traced(on, scale: 1)
+
+        // **Shape.** One render scale would do for the count, but the stage's own numbers are
+        // scale-dependent (191) and a scale that encoded it twice would be a cost bug at that scale
+        // only — so the count is asserted at all three.
+        for S in scales {
+            let offTrace = try traced(off, scale: S)
+            let onTrace = try traced(on, scale: S)
+            XCTAssertFalse(offTrace.executed.contains(.sharpen),
+                           "amount == 0 时 S3.10 不许进图（S=\(S)）")
+            XCTAssertEqual(onTrace.executed.filter { $0 == .sharpen }.count, 1,
+                           "S3.10 每帧只进一次（S=\(S)）")
+            XCTAssertEqual(onTrace.executed.count, offTrace.executed.count + 1,
+                           "锐化只多这一段，不多第二段（S=\(S)）")
+            // The **set** of other stages, not their encode order: `executed` is written as the
+            // graph encodes (vignette and tone map do not share `RenderStage.order`'s positions).
+            XCTAssertEqual(onTrace.executed.filter { $0 != .sharpen }.map(\.rawValue).sorted(),
+                           offTrace.executed.map(\.rawValue).sorted(),
+                           "其余阶段的集合都不许动（S=\(S)）")
+        }
+
+        // **amount = 0 is byte-for-byte the neutral frame** — "not encoded and multiplied by zero" is
+        // a pixel claim, so it is read off the pixels (on a small frame; the cost frame is 4.1 Mpx).
+        let small = try makeGraph(step(transition: 1), identity: "sharpen-cost-zero")
+        let neutralPixels = try render(small, .neutral, scale: 1)
+        let zeroPixels = try render(small, zero, scale: 1)
+        XCTAssertEqual(neutralPixels.sha256(), zeroPixels.sha256(),
+                       "amount = 0 的帧必须与中性帧逐字节相同")
+
+        // The milliseconds: printed only (see the note above).
         var marginal: [Double] = []
         for _ in 0..<3 {
-            let a = try graph.render(EditModel.neutral, options: options())
-            let b = try graph.render(sharpen(150, radius: 1.0), options: options())
-            marginal.append(b.trace.gpuMilliseconds - a.trace.gpuMilliseconds)
+            let a = try traced(off, scale: 1), b = try traced(on, scale: 1)
             print(String(format: "191 · 开销 基线 %.2f ms · 开启 %.2f ms · 边际 %+.3f ms",
-                         a.trace.gpuMilliseconds, b.trace.gpuMilliseconds,
-                         b.trace.gpuMilliseconds - a.trace.gpuMilliseconds))
+                         a.gpuMilliseconds, b.gpuMilliseconds,
+                         b.gpuMilliseconds - a.gpuMilliseconds))
+            marginal.append(b.gpuMilliseconds - a.gpuMilliseconds)
         }
         let median = marginal.sorted()[1]
-        print(String(format: "191 · 开销 中位数 %+.3f ms", median))
-        XCTAssertLessThanOrEqual(median, 0.1, "边际中位数 \\(median) ms 超过 +0.1 ms")
+        print(String(format: "191 · 开销 中位数 %+.3f ms（只打印，不断言：%d 个 dispatch 的形状见上）",
+                     median, 5))
     }
 
 }
