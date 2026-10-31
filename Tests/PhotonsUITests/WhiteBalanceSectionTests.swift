@@ -230,13 +230,14 @@ final class WhiteBalanceSectionTests: XCTestCase {
     /// A real grey patch — the case the task names ("在测试图的灰色区域取样"): one history entry, one
     /// development, and the settled frame measured **on the frame that settles**.
     ///
-    /// **The 2 % target is gone, and that is a finding, not a loosening.** Under 143 the "after" was
-    /// the as-shot sample times the S1 gain — the same model the solver solves in — so the number was
-    /// self-consistent by construction. 194 sends the pair to `CIRAWFilter`, which balances in camera
-    /// space: §2 measured that gap at up to 97 codes (ΔE00 4.7–7.6), and on this file the pair the
-    /// solver calls "6600 K / +4" moves the decoder much further than the model predicts. The settled
-    /// grey therefore lands at ~13.7 % instead of ≤ 2 %. `settledCeiling` is that measurement; the fix
-    /// is the one-time estimate→decoder calibration §2 names, and it is not in this change.
+    /// **The 2 % target is not met, and 195 says so with a number instead of a promise.** 194 measured
+    /// 13.7 %: the dropper solves in an analytic model while the settled frame is `CIRAWFilter`'s
+    /// answer. 195 tried inverting the preview's calibrated 3×3 instead and measured **16.3 %** — the
+    /// model's tint axis is not Apple's (it asked 5950 K/+66 for a sample whose settled cast is 16 %),
+    /// so that route is a regression and the solver stays. What is left is a property of the decoder,
+    /// not of the inverse: `CIRAWFilter` balances in camera space and no output-space matrix
+    /// reproduces it (`WhiteBalanceModelProbeTests`). The assertion below is 194's ceiling, kept as a
+    /// **measurement** — it is red until the main line picks A/B/C on 195's表.
     func testEyedropperMakesTheSampledGreyAreaNeutral() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
@@ -251,9 +252,10 @@ final class WhiteBalanceSectionTests: XCTestCase {
 
         XCTAssertEqual(session.edit.light.whiteBalance, report.solve.whiteBalance)
         XCTAssertFalse(report.solve.clamped, "a grey patch must not need the end of a range")
-        XCTAssertLessThan(report.afterChroma, 0.16,
+        XCTAssertLessThan(report.afterChroma, 0.14,
                           "the settled grey area is at \(String(format: "%.2f%%", report.afterChroma * 100))"
-                          + " — worse than the 13.7 % §2's estimate→decoder gap predicts")
+                          + " — 194's 13.7 % is the measurement; the ≤ 2 % target needs an estimate that"
+                          + " matches the decoder, which is the decision 195 hands back to the main line")
         XCTAssertEqual(report.historyDelta, 1, "the dropper writes one snapshot")
         XCTAssertEqual(report.decodeDelta, 1,
                        "a white-balance write is one development since 194 (the settled frame is the "

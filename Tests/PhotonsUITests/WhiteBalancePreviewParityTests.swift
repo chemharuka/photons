@@ -51,10 +51,22 @@ final class WhiteBalancePreviewParityTests: XCTestCase {
     private static let viewport = ImageSize(width: 800, height: 600)
     private static let decodeScale: Float = 0.125
 
-    /// 194 §2's measurement, rounded up: the drag's approximation is allowed to be visibly different
-    /// from the settled frame, and this is how different. It is the largest `max|Δ|` the five measured
-    /// pairs produced (3200 K, 97 codes); the three pairs this suite drags measured 15–19 codes.
-    private static let previewToleranceCodes = 100
+    /// **195's measured gap — and this tolerance is a failure, on purpose.**
+    ///
+    /// 194's preview was a von Kries diagonal and measured 97 codes at 3200 K; 195 replaces it with
+    /// the full 3×3 (`WhiteBalanceEstimate.relativeMatrix`) anchored on the file's as-shot pair, which
+    /// is measurably better — 6500 K 16 → 8 codes, 3200 K 97 → 60, tint +30 13 → 10 — but **not**
+    /// within the 3 codes the task asked for. The remaining error is not the diagonality: a 3×3
+    /// *fitted to the decoder* reaches ΔE00 0.06–0.43 (ceiling, `WhiteBalanceModelProbeTests`), while
+    /// the *analytic estimate* lands at 2–12. `CIRAWFilter` balances in camera space with its own
+    /// primaries and white-point normalisation, and no single 3×3 in the output space reproduces it
+    /// (the extreme cells need 4× entries, i.e. extrapolation).
+    ///
+    /// So this number stays at the **target**, not at the measurement: a looser number would turn a
+    /// known-unmet requirement into a green test. The decision the number waits on is the main line's
+    /// — A: refine the estimate progressively; B: accept the jump on release; C: limit the drag's
+    /// gain travel. Until then this test is red and says so.
+    private static let previewToleranceCodes = 3
 
     private func fixtures() throws -> [(Sample, URL)] {
         var found: [(Sample, URL)] = []
@@ -140,8 +152,11 @@ final class WhiteBalancePreviewParityTests: XCTestCase {
                 let delta = Self.maxCodeDelta(preview.texture, settled.texture)
                 worst = max(worst, delta)
                 XCTAssertLessThanOrEqual(delta, Self.previewToleranceCodes,
-                    "\(sample.name) \(pair): the preview is \(delta) codes from the settled frame, "
-                    + "beyond the measured approximation (\(Self.previewToleranceCodes))")
+                    "\(sample.name) \(pair): the 3×3 preview is \(delta) codes from the settled frame "
+                    + "(target \(Self.previewToleranceCodes)). 195 measured this and it does not pass — "
+                    + "the model class is proven sufficient (fitted 3×3 → ΔE00 0.1) and the analytic "
+                    + "estimate is what is short. Waiting on the main line's A/B/C decision; do not "
+                    + "raise this number to make it green.")
                 print(String(format: "WB two-stage %@ (%@): preview↔settled max|Δ| %d code · "
                              + "mean|Δ| %.3f · preview gain [%.6f %.6f %.6f] · settled gain (1, 1, 1)",
                              sample.name, WhiteBalance(temperature: pair.0, tint: pair.1).summary,
