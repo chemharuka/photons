@@ -1545,6 +1545,14 @@ public final class RenderGraph {
         /// normalized parameter belongs to it. (`RenderOptions.outputWindow` indexes the *canvas*,
         /// which is this grid plus the AABB margin — see `window` and `inset` in `plan`.)
         let frame: ImageSize
+        /// 191 — **canvas pixels per image pixel**: `options.scale` times the letterbox squeeze `kx`
+        /// (1 on every path that does not rescale the content rect). The picture's own grid is the
+        /// unit `EditModel`'s spatially-normalized numbers are written in — S3.10's radius, its mask
+        /// knee and its block window are all image pixels — and the kernel runs on the canvas, so
+        /// this is the one factor that converts them (`1` at 1:1, `0.293` for a 4 MP fit preview).
+        /// Before 191 those parameters were read straight into the canvas: a fit preview was a
+        /// 3.45× stronger sharpen than the same document at 1:1.
+        let imageScale: Double
         /// The part of the canvas this render produces, or `nil` for all of it (the pre-window
         /// behaviour, and what every caller that does not name a window gets). 176: the grid is the
         /// whole output — `canvasSize`'s AABB at θ ≠ 0, `frame` otherwise.
@@ -1814,6 +1822,10 @@ public final class RenderGraph {
             && content == orientedSource && canvas == orientedSource
             && window == nil
         return Plan(canvas: canvas, content: content, origin: origin, crop: crop, frame: frame,
+                    // 191: canvas px per **image** px — the picture's own grid is what the document's
+                    // spatial numbers are written in, and `kx` is the letterbox squeeze already applied
+                    // to `content`. Exactly 1 for a 1:1 whole-picture render (the pre-191 arithmetic).
+                    imageScale: scale * Double(kx),
                     window: window, frameSize: frameSize, frameOrigin: frameOrigin,
                     frameInCanvas: frameInCanvas, backgroundOutside: backgroundOutside, keys: keys,
                     s0Identity: untransformed && !caOn && !lensWarp,
@@ -4129,7 +4141,61 @@ public final class RenderGraph {
     //
     // A 细节 of 0 skips the fine plane's accumulation entirely (the kernel's `p.b.w` guard): the band's
     // weight is exactly zero, so the numbers would be thrown away.
+    //
+    // 191 — everything spatial below is a **document** number (the picture's own pixel grid) and is
+    // converted here, once, into the canvas the kernel runs on. `plan.imageScale` is the conversion
+    // (`1` at 1:1, `0.293` for the fit preview of a 4 MP portrait), so the same document sharpens the
+    // same physical detail at every zoom instead of 3.45× harder when fitted.
+    /// The block window, in **image** pixels: 4×4 of the picture's own grid, i.e. the "local level
+    /// window" the limiter may not leave. Converted to canvas pixels by `q = round(4·S)` below.
     private static let sharpenBlock = 4
+
+    /// 191 — **the one conversion** S3.10's spatial parameters go through: the document's numbers are
+    /// image pixels, the kernel runs on the canvas, and this is the pair of factors between them.
+    ///
+    /// Kept as a named value rather than four in-line expressions so that "S = 1 is the pre-191
+    /// arithmetic" is a thing a test can *call*, and so the ⌥ preview cannot drift from the apply pass
+    /// (`SharpenScaleTests.testTheConversionIsTheIdentityAtOneToOne`).
+    ///
+    /// - `radius`: σ in **canvas** pixels, `clamp(radius_img, 0.5, 3) · S`, floored at 0.5 canvas px.
+    ///   The floor is the one place where the conversion is deliberately *not* linear: below half a
+    ///   canvas pixel the Gaussian's only non-zero tap is the centre one, so a radius above zero would
+    ///   be the identity — and at a 0.29 fit scale a `radius = 0.5` document would land there. The
+    ///   floor makes fit's smallest radius behave exactly like 1:1's smallest radius instead of
+    ///   vanishing, and it is unreachable at S = 1 (the document range starts at 0.5).
+    /// - `block`: the limiter's window in canvas pixels, `max(2, round(4·S))` — 4 at 1:1.
+    /// - `kneeLow`/`kneeHigh`: the mask's gradient thresholds on a **canvas**-pixel slope, which is
+    ///   `1/S` times the image-pixel slope for the same physical edge: `0.01/S … 0.04/S`.
+    public struct SharpenScale: Sendable, Equatable {
+        public var radius: Double
+        public var block: Int
+        public var kneeLow: Double
+        public var kneeHigh: Double
+    }
+
+    /// The conversion itself. `imageScale` is `Plan.imageScale` (canvas px per image px).
+    public static func sharpenScale(radius documentRadius: Double, imageScale S: Double)
+        -> SharpenScale {
+        let s = Swift.max(0.01, S)
+        let clamped = min(max(documentRadius, 0.5), 3.0)
+        return SharpenScale(radius: Swift.max(clamped * s, 0.5),
+                            block: sharpenBlockWidth(imageScale: s),
+                            kneeLow: 0.01 / s,
+                            kneeHigh: 0.04 / s)
+    }
+
+    /// The limiter's window in **canvas** pixels: `max(2, round(4·S))`. 4 at 1:1 — the constant this
+    /// stage shipped with — 2 for a half-scale fit and 8 at 2×, so `hi − lo` is the range of the same
+    /// physical 4 px patch in every rung.
+    public static func sharpenBlockWidth(imageScale S: Double) -> Int {
+        Swift.max(2, Int((Double(sharpenBlock) * Swift.max(0.01, S)).rounded()))
+    }
+
+    /// 191 — the `imageScale` of the last S3.10 plan this graph encoded. The ⌥ preview draws the mask
+    /// for the frame that is on screen, and that frame was rendered with this conversion; keeping it
+    /// is what lets the preview use **the same arithmetic** as the apply pass without threading a
+    /// scale through the whole present path (the loupe's render scale is not the zoom it presents at).
+    private var lastSharpenImageScale: Double = 1
 
     /// The stage. Reads the display-referred image S3.9 produced and writes the sharpened one.
     private func encodeSharpen(cb: MTLCommandBuffer, into out: MTLTexture,
@@ -4139,13 +4205,24 @@ public final class RenderGraph {
         // low band, and the two blur passes are what this stage costs. The apply samples them back
         // bilinearly, and `rgba16Float` is what makes them filterable (Metal does not filter 32-bit).
         let hw = max(1, (w + 1) / 2), hh = max(1, (h + 1) / 2)
-        let q = RenderGraph.sharpenBlock
+        let imageScale = plan.imageScale
+        lastSharpenImageScale = imageScale
+        // The limiter's window is `sharpenBlock` **image** pixels; on this canvas that is
+        // `max(2, round(4·S))` — exactly 4 at 1:1 (the pre-191 constant), 2 for a half-scale fit and 8
+        // at 2×, so `hi − lo` is the range of the same physical 4 px patch in every rung.
+        let q = RenderGraph.sharpenBlockWidth(imageScale: imageScale)
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
 
         // Clamped on the document's own ranges, so a hand-edited file cannot ask the kernel for a
         // negative σ or a 20-code allowance.
         let amount = Float(min(max(edit.sharpen.amount, 0), 150)) / 100
-        let radius = Float(min(max(edit.sharpen.radius, 0.5), 3.0))
+        // 191 — σ is a **canvas** quantity. The document's radius is in image pixels, so
+        // `σ_canvas = radius_img · S`, floored at half a canvas pixel: below that the Gaussian's only
+        // non-zero tap is the centre one, and a radius slider that is above zero must not be the
+        // identity. At S = 1 the floor is unreachable (the document range starts at 0.5) and this is
+        // the pre-191 line exactly. The knees follow the same conversion — see `sharpenScale`.
+        let conversion = RenderGraph.sharpenScale(radius: edit.sharpen.radius, imageScale: imageScale)
+        let radius = Float(conversion.radius)
         let detail = Float(min(max(edit.sharpen.detail, 0), 100)) / 100
         let masking = Float(min(max(edit.sharpen.masking, 0), 100)) / 100
         // The fine plane is **always** built: the ≥ σ/2 px band is `G_fine − G_wide`, so 细节 = 0
@@ -4165,9 +4242,15 @@ public final class RenderGraph {
             // The mask's knee, measured on a **half-res** plane where a step's per-texel gradient is
             // ~0.3 and 2 code noise's is ~0.004 — so 0.01…0.04 opens on every real edge and on no
             // noise at all.
-            e: SIMD4(0.2126, 0.7152, 0.0722, 0.01),
+            //
+            // 191 — the gradient is a **per-canvas-pixel** slope (`du`/`dv` are two canvas px in the
+            // kernel) and it scales as `1/S`, while the knee is a property of the picture: a 6-code
+            // edge is the same edge at every zoom. So the two thresholds go on the same curve,
+            // `0.01/S … 0.04/S`. At S = 1 this is 0.01/0.04 — the pre-191 numbers, bit for bit.
+            e: SIMD4(0.2126, 0.7152, 0.0722, Float(conversion.kneeLow)),
             // 8 codes: §3's 「amount = 100 时 4 px 边过冲 ≤ 8 码」 is this number, at full strength.
-            f: SIMD4(0.04, 8, 0, 0))
+            // Codes are scale-free (they are a fraction of the displayed value), so `f.y` does not move.
+            f: SIMD4(Float(conversion.kneeHigh), 8, 0, 0))
 
         let bounds = try scratch("sharpen-bounds", width: qW, height: qH, format: .rgba16Float)
         let lum = try scratch("sharpen-luma", width: hw, height: hh, format: .rgba16Float)
@@ -4235,16 +4318,24 @@ public final class RenderGraph {
     /// `EditModel` field carries it, `RenderKeyChain.links` never sees it, and this function writes to a
     /// scratch texture and reads it back. Holding ⌥ therefore cannot invalidate a cached frame, cannot
     /// dirty a document and cannot change a history entry — it is a display, not an edit.
-    public func sharpenMaskPreview(from canvas: MTLTexture, edit: EditModel) throws -> DisplayImage {
+    ///
+    /// 191 — the knee is a per-**image**-pixel threshold, so the preview needs the same `S` the frame
+    /// on screen was rendered with or ⌥ would show a mask the render never used. `imageScale` names it
+    /// (a test, or a frame re-shown at another zoom); the default is the last plan this graph
+    /// encoded, which is the frame the overlay sits on.
+    public func sharpenMaskPreview(from canvas: MTLTexture, edit: EditModel,
+                                   imageScale: Double? = nil) throws -> DisplayImage {
         let w = canvas.width, h = canvas.height
+        let S = max(0.01, imageScale ?? lastSharpenImageScale)
+        let conversion = RenderGraph.sharpenScale(radius: edit.sharpen.radius, imageScale: S)
         var params = SharpenParams(
-            a: SIMD4(0, Float(min(max(edit.sharpen.radius, 0.5), 3.0)), 0,
+            a: SIMD4(0, Float(conversion.radius), 0,
                      Float(min(max(edit.sharpen.masking, 0), 100)) / 100),
-            b: SIMD4(Int32(w), Int32(h), Int32(RenderGraph.sharpenBlock), 0),
+            b: SIMD4(Int32(w), Int32(h), Int32(conversion.block), 0),
             c: SIMD4(Int32(w), Int32(h), 0, 0),
             d: SIMD4(Int32(w), Int32(h), 0, 0),
-            e: SIMD4(0.2126, 0.7152, 0.0722, 0.01),
-            f: SIMD4(0.04, 8, 0, 0))
+            e: SIMD4(0.2126, 0.7152, 0.0722, Float(conversion.kneeLow)),
+            f: SIMD4(Float(conversion.kneeHigh), 8, 0, 0))
         let hw = max(1, (w + 1) / 2), hh = max(1, (h + 1) / 2)
         let lum = try scratch("sharpen-preview-luma", width: hw, height: hh, format: .rgba16Float)
         let hWide = try scratch("sharpen-preview-hw", width: hw, height: hh, format: .rgba16Float)
