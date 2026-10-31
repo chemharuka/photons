@@ -182,6 +182,7 @@ Not "not yet" — decided against, with the reason recorded:
 ## Docs
 
 - [docs/whitepaper/](docs/whitepaper/) — 渲染白皮书：显示架构、处理架构、参数算法（`make whitepaper` → `site/`）
+  在线：https://chemharuka.github.io/photons/ · 源码在 `docs/whitepaper/`，`make whitepaper` 重建。
 - [docs/STATUS.md](docs/STATUS.md) — where the project actually is, with the measurements behind it.
 - [docs/architecture-decisions.md](docs/architecture-decisions.md) — why each choice was made, and
   what would have to be true for it to be wrong.
