@@ -184,8 +184,18 @@ static inline void s0_body(texture2d<float, access::read> src,
     // A canvas-space window may reach past the frame: that part is background, not the frame's edge
     // stretched outward. Off for every window that stays inside the frame, so the in-bounds path keeps
     // the clamp-to-edge behaviour documented at the top of this file.
-    if (p.e.y > 0.5 && (framePx.x < 0.0 || framePx.y < 0.0
-                        || framePx.x >= p.f.x || framePx.y >= p.f.y)) {
+    //
+    // 196 — **only in the un-rotated instantiation.** At θ ≠ 0 the frame (the crop's grid) is *not*
+    // the picture's extent: the turned picture's four corners stick out of it into the canvas' AABB
+    // margin, which is exactly what the canvas is bigger for. Clipping at the frame there cut the
+    // photograph's own corners off whenever the render was windowed (a zoom below 适应, i.e. always
+    // in the crop workspace), while the whole-frame path — which has no window, so `p.e.y` is 0 and
+    // this guard never ran — drew them correctly. That asymmetry is the reported 「竖拍旋转后缩小，
+    // 照片四角没有渲染」: same document, two different pictures depending on the zoom. The rotating
+    // path already answers "is this pixel the photograph" honestly at the bottom of this file
+    // (`cropped` outside `0…1²` → background), so the guard is not needed there.
+    if (!HAS_ROTATION && p.e.y > 0.5 && (framePx.x < 0.0 || framePx.y < 0.0
+                                         || framePx.x >= p.f.x || framePx.y >= p.f.y)) {
         dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
         return;
     }
