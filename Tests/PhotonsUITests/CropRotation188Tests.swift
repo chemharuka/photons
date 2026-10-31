@@ -137,16 +137,16 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertEqual(at45.v0, 0, accuracy: 1 / 1000)
     }
 
-    // MARK: - ② the frame may leave the expanded canvas
+    // MARK: - ② the frame stays inside the canvas, and may cover its letterbox
 
-    /// 5.4°, one 100 pt overhang: **the frame is not shrunk and not slid back**.
+    /// 5.4°, one 100 pt overhang: **the frame is pulled back inside the canvas, at its own size.**
     ///
-    /// The draft is the mid-height band of the picture at its left edge (`-0.1 … 0.1` on the source's
-    /// x, so its centre sits on the canvas' left edge and the quad hangs 138 pt past it). 188's rule is
-    /// reachability — the quad's centre is on the canvas — so `clampToView` has nothing to do; the
-    /// pre-188 rule (the quad's AABB inside the viewport) shrank it and moved it to `minX ≈ 0`, which
-    /// is Red on every assertion below.
-    func testTheFrameMayLeaveTheExpandedCanvasBy100Points() throws {
+    /// 190 read the user's 「框可以超出扩大后的画布」 as an area rule (≥25 % of the frame still over
+    /// the canvas) and this test pinned it. The user has since reversed it (196): the canvas is a
+    /// **hard** bound again (162's semantics) and the *photograph* is the soft one. So the same
+    /// overhang must now be clamped — and the two halves of the new contract are asserted here: the
+    /// frame *moves* (never shrinks), and it may sit over the canvas' `000000` corners.
+    func testTheFrameStaysInsideTheCanvasButMayCoverTheLetterbox() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
                                                              height: Self.source.height)
@@ -165,7 +165,7 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertLessThan(before.minX, canvas.minX - 100,
                           "the fixture must start 100 pt out: \(NSStringFromRect(before))")
 
-        // The app's own model-layer clamp (073/162/188), on the shipped drag path's mapping.
+        // The app's own model-layer clamp, on the shipped drag path's mapping.
         let moved = controller.clampToView(mapping: mapping, source: Self.source)
         let after = rect(controller.layout(mapping: mapping, source: Self.source, pointScale: 1))
         let drawn = controller.draft.crop
@@ -173,20 +173,30 @@ final class CropRotation188Tests: XCTestCase {
                      moved ? "MOVED" : "untouched", NSStringFromRect(after),
                      drawn.left, drawn.right, drawn.width, drawn.height))
 
-        // ① the overhang survives the clamp.
-        XCTAssertFalse(moved, "188: the frame is reachable — nothing to clamp")
-        XCTAssertEqual(drawn.left, draft.left, "the stored rect must be the one the user drew")
-        XCTAssertEqual(drawn.right, draft.right)
-        XCTAssertLessThan(after.minX, canvas.minX - 100,
-                          "the frame's quad is still 100 pt+ outside the canvas")
+        // ① 196 — 「框不得移出画布」: the 100 pt overhang is clamped, and the quad lands inside the
+        //    canvas (one point of slack for the overlay's rounding).
+        XCTAssertTrue(moved, "196: a frame 100 pt outside the canvas must be pulled back")
+        XCTAssertGreaterThanOrEqual(after.minX, canvas.minX - 1,
+                                    "the quad is still outside on the left: \(NSStringFromRect(after))")
+        XCTAssertLessThanOrEqual(after.maxX, canvas.maxX + 1, "\(NSStringFromRect(after))")
+        XCTAssertGreaterThanOrEqual(after.minY, canvas.minY - 1, "\(NSStringFromRect(after))")
+        XCTAssertLessThanOrEqual(after.maxY, canvas.maxY + 1, "\(NSStringFromRect(after))")
 
-        // ② at least one grip is still hittable where the frame is drawn.
-        let layout = controller.layout(mapping: mapping, source: Self.source, pointScale: 1)
-        var hits = 0
-        for corner in layout.corners where CropTool.hit(corner, in: layout) != .outside {
-            hits += 1
-        }
-        XCTAssertGreaterThanOrEqual(hits, 1, "no grip is reachable — the frame would be lost")
+        // ② it is **moved**, never shrunk: the size the user drew is the size they keep.
+        XCTAssertEqual(drawn.width, draft.width, accuracy: 1e-9, "a clamp may never resize the frame")
+        XCTAssertEqual(drawn.height, draft.height, accuracy: 1e-9)
+        XCTAssertNotEqual(drawn.left, draft.left, "the frame must actually have moved")
+
+        // ③ …and the canvas is not the photograph: the clamped frame still covers pixels that are
+        //    **not** photograph — the `000000` letterbox inside the canvas — and that is allowed.
+        //    (196: 画布是硬边界，照片只是「红框」警告。)
+        let overLetterbox = controller.frameExceedsPicture(source: Self.source, degrees: angle)
+        let layoutAfter = controller.layout(mapping: mapping, source: Self.source, pointScale: 1)
+        print("188 ② · after clamp · over the photograph \(overLetterbox)"
+              + " · exceedsPicture \(layoutAfter.exceedsPicture)")
+        XCTAssertTrue(overLetterbox,
+                      "a frame against the canvas' edge covers the letterbox at 5.4° — that is legal")
+        XCTAssertTrue(layoutAfter.exceedsPicture, "and the overlay must be told to paint it red")
 
         // ③ the size rules are untouched: `minimumSpan` and the ratio lock still describe the draft.
         let span = CropTool.minimumSpan(source: Self.source)

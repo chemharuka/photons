@@ -155,7 +155,7 @@ final class CropBoundsTests: XCTestCase {
     /// quarter of the frame's own area still covers the canvas — so this drag pins where 25 % is
     /// still on the canvas instead of where the centre sits on its edge. The frame keeps its size
     /// (no shrink) and stays grabbable (a corner is on the canvas).
-    func testAtEightDegreesTheFrameMayLeaveTheCanvasAndStayReachable() throws {
+    func testAtEightDegreesTheFrameIsPulledInsideTheCanvas() throws {
         let (controller, _) = try makeController()
         // 0.2× on a 3000×2000 source in a 900×600 canvas: the window is 4500×3000 source pixels, i.e.
         // the canvas bounds are -0.25…1.25 on both axes.
@@ -202,22 +202,25 @@ final class CropBoundsTests: XCTestCase {
         // canvas by exactly three quarters, no more, no less. Comparing against the *visible* canvas
         // rect would repeat 188's mistake: at 0.2× the viewport is a window of the document, so a
         // frame three quarters off the canvas is still comfortably inside the view.
-        let coverage = controller.canvasCoverage(of: crop, source: Self.source)
         let quadDoc = layout.corners.map { map.framePoint(viewX: Double($0.x), viewY: Double($0.y)) }
-        let maxY = quadDoc.map(\.y).max() ?? 0
-        print(String(format: "190 · 8° · pinned at coverage %.6f · quad maxY %.1f px (canvas bottom "
-                     + "%.1f) · frame %@", coverage, maxY,
-                     (Double(Self.source.height) + LoupeFraming.rotatedExtent(
-                        width: Double(Self.source.width), height: Double(Self.source.height),
-                        degrees: 8).height) / 2, NSStringFromRect(frame)))
-        XCTAssertEqual(coverage, 0.25, accuracy: 0.005,
-                       "the drag is pinned on the 25 % floor, not wherever it likes")
-        XCTAssertGreaterThan(maxY, Double(Self.source.height),
-                             "the frame still hangs past the canvas — moved, never shrunk")
-        // …and it is still findable: a grip answers at the drawn position.
-        var hits = 0
-        for corner in layout.corners where CropTool.hit(corner, in: layout) != .outside { hits += 1 }
-        XCTAssertGreaterThanOrEqual(hits, 1, "no grip is reachable — the frame would be lost")
+        let extent = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
+                                                height: Double(Self.source.height), degrees: 8)
+        let canvasLow = (x: (Double(Self.source.width) - extent.width) / 2,
+                         y: (Double(Self.source.height) - extent.height) / 2)
+        let canvasHigh = (x: (Double(Self.source.width) + extent.width) / 2,
+                          y: (Double(Self.source.height) + extent.height) / 2)
+        let minX = quadDoc.map(\.x).min() ?? 0, maxX = quadDoc.map(\.x).max() ?? 0
+        let minY = quadDoc.map(\.y).min() ?? 0, maxY = quadDoc.map(\.y).max() ?? 0
+        print(String(format: "196 · 8° · quad doc x %.1f…%.1f (canvas %.1f…%.1f) · "
+                     + "y %.1f…%.1f (canvas %.1f…%.1f) · frame %@",
+                     minX, maxX, canvasLow.x, canvasHigh.x, minY, maxY,
+                     canvasLow.y, canvasHigh.y, NSStringFromRect(frame)))
+        // 196 — the canvas is the hard bound: the turned quad's AABB is inside it, at the frame's own
+        // size (moved, never shrunk). 190 pinned the 25 % overlap here; the user reversed that.
+        XCTAssertGreaterThanOrEqual(minX, canvasLow.x - 2)
+        XCTAssertLessThanOrEqual(maxX, canvasHigh.x + 2)
+        XCTAssertGreaterThanOrEqual(minY, canvasLow.y - 2)
+        XCTAssertLessThanOrEqual(maxY, canvasHigh.y + 2)
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
                       "the frame covers the blank corner, so the warning must say so")
     }
