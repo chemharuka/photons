@@ -194,6 +194,11 @@ final class CropZoomBound190Tests: XCTestCase {
     /// centre reach the canvas' corner but 1:1 and 2× confine it to a window of the document, so the
     /// three limits are three different numbers. Green after: 25 % ± 1 % everywhere, and the three
     /// rects agree — the extreme is a property of the document, not of the zoom.
+    ///
+    /// `centre in viewport` is printed and **never asserted**: at 1:1 and 2× the viewport is a window
+    /// of the canvas, so a frame that keeps its quarter over the canvas is normally outside it. The
+    /// two clauses cannot both hold, and 190 chooses coverage (see `legal` in the controller). It is
+    /// printed so the next reader can see the choice instead of re-deriving the old rule.
     func testAtZoomTheFrameCannotLeaveTheCanvas() throws {
         var measured: [(Framing, Limit)] = []
         for framing in Self.framings {
@@ -264,6 +269,105 @@ final class CropZoomBound190Tests: XCTestCase {
                        "a far drag is pinned on the floor, not short of it")
         XCTAssertEqual(crop.width, Self.frame.width, accuracy: 1e-9, "never shrunk")
         XCTAssertEqual(crop.height, Self.frame.height, accuracy: 1e-9)
+    }
+
+    /// **Every** clamped result satisfies the law it was clamped by — including the two paths that
+    /// are easy to leave illegal: a frame bigger than the canvas (where 25 % may be unreachable and
+    /// the honest answer is the best position there is) and the opt-in photo-bound shrink
+    /// (`clampsToRotatedFrame`, which must not be allowed to undo the 25 % floor).
+    ///
+    /// The inputs are the interesting corners of the space: smaller / equal / bigger than the canvas,
+    /// hanging over one edge, over a corner, with and without an aspect lock, at 5.4° / 45° / 90°,
+    /// with the photo-bound shrink on and off.
+    func testEveryClampedResultSatisfiesItsOwnLaw() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir,
+                                                             width: Self.source.width,
+                                                             height: Self.source.height)
+        let controller = CropToolController(session: session)
+        XCTAssertTrue(controller.begin())
+        let f = LoupeFraming(viewport: Self.canvas, sourceWidth: Double(Self.source.width),
+                             sourceHeight: Double(Self.source.height), crop: .full,
+                             straightenDegrees: 0)
+        let mapping = f.mapping(of: .fit)
+
+        struct Case {
+            let name: String
+            let crop: CropRect
+            let degrees: Double
+            let lock: AspectLock
+            let photoBound: Bool
+        }
+        let cases: [Case] = [
+            Case(name: "小于画布 · 中央", crop: CropRect(left: 0.40, top: 0.40, right: 0.60,
+                                                        bottom: 0.60),
+                 degrees: 5.4, lock: .original, photoBound: false),
+            Case(name: "小于画布 · 贴右下角外", crop: CropRect(left: 0.86, top: 0.90, right: 1.06,
+                                                             bottom: 1.10),
+                 degrees: 5.4, lock: .original, photoBound: false),
+            Case(name: "等于画布 · 5.4°", crop: CropRect(left: 0, top: 0, right: 1, bottom: 1),
+                 degrees: 5.4, lock: .original, photoBound: false),
+            Case(name: "大于画布 · 45° · 1.5×", crop: CropRect(left: -0.25, top: -0.25,
+                                                              right: 1.25, bottom: 1.25),
+                 degrees: 45, lock: .original, photoBound: false),
+            Case(name: "远大于画布 · 45° · 4×（25% 不可达）",
+                 crop: CropRect(left: -1.5, top: -1.5, right: 2.5, bottom: 2.5),
+                 degrees: 45, lock: .original, photoBound: false),
+            Case(name: "小于画布 · 16:9 锁", crop: CropRect(left: 0.45, top: 0.30, right: 0.75,
+                                                           bottom: 0.50),
+                 degrees: 9, lock: .sixteenNine, photoBound: false),
+            Case(name: "大于画布 · 90°", crop: CropRect(left: -0.2, top: -0.3, right: 1.2,
+                                                        bottom: 1.1),
+                 degrees: 90, lock: .original, photoBound: false),
+            Case(name: "小于画布 · 照片约束开", crop: CropRect(left: 0.55, top: 0.85, right: 0.75,
+                                                              bottom: 1.05),
+                 degrees: 5.4, lock: .original, photoBound: true),
+            Case(name: "大于画布 · 照片约束开", crop: CropRect(left: -0.1, top: -0.1, right: 1.1,
+                                                              bottom: 1.1),
+                 degrees: 9, lock: .original, photoBound: true),
+        ]
+
+        // The biggest coverage any position can have: a frame bigger than the canvas tops out at
+        // canvas/frame when it is centred on it, so 25 % is simply not reachable for a huge frame.
+        let canvasPixels = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
+                                                      height: Double(Self.source.height),
+                                                      degrees: 0)
+        for c in cases {
+            controller.clampsToRotatedFrame = c.photoBound
+            controller.draft = CropToolController.Draft(crop: c.crop, straighten: c.degrees,
+                                                        lock: c.lock)
+            let before = controller.draft.crop
+            let moved = controller.clampToView(mapping: mapping, source: Self.source)
+            let after = controller.draft.crop
+            let coverage = controller.canvasCoverage(of: after, source: Self.source)
+            // 诊断，不是判据：可达性在 190 里由「25% 在画布上 + 适应可看全帧」保证，见 `legal` 的注释。
+            let reachable = controller.hasReachableGrip(after, source: Self.source)
+
+            let extent = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
+                                                    height: Double(Self.source.height),
+                                                    degrees: c.degrees)
+            let frameArea = after.width * Double(Self.source.width)
+                * after.height * Double(Self.source.height)
+            // 画布面积 / 框面积 —— 只用来判断「25% 到底可达不可达」，不是 coverage 的上界。
+            let best = min(1, extent.width * extent.height / max(frameArea, 1e-9))
+            _ = canvasPixels
+            print(String(format: "190 · law · %@ · moved %@ · l %.6f t %.6f r %.6f b %.6f · "
+                         + "coverage %.6f (画布/框 %.6f) · 可抓 %@",
+                         c.name, moved ? "yes" : "no", after.left, after.top, after.right,
+                         after.bottom, coverage, best, reachable ? "yes" : "no"))
+
+            // ① the law, re-measured on the result: at least a quarter of the frame over the canvas
+            //   whenever any position can achieve it…
+            XCTAssertGreaterThanOrEqual(coverage, min(0.25, best) - 1e-6,
+                                        "\(c.name): coverage \(coverage) breaks the law it was clamped by")
+            // …and never a *worse* position than the best one available.
+            XCTAssertLessThanOrEqual(coverage, 1.0 + 1e-9)
+            // ③ a clamp only ever moves (or reshapes for a lock): never shrinks.
+            if c.lock.ratio == nil {
+                XCTAssertEqual(after.width, before.width, accuracy: 1e-9, c.name)
+                XCTAssertEqual(after.height, before.height, accuracy: 1e-9, c.name)
+            }
+        }
+        controller.clampsToRotatedFrame = false
     }
 
     // MARK: - θ = 0 is untouched
