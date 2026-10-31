@@ -175,11 +175,14 @@ struct CalParams {
     float4 t;
 };
 
-// Rec.2020 luminance weights (BT.2020-2 Table 3, the working primaries) — the tint's axis, and the
-// quantity it holds constant. Not `tone_shape.metal`'s `kEndPointLumaWeights`: that one reads
-// *encoded sRGB* numbers for the blacks/whites knee coordinate (073B §4.9), which is a different
-// question in a different domain.
-constant float3 kCalibrationLuma = float3(0.2627, 0.6780, 0.0593);
+// The tint's axis, and the quantity it holds constant, is the **working primaries' own luma** — so it
+// comes from `primaries.metal#kWorkingLumaWeights`, which this file already includes, and not from a
+// fourth copy of the triple. (179 wrote `float3(0.2627, 0.6780, 0.0593)` here inline; the numbers are
+// the same three constants, and the kernel's output is byte-identical either way —
+// `SaturatedColourTests.testNoKernelCarriesItsOwnLumaWeights` is the rule that keeps it that way.)
+// Deliberately **not** `tone_shape.metal`'s `kEndPointLumaWeights`: that one reads *encoded sRGB*
+// numbers for the blacks/whites knee coordinate (073B §4.9), which is a different question in a
+// different domain.
 
 // `CalibrationGroup.shadowTintScale`: the green channel's change at full travel in the deepest shadows.
 constant float kCalibrationShadowTintScale = 0.5;
@@ -284,14 +287,14 @@ static inline void s1_body(texture2d<float, access::read> src,
 
         float st = cp.t.x;
         if (st != 0.0) {
-            float y0 = dot(v, kCalibrationLuma);
+            float y0 = dot(v, kWorkingLumaWeights);
             // A pixel at or below zero has no log coordinate; it also has no shadow *hue* to tint.
             if (y0 > 0.0) {
                 float w = 1.0 - calibration_smoothstep(-5.0, -0.5, log2(max(y0, 1e-7) / 0.18));
                 v.y *= max(1.0 - kCalibrationShadowTintScale * st * w, 0.0);
                 // Luminance is **kept**: the tint moves the colour, not the exposure. The same
                 // invariant LightCraft's `calibrate` holds (`c * y0 / y1`).
-                float y1 = max(dot(v, kCalibrationLuma), 1e-9);
+                float y1 = max(dot(v, kWorkingLumaWeights), 1e-9);
                 v *= y0 / y1;
             }
         }
