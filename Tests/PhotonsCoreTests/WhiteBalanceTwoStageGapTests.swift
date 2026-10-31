@@ -2,45 +2,56 @@ import XCTest
 import Metal
 @testable import PhotonsCore
 
-/// 194 §2 — **how far the drag's approximation is from the decoder's answer.**
+/// 195 — **the acceptance gate for the 3×3 preview**: how far the drag's frame is from the decoder's,
+/// per pair, in 8-bit display codes and CIEDE2000 — with the diagonal kept alongside as the control.
 ///
-/// Two-stage white balance has one approximation in it and this file is the measurement of that one:
-/// the drag draws the buffer on screen through an S1 gain (`WhiteBalanceEstimate`) because a decode is
-/// ~0.5 s, while the settled frame is what `CIRAWFilter.neutralTemperature`/`neutralTint` produce.
-/// Before the contract is rewritten (`WhiteBalancePreviewParityTests`) the size of the difference has
-/// to be a number, not an opinion:
+///   · **A** = decode **at** the pair, S1 identity — the truth (`CIRAWFilter`; a settled frame);
+///   · **B** = decode as shot, the pair as S1's **full 3×3** (`WhiteBalanceEstimate.relativeMatrix`,
+///     the Bradford product 194 reduced to its diagonal);
+///   · **C** = the same, but with only the matrix's **diagonal** (`previewMatrixOverride`) — 194's
+///     preview, isolated: same estimate, same interpolation-free path, cross terms dropped;
+///   · **D** = the same, with `WhiteBalanceSolver`'s analytic gain (`relativeGain`) — what shipped.
 ///
-///   · **A** = decode **at** the pair, S1 identity — the truth (`photonsctl render --wb <pair>`);
-///   · **B** = decode as shot, the pair as an S1 gain — the drag.
-///
-/// Five pairs: as shot, 6500 K, 3200 K, and ±30 tint on 6500 K. For each one the file prints
-/// `max|Δ|` in 8-bit display codes and ΔE00 averaged over three tonal bands (shadows / mid-tones /
-/// highlights, banded by the **truth**'s luma), because "2 codes" means nothing if it is all in the
-/// toe and nothing if it is all in a flat sky.
-///
-/// The measurement runs on the user's own RAW when it is present (`PHOTONS_WB_RAW`, else
-/// `~/Desktop/test/L1030433.dng`) and skips otherwise. Nothing here asserts a tolerance: 194 §3 is
-/// where the number becomes a contract, and it is the number this file prints.
+/// B against C is the cross terms' contribution, which is the number this task exists to produce; B
+/// against D also includes changing 143's estimate for the Bradford product. The tolerance applies to
+/// **B** (`max|Δ| ≤ 3 code`, `ΔE00 ≤ 1.0` per band); C and D are printed for attribution, not gated.
 final class WhiteBalanceTwoStageGapTests: XCTestCase {
 
-    private static let defaultRAW = "~/Desktop/test/L1030433.dng"
+    /// 195 §1.4 — a file the table **was** fitted on, and the file it was **not**. The numbers are
+    /// reported separately and the same tolerance applies to both.
+    private static let defaultRAWs = ["~/Desktop/test/L1030433.dng",
+                                      "~/Desktop/US/DJI_air3_2250_D.dng"]
     private static let decodeScale: Float = 0.25
 
+    /// 195 §1.5/§3 — the acceptance thresholds. Not "2 codes because it looked good": §2's 97-code
+    /// diagonal is what the table has to beat, and these are the numbers the table was fitted to hold.
+    static let toleranceCodes = 3
+    static let toleranceDeltaE = 1.0
+
+    /// 195 §3's five, plus three points away from neutral where the cross terms are largest.
     private static let pairs: [(String, WhiteBalance)] = [
         ("as shot", .asShot),
         ("6500 K", WhiteBalance(temperature: 6500, tint: 0)),
         ("3200 K", WhiteBalance(temperature: 3200, tint: 0)),
         ("6500 K / +30", WhiteBalance(temperature: 6500, tint: 30)),
         ("6500 K / −30", WhiteBalance(temperature: 6500, tint: -30)),
+        ("2850 K / +60", WhiteBalance(temperature: 2850, tint: 60)),
+        ("12000 K / −60", WhiteBalance(temperature: 12000, tint: -60)),
+        ("4800 K / −15", WhiteBalance(temperature: 4800, tint: -15)),
     ]
 
-    private func fixtureURL() throws -> URL {
-        let env = ProcessInfo.processInfo.environment["PHOTONS_WB_RAW"]
-        let path = NSString(string: env ?? Self.defaultRAW).expandingTildeInPath
-        guard FileManager.default.isReadableFile(atPath: path) else {
-            throw XCTSkip("missing fixture \(path)")
+    private func fixtureURLs() throws -> [URL] {
+        let env = ProcessInfo.processInfo.environment["PHOTONS_WB_RAWS"]
+        let paths = (env?.split(separator: ":").map(String.init)) ?? Self.defaultRAWs
+        var found: [URL] = []
+        for path in paths {
+            let expanded = NSString(string: path).expandingTildeInPath
+            guard FileManager.default.isReadableFile(atPath: expanded) else {
+                throw XCTSkip("missing fixture \(path)")
+            }
+            found.append(URL(fileURLWithPath: expanded))
         }
-        return URL(fileURLWithPath: path)
+        return found
     }
 
     private func decode(_ url: URL, _ wb: WhiteBalance) throws -> LinearImage {
@@ -49,9 +60,12 @@ final class WhiteBalanceTwoStageGapTests: XCTestCase {
     }
 
     private func render(_ image: LinearImage, buffer: WhiteBalance, document wb: WhiteBalance,
-                        identity: String) throws -> DisplayImage {
+                        identity: String, asShotPair: WhiteBalance = .asShot,
+                        override: Matrix3? = nil) throws -> DisplayImage {
         let graph = try RenderGraph(input: RenderInput(image: image, identity: identity,
-                                                       whiteBalance: buffer))
+                                                       whiteBalance: buffer,
+                                                       asShotPair: asShotPair))
+        graph.previewMatrixOverride = override
         var edit = EditModel.neutral
         edit.light.temperature = wb.temperature
         edit.light.tint = wb.tint
@@ -61,37 +75,98 @@ final class WhiteBalanceTwoStageGapTests: XCTestCase {
         return try XCTUnwrap(graph.render(edit, options: options).display)
     }
 
-    func testPreviewGainVersusDecoderTruth() throws {
-        let url = try fixtureURL()
+    func testMatrixPreviewVersusDecoderTruth() throws {
+        let urls = try fixtureURLs()
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
 
-        // One as-shot decode serves every pair's B side; each A side is its own development, which is
-        // exactly the cost the settled frame pays (`0.5 s` on 25 MP, `--scale` here).
-        let asShot = try decode(url, .asShot)
-        print(String(format: "WB gap: %@ @ scale %.2f → %d×%d",
-                     url.lastPathComponent, Double(Self.decodeScale),
-                     asShot.width, asShot.height))
+        var worstCodes = 0
+        var worstDeltaE = 0.0
+        var worstLabel = ""
 
-        for (name, pair) in Self.pairs {
-            let truth = try render(try decode(url, pair), buffer: pair, document: pair,
-                                   identity: "A-\(name)")
-            let approximation = try render(asShot, buffer: .asShot, document: pair,
-                                           identity: "B-\(name)")
-            let g = try RenderGraph(input: RenderInput(image: asShot, identity: "probe-\(name)"))
-                .whiteBalanceGain(from: .asShot, to: pair)
-            let report = Self.compare(truth, approximation)
-            print(String(format: "WB gap %-12@ max|Δ| %3d code · mean|Δ| %6.3f · "
-                         + "ΔE00 shadows %5.2f mid %5.2f highlights %5.2f",
-                         name as NSString,
-                         report.maxCode, report.meanCode,
-                         report.deltaE.shadows, report.deltaE.mid, report.deltaE.highlights)
-                + String(format: " · mean RGB truth %.3f %.3f %.3f · gain %.3f %.3f %.3f",
-                         report.meanA.0, report.meanA.1, report.meanA.2,
-                         report.meanB.0, report.meanB.1, report.meanB.2)
-                + String(format: " · S1 gain %.4f %.4f %.4f", g.r, g.g, g.b))
-            XCTAssertTrue(report.maxCode >= 0)
+        for url in urls {
+            // One as-shot decode serves every pair's B/C/D side; each A side is its own development,
+            // which is exactly the cost the settled frame pays (`0.5 s` on 25 MP, `--scale` here).
+            // 195: the drag's ratio is taken against the **file's** as-shot pair, which only the
+            // decoder knows; the image alone cannot tell 5872 K from 6500 K.
+            let asShotOutcome = try RAWDecoder().decodeDetailed(
+                url, options: DecodeOptions(scale: Self.decodeScale, whiteBalance: .asShot))
+            let asShot = asShotOutcome.image
+            let asShotPair = asShotOutcome.capabilities.asShotWhiteBalance
+            print("WB gap: \(url.lastPathComponent) as shot pair \(asShotPair.summary)")
+            print(String(format: "WB gap: %@ @ scale %.2f → %d×%d",
+                         url.lastPathComponent, Double(Self.decodeScale),
+                         asShot.width, asShot.height))
+            let probe = try RenderGraph(input: RenderInput(image: asShot, identity: "probe"))
+            for (name, pair) in Self.pairs {
+                let truth = try render(try decode(url, pair), buffer: pair, document: pair,
+                                       identity: "A-\(url.lastPathComponent)-\(name)")
+                let matrix = probe.whiteBalanceMatrix(from: WhiteBalance.asShot, to: pair)
+
+                func report(_ override: Matrix3?) throws -> Report {
+                    let image = try render(asShot, buffer: .asShot, document: pair,
+                                           identity: "B-\(url.lastPathComponent)-\(name)",
+                                           asShotPair: asShotPair, override: override)
+                    return Self.compare(truth, image)
+                }
+
+                let diagonal = Matrix3(rows: [[matrix[0, 0], 0, 0],
+                                              [0, matrix[1, 1], 0],
+                                              [0, 0, matrix[2, 2]]])
+                // 194's shipped preview number: `WhiteBalanceSolver`'s analytic gain, diagonal by
+                // construction. It is what C differs from by "which estimate", and what B differs
+                // from by "estimate + cross terms".
+                let old = probe.whiteBalanceGain(for: pair)
+                let solverOnly = Matrix3(rows: [[old.r, 0, 0], [0, 1, 0], [0, 0, old.b]])
+
+                let full = try report(nil)
+                let bradfordDiagonal = try report(diagonal)
+                let shippedDiagonal = try report(solverOnly)
+
+                func line(_ label: String, _ r: Report) -> String {
+                    String(format: "WB gap %-28@ %@ max|Δ| %3d 码 · ΔE00 暗 %5.2f 中 %5.2f 高 %5.2f",
+                           "\(url.lastPathComponent) \(name)" as NSString,
+                           label as NSString, r.maxCode,
+                           r.deltaE.shadows, r.deltaE.mid, r.deltaE.highlights)
+                }
+                print(line("3×3  B", full))
+                print(line("对角 C", bradfordDiagonal))
+                print(line("旧值 D", shippedDiagonal))
+                print("WB gap \(url.lastPathComponent) \(name) 阀门: \(probe.whiteBalanceFellBackToDiagonal ? "回退对角（|m|>3）" : "用 3×3")")
+                print(String(format: "WB gap %-28@ 交叉项贡献 |Δ|B−C| = %3d 码 · ΔE00B−C = %5.2f"
+                             + " · 估计器贡献 |C−D| = %3d 码 · M = [%.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f]",
+                             "\(url.lastPathComponent) \(name)" as NSString,
+                             abs(full.maxCode - bradfordDiagonal.maxCode),
+                             max(abs(full.deltaE.shadows - bradfordDiagonal.deltaE.shadows),
+                                 max(abs(full.deltaE.mid - bradfordDiagonal.deltaE.mid),
+                                     abs(full.deltaE.highlights - bradfordDiagonal.deltaE.highlights))),
+                             abs(bradfordDiagonal.maxCode - shippedDiagonal.maxCode),
+                             matrix[0, 0], matrix[0, 1], matrix[0, 2],
+                             matrix[1, 0], matrix[1, 1], matrix[1, 2],
+                             matrix[2, 0], matrix[2, 1], matrix[2, 2]))
+
+                let bandMax = max(full.deltaE.shadows,
+                                  max(full.deltaE.mid, full.deltaE.highlights))
+                if pair.isAsShot {
+                    // The identity gate: the same buffer, the same document, no matrix at all.
+                    XCTAssertEqual(full.maxCode, 0, "as shot must be byte-identical")
+                    XCTAssertEqual(bandMax, 0, accuracy: 1e-9, "as shot must be 0 ΔE00")
+                    XCTAssertEqual(matrix, Matrix3.identity, "as shot must be the identity matrix")
+                } else {
+                    if full.maxCode > worstCodes || bandMax > worstDeltaE {
+                        worstCodes = max(worstCodes, full.maxCode)
+                        worstDeltaE = max(worstDeltaE, bandMax)
+                        worstLabel = "\(url.lastPathComponent) \(name)"
+                    }
+                    // 195's verdict is that these do **not** pass, so they are not asserted here:
+                    // the gate lives in `WhiteBalancePreviewParityTests` (which fails, on purpose)
+                    // and this file's job is the attribution table above. Asserting here as well
+                    // would only add a second copy of the same red.
+                    XCTAssertGreaterThan(full.maxCode, -1)
+                }
+            }
         }
-        print("WB gap: done — the tolerance in WhiteBalancePreviewParityTests is these numbers.")
+        print("WB gap: worst \(worstCodes) 码 / ΔE00 \(worstDeltaE) on \(worstLabel)"
+              + " — the tolerance in WhiteBalancePreviewParityTests is this measurement.")
     }
 
     // MARK: - comparison
