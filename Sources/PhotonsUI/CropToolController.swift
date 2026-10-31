@@ -794,6 +794,12 @@ public final class CropToolController {
     /// every containment criterion goes red without the clamp; nothing in the app touches it.
     var clampsFrameToView = true
 
+    /// How many times `clampToView` has been asked to run, and how many of those moved the draft.
+    /// Diagnostics only (the 202 probe prints them to say *who* moved a frame that ended up
+    /// outside the canvas — the clamp that never ran, or a camera that moved under it).
+    public private(set) var clampCalls = 0
+    public private(set) var clampMoves = 0
+
     /// The largest rect the frame may occupy **right now**, in normalized frame coordinates.
     ///
     /// Three questions, and the answer is their intersection — each one was a separate report:
@@ -845,6 +851,7 @@ public final class CropToolController {
     /// Returns `true` when the draft moved, so a caller can tell "clamped" from "already legal".
     @discardableResult
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
+        clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
         // A canvas that has not been laid out yet (a zero-sized viewport in a headless test, or the
         // first `layout` pass) is not an opinion about what fits: clamping against it would shrink the
@@ -855,15 +862,31 @@ public final class CropToolController {
         // framing. Clamping the un-turned rect would leave the turned corners outside, so the
         // rotated path fits the quad's bounding box instead (Δθ = 0 keeps the old arithmetic bit
         // for bit).
-        let delta = straightenDelta
-        if delta.isFinite, delta != 0 {
-            return clampRotatedQuadToView(mapping: mapping, source: src, degrees: delta)
+        //
+        // 202 ② — **the switch reads the drawn angle, not the delta.** 196's law is stated on the
+        // quad, but this dispatch asked 「does the draft differ from the document?」, so a *committed*
+        // 拉直 (draft 5.4°, document 5.4° → delta 0) took the upright path: it clamped the un-turned
+        // rect against the turned canvas' AABB **in frame coordinates** — a rectangle nobody draws —
+        // and the quad on screen then hung outside the canvas (measured at 适应: 1 714 px off the left
+        // edge and 985 px off the bottom). The frame is turned whenever the draft carries an angle,
+        // whoever wrote it, so that is what decides the arithmetic. At θ = 0 both spells are the old
+        // path, value for value.
+        let drawnAngle = CropTool.clampStraighten(draft.straighten)
+        if drawnAngle.isFinite, abs(drawnAngle) > 1e-9 {
+            let moved = clampRotatedQuadToView(mapping: mapping, source: src, degrees: drawnAngle)
+            if moved { clampMoves &+= 1 }
+            return moved
         }
+        // 162 — the visible canvas, in frame coordinates. At 适应 the workspace frames the picture at
+        // 90 %, so this rect is slightly **larger** than the photograph and a crop is allowed to cover
+        // that black band (「框可以出相机像素」, `CropOverlayAlertTests` measures a 4 % overhang being
+        // applied without a snap-back); the viewport is what the upright frame may not leave.
         let room = canvasBounds(mapping: mapping, source: src)
         let before = draft.crop.clamped(allowsOutsideSource: true)
         let next = clampedToCanvas(before, bounds: room, source: src, lock: draft.lock)
         guard next != before else { return false }
         draft.crop = next
+        clampMoves &+= 1
         return true
     }
 
