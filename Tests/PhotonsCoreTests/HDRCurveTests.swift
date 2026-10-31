@@ -1218,17 +1218,19 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(developed.changedStages(from: base), Set(RenderStage.allCases),
                        "a decode change is every stage, as always")
 
+        // 194: the settled Kelvin **is** fed to the decoder again, so it is a development like any
+        // other decode input — every stage's source pixels are new.
         var warm = base
         warm.light.temperature = 5200
-        XCTAssertFalse(warm.decodesDifferently(from: base),
-                       "143: the document's Kelvin is no longer fed to the decoder")
-        XCTAssertEqual(warm.changedStages(from: base), [.sceneLinear],
-                       "143: WB is S1's gain, so it dirties S1 and only S1")
-        XCTAssertEqual(warm.splitFrom(base), .render)
+        XCTAssertTrue(warm.decodesDifferently(from: base),
+                      "194: the settled pair is written into `CIRAWFilter` — it is a decode input")
+        XCTAssertEqual(warm.changedStages(from: base), Set(RenderStage.allCases),
+                       "194: a new development re-runs every stage")
+        XCTAssertEqual(warm.splitFrom(base), .decode)
 
-        // …and "only S1" is enough because every link below S1 is seeded by the previous link's
-        // digest (`RenderKeyChain.links`), not by the parameters alone. One changed material moves
-        // the whole linear/render chain.
+        // …and the chain really does move: every link below S1 is seeded by the previous link's digest
+        // (`RenderKeyChain.links`), not by the parameters alone, so one changed material — or one new
+        // buffer — moves the whole linear/render chain.
         func links(_ edit: EditModel) -> RenderKeyChain.Links {
             RenderKeyChain.links(identity: "wb-dirty", sourceSize: ImageSize(width: 640, height: 480),
                                  canvas: ImageSize(width: 640, height: 480),
@@ -1273,7 +1275,11 @@ final class HDRCurveTests: XCTestCase {
         print("148 WB frame · executed \(hot.trace.executed.map(\.short).joined(separator: " "))")
         print("148 WB frame · sha \(coldFrame.sha256().prefix(16))… → \(hotFrame.sha256().prefix(16))…")
 
-        XCTAssertEqual(base.decodeKey, warm.decodeKey, "100 K is not a new development")
+        // 194: on **one** buffer this is the drag — the resident as-shot buffer drawn through S1 with the
+        // pair's gain — so the frame must move without a development. (Two documents that differ in the
+        // pair are two *buffers* when each is developed; that is the settle, and it is `decodeKey`'s job.)
+        XCTAssertNotEqual(base.decodeKey, warm.decodeKey,
+                          "194: a settled pair names its own buffer")
         XCTAssertNotEqual(cold.keys.sceneLinear, hot.keys.sceneLinear)
         XCTAssertNotEqual(cold.keys.curve, hot.keys.curve)
         XCTAssertNotEqual(cold.keys.toneMap, hot.keys.toneMap)
@@ -1283,7 +1289,7 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertTrue(hot.trace.executed.contains(.toneMap),
                       "…and the chain below S1 must miss too")
         XCTAssertNotEqual(coldFrame.sha256(), hotFrame.sha256(),
-                          "the picture must move: WB is an S1 gain now")
+                          "the picture must move on the resident buffer: that is the drag's S1 gain")
     }
 
     // MARK: - the model: names and versions

@@ -139,6 +139,85 @@ final class WhiteBalanceEstimateTests: XCTestCase {
         XCTAssertEqual(there.b * back.b, 1, accuracy: 1e-12)
     }
 
+    // MARK: - 2b. 路线 B: the anchor-relative matrix (2026-10-31)
+
+    /// **`M_anchor(6000 K / 0) == I` exactly** — the anchor is the identity *by construction*, not by
+    /// cancellation, so a pair landing on it carries no residue from an inverse.
+    func testTheAnchorIsTheUnitMatrix() {
+        let anchor = WhiteBalance(temperature: WhiteBalanceEstimate.previewAnchor.temperature,
+                                  tint: WhiteBalanceEstimate.previewAnchor.tint)
+        XCTAssertEqual(WhiteBalanceEstimate.anchorMatrix(for: anchor), .identity,
+                       "the anchor pair must be the unit matrix, elementwise and exactly")
+        // `nil` tint is the anchor's 0, not a different pair.
+        XCTAssertEqual(WhiteBalanceEstimate.anchorMatrix(for: WhiteBalance(temperature: 6000)),
+                       .identity)
+        // And it is not a coincidence of 6000: a neighbour is a real matrix.
+        let off = WhiteBalanceEstimate.anchorMatrix(for: WhiteBalance(temperature: 5900, tint: 0))
+        XCTAssertNotEqual(off, .identity)
+        print("WB anchor: M_anchor(6000 K / 0) = I · M_anchor(5900 K / 0) = \(off.rows)")
+    }
+
+    /// **`M_rel(W₀ → W₀)` is the identity for any W₀** — the drag's first frame and every tick back to
+    /// the settled value. The bound is 1e-9 elementwise (an adjugate inverse leaves ~1e-16, and a
+    /// tolerance of "looks like zero" would let a transpose slip through).
+    func testRelativeMatrixIsExactlyIdentityAtTheSamePoint() {
+        let points = [WhiteBalance(temperature: 2850, tint: 60),
+                      WhiteBalance(temperature: 3200, tint: 0),
+                      WhiteBalance(temperature: 5000, tint: -10),
+                      WhiteBalance(temperature: 6500, tint: 0),
+                      WhiteBalance(temperature: 12000, tint: -60)]
+        for w0 in points {
+            let m = WhiteBalanceEstimate.anchorRelativeMatrix(from: w0, to: w0)
+            var worst = 0.0
+            for r in 0..<3 {
+                for c in 0..<3 {
+                    let expected = (r == c) ? 1.0 : 0.0
+                    worst = max(worst, abs(m.matrix[r, c] - expected))
+                }
+            }
+            XCTAssertLessThanOrEqual(worst, 1e-9,
+                "M_rel(\(w0.summary) → itself) is \(worst) from the identity")
+            XCTAssertFalse(m.inverseFellBack, "\(w0.summary): a healthy determinant fell back")
+            XCTAssertEqual(WhiteBalanceEstimate.previewMatrix(from: w0, to: w0).rows,
+                           WhiteBalanceEstimate.anchorRelativeMatrix(from: w0, to: w0).matrix.rows,
+                           "the public door and the anchor door disagree")
+            print(String(format: "WB anchor: M_rel(%@ → itself) |m − I|∞ = %.3e",
+                         w0.summary, worst))
+        }
+    }
+
+    /// The anchor form telescopes to the old ratio — `M_anchor(Wₜ)·M_anchor(W₀)⁻¹ ==
+    /// M(Wₜ)·M(W₀)⁻¹` — so the refactor cannot have moved a preview pixel, and the inverse is a real
+    /// adjugate product (`M · M⁻¹ = I`), not a transpose.
+    func testTheAnchorFormTelescopesToTheDirectRatio() {
+        let pairs = [WhiteBalance(temperature: 3200, tint: 0),
+                     WhiteBalance(temperature: 5000, tint: -10),
+                     WhiteBalance(temperature: 7500, tint: 10)]
+        for (i, a) in pairs.enumerated() {
+            for b in pairs[(i + 1)...] {
+                let anchorForm = WhiteBalanceEstimate.anchorRelativeMatrix(from: a, to: b).matrix
+                let direct = WhiteBalanceEstimate.matrix(temperature: b.temperature ?? 6500,
+                                                          tint: b.tint ?? 0)
+                    * WhiteBalanceEstimate.matrix(temperature: a.temperature ?? 6500,
+                                                  tint: a.tint ?? 0).inverted()
+                for r in 0..<3 {
+                    for c in 0..<3 {
+                        XCTAssertEqual(anchorForm[r, c], direct[r, c], accuracy: 1e-12,
+                                       "\(a.summary) → \(b.summary) row\(r) col\(c)")
+                    }
+                }
+                // Round trip through the inverse: M_rel(a→b) · M_rel(b→a) = I.
+                let back = WhiteBalanceEstimate.anchorRelativeMatrix(from: b, to: a).matrix
+                let product = anchorForm * back
+                for r in 0..<3 {
+                    for c in 0..<3 {
+                        XCTAssertEqual(product[r, c], (r == c) ? 1 : 0, accuracy: 1e-9)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - 3. neutrality, direction, as-shot
 
     func testAsShotDocumentIsTheIdentity() {

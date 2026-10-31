@@ -345,6 +345,150 @@ public enum WhiteBalanceEstimate {
         return target * reference.inverted()
     }
 
+    // MARK: - 路线 B: the anchor (2026-10-31)
+
+    /// **The anchor the drag's relative matrix is written against.**
+    ///
+    /// The model is calibrated at 6000 K / tint 0, so every preview matrix is spelled as a *ratio to
+    /// that point* rather than as a direct difference of two requests:
+    ///
+    /// ```
+    /// M_anchor(X)      = M(X) · M(anchor)⁻¹           (M_anchor(anchor) = I, exactly)
+    /// M_rel(W₀ → Wₜ)   = M_anchor(Wₜ) · M_anchor(W₀)⁻¹
+    /// display          = base(settled @ W₀) ⊗ M_rel
+    /// ```
+    ///
+    /// Two reasons this is the shipped spelling and not the `M(Wₜ)·M(W₀)⁻¹` shorthand:
+    ///
+    ///   1. **`M_anchor(anchor)` is the identity *by construction*, not by cancellation.** A pair that
+    ///      lands on the anchor cannot carry a residue from the inverse, so the drag's first frame and
+    ///      a drag back to the anchor are the settled frame's own bytes (`whiteBalanceMatrix` returns
+    ///      `.identity` for `Wₜ == W₀` as well, which is the stronger statement the tests pin at
+    ///      ≤ 1e-9 elementwise before that early return).
+    ///   2. **The inverse is taken on a quantity that is near the identity**, not on a matrix that may
+    ///      itself be far from it: `M_anchor(W₀)⁻¹` is the inverse of `I + (small)` for nearby pairs,
+    ///      so a light drag cannot amplify arithmetic error. It is still a real 3×3 adjugate inverse
+    ///      (never a transpose, never a diagonal approximation), and a determinant under `1e-6` falls
+    ///      back to the identity **and is reported** (`inverseFellBack`) rather than throwing.
+    ///
+    /// **Boundary, and it is the whole point of 路线 B:** this matrix is the *drag preview's
+    /// increment*, nothing else. The settled frame is still `CIRAWFilter`'s own answer (the pair goes
+    /// into `DecodeInputs.whiteBalance`, S1's gain there is `(1, 1, 1)`), and neither this matrix nor
+    /// the anchor enters a render key, a decode key or an export. If a fitted table ever replaces the
+    /// analytic `M`, it slots in at `anchorMatrix` and nothing else moves.
+    public static let previewAnchor = (temperature: 6000.0, tint: 0.0)
+
+    /// `M(anchor)` and its inverse, computed once: the denominator of every `M_anchor`.
+    private static let anchorRawMatrix = matrix(temperature: previewAnchor.temperature,
+                                                tint: previewAnchor.tint)
+    private static let anchorRawInverse = stableInverse(anchorRawMatrix) ?? .identity
+
+    /// Is this pair the anchor itself (an unspecified tint is the anchor's 0)?
+    public static func isPreviewAnchor(_ temperature: Double?, _ tint: Double?) -> Bool {
+        guard let temperature else { return false }
+        return abs(temperature - previewAnchor.temperature) < 1e-9
+            && abs((tint ?? 0) - previewAnchor.tint) < 1e-9
+    }
+
+    /// `M_anchor(X)` — the 3×3 for a pair, expressed as a ratio to the anchor. **Exactly `I` at the
+    /// anchor**, which is the property the drag's identity frame relies on.
+    public static func anchorMatrix(for whiteBalance: WhiteBalance) -> Matrix3 {
+        let temperature = whiteBalance.temperature ?? WhiteBalanceSolver.nominalTemperature
+        let tint = whiteBalance.tint ?? 0
+        if isPreviewAnchor(temperature, tint) { return .identity }
+        return matrix(temperature: temperature, tint: tint) * anchorRawInverse
+    }
+
+    /// `M_anchor(W₀)⁻¹ · …` — the guarded analytic inverse.
+    ///
+    /// `nil` when the determinant is not usable (|det| < 1e-6 or non-finite). The caller substitutes
+    /// the identity and records that it did; silently returning a matrix here is exactly the failure
+    /// mode this signature exists to make impossible.
+    static func stableInverse(_ m: Matrix3, floor: Double = 1e-6) -> Matrix3? {
+        let det = m.determinant
+        guard det.isFinite, abs(det) >= floor else { return nil }
+        return m.inverted()
+    }
+
+    /// **`M_rel(W₀ → Wₜ)`** — the drag's matrix, anchor-relative.
+    ///
+    /// `inverseFellBack` is `true` when `M_anchor(W₀)⁻¹` was refused and the identity was used
+    /// instead (the frame is then anchored on the *target* alone; it is a preview, and saying so beats
+    /// a precondition trap).
+    public static func anchorRelativeMatrix(from buffer: WhiteBalance, to document: WhiteBalance,
+                                            asShotPair: WhiteBalance = .asShot)
+        -> (matrix: Matrix3, inverseFellBack: Bool) {
+        guard !document.isAsShot else { return (.identity, false) }
+        let target = anchorMatrix(for: document)
+        // The base is the pair the buffer **on screen** carries: the settled pair when it was
+        // developed at one, the file's as-shot pair when it was not (and the nominal 6500 K when the
+        // caller has no pair at all — 143/194's reference, kept so a synthetic image behaves as
+        // before).
+        let base: WhiteBalance
+        if !buffer.isAsShot {
+            base = buffer
+        } else if asShotPair.isAsShot {
+            base = WhiteBalance(temperature: WhiteBalanceSolver.nominalTemperature, tint: 0)
+        } else {
+            base = asShotPair
+        }
+        guard let inverse = stableInverse(anchorMatrix(for: base)) else {
+            return (target, true)
+        }
+        return (target * inverse, false)
+    }
+
+    /// **The drag preview's matrix** — the full 3×3, not its diagonal.
+    ///
+    /// 194's preview reduced this product to three numbers (`gains(from:)` below takes
+    /// `matrix[0,0]/[1,1]/[2,2]`), and §2 of 195 measured what that costs: 16 codes at 6500 K and
+    /// **97 codes / ΔE00 8.9** at 3200 K, because the adaptation's cross-channel terms grow exactly as
+    /// the request leaves neutral. `relativeMatrix` was always the complete product; this function is
+    /// where the pipeline now reads it, so the preview multiplies a pixel by the same 3×3 the model
+    /// always had instead of its shadow.
+    ///
+    /// The reference is the buffer's own balance:
+    ///
+    ///   · **buffer as shot** — `relativeMatrix(request:asShot:)`, i.e. the request adapted *from* the
+    ///     illuminant measured on that buffer (the nominal 6500 K when the frame is neutral), which is
+    ///     the same reference `gain(for:asShot:)` chose. A neutral frame asked for 6500 K therefore
+    ///     cancels to the identity, exactly as before.
+    ///   · **buffer settled at another pair** — `M(document) · M(buffer)⁻¹`. The as-shot reference
+    ///     cancels out of that quotient algebraically, so it is not consulted: a drag from a settled
+    ///     rung continues from where that rung is, and `M(x)·M(x)⁻¹` is the identity the settled frame
+    ///     needs.
+    public static func previewMatrix(from buffer: WhiteBalance, to document: WhiteBalance,
+                                     asShotPair: WhiteBalance = .asShot) -> Matrix3 {
+        // 路线 B (2026-10-31): one spelling only — `M_anchor(Wₜ) · M_anchor(W₀)⁻¹`. The inverse
+        // refusal is reported through `anchorRelativeMatrix`; `RenderGraph` is the caller that turns it
+        // into a diagnosis, so this door cannot hide it behind a different number.
+        anchorRelativeMatrix(from: buffer, to: document, asShotPair: asShotPair).matrix
+    }
+
+    /// 195 — **is this preview matrix sane enough to multiply by?**
+    ///
+    /// The valve exists because the model is a *ratio of two Bradford adaptations*, and far from
+    /// neutral that ratio's own extrapolation becomes violent: at 2850 K/+60 it produces a **4.06×**
+    /// blue entry, which does not correct the frame — it burns the highlights (measured 218 codes,
+    /// ΔE00 24). A matrix that large is not a better answer than the diagonal, it is a worse one, so
+    /// the caller falls back to `relativeGain`'s three numbers for that frame.
+    ///
+    /// The bound is `|m| ≤ 3` on every entry, which is deliberately loose: the biggest *legitimate*
+    /// entry measured across the five §3 pairs is 2.70 (3200 K's blue, whose decoder-fitted value is
+    /// 1.63 — the model already over-corrects there by 1.7×), so 3 admits every pair the task names
+    /// and rejects only the cells where the ratio is extrapolating.
+    ///
+    /// **What this is not.** It is not a "row sums must be ≈1" test, even though a chromatic
+    /// adaptation suggests one: a white-balance matrix's rows sum to its **channel gains**, and the
+    /// decoder's own answer at 3200 K has rows summing to 0.51 / 0.85 / 1.70 (measured — see
+    /// `WhiteBalanceModelProbeTests`). A row-sum gate would reject every real request and quietly make
+    /// the whole feature a no-op.
+    public static func isPlausiblePreviewMatrix(_ m: Matrix3) -> Bool {
+        for v in m.values where !v.isFinite || abs(v) > 3 { return false }
+        let g = m[1, 1]
+        return g.isFinite && abs(g) > 1e-6
+    }
+
     /// The full 3×3 matrix for one requested pair, in working RGB: `working⁻¹ · Bradford · working`.
     public static func matrix(temperature: Double, tint: Double) -> Matrix3 {
         let src = illuminantXYZ(temperature: temperature, tint: tint)

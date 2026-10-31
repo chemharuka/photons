@@ -5,10 +5,10 @@ import Foundation
 // A develop document holds two kinds of setting, and they part ways at the decoder:
 //
 //   · **DecodeInputs** — everything that changes the pixels ImageIO hands back: the decode recipe,
-//     the requested decoder version and the scale. (Since 143 the white balance is **not** one of
-//     them: the filter always stays at the file's as-shot balance, and the document's Kelvin/tint is
-//     an S1 gain.) A change here means "the buffer itself is a different picture", so it must
-//     **develop again**: a new ladder rung, a new `DecodeCacheKey`, a new on-disk buffer.
+//     the requested decoder version, the scale, and (since 194) the **settled** white balance. A
+//     change here means "the buffer itself is a different picture", so it must **develop again**: a
+//     new ladder rung, a new `DecodeCacheKey`, a new on-disk buffer. The white balance's other half —
+//     the drag — is view state in the loupe and never reaches this struct.
 //   · **RenderInputs** — everything the GPU stages do *after* the decode: exposure, contrast,
 //     highlights/shadows/whites/blacks, curves, colour, masks, geometry. A change here means "draw
 //     the buffer I already have differently", and must **never** develop.
@@ -30,10 +30,15 @@ import Foundation
 /// orphans every buffer written by the old recipe.
 public struct DecodeInputs: Sendable, Hashable {
 
-    /// Retained only for the key spellings that already exist. Since 143 the document never fills
-    /// this with anything but `.asShot`; the decoder is always the file's as-shot balance and the
-    /// balance itself is an S1 gain (`WhiteBalanceEstimate`). `.asShot` appends nothing to any key,
-    /// which keeps every pre-143 buffer on disk hitting.
+    /// The balance this development is baked at, or `.asShot` for the file's own balance.
+    ///
+    /// 194's settled half: a non-as-shot pair is written into `CIRAWFilter` before the pixels exist, so
+    /// two documents that differ only in Kelvin are two different buffers and this field is what names
+    /// the second one (`wb=5500K/+0`). `.asShot` appends nothing to any key, which keeps every as-shot
+    /// buffer and rung identity on disk hitting exactly as before.
+    ///
+    /// The drag does **not** come through here: while the hand is moving, the loupe renders the resident
+    /// buffer through S1 with an `WhiteBalanceEstimate` gain and no development at all.
     public var whiteBalance: WhiteBalance
     /// Decoder version requested from the system pipeline; `nil` = whatever Apple defaults to.
     /// Part of the key because a v9 request that silently became v8 is a different buffer.
@@ -138,9 +143,10 @@ public struct RenderInputs: Sendable, Equatable {
 
     public init(_ edit: EditModel) {
         var e = edit
-        // 143: the white balance is **not** a decode input any more. It is an S1 gain computed from
-        // the buffer's own illuminant, so a Kelvin/tint change must be visible here — that is what
-        // makes it a render (and what lets the drag preview settle on a real frame without a decode).
+        // 194: the white balance is a decode input again for the **settled** frame (the decoder bakes
+        // it), but the pair still belongs here: the drag preview is this same document drawn from a
+        // buffer that does not carry the pair yet, with an `WhiteBalanceEstimate` gain in S1. Keeping
+        // it is what lets "did this change the render?" see a preview tick.
         // 派单 031: the noise-reduction/detail amounts are assigned inside `CIRAWFilter`, so the
         // buffer already carries them. Leaving them here would make "did this change the render?"
         // answer yes for a change the render cannot see.
@@ -208,11 +214,12 @@ public extension EditModel {
     /// The document keeps its white balance in `light` (one `Codable` blob, 派单 011 A's last
     /// bullet); this property is the derivation, so there is no second stored copy to drift.
     var decodeInputs: DecodeInputs {
-        // 143 — the white balance is **not** a decoder input. The filter is always left at the file's
-        // as-shot balance; the document's Kelvin/tint is an S1 gain (`WhiteBalanceEstimate`). Keeping
-        // the component at `.asShot` here is what makes "as shot adds nothing" continue to hold for
-        // every decode key, rung identity and buffer on disk.
-        DecodeInputs(whiteBalance: .asShot,
+        // 194 — two-stage white balance. The document's pair is a **decoder** input again: the drag
+        // runs on an S1 gain (`WhiteBalanceEstimate`, no development), and the moment the hand lets go
+        // the value is written here so the frame that settles is the colour engine's own answer. A
+        // `nil` pair still spells `.asShot`, and `.asShot` appends **nothing** to any key — the as-shot
+        // identity gate is the same string it was before 194.
+        DecodeInputs(whiteBalance: WhiteBalance(temperature: light.temperature, tint: light.tint),
                      decoderVersion: decoderVersion,
                      scale: 1,
                      recipe: DecodeRecipe.current,
@@ -235,8 +242,10 @@ public extension EditModel {
 
     /// The one decision function: decode, render, or nothing.
     ///
-    /// A white-balance change is `.render` since 143: it is an S1 gain on the resident buffer, so no
-    /// development happens. (Before 143 it was `.decode` because the decoder owned the balance.)
+    /// A white-balance change is `.decode` since 194: the settled value is baked by `CIRAWFilter`, so a
+    /// different pair is a different buffer (`wb=…` in the key). The **drag** never comes through here —
+    /// it is view state (`LoupeController`'s preview), rendered with an S1 gain on the buffer already
+    /// resident, so a live gesture still costs one render and no development.
     func splitFrom(_ old: EditModel) -> EditSplit {
         if decodesDifferently(from: old) { return .decode }
         if renderInputs != old.renderInputs { return .render }

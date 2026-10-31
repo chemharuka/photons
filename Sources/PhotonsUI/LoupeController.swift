@@ -1315,6 +1315,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let decodeScale: Float
         let state: LoupeViewState
         var useCache: Bool
+        /// The decode inputs of the buffer **on screen** (194) — not the document's, which may already
+        /// name a pair this buffer does not carry (the release that is still developing, or the frame
+        /// after a settle whose ladder rung replaced the as-shot one). The drag draws that buffer.
+        let rungInputs: DecodeInputs
     }
 
     private var whiteBalancePreviewToken = 0
@@ -1417,11 +1421,39 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return frameSource?.edit.light.whiteBalance ?? .asShot
     }
 
+    /// **路线 B's drag base `W₀` — the pair the frame on screen was developed at.**
+    ///
+    /// This is the anchor the drag's relative matrix is written against
+    /// (`M_rel(W₀ → Wₜ) = M_anchor(Wₜ) · M_anchor(W₀)⁻¹`), and it is read off the graph rather than
+    /// remembered as a number, which is what makes its lifetime correct by construction:
+    ///
+    ///   · a **settle** develops a new rung → a new graph → `W₀` is the pair that rung carries;
+    ///   · a **drag tick** renders the same graph, so `W₀` does not move and no error accumulates
+    ///     (the base is never "the last preview", which would drift and could never return to the
+    ///     identity);
+    ///   · a **photo switch** clears the graph (`graph = nil`), so there is no stale base to transform
+    ///     against — `.asShot` here means "nothing is on screen yet", and the preview refuses to render
+    ///     for the same reason (`makeWhiteBalancePreviewRequest` returns `nil`);
+    ///   · an **undo**/edit change moves the decode identity, so the next frame is a different graph
+    ///     and therefore a different base.
+    ///
+    /// Nothing else reads it: it is not part of a render key, a decode key or an export.
+    public var anchorBaseWhiteBalance: WhiteBalance { graph?.bufferWhiteBalance ?? .asShot }
+
     /// S1's own triple for `whiteBalance` — the same call the settled render makes, so the two cannot
     /// disagree.
     private func previewGain(for whiteBalance: WhiteBalance) -> SIMD3<Double> {
-        guard !whiteBalance.isAsShot else { return SIMD3(1, 1, 1) }
-        let g = WhiteBalanceEstimate.gain(for: whiteBalance, asShot: previewIlluminant)
+        // 194: the drag's number is the move from **the buffer that is on screen** to the target, which
+        // is identity exactly when the buffer already carries the target (after a settle, a drag that
+        // has not left the current value must leave the frame alone). Before 194 this was `gain(for:)`
+        // — the gain from as shot — which is the same number only while the resident buffer *is* the
+        // as-shot one. When there is no graph yet there is nothing to preview against; the caller's
+        // `makeWhiteBalancePreviewRequest` refuses in the same situation.
+        guard let graph else {
+            let g = WhiteBalanceEstimate.gain(for: whiteBalance, asShot: previewIlluminant)
+            return SIMD3(g.r, g.g, g.b)
+        }
+        let g = graph.whiteBalanceGain(from: graph.bufferWhiteBalance, to: whiteBalance)
         return SIMD3(g.r, g.g, g.b)
     }
 
@@ -1444,12 +1476,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         let camera = viewport ?? jobViewport()
             ?? ImageSize(width: image.width, height: image.height)
+        let document = session?.edit ?? frameSource?.edit ?? .neutral
+        // 194: the rung this frame draws is whichever buffer is resident, described by its **own**
+        // balance. Everything else about it (decoder version, detail amounts) is the document's, because
+        // that is what developed it; only the pair is read off the graph.
+        var rungInputs = document.decodeInputs
+        rungInputs.whiteBalance = graph?.bufferWhiteBalance ?? .asShot
         return WhiteBalancePreviewRequest(
             target: target, token: 0, tickTime: CACurrentMediaTime(),
-            edit: session?.edit ?? frameSource?.edit ?? .neutral,
+            edit: document,
             url: url, baseIdentity: graphPhoto ?? url.lastPathComponent,
             viewport: camera, decodeScale: Float(decodedScale), state: viewState,
-            useCache: true)
+            useCache: true, rungInputs: rungInputs)
     }
 
     private func performWhiteBalancePreviewRender(_ request: WhiteBalancePreviewRequest) throws
@@ -1457,11 +1495,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         var edit = request.edit
         edit.light.temperature = request.target.temperature
         edit.light.tint = request.target.tint
+        // 194: the **buffer** is the document's settled development, not the target's — the target is
+        // drawn onto it as an S1 gain. Naming that rung's own inputs is what keeps the drag on the
+        // resident buffer and makes "a drag develops nothing" true by construction rather than by cache
+        // luck.
         return try makeFrame(url: request.url, cacheIdentity: request.baseIdentity,
                              viewport: request.viewport, decodeScale: request.decodeScale,
                              edit: edit, state: request.state, hashPixels: false,
                              resolve: .residentOnly, useCache: request.useCache,
-                             measurement: false)
+                             measurement: false,
+                             rungInputs: request.rungInputs)
     }
 
     /// **The drag path.** One real render per tick, single-flight: a tick that arrives while one is
@@ -3104,6 +3147,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return .sampled(DropperSample(sourceX: source.x, sourceY: source.y,
                                       bufferX: bx, bufferY: by, decodeScale: ds,
                                       rgb: image.averageRGB(x: bx, y: by)))
+    }
+
+    /// Where the refinement loop should read: the file, the rung on screen, and the buffer pixel the
+    /// click resolved to. `nil` when no buffer is resident (nothing to iterate against).
+    public func dropperProbe(for sample: DropperSample) -> WhiteBalanceDropperRefiner.Probe? {
+        guard decodedURL != nil, decoded != nil else { return nil }
+        return WhiteBalanceDropperRefiner.Probe(url: decodedURL!,
+                                                scale: Float(decodedScale > 0 ? decodedScale : 1),
+                                                x: sample.bufferX, y: sample.bufferY)
     }
 
     /// The scene illuminant measured from the resident decoded buffer (143). The eyedropper's test
@@ -5583,11 +5635,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The identity of one **rung** of one photo, including the document's decode inputs (派单 009/011).
     ///
-    /// The white balance is a *decode* input since 派单 006 (`CIRAWFilter.neutralTemperature`), so two
-    /// documents that differ only in Kelvin are two different buffers — the ladder must not answer
-    /// `2850 K` with the buffer it developed as shot. `DecodeInputs.appending(to:)` is the one
-    /// spelling of that rule; as shot appends nothing, so every pre-009 identity (and every cache key
-    /// built from it) is byte-for-byte the old string.
+    /// 194: the **settled** white balance is a decode input again (`CIRAWFilter.neutralTemperature`), so
+    /// two documents that differ only in Kelvin are two different buffers — the ladder must not answer
+    /// `2850 K` with the buffer it developed as shot. That is also what lets the drag be free: while the
+    /// hand moves the document keeps its old pair, so the rung it renders is the one already resident.
+    /// `DecodeInputs.appending(to:)` is the one spelling of the rule; as shot appends nothing, so every
+    /// pre-009 identity (and every cache key built from it) is byte-for-byte the old string.
     private static func rungIdentity(_ base: String, inputs: DecodeInputs) -> String {
         inputs.appending(to: base)
     }
@@ -5694,14 +5747,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            mode: LoupeFrameMode = .edited,
                            fitScale: Double = 1,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing,
-                           useCache: Bool = true, measurement: Bool = true) throws -> FrameResult {
+                           useCache: Bool = true, measurement: Bool = true,
+                           rungInputs: DecodeInputs? = nil) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
-        // 派单 011: the white balance is a **decode** input, so it is part of the *rung*, not of the
-        // render — a 2850 K document is a different development, never the as-shot buffer re-tinted
-        // in S1 (S1 is identity there). `DecodeInputs` is the only thing allowed to name a buffer;
-        // exposure/contrast/curve/colour never enter this identity, which is why changing them can
-        // never develop.
-        let inputs = model.decodeInputs
+        // 194: the white balance is a **decode** input for the *settled* frame, so a 2850 K document
+        // is its own development — and S1 is identity on that buffer because the decoder already
+        // baked the pair (`RenderInput.whiteBalance`). `DecodeInputs` is still the only thing allowed
+        // to name a buffer; exposure/contrast/curve/colour never enter this identity, which is why
+        // changing them can never develop.
+        //
+        // The drag is the one caller that asks for a buffer it is *not* about to draw from the
+        // document's own pair: it renders the resident rung (one settled step behind) through S1 with
+        // a `WhiteBalanceEstimate` gain, so it passes that rung's inputs explicitly rather than
+        // developing the target — `rungInputs`.
+        let inputs = rungInputs ?? model.decodeInputs
         let cacheIdentity = Self.rungIdentity(baseIdentity, inputs: inputs)
         // ── the decode ladder (§11.10) ───────────────────────────────────────────────────────
         // One photo, one development per rung. Keyed by (photo, scale), so the second visit to fit
@@ -5740,8 +5799,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
         if graph == nil || graphIdentity != identity {
-            graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url,
-                                                      lensProfile: outcome.rung.lensProfile))
+            graph = try RenderGraph(input: RenderInput(
+                image: image, identity: identity, sourceURL: url,
+                lensProfile: outcome.rung.lensProfile,
+                whiteBalance: inputs.whiteBalance,
+                // 195 — the drag's matrix is a ratio against the balance these pixels are already
+                // at, and for an as-shot buffer that is the **file's** pair (measured 5872 K/+20 and
+                // 5552 K/+24 on two fixtures), never the nominal 6500 K.
+                asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
             graphIdentity = identity
             graphPhoto = baseIdentity
             // A new photo (or a new rung of it): its key is a different picture, so the measurement
@@ -7065,7 +7130,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         let graph = try RenderGraph(input: RenderInput(image: outcome.rung.image,
                                                        identity: identity,
-                                                       sourceURL: request.sourceURL))
+                                                       sourceURL: request.sourceURL,
+                                                       whiteBalance: inputs.whiteBalance,
+                                                       asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
         histogramLock.lock()
         pictureGraph = graph                 // an older rung's graph is replaced, not reused
         pictureGraphIdentity = identity
@@ -7155,7 +7222,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         } else {
             measurer = try RenderGraph(input: RenderInput(image: outcome.rung.image,
                                                           identity: graphIdentityForRung,
-                                                          sourceURL: url))
+                                                          sourceURL: url,
+                                                          whiteBalance: inputs.whiteBalance))
         }
         let histogram = try measurer.measureHistogram(edit, bins: bins,
                                                      headroom: displayHeadroom.headroom)

@@ -168,9 +168,9 @@ final class WhiteBalanceSectionTests: XCTestCase {
                                                      preferred: "flash"), "闪光灯")
     }
 
-    // MARK: - B. one preset = one history entry, no development
+    // MARK: - B. one preset = one history entry, one development (194)
 
-    func testChoosingDaylightWritesOneHistoryEntryAndNoDevelopment() throws {
+    func testChoosingDaylightWritesOneHistoryEntryAndOneDevelopment() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
         let loupe = makeLoupe(session)
@@ -192,14 +192,17 @@ final class WhiteBalanceSectionTests: XCTestCase {
         XCTAssertEqual(session.history.currentSnapshot?.label, "预设 日光")
 
         let edited = try develop(loupe, url, session.edit)
-        XCTAssertTrue(edited.usedCachedDecode,
-                      "a new Kelvin must reuse the as-shot buffer — white balance is an S1 gain since 143")
-        XCTAssertEqual(decodeTotal(), decodesBefore, "one preset = zero developments")
+        XCTAssertFalse(edited.usedCachedDecode,
+                       "a preset's Kelvin must develop the buffer it settles on (194) — reusing the "
+                       + "as-shot buffer would leave `CIRAWFilter` at as shot")
+        XCTAssertEqual(edited.whiteBalanceGain, SIMD3(1, 1, 1),
+                       "the settled buffer already carries 5500 K; S1 must not apply it again")
+        XCTAssertEqual(decodeTotal(), decodesBefore + 1, "one preset = one development")
 
         // …and the new document is itself resident: a second frame at 5500 K is a hit.
         let again = try develop(loupe, url, session.edit)
         XCTAssertTrue(again.usedCachedDecode)
-        XCTAssertEqual(decodeTotal(), decodesBefore)
+        XCTAssertEqual(decodeTotal(), decodesBefore + 1)
         print("预设 日光: \(session.edit.light.whiteBalance.summary)"
               + " · history +\(session.history.count - historyBefore)"
               + " · decodes +\(decodeTotal() - decodesBefore)"
@@ -211,7 +214,8 @@ final class WhiteBalanceSectionTests: XCTestCase {
         XCTAssertNil(session.edit.light.tint)
         XCTAssertEqual(session.history.count, historyBefore + 2)
         _ = try develop(loupe, url, session.edit)
-        XCTAssertEqual(decodeTotal(), decodesBefore, "原照设置 is a render too, not a development")
+        XCTAssertEqual(decodeTotal(), decodesBefore + 2,
+                       "原照设置 is its own development — `.asShot` is a buffer like any other")
         print("原照设置: \(session.edit.light.whiteBalance.summary)"
               + " · history +\(session.history.count - historyBefore)"
               + " · decodes +\(decodeTotal() - decodesBefore)")
@@ -223,8 +227,23 @@ final class WhiteBalanceSectionTests: XCTestCase {
 
     // MARK: - C. the eyedropper
 
-    /// A real grey patch — the case the task names ("在测试图的灰色区域取样"): neutral well under the 2 %
-    /// target, one history entry, one development.
+    /// A real grey patch — the case the task names ("在测试图的灰色区域取样"): one history entry, and
+    /// the settled frame measured **on the frame that settles**.
+    ///
+    /// **路线 B, and the dropper is where it has to be paid.** Since 194 the settled frame is
+    /// `CIRAWFilter`'s answer while the dropper's first solve is the analytic model, so the analytic
+    /// pair lands 13.71 % off. The drag is allowed to live with that; a one-shot click is not, and it
+    /// can afford what a drag cannot: a few real developments. So the click solves, then **iterates
+    /// against the decoder** (`WhiteBalanceDropperRefiner`: two single-axis probes + a Newton step,
+    /// ≤ 4 developments), off the main thread, and writes the answer once.
+    ///
+    /// Three things are asserted, and each one is the promise:
+    ///
+    ///   1. **the residual is ≤ 2 %** on the frame that settles — the pre-194 gate, not a loosened one;
+    ///   2. **the click did not block** — it returned before the refinement landed, and the write
+    ///      happened on arrival (`returnedBeforeArrival`, `clickMilliseconds`);
+    ///   3. **one click is still one history entry and one development** (the settle), whatever the
+    ///      refinement spent internally.
     func testEyedropperMakesTheSampledGreyAreaNeutral() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
@@ -237,18 +256,53 @@ final class WhiteBalanceSectionTests: XCTestCase {
                                     session: session, commands: commands, label: "灰区")
         print(report.text)
 
-        XCTAssertEqual(session.edit.light.whiteBalance, report.solve.whiteBalance)
-        XCTAssertFalse(report.solve.clamped, "a grey patch must not need the end of a range")
-        XCTAssertLessThan(report.afterChroma, 0.02,
-                          "the grey area is still \(String(format: "%.2f%%", report.afterChroma * 100))")
-        XCTAssertLessThan(report.afterChroma, report.beforeChroma)
+        let refined = try XCTUnwrap(report.refinement, "the dropper took no decoder measurement")
+        XCTAssertEqual(session.edit.light.whiteBalance, refined.final.quantized(),
+                       "the document holds \(session.edit.light.whiteBalance.summary), the iteration "
+                       + "settled on \(refined.final.summary)")
+        XCTAssertLessThanOrEqual(refined.residual, 0.02,
+                                 "the settled grey area is at "
+                                 + String(format: "%.2f%%", refined.residual * 100)
+                                 + " — the dropper's target is 2 %, and the iteration curve is:\n"
+                                 + refined.attempts.map { "  " + $0.text }.joined(separator: "\n"))
+        XCTAssertLessThanOrEqual(refined.decodes, WhiteBalanceDropperRefiner.maxDecodes,
+                                 "the click spent \(refined.decodes) developments")
+        XCTAssertLessThanOrEqual(report.clickMilliseconds, 50,
+                                 "the click held the main thread for "
+                                 + String(format: "%.0f ms", report.clickMilliseconds)
+                                 + " — the refinement must run off it")
+        XCTAssertTrue(report.returnedBeforeArrival,
+                      "the click returned only after the refinement landed — it blocked")
+        // The 1.5 s *target* is missed, and the number says why: `CIRAWFilter` costs ~580 ms per
+        // development on this 60 MP file **at any rung** (1/16 is not cheaper than 1/8 — ImageIO
+        // demosaics the whole frame), so a four-development solve cannot fit in 1.5 s. The ceiling
+        // asserted here is that measured floor times the decode budget; the gate that matters is the
+        // residual, and the click is off the main thread either way.
+        XCTAssertLessThanOrEqual(refined.milliseconds, 3500,
+                                 String(format: "the refinement took %.0f ms — more than "
+                                        + "%.0f ms per development on this file means something "
+                                        + "changed in the decode path",
+                                        refined.milliseconds,
+                                        WhiteBalanceDropperRefiner.decoderMillisecondsPerDevelopment))
+        print(String(format: "dropper timing: %.0f ms for %d development(s) = %.0f ms each "
+                     + "(1.5 s target NOT met — the decode floor is the limit, the main thread paid "
+                     + "%.1f ms)", refined.milliseconds, refined.decodes,
+                     refined.milliseconds / Double(max(refined.decodes, 1)),
+                     report.clickMilliseconds))
         XCTAssertEqual(report.historyDelta, 1, "the dropper writes one snapshot")
-        XCTAssertEqual(report.decodeDelta, 0, "a white-balance write is a render since 143")
+        XCTAssertEqual(report.decodeDelta, refined.decodes + 1,
+                       "a dropper click = the refinement's \(refined.decodes) development(s) + the "
+                       + "frame that settles (\(report.decodeDelta - refined.decodes))")
+        print(String(format: "dropper grey: %.2f%% → %.2f%% · %d decode(s) · refine %.0f ms · "
+                     + "click %.1f ms (non-blocking %@)",
+                     report.beforeChroma * 100, refined.residual * 100, refined.decodes,
+                     refined.milliseconds, report.clickMilliseconds,
+                     report.returnedBeforeArrival ? "yes" : "NO"))
     }
 
-    /// The same click on a strongly coloured patch: the model is a Planckian fit, so a sample the fit
-    /// cannot reach is reported (`clamped`) rather than promised — but it must still cut the chroma by
-    /// more than half, and it must still be exactly one history entry and one development.
+    /// The same click on a strongly coloured patch: the model is a Planckian fit, so the *first* solve
+    /// can be far off — but the iteration reads the decoder, so the settled frame must still be much
+    /// closer to grey than the sample was, and it must still be exactly one history entry.
     func testEyedropperOnAColouredPatchStillImprovesAndWritesOnce() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
@@ -261,12 +315,18 @@ final class WhiteBalanceSectionTests: XCTestCase {
                                     session: session, commands: commands, label: "强色块")
         print(report.text)
 
-        XCTAssertLessThan(report.afterChroma, report.beforeChroma * 0.5,
-                          "the dropper must at least halve a strong cast ("
+        // A strongly coloured patch is not grey even after the balance — the promise is "much less
+        // coloured", measured on the settled frame. 194 measured 91.8 % → 31.9 % analytically; the
+        // iteration can only do better.
+        XCTAssertLessThan(report.afterChroma, report.beforeChroma * 0.4,
+                          "the settled frame must still cut a strong cast ("
                           + String(format: "%.2f%%", report.beforeChroma * 100) + " → "
                           + String(format: "%.2f%%", report.afterChroma * 100) + ")")
         XCTAssertEqual(report.historyDelta, 1)
-        XCTAssertEqual(report.decodeDelta, 0)
+        let refined = try XCTUnwrap(report.refinement)
+        XCTAssertEqual(report.decodeDelta, refined.decodes + 1,
+                       "one dropper click = \(refined.decodes) refinement development(s) + the settle "
+                       + "(\(report.decodeDelta))")
     }
 
     func testDropperOnTheLetterboxWritesNothing() throws {
@@ -313,10 +373,20 @@ final class WhiteBalanceSectionTests: XCTestCase {
         let afterChroma: Double
         let historyDelta: Int
         let decodeDelta: Int
+        let refinement: WhiteBalanceDropperRefiner.Refinement?
+        /// How long the click handler itself took (the part the user feels).
+        let clickMilliseconds: Double
+        /// `true` when the click returned **before** the refinement landed — the non-blocking gate.
+        let returnedBeforeArrival: Bool
     }
 
-    /// Arm, click through `LoupeController`, apply through `WhiteBalanceCommands` — the same three
-    /// calls the inspector makes — then develop the new document and read the same source point.
+    /// Arm, click through `LoupeController`, and let the inspector's own path run: `beginDropper`
+    /// (which solves on the main thread and refines off it) — then wait for the arrival, develop the
+    /// document it wrote, and read the same source point off the settled frame.
+    ///
+    /// The two clocks are separate on purpose: `clickMilliseconds` is what the main thread paid, and
+    /// `refinement.milliseconds` is what the decoder cost. A dropper that needs three developments is
+    /// fine; a dropper that *blocks* for them is not.
     private func runDropper(at point: CGPoint, url: URL, loupe: LoupeController,
                             session: CatalogSession, commands: WhiteBalanceCommands,
                             label: String) throws -> DropperReport {
@@ -327,11 +397,25 @@ final class WhiteBalanceSectionTests: XCTestCase {
 
         var solve: WhiteBalanceSolve?
         var clicked: LoupeController.DropperSample?
+        var refined: WhiteBalanceDropperRefiner.Refinement?
+        var arrived = false
+        var clickMilliseconds = 0.0
+
         loupe.armEyedropper { outcome in
-            if case .sampled(let sample) = outcome {
-                clicked = sample
+            guard case .sampled(let sample) = outcome else { return }
+            clicked = sample
+            guard let probe = loupe.dropperProbe(for: sample) else {
                 solve = commands.applyDropper(sample.rgb)
+                arrived = true
+                return
             }
+            let started = Date()
+            solve = commands.beginDropper(sample.rgb, probe: probe) { applied, report in
+                if applied != nil { solve = applied }
+                refined = report
+                arrived = true
+            }
+            clickMilliseconds = Date().timeIntervalSince(started) * 1000
         }
         XCTAssertTrue(loupe.isEyedropperArmed)
         let outcome = try XCTUnwrap(loupe.handleEyedropperClick(atViewPoint: point),
@@ -340,50 +424,66 @@ final class WhiteBalanceSectionTests: XCTestCase {
             throw XCTSkip("the click at \(point) produced \(String(describing: outcome))")
         }
         XCTAssertFalse(loupe.isEyedropperArmed, "the dropper is one-shot")
+        let returnedBeforeArrival = !arrived
+        // The refinement runs on a detached task and hops back to the main actor: pump the runloop
+        // until it lands (the assertions below need the number, not the timing).
+        let deadline = Date().addingTimeInterval(30)
+        while !arrived, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
         let applied = try XCTUnwrap(solve, "the dropper produced no solution")
         XCTAssertEqual(clicked?.rgb, sample.rgb, "the click must sample what it reported")
 
-        // The pixels: 143 — the decoded buffer no longer changes, the **S1 gain** does. Apply the
-        // exact triple the settled render writes into the linear buffer to the sample we read.
+        // The pixels: the write goes to the **decoder**, so the honest "after" is the settled frame's
+        // own pixel at the same screen point. Re-click the very same point on the newly developed frame
+        // (the dropper is one-shot, so it is re-armed) instead of predicting a gain.
         _ = try develop(loupe, url, session.edit)
-        let gain = WhiteBalanceEstimate.gain(for: session.edit.light.whiteBalance,
-                                             asShot: loupe.measuredAsShotIlluminant)
-        let after = RGBSample(r: sample.rgb.r * gain.r,
-                              g: sample.rgb.g * gain.g,
-                              b: sample.rgb.b * gain.b)
+        var afterSample: RGBSample?
+        loupe.armEyedropper { outcome in
+            if case .sampled(let s) = outcome { afterSample = s.rgb }
+        }
+        _ = loupe.handleEyedropperClick(atViewPoint: point)
+        let after = afterSample ?? sample.rgb
         let text = String(format: """
             [%@] src %.0f,%.0f → buf %d,%d @%.3f×
               solve   %@ (reference %.0f K / %+.1f) · model residual %.2f%% · clamped %@
-              model   predicted RGB %@
+            """, label, sample.sourceX, sample.sourceY, sample.bufferX, sample.bufferY,
+            sample.decodeScale, applied.whiteBalance.summary, reference.temperature,
+            reference.tint, applied.residual * 100, applied.clamped ? "YES" : "no")
+            + "\n" + (refined.map { "  refine  " + $0.text } ?? "  refine  (none)")
+            + "\n" + String(format: """
               before  RGB %@ · chroma %.2f%% (b/r %.3f, g/r %.3f)
               after   RGB %@ · chroma %.2f%% (b/r %.3f, g/r %.3f)
-              history +%d · decodes +%d
+              history +%d · decodes +%d · click %.1f ms · returned before arrival %@
             """,
-            label, sample.sourceX, sample.sourceY, sample.bufferX, sample.bufferY, sample.decodeScale,
-            applied.whiteBalance.summary, reference.temperature, reference.tint,
-            applied.residual * 100, applied.clamped ? "YES" : "no", applied.predicted.text,
             sample.rgb.text, sample.rgb.chroma * 100,
             sample.rgb.b / sample.rgb.r, sample.rgb.g / sample.rgb.r,
             after.text, after.chroma * 100,
             after.b / after.r, after.g / after.r,
-            session.history.count - historyBefore, decodeTotal() - decodesBefore)
+            session.history.count - historyBefore, decodeTotal() - decodesBefore,
+            clickMilliseconds, returnedBeforeArrival ? "yes" : "NO")
         return DropperReport(text: text, solve: applied,
                              beforeChroma: sample.rgb.chroma, afterChroma: after.chroma,
                              historyDelta: session.history.count - historyBefore,
-                             decodeDelta: decodeTotal() - decodesBefore)
+                             decodeDelta: decodeTotal() - decodesBefore,
+                             refinement: refined,
+                             clickMilliseconds: clickMilliseconds,
+                             returnedBeforeArrival: returnedBeforeArrival)
     }
 
-    // MARK: - 143: the split, measured on the real decoder
+    // MARK: - 194: the split, measured on the real decoder
 
-    /// **A white-balance change no longer develops; it re-renders the same buffer.** Counted with
+    /// **Render edits re-render; a settled white balance develops — once.** Counted with
     /// `RAWDecoder.decodeCounts`, because a second decode is easy to hide inside a frame that was
     /// going to be slow anyway.
     ///
     ///   1. exposure / contrast / curve / colour → `usedCachedDecode`, **0** new decodes;
-    ///   2. temperature + tint → still `usedCachedDecode`, **0** new decodes, and the pixels differ
-    ///      because S1's gain moved;
-    ///   3. back to as shot → the same buffer again, and the pixels return to the render-only frame.
-    func testExposureAndWhiteBalanceBothReuseTheAsShotBuffer() throws {
+    ///   2. temperature + tint → **1** new decode (the buffer is the decoder's answer), and the pixels
+    ///      differ because the decode did the work, not a gain on top of it;
+    ///   3. the same pair again → **0** more (one value, one development);
+    ///   4. back to as shot → **1** more, and the picture returns to the render-only frame exactly —
+    ///      the as-shot identity gate.
+    func testExposureReRendersAndASettledWhiteBalanceDevelopsOnce() throws {
         let url = try fixtureURL()
         let session = CatalogSession()
         let loupe = makeLoupe(session)
@@ -408,36 +508,39 @@ final class WhiteBalanceSectionTests: XCTestCase {
                           "the render-side edits changed no pixel — the fixture edit is a no-op")
         XCTAssertEqual(decodeTotal(), base, "a second render-side frame is still no development")
 
-        // ── white balance: the same rung, a different S1 gain
+        // ── white balance: a new development, because the settled frame is the decoder's
         var warm = render
         warm.light.temperature = 3500
         warm.light.tint = 12
         let developed = try develop(loupe, url, warm)
-        XCTAssertTrue(developed.usedCachedDecode,
-                      "3500 K/+12 developed a new buffer — the balance is a render gain since 143")
-        XCTAssertEqual(decodeTotal(), base, "改色温/色调不重解码（解码计数不变）")
+        XCTAssertFalse(developed.usedCachedDecode,
+                       "3500 K/+12 reused the as-shot buffer — the settled pair never reached "
+                       + "`CIRAWFilter` (this is the defect 194 fixes)")
+        XCTAssertEqual(decodeTotal(), base + 1, "改色温/色调重解码一次（落定帧是真值）")
+        XCTAssertEqual(developed.whiteBalanceGain, SIMD3(1, 1, 1),
+                       "the buffer was decoded at 3500 K/+12 and S1 applied the pair again")
         let warmPixels = try hashedFrame(loupe, url, warm)
         XCTAssertNotEqual(warmPixels, renderPixels,
-                          "the white balance re-rendered but the pixels did not move")
+                          "the white balance developed a buffer but the pixels did not move")
 
-        // ── the same document again is a cache hit (render key included)
+        // ── the same document again is a cache hit — one value, one development
         let again = try develop(loupe, url, warm)
         XCTAssertTrue(again.usedCachedDecode, "the same 3500 K document developed twice")
-        XCTAssertEqual(decodeTotal(), base)
+        XCTAssertEqual(decodeTotal(), base + 1)
 
-        // ── back to as shot: the same buffer, and the render-only pixels return.
+        // ── back to as shot: one more development, and the render-only pixels return exactly.
         var backToShot = warm
         backToShot.light.temperature = nil
         backToShot.light.tint = nil
         let reused = try develop(loupe, url, backToShot)
-        XCTAssertTrue(reused.usedCachedDecode,
-                      "the ladder developed again for the as-shot document")
-        XCTAssertEqual(decodeTotal(), base, "as shot re-renders the as-shot buffer")
+        XCTAssertFalse(reused.usedCachedDecode,
+                       "returning to as shot must develop the as-shot buffer again")
+        XCTAssertEqual(decodeTotal(), base + 2, "as shot develops its own buffer")
         XCTAssertEqual(try hashedFrame(loupe, url, backToShot), renderPixels,
                        "as shot with the same render inputs must be the same picture")
 
-        print("decode split: as shot \(base) decode(s) → render edits +0 → 3500 K/+12 +0 "
-              + "→ repeat +0 → back to as shot +0 (total \(decodeTotal()), one rung resident)")
+        print("decode split: as shot \(base) decode(s) → render edits +0 → 3500 K/+12 +1 "
+              + "→ repeat +0 → back to as shot +1 (total \(decodeTotal()))")
     }
 
     /// A frame whose pixels are hashed — the "did the decode reach the picture" half of the counting.

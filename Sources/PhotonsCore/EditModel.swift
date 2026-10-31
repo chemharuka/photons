@@ -607,9 +607,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             // Lightroom's Light panel straddles S1 (blacks/whites levels, exposure, highlight
             // recovery) and S2 (contrast, highlights, shadows). Blacks/whites are a **level** — the
             // 0 and 1 points of the scene-linear buffer — so they dirty `.sceneLinear` like exposure
-            // does: the linear buffer itself is what changed (派单 019). Since 143 the white balance
-            // is S1's gain slot too, so a Kelvin/tint change dirties `.sceneLinear` and nothing
-            // upstream of it (there is no development any more).
+            // does: the linear buffer itself is what changed (派单 019). 194: a white balance is a
+            // **development** now, so it never reaches this branch — `decodesDifferently` above has
+            // already answered "every stage" for it. The temperature/tint terms here are kept for the
+            // documents that carry a pair the decoder cannot honour, and they cost nothing.
             if light.exposure != old.light.exposure
                 || light.highlightRecovery != old.light.highlightRecovery
                 || light.whites != old.light.whites
@@ -1281,13 +1282,17 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// this number without moving `m` would put a discontinuity in the middle of the slider; moving
     /// both would change the first half of the travel, which is pinned to be bit-identical.
     public static let blacksEVToLevelSplit: Double = 50
-    /// Absolute white balance in Kelvin, fed to `CIRAWFilter.neutralTemperature` — **not** a gain on
-    /// S1 (派单 006 B). `nil` = as shot: the decoder is left alone and the inspector shows the number
-    /// the file reports (`DecoderCapabilities.asShotTemperature`).
+    /// Absolute white balance in Kelvin — **both halves of 194's two-stage gesture**.
     ///
-    /// It used to be a nominal 6500 with a Planckian S1 gain. That was a lie in two ways: the number
-    /// in the panel was not the file's, and the pixels moved through a fit rather than through the
-    /// decoder. The literal `6500` is **not** a sentinel any more, and `nil` is distinct from it.
+    /// The settled value is written into `CIRAWFilter.neutralTemperature` by the next development
+    /// (`DecodeInputs.whiteBalance`), so the frame that follows a release is the colour engine's own
+    /// answer. While the hand is moving the same number is read by `RenderGraph` as an
+    /// `WhiteBalanceEstimate` gain on the resident buffer, which is what makes the drag live — the
+    /// drag never touches this field, it is loupe view state.
+    ///
+    /// `nil` = as shot on this axis: the decoder is left alone and the inspector shows the number the
+    /// file reports (`DecoderCapabilities.asShotTemperature`). The literal `6500` is **not** a sentinel;
+    /// `nil` is distinct from it, and `nil` is the only spelling that appends nothing to a decode key.
     public var temperature: Double?      // 2000…12000, default nil (as shot)
     /// Absolute tint (−150…150, positive = magenta), same rules as `temperature`.
     public var tint: Double?             // default nil (as shot)

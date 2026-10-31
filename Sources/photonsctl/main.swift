@@ -444,7 +444,10 @@ func cmdRender(_ a: Args) throws {
     // which is already at `decodeScale`, so the pass scale is the remainder.
     let renderScale = scale / Double(decodeScale)
 
-    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
+    // 194: the decode above is **at `wb`**, so the graph must know the buffer already carries it;
+    // otherwise S1 would apply the same balance a second time.
+    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url,
+                                                  whiteBalance: wb))
     guard let goldenMode = a.value("--golden") else {
         try renderAll(a, graph: graph, edits: edits, names: names, outURL: outURL,
                       scale: scale, renderScale: renderScale, display: display,
@@ -577,11 +580,13 @@ func cmdBench(_ a: Args) throws {
     let fitScale = min(Double(viewport.width) / Double(probe.nativeWidth),
                        Double(viewport.height) / Double(probe.nativeHeight)) * scale
     let decodeScale = a.value("--decode-scale").flatMap(Float.init) ?? decodeScaleLadder(fitScale)
+    let viewportWhiteBalance = renderWhiteBalance(a, edits: edits)
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
                                                   fileHash: fileHash, version: version,
-                                                  whiteBalance: renderWhiteBalance(a, edits: edits))
+                                                  whiteBalance: viewportWhiteBalance)
 
-    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url))
+    let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity, sourceURL: url,
+                                                  whiteBalance: viewportWhiteBalance))
     let opts = RenderOptions(canvas: viewport, scale: 1, display: display,
                              useCache: false, wantsPixels: false)
 
