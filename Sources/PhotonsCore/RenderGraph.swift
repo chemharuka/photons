@@ -1605,6 +1605,10 @@ public final class RenderGraph {
     /// *which* pairs the valve fired on rather than leaving it invisible.
     public private(set) var whiteBalanceFellBackToDiagonal = false
 
+    /// True when the last `whiteBalanceMatrix(from:to:)` refused `M_anchor(buffer)⁻¹` (|det| < 1e-6)
+    /// and used the identity instead — 路线 B's guarded inverse, reported rather than thrown.
+    public private(set) var whiteBalanceInverseFellBack = false
+
     /// The S1 gain for a document's white balance, relative to the buffer's own as-shot estimate.
     public func whiteBalanceGain(for whiteBalance: WhiteBalance)
         -> (r: Double, g: Double, b: Double) {
@@ -1634,8 +1638,15 @@ public final class RenderGraph {
         if document.isAsShot && buffer.isAsShot { return .identity }
         if document == buffer { return .identity }
         if let override = previewMatrixOverride { return override }
-        let matrix = WhiteBalanceEstimate.previewMatrix(from: buffer, to: document,
-                                                        asShotPair: input.asShotPair)
+        // 路线 B (2026-10-31): the matrix is the anchor-relative increment
+        // `M_anchor(document) · M_anchor(buffer)⁻¹`, where the anchor is 6000 K / tint 0 and
+        // `M_anchor(anchor)` is exactly `I`. The buffer here **is** the settled frame — the base the
+        // drag starts from — so a light drag only carries the model's error over the distance it
+        // travelled, and `document == buffer` above is the byte-identical first frame.
+        let relative = WhiteBalanceEstimate.anchorRelativeMatrix(from: buffer, to: document,
+                                                                 asShotPair: input.asShotPair)
+        whiteBalanceInverseFellBack = relative.inverseFellBack
+        let matrix = relative.matrix
         guard WhiteBalanceEstimate.isPlausiblePreviewMatrix(matrix) else {
             // 195's valve: the model extrapolated (measured 4.06× blue at 2850 K/+60, 218 codes), so
             // this frame takes the diagonal the estimate already had instead of a violent matrix.

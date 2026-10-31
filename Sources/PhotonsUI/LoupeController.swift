@@ -1421,6 +1421,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return frameSource?.edit.light.whiteBalance ?? .asShot
     }
 
+    /// **路线 B's drag base `W₀` — the pair the frame on screen was developed at.**
+    ///
+    /// This is the anchor the drag's relative matrix is written against
+    /// (`M_rel(W₀ → Wₜ) = M_anchor(Wₜ) · M_anchor(W₀)⁻¹`), and it is read off the graph rather than
+    /// remembered as a number, which is what makes its lifetime correct by construction:
+    ///
+    ///   · a **settle** develops a new rung → a new graph → `W₀` is the pair that rung carries;
+    ///   · a **drag tick** renders the same graph, so `W₀` does not move and no error accumulates
+    ///     (the base is never "the last preview", which would drift and could never return to the
+    ///     identity);
+    ///   · a **photo switch** clears the graph (`graph = nil`), so there is no stale base to transform
+    ///     against — `.asShot` here means "nothing is on screen yet", and the preview refuses to render
+    ///     for the same reason (`makeWhiteBalancePreviewRequest` returns `nil`);
+    ///   · an **undo**/edit change moves the decode identity, so the next frame is a different graph
+    ///     and therefore a different base.
+    ///
+    /// Nothing else reads it: it is not part of a render key, a decode key or an export.
+    public var anchorBaseWhiteBalance: WhiteBalance { graph?.bufferWhiteBalance ?? .asShot }
+
     /// S1's own triple for `whiteBalance` — the same call the settled render makes, so the two cannot
     /// disagree.
     private func previewGain(for whiteBalance: WhiteBalance) -> SIMD3<Double> {
@@ -3124,6 +3143,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return .sampled(DropperSample(sourceX: source.x, sourceY: source.y,
                                       bufferX: bx, bufferY: by, decodeScale: ds,
                                       rgb: image.averageRGB(x: bx, y: by)))
+    }
+
+    /// Where the refinement loop should read: the file, the rung on screen, and the buffer pixel the
+    /// click resolved to. `nil` when no buffer is resident (nothing to iterate against).
+    public func dropperProbe(for sample: DropperSample) -> WhiteBalanceDropperRefiner.Probe? {
+        guard decodedURL != nil, decoded != nil else { return nil }
+        return WhiteBalanceDropperRefiner.Probe(url: decodedURL!,
+                                                scale: Float(decodedScale > 0 ? decodedScale : 1),
+                                                x: sample.bufferX, y: sample.bufferY)
     }
 
     /// The scene illuminant measured from the resident decoded buffer (143). The eyedropper's test
