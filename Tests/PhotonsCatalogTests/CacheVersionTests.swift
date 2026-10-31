@@ -169,8 +169,8 @@ final class CacheVersionTests: XCTestCase {
         // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2,
         // so its generation moved again to 4; 124 moved 高光's white closure above the HDR range).
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
-        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 7,
-                       "129: the blacks level's dispatch boundary moved to |blacks| = 20")
+        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 8,
+                       "179: 原色校准 joined S1 (a 3×3 primaries matrix at its exit)")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
                        "159: a mask's contrast left S1.6 for S2.5")
         XCTAssertEqual(StageAlgorithmVersion.contrast, 2,
@@ -560,7 +560,7 @@ final class CacheVersionTests: XCTestCase {
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
-        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=7"))
+        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=8"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=2"))
     }
 }

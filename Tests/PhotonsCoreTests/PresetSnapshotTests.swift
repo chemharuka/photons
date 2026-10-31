@@ -76,12 +76,13 @@ final class PresetSnapshotTests: XCTestCase {
               + "  groups \(snapshot.groups.map(\.rawValue).sorted())")
         // 081: light gained 黑电平 (`blackOffset`) and 色彩分级 joined as nine leaves;
         // 090 adds 中间调 to the tone leaves; 134 removes 圆度; 156 adds 校正 (色差 R/B) → 82;
-        // 164 adds the two denoises to the effects patch → 84; 185 adds the four sharpen leaves → 88.
-        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 88,
+        // 164 adds the two denoises to the effects patch → 84; 185 adds the four sharpen leaves → 88;
+        // 179 adds 校准's seven → 95.
+        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 95,
                        "9 geometry (4 crop edges + angle + 2 flips + lock + quarterTurns)"
                        + " + 11 light (7 tone + 2 balance + 高光恢复 + 黑电平) + 4 curve"
                        + " + 35 color (2 + switch + 8 bands × 4) + 9 色彩分级"
-                       + " + 5 detail + 2 校正 (色差 R/B)"
+                       + " + 5 detail + 2 校正 (色差 R/B) + 7 校准"
                        + " + 9 effects (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3 + 去噪/去彩噪 2)"
                        + " + 4 sharpen (S3.10 四参)")
         XCTAssertEqual(snapshot.fieldCount, 22,

@@ -56,12 +56,14 @@ final class PanelRowSpecTests: XCTestCase {
         let rows = specs.flatMap { spec in spec.rows.map { (spec, $0) } }
 
         // The spec union is exactly the tone tables — no table row outside a spec, no row twice.
-        // 185: 锐化四参是 S3.10 的行表（`sharpenRows`），挂在「细节」卡的第三个 block 上。
+        // 179: 校准 的七行是 `calibrationRows`（颜色卡之后的第六张卡）；185: 锐化四参是 S3.10 的行表
+        // （`sharpenRows`），挂在「细节」卡的第三个 block 上。
         let expected = InspectorView.lightRows + InspectorView.colorRows
+            + InspectorView.calibrationRows
             + InspectorView.correctionRows + InspectorView.detailFXRows
             + InspectorView.sharpenRows + InspectorView.effectsRows
         XCTAssertEqual(rows.map(\.1.keyPath), expected.map(\.keyPath),
-                       "spec 的行必须就是五张卡的全部行表")
+                       "spec 的行必须就是六张卡的全部行表")
         let ids = rows.map { $0.0.accessibilityID(for: $0.1) }
         XCTAssertEqual(Set(ids).count, ids.count, "同一行被两张卡声明（或 id 重复）")
         XCTAssertEqual(Set(rows.map(\.1.keyPath)).count, rows.count,
@@ -69,15 +71,19 @@ final class PanelRowSpecTests: XCTestCase {
 
         // …and the panel really draws exactly those identifiers. A row that exists only in a body
         // would show up here as an orphan id; a spec row that is not drawn would be missing.
-        let panel = host()
-        defer { panel.window.contentView = nil }
+        // 179: the spec cards now live in two workspaces (调整 draws five, 色彩 draws 校准), so the
+        // rendered probe is the union of the two panels — the claim is "the panel draws every spec row
+        // somewhere", which is what a row that exists only in a body would violate.
+        var panels = [host()]
+        panels.append(host(workspace: .colour))
+        defer { for panel in panels { panel.window.contentView = nil } }
         let caIDs = Set(InspectorView.caRows.map { "inspector.detail.\($0.title)" })
-        let scoped = panel.numberFieldIDs.filter { id in
-            ["inspector.light.", "inspector.color.", "inspector.correction.",
-             "inspector.detailFX.", "inspector.effects."]
+        let scoped = Set(panels.flatMap(\.numberFieldIDs)).filter { id in
+            ["inspector.light.", "inspector.color.", "inspector.calibration.",
+             "inspector.correction.", "inspector.detailFX.", "inspector.effects."]
                 .contains { id.hasPrefix($0) } || caIDs.contains(id)
         }
-        XCTAssertEqual(Set(scoped), Set(ids),
+        XCTAssertEqual(scoped, Set(ids),
                        "渲染出的行与 spec 行不一致 · 多了 \(Set(scoped).subtracting(ids))"
                        + " · 少了 \(Set(ids).subtracting(scoped))")
         print("ROW SPEC · \(specs.map(\.section.rawValue)) · \(rows.count) rows · \(ids.count) ids")
@@ -236,10 +242,11 @@ final class PanelRowSpecTests: XCTestCase {
     }
 
     private func host(session: CatalogSession? = nil,
+                      workspace: InspectorWorkspace = .adjust,
                       specs: [InspectorView.PanelCardSpec] = InspectorView.PanelCardSpec.all) -> Hosted {
         _ = NSApplication.shared
         let session = session ?? CatalogSession()
-        let state = InspectorWorkspaceState(.adjust)
+        let state = InspectorWorkspaceState(workspace)
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state,
                                                          cardSpecs: specs))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: Self.panelHeight)

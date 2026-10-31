@@ -30,6 +30,7 @@ final class FieldCoverageTests: XCTestCase {
             ("DetailSettings", stored(DetailSettings()), EditParameters.detailSettingsFields.names),
             ("EffectsGroup", stored(EffectsGroup()), EditParameters.effectsFields.names),
             ("OpticsGroup", stored(OpticsGroup()), EditParameters.opticsFields.names),
+            ("CalibrationGroup", stored(CalibrationGroup()), EditParameters.calibrationFields.names),
         ]
     }
 

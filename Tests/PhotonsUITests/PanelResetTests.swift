@@ -585,9 +585,10 @@ final class PanelResetTests: XCTestCase {
     /// behaviour, and they were exactly what made moving a row比改表更难.
     func testEveryToneCardHasOneSpecAndOneResetGroup() {
         let specs = InspectorView.PanelCardSpec.all
-        XCTAssertEqual(specs.map(\.section), [.light, .color, .correction, .detailFX, .effects])
+        XCTAssertEqual(specs.map(\.section),
+                       [.light, .color, .calibration, .correction, .detailFX, .effects])
         XCTAssertEqual(specs.map(\.group.rawValue),
-                       ["light", "color", "correction", "detailFX", "effects"],
+                       ["light", "color", "calibration", "correction", "detailFX", "effects"],
                        "one spec card per tone group, in panel order")
         XCTAssertEqual(Set(specs.map(\.group)).count, specs.count, "no group is claimed by two cards")
 
@@ -598,14 +599,18 @@ final class PanelResetTests: XCTestCase {
                            "\(spec.section) 的 spec 不能重复声明同一行")
             XCTAssertEqual(PanelResets.Group.allCases.filter { $0 == spec.group }, [spec.group],
                            "the card's group must be in the public enum (undo label + title dispatch)")
-            XCTAssertTrue(InspectorView.cardTitles(in: .adjust).contains(spec.section.title),
-                          "\(spec.section.title) 必须真的在调整工作区里")
+            // 179: a spec card lives in *some* workspace — 校准 is a 色彩 card, not a 调整 one, so
+            // the question is "does the panel draw this card anywhere", not "in 调整".
+            let drawn = InspectorWorkspace.allCases.contains {
+                InspectorView.cardTitles(in: $0).contains(spec.section.title)
+            }
+            XCTAssertTrue(drawn, "\(spec.section.title) 必须真的画在某个工作区里")
         }
 
         // The group list itself is still the eight cards 047 + 2026-10-28 built.
         XCTAssertEqual(PanelResets.Group.allCases.map(\.rawValue),
                        ["whiteBalance", "light", "color", "blackAndWhite", "detail", "correction",
-                        "detailFX", "effects", "colorGrading", "pointColor"])
+                        "detailFX", "effects", "colorGrading", "calibration", "pointColor"])
     }
 
     // MARK: - helpers

@@ -165,7 +165,7 @@ final class CopySheetCardTests: XCTestCase {
         _ = session
     }
 
-    // MARK: - ② 14 card rows, titles == the panel's card names
+    // MARK: - ② 15 card rows, titles == the panel's card names
 
     func testTheSheetHasThirteenCardRowsInPanelOrderAndTheirTitlesAreTheCards() throws {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
@@ -173,10 +173,10 @@ final class CopySheetCardTests: XCTestCase {
 
         let cardRows = view.rows.filter(\.isCard)
         print("156 rows: \(cardRows.count) cards · titles \(cardRows.map(\.title))")
-        XCTAssertEqual(cardRows.count, 14, "十四张卡：白平衡…蒙版（156 补上校正，164 补上细节）")
+        XCTAssertEqual(cardRows.count, 15, "十五张卡：白平衡…蒙版（156 校正，164 细节，179 校准）")
         XCTAssertEqual(cardRows.map(\.title),
                        ["白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
-                        "曲线", "开发", "校正", "细节", "效果", "裁切", "蒙版"])
+                        "校准", "曲线", "开发", "校正", "细节", "效果", "裁切", "蒙版"])
         // The row order *is* the inspector's render order — not a second list (曲线 above 开发 since
         // 2026-10-28; 校正 between 开发 and 细节 since 096/164). 调整's cards are compared in full: 156
         // added 校正 to the clipboard and 164 added 细节, so a missing card in either list is a red test.
@@ -196,7 +196,7 @@ final class CopySheetCardTests: XCTestCase {
                             InspectorView.cardTitles(in: .masks)].flatMap { $0 })
                            .subtracting(["旋转", "点颜色"]))
         // 默认不画子项。
-        XCTAssertEqual(view.rows.count, 14, "默认只有卡级行（081 §2）")
+        XCTAssertEqual(view.rows.count, 15, "默认只有卡级行（081 §2）")
     }
 
     // MARK: - ② 卡片粒度: 白平衡 + 黑电平 + Light
@@ -273,14 +273,14 @@ final class CopySheetCardTests: XCTestCase {
         XCTAssertFalse(CopySettingsSheet.showsChildren, "默认不展示子项（一个常量，不是注释）")
         let childCount = EditSnapshotChild.allCases.count
         let rows = CopySettingsAccessoryView.rows(showsChildren: true)
-        print("156 rows with children: \(rows.count) = 14 + \(childCount)")
-        XCTAssertEqual(rows.count, 14 + childCount)
+        print("156 rows with children: \(rows.count) = 15 + \(childCount)")
+        XCTAssertEqual(rows.count, 15 + childCount)
         XCTAssertEqual(rows.filter { !$0.isCard }.count, childCount)
         XCTAssertEqual(EditSnapshotSection.panelOrder.flatMap(\.children).count, childCount)
 
         let view = CopySettingsAccessoryView(selection: .none, purpose: .copy, showsChildren: true)
         view.layoutSubtreeIfNeeded()
-        XCTAssertEqual(view.rows.count, 14 + childCount, "打开开关后子项真的画出来了")
+        XCTAssertEqual(view.rows.count, 15 + childCount, "打开开关后子项真的画出来了")
         XCTAssertEqual(view.childCheckboxes.count, childCount)
         XCTAssertEqual(view.childCheckboxes[.exposure]?.title, "曝光")
 
