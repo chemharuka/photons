@@ -231,6 +231,23 @@ public struct RenderOptions: Sendable {
     /// counterproof. Never set by the app, never part of a key.
     public var legacyDehazePerChannel: Bool
 
+    /// **Tests only.** Make S1.9's `t` the **pre-2026-10-31** `max(1 − ω·D, t0)` over the raw block
+    /// minimum instead of the guided-filter veil + pixel floor. It reads `DehazeParamsU.l.y`, and the
+    /// apply pass samples the untouched block texture (slot 5) instead of the veil (slot 1), so the
+    /// difference between the two renders is the veil's spatial support and nothing else. Used by
+    /// `DehazeLinearTests`' halo counterproof. Never set by the app, never part of a key.
+    public var legacyDehazeBlockVeil: Bool
+
+    /// **Tests only.** Keep S1.9's **pre-2026-10-31 fog participation**: `w = 1 − smoothstep(A, k·A, L)`
+    /// with no resolution fade about the airlight. It reads `DehazeParamsU.l.w`; `t`, `D` and `A` are
+    /// the same in both renders, so the difference between them is the participation and nothing else.
+    /// The `J/I ≥ 0.97` acceptance needs it twice: as the counterproof (the unbounded recovery is the
+    /// 20 % sky darkening) and as the only place the *stage's own* `t` can be read back — the
+    /// acceptance's bands are §4.2's `t < 0.15` / `t ∈ 0.3…0.6`, and inverting the bounded render
+    /// would report 1 wherever the fade reaches (the correction is zero there, so `t` has nothing to
+    /// invert). Never set by the app, never part of a key.
+    public var legacyDehazeUnboundedRecovery: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -249,7 +266,9 @@ public struct RenderOptions: Sendable {
                 gradeGlobalWeights: Bool = false,
                 healWithoutBoundaryMatch: Bool = false,
                 probesDehazeAirlight: Bool = false,
-                legacyDehazePerChannel: Bool = false) {
+                legacyDehazePerChannel: Bool = false,
+                legacyDehazeBlockVeil: Bool = false,
+                legacyDehazeUnboundedRecovery: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -269,6 +288,8 @@ public struct RenderOptions: Sendable {
         self.healWithoutBoundaryMatch = healWithoutBoundaryMatch
         self.probesDehazeAirlight = probesDehazeAirlight
         self.legacyDehazePerChannel = legacyDehazePerChannel
+        self.legacyDehazeBlockVeil = legacyDehazeBlockVeil
+        self.legacyDehazeUnboundedRecovery = legacyDehazeUnboundedRecovery
     }
 }
 
@@ -980,12 +1001,12 @@ private struct DenoiseParamsU {
     var n: SIMD4<Float>      // luma amount, chroma amount, pad, pad
 }
 
-/// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117).
+/// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117 / 2026-10-31).
 private struct DehazeParamsU {
     var a: SIMD4<Float>   // amount (−1…1), ω, t0, "no haze" threshold for A
     var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
     var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
-    var d: SIMD4<Int32>   // qH, pad, pad, pad
+    var d: SIMD4<Int32>   // qH, box axis (0 = h, 1 = v), box segment length, box radius in blocks
     var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), 141: S1 exposure gain g
     // 120b — the canvas → source walk, the same fields `MaskAtlasParams` carries.
     var f: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
@@ -994,6 +1015,7 @@ private struct DehazeParamsU {
     var i: SIMD4<Float>   // cos, sin, flipH, flipV
     var j: SIMD4<Int32>   // sourceSize.xy, quarterTurns, hasDepth
     var k: SIMD4<Float>   // depthStrength (0…1), pad, pad, pad
+    var l: SIMD4<Float>   // the knee, tests-only legacy block-min t, pad, pad
 }
 
 private struct DisplayParams {
@@ -4678,18 +4700,24 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
 
     // MARK: - S1.9 去雾 (117)
     //
-    // Four passes over a `1/q` dark channel, q = 4:
+    // Ten passes over a `1/q` block field, q = 4:
     //
-    //   · `s1_9_dehaze_dark`     — block minimum, one texel per q × q block (rgba16Float, r used);
-    //   · `s1_9_dehaze_airlight` — one threadgroup scans the block texture for the largest block
-    //                              minimum and writes a 1 × 1 texture (He's brightest-dark-channel
-    //                              estimate, cheaply and deterministically);
-    //   · `s1_9_dehaze_limit`    — 135: caps that estimate at `κ·p99(L)` (`κ = 0.95`) in a second
-    //                              1 × 1 texture;
-    //   · `s1_9_dehaze_apply`    — full resolution: samples the block texture bilinearly, builds
-    //                              `t = max(1 − ω·D, t0)`, recovers **luminance** (130, hue
-    //                              preserving) with the `w = 1 − smoothstep(A, 2A, L)` fog-amount fade,
-    //                              and never clamps the top (the HDR tail is the point of 117).
+    //   · `s1_9_dehaze_dark`        — block minimum in `.r`, block mean luma in `.g` (rgba16Float);
+    //   · `s1_9_dehaze_airlight`    — one threadgroup scans the block texture for the largest block
+    //                                 minimum and writes a 1 × 1 texture (He's brightest-dark-channel
+    //                                 estimate, cheaply and deterministically);
+    //   · `s1_9_dehaze_limit`       — 135: caps that estimate at `κ·p99(L)` (`κ = 0.95`);
+    //   · `s1_9_dehaze_veil_stats`  — `(l, l², p, l·p)` for the guided filter;
+    //   · `s1_9_dehaze_box` ×2      — the window: a separable running-sum mean of those stats;
+    //   · `s1_9_dehaze_veil`        — `a`, `b` and `veil = a·l + b` (ε = 4e-4·A²);
+    //   · `s1_9_dehaze_box` ×2      — the same mean, on the veil;
+    //   · `s1_9_dehaze_apply`       — full resolution: samples the veil bilinearly, builds the
+    //                                 knee-blended `t` (guided veil ∧ the pixel's own dark channel),
+    //                                 recovers **luminance** (130, hue preserving) with the
+    //                                 `w = 1 − smoothstep(A, 2A, L)` fade, and never clamps the top.
+    //
+    // Passes 4–9 are at block resolution (1/16 of the canvas's texels), so the six new passes cost
+    // less than one of the two full-resolution passes around them.
     //
     // The airlight never comes back to the CPU on the shipped path; `probesDehazeAirlight` adds a
     // 4-byte blit for the acceptance's measurement.
@@ -4704,13 +4732,18 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         let w = plan.canvas.width, h = plan.canvas.height
         let q = 4
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
+        // 2026-10-31 — the guided filter's window, in **blocks**: 2 % of the long edge (the research
+        // pack's σ), divided by q. 24 MP (6000×4000) at q = 4 gives R = 30 blocks ≈ 120 px; a 4.1 Mpx
+        // canvas (1500×2731) gives R = 14. The `max(1, …)` keeps a thumbnail's window non-empty.
+        let boxRadius = max(1, Int((0.02 * Double(max(w, h)) / Double(q)).rounded()))
+        let boxSegment = 32
 
         var params = DehazeParamsU(
             a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, 0.1, 0.02),
             b: SIMD4(plan.origin.x, plan.origin.y,
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
-            d: SIMD4(Int32(qH), 0, 0, 0),
+            d: SIMD4(Int32(qH), 0, Int32(boxSegment), Int32(boxRadius)),
             // 141: S1's exposure gain. The four passes divide it out of every measurement and the
             // apply pass multiplies it back, so the dehaze result commutes with the exposure slider.
             // WB is not part of this number: it belongs to the light source, not the EV control.
@@ -4728,11 +4761,43 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             j: SIMD4(Int32(sourceSize.width), Int32(sourceSize.height),
                      Int32(edit.geometry.quarterTurns), input.depth != nil ? 1 : 0),
             // The UI's 0…100 row, as the kernel's 0…1 strength.
-            k: SIMD4(Float(edit.effects.dehazeDepth) / 100, 0, 0, 0))
+            k: SIMD4(Float(edit.effects.dehazeDepth) / 100, 0, 0, 0),
+            // The knee of the `tSmooth`/`tPixel` blend, and the tests-only pre-change `t`.
+            l: SIMD4(0.15, options.legacyDehazeBlockVeil ? 1 : 0, 0,
+                     options.legacyDehazeUnboundedRecovery ? 1 : 0))
 
         let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
         let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)
         let limited = try scratch("dehaze-limited", width: 1, height: 1, format: .rgba16Float)
+        // The veil's two ping-pong buffers, at **32-bit** (rgba32Float, +24 MB at 24 MP): the window
+        // means are consumed as `l² − l̄²` and `l·p − l̄·p̄`, a difference of two nearly equal numbers,
+        // and a half-float storage grid (relative 4.9e-4) dominates that difference wherever a window
+        // is flat — which would make `a` rounding noise there, and the exposure test shows it (3 pixels
+        // off by > 1 ULP at `E = −2`, `D = 100`, before this). They start life as the guided filter's
+        // statistics; the veil pass reuses them (its input is dead by then), so the seven new passes
+        // need two block textures, not four.
+        let blockA = try scratch("dehaze-block-a", width: qW, height: qH, format: .rgba32Float)
+        let blockB = try scratch("dehaze-block-b", width: qW, height: qH, format: .rgba32Float)
+
+        /// One separable box pass. `axis` = 0 walks rows (one thread per 32-texel segment of a row),
+        /// 1 walks columns — the `s1_7_box4_h/v` dispatch, with the axis in the uniform instead of the
+        /// function name.
+        func box(_ from: MTLTexture, _ to: MTLTexture, axis: Int32) throws {
+            params.d.y = axis
+            let pipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_box")
+            guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e.setComputePipelineState(pipe)
+            e.setTexture(from, index: 0)
+            e.setTexture(to, index: 1)
+            e.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            let groups = axis == 0
+                ? MTLSize(width: max(1, qW / boxSegment + 1), height: qH, depth: 1)
+                : MTLSize(width: qW, height: max(1, qH / boxSegment + 1), depth: 1)
+            let threads = axis == 0 ? MTLSize(width: 32, height: 1, depth: 1)
+                                    : MTLSize(width: 1, height: 32, depth: 1)
+            e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+            e.endEncoding()
+        }
 
         let pack = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_dark")
         let e0 = try encoder(cb, pack, in: src, out: dark)
@@ -4752,7 +4817,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
 
         // 135 — cap A at κ·p99(L) on the GPU: one threadgroup samples the content rect, bisects the
         // 1 % tail and writes the effective airlight. The raw estimate stays in `airlight` for the
-        // test probe; the apply pass reads `limited`.
+        // test probe; the veil and the apply pass read `limited`.
         let limit = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_limit")
         guard let e1b = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         e1b.setComputePipelineState(limit)
@@ -4765,14 +4830,55 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         e1b.endEncoding()
 
+        // (2026-10-31) the veil: `(l, l², p, l·p)` → box ×2 (the window means) → `a`, `b` → box ×2 (the
+        // coefficients) → `veil = a·l + b`. Seven block-resolution passes; at 24 MP the block texture is
+        // 1500 × 1000, so the whole group is a fraction of one full-resolution pass.
+        let statsPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil_stats")
+        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e3.setComputePipelineState(statsPipe)
+        e3.setTexture(dark, index: 0)
+        e3.setTexture(blockA, index: 1)
+        e3.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(e3, statsPipe, ImageSize(width: qW, height: qH))
+        e3.endEncoding()
+
+        try box(blockA, blockB, axis: 0)
+        try box(blockB, blockA, axis: 1)
+
+        let abPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil_ab")
+        guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e4.setComputePipelineState(abPipe)
+        e4.setTexture(blockA, index: 0)   // the window means
+        e4.setTexture(limited, index: 1)  // 135's capped A, for ε = 4e-4·A²
+        e4.setTexture(blockB, index: 2)   // (a, b)
+        e4.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(e4, abPipe, ImageSize(width: qW, height: qH))
+        e4.endEncoding()
+
+        try box(blockB, blockA, axis: 0)
+        try box(blockA, blockB, axis: 1)
+
+        // `veil = a·l + b` into the texture the apply pass samples (`blockA`; the coefficients in
+        // `blockB` are its input, so the two cannot be the same buffer).
+        let veilPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil")
+        guard let e5 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e5.setComputePipelineState(veilPipe)
+        e5.setTexture(blockB, index: 0)   // the boxed coefficients
+        e5.setTexture(dark, index: 1)     // the guide at texel resolution
+        e5.setTexture(blockA, index: 2)   // the veil
+        e5.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(e5, veilPipe, ImageSize(width: qW, height: qH))
+        e5.endEncoding()
+
         let apply = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_apply")
         guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         e2.setComputePipelineState(apply)
         e2.setTexture(src, index: 0)
-        e2.setTexture(dark, index: 1)
+        e2.setTexture(blockA, index: 1)   // the veil, sampled bilinearly — the old `dark` slot
         e2.setTexture(limited, index: 2)
         e2.setTexture(out, index: 3)
         e2.setTexture(try input.depth ?? depthDummy(), index: 4)
+        e2.setTexture(dark, index: 5)     // the raw block minimum, tests-only legacy `t`
         e2.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
         dispatch(e2, apply, plan.canvas)
         e2.endEncoding()

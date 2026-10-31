@@ -20,6 +20,30 @@ using namespace metal;
 //     t    = max(1 − ω·D, t0)             (ω = 0.95, t0 = 0.1 — He's own numbers)
 //     J    = (I − A·(1 − t)) / t
 //
+// **The veil's spatial support (2026-10-31).** `D` used to *be* `t`'s only input: a per-block minimum
+// upsampled bilinearly. A block minimum jumps by an order of magnitude across a skyline, and bilinear
+// interpolation only ramps it over one or two blocks, so `t` stepped at the edge and `J` over/under-shot
+// there — the bright/dark rim the user reported. `D` is now a **guided-filter veil**: the same block
+// minimum, regressed on the block's mean luma (`a·l + b`, the window's covariance over its variance,
+// both from a separable box mean at block resolution) and smoothed twice. A block-min field is
+// edge-aware by construction — a regression on a luma guide that is *itself* the same block mean — so
+// the veil follows the skyline instead of stepping across it.
+//
+// `t` then takes **two** estimates and blends them with a knee:
+//
+//     veilR  = min(veil / A, min_c(I/A))                (the smoothed veil, bounded by this pixel)
+//     tSmooth = max(1 − ω·veilR, t0)                    (the guided estimate)
+//     tPixel  = clamp(1 − ω·min_c(I/A), t0, 1)          (the pixel's own dark channel — a lower bound)
+//     t      = min(max(tSmooth, tPixel) + κ²·knee/4, 1)  where κ = max(knee − |tSmooth − tPixel|, 0)/knee
+//
+// `max` keeps the pixel's own dark channel from being *over*-recovered (which is what crushes a dark
+// edge to black); the knee term is a small lift where the two estimates agree, so the blend cannot
+// dim a foggy region that both estimates call foggy. `knee = 0.15`.
+//
+// The recovery takes no depth term: the depth-assisted distribution is a separate removal
+// (`effects.dehazeDepth` is still carried and `s1_9_dehaze_limit` still measures its p1/p99 window,
+// but `t` no longer reads it).
+//
 // **The physics.** `I > A` gives `J > I`, and that is correct: a sample under a veil is recovered by
 // dividing by `t`, so the upper bound is `J ≤ I / t0` (10× at `t0 = 0.1`), and the amount it gains is
 // exactly `A·(1 − t)/t`. A sample darker than the airlight (`I < A`) gives `J < I` (it is haze, not
@@ -42,20 +66,38 @@ using namespace metal;
 //      rejected the old `A = 1` in display codes that brightened every highlight without bound; `A`
 //      is still measured, and the only thing 130 says is that a pixel brighter than twice the
 //      airlight carries no evidence of fog. Do not "restore" the per-channel formula.
+//      (2026-10-31) The fade is now symmetric about `A`: the evidence for any correction is `|L − A|`,
+//      and the recovery multiplies it by `1/t`, so a difference smaller than `A`'s own estimation
+//      resolution (4 % of `A`, twice the guided filter's `σ`) is not evidence either way. Without
+//      that second fade the sky — 3 % below `A` at `t ≈ 0.12` — lost 20 % of its light. See
+//      `s1_9_dehaze_apply`.
 //
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
-// **Four passes (117's three, plus 135's bound):**
+// **Eleven passes (117's three, 135's bound, and the veil's seven):**
 //
-//   1. `s1_9_dehaze_dark`     — one texel per q × q block, the block's `min_c min I_c`. q = 4.
+//   1. `s1_9_dehaze_dark`     — one texel per q × q block: `.r` = the block's `min_c min I_c`, `.g` =
+//                               the block's mean luma. q = 4. `.r` is bit-identical to pre-2026-10-31
+//                               (the minimum's accumulation order did not move).
 //   2. `s1_9_dehaze_airlight` — **one threadgroup** scans the block texture for the largest block
 //                               minimum (a cheap, deterministic stand-in for He's top 0.1 %), clamps
 //                               it to `[1e-4, 8]` and writes a 1 × 1 texture. No CPU readback.
 //   3. `s1_9_dehaze_limit`    — 135: the airlight's physical **upper** bound, `min(A_raw, κ·p99(L))`
 //                               (`κ = 0.95`, `p99` clipped at white; the cap engages only when the
 //                               estimate is materially above the bright end), in a second 1 × 1 texture.
-//   4. `s1_9_dehaze_apply`    — samples the block texture bilinearly, builds `t`, and applies the
-//                               recovery. `max(out, 0)`, **no upper clamp** (HDR is the point).
+//   4. `s1_9_dehaze_veil_stats` — block resolution: `(l, l·l, p, l·p)` for the guided filter.
+//   5. `s1_9_dehaze_box` (h)  — the separable running-sum mean of those stats, horizontal.
+//   6. `s1_9_dehaze_box` (v)  — …and vertical.
+//   7. `s1_9_dehaze_veil_ab`  — `a = cov/(var + 4e-4·A²)`, `b = mean(p) − a·mean(l)` — the pair.
+//   8. `s1_9_dehaze_box` (h)  — the same separable mean, on **(a, b)**: the guided filter's second
+//                               smoothing, of the coefficients and not of the reconstruction.
+//   9. `s1_9_dehaze_box` (v)  — …and vertical.
+//  10. `s1_9_dehaze_veil`     — `veil = a·l + b`, clamped to `[0, 1]`.
+//  11. `s1_9_dehaze_apply`    — samples the veil bilinearly, builds the knee-blended `t`, and applies
+//                               the recovery. `max(out, 0)`, **no upper clamp** (HDR is the point).
+//
+// Passes 4–10 run at **block resolution** (`qW × qH`, 1/16 of the canvas's texels at q = 4), so the
+// seven new passes cost less than one of the two full-resolution passes they sit between.
 //
 // `A < 0.02` is treated as "no haze": the picture has no veil to remove, so the pass is a copy — adding
 // or removing nothing is the only honest answer for a frame whose airlight is essentially black.
@@ -91,7 +133,7 @@ struct DehazeParams {
     float4 b;
     // canvasW, canvasH, q (block size), qW
     int4 c;
-    // qH, pad, pad, pad
+    // qH, box axis (0 = horizontal, 1 = vertical), box segment length, box radius in blocks
     int4 d;
     // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
     // units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is taken on)
@@ -109,6 +151,8 @@ struct DehazeParams {
     int4 j;
     // depthStrength (0…1), pad, pad, pad
     float4 k;
+    // the knee (the `tSmooth`/`tPixel` blend width), tests-only legacy block-min `t`, pad, pad
+    float4 l;
 };
 
 /// 120b — the model's map is low resolution; bilinear + clamp is the correct upsample, the same
@@ -137,6 +181,11 @@ static inline float2 dehaze_source_uv(float2 pixel, constant DehazeParams &p) {
 /// Per `q × q` block: `min` over the block of `min` over channels, in **linear Rec2020**. `min` is
 /// associative, so one block-level minimum is exactly the dark channel at the resolution `t` lives at
 /// (the paper itself recommends estimating the transmission at low resolution).
+///
+/// 2026-10-31 — the same walk also accumulates the block's **mean luma** into `.g`, which is the
+/// guided filter's guide. `.r` is untouched by this: the minimum's accumulation order is the same one
+/// it has always been, so every existing `.r` assertion reads the same bits. `n` is `q²` even at the
+/// canvas's edge, where the reads clamp (that is how the block minimum already treats a short block).
 kernel void s1_9_dehaze_dark(texture2d<float, access::read> src [[texture(0)]],
                              texture2d<float, access::write> dark [[texture(1)]],
                              constant DehazeParams &p [[buffer(0)]],
@@ -149,15 +198,19 @@ kernel void s1_9_dehaze_dark(texture2d<float, access::read> src [[texture(0)]],
     float inv = 1.0 / max(p.e.w, 1e-6);
 
     float m = 1e9;
+    // The guide: the block's mean luma, in the same normalized space as `.r` (`× inv`, which is what
+    // makes the 141 identity hold: `g == 1` multiplies by exactly 1.0).
+    float sumL = 0.0;
     for (int dy = 0; dy < q; ++dy) {
         int y = min(int(gid.y) * q + dy, h - 1);
         for (int dx = 0; dx < q; ++dx) {
             int x = min(int(gid.x) * q + dx, w - 1);
             float3 c = src.read(uint2(x, y)).rgb * inv;
             m = min(m, min(min(c.r, c.g), c.b));
+            sumL += dot(c, kWorkingLumaWeights);
         }
     }
-    dark.write(float4(m, 0.0, 0.0, 1.0), gid);
+    dark.write(float4(m, sumL / float(q * q), 0.0, 1.0), gid);
 }
 
 /// The airlight: the largest block minimum, clamped to `[1e-4, 8]`. **One threadgroup**, one
@@ -312,18 +365,139 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
     limited.write(float4(clamp(A, 1e-4, 8.0), depthLo, depthHi, 1.0), uint2(0, 0));
 }
 
-/// The recovery: `t = max(1 − ω·D, t0)`, then (130) the He inversion on **luminance only** with the
-/// `w = 1 − smoothstep(A, kA, L)` fog-amount fade, and one common gain on all three channels;
-/// `out = mix(I, J, amount)`. Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
+// MARK: - 2026-10-31 — the guided-filter veil (block resolution)
+
+/// The guided filter's regularization, as a fraction of the airlight: `ε = epsRel·A²`. It is one
+/// number with two readers — the coefficient solve below, and the recovery's own resolution, which
+/// uses `2·sqrt(epsRel)` (4 % of `A`) as the size of the difference it can trust (see `s1_9_dehaze_apply`).
+constant float kDehazeAirEpsRel = 4e-4;
+
+/// `(l, l·l, p, l·p)` per block: the guided filter's window statistics, where `l` is the guide (the
+/// block's mean luma, from `s1_9_dehaze_dark`'s `.g`) and `p` is the thing being smoothed (the block
+/// minimum, its `.r`). Everything downstream is a separable mean of these four numbers, which is why
+/// this is a separate pass rather than a second output of the dark pass: the dark pass's texel keeps
+/// exactly the two values it always had and this pass owns the pair products.
+kernel void s1_9_dehaze_veil_stats(texture2d<float, access::read> dark [[texture(0)]],
+                                   texture2d<float, access::write> stats [[texture(1)]],
+                                   constant DehazeParams &p [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+    if (int(gid.x) >= p.c.w || int(gid.y) >= p.d.x) { return; }
+    float4 d = dark.read(gid);
+    float l = d.g, q = d.r;
+    stats.write(float4(l, l * l, q, l * q), gid);
+}
+
+/// Separable running-sum box mean — `MPSImageBox`'s equivalent, hand-written (the main line carries no
+/// third-party compute dependency and this chain lives at block resolution, where four passes cost
+/// less than one full-resolution pass).
+///
+/// One thread per `segment` of one row (axis 0) or one column (axis 1); the thread seeds its window
+/// with `2r + 1` clamped reads and then slides it, so a pass costs one read per texel after the seed —
+/// the same trick `s1_7_box4_h/v` use. `gid` = (segment, line) for the horizontal axis and
+/// (line, segment) for the vertical one, which is what lets one kernel serve both.
+kernel void s1_9_dehaze_box(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant DehazeParams &p [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    int qW = p.c.w, qH = p.d.x;
+    bool horizontal = p.d.y == 0;
+    int len = horizontal ? qW : qH;
+    int lines = horizontal ? qH : qW;
+    int segment = horizontal ? int(gid.x) : int(gid.y);
+    int line = horizontal ? int(gid.y) : int(gid.x);
+    if (line >= lines) { return; }
+    int segLen = max(p.d.z, 1);
+    int i0 = segment * segLen;
+    if (i0 >= len) { return; }
+    int i1 = min(i0 + segLen, len);
+    int r = max(p.d.w, 0);
+
+    // One coordinate walks, the other is fixed; both clamp at the edge (clamp_to_edge, as MPS's box
+    // filter's default edge mode does).
+    if (r == 0) {
+        for (int i = i0; i < i1; ++i) {
+            int k = clamp(i, 0, len - 1);
+            uint2 t = horizontal ? uint2(uint(k), uint(line)) : uint2(uint(line), uint(k));
+            dst.write(src.read(t), t);
+        }
+        return;
+    }
+    float inv = 1.0 / float(2 * r + 1);
+    float4 acc = float4(0.0);
+    for (int i = i0 - r; i <= i0 + r; ++i) {
+        int k = clamp(i, 0, len - 1);
+        uint2 t = horizontal ? uint2(uint(k), uint(line)) : uint2(uint(line), uint(k));
+        acc += src.read(t);
+    }
+    for (int i = i0; i < i1; ++i) {
+        int k = clamp(i, 0, len - 1);
+        uint2 t = horizontal ? uint2(uint(k), uint(line)) : uint2(uint(line), uint(k));
+        dst.write(acc * inv, t);
+        int add = clamp(i + r + 1, 0, len - 1), sub = clamp(i - r, 0, len - 1);
+        acc += src.read(horizontal ? uint2(uint(add), uint(line)) : uint2(uint(line), uint(add)))
+             - src.read(horizontal ? uint2(uint(sub), uint(line)) : uint2(uint(line), uint(sub)));
+    }
+}
+
+/// The guided filter's linear coefficients: `a = cov/(var + ε)`, `b = mean(p) − a·mean(l)`, from the
+/// window means `s1_9_dehaze_box` produced.
+///
+/// `ε ∝ A²` is the research pack's regularization: the regression is compared against the veil's own
+/// brightness, so a bright (strong) veil is smoothed harder than a faint one — otherwise the faint
+/// veil's quantized block minima look like structure and the guide follows noise.
+///
+/// Written as a pair because the **second** box pair (`s1_9_dehaze_box` again, next) smooths the
+/// coefficients, not the reconstruction — that is the guided filter proper (§2.3's "stats 的 box 两向
+/// + ab 的 box 两向"), and it is what makes the veil edge-preserving rather than merely smooth.
+kernel void s1_9_dehaze_veil_ab(texture2d<float, access::read> stats [[texture(0)]],
+                                texture2d<float, access::read> limited [[texture(1)]],
+                                texture2d<float, access::write> ab [[texture(2)]],
+                                constant DehazeParams &p [[buffer(0)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    if (int(gid.x) >= p.c.w || int(gid.y) >= p.d.x) { return; }
+    float A = max(limited.read(uint2(0, 0)).r, 1e-4);
+    float eps = kDehazeAirEpsRel * A * A;
+    float4 s = stats.read(gid);
+    float ml = s.x, mll = s.y, mp = s.z, mlp = s.w;
+    float var = max(mll - ml * ml, 0.0);
+    float cov = mlp - ml * mp;
+    float a = cov / (var + eps);
+    ab.write(float4(a, mp - a * ml, 0.0, 1.0), gid);
+}
+
+/// `veil = a·l + b`: the boxed coefficients applied to the block's own luma. This is the field the
+/// apply pass samples — same texture shape and same bilinear upsample as the block minimum it
+/// replaces, so nothing about the resampling changed, only what is in the texel.
+kernel void s1_9_dehaze_veil(texture2d<float, access::read> ab [[texture(0)]],
+                             texture2d<float, access::read> dark [[texture(1)]],
+                             texture2d<float, access::write> out [[texture(2)]],
+                             constant DehazeParams &p [[buffer(0)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    if (int(gid.x) >= p.c.w || int(gid.y) >= p.d.x) { return; }
+    float2 c = ab.read(gid).xy;
+    float l = dark.read(gid).g;
+    out.write(float4(clamp(c.x * l + c.y, 0.0, 1.0), 0.0, 0.0, 1.0), gid);
+}
+
+/// The recovery: (2026-10-31) the knee-blended `t` from the guided veil and the pixel's own dark
+/// channel, then (130) the He inversion on **luminance only** with the `w = 1 − smoothstep(A, kA, L)`
+/// fog-amount fade and one common gain on all three channels; `out = mix(I, J, amount)`. Negative
+/// amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
 /// **135** reads the capped airlight from `limited` (texture 2). No upper clamp:
 /// `J ≤ I/t0` is the physical bound, and S4's headroom decides how much of that tail is written.
 /// **141** runs the whole recovery in the unexposed space `I/g` and multiplies the result back by
 /// `g`, so the stage commutes with S1's exposure gain (`g == 1` is bit-identical to the pre-141 pass).
+///
+/// `veil` (texture 1) is the block-resolution guided veil, sampled bilinearly — the same texture shape
+/// and the same sampler the block minimum used, so nothing about the upsample changed; only what is
+/// in the texel did. `darkRaw` (texture 5) is the untouched block minimum, read only by the tests'
+/// pre-change `t` (`p.l.y`).
 kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
-                              texture2d<float, access::sample> dark [[texture(1)]],
+                              texture2d<float, access::sample> veil [[texture(1)]],
                               texture2d<float, access::read> limited [[texture(2)]],
                               texture2d<float, access::write> dst [[texture(3)]],
                               texture2d<float, access::sample> depth [[texture(4)]],
+                              texture2d<float, access::sample> darkRaw [[texture(5)]],
                               constant DehazeParams &p [[buffer(0)]],
                               uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
@@ -344,28 +518,14 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
     int qW = p.c.w, qH = p.d.x;
     float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(qW)),
                        (float(gid.y) + 0.5) / (float(q) * float(qH)));
-    float D = max(dark.sample(linearSampler, uv).r, 0.0);
+    // Tests only — the pre-2026-10-31 `t`, which read the block minimum straight off the bilinear.
+    bool legacy = p.l.y > 0.5;
+    float D = max(legacy ? darkRaw.sample(linearSampler, uv).r : veil.sample(linearSampler, uv).r, 0.0);
     float A = limited.read(uint2(0, 0)).r;
-    float depthLo = limited.read(uint2(0, 0)).g;
-    float depthHi = limited.read(uint2(0, 0)).b;
 
     float amount = clamp(p.a.x, -1.0, 1.0);
     float omega = clamp(p.a.y, 0.0, 1.0);
     float t0 = clamp(p.a.z, 1e-3, 1.0);
-
-    // 120b — how much thicker the veil is at this pixel. 0 = the pre-120b `t` (and the near end:
-    // shrinking back towards no haze relative to the far end), 1 = the far end's full boost.
-    // `depthStrength == 0` (or no map) leaves it at exactly 0 and never samples the texture, which is
-    // what keeps the frame byte-for-byte identical to the pre-120b pass.
-    float depthBoost = 0.0;
-    if (p.k.x > 0.0 && p.j.w != 0) {
-        float2 duv = dehaze_source_uv(float2(gid) + 0.5, p);
-        float z = clamp(depth.sample(kDepthSampler, duv).r, 0.0, 1.0);
-        // Robust p1…p99 window from `s1_9_dehaze_limit` (written in the same pass); 0 = far.
-        float nz = clamp((z - depthLo) / max(depthHi - depthLo, 1e-4), 0.0, 1.0);
-        float farness = 1.0 - smoothstep(0.40, 0.70, nz);
-        depthBoost = clamp(p.k.x, 0.0, 1.0) * farness * 0.90;
-    }
 
     // No airlight, no haze: mix straight back to the original picture (the only honest answer for a
     // frame whose dark channel never rises above black).
@@ -376,10 +536,27 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
 
     float3 outRGB;
     if (amount >= 0.0) {
-        // The measured airlight `A` (already capped by 135 above) is left alone; the depth map only
-        // makes the transmission thicker with distance. `depthBoost == 0` is the old expression
-        // verbatim (multiplying by 1.0 is exact).
-        float t = max(1.0 - omega * D * (1.0 + depthBoost), t0);
+        float t;
+        if (legacy) {
+            // The pre-change expression verbatim, kept so a test can measure the halo this stage used
+            // to leave at a skyline.
+            t = max(1.0 - omega * D, t0);
+        } else {
+            // The pixel's own normalized dark channel: `min_c(I/A)`, i.e. how much of *this* pixel the
+            // veil could account for. Below `A` it is fog; above, it is object.
+            float mPixel = clamp(min(min(In.r, In.g), In.b) / A, 0.0, 1.0);
+            // The guided veil, bounded by this pixel: a texture that claims more haze than the pixel
+            // carries is not evidence about the pixel.
+            float veilR = clamp(min(D / A, mPixel), 0.0, 1.0);
+            float tSmooth = max(1.0 - omega * veilR, t0);
+            float tPixel = clamp(1.0 - omega * mPixel, t0, 1.0);
+            // The knee: where the two estimates agree (within `knee`) the pair is trusted and lifted by
+            // up to `knee/4`; where they disagree the larger one wins, so a smoothed veil can never
+            // over-recover a dark edge into black and a bright pixel can never be under-recovered.
+            float knee = max(p.l.x, 1e-4);
+            float closeness = max(knee - fabs(tSmooth - tPixel), 0.0) / knee;
+            t = min(max(tSmooth, tPixel) + closeness * closeness * knee * 0.25, 1.0);
+        }
         float3 clear;
         if (p.e.y > 0.5) {
             // Tests only: the pre-130 per-channel recovery, kept so the acceptance can show that the
@@ -388,11 +565,30 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         } else {
             // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
             // and let the correction fade out where the veil cannot be a meaningful part of the
-            // pixel: `w = 0` for `L ≥ k·A`.
+            // pixel: `w = 0` for `L ≥ k·A`, and `w = 0` again within the airlight's own resolution.
+            //
+            // The second fade is 2026-10-31's. It used to be only the upper one — full participation
+            // at or below `A` — and at or below `A` the veil's *whole* evidence is `A − L`, which the
+            // recovery then multiplies by `1/t`. At the sky `t ≈ 0.12`, so the 3 % by which the
+            // airlight estimate sits above the sky (`L/A = 0.971` on `_1263309`) came out as a 20 %
+            // darkening (`J/I = 0.797`). `A` is a measurement, not a constant: over this frame's sky
+            // band it spreads 0.405…0.438, i.e. ±4 % of `A`, so a 3 % offset is inside the
+            // estimator's own error bar. A correction whose evidence is smaller than the estimator's
+            // resolution is not evidence, so participation fades in over `2σ … k·2σ` of `A`
+            // (`σ = sqrt(kDehazeAirEpsRel)·A = 2 %·A`, the guided filter's own regularization — one
+            // number, two readers). The fade is **symmetric**: a pixel a few percent *above* the
+            // airlight is not lifted either, and everything further than `8 %·A` from `A` — the whole
+            // mid-ground band is at 37 % — keeps exactly the correction it had.
             float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
             float k = max(p.e.x, 1.0);
             float w = 1.0 - smoothstep(A, k * A, L);
+            // Tests only (`legacyDehazeUnboundedRecovery`): the pre-2026-10-31 upper fade alone, so the
+            // counterproof can measure the darkening this test exists to prevent.
+            if (p.l.w < 0.5) {
+                float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
+                w *= smoothstep(res, k * res, fabs(L - A));      // …full again at 8 %
+            }
             float Lout = mix(L, recovered, w);
             float gain = max(Lout, 0.0) / max(L, 1e-6);
             clear = In * gain;
