@@ -12,7 +12,7 @@
 
 **算法**
 
-白平衡属于解码域：解码器停在文件自带的 as-shot 平衡上，文档里的 (K, tint) 是一次**等价的场景线性增益**（`Sources/PhotonsCore/RenderGraph.swift:3366`）——解码输出到 S1 之间只有线性通道混合与增益，所以可以在 S1 执行而不改域，换来实时预览。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:240`）；tint 沿轨迹法线位移，幅度 $5\times10^{-5}$ uv/单位（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:287`）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:349`），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。
+白平衡是解码参数：文档里的 (K, tint) 写回 `CIRAWFilter.neutralTemperature/neutralTint`，解码器据此出图（`Sources/PhotonsCore/EditModel.swift:1284`）。拖拽期间为了实时，另用本节这套**场景线性估计**给出等效增益预览——下面算的是估计器，不是解码器的模型。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:240`）；tint 沿轨迹法线位移，幅度 $5\times10^{-5}$ uv/单位（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:287`）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:349`），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。
 
 记 $W(T)$ 为求解器在温度 $T$ 给出的线性白光，$T_{\text{ref}},\tau_{\text{ref}}$ 为参考对，则增益是通道比、绿归一：
 
@@ -49,7 +49,7 @@ $$
 
 **实现**
 
-GPU 侧只有一行：`v *= p.a.x * p.a.yzw`（`Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245`），`a` 的四个分量就是曝光增益与 wbR/wbG/wbB（`Sources/PhotonsCore/Kernels/s1_scene_linear.metal:150`）。as shot 时三个数是字面量 1（`Sources/PhotonsCore/RenderGraph.swift:3371`）；「未改动」还要求 `blackOffset == 0` 等条件同时成立，才走整段拷贝的分支（`Sources/PhotonsCore/RenderGraph.swift:3376`）。照度估计在 CPU、每个缓冲一次并缓存（`Sources/PhotonsCore/RenderGraph.swift:1548`），GPU 只拿到三个数——没有矩阵、没有查表。
+预览路径上，GPU 侧只有一行：`v *= p.a.x * p.a.yzw`（`Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245`），`a` 的四个分量就是曝光增益与 wbR/wbG/wbB（`Sources/PhotonsCore/Kernels/s1_scene_linear.metal:150`）。as shot（不写回、也不加增益）时三个数是字面量 1（`Sources/PhotonsCore/RenderGraph.swift:3371`）；「未改动」还要求 `blackOffset == 0` 等条件同时成立，才走整段拷贝的分支（`Sources/PhotonsCore/RenderGraph.swift:3376`）。照度估计在 CPU、每个缓冲一次并缓存（`Sources/PhotonsCore/RenderGraph.swift:1548`），GPU 只拿到三个数——没有矩阵、没有查表。
 
 **开源对照**
 
@@ -61,7 +61,7 @@ GPU 侧只有一行：`v *= p.a.x * p.a.yzw`（`Sources/PhotonsCore/Kernels/s1_s
 - 估计是抽样的：至多 12 万像素、确定性步长（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:118`）。一张大面积单色的画面，三个估计器会一起错。
 - 增益夹在 1/20…20（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:420`），极端请求在这个边界上饱和，而不是报错。
 - `LightGroup.whiteBalanceGains` 还留着，但它是编码域拟合、约弱 2.2 倍，管线不用它（`Sources/PhotonsCore/EditModel.swift:1446`）。读代码的人容易把它当成实现。
-- 等价的边界：as-shot 时增益为 1，逐字节等于解码；显式白平衡没有第二条路径可逐像素比对（143 删掉了写回解码器的那条），所以「与 Apple 原本会给出的结果一致」是模型上的对齐，不是实测。
+- 预览与落定的关系：预览是增益、落定是解码器的模型，两者不承诺逐像素相同；一致的是请求的白点，不是实现。143 暂时删掉了写回，所以当前 `main` 上落定也走增益——核对清楚后再定这条取舍怎么写。
 
 ## 4.2 曝光
 

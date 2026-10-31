@@ -58,7 +58,7 @@ uv = (u0, v0) + (canvasX / canvasW, canvasY / canvasH) · (du, dv)
 
 ### 磁盘缓存
 
-解码结果的磁盘缓存键是 `DecodeCacheKey.digest`：文件 SHA-256、解码器版本、曝光、缩放、草稿标志、色彩空间、解码配方、细节参数、镜头剖面（`Sources/PhotonsCore/LinearImageStore.swift:24`）。白平衡字段仍留在键里，但自 143 起解码器不读它：缓冲只含文件的 as-shot 平衡，文档的白平衡在 S1 以增益执行，键里的那一项只为旧缓冲的命名兼容（`Sources/PhotonsCore/RAWDecoder.swift:102`）。配方号 `v3-lens` 不是装饰：`v1` 的缓冲曾经整体上下镜像，`v2` 修的就是它，所以老缓冲**必须**因为配方号变化而失效（同文件 `:9`）。键里没有像素哈希——对 60 MP 做哈希比解码还贵。
+解码结果的磁盘缓存键是 `DecodeCacheKey.digest`：文件 SHA-256、解码器版本、曝光、缩放、草稿标志、色彩空间、白平衡、细节参数、镜头剖面（`Sources/PhotonsCore/LinearImageStore.swift:24`）。白平衡在键里，因为它写回解码器、决定像素；as shot 时这一分量不出现，所以旧缓冲仍然命中（`Sources/PhotonsCore/DecodeInputs.swift:79`）。配方号 `v3-lens` 不是装饰：`v1` 的缓冲曾经整体上下镜像，`v2` 修的就是它，所以老缓冲**必须**因为配方号变化而失效（同文件 `:9`）。键里没有像素哈希——对 60 MP 做哈希比解码还贵。
 
 ### 中间纹理与副产物
 
@@ -75,7 +75,7 @@ uv = (u0, v0) + (canvasX / canvasW, canvasY / canvasH) · (du, dv)
 
 ### 键是链，不是集合
 
-每个阶段有自己的键材料：S1 是几何键 + 黑电平/曝光/白平衡/高光恢复；S3.6 是 24 个 HSL 数；S3.10 是四个锐化数（`Sources/PhotonsCore/EditModel.swift:1957`、`:2451`）。链式组合：
+每个阶段有自己的键材料：S1 是几何键 + 黑电平/曝光/高光恢复（拖拽预览时再加上白平衡增益）；S3.6 是 24 个 HSL 数；S3.10 是四个锐化数（`Sources/PhotonsCore/EditModel.swift:1957`、`:2451`）。链式组合：
 
 $$
 K_i = H\left(K_{i-1} \,\|\, M_i\right)

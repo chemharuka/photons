@@ -7,7 +7,7 @@
 | 域 | 量 | 能不能大于 1 | 典型操作 | 判据 |
 |---|---|---|---|---|
 | **RAW 解码域** | 相机样本，Apple 解释 | 是（HDR 余量） | 去马赛克、白平衡、机身降噪、镜头校正 | 需要马赛克或厂商模型的事，只能在这里做 |
-| **场景线性域** | 线性光，`1` = SDR 白 | 是（最高约 16×） | 白平衡增益（同域等效执行）、黑电平、曝光、端点、曲线、去雾、暗角、校准矩阵 | 操作是**光的乘加**，且必须在压缩之前 |
+| **场景线性域** | 线性光，`1` = SDR 白 | 是（最高约 16×） | 黑电平、曝光、端点、曲线、去雾、暗角、校准矩阵 | 操作是**光的乘加**，且必须在压缩之前 |
 | **显示参考域** | 显示码，`0…1` | 否 | 三段影调、对比、饱和、HSL、分级、细节、颗粒 | 操作的对象是「显示出来的样子」，或依赖色调映射后的亮度窗口 |
 
 域的边界不是审美问题，而是**信息是否还在**：一旦 S2 把场景压进 `0…1`，被压掉的高光就再也拿不回来；反过来，在线性域对已经显示的像素做「局部对比」，就没有可用的亮度参照。第三、四章的每个反例都能归到这两句话之一。
@@ -40,7 +40,7 @@
 | 光学 | `caRed`、`caBlue` ±0.005（滑杆 ±100） | 源像素 | **S0** | 径向比例，不是像素位移 |
 | 校准 | `shadowTint`、R/G/B × (`hue`,`sat`) ±100 | 场景线性 | **S1** | 线性 Rec.2020 上的 3×3 矩阵 |
 | 蒙版 | 形状 + `opacity`/`feather`/`refine`/`invert`/`blend` + 12 个局部量 | 两域 | **S1.5/S1.6/S3.5/S3.9** | 见 3.4 |
-| 光线 | `temperature` 2000…12000 K（`nil` = as shot）、`tint` ±150（`nil`） | 解码域（实现：S1 增益） | **S1** | 143 起用场景线性增益等效执行；`nil` = 增益 1 |
+| 光线 | `temperature` 2000…12000 K（`nil` = as shot）、`tint` ±150（`nil`） | 解码域 | `CIRAWFilter` | 写回解码器；拖拽期间用场景线性增益预览 |
 | 解码 | `sharpening` 0…150、`sharpeningRadius` 0.5…3、`noiseLuminance/Color` 0…100、`lensCorrections` | 解码域 | `CIRAWFilter` | 机身基线，改它要重新解码 |
 
 > **两处 α 期的文档债。** ① `Stage.swift` 里 S3.9 的注释仍写着「在暗角之前」，但 116 把暗角移到了线性链，执行顺序里暗角在 **S2 之前**、S3.9 在 S2 之后（`Stage.swift:190`）。以 `order` 数组为准，注释是旧的。② README 的对照表把 whites/blacks 记在 S2，代码在 S1（见 1.2 的注）。
@@ -125,11 +125,11 @@
 
 ## 3.7 解码域与 S1 的分工
 
-**白平衡属于解码域；143 起，它的效果以 S1 的等效增益执行。** 解码器交出的是文件自己的 as-shot 平衡，`CIRAWFilter.neutralTemperature/neutralTint` 不再被写入（`Sources/PhotonsCore/RAWDecoder.swift:102`）。文档里的 `temperature/tint` 由 `WhiteBalanceEstimate` 变成三通道增益：三个独立的估白器（white patch、grey world、grey edge）在场景线性缓冲上各给一个白点，逐通道取中位数；请求的 `(K, tint)` 是 CIE 1960 uv 上 Planckian 轨迹的一点加垂直 tint 位移，uv → XYZ，再用 Bradford 适配到工作基色的 D65 白点，得到 3×3 矩阵；最后折成 `WhiteBalanceSolver.gain` 的三个归一化数，S1 只做一次 `v *= gain · wb`（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:3`）。
+**白平衡是解码参数。** 文档里的 `temperature/tint` 非 `nil` 时写进 `CIRAWFilter.neutralTemperature/neutralTint`，解码器据此出图；因此它决定「哪张缓冲」，进的是解码键（`Sources/PhotonsCore/EditModel.swift:1284`、`Sources/PhotonsCore/RAWDecoder.swift:8`、`Sources/PhotonsCore/DecodeInputs.swift:79`）。`nil` 表示 as shot：**完全不碰 filter**——把读到的 as-shot 值再赋回去不是恒等（约 0.15 % / 0.40 % 的样本会移动，`docs/STATUS.md`），这也是默认像素逐字节不变的前提。
 
-**为什么这仍然算解码域，而不是「把白平衡搬到了显示链」。** 解码器输出到 S1 之间只有线性的通道混合（去马赛克）与增益，逐通道增益和去马赛克可交换，所以在 S1 乘一次与在解码时乘一次是同一个线性变换——差别只在**执行位置**，不在量或域。这样做换来的是实时：拖白平衡是一次场景线性 pass，不重新解码，预览与松手是同一张渲染（`Sources/PhotonsCore/RenderGraph.swift:2022`）。代价是解码缓冲只带 as-shot 平衡，文档的白平衡永远不进缓冲，因此解码键里的 `whiteBalance` 字段自 143 起只是命名兼容（`Sources/PhotonsCore/DecodeInputs.swift:95`）。
+**实时效果由场景线性估计承担。** 解码一次要数百毫秒，拖滑杆不能每帧重解；`WhiteBalanceEstimate` 因此在解码缓冲上估出画面照度：三个估白器（white patch、grey world、grey edge）各给一个白点，逐通道取中位数；请求的 `(K, tint)` 是 CIE 1960 uv 上 Planckian 轨迹的一点加垂直 tint 位移，uv → XYZ，再用 Bradford 适配到工作基色的 D65 白点，折成三通道增益，拖拽期间按增益预览（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:3`）。这不改变归属：估计只是把解码器的结果提前看见，落定仍由解码器出图。
 
-**旧注释还在。** `Sources/PhotonsCore/EditModel.swift:1284` 与 `Sources/PhotonsCore/WhiteBalancePresets.swift:61` 仍写着「喂给 CIRAWFilter」；那是 143 之前的路径，保留是因为字段名与 XMP 映射没有改。以 `RAWDecoder.swift:102` 和 `WhiteBalanceEstimate` 为准。
+**α 注记（2026-10-31）。** 当前 `main` 上的 143 暂时删掉了写回：解码器保持 as-shot，所有白平衡（含落定）走 S1 增益，预览与落定因此逐像素相同（`Sources/PhotonsCore/RAWDecoder.swift:102`）。这与本节的设计语义不一致，正在核对 143 是否为误改；若写回恢复，本节与 2.3 节不用再动，只需删掉这条注记。
 
 **镜头校正是文件事实。** DNG 有三个不同平面、或 RW2 有可用剖面时，Photons 关掉 Apple 的校正、自己在 S0 做 warp；否则用 Apple 的。判断依据随文件走（`RenderInput.lensProfile`），并进入解码键，因为「哪套校正跑过」决定了像素（`RenderGraph.swift:34`、`LinearImageStore.swift:41`）。
 

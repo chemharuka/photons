@@ -22,7 +22,7 @@
   <aside class="sidebar">
     <p class="sidebar-title">目录</p>
     <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li class="current"><span>4a 影调</span></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
-    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>4845a04</code></p>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>7eb9ae3</code></p>
   </aside>
   <main id="content" class="content">
     <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#白平衡色调与黑电平">4.1 白平衡、色调与黑电平</a></li><li class="toc-2"><a href="#曝光">4.2 曝光</a></li><li class="toc-2"><a href="#高光中间调阴影">4.3 高光、中间调、阴影</a></li><li class="toc-2"><a href="#白点与黑点">4.4 白点与黑点</a></li><li class="toc-2"><a href="#全局对比度">4.5 全局对比度</a></li><li class="toc-2"><a href="#hdr-曲线">4.6 HDR 曲线</a></li></ul></nav>
@@ -34,7 +34,7 @@
 <p><strong>它解决什么问题</strong></p>
 <p>把「这张图的光是什么颜色」定下来，再把用户想要的偏移叠上去。白平衡决定中性色落在哪，色调（tint）修绿/品红偏移，黑电平决定「0」在哪。三者的共同要求是：没碰过时必须逐字节不变。</p>
 <p><strong>算法</strong></p>
-<p>白平衡属于解码域：解码器停在文件自带的 as-shot 平衡上，文档里的 (K, tint) 是一次<strong>等价的场景线性增益</strong>（<code>Sources/PhotonsCore/RenderGraph.swift:3366</code>）——解码输出到 S1 之间只有线性通道混合与增益，所以可以在 S1 执行而不改域，换来实时预览。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:240</code>）；tint 沿轨迹法线位移，幅度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>5</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>5</mn></mrow></msup></mrow><annotation encoding="application/x-tex">5\times10^{-5}</annotation></semantics></math> uv/单位（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:287</code>）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:349</code>），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。</p>
+<p>白平衡是解码参数：文档里的 (K, tint) 写回 <code>CIRAWFilter.neutralTemperature/neutralTint</code>，解码器据此出图（<code>Sources/PhotonsCore/EditModel.swift:1284</code>）。拖拽期间为了实时，另用本节这套<strong>场景线性估计</strong>给出等效增益预览——下面算的是估计器，不是解码器的模型。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:240</code>）；tint 沿轨迹法线位移，幅度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>5</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>5</mn></mrow></msup></mrow><annotation encoding="application/x-tex">5\times10^{-5}</annotation></semantics></math> uv/单位（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:287</code>）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:349</code>），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。</p>
 <p>记 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>W</mi><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">W(T)</annotation></semantics></math> 为求解器在温度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>T</mi><annotation encoding="application/x-tex">T</annotation></semantics></math> 给出的线性白光，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo>,</mo><msub><mi>τ</mi><mtext mathvariant="normal">ref</mtext></msub></mrow><annotation encoding="application/x-tex">T_{\text{ref}},\tau_{\text{ref}}</annotation></semantics></math> 为参考对，则增益是通道比、绿归一：</p>
 <p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>g</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>g</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>g</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>b</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>b</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>b</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mi>g</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>←</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mi>r</mi><mi>g</mi></mfrac><mo>,</mo><mspace width="0.167em"></mspace><mn>1</mn><mo>,</mo><mspace width="0.167em"></mspace><mfrac><mi>b</mi><mi>g</mi></mfrac><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
 r=\frac{W_r(T_{\text{ref}})}{W_r(T)},\quad g=\frac{W_g(T_{\text{ref}})}{W_g(T)},\quad b=\frac{W_b(T_{\text{ref}})}{W_b(T)},\qquad (r,g,b)\leftarrow\left(\frac{r}{g},\,1,\,\frac{b}{g}\right)
@@ -105,7 +105,7 @@ v \leftarrow v+o,\qquad o=\text{blackOffset}\in[-0.01,\,+0.01]
 </tbody>
 </table>
 <p><strong>实现</strong></p>
-<p>GPU 侧只有一行：<code>v *= p.a.x * p.a.yzw</code>（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245</code>），<code>a</code> 的四个分量就是曝光增益与 wbR/wbG/wbB（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:150</code>）。as shot 时三个数是字面量 1（<code>Sources/PhotonsCore/RenderGraph.swift:3371</code>）；「未改动」还要求 <code>blackOffset == 0</code> 等条件同时成立，才走整段拷贝的分支（<code>Sources/PhotonsCore/RenderGraph.swift:3376</code>）。照度估计在 CPU、每个缓冲一次并缓存（<code>Sources/PhotonsCore/RenderGraph.swift:1548</code>），GPU 只拿到三个数——没有矩阵、没有查表。</p>
+<p>预览路径上，GPU 侧只有一行：<code>v *= p.a.x * p.a.yzw</code>（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245</code>），<code>a</code> 的四个分量就是曝光增益与 wbR/wbG/wbB（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:150</code>）。as shot（不写回、也不加增益）时三个数是字面量 1（<code>Sources/PhotonsCore/RenderGraph.swift:3371</code>）；「未改动」还要求 <code>blackOffset == 0</code> 等条件同时成立，才走整段拷贝的分支（<code>Sources/PhotonsCore/RenderGraph.swift:3376</code>）。照度估计在 CPU、每个缓冲一次并缓存（<code>Sources/PhotonsCore/RenderGraph.swift:1548</code>），GPU 只拿到三个数——没有矩阵、没有查表。</p>
 <p><strong>开源对照</strong></p>
 <ul>
 <li>darktable <code>temperature</code>（<code>src/iop/temperature.c</code>）：系数来自相机矩阵与按文件记录的照度选表，是「查表 + 相机模型」；本实现是在解码后的线性缓冲上自己估照度再算增益——https://github.com/darktable-org/darktable/blob/master/src/iop/temperature.c</li>
@@ -116,7 +116,7 @@ v \leftarrow v+o,\qquad o=\text{blackOffset}\in[-0.01,\,+0.01]
 <li>估计是抽样的：至多 12 万像素、确定性步长（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:118</code>）。一张大面积单色的画面，三个估计器会一起错。</li>
 <li>增益夹在 1/20…20（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:420</code>），极端请求在这个边界上饱和，而不是报错。</li>
 <li><code>LightGroup.whiteBalanceGains</code> 还留着，但它是编码域拟合、约弱 2.2 倍，管线不用它（<code>Sources/PhotonsCore/EditModel.swift:1446</code>）。读代码的人容易把它当成实现。</li>
-<li>等价的边界：as-shot 时增益为 1，逐字节等于解码；显式白平衡没有第二条路径可逐像素比对（143 删掉了写回解码器的那条），所以「与 Apple 原本会给出的结果一致」是模型上的对齐，不是实测。</li>
+<li>预览与落定的关系：预览是增益、落定是解码器的模型，两者不承诺逐像素相同；一致的是请求的白点，不是实现。143 暂时删掉了写回，所以当前 <code>main</code> 上落定也走增益——核对清楚后再定这条取舍怎么写。</li>
 </ul>
 <h2 id="曝光">4.2 曝光</h2>
 <p><strong>它解决什么问题</strong></p>
@@ -630,7 +630,7 @@ v_c\leftarrow x\left(\mathrm{LUT}_c\big(u(v_c)\big)+\max(u-1,0)\cdot\mathrm{clam
       <a class="next" href="04b-color.html">4b 色彩 →</a>
     </nav>
     <footer class="page-footer">
-      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>4845a04</code> · 2026-10-31</p>
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>7eb9ae3</code> · 2026-10-31</p>
       <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
     </footer>
   </main>
