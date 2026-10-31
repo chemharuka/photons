@@ -5483,6 +5483,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                        measure: Bool) throws -> (result: RenderResult, ms: Double) {
             let t = CFAbsoluteTimeGetCurrent()
             // 一次请求 = 一个值：字段和 `RenderOptions` 一一对应，映射只在 `LoupeFrameRequest` 里有一份。
+            // 132 §9: the crop workspace's fit is a deliberate 90 %; do not let the renderer
+            // scale that margin back up to the viewport (`neverUpscalesContent`).
             let request = LoupeFrameRequest(
                 identity: cacheIdentity,
                 documentHash: "",
