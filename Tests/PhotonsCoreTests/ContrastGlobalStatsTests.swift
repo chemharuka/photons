@@ -606,6 +606,23 @@ final class ContrastGlobalStatsTests: XCTestCase {
 
     // MARK: - 5 · hot and cold marginal cost
 
+    /// **What a settled frame pays, in counts — not in milliseconds.**
+    ///
+    /// This test shipped asserting a *wall clock* (`hot median ≤ +0.4 ms`, `cold ≤ 6 ms`). On this
+    /// memory-starved box that is a coin flip: the same unchanged stage measured +9.6 / −4.7 / +0.8 ms
+    /// on 2026-10-31 while other lanes compiled, and a marginal can even go **negative** under load.
+    /// 185's `testTheCostIsOneStageThatEntersOnlyWhenNonZero` and 171's cost gate were rewritten to
+    /// the same rule, and this one follows them: the receipts are the **S2.5 recompute counts**,
+    /// which are load-independent, and the milliseconds stay in the log for an idle machine.
+    ///
+    ///   · hot frame, maps already built → **0** rebuilds (`contrastMapBuilds` stands still) and S2.5
+    ///     is a **stage-cache hit**, so it is recorded in `skipped`, not in `executed` (that is what
+    ///     "recomputed 0 times" looks like from the trace; `contrastMapHits` is the *other* case — the
+    ///     stage ran for a moved window with the maps already built, see the counters test);
+    ///   · a contrast change → exactly **1** rebuild (`c=<contrast>` is in the map key);
+    ///   · hot and cold frames alike run **one** S2.5 pass when they run it at all, and the
+    ///     contrast-free document has no S2.5 pass to run;
+    ///   · cold (`useCache = false`) → one rebuild per frame, by definition of the flag.
     func testHotAndColdMarginalCostAtFourMegapixels() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         let w = 2560, h = 1600
@@ -619,46 +636,72 @@ final class ContrastGlobalStatsTests: XCTestCase {
         let g = try RenderGraph(input: RenderInput(image: image, identity: "187-cost"))
         let off = contrast(0), on = contrast(50)
 
-        // Hot: one warm-up each (pipeline compile + the one map build), then alternate. With
-        // `useCache = true` the second visit to each document resumes at S4, so the marginal number
-        // is "what a settled frame pays" — and `contrastMapBuilds` staying at 1 is the receipt that
-        // the coefficient maps are not rebuilt.
+        func s2_5Passes(_ frame: Frame) -> Int {
+            frame.trace.executed.filter { $0 == .contrast }.count
+        }
+
+        // One warm-up each: the pipelines compile and the `on` document's maps are built once. The
+        // `off` document has no S2.5 stage at all (`hasContrastStage` is false), so it contributes
+        // nothing to either counter.
         _ = try render(g, off, scale: 1, useCache: true)
         _ = try render(g, on, scale: 1, useCache: true)
-        // Five pairs, median: this box swaps (1.2 GB free of 7) and a single frame moves by
-        // milliseconds when the OS pages — the same reason 185 asserts a median of three.
+        XCTAssertEqual(g.contrastMapBuilds, 1, "the warm-up must build the maps exactly once")
+        XCTAssertEqual(g.contrastMapHits, 0)
+
+        // Hot: alternate between two documents whose keys are both settled. The marginal frame is
+        // "what a cache hit costs" — and its S2.5 recompute count is the claim, not its duration.
         var hot: [Double] = []
+        let hotBuildsBefore = g.contrastMapBuilds
         for i in 0..<5 {
             let a = try render(g, off, scale: 1, useCache: true)
             let b = try render(g, on, scale: 1, useCache: true)
             let marginal = b.trace.gpuMilliseconds - a.trace.gpuMilliseconds
             hot.append(marginal)
-            print(String(format: "187 · hot %d · c=0 %.2f ms · c=+50 %.2f ms · marginal %+.3f ms",
-                         i + 1, a.trace.gpuMilliseconds, b.trace.gpuMilliseconds, marginal))
+            XCTAssertEqual(s2_5Passes(a), 0, "contrast = 0 没有 S2.5 可跑（第 \(i + 1) 对）")
+            XCTAssertEqual(s2_5Passes(b), 0, "热帧不许重算 S2.5（第 \(i + 1) 对）")
+            // ...and it is *there*, served from the stage cache — not absent from the frame.
+            XCTAssertEqual(b.trace.skipped.filter { $0 == .contrast }.count, 1,
+                           "热帧的 S2.5 应该是一次缓存命中（第 \(i + 1) 对）")
+            print(String(format: "187 · hot %d · c=0 %.2f ms (%d 段) · c=+50 %.2f ms (%d 段, 跳过 %d) "
+                         + "· marginal %+.3f ms",
+                         i + 1, a.trace.gpuMilliseconds, s2_5Passes(a),
+                         b.trace.gpuMilliseconds, s2_5Passes(b),
+                         b.trace.skipped.filter { $0 == .contrast }.count, marginal))
         }
-        let hotMedian = hot.sorted()[hot.count / 2]
-        XCTAssertLessThanOrEqual(hotMedian, 0.4,
-                                 "hot marginal median \(hotMedian) ms exceeds the +0.4 ms budget")
-        XCTAssertEqual(g.contrastMapBuilds, 1, "the hot frames must not rebuild the maps")
+        XCTAssertEqual(g.contrastMapBuilds - hotBuildsBefore, 0,
+                       "热帧的 S2.5 重算次数必须是 0，实际重算了 \(g.contrastMapBuilds - hotBuildsBefore) 次")
 
-        // Cold: `useCache = false`, so every frame rebuilds the proxy prefix and the maps. Both
-        // frames run the whole graph, so the difference is exactly the S2.5 stage.
-        _ = try render(g, off, scale: 1, useCache: false)
-        _ = try render(g, on, scale: 1, useCache: false)
+        // Only the slider moved: exactly one rebuild — §2's contract, and the reason `c=` is in the
+        // map key. The frame that pays it runs one S2.5 pass, not two.
+        let changeBuildsBefore = g.contrastMapBuilds
+        let moved = try render(g, contrast(40), scale: 1, useCache: true)
+        XCTAssertEqual(g.contrastMapBuilds - changeBuildsBefore, 1,
+                       "改 contrast 只许重算一次，实际 \(g.contrastMapBuilds - changeBuildsBefore) 次")
+        XCTAssertEqual(s2_5Passes(moved), 1, "改 contrast 的那一帧只跑一段 S2.5")
+
+        // Cold: `useCache = false` rebuilds every frame, so the maps are rebuilt once per `on` frame
+        // — that is what the flag means, and it is countable.
         var cold: [Double] = []
+        let coldBuildsBefore = g.contrastMapBuilds
         for i in 0..<5 {
             let a = try render(g, off, scale: 1, useCache: false)
             let b = try render(g, on, scale: 1, useCache: false)
             let marginal = b.trace.gpuMilliseconds - a.trace.gpuMilliseconds
             cold.append(marginal)
+            XCTAssertEqual(s2_5Passes(a), 0, "冷帧里 contrast = 0 仍然没有 S2.5（第 \(i + 1) 对）")
+            XCTAssertEqual(s2_5Passes(b), 1, "冷帧只跑一段 S2.5（第 \(i + 1) 对）")
             print(String(format: "187 · cold %d · c=0 %.2f ms · c=+50 %.2f ms · marginal %+.3f ms",
                          i + 1, a.trace.gpuMilliseconds, b.trace.gpuMilliseconds, marginal))
         }
+        XCTAssertEqual(g.contrastMapBuilds - coldBuildsBefore, 5,
+                       "冷帧每帧重算一次：5 帧应是 5 次，实际 \(g.contrastMapBuilds - coldBuildsBefore) 次")
+
+        // Printed, never asserted: the wall clock on this box measures the machine, not the stage.
+        let hotMedian = hot.sorted()[hot.count / 2]
         let coldMedian = cold.sorted()[cold.count / 2]
-        print(String(format: "187 · hot median %+.3f ms · cold median %+.3f ms",
-                     hotMedian, coldMedian))
-        XCTAssertLessThanOrEqual(coldMedian, 6.0,
-                                 "cold marginal median \(coldMedian) ms exceeds the 6.0 ms budget")
+        print(String(format: "187 · hot median %+.3f ms · cold median %+.3f ms · "
+                     + "builds %d · hits %d (只打印，不断言)",
+                     hotMedian, coldMedian, g.contrastMapBuilds, g.contrastMapHits))
     }
 
     // MARK: - 6 · a neutral document does not know S2.5 exists
