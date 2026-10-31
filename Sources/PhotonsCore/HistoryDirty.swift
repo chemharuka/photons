@@ -45,6 +45,15 @@ extension EditHistory {
         // because `decodeInputs` moves). It dirties no *stage*: a new development is not a render stage.
         if before.decoderVersion != after.decoderVersion { dirty.insert(.detail) }
         if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
+        // 2026-10-31 (185): **显示域锐化**. Exactly the 078 B8 色差 accident again — 185 put four
+        // sliders on 细节卡 and wired the S3.10 stage, key token, history labels and snapshot
+        // leaves, but never added the group here. `applyEdit` short-circuits on this set, so every
+        // sharpen drag was *silently dropped*: no commit, no history row, no re-render — the panel
+        // moved a knob that changed nothing. User-reported ("UI 写了，功能没连上").
+        //
+        // `.effects`, not a group of its own: `RenderGroup.effects.stages` already carries `.sharpen`
+        // (History.swift:64), and the history field tags spell `sharpen.*` as `.effects`.
+        if !EditParameters.areEqual(before.sharpen, after.sharpen) { dirty.insert(.effects) }
         if !EditParameters.areEqual(before.geometry, after.geometry) { dirty.insert(.geometry) }
         // 2026-10-28 (078 B8): **色差**. 029 put the two ratios in `optics` and the cache key
         // (`;car=`, `;cab=`) and the history's field table, but never here — and this is the list
@@ -284,6 +293,21 @@ enum EditParameters {
     static func areEqual(_ a: DetailGroup, _ b: DetailGroup) -> Bool {
         detailFields.allEqual(a, b)
     }
+
+    /// 185: the display-domain sharpen's four numbers. Same tolerance story as every other slider
+    /// table: one step of travel is far above 1e-6, and a JSON round trip is far below it.
+    static func areEqual(_ a: SharpenGroup, _ b: SharpenGroup) -> Bool {
+        sharpenFields.allEqual(a, b)
+    }
+
+    static let sharpenFields: FieldTable<SharpenGroup> = {
+        var t = FieldTable<SharpenGroup>()
+        t.field("sharpen.amount") { areEqual($0.amount, $1.amount) }
+        t.field("sharpen.radius") { areEqual($0.radius, $1.radius) }
+        t.field("sharpen.detail") { areEqual($0.detail, $1.detail) }
+        t.field("sharpen.masking") { areEqual($0.masking, $1.masking) }
+        return t
+    }()
 
     static let detailFields: FieldTable<DetailGroup> = {
         var t = FieldTable<DetailGroup>()

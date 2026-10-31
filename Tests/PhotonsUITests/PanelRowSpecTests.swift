@@ -21,7 +21,35 @@ final class PanelRowSpecTests: XCTestCase {
 
     private static let panelHeight: CGFloat = 4200
 
-    // MARK: - 1. every rendered row belongs to exactly one spec
+    // MARK: - 2. every row the panel draws must be a row the document notices
+
+    /// 2026-10-31 (185): the sharpen rows shipped with a stage, a key token, history labels and
+    /// snapshot leaves — but no `dirtyGroups` comparison, so `applyEdit` short-circuited and **every
+    /// drag was silently dropped** (user: 「UI 写了，功能没连上」). 078 B8's 色差 was the same accident.
+    ///
+    /// This is the invariant that makes that whole class impossible: one step inside a row's own
+    /// range has to dirty at least one group. A new slider that forgets the dirty table fails here.
+    func testEveryRenderedRowDirtiesAtLeastOneGroup() {
+        let rows = InspectorView.PanelCardSpec.all.flatMap(\.rows)
+        XCTAssertGreaterThan(rows.count, 24, "行表比这更少说明守卫读到的不是真的表")
+        var silent: [String] = []
+        for row in rows {
+            var after = EditModel.neutral
+            let before = after[keyPath: row.keyPath]
+            let span = row.range.upperBound - row.range.lowerBound
+            let step = max(0.01, span / 100)
+            let target = before + step <= row.range.upperBound ? before + step : before - step
+            XCTAssertNotEqual(target, before, "\(row.title)：没有任何可移动的一步，守卫推不动它")
+            after[keyPath: row.keyPath] = target
+            if EditHistory.dirtyGroups(from: .neutral, to: after).isEmpty {
+                silent.append(row.title)
+            }
+        }
+        XCTAssertEqual(silent, [],
+                       "这些滑杆改了文档却不产生任何脏组 ⇒ applyEdit 会静默丢掉写入：\(silent)")
+    }
+
+    // MARK: - 3. every rendered row belongs to exactly one spec
 
     func testEveryRenderedToneRowBelongsToExactlyOneCardSpec() throws {
         let specs = InspectorView.PanelCardSpec.all
