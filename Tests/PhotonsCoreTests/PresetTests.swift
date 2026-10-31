@@ -203,17 +203,18 @@ final class PresetTests: XCTestCase {
 
     // MARK: - 5. versioning
 
-    func testPresetRejectsDifferentSchemaVersion() throws {
+    func testPresetFromANewerSchemaVersionIsReadNotRefused() throws {
         let future = """
         {"schemaVersion":2,"name":"From the future","groups":["light"],"fragment":{"light":{"exposure":1}}}
         """
-        XCTAssertThrowsError(try JSONDecoder().decode(Preset.self, from: Data(future.utf8))) { error in
-            guard case PresetError.unsupportedSchemaVersion(let found, let supported) = error else {
-                return XCTFail("expected unsupportedSchemaVersion, got \(error)")
-            }
-            XCTAssertEqual(found, 2)
-            XCTAssertEqual(supported, Preset.currentSchemaVersion)
-        }
+        // 205: a newer envelope is read with the known groups and remembered, never refused; the
+        // `unsupportedSchemaVersion` case stays for structurally bad files, not for "newer".
+        let preset = try JSONDecoder().decode(Preset.self, from: Data(future.utf8))
+        XCTAssertEqual(preset.name, "From the future")
+        XCTAssertEqual(preset.schemaVersion, 2)
+        XCTAssertEqual(preset.forwardCompatVersion, 2)
+        XCTAssertEqual(preset.groups, [.light])
+        XCTAssertEqual(preset.edit.light.exposure, 1)
     }
 
     func testPresetForgivesAMissingSchemaVersionAndGroups() throws {

@@ -341,36 +341,36 @@ final class PresetCatalogTests: XCTestCase {
 
     // MARK: - 5. version guard
 
-    func testPresetWithANewerSchemaVersionIsRefusedAndCounted() throws {
+    func testPresetWithANewerSchemaVersionStillLoadsAndKeepsItsKeys() throws {
         let catalog = try newLibrary()
         try catalog.savePreset(Preset(name: "Current", from: edit(contrast: 5), groups: [.light]))
         try catalog.dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO presets(id, name, develop_json, is_default, created_at, updated_at)
                 VALUES(?, ?, ?, 0, ?, ?)
-                """, arguments: ["future-id", "Future",
-                                 #"{"schemaVersion":9,"name":"Future","groups":["light"]}"#,
+                """, arguments: ["future-id", "From the future",
+                                 #"{"schemaVersion":9,"name":"From the future","groups":["light","futureGroup"],"fragment":{"light":{"exposure":0.5},"futureGroup":{"x":1}},"futureTop":true}"#,
                                  ISO8601.now(), ISO8601.now()])
         }
 
-        // Listing skips it (one unreadable row must not empty the menu) and counts it.
+        // 205: a newer envelope is read, not skipped and not refused. The known group is usable and
+        // the unknown names are kept for a save.
         let listed = try catalog.presetRecords()
-        XCTAssertEqual(listed.map(\.name), ["Current"])
-        XCTAssertEqual(catalog.presetDecodeFailures, 1)
+        XCTAssertEqual(Set(listed.map(\.name)), ["Current", "From the future"])
+        XCTAssertEqual(catalog.presetDecodeFailures, 0)
 
-        // Asking for it by name throws instead of pretending it is not there.
-        XCTAssertThrowsError(try catalog.presetRecord(named: "Future")) { error in
-            guard case PresetError.unsupportedSchemaVersion(let found, _) = error else {
-                return XCTFail("expected unsupportedSchemaVersion, got \(error)")
-            }
-            XCTAssertEqual(found, 9)
-        }
+        let record = try XCTUnwrap(try catalog.presetRecord(named: "From the future"))
+        XCTAssertEqual(record.preset.forwardCompatVersion, 9)
+        XCTAssertEqual(record.preset.groups, [.light])
+        XCTAssertEqual(record.preset.edit.light.exposure, 0.5)
+        XCTAssertEqual(record.preset.forwardExtras?["futureTop"], .bool(true))
 
         // Its bytes are untouched: a newer build can still read them.
         let blob = try catalog.dbQueue.read { db in
-            try String.fetchOne(db, sql: "SELECT develop_json FROM presets WHERE name = 'Future'")
+            try String.fetchOne(db, sql: "SELECT develop_json FROM presets WHERE name = 'From the future'")
         }
         XCTAssertTrue(blob?.contains("\"schemaVersion\":9") ?? false)
+        XCTAssertTrue(blob?.contains("futureGroup") ?? false)
     }
 
     // MARK: - 6. migration v3 → v4

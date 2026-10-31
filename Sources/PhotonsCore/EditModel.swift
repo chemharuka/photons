@@ -220,6 +220,27 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// source-anchored).
     public var healSpots: [HealSpot]
 
+    /// 205 — **the keys this build does not know**, kept for the save.
+    ///
+    /// Shape: one entry per *level* of the document that had unknown keys. A top-level unknown key
+    /// maps to its raw value (`"futureThing": {"a": 1}` → `["futureThing": .object(…)]`); a known
+    /// group with unknown children maps to an object of **only** those children
+    /// (`"effects": {"futureGrain": 0.5}` → `["effects": .object(["futureGrain": .number(0.5)])]`).
+    /// `nil` means "nothing unknown" — every document this build wrote — and is what keeps the old
+    /// encode path byte-identical.
+    ///
+    /// Not part of the document's meaning and never encoded as a key of its own: `encode(to:)`
+    /// flattens these entries back to where they came from. Child paths are kept whole, not probed
+    /// deeper (§1.2 of 205): a future object under an unknown name is one opaque value.
+    public var forwardExtras: JSONValue.Object?
+
+    /// 205 — the `schemaVersion` the file actually carried, when it was **higher** than this build's
+    /// (`nil` otherwise). The document's own `schemaVersion` is lifted to
+    /// `EditModel.currentSchemaVersion` on decode; this is the number the UI's one-line notice names
+    /// (`该文件来自更新的版本 v\(n)，未知设置已原样保留`) and the reason "old document, no notice" is
+    /// one nil check.
+    public var forwardCompatVersion: Int?
+
     public init(schemaVersion: Int = EditModel.currentSchemaVersion,
                 processVersion: Int = EditModel.currentProcessVersion,
                 geometry: GeometryGroup = .identity,
@@ -236,7 +257,9 @@ public struct EditModel: Sendable, Equatable, Codable {
                 calibration: CalibrationGroup = .identity,
                 masks: [Mask] = [],
                 showMaskID: String? = nil,
-                healSpots: [HealSpot] = []) {
+                healSpots: [HealSpot] = [],
+                forwardExtras: JSONValue.Object? = nil,
+                forwardCompatVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
         self.processVersion = processVersion
         self.geometry = geometry
@@ -254,6 +277,8 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.masks = masks
         self.showMaskID = showMaskID
         self.healSpots = healSpots
+        self.forwardExtras = forwardExtras
+        self.forwardCompatVersion = forwardCompatVersion
     }
 
     /// The all-defaults document: renders as "decode → display encode", nothing else.
@@ -402,9 +427,22 @@ public struct EditModel: Sendable, Equatable, Codable {
     public var hasGrade: Bool { !colorGrading.isIdentity }
 
     public init(from decoder: any Decoder) throws {
+        // 205: the raw tree is what lets the keys this build does not know survive the decode. Read
+        // before the keyed container and independently of it — a value of the wrong type still falls
+        // back through `val(…)` exactly as it always did.
+        let tree = (try? JSONValue(from: decoder)) ?? .null
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var v = EditModel.neutral
-        v.schemaVersion = c.val("schemaVersion", v.schemaVersion)
+        let incomingVersion = c.val("schemaVersion", v.schemaVersion)
+        v.schemaVersion = incomingVersion
+        // 205: a document from a newer build is **not** refused. This build understands the fields it
+        // knows (the `val(…)` helpers already supply every explicit default), the version is lifted so
+        // a save is written with this build's version, and the original number is remembered for the
+        // one-line notice. The unknown keys are collected at the end, once the tree is available.
+        if incomingVersion > EditModel.currentSchemaVersion {
+            v.forwardCompatVersion = incomingVersion
+            v.schemaVersion = EditModel.currentSchemaVersion
+        }
         v.processVersion = c.val("processVersion", v.processVersion)
         v.geometry = c.val("geometry", v.geometry)
         v.light = c.val("light", v.light)
@@ -525,7 +563,29 @@ public struct EditModel: Sendable, Equatable, Codable {
         // `detailSettings` is: a hand-edited `radius: 9` must not draw a disk the kernels cannot
         // express.
         v.healSpots = c.val("healSpots", v.healSpots).map(\.clamped)
+        // 205: keep the tree's unknown paths for the save. `nil` for every document this build wrote,
+        // which is what makes the old encode path (and its bytes) untouched.
+        v.forwardExtras = EditModel.forwardExtras(in: tree)
         self = v
+    }
+
+    /// The unknown paths of `tree`: top-level keys this build does not know, plus unknown children of
+    /// a known group. A group's unknown children are kept as one object under the group's name so
+    /// `encode(to:)` can merge them back into that group's container; a child path is never probed
+    /// deeper (§1.2).
+    static func forwardExtras(in tree: JSONValue) -> JSONValue.Object? {
+        guard case .object(let root) = tree else { return nil }
+        var out: JSONValue.Object = [:]
+        let known = ForwardCompatKnownKeys.topLevel
+        for (key, value) in root where !known.contains(key) {
+            out[key] = value
+        }
+        for (group, groupKnown) in ForwardCompatKnownKeys.groups {
+            guard case .object(let children)? = root[group] else { continue }
+            let unknown = children.filter { !groupKnown.contains($0.key) }
+            if !unknown.isEmpty { out[group] = .object(unknown) }
+        }
+        return out.isEmpty ? nil : out
     }
 
     public static func load(from url: URL) throws -> EditModel {
@@ -542,31 +602,32 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// reader sees; it is what keeps this function readable against the property list.
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: AnyCodingKey.self)
+        let extras = forwardExtras
         try c.encode(schemaVersion, forKey: AnyCodingKey("schemaVersion"))
         try c.encode(processVersion, forKey: AnyCodingKey("processVersion"))
-        try c.encode(geometry, forKey: AnyCodingKey("geometry"))
-        try c.encode(light, forKey: AnyCodingKey("light"))
-        try c.encode(curve, forKey: AnyCodingKey("curve"))
-        try c.encode(color, forKey: AnyCodingKey("color"))
-        if !colorGrading.isIdentity {
-            try c.encode(colorGrading, forKey: AnyCodingKey("colorGrading"))
+        try encodeGroup(geometry, "geometry", into: &c, extras: extras)
+        try encodeGroup(light, "light", into: &c, extras: extras)
+        try encodeGroup(curve, "curve", into: &c, extras: extras)
+        try encodeGroup(color, "color", into: &c, extras: extras)
+        if !colorGrading.isIdentity || hasExtras("colorGrading", extras) {
+            try encodeGroup(colorGrading, "colorGrading", into: &c, extras: extras)
         }
-        try c.encode(detail, forKey: AnyCodingKey("detail"))
-        try c.encode(detailSettings, forKey: AnyCodingKey("detailSettings"))
+        try encodeGroup(detail, "detail", into: &c, extras: extras)
+        try encodeGroup(detailSettings, "detailSettings", into: &c, extras: extras)
         try c.encodeIfPresent(decoderVersion, forKey: AnyCodingKey("decoderVersion"))
-        try c.encode(effects, forKey: AnyCodingKey("effects"))
+        try encodeGroup(effects, "effects", into: &c, extras: extras)
         // 185: written **only when non-neutral** (the `colorGrading`/`healSpots` rule), so every
         // document from before S3.10 re-encodes byte for byte and an absent key reads as the identity.
-        if !sharpen.isIdentity {
-            try c.encode(sharpen, forKey: AnyCodingKey("sharpen"))
+        if !sharpen.isIdentity || hasExtras("sharpen", extras) {
+            try encodeGroup(sharpen, "sharpen", into: &c, extras: extras)
         }
-        try c.encode(optics, forKey: AnyCodingKey("optics"))
+        try encodeGroup(optics, "optics", into: &c, extras: extras)
         // 179: written **only when the panel moved** (the `colorGrading`/`healSpots` rule). A neutral
         // document re-encodes byte for byte — which is not a cosmetic detail: `ThumbRecipe`'s on-disk
         // key is `sha256(canonical(develop_json) | …)`, so an unconditional key would invalidate every
         // cached thumbnail on disk for a document that never opened the card.
-        if !calibration.isIdentity {
-            try c.encode(calibration, forKey: AnyCodingKey("calibration"))
+        if !calibration.isIdentity || hasExtras("calibration", extras) {
+            try encodeGroup(calibration, "calibration", into: &c, extras: extras)
         }
         try c.encode(masks, forKey: AnyCodingKey("masks"))
         try c.encodeIfPresent(showMaskID, forKey: AnyCodingKey("showMaskID"))
@@ -575,6 +636,45 @@ public struct EditModel: Sendable, Equatable, Codable {
         if !healSpots.isEmpty {
             try c.encode(healSpots, forKey: AnyCodingKey("healSpots"))
         }
+        // 205: the unknown top-level keys go last (the encoder sorts, so the order is cosmetic). A
+        // known group's unknown children were merged by `encodeGroup` above; their entry is skipped
+        // here because the group name is in `ForwardCompatKnownKeys.topLevel`.
+        if let extras {
+            for (key, value) in extras where !ForwardCompatKnownKeys.topLevel.contains(key) {
+                try c.encode(value, forKey: AnyCodingKey(key))
+            }
+        }
+    }
+
+    /// Is there a preserved unknown-key object for this group? A conditional group must still be
+    /// written if its future keys are the only thing in it — dropping the group would drop them.
+    private func hasExtras(_ group: String, _ extras: JSONValue.Object?) -> Bool {
+        guard let extras, case .object(let unknown)? = extras[group] else { return false }
+        return !unknown.isEmpty
+    }
+
+    /// Encode a group, merging the unknown children the file carried under the same group name.
+    ///
+    /// Without extras this is exactly `c.encode(value, forKey:)` — the old path, unchanged bytes.
+    /// With extras the known value is encoded through `JSONValue` and the unknown keys are added
+    /// beside it; the group's own encoders still produce every known key, so a value reset to its
+    /// neutral spelling is not resurrected by this merge (the six conditional keys are *known*, which
+    /// is why they never become extras in the first place).
+    private func encodeGroup<G: Encodable>(_ value: G, _ key: String,
+                                           into c: inout KeyedEncodingContainer<AnyCodingKey>,
+                                           extras: JSONValue.Object?) throws {
+        guard let extras, case .object(let unknown)? = extras[key], !unknown.isEmpty else {
+            try c.encode(value, forKey: AnyCodingKey(key))
+            return
+        }
+        var merged = try JSONValue(encoding: value)
+        guard case .object(var children) = merged else {
+            try c.encode(value, forKey: AnyCodingKey(key))
+            return
+        }
+        for (child, v) in unknown { children[child] = v }
+        merged = .object(children)
+        try c.encode(merged, forKey: AnyCodingKey(key))
     }
 
     public func write(to url: URL) throws {

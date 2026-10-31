@@ -3,6 +3,28 @@ import SwiftUI
 import PhotonsCatalog
 import PhotonsCore
 
+// MARK: - 205 · the newer-document notice (one line, not a banner)
+
+/// The single sentence shown when the open document came from a build with a higher
+/// `schemaVersion`, plus the two metrics that keep it a *notice* rather than chrome.
+///
+/// It exists as its own type so the text can be asserted without a window: the version is the only
+/// variable, and `nil` — the case for every document this build writes — must produce no text at all
+/// (the view then hides the label, which is what keeps the acceptance's "nil ⇒ zero pixels changed").
+public enum ForwardCompatNotice {
+    /// 10 pt, matching `TopBarStatusCluster.Metrics`: the smallest type already used for status text.
+    public static let fontSize: CGFloat = 10
+    public static let lineHeight: CGFloat = 14
+    public static let font: NSFont = .systemFont(ofSize: fontSize)
+    public static let textColor: NSColor = .secondaryLabelColor
+
+    /// `该文件来自更新的版本 v14，未知设置已原样保留` — or `nil` when there is nothing to say.
+    public static func text(for version: Int?) -> String? {
+        guard let version else { return nil }
+        return "该文件来自更新的版本 v\(version)，未知设置已原样保留"
+    }
+}
+
 // MARK: - tool button (§2b: 28 pt hit box, 26 pt paint, radius 7 continuous, 9 pt side padding)
 
 public final class ToolButton: NSButton {
@@ -325,6 +347,14 @@ public final class WorkspaceRootView: NSView {
     /// The one line of import feedback (进度 + 取消), floating at the bottom of the canvas.
     public let importProgressBar = ImportProgressBar()
 
+    /// 205 — the one-line notice when the open document came from a newer build. A plain 10 pt
+    /// secondary label over the canvas' top edge; hidden (and zero pixels different) when
+    /// `session.edit.forwardCompatVersion == nil`, i.e. for every document this build wrote.
+    ///
+    /// Deliberately **not** a banner, alert or inspector row: the document is readable, so this is a
+    /// note about provenance, not an error, and it must not move any `WorkspaceLayout` frame.
+    public let forwardCompatNotice = NSTextField(labelWithString: "")
+
     private let canvasHost = NSView()
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
@@ -386,9 +416,16 @@ public final class WorkspaceRootView: NSView {
         // 红绿灯本身由 AppKit 画在 contentView 之上，所以这里只要保证不在按钮上方盖任何不透明层。
         for v: NSView in [headerGlass, topBar, browserPane.view, browserDivider, canvasHost,
                           inspectorDivider, inspectorBackdrop, inspectorHost,
-                          filmstripController.view, importProgressBar] {
+                          filmstripController.view, importProgressBar, forwardCompatNotice] {
             addSubview(v)
         }
+
+        forwardCompatNotice.font = ForwardCompatNotice.font
+        forwardCompatNotice.textColor = ForwardCompatNotice.textColor
+        forwardCompatNotice.isSelectable = false
+        forwardCompatNotice.lineBreakMode = .byTruncatingTail
+        forwardCompatNotice.isHidden = true
+        forwardCompatNotice.setAccessibilityIdentifier("workspace.forwardCompat.notice")
 
         browserDivider.onDrag = { [weak self] delta in
             guard let self else { return }
@@ -461,6 +498,9 @@ public final class WorkspaceRootView: NSView {
         loupeController.setCropWorkspaceActive(inspectorWorkspaces.selection.showsCropCard)
 
         showModule(for: session.mode)
+        // 205: a session that already has a document loaded before this view exists (the app opens
+        // the library first) must show the notice on the very first frame, not on the next change.
+        updateForwardCompatNotice()
         applyBrowserMode()
         observeModel()
     }
@@ -494,10 +534,18 @@ public final class WorkspaceRootView: NSView {
             _ = self.session.libraryURL
             // 排序按钮的字 = 当前顺序：会话里的值一变（按钮、菜单、测试），顶栏就重画。
             _ = self.session.sortOrder
+            // 205: the provenance notice follows the open document. `editRevision` moves on every
+            // commit; the loaded id moves on a photo switch.
+            _ = self.session.editRevision
+            _ = self.session.loadedEditAssetID
+            // The value the notice is made of: a forced re-read of the same asset changes this
+            // without moving `editRevision`.
+            _ = self.session.edit.forwardCompatVersion
         }, { [weak self] in
             guard let self else { return }
             self.showModule(for: self.session.mode)
             self.updateTopBar()
+            self.updateForwardCompatNotice()
         })
     }
 
@@ -508,6 +556,21 @@ public final class WorkspaceRootView: NSView {
                       libraryName: session.libraryURL?.deletingPathExtension().lastPathComponent,
                       filmstrip: browserMode == .filmstrip)
         topBar.updateSortOrder(session.sortOrder)
+    }
+
+    /// 205 — show/hide the one-line notice. `nil` means the document was written by this build (or an
+    /// older one), so the label is hidden and takes no space at all; no other frame/constraint moves.
+    public func updateForwardCompatNotice() {
+        showForwardCompatNotice(session.edit.forwardCompatVersion)
+    }
+
+    /// The view half of `updateForwardCompatNotice()`, reachable without a loaded library so a test
+    /// can assert the exact wording and that showing it moves no layout frame.
+    public func showForwardCompatNotice(_ version: Int?) {
+        let text = ForwardCompatNotice.text(for: version)
+        forwardCompatNotice.stringValue = text ?? ""
+        forwardCompatNotice.isHidden = text == nil
+        needsLayout = true
     }
 
     // MARK: modules
@@ -588,6 +651,12 @@ public final class WorkspaceRootView: NSView {
         importProgressBar.frame = NSRect(x: g.canvas.minX + 12,
                                          y: g.canvas.maxY - barHeight - 12,
                                          width: barWidth, height: barHeight)
+        // 205: one 10 pt line under the top bar, over the canvas' top edge. Its own frame only — the
+        // notice is not part of `WorkspaceLayout`, so no existing size assertion moves.
+        forwardCompatNotice.frame = NSRect(x: g.canvas.minX + 12,
+                                           y: g.topBar.maxY + 8,
+                                           width: min(360, max(0, g.canvas.width - 24)),
+                                           height: ForwardCompatNotice.lineHeight)
         topBar.needsLayout = true
         topBar.needsDisplay = true
     }

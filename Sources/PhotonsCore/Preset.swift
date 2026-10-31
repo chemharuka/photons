@@ -13,8 +13,10 @@ import Foundation
 //     one key per group in the subset and nothing else, so a preset file cannot carry fields it
 //     does not own (docs/xmp-mapping.md §1.8: masks are not mappable, so they are not carried).
 //
-// `schemaVersion` is the preset envelope's own version, not the document's: a preset written by a
-// newer build is refused instead of being applied with fields silently dropped.
+// `schemaVersion` is the preset envelope's own version, not the document's. 205: a preset written by
+// a newer build is no longer refused — the known groups are read, the keys this build does not know
+// are kept verbatim for the save (`forwardExtras`), and `forwardCompatVersion` remembers the number
+// the file wrote. `PresetError.unsupportedSchemaVersion` stays for structurally bad envelopes.
 
 /// The groups a preset can carry. Deliberately **not** `RenderGroup`: two of its cases are groups of
 /// the document that cannot be groups of a preset — `masks` (per-photo geometry, docs/xmp-mapping.md
@@ -93,8 +95,8 @@ public enum PresetGroup: String, CaseIterable, Sendable, Hashable, Codable {
 }
 
 public enum PresetError: LocalizedError, Equatable {
-    /// A preset envelope from a build that knows fields this one does not. Refused rather than
-    /// half-applied: silently dropping an unknown group is how a look quietly stops matching.
+    /// Kept for **structurally** bad envelopes (205 keeps the case, not the "newer version" policy:
+    /// a higher `schemaVersion` is now read, with its unknown keys preserved in `Preset.forwardExtras`).
     case unsupportedSchemaVersion(found: Int, supported: Int)
     case emptyName
     case noGroups
@@ -143,6 +145,23 @@ public struct Preset: Sendable, Equatable, Codable {
     /// applies the groups, which is the coarse answer, never a wrong one.
     public var sections: Set<EditSnapshotSection>?
 
+    /// 205 — the envelope's keys this build does not know, kept for the save.
+    ///
+    /// Top-level unknown keys map to their raw values. The two reserved keys are the two places a
+    /// preset can grow without this build knowing the name:
+    ///   · `"fragment"` → an object of **unknown group keys** (`{"futureGroup": {…}}`), written back
+    ///     beside the known groups;
+    ///   · `"groups"` → the raw tokens in the envelope's list that are not `PresetGroup` cases, so a
+    ///     future group named in `groups` is not silently dropped from the list.
+    ///
+    /// `nil` for every preset this build wrote, which keeps their bytes exactly as they were.
+    public var forwardExtras: JSONValue.Object?
+
+    /// 205 — the envelope version the file carried when it was higher than this build's (`nil`
+    /// otherwise). The preset's own `schemaVersion` keeps the file's number, so saving an untouched
+    /// future preset does not claim to be this build's.
+    public var forwardCompatVersion: Int?
+
     public init(name: String,
                 groups: Set<PresetGroup> = Set(PresetGroup.allCases),
                 edit: EditModel = .neutral,
@@ -155,6 +174,8 @@ public struct Preset: Sendable, Equatable, Codable {
         // Only the subset survives: reading `preset.edit.color` on a Light preset must show what
         // would actually be applied (neutral), never a value that is silently dropped on encode.
         self.edit = Preset.project(edit, onto: groups)
+        self.forwardExtras = nil
+        self.forwardCompatVersion = nil
     }
 
     /// Capture a preset from a document: same groups, values as they stand (masks dropped).
@@ -278,7 +299,15 @@ public struct Preset: Sendable, Equatable, Codable {
         var c = encoder.container(keyedBy: AnyCodingKey.self)
         try c.encode(schemaVersion, forKey: Key.schemaVersion)
         try c.encode(name, forKey: Key.name)
-        try c.encode(PresetGroup.ordered(groups).map(\.rawValue), forKey: Key.groups)
+        // 205: the list keeps the future tokens the file named. They are appended after the known
+        // groups; an unknown name has no value this build can read, but dropping the token would
+        // change "this panel is part of the preset" into "it is not". Raw `JSONValue`s so a
+        // hand-written non-string token is kept too.
+        var tokens: [JSONValue] = PresetGroup.ordered(groups).map { .string($0.rawValue) }
+        if let extras = forwardExtras, case .array(let unknown)? = extras[Key.groups.stringValue] {
+            tokens += unknown
+        }
+        try c.encode(tokens, forKey: Key.groups)
         // 081: only when the preset was saved from the copy sheet's cards. **Absent** for every other
         // preset, which is what keeps their bytes — and their old behaviour — identical.
         if let sections {
@@ -302,14 +331,32 @@ public struct Preset: Sendable, Equatable, Codable {
             case .effects: try fragment.encode(edit.effects, forKey: AnyCodingKey(group.rawValue))
             }
         }
+        // 205: unknown group keys keep their raw values, one `fragment` child each.
+        if let extras = forwardExtras, case .object(let unknown)? = extras[Key.fragment.stringValue] {
+            for (key, value) in unknown {
+                try fragment.encode(value, forKey: AnyCodingKey(key))
+            }
+        }
+        // …and every other unknown envelope key goes back at the top level.
+        if let extras = forwardExtras {
+            for (key, value) in extras
+            where key != Key.groups.stringValue && key != Key.fragment.stringValue {
+                try c.encode(value, forKey: AnyCodingKey(key))
+            }
+        }
     }
 
     public init(from decoder: any Decoder) throws {
+        // 205: the raw tree is how the unknown names survive; the typed decode below is unchanged.
+        let tree = (try? JSONValue(from: decoder)) ?? .null
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         let version = c.val("schemaVersion", Preset.currentSchemaVersion)
-        guard version == Preset.currentSchemaVersion else {
-            throw PresetError.unsupportedSchemaVersion(found: version,
-                                                       supported: Preset.currentSchemaVersion)
+        // 205: a newer envelope is read, not refused. Only a *higher* version is recorded — an old
+        // preset that predates a field is the ordinary "missing key reads as its default" case.
+        if version > Preset.currentSchemaVersion {
+            self.forwardCompatVersion = version
+        } else {
+            self.forwardCompatVersion = nil
         }
         self.schemaVersion = version
         self.name = c.val("name", "")
@@ -349,6 +396,34 @@ public struct Preset: Sendable, Equatable, Codable {
         } else {
             self.sections = nil
         }
+
+        // 205: collect what this build does not know — unknown envelope keys, unknown group tokens in
+        // `groups`, and unknown keys in `fragment` (they are the future groups).
+        self.forwardExtras = Preset.forwardExtras(in: tree)
+    }
+
+    /// The unknown paths of a preset envelope (see `forwardExtras`).
+    static func forwardExtras(in tree: JSONValue) -> JSONValue.Object? {
+        guard case .object(let root) = tree else { return nil }
+        let knownEnvelope: Set<String> = [Key.schemaVersion.stringValue, Key.name.stringValue,
+                                          Key.groups.stringValue, Key.sections.stringValue,
+                                          Key.fragment.stringValue]
+        var out: JSONValue.Object = [:]
+        for (key, value) in root where !knownEnvelope.contains(key) {
+            out[key] = value
+        }
+        if case .array(let rawGroups)? = root[Key.groups.stringValue] {
+            let unknown = rawGroups.filter { value in
+                guard case .string(let token) = value else { return true }
+                return PresetGroup(rawValue: token) == nil
+            }
+            if !unknown.isEmpty { out[Key.groups.stringValue] = .array(unknown) }
+        }
+        if case .object(let fragment)? = root[Key.fragment.stringValue] {
+            let unknown = fragment.filter { PresetGroup(rawValue: $0.key) == nil }
+            if !unknown.isEmpty { out[Key.fragment.stringValue] = .object(unknown) }
+        }
+        return out.isEmpty ? nil : out
     }
 
     // MARK: convenience
