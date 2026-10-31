@@ -24,12 +24,30 @@ final class ExportMetadataPolicyTests: XCTestCase {
 
     // MARK: - baselines (measured on pre-186 `main`, same fixture)
 
-    /// `.all` + `writeXMP: true`: the 25-key develop packet, byte for byte as 186 found it.
+    /// `.all` + `writeXMP: true`: the 25-key develop packet, byte for byte as 186 found it — for a
+    /// **pre-186 document** (`schemaVersion` 12).
+    ///
+    /// 186's contract is about the packet *writer*, and one of the numbers it copies is the
+    /// document's own: `schemaVersion` appears twice in the packet (`photons:schemaVersion` as an
+    /// attribute, and `"schemaVersion"` inside the deflated `photons:settings` blob, which is why the
+    /// base64 text moves with it). Schema 13 (b9f5a77, 120b's depth
+    /// removal) took the current number to 13, so today's fixture exports `schema13PacketSHA` — the
+    /// packet is the same 3719 bytes, and the 522 that differ are the single character of
+    /// `photons:schemaVersion` plus the 600-character `photons:settings` base64 (re-deflating a
+    /// one-byte change to the document moves the rest of that stream). Every key, every
+    /// `crs:`/`dc:`/`photoshop:` value and their order are byte-identical.
+    ///
+    /// **Not** the 191 export-sharpen removal: export sharpening never wrote an XMP key
+    /// (`crs:Sharpness`/`crs:SharpenRadius` come from the *document's* decoder detail group), and
+    /// 191's diff contains no XMP writer at all.
     private let legacyPacketSHA = "1323a4c44d29dd2cbea2fa3cbdea431f72331fbc31e8ecd774dad817c43285b6"
     private let legacyFileSHAs = [
         "3dc213f56a9be083938d2c0c9f16d0324b20169c02bd1d15f7e60ec62c7e345f",
         "47a948e04eddc4590ca211513735c5d14a03679ae27b3916c16ff746e0c9fbb2",
     ]
+    /// The same packet with today's `schemaVersion` 13: the setting blob re-deflates to a different
+    /// base64, at the same length. Everything else is the pre-186 packet.
+    private let schema13PacketSHA = "0e5a3aab1ef662da1dd626773e93975b7a32ad58d35967d4dbc01d914e96d584"
     /// `.all` + `writeXMP: false`: 107's ImageIO-composed packet, 16 keys. 186 must not move it.
     private let composedPacketSHA = "186c1bd738c80fe07aad301be948d487ee42a33fa982f2b455b8806005bbae0c"
     private let composedFileSHAs = [
@@ -131,10 +149,12 @@ final class ExportMetadataPolicyTests: XCTestCase {
         return try XCTUnwrap(context.makeImage())
     }
 
-    private func item(sourceURL: URL) -> ExportItem {
+    private func item(sourceURL: URL, schemaVersion: Int = EditModel.currentSchemaVersion)
+        -> ExportItem {
         var edit = EditModel.neutral
         edit.light.exposure = 0.75
         edit.color.vibrance = 20
+        edit.schemaVersion = schemaVersion
         return ExportItem(id: "1", name: "src", edit: edit, sourceURL: sourceURL,
                           author: "Ada Lovelace", copyright: "© 2026 Ada")
     }
@@ -154,11 +174,13 @@ final class ExportMetadataPolicyTests: XCTestCase {
     }
 
     @discardableResult
-    private func export(_ preset: ExportPreset, tag: String)
+    private func export(_ preset: ExportPreset, tag: String,
+                        schemaVersion: Int = EditModel.currentSchemaVersion)
         throws -> (outcome: BatchExportOutcome, url: URL) {
         let directory = out.appendingPathComponent(tag, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let report = BatchExporter.run(items: [item(sourceURL: source)], preset: preset,
+        let report = BatchExporter.run(items: [item(sourceURL: source, schemaVersion: schemaVersion)],
+                                       preset: preset,
                                        outputDirectory: directory,
                                        render: { _, _ in self.image() })
         let outcome = try XCTUnwrap(report.written.first)
@@ -209,18 +231,28 @@ final class ExportMetadataPolicyTests: XCTestCase {
             ExportPreset.self, from: try decoded.data()).data())
 
         let exported = try export(decoded, tag: "legacy")
-        // The bytes 186 can touch: the develop packet, identical to what `main` wrote.
-        XCTAssertEqual(try packetSHA(exported.url), legacyPacketSHA,
+        // Today's document (schema 13): the packet differs from the pre-186 bytes in the schema
+        // number alone — see `legacyPacketSHA` for the measurement.
+        XCTAssertEqual(try packetSHA(exported.url), schema13PacketSHA,
                        "a pre-186 preset must export the same XMP packet as before 186")
+
+        // The pre-186 bytes themselves, still produced to the byte — by the pre-186 *document*: the
+        // same fixture, the same preset, `schemaVersion` 12. That the two exports differ only in the
+        // number is the point: 186 owns the policy, the document owns its schema number.
+        let pre186 = try export(decoded, tag: "legacy-schema12", schemaVersion: 12)
+        XCTAssertEqual(try packetSHA(pre186.url), legacyPacketSHA,
+                       "186 must not move the packet: a schema-12 document must export the pre-186 "
+                       + "bytes exactly")
         // The container around it, up to ImageIO's per-process IIM ordering.
-        let legacyFileSHA = try sha256(exported.url)
+        let legacyFileSHA = try sha256(pre186.url)
         XCTAssertTrue(legacyFileSHAs.contains(legacyFileSHA),
                       "legacy preset exported \(legacyFileSHA), which is not one of the shapes "
                       + "pre-186 `main` writes")
+        XCTAssertEqual(fileXMPPaths(pre186.url).count, 25)
         XCTAssertEqual(fileXMPPaths(exported.url).count, 25)
         // And the same preset, spelled out with today's defaults, produces the same bytes.
         let explicit = try export(preset(policy: .all, writeXMP: true), tag: "legacy-explicit")
-        XCTAssertEqual(try packetSHA(explicit.url), legacyPacketSHA)
+        XCTAssertEqual(try packetSHA(explicit.url), schema13PacketSHA)
     }
 
     // MARK: - 2. key lists

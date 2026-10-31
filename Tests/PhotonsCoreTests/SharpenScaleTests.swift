@@ -381,6 +381,12 @@ final class SharpenScaleTests: XCTestCase {
         }
         XCTAssertEqual(unchanged.count + 1, RenderStage.order.count,
                        "名单漏了一个阶段，等于没盯住它")
+        // The count alone cannot tell "one stage missing" from "one stage twice": spell the set out.
+        // The list must be `RenderStage.order` minus the one stage that moved.
+        XCTAssertEqual(Set(unchanged.map(\.0)), Set(RenderStage.order).subtracting([.sharpen]),
+                       "「没变」名单必须正好是 order 去掉 sharpen —— 不多一条，不少一条")
+        XCTAssertEqual(Set(unchanged.map(\.0)).count, unchanged.count,
+                       "「没变」名单里有阶段写了两次")
     }
 
     // MARK: - 6. cost
