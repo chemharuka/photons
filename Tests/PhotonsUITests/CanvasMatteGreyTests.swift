@@ -188,9 +188,9 @@ final class CanvasMatteGreyTests: XCTestCase {
         }
 
         // The container layer too, from the source: two assignments, both from the constant, and no
-        // `NSColor.black` background left in the loupe.
-        let text = try String(contentsOf: Self.loupeURL, encoding: .utf8)
-            + String(contentsOf: Self.canvasViewURL, encoding: .utf8)
+        // `NSColor.black` background left in the loupe. P2 split the canvas out of the controller, so
+        // the scan is a **directory**, not a file list: pinning names would fail on the next move.
+        let text = try Self.loupeSourcesText()
         XCTAssertEqual(text.components(separatedBy: "NSColor.canvasMatte.cgColor").count - 1, 2,
                        "both the metal layer and the container layer take the matte from the constant")
         XCTAssertFalse(text.contains("backgroundColor = NSColor.black.cgColor"),
@@ -469,13 +469,20 @@ final class CanvasMatteGreyTests: XCTestCase {
             .appendingPathComponent("Sources/PhotonsUI/LoupeController.swift")
     }
 
-    /// `LoupeCanvasView.swift` — the canvas' layer background, moved out of the controller in P2.
-    private static var canvasViewURL: URL {
-        URL(fileURLWithPath: #filePath)
+    /// `Loupe/` 下所有 `.swift` 加 `LoupeController.swift`——Loupe 的源码文本，不管类型现在住在哪个文件。
+    private static func loupeSourcesText() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/PhotonsUI/Loupe/LoupeCanvasView.swift")
+            .appendingPathComponent("Sources/PhotonsUI")
+        var files = FileManager.default.enumerator(at: root.appendingPathComponent("Loupe"),
+                                                   includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+            .sorted { $0.path < $1.path } ?? []
+        files.append(root.appendingPathComponent("LoupeController.swift"))
+        return try files.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
     }
 
     /// `CanvasPresenter.swift` — the matte's remaining producer is the clear colour, and it is asserted
