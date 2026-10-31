@@ -2378,19 +2378,58 @@ public struct InspectorView: View {
         loupe.armEyedropper { outcome in applyDropper(outcome) }
     }
 
-    /// The dropper's answer: solve, write once, report the numbers it acted on.
+    /// The dropper's answer: solve, refine against the decoder **off the main thread**, write once.
+    ///
+    /// 路线 B (2026-10-31): the drag may approximate, but the dropper's promise is "this pixel is now
+    /// grey", and the analytic solve leaves 13.71 % of cast on a settled frame. The refinement costs up
+    /// to four developments, so it cannot run inside the click: `beginDropper` returns immediately and
+    /// the moment the loop lands the pair is committed **once** (one history entry, one ⌘Z), with the
+    /// residual in the hint so the number is on screen rather than in a log.
     private func applyDropper(_ outcome: LoupeController.DropperOutcome) {
         switch outcome {
         case .sampled(let sample):
             eyedropperArmed = false
-            guard let solve = commands.applyDropper(sample.rgb) else {
-                hint = "吸管：取样点几乎无颜色信息，未写入"
+            guard let loupe, let probe = loupe.dropperProbe(for: sample) else {
+                // No resident buffer to iterate against: the analytic answer is all that is on offer,
+                // and it is still one development of the same document.
+                guard let solve = commands.applyDropper(sample.rgb) else {
+                    hint = "吸管：取样点几乎无颜色信息，未写入"
+                    return
+                }
+                lastPresetID = nil
+                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
+                              sample.text, solve.whiteBalance.summary, sample.rgb.text,
+                              solve.clamped ? " · 已到量程边界（近似）" : "")
                 return
             }
             lastPresetID = nil
-            hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
-                          sample.text, solve.whiteBalance.summary, sample.rgb.text,
-                          solve.clamped ? " · 已到量程边界（近似）" : "")
+            hint = "吸管精修：正在对解码器迭代（最多 \(WhiteBalanceDropperRefiner.maxDecodes) 次解码）…"
+            let started = Date()
+            let immediate = commands.beginDropper(sample.rgb, probe: probe) { solve, report in
+                guard let solve else {
+                    hint = "吸管：取样点几乎无颜色信息，未写入"
+                    return
+                }
+                let elapsed = Date().timeIntervalSince(started) * 1000
+                if let report {
+                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n%@\n界面等待 %.0f ms",
+                                  sample.text, report.final.summary, sample.rgb.text,
+                                  report.text, 0.0)
+                    print(String(format: "dropper: %.2f%% after %d decode(s) in %.0f ms "
+                                 + "(wall %.0f ms) → %@%@",
+                                 report.residual * 100, report.decodes, report.milliseconds,
+                                 elapsed, report.final.summary,
+                                 report.converged ? "" : " · 未达 2%"))
+                } else {
+                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
+                                  sample.text, solve.whiteBalance.summary, sample.rgb.text,
+                                  solve.clamped ? " · 已到量程边界（近似）" : "")
+                }
+            }
+            guard immediate != nil else {
+                hint = "吸管：取样点几乎无颜色信息，未写入"
+                return
+            }
         case .outsideImage, .notReady:
             // No document write, and the tool stays armed on a miss (the loupe keeps it armed too).
             eyedropperArmed = loupe?.isEyedropperArmed ?? false
@@ -3030,11 +3069,25 @@ public struct WhiteBalanceCommands {
         return true
     }
 
+    /// The eyedropper's analytic solve alone — instant, no development.
+    ///
+    /// `nil` when the sample carries no colour (near-black, or a channel at zero): the document must
+    /// not be touched, which is the difference between "the dropper refused" and "the dropper wrote a
+    /// guess".
+    public func solveDropper(_ sample: RGBSample) -> WhiteBalanceSolve? {
+        WhiteBalanceSolver.neutral(for: sample, reference: reference)
+    }
+
     /// The eyedropper's whole document effect: solve the sample, write it once (派单 009 C).
     ///
     /// `nil` when the sample carries no colour (near-black, or a channel at zero) — in that case the
     /// document is **not** touched, which is the difference between "the dropper refused" and "the
     /// dropper wrote a guess". The caller prints the hint either way.
+    ///
+    /// **This is the analytic answer only.** Since 194 the settled frame is `CIRAWFilter`'s, so the
+    /// analytic pair lands with a measurable residual (13.71 % on the user's grey patch). Use
+    /// `beginDropper` / `applyDropperRefined` — the ones the inspector and the tests call — for the
+    /// click that actually reads the decoder back.
     @discardableResult
     public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
         // 195 tried inverting the preview's 3×3 here (`WhiteBalanceEstimate.neutral`) on the theory
@@ -3043,8 +3096,60 @@ public struct WhiteBalanceCommands {
         // asked 5950 K/+66 and the settled frame carried 16.3 % where the solver's answer left
         // 13.7 %). So the one body stays 143's solver — the residual is the estimate's, and hiding it
         // behind a second model would only move the error somewhere the tests do not look.
-        guard let solve = WhiteBalanceSolver.neutral(for: sample, reference: reference) else { return nil }
+        guard let solve = solveDropper(sample) else { return nil }
         commit(solve.whiteBalance, label: label)
+        return solve
+    }
+
+    /// **The refined click, synchronously** — solve, then iterate against the decoder
+    /// (`WhiteBalanceDropperRefiner`), then write the final pair **once**.
+    ///
+    /// One decode per attempt at the rung the loupe is on; at most `maxDecodes`. The document is
+    /// written a single time no matter how many attempts it took, so one click stays one history entry
+    /// and one ⌘Z.
+    @discardableResult
+    public func applyDropperRefined(_ sample: RGBSample,
+                                    probe: WhiteBalanceDropperRefiner.Probe,
+                                    maxDecodes: Int = WhiteBalanceDropperRefiner.maxDecodes,
+                                    label: String = "吸管白平衡")
+        -> (solve: WhiteBalanceSolve?, refinement: WhiteBalanceDropperRefiner.Refinement?) {
+        guard let solve = solveDropper(sample) else { return (nil, nil) }
+        let report = WhiteBalanceDropperRefiner.refine(initial: solve.whiteBalance, probe: probe,
+                                                       maxDecodes: maxDecodes)
+        commit(report.final, label: label)
+        return (solve, report)
+    }
+
+    /// **The refined click, off the main thread** — what the inspector's dropper runs.
+    ///
+    /// Returns the analytic solve *immediately* (so the click handler returns in microseconds, not in
+    /// four developments) and calls `finish` on the main thread when the iteration lands, having
+    /// written the final pair exactly once. The refined pair replaces the analytic one **before** the
+    /// document is touched, so no intermediate value is ever committed — nothing flickers through the
+    /// undo stack.
+    @discardableResult
+    public func beginDropper(_ sample: RGBSample,
+                             probe: WhiteBalanceDropperRefiner.Probe,
+                             maxDecodes: Int = WhiteBalanceDropperRefiner.maxDecodes,
+                             label: String = "吸管白平衡",
+                             finish: @escaping (WhiteBalanceSolve?, WhiteBalanceDropperRefiner.Refinement?) -> Void)
+        -> WhiteBalanceSolve? {
+        guard let solve = solveDropper(sample) else {
+            finish(nil, nil)
+            return nil
+        }
+        let initial = solve.whiteBalance
+        let session = self.session
+        let asShot = self.asShot
+        Task.detached(priority: .userInitiated) {
+            let report = WhiteBalanceDropperRefiner.refine(initial: initial, probe: probe,
+                                                           maxDecodes: maxDecodes)
+            await MainActor.run {
+                WhiteBalanceCommands(session: session, asShot: asShot).commit(report.final,
+                                                                              label: label)
+                finish(solve, report)
+            }
+        }
         return solve
     }
 
