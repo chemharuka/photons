@@ -222,7 +222,16 @@ public enum StageAlgorithmVersion {
     /// smaller than the measurement's error bar. Every document with `effects.dehaze > 0` renders
     /// different pixels for the same stored number; `dehaze < 0` and `dehaze == 0` are bit-identical
     /// to 7.
-    public static let dehaze = 8
+    ///
+    /// **9** — 160: the statistics (`A`, `p99(L)`, the guided veil) moved to a fixed **512-long-edge
+    /// proxy of the whole picture**, and `q` became a canvas quantity (`qCanvas = 4`,
+    /// `qTex = max(1, round(qCanvas·scale))`). Before this, the estimating passes read the render
+    /// texture, so the same document measured `A = 0.50` at `scale 0.25` and `A = 0.63` at 1:1 on
+    /// `L1030433` (20.6 %) and the fit preview, a 1:1 window and the export disagreed. Every document
+    /// with `effects.dehaze != 0` — including a **negative** amount, whose haze-adding branch uses the
+    /// measured `A` — renders different pixels for the same stored number; `dehaze == 0` is
+    /// bit-identical to 8.
+    public static let dehaze = 9
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
