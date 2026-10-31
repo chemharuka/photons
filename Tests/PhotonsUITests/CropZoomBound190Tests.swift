@@ -75,6 +75,16 @@ final class CropZoomBound190Tests: XCTestCase {
                 image(rect.right, rect.bottom), image(rect.left, rect.bottom)]
     }
 
+    /// The turned quad's bounding box in document pixels — what the canvas containment law is stated
+    /// on (196).
+    private func box(_ rect: CropRect) -> CGRect {
+        let corners = quad(rect)
+        let xs = corners.map { $0.x }, ys = corners.map { $0.y }
+        return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                      width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                      height: (ys.max() ?? 0) - (ys.min() ?? 0))
+    }
+
     /// Sutherland–Hodgman against the axis-aligned canvas, then the shoelace area.
     private func overlapFraction(_ rect: CropRect) -> Double {
         let clip = Self.canvasPixels
@@ -210,10 +220,18 @@ final class CropZoomBound190Tests: XCTestCase {
                          l.overlap, l.centreInViewport ? "yes" : "no"))
         }
 
-        // ① cannot be dragged out of the canvas: at least a quarter of the frame still covers it.
+        // ① 196 — 「框不得移出画布」: the turned quad's bounding box is inside the canvas at **every**
+        //   framing. 190 measured 25 % area overlap here; the user has reversed that.
         for (framing, l) in measured {
-            XCTAssertGreaterThanOrEqual(l.overlap, 0.25 - 0.01,
-                                        "\(framing.name): \(l.overlap) of the frame is off the canvas")
+            let b = box(l.crop), c = Self.canvasPixels
+            XCTAssertGreaterThanOrEqual(b.minX, c.minX - 0.5,
+                                        "\(framing.name): the frame hangs off the canvas' left \(b) vs \(c)")
+            XCTAssertLessThanOrEqual(b.maxX, c.maxX + 0.5,
+                                     "\(framing.name): the frame hangs off the canvas' right \(b) vs \(c)")
+            XCTAssertGreaterThanOrEqual(b.minY, c.minY - 0.5,
+                                        "\(framing.name): the frame hangs off the canvas' top \(b) vs \(c)")
+            XCTAssertLessThanOrEqual(b.maxY, c.maxY + 0.5,
+                                     "\(framing.name): the frame hangs off the canvas' bottom \(b) vs \(c)")
             XCTAssertLessThanOrEqual(l.overlap, 1.0 + 1e-9)
         }
 
@@ -241,9 +259,9 @@ final class CropZoomBound190Tests: XCTestCase {
     }
 
     /// One far drag (a single tick that jumps the frame far off the canvas) must land **on** the
-    /// floor, not somewhere in between: the clamp is a pull-back to the boundary, so the resulting
-    /// coverage is the floor itself and the frame keeps its size.
-    func testASingleFarDragIsPinnedAtTheQuarterFloor() throws {
+    /// canvas' edge, not somewhere in between: the clamp is a pull-back to the boundary (196), so the
+    /// turned box ends flush with an edge and the frame keeps its size.
+    func testASingleFarDragIsPinnedOnTheCanvasEdge() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
                                                              height: Self.source.height)
@@ -263,10 +281,18 @@ final class CropZoomBound190Tests: XCTestCase {
                                                        mapping: mapping),
                                 mapping: mapping, source: Self.source)
         let crop = controller.draft.crop
-        print(String(format: "190 · far drag · crop l %.6f t %.6f r %.6f b %.6f · overlap %.6f",
-                     crop.left, crop.top, crop.right, crop.bottom, overlapFraction(crop)))
-        XCTAssertEqual(overlapFraction(crop), 0.25, accuracy: 1e-6,
-                       "a far drag is pinned on the floor, not short of it")
+        let b = box(crop), c = Self.canvasPixels
+        print(String(format: "190 · far drag · crop l %.6f t %.6f r %.6f b %.6f · overlap %.6f "
+                     + "· box %.3f,%.3f–%.3f,%.3f · canvas %.3f,%.3f–%.3f,%.3f",
+                     crop.left, crop.top, crop.right, crop.bottom, overlapFraction(crop),
+                     b.minX, b.minY, b.maxX, b.maxY, c.minX, c.minY, c.maxX, c.maxY))
+        // 196 — pinned on the canvas' edge: inside on all four sides, flush with two of them.
+        XCTAssertGreaterThanOrEqual(b.minX, c.minX - 0.5)
+        XCTAssertLessThanOrEqual(b.maxX, c.maxX + 0.5)
+        XCTAssertGreaterThanOrEqual(b.minY, c.minY - 0.5)
+        XCTAssertLessThanOrEqual(b.maxY, c.maxY + 0.5)
+        XCTAssertEqual(min(c.maxX - b.maxX, b.minX - c.minX, c.maxY - b.maxY, b.minY - c.minY),
+                       0, accuracy: 0.5, "the far drag did not reach the canvas' edge")
         XCTAssertEqual(crop.width, Self.frame.width, accuracy: 1e-9, "never shrunk")
         XCTAssertEqual(crop.height, Self.frame.height, accuracy: 1e-9)
     }
@@ -355,14 +381,35 @@ final class CropZoomBound190Tests: XCTestCase {
                          c.name, moved ? "yes" : "no", after.left, after.top, after.right,
                          after.bottom, coverage, best, reachable ? "yes" : "no"))
 
-            // ① the law, re-measured on the result: at least a quarter of the frame over the canvas
-            //   whenever any position can achieve it…
-            XCTAssertGreaterThanOrEqual(coverage, min(0.25, best) - 1e-6,
-                                        "\(c.name): coverage \(coverage) breaks the law it was clamped by")
-            // …and never a *worse* position than the best one available.
+            // ① 196 — the law, re-measured on the result: the turned box is **inside the canvas** on
+            //   all four sides, whenever the box could fit at all.
+            let b = box(after), cnv = Self.canvasPixels
+            // `clampsToRotatedFrame` is a **view** bound (132): it is `effectiveCrop`'s answer, never
+            // the stored draft's, so the draft may stay outside the canvas in those two cases.
+            let fits = b.width <= cnv.width + 0.5 && b.height <= cnv.height + 0.5
+            if fits && !c.photoBound {
+                XCTAssertGreaterThanOrEqual(b.minX, cnv.minX - 0.5,
+                                            "\(c.name): hangs off the left — \(b) vs \(cnv)")
+                XCTAssertLessThanOrEqual(b.maxX, cnv.maxX + 0.5,
+                                         "\(c.name): hangs off the right — \(b) vs \(cnv)")
+                XCTAssertGreaterThanOrEqual(b.minY, cnv.minY - 0.5,
+                                            "\(c.name): hangs off the top — \(b) vs \(cnv)")
+                XCTAssertLessThanOrEqual(b.maxY, cnv.maxY + 0.5,
+                                         "\(c.name): hangs off the bottom — \(b) vs \(cnv)")
+            } else if !c.photoBound {
+                // 162's other half: a frame whose turned box cannot fit is shrunk to the canvas.
+                XCTAssertLessThanOrEqual(b.width, cnv.width + 0.5, "\(c.name): not shrunk to the canvas")
+                XCTAssertLessThanOrEqual(b.height, cnv.height + 0.5, "\(c.name): not shrunk to the canvas")
+            }
             XCTAssertLessThanOrEqual(coverage, 1.0 + 1e-9)
-            // ③ a clamp only ever moves (or reshapes for a lock): never shrinks.
-            if c.lock.ratio == nil {
+            // ③ a clamp only ever moves a frame that fits (196 keeps 162's shrink for one that does
+            //   not): the size is untouched unless the box had to be brought inside.
+            let beforeBox = box(before)
+            // …and the opt-in photo bound (`clampsToRotatedFrame`) is a shrink by design, so it is
+            // excluded: this clause is about the *canvas* law, which only ever moves.
+            if beforeBox.width <= Self.canvasPixels.width + 0.5,
+               beforeBox.height <= Self.canvasPixels.height + 0.5,
+               c.lock.ratio == nil, !c.photoBound {
                 XCTAssertEqual(after.width, before.width, accuracy: 1e-9, c.name)
                 XCTAssertEqual(after.height, before.height, accuracy: 1e-9, c.name)
             }

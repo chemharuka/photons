@@ -944,79 +944,73 @@ public final class CropToolController {
         let base = seen(shaped)
         let width = Double(max(source.width, 1)), height = Double(max(source.height, 1))
 
-        /// How much of the frame's own area still covers the canvas — the rotation-invariant thing,
-        /// because a rotation preserves area and the canvas is an AABB.
-        func coverage(_ rect: CropRect) -> Double {
-            canvasCoverage(rect, canvas: canvas, source: source, degrees: angle)
+        /// The turned frame's bounding box in document pixels.
+        func quadBox(_ rect: CropRect) -> CGRect {
+            let corners = documentQuad(rect, source: source, degrees: angle)
+            guard let minX = corners.map({ $0.x }).min(), let maxX = corners.map({ $0.x }).max(),
+                  let minY = corners.map({ $0.y }).min(), let maxY = corners.map({ $0.y }).max()
+            else { return .zero }
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         }
 
-        /// The law of 190, stated with **areas only**: at least a quarter of the frame's own area is
-        /// over the canvas. Area (not a corner test) is what makes it well defined for a frame larger
-        /// than the canvas — there coverage is `canvas/frame`, monotonically increasing along the
-        /// pull-back, which is exactly what the bisection needs.
+        /// 196 (user 2026-10-31) — **the canvas is a hard bound again.** 190 read the user's
+        /// 「框可以超出扩大后的画布」 as an area rule (≥25 % of the frame still over the canvas);
+        /// the user has since reversed that: the frame may **not** leave the canvas at all, it may
+        /// only leave the *photograph* (the rotated-out `000000` corners, and the canvas inside the
+        /// photograph's edge). So the law is 162's again, stated on the **turned quad**: all four
+        /// sides inside `canvasBounds`, which is the canvas in document pixels and therefore does
+        /// not move with the zoom, the window or the framing (190's own finding, kept).
         ///
-        /// **There is deliberately no reachability clause here.** 188 had one (「the quad's centre is
-        /// in the viewport」) and 190 must not: at 1:1 and 2× the viewport is a *window* of the
-        /// canvas, so a frame that keeps 25 % over the canvas can sit outside it — measured, the
-        /// frame's centre is off-viewport at both zooms while the coverage is exactly 0.25. The two
-        /// clauses cannot both hold, and the coverage clause is the one the user's report is about.
-        /// Do not add it back: it is what made the limit move with the zoom.
-        ///
-        /// The frame stays findable by the mechanism that was always there, not by a new one:
-        /// ① 25 % of it is on the **canvas** (not on the screen), ② 适应 is the entry framing and
-        /// shows the whole canvas (`CropZoomEntryTests`), so zooming back out puts the frame on
-        /// screen again, ③ therefore 「框丢了」 cannot happen. No auto-pan and no auto-fit: that
-        /// would be a new feature, and it is not this task.
+        /// Half a document pixel of slack: the overlay and the present round to whole pixels, and a
+        /// frame that is *at* the edge must not be pulled back by the rounding.
+        let containmentTolerance = 0.5
         func legal(_ rect: CropRect) -> Bool {
-            coverage(rect) >= Self.canvasCoverageFloor
+            let box = quadBox(rect)
+            return box.minX >= canvas.minX - containmentTolerance
+                && box.maxX <= canvas.maxX + containmentTolerance
+                && box.minY >= canvas.minY - containmentTolerance
+                && box.maxY <= canvas.maxY + containmentTolerance
         }
 
-        // **No shrink** (188 deleted the `0…1²`-room search and it is not coming back): the frame is
-        // translated toward the canvas' centre by the least amount that makes it legal — 「最多 3/4
-        // 出去」, arrived at by moving, never by resizing. The quad turns about the *source's*
-        // centre (`imagePoint`), so a move asked for in document pixels is `R(θ)` of the same move
-        // in the rect's own coordinates.
-        //
-        // Returns a rect that satisfies `legal` — including the case the floor cannot be reached at
-        // all (a frame more than four times the canvas' area): then no position is legal, the
-        // canvas' centre is the *maximum* coverage there is, and that is what is returned. `seen()`
-        // is applied by the caller, which re-checks it (the opt-in photo-bound shrink may not undo
-        // this law).
+        // **Move, never shrink — until the frame genuinely cannot fit.** 188 deleted the
+        // `0…1²`-room search and it is not coming back: a legal-size frame is *translated* the least
+        // amount that puts its turned box inside the canvas. Only a frame whose turned box is
+        // larger than the canvas is shrunk, uniformly about its centre, and that is 162's own rule
+        // (`clampedToCanvas`), not a new one.
         func pulledBack() -> CropRect {
-            let rotation = CropGeometry.RotationMatrix(degrees: angle)
-            let corners = documentQuad(base, source: source, degrees: angle)
-            guard corners.count == 4 else { return base }
-            let centre = CGPoint(x: (corners[0].x + corners[2].x) / 2,
-                                 y: (corners[0].y + corners[2].y) / 2)
-            let toCentreX = Double(canvas.midX - centre.x)
-            let toCentreY = Double(canvas.midY - centre.y)
-            func moved(_ t: Double) -> CropRect {
-                let turned = rotation.apply(x: toCentreX * t, y: toCentreY * t)
-                let left: Double = base.left + turned.x / width
-                let top: Double = base.top + turned.y / height
-                return CropRect(left: left, top: top,
-                                right: left + base.width, bottom: top + base.height)
+            var rect = base
+            var box = quadBox(rect)
+            let shrink = min(1, canvas.width / max(box.width, 1e-9),
+                             canvas.height / max(box.height, 1e-9))
+            if shrink < 1 {
+                let w = rect.width * shrink, h = rect.height * shrink
+                rect = CropRect(left: rect.centerX - w / 2, top: rect.centerY - h / 2,
+                                right: rect.centerX + w / 2, bottom: rect.centerY + h / 2)
                     .clamped(allowsOutsideSource: true)
+                box = quadBox(rect)
             }
-            // Already legal: nothing to pull back, and `base` is the answer — returning it (rather
-            // than `moved(≈0)`) keeps the rect bit for bit, so a legal frame is never rewritten.
-            if legal(base) { return base }
-            // Centred, the frame reaches the maximum coverage any position can have — a frame up to
-            // four times the canvas' area still clears the floor there (canvas/frame ≥ 25 %). Beyond
-            // that no position is legal and the centre, the best there is, is what is returned.
-            guard legal(moved(1)) else { return moved(1) }
-            var outside = 0.0, inside = 1.0
-            for _ in 0..<48 {
-                let mid = (outside + inside) / 2
-                if legal(moved(mid)) { inside = mid } else { outside = mid }
-            }
-            return moved(inside)
+            var dx = 0.0, dy = 0.0
+            if box.minX < canvas.minX { dx = canvas.minX - box.minX }
+            else if box.maxX > canvas.maxX { dx = canvas.maxX - box.maxX }
+            if box.minY < canvas.minY { dy = canvas.minY - box.minY }
+            else if box.maxY > canvas.maxY { dy = canvas.maxY - box.maxY }
+            guard dx != 0 || dy != 0 else { return rect }
+            // The quad is rigid: `documentQuad` puts a rect in document pixels through `R(−θ)`, so a
+            // move of `d` in document pixels is `R(θ)·d` in the rect's own coordinates.
+            let local = CropGeometry.RotationMatrix(degrees: angle).apply(x: dx, y: dy)
+            let left = rect.left + local.x / width, top = rect.top + local.y / height
+            return CropRect(left: left, top: top, right: left + rect.width,
+                            bottom: top + rect.height)
+                .clamped(allowsOutsideSource: true)
         }
 
         // The frame already satisfies the law: the only thing that may still have to be written back
         // is the **lock's reshape** (162 — a document constraint, not a canvas one). Otherwise the
         // stored rect stays bit for bit, so reducing the angle to 0° gives the whole frame back.
         if legal(base) {
+            // 132: the opt-in photo bound (`clampsToRotatedFrame`) is a **view** fact — it lives in
+            // `effectiveCrop` and must not reach the stored draft, so the pre-bound `shaped` is what
+            // is written back here. `base` is only read to *test* the canvas law against it.
             guard shaped != before else { return false }
             draft.crop = shaped
             return true

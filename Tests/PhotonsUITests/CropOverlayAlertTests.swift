@@ -135,4 +135,61 @@ final class CropOverlayAlertTests: XCTestCase {
         XCTAssertLessThan(drawn.width, 0.95, "the opt-in rule must still inscribe")
         XCTAssertEqual(loupe.cropTool.draft.crop, .full, "the intent is still not written")
     }
+
+    /// 196 — **the portrait hole**: `quarterTurns = 1` + 5.4°, where the frame *is* outside the
+    /// photograph's turned support and has to go red.
+    ///
+    /// The user's report was 「裁剪框在此时理应出界但没有变为红色」. The two candidate causes were
+    /// (a) the predicate reading the slider's angle while the overlay draws the quarter turn too, and
+    /// (b) the predicate being dead. This pins the answer: the drawing angle is
+    /// `quarterTurns·90 + straighten` *in display space*, while `sourceSize` is already the
+    /// **turned** source and the predicate turns only by the straighten — the same rotation *relative
+    /// to the photograph*, so both are the same number and the flag must be true here. If a later
+    /// change adds the quarter turn to the predicate it double-counts and this test goes red.
+    func testAPortraitDocumentGoesRedWhereTheFrameCoversTheRotatedOutCorner() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.close() }
+        let loupe = editor.rootView.loupeController
+        let session = editor.session
+        // 竖拍：同一张照片转 90°,再直线 5.4°。
+        session.applyEdit { $0.geometry.quarterTurns = 1 }
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
+        CropUITestSupport.pump(0.05)
+        loupe.cropTool.setStraighten(5.4)
+        loupe.refreshCropTool()
+        CropUITestSupport.pump(0.02)
+
+        let history = session.history.snapshots.count
+        let revision = session.editRevision
+        let source = loupe.cropSourceSize
+        print("196 red · quarterTurns \(session.edit.geometry.quarterTurns) "
+              + "· straighten \(loupe.cropTool.draft.straighten) "
+              + "· source \(source.keyString) "
+              + "· document rotation \(session.edit.geometry.rotationDegrees)")
+
+        // ① a frame covering the turned-out corner (the full frame at 5.4°) → red.
+        loupe.cropTool.draft.crop = .full
+        loupe.refreshCropTool()
+        CropUITestSupport.pump(0.02)
+        let full = try XCTUnwrap(loupe.cropOverlayLayoutForTesting)
+        XCTAssertTrue(full.exceedsPicture, "portrait + 5.4°: the full frame covers the 000000 corner")
+        XCTAssertTrue(loupe.cropTool.frameExceedsPicture(source: source, degrees: 5.4))
+
+        // ② a small centred frame inside the photograph → not red.
+        let insideCrop = CropRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
+        loupe.cropTool.draft.crop = insideCrop
+        loupe.refreshCropTool()
+        CropUITestSupport.pump(0.02)
+        let inside = try XCTUnwrap(loupe.cropOverlayLayoutForTesting)
+        XCTAssertFalse(inside.exceedsPicture, "a 0.4× centred frame at 5.4° is inside → not red")
+
+        // ③ the warning is a colour: no rect change, no history, no revision bump.
+        XCTAssertEqual(loupe.cropTool.draft.crop, insideCrop, "the alert moved the rect")
+        XCTAssertEqual(session.history.snapshots.count, history, "the red frame wrote a history row")
+        XCTAssertEqual(session.editRevision, revision, "the red frame bumped editRevision")
+        print("196 red · full \(full.exceedsPicture) · 0.4× \(inside.exceedsPicture) "
+              + "· history +\(session.history.snapshots.count - history) "
+              + "· revision +\(session.editRevision - revision)")
+    }
+
 }
