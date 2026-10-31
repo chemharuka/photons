@@ -345,6 +345,7 @@ public final class CropToolController {
     public func begin() -> Bool {
         guard !isActive, let session else { return false }
         draft = Draft(geometry: session.edit.geometry)
+        draftPhotoID = session.anchorID
         // 087 — the state Esc has to come back to. `转动` writes the document on every tick, and a
         // released drag closes/reopens the tool session (one row per gesture), so by the time Esc
         // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
@@ -400,6 +401,7 @@ public final class CropToolController {
         session.applyEdit { $0.geometry = geometry }
         let committed = session.endToolSession(label: "裁切与旋转")
         draft = Draft(geometry: geometry)
+        draftPhotoID = session.anchorID
         if committed { appliedCount += 1 }
         return committed
     }
@@ -420,6 +422,7 @@ public final class CropToolController {
             _ = session.commitEdit(label: "变换 · 取消", coalesce: false)
         }
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
+        draftPhotoID = session?.anchorID
         cancelledCount += 1
     }
 
@@ -436,6 +439,7 @@ public final class CropToolController {
         // write is rolled back by `cancelToolSession`).
         session?.cancelToolSession()
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
+        draftPhotoID = session?.anchorID
     }
 
     // MARK: the draft's commands (never touch the document)
@@ -448,6 +452,7 @@ public final class CropToolController {
     public func reseedDraftFromDocument() {
         guard isActive, let session else { return }
         draft = Draft(geometry: session.edit.geometry)
+        draftPhotoID = session.anchorID
     }
 
     /// 169 §2b — the crop session was opened on photo A and the user clicked photo B **without
@@ -463,11 +468,38 @@ public final class CropToolController {
         guard isActive, let session else { return false }
         endDrag()
         draft = Draft(geometry: session.edit.geometry)
+        draftPhotoID = session.anchorID
         entryGeometry = session.edit.geometry
         if !session.isToolSessionActive {
             session.beginToolSession("裁切", label: "裁切与旋转")
         }
         return true
+    }
+
+    /// 202 ④ — **which photo the draft was seeded for.**
+    ///
+    /// The overlay and the frame job read the draft on **every** turn, and a photo switch publishes
+    /// the new anchor (and the new `cropSourceSize`) several turns before the observation that
+    /// re-seeds the draft runs. Those turns draw the *previous* photo's rect on the *new* photo: on a
+    /// 3000 × 2000 → 2000 × 3000 switch the stale full-frame rect lands as a small patch in the
+    /// top-left corner (measured in `CropPhotoSwitchFrame202Tests`: 「1/4 面积的左上角」, then the
+    /// correct frame). Tagging the draft with the photo it belongs to makes that state visible and
+    /// lets the reader heal it before it is drawn instead of after.
+    public private(set) var draftPhotoID: String?
+
+    /// 202 ④ — **the self-heal the reader calls**: if the draft belongs to another photo, re-seed it
+    /// from the document on screen *now*, before anything is laid out. Synchronous by design (the
+    /// ask's preferred fix: 「同步种好…在第一次 present 之前完成」) — the new document's geometry is
+    /// already in `session.edit` by the time the anchor changes, so there is nothing to wait for and
+    /// no reason to draw a frame that belongs to the previous picture.
+    ///
+    /// Returns `true` when it re-seeded, so a caller can refresh the bar and the readouts.
+    @discardableResult
+    public func reseedIfPhotoMoved() -> Bool {
+        guard isActive, let session else { return false }
+        // `nil` on both sides is 「no photo」, which is not a move.
+        guard draftPhotoID != session.anchorID else { return false }
+        return reseedForPhotoChange()
     }
 
     /// 拉直 slider, and the readout next to it. Clamped to the document's own ±45.
@@ -794,6 +826,12 @@ public final class CropToolController {
     /// every containment criterion goes red without the clamp; nothing in the app touches it.
     var clampsFrameToView = true
 
+    /// How many times `clampToView` has been asked to run, and how many of those moved the draft.
+    /// Diagnostics only (the 202 probe prints them to say *who* moved a frame that ended up
+    /// outside the canvas — the clamp that never ran, or a camera that moved under it).
+    public private(set) var clampCalls = 0
+    public private(set) var clampMoves = 0
+
     /// The largest rect the frame may occupy **right now**, in normalized frame coordinates.
     ///
     /// Three questions, and the answer is their intersection — each one was a separate report:
@@ -845,6 +883,7 @@ public final class CropToolController {
     /// Returns `true` when the draft moved, so a caller can tell "clamped" from "already legal".
     @discardableResult
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
+        clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
         // A canvas that has not been laid out yet (a zero-sized viewport in a headless test, or the
         // first `layout` pass) is not an opinion about what fits: clamping against it would shrink the
@@ -855,15 +894,31 @@ public final class CropToolController {
         // framing. Clamping the un-turned rect would leave the turned corners outside, so the
         // rotated path fits the quad's bounding box instead (Δθ = 0 keeps the old arithmetic bit
         // for bit).
-        let delta = straightenDelta
-        if delta.isFinite, delta != 0 {
-            return clampRotatedQuadToView(mapping: mapping, source: src, degrees: delta)
+        //
+        // 202 ② — **the switch reads the drawn angle, not the delta.** 196's law is stated on the
+        // quad, but this dispatch asked 「does the draft differ from the document?」, so a *committed*
+        // 拉直 (draft 5.4°, document 5.4° → delta 0) took the upright path: it clamped the un-turned
+        // rect against the turned canvas' AABB **in frame coordinates** — a rectangle nobody draws —
+        // and the quad on screen then hung outside the canvas (measured at 适应: 1 714 px off the left
+        // edge and 985 px off the bottom). The frame is turned whenever the draft carries an angle,
+        // whoever wrote it, so that is what decides the arithmetic. At θ = 0 both spells are the old
+        // path, value for value.
+        let drawnAngle = CropTool.clampStraighten(draft.straighten)
+        if drawnAngle.isFinite, abs(drawnAngle) > 1e-9 {
+            let moved = clampRotatedQuadToView(mapping: mapping, source: src, degrees: drawnAngle)
+            if moved { clampMoves &+= 1 }
+            return moved
         }
+        // 162 — the visible canvas, in frame coordinates. At 适应 the workspace frames the picture at
+        // 90 %, so this rect is slightly **larger** than the photograph and a crop is allowed to cover
+        // that black band (「框可以出相机像素」, `CropOverlayAlertTests` measures a 4 % overhang being
+        // applied without a snap-back); the viewport is what the upright frame may not leave.
         let room = canvasBounds(mapping: mapping, source: src)
         let before = draft.crop.clamped(allowsOutsideSource: true)
         let next = clampedToCanvas(before, bounds: room, source: src, lock: draft.lock)
         guard next != before else { return false }
         draft.crop = next
+        clampMoves &+= 1
         return true
     }
 

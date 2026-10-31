@@ -752,6 +752,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The rung the last presented frame came from — what `framing()` measures and what an edit
     /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
     private var decoded: LinearImage?
+    /// 202 ④ — **whose pixels `decoded` holds** (`makeFrame`'s base identity).
+    ///
+    /// A photo switch does not clear the resident buffer: it stays until the next photo's first frame
+    /// replaces it. `framing()` read it unconditionally, so between the switch and that frame the
+    /// projection was built from the *previous* photo's pixel grid while the crop draft and
+    /// `cropSourceSize` were the new photo's — the frame came out as a small patch in the corner
+    /// (「刚好是 1/4 面积的左上角」) until the frame job caught up. A buffer is only usable for the
+    /// photo it is a buffer of.
+    private var decodedIdentity: String?
     /// 派单 105: which file `decoded` came from, so the automatic black level can ask the decoder for
     /// a second, measurement-only development of the same pixels' source. Set next to `decoded`.
     private var decodedURL: URL?
@@ -1214,6 +1223,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 123 — a transform was **confirmed** (↵ / 完成): the workspace can now leave 变换 (the
     /// acceptance asks the panel to return to `.adjust`). Esc does not call this.
     public var onTransformConfirmed: (() -> Void)?
+    /// 202 ① — **裁切 ended, whichever door**: ↵, 完成, Esc and the card's 取消 all call this, after
+    /// the mode has left and the camera is heading back. The panel hangs its 「回到上一个非裁切工作区」
+    /// on it, so the exit route no longer decides where the inspector lands (123's
+    /// `onTransformConfirmed` stays the *document* signal; this one is the *mode* signal).
+    public var onCropToolExit: (() -> Void)?
     /// What the callback was last told, so a drag tick cannot republish it.
     private var publishedCropModeActive = false
     /// 072 §A1 — 确认/取消裁切后, the picture is carried from the crop framing to the entry framing by
@@ -2975,7 +2989,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the camera has to describe the same picture the frame job renders (`canvasEdit`), or the
         // overlay would be projected through a crop the pixels no longer have.
         let edit = cropTool.canvasEdit(from: session?.edit ?? .neutral)
-        if let image = decoded {
+        // 202 ④ — only a buffer of **this** photo may describe this photo's projection.
+        if let image = decoded, decodedIdentity == backdropPhotoKey {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
                                 decodeScale: decodedScale,
@@ -3869,6 +3884,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let applied = cropTool.finish(outcome)
         leaveCropTool()
         if outcome != .cancel { onTransformConfirmed?() }
+        // 202 ① — the **mode** left, whichever door was used. Published after the mode and the camera,
+        // so a listener that switches the panel cannot race a still-open tool (a workspace switch
+        // back with the frame up would cancel it a second time).
+        onCropToolExit?()
         return applied
     }
 
@@ -4472,6 +4491,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             }
             return
         }
+        // 202 ④ — **a draft that belongs to the previous photo is never laid out.** A photo switch
+        // publishes the new anchor and the new source size before the observation that re-seeds the
+        // draft runs; the turns in between projected the old rect through the new framing, which is
+        // the small box in the corner the report describes. The re-seed is synchronous and happens
+        // here — the one place the overlay is built — so there is no window in which a wrong frame
+        // can reach the screen (the ask's preferred fix: 「同步种好…在第一次 present 之前」).
+        if cropTool.reseedIfPhotoMoved() { cropBar.sync() }
         // ② (2026-10-27) — mid-animation the frame is a rect of the *picture on the canvas*, not of the
         // camera: project it with the bridge's own mapping and carry it by that frame's own similarity.
         // No clamp and no bar sync here: the draft is already lawful (it was clamped when the stop
@@ -4482,8 +4508,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // has reached right now — so a draft change or a mode refresh during a transition cannot jump
         // the frame to the target either.
         if let bridge = zoomBridge {
-            cropOverlay.layout = cropToolLayout(bridge: bridge,
-                                                progress: progress ?? zoomBridgeProgress())
+            setCropOverlayLayout(cropToolLayout(bridge: bridge,
+                                                progress: progress ?? zoomBridgeProgress()))
             cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
             return
         }
@@ -4491,8 +4517,38 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // clamp belongs on this path and not only on the drag paths. When it moves the draft the bar's
         // numbers move with it, or the readout would describe a rect that is no longer on screen.
         if clampCropFrameToCanvas() { cropBar.sync() }
-        cropOverlay.layout = cropToolLayout()
+        setCropOverlayLayout(cropToolLayout())
         cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
+    }
+
+    /// 202 ④ — **the overlay's layout log**, one entry per frame the overlay is given.
+    ///
+    /// Each entry names the photo the draft belongs to, so a test can say 「the first layout after the
+    /// switch is the new photo's rect」 instead of reading the view at some wall-clock instant (which
+    /// is neither a frame nor a guarantee). Capped like the other per-frame logs.
+    public struct CropOverlayLayoutFrame: Equatable, Sendable {
+        public let photoID: String?
+        public let crop: CropRect
+        public let corners: CGRect?
+    }
+    public private(set) var cropOverlayLayoutFrames: [CropOverlayLayoutFrame] = []
+    private static let cropOverlayLayoutFrameLimit = 256
+
+    private func setCropOverlayLayout(_ layout: CropToolLayout?) {
+        cropOverlay.layout = layout
+        let rect = layout.map { l -> CGRect in
+            let xs = l.corners.map(\.x), ys = l.corners.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else { return .zero }
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+        cropOverlayLayoutFrames.append(CropOverlayLayoutFrame(photoID: cropTool.draftPhotoID,
+                                                              crop: cropTool.draft.crop,
+                                                              corners: rect))
+        if cropOverlayLayoutFrames.count > Self.cropOverlayLayoutFrameLimit {
+            cropOverlayLayoutFrames
+                .removeFirst(cropOverlayLayoutFrames.count - Self.cropOverlayLayoutFrameLimit)
+        }
     }
 
     /// 169 §0 — the bar is laid out against the **layout's** canvas, not a second reading of
@@ -5225,11 +5281,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the backdrop is rendered from *and* into its digest (below), so the preview and the settled
     /// frame are two different sources even when they happen to name the same pair.
     private func backdropEdit(_ document: EditModel) -> EditModel {
-        guard let target = backdropPreviewTarget else { return document }
         var edit = document
+        guard let target = backdropPreviewTarget else {
+            // 202 ③ — **the backdrop is the same document the frame is.** Since 197 the frame job and
+            // the camera are the *whole frame* in 裁切 mode (`cropTool.canvasEdit`), and
+            // `framePlacement.region` normalises against that canvas. Rendering the backdrop from the
+            // document's own crop made the texture hold the kept rectangle while the sampler read it
+            // as the picture: on a 9520 × 6336 frame at 5.4° the texture's canvas came out
+            // 4149 × 4144 against the frame's 10075 × 7204 (0.412×), and the crop's centre landed at
+            // the picture's middle — 160 / 100 px of 「偏贴」 on the off-centre crop
+            // (`x 0.2–0.6, y 0.1–0.7`), 0 px on a centred one, which is why only the off-centre case
+            // was reported. One edit, one picture: the low-res layer is the whole frame, exactly as
+            // the sharp one is.
+            return cropTool.canvasEdit(from: edit)
+        }
         edit.light.temperature = target.temperature
         edit.light.tint = target.tint
-        return edit
+        return cropTool.canvasEdit(from: edit)
     }
 
     /// The target pair a live preview frame is actually showing, or `nil` when the canvas is a settled
@@ -5792,6 +5860,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             graphPhoto = nil
         }
         decoded = image
+        decodedIdentity = baseIdentity
         decodedURL = url
         decodedScale = ds
         decodedCaps = outcome.rung.capabilities
