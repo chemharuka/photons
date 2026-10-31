@@ -212,7 +212,16 @@ public enum StageAlgorithmVersion {
     /// stage now reads the depth map and modulates `A`/`t` per pixel; `depthStrength == 0` (or no
     /// map) takes the pre-120b branch verbatim and is byte-identical, so the bump changes pixels only
     /// for documents that actually ask for the assist.
-    public static let dehaze = 7
+    /// **8** — 2026-10-31: 130's fog participation became **symmetric about the airlight**. `w` used to
+    /// be `1 − smoothstep(A, 2A, L)` — full participation at or below `A` — and below `A` the veil's
+    /// whole evidence is `A − L`, which the recovery multiplies by `1/t`. At the sky `t ≈ 0.12`, so the
+    /// 3 % by which the airlight estimate sits above the sky came out as a 20 % darkening. The
+    /// correction now also fades out within the airlight's own resolution (`2σ … k·2σ` of `A`,
+    /// `σ = 2 %·A` — the guided filter's ε, one number with two readers), i.e. where the evidence is
+    /// smaller than the measurement's error bar. Every document with `effects.dehaze > 0` renders
+    /// different pixels for the same stored number; `dehaze < 0` and `dehaze == 0` are bit-identical
+    /// to 7.
+    public static let dehaze = 8
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a

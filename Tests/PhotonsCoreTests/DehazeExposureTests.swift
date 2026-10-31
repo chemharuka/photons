@@ -255,17 +255,21 @@ final class DehazeExposureTests: XCTestCase {
     /// 6 → 7). The four **negative** entries are the pre-2026-10-31 bytes, unchanged to the digit: the
     /// haze-adding branch never read `t`, and this test's actual claim — that `g = 1` is an exact
     /// identity for the 141 normalization — is now checked against the current arithmetic.
+    /// The same day, later: the six positive entries moved **again** when 130's fog participation
+    /// became symmetric about the airlight (`w` now also fades within `A`'s own resolution). Again a
+    /// fingerprint of the current arithmetic and not a golden: the four negative hashes still match
+    /// to the digit, which is the evidence that the new fade reaches the recovery and nothing else.
     private static let e0SHA: [String: String] = [
         "foggy·-100": "0cfbcd45e29b430becf3580355f9ce6784f62d6f8c40e48a10de612b565ac847",
         "foggy·-60": "9606e7fae6a803fec18c83ff10c8fefd8a815602f407ff0a39833f887835f6ba",
-        "foggy·20": "752e067ea6da6afea12ba5ed3e18a60017a168a5b7ce8aa4b540a1142ba811ec",
-        "foggy·60": "bc835439f7b3f2168dbbe199b537d5701a96fe38dbdbdb627f2931471b575d7c",
-        "foggy·100": "0e32f95f3e1418dfd15b56338d80b17d5601809b51178bdb5bea2ca6ecb43adf",
+        "foggy·20": "38b521e8371a542587d95e519ff0e1f40639c324d8038bd357a5c857d9c20d34",
+        "foggy·60": "33ac7bca31851c59b253183bbf126112c5346269268cc057924e299a53b313ba",
+        "foggy·100": "3119ea808727ce986d27e62994e7a6b3d1cfa2c70caa7fec5b05dfd9e833806d",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
-        "chroma·20": "2de4ddc38bd26367013d71196e8de0e689e0728fc986c2abd72b32161af88ff5",
-        "chroma·60": "9957328624b6cac3e193ee06bb421b1f1c09eb040139d9e03a87a726939c54ed",
-        "chroma·100": "7b893d5c17775789d7c96f49742c0d6801e2458d7eb324fce11e48397cb93121",
+        "chroma·20": "3a29821b67bca34a2773bebb569ef01579c8c3026bb8c35266bf008a01f51592",
+        "chroma·60": "fdce68d4ce11440541831c6b132d39e9e49c8f3c88cefd4cf0ef6f9bca0a7877",
+        "chroma·100": "fd7aed92dfcd15f81778ab05ae17c44a05011949c4742836b255ff1808382191",
     ]
 
     func testZeroExposureKeepsTheStageByteIdentical() throws {

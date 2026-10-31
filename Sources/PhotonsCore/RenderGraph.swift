@@ -238,6 +238,16 @@ public struct RenderOptions: Sendable {
     /// `DehazeLinearTests`' halo counterproof. Never set by the app, never part of a key.
     public var legacyDehazeBlockVeil: Bool
 
+    /// **Tests only.** Keep S1.9's **pre-2026-10-31 fog participation**: `w = 1 − smoothstep(A, k·A, L)`
+    /// with no resolution fade about the airlight. It reads `DehazeParamsU.l.w`; `t`, `D` and `A` are
+    /// the same in both renders, so the difference between them is the participation and nothing else.
+    /// The `J/I ≥ 0.97` acceptance needs it twice: as the counterproof (the unbounded recovery is the
+    /// 20 % sky darkening) and as the only place the *stage's own* `t` can be read back — the
+    /// acceptance's bands are §4.2's `t < 0.15` / `t ∈ 0.3…0.6`, and inverting the bounded render
+    /// would report 1 wherever the fade reaches (the correction is zero there, so `t` has nothing to
+    /// invert). Never set by the app, never part of a key.
+    public var legacyDehazeUnboundedRecovery: Bool
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -257,7 +267,8 @@ public struct RenderOptions: Sendable {
                 healWithoutBoundaryMatch: Bool = false,
                 probesDehazeAirlight: Bool = false,
                 legacyDehazePerChannel: Bool = false,
-                legacyDehazeBlockVeil: Bool = false) {
+                legacyDehazeBlockVeil: Bool = false,
+                legacyDehazeUnboundedRecovery: Bool = false) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -278,6 +289,7 @@ public struct RenderOptions: Sendable {
         self.probesDehazeAirlight = probesDehazeAirlight
         self.legacyDehazePerChannel = legacyDehazePerChannel
         self.legacyDehazeBlockVeil = legacyDehazeBlockVeil
+        self.legacyDehazeUnboundedRecovery = legacyDehazeUnboundedRecovery
     }
 }
 
@@ -4409,7 +4421,8 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             // The UI's 0…100 row, as the kernel's 0…1 strength.
             k: SIMD4(Float(edit.effects.dehazeDepth) / 100, 0, 0, 0),
             // The knee of the `tSmooth`/`tPixel` blend, and the tests-only pre-change `t`.
-            l: SIMD4(0.15, options.legacyDehazeBlockVeil ? 1 : 0, 0, 0))
+            l: SIMD4(0.15, options.legacyDehazeBlockVeil ? 1 : 0, 0,
+                     options.legacyDehazeUnboundedRecovery ? 1 : 0))
 
         let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
         let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)

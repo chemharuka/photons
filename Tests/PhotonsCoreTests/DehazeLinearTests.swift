@@ -105,13 +105,15 @@ final class DehazeLinearTests: XCTestCase {
     private func linearRender(_ graph: RenderGraph, _ edit: EditModel,
                               legacyBlockVeil: Bool = false,
                               headroom: Double = 1,
-                              probeAirlight: Bool = false) throws -> DisplayImage {
+                              probeAirlight: Bool = false,
+                              unboundedRecovery: Bool = false) throws -> DisplayImage {
         let display = DisplayOptions(primaries: .rec2020, bitDepth: 16, headroom: headroom,
                                      linearOutput: true)
         let result = try graph.render(edit, options: RenderOptions(
             scale: 1, display: display, useCache: false, wantsPixels: true,
             probesDehazeAirlight: probeAirlight,
-            legacyDehazeBlockVeil: legacyBlockVeil))
+            legacyDehazeBlockVeil: legacyBlockVeil,
+            legacyDehazeUnboundedRecovery: unboundedRecovery))
         if let t = result.output { graph.recycle(output: t) }
         return try XCTUnwrap(result.display)
     }
@@ -851,10 +853,13 @@ final class DehazeLinearTests: XCTestCase {
     /// light (`J/I ≥ 0.97`), the mid band (`t ∈ 0.3…0.6`) comes up to ≈ 0.30, and almost nothing lands
     /// on zero (`< 0.1 %`).
     ///
-    /// `t` is *inverted* per pixel (130's fade is 1 below the airlight, `t = (L − A)/(J − A)`) instead
-    /// of being selected by brightness, so the bands are the ones §4.2 names and not a luminance
-    /// proxy. The measurement chain's gain `s` is calibrated against the decoded frame, which is what
-    /// the linear exit of a neutral document is.
+    /// `t` is *inverted* per pixel (`t = (L − A)/(J − A)`) instead of being selected by brightness, so
+    /// the bands are the ones §4.2 names and not a luminance proxy. The inversion is taken from the
+    /// **unbounded** recovery (`legacyDehazeUnboundedRecovery`): the identity `I = t·J + A(1 − t)`
+    /// inverts only while 130's participation is 1, which is what that render is — and that render is
+    /// also this test's counterproof, so the before/after pairs the same `t` with the two
+    /// participations and nothing else differs. The measurement chain's gain `s` is calibrated against
+    /// the decoded frame, which is what the linear exit of a neutral document is.
     func testTheReferenceFrameKeepsItsSkyAndItsMidground() throws {
         let path = NSString(string: "~/Desktop/test/_1263309.dng").expandingTildeInPath
         guard FileManager.default.fileExists(atPath: path) else {
@@ -868,7 +873,10 @@ final class DehazeLinearTests: XCTestCase {
 
         let input = try linearRender(graph, .neutral)
         let out = try linearRender(graph, edit)
-        let legacy = try linearRender(graph, edit, legacyBlockVeil: true)
+        // The counterproof *and* the band selector: the same `t`, `D` and `A`, with 130's pre-change
+        // participation. Inverting this render is the only way to read the stage's own `t` back —
+        // the bounded render's inversion returns 1 wherever the fade reaches.
+        let unbounded = try linearRender(graph, edit, unboundedRecovery: true)
         _ = try linearRender(graph, edit, probeAirlight: true)
         let AScene = try XCTUnwrap(graph.lastDehazeAirlight)
         let s = lightLuma(input, input.width / 2, input.height / 2)
@@ -878,6 +886,16 @@ final class DehazeLinearTests: XCTestCase {
                   1e-6)
         let A = AScene * s
 
+        /// §4.2's `t`, inverted out of the **unbounded** render: `I = t·J + A(1 − t)` inverts to
+        /// `t = (L − A)/(J − A)` only while the participation is 1, which is exactly what that render
+        /// is. It is the stage's own `t` (`tSmooth`, `tPixel` and the knee), so the bands are the ones
+        /// §4.2 names and not a luminance proxy — and they stay fixed while the bounded render's
+        /// correction changes.
+        func bandT(_ x: Int, _ y: Int) -> Double {
+            let L = lightLuma(input, x, y), J = lightLuma(unbounded, x, y)
+            guard abs(J - A) > 1e-4, abs(L - A) > 1e-4 else { return 1 }
+            return (L - A) / (J - A)
+        }
         struct Bands { var skyI = 0.0, skyJ = 0.0, midI = 0.0, midJ = 0.0
                        var skyN = 0, midN = 0, zero = 0, total = 0 }
         func measure(_ image: DisplayImage) -> Bands {
@@ -888,15 +906,14 @@ final class DehazeLinearTests: XCTestCase {
                     let J = lightLuma(image, x, y)
                     b.total += 1
                     if J <= 1e-5 { b.zero += 1 }
-                    guard L < A, abs(J - A) > 1e-4, abs(L - A) > 1e-4 else { continue }
-                    let t = (L - A) / (J - A)
+                    let t = bandT(x, y)
                     if t < 0.15 { b.skyI += L; b.skyJ += J; b.skyN += 1 }
                     if t > 0.3, t < 0.6 { b.midI += L; b.midJ += J; b.midN += 1 }
                 }
             }
             return b
         }
-        let now = measure(out), before = measure(legacy)
+        let now = measure(out), before = measure(unbounded)
         // A cross-check that needs no `A` at all: the brightest decile of the input is the sky/haze
         // bright end, and its `J/I` is the readout the user sees.
         var lumas: [Double] = []
@@ -924,22 +941,17 @@ final class DehazeLinearTests: XCTestCase {
                      s, A, now.skyN, now.skyI / Double(max(now.skyN, 1)), now.skyJ / Double(max(now.skyN, 1)),
                      skyRatio, before.skyJ / max(before.skyI, 1e-9),
                      midRatio, before.midJ / max(before.midI, 1e-9),
-                     brightRatio(out), brightRatio(legacy),
+                     brightRatio(out), brightRatio(unbounded),
                      zeroShare * 100,
                      100 * Double(before.zero) / Double(max(before.total, 1))))
         XCTAssertGreaterThan(now.skyN, 1000, "天空带必须真的采到点")
-        // **未达标（已声明）**: the handoff's §4.2 target is `J/I ≥ 0.97` on the sky band, and the
-        // research pack reaches 0.990 on this file — but it measures `A` uncapped (0.4212) while 135
-        // caps ours at `0.95·p99(L)` = 0.4273. At the airlight `J = A + (L − A)/t`, so the 1.45 % that
-        // the cap adds to `A` is multiplied by `1/t ≈ 8` — the band lands at 0.80. §5 forbids touching
-        // `A`'s estimate, so this is recorded as a known failure with its cause rather than fixed here.
-        XCTExpectFailure("""
-            天空带 J/I 0.80 < 0.97：135 的 A 上限把 A 抬到实测空气光之上 1.45 %，而新的小 t 在 \
-            空气光处把这点差放大 1/t 倍（研究包不设这个上限，实测 A = 0.4212）
-            """, strict: false) {
-            XCTAssertGreaterThanOrEqual(skyRatio, 0.97,
-                                        String(format: "天空带 J/I 必须 ≥ 0.97（实测 %.3f）", skyRatio))
-        }
+        // §4.2's `J/I ≥ 0.97` on the sky band. The stage reaches it through 130's *symmetric* fade:
+        // the band sits 3 % below `A` (`L/A = 0.971`) at `t ≈ 0.12`, so the unbounded recovery divided
+        // that 3 % by `t` and turned it into a 20 % darkening (`J/I = 0.797`); the correction is now
+        // faded out within 4 % of `A` — the airlight estimate's own resolution — and the band keeps its
+        // light. The mid-band target below pins the other side: that fade must not reach 37 % away.
+        XCTAssertGreaterThanOrEqual(skyRatio, 0.97,
+                                    String(format: "天空带 J/I 必须 ≥ 0.97（实测 %.3f）", skyRatio))
         XCTAssertGreaterThan(midRatio, 0.20,
                              String(format: "中景带必须真的被去雾（§4.2 目标 ≈ 0.30，实测 %.3f）", midRatio))
         XCTAssertLessThan(midRatio, 0.45,

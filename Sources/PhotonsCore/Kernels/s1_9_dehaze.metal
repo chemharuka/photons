@@ -66,6 +66,11 @@ using namespace metal;
 //      rejected the old `A = 1` in display codes that brightened every highlight without bound; `A`
 //      is still measured, and the only thing 130 says is that a pixel brighter than twice the
 //      airlight carries no evidence of fog. Do not "restore" the per-channel formula.
+//      (2026-10-31) The fade is now symmetric about `A`: the evidence for any correction is `|L − A|`,
+//      and the recovery multiplies it by `1/t`, so a difference smaller than `A`'s own estimation
+//      resolution (4 % of `A`, twice the guided filter's `σ`) is not evidence either way. Without
+//      that second fade the sky — 3 % below `A` at `t ≈ 0.12` — lost 20 % of its light. See
+//      `s1_9_dehaze_apply`.
 //
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
@@ -362,6 +367,11 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
 
 // MARK: - 2026-10-31 — the guided-filter veil (block resolution)
 
+/// The guided filter's regularization, as a fraction of the airlight: `ε = epsRel·A²`. It is one
+/// number with two readers — the coefficient solve below, and the recovery's own resolution, which
+/// uses `2·sqrt(epsRel)` (4 % of `A`) as the size of the difference it can trust (see `s1_9_dehaze_apply`).
+constant float kDehazeAirEpsRel = 4e-4;
+
 /// `(l, l·l, p, l·p)` per block: the guided filter's window statistics, where `l` is the guide (the
 /// block's mean luma, from `s1_9_dehaze_dark`'s `.g`) and `p` is the thing being smoothed (the block
 /// minimum, its `.r`). Everything downstream is a separable mean of these four numbers, which is why
@@ -446,7 +456,7 @@ kernel void s1_9_dehaze_veil_ab(texture2d<float, access::read> stats [[texture(0
                                 uint2 gid [[thread_position_in_grid]]) {
     if (int(gid.x) >= p.c.w || int(gid.y) >= p.d.x) { return; }
     float A = max(limited.read(uint2(0, 0)).r, 1e-4);
-    float eps = 4e-4 * A * A;
+    float eps = kDehazeAirEpsRel * A * A;
     float4 s = stats.read(gid);
     float ml = s.x, mll = s.y, mp = s.z, mlp = s.w;
     float var = max(mll - ml * ml, 0.0);
@@ -555,11 +565,30 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         } else {
             // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
             // and let the correction fade out where the veil cannot be a meaningful part of the
-            // pixel: `w = 0` for `L ≥ k·A`.
+            // pixel: `w = 0` for `L ≥ k·A`, and `w = 0` again within the airlight's own resolution.
+            //
+            // The second fade is 2026-10-31's. It used to be only the upper one — full participation
+            // at or below `A` — and at or below `A` the veil's *whole* evidence is `A − L`, which the
+            // recovery then multiplies by `1/t`. At the sky `t ≈ 0.12`, so the 3 % by which the
+            // airlight estimate sits above the sky (`L/A = 0.971` on `_1263309`) came out as a 20 %
+            // darkening (`J/I = 0.797`). `A` is a measurement, not a constant: over this frame's sky
+            // band it spreads 0.405…0.438, i.e. ±4 % of `A`, so a 3 % offset is inside the
+            // estimator's own error bar. A correction whose evidence is smaller than the estimator's
+            // resolution is not evidence, so participation fades in over `2σ … k·2σ` of `A`
+            // (`σ = sqrt(kDehazeAirEpsRel)·A = 2 %·A`, the guided filter's own regularization — one
+            // number, two readers). The fade is **symmetric**: a pixel a few percent *above* the
+            // airlight is not lifted either, and everything further than `8 %·A` from `A` — the whole
+            // mid-ground band is at 37 % — keeps exactly the correction it had.
             float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
             float k = max(p.e.x, 1.0);
             float w = 1.0 - smoothstep(A, k * A, L);
+            // Tests only (`legacyDehazeUnboundedRecovery`): the pre-2026-10-31 upper fade alone, so the
+            // counterproof can measure the darkening this test exists to prevent.
+            if (p.l.w < 0.5) {
+                float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
+                w *= smoothstep(res, k * res, fabs(L - A));      // …full again at 8 %
+            }
             float Lout = mix(L, recovered, w);
             float gain = max(Lout, 0.0) / max(L, 1e-6);
             clear = In * gain;
