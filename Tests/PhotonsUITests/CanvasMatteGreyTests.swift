@@ -129,16 +129,28 @@ final class CanvasMatteGreyTests: XCTestCase {
     }
 
     /// The settled present is the one that has the render's own receipt, and it must use it: the quad is
-    /// inverted from the photograph's rect inside the frame texture, so a letterboxed 适应 frame is grey
+    /// inverted from the rect S0 wrote inside the frame texture, so a letterboxed 适应 frame is grey
     /// around a picture that is exactly where S0 drew it.
-    func testTheSettledPresentUsesTheRendersOwnPictureRect() throws {
+    ///
+    /// **192 — the receipt the quad is inverted from is now the canvas' rect, not the picture's.**
+    /// Pre-192 the settled present named `frame.photoRect` alone, and a *windowed* render (1:1 and
+    /// beyond, or zoomed out below 适应) of a straightened document painted the photograph only: the
+    /// canvas' own margin — `(canvasSize − crop)/2` per side, 33 × 46 px at 25 % of a 2000 px crop,
+    /// 16.6 % of the canvas' pixels — fell through to the pass's clear colour `#0F0F0F`, so the matte
+    /// outside the canvas appeared *inside* it (「旋转后缩小，画布外的遮罩入侵了画布」). `Plan.canvasRect`
+    /// is that margin's own receipt (`photoRect + inset`, identical to `drawnRect` at θ = 0 and at
+    /// 适应), so the pin is still "the present uses the render's own rect" — with the photograph's
+    /// rect carried alongside, because 169's crop-workspace rescale measures the picture.
+    func testTheSettledPresentUsesTheRendersOwnCanvasRect() throws {
         let text = try String(contentsOf: Self.loupeURL, encoding: .utf8)
         XCTAssertTrue(text.contains("presentCanvas(presenter, texture: frame.texture, "
-                                    + "photoRect: frame.photoRect,"),
-                      "the settled frame's rect is not taken from `RenderResult.photoRect`")
-        XCTAssertTrue(text.contains("canvasPicture = (frame.photoRect, canvas)"),
-                      "the rect must be remembered: every later re-present of this frame (a bridge, a "
-                      + "teardown, a window drag) derives its quad from it")
+                                    + "photoRect: frame.presentRect,"),
+                      "the settled frame's canvas quad is not taken from `RenderResult.canvasRect`")
+        XCTAssertTrue(text.contains("pictureRect: frame.photoRect,"),
+                      "the photograph's own rect must still ride along: 169 rescales the picture")
+        XCTAssertTrue(text.contains("canvasPicture = (frame.presentRect, frame.photoRect, canvas)"),
+                      "the canvas rect must be remembered: every later re-present of this frame "
+                      + "(a bridge, a teardown, a window drag) derives its quad from it")
 
         // And the on-screen pass accepts it (skipped, like 037's own real-layer test, when this session
         // hands out no drawable — a layer needs a visible window for one).
