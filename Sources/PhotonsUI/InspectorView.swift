@@ -311,11 +311,13 @@ public struct InspectorView: View {
         .task {
             // 123 — a confirmed transform returns the panel to 调整, even when the panel is hosted
             // on its own (a test window without `WorkspaceRootView`).
-            loupe?.onTransformConfirmed = { [workspaces] in
-                switch workspaces.selection {
-                case .transform: workspaces.select(.adjust)
-                default: break
-                }
+            //
+            // 202 ① — **all three doors**, and to the workspace the user came from: ↵/完成 used to
+            // return to 调整 unconditionally (and Esc returned nowhere, leaving the panel on the
+            // crop card with no frame). The exit signal is the mode's, so Esc lands the same place
+            // 应用 does, and an entry from 色彩 comes back to 色彩.
+            loupe?.onCropToolExit = { [workspaces] in
+                workspaces.returnFromCrop()
             }
         }
         .onChange(of: workspaces.selection) { _, workspace in

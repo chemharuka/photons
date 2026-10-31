@@ -170,9 +170,19 @@ public final class InspectorWorkspaceState {
     public var selection: InspectorWorkspace {
         didSet {
             guard selection != oldValue else { return }
+            // 202 ① — remember where to go back to. 变换 is the crop tool's own panel (its card is
+            // the frame's controls), so leaving 裁切 has to hand the panel back to the workspace the
+            // user was in before entering it — the ask: 「裁剪后退回其他工作栏例如调整」, and an entry
+            // from 色彩 comes back to 色彩. Only a **non-crop** workspace is remembered, so the
+            // switch back can never overwrite the memory with `.transform`.
+            if !selection.showsCropCard { lastNonCropWorkspace = selection }
             onChange?(selection)
         }
     }
+
+    /// The workspace the panel returns to when 裁切 ends — the last non-crop one the user chose,
+    /// 调整 until they choose another. View state, like the selection it remembers.
+    public private(set) var lastNonCropWorkspace: InspectorWorkspace = .adjust
 
     /// Called for every selection change (not for a re-selection of the same tab).
     public var onChange: ((InspectorWorkspace) -> Void)?
@@ -203,6 +213,15 @@ public final class InspectorWorkspaceState {
     public func select(_ workspace: InspectorWorkspace) {
         selection = workspace
         onSelectionChange?(workspace)
+    }
+
+    /// 202 ① — **裁切 ended: hand the panel back.** Called from every door out of the crop tool (↵,
+    /// 完成, Esc, the card's 取消), not from a tab click: a click already says which workspace the
+    /// user wants. Guarded by `showsCropCard`, so the one path that is *already* a switch away from
+    /// 变换 (`setCropWorkspaceActive(false)` → `cancelCropTool()`) cannot bounce the selection back.
+    public func returnFromCrop() {
+        guard selection.showsCropCard else { return }
+        select(lastNonCropWorkspace)
     }
 
     /// The band selector's action. Clamped to the nine cells, and — like `select` — never a document

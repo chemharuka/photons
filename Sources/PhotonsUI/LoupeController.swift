@@ -1214,6 +1214,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 123 — a transform was **confirmed** (↵ / 完成): the workspace can now leave 变换 (the
     /// acceptance asks the panel to return to `.adjust`). Esc does not call this.
     public var onTransformConfirmed: (() -> Void)?
+    /// 202 ① — **裁切 ended, whichever door**: ↵, 完成, Esc and the card's 取消 all call this, after
+    /// the mode has left and the camera is heading back. The panel hangs its 「回到上一个非裁切工作区」
+    /// on it, so the exit route no longer decides where the inspector lands (123's
+    /// `onTransformConfirmed` stays the *document* signal; this one is the *mode* signal).
+    public var onCropToolExit: (() -> Void)?
     /// What the callback was last told, so a drag tick cannot republish it.
     private var publishedCropModeActive = false
     /// 072 §A1 — 确认/取消裁切后, the picture is carried from the crop framing to the entry framing by
@@ -3817,6 +3822,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let applied = cropTool.finish(outcome)
         leaveCropTool()
         if outcome != .cancel { onTransformConfirmed?() }
+        // 202 ① — the **mode** left, whichever door was used. Published after the mode and the camera,
+        // so a listener that switches the panel cannot race a still-open tool (a workspace switch
+        // back with the frame up would cancel it a second time).
+        onCropToolExit?()
         return applied
     }
 
