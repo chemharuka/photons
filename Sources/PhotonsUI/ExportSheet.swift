@@ -63,7 +63,13 @@ public enum UIExportRenderer {
         let content = edit.geometry.outputPixels(in: source)
         let scale = preset.renderScale(content: content)
         let decodeScale = decodeScaleLadder(scale)
-        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale))
+        // 194: the export is the **settled** picture, so it develops at the document's own balance —
+        // the same development the loupe settles on — and the graph is told the buffer already carries
+        // it (S1 identity below). Exporting the as-shot buffer with an S1 gain instead would ship the
+        // drag's approximation as the file.
+        let exportWhiteBalance = edit.decodeInputs.whiteBalance
+        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale,
+                                                                    whiteBalance: exportWhiteBalance))
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)
@@ -78,7 +84,8 @@ public enum UIExportRenderer {
         //     back before the next picture in a batch decodes, so a 20-image batch no longer peaks at
         //     20 × the export's own working set.
         let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity,
-                                                      sourceURL: url),
+                                                      sourceURL: url,
+                                                      whiteBalance: exportWhiteBalance),
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
         // 113 — HDR export is **one** render of the HDR frame; the SDR base is a projection of it.

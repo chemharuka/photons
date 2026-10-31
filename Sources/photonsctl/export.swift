@@ -119,7 +119,11 @@ func cmdExportBatch(_ a: Args) throws {
         let content = edit.geometry.outputPixels(in: native)
         let scale = preset.renderScale(content: content)
         let decodeScale = decodeScaleLadder(scale)
-        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale))
+        // 194: develop at the document's own balance — the export is the settled picture, not a
+        // prediction of it.
+        let exportWhiteBalance = edit.decodeInputs.whiteBalance
+        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale,
+                                                                    whiteBalance: exportWhiteBalance))
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)
@@ -128,7 +132,8 @@ func cmdExportBatch(_ a: Args) throws {
         // everything handed back when the image is done, so a 60 Mpx batch runs at one export's
         // working set instead of accumulating one per image.
         let graph = try RenderGraph(input: RenderInput(image: decoded, identity: identity,
-                                                      sourceURL: url),
+                                                      sourceURL: url,
+                                                      whiteBalance: exportWhiteBalance),
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
         let display = DisplayOptions(primaries: preset.colorSpace,

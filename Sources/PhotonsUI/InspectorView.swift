@@ -2191,9 +2191,9 @@ public struct InspectorView: View {
         public var format: String
         /// 047: typeable, like every other row (no card opts out).
         public var editable: Bool = true
-        /// 143: 色温/色调 are **our own** scene-linear gain (`WhiteBalanceEstimate`) applied in S1, not a
-        /// decoder input. They stay 「解 RAW 参数」 → `.bar` → yellow: the yellow is the card's promise
-        /// that the value shapes the picture from the linear buffer, not that it triggers a decode.
+        /// 194: 色温/色调 现在是**两段式**——落定值写进 `CIRAWFilter`（真值，一次 develop），拖动值是
+        /// S1 上的 `WhiteBalanceEstimate` 增益（近似，零次 develop）。仍归「解 RAW 参数」→ `.bar` →
+        /// 黄色：黄色是卡片对**落定帧**的承诺（值真的经解码器作用在线性缓冲上）。
         /// 类别归 `SliderShape` 一处表达，行视图照着上色，不写死一个颜色。
         public var shape: SliderShape = .bar
     }
@@ -2316,9 +2316,10 @@ public struct InspectorView: View {
                                       }
                                   })
             }
-            // 143: 色温/色调 是场景线性的 S1 增益（`WhiteBalanceEstimate`），不是 `CIRAWFilter` 的输入，
-            // 所以它们不再是「重新解码」——释放滑杆只重算一次增益、重画同一张缓冲。黄色仍然是
-            // 「解 RAW 参数」的卡片承诺（值直接作用于线性缓冲），只是不再隐含一次 develop。
+            // 194: 两段式。拖动时 色温/色调 是场景线性的 S1 增益（`WhiteBalanceEstimate`），画的是已经
+            // 在屏幕上的那张缓冲 —— 一次渲染、零次解码；松手写进文档，下一次 develop 把它交给
+            // `CIRAWFilter.neutralTemperature`，定格帧才是真值（S1 增益在该帧里是恒等）。黄色卡片仍是
+            // 「解 RAW 参数」的承诺，只是它现在描述的是**落定**的那一帧。
             // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
             // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
             Self.shapeSlider(Binding(get: { shown },
@@ -3036,6 +3037,12 @@ public struct WhiteBalanceCommands {
     /// dropper wrote a guess". The caller prints the hint either way.
     @discardableResult
     public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
+        // 195 tried inverting the preview's 3×3 here (`WhiteBalanceEstimate.neutral`) on the theory
+        // that the dropper should invert the function it draws with. Measured on L1030433's grey
+        // patch it is **worse**, not better: the 3×3 model's tint axis is not `CIRAWFilter`'s (it
+        // asked 5950 K/+66 and the settled frame carried 16.3 % where the solver's answer left
+        // 13.7 %). So the one body stays 143's solver — the residual is the estimate's, and hiding it
+        // behind a second model would only move the error somewhere the tests do not look.
         guard let solve = WhiteBalanceSolver.neutral(for: sample, reference: reference) else { return nil }
         commit(solve.whiteBalance, label: label)
         return solve

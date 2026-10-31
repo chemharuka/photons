@@ -327,15 +327,19 @@ final class CopyPasteSettingsTests: XCTestCase {
         _ = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: scale, edit: session.edit)
         XCTAssertEqual(decodeTotal(), baseline)
 
-        // White balance: 143 — the balance is an S1 gain, so it re-renders the resident buffer and
-        // develops nothing.
+        // White balance: 194 — the settled value goes to `CIRAWFilter`, so it develops **once**. A
+        // paste that only re-rendered would leave the decoder at as shot, which is exactly the defect
+        // this pair of stages removes.
         _ = session.pasteSettings(sections: [.whiteBalance])
         XCTAssertEqual(session.edit.light.temperature, 5500)
         _ = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: scale, edit: session.edit)
         let afterWB = decodeTotal()
         print("DECODE after white-balance paste: \(RAWDecoder.decodeCounts()) (+\(afterWB - baseline))")
-        XCTAssertEqual(afterWB, baseline,
-                       "a Kelvin paste must re-render, not develop: \(RAWDecoder.decodeCounts())")
+        XCTAssertEqual(afterWB, baseline + 1,
+                       "a Kelvin paste must develop the buffer it settles on: \(RAWDecoder.decodeCounts())")
+        // …and only once: the same document again is the same rung.
+        _ = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: scale, edit: session.edit)
+        XCTAssertEqual(decodeTotal(), baseline + 1, "one value, one development")
     }
 
     // MARK: - ⑥ 焦点在文本域时 ⌘C 不被劫持

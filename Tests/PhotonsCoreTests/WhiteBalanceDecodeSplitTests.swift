@@ -2,14 +2,17 @@ import XCTest
 import CryptoKit
 @testable import PhotonsCore
 
-/// 011 A's two parameter streams, **as re-cut by 143**.
+/// 011 A's two parameter streams, **as re-cut by 194's two-stage white balance**.
 ///
 /// The split still exists and is still the whole pipeline decision: a change is either a new
-/// **decode** (a different buffer) or a new **render** (the same buffer drawn differently). What moved
-/// is white balance. Since 143 the decoder never receives a Kelvin/tint; the document's pair is an S1
-/// gain computed by `WhiteBalanceEstimate`, so it is a **render** input. The file keeps the historical
-/// assertions that made the split checkable — as shot adds nothing to any key, render-side edits never
-/// develop, and `splitFrom` is the one decision function — and pins the new placement of the balance.
+/// **decode** (a different buffer) or a new **render** (the same buffer drawn differently). The white
+/// balance straddles the two halves of one gesture and this file is where the boundary is pinned:
+/// **settled** values are decode inputs again (143 had moved them out; 194 puts them back, because the
+/// settled frame must be `CIRAWFilter`'s answer rather than our estimate), while the **drag** never
+/// reaches `EditModel` at all — it is view state in the loupe, an S1 gain on the resident buffer.
+///
+/// The historical assertions that made the split checkable survive: as shot adds nothing to any key,
+/// render-side edits never develop, and `splitFrom` is the one decision function.
 final class WhiteBalanceDecodeSplitTests: XCTestCase {
 
     // MARK: - fixtures
@@ -58,17 +61,13 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         var crop = base; crop.geometry.crop = NormalizedRect(x: 0.2, y: 0.2, width: 0.5, height: 0.5)
         var masks = base; masks.masks.append(Mask(id: "m2", name: "m2"))
         var vignette = base; vignette.effects.vignetteAmount = -40
-        var whiteBalance = base
-        whiteBalance.light.temperature = 3000
-        whiteBalance.light.tint = -20
-
         let cases: [(String, EditModel)] = [
             ("exposure", exposure), ("contrast", contrast), ("highlights", highlights),
             ("shadows", shadows), ("whites", whites), ("blacks", blacks),
             ("highlight recovery", recovery), ("RGB curve", toneCurve),
             ("channel curve", channelCurve), ("saturation/vibrance", colour),
             ("HSL band", bands), ("geometry", geometry), ("crop", crop), ("masks", masks),
-            ("vignette", vignette), ("white balance", whiteBalance),
+            ("vignette", vignette),
         ]
         for (name, edited) in cases {
             XCTAssertEqual(edited.decodeKey, key, "\(name) moved the decode key — it would develop again")
@@ -86,8 +85,6 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         edited.light.exposure = -2
         edited.light.contrast = 60
         edited.light.blacks = -50
-        edited.light.temperature = 3600
-        edited.light.tint = 18
         edited.curve.blue = [CurvePoint(u: 0, v: 0.1), CurvePoint(u: 1, v: 0.9)]
         edited.color.saturation = 40
         edited.effects.vignetteAmount = 25
@@ -96,12 +93,13 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         XCTAssertEqual(edited.splitFrom(base), .render)
     }
 
-    // MARK: - 2. white balance is render-side now
+    // MARK: - 2. a settled white balance is a development again
 
-    /// Every transition of the three-valued pair — including `nil` → a value and a value → `nil` —
-    /// is a **render** change. The decode key stays byte-identical; `RenderInputs` moves each time,
-    /// because the S1 gain reads the pair.
-    func testAnyWhiteBalanceChangeMovesTheRenderInputsNotTheDecodeKey() {
+    /// Every transition of the three-valued pair — including `nil` → a value and a value → `nil` — is a
+    /// **decode** change now: the settled frame is the decoder's, so a different pair is a different
+    /// buffer (`wb=…`) and a new development. `RenderInputs` moves too, because the *drag* is still
+    /// this same pair drawn as an S1 gain on a buffer that does not carry it yet.
+    func testAnyWhiteBalanceChangeMovesTheDecodeKeyAndTheRenderInputs() {
         var state = EditModel.neutral
         var sequence: [(String, EditModel)] = [("as shot", state)]
 
@@ -117,25 +115,27 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         sequence.append(("as-shot K, tint +31", z)); state = z
         var p = state; p.light.tint = nil
         sequence.append(("back to as shot", p)); state = p
-        var pinned = state
-        pinned.light.temperature = 5871.6
-        pinned.light.tint = 20.35
-        sequence.append(("pinned to the as-shot numbers", pinned))
 
         let asShotKey = sequence[0].1.decodeKey
         for i in 1..<sequence.count {
             let (name, doc) = sequence[i]
             let (previousName, previous) = sequence[i - 1]
-            XCTAssertEqual(doc.decodeKey, asShotKey,
-                           "“\(name)” moved the decode key — the decoder no longer takes a balance")
-            XCTAssertEqual(previous.decodeKey, asShotKey)
-            XCTAssertEqual(doc.splitFrom(previous), .render,
-                           "“\(previousName)” → “\(name)” must be a render, not a development")
+            XCTAssertNotEqual(doc.decodeKey, previous.decodeKey,
+                              "“\(previousName)” → “\(name)” did not move the decode key — the "
+                              + "settled frame would be drawn from the previous balance's buffer")
+            XCTAssertEqual(doc.splitFrom(previous), .decode,
+                           "“\(previousName)” → “\(name)” must be a development")
             XCTAssertNotEqual(doc.renderInputs, previous.renderInputs,
                               "“\(name)” did not reach RenderInputs")
         }
-        // The last step returns to the as-shot document, and must return to its render key too.
-        XCTAssertEqual(sequence[6].1.renderInputs, sequence[0].1.renderInputs)
+        // A document that walks to another pair and comes back names the first buffer again — the key
+        // is a name, not a history, so the round trip hits the development it already paid for.
+        var there = EditModel.neutral
+        there.light.temperature = 4200
+        var back = there
+        back.light.temperature = nil
+        XCTAssertNotEqual(there.decodeKey, asShotKey)
+        XCTAssertEqual(back.decodeKey, asShotKey)
     }
 
     // MARK: - 3. as shot is still the historical key
@@ -151,14 +151,14 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         XCTAssertEqual(shot.decodeInputs.appending(to: photo), photo,
                        "as shot appended something to the rung identity — every resident rung's key moved")
 
-        // An explicit white balance no longer appends anything either: the pixels are the as-shot
-        // buffer, and the balance is an S1 gain.
+        // An explicit white balance **does** name a second buffer since 194 — that buffer is the
+        // settled frame. The as-shot identity above is what must not move; this is the opposite gate.
         var warm = shot
         warm.light.temperature = 5500
         warm.light.tint = 0
-        XCTAssertEqual(warm.decodeInputs.appending(to: photo), photo,
-                       "a white balance reached the rung identity — it would develop a second buffer")
-        XCTAssertEqual(warm.decodeKey, shot.decodeKey)
+        XCTAssertEqual(warm.decodeInputs.appending(to: photo), "\(photo)|wb=5500K/+0",
+                       "a settled white balance must develop its own buffer")
+        XCTAssertNotEqual(warm.decodeKey, shot.decodeKey)
 
         // The on-disk key: as shot is still the pinned pre-006 digest.
         let decoderVersion = "8"
@@ -188,13 +188,17 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
 
         var render = asShot
         render.light.exposure = 1.2
-        render.light.temperature = 5500
-        render.light.tint = 0
         render.light.contrast = 40
         render.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.6), CurvePoint(u: 1, v: 1)]
         render.color.vibrance = 30
         XCTAssertEqual(render.decodeInputs.appending(to: photo), photo,
-                       "exposure/contrast/curve/colour/white-balance moved the rung identity")
+                       "exposure/contrast/curve/colour moved the rung identity")
+        // 194: the settled white balance is a decode input again, so it *does* move the identity — and
+        // it must, or a 5500 K document would be answered with the as-shot buffer.
+        var warm = render
+        warm.light.temperature = 5500
+        warm.light.tint = 0
+        XCTAssertEqual(warm.decodeInputs.appending(to: photo), "\(photo)|wb=5500K/+0")
 
         // A decode-side change: the decoder version. It moves the identity, once, and appears in the
         // on-disk key too — the one remaining document-side decode input.
@@ -214,10 +218,10 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         b.light.temperature = 2850
         b.light.tint = -12
         XCTAssertNotEqual(a.renderInputs, b.renderInputs,
-                          "the render half does not see the white balance — S1 would render the old pair")
+                          "the render half does not see the white balance — the drag would render the old pair")
         XCTAssertNotEqual(a.renderInputs.key, b.renderInputs.key)
-        XCTAssertEqual(a.decodeKey, b.decodeKey,
-                       "a white-balance change moved the decode key")
+        XCTAssertNotEqual(a.decodeKey, b.decodeKey,
+                          "a settled white-balance change did not move the decode key")
 
         let warmKey = b.decodeKey
         b.light.exposure += 0.5
@@ -233,9 +237,10 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
         XCTAssertEqual(base.splitFrom(base), EditSplit.none)
         var render = base; render.light.whites += 1
         XCTAssertEqual(render.splitFrom(base), EditSplit.render)
+        // 194: a white balance is a development again — the settled frame is the decoder's.
         var warm = base; warm.light.tint = 3
-        XCTAssertEqual(warm.splitFrom(base), EditSplit.render)
-        // A decoder-version change is the remaining development.
+        XCTAssertEqual(warm.splitFrom(base), EditSplit.decode)
+        // A decoder-version change is the other development.
         var decode = base; decode.decoderVersion = "9"
         XCTAssertEqual(decode.splitFrom(base), EditSplit.decode)
         var both = base; both.light.exposure += 1; both.decoderVersion = "9"
@@ -247,8 +252,8 @@ final class WhiteBalanceDecodeSplitTests: XCTestCase {
     func testChangedStagesFollowsTheSameDecision() {
         let base = busyDocument()
         var warm = base; warm.light.temperature = 3200
-        XCTAssertEqual(warm.changedStages(from: base), [.sceneLinear],
-                       "a white-balance change is S1's gain slot and nothing above it")
+        XCTAssertEqual(warm.changedStages(from: base), Set(RenderStage.allCases),
+                       "a settled white-balance change is a new development — every stage re-runs")
 
         var exposure = base; exposure.light.exposure += 1
         XCTAssertEqual(exposure.changedStages(from: base), [.sceneLinear],
