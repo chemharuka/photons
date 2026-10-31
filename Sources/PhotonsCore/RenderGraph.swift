@@ -4484,17 +4484,21 @@ public final class RenderGraph {
     /// arithmetic" is a thing a test can *call*, and so the ⌥ preview cannot drift from the apply pass
     /// (`SharpenScaleTests.testTheConversionIsTheIdentityAtOneToOne`).
     ///
-    /// - `radius`: σ in **canvas** pixels, `clamp(radius_img, 0.5, 3) · S`, floored at 0.5 canvas px.
-    ///   The floor is the one place where the conversion is deliberately *not* linear: below half a
-    ///   canvas pixel the Gaussian's only non-zero tap is the centre one, so a radius above zero would
-    ///   be the identity — and at a 0.29 fit scale a `radius = 0.5` document would land there. The
-    ///   floor makes fit's smallest radius behave exactly like 1:1's smallest radius instead of
-    ///   vanishing, and it is unreachable at S = 1 (the document range starts at 0.5).
+    /// - `radius`: σ in **canvas** pixels, `clamp(radius_img, 0.5, 3) · S` — **linear, no floor**.
+    ///   The floor that used to sit here (0.5 canvas px) was the bug this generation removes: it is a
+    ///   σ the document never asked for, it is 2.5 image pixels at a 0.2 fit, and it collapsed every
+    ///   `radius ≤ 0.5/S` onto one kernel. A σ below the base plane's own texel is not a reason to
+    ///   inflate it — `s3_10_tap` runs a moment-matched (energy- and variance-normalised) kernel
+    ///   there instead, so a small zoom narrows the response instead of strengthening it.
+    /// - `planeStride`: the base plane's stride in canvas pixels, `max(1, round(2·S))` — one plane
+    ///   texel per **two image pixels**, so the box the base layer averages over is the same picture
+    ///   width in every rung. 2 at 1:1 (185's plane, byte for byte).
     /// - `block`: the limiter's window in canvas pixels, `max(2, round(4·S))` — 4 at 1:1.
     /// - `kneeLow`/`kneeHigh`: the mask's gradient thresholds on a **canvas**-pixel slope, which is
     ///   `1/S` times the image-pixel slope for the same physical edge: `0.01/S … 0.04/S`.
     public struct SharpenScale: Sendable, Equatable {
         public var radius: Double
+        public var planeStride: Int
         public var block: Int
         public var kneeLow: Double
         public var kneeHigh: Double
@@ -4505,10 +4509,20 @@ public final class RenderGraph {
         -> SharpenScale {
         let s = Swift.max(0.01, S)
         let clamped = min(max(documentRadius, 0.5), 3.0)
-        return SharpenScale(radius: Swift.max(clamped * s, 0.5),
+        return SharpenScale(radius: clamped * s,
+                            planeStride: sharpenPlaneStride(imageScale: s),
                             block: sharpenBlockWidth(imageScale: s),
                             kneeLow: 0.01 / s,
                             kneeHigh: 0.04 / s)
+    }
+
+    /// The base plane's stride in **canvas** pixels: `max(1, round(2·S))`, i.e. one plane texel per
+    /// two **image** pixels. 2 at 1:1 — the half-resolution plane 185 shipped — and 4 at 2×, so the
+    /// `p × p` box the base layer averages over is the same physical width in both. At a fit scale
+    /// below `S = 0.75` two image pixels are less than `2·S` canvas pixels and the canvas cannot hold
+    /// them, so the stride is 1: the plane *is* the canvas, the finest base the display has.
+    public static func sharpenPlaneStride(imageScale S: Double) -> Int {
+        Swift.max(1, Int((2.0 * Swift.max(0.01, S)).rounded()))
     }
 
     /// The limiter's window in **canvas** pixels: `max(2, round(4·S))`. 4 at 1:1 — the constant this
@@ -4528,27 +4542,28 @@ public final class RenderGraph {
     private func encodeSharpen(cb: MTLCommandBuffer, into out: MTLTexture,
                                from src: MTLTexture, edit: EditModel, plan: Plan) throws {
         let w = plan.canvas.width, h = plan.canvas.height
-        // The blurred planes are **half resolution** (one texel per 2 × 2 block): a USM's base is the
-        // low band, and the two blur passes are what this stage costs. The apply samples them back
-        // bilinearly, and `rgba16Float` is what makes them filterable (Metal does not filter 32-bit).
-        let hw = max(1, (w + 1) / 2), hh = max(1, (h + 1) / 2)
         let imageScale = plan.imageScale
         lastSharpenImageScale = imageScale
+        let conversion = RenderGraph.sharpenScale(radius: edit.sharpen.radius, imageScale: imageScale)
+        // The base plane's stride: one texel per `p` canvas pixels, i.e. per two **image** pixels.
+        // `p` is 2 at 1:1 (the half-resolution plane of 185, byte for byte) and 1 at a fit scale,
+        // where the canvas cannot hold two image pixels in one texel.
+        let stride = conversion.planeStride
+        let hw = max(1, (w + stride - 1) / stride), hh = max(1, (h + stride - 1) / stride)
         // The limiter's window is `sharpenBlock` **image** pixels; on this canvas that is
         // `max(2, round(4·S))` — exactly 4 at 1:1 (the pre-191 constant), 2 for a half-scale fit and 8
         // at 2×, so `hi − lo` is the range of the same physical 4 px patch in every rung.
-        let q = RenderGraph.sharpenBlockWidth(imageScale: imageScale)
+        let q = conversion.block
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
 
         // Clamped on the document's own ranges, so a hand-edited file cannot ask the kernel for a
         // negative σ or a 20-code allowance.
         let amount = Float(min(max(edit.sharpen.amount, 0), 150)) / 100
         // 191 — σ is a **canvas** quantity. The document's radius is in image pixels, so
-        // `σ_canvas = radius_img · S`, floored at half a canvas pixel: below that the Gaussian's only
-        // non-zero tap is the centre one, and a radius slider that is above zero must not be the
-        // identity. At S = 1 the floor is unreachable (the document range starts at 0.5) and this is
-        // the pre-191 line exactly. The knees follow the same conversion — see `sharpenScale`.
-        let conversion = RenderGraph.sharpenScale(radius: edit.sharpen.radius, imageScale: imageScale)
+        // `σ_canvas = radius_img · S`, linearly and with no floor: a σ smaller than the base plane's
+        // texel is carried by the kernel's moment-matched sub-texel taps, which narrow the response
+        // instead of inflating it (see `s3_10_tap`). At S = 1 the conversion is the pre-191 value
+        // exactly, because the document's range starts at 0.5 and `clamp` is what bounds it.
         let radius = Float(conversion.radius)
         let detail = Float(min(max(edit.sharpen.detail, 0), 100)) / 100
         let masking = Float(min(max(edit.sharpen.masking, 0), 100)) / 100
@@ -4562,7 +4577,7 @@ public final class RenderGraph {
             // The content rect, not the canvas: a sharpen is picture detail, and the letterbox must
             // stay exactly 0 (派单 008 C's rule, the one S2/S3/S3.5/S3.9 carry).
             c: SIMD4(Int32(qW), Int32(qH), Int32(plan.origin.x), Int32(plan.origin.y)),
-            d: SIMD4(Int32(plan.content.width), Int32(plan.content.height), 0, 0),
+            d: SIMD4(Int32(plan.content.width), Int32(plan.content.height), Int32(stride), 0),
             // `e.w`/`f.x` are the mask's knee: 0.02…0.08 luma per px. A 0.44 step reads 0.44 and opens
             // the mask fully; the fixture's 2-code noise reads ~0.008 and does not open it at all,
             // which is what makes `masking = 100` leave a flat area's noise alone to within ±2 %.
@@ -4660,10 +4675,11 @@ public final class RenderGraph {
                      Float(min(max(edit.sharpen.masking, 0), 100)) / 100),
             b: SIMD4(Int32(w), Int32(h), Int32(conversion.block), 0),
             c: SIMD4(Int32(w), Int32(h), 0, 0),
-            d: SIMD4(Int32(w), Int32(h), 0, 0),
+            d: SIMD4(Int32(w), Int32(h), Int32(conversion.planeStride), 0),
             e: SIMD4(0.2126, 0.7152, 0.0722, Float(conversion.kneeLow)),
             f: SIMD4(Float(conversion.kneeHigh), 8, 0, 0))
-        let hw = max(1, (w + 1) / 2), hh = max(1, (h + 1) / 2)
+        let stride = conversion.planeStride
+        let hw = max(1, (w + stride - 1) / stride), hh = max(1, (h + stride - 1) / stride)
         let lum = try scratch("sharpen-preview-luma", width: hw, height: hh, format: .rgba16Float)
         let hWide = try scratch("sharpen-preview-hw", width: hw, height: hh, format: .rgba16Float)
         let hFine = try scratch("sharpen-preview-hf", width: hw, height: hh, format: .rgba16Float)
