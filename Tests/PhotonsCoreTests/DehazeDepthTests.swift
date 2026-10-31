@@ -4,11 +4,11 @@ import PhotonsCore
 
 /// 120b — the depth-assisted dehaze (`effects.dehazeDepth`).
 ///
-/// The depth map only changes the **distribution** of the veil: far pixels keep the measured `A`/`t`
-/// (full correction), near pixels shrink towards no haze (`A → 0`, `t → 1`). 130's hue-preserving
-/// luminance recovery and 135's airlight ceiling stay in charge. `depthStrength == 0` takes the
-/// pre-120b branch verbatim, so a frame with a depth map and strength 0 is byte-identical to one
-/// rendered with no depth at all.
+/// **2026-10-31**: `t` no longer reads the depth map (`tSmooth` dropped its `(1 + depthBoost)` factor;
+/// the user's decision — 去雾暂时不接深度). The map is still carried, `s1_9_dehaze_limit` still writes
+/// its p1/p99 window, and the strength still enters the stage key: that part belongs to the removal
+/// that owns the depth assist. What is pinned here is that the strength cannot move a pixel, that a
+/// zero-strength frame is byte-identical with and without a map, and that 141 still holds.
 final class DehazeDepthTests: XCTestCase {
 
     // MARK: fixtures
@@ -96,9 +96,14 @@ final class DehazeDepthTests: XCTestCase {
         return sum / Double(max(n, 1))
     }
 
-    // MARK: 4 — far gets the correction, near is left alone
+    // MARK: 4 — the assist no longer reaches `t`
 
-    func testFarDarkensWhileNearIsUnchanged() throws {
+    /// **2026-10-31 (user): 去雾暂时不接深度.** The depth map still arrives, and
+    /// `s1_9_dehaze_limit` still measures its p1/p99 window (that belongs to the removal that owns the
+    /// depth assist, not to this lane), but `t` no longer reads it: `tSmooth` has no `(1 + depthBoost)`
+    /// factor. So a strength of 100 must be **bit-identical** to a strength of 0 on the same frame —
+    /// this is the contract now, and it is what the two halves of the scene measure.
+    func testDepthStrengthNoLongerMovesTheVeil() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let depth = try halfDepth(device)
         let graph = try makeGraph(scene(), depth: depth)
@@ -109,16 +114,12 @@ final class DehazeDepthTests: XCTestCase {
         let farOn = darkMean(on, leftHalf: true)
         let nearOff = darkMean(off, leftHalf: false)
         let nearOn = darkMean(on, leftHalf: false)
+        print("DEHAZE DEPTH · far \(farOff) → \(farOn) · near \(nearOff) → \(nearOn)（深度强度不再影响 t）")
 
-        let farDrop = (farOff - farOn) / max(farOff, 1e-9)
-        let nearChange = abs(nearOff - nearOn) / max(nearOff, 1e-9)
-        print("DEHAZE DEPTH · far \(farOff) → \(farOn) (\(farDrop * 100)%) · "
-              + "near \(nearOff) → \(nearOn) (\(nearChange * 100)%)")
-        XCTAssertGreaterThanOrEqual(farDrop, 0.15,
-                                   "far (depth p10–p30) must lose ≥ 15 % of its dark channel")
-        XCTAssertLessThanOrEqual(nearChange, 0.05,
-                                "near (depth p70–p90) must move ≤ 5 %")
-        XCTAssertLessThan(farOn, nearOn, "far is corrected more than near")
+        XCTAssertEqual(off.sha256(), on.sha256(),
+                       "去雾暂时不接深度：strength 100 必须与 0 逐字节相同")
+        XCTAssertEqual(farOff, farOn, accuracy: 0, "far 半区不许被深度改动")
+        XCTAssertEqual(nearOff, nearOn, accuracy: 0, "near 半区不许被深度改动")
     }
 
     // MARK: 5 — strength 0 is today's dehaze, byte for byte

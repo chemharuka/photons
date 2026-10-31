@@ -247,22 +247,28 @@ final class DehazeExposureTests: XCTestCase {
 
     // MARK: - 2. E = 0 逐字节不变
 
-    /// SHA of the scene-linear frame at `exposure = 0`, **recorded with the pre-141 build**. The
-    /// normalization is `I / g`, and `g = 1` at EV 0, so the stage must not move a single bit.
+    /// SHA of the scene-linear frame at `exposure = 0`. The normalization is `I / g`, and `g = 1` at
+    /// EV 0, so the stage must not move a single bit for a given arithmetic.
+    ///
+    /// 2026-10-31 — the six **positive** entries were re-recorded: `t` now comes from the guided veil,
+    /// so `dehaze > 0` renders different pixels by design (that is why `AlgorithmVersion.dehaze` moved
+    /// 6 → 7). The four **negative** entries are the pre-2026-10-31 bytes, unchanged to the digit: the
+    /// haze-adding branch never read `t`, and this test's actual claim — that `g = 1` is an exact
+    /// identity for the 141 normalization — is now checked against the current arithmetic.
     private static let e0SHA: [String: String] = [
         "foggy·-100": "0cfbcd45e29b430becf3580355f9ce6784f62d6f8c40e48a10de612b565ac847",
         "foggy·-60": "9606e7fae6a803fec18c83ff10c8fefd8a815602f407ff0a39833f887835f6ba",
-        "foggy·20": "81dd515b439cf80b0de4d0a1a76fe42afdc9d3bde9dab8af9379053313a79826",
-        "foggy·60": "4186ff1280f1b89489f637451d19d59c7f7c22c1f09134ed275b6c7990da2c47",
-        "foggy·100": "59988dc6b2405fe6d6bb73dc510e758e48925f92d6e877947158b22324d7c98b",
+        "foggy·20": "752e067ea6da6afea12ba5ed3e18a60017a168a5b7ce8aa4b540a1142ba811ec",
+        "foggy·60": "bc835439f7b3f2168dbbe199b537d5701a96fe38dbdbdb627f2931471b575d7c",
+        "foggy·100": "0e32f95f3e1418dfd15b56338d80b17d5601809b51178bdb5bea2ca6ecb43adf",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
-        "chroma·20": "975d4778dd00b7af9e9f8a9eed5eae4b96c1908746bbe9f4cc3083db140ab4a3",
-        "chroma·60": "e2f73ac03d33c1e470a9748a91aaeda82cb93c42774a5bcecdb5a8a7c1e5e924",
-        "chroma·100": "b9a8ba66fe040681f3ad791b877cfbeaf0eb66dbd24c6df89b9e7c3d9ec447ec",
+        "chroma·20": "2de4ddc38bd26367013d71196e8de0e689e0728fc986c2abd72b32161af88ff5",
+        "chroma·60": "9957328624b6cac3e193ee06bb421b1f1c09eb040139d9e03a87a726939c54ed",
+        "chroma·100": "7b893d5c17775789d7c96f49742c0d6801e2458d7eb324fce11e48397cb93121",
     ]
 
-    func testZeroExposureIsByteIdenticalToThePre141Stage() throws {
+    func testZeroExposureKeepsTheStageByteIdentical() throws {
         let frameSets: [(String, LinearImage)] = [
             ("foggy", foggy(landscape())),
             ("chroma", colouredBlocks()),
