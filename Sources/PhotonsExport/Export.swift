@@ -330,7 +330,8 @@ public enum Exporter {
                                                        halfSize: hdr.halfSize,
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
-                                                       bitDepth: options.bitDepth),
+                                                       bitDepth: options.bitDepth,
+                                                       dither8Bit: options.dither8Bit),
                             metadata: metadata,
                             format: options.format)
                         return result.warnings
@@ -346,7 +347,8 @@ public enum Exporter {
                                                        halfSize: hdr.halfSize,
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
-                                                       bitDepth: options.bitDepth),
+                                                       bitDepth: options.bitDepth,
+                                                       dither8Bit: options.dither8Bit),
                             metadata: metadata,
                             format: .avif)
                         if apple {

@@ -16,11 +16,12 @@ final class WatermarkTests: XCTestCase {
     /// `testEmptyWatermarkIsByteIdenticalToTheUntouchedEncoderPath` 里 Batch 与 `Exporter.write`
     /// 的**相等**；这条常量是那次跨提交实测的记录，ImageIO 的输出变了它会红，届时重新量。
     /// 206 — the same fixture with the 8-bit TPDF dither on. The previous 180 baseline
-    /// `20dc579a…` was measured before the quantiser changed; the HDR pin below is untouched because
-    /// a gain-map base goes through `Exporter.cgImage` (dither defaults to off there).
+    /// `20dc579a…` was measured before the quantiser changed; the HDR pin below moved in the 206
+    /// follow-up, when the gain map's SDR base started honouring `dither8Bit` too.
     static let baseSDRSHA = "b60ce712735784f6130c9dead7678fdc7bf682079e1404d1c8db61f8a9ce4863"
-    /// 同上，HEIC 增益图（`fixture(hdr: true)`）。
-    static let baseHDRSHA = "f808e0001731b663d63eabb86d220d02896deaba28142f4a4eae93fe381676c6"
+    /// 同上，HEIC 增益图（`fixture(hdr: true)`）。206 追单后 SDR 基底也过 8 位抖动，
+    /// 旧值 `f808e000…` 随之变为下面的新值；增益图本身仍按 8 位旁路图原样写。
+    static let baseHDRSHA = "0eb0f087fef9c985fda9c1e69821ede8ea0cf1c0b496c2a9600b37300464be56"
 
     private var scratch: URL!
 

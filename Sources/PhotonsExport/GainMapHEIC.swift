@@ -45,14 +45,19 @@ public struct HDRGainMapOptions: Sendable {
     public var headroom: HDRExport.Headroom
     public var quality: Double
     public var bitDepth: Int
+    /// 206 — the SDR base's 8-bit quantiser. `true` (the export default) matches `Exporter.write`;
+    /// the gain map itself is 8-bit by construction but is a smooth ratio field, not a display ramp.
+    public var dither8Bit: Bool
 
     public init(gainMap: HDRExport.GainMap = .iso, halfSize: Bool = true,
-                headroom: HDRExport.Headroom = .auto, quality: Double = 0.95, bitDepth: Int = 8) {
+                headroom: HDRExport.Headroom = .auto, quality: Double = 0.95, bitDepth: Int = 8,
+                dither8Bit: Bool = true) {
         self.gainMap = gainMap
         self.halfSize = halfSize
         self.headroom = headroom
         self.quality = quality
         self.bitDepth = bitDepth
+        self.dither8Bit = dither8Bit
     }
 }
 
@@ -171,7 +176,8 @@ public enum GainMapHEIC {
         if fullPeak < sdrThreshold {
             try Exporter.write(sdr, to: url,
                                options: ExportOptions(format: format, quality: options.quality,
-                                                      bitDepth: options.bitDepth),
+                                                      bitDepth: options.bitDepth,
+                                                      dither8Bit: options.dither8Bit),
                                metadata: metadata)
             return HDRWriteResult(
                 headroom: 1,
@@ -244,7 +250,8 @@ public enum GainMapHEIC {
                                  metadata: ExportMetadataContext,
                                  format: ExportFormat) throws {
         let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
-                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries),
+                                          dither: options.dither8Bit)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
@@ -335,7 +342,8 @@ public enum GainMapHEIC {
                                        to url: URL, options: HDRGainMapOptions,
                                        metadata: ExportMetadataContext) throws {
         let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
-                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries),
+                                          dither: options.dither8Bit)
         guard let gainCG = map.appleCGImage() else {
             throw GainMapHEICError.gainMapFailed("could not build the Apple gain map bitmap")
         }
@@ -406,7 +414,8 @@ public enum GainMapHEIC {
                                        to url: URL, options: HDRGainMapOptions,
                                        metadata: ExportMetadataContext) throws {
         let baseCG = try Exporter.cgImage(sdr, bitDepth: options.bitDepth,
-                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries))
+                                          space: HDREncoding.sdrColorSpace(for: sdr.primaries),
+                                          dither: options.dither8Bit)
         guard let gainCG = map.appleCGImage() else {
             throw GainMapHEICError.gainMapFailed("could not build the Apple gain map bitmap")
         }
