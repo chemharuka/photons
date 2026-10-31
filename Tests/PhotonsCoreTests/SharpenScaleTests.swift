@@ -183,12 +183,22 @@ final class SharpenScaleTests: XCTestCase {
         XCTAssertEqual(twice.kneeLow, 0.005)
         XCTAssertEqual(twice.kneeHigh, 0.02)
 
-        // A 4 MP portrait's fit preview: 0.147 canvas px would be a σ whose only non-zero tap is the
-        // centre one, which is why the floor exists — and the floor lands on the same value 1:1's
-        // smallest radius gets, so the two agree instead of the preview showing nothing.
+        // A 4 MP portrait's fit preview: **no floor** (192). `radius = 0.5` lands on 0.146 canvas px,
+        // which is what the document asked for — half a canvas pixel would have been 2.5 image pixels
+        // here, i.e. a σ the slider never named, and it is the σ that used to make a fit preview
+        // sharper than the same document at 1:1. The sub-texel kernel (`s3_10_tap`) is what carries a
+        // σ that small now, by narrowing rather than by a clamp.
         let fit = RenderGraph.sharpenScale(radius: 0.5, imageScale: 0.293)
-        XCTAssertEqual(fit.radius, 0.5, "fit 下 radius 0.5 落到了零支撑核")
+        XCTAssertEqual(fit.radius, 0.5 * 0.293, accuracy: 1e-12,
+                       "fit 下 σ 必须逐值等于 radius·S（0.5 的画布像素地板已删除）")
         XCTAssertEqual(fit.block, 2)
+        // The base plane is one texel per **two image pixels**, so its box is the same picture width
+        // at every rung: 2 texels of stride at 1:1, 4 at 2×, and 1 below S = 0.75 where the canvas
+        // cannot hold two image pixels in one texel.
+        XCTAssertEqual(RenderGraph.sharpenPlaneStride(imageScale: 1), 2)
+        XCTAssertEqual(RenderGraph.sharpenPlaneStride(imageScale: 2), 4)
+        XCTAssertEqual(RenderGraph.sharpenPlaneStride(imageScale: 0.5), 1)
+        XCTAssertEqual(fit.planeStride, 1)
     }
 
     // MARK: - 2. overshoot across three render scales
@@ -348,19 +358,19 @@ final class SharpenScaleTests: XCTestCase {
     /// bump that also moved something else is a bug in the bump: **变了** = sharpen, **没变** =
     /// everything else, asserted one stage at a time.
     func testTheSharpenGenerationMovedAndNoOtherStageDid() throws {
-        XCTAssertEqual(StageAlgorithmVersion.sharpen, 2, "191：半径/膝/块窗的语义变了")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .sharpen), 2)
+        XCTAssertEqual(StageAlgorithmVersion.sharpen, 3, "192：σ 地板删除 + 基面 stride 随尺度")
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .sharpen), 3)
 
         // The `;alg=` token itself — the key text a cache entry is minted from.
         let edit = sharpen(150, radius: 1.0)
-        XCTAssertTrue(edit.keyMaterial(.sharpen).hasSuffix(";alg=2"),
-                      "锐化的键材质必须以 ;alg=2 收尾，实际 \(edit.keyMaterial(.sharpen))")
-        XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=2"))
-        XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=1"))
+        XCTAssertTrue(edit.keyMaterial(.sharpen).hasSuffix(";alg=3"),
+                      "锐化的键材质必须以 ;alg=3 收尾，实际 \(edit.keyMaterial(.sharpen))")
+        XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=3"))
+        XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=2"))
 
         // The list that must NOT have moved, in `RenderStage.order`.
         let unchanged: [(RenderStage, Int)] = [
-            (.geometry, 2), (.sceneLinear, 7), (.maskAtlas, 5), (.localApply, 4), (.heal, 1),
+            (.geometry, 2), (.sceneLinear, 8), (.maskAtlas, 5), (.localApply, 4), (.heal, 1),
             (.curve, 2), (.contrast, 2), (.toneMap, 5), (.color, 1), (.bw, 1), (.localColor, 1),
             (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4), (.dehaze, 8),
             (.vignette, 3), (.grain, 1), (.display, 1),
