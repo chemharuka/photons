@@ -751,6 +751,10 @@ final class ContrastMultiscaleTests: XCTestCase {
             ("MC_GATE_HI", MultiscaleContrast.gateHi),
             ("MC_R_C_FRAC", MultiscaleContrast.coarseRadiusFraction),
             ("MC_R_M_FRAC", MultiscaleContrast.midRadiusFraction),
+            // 187 — the negative half's shrink cap. It is a *value* the kernel reads, so it is a
+            // mirrored constant like every other one on this list; a one-sided edit here is exactly
+            // the drift this test exists to catch.
+            ("MC_SHRINK", MultiscaleContrast.shrink),
         ]
         for (name, swift) in pairs {
             XCTAssertEqual(try float(name), swift, accuracy: 1e-9, "\(name) drifted from MultiscaleContrast")
@@ -767,12 +771,35 @@ final class ContrastMultiscaleTests: XCTestCase {
         XCTAssertEqual(zero.fine, 0, accuracy: 0)
         let bands = MultiscaleContrast.Bands(coarse: -2, mid: 0.3, fine: -0.1)
         XCTAssertEqual(MultiscaleContrast.gainRatio(Y: 0.18, bands: bands, contrast: 0), 1, accuracy: 0)
-        for t in [-1.0, 1.0] {
+        // 187: the two signs are **different laws**. `t ≥ 0` is a travel (`W·t` EV of the band);
+        // `t < 0` is a *shrink* (`2^t − 1`, i.e. the residual is multiplied by `2^t`), because the
+        // linear travel at `t = −1` asks for `−7.5·B_m` — the residual amplified and sign-flipped,
+        // which inverts the picture. Both halves must be the identity at 0 and monotone in `t`.
+        for t in [0.25, 1.0] {
             let g = MultiscaleContrast.scaleGains(t: t)
             XCTAssertEqual(g.coarse, MultiscaleContrast.coarseWeight * t, accuracy: 1e-12)
             XCTAssertEqual(g.mid, MultiscaleContrast.midWeight * t, accuracy: 1e-12)
             XCTAssertEqual(g.fine, MultiscaleContrast.fineWeight * t, accuracy: 1e-12)
         }
+        // Both band multipliers are **positive** everywhere and **monotone** in the slider. They are
+        // equal only on the shrink side (one law, no travel); above zero they keep their 2:1 travel
+        // ratio, which is 159's, so only the sign of the *derivative* is asserted there.
+        var previousMid = 0.0, previousFine = 0.0
+        for c in stride(from: -100.0, through: 100.0, by: 10) {
+            let m = MultiscaleContrast.bandMultipliers(t: c / 100)
+            XCTAssertGreaterThan(m.mid, 0, "c=\(c) 的中带倍率必须恒正（禁反相）")
+            XCTAssertGreaterThan(m.fine, 0, "c=\(c) 的细带倍率必须恒正")
+            if c < 0 { XCTAssertEqual(m.mid, m.fine, accuracy: 1e-12, "负半区只有一条律：无 W") }
+            if c > -100 {
+                XCTAssertGreaterThan(m.mid, previousMid, "中带倍率必须关于 0 单调（c=\(c)）")
+                XCTAssertGreaterThan(m.fine, previousFine, "细带倍率必须关于 0 单调（c=\(c)）")
+            }
+            previousMid = m.mid
+            previousFine = m.fine
+        }
+        XCTAssertEqual(MultiscaleContrast.bandMultipliers(t: 0).mid, 1, accuracy: 1e-15)
+        XCTAssertEqual(MultiscaleContrast.bandMultipliers(t: -1).mid,
+                       pow(2, -MultiscaleContrast.shrink), accuracy: 1e-12)
         print("A6/const · kernel constants match Swift; gains at t=0 are exactly 1")
     }
 }
@@ -791,6 +818,12 @@ private final class ContrastKernelHarness {
         var d: SIMD4<Int32>     // canvasW, canvasH, q, coarse radius
         var e: SIMD4<Int32>     // qW, qH, segment length, mid radius
         var f: SIMD4<Int32>     // mode
+        // 187 — the mirror grew three rows. The harness runs the canonical case (the picture grid *is*
+        // the source grid): `f.z = 1` keeps the old direct read, and `map` is the identity
+        // picture-normalization so the apply's uv is the pre-187 `(gid + ½) / (q·qW)`.
+        var map: SIMD4<Float>
+        var mapOrigin: SIMD4<Float>
+        var srcMax: SIMD4<Float>
     }
 
     private let device: MTLDevice
@@ -814,7 +847,7 @@ private final class ContrastKernelHarness {
         self.device = device
         self.queue = queue
         self.pipelines = map
-        XCTAssertEqual(MemoryLayout<Params>.stride, 128, "ContrastParams' mirror must match Metal's")
+        XCTAssertEqual(MemoryLayout<Params>.stride, 176, "ContrastParams' mirror must match Metal's")
     }
 
     func run(_ rgba: [Float], width w: Int, height h: Int, contrast: Double) throws -> [Float] {
@@ -841,7 +874,10 @@ private final class ContrastKernelHarness {
             rect: SIMD4(0, 0, Float(w), Float(h)),
             d: SIMD4(Int32(w), Int32(h), Int32(q), rc),
             e: SIMD4(Int32(qW), Int32(qH), 32, rm),
-            f: SIMD4(0, 0, 0, 0))
+            f: SIMD4(0, 0, 1, 0),   // 187: direct read — the harness's source *is* the picture grid
+            map: SIMD4(1, 1, Float(q * qW), Float(q * qH)),
+            mapOrigin: SIMD4(0, 0, 0, 0),
+            srcMax: SIMD4(1, 1, 0, 0))
 
         let src = try texture(w, h, .rgba32Float)
         let dst = try texture(w, h, .rgba32Float)
@@ -862,6 +898,7 @@ private final class ContrastKernelHarness {
         e0.setComputePipelineState(pack)
         e0.setTexture(src, index: 0); e0.setTexture(base, index: 1)
         e0.setTexture(coeffC, index: 2); e0.setTexture(statsM, index: 3)
+        e0.setTexture(src, index: 4)
         e0.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
         dispatch(e0, pack, qW, qH)
         e0.endEncoding()
@@ -876,6 +913,7 @@ private final class ContrastKernelHarness {
         e2.setComputePipelineState(pack)
         e2.setTexture(base, index: 0); e2.setTexture(statsM, index: 1)
         e2.setTexture(coeffC, index: 2); e2.setTexture(statsM, index: 3)
+        e2.setTexture(base, index: 4)
         e2.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
         dispatch(e2, pack, qW, qH)
         e2.endEncoding()

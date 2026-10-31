@@ -62,9 +62,28 @@ struct ContrastParams {
     int4 d;
     // qW, qH, segment length, mid radius in the 1/q domain
     int4 e;
-    // mode (0 = G statistics, 1 = D1 statistics), pad, pad, pad
+    // mode (0 = G statistics, 1 = D1 statistics), mask count (masked apply), direct-read flag
+    // (187: the proxy canvas *is* the picture grid), pad
     int4 f;
+    // 187 — the whole-picture coefficient map's mapping. `map = (uvScaleX, uvScaleY, spanX, spanY)`;
+    // `mapOrigin = (frameOrigin.xy, contentOrigin.xy)`; `srcMax` maps a **picture** pixel to the
+    // proxy canvas (`+ offset` then `× scale`), used only by the pack passes.
+    float4 map;
+    float4 mapOrigin;
+    float4 srcMax;
 };
+
+/// 187 — one source texel of the *picture* grid. `p.f.z == 1` is the canonical case (the proxy
+/// canvas **is** the picture grid): read, bit-exact, no resample. Otherwise the picture pixel maps
+/// into the proxy canvas (`s0_geometry`'s own `gid + ½ − origin + frameOrigin` rule, inverted).
+static inline float3 s1_8_fetch(texture2d<float, access::read> srcR,
+                                texture2d<float, access::sample> srcS,
+                                constant ContrastParams &p, int x, int y) {
+    if (p.f.z == 1) { return srcR.read(uint2(uint(x), uint(y))).rgb; }
+    float2 pos = float2(float(x), float(y)) * p.srcMax.xy + p.srcMax.zw;
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    return srcS.sample(s, (pos + 0.5) / float2(float(p.d.x), float(p.d.y))).rgb;
+}
 
 /// The mask descriptor S1.6 also uses (`s1_6_local.metal#LocalAdjustDesc`), declared here because a
 /// kernel cannot include another kernel. Byte-for-byte the same three `float4`s; `.b.x` is the
@@ -90,6 +109,8 @@ constant float MC_R_M_FRAC = 0.02;
 constant int MC_R_C_CAP = 96;
 constant int MC_R_M_CAP = 24;
 constant int MC_BLOCK = 4;
+/// 187 — the negative slider's shrink cap (see `s2_5_band_weights`): `2^(MC_SHRINK·t)`.
+constant float MC_SHRINK = 0.75;
 
 static inline float s1_8_g_luma(float3 rgb) {
     return max(dot(max(rgb, 0.0), kWorkingLumaWeights), 1e-6);
@@ -109,20 +130,26 @@ kernel void s1_8_g_contrast_pack(texture2d<float, access::read> src [[texture(0)
                                  texture2d<float, access::write> packed [[texture(1)]],
                                  texture2d<float, access::sample> aux [[texture(2)]],
                                  texture2d<float, access::write> residual [[texture(3)]],
+                                 texture2d<float, access::sample> srcSample [[texture(4)]],
                                  constant ContrastParams &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
     int qW = p.e.x, qH = p.e.y, q = max(p.d.z, 1);
     if (int(gid.x) >= qW || int(gid.y) >= qH) { return; }
 
     if (p.f.x == 0) {
-        int w = p.d.x, h = p.d.y;
+        // 187 — the block loop walks the **picture** grid (`qW × qH`), which the proxy canvas may
+        // exceed or fall short of. The direct-read path keeps the old canvas clamp (`p.d`); the
+        // resampling path clamps to the picture grid and lets `clamp_to_edge` cover the margin.
+        int wLimit = p.f.z == 1 ? p.d.x - 1 : q * qW - 1;
+        int hLimit = p.f.z == 1 ? p.d.y - 1 : q * qH - 1;
         float sumG = 0.0, sumGG = 0.0;
         int n = 0;
         for (int dy = 0; dy < q; ++dy) {
-            int y = min(int(gid.y) * q + dy, h - 1);
+            int y = min(int(gid.y) * q + dy, hLimit);
             for (int dx = 0; dx < q; ++dx) {
-                int x = min(int(gid.x) * q + dx, w - 1);
-                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb) / max(p.c.z, 1e-6));
+                int x = min(int(gid.x) * q + dx, wLimit);
+                float G = log2(s1_8_g_luma(s1_8_fetch(src, srcSample, p, x, y))
+                               / max(p.c.z, 1e-6));
                 sumG += G; sumGG += G * G;
                 n += 1;
             }
@@ -130,15 +157,17 @@ kernel void s1_8_g_contrast_pack(texture2d<float, access::read> src [[texture(0)
         float inv = 1.0 / float(max(n, 1));
         packed.write(float4(sumG * inv, sumGG * inv, 0.0, 1.0), gid);
     } else {
-        int w = p.d.x, h = p.d.y;
+        int wLimit = p.f.z == 1 ? p.d.x - 1 : q * qW - 1;
+        int hLimit = p.f.z == 1 ? p.d.y - 1 : q * qH - 1;
         constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
         float sumD = 0.0, sumDD = 0.0;
         int n = 0;
         for (int dy = 0; dy < q; ++dy) {
-            int y = min(int(gid.y) * q + dy, h - 1);
+            int y = min(int(gid.y) * q + dy, hLimit);
             for (int dx = 0; dx < q; ++dx) {
-                int x = min(int(gid.x) * q + dx, w - 1);
-                float G = log2(s1_8_g_luma(src.read(uint2(x, y)).rgb) / max(p.c.z, 1e-6));
+                int x = min(int(gid.x) * q + dx, wLimit);
+                float G = log2(s1_8_g_luma(s1_8_fetch(src, srcSample, p, x, y))
+                               / max(p.c.z, 1e-6));
                 float2 uv = float2((float(x) + 0.5) / (float(q) * float(qW)),
                                    (float(y) + 0.5) / (float(q) * float(qH)));
                 float4 c = aux.sample(linearSampler, uv);
@@ -153,8 +182,18 @@ kernel void s1_8_g_contrast_pack(texture2d<float, access::read> src [[texture(0)
 }
 
 /// Separable box mean of the two statistics channels. Running sum (two reads per output whatever
-/// the radius), edge-replicated, one thread per segment of `p.e.z` texels — the same shape as
-/// `s3_8_guide_box_h/v`.
+/// the radius), **edge-shrinking window**, one thread per segment of `p.e.z` texels — the same shape
+/// as `s3_8_guide_box_h/v`.
+///
+/// **187 — the border divides by the true sample count, not by `2r+1`.** Through 185 the window was
+/// edge-*replicated* (`clamp(i, 0, qW-1)`) and always divided by `2r+1`: the same edge texel was
+/// counted up to `r+1` times, which deflates the window's **variance** exactly where the count is
+/// inflated. The guided filter then reads `a = var/(var+ε) → 0` and `b → mean` on that band, the
+/// residual there is ~0, and the gain collapses to 1.0 — the unchanged strip the user saw on all
+/// four edges at `contrast = +100`. A shrinking window sees only texels that exist and divides by
+/// how many it saw, so a border texel's variance is measured with the same arithmetic as an interior
+/// one. The interior is bit-identical to before (same taps, same `1.0 / float(2*r+1)`), which is what
+/// keeps the recorded interior measurements standing.
 kernel void s1_8_g_contrast_box_h(texture2d<float, access::read> src [[texture(0)]],
                                   texture2d<float, access::write> dst [[texture(1)]],
                                   constant ContrastParams &p [[buffer(0)]],
@@ -170,15 +209,16 @@ kernel void s1_8_g_contrast_box_h(texture2d<float, access::read> src [[texture(0
         for (int x = x0; x < x1; ++x) { dst.write(src.read(uint2(x, row)), uint2(x, row)); }
         return;
     }
-    float inv = 1.0 / float(2 * r + 1);
+    int lo = max(x0 - r, 0), hi = min(x0 + r, qW - 1);
     float2 acc = float2(0.0);
-    for (int i = x0 - r; i <= x0 + r; ++i) {
-        acc += src.read(uint2(clamp(i, 0, qW - 1), row)).xy;
-    }
+    for (int i = lo; i <= hi; ++i) { acc += src.read(uint2(i, row)).xy; }
     for (int x = x0; x < x1; ++x) {
+        int cl = max(x - r, 0), ch = min(x + r, qW - 1);
+        float inv = 1.0 / float(ch - cl + 1);
         dst.write(float4(acc * inv, 0.0, 1.0), uint2(x, row));
-        acc += src.read(uint2(clamp(x + r + 1, 0, qW - 1), row)).xy
-             - src.read(uint2(clamp(x - r, 0, qW - 1), row)).xy;
+        int nl = max(x + 1 - r, 0), nh = min(x + 1 + r, qW - 1);
+        if (nh > ch) { acc += src.read(uint2(nh, row)).xy; }
+        if (nl > cl) { acc -= src.read(uint2(cl, row)).xy; }
     }
 }
 
@@ -197,15 +237,16 @@ kernel void s1_8_g_contrast_box_v(texture2d<float, access::read> src [[texture(0
         for (int y = y0; y < y1; ++y) { dst.write(src.read(uint2(col, y)), uint2(col, y)); }
         return;
     }
-    float inv = 1.0 / float(2 * r + 1);
+    int lo = max(y0 - r, 0), hi = min(y0 + r, qH - 1);
     float2 acc = float2(0.0);
-    for (int i = y0 - r; i <= y0 + r; ++i) {
-        acc += src.read(uint2(col, clamp(i, 0, qH - 1))).xy;
-    }
+    for (int i = lo; i <= hi; ++i) { acc += src.read(uint2(col, i)).xy; }
     for (int y = y0; y < y1; ++y) {
+        int cl = max(y - r, 0), ch = min(y + r, qH - 1);
+        float inv = 1.0 / float(ch - cl + 1);
         dst.write(float4(acc * inv, 0.0, 1.0), uint2(col, y));
-        acc += src.read(uint2(col, clamp(y + r + 1, 0, qH - 1))).xy
-             - src.read(uint2(col, clamp(y - r, 0, qH - 1))).xy;
+        int nl = max(y + 1 - r, 0), nh = min(y + 1 + r, qH - 1);
+        if (nh > ch) { acc += src.read(uint2(col, nh)).xy; }
+        if (nl > cl) { acc -= src.read(uint2(col, cl)).xy; }
     }
 }
 
@@ -244,10 +285,38 @@ kernel void s1_8_g_contrast_coeff(texture2d<float, access::read> stats [[texture
 // `contrast` is the slider value (−100…100). The band weights are the constants above, so the
 // mask's number rides the same travel as the global one. The ±3 EV bound is a shape cap, not a
 // clamp on the picture: inside it the gain is the residual arithmetic exactly.
+/// 187 — the two band weights for a slider value, in **residual units** (`d = wm·B_m + wf·D_f`).
+///
+/// The two signs are different laws, and this is the one place that says so:
+///
+///   · `t ≥ 0` — a *travel*: `W·t` EV of the band, so the residual grows to `1 + W·t`.
+///   · `t < 0` — a *shrink*: the residual is multiplied by `2^(MC_SHRINK·t)` ∈ [0.59, 1), i.e. `k = 2^… − 1`,
+///     and **no `W`**: the travel constants belong to amplification, not to removal. (Through 185
+///     the same `t · MC_W` line ran on both sides, so at `t = −1` the mid band asked for
+///     `−7.5·B_m` — a 7.5× *inverted* residual, which is the negative picture the user reported.)
+///
+/// `MultiscaleContrast.scaleGains` is the Swift copy of this function; the constants test pins the
+/// two together.
+static inline void s2_5_band_weights(float contrast, thread float &wm, thread float &wf) {
+    float t = contrast / 100.0;
+    if (t >= 0.0) {
+        wm = t * MC_W_M;
+        wf = t * MC_W_F;
+    } else {
+        // `MC_SHRINK` = 0.75: the residual is multiplied by `2^(0.75·t)` ∈ [0.59, 1). Halving it
+        // (`2^t`) measures a −1.21-code drift of the picture's mean at `c = −100`; 0.75 lands at
+        // −0.91, i.e. removing local contrast does not remove light (§2's ±1 code).
+        float k = exp2(MC_SHRINK * t) - 1.0;
+        wm = k;
+        wf = k;
+    }
+}
+
 static inline float s2_5_contrast_gain(float Bm, float Df, float gate, float contrast,
                                         float G, float logExposure) {
-    float t = contrast / 100.0;
-    float d = clamp(gate * (t * MC_W_M * Bm + t * MC_W_F * Df), -3.0, 3.0);
+    float wm, wf;
+    s2_5_band_weights(contrast, wm, wf);
+    float d = clamp(gate * (wm * Bm + wf * Df), -3.0, 3.0);
     // The **white shoulder** (0107's `4u(1−u)` lesson): a positive gain fades to 0 at display
     // white, and is then capped at the light that still fits under it (`Y_output ≤ 0.98`). Nothing
     // below white can be pushed onto the ceiling. Darkening is not faded or capped — a highlight
@@ -318,8 +387,12 @@ kernel void s1_8_g_contrast_apply(texture2d<float, access::read> src [[texture(0
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
     int q = max(p.d.z, 1);
-    float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(p.e.x)),
-                       (float(gid.y) + 0.5) / (float(q) * float(p.e.y)));
+    // 187 — the picture-normalized position of this pixel, the same metric `s3_vignette` uses
+    // (`uv = (px + ½ − contentOrigin + frameOrigin) / frameSize`), then into the coefficient map's
+    // own q-grid. In the canonical case (`uvScale == 1`, offsets 0) this is the pre-187 expression
+    // **bit for bit** — the identity path must not move a pixel.
+    float2 imgPx = float2(gid) + 0.5 - p.mapOrigin.zw + p.mapOrigin.xy;
+    float2 uv = imgPx * p.map.xy / p.map.zw;
     float4 cC = coeffC.sample(linearSampler, uv);
     float4 cM = coeffM.sample(linearSampler, uv);
     float Bm, Df, gate;
@@ -356,8 +429,12 @@ kernel void s1_8_g_contrast_apply_masked(texture2d<float, access::read> src [[te
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
     int q = max(p.d.z, 1);
-    float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(p.e.x)),
-                       (float(gid.y) + 0.5) / (float(q) * float(p.e.y)));
+    // 187 — the picture-normalized position of this pixel, the same metric `s3_vignette` uses
+    // (`uv = (px + ½ − contentOrigin + frameOrigin) / frameSize`), then into the coefficient map's
+    // own q-grid. In the canonical case (`uvScale == 1`, offsets 0) this is the pre-187 expression
+    // **bit for bit** — the identity path must not move a pixel.
+    float2 imgPx = float2(gid) + 0.5 - p.mapOrigin.zw + p.mapOrigin.xy;
+    float2 uv = imgPx * p.map.xy / p.map.zw;
     float4 cC = coeffC.sample(linearSampler, uv);
     float4 cM = coeffM.sample(linearSampler, uv);
     float Bm, Df, gate;
