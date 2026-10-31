@@ -9,9 +9,10 @@ import PhotonsCore
 ///
 /// The user, 2026-10-27:「裁剪后右上角信息栏中的像素大小也要改，这个视为画布的大小」. So the two value
 /// cells of the first row come from the crop's output grid —
-/// `CropMath.outputSize(geometry.renderCrop(source:), in: source)`, the same call the export and the
-/// histogram make — while a photo with no crop prints, character for character, what it printed
-/// before this task.
+/// `GeometryGroup.outputPixels(geometry.renderCrop(source:), in: source)`, i.e. `CropMath.canvasSize`
+/// since 188 (the grid the renderer allocates, which is the crop itself at every right angle and the
+/// turned crop's bounding box at any other) — while a photo with no crop prints, character for
+/// character, what it printed before this task.
 ///
 /// Five claims, each with a measured number:
 ///   1. no crop → `60 MP / 9520×6336`, from the asset's own row (unchanged by 049);
@@ -79,16 +80,41 @@ final class InspectorCropInfoTests: XCTestCase {
         XCTAssertEqual(plain.pixelDimensions, "9520×6336")
         XCTAssertFalse(plain.isCroppedCanvas)
 
-        // The same with a flip or a straighten: neither moves the output grid (S0 keeps the crop as
-        // the frame), so the row must not move either.
-        for geometry in [GeometryGroup(crop: .full, rotationDegrees: 12),
-                         GeometryGroup(crop: .full, flipHorizontal: true, flipVertical: true)] {
-            XCTAssertEqual(InspectorPhotoInfo.metrics(storedWidth: storedWidth, storedHeight: storedHeight,
-                                                      geometry: geometry),
-                           plain, "\(geometry) does not change the grid")
-        }
+        // A flip does not move the output grid — it is a different reading of the same pixels, so the
+        // row must not move either.
+        let flips = GeometryGroup(crop: .full, flipHorizontal: true, flipVertical: true)
+        XCTAssertEqual(InspectorPhotoInfo.metrics(storedWidth: storedWidth, storedHeight: storedHeight,
+                                                  geometry: flips),
+                       plain, "\(flips) does not change the grid")
+
+        // **188 — a straighten does, and this is the one row that moved.** The expectation this test
+        // used to carry here (`9520×6336 / isCroppedCanvas: false` for `rotationDegrees: 12`) came from
+        // 176's 「S0 不改输出网格」: `EditModel.outputPixels` then answered `CropMath.frameSize`, the
+        // crop's own rect, and the angle only decided how that rect was *drawn*. 188 made the same
+        // property answer `CropMath.canvasSize` — **the grid the renderer allocates** — because at
+        // θ ≠ 0 the render does not allocate the crop, it allocates the turned crop's bounding box
+        // (162), and the backdrop's own scale and the exported file are that box. So the old
+        // expectation is void: the row now prints the canvas the document will really produce,
+        // `10630×8177` = ⌈9520·cos12° + 6336·sin12°⌉ × ⌈9520·sin12° + 6336·cos12°⌉.
+        //
+        // θ = 0 is untouched by 188 (`canvasSize` returns `outputSize` at every right angle), which is
+        // why the three values asserted above — `60 MP`, `9520×6336`, `isCroppedCanvas == false` — are
+        // still the pre-049 ones to the last digit, and why a *whole-frame* crop must keep equalling
+        // the no-crop row.
+        let turned = GeometryGroup(crop: .full, rotationDegrees: 12)
+        let turnedRow = InspectorPhotoInfo.metrics(storedWidth: storedWidth, storedHeight: storedHeight,
+                                                   geometry: turned)
+        XCTAssertEqual(turnedRow.pixelDimensions, "10630×8177")
+        XCTAssertEqual(turnedRow.pixelCount, "87 MP")
+        // …and the number is the document's own, not this test's arithmetic.
+        XCTAssertEqual(turnedRow.canvas, turned.outputPixels(in: stored))
+        XCTAssertTrue(turnedRow.isCroppedCanvas,
+                      "a turned full-canvas crop is a canvas of its own, not the asset's own row")
+        XCTAssertNotEqual(turnedRow, plain, "12° grows the canvas; the row has to say so")
+
         print("049 full-canvas == no-crop: \(plain.pixelCount) / \(plain.pixelDimensions) "
-              + "(rect \(wholeRect.canvas!), full \(plain.canvas!))")
+              + "(rect \(wholeRect.canvas!), full \(plain.canvas!), "
+              + "turned 12° \(turnedRow.pixelDimensions))")
     }
 
     // MARK: 2 + 5 — the crop, the refresh and ⌘Z
