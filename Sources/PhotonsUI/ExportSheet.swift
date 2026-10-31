@@ -238,7 +238,7 @@ public final class ExportSheetModel {
 
     /// 099: the sections, in Lightroom's order, as data — the view and its test read the same list.
     public static let sectionTitles = ["位置", "文件命名", "文件设置", "图像尺寸",
-                                       "输出锐化", "元数据", "导出"]
+                                       "元数据", "导出"]
 
     /// What the user is editing. Passed to `BatchExporter` verbatim at run time.
     ///
@@ -997,7 +997,6 @@ public struct ExportSheetView: View {
                 namingSection
                 fileSection
                 sizeSection
-                sharpenSection
                 metadataSection
                 watermarkSection
                 exportSection
@@ -1401,57 +1400,6 @@ public struct ExportSheetView: View {
         }
     }
 
-    // MARK: 输出锐化
-
-    private var sharpenSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Toggle(isOn: sharpenEnabledBinding) {
-                    Text("输出锐化").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running)
-                Spacer(minLength: 8)
-                Text("最终像素之后，只影响导出文件")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            HStack(spacing: 8) {
-                Text("强度").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Slider(value: sharpenAmountBinding, in: 0 ... 1)
-                    .controlSize(.small)
-                    .frame(width: 150)
-                    .disabled(model.phase == .running || model.preset.sharpen == nil)
-                SliderNumberField(value: model.preset.sharpen?.amount ?? 0.6,
-                                  range: 0 ... 1, format: "%.2f",
-                                  decimals: 2, fontSize: 10, width: 48,
-                                  accessibilityID: "export.sharpen.amount") { typed in
-                    updateSharpen { $0.amount = min(1, max(0, typed)) }
-                }
-                .disabled(model.phase == .running || model.preset.sharpen == nil)
-            }
-            HStack(spacing: 8) {
-                Text("半径").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Slider(value: sharpenRadiusBinding, in: 0.3 ... 3)
-                    .controlSize(.small)
-                    .frame(width: 150)
-                    .disabled(model.phase == .running || model.preset.sharpen == nil)
-                SliderNumberField(value: model.preset.sharpen?.radius ?? 0.8,
-                                  range: 0.3 ... 3, format: "%.1f",
-                                  decimals: 1, fontSize: 10, width: 44,
-                                  accessibilityID: "export.sharpen.radius") { typed in
-                    updateSharpen { $0.radius = min(3, max(0.3, typed)) }
-                }
-                .disabled(model.phase == .running || model.preset.sharpen == nil)
-                Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-        } header: {
-            sectionHeader("输出锐化")
-        }
-    }
-
     // MARK: 元数据
 
     private var metadataSection: some View {
@@ -1757,31 +1705,6 @@ public struct ExportSheetView: View {
     private var writeXMPBinding: Binding<Bool> {
         Binding(get: { model.preset.metadataLevel == .all && model.preset.writeXMP },
                 set: { model.preset.writeXMP = $0 })
-    }
-
-    private var sharpenEnabledBinding: Binding<Bool> {
-        Binding(get: { model.preset.sharpen != nil },
-                set: { on in
-                    model.preset.sharpen = on
-                        ? (model.preset.sharpen ?? OutputSharpening(amount: 0.6, radius: 0.8))
-                        : nil
-                })
-    }
-
-    private var sharpenAmountBinding: Binding<Double> {
-        Binding(get: { model.preset.sharpen?.amount ?? 0.6 },
-                set: { value in updateSharpen { $0.amount = min(1, max(0, value)) } })
-    }
-
-    private var sharpenRadiusBinding: Binding<Double> {
-        Binding(get: { model.preset.sharpen?.radius ?? 0.8 },
-                set: { value in updateSharpen { $0.radius = min(3, max(0.3, value)) } })
-    }
-
-    private func updateSharpen(_ body: (inout OutputSharpening) -> Void) {
-        var sharpening = model.preset.sharpen ?? OutputSharpening(amount: 0.6, radius: 0.8)
-        body(&sharpening)
-        model.preset.sharpen = sharpening
     }
 }
 // MARK: - presentation

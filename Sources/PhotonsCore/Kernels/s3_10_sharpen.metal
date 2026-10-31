@@ -7,7 +7,7 @@ using namespace metal;
 // This is **not** the decoder-forwarded 机身基线 sharpening (`DetailGroup.sharpening`, which is a
 // `CIRAWFilter` input read at decode time and cannot be previewed without a re-decode). This pass
 // reads the tone-mapped, display-referred pixels S3.9 produced, so a slider drag is one render — and
-// it composes with the export's own output sharpening (S4 / `DisplaySharpen`) instead of replacing it.
+// it is the document's own sharpening rather than an export-time pass.
 //
 // ## The arithmetic
 //

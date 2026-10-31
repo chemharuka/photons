@@ -18,7 +18,6 @@ final class ExportPresetTests: XCTestCase {
         let bitDepth: Int
         let colorSpace: String
         let writeXMP: Bool
-        let sharpen: OutputSharpening?
         let nameTemplate: String
     }
 
@@ -30,7 +29,6 @@ final class ExportPresetTests: XCTestCase {
                                   bitDepth: preset.bitDepth,
                                   colorSpace: preset.colorSpace.rawValue,
                                   writeXMP: preset.writeXMP,
-                                  sharpen: preset.sharpen,
                                   nameTemplate: preset.nameTemplate)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -40,12 +38,42 @@ final class ExportPresetTests: XCTestCase {
     func testLegacyJSONReEncodesByteForByteWhenTheNewFieldsAreDefault() throws {
         let preset = ExportPreset(name: "Web", format: .heic, longEdge: 2400, quality: 0.8,
                                   bitDepth: 8, colorSpace: .displayP3, writeXMP: true,
-                                  sharpen: OutputSharpening(amount: 0.4, radius: 0.7),
                                   nameTemplate: "{date}/{name}")
         let legacy = try legacyData(for: preset)
         let decoded = try JSONDecoder().decode(ExportPreset.self, from: legacy).validated()
         XCTAssertEqual(try decoded.data(), legacy, "a pre-099 preset must re-encode identically")
         XCTAssertFalse(String(decoding: legacy, as: UTF8.self).contains("sizingMode"))
+    }
+
+    /// A preset written while output sharpening was still a field must still load after the field
+    /// was removed: the unknown `sharpen` key is ignored, and re-encoding drops it.
+    func testAPresetFromBeforeTheSharpeningRemovalStillLoads() throws {
+        let legacy = Data("""
+        {
+          "format" : "jpeg",
+          "quality" : 0.92,
+          "sharpen" : {
+            "amount" : 0.6,
+            "radius" : 0.8
+          }
+        }
+        """.utf8)
+        let decoded = try JSONDecoder().decode(ExportPreset.self, from: legacy).validated()
+        XCTAssertEqual(decoded.format, .jpeg)
+        XCTAssertEqual(decoded.quality, 0.92, accuracy: 1e-9)
+        XCTAssertFalse(String(decoding: try decoded.data(), as: UTF8.self).contains("sharpen"),
+                       "the dropped key must not be written back")
+    }
+
+    /// Removing the field must not move any other byte: a preset that never carried `sharpen` round
+    /// trips exactly, so export pixels and preset files for existing users are unchanged.
+    func testRemovingSharpeningDidNotMoveAnyOtherByte() throws {
+        let preset = ExportPreset(name: "Web", format: .heic, longEdge: 2400, quality: 0.8,
+                                  bitDepth: 8, colorSpace: .displayP3, writeXMP: true,
+                                  nameTemplate: "{date}/{name}")
+        let legacy = try legacyData(for: preset)
+        let decoded = try JSONDecoder().decode(ExportPreset.self, from: legacy).validated()
+        XCTAssertEqual(try decoded.data(), legacy)
     }
 
     func testLegacyJSONTakesEveryNewDefault() throws {
@@ -82,13 +110,6 @@ final class ExportPresetTests: XCTestCase {
 
     func testValidatedRejectsEmptyNameTemplate() {
         XCTAssertThrowsError(try ExportPreset(nameTemplate: "   ").validated())
-    }
-
-    func testValidatedRejectsSharpeningRadiusOutsideTheSlider() {
-        XCTAssertThrowsError(try ExportPreset(sharpen: OutputSharpening(amount: 0.5, radius: 0.2)).validated())
-        XCTAssertThrowsError(try ExportPreset(sharpen: OutputSharpening(amount: 0.5, radius: 3.1)).validated())
-        XCTAssertNoThrow(try ExportPreset(sharpen: OutputSharpening(amount: 0.5, radius: 0.3)).validated())
-        XCTAssertNoThrow(try ExportPreset(sharpen: OutputSharpening(amount: 0.5, radius: 3.0)).validated())
     }
 
     // MARK: sizing

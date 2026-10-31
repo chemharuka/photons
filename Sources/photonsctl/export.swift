@@ -198,7 +198,6 @@ func cmdExportBatch(_ a: Args) throws {
                 "hdr": preset.hdr?.enabled == true
                     ? "\(preset.hdr!.gainMap.rawValue)\(preset.hdr!.halfSize ? "-half" : "")" : "",
                 "writeXMP": preset.writeXMP,
-                "sharpen": preset.sharpen?.amount ?? 0,
                 "nameTemplate": preset.nameTemplate,
             ] as [String: Any],
             "files": written.map { $0.fileURL?.path ?? "" },

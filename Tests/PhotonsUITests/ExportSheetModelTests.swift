@@ -54,7 +54,7 @@ final class ExportSheetModelTests: XCTestCase {
 
     func testSectionOrderMatchesLightroom() {
         XCTAssertEqual(ExportSheetModel.sectionTitles,
-                       ["位置", "文件命名", "文件设置", "图像尺寸", "输出锐化", "元数据", "导出"])
+                       ["位置", "文件命名", "文件设置", "图像尺寸", "元数据", "导出"])
     }
 
     // MARK: - 109 文件设置
