@@ -141,6 +141,19 @@ final class CalibrationTests: XCTestCase {
         return SIMD3(Float(image.rgba[o]), Float(image.rgba[o + 1]), Float(image.rgba[o + 2]))
     }
 
+    /// A display pixel — `DisplayImage` stores sRGB-encoded floats — back to **linear Rec.2020**, the
+    /// space the matrix is defined on. The eOTF is the standard piecewise curve, written here because
+    /// the display stage's encode is not exposed; a wrong inverse would show up as a hue error in the
+    /// patch table below, not as a silent pass.
+    private func frameLinear(_ v: SIMD3<Float>) -> SIMD3<Double> {
+        func eotf(_ e: Double) -> Double {
+            let e = min(max(e, 0), 1)
+            return e <= 0.04045 ? e / 12.92 : pow((e + 0.055) / 1.055, 2.4)
+        }
+        let srgb = SIMD3<Double>(eotf(Double(v.x)), eotf(Double(v.y)), eotf(Double(v.z)))
+        return ColorPrimaries.conversion(from: .sRGB, to: .rec2020).applying(to: srgb)
+    }
+
     /// A flat frame of `v` rendered with `cal` as the *only* edit — the graph's S1 for a document that
     /// moved nothing else is `v * 1 * (1,1,1)`, no knee, no shoulder, then the calibration.
     private func renderCalibrated(_ v: SIMD3<Double>, _ cal: CalibrationGroup) throws -> SIMD3<Float> {
@@ -390,6 +403,117 @@ final class CalibrationTests: XCTestCase {
         let plus = cpuCalibrated(SIMD3(0.01, 0.01, 0.01), tint)
         let minus = cpuCalibrated(SIMD3(0.01, 0.01, 0.01), CalibrationGroup(shadowTint: -50))
         XCTAssertLessThan(plus.y, minus.y, "+50 必须是往品红走（绿减）")
+    }
+
+    // MARK: - 2b. 白点守恒：联动是被证明的，不是被容忍的
+
+    /// §3 第三条（2026-10-30 更正）：判据不是「其余色块色相偏移 ≤3°」——那条**在数学上不可达**。
+    ///
+    /// 白点守恒要求 `Σ m_i = (1,1,1)`，于是只由 G+B 组成的青就是 `(1,1,1) − m_red`：红列一转，青
+    /// **必然**跟着转。对全部 in-gamut 列做 120³ 穷举（946 个候选），青的最小可能偏移是 **10.6°**；
+    /// 本实现实测 **+13.41°**（`testRedHueThirty` 把这条钉死）。正确的判据是「联动可预测」：
+    ///
+    /// > 其余色块的偏移 = 用**同一矩阵**重建出的预测值，±0.5°。
+    ///
+    /// 两条都在这里，因为它们量的是同一件事：
+    ///
+    ///   1. **表的层面**：预测值按三列的响应重建（`Σ v_i · M·e_i`），实测值是 `M·v` —— 重建与
+    ///      矩阵必须逐位相同（线性），这一条把「矩阵的九个系数」定死。
+    ///   2. **帧的层面**：把 `M` 乘在源上（`S0⁻¹·M·S0`，校准保持 0）渲一张预测帧，与「七个数设上、
+    ///      核里算 `M·v`」渲的帧比 **色相差 ≤0.5°** —— 两者下游每一步都是同一个算子，所以这个差
+    ///      不是调出来的，是「帧上的联动就是矩阵的联动」。亮度都在 `Y > 0.127` 之上，暗部 tint 的
+    ///      窗口在那里**精确为 0**，所以预测帧不需要 tint。
+    func testTheOtherPatchesMatchTheSameMatrixPredictionWithinHalfADegree() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let cases: [(String, CalibrationGroup)] = [
+            ("R hue +30", CalibrationGroup(redHue: 30)),
+            ("G sat −100", CalibrationGroup(greenSat: -100)),
+            ("B hue −45 sat +60", CalibrationGroup(blueHue: -45, blueSat: 60)),
+            ("all seven", CalibrationGroup(shadowTint: -30, redHue: 20, redSat: -40,
+                                           greenHue: -15, greenSat: 25, blueHue: 10, blueSat: -20)),
+        ]
+        // 非 R/G/B 的色块：由移动的列**拼出来**的那三个（灰没有色相可言，它的守恒在下面那一条）。
+        let others = ["Y", "C", "M"]
+        let toWorking = ColorPrimaries.conversion(from: .decoded, to: .working)
+        let fromWorking = ColorPrimaries.conversion(from: .working, to: .decoded)
+
+        for (name, cal) in cases {
+            let m = try XCTUnwrap(cal.matrix(), "\(name)：非全 0 却没有矩阵")
+            var edit = EditModel.neutral
+            edit.calibration = cal
+            // 三列的响应 —— 预测值的全部材料。
+            let columns = (0..<3).map { i -> SIMD3<Double> in
+                var e = SIMD3<Double>(0, 0, 0)
+                e[i] = 1
+                return m.applying(to: e)
+            }
+            for (block, v) in Self.chart where others.contains(block) {
+                // ① 表的层面：重建 = 矩阵
+                let measured = hueDelta(v, m.applying(to: v))
+                let predicted = hueDelta(v, columns[0] * v.x + columns[1] * v.y + columns[2] * v.z)
+                XCTAssertEqual(measured, predicted, accuracy: 1e-9,
+                               "\(name) / \(block)：列的加权和不是 `M·v`")
+
+                // ② 帧的层面：预测帧 vs 校准帧，同一个下游
+                let base = lch(frameLinear(centre(try render(flat(v), edit: .neutral)))).h
+                let pre = fromWorking.applying(to: m.applying(to: toWorking.applying(to: v)))
+                let predictedFrame = lch(frameLinear(centre(try render(flat(pre), edit: .neutral)))).h
+                let measuredFrame = lch(frameLinear(centre(try render(flat(v), edit: edit)))).h
+                func wrap(_ d: Double) -> Double {
+                    var x = d
+                    while x > 180 { x -= 360 }
+                    while x < -180 { x += 360 }
+                    return x
+                }
+                let predictedAngle = wrap(predictedFrame - base)
+                let measuredAngle = wrap(measuredFrame - base)
+                XCTAssertEqual(measuredAngle, predictedAngle, accuracy: 0.5,
+                               "\(name) / \(block) 块：帧上实测 \(measuredAngle)°，同一矩阵的预测 \(predictedAngle)°")
+            }
+        }
+        // 白点约束的代价，钉成数字：红转 +30° ⇒ 黄 0.00°、青 +13.41°、品红 −0.63°（穷举下限 10.6°）。
+        let m30 = try XCTUnwrap(CalibrationGroup(redHue: 30).matrix())
+        func shift(_ i: Int) -> Double { hueDelta(Self.chart[i].linear, m30.applying(to: Self.chart[i].linear)) }
+        XCTAssertEqual(shift(3), 0, accuracy: 0.5, "黄块 —— 与移动的列无关，不联动")
+        XCTAssertEqual(shift(5), -0.63, accuracy: 0.1, "品红块 —— 被 k 的重新配平带了一点")
+        XCTAssertEqual(shift(4), 13.41, accuracy: 0.1, "青块 —— 白点守恒的必然联动")
+    }
+
+    /// 白点守恒本身：`Σ row == (1,1,1)`，±1e-6；中性灰是矩阵的**不动点**，任意组合下三个通道逐位
+    /// 相等（因此 OkLab 的 `a`/`b` 为 0，色相没有被推动，无论用哪种定义去读它）。
+    func testTheWhitePointIsConserved() {
+        let combos: [(String, CalibrationGroup)] = [
+            ("R hue +30", CalibrationGroup(redHue: 30)),
+            ("R hue −100", CalibrationGroup(redHue: -100)),
+            ("G sat +100", CalibrationGroup(greenSat: 100)),
+            ("G sat −100", CalibrationGroup(greenSat: -100)),
+            ("B hue +45 sat +60", CalibrationGroup(blueHue: 45, blueSat: 60)),
+            ("三色相 +30", CalibrationGroup(redHue: 30, greenHue: 30, blueHue: 30)),
+            ("三饱和 −100", CalibrationGroup(redSat: -100, greenSat: -100, blueSat: -100)),
+            ("all seven", CalibrationGroup(shadowTint: -30, redHue: 20, redSat: -40,
+                                           greenHue: -15, greenSat: 25, blueHue: 10, blueSat: -20)),
+            ("只改 tint", CalibrationGroup(shadowTint: 50)),
+        ]
+        for (name, cal) in combos {
+            guard let m = cal.matrix() else {
+                XCTAssertTrue(cal.isIdentity, "\(name)：非全 0 却没有矩阵")
+                continue
+            }
+            XCTAssertEqual(m.rowSums.x, 1, accuracy: 1e-6, "\(name)：第一行 Σ ≠ 1")
+            XCTAssertEqual(m.rowSums.y, 1, accuracy: 1e-6, "\(name)：第二行 Σ ≠ 1")
+            XCTAssertEqual(m.rowSums.z, 1, accuracy: 1e-6, "\(name)：第三行 Σ ≠ 1")
+            for y in [0.004, 0.02, 0.18, 0.5, 1.0] {
+                let out = m.applying(to: SIMD3<Double>(y, y, y))
+                XCTAssertEqual(out.x, y, accuracy: 1e-9, "\(name)：Y = \(y) 的灰被染色了")
+                XCTAssertEqual(out.y, y, accuracy: 1e-9, "\(name)：Y = \(y) 的灰被染色了")
+                XCTAssertEqual(out.z, y, accuracy: 1e-9, "\(name)：Y = \(y) 的灰被染色了")
+                let lab = cielab(out)
+                XCTAssertEqual(lab.a, 0, accuracy: 1e-6, "\(name)：Y = \(y) 的 a* 不是 0")
+                XCTAssertEqual(lab.b, 0, accuracy: 1e-6, "\(name)：Y = \(y) 的 b* 不是 0")
+            }
+        }
+        // 全 0：白点守恒是「什么都不做」—— 没有矩阵，不是单位阵。
+        XCTAssertNil(CalibrationGroup().matrix())
     }
 
     // MARK: - 3. the kernel computes the CPU's matrix
