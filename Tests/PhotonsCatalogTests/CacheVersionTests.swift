@@ -181,6 +181,10 @@ final class CacheVersionTests: XCTestCase {
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         XCTAssertEqual(StageAlgorithmVersion.curve, 2,
                        "137: inverted curves render the descending table instead of the identity")
+        // 191: S3.10's radius, mask knee and block window are image pixels converted to the canvas,
+        // so a cached 185-era frame at any scale but 1 holds pixels this build would not produce.
+        XCTAssertEqual(StageAlgorithmVersion.sharpen, 2,
+                       "191: 半径/膝/块窗按 S 换算到画布")
         // 183: the keystone knobs are a 3×3 homography inside S0, so the same crop now draws
         // different pixels — the geometry stage moves to generation 2.
         XCTAssertEqual(StageAlgorithmVersion.geometry, 2,
