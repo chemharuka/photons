@@ -58,19 +58,3 @@ and `local/research/licensing.md`. Decoding is `CIRAWFilter`, metadata is ImageI
 no source was copied. The M2 schema shape (wide `assets` + cold 1:1 satellite table, import session
 ledger, `content_hash`/`quick_hash` pair) was designed from those readings and is our own code.
 
-## Bundled model weights — Depth Anything V2 (Small, Core ML)
-
-`Resources/DepthAnythingV2SmallF16.mlpackage` (48 MB, F16) is redistributed unchanged under the
-**Apache License 2.0** (full text: `Resources/Depth-Anything-V2-LICENSE.txt`).
-
-- Model: **Depth Anything V2** (Small) — Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu,
-  Jiashi Feng, Hengshuang Zhao. <https://github.com/DepthAnything/Depth-Anything-V2>
-- Core ML conversion: **`apple/coreml-depth-anything-v2-small`** on Hugging Face, revision `cfef6f6`
-  (weights `DepthAnythingV2SmallF16.mlpackage`, weight.bin SHA-256 recorded by
-  `DepthModel.revision`). Apache-2.0 as published by Apple.
-- Redistribution conditions met: the licence ships with the app, the attribution above is kept, no file
-  inside the package was modified, and nothing claims endorsement by Apple or the authors.
-- Compiled per bundle by `scripts/depth-model.sh` (`xcrun coremlcompiler compile`), because SwiftPM
-  cannot process an `.mlpackage` directory.
-
-Depth Anything V2 *Giant* is CC-BY-NC-4.0 and is **not** used anywhere in this project.

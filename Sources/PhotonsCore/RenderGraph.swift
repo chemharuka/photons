@@ -33,33 +33,14 @@ public struct RenderInput: @unchecked Sendable {
     /// twice.
     public let lensProfile: LensProfile?
 
-    /// 120b — the depth map for this render, or `nil` when it has not been computed.
-    ///
-    /// **Contract:** single-channel Float16 (`.r16Float`), long edge ≤ 4096, normalised to `0…1` with
-    /// `1` = nearest (i.e. `DepthMap.normalised()`). The texture is sampled at the **source** uv, the
-    /// same coordinate every mask shape is measured in, so one map serves the whole geometry pipeline.
-    /// A depth mask with no texture (`nil`) contributes 0 coverage; a document without a depth mask
-    /// never reads it. The graph never writes or frees it — it belongs to the caller.
-    public let depth: MTLTexture?
-
-    /// Identity of `depth` for the render cache. Defaults to its dimensions when absent; a caller
-    /// that reuses the same texture for a different photo must pass the depth cache digest here.
-    /// Never part of the document key: depth has not been computed for most documents, and adding a
-    /// suffix unconditionally would move every existing cache key.
-    public let depthKey: String?
-
     public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
-                lensProfile: LensProfile? = nil,
-                depth: MTLTexture? = nil,
-                depthKey: String? = nil) {
+                lensProfile: LensProfile? = nil) {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
         self.lensProfile = lensProfile ?? sourceURL.flatMap {
             LensProfile.read(from: $0) ?? LensProfile.readPanasonic(from: $0)
         }
-        self.depth = depth
-        self.depthKey = depthKey
     }
 
     /// Does S0 apply the file's own lens warp? DNG: exactly when it carries three distinct planes;
@@ -1105,12 +1086,11 @@ private struct MaskDescU {
 }
 
 private struct MaskShapeDescU {
-    var meta: SIMD4<Int32>   // kind (0 linear, 1 radial, 2 brush, 3 colour, 4 luma, 5 semantic, 6 depth, −1 not evaluated), componentInvert, op, pad
+    var meta: SIMD4<Int32>   // kind (0 linear, 1 radial, 2 brush, 3 colour, 4 luma, 5 semantic, −1 not evaluated), componentInvert, op, pad
     var p0: SIMD4<Float>     // linear: start.xy end.xy | radial: centre.xy radius.xy
                              // brush: firstStroke, strokeCount | colour: firstSample, count, tol, smooth
-                             // luma/depth: low, high, lowFeather, highFeather
+                             // luma: low, high, lowFeather, highFeather
     var p1: SIMD4<Float>     // linear: midpoint, feather | radial: cos, sin, feather
-                             // depth: feather, shapeInvert, pad, pad
 }
 
 /// One brush stroke, flattened for the GPU. The point list lives in a separate `float4` array
