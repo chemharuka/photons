@@ -120,7 +120,14 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// shape (one swatch, active 0), and the encoder writes the new shape. The schema number stays 12
     /// because no *other* key gained or changed meaning; a pre-158 reader would reject the new shape,
     /// but this build's decoder is the compatibility contract.
-    public static let currentSchemaVersion = 12
+    ///
+    /// **13 (2026-10-31): 120b's depth-assisted 去雾 is deleted model-wide.** `effects.dehazeDepth`
+    /// was a second strength on the dehaze stage, and the depth map it read is environment, not a
+    /// document. The decode drops the key and the `;dd=` token disappears with it; a document that
+    /// still carries `effects.dehazeDepth` is stamped — but only when the old key is actually there,
+    /// because a document that never wrote it must keep its bytes (and the same rule schema 11 used
+    /// when `blackLevel`/`whiteLevel` went away).
+    public static let currentSchemaVersion = 13
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
     ///
@@ -465,6 +472,15 @@ public struct EditModel: Sendable, Equatable, Codable {
            lc.contains(AnyCodingKey("blackLevel")) || lc.contains(AnyCodingKey("whiteLevel")) {
             v.schemaVersion = EditModel.currentSchemaVersion
         }
+        // schema 13: 120b's depth-assisted dehaze is deleted model-wide. A document that still
+        // carries `effects.dehazeDepth` loses the strength it named (and re-keys once, because the
+        // `;dd=` token disappears). Stamped, unlike the additive schema-7…12 keys: the bytes change
+        // (a key disappears) and the pixels would change had anything ever set it.
+        if v.schemaVersion < 13,
+           let ec = try? c.nestedContainer(keyedBy: AnyCodingKey.self, forKey: AnyCodingKey("effects")),
+           ec.contains(AnyCodingKey("dehazeDepth")) {
+            v.schemaVersion = EditModel.currentSchemaVersion
+        }
         // 2026-10-28 (078 P0-1): `healSpots` is additive (schema 7/8/9's rule): an absent key reads
         // as `[]`, which is `hasHeal == false` and no S1.9 — so there is nothing to convert and the
         // version is not stamped. A spot read back from disk is clamped for the same reason
@@ -628,8 +644,7 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
             // 117: 去雾 is S1.9 now, in the linear chain — its own stage and its own dirty bit, so a
             // dehaze drag must not re-run the display-referred detail filter.
-            if effects.dehaze != old.effects.dehaze
-                || effects.dehazeDepth != old.effects.dehazeDepth { s.insert(.dehaze) }
+            if effects.dehaze != old.effects.dehaze { s.insert(.dehaze) }
         }
         // 185: S3.10 is its own stage and its own dirty bit — a 数量 drag must not re-run S3.9, and a
         // 纹理 drag must not re-run S3.10 (neither reads the other's numbers).
@@ -2210,10 +2225,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// He/Sun/Tang (2010) with a measured airlight `A` (`Kernels/s1_9_dehaze.metal`). Negative
     /// **adds** the veil back.
     public var dehaze: Double
-    /// 120b — how strongly 去雾 reads the depth map (0…100, default 0). 0 is the pre-120b arithmetic
-    /// **byte for byte**; the uniform is this number / 100. The stage still exists by `dehaze`, not by
-    /// this field: a depth strength with no dehaze has nothing to modulate (and no depth map is read).
-    public var dehazeDepth: Double
     /// 164 — **去噪** (0…100, default 0): S3.9's display-referred luminance denoise. The
     /// guided filter's residual (the same statistics 纹理/清晰度 use) is subtracted from the luma at a
     /// 1–3 px radius, so flat noise is averaged while structural edges keep their step. 0 is the
@@ -2248,11 +2259,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// 117: does S1.9 (去雾) exist for this document? Its own stage, its own link.
     public var hasDehaze: Bool { dehaze != 0 }
 
-    /// 120b: does 去雾 actually read the depth map? Judged by value — the stage must exist (`dehaze`)
-    /// and the user must have moved the assist away from 0. A strength with no dehaze has nothing to
-    /// modulate, and appending a depth key for it would invalidate a cached neutral frame for nothing.
-    public var usesDepthDehaze: Bool { dehaze != 0 && dehazeDepth != 0 }
-
     /// S3.9's material — 纹理 / 清晰度 and the two denoises, and nothing else. A clarity
     /// drag must not miss a cached vignette (S3c reads neither) and a vignette drag must not re-run
     /// S3.9. 去雾 has its own string now that it is its own stage. The newer fields append only when
@@ -2264,20 +2270,15 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         return m
     }
 
-    /// S1.9's material — the dehaze amount and, when it is non-zero, 120b's depth strength. The depth
-    /// texture itself is environment and enters the stage key (RenderGraph), not the document.
-    public var dehazeKeyString: String {
-        var m = "dz=\(k(dehaze))"
-        if dehazeDepth != 0 { m += ";dd=\(k(dehazeDepth))" }
-        return m
-    }
+    /// S1.9's material — the dehaze amount itself. 120b's `;dd=` token went with the field, so a
+    /// document that never named a depth strength re-encodes its `dz=…` text byte for byte.
+    public var dehazeKeyString: String { "dz=\(k(dehaze))" }
 
     public init(vignetteAmount: Double = 0, vignetteMidpoint: Double = 50,
                 vignetteFeather: Double = 50,
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
                 texture: Double = 0, clarity: Double = 0, dehaze: Double = 0,
-                dehazeDepth: Double = 0,
                 nonBayerLuminanceNR: Double = 0, nonBayerColorNR: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
@@ -2289,7 +2290,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         self.texture = texture
         self.clarity = clarity
         self.dehaze = dehaze
-        self.dehazeDepth = dehazeDepth
         self.nonBayerLuminanceNR = nonBayerLuminanceNR
         self.nonBayerColorNR = nonBayerColorNR
     }
@@ -2307,7 +2307,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         v.texture = c.val("texture", v.texture)
         v.clarity = c.val("clarity", v.clarity)
         v.dehaze = c.val("dehaze", v.dehaze)
-        v.dehazeDepth = c.val("dehazeDepth", v.dehazeDepth)
         v.nonBayerLuminanceNR = c.val("nonBayerLuminanceNR", v.nonBayerLuminanceNR)
         v.nonBayerColorNR = c.val("nonBayerColorNR", v.nonBayerColorNR)
         self = v
@@ -2329,7 +2328,6 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
         if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
-        if dehazeDepth != 0 { try c.encode(dehazeDepth, forKey: AnyCodingKey("dehazeDepth")) }
         // 164: additive, absent at 0 — a pre-164 document re-encodes byte for byte.
         if nonBayerLuminanceNR != 0 {
             try c.encode(nonBayerLuminanceNR, forKey: AnyCodingKey("nonBayerLuminanceNR"))

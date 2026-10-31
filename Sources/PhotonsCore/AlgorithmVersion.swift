@@ -217,7 +217,8 @@ public enum StageAlgorithmVersion {
     /// **6** — 120b: the depth-assisted distribution (`effects.dehazeDepth`, `depthStrength`). The
     /// stage now reads the depth map and modulates `A`/`t` per pixel; `depthStrength == 0` (or no
     /// map) takes the pre-120b branch verbatim and is byte-identical, so the bump changes pixels only
-    /// for documents that actually ask for the assist.
+    /// for documents that actually ask for the assist. **175 deleted the field and the p1/p99 window**
+    /// — generations 7 and 8 never read them, so the number stays where 8 put it and no pixel moves.
     /// **8** — 2026-10-31: 130's fog participation became **symmetric about the airlight**. `w` used to
     /// be `1 − smoothstep(A, 2A, L)` — full participation at or below `A` — and below `A` the veil's
     /// whole evidence is `A − L`, which the recovery multiplies by `1/t`. At the sky `t ≈ 0.12`, so the

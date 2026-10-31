@@ -53,7 +53,7 @@ final class EffectsCardTests: XCTestCase {
 
         // 164: 效果 is only 去雾 + 颗粒; 纹理/清晰度 moved to 细节 and 暗角 stayed on 校正.
         XCTAssertEqual(InspectorView.effectsRows.map(\.title),
-                       ["去雾", "去雾深度",
+                       ["去雾",
                         "颗粒数量", "颗粒大小", "颗粒粗糙度", "种子"])
         XCTAssertEqual(InspectorView.detailFXRows.map(\.title),
                        ["纹理", "清晰度", "去噪", "去彩噪"])
@@ -68,7 +68,7 @@ final class EffectsCardTests: XCTestCase {
                        "去雾在线性域，行必须是红色（.linear）")
         XCTAssertEqual(InspectorView.vignetteRows.count, 3)
         XCTAssertEqual(InspectorView.detailFXRows.count, 4)
-        XCTAssertEqual(InspectorView.effectsRows.count, 6)
+        XCTAssertEqual(InspectorView.effectsRows.count, 5)
         XCTAssertEqual(InspectorView.grainRows.count, 4)
 
         // Every row's travel is the kernel's own (a slider the shader cannot honour lies):
@@ -77,7 +77,7 @@ final class EffectsCardTests: XCTestCase {
         XCTAssertEqual(InspectorView.detailFXRows.map(\.range),
                        [-100 ... 100, -100 ... 100, 0 ... 100, 0 ... 100])
         XCTAssertEqual(InspectorView.effectsRows.map(\.range),
-                       [-100 ... 100, 0 ... 100, 0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
+                       [-100 ... 100, 0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
         XCTAssertEqual(InspectorView.grainRows.map(\.range),
                        [0 ... 100, 0 ... 100, 0 ... 100, 0 ... 999])
 
@@ -265,8 +265,7 @@ final class EffectsCardTests: XCTestCase {
     /// `isSemanticallyIdentical` 上短路返回，文档根本没被写过 —— 和文件里 grain 那三行注释记的是
     /// 同一个坑。这条测试逐个字段写入 + 断言文档真的变了，且历史里真的多了一行。
     func testEffectRowsWriteTheDocument() throws {
-        for (name, keyPath) in [("去雾", \EditModel.effects.dehaze),
-                                ("去雾深度", \EditModel.effects.dehazeDepth)] {
+        for (name, keyPath) in [("去雾", \EditModel.effects.dehaze)] {
             let session = CatalogSession()
             session.loadEditForAnchor()
             let before = session.history.count

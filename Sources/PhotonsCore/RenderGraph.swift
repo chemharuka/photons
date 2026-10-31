@@ -1037,13 +1037,7 @@ private struct DehazeParamsU {
     var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
     var d: SIMD4<Int32>   // qH, box axis (0 = h, 1 = v), box segment length, box radius in blocks
     var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), 141: S1 exposure gain g
-    // 120b — the canvas → source walk, the same fields `MaskAtlasParams` carries.
-    var f: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
-    var g: SIMD4<Float>   // frameSize.xy, frameOrigin.xy
-    var h: SIMD4<Float>   // crop rect (left, top, width, height)
-    var i: SIMD4<Float>   // cos, sin, flipH, flipV
-    var j: SIMD4<Int32>   // sourceSize.xy, quarterTurns, hasDepth
-    var k: SIMD4<Float>   // depthStrength (0…1), pad, pad, pad
+    var j: SIMD4<Int32>   // sourceSize.xy, quarterTurns, pad
     var l: SIMD4<Float>   // the knee, tests-only legacy block-min t, pad, pad
 }
 
@@ -2087,10 +2081,11 @@ public final class RenderGraph {
         // whose mattes differ must never share a cached atlas.
         //
         // 120b: the depth map is environment too. It is appended **only when an enabled mask actually
-        // reads depth, or the document asks dehaze to consult it** — a document that merely carries a
-        // depth texture it does not use keeps every key (and every cached frame) byte for byte.
+        // reads depth** — a document that merely carries a depth texture it does not use keeps every
+        // key (and every cached frame) byte for byte. (175 deleted the dehaze assist, which used to be
+        // the second reason to append it.)
         let depthSuffix: String
-        if edit.hasDepthRangeMask || edit.effects.usesDepthDehaze {
+        if edit.hasDepthRangeMask {
             if let depth = input.depth {
                 let material = input.depthKey ?? "\(depth.width)x\(depth.height)"
                 depthSuffix = "|depth=" + KeyBuilder.digest(of: material)
@@ -4845,19 +4840,8 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             // WB is not part of this number: it belongs to the light source, not the EV control.
             e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0.95,
                      Float(edit.light.exposureGain)),
-            // 120b — the same canvas → source walk the mask atlas uses (one frame coordinate).
-            f: SIMD4(plan.origin.x, plan.origin.y,
-                     Float(plan.content.width), Float(plan.content.height)),
-            g: SIMD4(plan.frameSize.x, plan.frameSize.y,
-                     plan.frameOrigin.x, plan.frameOrigin.y),
-            h: SIMD4(Float(plan.crop.left), Float(plan.crop.top),
-                     Float(plan.crop.width), Float(plan.crop.height)),
-            i: SIMD4(costheta(edit), sintheta(edit),
-                     edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
             j: SIMD4(Int32(sourceSize.width), Int32(sourceSize.height),
-                     Int32(edit.geometry.quarterTurns), input.depth != nil ? 1 : 0),
-            // The UI's 0…100 row, as the kernel's 0…1 strength.
-            k: SIMD4(Float(edit.effects.dehazeDepth) / 100, 0, 0, 0),
+                     Int32(edit.geometry.quarterTurns), 0),
             // The knee of the `tSmooth`/`tPixel` blend, and the tests-only pre-change `t`.
             l: SIMD4(0.15, options.legacyDehazeBlockVeil ? 1 : 0, 0,
                      options.legacyDehazeUnboundedRecovery ? 1 : 0))
@@ -4920,7 +4904,6 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         e1b.setTexture(src, index: 0)
         e1b.setTexture(airlight, index: 1)
         e1b.setTexture(limited, index: 2)
-        e1b.setTexture(try input.depth ?? depthDummy(), index: 3)
         e1b.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
         e1b.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -4973,7 +4956,6 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         e2.setTexture(blockA, index: 1)   // the veil, sampled bilinearly — the old `dark` slot
         e2.setTexture(limited, index: 2)
         e2.setTexture(out, index: 3)
-        e2.setTexture(try input.depth ?? depthDummy(), index: 4)
         e2.setTexture(dark, index: 5)     // the raw block minimum, tests-only legacy `t`
         e2.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
         dispatch(e2, apply, plan.canvas)
