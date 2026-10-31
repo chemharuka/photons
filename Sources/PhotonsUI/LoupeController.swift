@@ -5182,11 +5182,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the backdrop is rendered from *and* into its digest (below), so the preview and the settled
     /// frame are two different sources even when they happen to name the same pair.
     private func backdropEdit(_ document: EditModel) -> EditModel {
-        guard let target = backdropPreviewTarget else { return document }
         var edit = document
+        guard let target = backdropPreviewTarget else {
+            // 202 ③ — **the backdrop is the same document the frame is.** Since 197 the frame job and
+            // the camera are the *whole frame* in 裁切 mode (`cropTool.canvasEdit`), and
+            // `framePlacement.region` normalises against that canvas. Rendering the backdrop from the
+            // document's own crop made the texture hold the kept rectangle while the sampler read it
+            // as the picture: on a 9520 × 6336 frame at 5.4° the texture's canvas came out
+            // 4149 × 4144 against the frame's 10075 × 7204 (0.412×), and the crop's centre landed at
+            // the picture's middle — 160 / 100 px of 「偏贴」 on the off-centre crop
+            // (`x 0.2–0.6, y 0.1–0.7`), 0 px on a centred one, which is why only the off-centre case
+            // was reported. One edit, one picture: the low-res layer is the whole frame, exactly as
+            // the sharp one is.
+            return cropTool.canvasEdit(from: edit)
+        }
         edit.light.temperature = target.temperature
         edit.light.tint = target.tint
-        return edit
+        return cropTool.canvasEdit(from: edit)
     }
 
     /// The target pair a live preview frame is actually showing, or `nil` when the canvas is a settled
