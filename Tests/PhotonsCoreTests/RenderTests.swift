@@ -587,7 +587,14 @@ final class RenderTests: XCTestCase {
                 // two mutable keys into the file the CLI wrote instead of rewriting the whole record.
                 var object = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any] ?? [:]
                 object["pixelSHA256"] = pixels.sha256()
-                object["fileSHA256"] = fileHash
+                // **`fileSHA256` is not ours to write.** It is the digest of the *exported* file, which
+                // only `photonsctl render` produces; this test renders in memory. Until 2026-10-31 this
+                // line wrote `fileHash` above — the digest of the **input RAW** — so every re-record
+                // through this path stamped the fixture's own hash into `fileSHA256` (it made two
+                // different documents claim the same file digest, and `rawSHA256` already carries
+                // that value). Leave the key as the CLI wrote it and say so, rather than write a lie.
+                print("RECORDED \(file.lastPathComponent) · pixelSHA256 only · fileSHA256 left as recorded "
+                      + "(it is the exported file's digest: re-record it with `photonsctl render`)")
                 let data = try JSONSerialization.data(withJSONObject: object,
                                                       options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: file)
