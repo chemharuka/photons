@@ -18,7 +18,7 @@ APPICON := Resources/AppIcon.icns
 CACHE_DIR ?= $(HOME)/Library/Caches/Photons/linear
 VIEWPORT ?= 2560x1600
 
-.PHONY: all build test l1 l2 l3 catalog catalog-perf bench verify record clean info cache render app ui-smoke ui-bench
+.PHONY: all build test l1 l2 l3 catalog catalog-perf bench verify record clean info cache render app ui-smoke ui-bench whitepaper whitepaper-serve
 
 all: build
 
@@ -131,6 +131,14 @@ info: build
 
 cache: build
 	$(BIN) cache --dir $(CACHE_DIR)
+
+## 白皮书：docs/whitepaper/*.md → site/（pandoc + MathML，见 docs/whitepaper/nav.json）
+## 站点是提交进仓库的产物；CI 只上传 site/，不在 Actions 里跑 pandoc。
+whitepaper:
+	@python3 scripts/whitepaper/build.py
+
+whitepaper-serve: whitepaper
+	@python3 -m http.server 8321 --directory site
 
 clean:
 	swift package clean

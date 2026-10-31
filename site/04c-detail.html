@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4.10–4.15 细节与效果：纹理、锐化、降噪、去雾、暗角、颗粒 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li class="current"><span>4c 细节</span></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#纹理与清晰度s3.9">4.10 纹理与清晰度（S3.9）</a></li><li class="toc-2"><a href="#锐化s3.10">4.11 锐化（S3.10）</a></li><li class="toc-2"><a href="#降噪解码域与显示域">4.12 降噪：解码域与显示域</a></li><li class="toc-2"><a href="#去雾s1.9">4.13 去雾（S1.9）</a></li><li class="toc-2"><a href="#暗角s3c">4.14 暗角（S3c）</a></li><li class="toc-2"><a href="#颗粒s3.7">4.15 颗粒（S3.7）</a></li></ul></nav>
+    <article>
+<h1 id="细节与效果">4.10–4.15 细节与效果</h1>
+<p>这一章讲六组「成品图」上的算子：纹理与清晰度、锐化、两套降噪、去雾、暗角、颗粒。它们分布在链的两端：去雾与暗角在场景线性域，其余四组在显示参考域。判据仍是第 3 章那一句——<strong>操作必须待在它的量所在的域里</strong>。</p>
+<hr />
+<h2 id="纹理与清晰度s3.9">4.10 纹理与清晰度（S3.9）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>一张照片的「细节」不是一个尺度。皮肤毛孔、织物纹理在 2–8 px 的细带；云层的体积、建筑的明暗关系在画幅几个百分点的中带（<code>Sources/PhotonsCore/EditModel.swift:2231</code>、<code>:2257</code>）。普通的 unsharp mask 能同时放大这两者，代价是每条强边两侧各留一圈 3–6 px 的光环。纹理与清晰度要的是同一件事的两个尺度，但不要光环。</p>
+<p><strong>算法</strong></p>
+<p>引导滤波（He/Sun/Tang 2010），以画面自身的亮度作引导，<code>p = I</code> 自引导，取滤波输出为<strong>基底层</strong>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo>=</mo><mo stretchy="false" form="prefix">⟨</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>,</mo><mspace width="0.167em"></mspace><mi>w</mi><mo stretchy="false" form="postfix">⟩</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>w</mi><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>0.2126</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>0.7152</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>0.0722</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+I=\langle \mathrm{rgb},\,w\rangle,\qquad w=(0.2126,\ 0.7152,\ 0.0722)
+</annotation></semantics></math></p>
+<p>统计量在 <code>q × q</code> 块上求（<code>q = 4</code>）：每块写入 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mover><mi>I</mi><mo accent="true">‾</mo></mover><mo>,</mo><mspace width="0.222em"></mspace><mover><msup><mi>I</mi><mn>2</mn></msup><mo accent="true">¯</mo></mover><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\bar I,\ \overline{I^2})</annotation></semantics></math>，块平均把 2 px 级的纹理从回归里抹掉，阶梯边不会（<code>Sources/PhotonsCore/RenderGraph.swift:4160</code>、<code>Kernels/s3_8_detail_fx.metal:96</code>）。再对这两张统计图做半径 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math> 的可分离盒均值，得到窗口均值：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>μ</mi><mi>I</mi></msub><mo>=</mo><msub><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">x</mi></mrow><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><mover><mi>I</mi><mo accent="true">‾</mo></mover><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>μ</mi><mrow><mi>I</mi><mi>I</mi></mrow></msub><mo>=</mo><msub><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">x</mi></mrow><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><mover><msup><mi>I</mi><mn>2</mn></msup><mo accent="true">¯</mo></mover><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\mu_I=\mathrm{box}_r(\bar I),\qquad \mu_{II}=\mathrm{box}_r(\overline{I^2})
+</annotation></semantics></math></p>
+<p>系数逐块求解（<code>Kernels/s3_8_detail_fx.metal:207</code>–<code>:210</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>σ</mi><mn>2</mn></msup><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>μ</mi><mrow><mi>I</mi><mi>I</mi></mrow></msub><mo>−</mo><msubsup><mi>μ</mi><mi>I</mi><mn>2</mn></msubsup><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>a</mi><mo>=</mo><mfrac><msup><mi>σ</mi><mn>2</mn></msup><mrow><msup><mi>σ</mi><mn>2</mn></msup><mo>+</mo><mi>ε</mi></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>b</mi><mo>=</mo><msub><mi>μ</mi><mi>I</mi></msub><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\sigma^2=\max(\mu_{II}-\mu_I^2,\ 0),\qquad
+a=\frac{\sigma^2}{\sigma^2+\varepsilon},\qquad
+b=\mu_I\,(1-a)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ε</mi><annotation encoding="application/x-tex">\varepsilon</annotation></semantics></math> 是幅度阈值：0.05 的纹理（方差 2.5e-3）保留约 60 % 残差，边缘块（方差约 5e-2）只留 8 %（<code>Kernels/s3_8_detail_fx.metal:28</code>）。系数图另存第三通道，即<strong>梯度门</strong>——窗口均值的一阶差分：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mo stretchy="false" form="prefix">|</mo><msub><mi>∂</mi><mi>x</mi></msub><msub><mi>μ</mi><mi>I</mi></msub><mo stretchy="false" form="postfix">|</mo><mo>,</mo><mspace width="0.222em"></mspace><mo stretchy="false" form="prefix">|</mo><msub><mi>∂</mi><mi>y</mi></msub><msub><mi>μ</mi><mi>I</mi></msub><mo stretchy="false" form="postfix">|</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi></mrow><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>g</mi><mn>0</mn></msub><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>g</mi><mn>1</mn></msub><mo>,</mo><mspace width="0.222em"></mspace><mi>g</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+g=\max\bigl(\lvert \partial_x \mu_I\rvert,\ \lvert \partial_y \mu_I\rvert\bigr),\qquad
+\mathrm{gate}=1-\mathrm{smoothstep}(g_0,\ g_1,\ g)
+</annotation></semantics></math></p>
+<p>门是必需的：<code>base</code> 是窗口均值，强边两侧 3–6 px 处 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo>−</mo><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">e</mi></mrow></mrow><annotation encoding="application/x-tex">I-\mathrm{base}</annotation></semantics></math> 仍然很大而 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>a</mi><annotation encoding="application/x-tex">a</annotation></semantics></math> 已经落下，这正是引导滤波的经典光环；门把残差在阶梯处关掉（<code>Kernels/s3_8_detail_fx.metal:33</code>–<code>:36</code>）。实测同一阶梯：本实现过冲 0.00 码，同半径 unsharp 为 32.26 码（<code>Kernels/s3_8_detail_fx.metal:36</code>）。</p>
+<p>全分辨率重建把两条带合进一个 pass（系数图双线性上采样）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">e</mi></mrow><mi>k</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>a</mi><mi>k</mi></msub><mi>I</mi><mo>+</mo><msub><mi>b</mi><mi>k</mi></msub><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>2</mn><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi mathvariant="normal">Δ</mi><mo>=</mo><munder><mo>∑</mo><mrow><mi>k</mi><mo>∈</mo><mo stretchy="false" form="prefix">{</mo><mrow><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">x</mi></mrow><mo>,</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi></mrow><mo stretchy="false" form="postfix">}</mo></mrow></munder><msub><mi>A</mi><mi>k</mi></msub><mo>⋅</mo><msub><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi></mrow><mi>k</mi></msub><mo>⋅</mo><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>−</mo><msub><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">e</mi></mrow><mi>k</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\mathrm{base}_k=\mathrm{clamp}(a_k I+b_k,\ 0,\ 2),\qquad
+\Delta=\sum_{k\in\{\mathrm{tex},\mathrm{cla}\}} A_k\cdot \mathrm{gate}_k\cdot (I-\mathrm{base}_k)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>+</mo><mi mathvariant="normal">Δ</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>4</mn><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\mathrm{out}=\mathrm{clamp}\bigl(\mathrm{rgb}+\Delta,\ 0,\ 4\bigr)
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_8_detail_fx.metal:332</code>–<code>:337</code>、<code>:413</code>）。残差等量加到三个通道，所以增益只动亮度，不动色度比例（<code>:232</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>texture</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2256</code></td>
+</tr>
+<tr>
+<td><code>clarity</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2261</code></td>
+</tr>
+<tr>
+<td><code>nonBayerLuminanceNR</code></td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2270</code></td>
+</tr>
+<tr>
+<td><code>nonBayerColorNR</code></td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2273</code></td>
+</tr>
+</tbody>
+</table>
+<p>实现常数（不在文档里，改动即改渲染）：块 <code>q = 4</code>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>ε</mi><mrow><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">x</mi></mrow></msub><mo>=</mo><mn>4</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>3</mn></mrow></msup></mrow><annotation encoding="application/x-tex">\varepsilon_{\mathrm{tex}}=4\times10^{-3}</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>ε</mi><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi></mrow></msub><mo>=</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>2</mn></mrow></msup></mrow><annotation encoding="application/x-tex">\varepsilon_{\mathrm{cla}}=10^{-2}</annotation></semantics></math>，门膝 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>g</mi><mn>0</mn></msub><mo>=</mo><mn>0.015</mn></mrow><annotation encoding="application/x-tex">g_0=0.015</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>g</mi><mn>1</mn></msub><mo>=</mo><mn>0.06</mn></mrow><annotation encoding="application/x-tex">g_1=0.06</annotation></semantics></math>（<code>Sources/PhotonsCore/RenderGraph.swift:4382</code>、<code>:4206</code>）。两条带的半径都是<strong>画幅短边的比例</strong>，在 <code>1/q</code> 域取整：纹理 0.15 %、上限 4 texel；清晰度 2 %、上限 24 texel（<code>Sources/PhotonsCore/RenderGraph.swift:4186</code>–<code>:4187</code>）。2731 px 的短边上分别是约 4 px 与 55 px，因此 25 % 预览与 1:1 窗口锐化的是同一处细节（<code>Sources/PhotonsCore/EditModel.swift:2397</code>）。</p>
+<p>清晰度的量被乘了 0.8：1.0 时加性增益会把全幅均值推移约 1.1 %，而这条滑杆承诺不改亮度；0.8 把高通增益留在 +67 %，均值在 1 % 内（<code>Sources/PhotonsCore/RenderGraph.swift:4299</code>–<code>:4303</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_8_detail_fx.metal</code>。CPU 侧按「一个 pack、每条带一对盒均值、一张系数图、一个 apply」编码，两条带的系数图分别绑到 apply 的槽 1、槽 2（<code>Sources/PhotonsCore/RenderGraph.swift:4372</code>–<code>:4397</code>）；统计图是 <code>rgba32Float</code>，因为半精度解不出纹理那种 1e-4 的方差，系数图是 <code>rgba16Float</code>，因为它要被线性采样而 Metal 不过滤 32 位格式（<code>Sources/PhotonsCore/RenderGraph.swift:4333</code>–<code>:4335</code>）。盒均值用滑动和，一次种子加每像素两读，半径 55 px 与 4 px 同价（<code>Kernels/s3_8_detail_fx.metal:132</code>–<code>:134</code>）。apply 是唯一的全分辨率 pass，<code>g.x == 0</code> 时局部蒙版的循环整段不存在（<code>:355</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · 局部对比（<code>contrastntexture.c</code>）</strong> — 同样是引导滤波残差，但分 coarse/medium/fine 三级增益，另有一个连续的 <code>halo_control</code>；Photons 只有两条固定带和一个硬阈值门。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/contrastntexture.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/contrastntexture.c</a></li>
+<li><strong>vkdt · <code>llap</code></strong> — 用局部拉普拉斯金字塔做 clarity，尺度由金字塔层数决定；Photons 是单尺度的引导滤波残差，没有金字塔。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/llap/llap.glsl" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/llap/llap.glsl</a></li>
+<li><strong>RawTherapee · 小波（<code>ipwavelet.cc</code>）</strong> — 十来级小波分解，局部对比在残差图上按 level 调；Photons 只暴露两条带，换不到中间层。 <a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipwavelet.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipwavelet.cc</a></li>
+<li><strong>LightZone · 模糊（<code>GaussianBlurOperation.java</code>）</strong> — 整图高斯模糊，正是 USM「基底层」最朴素的形式：无边缘感知，也就无门可用。 <a href="https://github.com/ktgw0316/LightZone/blob/master/lightcrafts/src/main/java/com/lightcrafts/model/ImageEditor/GaussianBlurOperation.java" class="uri">https://github.com/ktgw0316/LightZone/blob/master/lightcrafts/src/main/java/com/lightcrafts/model/ImageEditor/GaussianBlurOperation.java</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>两条带、一个门、一个 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ε</mi><annotation encoding="application/x-tex">\varepsilon</annotation></semantics></math>，换来的是可预测：同一滑杆在任何缩放下动同一处细节。代价是没有 per-level 控制——半径是编译进 CPU 的常数，用户碰不到。门也有代价：一条低对比但真实的边（天空与远山）会被判成渐变而放大，只能把 clarity 收小。</p>
+<hr />
+<h2 id="锐化s3.10">4.11 锐化（S3.10）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p><code>DetailGroup.sharpening</code> 是解码参数，交给 <code>CIRAWFilter</code>，改一次要重新解码，滑杆拖不动（<code>Sources/PhotonsCore/EditModel.swift:2407</code>–<code>:2410</code>）。成品图需要一条能实时预览的锐化：四个数——数量、半径、细节、蒙版——一个 USM，两种尺度，外加一个不许出光环的限制器。</p>
+<p><strong>算法</strong></p>
+<p>亮度与两个高斯（<code>Kernels/s3_10_sharpen.metal:16</code>–<code>:25</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo>=</mo><mo stretchy="false" form="prefix">⟨</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>,</mo><mi>w</mi><mo stretchy="false" form="postfix">⟩</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>G</mi><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>σ</mi><mi>/</mi><mn>2</mn><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>G</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>σ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+I=\langle \mathrm{rgb},w\rangle,\qquad
+G_{\mathrm{fine}}=\mathrm{gauss}(I,\ \sigma/2),\qquad
+G_{\mathrm{wide}}=\mathrm{gauss}(I,\ \sigma)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>d</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>=</mo><msub><mi>G</mi><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>−</mo><msub><mi>G</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>d</mi><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>=</mo><mi>I</mi><mo>−</mo><msub><mi>G</mi><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>d</mi><mo>=</mo><msub><mi>d</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>+</mo><mi>t</mi><mspace width="0.167em"></mspace><msub><mi>d</mi><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi></mrow></msub><mo>,</mo><mspace width="1.0em"></mspace><mi>t</mi><mo>=</mo><mfrac><mrow><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">l</mi></mrow><mn>100</mn></mfrac></mrow><annotation encoding="application/x-tex">
+d_{\mathrm{wide}}=G_{\mathrm{fine}}-G_{\mathrm{wide}},\qquad
+d_{\mathrm{fine}}=I-G_{\mathrm{fine}},\qquad
+d=d_{\mathrm{wide}}+t\,d_{\mathrm{fine}},\quad t=\frac{\mathrm{detail}}{100}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">t=0</annotation></semantics></math> 时 1–2 px 那一层权重恰好为 0，所以「细节 = 0 只放大 ≥ σ/2 的结构」是算术事实而不是近似；<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">t=1</annotation></semantics></math> 退化成普通 USM，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>d</mi><mo>=</mo><mi>I</mi><mo>−</mo><msub><mi>G</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub></mrow><annotation encoding="application/x-tex">d=I-G_{\mathrm{wide}}</annotation></semantics></math>（<code>Kernels/s3_10_sharpen.metal:27</code>–<code>:29</code>）。</p>
+<p>蒙版取<strong>模糊后</strong>亮度的梯度，噪声被高斯平均掉，开不了门：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>g</mi><mn>0</mn></msub><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>g</mi><mn>1</mn></msub><mo>,</mo><mspace width="0.222em"></mspace><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mo stretchy="false" form="prefix">|</mo><msub><mi>∂</mi><mi>x</mi></msub><msub><mi>G</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo stretchy="false" form="postfix">|</mo><mo>,</mo><mo stretchy="false" form="prefix">|</mo><msub><mi>∂</mi><mi>y</mi></msub><msub><mi>G</mi><mrow><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi></mrow></msub><mo stretchy="false" form="postfix">|</mo><mo stretchy="false" form="postfix">)</mo><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>ω</mi><mo>=</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>,</mo><mspace width="0.222em"></mspace><mi>m</mi><mo>,</mo><mspace width="0.222em"></mspace><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">k</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">g</mi></mrow><mi>/</mi><mn>100</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+m=\mathrm{smoothstep}(g_0,\ g_1,\ \max(\lvert\partial_x G_{\mathrm{wide}}\rvert,\lvert\partial_y G_{\mathrm{wide}}\rvert)),\qquad
+\omega=\mathrm{mix}(1,\ m,\ \mathrm{masking}/100)
+</annotation></semantics></math></p>
+<p>0.44 的阶梯读出 0.44，2 码噪声读出约 0.008，落在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>g</mi><mn>0</mn></msub><annotation encoding="application/x-tex">g_0</annotation></semantics></math> 之下（<code>Kernels/s3_10_sharpen.metal:313</code>–<code>:320</code>）。增益与限制器：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi mathvariant="normal">Δ</mi><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">w</mi></mrow></msub><mo>=</mo><mi>A</mi><mspace width="0.167em"></mspace><mi>ω</mi><mspace width="0.167em"></mspace><mi>d</mi><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">w</mi></mrow><mo>=</mo><mi>A</mi><mo>⋅</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mstyle displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><mo stretchy="false" form="prefix">(</mo><msub><mi>h</mi><mi>i</mi></msub><mo>−</mo><msub><mi>l</mi><mi>o</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>8</mn><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mi>m</mi><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\Delta_{\mathrm{raw}}=A\,\omega\,d,\qquad
+\mathrm{allow}=A\cdot\mathrm{mix}\Bigl(\tfrac12(h_i-l_o),\ \mathrm{codes}(8),\ m\Bigr)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi mathvariant="normal">Δ</mi><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi mathvariant="normal">Δ</mi><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">w</mi></mrow></msub><mo>,</mo><mspace width="0.222em"></mspace><mo>−</mo><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">w</mi></mrow><mo>,</mo><mspace width="0.222em"></mspace><mo>+</mo><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">w</mi></mrow><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>+</mo><mi mathvariant="normal">Δ</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>4</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\Delta=\mathrm{clamp}(\Delta_{\mathrm{raw}},\ -\mathrm{allow},\ +\mathrm{allow}),\qquad
+\mathrm{out}=\mathrm{clamp}(\mathrm{rgb}+\Delta,\ 0,\ 4)
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_10_sharpen.metal:323</code>、<code>:343</code>–<code>:346</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>l</mi><mi>o</mi></msub><mo>,</mo><msub><mi>h</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">l_o,h_i</annotation></semantics></math> 是 4×4 块的亮度范围，被双线性上采样后与本像素取并（<code>:340</code>）。平坦块 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>h</mi><mi>i</mi></msub><mo>=</mo><msub><mi>l</mi><mi>o</mi></msub></mrow><annotation encoding="application/x-tex">h_i=l_o</annotation></semantics></math>，range 那一半为 0，锐化在那里<strong>不允许</strong>动——光环被画面自己的局部电平夹住，而不是被一个常数夹住（<code>:334</code>）。边上一半用码预算，因为 8 码是「过冲 ≤ 8 码」这句验收的原话：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>k</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mfrac><mrow><mi>k</mi><mi>/</mi><mn>255</mn></mrow><mrow><mn>0.4396</mn><mspace width="0.167em"></mspace><msup><mi>v</mi><mrow><mi>−</mi><mn>0.5833</mn></mrow></msup></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>v</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0.0031308</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\mathrm{codes}(k)=\frac{k/255}{0.4396\,v^{-0.5833}},\qquad v=\max(I,\ 0.0031308)
+</annotation></semantics></math></p>
+<p>即对 sRGB 传递函数的斜率求逆，让「8 码」在暗部与高光都是 8 码（<code>Kernels/s3_10_sharpen.metal:100</code>–<code>:103</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>amount</code></td>
+<td>0…150</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2412</code>、<code>:2420</code></td>
+</tr>
+<tr>
+<td><code>radius</code>（σ，内容像素）</td>
+<td>0.5…3.0</td>
+<td>1.0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2413</code>、<code>:2421</code></td>
+</tr>
+<tr>
+<td><code>detail</code></td>
+<td>0…100</td>
+<td>25</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2414</code>、<code>:2424</code></td>
+</tr>
+<tr>
+<td><code>masking</code></td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2415</code>、<code>:2424</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>detail</code> 与 <code>masking</code> 默认非零，是因为它们只是「一个不存在的 pass 的形状参数」，不能把 pass 召唤出来；stage 的存在性只看 <code>amount &gt; 0</code>（<code>Sources/PhotonsCore/EditModel.swift:381</code>、<code>:2431</code>–<code>:2433</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_10_sharpen.metal</code>，五个 pass：半分辨率亮度平面（<code>:154</code>–<code>:170</code>）、4×4 块范围（<code>:114</code>–<code>:142</code>，从平面读，一次 11 M texel 的步长读被省掉，<code>:120</code>–<code>:123</code>）、水平双向高斯（<code>:175</code>–<code>:202</code>，两个尺度共用抽头）、垂直双向高斯（<code>:210</code>–<code>:261</code>，32×8 tile 过线程组内存，把每像素十五次跨行读变成一次装载）、apply（<code>:270</code>–<code>:347</code>）。</p>
+<p>半径的单位是<strong>内容像素</strong>，CPU 侧一次换算：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>σ</mi><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">v</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">s</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mn>0.5</mn><mo>,</mo><mn>3</mn><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><mi>S</mi></mrow><annotation encoding="application/x-tex">\sigma_{\mathrm{canvas}}=\mathrm{clamp}(r,0.5,3)\cdot S</annotation></semantics></math>，<strong>没有 σ 地板</strong>（192 删掉了旧的 <code>max(…, 0.5)</code>：半个画布像素在 0.2 的适应视图里等于 2.5 个图像像素，而且把三个小半径折成同一个核）；基面 stride <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>p</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>,</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">d</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>2</mn><mi>S</mi><mo stretchy="false" form="postfix">)</mo><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">p=\max(1,\mathrm{round}(2S))</annotation></semantics></math>（一个 texel 两个图像像素）、限制器块宽 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>q</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mn>2</mn><mo>,</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">d</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>4</mn><mi>S</mi><mo stretchy="false" form="postfix">)</mo><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">q=\max(2,\mathrm{round}(4S))</annotation></semantics></math>、门膝 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>0.01</mn><mi>/</mi><mi>S</mi></mrow><annotation encoding="application/x-tex">0.01/S</annotation></semantics></math>…<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>0.04</mn><mi>/</mi><mi>S</mi></mrow><annotation encoding="application/x-tex">0.04/S</annotation></semantics></math>（<code>Sources/PhotonsCore/RenderGraph.swift:4513</code>–<code>:4550</code>）。亚像素 σ 由 <code>s3_10_tap</code> 的矩匹配核承担——方差为 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>σ</mi><mn>2</mn></msup><annotation encoding="application/x-tex">\sigma^2</annotation></semantics></math>、权重和为 1——而不是靠夹取（<code>Sources/PhotonsCore/Kernels/s3_10_sharpen.metal:86</code>–<code>:110</code>）；这次改动把 <code>StageAlgorithmVersion.sharpen</code> 推到 3（<code>Sources/PhotonsCore/AlgorithmVersion.swift:251</code>）。191 之前 σ 被当成画布像素读，于是 fit 预览比同一文档的 1:1 强 3.45 倍（<code>Kernels/s3_10_sharpen.metal:47</code>–<code>:51</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · 锐化（<code>sharpen.c</code>）</strong> — L 通道上的 USM，半径 0…99、默认 2，阈值 0…100、默认 0.5（<code>src/iop/sharpen.c</code> 的参数块）；没有细节/蒙版拆分，也没有码预算限制器。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/sharpen.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/sharpen.c</a></li>
+<li><strong>RawTherapee · 锐化（<code>ipsharpen.cc</code>）</strong> — USM（半径/数量/阈值）之外还有 Richardson–Lucy 反卷积一路，可选迭代与阻尼；Photons 只有 USM。 <a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipsharpen.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipsharpen.cc</a></li>
+<li><strong>vkdt · <code>usm</code></strong> — 两个数：<code>amount</code> 与 <code>thrs</code>，基底来自 mip 采样，低于阈值的差被整段折回；没有分带、没有上限。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/usm/main.comp" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/usm/main.comp</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>四根滑杆是可用性换可控：<code>detail</code> 把「只锐结构 / 全锐」变成一个连续量，<code>masking</code> 把「噪声」从锐化里摘出去。限制器让 8 码成为可测的事实，代价写在代码里——纯平坦块不许动，低对比的纹理只能靠 <code>detail</code> 的细带补，<code>amount</code> 拧到底也不会把它救回来。这也是为什么强锐化在磨砂质感上会显得「只在边上响」。</p>
+<hr />
+<h2 id="降噪解码域与显示域">4.12 降噪：解码域与显示域</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>噪声有两个来源，处理它们的地方也不同。传感器噪声是解码器的事：去马赛克、白平衡、噪声模型都在 <code>CIRAWFilter</code> 里，Apple 的模型比任何显示域后处理都准，但它改一次要重新解码（<code>Sources/PhotonsCore/RenderGraph.swift:108</code>–<code>:109</code>）。解码之后还剩下的那一点（压缩、锐化、机内处理留下的）才轮到显示域，而它必须能实时预览、能被蒙版局部加权。</p>
+<p><strong>算法</strong></p>
+<p><strong>解码域</strong>是四个转发参数。三个 0…1，<code>detailAmount</code> 0…3，滑杆位置除以 100 或 10；<code>nil</code> 表示「停在这个机身的默认位置」，等价于不赋值（<code>Sources/PhotonsCore/DetailSettings.swift:30</code>–<code>:35</code>、<code>:54</code>–<code>:57</code>）。这条 <code>nil</code> 不是洁癖：<code>colorNoiseReductionAmount</code> 的基线实测是 0.5、<code>sharpnessAmount</code> 也是 0.5（Canon 机身读到 1.0），把 0 显式写进去等于关掉 Apple 的一半降噪（<code>Sources/PhotonsCore/RAWDecoder.swift:463</code>–<code>:465</code>）。</p>
+<p><strong>显示域</strong>是联合双边网格（Paris/Durand，Halide 的 <code>apps/bilateral_grid</code> 形状）：splat → 五抽模糊 → slice。第三根轴是亮度，也是保边的那根轴——只有落进同一亮度 bin 的邻居才互相平均（<code>Kernels/s3_9_denoise.metal:8</code>–<code>:12</code>）。</p>
+<p>噪声强度先由画面自己估：64×64 点阵上取 3×3 高通的中位绝对偏差，直方图 256 个 bin 覆盖 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">|</mo><mi>D</mi><mo stretchy="false" form="prefix">|</mo><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>0.25</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">|D|\in[0,0.25]</annotation></semantics></math>，中位数乘 1.572 换成高斯 σ（<code>Kernels/s3_9_denoise.metal:39</code>–<code>:43</code>、<code>:90</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>σ</mi><mo>=</mo><mn>1.572</mn><mo>⋅</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">d</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">n</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mo stretchy="false" form="prefix">|</mo><mi>L</mi><mo>−</mo><msub><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">n</mi></mrow><mrow><mn>3</mn><mo>×</mo><mn>3</mn></mrow></msub><mi>L</mi><mo stretchy="false" form="postfix">|</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\sigma=1.572\cdot\mathrm{median}\bigl(\lvert L-\mathrm{mean}_{3\times3}L\rvert\bigr)
+</annotation></semantics></math></p>
+<p>格子的 z 尺度随强度走：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mo stretchy="false" form="prefix">(</mo><mn>0.4</mn><mo>+</mo><mn>0.6</mn><mspace width="0.167em"></mspace><msub><mi>α</mi><mi>L</mi></msub><mo stretchy="false" form="postfix">)</mo><mspace width="0.167em"></mspace><mi>σ</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0.010</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>0.050</mn><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>z</mi><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">d</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mi>/</mi><mi>r</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>39</mn><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+r=\mathrm{clamp}\bigl((0.4+0.6\,\alpha_L)\,\sigma,\ 0.010,\ 0.050\bigr),\qquad
+z=\mathrm{clamp}\bigl(\mathrm{round}(L/r),\ 0,\ 39\bigr)
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_9_denoise.metal:120</code>、<code>:139</code>）。splat 用<strong>整数</strong>原子加、定点 65535：浮点原子加的次序会改变结果，整数不会，同一帧永远得到同一张网格（<code>:18</code>–<code>:21</code>、<code>:145</code>–<code>:148</code>）。z 轴五抽 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">[</mo><mn>1</mn><mo>,</mo><mn>4</mn><mo>,</mo><mn>6</mn><mo>,</mo><mn>4</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">]</mo><mi>/</mi><mn>16</mn></mrow><annotation encoding="application/x-tex">[1,4,6,4,1]/16</annotation></semantics></math> 在 splat 的线程组内完成；色度用更宽的七抽 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">[</mo><mn>1</mn><mo>,</mo><mn>2</mn><mo>,</mo><mn>3</mn><mo>,</mo><mn>4</mn><mo>,</mo><mn>3</mn><mo>,</mo><mn>2</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">]</mo><mi>/</mi><mn>16</mn></mrow><annotation encoding="application/x-tex">[1,2,3,4,3,2,1]/16</annotation></semantics></math>，因为一条轴上只有一个 bin 宽，「色度容忍 1.5× 更宽的值窗」只能表达成更宽的核（<code>:155</code>–<code>:162</code>）。</p>
+<p>slice 在 apply 里做手工三线性插值（<code>texture3d</code> 的线性过滤在部分设备上静默退化成最近邻，<code>:278</code>–<code>:280</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mover><mi>L</mi><mo accent="true">‾</mo></mover><mo>=</mo><mfrac><mrow><munder><mo>∑</mo><mi>c</mi></munder><msub><mi>w</mi><mi>c</mi></msub><msub><mi>L</mi><mi>c</mi></msub></mrow><mrow><munder><mo>∑</mo><mi>c</mi></munder><msub><mi>w</mi><mi>c</mi></msub></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><msub><mi mathvariant="normal">Δ</mi><mi>L</mi></msub><mo>=</mo><msub><mi>α</mi><mi>L</mi></msub><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mover><mi>L</mi><mo accent="true">‾</mo></mover><mo>−</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\bar L=\frac{\sum_c w_c L_c}{\sum_c w_c},\qquad
+\Delta_L=\alpha_L\,(\bar L-L)
+</annotation></semantics></math></p>
+<p>色度把 OKLab 的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>,</mo><mi>b</mi></mrow><annotation encoding="application/x-tex">a,b</annotation></semantics></math> 朝网格均值混合，再把 Rec.709 亮度用一个公共增益放回去：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>a</mi><mo>′</mo></msup><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>α</mi><mi>C</mi></msub><mo stretchy="false" form="postfix">)</mo><mi>a</mi><mo>+</mo><msub><mi>α</mi><mi>C</mi></msub><mover><mi>a</mi><mo accent="true">‾</mo></mover><mo>,</mo><mspace width="2.0em"></mspace><msup><mi>b</mi><mo>′</mo></msup><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>α</mi><mi>C</mi></msub><mo stretchy="false" form="postfix">)</mo><mi>b</mi><mo>+</mo><msub><mi>α</mi><mi>C</mi></msub><mover><mi>b</mi><mo accent="true">‾</mo></mover><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">k</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">c</mi><mi mathvariant="normal">h</mi><mn mathvariant="normal">2</mn><mi mathvariant="normal">l</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi></mrow><mo stretchy="false" form="prefix">(</mo><msup><mi>L</mi><mo>′</mo></msup><mo>,</mo><msup><mi>C</mi><mo>′</mo></msup><mo>,</mo><mi>h</mi><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><mfrac><msub><mi>Y</mi><mn>0</mn></msub><msub><mi>Y</mi><mn>1</mn></msub></mfrac></mrow><annotation encoding="application/x-tex">
+a&#39;=(1-\alpha_C)a+\alpha_C\bar a,\qquad
+b&#39;=(1-\alpha_C)b+\alpha_C\bar b,\qquad
+\mathrm{out}=\mathrm{oklch2lin}(L&#39;,C&#39;,h)\cdot\frac{Y_0}{Y_1}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_8_detail_fx.metal:418</code>–<code>:433</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>C</mi><mo>≤</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup></mrow><annotation encoding="application/x-tex">C\le10^{-6}</annotation></semantics></math> 的像素整段跳过，灰卡因此不会被舍入染上色（<code>:421</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>组</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>noiseLuminance</code></td>
+<td><code>DetailGroup</code>（解码）</td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2183</code>、<code>:2189</code></td>
+</tr>
+<tr>
+<td><code>noiseColor</code></td>
+<td><code>DetailGroup</code>（解码）</td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2184</code>、<code>:2189</code></td>
+</tr>
+<tr>
+<td><code>sharpening</code></td>
+<td><code>DetailGroup</code>（解码）</td>
+<td>0…150</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2181</code>、<code>:2189</code></td>
+</tr>
+<tr>
+<td><code>sharpeningRadius</code></td>
+<td><code>DetailGroup</code>（解码）</td>
+<td>0.5…3</td>
+<td>1.0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2182</code>、<code>:2189</code></td>
+</tr>
+<tr>
+<td><code>nonBayerLuminanceNR</code></td>
+<td><code>EffectsGroup</code>（S3.9）</td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2270</code></td>
+</tr>
+<tr>
+<td><code>nonBayerColorNR</code></td>
+<td><code>EffectsGroup</code>（S3.9）</td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2273</code></td>
+</tr>
+</tbody>
+</table>
+<p>两组数在面板上是两张卡，在文档里是两个组，在键里也是两个阶段：改解码组要重新 develop，改显示组只重跑 S3.9（<code>Sources/PhotonsCore/EditModel.swift:2304</code>–<code>:2308</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_9_denoise.metal</code> 三个 pass（估 σ、splat、x/y 一次模糊），slice 在 <code>s3_8_detail_fx.metal</code> 的 apply 里，与纹理/清晰度共用一次全分辨率读（<code>Kernels/s3_8_detail_fx.metal:53</code>–<code>:55</code>）。格子边长 8 px、40 个 z bin（<code>Sources/PhotonsCore/RenderGraph.swift:4163</code>–<code>:4164</code>）。网格从<strong>阶段输入</strong>建，不读纹理/清晰度残差，σ 因此是关于这一帧的事实而不是关于滑杆的（<code>Sources/PhotonsCore/RenderGraph.swift:4227</code>–<code>:4229</code>）。只有色度被拖时，引导滤波那条带链整段不建（<code>:4360</code>–<code>:4362</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · <code>bilat</code></strong> — 同一套双边网格，另有本地拉普拉斯模式，参数是空间/值域 σ 与 detail；Photons 只有 grid，且亮度与色度用不同宽度的 z 核。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/bilat.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/bilat.c</a></li>
+<li><strong>darktable · <code>denoiseprofile</code></strong> — profiled 非局部均值与小波，靠相机噪声剖面把噪声建模到传感器层面；Photons 单帧估一个标量 σ，没有剖面。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/denoiseprofile.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/denoiseprofile.c</a></li>
+<li><strong>vkdt · <code>denoise</code></strong> — 下采样 + 协方差估计的分层降噪；Photons 的 σ 是全帧一个数，不分层。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/denoise/main.c" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/denoise/main.c</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>单帧 σ 省掉了 profile 依赖，也让「打开一张没见过的图」就能用；代价是混合内容只有一个 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math>：暗部噪声大、亮部干净的一张图，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math> 要么放过暗部要么磨平亮部。色度用更宽的 z 核而不是换 bin 宽，是因为一条轴只能有一个 bin 宽——这是网格结构的硬限制，不是调参。最后一条：显示域降噪不能替代解码域，它没有噪声模型，只会在已经错了的样本上求平均。</p>
+<hr />
+<h2 id="去雾s1.9">4.13 去雾（S1.9）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>雾是加性的空气光：一个像素收到的是物体反射的光被透过率衰减，再加上一层雾幕。要去掉它，必须知道幕有多亮（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math>）、有多厚（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>t</mi><annotation encoding="application/x-tex">t</annotation></semantics></math>），而且必须在<strong>光</strong>上减——显示码上的「白」不等于场景里的空气光。117 之前在显示域、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 固定为 1，公式退化成 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>J</mi><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>−</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo><mi>/</mi><mi>t</mi><mo>+</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">J=(I-1)/t+1</annotation></semantics></math>，对 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo>&gt;</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">I&gt;1</annotation></semantics></math> 的样本是<strong>加光</strong>：去雾越强，HDR 高光越亮（<code>Kernels/s1_9_dehaze.metal:8</code>–<code>:15</code>）。</p>
+<p><strong>算法</strong></p>
+<p>模型（<code>Kernels/s1_9_dehaze.metal:17</code>–<code>:21</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo>=</mo><mi>t</mi><mspace width="0.167em"></mspace><mi>J</mi><mo>+</mo><mi>A</mi><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>t</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>J</mi><mo>=</mo><mfrac><mrow><mi>I</mi><mo>−</mo><mi>A</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>t</mi><mo stretchy="false" form="postfix">)</mo></mrow><mi>t</mi></mfrac></mrow><annotation encoding="application/x-tex">
+I=t\,J+A\,(1-t),\qquad J=\frac{I-A(1-t)}{t}
+</annotation></semantics></math></p>
+<p>暗通道与空气光，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi mathvariant="normal">Ω</mi><annotation encoding="application/x-tex">\Omega</annotation></semantics></math> 是 4×4 的块（<code>Kernels/s1_9_dehaze.metal:147</code>–<code>:180</code>、<code>Sources/PhotonsCore/RenderGraph.swift:4787</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>D</mi><mo stretchy="false" form="prefix">(</mo><mi>p</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><munder><mi mathvariant="normal">min</mi><mi>c</mi></munder><mspace width="0.222em"></mspace><munder><mi mathvariant="normal">min</mi><mrow><mi>q</mi><mo>∈</mo><mi mathvariant="normal">Ω</mi><mo stretchy="false" form="prefix">(</mo><mi>p</mi><mo stretchy="false" form="postfix">)</mo></mrow></munder><msub><mi>I</mi><mi>c</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>q</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>A</mi><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><munder><mi mathvariant="normal">max</mi><mrow><mi mathvariant="normal">b</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">c</mi><mi mathvariant="normal">k</mi><mi mathvariant="normal">s</mi></mrow></munder><mi>D</mi><mo>,</mo><mspace width="0.222em"></mspace><msup><mn>10</mn><mrow><mi>−</mi><mn>4</mn></mrow></msup><mo>,</mo><mspace width="0.222em"></mspace><mn>8</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+D(p)=\min_c\ \min_{q\in\Omega(p)} I_c(q),\qquad
+A=\mathrm{clamp}\Bigl(\max_{\mathrm{blocks}} D,\ 10^{-4},\ 8\Bigr)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 的估计是一个线程组扫过整张块纹理取最大（He 的「最亮 0.1 %」的确定性替身，<code>Kernels/s1_9_dehaze.metal:182</code>–<code>:188</code>），再上一道物理上限：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 只在<strong>明显</strong>高于画面亮端时被压到 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>κ</mi><mo>⋅</mo><msub><mi>p</mi><mn>99</mn></msub><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\kappa\cdot p_{99}(L)</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>κ</mi><mo>=</mo><mn>0.95</mn></mrow><annotation encoding="application/x-tex">\kappa=0.95</annotation></semantics></math>，死区 2 %（<code>:285</code>–<code>:290</code>）。这一条来自实测：+2 EV 的 DJI 帧 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>A</mi><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">w</mi></mrow></msub><mo>=</mo><mn>2.283</mn></mrow><annotation encoding="application/x-tex">A_{\mathrm{raw}}=2.283</annotation></semantics></math> 而 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>p</mi><mn>99</mn></msub><mo>=</mo><mn>2.035</mn></mrow><annotation encoding="application/x-tex">p_{99}=2.035</annotation></semantics></math>，不压的话 46.8 % 的像素被写成黑（<code>:214</code>–<code>:219</code>）。</p>
+<p>雾幕不再直接取块最小值，而是对它做一次引导滤波——引导是块平均亮度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>l</mi><annotation encoding="application/x-tex">l</annotation></semantics></math>，被平滑的是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>D</mi><annotation encoding="application/x-tex">D</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mfrac><mrow><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">v</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>l</mi><mo>,</mo><mi>D</mi><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>l</mi><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mi>ε</mi></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>b</mi><mo>=</mo><msub><mi>μ</mi><mi>D</mi></msub><mo>−</mo><mi>a</mi><mspace width="0.167em"></mspace><msub><mi>μ</mi><mi>l</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>ε</mi><mo>=</mo><mn>4</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>4</mn></mrow></msup><msup><mi>A</mi><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">
+a=\frac{\mathrm{cov}(l,D)}{\mathrm{var}(l)+\varepsilon},\qquad b=\mu_D-a\,\mu_l,\qquad \varepsilon=4\times10^{-4}A^2
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">l</mi></mrow><mo>=</mo><mi>a</mi><mspace width="0.167em"></mspace><mi>l</mi><mo>+</mo><mi>b</mi></mrow><annotation encoding="application/x-tex">
+\mathrm{veil}=a\,l+b
+</annotation></semantics></math></p>
+<p>两次盒均值分别作用在统计量上、再作用在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>a</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(a,b)</annotation></semantics></math> 上，所以它是保边的平滑而不只是平滑（<code>Kernels/s1_9_dehaze.metal:369</code>–<code>:393</code>、<code>:398</code>–<code>:406</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ε</mi><mo>∝</mo><msup><mi>A</mi><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">\varepsilon\propto A^2</annotation></semantics></math> 让浓雾比淡雾被抹得更狠，淡雾的量化块最小值才不会被当成结构（<code>:372</code>–<code>:374</code>）。</p>
+<p>透过率取两个估计并按膝宽混合：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>t</mi><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>ω</mi><mspace width="0.167em"></mspace><msub><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">l</mi></mrow><mi>R</mi></msub><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>t</mi><mn>0</mn></msub><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>t</mi><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">l</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>ω</mi><mspace width="0.167em"></mspace><munder><mi mathvariant="normal">min</mi><mi>c</mi></munder><mo stretchy="false" form="prefix">(</mo><msub><mi>I</mi><mi>c</mi></msub><mi>/</mi><mi>A</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>t</mi><mn>0</mn></msub><mo>,</mo><mspace width="0.222em"></mspace><mn>1</mn><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+t_{\mathrm{smooth}}=\max\bigl(1-\omega\,\mathrm{veil}_R,\ t_0\bigr),\qquad
+t_{\mathrm{pixel}}=\mathrm{clamp}\bigl(1-\omega\,\min_c(I_c/A),\ t_0,\ 1\bigr)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>χ</mi><mo>=</mo><mfrac><mrow><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">k</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi></mrow><mo>−</mo><mo stretchy="false" form="prefix">|</mo><msub><mi>t</mi><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi></mrow></msub><mo>−</mo><msub><mi>t</mi><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">l</mi></mrow></msub><mo stretchy="false" form="postfix">|</mo><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mi mathvariant="normal">k</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>t</mi><mo>=</mo><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>t</mi><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi></mrow></msub><mo>,</mo><msub><mi>t</mi><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">l</mi></mrow></msub><mo stretchy="false" form="postfix">)</mo><mo>+</mo><msup><mi>χ</mi><mn>2</mn></msup><mspace width="0.167em"></mspace><mfrac><mrow><mi mathvariant="normal">k</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi></mrow><mn>4</mn></mfrac><mo>,</mo><mspace width="0.222em"></mspace><mn>1</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\chi=\frac{\max(\mathrm{knee}-\lvert t_{\mathrm{smooth}}-t_{\mathrm{pixel}}\rvert,\ 0)}{\mathrm{knee}},\qquad
+t=\min\Bigl(\max(t_{\mathrm{smooth}},t_{\mathrm{pixel}})+\chi^2\,\frac{\mathrm{knee}}{4},\ 1\Bigr)
+</annotation></semantics></math></p>
+<p>其中 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">l</mi></mrow><mi>R</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">l</mi></mrow><mi>/</mi><mi>A</mi><mo>,</mo><mspace width="0.222em"></mspace><msub><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mi>c</mi></msub><msub><mi>I</mi><mi>c</mi></msub><mi>/</mi><mi>A</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\mathrm{veil}_R=\min(\mathrm{veil}/A,\ \min_c I_c/A)</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ω</mi><mo>=</mo><mn>0.95</mn></mrow><annotation encoding="application/x-tex">\omega=0.95</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>t</mi><mn>0</mn></msub><mo>=</mo><mn>0.1</mn></mrow><annotation encoding="application/x-tex">t_0=0.1</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">k</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi></mrow><mo>=</mo><mn>0.15</mn></mrow><annotation encoding="application/x-tex">\mathrm{knee}=0.15</annotation></semantics></math>（<code>Kernels/s1_9_dehaze.metal:471</code>–<code>:484</code>、<code>Sources/PhotonsCore/RenderGraph.swift:4796</code>、<code>:4809</code>）。取 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi mathvariant="normal">max</mi><annotation encoding="application/x-tex">\max</annotation></semantics></math> 是防<strong>过度</strong>恢复（把一条暗边压成黑），膝项只在两个估计一致时轻轻抬一点。</p>
+<p>恢复只在亮度上做，三个通道乘同一个增益，色相与色度按构造不变；参与度按「雾的份额」淡出两次：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>J</mi><mi>L</mi></msub><mo>=</mo><mfrac><mrow><mi>L</mi><mo>−</mo><mi>A</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>t</mi><mo stretchy="false" form="postfix">)</mo></mrow><mi>t</mi></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>w</mi><mo>=</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">[</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>A</mi><mo>,</mo><mspace width="0.167em"></mspace><mn>2</mn><mi>A</mi><mo>,</mo><mspace width="0.167em"></mspace><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">]</mo><mo>⋅</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>0.04</mn><mi>A</mi><mo>,</mo><mspace width="0.167em"></mspace><mn>0.08</mn><mi>A</mi><mo>,</mo><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">|</mo><mi>L</mi><mo>−</mo><mi>A</mi><mo stretchy="false" form="postfix">|</mo><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+J_L=\frac{L-A(1-t)}{t},\qquad
+w=\bigl[1-\mathrm{smoothstep}(A,\,2A,\,L)\bigr]\cdot\mathrm{smoothstep}(0.04A,\,0.08A,\,\lvert L-A\rvert)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>L</mi><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mo>,</mo><mspace width="0.167em"></mspace><msub><mi>J</mi><mi>L</mi></msub><mo>,</mo><mspace width="0.167em"></mspace><mi>w</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mi>I</mi><mo>⋅</mo><mfrac><mrow><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>L</mi><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow></msub><mo>,</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mo>,</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup><mo stretchy="false" form="postfix">)</mo></mrow></mfrac></mrow><annotation encoding="application/x-tex">
+L_{\mathrm{out}}=\mathrm{mix}(L,\,J_L,\,w),\qquad
+\mathrm{out}=I\cdot\frac{\max(L_{\mathrm{out}},0)}{\max(L,10^{-6})}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s1_9_dehaze.metal:508</code>–<code>:520</code>）。第二个淡出是对称的：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 是测量值，本身有约 ±4 % 的误差带，比它更小的差不是证据。天空在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>≈</mo><mn>0.12</mn></mrow><annotation encoding="application/x-tex">t\approx0.12</annotation></semantics></math> 时只比 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 低 3 %，没有这一项会被压掉 20 % 的光（<code>:496</code>–<code>:507</code>）。</p>
+<p>负值把同一模型反过来用：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">h</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">z</mi><mi mathvariant="normal">y</mi></mrow><mo>=</mo><mn>0.6</mn><mi>I</mi><mo>+</mo><mn>0.4</mn><mi>A</mi></mrow><annotation encoding="application/x-tex">\mathrm{hazy}=0.6I+0.4A</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>,</mo><mrow><mi mathvariant="normal">h</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">z</mi><mi mathvariant="normal">y</mi></mrow><mo>,</mo><mi>−</mi><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">t</mi></mrow><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\mathrm{out}=\mathrm{mix}(I,\mathrm{hazy},-\mathrm{amount})</annotation></semantics></math>（<code>:524</code>）。所有估计都在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mi>/</mi><mi>g</mi></mrow><annotation encoding="application/x-tex">I/g</annotation></semantics></math> 上做、恢复后乘回 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>g</mi><annotation encoding="application/x-tex">g</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mo>=</mo><msup><mn>2</mn><mrow><mi>E</mi><mi>V</mi></mrow></msup></mrow><annotation encoding="application/x-tex">g=2^{EV}</annotation></semantics></math> 是 S1 的曝光增益，于是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mi>e</mi><mi>n</mi><mi>d</mi><mi>e</mi><mi>r</mi><mo stretchy="false" form="prefix">(</mo><mi>E</mi><mo>,</mo><mi>D</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><msup><mn>2</mn><mi>E</mi></msup><mo>⋅</mo><mi>r</mi><mi>e</mi><mi>n</mi><mi>d</mi><mi>e</mi><mi>r</mi><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>,</mo><mi>D</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">render(E,D)=2^E\cdot render(0,D)</annotation></semantics></math> 精确成立（<code>:109</code>–<code>:122</code>、<code>:527</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dehaze</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2262</code>、<code>:2319</code></td>
+</tr>
+</tbody>
+</table>
+<p>实现常数：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ω</mi><mo>=</mo><mn>0.95</mn></mrow><annotation encoding="application/x-tex">\omega=0.95</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>t</mi><mn>0</mn></msub><mo>=</mo><mn>0.1</mn></mrow><annotation encoding="application/x-tex">t_0=0.1</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">k</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi></mrow><mo>=</mo><mn>0.15</mn></mrow><annotation encoding="application/x-tex">\mathrm{knee}=0.15</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>k</mi><mo>=</mo><mn>2</mn></mrow><annotation encoding="application/x-tex">k=2</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>κ</mi><mo>=</mo><mn>0.95</mn></mrow><annotation encoding="application/x-tex">\kappa=0.95</annotation></semantics></math>、无雾阈值 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>A</mi><mo>&lt;</mo><mn>0.02</mn></mrow><annotation encoding="application/x-tex">A&lt;0.02</annotation></semantics></math>（<code>Sources/PhotonsCore/RenderGraph.swift:4796</code>、<code>:4804</code>、<code>:4809</code>；<code>Kernels/s1_9_dehaze.metal:458</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s1_9_dehaze.metal</code>，十一个 pass：暗通道、空气光、上限、统计、盒均值 ×2、系数、盒均值 ×2、雾幕、apply（<code>:77</code>–<code>:97</code>）。第 4–10 个跑在块分辨率上，q = 4 时是全幅的十六分之一，七个新 pass 加起来不到夹在中间那两个全分辨率 pass 之一（<code>:99</code>–<code>:100</code>）。盒半径是画幅长边的 2 % 再除以 q，24 MP 时约 30 块 ≈ 120 px（<code>Sources/PhotonsCore/RenderGraph.swift:4789</code>–<code>:4792</code>）。全部在 GPU 上，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 停在 1×1 纹理里，不需要回读（<code>Kernels/s1_9_dehaze.metal:187</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · 去雾（<code>hazeremoval.c</code>）</strong> — 同一篇论文的暗通道 + 引导滤波，参数是 strength / distance / adaptive；Photons 多一个像素级 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>t</mi><annotation encoding="application/x-tex">t</annotation></semantics></math> 下界与膝混合，且 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 有 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>p</mi><mn>99</mn></msub><annotation encoding="application/x-tex">p_{99}</annotation></semantics></math> 上限、按曝光归一。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/hazeremoval.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/hazeremoval.c</a></li>
+<li><strong>RawTherapee · 去雾（<code>ipdehaze.cc</code>）</strong> — 暗通道后用 guided filter 做 soft matting，逐通道估 ambient；Photons 只在亮度上反演再乘公共增益，因此不改色相。 <a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipdehaze.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipdehaze.cc</a></li>
+<li><strong>vkdt · <code>dehaze</code></strong> — 模块自带 <code>depth.comp</code>，可以用深度图引导透过率；Photons 在 175 删掉了深度项，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>t</mi><annotation encoding="application/x-tex">t</annotation></semantics></math> 只是关于画面的事实。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/dehaze/main.c" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/dehaze/main.c</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>保色相 + 双重淡出，换来的是天空不会被去雾压暗、彩色边缘不会转色。代价是去雾本身不再增加饱和度——浓雾去掉之后画面会显得发灰，要靠饱和或分级补回来；这是刻意的：让一条滑杆只做一件事，比让它同时改色相可靠。另一个代价是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>A</mi><annotation encoding="application/x-tex">A</annotation></semantics></math> 只有一个全局值，画面里两种雾（远山与近地蒸汽）只能取一个折中。</p>
+<hr />
+<h2 id="暗角s3c">4.14 暗角（S3c）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>镜头的照度沿半径衰减，角落比中心暗；校正它要乘一个随半径上升的增益。它也可以反着用：压暗角落把视线收回中心。两件事都是<strong>乘在光上</strong>，所以它虽然叫 S3c、参数也在效果卡里，执行却在 S2 之前的线性链末尾（<code>Sources/PhotonsCore/Stage.swift:150</code>–<code>:153</code>、<code>:190</code>）。</p>
+<p><strong>算法</strong></p>
+<p>先把画布像素换到整幅画面的坐标，再取一个度量（<code>Kernels/s3_vignette.metal:45</code>–<code>:57</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">x</mi></mrow><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">u</mi><mi mathvariant="normal">v</mi></mrow><mo>−</mo><mn>0.5</mn><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">z</mi><mi mathvariant="normal">e</mi></mrow><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">n</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">r</mi><mi mathvariant="normal">m</mi></mrow><mo>=</mo><mn>0.5</mn><mo>⋅</mo><mrow><mo stretchy="true" form="prefix">‖</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">z</mi><mi mathvariant="normal">e</mi></mrow><mo stretchy="true" form="postfix">‖</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><mi>d</mi><mo>=</mo><mfrac><mrow><mo stretchy="true" form="prefix">‖</mo><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">x</mi></mrow><mo stretchy="true" form="postfix">‖</mo></mrow><mrow><mi mathvariant="normal">n</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">r</mi><mi mathvariant="normal">m</mi></mrow></mfrac></mrow><annotation encoding="application/x-tex">
+\mathrm{px}=(\mathrm{uv}-0.5)\cdot\mathrm{size},\qquad
+\mathrm{norm}=0.5\cdot\lVert\mathrm{size}\rVert,\qquad
+d=\frac{\lVert \mathrm{px}\rVert}{\mathrm{norm}}
+</annotation></semantics></math></p>
+<p>半对角线归一，所以任何画幅比例的<strong>角落都恰好是 1.0</strong>；旧实现按短边一半归一，3:2 的角落是 1.803，<code>inner</code> 最大 1.05 永远够不到（<code>:10</code>–<code>:16</code>）。</p>
+<p>衰减曲线是一个可调宽度的 smoothstep：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>w</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mfrac><mrow><mi mathvariant="normal">f</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">r</mi></mrow><mn>100</mn></mfrac><mo>⋅</mo><mn>0.5</mn><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi></mrow><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mn>0.002</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>t</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi></mrow><mo>−</mo><mi>w</mi><mo>,</mo><mspace width="0.222em"></mspace><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">d</mi></mrow><mo>+</mo><mi>w</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>d</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+w=\max\Bigl(\frac{\mathrm{feather}}{100}\cdot0.5\,(1-\mathrm{mid}),\ 0.002\Bigr),\qquad
+t=\mathrm{smoothstep}(\mathrm{mid}-w,\ \mathrm{mid}+w,\ d)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>+</mo><mfrac><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">t</mi></mrow><mn>100</mn></mfrac><mspace width="0.167em"></mspace><mi>t</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>4</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>⋅</mo><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi></mrow></mrow><annotation encoding="application/x-tex">
+\mathrm{gain}=\mathrm{clamp}\Bigl(1+\frac{\mathrm{amount}}{100}\,t,\ 0,\ 4\Bigr),\qquad
+\mathrm{out}=\mathrm{rgb}\cdot\mathrm{gain}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_vignette.metal:59</code>–<code>:72</code>）。<code>mid</code> 是 50 % 点：0 在中心（全幅变暗），1 在角落。宽度在角落处自动收窄，否则 midpoint = 100 时过渡带会从 0.75 开始、把长边中点也压暗；下限 0.2 % 是因为零宽台阶在 1.0 处永远碰不到任何像素中心，角落会一点都不暗（<code>:62</code>–<code>:68</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vignetteAmount</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2240</code>、<code>:2315</code></td>
+</tr>
+<tr>
+<td><code>vignetteMidpoint</code></td>
+<td>0…100</td>
+<td>50</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2241</code>、<code>:2315</code></td>
+</tr>
+<tr>
+<td><code>vignetteFeather</code></td>
+<td>0…100</td>
+<td>50</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2242</code>、<code>:2316</code></td>
+</tr>
+</tbody>
+</table>
+<p>内核把 feather 夹到 2…100 %，gain 夹到 0…4（<code>Kernels/s3_vignette.metal:60</code>、<code>:71</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_vignette.metal</code>，一个全分辨率 pass，读帧尺寸与窗口原点，不读画布——1:1 窗口必须看到与整幅同一物理位置的衰减，留黑边不参与（<code>Sources/PhotonsCore/RenderGraph.swift:3668</code>–<code>:3670</code>）。形状<strong>恒为圆</strong>：镜头旋转对称，衰减也对称，134 之后没有「圆度」这个字段，旧文档里那个键被当成未知键忽略（<code>Sources/PhotonsCore/EditModel.swift:2223</code>–<code>:2225</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · 暗角（<code>vignette.c</code>）</strong> — fall-off start/radius 加 brightness/saturation 与 shape/ratio，是显示域的创作暗角，还能顺手去饱和；Photons 只乘光、不改饱和，形状恒圆。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/vignette.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/vignette.c</a></li>
+<li><strong>vkdt · <code>vignette</code></strong> — 四次多项式加 sigmoid 的光学模型，带 center、cx/cy 与旋转角，能表达椭圆与偏轴衰减；Photons 是单一圆、半对角线归一，没有角度。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/vignette/main.comp" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/vignette/main.comp</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>圆 + 半对角线让「角落 = 1」成为与画幅无关的事实，导出与预览因此一致，参数也只剩三个。代价是做不了椭圆暗角与偏轴暗角——那属于镜头剖面的活，硬塞进这条滑杆只会让 corner = 1 这条不变量失效。另一处代价：因为在光域乘，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mi>m</mi><mi>o</mi><mi>u</mi><mi>n</mi><mi>t</mi><mo>&gt;</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">amount&gt;0</annotation></semantics></math> 时角落会被推到 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>1.0</mn><annotation encoding="application/x-tex">1.0</annotation></semantics></math> 以上，实际能提亮多少由 S2 与 S4 的 headroom 决定，而不是由这条滑杆决定。</p>
+<hr />
+<h2 id="颗粒s3.7">4.15 颗粒（S3.7）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>成品图需要一层胶片式的颗粒：均匀、单色、尺度可调，盖在已经完成的画面上。它必须<strong>确定</strong>——同一份文档每次渲染出同样的字节，否则缓存键、导出与预览三者对不上（<code>Kernels/s3_7_grain.metal:20</code>–<code>:23</code>）。</p>
+<p><strong>算法</strong></p>
+<p>位置先换到整幅画面的归一坐标，格子尺寸按<strong>画幅比例</strong>给（<code>Kernels/s3_7_grain.metal:102</code>–<code>:107</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">l</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mfrac><mn>1</mn><mn>1500</mn></mfrac><mo>,</mo><mspace width="0.222em"></mspace><mfrac><mn>1</mn><mn>200</mn></mfrac><mo>,</mo><mspace width="0.222em"></mspace><mfrac><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">z</mi><mi mathvariant="normal">e</mi></mrow><mn>100</mn></mfrac><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>q</mi><mo>=</mo><mfrac><mrow><mi mathvariant="normal">u</mi><mi mathvariant="normal">v</mi></mrow><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">l</mi></mrow></mfrac></mrow><annotation encoding="application/x-tex">
+\mathrm{cell}=\mathrm{mix}\Bigl(\frac{1}{1500},\ \frac{1}{200},\ \frac{\mathrm{size}}{100}\Bigr),\qquad
+q=\frac{\mathrm{uv}}{\mathrm{cell}}
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>n</mi><mo>=</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">[</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">x</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mi>V</mi><mo stretchy="false" form="prefix">(</mo><mi>q</mi><mo>,</mo><mi>s</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mi>V</mi><mo stretchy="false" form="prefix">(</mo><mn>2</mn><mi>q</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>s</mi><mo>⊕</mo><mrow><mn mathvariant="monospace">𝟶</mn><mi mathvariant="monospace">𝚡</mi><mn mathvariant="monospace">𝟿</mn><mi mathvariant="monospace">𝙴</mi><mn mathvariant="monospace">𝟹𝟽𝟽𝟿</mn><mi mathvariant="monospace">𝙱</mi><mn mathvariant="monospace">𝟿</mn></mrow><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mi>ρ</mi><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">]</mo><mo>⋅</mo><mn>2</mn><mo>−</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">
+n=\bigl[\mathrm{mix}\bigl(V(q,s),\ V(2q,\ s\oplus \mathtt{0x9E3779B9}),\ \rho\bigr)\bigr]\cdot2-1
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>V</mi><annotation encoding="application/x-tex">V</annotation></semantics></math> 是 smoothstep 插值的值噪声，格点值来自 32 位雪崩哈希（<code>Kernels/s3_7_grain.metal:47</code>–<code>:76</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>h</mi><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo>⋅</mo><mrow><mn mathvariant="monospace">𝟶</mn><mi mathvariant="monospace">𝚡</mi><mn mathvariant="monospace">𝟿</mn><mi mathvariant="monospace">𝙴</mi><mn mathvariant="monospace">𝟹𝟽𝟽𝟿</mn><mi mathvariant="monospace">𝙱</mi><mn mathvariant="monospace">𝟷</mn></mrow><mo stretchy="false" form="postfix">)</mo><mo>⊕</mo><mo stretchy="false" form="prefix">(</mo><mi>y</mi><mo>⋅</mo><mrow><mn mathvariant="monospace">𝟶</mn><mi mathvariant="monospace">𝚡</mi><mn mathvariant="monospace">𝟾𝟻</mn><mi mathvariant="monospace">𝙴</mi><mi mathvariant="monospace">𝙱</mi><mi mathvariant="monospace">𝙲</mi><mi mathvariant="monospace">𝙰</mi><mn mathvariant="monospace">𝟽𝟽</mn></mrow><mo stretchy="false" form="postfix">)</mo><mo>⊕</mo><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">d</mi></mrow><mo>⋅</mo><mrow><mn mathvariant="monospace">𝟶</mn><mi mathvariant="monospace">𝚡</mi><mi mathvariant="monospace">𝙲</mi><mn mathvariant="monospace">𝟸</mn><mi mathvariant="monospace">𝙱</mi><mn mathvariant="monospace">𝟸</mn><mi mathvariant="monospace">𝙰</mi><mi mathvariant="monospace">𝙴</mi><mn mathvariant="monospace">𝟹</mn><mi mathvariant="monospace">𝙳</mi></mrow><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+h=(x\cdot\mathtt{0x9E3779B1})\oplus(y\cdot\mathtt{0x85EBCA77})\oplus(\mathrm{seed}\cdot\mathtt{0xC2B2AE3D})
+</annotation></semantics></math></p>
+<p>再做三轮 <code>h ^= h &gt;&gt; k; h *= C</code>，取高 24 位当尾数、除以 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>2</mn><mn>24</mn></msup><annotation encoding="application/x-tex">2^{24}</annotation></semantics></math>，值严格落在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">[0,1)</annotation></semantics></math> 且相邻格点的低位不相关（<code>:57</code>–<code>:61</code>）。最后按幅度叠加：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>σ</mi><mo>=</mo><mfrac><mrow><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">t</mi></mrow><mn>100</mn></mfrac><mo>⋅</mo><mn>0.055</mn><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>+</mo><mi>n</mi><mspace width="0.167em"></mspace><mi>σ</mi><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>4</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\sigma=\frac{\mathrm{amount}}{100}\cdot0.055,\qquad
+\mathrm{out}=\mathrm{clamp}(\mathrm{rgb}+n\,\sigma,\ 0,\ 4)
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_7_grain.metal:110</code>–<code>:113</code>）。0.055 在 0…1 单位里约等于 8 位输出的 14 码，正是 Lightroom 自己 100 的位置（<code>:110</code>）。</p>
+<p>哈希必须是<strong>标量</strong>的：第一版哈希 <code>uint3(x,y,seed)</code> 而每个算子都逐分量，seed 只进 <code>.z</code> 且从不回写 <code>.x</code>，两个不同种子给出同一张图（<code>:42</code>–<code>:46</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>grain</code>（amount）</td>
+<td>0…100</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2226</code>、<code>:2317</code></td>
+</tr>
+<tr>
+<td><code>grainSize</code></td>
+<td>0…100</td>
+<td>25</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2228</code>、<code>:2317</code></td>
+</tr>
+<tr>
+<td><code>grainRoughness</code></td>
+<td>0…100</td>
+<td>50</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2229</code>、<code>:2318</code></td>
+</tr>
+<tr>
+<td><code>grainSeed</code></td>
+<td>0…999</td>
+<td>0</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2230</code>、<code>:2318</code></td>
+</tr>
+</tbody>
+</table>
+<p>种子在进内核前被量化并夹紧，所以键与 uniform 不会对不上（<code>Sources/PhotonsCore/EditModel.swift:2279</code>–<code>:2282</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_7_grain.metal</code>，一个全分辨率 pass，位置在暗角之后、S4 之前——颗粒盖在已完成的画面上，之后只剩编码（<code>Sources/PhotonsCore/Stage.swift:154</code>–<code>:161</code>、<code>:190</code>–<code>:192</code>）。<code>amount = 0</code> 时整条 stage 不编码，不是编码后乘 0（<code>Sources/PhotonsCore/EditModel.swift:2287</code>）；键里带种子，两份只差种子的文档不能共享缓存（<code>:2384</code>–<code>:2388</code>）。格子用画幅比例而不是画布像素，1:1 窗口与 9504 px 的导出才是同一颗颗粒（<code>Kernels/s3_7_grain.metal:12</code>–<code>:16</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · 颗粒（<code>grain.c</code>）</strong> — 有 scale、strength 与中间调偏置，内部还有亮度/色相/饱和三个强度常数，颗粒不只作用在亮度上；Photons 单色、无中间调加权，第二倍频由一个 roughness 权重控制。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/grain.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/grain.c</a></li>
+<li><strong>RawTherapee · 胶片颗粒（<code>ipgrain.cc</code>）</strong> — 按 ISO 与尺寸查表，颗粒强度随感光度走，作用在 Lab 的 L 上；Photons 与 ISO 无关，纯程序化。 <a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipgrain.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipgrain.cc</a></li>
+<li><strong>vkdt · <code>grain</code></strong> — size / magnitude / decay / octaves，哈希里带帧号，因此颗粒逐帧变化（适合动画）；Photons 的种子只由文档决定，同一文档每一帧都是同一张。 <a href="https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/grain/main.comp" class="uri">https://github.com/hanatos/vkdt/blob/master/src/pipe/modules/grain/main.comp</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>单色 + 两个倍频 + 一个标量种子，换来的是便宜、可缓存、可复现：颗粒不需要读邻居，一个 pass 结束，种子一改就是另一张图而不动别的键。代价有三处：没有色度颗粒，所以在高饱和区域颗粒看起来比胶片「干」；没有按亮度加权，暗部与亮部同一个 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>σ</mi><annotation encoding="application/x-tex">\sigma</annotation></semantics></math>，暗部的颗粒在视觉上更明显；尺度只有两档（主格 + 半格），再细的结构得靠 <code>size</code> 一个人扛。</p>
+<hr />
+<p>六组算子，一条共同的线：<strong>域决定公式，公式决定参数，参数的范围由内核能兑现的算术决定</strong>。去雾与暗角在光域，所以能与曝光交换、能保留大于 1 的高光；纹理、锐化、两种降噪在显示域，所以半径与预算都按画幅或码取值；颗粒在链尾，是唯一只做加法、不读邻居的算子。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="04b-color.html">← 4b 色彩</a>
+      <a class="next" href="04d-geometry-masks.html">4d 几何·蒙版 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

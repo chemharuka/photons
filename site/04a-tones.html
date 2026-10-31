@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4.1–4.6 影调：白平衡、曝光、端点、对比、曲线 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li class="current"><span>4a 影调</span></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#白平衡色调与黑电平">4.1 白平衡、色调与黑电平</a></li><li class="toc-2"><a href="#曝光">4.2 曝光</a></li><li class="toc-2"><a href="#高光中间调阴影">4.3 高光、中间调、阴影</a></li><li class="toc-2"><a href="#白点与黑点">4.4 白点与黑点</a></li><li class="toc-2"><a href="#全局对比度">4.5 全局对比度</a></li><li class="toc-2"><a href="#hdr-曲线">4.6 HDR 曲线</a></li></ul></nav>
+    <article>
+<h1 id="影调白平衡曝光端点对比曲线">4.1–4.6 影调：白平衡、曝光、端点、对比、曲线</h1>
+<p>第 3 章说参数该待在哪个域。这一章给算式：白平衡、曝光、三个影调窗口、两个端点、对比、曲线。每一节按同一结构写——解决什么问题、算式、参数、实现、开源对照、已知取舍。</p>
+<p>常数一律抄自 <code>Sources/PhotonsCore/Kernels/</code>，范围与默认值一律抄自 <code>Sources/PhotonsCore/EditModel.swift</code>。两者冲突时以 kernel 为准，冲突本身在哪一节都会点名。</p>
+<h2 id="白平衡色调与黑电平">4.1 白平衡、色调与黑电平</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>把「这张图的光是什么颜色」定下来，再把用户想要的偏移叠上去。白平衡决定中性色落在哪，色调（tint）修绿/品红偏移，黑电平决定「0」在哪。三者的共同要求是：没碰过时必须逐字节不变。</p>
+<p><strong>算法</strong></p>
+<p>解码器停在文件自带的 as-shot 平衡上，文档里的 (K, tint) 是 S1 的一次线性增益（<code>Sources/PhotonsCore/RenderGraph.swift:3366</code>）。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:240</code>）；tint 沿轨迹法线位移，幅度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>5</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>5</mn></mrow></msup></mrow><annotation encoding="application/x-tex">5\times10^{-5}</annotation></semantics></math> uv/单位（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:287</code>）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:349</code>），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。</p>
+<p>记 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>W</mi><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">W(T)</annotation></semantics></math> 为求解器在温度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>T</mi><annotation encoding="application/x-tex">T</annotation></semantics></math> 给出的线性白光，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo>,</mo><msub><mi>τ</mi><mtext mathvariant="normal">ref</mtext></msub></mrow><annotation encoding="application/x-tex">T_{\text{ref}},\tau_{\text{ref}}</annotation></semantics></math> 为参考对，则增益是通道比、绿归一：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>r</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>g</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>g</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>g</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>b</mi><mo>=</mo><mfrac><mrow><msub><mi>W</mi><mi>b</mi></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>T</mi><mtext mathvariant="normal">ref</mtext></msub><mo stretchy="false" form="postfix">)</mo></mrow><mrow><msub><mi>W</mi><mi>b</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>T</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mi>g</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>←</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mi>r</mi><mi>g</mi></mfrac><mo>,</mo><mspace width="0.167em"></mspace><mn>1</mn><mo>,</mo><mspace width="0.167em"></mspace><mfrac><mi>b</mi><mi>g</mi></mfrac><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+r=\frac{W_r(T_{\text{ref}})}{W_r(T)},\quad g=\frac{W_g(T_{\text{ref}})}{W_g(T)},\quad b=\frac{W_b(T_{\text{ref}})}{W_b(T)},\qquad (r,g,b)\leftarrow\left(\frac{r}{g},\,1,\,\frac{b}{g}\right)
+</annotation></semantics></math></p>
+<p>色调是编码域上的二次项，转到线性域就是一次乘与一次开方：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><msup><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>+</mo><mfrac><mrow><mi>τ</mi><mo>−</mo><msub><mi>τ</mi><mtext mathvariant="normal">ref</mtext></msub></mrow><mn>600</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mn>2</mn></msup><mo>,</mo><mspace width="2.0em"></mspace><mi>g</mi><mo>←</mo><mfrac><mi>g</mi><mi>s</mi></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>r</mi><mo>←</mo><msqrt><mi>s</mi></msqrt><mspace width="0.167em"></mspace><mi>r</mi><mo>,</mo><mspace width="1.0em"></mspace><mi>b</mi><mo>←</mo><msqrt><mi>s</mi></msqrt><mspace width="0.167em"></mspace><mi>b</mi></mrow><annotation encoding="application/x-tex">
+s=\left(1+\frac{\tau-\tau_{\text{ref}}}{600}\right)^{2},\qquad g\leftarrow \frac{g}{s},\quad r\leftarrow \sqrt{s}\,r,\quad b\leftarrow \sqrt{s}\,b
+</annotation></semantics></math></p>
+<p>参考对不写死成 6500 K / 0。先从解码缓冲估出画面自己的照度：三个估计器（白块 p99.5、1 %–99 % 截尾的灰世界均值、梯度加权的灰边）各给一个答案，逐通道取中位数（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:91</code>、<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:98</code>）；测出的色度 ≤ 0.02 时退回名义值（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:364</code>）。所以「as shot」与「显式 6500 K」在已平衡的画面上互为恒等，而偏色画面上的请求是相对它自己的偏色。</p>
+<p>黑电平是加法，且在增益之前：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>←</mo><mi>v</mi><mo>+</mo><mi>o</mi><mo>,</mo><mspace width="2.0em"></mspace><mi>o</mi><mo>=</mo><mtext mathvariant="normal">blackOffset</mtext><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mi>−</mi><mn>0.01</mn><mo>,</mo><mspace width="0.167em"></mspace><mo>+</mo><mn>0.01</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">
+v \leftarrow v+o,\qquad o=\text{blackOffset}\in[-0.01,\,+0.01]
+</annotation></semantics></math></p>
+<p>位置是 071 定的：加法量要被同一个增益缩放，负样本才和正样本一起被抬过零（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:237</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>temperature</code></td>
+<td>2000…12000</td>
+<td><code>nil</code>（as shot）</td>
+<td>K（<code>Sources/PhotonsCore/EditModel.swift:1291</code>）</td>
+</tr>
+<tr>
+<td><code>tint</code></td>
+<td>−150…150</td>
+<td><code>nil</code></td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1293</code>）</td>
+</tr>
+<tr>
+<td><code>blackOffset</code></td>
+<td>−0.01…+0.01</td>
+<td>0</td>
+<td>线性光（<code>Sources/PhotonsCore/EditModel.swift:1322</code>）</td>
+</tr>
+<tr>
+<td><code>blackOffset</code> 滑杆</td>
+<td>−10…+10，整数</td>
+<td>0</td>
+<td>1/1000（<code>Sources/PhotonsCore/EditModel.swift:1324</code>）</td>
+</tr>
+<tr>
+<td>照度采样上限</td>
+<td>120 000</td>
+<td>120 000</td>
+<td>像素（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:91</code>）</td>
+</tr>
+<tr>
+<td>增益夹取</td>
+<td>1/20…20</td>
+<td>—</td>
+<td>倍（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:420</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>GPU 侧只有一行：<code>v *= p.a.x * p.a.yzw</code>（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245</code>），<code>a</code> 的四个分量就是曝光增益与 wbR/wbG/wbB（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:150</code>）。as shot 时三个数是字面量 1（<code>Sources/PhotonsCore/RenderGraph.swift:3371</code>）；「未改动」还要求 <code>blackOffset == 0</code> 等条件同时成立，才走整段拷贝的分支（<code>Sources/PhotonsCore/RenderGraph.swift:3376</code>）。照度估计在 CPU、每个缓冲一次并缓存（<code>Sources/PhotonsCore/RenderGraph.swift:1548</code>），GPU 只拿到三个数——没有矩阵、没有查表。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>darktable <code>temperature</code>（<code>src/iop/temperature.c</code>）：系数来自相机矩阵与按文件记录的照度选表，是「查表 + 相机模型」；本实现是在解码后的线性缓冲上自己估照度再算增益——https://github.com/darktable-org/darktable/blob/master/src/iop/temperature.c</li>
+<li>RawTherapee 的 RAW 阶段白平衡（<code>rtengine/rawimagesource.cc</code>）：乘子乘在去马赛克之前的马赛克上，以 <code>refwb_*</code> 的 as-shot 为参考；本实现乘在已去马赛克的线性图上，参考来自画面估计而不是文件记录——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/rawimagesource.cc</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>估计是抽样的：至多 12 万像素、确定性步长（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:118</code>）。一张大面积单色的画面，三个估计器会一起错。</li>
+<li>增益夹在 1/20…20（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:420</code>），极端请求在这个边界上饱和，而不是报错。</li>
+<li><code>LightGroup.whiteBalanceGains</code> 还留着，但它是编码域拟合、约弱 2.2 倍，管线不用它（<code>Sources/PhotonsCore/EditModel.swift:1446</code>）。读代码的人容易把它当成实现。</li>
+<li>这里与第 1.1、3.7 节的说法已经不同：那两节写「温度/色调喂给 <code>CIRAWFilter.neutralTemperature</code>」（<code>Sources/PhotonsCore/EditModel.swift:1284</code>），而 143 之后解码器不再收这个请求（<code>Sources/PhotonsCore/DecodeInputs.swift:8</code>）。以本节的代码路径为准。</li>
+</ul>
+<h2 id="曝光">4.2 曝光</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>给整幅画面加减光。它必须是一次纯增益，必须在任何压缩之前完成——一旦压在显示域，被压掉的高光就再拿不回来。它也是 S1 里唯一不带窗口的增益：不改斜率、不改色度、不动任何端点。</p>
+<p><strong>算法</strong></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>←</mo><mi>v</mi><mo>⋅</mo><msup><mn>2</mn><mi>E</mi></msup></mrow><annotation encoding="application/x-tex">
+v \leftarrow v\cdot 2^{E}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>E</mi><annotation encoding="application/x-tex">E</annotation></semantics></math> 是文档的 EV。没有夹取、没有端点、没有曲线参与（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:245</code>）。位置固定：在加法微调之后、两个端点之前（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:239</code>、<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:251</code>）。</p>
+<p>有一条配套约定让曝光可交换：<code>whites</code> 的窗口读「没加曝光的亮度」<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>L</mi><mn>0</mn></msub><annotation encoding="application/x-tex">L_0</annotation></semantics></math>，而不是画面当前的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>L</mi><mn>0</mn></msub><mo>=</mo><mi>L</mi><mo>−</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><msup><mn>2</mn><mi>E</mi></msup></mrow><annotation encoding="application/x-tex">
+L_0=L-\log_2 2^{E}
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:233</code>。）于是曝光平移画面、不平移窗口，同一个 <code>whites</code> 数值在 E0 与 E+2 下作用在同一批场景影调上（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:207</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>exposure</code></td>
+<td>−5…+5</td>
+<td>0</td>
+<td>EV（<code>Sources/PhotonsCore/EditModel.swift:1245</code>）</td>
+</tr>
+<tr>
+<td>增益 <code>2^E</code></td>
+<td>1/32…32</td>
+<td>1</td>
+<td>倍（<code>Sources/PhotonsCore/EditModel.swift:1437</code>）</td>
+</tr>
+<tr>
+<td><code>highlightRecovery</code></td>
+<td>0…1</td>
+<td>0</td>
+<td>无量纲（<code>Sources/PhotonsCore/EditModel.swift:1295</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>增益在 CPU 上算：<code>exposureGain = pow(2, exposure)</code>（<code>Sources/PhotonsCore/EditModel.swift:1437</code>），作为 <code>S1Params.a.x</code> 传入（<code>Sources/PhotonsCore/RenderGraph.swift:3388</code>）。只有 <code>kKnee</code> 打开时，它才额外作为参数交给端点函数（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:257</code>），因为 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>L</mi><mn>0</mn></msub><annotation encoding="application/x-tex">L_0</annotation></semantics></math> 要用到它；<code>g = 1</code> 时 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>L</mi><mn>0</mn></msub><mo>=</mo><mi>L</mi></mrow><annotation encoding="application/x-tex">L_0=L</annotation></semantics></math> 逐位成立（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:212</code>）。</p>
+<p>高光恢复在同一次 dispatch 的最后：膝 0.8，<code>amount=0</code> 是精确恒等，<code>amount=1</code> 渐近 1.0（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:262</code>）。它永远排在端点之后——<code>whites</code> 说白点在哪，恢复说肩怎么压（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:139</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>darktable <code>exposure</code>（<code>src/iop/exposure.c</code>）：同一模块里还有黑点与 deflicker，且黑点被约束在白点之下；本实现的曝光只有一个数，黑电平是另一个加法量、在增益之前——https://github.com/darktable-org/darktable/blob/master/src/iop/exposure.c</li>
+<li>darktable <code>filmicrgb</code>（<code>src/iop/filmicrgb.c</code>）：那里「曝光」是相对曝光的范围归一化，先定白/黑相对 EV 再上曲线；本实现的曝光是乘在光上的纯增益，范围由 <code>whites</code> 的 EV 窗口另行表达——https://github.com/darktable-org/darktable/blob/master/src/iop/filmicrgb.c</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>kernel 不夹取 <code>p.a.x</code>。−5…+5 只是文档声明的范围（<code>Sources/PhotonsCore/EditModel.swift:1245</code>），手改文档能超出滑杆。</li>
+<li>高光恢复吃的是 S1 出口的值，也就是已经过 <code>blacks</code>/<code>whites</code> 的值；想把肩放在端点之前，目前没有位置。</li>
+</ul>
+<h2 id="高光中间调阴影">4.3 高光、中间调、阴影</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>三个滑杆分别抬或压暗部、中间调、亮部，而互不打架。判据有两条：每个亮度必须有一个满权主人，中间不能有死带（两个滑杆都不作用的带）。</p>
+<p><strong>算法</strong></p>
+<p>权重是两条互补的 smoothstep 链，坐标是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>=</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mi>Y</mi></mrow><annotation encoding="application/x-tex">L=\log_2 Y</annotation></semantics></math>（相对显示白的 EV，直方图自己的轴）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>5.4</mn><mo>,</mo><mi>−</mi><mn>3.9</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="1.0em"></mspace><mi>b</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>2.4</mn><mo>,</mo><mi>−</mi><mn>0.9</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="1.0em"></mspace><mi>c</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>4.0</mn><mo>,</mo><mn>6.0</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+a=\mathrm{ss}(-5.4,-3.9,L),\quad b=\mathrm{ss}(-2.4,-0.9,L),\quad c=\mathrm{ss}(4.0,6.0,L)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>s</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><mi>a</mi><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mi>m</mi></msub><mo>=</mo><mi>a</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mi>h</mi></msub><mo>=</mo><mi>b</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>c</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+w_s=1-a,\qquad w_m=a(1-b),\qquad w_h=b(1-c)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>a</mi><annotation encoding="application/x-tex">a</annotation></semantics></math> 在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>b</mi><annotation encoding="application/x-tex">b</annotation></semantics></math> 起步之前就已到 1，所以 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>&lt;</mo><mi>+</mi><mn>4</mn></mrow><annotation encoding="application/x-tex">L&lt;+4</annotation></semantics></math> 时 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>s</mi></msub><mo>+</mo><msub><mi>w</mi><mi>m</mi></msub><mo>+</mo><msub><mi>w</mi><mi>h</mi></msub><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">w_s+w_m+w_h=1</annotation></semantics></math>：没有哪个亮度是没人管的（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:98</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:104</code>）。增益只有一个 <code>exp2</code>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>←</mo><mi>v</mi><mo>⋅</mo><msup><mn>2</mn><mrow><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>s</mi></msub><msub><mi>d</mi><mi>s</mi></msub><mo>+</mo><msub><mi>w</mi><mi>m</mi></msub><msub><mi>d</mi><mi>m</mi></msub><mo>+</mo><msub><mi>w</mi><mi>h</mi></msub><msub><mi>d</mi><mi>h</mi></msub></mrow></msup></mrow><annotation encoding="application/x-tex">
+v \leftarrow v\cdot 2^{\,w_s d_s+w_m d_m+w_h d_h}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>d</mi><mi>i</mi></msub><annotation encoding="application/x-tex">d_i</annotation></semantics></math> 是<strong>已经过门</strong>的 EV 位移，在 CPU 上算：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>d</mi><mi>i</mi></msub><mo>=</mo><mfrac><msub><mi>s</mi><mi>i</mi></msub><mn>100</mn></mfrac><msub><mi mathvariant="normal">Δ</mi><mi>i</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><msub><mi mathvariant="normal">Δ</mi><mi>s</mi></msub><mo>=</mo><mn>0.90</mn><mo>,</mo><mspace width="0.222em"></mspace><msub><mi mathvariant="normal">Δ</mi><mi>m</mi></msub><mo>=</mo><mn>0.70</mn><mo>,</mo><mspace width="0.222em"></mspace><msub><mi mathvariant="normal">Δ</mi><mi>h</mi></msub><mo>=</mo><mn>0.60</mn></mrow><annotation encoding="application/x-tex">
+d_i=\frac{s_i}{100}\Delta_i,\qquad \Delta_s=0.90,\ \Delta_m=0.70,\ \Delta_h=0.60
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/S2Regions.swift:40</code>。）三个行程反号时会把局部斜率压穿，所以有一道公共压缩：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">deficit</mtext><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">{</mo><mo stretchy="false" form="prefix">|</mo><msub><mi>d</mi><mi>m</mi></msub><mo>−</mo><msub><mi>d</mi><mi>s</mi></msub><mo stretchy="false" form="prefix">|</mo><mo>,</mo><mspace width="0.222em"></mspace><mo stretchy="false" form="prefix">|</mo><msub><mi>d</mi><mi>h</mi></msub><mo>−</mo><msub><mi>d</mi><mi>m</mi></msub><mo stretchy="false" form="prefix">|</mo><mo>,</mo><mspace width="0.222em"></mspace><mstyle displaystyle="false"><mfrac><mn>1.5</mn><mn>2.0</mn></mfrac></mstyle><mo stretchy="false" form="prefix">|</mo><msub><mi>d</mi><mi>h</mi></msub><mo stretchy="false" form="prefix">|</mo><mo stretchy="true" form="postfix">}</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><mtext mathvariant="normal">deficit</mtext><mo>&gt;</mo><mn>1</mn><mo>−</mo><mi>σ</mi><mspace width="0.222em"></mspace><mo>⇒</mo><mspace width="0.222em"></mspace><mi>d</mi><mo>←</mo><mi>d</mi><mo>⋅</mo><mfrac><mi>σ</mi><mtext mathvariant="normal">deficit</mtext></mfrac></mrow><annotation encoding="application/x-tex">
+\text{deficit}=\max\left\{|d_m-d_s|,\ |d_h-d_m|,\ \tfrac{1.5}{2.0}|d_h|\right\},\qquad \text{deficit}&gt;1-\sigma\ \Rightarrow\ d\leftarrow d\cdot\frac{\sigma}{\text{deficit}}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>σ</mi><mo>=</mo><mn>0.500</mn></mrow><annotation encoding="application/x-tex">\sigma=0.500</annotation></semantics></math>（<code>Sources/PhotonsCore/S2Regions.swift:52</code>、<code>Sources/PhotonsCore/S2Regions.swift:82</code>）。方向照 Lightroom：<code>+</code> 提亮该区，<code>−</code> 压暗（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:31</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>shadows</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1252</code>）</td>
+</tr>
+<tr>
+<td><code>midtones</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1251</code>）</td>
+</tr>
+<tr>
+<td><code>highlights</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1247</code>）</td>
+</tr>
+<tr>
+<td>满行程</td>
+<td>0.90 / 0.70 / 0.60</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/S2Regions.swift:40</code>）</td>
+</tr>
+<tr>
+<td>最小斜率 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>σ</mi><annotation encoding="application/x-tex">\sigma</annotation></semantics></math></td>
+<td>0.500</td>
+<td>0.500</td>
+<td>— （<code>Sources/PhotonsCore/S2Regions.swift:52</code>）</td>
+</tr>
+<tr>
+<td>窗口边界</td>
+<td>−5.4/−3.9，−2.4/−0.9，+4.0/+6.0</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:90</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:95</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>分工很清楚：kernel 只做权重与一次 <code>exp2</code>（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:90</code>、<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:92</code>），行程和单调性门都在 CPU 的 <code>S2Regions.travelEV</code>（<code>Sources/PhotonsCore/S2Regions.swift:73</code>）——kernel 收到的是 EV，不是滑杆位置（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:26</code>）。“图不会折”因此是一个可计算的属性，而不是窗口宽度选得巧。</p>
+<p>S2 在入口<strong>不夹取</strong>：<code>v = c.rgb</code> 直接进权重（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:83</code>），只在本阶段末尾取 <code>max(v, 0)</code>（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:97</code>）。原因是解码器会给零以下的样本，抬升已把它们拉过零的像素是真画面（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:78</code>）。alpha 0 与内容矩形两道守卫在像素运算之前（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:66</code>、<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:73</code>），否则抬暗部会把黑边一起点亮。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>darktable <code>toneequal</code>（<code>src/iop/toneequal.c</code>）：在场景线性相机 RGB 上按曝光八度建高斯权重系，解线性系统得到各区增益；本实现是显示参考域的三个互补窗口，没有空间项、没有解法——https://github.com/darktable-org/darktable/blob/master/src/iop/toneequal.c</li>
+<li>RawTherapee <code>shadows/highlights</code>（<code>rtengine/ipshadowshighlights.cc</code>）：带半径的 Lab 亮度分带，是局部算子；本实现是逐像素、无半径的窗口，作用域只由蒙版决定——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/ipshadowshighlights.cc</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>单个 <code>shadows +100</code> 拿不到 0.90 EV：门会把它压到 0.50（<code>Sources/PhotonsCore/S2Regions.swift:44</code>）。三个滑杆的满行程是标称值，不是保证值。</li>
+<li>两条接缝都是钉死的 1.5 EV（<code>Sources/PhotonsCore/S2Regions.swift:83</code>），不随画幅、不随内容自适应；动态范围很窄的图可能整幅落在某条接缝上，三个滑杆于是都动它。</li>
+<li>蒙版内的阴影/高光仍用 074 的两窗口 <code>region_weights</code>（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:53</code>），与全局的三段<strong>故意</strong>不同步（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:30</code>）。同一次拖动，全局与蒙版的响应因此不完全同形。</li>
+</ul>
+<h2 id="白点与黑点">4.4 白点与黑点</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>把最暗与最亮钉在哪。纯乘法做不到：<code>0 → 0</code> 对任何增益都成立，所以黑点既压不到 0 也浮不起来；纯加法会造灰。答案是「EV 膝 + 电平」的混合，两半按行程混合。</p>
+<p><strong>算法</strong></p>
+<p>记 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>=</mo><mtext mathvariant="normal">blacks</mtext><mi>/</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">t=\text{blacks}/100</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mo stretchy="false" form="prefix">|</mo><mi>t</mi><mo stretchy="false" form="prefix">|</mo></mrow><annotation encoding="application/x-tex">a=|t|</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 是端点的坐标（BT.709 亮度取对数）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>b</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>12</mn><mo>,</mo><mi>−</mi><mn>1</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>v</mi><mo>←</mo><mi>v</mi><mo>⋅</mo><msup><mn>2</mn><mrow><mn>3.0</mn><mspace width="0.167em"></mspace><mi>t</mi><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>b</mi></msub></mrow></msup></mrow><annotation encoding="application/x-tex">
+w_b=1-\mathrm{ss}(-12,-1,L),\qquad v\leftarrow v\cdot 2^{3.0\,t\,w_b}
+</annotation></semantics></math></p>
+<p>这就是前半段，也是整个 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">|</mo><mi>t</mi><mo stretchy="false" form="prefix">|</mo><mo>≤</mo><mn>0.2</mn></mrow><annotation encoding="application/x-tex">|t|\le 0.2</annotation></semantics></math> 时的全部算术（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:237</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:267</code>）。超过 0.2 之后电平进场：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>0.2</mn><mo>,</mo><mn>1</mn><mo>,</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mi>l</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>6</mn><mo>,</mo><mi>−</mi><mn>1</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mtext mathvariant="normal">off</mtext><mo>=</mo><mn>0.006</mn><mspace width="0.167em"></mspace><mi>t</mi><mspace width="0.167em"></mspace><mi>m</mi><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>l</mi></msub></mrow><annotation encoding="application/x-tex">
+m=\mathrm{ss}(0.2,1,a),\qquad w_l=1-\mathrm{ss}(-6,-1,L),\qquad \text{off}=0.006\,t\,m\,w_l
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">off</mtext><mo>&lt;</mo><mn>0</mn><mo>:</mo><mspace width="0.222em"></mspace><mi>v</mi><mo>←</mo><mi>T</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo>+</mo><mtext mathvariant="normal">off</mtext><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><mi>g</mi><mo>,</mo><mspace width="2.0em"></mspace><mtext mathvariant="normal">off</mtext><mo>&gt;</mo><mn>0</mn><mo>:</mo><mspace width="0.222em"></mspace><mi>v</mi><mo>←</mo><mi>T</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo>⋅</mo><mi>g</mi><mo>+</mo><mtext mathvariant="normal">off</mtext><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>g</mi><mo>=</mo><msup><mn>2</mn><mrow><mn>3.0</mn><mspace width="0.167em"></mspace><mi>t</mi><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>b</mi></msub></mrow></msup></mrow><annotation encoding="application/x-tex">
+\text{off}&lt;0:\ v\leftarrow T(v+\text{off})\cdot g,\qquad \text{off}&gt;0:\ v\leftarrow T(v\cdot g+\text{off}),\qquad g=2^{3.0\,t\,w_b}
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:245</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:250</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:262</code>。）<strong>顺序看符号</strong>，这是单调性的来源：压暗时两件事都变暗，先电平后增益；提亮时电平必须骑在增益<strong>外面</strong>，否则 ±0.006 在 8× 增益里会被放大八倍，最暗的那一格反而最亮（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:254</code>）。</p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>T</mi><annotation encoding="application/x-tex">T</annotation></semantics></math> 是 C¹ 整流器，膝 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>k</mi><mo>=</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>3</mn></mrow></msup></mrow><annotation encoding="application/x-tex">k=10^{-3}</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>T</mi><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="left" style="text-align: left"><mi>x</mi><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>x</mi><mo>≥</mo><mi>k</mi></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mn>0</mn><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>x</mi><mo>≤</mo><mi>−</mi><mi>k</mi></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mstyle displaystyle="true"><mfrac><mrow><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo>+</mo><mi>k</mi><msup><mo stretchy="false" form="postfix">)</mo><mn>2</mn></msup></mrow><mrow><mn>4</mn><mi>k</mi></mrow></mfrac></mstyle><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mtext mathvariant="normal">otherwise</mtext></mtd></mtr></mtable></mrow></mrow><annotation encoding="application/x-tex">
+T(x)=\begin{cases}x, &amp; x\ge k\\ 0, &amp; x\le -k\\ \dfrac{(x+k)^2}{4k}, &amp; \text{otherwise}\end{cases}
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:186</code>。）压暗一侧真的会到 0——那就是「改电平」的意思；提亮一侧 <code>off ≥ 0</code> 不夹取，所以 <code>t=+1</code> 不会把正的样本压到 0。</p>
+<p>白点用同一个函数的后半段，但读 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>L</mi><mn>0</mn></msub><annotation encoding="application/x-tex">L_0</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>=</mo><mfrac><mtext mathvariant="normal">whites</mtext><mn>100</mn></mfrac><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mi>w</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>2</mn><mo>,</mo><mn>2</mn><mo>,</mo><msub><mi>L</mi><mn>0</mn></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>λ</mi><mo>=</mo><mfrac><mn>1</mn><mrow><mn>1</mn><mo>−</mo><mn>0.20</mn><mspace width="0.167em"></mspace><mi>u</mi><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">|</mo><mi>u</mi><mo stretchy="false" form="prefix">|</mo></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mi>v</mi><mo>←</mo><mi>v</mi><mo>⋅</mo><msup><mn>2</mn><mrow><mn>1.2</mn><mspace width="0.167em"></mspace><mi>u</mi><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>w</mi></msub></mrow></msup><mo>⋅</mo><mi>λ</mi></mrow><annotation encoding="application/x-tex">
+u=\frac{\text{whites}}{100},\qquad w_w=\mathrm{ss}(-2,2,L_0),\qquad \lambda=\frac{1}{1-0.20\,u\,|u|},\qquad v\leftarrow v\cdot 2^{1.2\,u\,w_w}\cdot\lambda
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:275</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:276</code>。）<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>λ</mi><annotation encoding="application/x-tex">\lambda</annotation></semantics></math> 是乘法电平、没有窗口，所以它缩放每一档亮度（含 HDR 尾）；<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">u=0</annotation></semantics></math> 时 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>λ</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">\lambda=1</annotation></semantics></math>，中性文档逐字节不变（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:113</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>blacks</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1275</code>）</td>
+</tr>
+<tr>
+<td><code>whites</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1257</code>）</td>
+</tr>
+<tr>
+<td>黑 EV 满行程 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>B</mi><mrow><mi>E</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">B_{EV}</annotation></semantics></math></td>
+<td>3.0</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:117</code>）</td>
+</tr>
+<tr>
+<td>黑膝窗口</td>
+<td>−12…−1</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:118</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:119</code>）</td>
+</tr>
+<tr>
+<td>电平幅度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>B</mi><mrow><mi>L</mi><mi>E</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">B_{LEV}</annotation></semantics></math></td>
+<td>0.006</td>
+<td>—</td>
+<td>线性光（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:129</code>）</td>
+</tr>
+<tr>
+<td>电平窗口</td>
+<td>−6…−1</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:130</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:131</code>）</td>
+</tr>
+<tr>
+<td>电平膝</td>
+<td>1e-3</td>
+<td>—</td>
+<td>线性光（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:132</code>）</td>
+</tr>
+<tr>
+<td>电平入场点</td>
+<td>|blacks| &gt; 20</td>
+<td>—</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/RenderGraph.swift:3196</code>）</td>
+</tr>
+<tr>
+<td>白 EV 满行程 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mrow><mi>E</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">W_{EV}</annotation></semantics></math></td>
+<td>1.2</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:170</code>）</td>
+</tr>
+<tr>
+<td>白电平 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mrow><mi>L</mi><mi>E</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">W_{LEV}</annotation></semantics></math></td>
+<td>0.20</td>
+<td>—</td>
+<td>无量纲（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:171</code>）</td>
+</tr>
+<tr>
+<td>白点窗口</td>
+<td>−2…+2</td>
+<td>—</td>
+<td>EV（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:172</code>、<code>Sources/PhotonsCore/Kernels/tone_shape.metal:173</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>一个模板函数、七个入口。<code>kKnee</code>/<code>kHybrid</code>/<code>kTrim</code>/<code>kCalib</code> 都是编译期常量（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:209</code>），CPU 按值选名字（<code>Sources/PhotonsCore/RenderGraph.swift:3213</code>）：<code>|blacks| &gt; 20</code> 才进 <code>_hybrid</code>（<code>Sources/PhotonsCore/RenderGraph.swift:3196</code>），否则是 073B 的那一支。分派阈值与 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>m</mi><annotation encoding="application/x-tex">m</annotation></semantics></math> 的零点重合，所以两支在边界上逐位相等（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:196</code>）。真要两个滑杆都是 0，<code>p.b.y</code> 让整段拷贝直接返回（<code>Sources/PhotonsCore/Kernels/s1_scene_linear.metal:216</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>darktable <code>levels</code>（<code>src/iop/levels.c</code>）：黑、中间、白三个把手，作用在显示参考的 0…1 上，是一次跨度的仿射重映射；本实现的黑白点是场景线性域的两个端点，动的是膝与电平，不改整幅斜率——https://github.com/darktable-org/darktable/blob/master/src/iop/levels.c</li>
+<li>RawTherapee 的 RAW 黑白电平（<code>rtengine/rawimage.cc</code>）：逐通道从遮罩/元数据求黑电平，是解码域的钳位；本实现的端点在解码之后，是用户可以拖的量——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/rawimage.cc</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>端点亮度用的是 BT.709 权重（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:181</code>），不是工作基色 Rec.2020；S1 还没迁移，因为 <code>BwLevelsTests</code> 的数都钉在这三个数上（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:175</code>）。</li>
+<li><code>whites</code> 的电平是全局乘法，物理上限很小：p1 只动 2–5 码（<code>Sources/PhotonsCore/Kernels/tone_shape.metal:145</code>）。要暗部明显变亮，它是错的工具，<code>blacks</code> 的 EV 膝或 <code>exposure</code> 才对。</li>
+<li><code>EditModel</code> 的注释还写着旧常数：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>0.5</mn><mo>,</mo><mn>1</mn><mo>,</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">m=\mathrm{ss}(0.5,1,a)</annotation></semantics></math>、0.005、窗口 −6.9…−4.4（<code>Sources/PhotonsCore/EditModel.swift:1263</code>），而 kernel 是 0.2 / 0.006 / −6…−1。以 <code>tone_shape.metal</code> 为准；<code>EditModel.blacksEVToLevelSplit = 50</code>（<code>Sources/PhotonsCore/EditModel.swift:1283</code>）也已经不是实际阈值。</li>
+</ul>
+<h2 id="全局对比度">4.5 全局对比度</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>让局部反差变大，同时不动整体亮度。乘一个幂律斜率做不到这件事：它把中间调一起推上顶，细节与整体分不开。还有一条硬条件——它必须与曝光可交换：先加曝光再加对比，与先对比再加曝光，必须是同一张图。</p>
+<p><strong>算法</strong></p>
+<p>只分解亮度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math>（显示参考、白 = 1 = 0 EV），一切增益都是<strong>残差</strong>，没有绝对锚点：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Y</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mo stretchy="false" form="prefix">⟨</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>,</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo><msub><mo stretchy="false" form="postfix">⟩</mo><mi>w</mi></msub><mo>,</mo><mspace width="0.167em"></mspace><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>G</mi><mo>=</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mi>Y</mi></mrow><annotation encoding="application/x-tex">
+Y=\max(\langle\max(\mathrm{rgb},0)\rangle_w,\,10^{-6}),\qquad G=\log_2 Y
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>B</mi><mi>c</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">G</mi><mi mathvariant="normal">F</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>G</mi><mo>;</mo><msub><mi>r</mi><mi>c</mi></msub><mo>,</mo><msub><mi>ε</mi><mi>c</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>D</mi><mn>1</mn></msub><mo>=</mo><mi>G</mi><mo>−</mo><msub><mi>B</mi><mi>c</mi></msub><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>B</mi><mi>m</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">G</mi><mi mathvariant="normal">F</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>D</mi><mn>1</mn></msub><mo>;</mo><msub><mi>r</mi><mi>m</mi></msub><mo>,</mo><msub><mi>ε</mi><mi>m</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>D</mi><mi>f</mi></msub><mo>=</mo><msub><mi>D</mi><mn>1</mn></msub><mo>−</mo><msub><mi>B</mi><mi>m</mi></msub></mrow><annotation encoding="application/x-tex">
+B_c=\mathrm{GF}(G;r_c,\varepsilon_c),\quad D_1=G-B_c,\quad B_m=\mathrm{GF}(D_1;r_m,\varepsilon_m),\quad D_f=D_1-B_m
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>G</mi><mo>′</mo></msup><mo>=</mo><mi>G</mi><mo>+</mo><mi>γ</mi><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>k</mi><mi>m</mi></msub><msub><mi>B</mi><mi>m</mi></msub><mo>+</mo><msub><mi>k</mi><mi>f</mi></msub><msub><mi>D</mi><mi>f</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><msup><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>′</mo></msup><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo>,</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><msup><mn>2</mn><mrow><msup><mi>G</mi><mo>′</mo></msup><mo>−</mo><mi>G</mi></mrow></msup></mrow><annotation encoding="application/x-tex">
+G&#39;=G+\gamma\left(k_mB_m+k_fD_f\right),\qquad \mathrm{rgb}&#39;=\max(\mathrm{rgb},0)\cdot 2^{G&#39;-G}
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:17</code>。）<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi mathvariant="normal">G</mi><mi mathvariant="normal">F</mi></mrow><annotation encoding="application/x-tex">\mathrm{GF}</annotation></semantics></math> 是自引导滤波，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mi>/</mi><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">v</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mo>+</mo><mi>ε</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">a=\mathrm{var}/(\mathrm{var}+\varepsilon)</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>b</mi><mo>=</mo><mover><mi>I</mi><mo accent="true">‾</mo></mover><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">b=\bar I(1-a)</annotation></semantics></math>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:266</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>γ</mi><annotation encoding="application/x-tex">\gamma</annotation></semantics></math> 是梯度门，读的是窗口均值的梯度：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>γ</mi><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>0.05</mn><mo>,</mo><mspace width="0.167em"></mspace><mn>2.00</mn><mo>,</mo><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">|</mo><mi>∇</mi><msub><mover><mi>D</mi><mo accent="true">‾</mo></mover><mn>1</mn></msub><mo stretchy="false" form="prefix">|</mo><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+\gamma=1-\mathrm{ss}(0.05,\,2.00,\,|\nabla \bar D_1|)
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:274</code>。）门只乘两条细节带，所以强边附近不会被放大成晕。</p>
+<p>权重两段不同律（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:300</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>≥</mo><mn>0</mn><mo>:</mo><mspace width="0.222em"></mspace><msub><mi>k</mi><mi>m</mi></msub><mo>=</mo><mn>7.50</mn><mspace width="0.167em"></mspace><mi>t</mi><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>k</mi><mi>f</mi></msub><mo>=</mo><mn>3.75</mn><mspace width="0.167em"></mspace><mi>t</mi><mo>;</mo><mspace width="2.0em"></mspace><mi>t</mi><mo>&lt;</mo><mn>0</mn><mo>:</mo><mspace width="0.222em"></mspace><msub><mi>k</mi><mi>m</mi></msub><mo>=</mo><msub><mi>k</mi><mi>f</mi></msub><mo>=</mo><msup><mn>2</mn><mrow><mn>0.75</mn><mi>t</mi></mrow></msup><mo>−</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">
+t\ge 0:\ k_m=7.50\,t,\ k_f=3.75\,t;\qquad t&lt;0:\ k_m=k_f=2^{0.75t}-1
+</annotation></semantics></math></p>
+<p>负向是<strong>收缩</strong>，不是反号的行程：残差最小乘到 0.59，恒为正（<code>Sources/PhotonsCore/ContrastMultiscale.swift:184</code>）。正向到白点要淡出，并给一个上限：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>d</mi><mo>&gt;</mo><mn>0</mn><mo>:</mo><mspace width="1.0em"></mspace><mi>d</mi><mo>←</mo><mi>d</mi><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>1</mn><mo>,</mo><mn>0</mn><mo>,</mo><mi>G</mi><mo stretchy="false" form="postfix">)</mo><mo stretchy="true" form="postfix">)</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><mi>G</mi><mo>&lt;</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mn>0.98</mn><mspace width="0.222em"></mspace><mo>⇒</mo><mspace width="0.222em"></mspace><mi>d</mi><mo>≤</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mn>0.98</mn><mo>−</mo><mi>G</mi></mrow><annotation encoding="application/x-tex">
+d&gt;0:\quad d\leftarrow d\left(1-\mathrm{ss}(-1,0,G)\right),\qquad G&lt;\log_2 0.98\ \Rightarrow\ d\le\log_2 0.98-G
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:327</code>。）所以白点以下没有像素能被推上顶；而已经大于 1 的 HDR 样本照常扩张（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:329</code>）。黑地板 0.00110 保证「清过地板」的像素不会被压到地板以下（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:341</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>contrast</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（<code>Sources/PhotonsCore/EditModel.swift:1246</code>）</td>
+</tr>
+<tr>
+<td>中带权重 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>m</mi></msub><annotation encoding="application/x-tex">W_m</annotation></semantics></math></td>
+<td>7.50</td>
+<td>7.50</td>
+<td>EV/EV（<code>Sources/PhotonsCore/ContrastMultiscale.swift:72</code>）</td>
+</tr>
+<tr>
+<td>细带权重 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>f</mi></msub><annotation encoding="application/x-tex">W_f</annotation></semantics></math></td>
+<td>3.75</td>
+<td>3.75</td>
+<td>EV/EV（<code>Sources/PhotonsCore/ContrastMultiscale.swift:77</code>）</td>
+</tr>
+<tr>
+<td>粗/中 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ε</mi><annotation encoding="application/x-tex">\varepsilon</annotation></semantics></math></td>
+<td>0.80 / 0.32</td>
+<td>—</td>
+<td><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msubsup><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn><mn>2</mn></msubsup><annotation encoding="application/x-tex">\log_2^2</annotation></semantics></math>（<code>Sources/PhotonsCore/ContrastMultiscale.swift:59</code>、<code>Sources/PhotonsCore/ContrastMultiscale.swift:62</code>）</td>
+</tr>
+<tr>
+<td>门膝</td>
+<td>0.05 / 2.00</td>
+<td>—</td>
+<td><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><annotation encoding="application/x-tex">\log_2</annotation></semantics></math>/texel（<code>Sources/PhotonsCore/ContrastMultiscale.swift:92</code>、<code>Sources/PhotonsCore/ContrastMultiscale.swift:93</code>）</td>
+</tr>
+<tr>
+<td>统计块 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>q</mi><annotation encoding="application/x-tex">q</annotation></semantics></math></td>
+<td>4</td>
+<td>4</td>
+<td>像素（<code>Sources/PhotonsCore/ContrastMultiscale.swift:103</code>）</td>
+</tr>
+<tr>
+<td>粗/中半径</td>
+<td>短边 6 % / 2 %，上限 96 / 24</td>
+<td>—</td>
+<td>1/q texel（<code>Sources/PhotonsCore/ContrastMultiscale.swift:118</code>、<code>Sources/PhotonsCore/ContrastMultiscale.swift:121</code>）</td>
+</tr>
+<tr>
+<td>统计代理长边</td>
+<td>1024</td>
+<td>1024</td>
+<td>像素（<code>Sources/PhotonsCore/ContrastMultiscale.swift:115</code>）</td>
+</tr>
+<tr>
+<td>负向收缩指数</td>
+<td>0.75</td>
+<td>0.75</td>
+<td>— （<code>Sources/PhotonsCore/ContrastMultiscale.swift:184</code>）</td>
+</tr>
+<tr>
+<td>黑地板</td>
+<td>0.00110</td>
+<td>—</td>
+<td>线性光（<code>Sources/PhotonsCore/ContrastMultiscale.swift:99</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>统计不在全分辨率上做。系数图在长边 1024 的<strong>整幅代理</strong>上建一次并缓存（<code>Sources/PhotonsCore/ContrastMultiscale.swift:115</code>、<code>Sources/PhotonsCore/RenderGraph.swift:3732</code>），所以适应、25 %、1:1、平移中的 1:1 窗口取样的是同一张图——一个物理像素的增益不能取决于窗口在哪。kernel 分五个 pass：pack（每 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>q</mi><mo>×</mo><mi>q</mi></mrow><annotation encoding="application/x-tex">q\times q</annotation></semantics></math> 块写均值与平方均值）→ 水平盒 → 垂直盒 → 系数 → apply，带蒙版时 apply 换成 masked 变体。</p>
+<p>一个细节让曝光与对比可交换：分解读的是<strong>没加曝光的显示对数</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>G</mi><mo>=</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mo stretchy="false" form="prefix">(</mo><mi>Y</mi><mi>/</mi><msup><mn>2</mn><mi>E</mi></msup><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">G=\log_2(Y/2^{E})</annotation></semantics></math>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:386</code>），曝光只是把画面平移过同一张系数图。带蒙版时，蒙版自己的线性增益要先折进 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>G</mi><annotation encoding="application/x-tex">G</annotation></semantics></math>（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:451</code>），否则同一个 <code>contrast</code> 在蒙版内外是两套算子。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>RawTherapee <code>local contrast</code>（<code>rtengine/iplocalcontrast.cc</code>）：对 Lab 的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 做 FFT 高斯模糊，按半径与明暗三参数做非锐化式局部对比；本实现是显示对数上的引导滤波多尺度残差，且残差增益与曝光无关——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/iplocalcontrast.cc</li>
+<li>darktable <code>local contrast</code>（<code>src/iop/bilat.c</code>）：双边网格或局部拉普拉斯滤波，跑在 Lab 亮度上，带空间半径；本实现的分解是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>q</mi><mo>=</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">q=4</annotation></semantics></math> 块统计上的自引导滤波，没有双边权重，也不做边缘保持的显式项——https://github.com/darktable-org/darktable/blob/master/src/iop/bilat.c</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>负向只能把残差压到 0.59×，永远不是 0：<code>2^t</code> 会把画面均值拉走 −1.21 码，超出「±1 码」的预算，所以取了 0.75（<code>Sources/PhotonsCore/Kernels/s1_8_contrast.metal:306</code>）。</li>
+<li>门的 0.05/2.00 不在「显示域是场景域 1/4 宽」的 ×4 规则上，是这组常数里唯一的例外，理由是门的输入是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>q</mi><annotation encoding="application/x-tex">q</annotation></semantics></math> 域的窗口均值梯度（<code>Sources/PhotonsCore/ContrastMultiscale.swift:89</code>）。</li>
+<li>系数图固定 1024 长边：画面小于 1024 时它就是自己（逐位复用旧系数），大于它时 1:1 拿到的是上采样结果（<code>Sources/PhotonsCore/ContrastMultiscale.swift:105</code>）。</li>
+</ul>
+<h2 id="hdr-曲线">4.6 HDR 曲线</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>一条曲线，要同时弯 SDR 的 0–255 与显示白以上的 +0…+4 EV，而且必须与它上面的直方图同轴——左半是显示码，右半是 stops。它是管线里唯一一个用户直接画形状的算子：不解释画面，只执行点列。</p>
+<p><strong>算法</strong></p>
+<p>横轴 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>u</mi><annotation encoding="application/x-tex">u</annotation></semantics></math> 是分段函数，SDR 半边用 sRGB 编码，HDR 半边用 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><annotation encoding="application/x-tex">\log_2</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="left" style="text-align: left"><mn>0.5</mn><mspace width="0.167em"></mspace><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">R</mi><mi mathvariant="normal">G</mi><mi mathvariant="normal">B</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mn>0</mn><mo>&lt;</mo><mi>x</mi><mo>≤</mo><mn>1</mn></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mn>0.5</mn><mo>+</mo><mn>0.125</mn><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mi>x</mi><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>x</mi><mo>&gt;</mo><mn>1</mn></mtd></mtr></mtable></mrow><mspace width="2.0em"></mspace><mi>x</mi><mo stretchy="false" form="prefix">(</mo><mi>u</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="left" style="text-align: left"><msup><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">R</mi><mi mathvariant="normal">G</mi><mi mathvariant="normal">B</mi></mrow><mrow><mi>−</mi><mn>1</mn></mrow></msup><mo stretchy="false" form="prefix">(</mo><mn>2</mn><mi>u</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>u</mi><mo>≤</mo><mn>0.5</mn></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><msup><mn>2</mn><mrow><mn>8</mn><mo stretchy="false" form="prefix">(</mo><mi>u</mi><mo>−</mo><mn>0.5</mn><mo stretchy="false" form="postfix">)</mo></mrow></msup><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>u</mi><mo>&gt;</mo><mn>0.5</mn></mtd></mtr></mtable></mrow></mrow><annotation encoding="application/x-tex">
+u(x)=\begin{cases}0.5\,\mathrm{sRGB}(x), &amp; 0&lt;x\le 1\\ 0.5+0.125\log_2 x, &amp; x&gt;1\end{cases}
+\qquad
+x(u)=\begin{cases}\mathrm{sRGB}^{-1}(2u), &amp; u\le 0.5\\ 2^{8(u-0.5)}, &amp; u&gt;0.5\end{cases}
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:15</code>。）于是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo stretchy="false" form="prefix">(</mo><mn>0.18</mn><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mn>0.2307</mn></mrow><annotation encoding="application/x-tex">u(0.18)=0.2307</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mn>0.5</mn></mrow><annotation encoding="application/x-tex">u(1)=0.5</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo stretchy="false" form="prefix">(</mo><mn>4</mn><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mn>0.75</mn></mrow><annotation encoding="application/x-tex">u(4)=0.75</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo stretchy="false" form="prefix">(</mo><mn>16</mn><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">u(16)=1</annotation></semantics></math>（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:20</code>）。白点位置 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>0.5</mn><annotation encoding="application/x-tex">0.5</annotation></semantics></math> 与每档宽度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>0.125</mn><annotation encoding="application/x-tex">0.125</annotation></semantics></math> 都从 uniform 来，不写死在 kernel 里（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:109</code>），CPU 的参考实现与 GPU 的整形器因此不可能漂移。</p>
+<p>表里存的是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">v\in[0,1]</annotation></semantics></math>，插值在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>u</mi><annotation encoding="application/x-tex">u</annotation></semantics></math> 上做（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:126</code>）。W 曲线是<strong>亮度增益</strong>，不是逐通道查表：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>←</mo><mi>v</mi><mo>⋅</mo><msup><mn>2</mn><mi mathvariant="normal">Δ</mi></msup><mo>,</mo><mspace width="2.0em"></mspace><mi mathvariant="normal">Δ</mi><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mrow><mo stretchy="true" form="prefix">(</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mfrac><mrow><mi>x</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mi>x</mi><mo stretchy="false" form="prefix">(</mo><mi>u</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="0.167em"></mspace><mo>−</mo><mn>12</mn><mo>,</mo><mspace width="0.167em"></mspace><mo>+</mo><mn>12</mn><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+v\leftarrow v\cdot 2^{\Delta},\qquad \Delta=\mathrm{clamp}\left(\log_2\frac{x(v)}{x(u)},\,-12,\,+12\right)
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:237</code>。）<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi mathvariant="normal">Δ</mi><annotation encoding="application/x-tex">\Delta</annotation></semantics></math> 是两束<strong>光</strong>的比，不是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>u</mi><annotation encoding="application/x-tex">u</annotation></semantics></math> 差乘常数——SDR 半边上 1 个 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>u</mi><annotation encoding="application/x-tex">u</annotation></semantics></math> 是 12–100 个 stops，乘常数会让中间调弱 40 %（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:231</code>）。R/G/B 是可分表，各自独立：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>v</mi><mi>c</mi></msub><mo>←</mo><mi>x</mi><mrow><mo stretchy="true" form="prefix">(</mo><msub><mrow><mi mathvariant="normal">L</mi><mi mathvariant="normal">U</mi><mi mathvariant="normal">T</mi></mrow><mi>c</mi></msub><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mi>u</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>v</mi><mi>c</mi></msub><mo stretchy="false" form="postfix">)</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>+</mo><mi mathvariant="normal">max</mi><mo stretchy="false" form="prefix">(</mo><mi>u</mi><mo>−</mo><mn>1</mn><mo>,</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>s</mi><mi>c</mi></msub><mo>,</mo><mi>−</mi><mn>2</mn><mo>,</mo><mn>2</mn><mo stretchy="false" form="postfix">)</mo><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+v_c\leftarrow x\left(\mathrm{LUT}_c\big(u(v_c)\big)+\max(u-1,0)\cdot\mathrm{clamp}(s_c,-2,2)\right)
+</annotation></semantics></math></p>
+<p>（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:180</code>、<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:243</code>。）顺序 W → R → G → B：先整幅影调，再偏色（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:94</code>）。</p>
+<p>四条边界规则都不 Optional：① 恒等表直接拷贝（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:192</code>）；② alpha 0 与内容矩形的守卫（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:198</code>、<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:205</code>）；③ <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>x</mi><mo>≤</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">x\le0</annotation></semantics></math> 原样穿过、保号，<strong>除非</strong>黑点被抬过（此时落进表的常值段，负样本一起被夹）（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:175</code>）；④ <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>&gt;</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">u&gt;1</annotation></semantics></math> 按末段斜率继续，不夹取（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:180</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>控制点 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math></td>
+<td>0…2</td>
+<td>0</td>
+<td>轴坐标 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>=</mo><mi>x</mi><mi>/</mi><mn>2</mn></mrow><annotation encoding="application/x-tex">u=x/2</annotation></semantics></math>（<code>Sources/PhotonsCore/EditModel.swift:1740</code>、<code>Sources/PhotonsCore/EditModel.swift:1751</code>）</td>
+</tr>
+<tr>
+<td>控制点 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math></td>
+<td>0…2</td>
+<td>—</td>
+<td>同上（<code>Sources/PhotonsCore/EditModel.swift:1757</code>）</td>
+</tr>
+<tr>
+<td>恒等点列</td>
+<td>—</td>
+<td>(0,0),(2,2)</td>
+<td>（<code>Sources/PhotonsCore/EditModel.swift:1823</code>）</td>
+</tr>
+<tr>
+<td>表长 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>N</mi><annotation encoding="application/x-tex">N</annotation></semantics></math></td>
+<td>4096</td>
+<td>4096</td>
+<td>采样点（<code>Sources/PhotonsCore/EditCurve.swift:45</code>）</td>
+</tr>
+<tr>
+<td>表数</td>
+<td>4（W/R/G/B）</td>
+<td>4</td>
+<td>张（<code>Sources/PhotonsCore/EditCurve.swift:52</code>）</td>
+</tr>
+<tr>
+<td>末段斜率</td>
+<td>−2…+2</td>
+<td>由末两点算</td>
+<td>EV/u（<code>Sources/PhotonsCore/HDRCurve.swift:190</code>、<code>Sources/PhotonsCore/HDRCurve.swift:200</code>）</td>
+</tr>
+<tr>
+<td>曲线格式</td>
+<td>version 2、<code>double</code>、<code>max: 2</code></td>
+<td>同</td>
+<td>（<code>Sources/PhotonsCore/EditModel.swift:1549</code>）</td>
+</tr>
+<tr>
+<td><code>processVersion</code></td>
+<td>2</td>
+<td>2</td>
+<td>（<code>Sources/PhotonsCore/EditModel.swift:141</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p>一张 4×4096 的 float 表在 GPU 缓冲里，kernel 只读（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:187</code>）。恒等表按位掩码跳过（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:218</code>、<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:227</code>）——整形器往返会带 ~5e-7 的误差，在 fp16 边界上就是 1 bit。末段斜率由表尾两点算（<code>Sources/PhotonsCore/EditCurve.swift:126</code>），夹取的两端是同一个数：<code>tailSlopeLimit = 2</code>、<code>tailSlopeFloor = -2</code>（<code>Sources/PhotonsCore/HDRCurve.swift:190</code>、<code>Sources/PhotonsCore/HDRCurve.swift:200</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li>darktable <code>tonecurve</code>（<code>src/iop/tonecurve.c</code>）：表的末段用拟合出的幂律外推，不夹取；本实现的末段是线性外推加 ±2 的斜率夹取，斜率直接就是 +4 EV 以上的对数对比——https://github.com/darktable-org/darktable/blob/master/src/iop/tonecurve.c</li>
+<li>darktable <code>AgX</code>（<code>src/iop/agx.c</code>）：基色压缩 + log + sigmoid 的整幅色调映射，形状由模块给；本实现的曲线形状由用户点列给，模块只负责轴与边界——https://github.com/darktable-org/darktable/blob/master/src/iop/agx.c</li>
+<li>Filmulator 的胶片曲线（<code>filmulator-gui/Halide/applyfilmlikecurve.cpp</code>）：先把 RGB 排序，逐通道查表，中间通道按低/高两条的差线性插值以保序；本实现的 W 曲线是亮度增益，三通道按同一 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi mathvariant="normal">Δ</mi><annotation encoding="application/x-tex">\Delta</annotation></semantics></math> 缩放，保的是色相与饱和——https://github.com/CarVac/filmulator-gui/blob/master/filmulator-gui/Halide/applyfilmlikecurve.cpp</li>
+</ul>
+<p><strong>取舍</strong></p>
+<ul>
+<li>W 曲线永远不会被反相：下降的 W 点列到了 kernel 就是恒等表（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:97</code>）。负片的下降只能交给 R/G/B 三张表，它们各自可以整体下降（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:99</code>）。</li>
+<li><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>&gt;</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">u&gt;1</annotation></semantics></math> 是线性外推，一段之外没有第二道形状；斜率夹在 ±2 是防手改文档，不是画面决定（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:71</code>）。</li>
+<li><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi mathvariant="normal">Δ</mi><annotation encoding="application/x-tex">\Delta</annotation></semantics></math> 夹在 ±12 EV 是 fp16 保护：把白点从 0.5 拖到 1.0 是 +9 EV，200 级的像素在 half float 里已经接近 inf（<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:235</code>、<code>Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:238</code>）。所以极端的点列会被截断，而且不会有提示。</li>
+</ul>
+<hr />
+<p>曲线之后，S2 交出 <code>0…1</code>，S2.5 的对比与 S3 的色彩才有可用的坐标。这六节加起来只说明一件事：每个滑杆都待在自己的域里，而且都能被一行算式复述。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="03-processing.html">← 3 处理架构</a>
+      <a class="next" href="04b-color.html">4b 色彩 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

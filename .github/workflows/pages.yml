@@ -1,0 +1,39 @@
+# 发布白皮书站点（site/）到 GitHub Pages。
+#
+# 只做上传与部署：站点由 scripts/whitepaper/build.py 在本地构建并提交到 site/，
+# 所以 Actions 里没有 pandoc、没有 Ruby、没有主题解析——CI 只搬运已经评审过的 HTML。
+#
+# 一次性设置：仓库 Settings → Pages → Source = "GitHub Actions"。
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,14 @@
+{
+  "title": "Photons 渲染白皮书",
+  "subtitle": "显示架构 · 处理架构 · 参数算法",
+  "chapters": [
+    { "slug": "00-preface", "file": "00-preface.md", "title": "卷首：这份文档是什么", "short": "卷首" },
+    { "slug": "01-overview", "file": "01-overview.md", "title": "1 总览：一条管线，三条不变量", "short": "1 总览" },
+    { "slug": "02-display", "file": "02-display.md", "title": "2 显示架构：画布、缓冲、渲染", "short": "2 显示架构" },
+    { "slug": "03-processing", "file": "03-processing.md", "title": "3 处理架构：域、顺序、契约", "short": "3 处理架构" },
+    { "slug": "04a-tones", "file": "04a-tones.md", "title": "4.1–4.6 影调：白平衡、曝光、端点、对比、曲线", "short": "4a 影调" },
+    { "slug": "04b-color", "file": "04b-color.md", "title": "4.7–4.9 色彩：饱和、HSL、点颜色、分级", "short": "4b 色彩" },
+    { "slug": "04c-detail", "file": "04c-detail.md", "title": "4.10–4.15 细节与效果：纹理、锐化、降噪、去雾、暗角、颗粒", "short": "4c 细节" },
+    { "slug": "04d-geometry-masks", "file": "04d-geometry-masks.md", "title": "4.16–4.17 几何与蒙版", "short": "4d 几何·蒙版" }
+  ]
+}

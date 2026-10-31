@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 处理架构：域、顺序、契约 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li class="current"><span>3 处理架构</span></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#三个域">3.1 三个域</a></li><li class="toc-2"><a href="#参数-组-域-阶段">3.2 参数 → 组 → 域 → 阶段</a></li><li class="toc-2"><a href="#顺序的八条判据">3.3 顺序的八条判据</a></li><li class="toc-2"><a href="#局部调整一张蒙版横跨两个域">3.4 局部调整：一张蒙版横跨两个域</a></li><li class="toc-2"><a href="#中性零变化谓词而不是乘法">3.5 中性零变化：谓词，而不是乘法</a></li><li class="toc-2"><a href="#五个顺序陷阱">3.6 五个顺序陷阱</a></li><li class="toc-2"><a href="#解码域与-s1-的分工">3.7 解码域与 S1 的分工</a></li><li class="toc-2"><a href="#版本格式与迁移">3.8 版本、格式与迁移</a></li></ul></nav>
+    <article>
+<h1 id="处理架构域顺序契约">3 处理架构：域、顺序、契约</h1>
+<p>第 2 章讲的是「像素怎么到屏幕上」。这一章讲的是<strong>每个参数为什么在那个位置</strong>：先给三个域的定义，再给一张全参数归属表，然后解释排序的八条判据、局部调整为什么横跨两个域、以及中性零变化这条契约是怎么被工程化的。最后一节讲版本与迁移。</p>
+<h2 id="三个域">3.1 三个域</h2>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>域</th>
+<th>量</th>
+<th>能不能大于 1</th>
+<th>典型操作</th>
+<th>判据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>RAW 解码域</strong></td>
+<td>相机样本，Apple 解释</td>
+<td>是（HDR 余量）</td>
+<td>去马赛克、机身降噪、镜头校正</td>
+<td>需要马赛克或厂商模型的事，只能在这里做</td>
+</tr>
+<tr>
+<td><strong>场景线性域</strong></td>
+<td>线性光，<code>1</code> = SDR 白</td>
+<td>是（最高约 16×）</td>
+<td>白平衡、黑电平、曝光、端点、曲线、去雾、暗角、校准矩阵</td>
+<td>操作是<strong>光的乘加</strong>，且必须在压缩之前</td>
+</tr>
+<tr>
+<td><strong>显示参考域</strong></td>
+<td>显示码，<code>0…1</code></td>
+<td>否</td>
+<td>三段影调、对比、饱和、HSL、分级、细节、颗粒</td>
+<td>操作的对象是「显示出来的样子」，或依赖色调映射后的亮度窗口</td>
+</tr>
+</tbody>
+</table>
+<p>域的边界不是审美问题，而是<strong>信息是否还在</strong>：一旦 S2 把场景压进 <code>0…1</code>，被压掉的高光就再也拿不回来；反过来，在线性域对已经显示的像素做「局部对比」，就没有可用的亮度参照。第三、四章的每个反例都能归到这两句话之一。</p>
+<h2 id="参数-组-域-阶段">3.2 参数 → 组 → 域 → 阶段</h2>
+<p>下表是全文的参数真值表；第四列的「键」是该参数进入哪个阶段的键材料（决定改它要重跑哪一段）。范围与默认值全部取自 <code>Sources/PhotonsCore/EditModel.swift</code>。</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>组</th>
+<th>参数（范围 / 默认）</th>
+<th>域</th>
+<th>阶段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>几何</td>
+<td><code>crop</code>、<code>rotationDegrees</code> ±45°、<code>flipH/V</code>、<code>aspectLock</code>、<code>quarterTurns</code> 0…3、<code>perspectiveV/H</code> ±100</td>
+<td>源像素</td>
+<td><strong>S0</strong></td>
+<td>几何改变像素网格，必须最先</td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>exposure</code> −5…+5 / 0</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>纯增益 <code>2^EV</code></td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>blackOffset</code> ±0.01 / 0</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>加法微调，在增益<strong>之前</strong></td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>blacks</code>、<code>whites</code> ±100 / 0</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>端点；EV + 电平混合（073B/C）</td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>highlightRecovery</code> 0…1 / 0</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>软肩</td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>contrast</code> −100…100 / 0</td>
+<td>显示参考</td>
+<td><strong>S2.5</strong></td>
+<td>多尺度残差，见 4.5</td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>highlights</code>、<code>midtones</code>、<code>shadows</code> ±100 / 0</td>
+<td>显示参考</td>
+<td><strong>S2</strong></td>
+<td>三段互补窗口</td>
+</tr>
+<tr>
+<td>曲线</td>
+<td><code>white/red/green/blue</code> 控制点，<code>x,y ∈ 0…2</code></td>
+<td>曲线轴 <code>u</code></td>
+<td><strong>S1.7</strong></td>
+<td>W 是亮度增益，R/G/B 是逐通道</td>
+</tr>
+<tr>
+<td>色彩</td>
+<td><code>vibrance</code>、<code>saturation</code> ±100 / 0</td>
+<td>显示参考</td>
+<td><strong>S3</strong></td>
+<td>—</td>
+</tr>
+<tr>
+<td>色彩</td>
+<td>8 色带 × (<code>hue</code>,<code>saturation</code>,<code>luminance</code>) ±100</td>
+<td>显示参考</td>
+<td><strong>S3.6</strong></td>
+<td>OKLCh，色相 ±30°</td>
+</tr>
+<tr>
+<td>色彩</td>
+<td>8 色带 × <code>mix</code> ±100</td>
+<td>显示参考</td>
+<td><strong>S3.4</strong></td>
+<td>仅黑白开启时</td>
+</tr>
+<tr>
+<td>色彩</td>
+<td><code>global</code> 三轴 ±100</td>
+<td>显示参考</td>
+<td><strong>S3.6</strong></td>
+<td>第九选择器</td>
+</tr>
+<tr>
+<td>色彩</td>
+<td><code>point</code> 采样色 + 3 轴</td>
+<td>显示参考</td>
+<td><strong>S3.6b</strong></td>
+<td>点颜色</td>
+</tr>
+<tr>
+<td>分级</td>
+<td>3 区域 × (<code>hue</code>,<code>sat</code>,<code>lightness</code>) ±100</td>
+<td>显示参考</td>
+<td><strong>S3.8</strong></td>
+<td>阴影/高光是 S2 的 074 两窗，中间调 = 1 − 两者</td>
+</tr>
+<tr>
+<td>效果</td>
+<td><code>vignetteAmount</code> ±100、<code>midpoint</code>/<code>feather</code> 0…100</td>
+<td>场景线性</td>
+<td><strong>S3c</strong></td>
+<td>校正，跑在 S2 之前</td>
+</tr>
+<tr>
+<td>效果</td>
+<td><code>dehaze</code> ±100 / 0</td>
+<td>场景线性</td>
+<td><strong>S1.9</strong></td>
+<td>暗通道先验</td>
+</tr>
+<tr>
+<td>效果</td>
+<td><code>texture</code>、<code>clarity</code> ±100；<code>nonBayerLuminanceNR</code>、<code>nonBayerColorNR</code> 0…100</td>
+<td>显示参考</td>
+<td><strong>S3.9</strong></td>
+<td>纹理/清晰度是引导残差；去噪是联合双边网格（171）</td>
+</tr>
+<tr>
+<td>效果</td>
+<td><code>grain</code> 0…100、<code>size</code>、<code>roughness</code>、<code>seed</code></td>
+<td>显示参考</td>
+<td><strong>S3.7</strong></td>
+<td>—</td>
+</tr>
+<tr>
+<td>锐化</td>
+<td><code>amount</code> 0…150、<code>radius</code> 0.5…3、<code>detail</code>/<code>masking</code> 0…100</td>
+<td>显示参考</td>
+<td><strong>S3.10</strong></td>
+<td>USM</td>
+</tr>
+<tr>
+<td>光学</td>
+<td><code>caRed</code>、<code>caBlue</code> ±0.005（滑杆 ±100）</td>
+<td>源像素</td>
+<td><strong>S0</strong></td>
+<td>径向比例，不是像素位移</td>
+</tr>
+<tr>
+<td>校准</td>
+<td><code>shadowTint</code>、R/G/B × (<code>hue</code>,<code>sat</code>) ±100</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>线性 Rec.2020 上的 3×3 矩阵</td>
+</tr>
+<tr>
+<td>蒙版</td>
+<td>形状 + <code>opacity</code>/<code>feather</code>/<code>refine</code>/<code>invert</code>/<code>blend</code> + 13 个局部量</td>
+<td>两域</td>
+<td><strong>S1.5/S1.6/S3.5/S3.9</strong></td>
+<td>见 3.4</td>
+</tr>
+<tr>
+<td>光线</td>
+<td><code>temperature</code> 2000…12000 K（<code>nil</code> = as shot）、<code>tint</code> ±150（<code>nil</code>）</td>
+<td>场景线性</td>
+<td><strong>S1</strong></td>
+<td>自 143 起是增益，不是解码参数；<code>nil</code> = 增益 1</td>
+</tr>
+<tr>
+<td>解码</td>
+<td><code>sharpening</code> 0…150、<code>sharpeningRadius</code> 0.5…3、<code>noiseLuminance/Color</code> 0…100、<code>lensCorrections</code></td>
+<td>解码域</td>
+<td><code>CIRAWFilter</code></td>
+<td>机身基线，改它要重新解码</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>两处 α 期的文档债。</strong> ① <code>Stage.swift</code> 里 S3.9 的注释仍写着「在暗角之前」，但 116 把暗角移到了线性链，执行顺序里暗角在 <strong>S2 之前</strong>、S3.9 在 S2 之后（<code>Stage.swift:190</code>）。以 <code>order</code> 数组为准，注释是旧的。② README 的对照表把 whites/blacks 记在 S2，代码在 S1（见 1.2 的注）。</p>
+</blockquote>
+<h2 id="顺序的八条判据">3.3 顺序的八条判据</h2>
+<p><strong>① 几何最先（S0）。</strong> 它改变像素网格本身（裁剪、旋转、透视、镜头 warp），后面所有按像素做的运算——蒙版坐标、暗角半径、锐化半径——都以它的输出为准。把几何放到后面，等于让每一步都重新解释一次坐标。</p>
+<p><strong>② 修复先于风格（S1.9）。</strong> 修复画笔是「修画面」，不是「调色」：它要读被 S1.6 写过的可见像素作为源，又必须在曲线、色调映射、色彩之前完成，否则补丁会被后续的曲线放大成一块可见的斑（<code>Stage.swift:24</code>）。</p>
+<p><strong>③ 曲线在色调映射之前（S1.7）。</strong> 030 把曲线从 S3 移到 S1.7：曲线在 HDR 轴上工作，<code>+4 EV</code> 的高光在进入 S2 之前就按用户的意图弯过了；如果放在 S2 之后，用户只能弯 S2 已经压过的数据，「高光」这个滑杆与曲线上的高光段会互相打架（<code>Stage.swift:34</code>）。</p>
+<p><strong>④ 对比在色调映射之后（S2.5）。</strong> 159 之前，对比在 S1.8（场景线性、固定 −3.5 EV 锚点），实测 <code>曝光 × 对比</code> 不可交换：同一个对比在 E0 与 E+2 下给出不同的 p50 增益（0.666 vs 2.695），74 % 的像素改变方向（<code>ContrastMultiscale.swift:3</code>）。改成显示域的<strong>纯残差</strong>增益后，曝光增益同时缩放 <code>G</code> 与各带残差，对比增益不变（<code>Stage.swift:42</code>）。</p>
+<p><strong>⑤ 色彩在显示域（S3 之后）。</strong> 饱和与 HSL 的对象是「看起来的颜色」。HSL 曾在线性域，纯蓝与纯黄的 <code>l</code> 都是 0.5，而两者的亮度差 6.9×（<code>Stage.swift:89</code>）；搬到 OKLCh 的显示域后，<code>L</code> 才与感知亮度对应。</p>
+<p><strong>⑥ 去雾在光域（S1.9）。</strong> 去雾模型 <code>J = (I − A(1 − t))/t</code> 里的 <code>A</code> 是空气光，是场景里的一个光量。117 之前它在显示域、<code>A</code> 固定为 1，于是 <code>I &gt; 1</code> 的高光越去雾越亮（<code>Stage.swift:55</code>）。</p>
+<p><strong>⑦ 暗角在光域、且在色调映射之前（S3c）。</strong> 暗角是照度衰减的<strong>校正</strong>，乘的是光，不是显示码；放在 S2 之后会把暗角变成一个「暗部窗口」操作（<code>Stage.swift:150</code>）。它仍在去雾之后：否则暗角的衰减会被暗通道当成雾幕。</p>
+<p><strong>⑧ 细节与锐化在显示域、色彩之后、颗粒之前。</strong> 纹理/清晰度/锐化是「成品图上的细节」，半径按内容像素定义，因此 1:1 与 25 % 预览锐化的是同一处细节（<code>EditModel.swift:2397</code>）。颗粒在最后：它盖在已经完成的画面上，之后只剩 S4 编码（<code>Stage.swift:154</code>）。</p>
+<h2 id="局部调整一张蒙版横跨两个域">3.4 局部调整：一张蒙版横跨两个域</h2>
+<p>蒙版本身只产出一张覆盖率图（S1.5 图集），<strong>它没有域</strong>；域属于「被蒙版加权的那次运算」。056 把局部量按域拆开：</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>量</th>
+<th>阶段</th>
+<th>域</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>exposure</code>、<code>temperature/tint</code>、<code>highlights/shadows/whites/blacks</code></td>
+<td>S1.6</td>
+<td>场景线性</td>
+<td>是光量，且要在 S2 压缩之前</td>
+</tr>
+<tr>
+<td><code>hue</code>、<code>saturation</code></td>
+<td>S3.5</td>
+<td>显示参考</td>
+<td>与全局 S3 同一算子，全画布蒙版必须等于全局滑杆</td>
+</tr>
+<tr>
+<td><code>contrast</code></td>
+<td>S2.5</td>
+<td>显示参考</td>
+<td>159：与全局对比同一算子、同一域</td>
+</tr>
+<tr>
+<td><code>texture</code>、<code>sharpen</code></td>
+<td>S3.9</td>
+<td>显示参考</td>
+<td>181：与全局纹理/锐化同一带、同一 ε</td>
+</tr>
+</tbody>
+</table>
+<p><code>amount</code> 是 0…100 的整体权重，<code>opacity</code> 是覆盖率的整体缩放，二者都在各自的阶段里乘进权重；<code>feather</code> 的半径以<strong>短边百分比</strong>表达，因此在任何画布尺寸下物理宽度一致（<code>Masks.swift</code>、<code>docs/architecture-decisions.md §11.11</code>）。</p>
+<p>两个工程细节：</p>
+<ul>
+<li><strong>图集只依赖形状，不依赖调整。</strong> 一张蒙版改曝光不会重建图集（S1.5 的键不含调整），这是拖动局部滑杆只重跑一个 pass 的原因（<code>Masks.swift:30</code>）。</li>
+<li><strong>tile 是成本旋钮，不是质量旋钮。</strong> 蒙版覆盖不足一半画布时按 tile 重算，两种分派的输出必须逐字节相同（<code>RenderGraph.swift:99</code>）。</li>
+</ul>
+<h2 id="中性零变化谓词而不是乘法">3.5 中性零变化：谓词，而不是乘法</h2>
+<p>每一条「没碰过就等于没发生」的承诺，都落在同一个机制上：条件 stage 的<strong>谓词</strong>。谓词看值，不看对象是否存在。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>阶段</th>
+<th>谓词</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S1.5 / S1.6</td>
+<td><code>masks</code> 非空</td>
+<td><code>Stage.swift:217</code></td>
+</tr>
+<tr>
+<td>S1.9</td>
+<td>有修复点</td>
+<td><code>:218</code></td>
+</tr>
+<tr>
+<td>S1.9-dz</td>
+<td><code>dehaze ≠ 0</code></td>
+<td><code>:226</code></td>
+</tr>
+<tr>
+<td>S2.5</td>
+<td>全局 <code>contrast ≠ 0</code>，或某个蒙版的 <code>contrast ≠ 0</code></td>
+<td><code>Stage.swift:287</code></td>
+</tr>
+<tr>
+<td>S3.4</td>
+<td>黑白开关为真</td>
+<td><code>:219</code></td>
+</tr>
+<tr>
+<td>S3.5</td>
+<td>某蒙版带色相或饱和</td>
+<td><code>:220</code></td>
+</tr>
+<tr>
+<td>S3.6</td>
+<td>24 个 HSL 数任一非零</td>
+<td><code>EditModel.swift:1933</code></td>
+</tr>
+<tr>
+<td>S3.6b</td>
+<td>至少一个采样色且被调整</td>
+<td><code>:1943</code></td>
+</tr>
+<tr>
+<td>S3.8</td>
+<td>九个分级数为任一非零</td>
+<td><code>EditModel.swift:2163</code></td>
+</tr>
+<tr>
+<td>S3.9</td>
+<td>纹理/清晰度/去噪/去彩噪任一非零</td>
+<td><code>:2293</code></td>
+</tr>
+<tr>
+<td>S3.10</td>
+<td><code>amount &gt; 0</code></td>
+<td><code>EditModel.swift:2434</code></td>
+</tr>
+<tr>
+<td>S3.7</td>
+<td><code>grain &gt; 0</code></td>
+<td><code>:2287</code></td>
+</tr>
+</tbody>
+</table>
+<p>谓词为假时，该阶段的链接<strong>整条不写</strong>：不是「写一个中性值」，而是让键链与阶段列表都退化成没有这个功能时的样子。这就是为什么老文档的 trace、键、像素能同时逐字节复现（<code>Stage.swift:15</code>）。</p>
+<p>文档层面还有一条同源规则：中性值<strong>不落盘</strong>。<code>blackOffset = 0</code>、<code>quarterTurns = 0</code>、<code>blackAndWhite = false</code>、全零的分级组、全零的锐化组，在 JSON 里都不写键；读回来是默认值，再写出去逐字节相同（<code>EditModel.swift:1392</code>、<code>:1899</code>、<code>:2154</code>）。</p>
+<h2 id="五个顺序陷阱">3.6 五个顺序陷阱</h2>
+<p>这些都不是抽象风险，每一条都有实测症状与修正。</p>
+<p><strong>① 曝光 × 对比不可交换（142 → 159）。</strong> 旧实现把对比锚在场景线性的绝对亮度上。结果：同一张图先加曝光再加对比，与先对比再加曝光，像素不是同一张；p50 增益在 E0 与 E+2 下相差 4 倍，74 % 的像素方向相反。修正：对比改为显示域的残差增益，没有绝对锚点（<code>Stage.swift:42</code>）。</p>
+<p><strong>② HSL 在线性域（079）。</strong> 纯蓝与纯黄在线性域的 <code>l</code> 都是 0.5，但感知亮度相差 6.9×：拖动「蓝色明度」会把天空拖成灰。修正：八色带搬到显示域的 OKLCh，S3 只留自然饱和/饱和（<code>Stage.swift:89</code>、<code>:93</code>）。</p>
+<p><strong>③ 去雾在显示域（117）。</strong> <code>A = 1</code> 的显示域版本对 <code>I &gt; 1</code> 的样本<strong>加光</strong>：去雾越强，高光越亮，天空先爆。修正：暗通道 + 实测 airlight 在场景线性域做，<code>A</code> 由画面估计，负值只表示「把雾加回来」（<code>Stage.swift:55</code>）。</p>
+<p><strong>④ 暗角在显示域（116）。</strong> 暗角是照度衰减的补偿，乘在显示码上等于「把角落加点黑」，与曝光、对比的交互完全错位。修正：移到线性链末尾、S2 之前（<code>Stage.swift:150</code>）。</p>
+<p><strong>⑤ 曲线在色调映射之后（030）。</strong> 曲线只能弯 S2 已经压过的数据，<code>+4 EV</code> 的高光在曲线看到之前就被当成「高光区」处理了。修正：曲线移到 S1.7，横轴换成直方图自己的轴（SDR 半 + <code>+0…+4 EV</code> 半），见 4.6（<code>Stage.swift:34</code>）。</p>
+<h2 id="解码域与-s1-的分工">3.7 解码域与 S1 的分工</h2>
+<p><strong>白平衡自 143 起是 S1 的增益，不是解码参数。</strong> 解码器永远停在文件自己的 as-shot 平衡：<code>CIRAWFilter.neutralTemperature/neutralTint</code> 从不写入（<code>Sources/PhotonsCore/RAWDecoder.swift:102</code>）。文档里的 <code>temperature/tint</code> 由 <code>WhiteBalanceEstimate</code> 变成三通道增益：三个独立的估白器（white patch、grey world、grey edge）在场景线性缓冲上各给一个白点，逐通道取中位数；请求的 <code>(K, tint)</code> 是 CIE 1960 uv 上 Planckian 轨迹的一点加垂直 tint 位移，uv → XYZ，再用 Bradford 适配到工作基色的 D65 白点，得到 3×3 矩阵；最后折成 <code>WhiteBalanceSolver.gain</code> 的三个归一化数，S1 只做一次 <code>v *= gain · wb</code>（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:3</code>）。</p>
+<p><strong>这条改动值得单独说，因为它改的是「哪个域」。</strong> ① 拖白平衡不再触发解码：预览与松手是同一张渲染，差值为 0（143b）。② 解码键里的白平衡字段成了遗留项——像素不再依赖它，留着只为旧缓冲的命名兼容。③ 仓库里仍有旧注释（<code>EditModel.swift:1284</code>、<code>WhiteBalancePresets.swift:61</code> 说「喂给 CIRAWFilter」）；以 <code>RAWDecoder.swift:102</code> 和 <code>WhiteBalanceEstimate</code> 的实现为准。</p>
+<p><strong>镜头校正是文件事实。</strong> DNG 有三个不同平面、或 RW2 有可用剖面时，Photons 关掉 Apple 的校正、自己在 S0 做 warp；否则用 Apple 的。判断依据随文件走（<code>RenderInput.lensProfile</code>），并进入解码键，因为「哪套校正跑过」决定了像素（<code>RenderGraph.swift:34</code>、<code>LinearImageStore.swift:41</code>）。</p>
+<p><strong>降噪有两套，别混。</strong> <code>DetailGroup.noiseLuminance/Color</code> 是解码参数（<code>CIRAWFilter</code> 的机身降噪，改它要重新解码）；<code>EffectsGroup.nonBayerLuminanceNR/ColorNR</code> 是 S3.9 的显示域降噪（引导滤波残差 + OKLab 色度抑制，可实时预览）。两组数在面板上是不同的卡，在文档里是不同的组，在键里也是不同的阶段（<code>EditModel.swift:2180</code>、<code>:2266</code>）。</p>
+<h2 id="版本格式与迁移">3.8 版本、格式与迁移</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>机制</th>
+<th>现在是什么</th>
+<th>变了会怎样</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>processVersion</code></td>
+<td>2：曲线从 S3 搬到 S1.7 的那次语义变更</td>
+<td>旧文档保留控制点，但渲染不同；这是<strong>声明过的迁移</strong>，不是 bug（<code>EditModel.swift:1497</code>）</td>
+</tr>
+<tr>
+<td>曲线格式块</td>
+<td><code>version 2</code>、<code>type: double</code>、<code>max: 2</code>、<code>domain: "hdr"</code></td>
+<td>读到不认识的版本不猜：整条曲线退回恒等，其余字段照常加载，并留一条 <code>decodeWarnings</code>（<code>EditModel.swift:1523</code>、<code>:1623</code>）</td>
+</tr>
+<tr>
+<td><code>DecodeRecipe</code></td>
+<td><code>v3-lens</code></td>
+<td>配方变更意味着<strong>旧缓冲不可复用</strong>（镜像 bug、RW2 warp），磁盘缓存靠它失效（<code>LinearImageStore.swift:16</code>）</td>
+</tr>
+<tr>
+<td>schema</td>
+<td>11：删掉了绝对的 <code>blackLevel/whiteLevel</code>，只留 <code>blackOffset</code></td>
+<td>老文档带着旧键也能读（未知键被忽略），重新保存会写成新 schema</td>
+</tr>
+<tr>
+<td>未知键</td>
+<td>一律忽略，不报错</td>
+<td>手写/未来文档不会让整张照片打不开；坏值按默认值处理（<code>AnyCodingKey.val</code>，<code>EditModel.swift:2874</code>）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p>参数落在哪个域、为什么按这个顺序，到这里说完了。下一章逐项展开算法：每个滑杆背后的公式、常数、实现文件，以及开源软件里的同类做法。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="02-display.html">← 2 显示架构</a>
+      <a class="next" href="04a-tones.html">4a 影调 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4.16–4.17 几何与蒙版 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li class="current"><span>4d 几何·蒙版</span></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#几何裁切拉直翻转90透视与横向色差s0">4.16 几何：裁切、拉直、翻转、90°、透视与横向色差（S0）</a></li><li class="toc-2"><a href="#蒙版权重画笔渐变颜色范围亮度范围语义s1.5-s1.6-s3.5">4.17 蒙版权重：画笔、渐变、颜色范围、亮度范围、语义（S1.5 / S1.6 / S3.5）</a></li></ul></nav>
+    <article>
+<h1 id="几何与蒙版">4.16–4.17 几何与蒙版</h1>
+<p>两节：几何（S0）与蒙版权重（S1.5 / S1.6 / S3.5）。前者决定每个画布像素读源图的哪个点、画布多大；后者决定一次调整覆盖画面的多少。两者的共同要求还是那句话——没碰过的文档必须逐字节不变。</p>
+<h2 id="几何裁切拉直翻转90透视与横向色差s0">4.16 几何：裁切、拉直、翻转、90°、透视与横向色差（S0）</h2>
+<p>S0 是唯一改变像素网格本身的阶段：它把画布上每个像素映射回源文件的一个采样点，之后所有按像素做的运算都以它的输出为准（<code>Sources/PhotonsCore/Kernels/s0_geometry.metal:9</code>）。这一节只回答两件事：<strong>读哪个点</strong>，<strong>画布多大</strong>。</p>
+<p><strong>它解决什么问题</strong></p>
+<p>裁切决定输出框，拉直把地平线转正，翻转与 90° 管整幅方向，透视把建筑照里汇聚的竖线拉回平行，横向色差收回红蓝相对绿的径向放大（<code>Sources/PhotonsCore/EditModel.swift:2457</code>）。五件事共用一个结构：都是<strong>在固定参考系里重采样</strong>，可写成一条「画布 → 源像素」的映射。</p>
+<p>代价是它必须精确到最后一位：快速路径、八个入口、「θ = 0 时不出现一次乘法」，都是为了让没碰过几何的文档逐字节等于没有几何（<code>Sources/PhotonsCore/Kernels/s0_geometry.metal:105</code>）。</p>
+<p><strong>算法</strong></p>
+<h4 id="裁切框的表示">裁切框的表示</h4>
+<p>文档只有一个裁切矩形的真值，两种拼法：<code>crop</code> 是原点加尺寸，<code>cropRect</code> 是同一矩形的四条边，<code>right</code>/<code>bottom</code> 是<strong>绝对边界</strong>而非宽高，所以 <code>full</code> 是 <code>(0, 0, 1, 1)</code> 而不是 <code>(0, 0, 0, 0)</code>（<code>Sources/PhotonsCore/EditModel.swift:1157</code>、<code>Sources/PhotonsCore/CropMath.swift:12</code>）。坐标是未裁切源图的归一化坐标，原点左上（<code>Sources/PhotonsCore/Masks.swift:5</code>）。</p>
+<h4 id="从画布到源像素一条仿射链">从画布到源像素：一条仿射链</h4>
+<p>记画布像素 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math>（像素中心在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="italic">𝑔</mi><mi mathvariant="italic">𝑖</mi><mi mathvariant="italic">𝑑</mi></mrow><mo>+</mo><mfrac><mn>1</mn><mn>2</mn></mfrac></mrow><annotation encoding="application/x-tex">\mathit{gid} + \frac{1}{2}</annotation></semantics></math>），内容原点 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>o</mi><mi>c</mi></msub><annotation encoding="application/x-tex">o_{c}</annotation></semantics></math>、帧原点 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>o</mi><mi>f</mi></msub><annotation encoding="application/x-tex">o_{f}</annotation></semantics></math>、帧尺寸 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>s</mi><mi>f</mi></msub><annotation encoding="application/x-tex">s_{f}</annotation></semantics></math>、裁切原点 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>c</mi><mn>0</mn></msub><annotation encoding="application/x-tex">c_{0}</annotation></semantics></math> 与跨度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>c</mi><mi>w</mi></msub><annotation encoding="application/x-tex">c_{w}</annotation></semantics></math>、源尺寸 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>s</mi><annotation encoding="application/x-tex">s</annotation></semantics></math>、翻转符号 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>σ</mi><mo>∈</mo><msup><mrow><mo stretchy="true" form="prefix">{</mo><mi>±</mi><mn>1</mn><mo stretchy="true" form="postfix">}</mo></mrow><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">\sigma \in \left\{ \pm 1 \right\}^{2}</annotation></semantics></math>、顺时针四分之一转的置换 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>T</mi><mi>q</mi></msub><annotation encoding="application/x-tex">T_{q}</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mtable><mtr><mtd columnalign="left" style="text-align: left"><msub><mi>x</mi><mn>1</mn></msub><mo>=</mo><mi>x</mi><mo>+</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>−</mo><msub><mi>o</mi><mi>c</mi></msub><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>x</mi><mn>2</mn></msub><mo>=</mo><msub><mi>x</mi><mn>1</mn></msub><mo>+</mo><msub><mi>o</mi><mi>f</mi></msub><mo>,</mo><mspace width="1.0em"></mspace><mi>u</mi><mo>=</mo><msub><mi>x</mi><mn>2</mn></msub><mo>⊘</mo><msub><mi>s</mi><mi>f</mi></msub></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><msup><mi>u</mi><mo>′</mo></msup><mo>=</mo><mi>σ</mi><mo>⊙</mo><mi>u</mi><mo>+</mo><mfrac><mrow><mn>1</mn><mo>−</mo><mi>σ</mi></mrow><mn>2</mn></mfrac></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mi>r</mi><mo>=</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>+</mo><msubsup><mi>s</mi><mi>f</mi><mrow><mi>−</mi><mn>1</mn></mrow></msubsup><mo>⊙</mo><mrow><mo stretchy="true" form="prefix">[</mo><mi>R</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mrow><mo stretchy="true" form="prefix">(</mo><mrow><mo stretchy="true" form="prefix">(</mo><msup><mi>u</mi><mo>′</mo></msup><mo>−</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mo>⊙</mo><msub><mi>s</mi><mi>f</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow><mo stretchy="true" form="postfix">]</mo></mrow></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mi>z</mi><mo>=</mo><msub><mi>c</mi><mn>0</mn></msub><mo>+</mo><msub><mi>c</mi><mi>w</mi></msub><mo>⊙</mo><mi>r</mi><mo>,</mo><mspace width="1.0em"></mspace><mi>w</mi><mo>=</mo><msub><mi>T</mi><mi>q</mi></msub><mi>z</mi><mo>,</mo><mspace width="1.0em"></mspace><mi>p</mi><mo>=</mo><mi>s</mi><mo>⊙</mo><mi>w</mi></mtd></mtr></mtable><annotation encoding="application/x-tex">
+\begin{array}{l}
+{x_{1} = x + \frac{1}{2} - o_{c},\quad x_{2} = x_{1} + o_{f},\quad u = x_{2} \oslash s_{f}} \\
+{u&#39; = \sigma \odot u + \frac{1 - \sigma}{2}} \\
+{r = \frac{1}{2} + s_{f}^{- 1} \odot \left\lbrack R(\theta)\left( \left( u&#39; - \frac{1}{2} \right) \odot s_{f} \right) \right\rbrack} \\
+{z = c_{0} + c_{w} \odot r,\quad w = T_{q}z,\quad p = s \odot w}
+\end{array}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>R</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mrow><mi mathvariant="normal">cos</mi><mo>&#8289;</mo></mrow><mi>θ</mi></mtd><mtd columnalign="center" style="text-align: center"><mi>−</mi><mrow><mi mathvariant="normal">sin</mi><mo>&#8289;</mo></mrow><mi>θ</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mrow><mi mathvariant="normal">sin</mi><mo>&#8289;</mo></mrow><mi>θ</mi></mtd><mtd columnalign="center" style="text-align: center"><mrow><mi mathvariant="normal">cos</mi><mo>&#8289;</mo></mrow><mi>θ</mi></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">R(\theta) = \begin{bmatrix}
+{\cos\theta} &amp; {- \sin\theta} \\
+{\sin\theta} &amp; {\cos\theta}
+\end{bmatrix}</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math> 向下，正角度即屏幕上的顺时针（<code>Sources/PhotonsCore/CropGeometry.swift:35</code>）。</p>
+<p>第三行是唯一要解释的一项：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>R</mi><annotation encoding="application/x-tex">R</annotation></semantics></math> 乘的是<strong>像素偏移</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mo stretchy="true" form="prefix">(</mo><msup><mi>u</mi><mo>′</mo></msup><mo>−</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mo>⊙</mo><msub><mi>s</mi><mi>f</mi></msub></mrow><annotation encoding="application/x-tex">\left( u&#39; - \frac{1}{2} \right) \odot s_{f}</annotation></semantics></math>。直接旋转归一化坐标得到的是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msubsup><mi>s</mi><mi>f</mi><mrow><mi>−</mi><mn>1</mn></mrow></msubsup><mi>R</mi><msub><mi>s</mi><mi>f</mi></msub></mrow><annotation encoding="application/x-tex">s_{f}^{- 1}Rs_{f}</annotation></semantics></math>，非对角项差 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>s</mi><mi>x</mi></msub><mi>/</mi><msub><mi>s</mi><mi>y</mi></msub></mrow><annotation encoding="application/x-tex">s_{x}/s_{y}</annotation></semantics></math> 倍——3:2 的帧剪切 1.5 倍，拉直出来是歪的不是转的（<code>Sources/PhotonsCore/Kernels/s0_geometry.metal:118</code>）。固定 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>q</mi><annotation encoding="application/x-tex">q</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> 时整条链是仿射的：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>T</mi><mi>q</mi></msub><annotation encoding="application/x-tex">T_{q}</annotation></semantics></math> 是带符号置换，其余是缩放、平移与旋转。</p>
+<h4 id="置换而不是旋转">90°：置换而不是旋转</h4>
+<p><code>quarterTurns</code> 只存一个 0…3 的整数：「图像被顺时针转了几个 90°」。导出写 <code>tiff:Orientation</code> 用的是同一个数，两处各存一份会让「哪边是顺时针」有两种答案（<code>EditModel.swift:970</code>）。帧转 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>q</mi><mo>⋅</mo><msup><mn>90</mn><mo>∘</mo></msup></mrow><annotation encoding="application/x-tex">q \cdot 90^{\circ}</annotation></semantics></math>（奇数时宽高互换），<code>crop</code> 量在转过的帧里，所以转帧时裁切框跟着转、仍覆盖照片上同一块像素（<code>:981</code>、<code>CropMath.swift:683</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>l</mi><mo>,</mo><mi>t</mi><mo>,</mo><mi>r</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>↦</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>b</mi><mo>,</mo><mi>l</mi><mo>,</mo><mn>1</mn><mo>−</mo><mi>t</mi><mo>,</mo><mi>r</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+(l,t,r,b)\mapsto(1 - b,l,1 - t,r)
+</annotation></semantics></math></p>
+<p>四次转回原位是精确的：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>−</mo><mi>x</mi></mrow><annotation encoding="application/x-tex">1 - x</annotation></semantics></math> 对 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>x</mi><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">x \in \lbrack 0,1\rbrack</annotation></semantics></math> 在二进制浮点里无误差，映射又只是四个数的排列（<code>CropMath.swift:687</code>）。核心里顺序是「先拉直、再反解 90°、最后走裁切框」：照片的像素没被转过，转的只是位置（<code>s0_geometry.metal:238</code>）。</p>
+<h4 id="画布包围盒且只在真的旋转时变大">画布：包围盒，且只在真的旋转时变大</h4>
+<p>直角处（0/90/180/270）画布就是裁切框的像素尺寸，一个像素都不多；其它角度是旋转后裁切框的<strong>精确包围盒</strong>，只向上取整一次（<code>CropMath.swift:580</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>W</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">⌈</mo><mi>w</mi><mo stretchy="false" form="postfix">|</mo><mi mathvariant="normal">cos</mi><mi>θ</mi><mo stretchy="false" form="postfix">|</mo><mo>+</mo><mi>h</mi><mo stretchy="false" form="postfix">|</mo><mi mathvariant="normal">sin</mi><mi>θ</mi><mo stretchy="false" form="postfix">|</mo><mo stretchy="true" form="postfix">⌉</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><mi>H</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">⌈</mo><mi>w</mi><mo stretchy="false" form="postfix">|</mo><mi mathvariant="normal">sin</mi><mi>θ</mi><mo stretchy="false" form="postfix">|</mo><mo>+</mo><mi>h</mi><mo stretchy="false" form="postfix">|</mo><mi mathvariant="normal">cos</mi><mi>θ</mi><mo stretchy="false" form="postfix">|</mo><mo stretchy="true" form="postfix">⌉</mo></mrow></mrow><annotation encoding="application/x-tex">
+W = \left\lceil w \vert \cos\theta \vert + h \vert \sin\theta \vert \right\rceil,\quad H = \left\lceil w \vert \sin\theta \vert + h \vert \cos\theta \vert \right\rceil
+</annotation></semantics></math></p>
+<p>用 <code>ceil</code> 而非 <code>round</code>：5400×3600 的裁切框在 1° 下是 5462.006 宽，<code>round</code> 给 5462，画布就切掉了旋转后的角（<code>:591</code>）。所以「输出尺寸」报的是 <code>canvasSize</code> 而不是裁切框尺寸（<code>EditModel.swift:1111</code>）；多出来的部分写透明，不是把边缘拖出去（<code>s0_geometry.metal:275</code>）。</p>
+<h4 id="透视一台单应近端不动">透视：一台单应，近端不动</h4>
+<p>两个滑杆各是一个梯形强度 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>p</mi><mi>v</mi></msub><mo>,</mo><msub><mi>p</mi><mi>h</mi></msub><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mi>−</mi><mn>100</mn><mo>,</mo><mn>100</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">p_{v},p_{h} \in \lbrack - 100,100\rbrack</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>v</mi><mi>k</mi></msub><mo>=</mo><mi>−</mi><mfrac><msub><mi>p</mi><mi>k</mi></msub><mn>100</mn></mfrac><mo>⋅</mo><mn>0.21</mn><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>M</mi><mi>v</mi></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mn>1</mn></mtd><mtd columnalign="center" style="text-align: center"><mi>−</mi><mfrac><msub><mi>v</mi><mi>v</mi></msub><mn>2</mn></mfrac></mtd><mtd columnalign="center" style="text-align: center"><mfrac><msub><mi>v</mi><mi>v</mi></msub><mn>2</mn></mfrac></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mn>0</mn></mtd><mtd columnalign="center" style="text-align: center"><mn>1</mn><mo>−</mo><msub><mi>v</mi><mi>v</mi></msub></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>v</mi><mi>v</mi></msub></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mn>0</mn></mtd><mtd columnalign="center" style="text-align: center"><mi>−</mi><msub><mi>v</mi><mi>v</mi></msub></mtd><mtd columnalign="center" style="text-align: center"><mn>1</mn><mo>+</mo><msub><mi>v</mi><mi>v</mi></msub></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><mi>H</mi><mo>=</mo><msub><mi>M</mi><mi>h</mi></msub><msub><mi>M</mi><mi>v</mi></msub></mrow><annotation encoding="application/x-tex">
+v_{k} = - \frac{p_{k}}{100} \cdot 0.21,\quad M_{v} = \begin{bmatrix}
+1 &amp; {- \frac{v_{v}}{2}} &amp; \frac{v_{v}}{2} \\
+0 &amp; {1 - v_{v}} &amp; v_{v} \\
+0 &amp; {- v_{v}} &amp; {1 + v_{v}}
+\end{bmatrix},\quad H = M_{h}M_{v}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>H</mi><annotation encoding="application/x-tex">H</annotation></semantics></math> 是「帧 → 变形后的帧」，核心里用它的逆把采样点送回帧归一化坐标：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>z</mi><mo>′</mo></msup><mo>=</mo><mi>π</mi><mrow><mo stretchy="true" form="prefix">(</mo><msup><mi>H</mi><mrow><mi>−</mi><mn>1</mn></mrow></msup><mo stretchy="false" form="prefix">(</mo><mi>z</mi><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">z&#39; = \pi\left( H^{- 1}(z,1) \right)</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>π</mi><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo>,</mo><mi>y</mi><mo>,</mo><mi>w</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mi>/</mi><mi>w</mi><mo>,</mo><mi>y</mi><mi>/</mi><mi>w</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\pi(x,y,w) = (x/w,y/w)</annotation></semantics></math>（<code>CropMath.swift:325</code>、<code>s0_geometry.metal:265</code>）。</p>
+<p>满行程是方形画幅上 6° 的收敛，即 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>2</mn><mrow><mi mathvariant="normal">tan</mi><mo>&#8289;</mo></mrow><msup><mn>6</mn><mo>∘</mo></msup><mo>≈</mo><mn>0.21</mn></mrow><annotation encoding="application/x-tex">2\tan 6^{\circ} \approx 0.21</annotation></semantics></math>，±50 是 3°（<code>EditModel.swift:1004</code>、<code>CropMath.swift:283</code>）。符号让 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>w</mi><mo>=</mo><mn>1</mn><mo>+</mo><mi>v</mi><mi>s</mi></mrow><annotation encoding="application/x-tex">w = 1 + vs</annotation></semantics></math> 随离近端距离变大：远端展开、近端收住，「+」修的是从下往上拍的照片（<code>:306</code>）。画布取变形四边形里<strong>保住不动角</strong>的最大内接矩形，闭式求解：每条边给一条 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>α</mi><mi>w</mi><mo>+</mo><mi>β</mi><mi>h</mi><mo>≤</mo><mi>c</mi></mrow><annotation encoding="application/x-tex">\alpha w + \beta h \leq c</annotation></semantics></math>，最优解在至多十个候选里取面积最大者（<code>:359</code>）。</p>
+<h4 id="横向色差一个比例不是位移">横向色差：一个比例，不是位移</h4>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>α</mi><annotation encoding="application/x-tex">\alpha</annotation></semantics></math> 是<strong>无量纲的径向比例</strong>：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>α</mi><mi>R</mi></msub><mo>&gt;</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">\alpha_{R} &gt; 0</annotation></semantics></math> 表示红通道的像比绿通道大，校正按</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>p</mi><mi>c</mi></msub><mo>=</mo><mi>a</mi><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mi>p</mi><mo>−</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>+</mo><msub><mi>α</mi><mi>c</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><mi>a</mi><mo>=</mo><mfrac><mi>s</mi><mn>2</mn></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>c</mi><mo>∈</mo><mrow><mo stretchy="true" form="prefix">{</mo><mi>R</mi><mo>,</mo><mi>B</mi><mo stretchy="true" form="postfix">}</mo></mrow></mrow><annotation encoding="application/x-tex">
+p_{c} = a + (p - a)\left( 1 + \alpha_{c} \right),\quad a = \frac{s}{2},\quad c \in \left\{ R,B \right\}
+</annotation></semantics></math></p>
+<p>只重采样红与蓝，绿原样读（<code>s0_geometry.metal:344</code>）。比例而非像素位移是这里唯一重要的设计：400 px 预览与 9504 px 导出校正同一段半径比例；换成像素值，同一个滑杆在两种尺寸下就是两件事（<code>EditModel.swift:2461</code>）。中心取<strong>源图</strong>中心而非裁切框中心——色差是光轴的性质，裁切与旋转不该把无像差的点挪走（<code>s0_geometry.metal:346</code>）。满行程 ±0.005，面板 ±100、步长 0.1（<code>EditModel.swift:2473</code>、<code>:2515</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围 / 默认</th>
+<th>单位</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>crop</code></td>
+<td>0…1，默认 <code>full</code></td>
+<td>源归一化</td>
+<td>输出框，四边是绝对边界（<code>EditModel.swift:960</code>、<code>:1157</code>）</td>
+</tr>
+<tr>
+<td><code>aspectLock</code></td>
+<td><code>.original</code> = 无约束</td>
+<td>像素比</td>
+<td>锁定时重写矩形（<code>:967</code>、<code>:1195</code>）</td>
+</tr>
+<tr>
+<td><code>rotationDegrees</code></td>
+<td>±45°，默认 0</td>
+<td>度，正 = 顺时针</td>
+<td>S0 读钳过的 <code>straightenDegrees</code>（<code>:958</code>、<code>:1175</code>）</td>
+</tr>
+<tr>
+<td><code>flipHorizontal</code> / <code>flipVertical</code></td>
+<td><code>false</code></td>
+<td>—</td>
+<td>帧内镜像（<code>:965</code>）</td>
+</tr>
+<tr>
+<td><code>quarterTurns</code></td>
+<td>0…3，默认 0</td>
+<td>90° 计数</td>
+<td><code>n % 4</code> 归一（<code>:994</code>、<code>:1036</code>）</td>
+</tr>
+<tr>
+<td><code>perspectiveVertical</code> / <code>perspectiveHorizontal</code></td>
+<td>±100，默认 0</td>
+<td>强度</td>
+<td>0/0 时 <code>perspective</code> 为 <code>nil</code>（<code>:1010</code>、<code>:1184</code>）</td>
+</tr>
+<tr>
+<td><code>caRed</code> / <code>caBlue</code></td>
+<td>±0.005，默认 0</td>
+<td>径向比例 α（<code>:2476</code>）</td>
+<td>横向色差</td>
+</tr>
+<tr>
+<td><code>alphaPerSliderUnit</code> / <code>sliderStep</code></td>
+<td>5×10⁻⁵、0.1</td>
+<td>α / 单位</td>
+<td>滑杆 ±100 恰映射到 ±0.005（<code>:2519</code>、<code>:2524</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><code>isIdentity</code> 与键都按值判定：<code>caRed == caBlue == 0</code> 是快速路径的判据（<code>:2496</code>）；<code>quarterTurns</code>、<code>perspectiveV/H</code> 为 0 时连 JSON 键都不写，老文档重存逐字节不变（<code>:1078</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s0_geometry.metal</code> 是一个模板体加三组模板参数 <code>HAS_ROTATION</code>、<code>HAS_TURN</code>、<code>HAS_LENS_WARP</code>（共八个入口），由 <code>RenderGraph</code> 按 <code>straightenDegrees != 0</code>、<code>quarterTurns != 0</code> 与镜头剖面选择（<code>s0_geometry.metal:130</code>、<code>RenderGraph.swift:1863</code>）。</p>
+<p><strong>三条快速路径</strong>，各解决一个「本来不该有算术」的场景：</p>
+<ul>
+<li><strong>identity</strong>：满幅、无旋转无翻转、无窗口、画布等于源尺寸，逐 texel 拷贝；出口矩阵仍跑，「恒等」说的是采样而不是色彩空间（<code>s0_geometry.metal:140</code>、<code>:38</code>）。</li>
+<li><strong>pure-CA</strong>：上面再加 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>α</mi><mo>≠</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">\alpha \neq 0</annotation></semantics></math>。绿按 texel 直读，只有红蓝重采样，这一帧的绿与 identity 逐字节相同（<code>:192</code>）。</li>
+<li><strong>pure-turn</strong>：只转了 90°。通用路径会做 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi>u</mi><mi>v</mi></mrow><mo>=</mo><mi>f</mi><mi>/</mi><msub><mi>s</mi><mi>f</mi></msub></mrow><annotation encoding="application/x-tex">{uv} = f/s_{f}</annotation></semantics></math> 再乘回源尺寸，在 9504 px 上是约 10⁻³ texel 的往返，等于给没有算术的操作加插值，四次就回不到原字节；源索引改在 <code>int</code> 里算：源 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>i</mi><mo>,</mo><mi>j</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(i,j)</annotation></semantics></math> 出现在转过一档的帧的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>H</mi><mo>−</mo><mn>1</mn><mo>−</mo><mi>j</mi><mo>,</mo><mi>i</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(H - 1 - j,i)</annotation></semantics></math>（<code>:151</code>）。</li>
+</ul>
+<p>三个标志由 <code>RenderGraph.plan</code> 一处判定：<code>untransformed</code> 是 pre-029 的恒等条件，<code>s0PureTurn</code> 再加满幅、1:1、无窗口、无 CA（<code>RenderGraph.swift:1863</code>、<code>:1876</code>、<code>:1890</code>）。顺序也被钉住：<strong>先反解旋转、再走单应、最后反解 90°</strong>（<code>s0_geometry.metal:251</code>）。</p>
+<p>镜头 warp 也在这里：有 <code>WarpRectilinear</code> 三平面时逐通道做 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>p</mi><mi>c</mi></msub><mo>=</mo><mrow><mi>c</mi><mi>e</mi><mi>n</mi><mi>t</mi><mi>e</mi><mi>r</mi></mrow><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mrow><mi>p</mi><mi>x</mi></mrow><mo>−</mo><mrow><mi>c</mi><mi>e</mi><mi>n</mi><mi>t</mi><mi>e</mi><mi>r</mi></mrow><mo stretchy="false" form="postfix">)</mo><mo>⋅</mo><msub><mi>s</mi><mi>c</mi></msub><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">p_{c} = {center} + ({px} - {center}) \cdot s_{c}(r)</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>s</mi><mi>c</mi></msub><annotation encoding="application/x-tex">s_{c}</annotation></semantics></math> 是 <code>kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶</code>——<strong>偶次幂</strong>。写成奇次幂在系数全零时与规范一致，合成测试抓不到，真实文件上却把整幅图移动约 0.4 % 的半径（<code>:315</code>）；顺序是先 warp、后手动 α（<code>:306</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable 的「裁剪」</strong>：可拖拽矩形加宽高比列表（<code>freehand</code>、<code>original image</code>、<code>square</code>、<code>golden cut</code> 等预设）（<a href="https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/crop/" class="uri">https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/crop/</a>）。Photons 拆成「归一化四边 + 具名 <code>AspectLock</code>」，锁定与矩形不一致时锁定胜出（<code>EditModel.swift:1195</code>）。差别在画布：darktable 的裁剪就是输出框，Photons 在非直角下是包围盒（<code>CropMath.swift:580</code>）。</li>
+<li><strong>darktable 的「旋转与透视」</strong>：用检测或手画的线段做<strong>拟合</strong>反推参数，机制源自 ShiftN（<a href="https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/rotate-perspective/" class="uri">https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/rotate-perspective/</a>）。Photons 不拟合：两个 ±100 的强度直接给出 6° 满行程，能被一句公式说清、被一个测试钉住（<code>CropMath.swift:283</code>）。</li>
+<li><strong>darktable 的「镜头校正」</strong>：畸变与 TCA 来自 lensfun 剖面或文件内嵌元数据，是「按型号查表」的路线（<a href="https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/lens-correction/" class="uri">https://docs.darktable.org/usermanual/4.6/en/module-reference/processing-modules/lens-correction/</a>）。Photons 两条腿都有：有 DNG 三平面时用文件自己的 <code>WarpRectilinear</code>，否则用 Apple 的，再叠一层手动 α（<code>EditModel.swift:2465</code>、<code>s0_geometry.metal:293</code>）——手动那层是给没有剖面的镜头准备的。</li>
+</ul>
+<p><strong>取舍</strong></p>
+<p><strong>先变形、后裁切。</strong> 裁切框是输出框，所以拉直不会自动「放大填满」，转过的角是背景而不是黑边（<code>s0_geometry.metal:23</code>）。自动填满得先替用户决定裁多少；代价是拉完角度通常还要再收一次框。</p>
+<p><strong>画布尺寸与裁切框尺寸不是同一个数。</strong> 直角处相等，别的角度画布更大（<code>CropMath.swift:613</code>）。这条写错，信息栏尺寸与 loupe 取景会同时错位（188 就是为这个加的，<code>EditModel.swift:1111</code>）。</p>
+<p><strong>透视固定 6°，不做自动拟合。</strong> 6° 覆盖多数手持建筑照的收敛量，与「近端不动」一起使画布有闭式解（<code>CropMath.swift:270</code>）。超出 6° 需先裁再校，或接受远端被放大。</p>
+<hr />
+<h2 id="蒙版权重画笔渐变颜色范围亮度范围语义s1.5-s1.6-s3.5">4.17 蒙版权重：画笔、渐变、颜色范围、亮度范围、语义（S1.5 / S1.6 / S3.5）</h2>
+<p>蒙版不是位图，是一个<strong>覆盖率函数</strong>：文档存形状参数，渲染时求值。坐标归一化到未裁切源图，距离一律除以 <code>min(W, H)</code>，所以同一份文档在缩略图、1:1 与导出尺寸下给出同一形状（<code>Sources/PhotonsCore/Masks.swift:5</code>）。</p>
+<p><strong>它解决什么问题</strong></p>
+<p>一张蒙版回答「这个像素被这个操作影响多少」，取值 0…1。它本身<strong>没有域</strong>：域属于被加权的那次运算，所以局部曝光与色温在 S1.6（场景线性），色相与饱和在 S3.5（显示参考）（<code>Sources/PhotonsCore/Kernels/s1_6_local.metal:6</code>、<code>s3_5_local_color.metal:4</code>）。</p>
+<p>要三种「选」：几何选（渐变、画笔）、按值选（颜色、亮度）、按内容选（语义），再加一层组合与两级羽化。难点不在任一形状，而在这些权重必须能相加、能取反、在四种画布尺寸下一致。</p>
+<p><strong>算法</strong></p>
+<h4 id="一个分量的覆盖率">一个分量的覆盖率</h4>
+<p>六种形状各给出 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>α</mi><mi>i</mi></msub><mo>∈</mo><mo stretchy="false" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">\alpha_{i} \in \lbrack 0,1\rbrack</annotation></semantics></math>，分量级 <code>invert</code> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>ι</mi><mi>i</mi></msub><annotation encoding="application/x-tex">\iota_{i}</annotation></semantics></math> 使 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>a</mi><mi>i</mi></msub><mo>=</mo><msub><mi>ι</mi><mi>i</mi></msub><mi>?</mi><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>α</mi><mi>i</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow><mo>:</mo><msub><mi>α</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">a_{i} = \iota_{i}?\left( 1 - \alpha_{i} \right):\alpha_{i}</annotation></semantics></math>，取反在<strong>组合之前</strong>发生（<code>Masks.swift:744</code>、<code>:865</code>）。</p>
+<h4 id="组合取反透明度">组合、取反、透明度</h4>
+<p>第一个分量的 <code>op</code> 被忽略（<code>Masks.swift:863</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>A</mi><mo>=</mo><msub><mi>a</mi><mn>1</mn></msub><mo>,</mo><mspace width="1.0em"></mspace><mi>A</mi><mo>←</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>A</mi><mo>,</mo><msub><mi>a</mi><mi>i</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow></mtd><mtd columnalign="center" style="text-align: center"><mtext mathvariant="normal">add</mtext></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>A</mi><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>a</mi><mi>i</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow></mtd><mtd columnalign="center" style="text-align: center"><mtext mathvariant="normal">subtract</mtext></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>A</mi><msub><mi>a</mi><mi>i</mi></msub></mtd><mtd columnalign="center" style="text-align: center"><mtext mathvariant="normal">intersect</mtext></mtd></mtr></mtable></mrow></mrow><annotation encoding="application/x-tex">
+A = a_{1},\quad A\leftarrow\left\{ \begin{matrix}
+{\max\left( A,a_{i} \right)} &amp; \text{add} \\
+{A\left( 1 - a_{i} \right)} &amp; \text{subtract} \\
+{Aa_{i}} &amp; \text{intersect}
+\end{matrix}
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>C</mi><mo>=</mo><mrow><mi mathvariant="normal">clamp</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>o</mi><mo>⋅</mo><mrow><mo stretchy="true" form="prefix">[</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>I</mi><mo stretchy="false" form="postfix">)</mo><mi>A</mi><mo>+</mo><mi>I</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>A</mi><mo stretchy="false" form="postfix">)</mo><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+C = \operatorname{clamp}\left( o \cdot \left\lbrack (1 - I)A + I(1 - A) \right\rbrack,0,1 \right)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>o</mi><annotation encoding="application/x-tex">o</annotation></semantics></math> 是蒙版级 <code>opacity</code>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>I</mi><annotation encoding="application/x-tex">I</annotation></semantics></math> 是蒙版级 <code>invert</code>，两者都作用在组合后的选择上；<code>add</code> 用 <code>max</code> 而非相加，关节处不会双重曝光——与画笔在一笔内的累加同一条规则（<code>Masks.swift:18</code>、<code>s1_5_mask_atlas.metal:465</code>）。</p>
+<h4 id="羽化在形状外按短边量">羽化：在形状外，按短边量</h4>
+<p>形状羽化是「以短边百分比表示、花在边界<strong>外侧</strong>」的二次衰减：内部保持 1，越过边界后按半径平方回落到 0（<code>s1_5_mask_atlas.metal:238</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mo>=</mo><mfrac><mrow><mi>f</mi><mo>⋅</mo><mn>0.1</mn><mo>⋅</mo><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>W</mi><mo>,</mo><mi>H</mi><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>r</mi><mi>x</mi></msub><mo>,</mo><msub><mi>r</mi><mi>y</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>r</mi><mrow><mi>o</mi><mi>u</mi><mi>t</mi></mrow></msub><mo>=</mo><mn>1</mn><mo>+</mo><mi>g</mi><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>α</mi><mtext mathvariant="normal">rad</mtext></msub><mo>=</mo><msup><mrow><mo stretchy="true" form="prefix">[</mo><mfrac><mrow><msubsup><mi>r</mi><mrow><mi>o</mi><mi>u</mi><mi>t</mi></mrow><mn>2</mn></msubsup><mo>−</mo><msup><mi>r</mi><mn>2</mn></msup></mrow><mrow><msubsup><mi>r</mi><mrow><mi>o</mi><mi>u</mi><mi>t</mi></mrow><mn>2</mn></msubsup><mo>−</mo><mn>1</mn></mrow></mfrac><mo stretchy="true" form="postfix">]</mo></mrow><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">
+g = \frac{f \cdot 0.1 \cdot \min(W,H)}{\min\left( r_{x},r_{y} \right)},\quad r_{out} = 1 + g,\quad\alpha_{\text{rad}} = \left\lbrack \frac{r_{out}^{2} - r^{2}}{r_{out}^{2} - 1} \right\rbrack^{2}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>f</mi><annotation encoding="application/x-tex">f</annotation></semantics></math> 是分量 <code>feather</code>（0…1，即短边 0…10 %），<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math> 是椭圆归一化半径（<code>s1_5_mask_atlas.metal:220</code>）。以短边为单位，物理宽度不随画布变：缩略图与导出拿到同一个数，图集级与形状级的 <code>feather</code> 也因此是同一个量、两个算子（<code>Masks.swift:1528</code>）。</p>
+<p><strong>一个例外，且是故意的</strong>：线性渐变的 <code>feather</code> 是<strong>跨度</strong>的比例，斜坡以 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>t</mi><mo>′</mo></msup><mo>=</mo><mfrac><mn>1</mn><mn>2</mn></mfrac></mrow><annotation encoding="application/x-tex">t&#39; = \frac{1}{2}</annotation></semantics></math> 为中心对称（<code>s1_5_mask_atlas.metal:203</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>t</mi><mo>=</mo><mrow><mi mathvariant="normal">clamp</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><mo stretchy="true" form="prefix">⟨</mo><mi>p</mi><mo>−</mo><msub><mi>p</mi><mn>0</mn></msub><mo>,</mo><mi>d</mi><mo stretchy="true" form="postfix">⟩</mo></mrow><mrow><mo stretchy="true" form="prefix">⟨</mo><mi>d</mi><mo>,</mo><mi>d</mi><mo stretchy="true" form="postfix">⟩</mo></mrow></mfrac><mo>,</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><msup><mi>t</mi><mo>′</mo></msup><mo>=</mo><msup><mi>t</mi><mrow><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mfrac><mn>1</mn><mn>2</mn></mfrac><mi>/</mi><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mi>m</mi></mrow></msup><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>α</mi><mtext mathvariant="normal">lin</mtext></msub><mo>=</mo><mrow><mi mathvariant="normal">smoothstep</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>−</mo><mfrac><mi>f</mi><mn>2</mn></mfrac><mo>,</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>+</mo><mfrac><mi>f</mi><mn>2</mn></mfrac><mo>,</mo><msup><mi>t</mi><mo>′</mo></msup><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+t = \operatorname{clamp}\left( \frac{\left\langle p - p_{0},d \right\rangle}{\left\langle d,d \right\rangle},0,1 \right),\quad t&#39; = t^{\log\frac{1}{2}/\log m},\quad\alpha_{\text{lin}} = \operatorname{smoothstep}\left( \frac{1}{2} - \frac{f}{2},\frac{1}{2} + \frac{f}{2},t&#39; \right)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>m</mi><annotation encoding="application/x-tex">m</annotation></semantics></math> 是 <code>midpoint</code>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mfrac><mn>1</mn><mn>2</mn></mfrac></mrow><annotation encoding="application/x-tex">m = \frac{1}{2}</annotation></semantics></math> 为恒等。079 A4 一度把径向那条规则套到线性渐变上，斜坡一侧变窄、十倍短、且不再经过中点；现在是 102 恢复的原契约（<code>:203</code>、<code>Masks.swift:874</code>）。</p>
+<h4 id="画笔胶囊链">画笔：胶囊链</h4>
+<p>一笔是一串线段，覆盖按到线段的距离给，半径沿线插值以支持压感（<code>s1_5_mask_atlas.metal:254</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>α</mi><mtext mathvariant="normal">seg</mtext></msub><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">smoothstep</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>r</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>f</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mi>r</mi><mo>,</mo><mrow><mi>d</mi><mi>i</mi><mi>s</mi><mi>t</mi></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>p</mi><mo>,</mo><mover><mrow><mi>a</mi><mi>b</mi></mrow><mo accent="true">¯</mo></mover><mo stretchy="true" form="postfix">)</mo></mrow><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+\alpha_{\text{seg}} = 1 - \operatorname{smoothstep}\left( r(1 - f),r,{dist}\left( p,\overline{ab} \right) \right)
+</annotation></semantics></math></p>
+<p>一笔之内取 <code>max</code>（关节是并集，不是双重曝光）再乘 <code>flow</code>；笔与笔之间是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi>s</mi><mi>r</mi><mi>c</mi></mrow><mo>+</mo><mrow><mi>d</mi><mi>s</mi><mi>t</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mrow><mi>s</mi><mi>r</mi><mi>c</mi></mrow><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">{src} + {dst}(1 - {src})</annotation></semantics></math>，橡皮是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi>d</mi><mi>s</mi><mi>t</mi></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mrow><mi>s</mi><mi>r</mi><mi>c</mi></mrow><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">{dst}(1 - {src})</annotation></semantics></math>（<code>:289</code>、<code>:305</code>）。半径是短边单位、笔画自带，<code>size</code> 只是没有半径时的回退（<code>Masks.swift:337</code>）。</p>
+<h4 id="颜色范围oklab-里的最近距离">颜色范围：OKLab 里的最近距离</h4>
+<p>取分量内最接近的采样色，距离在归一化 OKLab 度量里量：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi mathvariant="normal">Δ</mi><mo>=</mo><munder><mi mathvariant="normal">min</mi><mi>i</mi></munder><msqrt><mrow><msup><mrow><mo stretchy="true" form="prefix">(</mo><mi>L</mi><mo>−</mo><msub><mi>L</mi><mi>i</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow><mn>2</mn></msup><mo>+</mo><msup><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><mi>a</mi><mo>−</mo><msub><mi>a</mi><mi>i</mi></msub></mrow><mn>0.4</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mn>2</mn></msup><mo>+</mo><msup><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><mi>b</mi><mo>−</mo><msub><mi>b</mi><mi>i</mi></msub></mrow><mn>0.4</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mn>2</mn></msup></mrow></msqrt><mo>,</mo><mspace width="1.0em"></mspace><mi>α</mi><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">smoothstep</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>τ</mi><mo>,</mo><mi>τ</mi><mo>+</mo><mi>σ</mi><mo stretchy="false" form="prefix">(</mo><mn>0.5</mn><mo>−</mo><mi>τ</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mi mathvariant="normal">Δ</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+\Delta = \min\limits_{i}\sqrt{\left( L - L_{i} \right)^{2} + \left( \frac{a - a_{i}}{0.4} \right)^{2} + \left( \frac{b - b_{i}}{0.4} \right)^{2}},\quad\alpha = 1 - \operatorname{smoothstep}\left( \tau,\tau + \sigma(0.5 - \tau),\Delta \right)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>τ</mi><annotation encoding="application/x-tex">\tau</annotation></semantics></math> 是 <code>tolerance</code>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>σ</mi><annotation encoding="application/x-tex">\sigma</annotation></semantics></math> 是 <code>smoothness</code>（<code>s1_5_mask_atlas.metal:340</code>）。<code>a</code>/<code>b</code> 除以 0.4（sRGB 的自然半跨度），一个容差数字才在两条轴上同义（<code>Masks.swift:566</code>）。最多 8 个采样，超出丢最旧的一个（<code>:379</code>、<code>:421</code>）。这里折叠用的是<strong>工作基色</strong>（Rec.2020）的矩阵：Ottosson 发表的 sRGB 九系数在饱和红上误差 0.1252，占容差跨度的 31 %，且是渐进错、golden 看不出来（<code>:579</code>）。</p>
+<h4 id="亮度范围一条两端羽化的窗口">亮度范围：一条两端羽化的窗口</h4>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>α</mi><mo>=</mo><mrow><mi mathvariant="normal">smoothstep</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mrow><mi>l</mi><mi>o</mi></mrow><mo>−</mo><msub><mi>f</mi><mrow><mi>l</mi><mi>o</mi></mrow></msub><mo>,</mo><mrow><mi>l</mi><mi>o</mi></mrow><mo>+</mo><msub><mi>f</mi><mrow><mi>l</mi><mi>o</mi></mrow></msub><mo>,</mo><mi>L</mi><mo stretchy="true" form="postfix">)</mo></mrow><mo>⋅</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>1</mn><mo>−</mo><mi mathvariant="normal">smoothstep</mi><mrow><mo stretchy="true" form="prefix">(</mo><mrow><mi>h</mi><mi>i</mi></mrow><mo>−</mo><msub><mi>f</mi><mrow><mi>h</mi><mi>i</mi></mrow></msub><mo>,</mo><mrow><mi>h</mi><mi>i</mi></mrow><mo>+</mo><msub><mi>f</mi><mrow><mi>h</mi><mi>i</mi></mrow></msub><mo>,</mo><mi>L</mi><mo stretchy="true" form="postfix">)</mo></mrow><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">
+\alpha = \operatorname{smoothstep}\left( {lo} - f_{lo},{lo} + f_{lo},L \right) \cdot \left\lbrack 1 - \operatorname{smoothstep}\left( {hi} - f_{hi},{hi} + f_{hi},L \right) \right\rbrack
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 是<strong>未钳</strong>线性光的 OKLab 亮度，轴到 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mn>16</mn><mrow><mn>1</mn><mi>/</mi><mn>3</mn></mrow></msup><mo>≈</mo><mn>2.5198</mn></mrow><annotation encoding="application/x-tex">16^{1/3} \approx 2.5198</annotation></semantics></math>，即 +4 EV（<code>Masks.swift:455</code>、<code>s1_5_mask_atlas.metal:371</code>）。167 之前折的是 <code>clamp(linearRGB, 0, 1)</code>，显示白以上全变成 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">L = 1</annotation></semantics></math>，窗口上半段没有分辨率。v1 文档按原值读、只升代次：把 <code>high = 1.0</code> 改成 <code>hdrMax</code> 会改掉用户刻意切的位置（<code>:492</code>）。边界倒置时两边<strong>连带羽化</strong>一起交换（<code>:436</code>）。</p>
+<h4 id="语义一个意图加一张系统栅格">语义：一个意图加一张系统栅格</h4>
+<p><code>semantic</code> 是「意图 + 操作系统产出的栅格」，位图不进文档，只进一个 SHA-256 摘要（<code>Masks.swift:689</code>）。两条路线：<code>CIRAWFilter</code> 的只读 matte（sky、hair、skin、teeth、glasses、person）与 Vision 前景实例蒙版；本机的 Leica DNG 上六个 matte 全是 <code>nil</code>，实际只有 subject 可用（<code>Sources/PhotonsCore/MaskSemantics.swift:12</code>、<code>:15</code>）。模型跑在长边 ≤ 1024 的副本上，核心里双线性上采样再按 <code>softEdge</code> 收边：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>α</mi><mo>=</mo><mrow><mi mathvariant="normal">smoothstep</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>−</mo><mfrac><mi>s</mi><mn>2</mn></mfrac><mo>,</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>+</mo><mfrac><mi>s</mi><mn>2</mn></mfrac><mo>,</mo><mrow><mi>r</mi><mi>a</mi><mi>w</mi></mrow><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+\alpha = \operatorname{smoothstep}\left( \frac{1}{2} - \frac{s}{2},\frac{1}{2} + \frac{s}{2},{raw} \right)
+</annotation></semantics></math></p>
+<p>没有栅格时该分量贡献 0 覆盖并记一条原因，不做近似（<code>s1_5_mask_atlas.metal:384</code>）。</p>
+<h4 id="amount-opacity-invert-各管什么">amount / opacity / invert 各管什么</h4>
+<p>三者都乘进权重，位置不同：<code>invert</code> 翻转覆盖率（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>−</mo><mi>a</mi></mrow><annotation encoding="application/x-tex">1 - a</annotation></semantics></math>），<code>opacity</code> 缩放整个选择，<code>amount</code> 是这次调整的整体强度，0…100 存、0…1 用（<code>Masks.swift:913</code>、<code>:37</code>）。每个消费阶段算同一个权重：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>w</mi><mo>=</mo><mrow><mi mathvariant="normal">clamp</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>C</mi><mo>⋅</mo><mfrac><mtext mathvariant="normal">amount</mtext><mn>100</mn></mfrac><mo>,</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><msup><mi>v</mi><mo>′</mo></msup><mo>=</mo><mrow><mi mathvariant="normal">mix</mi><mo>&#8289;</mo></mrow><mrow><mo stretchy="true" form="prefix">(</mo><mi>v</mi><mo>,</mo><mi>f</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mi>w</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+w = \operatorname{clamp}\left( C \cdot \frac{\text{amount}}{100},0,1 \right),\quad v&#39; = \operatorname{mix}\left( v,f(v),w \right)
+</annotation></semantics></math></p>
+<p><code>amount = 0</code> 时 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>w</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">w = 0</annotation></semantics></math>，该蒙版不渲染——不是「渲染成恒等」，而是连 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>f</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">f(v)</annotation></semantics></math> 都不调用，所以即使滑杆会产出 NaN 也逐字节等于无蒙版（<code>s1_6_local.metal:136</code>、<code>s3_5_local_color.metal:65</code>）。<code>mix</code> 在 RGB 上做，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>w</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">w = 1</annotation></semantics></math> 时像素恰好是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>f</mi><mo stretchy="false" form="prefix">(</mo><mi>v</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">f(v)</annotation></semantics></math>——「全画布蒙版等于全局滑杆」由此逐字节成立（<code>s3_5_local_color.metal:81</code>）。</p>
+<h4 id="图集级羽化与-refine">图集级羽化与 refine</h4>
+<p>点式覆盖率之后是两个<strong>邻域</strong>算子：蒙版级 <code>feather</code> 是可分离盒式模糊，半径 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>f</mi><mo>⋅</mo><mn>0.1</mn><mo>⋅</mo><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>W</mi><mo>,</mo><mi>H</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">f \cdot 0.1 \cdot \min(W,H)</annotation></semantics></math> 画布像素；<code>refine</code> 是以 S1 亮度为引导的引导滤波（<code>Sources/PhotonsCore/Kernels/s1_7_mask_neighbourhood.metal:1</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mfrac><mrow><mrow><mi>c</mi><mi>o</mi><mi>v</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo>,</mo><mi>p</mi><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mrow><mi>v</mi><mi>a</mi><mi>r</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>I</mi><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mi>ε</mi></mrow></mfrac><mo>,</mo><mspace width="1.0em"></mspace><mi>b</mi><mo>=</mo><mover><mi>p</mi><mo accent="true">¯</mo></mover><mo>−</mo><mi>a</mi><mover><mi>I</mi><mo accent="true">¯</mo></mover><mo>,</mo><mspace width="1.0em"></mspace><mrow><mi>o</mi><mi>u</mi><mi>t</mi></mrow><mo>=</mo><mi>a</mi><mi>I</mi><mo>+</mo><mi>b</mi><mo>,</mo><mspace width="1.0em"></mspace><mi>ε</mi><mo>=</mo><mn>0.01</mn><mo>⋅</mo><msup><mn>10</mn><mrow><mi>−</mi><mrow><mi>r</mi><mi>e</mi><mi>f</mi><mi>i</mi><mi>n</mi><mi>e</mi></mrow></mrow></msup></mrow><annotation encoding="application/x-tex">
+a = \frac{{cov}(I,p)}{{var}(I) + \varepsilon},\quad b = \overline{p} - a\overline{I},\quad{out} = aI + b,\quad\varepsilon = 0.01 \cdot 10^{- {refine}}
+</annotation></semantics></math></p>
+<p>核直径取 <code>odd(clamp(2·round(max(W,H)/30) + 1, 3, 65))</code>，系数在 1/q 分辨率求解、上采样后重建（<code>Masks.swift:1534</code>、<code>:1549</code>）。两个算子对 <code>opacity</code>/<code>invert</code> 都仿射不变，所以图集可先写最终覆盖率、再跑这两步（<code>s1_7_mask_neighbourhood.metal:13</code>）。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>量</th>
+<th>范围 / 默认</th>
+<th>单位</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td><code>"m-&lt;uuid&gt;"</code></td>
+<td>—</td>
+<td>图集身份，进键（<code>Masks.swift:908</code>）</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>自由文本</td>
+<td>—</td>
+<td><strong>不进任何键</strong>，改名不重渲（<code>:910</code>）</td>
+</tr>
+<tr>
+<td><code>isEnabled</code></td>
+<td><code>true</code></td>
+<td>—</td>
+<td>假则不参与（<code>:912</code>）</td>
+</tr>
+<tr>
+<td><code>opacity</code></td>
+<td>0…1，默认 1</td>
+<td>—</td>
+<td>组合后整体缩放（<code>:913</code>）</td>
+</tr>
+<tr>
+<td><code>invert</code></td>
+<td><code>false</code></td>
+<td>—</td>
+<td><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>−</mo><mi>A</mi></mrow><annotation encoding="application/x-tex">1 - A</annotation></semantics></math>（<code>:915</code>）</td>
+</tr>
+<tr>
+<td><code>feather</code></td>
+<td>0…0.1（UI 0…1），默认 0</td>
+<td>短边比例</td>
+<td>盒式模糊半径（<code>:917</code>、<code>:1528</code>）</td>
+</tr>
+<tr>
+<td><code>refine</code></td>
+<td>0…1，默认 0</td>
+<td>—</td>
+<td>引导滤波强度（<code>:921</code>）</td>
+</tr>
+<tr>
+<td><code>components[].op</code></td>
+<td><code>add</code> / <code>subtract</code> / <code>intersect</code></td>
+<td>—</td>
+<td>首个分量的 op 忽略（<code>:16</code>、<code>:863</code>）</td>
+</tr>
+<tr>
+<td><code>components[].invert</code></td>
+<td><code>false</code></td>
+<td>—</td>
+<td>组合前取反（<code>:865</code>）</td>
+</tr>
+<tr>
+<td><code>components[].feather</code></td>
+<td>0…1，默认 0.5</td>
+<td>短边 0…10 %；线性为跨度比例</td>
+<td>形状边缘（<code>:867</code>、<code>:874</code>）</td>
+</tr>
+<tr>
+<td><code>amount</code></td>
+<td>0…100，默认 100</td>
+<td>—</td>
+<td>0 = 该蒙版不渲染（<code>:37</code>）</td>
+</tr>
+<tr>
+<td><code>exposure</code></td>
+<td>−4…+4 EV，默认 0</td>
+<td>EV</td>
+<td>场景线性增益（<code>:39</code>）</td>
+</tr>
+<tr>
+<td><code>temperature</code> / <code>tint</code></td>
+<td>±100，默认 0</td>
+<td>6500 K + 30 K/单位</td>
+<td>场景线性白平衡（<code>:42</code>）</td>
+</tr>
+<tr>
+<td><code>highlights</code> / <code>shadows</code></td>
+<td>±100，默认 0</td>
+<td>—</td>
+<td>S2 的三个窗口，中间调钉 0（<code>:49</code>）</td>
+</tr>
+<tr>
+<td><code>whites</code> / <code>blacks</code></td>
+<td>±100，默认 0</td>
+<td>—</td>
+<td>S1 的端点，同一函数（<code>:51</code>）</td>
+</tr>
+<tr>
+<td><code>contrast</code></td>
+<td>±100，默认 0</td>
+<td>—</td>
+<td>实际在 S2.5 执行（<code>:48</code>）</td>
+</tr>
+<tr>
+<td><code>hue</code> / <code>saturation</code></td>
+<td>±100，默认 0</td>
+<td>—</td>
+<td>显示域，S3.5（<code>:54</code>）</td>
+</tr>
+<tr>
+<td><code>texture</code> / <code>sharpen</code></td>
+<td>±100 / 0…100，默认 0</td>
+<td>—</td>
+<td>S3.9（<code>:63</code>、<code>:68</code>）</td>
+</tr>
+</tbody>
+</table>
+<p>形状字段：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>形状</th>
+<th>字段</th>
+<th>范围 / 默认</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>线性渐变</td>
+<td><code>start</code>、<code>end</code>、<code>midpoint</code></td>
+<td>(0.5,0)→(0.5,1)，中点 0.5（<code>Masks.swift:239</code>）</td>
+</tr>
+<tr>
+<td>径向渐变</td>
+<td><code>center</code>、<code>radius</code>、<code>angle</code></td>
+<td>(0.5,0.5)、(0.25,0.25)、0（<code>:270</code>）</td>
+</tr>
+<tr>
+<td>画笔</td>
+<td><code>size</code>、<code>strokes[]</code>（<code>radius</code>、<code>feather</code>、<code>flow</code>、<code>erase</code>、<code>closed</code>）</td>
+<td>size 0.06、半径 0.06、羽化 0.5、flow 1（<code>:312</code>、<code>:359</code>）</td>
+</tr>
+<tr>
+<td>颜色范围</td>
+<td><code>samples</code> ≤ 8、<code>tolerance</code>、<code>smoothness</code></td>
+<td>容差 0.30、平滑 0.50（<code>:379</code>、<code>:390</code>）</td>
+</tr>
+<tr>
+<td>亮度范围</td>
+<td><code>low</code>、<code>high</code>、<code>lowFeather</code>、<code>highFeather</code></td>
+<td>0 / 2.5198 / 0.10 / 0.10（<code>:481</code>）</td>
+</tr>
+<tr>
+<td>语义</td>
+<td><code>kind</code>、<code>provider</code>、<code>softEdge</code>、<code>rasterDigest</code></td>
+<td><code>foreground</code> / Vision，软边 0.20（<code>:709</code>）</td>
+</tr>
+<tr>
+<td>上限</td>
+<td><code>Mask.maxCount</code></td>
+<td>12（<code>:906</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现</strong></p>
+<p><strong>图集是一张纹理数组</strong>：每张启用的蒙版一片，R16F，画布分辨率，写 <code>opacity · combine(components) · invert</code>（<code>s1_5_mask_atlas.metal:7</code>、<code>:478</code>）。坐标走 S0 的反向：画布 → 内容 → 帧 → 翻转 → 旋转 → 裁切 → 反解 90°，最后乘源尺寸（<code>:135</code>）。旋转同样在<strong>帧像素</strong>里做、同样两个模板实例：080 之前这里转归一化坐标而 S0 转像素，7° 拉直在 9504×6336 上把蒙版挪开 273 px（<code>:31</code>）。</p>
+<p><strong>只依赖形状。</strong> 图集身份是 <code>selectionKey</code>：<code>id | 分量（op、invert、feather、shape…）| invert | opacity | feather | refine | isEnabled</code>，<strong>不含任何滑杆</strong>；局部量走另一个键 <code>applyKey</code>（<code>Masks.swift:980</code>、<code>:989</code>）。拖局部曝光只重跑 S1.6 一个 pass，不重建图集（<code>:29</code>）。</p>
+<p><strong>只算该算的像素。</strong> 每片带一个画布盒子：支撑集按两级邻域半径 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>r</mi><mtext mathvariant="normal">feather</mtext></msub><mo>+</mo><msub><mi>r</mi><mtext mathvariant="normal">guided</mtext></msub></mrow><annotation encoding="application/x-tex">r_{\text{feather}} + r_{\text{guided}}</annotation></semantics></math> 长大、裁到画布；倒置蒙版与按值谓词答整幅，因为它们的支撑集是画面的性质而不是参数的（<code>s1_5_mask_atlas.metal:97</code>、<code>Masks.swift:1577</code>）。盒外覆盖率恒为 0，但<strong>仍要写</strong>：图集纹理跨重建复用，留着上一帧的 texel 就是泄漏（<code>:101</code>）。外层的 tile 是另一件事，三档输出必须逐字节相同（<code>RenderGraph.swift:290</code>）。</p>
+<p><strong>两个消费阶段读同一份数。</strong> S1.6 逐像素读覆盖率、<code>mix</code> 进场景线性结果，唯一钳位在出口（<code>s1_6_local.metal:126</code>、<code>:144</code>）；S3.5 读同一片、在 RGB 上 <code>mix</code>，色相旋转前按峰值归一化以照看 HDR（<code>s3_5_local_color.metal:72</code>）。两者都跳过「覆盖率 0」与「未启用」，只有曝光滑杆的蒙版在 S3.5 上一分钱不花（<code>:21</code>）。</p>
+<p><strong>按值谓词读 S1 的输出，但要除掉全局曝光</strong>：同一张 <code>luminanceRange 0.55…1.0</code> 在 E0 下选 17 %、E+2 下选 55 %（IoU 0.196），所以采样前除以 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mo>=</mo><msup><mn>2</mn><mrow><mi>E</mi><mi>V</mi></mrow></msup></mrow><annotation encoding="application/x-tex">g = 2^{EV}</annotation></semantics></math>，谓词看到的是解码器的光（<code>s1_5_mask_atlas.metal:15</code>）。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable 的绘制蒙版</strong>：形状以矢量存在<strong>原图坐标系</strong>，随后续变形模块一起被变换，「永远作用在同一块画面区域」（<a href="https://docs.darktable.org/usermanual/4.6/en/darkroom/masking-and-blending/masks/drawn/" class="uri">https://docs.darktable.org/usermanual/4.6/en/darkroom/masking-and-blending/masks/drawn/</a>）。Photons 同一条纪律，但写成了坐标契约：形状归一化到未裁切源图、距离除以短边（<code>Masks.swift:5</code>）。羽化的定义不同：darktable 是「边缘的模糊」，Photons 是<strong>边界外侧的二次衰减</strong>——这条正是 079 A4 从 darktable 的 <code>masks/ellipse.c</code> 学来的，因为它不吃掉形状的实心面积（<code>s1_5_mask_atlas.metal:56</code>）。</li>
+<li><strong>darktable 的参数化蒙版</strong>：每个数据通道（Lab、RGB、Jzazbz 及 hue/saturation 这类虚拟通道）各给一条不透明度函数，最后<strong>逐像素相乘</strong>再乘全局不透明度；HDR 用 <code>boost factor</code> 把量程往外推（<a href="https://docs.darktable.org/usermanual/4.6/en/darkroom/masking-and-blending/masks/parametric/" class="uri">https://docs.darktable.org/usermanual/4.6/en/darkroom/masking-and-blending/masks/parametric/</a>）。Photons 只给两个谓词、一个固定度量空间、一条「最近采样色距离 vs 容差」，HDR 靠把 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 轴延到 +4 EV（<code>Masks.swift:455</code>）。表达力少一截，换来每条谓词只有三个数、能写出闭式期望值。</li>
+<li><strong>一个数走两个域</strong>：darktable 的混合是「模块只跑一个 <code>process()</code>，蒙版只决定 alpha」，带与不带蒙版不可能长出两套算法（<code>s1_6_local.metal:20</code>）。S1.6 同法：调的不是「局部版本」，而是全局阶段自己的函数体（<code>:24</code>）。</li>
+</ul>
+<p><strong>取舍</strong></p>
+<p><strong>解析形状，不存位图。</strong> 形状在任何尺寸下精确、文档只有几百字节、改画布不必重采样蒙版；代价是画笔成本随点数线性增长，靠笔画包围盒先拒（一笔 300 点等于 299 次距离计算）压住（<code>s1_5_mask_atlas.metal:268</code>）。语义蒙版是唯一例外。</p>
+<p><strong>两种羽化单位。</strong> 径向与画笔按短边、线性按跨度。这是 102 的结论而非疏忽：把径向规则套到开放形状上，斜坡不再经过中点（<code>:203</code>）。代价是同一张蒙版里两个同名参数语义不同。</p>
+<p><strong>颜色范围只有一个度量空间。</strong> 固定 OKLab 让「容差 0.3」在两张照片上同义，也让 CPU 取色器与 GPU 像素走同一条 <code>fromLinear</code>（<code>Masks.swift:660</code>）；代价是不能换坐标系去贴合某类画面。</p>
+<p><strong>语义蒙版依赖操作系统。</strong> 本机只有 subject 可用；缺能力时给 0 覆盖加一条原因而不猜近似（<code>MaskSemantics.swift:12</code>、<code>s1_5_mask_atlas.metal:72</code>）。摘要进文档，为了让「系统模型换了」下次打开时可见（<code>Masks.swift:699</code>）。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="04c-detail.html">← 4c 细节</a>
+      <span></span>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

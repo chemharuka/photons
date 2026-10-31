@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photons 渲染白皮书 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li class="current"><span>卷首</span></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    
+    <article>
+<h1>Photons 渲染白皮书</h1>
+<p class="lede">显示架构 · 处理架构 · 参数算法</p>
+<p>Photons 是一个 macOS 上的原生 RAW 工作流：导入、挑片、非破坏性显影、导出。
+它不自带解码器——去马赛克、镜头校正、机器学习降噪来自 Apple 的 <code>CIRAWFilter</code>；
+解码之上的整条算术链、蒙版、色彩管理与导出，是 Photons 自己的 Metal 渲染图。</p>
+<p>这份白皮书讲三件事：画面如何被画到屏幕上（显示架构）、每个参数作用在哪个域以及为什么在那个位置
+（处理架构）、关键参数的具体算法（参数算法）。它不写界面设计，也不描述尚未落地的计划。</p>
+<blockquote><p><strong>α 阶段声明。</strong>项目仍在 α：本文描述的是当前实现，不是稳定 API。
+管线、参数与常数都会变，改动会反映在页脚的代码基准上。</p></blockquote>
+<h2>章节目录</h2>
+<ul class="landing-list"><li><a href="00-preface.html">卷首：这份文档是什么</a></li><li><a href="01-overview.html">1 总览：一条管线，三条不变量</a></li><li><a href="02-display.html">2 显示架构：画布、缓冲、渲染</a></li><li><a href="03-processing.html">3 处理架构：域、顺序、契约</a></li><li><a href="04a-tones.html">4.1–4.6 影调：白平衡、曝光、端点、对比、曲线</a></li><li><a href="04b-color.html">4.7–4.9 色彩：饱和、HSL、点颜色、分级</a></li><li><a href="04c-detail.html">4.10–4.15 细节与效果：纹理、锐化、降噪、去雾、暗角、颗粒</a></li><li><a href="04d-geometry-masks.html">4.16–4.17 几何与蒙版</a></li></ul>
+<h2>怎么读</h2>
+<p>第一次读，按顺序：总览给出一张管线图和三条不变量；显示架构解释「屏幕上的这张图」是怎么来的；
+处理架构给出参数到域、域到阶段的归属表；参数算法逐项展开公式与实现。</p>
+<p>需要核对某一句话时，正文里的每个常数后面都跟着 <code>文件:行</code>。
+白皮书与 <code>docs/architecture-decisions.md</code> 分工不同：前者说「现在是什么」，后者说「为什么这样定、什么条件下会错」。</p>
+
+    </article>
+    <nav class="pager">
+      <span></span>
+      <a class="next" href="00-preface.html">卷首 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

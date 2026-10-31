@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卷首：这份文档是什么 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li class="current"><span>卷首</span></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#α-阶段声明">α 阶段声明</a></li><li class="toc-2"><a href="#读者">读者</a></li><li class="toc-2"><a href="#三个域先说清楚">三个域，先说清楚</a></li><li class="toc-2"><a href="#记法">记法</a></li><li class="toc-2"><a href="#术语表">术语表</a></li><li class="toc-2"><a href="#与另外两份文档的分工">与另外两份文档的分工</a></li><li class="toc-2"><a href="#版本基准">版本基准</a></li></ul></nav>
+    <article>
+<h1 id="卷首这份文档是什么">卷首：这份文档是什么</h1>
+<p>Photons 是一个 macOS 上的原生 RAW 工作流：导入一个文件夹、挑片、非破坏性显影、导出。它不自带解码器——去马赛克、镜头校正、机器学习降噪来自 Apple 的 <code>CIRAWFilter</code>（<code>Sources/PhotonsCore/RAWDecoder.swift:1</code>）。解码之上的整条算术链、蒙版、色彩管理、XMP 与导出，是 Photons 自己的 Metal 渲染图。</p>
+<p>这份文档只讲解码之上的那一半：<strong>画面如何被画到屏幕上、每个参数作用在哪个域、这些参数的具体算法</strong>。</p>
+<h2 id="α-阶段声明">α 阶段声明</h2>
+<p>项目仍在 α。本文描述的是<strong>当前实现</strong>，不是稳定 API，也不是路线图。管线阶段、参数范围、常数都会变；每一页页脚写着构建时的代码基准（<code>git rev-parse --short HEAD</code>），正文里的每个常数后面跟着 <code>文件:行</code>。当文档与代码冲突时，以代码为准，并把那一处当成文档的 bug。</p>
+<p>不写的东西：界面设计（布局、控件、交互规格）、性能优化计划、与其他软件的评测。文中会出现「面板上的滑杆」这样的说法，那只是参数的名字，不是界面描述。</p>
+<h2 id="读者">读者</h2>
+<ul>
+<li>想知道「这个滑杆到底动了什么」的高级用户；</li>
+<li>要评审渲染正确性的工程师；</li>
+<li>准备改这条管线的未来贡献者。</li>
+</ul>
+<p>阅读前提：知道 RAW 是线性光、知道 sRGB 不是「颜色」而是传递函数、不害怕 <code>log2</code>。不要求读过 Photons 的代码。</p>
+<h2 id="三个域先说清楚">三个域，先说清楚</h2>
+<p>后面每一章都围着这三个域转，这里先给一句话版本：</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>域</th>
+<th>变量是什么</th>
+<th>典型操作</th>
+<th>在管线里的位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>RAW 解码域</strong></td>
+<td>相机原始像素，由 Apple 的 <code>RawCamera</code> 解释</td>
+<td>去马赛克、色温/色调、机身降噪、镜头校正</td>
+<td><code>CIRAWFilter</code>，渲染图之外</td>
+</tr>
+<tr>
+<td><strong>场景线性域</strong></td>
+<td>线性光，<code>1</code> 是 SDR 白，可以大于 1</td>
+<td>黑电平、曝光、黑白端点、曲线、去雾、暗角</td>
+<td>S1 到 S1.9</td>
+</tr>
+<tr>
+<td><strong>显示参考域</strong></td>
+<td>经过色调映射的显示码，<code>0…1</code></td>
+<td>高光/中间调/阴影、对比、饱和、HSL、分级、锐化、颗粒</td>
+<td>S2 之后</td>
+</tr>
+</tbody>
+</table>
+<p>一条贯穿全文的规则：<strong>一个操作必须待在它的量所在的域里</strong>。把曝光做成显示域增益，就再也拿不回被压缩的高光；把去雾做成显示域减法，<code>A = 1</code> 会让高光越去雾越亮（<code>Sources/PhotonsCore/Stage.swift:55</code>）。第三、四章的大部分篇幅，都是在解释这句话的后果。</p>
+<h2 id="记法">记法</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>记号</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EV</code></td>
+<td>以 2 为底的对数曝光，<code>+1 EV</code> = 光量 ×2</td>
+</tr>
+<tr>
+<td>显示码</td>
+<td>sRGB 编码后的 <code>0…255</code>，<code>0.5</code> 约为 18 % 灰的编码值</td>
+</tr>
+<tr>
+<td><code>Y</code></td>
+<td>工作基色（线性 Rec.2020）下的亮度，权重 <code>0.2627 / 0.6780 / 0.0593</code>（<code>Sources/PhotonsCore/ColorPrimaries.swift</code>）</td>
+</tr>
+<tr>
+<td><code>L</code></td>
+<td><code>log2(Y)</code>，单位是「相对显示白的 EV」，显示白处 <code>L = 0</code></td>
+</tr>
+<tr>
+<td><code>u</code></td>
+<td>曲线的横轴坐标：<code>0…0.5</code> 是 SDR 显示码，<code>0.5…1</code> 是 <code>+0…+4 EV</code>（<code>Sources/PhotonsCore/HDRCurve.swift:46</code>）</td>
+</tr>
+<tr>
+<td><code>S0…S4</code></td>
+<td>渲染阶段编号；<code>.5</code> / <code>.6</code> 之类是插在中间的阶段，执行顺序见第 1 章</td>
+</tr>
+<tr>
+<td>键 / key</td>
+<td>阶段缓存的标识串，只由该阶段真正读到的参数组成（第 2.4 节）</td>
+</tr>
+</tbody>
+</table>
+<h2 id="术语表">术语表</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>术语</th>
+<th>在这份文档里的意思</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>画布（canvas）</strong></td>
+<td>屏幕上的那块像素面，尺寸等于 drawable 的像素尺寸；照片可以在里面留黑边</td>
+</tr>
+<tr>
+<td><strong>内容像素</strong></td>
+<td>裁剪后的照片自己的像素网格（<code>RenderOptions.scale</code> 作用在它上面）</td>
+</tr>
+<tr>
+<td><strong>rung</strong></td>
+<td>解码阶梯上的一档，<code>0.5</code> 是预览档、<code>1.0</code> 是全分辨率档</td>
+</tr>
+<tr>
+<td><strong>stage</strong></td>
+<td>渲染图里的一个 pass，有独立的输入、输出与缓存键</td>
+</tr>
+<tr>
+<td><strong>条件 stage</strong></td>
+<td>只有谓词成立时才存在的阶段（有蒙版、曲线非恒等、颗粒 &gt; 0……）</td>
+</tr>
+<tr>
+<td><strong>中性零变化</strong></td>
+<td>没碰过的参数必须让像素逐字节不变，而不只是「看起来一样」</td>
+</tr>
+<tr>
+<td><strong>键链（key chain）</strong></td>
+<td>每个阶段的键 = <code>H(上一阶段的键 | 本阶段材料)</code>；链尾相等蕴含整条链相等</td>
+</tr>
+<tr>
+<td><strong>headroom</strong></td>
+<td>显示编码的上限，<code>1</code> 是 SDR；EDR 屏上可以大于 1</td>
+</tr>
+<tr>
+<td><strong>工作基色</strong></td>
+<td>线性 Rec.2020；所有线性域运算都在它里面做</td>
+</tr>
+<tr>
+<td><strong>OETF</strong></td>
+<td>光→信号的传递函数；S4 用 sRGB 分段函数，Display P3 共用同一条</td>
+</tr>
+</tbody>
+</table>
+<h2 id="与另外两份文档的分工">与另外两份文档的分工</h2>
+<ul>
+<li><code>README.md</code>：项目是什么、怎么构建、门槛命令。它的管线一节是 M1 时点的摘要，个别归属已经被后续派单改过（例如黑白端点已从 S2 移到 S1），本文以代码为准。</li>
+<li><code>docs/architecture-decisions.md</code>：<strong>为什么</strong>这样定、什么条件下这个决定会错、当时的实测证据。本文说「现在是什么」，那份说「凭什么」。</li>
+<li>本文：把两者的结论组织成一份可从头读到尾的算法文档，并补上公式与开源对照。</li>
+</ul>
+<h2 id="版本基准">版本基准</h2>
+<ul>
+<li>代码：<code>main</code> @ <code>2050c0e</code>（构建时自动写入页脚）</li>
+<li>解码配方：<code>DecodeRecipe.current = "v3-lens"</code>（<code>Sources/PhotonsCore/LinearImageStore.swift:16</code>）</li>
+<li>曲线格式：<code>version 2</code>、<code>type: double</code>、<code>max: 2</code>、<code>domain: hdr</code>（<code>Sources/PhotonsCore/EditModel.swift:1528</code>）</li>
+<li>构建环境：macOS 27 / Xcode 27 / Swift 6（<code>README.md</code>）</li>
+</ul>
+
+    </article>
+    <nav class="pager">
+      <span></span>
+      <a class="next" href="01-overview.html">1 总览 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

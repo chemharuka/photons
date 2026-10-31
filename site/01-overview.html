@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1 总览：一条管线，三条不变量 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li class="current"><span>1 总览</span></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#分工边界apple-做解码photons-做其余">1.1 分工边界：Apple 做解码，Photons 做其余</a></li><li class="toc-2"><a href="#一条管线20-个-stage">1.2 一条管线：20 个 stage</a></li><li class="toc-2"><a href="#三条不变量">1.3 三条不变量</a></li><li class="toc-2"><a href="#两条路径一套算术">1.4 两条路径，一套算术</a></li><li class="toc-2"><a href="#代码地图">1.5 代码地图</a></li><li class="toc-2"><a href="#怎么自己看">1.6 怎么自己看</a></li></ul></nav>
+    <article>
+<h1 id="总览一条管线三条不变量">1 总览：一条管线，三条不变量</h1>
+<h2 id="分工边界apple-做解码photons-做其余">1.1 分工边界：Apple 做解码，Photons 做其余</h2>
+<p><code>CIRAWFilter</code> 交出来的是<strong>已经去马赛克、已经做过机身降噪与镜头校正</strong>的线性图。Photons 不碰马赛克，也因此放弃了两件必须在马赛克上做的事——HDR 合成与超分辨率（<code>README.md</code> 的「Not in scope」）。</p>
+<p>这条边界带来三个直接后果，后面每一章都会用到：</p>
+<ol type="1">
+<li><strong>白平衡是 S1 的增益，不是解码参数（143 起）。</strong> 解码器永远停在文件自己的 as-shot 平衡，<code>CIRAWFilter</code> 的温度/色调从不写入；文档里的 <code>temperature/tint</code> 由 <code>WhiteBalanceEstimate</code> 在本机算成三通道增益，S1 用 <code>v *= gain · wb</code> 一次乘完（<code>Sources/PhotonsCore/WhiteBalanceEstimate.swift:3</code>、<code>Sources/PhotonsCore/RAWDecoder.swift:102</code>）。好处是拖白平衡不再重新解码，预览就是松手帧（<code>docs/STATUS.md</code>）。注：<code>Sources/PhotonsCore/EditModel.swift:1284</code> 的注释仍写着「喂给 <code>CIRAWFilter</code>」，那是 143 之前的说法，保留它是因为字段名还没改。</li>
+<li><strong>解码是昂贵的、带缓存的。</strong> 60 MP 全分辨率解码约 0.5 s（v8）/ 更久（v9），结果按 <code>DecodeCacheKey</code> 落到磁盘，第二次打开是读盘而不是解码（<code>Sources/PhotonsCore/LinearImageStore.swift:24</code>）。</li>
+<li><strong>解码缓冲进缓存键。</strong> 缓冲的身份是 <code>DecodeCacheKey.digest</code>（文件 SHA-256、解码器版本、曝光、缩放、色彩空间、白平衡、细节参数、解码配方、镜头剖面），不是像素哈希——对 60 MP 每帧做哈希比渲染本身还贵（<code>Sources/PhotonsCore/RenderGraph.swift:11</code>）。</li>
+</ol>
+<blockquote>
+<p><strong>α 注记。</strong> <code>CIRAWFilter</code> 的 <code>decoderVersion</code> 会被机型白名单静默降级（请求 v9 得到 v8），所以解码后必须回读能力集再决定 UI 与键（<code>Sources/PhotonsCore/DecoderCapabilities.swift</code>）。</p>
+</blockquote>
+<h2 id="一条管线20-个-stage">1.2 一条管线：20 个 stage</h2>
+<p>渲染图是<strong>一条单向链</strong>：每个 stage 读上一张纹理、写下一张，边界就是缓存键。执行顺序定义在 <code>Sources/PhotonsCore/Stage.swift:182</code>；下表按它排列，并给出每个 stage 的域与存在条件。</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>顺序</th>
+<th>stage</th>
+<th>做什么</th>
+<th>域</th>
+<th>何时存在</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>S0</strong></td>
+<td><code>s0-geometry</code></td>
+<td>方向、裁切、拉直、翻转、90°、透视、横向色差、文件自带镜头 warp</td>
+<td>源像素</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S1</strong></td>
+<td><code>s1-scene-linear</code></td>
+<td>白平衡增益、黑电平偏移、曝光增益、黑白端点、高光恢复</td>
+<td>场景线性</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S1.5</strong></td>
+<td><code>s1.5-mask-atlas</code></td>
+<td>把所有蒙版的覆盖率烘成一张图集</td>
+<td>画布网格</td>
+<td>有启用的蒙版</td>
+</tr>
+<tr>
+<td><strong>S1.6</strong></td>
+<td><code>s1.6-local</code></td>
+<td>蒙版内的曝光、色温/色调、黑白端点、影调</td>
+<td>场景线性</td>
+<td>同上</td>
+</tr>
+<tr>
+<td><strong>S1.9</strong></td>
+<td><code>s1.9-heal</code></td>
+<td>修复/克隆（泊松边界匹配）</td>
+<td>场景线性</td>
+<td>有修复点</td>
+</tr>
+<tr>
+<td><strong>S1.7</strong></td>
+<td><code>s1.7-hdr-curve</code></td>
+<td>HDR 曲线（W/R/G/B 四张表）</td>
+<td>曲线轴（<code>u</code>）</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S1.9-dz</strong></td>
+<td><code>s1.9-dehaze</code></td>
+<td>去雾（暗通道先验）</td>
+<td>场景线性</td>
+<td><code>dehaze ≠ 0</code></td>
+</tr>
+<tr>
+<td><strong>S3c</strong></td>
+<td><code>s3-vignette</code></td>
+<td>镜头暗角校正</td>
+<td>场景线性</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S2</strong></td>
+<td><code>s2-tone-map</code></td>
+<td>高光、中间调、阴影三段窗口</td>
+<td>显示参考</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S2.5</strong></td>
+<td><code>s1.8-contrast</code></td>
+<td>对比（多尺度引导滤波残差）</td>
+<td>显示参考</td>
+<td><code>contrast ≠ 0</code> 或蒙版带对比</td>
+</tr>
+<tr>
+<td><strong>S3</strong></td>
+<td><code>s3-color</code></td>
+<td>自然饱和、饱和</td>
+<td>显示参考</td>
+<td>总是</td>
+</tr>
+<tr>
+<td><strong>S3.4</strong></td>
+<td><code>s3.4-bw</code></td>
+<td>黑白 + 每色相混合</td>
+<td>显示参考</td>
+<td>黑白开关开</td>
+</tr>
+<tr>
+<td><strong>S3.5</strong></td>
+<td><code>s3.5-local-color</code></td>
+<td>蒙版内的色相、饱和</td>
+<td>显示参考</td>
+<td>蒙版带色相/饱和</td>
+</tr>
+<tr>
+<td><strong>S3.6</strong></td>
+<td><code>s3.6-hsl</code></td>
+<td>八色带 HSL（OKLCh）</td>
+<td>显示参考</td>
+<td>24 个值任一非零</td>
+</tr>
+<tr>
+<td><strong>S3.6b</strong></td>
+<td><code>s3.6b-point-colour</code></td>
+<td>点颜色（采样一个 OKLCh 颜色）</td>
+<td>显示参考</td>
+<td>有采样且有调整</td>
+</tr>
+<tr>
+<td><strong>S3.8</strong></td>
+<td><code>s3.8-grade</code></td>
+<td>三向色彩分级（阴影/中间调/高光）</td>
+<td>显示参考</td>
+<td>九个值任一非零</td>
+</tr>
+<tr>
+<td><strong>S3.9</strong></td>
+<td><code>s3.9-detail-fx</code></td>
+<td>纹理、清晰度、去噪、去彩噪</td>
+<td>显示参考</td>
+<td>任一非零</td>
+</tr>
+<tr>
+<td><strong>S3.10</strong></td>
+<td><code>s3.10-sharpen</code></td>
+<td>锐化（USM + 边缘蒙版）</td>
+<td>显示参考</td>
+<td><code>amount &gt; 0</code></td>
+</tr>
+<tr>
+<td><strong>S3.7</strong></td>
+<td><code>s3.7-grain</code></td>
+<td>颗粒</td>
+<td>显示参考</td>
+<td><code>grain &gt; 0</code></td>
+</tr>
+<tr>
+<td><strong>S4</strong></td>
+<td><code>s4-display</code></td>
+<td>基色矩阵、sRGB OETF、<code>min(v, headroom)</code></td>
+<td>输出</td>
+<td>总是</td>
+</tr>
+</tbody>
+</table>
+<p>七个<strong>无条件</strong>阶段（S0、S1、S1.7、S3c、S2、S3、S4）构成基线；其余十三个由谓词决定是否进入链。谓词是「值」而不是「对象存在」：<code>EditModel.hasBands</code> 看 24 个 HSL 数里有没有非零，<code>hasDetailFX</code> 看四个数，<code>hasGrain</code> 看 <code>grain &gt; 0</code>（<code>Sources/PhotonsCore/EditModel.swift:1933</code>、<code>:2293</code>、<code>:2287</code>）。</p>
+<blockquote>
+<p><strong>两处与 README 不一致，以代码为准。</strong> ① 曲线在 <strong>tone map 之前</strong>（S1.7），不在之后（<code>Stage.swift:34</code>）；② 白点/黑点是 <strong>S1 的端点</strong>，不在 S2（<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:40</code>，同一文件第 9 行还留着「098 moved contrast out of this file」的历史注记）。README 的对照表是 M1 版本。</p>
+</blockquote>
+<h2 id="三条不变量">1.3 三条不变量</h2>
+<p>这三条不是设计口号，是被测试钉住的属性；第四章每次讲算法都会回到它们。</p>
+<p><strong>① 中性零变化（byte-for-byte）。</strong> 没碰过的控件必须让像素逐字节等于没有这个功能时的像素，不是「视觉上一样」。做法是让条件 stage <strong>根本不进链</strong>：<code>masks == []</code> 的文档得到与 M1 完全相同的 trace、键链与像素；24 个 HSL 全零、颗粒为 0、锐化 amount 为 0 的文档同样（<code>Stage.swift:164</code>、<code>:176</code>）。这条契约的强度在于它让「优化」和「新功能」都不会悄悄改变老照片。</p>
+<p><strong>② stage 级缓存键。</strong> 每个边界是一个键：只改 S3 的参数不会重跑 S0/S1/S2。键是链式的——<code>H(上一环 | 本环材料)</code>——所以链尾相等就蕴含整条链相等；<code>--trace-stages</code> 会打印每一阶段是跑了还是命中（<code>RenderGraph.swift:1925</code>）。</p>
+<p><strong>③ 屏幕与导出同一算术。</strong> 同一份文档、同一个 <code>RenderGraph</code>：屏幕上渲染到画布（可能带黑边、带 EDR headroom），导出渲染到内容尺寸（<code>headroom = 1</code>）。两条路径的差别只有 <code>RenderOptions</code>，没有第二套着色器（<code>README.md</code>；<code>Sources/PhotonsCore/Stage.swift:373</code>）。</p>
+<h2 id="两条路径一套算术">1.4 两条路径，一套算术</h2>
+<pre><code>屏幕：decode → S0…S3.7 → S4 → present（画布，headroom = 屏的上限）
+               ↘（同一批纹理）
+导出：decode → S0…S3.7 → S4 → encode（内容尺寸，headroom = 1）→ JPEG/HEIC/TIFF/PNG/AVIF</code></pre>
+<ul>
+<li>屏幕的 <code>canvas</code> 是视口像素，照片在里面可能留黑边（letterbox）；导出的 <code>canvas</code> 为 <code>nil</code>，即内容本身的大小（<code>RenderGraph.swift:52</code>）。</li>
+<li>屏幕的 S4 把上限交给 <code>DisplayOptions.headroom</code>；导出恒为 1。<code>headroom = 1</code> 与旧的 <code>clamp(v, 0, 1)</code> 逐字节相同（<code>Sources/PhotonsCore/Kernels/s4_display.metal:11</code>）。</li>
+<li>「显示原图」（<code>\</code>）不是「参数清零后的渲染」，而是把管线缩短成 <code>S0(identity) → S4</code> 的另一次渲染；它不改键、不写文档、不重新解码（<code>RenderGraph.swift:148</code>、<code>:1972</code>）。</li>
+</ul>
+<h2 id="代码地图">1.5 代码地图</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>目录</th>
+<th>职责</th>
+<th>本文用到的部分</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Sources/PhotonsCore/</code></td>
+<td>解码、线性缓冲、RenderGraph、Metal kernel（不依赖 AppKit）</td>
+<td>第 2、3、4 章的全部</td>
+</tr>
+<tr>
+<td><code>Sources/PhotonsCore/Kernels/</code></td>
+<td>每个 stage 的 <code>.metal</code> 源文件，运行时由 <code>Metal.framework</code> 编译</td>
+<td>公式的最终真值</td>
+</tr>
+<tr>
+<td><code>Sources/PhotonsExport/</code></td>
+<td>渲染 + 编码、批量导出、XMP</td>
+<td>第 1.4、2.5 节</td>
+</tr>
+<tr>
+<td><code>Sources/PhotonsCatalog/</code></td>
+<td>SQLite 目录、导入、缩略图</td>
+<td>不涉及</td>
+</tr>
+<tr>
+<td><code>Sources/PhotonsUI/</code></td>
+<td>AppKit/SwiftUI 外壳、画布、检查器</td>
+<td>只提参数名，不写界面</td>
+</tr>
+<tr>
+<td><code>Sources/photonsctl/</code></td>
+<td>无窗口的验收工具，也是每个动词的唯一实现</td>
+<td>第 1.6 节</td>
+</tr>
+</tbody>
+</table>
+<h2 id="怎么自己看">1.6 怎么自己看</h2>
+<div class="sourceCode" id="cb2"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 一次渲染，打印每个阶段是跑了还是命中缓存</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">.build/release/photonsctl</span> render photo.dng <span class="at">--edit</span> Tests/Fixtures/edit-push.json <span class="dt">\</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">--out</span> /tmp/out.jpg <span class="at">--scale</span> 0.25 <span class="at">--trace-stages</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 解码事实：版本、能力、as-shot 白平衡、线性最大值</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="ex">.build/release/photonsctl</span> info photo.dng</span></code></pre></div>
+<p><code>--trace-stages</code> 是本文所有「某阶段没重跑」说法的现场证据：它打印的短名（<code>s1</code>、<code>s2.5</code>、<code>s3.6</code>……）与 <code>RenderStage.short</code> 一致（<code>Stage.swift:240</code>）。</p>
+<hr />
+<p>下一章从屏幕开始：一张照片是怎么从一块线性缓冲变成画布上的像素的。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="00-preface.html">← 卷首</a>
+      <a class="next" href="02-display.html">2 显示架构 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

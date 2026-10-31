@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2 显示架构：画布、缓冲、渲染 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li class="current"><span>2 显示架构</span></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#画布三个尺寸不是一个">2.1 画布：三个尺寸，不是一个</a></li><li class="toc-2"><a href="#坐标谁贴在谁上面">2.2 坐标：谁贴在谁上面</a></li><li class="toc-2"><a href="#缓冲像素放在哪放几份">2.3 缓冲：像素放在哪、放几份</a></li><li class="toc-3"><a href="#解码缓冲">解码缓冲</a></li><li class="toc-3"><a href="#解码阶梯">解码阶梯</a></li><li class="toc-3"><a href="#磁盘缓存">磁盘缓存</a></li><li class="toc-3"><a href="#中间纹理与副产物">中间纹理与副产物</a></li><li class="toc-2"><a href="#渲染图键脏组队列">2.4 渲染：图、键、脏组、队列</a></li><li class="toc-3"><a href="#一张图">一张图</a></li><li class="toc-3"><a href="#键是链不是集合">键是链，不是集合</a></li><li class="toc-3"><a href="#脏组">脏组</a></li><li class="toc-3"><a href="#两条队列">两条队列</a></li><li class="toc-3"><a href="#present">present</a></li><li class="toc-2"><a href="#显示编码与-hdr">2.5 显示编码与 HDR</a></li><li class="toc-2"><a href="#帧预算时序与故障">2.6 帧预算、时序与故障</a></li></ul></nav>
+    <article>
+<h1 id="显示架构画布缓冲渲染">2 显示架构：画布、缓冲、渲染</h1>
+<p>这一章回答一个问题：<strong>一块解码出来的线性缓冲，是怎么变成屏幕上那张图的？</strong> 答案分四层：尺寸（画布与内容）、坐标（谁贴在谁上面）、缓冲（像素放在哪、放几份）、渲染（哪些 pass 跑、什么时候跳过）。最后两节讲显示编码与帧预算。</p>
+<h2 id="画布三个尺寸不是一个">2.1 画布：三个尺寸，不是一个</h2>
+<p>一张照片在屏幕上涉及三个不同的像素网格，混用其中任意两个都会得到「图被拉扁」或「1:1 不 1:1」：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>名字</th>
+<th>定义</th>
+<th>谁决定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>源尺寸</strong></td>
+<td>解码缓冲的正立尺寸（EXIF 方向已应用）</td>
+<td>文件 + 解码器</td>
+</tr>
+<tr>
+<td><strong>内容尺寸</strong></td>
+<td>裁剪后的照片尺寸 × <code>RenderOptions.scale</code></td>
+<td>文档的几何 + 本次渲染的缩放</td>
+</tr>
+<tr>
+<td><strong>画布尺寸</strong></td>
+<td>实际要画的像素面（视口 / drawable）</td>
+<td>窗口，或导出时的内容本身</td>
+</tr>
+</tbody>
+</table>
+<p>屏幕上，内容通常小于画布：照片按适应比例居中，四周留黑边（letterbox）。黑边<strong>不是</strong>图层颜色，也不是着色器算出来的——S2 与 S4 在内容矩形之外直接写 <code>float4(0)</code>，present pass 的照片 quad 根本不覆盖那些像素，画布的 clear color（<code>#0F0F0F</code>）透出来（<code>Sources/PhotonsCore/CanvasPresenter.swift:307</code>、<code>Sources/PhotonsCore/Kernels/s2_tone_map.metal:44</code>）。这条设计有一个可测的后果：直方图只统计内容矩形，黑边永远不会被当成「暗部像素」。</p>
+<p><strong>画布不总是裁剪矩形。</strong> 拉直或透视之后，裁剪框在画面里变成一个转过的矩形，渲染的画布是它的<strong>包围盒</strong>：<code>CropMath.canvasSize(...)</code>（<code>Sources/PhotonsCore/EditModel.swift:1111</code>）。所以一张 9° 拉直的照片，画布比裁剪框大，照片在画布里居中；「输出尺寸」这个读数必须用 <code>canvasSize</code> 而不是裁剪框尺寸，否则读数会比屏幕上的图小一圈。</p>
+<p><strong>1:1 不是裁剪。</strong> 放大到 100 % 时，渲染的仍然是整幅画面，只是取其中一个窗口：<code>RenderOptions.outputWindow</code>，单位是<strong>内容像素</strong>，坐标系是整幅输出的网格（<code>Sources/PhotonsCore/RenderGraph.swift:58</code>）。用裁剪冒充 1:1 会有两个立刻可见的错：拉直角在裁剪空间里转，窗口的投影与整帧差约 0.29 %；暗角与蒙版羽化按窗口归一，1:1 时它们的物理尺寸会缩水（同文件 <code>:67</code>）。</p>
+<blockquote>
+<p>画布尺寸是渲染的入参，不是结果的属性。<code>PresentRequest</code> 把画布尺寸和 quad 一起带着走，present 时若 drawable 与请求的画布不一致，这一帧在拿 drawable <strong>之前</strong>就被拒绝——拿一个不属于它的 drawable 会花掉一次 vsync，在拖动里就是「果冻」（<code>CanvasPresenter.swift:418</code>）。</p>
+</blockquote>
+<h2 id="坐标谁贴在谁上面">2.2 坐标：谁贴在谁上面</h2>
+<p>一条渲染链上有四种矩形，换算关系只有一条仿射：</p>
+<pre><code>uv = (u0, v0) + (canvasX / canvasW, canvasY / canvasH) · (du, dv)</code></pre>
+<p><code>PresentWindow</code> 就是这四个数 <code>(u0, v0, du, dv)</code>（<code>CanvasPresenter.swift:22</code>）。它描述的是「画布上的这一点，读纹理的哪里」，而不是「纹理有多大」——所以同一个窗口可以贴在一张比画布大的纹理上（缩小显示），也可以贴在一张更小的纹理上（放大显示）。</p>
+<p><code>FramePlacement</code> 补上另一半信息（<code>CanvasPresenter.swift:165</code>）：</p>
+<ul>
+<li><code>region</code>：这张画布大小的帧纹理，覆盖了整幅照片的哪一块（1:1 窗口时是九分之一，适应时是全部）；</li>
+<li><code>rect</code>：照片在这张纹理里的矩形（letterbox 之后，纹理里有一部分是 0）。</li>
+</ul>
+<p>两个结构合起来，才能回答「这张纹理的某个像素，对应整幅照片的哪里」，背景纹理就是靠这个映射把画布上照片没盖住的部分填成照片自己的低分辨率延续，而不是灰块（<code>PresentWindow.onWholePicture</code>，同文件 <code>:71</code>）。</p>
+<p><strong>present 只画两个 quad。</strong> 先画整幅低分辨率背景，再画照片本身；画家顺序即合成，不开混合、不用深度缓冲，后画的覆盖先画的（<code>CanvasPresenter.swift:539</code>）。分成两个 draw 而不是一个带分支的着色器，是因为 GPU 不能谓词化纹理取样：分支里的取样照样要付带宽。</p>
+<h2 id="缓冲像素放在哪放几份">2.3 缓冲：像素放在哪、放几份</h2>
+<h3 id="解码缓冲">解码缓冲</h3>
+<p><code>LinearImage</code> 是 <code>Float16</code> 的 RGBA，色彩空间标为 <code>extendedLinearSRGB</code>，行序自上而下（<code>Sources/PhotonsCore/LinearImage.swift:122</code>、<code>Sources/PhotonsCore/LinearImageStore.swift:9</code>）。方向不烘进缓冲：解码器交出的行可能还是文件声明的方向，<code>oriented()</code> 在进入 S0 之前做一次拷贝——旋转一次渲染，而不是重新解码一次（<code>LinearImage.swift:156</code>）。</p>
+<h3 id="解码阶梯">解码阶梯</h3>
+<p>同一张照片会有两档缓冲（<code>Sources/PhotonsCore/RAWDecoder.swift:1038</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>rung</th>
+<th>用途</th>
+<th>相对像素</th>
+<th>60 MP 文件的内存</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0.5</code></td>
+<td>适应视图的第一帧</td>
+<td>1/4</td>
+<td>约 120 MB</td>
+</tr>
+<tr>
+<td><code>1.0</code></td>
+<td>1:1 及更高倍率</td>
+<td>1</td>
+<td>约 482 MB</td>
+</tr>
+</tbody>
+</table>
+<p>规则只有两条：同 <code>(identity, scale)</code> 命中就复用；<strong>高的一档落地时释放低的一档</strong>（同文件 <code>:1026</code>）。后者让稳态内存回到「一张缓冲」而不是两张，也解释了为什么「适应 → 1:1 → 适应 → 1:1」只解码两次而不是四次。</p>
+<h3 id="磁盘缓存">磁盘缓存</h3>
+<p>解码结果的磁盘缓存键是 <code>DecodeCacheKey.digest</code>：文件 SHA-256、解码器版本、曝光、缩放、草稿标志、色彩空间、解码配方、细节参数、镜头剖面（<code>Sources/PhotonsCore/LinearImageStore.swift:24</code>）。白平衡字段仍留在键里，但自 143 起解码器不读它——像素与文档的白平衡无关，键里的那一项只是为了旧缓冲的命名兼容（<code>Sources/PhotonsCore/RAWDecoder.swift:102</code>）。配方号 <code>v3-lens</code> 不是装饰：<code>v1</code> 的缓冲曾经整体上下镜像，<code>v2</code> 修的就是它，所以老缓冲<strong>必须</strong>因为配方号变化而失效（同文件 <code>:9</code>）。键里没有像素哈希——对 60 MP 做哈希比解码还贵。</p>
+<h3 id="中间纹理与副产物">中间纹理与副产物</h3>
+<ul>
+<li>每个 stage 的输出是一张画布尺寸的 <code>rgba16Float</code> 纹理；缓存的粒度就是这张纹理（第 2.4 节）。</li>
+<li>蒙版图集（S1.5）是一张画布尺寸的覆盖率纹理，一张蒙版一个通道/切片；局部调整的阶段读它，而不重新算形状（<code>Sources/PhotonsCore/Masks.swift</code>）。</li>
+<li>少量 1×1 的「统计纹理」：去雾的 airlight <code>A</code> 就是一张 1×1 纹理，apply pass 在 GPU 上取样，不读回 CPU（<code>RenderGraph.swift:199</code>）。</li>
+<li>直方图：默认在<strong>缩略图尺度</strong>（约 0.58 Mpx）整幅渲染后测量；帧内测量则是对 S4 之前的纹理做固定步长的网格取样（256 长边 ≈ 0.29 MB），两者域相同，只差采样误差（<code>RenderGraph.swift:107</code>、<code>:123</code>）。</li>
+</ul>
+<h2 id="渲染图键脏组队列">2.4 渲染：图、键、脏组、队列</h2>
+<h3 id="一张图">一张图</h3>
+<p><code>RenderGraph.render(edit:options:)</code> 是唯一入口（<code>RenderGraph.swift:1982</code>）。它把文档与选项折成一份 <code>Plan</code>（画布、内容、窗口、S0 的快速路径），然后按 <code>RenderStage.pipeline(...)</code> 给出的阶段列表走：每个阶段读上一张纹理，写下一张；条件不成立就整段跳过，而不是「跑一遍再乘 0」（<code>Stage.swift:204</code>）。</p>
+<h3 id="键是链不是集合">键是链，不是集合</h3>
+<p>每个阶段有自己的键材料：S1 是几何键 + 黑电平/曝光/白平衡/高光恢复；S3.6 是 24 个 HSL 数；S3.10 是四个锐化数（<code>Sources/PhotonsCore/EditModel.swift:1957</code>、<code>:2451</code>）。链式组合：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mi>i</mi></msub><mo>=</mo><mi>H</mi><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>K</mi><mrow><mi>i</mi><mo>−</mo><mn>1</mn></mrow></msub><mspace width="0.167em"></mspace><mo stretchy="false" form="postfix">∥</mo><mspace width="0.167em"></mspace><msub><mi>M</mi><mi>i</mi></msub><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">
+K_i = H\left(K_{i-1} \,\|\, M_i\right)
+</annotation></semantics></math></p>
+<p>因此「链尾相等」蕴含「整条链相等」；<code>compositeKey</code> 把链尾与环境的两个后缀（tiling、语义蒙版）拼起来，一次比较就能跳过一次完整的走图（<code>RenderGraph.swift:1925</code>）。条件 stage 被跳过时，它的链接<strong>整条不写</strong>，而不是写一个中性值——这是中性零变化能逐字节成立的原因（<code>Stage.swift:15</code>）。</p>
+<h3 id="脏组">脏组</h3>
+<p>历史记录按<strong>组</strong>比较：<code>light</code>、<code>curve</code>、<code>color</code>、<code>masks</code>、<code>effects</code>、<code>geometry</code>……浮点容差 <code>1e-6</code>，蒙版 <code>1e-5</code>（<code>docs/STATUS.md</code>）。拖动一个滑杆只把对应组标脏，下一次渲染只需要从该组最早的阶段重跑。文档级相等不参与这个判断；否则「改了一个像素的暗角」会重跑解码。</p>
+<h3 id="两条队列">两条队列</h3>
+<p>解码与渲染分属两条队列（<code>Sources/PhotonsCore/DecodeQueue.swift</code>、<code>docs/STATUS.md</code> 第 10 轮）：</p>
+<ul>
+<li>解码队列串行、同键去重、可取消；解码在锁外进行（<code>RAWDecoder.swift:1032</code>）。</li>
+<li>渲染队列只使用<strong>已驻留</strong>的 rung；新窗口到达时合并到下一帧，不排队。</li>
+<li>全屏解码期间平移 20 帧从 5.8 s 串联降到 render p50 4.0–4.5 ms（<code>docs/STATUS.md</code>）。</li>
+</ul>
+<h3 id="present">present</h3>
+<p>present 是一个 render pass：清成 <code>#0F0F0F</code>，按次序画背景 quad 与照片 quad，<code>framebufferOnly = true</code>（读不回来，也对——屏幕上的东西不该被 CPU 采样）。着色器只做一件事：按窗口取样，并按目标存储做编码↔︎线性的转换（<code>CanvasPresenter.swift:547</code>）。</p>
+<h2 id="显示编码与-hdr">2.5 显示编码与 HDR</h2>
+<p>S4 是管线里唯一写「显示值」的地方，只有四步（<code>Sources/PhotonsCore/Kernels/s4_display.metal:38</code>）：</p>
+<ol type="1">
+<li>基色矩阵：工作基色（线性 Rec.2020）→ 输出基色（sRGB / Display P3 / Rec.2020）；</li>
+<li><strong>矩阵之后</strong>取 <code>max(v, 0)</code>；</li>
+<li><code>min(v, headroom)</code>；</li>
+<li>sRGB 分段 OETF。</li>
+</ol>
+<p>第 2 步的位置是修出来的：<code>Rec.2020 → sRGB</code> 的最小系数是 <code>−0.5876</code>，纯 Rec.2020 绿会算出 <code>R = −0.5876</code>；如果先钳再乘矩阵，这个负数会以「负的光」进入 16 位 drawable，直方图把它放到轴的负区（同文件 <code>:16</code>）。测试 <code>testS4ClampsAfterThePrimariesMatrix</code> 会在这一行被挪回矩阵之前时变红。</p>
+<p><strong>两条存储路径</strong>，由图层能接受什么决定（<code>CanvasPresenter.swift:340</code>）：</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>路径</th>
+<th>像素格式 / 色彩空间</th>
+<th>取值</th>
+<th>何时</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>linear16</code></td>
+<td><code>rgba16Float</code> + <code>extendedLinearDisplayP3</code></td>
+<td>线性光，可以 &gt; 1</td>
+<td>首选，EDR 前提</td>
+</tr>
+<tr>
+<td><code>srgb8</code></td>
+<td><code>bgra8Unorm</code> + sRGB</td>
+<td>显示编码，钳在 <code>0…1</code></td>
+<td>首帧拿不到 16 位 drawable 时降级一次，之后不再重试</td>
+</tr>
+</tbody>
+</table>
+<p><strong>headroom 是乘数，不是差值。</strong> AppKit 报的 <code>maximumExtendedDynamicRangeColorComponentValue</code> 是「SDR 白的倍数」，所以给 S4 的上限是 <code>1 + (max − 1)</code>，再夹到 <code>[1, 16]</code>（<code>Sources/PhotonsUI/DisplayHeadroom.swift:59</code>）。写成 <code>max − 1</code> 会把 1.2 变成 0.2、钳回 SDR，让 EDR 在唯一支持它的屏幕上变成空操作。</p>
+<p>三个必须知道的边界：</p>
+<ul>
+<li>屏幕亮度变化<strong>没有通知</strong>。macOS 不发「亮度变了」，只改 <code>maximumEDR</code> 属性；所以上限是<strong>每次问</strong>，不是启动时缓存（<code>DisplayHeadroom.swift:129</code>）。</li>
+<li>8 位图层不能承载 &gt; 1 的值，所以 <code>layerAcceptsEDR == false</code> 时，headroom 必须在渲染<strong>之前</strong>降回 1，而不是看到颜色不对再降（同文件 <code>:66</code>）。</li>
+<li>导出永远是 <code>headroom = 1</code>；HDR 导出走 S4 的线性出口（<code>s4_display.metal:65</code>），因为增益图需要的是 HDR/SDR 的线性比，不是编码值。</li>
+</ul>
+<h2 id="帧预算时序与故障">2.6 帧预算、时序与故障</h2>
+<p><strong>预算。</strong> 60 fps 是 16.7 ms。当前 release 构建在 4.10 Mpx 画布上全链 p95 为 <strong>4.7–6.4 ms</strong>；平移 3.95–5.5 ms；进入 1:1 的首帧在 0.5 档已驻留时 <strong>24–26 ms</strong>（含一次全分辨率解码时是 526–744 ms，<code>docs/STATUS.md</code>）。这些数字会随代码变，本文只记录它们对应的测量口径：<code>--viewport 2560x1600</code>、<code>--iterations 60</code>。</p>
+<p><strong>数字不会每帧都测。</strong> 直方图在手势中不采集，停手 60 ms 后用一帧专用测量帧补上：平移额外成本从 +8.2 ms 降到约 0（<code>docs/STATUS.md</code> 已知待修 1）。</p>
+<p><strong>故障模式</strong>（都是显式的，不靠重试掩盖）：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>现象</th>
+<th>实际发生的事</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无 drawable（无头会话/窗口关闭）</td>
+<td>present 返回 false，记 <code>lastFailure</code>，不重试</td>
+<td><code>CanvasPresenter.swift:454</code></td>
+</tr>
+<tr>
+<td>16 位 drawable 被拒</td>
+<td>降级到 8-bit sRGB <strong>一次</strong>并记住；不降的话每帧都失败</td>
+<td><code>:447</code></td>
+</tr>
+<tr>
+<td>画布尺寸与 drawable 不符</td>
+<td>该帧被拒，<code>droppedStaleFrameCount += 1</code></td>
+<td><code>:435</code></td>
+</tr>
+<tr>
+<td>1:1 窗口边缘的羽化/引导滤波</td>
+<td>半径按整帧算，边界按窗口钳制，最多 <code>feather + guided</code> 像素宽</td>
+<td><code>RenderGraph.swift:80</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p>到这里，屏幕上的图有了来处。下一章把镜头拉远：这些 pass 为什么按这个顺序排，每个参数为什么属于某个域。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="01-overview.html">← 1 总览</a>
+      <a class="next" href="03-processing.html">3 处理架构 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

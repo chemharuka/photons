@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4.7–4.9 色彩：饱和、HSL、点颜色、分级 · Photons 白皮书</title>
+<meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
+<link rel="stylesheet" href="assets/whitepaper.css">
+<link rel="icon" href="assets/mark.svg">
+</head>
+<body>
+<a class="skip" href="#content">跳到正文</a>
+<header class="topbar">
+  <button class="menu-button" type="button" aria-label="目录" aria-expanded="false">☰</button>
+  <a class="brand" href="index.html">Photons<span>白皮书</span></a>
+  <div class="search">
+    <input id="search-input" type="search" placeholder="搜索全文（/）" autocomplete="off" aria-label="搜索全文">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <p class="sidebar-title">目录</p>
+    <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li class="current"><span>4b 色彩</span></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>0148727</code></p>
+  </aside>
+  <main id="content" class="content">
+    <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#自然饱和度与饱和度s3">4.7 自然饱和度与饱和度（S3）</a></li><li class="toc-2"><a href="#hsl-八色带与黑白混合s3.6-s3.4">4.8 HSL 八色带与黑白混合（S3.6 / S3.4）</a></li><li class="toc-2"><a href="#点颜色与三向色彩分级s3.6b-s3.8">4.9 点颜色与三向色彩分级（S3.6b / S3.8）</a></li></ul></nav>
+    <article>
+<h1 id="色彩饱和色带分级">4.7–4.9 色彩：饱和、色带、分级</h1>
+<p>这三节包五个 pass、四种互补的选择器：S3 按「全体像素」选，S3.6 按「色相」选，S3.6b 按「一个采样色附近的一块区域」选，S3.8 按「亮度」选；S3.4 是 S3.6 的灰度版，共用后者的色带。它们全部跑在显示参考域，位置在 S2.5 之后（<code>Sources/PhotonsCore/Stage.swift:190</code>–<code>:192</code>）。五个 pass 之间没有共享算式，只有两份共享的定义：<code>color_hsl.metal</code> 的 RGB↔︎HSL（S3 与 S3.5），<code>oklch_bands.metal</code> 的 OKLCh 与八色带几何（S3.6 与 S3.4）。</p>
+<p>判据仍是第 3 章那一句：对象是「显示出来的样子」，就必须待在显示域。</p>
+<hr />
+<h2 id="自然饱和度与饱和度s3">4.7 自然饱和度与饱和度（S3）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>一条全局饱和对「已经很鲜艳」和「刚有一点颜色」的像素一视同仁：+30 把正红顶到夹位（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>s</mi><annotation encoding="application/x-tex">s</annotation></semantics></math> 夹在 1），却几乎不改变一片灰蓝天。自然饱和度要的是相反的加权——离灰越近的像素动得越多，已经饱和的像素不动。这两条滑杆必须是两个算子，而不是一条滑杆的两个名字。</p>
+<p><strong>算法</strong></p>
+<p>先把像素读成 HSL（<code>Kernels/color_hsl.metal:21</code>–<code>:39</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>m</mi><mi>x</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mi>g</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>m</mi><mi>n</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">min</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mi>g</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>l</mi><mo>=</mo><mstyle displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><mo stretchy="false" form="prefix">(</mo><msub><mi>m</mi><mi>x</mi></msub><mo>+</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+m_x=\max(r,g,b),\qquad m_n=\min(r,g,b),\qquad l=\tfrac12(m_x+m_n)
+</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="left" style="text-align: left"><mi>d</mi><mi>/</mi><mo stretchy="false" form="prefix">(</mo><mn>2</mn><mo>−</mo><msub><mi>m</mi><mi>x</mi></msub><mo>−</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mi>l</mi><mo>&gt;</mo><mn>0.5</mn></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mi>d</mi><mi>/</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>m</mi><mi>x</mi></msub><mo>+</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">r</mi><mi mathvariant="normal">w</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">e</mi></mrow></mtd></mtr></mtable></mrow><mo>,</mo><mspace width="2.0em"></mspace><mi>d</mi><mo>=</mo><msub><mi>m</mi><mi>x</mi></msub><mo>−</mo><msub><mi>m</mi><mi>n</mi></msub></mrow><annotation encoding="application/x-tex">
+s=\begin{cases} d/(2-m_x-m_n), &amp; l&gt;0.5\\ d/(m_x+m_n), &amp; \mathrm{otherwise}\end{cases},\qquad d=m_x-m_n
+</annotation></semantics></math></p>
+<p>也就是说 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mi>d</mi><mi>/</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mo stretchy="false" form="prefix">|</mo><mn>2</mn><mi>l</mi><mo>−</mo><mn>1</mn><mo stretchy="false" form="postfix">|</mo><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">s=d/(1-\lvert 2l-1\rvert)</annotation></semantics></math>：一个纯粹由显示码算出的「距灰多远」，和亮度、和感知都无关（<code>color_hsl.metal:29</code>）。</p>
+<p>自然饱和度是一条<strong>加性、按剩余空间加权</strong>的增益，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>v</mi><annotation encoding="application/x-tex">v</annotation></semantics></math> 是滑杆值：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>s</mi><mn>1</mn></msub><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mi>s</mi><mo>+</mo><mfrac><mi>v</mi><mn>100</mn></mfrac><mo>⋅</mo><mstyle displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>s</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>1</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+s_1=\mathrm{clamp}\Bigl(s+\frac{v}{100}\cdot\tfrac12\,(1-s),\ 0,\ 1\Bigr)
+</annotation></semantics></math></p>
+<p>饱和是<strong>乘性</strong>的，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>u</mi><annotation encoding="application/x-tex">u</annotation></semantics></math> 是滑杆值，两条依次施加，先自然饱和再饱和（<code>Kernels/s3_color.metal:73</code>–<code>:78</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>s</mi><mn>2</mn></msub><mo>=</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><msub><mi>s</mi><mn>1</mn></msub><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>+</mo><mi>u</mi><mi>/</mi><mn>100</mn><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>1</mn><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+s_2=\mathrm{clamp}\bigl(s_1\,(1+u/100),\ 0,\ 1\bigr)
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mstyle displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><annotation encoding="application/x-tex">\tfrac12</annotation></semantics></math> 是斜率，不是可调参数：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mo>=</mo><mi>+</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">v=+100</annotation></semantics></math> 把 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mn>0.5</mn></mrow><annotation encoding="application/x-tex">s=0.5</annotation></semantics></math> 的像素送到 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>0.75</mn><annotation encoding="application/x-tex">0.75</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mn>0.9</mn></mrow><annotation encoding="application/x-tex">s=0.9</annotation></semantics></math> 的送到 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>0.95</mn><annotation encoding="application/x-tex">0.95</annotation></semantics></math>，而 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">s=0</annotation></semantics></math>（灰）恒为 0——自然饱和度对灰色没有任何作用，是算术事实。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>u</mi><mo>=</mo><mi>+</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">u=+100</annotation></semantics></math> 则把距离翻倍，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">-100</annotation></semantics></math> 得到纯灰。</p>
+<p>HDR 余量绕着 HSL 走，不穿过它。先按峰值归一，再进 HSL，出来再乘回去（<code>Kernels/s3_color.metal:66</code>–<code>:68</code>、<code>:81</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>k</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>,</mo><mspace width="0.222em"></mspace><mfrac><mi>p</mi><mn>0.9</mn></mfrac><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>p</mi><mo>=</mo><mrow><mi mathvariant="normal">max</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>r</mi><mo>,</mo><mi>g</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><mi>k</mi><mo>⋅</mo><mrow><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">l</mi><mn mathvariant="normal">2</mn><mi mathvariant="normal">r</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">b</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>s</mi><mn>2</mn></msub><mo>,</mo><mspace width="0.167em"></mspace><mi>l</mi><mo>,</mo><mspace width="0.167em"></mspace><mi>h</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+k=\max\Bigl(1,\ \frac{p}{0.9}\Bigr),\qquad p=\max(r,g,b),\qquad \mathrm{out}=k\cdot\mathrm{hsl2rgb}(s_2,\,l,\,h)
+</annotation></semantics></math></p>
+<p>目标是 0.9 而不是 1.0：<code>rgb_to_hsl</code> 对峰值恰好为 1 的颜色恒返回 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">s=1</annotation></semantics></math>（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo><mi>/</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">s=(1-m_n)/(1-m_n)</annotation></semantics></math>），那样饱和滑杆在任何 HDR 像素上都是空操作（<code>:62</code>–<code>:65</code>）。归一化保住色度比例，<code>+</code> 方向仍有行程。</p>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vibrance</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（÷100 进公式，斜率 1/2）</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1832</code></td>
+</tr>
+<tr>
+<td><code>saturation</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（÷100 = 乘性系数 − 1）</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1833</code></td>
+</tr>
+</tbody>
+</table>
+<p>两个都为 0 时 CPU 侧把身份位置 1：S3 仍在链上（它是无条件 pass），但整段直写（<code>Kernels/s3_color.metal:24</code>、<code>:33</code>）。身份位只看这两个数（<code>Sources/PhotonsCore/RenderGraph.swift:3507</code>–<code>:3509</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_color.metal</code>，一个全分辨率 pass，三处早退：身份位（<code>:33</code>）、alpha 为 0 的黑边（<code>:43</code>）、内容矩形之外（<code>:50</code>）。后两处是「matte 不是阴影」：S0 用 alpha 0 标记「这里没有照片」，否则一次提黑会把黑边一起提亮。</p>
+<p>HSL 的算式不在这份文件里，而在 <code>color_hsl.metal</code>，由 S3 与 S3.5 <strong>各自 include</strong>（<code>Kernels/s3_color.metal:21</code>、<code>Kernels/color_hsl.metal:78</code>–<code>:81</code>）。这是 056 的硬要求：一张全画布蒙版在饱和 +40 上必须与全局滑杆 +40 得到同一张图，不是「看起来差不多」。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · <code>colorbalancergb.c</code> 的 global vibrance</strong> — 同一件事的另一种写法：增益是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>v</mi><mspace width="0.167em"></mspace><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msup><mi>C</mi><mrow><mo stretchy="false" form="prefix">|</mo><mi>v</mi><mo stretchy="false" form="postfix">|</mo></mrow></msup><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">v\,(1-C^{\lvert v\rvert})</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>C</mi><annotation encoding="application/x-tex">C</annotation></semantics></math> 是 Filmlight Ych 的彩度，再并进一个总的 <code>chroma_factor</code>（<a href="https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c</a>，第 718–719 行）。差别在权重函数与空间：darktable 的指数随滑杆值变化，Photons 的斜率恒为 1/2；darktable 在 Ych，Photons 在 HSL 饱和上。</li>
+<li><strong>darktable · <code>vibrance.c</code></strong> — 这个独立模块已被标为弃用，模块提示让用户改用 color balance rgb 里的 vibrance 滑杆（<a href="https://github.com/darktable-org/darktable/blob/master/src/iop/vibrance.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/vibrance.c</a>，第 59 行）。Photons 保留独立 pass 是为了共享算式，不是沿革。</li>
+<li><strong>RawTherapee · <code>ipvibrance.cc</code></strong> — <code>ImProcFunctions::vibrance</code> 工作在 <code>LabImage</code> 上，用 pastel / saturated 两个阈值区加一条肤色保护曲线（<a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipvibrance.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/ipvibrance.cc</a>，第 64、99–110 行）。Photons 没有肤色保护，也没有分区阈值：一条连续斜率取代了三个经验分界。</li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>两条滑杆、一个常数斜率换来可复现：自然饱和度的增益只由 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>s</mi><annotation encoding="application/x-tex">s</annotation></semantics></math> 决定。代价是它分不清「皮肤的红」和「夕阳的红」——两者在同一 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>s</mi><annotation encoding="application/x-tex">s</annotation></semantics></math> 上得到同一增益。RawTherapee 的肤色曲线正为此存在，代价是一张按色相索引的表——写错就是可见的边界。</p>
+<p>还有一处必须说清：S3 的饱和与 S3.6 的饱和<strong>不是同一个量</strong>。前者乘 HSL 的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>s</mi><annotation encoding="application/x-tex">s</annotation></semantics></math>（显示码的距离），后者乘 OKLCh 的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>C</mi><annotation encoding="application/x-tex">C</annotation></semantics></math>（感知彩度）。同一个像素在两张卡上各 +50 不是 +100，这是有意的分工，不是漏改。</p>
+<hr />
+<h2 id="hsl-八色带与黑白混合s3.6-s3.4">4.8 HSL 八色带与黑白混合（S3.6 / S3.4）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>「只把天空的蓝压暗」需要一条按色相索引的通道；「把红苹果压成深灰、把蓝天提成浅灰」需要同一张索引表去决定每个色相在灰里的分量。前者是 HSL 卡，后者是黑白混合，两者必须共用同一组色相中心——否则同一个「蓝」在两张卡上落在不同位置。</p>
+<p>亮度轴的定义是这里的关键。HSL 的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>l</mi><mo>=</mo><mo stretchy="false" form="prefix">(</mo><msub><mi>m</mi><mi>x</mi></msub><mo>+</mo><msub><mi>m</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo><mi>/</mi><mn>2</mn></mrow><annotation encoding="application/x-tex">l=(m_x+m_n)/2</annotation></semantics></math> 是对<strong>交给它的那三个数</strong>取的，与光量无关：在线性光上，纯蓝与纯黄的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>l</mi><annotation encoding="application/x-tex">l</annotation></semantics></math> 都是 0.5，而它们的亮度相差 6.9×（0.0722 对 0.500）；在 OKLab 上同样的两个颜色读出 0.452 与 0.968（<code>Sources/PhotonsCore/HSLBands.swift:18</code>–<code>:21</code>、<code>Sources/PhotonsCore/Stage.swift:94</code>–<code>:95</code>）。这就是 079 结论 4，也是八色带从 S3 搬进 S3.6 的全部理由。</p>
+<p><strong>算法</strong></p>
+<p>空间是 OKLCh，折叠矩阵不是 Ottosson 发表的那组 sRGB 字面量，而是<strong>用工作基色重新推导</strong>的：<code>M1 · toXYZ(Rec.2020)</code>，每行归一到和为 1（白必须折成 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>=</mo><mn>1</mn><mo>,</mo><mi>a</mi><mo>=</mo><mi>b</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">L=1,a=b=0</annotation></semantics></math>），九个结果字面量写死在 kernel 里（<code>Kernels/oklch_bands.metal:36</code>–<code>:40</code>；推导在 <code>Sources/PhotonsCore/Masks.swift:588</code>–<code>:601</code>）。</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mi>l</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>m</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>s</mi></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mo>=</mo><msub><mi>M</mi><mn>1</mn></msub><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mi>r</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>g</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>b</mi></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><mi>L</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>a</mi></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>b</mi></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mo>=</mo><msub><mi>M</mi><mn>2</mn></msub><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><msup><mi>l</mi><mrow><mn>1</mn><mi>/</mi><mn>3</mn></mrow></msup></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msup><mi>m</mi><mrow><mn>1</mn><mi>/</mi><mn>3</mn></mrow></msup></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msup><mi>s</mi><mrow><mn>1</mn><mi>/</mi><mn>3</mn></mrow></msup></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">
+\begin{bmatrix}l\\m\\s\end{bmatrix}=M_1\begin{bmatrix}r\\g\\b\end{bmatrix},
+\qquad
+\begin{bmatrix}L\\a\\b\end{bmatrix}=M_2
+\begin{bmatrix}l^{1/3}\\m^{1/3}\\s^{1/3}\end{bmatrix}
+</annotation></semantics></math></p>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>M</mi><mn>2</mn></msub><annotation encoding="application/x-tex">M_2</annotation></semantics></math> 是发表的 OKLab 矩阵（<code>oklch_bands.metal:42</code>–<code>:44</code>）。逆向是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msubsup><mi>M</mi><mn>2</mn><mrow><mi>−</mi><mn>1</mn></mrow></msubsup><annotation encoding="application/x-tex">M_2^{-1}</annotation></semantics></math>、立方、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msubsup><mi>M</mi><mn>1</mn><mrow><mi>−</mi><mn>1</mn></mrow></msubsup><annotation encoding="application/x-tex">M_1^{-1}</annotation></semantics></math>，同样十八个字面量逐个写出（<code>:56</code>–<code>:62</code>）。色相与彩度：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>C</mi><mo>=</mo><msqrt><mrow><msup><mi>a</mi><mn>2</mn></msup><mo>+</mo><msup><mi>b</mi><mn>2</mn></msup></mrow></msqrt><mo>,</mo><mspace width="2.0em"></mspace><mi>h</mi><mo>=</mo><mfrac><mn>180</mn><mi>π</mi></mfrac><mrow><mi mathvariant="normal">atan2</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>b</mi><mo>,</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo><mspace width="0.222em"></mspace><mspace width="0.222em"></mspace><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">d</mi></mrow><mspace width="0.222em"></mspace><mn>360</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">
+C=\sqrt{a^2+b^2},\qquad h=\frac{180}{\pi}\operatorname{atan2}(b,a)\ \ (\mathrm{mod}\ 360)
+</annotation></semantics></math></p>
+<p>中性门是必须的：折叠矩阵的行只在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mrow><mi>−</mi><mn>10</mn></mrow></msup><annotation encoding="application/x-tex">10^{-10}</annotation></semantics></math> 的精度上求和为 1，一个数学上的灰会带着 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>C</mi><mo>≈</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>8</mn></mrow></msup></mrow><annotation encoding="application/x-tex">C\approx10^{-8}</annotation></semantics></math> 和一个任意角度回来，足够让灰走过一遍转换、改掉最后一位。所以门在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup><annotation encoding="application/x-tex">10^{-6}</annotation></semantics></math> 处<strong>恰好</strong>为 0，在 0.02 处为 1，中间是 smoothstep（<code>oklch_bands.metal:81</code>–<code>:83</code>）。</p>
+<p>八条带各自的权重是一个局部支撑的三次多项式，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math> 是该侧到邻中心的角距：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><msup><mi>t</mi><mn>2</mn></msup><mo stretchy="false" form="prefix">(</mo><mn>3</mn><mo>−</mo><mn>2</mn><mi>t</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>t</mi><mo>=</mo><mfrac><mrow><mo stretchy="false" form="prefix">|</mo><mi mathvariant="normal">Δ</mi><msub><mi>h</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">|</mo></mrow><msub><mi>r</mi><mi>i</mi></msub></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mo stretchy="false" form="prefix">|</mo><mi mathvariant="normal">Δ</mi><msub><mi>h</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">|</mo><mo>≥</mo><msub><mi>r</mi><mi>i</mi></msub><mo>⇒</mo><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">
+w_i=1-t^2(3-2t),\qquad t=\frac{\lvert \Delta h_i\rvert}{r_i},\qquad \lvert\Delta h_i\rvert\ge r_i\Rightarrow w_i=0
+</annotation></semantics></math></p>
+<p>（<code>oklch_bands.metal:68</code>–<code>:73</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>r</mi><annotation encoding="application/x-tex">r</annotation></semantics></math> 不是八分之一圈，而是<strong>到那一侧邻居的实际间距</strong>（<code>Sources/PhotonsCore/HSLBands.swift:150</code>–<code>:159</code>）：中心在 OKLCh 角度上并不等距——红 24.78°、橙 80.03°、黄 109.42°、绿 143.00°、青 195.00°、蓝 274.46°、紫 320.84°、品红 335.01°，相邻间距从 14.17°（紫→品红）到 79.46°（青→蓝）（<code>Sources/PhotonsCore/HSLBands.swift:81</code>–<code>:90</code>）。每个间隙由两侧的带共同覆盖，两边的权重是一对互补的 smoothstep（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo stretchy="false" form="prefix">(</mo><mi>t</mi><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mi>S</mi><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>t</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">S(t)+S(1-t)=1</annotation></semantics></math>），因此 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo>∑</mo><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">\sum w_i=1</annotation></semantics></math> 在<strong>每一个</strong>色相上成立，缝上也是。除法仍然无条件做一次（<code>Kernels/s3_6_hsl.metal:160</code>），那是把「恰好为 1」变成保证，而不是修正。</p>
+<p>三条滑杆：色相是偏移，饱和乘 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>C</mi><annotation encoding="application/x-tex">C</annotation></semantics></math>，亮度乘 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math>：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>h</mi><mo>′</mo></msup><mo>=</mo><mi>h</mi><mo>+</mo><mn>0.3</mn><mspace width="0.167em"></mspace><msub><mi>s</mi><mi>h</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><msup><mi>C</mi><mo>′</mo></msup><mo>=</mo><mi>C</mi><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>+</mo><mfrac><msub><mi>s</mi><mi>s</mi></msub><mn>100</mn></mfrac><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msup><mi>L</mi><mo>′</mo></msup><mo>=</mo><mi>L</mi><mo>⋅</mo><msup><mn>2</mn><mrow><msub><mi>s</mi><mi>l</mi></msub><mi>/</mi><mn>100</mn></mrow></msup></mrow><annotation encoding="application/x-tex">
+h&#39;=h+0.3\,s_h,\qquad C&#39;=C\Bigl(1+\frac{s_s}{100}\Bigr),\qquad L&#39;=L\cdot 2^{s_l/100}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_6_hsl.metal:170</code>–<code>:172</code>）。<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">\pm100</annotation></semantics></math> 对应 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>30</mn><mi>°</mi></mrow><annotation encoding="application/x-tex">\pm30°</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>×</mi><mn>2</mn></mrow><annotation encoding="application/x-tex">\times2</annotation></semantics></math> / <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>×</mi><mn>0</mn></mrow><annotation encoding="application/x-tex">\times0</annotation></semantics></math>、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>1</mn></mrow><annotation encoding="application/x-tex">\pm1</annotation></semantics></math> 档感知亮度。第九个选择器「全局」是同一组三轴，加在带偏移<strong>之后</strong>，单位相同；它的色相与饱和走同一道中性门，明度不走（灰没有色相可转，但可以被提亮）（<code>:116</code>–<code>:118</code>）。它由编译期模板参数分成两个 kernel 入口，所以 076 的默认实例里根本没有那段算术（<code>:46</code>–<code>:49</code>、<code>:181</code>–<code>:195</code>）。</p>
+<p>黑白混合在同一张表上只读一个数（<code>HSLBand.mix</code>，主机侧塞进 <code>.v.x</code>：<code>Sources/PhotonsCore/RenderGraph.swift:6100</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup><mo>,</mo><mspace width="0.167em"></mspace><mn>0.02</mn><mo>,</mo><mspace width="0.167em"></mspace><mi>C</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>m</mi><mo>=</mo><mfrac><mrow><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>w</mi><mi>i</mi></msub><mspace width="0.167em"></mspace><msub><mi>m</mi><mi>i</mi></msub></mrow><mrow><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>w</mi><mi>i</mi></msub></mrow></mfrac><mspace width="0.167em"></mspace><mi>g</mi><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">g</mi><mi mathvariant="normal">r</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">y</mi></mrow><mo>=</mo><msup><mi>L</mi><mn>3</mn></msup><mo>⋅</mo><msup><mn>2</mn><mrow><mi>m</mi><mi>/</mi><mn>100</mn></mrow></msup></mrow><annotation encoding="application/x-tex">
+g=\mathrm{smoothstep}(10^{-6},\,0.02,\,C),\qquad
+m=\frac{\sum_i w_i\,m_i}{\sum_i w_i}\,g,\qquad
+\mathrm{grey}=L^3\cdot 2^{m/100}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_4_bw.metal:90</code>、<code>:112</code>、<code>:118</code>、<code>:120</code>、<code>:145</code>）。三件事值得拆开看：</p>
+<ul>
+<li><strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>L</mi><mn>3</mn></msup><annotation encoding="application/x-tex">L^3</annotation></semantics></math> 而不是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math>。</strong> 灰要的是「这个感知亮度在线性光里的值」，而 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msubsup><mi>M</mi><mn>2</mn><mrow><mi>−</mi><mn>1</mn></mrow></msubsup><msubsup><mi>M</mi><mn>1</mn><mrow><mi>−</mi><mn>1</mn></mrow></msubsup></mrow><annotation encoding="application/x-tex">M_2^{-1}M_1^{-1}</annotation></semantics></math> 的三行和为 1，所以 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mrow><mi mathvariant="normal">O</mi><mi mathvariant="normal">K</mi><mi mathvariant="normal">L</mi><mi mathvariant="normal">C</mi><mi mathvariant="normal">h</mi></mrow><mrow><mi>−</mi><mn>1</mn></mrow></msup><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mo>,</mo><mn>0</mn><mo>,</mo><mi>h</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\mathrm{OKLCh}^{-1}(L,0,h)</annotation></semantics></math> 恰好是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>L</mi><mn>3</mn></msup><annotation encoding="application/x-tex">L^3</annotation></semantics></math> 的三个相同分量。写成三次乘法而不是走矩阵，是为了三个通道<strong>逐位相同</strong>，不是「在容差内相同」（<code>:139</code>–<code>:146</code>）。</li>
+<li><strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>1</mn></mrow><annotation encoding="application/x-tex">\pm1</annotation></semantics></math> 档线性光，不是感知亮度。</strong> 混合说的是「这个颜色在相纸里沉积多少光」，是密度，密度是线性的；S3.6 的亮度说的是「这个颜色看起来多亮」，两者差 8 倍光量。混用会让「绿 +100」把一片中调的叶子推成高光（<code>Kernels/s3_4_bw.metal:28</code>–<code>:33</code>）。</li>
+<li><strong>乘性，所以黑仍是黑。</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>0</mn><mo>⋅</mo><msup><mn>2</mn><mi>k</mi></msup><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">0\cdot 2^k=0</annotation></semantics></math>：一条影调里没有的颜色，滑杆抬不动它。</li>
+</ul>
+<p>转换本身不看混合值：开关打开、八个 mix 全 0，画面照样变灰，灰落在像素自己的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 上（<code>:40</code>–<code>:44</code>）。<strong>stage 是条件的</strong>——只有开关为真才进链（<code>Sources/PhotonsCore/EditModel.swift:396</code>），所以彩色文档根本没编码这个 pass。</p>
+<p><strong>参数与范围</strong></p>
+<p>范围与默认全部来自 <code>HSLBand</code>（<code>Sources/PhotonsCore/EditModel.swift:1985</code>–<code>:1996</code>）与 <code>ColorGroup</code>（<code>:1831</code>–<code>:1857</code>）：</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bands[i].hue</code> ×8</td>
+<td>−100…100</td>
+<td>0</td>
+<td>滑杆单位（0.3°/单位）</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1986</code></td>
+</tr>
+<tr>
+<td><code>bands[i].saturation</code> ×8</td>
+<td>−100…100</td>
+<td>0</td>
+<td>乘性系数 − 1，÷100</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1987</code></td>
+</tr>
+<tr>
+<td><code>bands[i].luminance</code> ×8</td>
+<td>−100…100</td>
+<td>0</td>
+<td>感知亮度档，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>2</mn><mrow><mi>x</mi><mi>/</mi><mn>100</mn></mrow></msup><annotation encoding="application/x-tex">2^{x/100}</annotation></semantics></math></td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1988</code></td>
+</tr>
+<tr>
+<td><code>bands[i].mix</code> ×8</td>
+<td>−100…100</td>
+<td>0</td>
+<td>线性光档，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>2</mn><mrow><mi>x</mi><mi>/</mi><mn>100</mn></mrow></msup><annotation encoding="application/x-tex">2^{x/100}</annotation></semantics></math></td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1996</code></td>
+</tr>
+<tr>
+<td><code>global.hue/saturation/luminance</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>同上三轴</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1852</code></td>
+</tr>
+<tr>
+<td><code>blackAndWhite</code></td>
+<td>Bool</td>
+<td>false</td>
+<td>—</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:1842</code></td>
+</tr>
+</tbody>
+</table>
+<p>24 个数（8×3）是 S3.6 的全部材料，<code>hasBands</code> 逐个查值（<code>Sources/PhotonsCore/EditModel.swift:1933</code>）；<code>mix</code> 不算在 24 里——S3.6 只读三轴，只带 mix 的文档不该为它编一个 pass（<code>:1930</code>–<code>:1932</code>）。全局三轴另有谓词（<code>:1937</code>）。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/oklch_bands.metal</code> 是唯一的几何定义：中心、间距、权重函数、中性门，全部一份，由 S3.6 与 S3.4 两个 kernel 各自 <code>#include</code>（<code>Kernels/oklch_bands.metal:3</code>–<code>:10</code>）。CPU 侧 <code>HSLBands</code> 是同一份代数在 <code>Double</code> 上的参考实现，<code>HSLTests</code> 拿两者对跑（<code>Sources/PhotonsCore/HSLBands.swift:9</code>–<code>:13</code>）。</p>
+<p>中心不是手写的度数，而是<strong>用 Lightroom 的 HSL 角度反算出来的</strong>：取 <code>hsl(0/30/60/120/180/240/285/315, 0.85, 0.5)</code> 这八个物理颜色，转到工作基色，再量它们的 OKLCh 色相（<code>Sources/PhotonsCore/HSLBands.swift:136</code>–<code>:145</code>）。所以「红」这个带作用的是那只红苹果，不是 sRGB 色环上的 0°。</p>
+<p>上传一份八元结构体数组，每个元素带三轴值与中心、两侧间距（<code>Sources/PhotonsCore/RenderGraph.swift:6072</code>–<code>:6088</code>）。S3.4 用<strong>同一张表</strong>，只把 <code>mix</code> 放在 <code>.v.x</code>、其余两轴置 0（<code>:6094</code>–<code>:6109</code>）。</p>
+<p>顺序上 S3.4 在 S3.6 之前（<code>Sources/PhotonsCore/Stage.swift:191</code>）。这不是随便排的：黑白写出的灰 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>C</mi><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">C=0</annotation></semantics></math>，S3.6 的中性门会让它整段直写，两个 stage 的唯一交互因此是「下游自动失效」而不是「下游再算一遍」。</p>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · <code>colorzones.c</code></strong> — 最接近的邻居：八个控制节点落在 Lab/LCh 的色相轴上，本质是<strong>一条色相曲线</strong>（<a href="https://github.com/darktable-org/darktable/blob/master/src/iop/colorzones.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/colorzones.c</a>）。差别在归一化：076 之前 Photons 的旧方案只在八顶帐篷之和超过 1 时才归一，于是绿 +100 在自己中心给出 100、在 90°/150° 只剩 25.93，形成 4 倍波纹（<code>Sources/PhotonsCore/HSLBands.swift:99</code>–<code>:101</code>、<code>Kernels/s3_6_hsl.metal:20</code>–<code>:26</code>）。现在是构造性的单位和。</li>
+<li><strong>RawTherapee · HSV Equalizer（<code>improcfun.cc</code>）</strong> — 正是 076 搬离的那种构造：在 HSV 里对 H / S / V 各挂一条 FlatCurve，按色相查表（<a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/improcfun.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/improcfun.cc</a>，第 2162–2193 行）。差别是空间与门：HSV 是设备空间的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>l</mi><annotation encoding="application/x-tex">l</annotation></semantics></math>，没有色度门，灰的色相是任意的——把它当索引去查曲线，结果取决于浮点噪声。</li>
+<li><strong>darktable · <code>colorbalancergb.c</code> 的 hue/chroma 轴</strong> — 绝对色相角加彩度乘数，没有「带」的概念：一串叠加的绝对值没有「所有带同值 = 全局同值」这个性质，而局部支撑的带权重有。 <a href="https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c</a></li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>八段局部支撑换来两件事：可预测（一个带在自己中心恰好给 100）与可加（八个带同值时处处相同）。代价是它无法把「高光里的蓝」与「阴影里的蓝」分开——那是亮度轴的事，属于 S3.8，不属于这里。</p>
+<p>黑白混合挂在同一张表上，省掉第二套色相中心，代价是它只能在开关打开时读：关掉后 mix 仍留在文档里但不渲染（<code>Sources/PhotonsCore/EditModel.swift:1993</code>–<code>:1996</code>），切回彩色因此逐位可复现。</p>
+<hr />
+<h2 id="点颜色与三向色彩分级s3.6b-s3.8">4.9 点颜色与三向色彩分级（S3.6b / S3.8）</h2>
+<p><strong>它解决什么问题</strong></p>
+<p>八色带只认色相，所以一片枯草和一块肤色在同一个橙带里得到同一处理。人眼区分「同一材质」靠的是三件事一起：亮度接近、色度接近、色相接近。点颜色要的是一个<strong>区域</strong>——围绕一个采样点的盒子，不是一条色相线。三向分级要的是另一个维度：同一个颜色在阴影里该偏冷、在高光里该偏暖，这与它是什么颜色无关。</p>
+<p><strong>算法</strong></p>
+<p>点颜色的窗口建在 Rec.709 full-range YCbCr 上。输入是显示参考域的线性工作基色，所以先转 sRGB 基色、过 sRGB 传递函数，再用<strong>工作基色自己的</strong>亮度权重求 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math>（<code>Kernels/s3_6b_point_colour.metal:59</code>–<code>:66</code>）：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Y</mi><mo>=</mo><mi>w</mi><mo>⋅</mo><mrow><mi mathvariant="normal">e</mi><mi mathvariant="normal">n</mi><mi mathvariant="normal">c</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>M</mi><mrow><mi mathvariant="normal">w</mi><mo mathvariant="normal">→</mo><mi mathvariant="normal">s</mi><mi mathvariant="normal">R</mi><mi mathvariant="normal">G</mi><mi mathvariant="normal">B</mi></mrow></msub><mspace width="0.167em"></mspace><mi>v</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>U</mi><mo>=</mo><mfrac><mrow><mi>B</mi><mo>−</mo><mi>Y</mi></mrow><mn>1.8556</mn></mfrac><mo>+</mo><mn>0.5</mn><mo>,</mo><mspace width="2.0em"></mspace><mi>V</mi><mo>=</mo><mfrac><mrow><mi>R</mi><mo>−</mo><mi>Y</mi></mrow><mn>1.5748</mn></mfrac><mo>+</mo><mn>0.5</mn></mrow><annotation encoding="application/x-tex">
+Y=w\cdot \mathrm{enc}(M_{\mathrm{w\to sRGB}}\,v),\qquad
+U=\frac{B-Y}{1.8556}+0.5,\qquad
+V=\frac{R-Y}{1.5748}+0.5
+</annotation></semantics></math></p>
+<p>权重是三条软盒之积，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>d</mi><mi>a</mi></msub><annotation encoding="application/x-tex">d_a</annotation></semantics></math> 是半宽、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>s</mi><mi>a</mi></msub><mo>=</mo><mstyle displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><msub><mi>d</mi><mi>a</mi></msub><mi>f</mi></mrow><annotation encoding="application/x-tex">s_a=\tfrac12 d_a f</annotation></semantics></math> 是肩宽：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>a</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><msub><mi>d</mi><mi>a</mi></msub><mo>,</mo><mspace width="0.222em"></mspace><msub><mi>d</mi><mi>a</mi></msub><mo>+</mo><msub><mi>s</mi><mi>a</mi></msub><mo>,</mo><mspace width="0.222em"></mspace><mo stretchy="false" form="prefix">|</mo><msub><mi>x</mi><mi>a</mi></msub><mo>−</mo><msub><mi>m</mi><mi>a</mi></msub><mo stretchy="false" form="postfix">|</mo><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>w</mi><mo>=</mo><msub><mi>w</mi><mi>Y</mi></msub><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>U</mi></msub><mspace width="0.167em"></mspace><msub><mi>w</mi><mi>V</mi></msub></mrow><annotation encoding="application/x-tex">
+w_a=1-\mathrm{smoothstep}\bigl(d_a,\ d_a+s_a,\ \lvert x_a-m_a\rvert\bigr),\qquad
+w=w_Y\,w_U\,w_V
+</annotation></semantics></math></p>
+<p>（<code>:164</code>–<code>:167</code>）。三条轴<strong>等权相乘</strong>，不是加权和：盒子是一个区域，不是一个评分。半宽是 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>d</mi><mi>Y</mi></msub><mo>=</mo><mn>0.06</mn></mrow><annotation encoding="application/x-tex">d_Y=0.06</annotation></semantics></math>（约 ±15/255）、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>d</mi><mi>U</mi></msub><mo>=</mo><msub><mi>d</mi><mi>V</mi></msub><mo>=</mo><mn>0.10</mn></mrow><annotation encoding="application/x-tex">d_U=d_V=0.10</annotation></semantics></math>（约 ±13/255），肩宽是半宽的一半，所以盒子在边界上 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>C</mi><mn>1</mn></msup><annotation encoding="application/x-tex">C^1</annotation></semantics></math> 且恰好归零（<code>Sources/PhotonsCore/PointColor.swift:54</code>–<code>:58</code>）。亮度盒最紧，因为亮度携带「是不是同一块材质」的信息；色度盒更宽，因为人眼的色度分辨率低得多。</p>
+<p>另有一道硬地板：像素自身的 YUV 色度若低于 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>0.5</mn><mspace width="0.167em"></mspace><msub><mi>c</mi><mn>0</mn></msub></mrow><annotation encoding="application/x-tex">0.5\,c_0</annotation></semantics></math>，权重直接为 0（<code>Kernels/s3_6b_point_colour.metal:132</code>、<code>Sources/PhotonsCore/PointColor.swift:60</code>）。灰因此逐位不变，接近灰的渐变也不会被误染。</p>
+<p>一个文档最多八个采样色，<strong>按数组顺序全部渲染</strong>，每个都看前一个的输出（<code>Kernels/s3_6b_point_colour.metal:149</code>–<code>:177</code>、<code>Sources/PhotonsCore/PointColor.swift:313</code>）。三个调整量与 HSL 卡同单位：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>H</mi><mo>+</mo><mo>=</mo><mi>w</mi><mspace width="0.167em"></mspace><msub><mi>a</mi><mi>h</mi></msub><mspace width="0.167em"></mspace><mn>0.3</mn><mo>,</mo><mspace width="2.0em"></mspace><mi>C</mi><mo>*</mo><mo>=</mo><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mn>1</mn><mo>+</mo><mi>w</mi><mfrac><msub><mi>a</mi><mi>s</mi></msub><mn>100</mn></mfrac><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>L</mi><mo>*</mo><mo>=</mo><msup><mn>2</mn><mrow><mspace width="0.167em"></mspace><mi>w</mi><msub><mi>a</mi><mi>l</mi></msub><mi>/</mi><mn>100</mn></mrow></msup></mrow><annotation encoding="application/x-tex">
+H\mathrel{+}=w\,a_h\,0.3,\qquad
+C\mathrel{*}=\Bigl(1+w\frac{a_s}{100}\Bigr),\qquad
+L\mathrel{*}=2^{\,w a_l/100}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_6b_point_colour.metal:172</code>–<code>:174</code>）。注意每个量都乘 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>w</mi><annotation encoding="application/x-tex">w</annotation></semantics></math>，所以在肩上三条一起归零，穿过盒子边界的渐变不会有台阶。</p>
+<p>三向分级用 S2 的亮度窗口决定「哪个轮子管这个像素」：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mrow><mi>s</mi><mi>h</mi></mrow></msub><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>5.9</mn><mo>,</mo><mi>−</mi><mn>3.9</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mrow><mi>h</mi><mi>i</mi></mrow></msub><mo>=</mo><mrow><mi mathvariant="normal">s</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">h</mi><mi mathvariant="normal">s</mi><mi mathvariant="normal">t</mi><mi mathvariant="normal">e</mi><mi mathvariant="normal">p</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>−</mi><mn>3.2</mn><mo>,</mo><mi>−</mi><mn>1.2</mn><mo>,</mo><mi>L</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>w</mi><mrow><mi>m</mi><mi>i</mi><mi>d</mi></mrow></msub><mo>=</mo><mn>1</mn><mo>−</mo><msub><mi>w</mi><mrow><mi>s</mi><mi>h</mi></mrow></msub><mo>−</mo><msub><mi>w</mi><mrow><mi>h</mi><mi>i</mi></mrow></msub></mrow><annotation encoding="application/x-tex">
+w_{sh}=1-\mathrm{smoothstep}(-5.9,-3.9,L),\qquad
+w_{hi}=\mathrm{smoothstep}(-3.2,-1.2,L),\qquad
+w_{mid}=1-w_{sh}-w_{hi}
+</annotation></semantics></math></p>
+<p>（<code>Kernels/tone_shape.metal:53</code>–<code>:57</code>、<code>Kernels/s3_8_grade.metal:77</code>–<code>:81</code>），其中 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>=</mo><msub><mrow><mi mathvariant="normal">log</mi><mo>&#8289;</mo></mrow><mn>2</mn></msub><mi>Y</mi></mrow><annotation encoding="application/x-tex">L=\log_2 Y</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math> 按工作基色的权重求（<code>:54</code>）。两个窗口不重叠（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mn>3.9</mn><mo>&lt;</mo><mi>−</mi><mn>3.2</mn></mrow><annotation encoding="application/x-tex">-3.9&lt;-3.2</annotation></semantics></math>），第三个数是余量，所以三者和恒为 1，且这个 stage 没有自己的窗口表。</p>
+<p>参数<strong>先混后算</strong>，这是「中性轮在自己区域里给出恰好零」的原因：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>δ</mi><mi>h</mi><mo>=</mo><mn>0.3</mn><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>w</mi><mi>i</mi></msub><msub><mi>h</mi><mi>i</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>κ</mi><mo>=</mo><mn>1</mn><mo>+</mo><mfrac><mn>1</mn><mn>100</mn></mfrac><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>w</mi><mi>i</mi></msub><msub><mi>s</mi><mi>i</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>δ</mi><mi>l</mi><mo>=</mo><mfrac><mn>1</mn><mn>100</mn></mfrac><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>w</mi><mi>i</mi></msub><msub><mi>l</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">
+\delta h=0.3\sum_i w_i h_i,\qquad
+\kappa=1+\frac{1}{100}\sum_i w_i s_i,\qquad
+\delta l=\frac{1}{100}\sum_i w_i l_i
+</annotation></semantics></math></p>
+<p>（<code>Kernels/s3_8_grade.metal:107</code>–<code>:113</code>）。然后：</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>v</mi><mn>1</mn></msub><mo>=</mo><msup><mrow><mi mathvariant="normal">O</mi><mi mathvariant="normal">K</mi><mi mathvariant="normal">L</mi><mi mathvariant="normal">C</mi><mi mathvariant="normal">h</mi></mrow><mrow><mi>−</mi><mn>1</mn></mrow></msup><mo minsize="120%" maxsize="120%" stretchy="true" form="prefix">(</mo><mi>L</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>κ</mi><mi>C</mi><mo>,</mo><mspace width="0.222em"></mspace><mi>h</mi><mo>+</mo><mi>δ</mi><mi>h</mi><mo>⋅</mo><mi>g</mi><mo minsize="120%" maxsize="120%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>v</mi><mn>2</mn></msub><mo>=</mo><msub><mi>v</mi><mn>1</mn></msub><mo>⋅</mo><mrow><mi mathvariant="normal">c</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">m</mi><mi mathvariant="normal">p</mi></mrow><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">(</mo><mfrac><msub><mi>Y</mi><mrow><mi mathvariant="normal">i</mi><mi mathvariant="normal">n</mi></mrow></msub><mrow><mi>Y</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>v</mi><mn>1</mn></msub><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>,</mo><mspace width="0.222em"></mspace><mn>0.125</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>8</mn><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">o</mi><mi mathvariant="normal">u</mi><mi mathvariant="normal">t</mi></mrow><mo>=</mo><msub><mi>v</mi><mn>2</mn></msub><mo>⋅</mo><msup><mn>2</mn><mrow><mi>δ</mi><mi>l</mi></mrow></msup></mrow><annotation encoding="application/x-tex">
+v_1=\mathrm{OKLCh}^{-1}\bigl(L,\ \kappa C,\ h+\delta h\cdot g\bigr),\qquad
+v_2=v_1\cdot\mathrm{clamp}\Bigl(\frac{Y_{\mathrm{in}}}{Y(v_1)},\ 0.125,\ 8\Bigr),\qquad
+\mathrm{out}=v_2\cdot 2^{\delta l}
+</annotation></semantics></math></p>
+<p>（<code>:136</code>–<code>:138</code>、<code>:165</code>–<code>:169</code>、<code>:172</code>–<code>:174</code>）。三步各有理由：</p>
+<ul>
+<li>色相旋转在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 与 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>C</mi><annotation encoding="application/x-tex">C</annotation></semantics></math> 不动的前提下做，<strong>亮度不跟着动</strong>；饱和改 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>C</mi><annotation encoding="application/x-tex">C</annotation></semantics></math> 会改 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math>（同 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> 下更鲜艳的像素亮度不同），所以第三步把 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math> 乘回输入值。这个恢复是一次<strong>均匀增益</strong>，而均匀增益不会移动 OKLCh 色相——折叠对 RGB 线性、立方根把增益变成 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>ℓ</mi><mo>,</mo><mi>m</mi><mo>,</mo><mi>s</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\ell,m,s)</annotation></semantics></math> 上的标量，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>L</mi><mo>,</mo><mi>a</mi><mo>,</mo><mi>b</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(L,a,b)</annotation></semantics></math> 同乘 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>g</mi><mrow><mn>1</mn><mi>/</mi><mn>3</mn></mrow></msup><annotation encoding="application/x-tex">g^{1/3}</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">atan2</mi><mo>&#8289;</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>b</mi><mo>,</mo><mi>a</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\operatorname{atan2}(b,a)</annotation></semantics></math> 不变（<code>Sources/PhotonsCore/ColorGrade.swift:33</code>–<code>:38</code>）。「饱和不动色相」因此是算术性质，不是容差。</li>
+<li>工作基色装不下的彩度会回来一个负通道，硬剪会转色相（阴影片上实测 8.4°）并丢掉刚恢复的亮度，所以<strong>缩短这次移动</strong>：在输入彩度与请求彩度之间二分六步，停在装得下的最宽处（<code>Kernels/s3_8_grade.metal:152</code>–<code>:160</code>）。</li>
+<li>亮度是纯增益 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>2</mn><mrow><mi>δ</mi><mi>l</mi></mrow></msup><annotation encoding="application/x-tex">2^{\delta l}</annotation></semantics></math>，<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>100</mn></mrow><annotation encoding="application/x-tex">\pm100</annotation></semantics></math> 就是该区域 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>±</mi><mn>1</mn></mrow><annotation encoding="application/x-tex">\pm1</annotation></semantics></math> 档光，与曝光同一个单位——档（<code>Sources/PhotonsCore/ColorGrade.swift:64</code>–<code>:65</code>）。</li>
+</ul>
+<p><strong>参数与范围</strong></p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>范围</th>
+<th>默认</th>
+<th>单位</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>point.sampleY/U/V</code></td>
+<td>0…1（U/V 以 0.5 为中性）</td>
+<td>0.5 / 0.5 / 0.5</td>
+<td>Rec.709 full-range 码</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:68</code>–<code>:70</code></td>
+</tr>
+<tr>
+<td><code>point.range</code></td>
+<td>0…120</td>
+<td>30（= 上面的半宽）</td>
+<td>倍数，÷30</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:73</code></td>
+</tr>
+<tr>
+<td><code>point.feather</code></td>
+<td>0…120</td>
+<td>30（= 半宽的 1/2）</td>
+<td>倍数，÷30</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:75</code></td>
+</tr>
+<tr>
+<td><code>point.hue</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>0.3°/单位</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:77</code></td>
+</tr>
+<tr>
+<td><code>point.saturation</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>乘性系数 − 1，÷100</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:79</code></td>
+</tr>
+<tr>
+<td><code>point.luminance</code></td>
+<td>−100…100</td>
+<td>0</td>
+<td>感知亮度档</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:81</code></td>
+</tr>
+<tr>
+<td>采样色个数</td>
+<td>1…8</td>
+<td>—（空 = 无此 pass）</td>
+<td>个</td>
+<td><code>Sources/PhotonsCore/PointColor.swift:313</code></td>
+</tr>
+<tr>
+<td><code>shadows/midtones/highlights.(hue,sat,light)</code></td>
+<td>−100…100 ×9</td>
+<td>全 0</td>
+<td>0.3° / 乘性 / 光档</td>
+<td><code>Sources/PhotonsCore/EditModel.swift:2062</code>–<code>:2075</code></td>
+</tr>
+</tbody>
+</table>
+<p>分级的九个 0 是 <code>hasGrade</code>（<code>Sources/PhotonsCore/EditModel.swift:402</code>），点颜色的谓词是「至少一个采样色<strong>且</strong>有非零调整」（<code>:1943</code>、<code>Sources/PhotonsCore/PointColor.swift:177</code>）——只有采样没有调整不构成 stage，只有调整没有采样也不构成。</p>
+<p><strong>实现</strong></p>
+<p><code>Kernels/s3_6b_point_colour.metal</code> 与 <code>Kernels/s3_8_grade.metal</code>，两个全分辨率 pass，都在 S3.6 之后、S3.9 之前（<code>Sources/PhotonsCore/Stage.swift:191</code>）。两者都带同样的三道早退：空内容窗口、alpha 0、内容矩形之外。</p>
+<p>内核按成本排序：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math> 只依赖三行矩阵与三条 OETF，先算一次，把绝大多数像素挡在循环外（<code>Kernels/s3_6b_point_colour.metal:112</code>–<code>:126</code>）；<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>U</mi><mi>/</mi><mi>V</mi></mrow><annotation encoding="application/x-tex">U/V</annotation></semantics></math>、色度地板与 OKLab 都推迟到某个盒子放行之后。像素在各盒子之间保持 OKLCh 形态，只有前一个采样色真的写了东西才重折 YUV（<code>:139</code>–<code>:160</code>）。</p>
+<p>分级的主机侧把「混参数」定义成 <code>Effective</code>（色相度、彩度乘数、光档），与 kernel 同一顺序：先混、再转换、再恢复亮度、再加增益（<code>Sources/PhotonsCore/ColorGrade.swift:110</code>–<code>:134</code>）。</p>
+<blockquote>
+<p><strong>一处 α 期文档债。</strong> <code>Kernels/tone_shape.metal</code> 里现在有两个窗口函数：074 R2 的两窗 <code>region_weights</code>（<code>:53</code>）与 085 的三窗链 <code>region_weights3</code>（<code>:98</code>），S2 的全局段用后者，分级仍 include 前者（<code>s3_8_grade.metal:10</code>–<code>:16</code>）。两套在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mn>3.9</mn></mrow><annotation encoding="application/x-tex">-3.9</annotation></semantics></math> 以下、<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mn>1.2</mn></mrow><annotation encoding="application/x-tex">-1.2</annotation></semantics></math> 以上一致，中间的过渡不同；<code>Sources/PhotonsCore/ColorGrade.swift:45</code>–<code>:52</code> 的注释还写着「S2 自己的窗口」，严格说只对 074 成立。改窗口时两处必须一起改，否则「高光」在两张卡上会重新变成两个区域。</p>
+</blockquote>
+<p><strong>开源对照</strong></p>
+<ul>
+<li><strong>darktable · <code>colorbalancergb.c</code></strong> — 三只轮子加一个全局段，工作在 Filmlight Ych，每只轮存<strong>绝对色相角</strong>（<a href="https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c" class="uri">https://github.com/darktable-org/darktable/blob/master/src/iop/colorbalancergb.c</a>）。Photons 存的是<strong>偏移</strong>：交叉淡化时偏移是普通数，直接线性插值即可；绝对角需要圆环插值（350° 与 10° 相差 20°，不是 340°），而且「阴影是橙色」会变成「把所有阴影像素旋到橙色」，抹掉画面自己的颜色差异（<code>Sources/PhotonsCore/EditModel.swift:2050</code>–<code>:2061</code>）。</li>
+<li><strong>RawTherapee · Color Toning（<code>improcfun.cc</code>）</strong> — 阴影/中间调/高光各三个 RGB 数，外加饱和度保护与一条强度曲线（<a href="https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/improcfun.cc" class="uri">https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/improcfun.cc</a>，第 2281–2296 行）。它直接加在通道上，因此会同时改亮度与色相；Photons 先转色相、再恢复 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>Y</mi><annotation encoding="application/x-tex">Y</annotation></semantics></math>、最后才乘亮度，三个量互不串。</li>
+<li><strong>LightZone · <code>ColorBalanceOperation.java</code></strong> — 三条互补轴（Cyan-Red / Magenta-Green / Yellow-Blue）加一个 midpoint，Highlights / Midtones / Shadows 三个选项把 midpoint 设成 0.62 / 0.18 / 0.04，最后生成每通道一条 B 样条 LUT（<a href="https://github.com/ktgw0316/LightZone/blob/master/lightcrafts/src/main/java/com/lightcrafts/model/ImageEditor/ColorBalanceOperation.java" class="uri">https://github.com/ktgw0316/LightZone/blob/master/lightcrafts/src/main/java/com/lightcrafts/model/ImageEditor/ColorBalanceOperation.java</a>，第 83–140 行）。差别是维度：它一次只作用一个影调档、靠通道加减；Photons 三个档同时按权重混合，且旋转的是 OKLCh 色相。</li>
+</ul>
+<p><strong>取舍</strong></p>
+<p>点颜色的盒子是<strong>矩形</strong>：三个轴独立，所以它抓不住「同一个色相、不同明度」斜着穿过盒子的那种颜色（一条从亮到暗的渐变会有一半在盒外）。换成椭球能贴合得更好，但每个采样色要多存一个方向，八个的上限立刻变成负担。</p>
+<p>这套系统按「一个维度一个 stage」组织，每个 stage 只有一个划分；代价是组合靠链序——先黑白再色带再分级，顺序变了结果就变，而链序不开放给用户。</p>
+<p>分级的窗口只有一套，所以 18 % 灰（码 118）读作 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mn>2.44</mn></mrow><annotation encoding="application/x-tex">-2.44</annotation></semantics></math> EV，落在 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>0.70</mn><mo>,</mo><mspace width="0.222em"></mspace><mn>0.30</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(0,\ 0.70,\ 0.30)</annotation></semantics></math>：中间调轮占七成，高光轮已经开始碰它（<code>Sources/PhotonsCore/EditModel.swift:2122</code>–<code>:2123</code>）。这是一张表的代价，也是「高光」这个滑杆自 074 R2 起就有的同一个重叠。</p>
+<p>校准（<code>CalibrationGroup</code>，七个 ±100 的数）在 S1 的线性光上做矩阵，改的是「哪个通道算红」，不在这一章展开（<code>Sources/PhotonsCore/EditModel.swift:2636</code>、<code>:363</code>）。</p>
+
+    </article>
+    <nav class="pager">
+      <a class="prev" href="04a-tones.html">← 4a 影调</a>
+      <a class="next" href="04c-detail.html">4c 细节 →</a>
+    </nav>
+    <footer class="page-footer">
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>0148727</code> · 2026-10-31</p>
+      <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
+    </footer>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

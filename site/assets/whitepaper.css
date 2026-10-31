@@ -1,0 +1,281 @@
+/* Photons 白皮书 — 静态站点样式。
+   目标：像一份技术支持文档，而不是产品页。白底、窄行宽、可打印。 */
+
+:root {
+  --ink: #1c1c1e;
+  --ink-soft: #55555c;
+  --ink-faint: #85858c;
+  --line: #e3e3e6;
+  --line-strong: #c9c9cf;
+  --bg: #ffffff;
+  --bg-soft: #f7f7f8;
+  --accent: #0b5fd0;
+  --accent-soft: #eaf1fc;
+  --warn: #fff8e6;
+  --warn-line: #e7c56a;
+  --code-bg: #f4f4f6;
+  --measure: 46rem;
+  --sidebar: 15rem;
+  font-synthesis: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e8ea;
+    --ink-soft: #b4b4bc;
+    --ink-faint: #8a8a92;
+    --line: #2e2e33;
+    --line-strong: #44444c;
+    --bg: #17171a;
+    --bg-soft: #1f1f23;
+    --accent: #74a8ff;
+    --accent-soft: #1d2a40;
+    --warn: #2a2416;
+    --warn-line: #6b5a28;
+    --code-bg: #232327;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html {
+  scroll-padding-top: 4.5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+               "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  font-size: 16px;
+  line-height: 1.75;
+  text-rendering: optimizeLegibility;
+}
+
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: #fff; padding: .5rem .75rem; z-index: 20;
+}
+.skip:focus { left: .5rem; top: .5rem; }
+
+/* ── top bar ─────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: .75rem;
+  height: 3.25rem; padding: 0 1rem;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 650; letter-spacing: .01em; color: var(--ink);
+  text-decoration: none; white-space: nowrap;
+}
+.brand span { font-weight: 400; color: var(--ink-faint); margin-left: .3rem; font-size: .9em; }
+
+.menu-button {
+  display: none; border: 1px solid var(--line-strong); background: transparent;
+  color: var(--ink); border-radius: .4rem; font-size: 1rem; padding: .1rem .45rem;
+}
+
+.search { position: relative; margin-left: auto; width: min(22rem, 45vw); }
+.search input {
+  width: 100%; font: inherit; font-size: .9rem;
+  padding: .35rem .6rem; border-radius: .45rem;
+  border: 1px solid var(--line-strong); background: var(--bg-soft); color: var(--ink);
+}
+.search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+
+.search-results {
+  position: absolute; right: 0; top: calc(100% + .35rem);
+  width: min(30rem, 80vw); max-height: 60vh; overflow: auto;
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: .5rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .14); padding: .35rem; z-index: 30;
+}
+.search-results a {
+  display: block; padding: .4rem .5rem; border-radius: .35rem;
+  color: var(--ink); text-decoration: none; font-size: .9rem;
+}
+.search-results a:hover, .search-results a:focus { background: var(--accent-soft); }
+.search-results .snippet { display: block; color: var(--ink-faint); font-size: .8rem; line-height: 1.45; }
+.search-results .empty { color: var(--ink-faint); font-size: .85rem; padding: .5rem; }
+
+/* ── layout ──────────────────────────────────────────────────────────── */
+
+.layout {
+  display: grid;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  gap: 2.5rem;
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+.sidebar {
+  position: sticky; top: 3.25rem; align-self: start;
+  max-height: calc(100vh - 3.25rem); overflow: auto;
+  padding: 1.75rem 0 2rem;
+  font-size: .9rem;
+}
+
+.sidebar-title, .toc-title {
+  margin: 0 0 .5rem; font-size: .72rem; font-weight: 650;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint);
+}
+
+.chapter-list { list-style: none; margin: 0; padding: 0; }
+.chapter-list li { margin: .1rem 0; }
+.chapter-list a, .chapter-list span {
+  display: block; padding: .3rem .5rem; border-radius: .35rem;
+  color: var(--ink-soft); text-decoration: none; line-height: 1.45;
+}
+.chapter-list a:hover { background: var(--bg-soft); color: var(--ink); }
+.chapter-list .current span { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.sidebar-note {
+  margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line);
+  color: var(--ink-faint); font-size: .78rem; line-height: 1.6;
+}
+
+.content {
+  min-width: 0;
+  max-width: var(--measure);
+  padding: 2rem 0 4rem;
+}
+
+/* ── page toc ────────────────────────────────────────────────────────── */
+
+.page-toc {
+  margin: 0 0 1.75rem; padding: .9rem 1.1rem;
+  background: var(--bg-soft); border: 1px solid var(--line); border-radius: .6rem;
+}
+.page-toc ul { list-style: none; margin: 0; padding: 0; }
+.page-toc li { margin: .15rem 0; font-size: .9rem; }
+.page-toc .toc-3 { padding-left: 1rem; }
+.page-toc a { color: var(--ink-soft); text-decoration: none; }
+.page-toc a:hover { color: var(--accent); }
+
+/* ── prose ───────────────────────────────────────────────────────────── */
+
+article h1 {
+  font-size: 1.9rem; line-height: 1.3; margin: 0 0 1rem;
+  letter-spacing: -.01em; font-weight: 680;
+}
+article h2 {
+  font-size: 1.32rem; line-height: 1.4; margin: 2.6rem 0 .8rem;
+  padding-bottom: .35rem; border-bottom: 1px solid var(--line);
+}
+article h3 { font-size: 1.06rem; margin: 1.9rem 0 .5rem; }
+article h4 { font-size: .98rem; margin: 1.4rem 0 .4rem; color: var(--ink-soft); }
+
+article p { margin: 0 0 .9rem; }
+article ul, article ol { margin: 0 0 1rem; padding-left: 1.35rem; }
+article li { margin: .25rem 0; }
+
+article a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+article a:hover { border-bottom-color: var(--accent); }
+
+.lede { font-size: 1.12rem; color: var(--ink-soft); margin-bottom: 1.5rem; }
+
+blockquote {
+  margin: 1.2rem 0; padding: .8rem 1rem;
+  background: var(--bg-soft);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 .4rem .4rem 0;
+  color: var(--ink-soft);
+}
+blockquote p:last-child { margin-bottom: 0; }
+blockquote strong { color: var(--ink); }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: .86em;
+  background: var(--code-bg);
+  padding: .1em .32em; border-radius: .25rem;
+}
+pre {
+  background: var(--code-bg); border: 1px solid var(--line);
+  border-radius: .5rem; padding: .85rem 1rem; overflow: auto;
+  font-size: .84rem; line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+
+/* ── tables ──────────────────────────────────────────────────────────── */
+
+.table-wrap { overflow-x: auto; margin: 1rem 0 1.4rem; }
+article table {
+  width: 100%; border-collapse: collapse; font-size: .87rem; line-height: 1.55;
+}
+article th, article td {
+  text-align: left; vertical-align: top;
+  padding: .45rem .6rem; border-bottom: 1px solid var(--line);
+}
+article thead th {
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink-soft); font-weight: 620; white-space: nowrap;
+}
+article tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-soft) 55%, transparent); }
+article td code { white-space: nowrap; }
+
+/* ── math (MathML) ───────────────────────────────────────────────────── */
+
+math { font-size: 1.02em; }
+math[display="block"] {
+  display: block; margin: 1rem 0; overflow-x: auto; overflow-y: hidden;
+  padding: .35rem 0;
+}
+
+/* ── pager / footer ──────────────────────────────────────────────────── */
+
+.pager {
+  display: flex; justify-content: space-between; gap: 1rem;
+  margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+  font-size: .9rem;
+}
+.pager a { color: var(--accent); text-decoration: none; }
+.pager .next { margin-left: auto; text-align: right; }
+
+.page-footer {
+  margin-top: 2rem; color: var(--ink-faint); font-size: .78rem; line-height: 1.65;
+}
+.page-footer p { margin: .2rem 0; }
+
+.landing-list { columns: 2; column-gap: 2rem; }
+.landing-list li { break-inside: avoid; }
+.placeholder { color: var(--ink-faint); }
+
+/* ── narrow screens ──────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 1rem; }
+  .content { max-width: none; padding-top: 1.25rem; }
+  .menu-button { display: inline-block; }
+  .sidebar {
+    position: fixed; inset: 3.25rem 0 auto 0; z-index: 15;
+    max-height: calc(100vh - 3.25rem);
+    background: var(--bg); border-bottom: 1px solid var(--line);
+    padding: 1rem 1rem 1.5rem; display: none;
+  }
+  .sidebar.open { display: block; }
+  .search { width: auto; flex: 1; }
+  .landing-list { columns: 1; }
+  article h1 { font-size: 1.6rem; }
+}
+
+/* ── print ───────────────────────────────────────────────────────────── */
+
+@media print {
+  .topbar, .sidebar, .pager, .search, .menu-button, .page-toc { display: none !important; }
+  .layout { display: block; max-width: none; padding: 0; }
+  .content { max-width: none; padding: 0; }
+  body { font-size: 11pt; line-height: 1.5; }
+  article h2 { break-after: avoid; }
+  article table, article pre, article blockquote { break-inside: avoid; }
+  a { color: inherit; text-decoration: none; border: 0; }
+}
