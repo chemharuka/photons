@@ -885,14 +885,20 @@ public final class CropToolController {
         return CropRect(left: left, top: top, right: left + width, bottom: top + height)
     }
 
-    /// 092 — the Δθ ≠ 0 half of `clampToView`: fit the **bounding box of the turned quad** into the
-    /// canvas instead of the un-turned rect.
+    /// 190 — the Δθ ≠ 0 half of `clampToView`: keep the **turned frame over the canvas**, and keep
+    /// it findable.
     ///
-    /// The frame the user sees at `degrees` is `effectiveCrop` (the rect inscribed in the turned
-    /// sensor) projected through `CropTool.layout`; its four corners are a rotated quad, and the thing
-    /// that has to stay on the canvas is their AABB. Shrinking is uniform about the rect's centre (so
-    /// the pixel ratio survives), moving translates the quad's centre in view space and is converted
-    /// back through the same inverse the drags use. The photo bound stays `effectiveCrop`'s job.
+    /// The frame the user sees at `degrees` is `effectiveCrop` projected through `CropTool.layout`;
+    /// its four corners are a rotated quad. 092 fitted that quad's AABB into the canvas, 188 only
+    /// kept its *centre* there — and read both from `mapping.viewport`, i.e. from the **view**.
+    /// That is the bug this replaces: at 适应 the viewport is the whole canvas and the two readings
+    /// agree, but at 1:1 or 2× it is a window onto the document, so the bound shrank to nothing and
+    /// the frame could be dragged out of the canvas entirely.
+    ///
+    /// The bound is now a document fact (see `documentCanvas`): **at least a quarter of the frame's
+    /// own area still covers the canvas**, and one grip is on the canvas. A frame that breaks it is
+    /// *moved* back toward the canvas' centre at its own size — never shrunk (188's rule), and its
+    /// ratio and `minimumSpan` are untouched. The photo bound stays `effectiveCrop`'s job.
     private func clampRotatedQuadToView(mapping: LoupeMapping, source: ImageSize,
                                         degrees: Double) -> Bool {
         // 132: the turned-quad clamp existed to keep the *photo-bound* frame on the canvas. With the
@@ -909,89 +915,256 @@ public final class CropToolController {
             return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle,
                                                   keepsInsideRotatedFrame: true)
         }
-        func quadBounds(_ rect: CropRect) -> (center: CGPoint, halfWidth: Double, halfHeight: Double) {
-            let layout = CropTool.layout(crop: rect, source: source, mapping: mapping,
-                                         pointScale: 1, showsGrid: false,
-                                         quadRotationDegrees: degrees)
-            let xs = layout.corners.map { Double($0.x) }
-            let ys = layout.corners.map { Double($0.y) }
-            guard let minX = xs.min(), let maxX = xs.max(),
-                  let minY = ys.min(), let maxY = ys.max() else {
-                return (.zero, 0, 0)
-            }
-            return (CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2),
-                    (maxX - minX) / 2, (maxY - minY) / 2)
+        // 190 — **the bound is a document question.** 「How much of the frame still covers the
+        // canvas」 is asked of the turned frame's own pixels: `canvas` is the photograph's AABB and
+        // `documentQuad` is the four corners `CropTool.layout` projects, with the view's similarity
+        // removed. Neither number knows about a viewport, a zoom or a window, so the limit cannot
+        // move when the framing does — which is exactly what 188 got wrong: it asked the *view*
+        // (`mapping.viewport`), and it agreed with the canvas only at 适应. At 1:1 and 2× the
+        // viewport is a window onto the document, so 「the quad's centre is in the viewport」 became
+        // an almost empty rule and the frame could be dragged until a tenth of it was left
+        // (measured at 5.4°: 10.9 % of the frame on the canvas at 适应, 100 % at 1:1 and 2×).
+        let canvas = documentCanvas(source: source, degrees: angle)
+
+        /// 162 — the ratio lock is a document constraint and has to survive this clamp. Applied to
+        /// the *size* about the frame's centre, so it never goes through `CropTool.constrain`'s
+        /// `0…1²` clamp (which would forbid the camera-outside band).
+        func withLock(_ rect: CropRect) -> CropRect {
+            guard let ratio = draft.lock.ratio,
+                  let aspect = CropTool.normalizedAspect(ratio, source: source),
+                  rect.width > 0, rect.height > 0 else { return rect }
+            var w = rect.width, h = rect.height
+            if w / h > aspect { w = h * aspect } else { h = w / aspect }
+            let left: Double = rect.centerX - w / 2
+            let top: Double = rect.centerY - h / 2
+            return CropRect(left: left, top: top, right: left + w, bottom: top + h)
+                .clamped(allowsOutsideSource: true)
         }
-        func fit(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
-            lower <= upper ? min(max(value, lower), upper) : (lower + upper) / 2
+        let shaped = withLock(before)
+        let base = seen(shaped)
+        let width = Double(max(source.width, 1)), height = Double(max(source.height, 1))
+
+        /// How much of the frame's own area still covers the canvas — the rotation-invariant thing,
+        /// because a rotation preserves area and the canvas is an AABB.
+        func coverage(_ rect: CropRect) -> Double {
+            canvasCoverage(rect, canvas: canvas, source: source, degrees: angle)
         }
 
-        let canvasWidth = Double(mapping.viewport.width)
-        let canvasHeight = Double(mapping.viewport.height)
-        let base = seen(before)
-
-        /// The rect at uniform scale `s` (about the frame's centre, so the ratio is untouched), then
-        /// moved so its quad's centre is **on the canvas**. The move is asked for in **view** space and
-        /// converted back through the drags' own inverse.
+        /// The law of 190, stated with **areas only**: at least a quarter of the frame's own area is
+        /// over the canvas. Area (not a corner test) is what makes it well defined for a frame larger
+        /// than the canvas — there coverage is `canvas/frame`, monotonically increasing along the
+        /// pull-back, which is exactly what the bisection needs.
         ///
-        /// 188 — the target is the canvas *rectangle*, not the canvas minus the quad: the frame may
-        /// leave the expanded canvas (user's 「旋转后裁切框可以出画布」), so what has to stay reachable is
-        /// the quad's centre, and nothing here shrinks it. `s` is kept for the ratio branch and for
-        /// callers that ask about a size, but the shipped path only ever asks for `1`.
-        func candidate(_ s: Double) -> CropRect {
-            var width = base.width * s, height = base.height * s
-            // 162: the ratio lock is a document constraint and must survive the canvas clamp; applying
-            // it to the *size* here (about the same centre) keeps it without `CropTool.constrain`'s
-            // `0…1²` clamp, which would forbid the camera-outside band.
-            if let ratio = draft.lock.ratio,
-               let normalizedAspect = CropTool.normalizedAspect(ratio, source: source) {
-                if width / height > normalizedAspect { width = height * normalizedAspect }
-                else { height = width / normalizedAspect }
-            }
-            let raw = CropRect(x: base.centerX - width / 2, y: base.centerY - height / 2,
-                               width: width, height: height).clamped(allowsOutsideSource: true)
-            let box = quadBounds(raw)
-            // 188: reachability, not containment — the quad's centre lands on the canvas, and the
-            // frame's own edges are free to cross it (that is the 100 pt the user asked for).
-            let targetX = fit(Double(box.center.x), 0, canvasWidth)
-            let targetY = fit(Double(box.center.y), 0, canvasHeight)
-            guard let centre = Self.normalized(CGPoint(x: targetX, y: targetY), mapping: mapping,
-                                               source: source, pointScale: 1,
-                                               rotationDegrees: degrees) else { return raw }
-            var moved = CropRect(x: centre.x - width / 2, y: centre.y - height / 2,
-                                 width: width, height: height).clamped(allowsOutsideSource: true)
-            // 162: at a draft angle the ratio is already preserved by the uniform scale/move; pulling
-            // the rect through `CropTool.constrain` would clamp it to the **camera pixels** (0…1²) and
-            // make 「框可以出相机像素」 impossible. Keep that only for the opt-in photo-bound path.
-            if clampsToRotatedFrame, draft.lock.ratio != nil {
-                moved = CropTool.constrain(moved, lock: draft.lock, source: source, anchor: .center)
-            }
-            return seen(moved)
+        /// **There is deliberately no reachability clause here.** 188 had one (「the quad's centre is
+        /// in the viewport」) and 190 must not: at 1:1 and 2× the viewport is a *window* of the
+        /// canvas, so a frame that keeps 25 % over the canvas can sit outside it — measured, the
+        /// frame's centre is off-viewport at both zooms while the coverage is exactly 0.25. The two
+        /// clauses cannot both hold, and the coverage clause is the one the user's report is about.
+        /// Do not add it back: it is what made the limit move with the zoom.
+        ///
+        /// The frame stays findable by the mechanism that was always there, not by a new one:
+        /// ① 25 % of it is on the **canvas** (not on the screen), ② 适应 is the entry framing and
+        /// shows the whole canvas (`CropZoomEntryTests`), so zooming back out puts the frame on
+        /// screen again, ③ therefore 「框丢了」 cannot happen. No auto-pan and no auto-fit: that
+        /// would be a new feature, and it is not this task.
+        func legal(_ rect: CropRect) -> Bool {
+            coverage(rect) >= Self.canvasCoverageFloor
         }
 
-        /// 188 — is the frame still **reachable**? Its quad's centre is on the canvas, so the frame can
-        /// always be grabbed again; how much of it hangs over the edge is the user's business.
-        func reachable(_ rect: CropRect) -> Bool {
-            let box = quadBounds(rect)
-            let tolerance = 1e-7
-            return Double(box.center.x) >= -tolerance && Double(box.center.x) <= canvasWidth + tolerance
-                && Double(box.center.y) >= -tolerance && Double(box.center.y) <= canvasHeight + tolerance
+        // **No shrink** (188 deleted the `0…1²`-room search and it is not coming back): the frame is
+        // translated toward the canvas' centre by the least amount that makes it legal — 「最多 3/4
+        // 出去」, arrived at by moving, never by resizing. The quad turns about the *source's*
+        // centre (`imagePoint`), so a move asked for in document pixels is `R(θ)` of the same move
+        // in the rect's own coordinates.
+        //
+        // Returns a rect that satisfies `legal` — including the case the floor cannot be reached at
+        // all (a frame more than four times the canvas' area): then no position is legal, the
+        // canvas' centre is the *maximum* coverage there is, and that is what is returned. `seen()`
+        // is applied by the caller, which re-checks it (the opt-in photo-bound shrink may not undo
+        // this law).
+        func pulledBack() -> CropRect {
+            let rotation = CropGeometry.RotationMatrix(degrees: angle)
+            let corners = documentQuad(base, source: source, degrees: angle)
+            guard corners.count == 4 else { return base }
+            let centre = CGPoint(x: (corners[0].x + corners[2].x) / 2,
+                                 y: (corners[0].y + corners[2].y) / 2)
+            let toCentreX = Double(canvas.midX - centre.x)
+            let toCentreY = Double(canvas.midY - centre.y)
+            func moved(_ t: Double) -> CropRect {
+                let turned = rotation.apply(x: toCentreX * t, y: toCentreY * t)
+                let left: Double = base.left + turned.x / width
+                let top: Double = base.top + turned.y / height
+                return CropRect(left: left, top: top,
+                                right: left + base.width, bottom: top + base.height)
+                    .clamped(allowsOutsideSource: true)
+            }
+            // Already legal: nothing to pull back, and `base` is the answer — returning it (rather
+            // than `moved(≈0)`) keeps the rect bit for bit, so a legal frame is never rewritten.
+            if legal(base) { return base }
+            // Centred, the frame reaches the maximum coverage any position can have — a frame up to
+            // four times the canvas' area still clears the floor there (canvas/frame ≥ 25 %). Beyond
+            // that no position is legal and the centre, the best there is, is what is returned.
+            guard legal(moved(1)) else { return moved(1) }
+            var outside = 0.0, inside = 1.0
+            for _ in 0..<48 {
+                let mid = (outside + inside) / 2
+                if legal(moved(mid)) { inside = mid } else { outside = mid }
+            }
+            return moved(inside)
         }
 
-        // The frame is already reachable and carries no lock to re-apply: nothing to clamp, so the
-        // stored rect (the user's intent) stays untouched — reducing the angle to 0° then gives the
-        // whole frame back. A lock still has to reshape the rect even when it already fits.
-        if draft.lock.ratio == nil, reachable(base) { return false }
+        // The frame already satisfies the law: the only thing that may still have to be written back
+        // is the **lock's reshape** (162 — a document constraint, not a canvas one). Otherwise the
+        // stored rect stays bit for bit, so reducing the angle to 0° gives the whole frame back.
+        if legal(base) {
+            guard shaped != before else { return false }
+            draft.crop = shaped
+            return true
+        }
 
-        // **No shrink** (188 deleted the `0…1²`-room binary search): a frame whose centre is off the
-        // canvas is *moved* back onto it at its own size. The frame the user drew keeps its edges, its
-        // ratio and `CropTool.minimumSpan` — the only thing this clamp does is keep it findable.
-        let next = candidate(1)
-        // `base` is the derived inscribed frame, not a user edit: when the canvas needed nothing,
-        // leave the stored rect alone (the 088 rule — the shrink is a view, so 0° gives it back).
-        guard next != before, next != base else { return false }
+        var next = pulledBack()
+        // 190 — `seen()` is the opt-in **photo-bound** shrink (`clampsToRotatedFrame`), and a shrink
+        // is a view: it may not undo the canvas law that was just satisfied. Re-check it here and
+        // refuse a shrink that breaks the law (宁可不缩), so no path can hand back a rect that
+        // fails `legal`.
+        if clampsToRotatedFrame, angle != 0 {
+            let shrunk = seen(next)
+            if legal(shrunk) { next = shrunk }
+        }
+        guard next != before else { return false }
         draft.crop = next
         return true
+    }
+
+    // MARK: - the document-space canvas (190)
+
+    /// The smallest fraction of the frame that must keep covering the canvas. 25 % is the user's
+    /// 「最多 3/4 出去」: the frame may leave the expanded canvas, but not so far that it stops being
+    /// a frame *of* that canvas.
+    static let canvasCoverageFloor: Double = 0.25
+
+    /// The canvas in **document pixels**: the turned photograph's AABB, centred on the source's
+    /// centre — the region the workspace calls 画布, with the letterbox being the viewport's
+    /// business. Built from the photo and the angle alone, which is what makes every number derived
+    /// from it (the 25 % floor, the pull-back) a property of the document rather than of a framing.
+    private func documentCanvas(source: ImageSize, degrees: Double) -> CGRect {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let extent = LoupeFraming.rotatedExtent(width: w, height: h, degrees: degrees)
+        return CGRect(x: (w - extent.width) / 2, y: (h - extent.height) / 2,
+                      width: extent.width, height: extent.height)
+    }
+
+    /// |frame ∩ canvas| / |frame| in document pixels. `rect` is the frame in normalized source
+    /// coordinates, `canvas` the turned photograph's AABB, so the answer is a property of the
+    /// document: **the same number at every zoom**, which is the whole of 190.
+    private func canvasCoverage(_ rect: CropRect, canvas: CGRect, source: ImageSize,
+                                degrees: Double) -> Double {
+        let clipped = Self.clipped(documentQuad(rect, source: source, degrees: degrees), to: canvas)
+        guard clipped.count >= 3 else { return 0 }
+        var twice = 0.0
+        for index in clipped.indices {
+            let a = clipped[index], b = clipped[(index + 1) % clipped.count]
+            twice += Double(a.x) * Double(b.y) - Double(b.x) * Double(a.y)
+        }
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let own = rect.width * w * rect.height * h
+        return own > 0 ? abs(twice) / 2 / own : 0
+    }
+
+    /// 190 — `canvasCoverage` for a rect at the draft's current angle, in document pixels. Exposed
+    /// (internal) for the reverse gate: `CropBoundsTests` states the bound 190 puts on a drag in the
+    /// same units the clamp uses, instead of comparing against the *visible* canvas — which at a
+    /// zoom is a window and is exactly the confusion 188 fell into.
+    func canvasCoverage(of rect: CropRect, source: ImageSize? = nil) -> Double {
+        let src = source ?? sourceSize
+        let degrees = CropTool.clampStraighten(draft.straighten)
+        return canvasCoverage(rect, canvas: documentCanvas(source: src, degrees: degrees),
+                              source: src, degrees: degrees)
+    }
+
+    /// **Diagnostic only — not part of the law.** `true` when a corner of the frame is on the canvas,
+    /// or the canvas' centre is inside the frame. 188 used a viewport version of this as a *clamp*
+    /// and that is what made the limit move with the zoom (see `legal`): it is printed by the tests
+    /// to show where the frame's centre sits, and nothing may branch on it.
+    func hasReachableGrip(_ rect: CropRect, source: ImageSize? = nil) -> Bool {
+        let src = source ?? sourceSize
+        let degrees = CropTool.clampStraighten(draft.straighten)
+        return reachableGrip(rect, canvas: documentCanvas(source: src, degrees: degrees),
+                             source: src, degrees: degrees)
+    }
+
+    private func reachableGrip(_ rect: CropRect, canvas: CGRect, source: ImageSize,
+                               degrees: Double) -> Bool {
+        let corners = documentQuad(rect, source: source, degrees: degrees)
+        let tolerance = 1e-6
+        if corners.contains(where: {
+            $0.x >= canvas.minX - tolerance && $0.x <= canvas.maxX + tolerance
+                && $0.y >= canvas.minY - tolerance && $0.y <= canvas.maxY + tolerance
+        }) { return true }
+        // Convex polygon, consistent winding: one sign for every cross product means "inside".
+        guard corners.count == 4 else { return false }
+        let centre = CGPoint(x: canvas.midX, y: canvas.midY)
+        var positive = false, negative = false
+        for index in corners.indices {
+            let a = corners[index], b = corners[(index + 1) % corners.count]
+            let cross = Double(b.x - a.x) * Double(centre.y - a.y)
+                - Double(b.y - a.y) * Double(centre.x - a.x)
+            if cross > 1e-9 { positive = true }
+            if cross < -1e-9 { negative = true }
+            if positive && negative { return false }
+        }
+        return true
+    }
+    /// The frame's four corners in document pixels — `CropTool.layout`'s quad with the view's
+    /// similarity removed. `imagePoint` there is `centre + R(−θ)·(corner − centre)`, so this is the
+    /// same arithmetic on the same numbers.
+    private func documentQuad(_ rect: CropRect, source: ImageSize, degrees: Double) -> [CGPoint] {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let rotation = CropGeometry.RotationMatrix(degrees: degrees.isFinite ? degrees : 0)
+        func image(_ u: Double, _ v: Double) -> CGPoint {
+            let turned = rotation.invert(x: u * w - w / 2, y: v * h - h / 2)
+            return CGPoint(x: w / 2 + turned.x, y: h / 2 + turned.y)
+        }
+        return [image(rect.left, rect.top), image(rect.right, rect.top),
+                image(rect.right, rect.bottom), image(rect.left, rect.bottom)]
+    }
+
+    /// Sutherland–Hodgman: a convex polygon clipped to an axis-aligned rectangle.
+    private static func clipped(_ polygon: [CGPoint], to rect: CGRect) -> [CGPoint] {
+        let edges: [(CGPoint, CGPoint)] = [
+            (CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY)),
+            (CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.maxY)),
+            (CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY)),
+            (CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.minY)),
+        ]
+        var output = polygon
+        for (a, b) in edges where !output.isEmpty {
+            func inside(_ p: CGPoint) -> Bool {
+                (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) >= 0
+            }
+            func crossing(_ p: CGPoint, _ q: CGPoint) -> CGPoint {
+                let dx = q.x - p.x, dy = q.y - p.y
+                let ex = b.x - a.x, ey = b.y - a.y
+                let denominator = dx * ey - dy * ex
+                guard abs(denominator) > 1e-12 else { return q }
+                let t = ((a.x - p.x) * ey - (a.y - p.y) * ex) / denominator
+                return CGPoint(x: p.x + dx * t, y: p.y + dy * t)
+            }
+            var next: [CGPoint] = []
+            for index in output.indices {
+                let current = output[index]
+                let previous = output[(index + output.count - 1) % output.count]
+                let currentIn = inside(current), previousIn = inside(previous)
+                if currentIn {
+                    if !previousIn { next.append(crossing(previous, current)) }
+                    next.append(current)
+                } else if previousIn {
+                    next.append(crossing(previous, current))
+                }
+            }
+            output = next
+        }
+        return output
     }
 
     // MARK: the drag

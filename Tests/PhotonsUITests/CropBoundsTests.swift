@@ -148,12 +148,13 @@ final class CropBoundsTests: XCTestCase {
 
     /// At 8° with the camera zoomed out the canvas is wider than the sensor (`-0.25…1.25`). The frame
     /// may sit in that band — pixels outside the camera are allowed — and, since 188, **it may leave
-    /// the canvas too**: what the clamp keeps is *reachability*, the turned quad's centre on the
-    /// canvas, so the frame can always be grabbed again (user's 「旋转后裁切框可以出画布」).
+    /// the canvas too** (user's 「旋转后裁切框可以出画布」).
     ///
-    /// Pre-188 this test asserted the opposite (`…ButNotLeaveTheCanvas`, the quad's AABB inside the
-    /// viewport): the drag was shrunk and slid back until `frame.maxX == canvas.maxX`. Both numbers are
-    /// quoted in the log line, so the flip is visible, not asserted by hand.
+    /// 190 replaced *how far*: 188 kept the turned quad's centre on the canvas, a rule that read the
+    /// viewport and therefore moved with the zoom. The bound is now a document one — at least a
+    /// quarter of the frame's own area still covers the canvas — so this drag pins where 25 % is
+    /// still on the canvas instead of where the centre sits on its edge. The frame keeps its size
+    /// (no shrink) and stays grabbable (a corner is on the canvas).
     func testAtEightDegreesTheFrameMayLeaveTheCanvasAndStayReachable() throws {
         let (controller, _) = try makeController()
         // 0.2× on a 3000×2000 source in a 900×600 canvas: the window is 4500×3000 source pixels, i.e.
@@ -191,17 +192,28 @@ final class CropBoundsTests: XCTestCase {
               + String(format: " · centre (%.2f, %.2f)", frame.midX, frame.midY))
 
         let crop = controller.draft.crop
-        XCTAssertGreaterThan(crop.right, 1.0, "the frame must be allowed outside the camera pixels")
-        XCTAssertGreaterThan(crop.bottom, 1.0)
+        // The drag is pulled back toward the canvas' centre, so it ends up hanging over whichever
+        // edge the hand came from — here the bottom. Either way it is past the camera's pixels,
+        // which is the 132 promise the pre-188 test pinned on the right edge.
+        XCTAssertGreaterThan(crop.bottom, 1.0, "the frame must be allowed outside the camera pixels")
 
-        // 188 — the quad's **centre** is what the clamp keeps on the canvas, so a drag into the
-        // corner ends with the centre on that corner and the frame hanging past it by half its size.
-        XCTAssertEqual(frame.midX, canvas.maxX, accuracy: 0.5,
-                       "the reachability clamp must put the quad's centre on the canvas' right edge")
-        XCTAssertEqual(frame.midY, canvas.maxY, accuracy: 0.5)
-        XCTAssertGreaterThan(frame.maxX, canvas.maxX + 40,
-                             "the frame is allowed to leave the canvas — no shrink, no pull-back")
-        XCTAssertGreaterThan(frame.maxY, canvas.maxY + 30)
+        // 190 — 「最多 3/4 出去」, measured where the clamp measures it: the **document**. The pair of
+        // numbers below is the whole law — the frame left the camera pixels (above) and left the
+        // canvas by exactly three quarters, no more, no less. Comparing against the *visible* canvas
+        // rect would repeat 188's mistake: at 0.2× the viewport is a window of the document, so a
+        // frame three quarters off the canvas is still comfortably inside the view.
+        let coverage = controller.canvasCoverage(of: crop, source: Self.source)
+        let quadDoc = layout.corners.map { map.framePoint(viewX: Double($0.x), viewY: Double($0.y)) }
+        let maxY = quadDoc.map(\.y).max() ?? 0
+        print(String(format: "190 · 8° · pinned at coverage %.6f · quad maxY %.1f px (canvas bottom "
+                     + "%.1f) · frame %@", coverage, maxY,
+                     (Double(Self.source.height) + LoupeFraming.rotatedExtent(
+                        width: Double(Self.source.width), height: Double(Self.source.height),
+                        degrees: 8).height) / 2, NSStringFromRect(frame)))
+        XCTAssertEqual(coverage, 0.25, accuracy: 0.005,
+                       "the drag is pinned on the 25 % floor, not wherever it likes")
+        XCTAssertGreaterThan(maxY, Double(Self.source.height),
+                             "the frame still hangs past the canvas — moved, never shrunk")
         // …and it is still findable: a grip answers at the drawn position.
         var hits = 0
         for corner in layout.corners where CropTool.hit(corner, in: layout) != .outside { hits += 1 }
