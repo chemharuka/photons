@@ -33,14 +33,28 @@ public struct RenderInput: @unchecked Sendable {
     /// twice.
     public let lensProfile: LensProfile?
 
+    /// The balance this buffer was **developed at** (194, two-stage white balance).
+    ///
+    /// The decoder bakes a settled pair into the pixels, so the graph must not apply the same pair
+    /// again in S1 — that would be a double application, and the settled frame would be a *twice*-
+    /// corrected picture rather than the colour engine's answer. Carrying the buffer's own pair lets
+    /// S1 compute the honest gain: identity when the document asks for the balance the buffer already
+    /// has, the relative move otherwise (the drag, on a buffer that is one settled step behind).
+    ///
+    /// `.asShot` is the default: every caller that decodes without a balance (tests, thumbnails, an
+    /// as-shot document) means exactly that, and gets the pre-194 arithmetic byte for byte.
+    public let whiteBalance: WhiteBalance
+
     public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
-                lensProfile: LensProfile? = nil) {
+                lensProfile: LensProfile? = nil,
+                whiteBalance: WhiteBalance = .asShot) {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
         self.lensProfile = lensProfile ?? sourceURL.flatMap {
             LensProfile.read(from: $0) ?? LensProfile.readPanasonic(from: $0)
         }
+        self.whiteBalance = whiteBalance
     }
 
     /// Does S0 apply the file's own lens warp? DNG: exactly when it carries three distinct planes;
@@ -1553,10 +1567,35 @@ public final class RenderGraph {
         return measuredIlluminantCache ?? .neutral
     }
 
+    /// The balance this graph's buffer was developed at (194). `.asShot` for every decode that asked
+    /// for nothing — tests, thumbnails, an as-shot document.
+    public var bufferWhiteBalance: WhiteBalance { input.whiteBalance }
+
     /// The S1 gain for a document's white balance, relative to the buffer's own as-shot estimate.
     public func whiteBalanceGain(for whiteBalance: WhiteBalance)
         -> (r: Double, g: Double, b: Double) {
         WhiteBalanceEstimate.gain(for: whiteBalance, asShot: measuredAsShotIlluminant)
+    }
+
+    /// S1's gain on **this** buffer for a document's pair (194, two-stage white balance).
+    ///
+    /// Three cases, in this order, and the order is the honesty:
+    ///
+    ///  1. **Both as shot** — the identity, exactly the pre-194 arithmetic (a document that follows the
+    ///     file's own balance must keep every pixel and every key it had).
+    ///  2. **The buffer was developed at the document's pair** — the identity too: the decoder already
+    ///     baked the balance into these pixels, and applying the gain again would correct the frame
+    ///     twice. This is the settled frame.
+    ///  3. Otherwise the gain that moves the buffer's balance to the document's: `gain(for:)` when the
+    ///     buffer is as shot (the first drag of a photo — the pre-194 number, bit for bit), and
+    ///     `relativeGain(from:to:)` when the drag starts from an already-settled buffer.
+    public func whiteBalanceGain(from buffer: WhiteBalance, to document: WhiteBalance)
+        -> (r: Double, g: Double, b: Double) {
+        if document.isAsShot && buffer.isAsShot { return (1, 1, 1) }
+        if document == buffer { return (1, 1, 1) }
+        if buffer.isAsShot { return whiteBalanceGain(for: document) }
+        return WhiteBalanceEstimate.relativeGain(from: buffer, to: document,
+                                                 asShot: measuredAsShotIlluminant)
     }
 
     // MARK: plan
@@ -2022,7 +2061,10 @@ public final class RenderGraph {
         if edit.light.whiteBalance.isAsShot {
             appliedWhiteBalance = SIMD3(1, 1, 1)
         } else {
-            let g = whiteBalanceGain(for: edit.light.whiteBalance)
+            // 194: the same `from:to:` decision S1 makes one layer down, so the number the frame
+            // reports is the number the kernel multiplied by — including the identity a settled frame
+            // gets because its buffer already carries the pair.
+            let g = whiteBalanceGain(from: bufferWhiteBalance, to: edit.light.whiteBalance)
             appliedWhiteBalance = SIMD3(g.r, g.g, g.b)
         }
         // 117: the airlight probe is per frame. A stale value from an earlier probed render must not
@@ -3363,14 +3405,13 @@ public final class RenderGraph {
             // changed the slope of the whole picture, which is not what the owner asked for — and
             // survives only as 030's dropper level, where "this sample is black" *is* a level.
             //
-            // 143 — the white balance is **ours** now. The decoder is left at the file's as-shot
-            // balance; the document's `(Kelvin, tint)` becomes a scene-linear gain computed by
-            // `WhiteBalanceEstimate` from the buffer's own illuminant and written into the slot S1
-            // has always had (`v *= gain · wb`). There is no table and no decoder prediction any more.
+            // 194 — the white balance is the decoder's again for the **settled** frame and S1's only
+            // while the hand is moving. `whiteBalanceGain(from:to:)` is the one place that decides:
+            // identity when the buffer already carries this pair (the decoder baked it), the relative
+            // move when the drag is running on a buffer one settled step behind.
             let documentWhiteBalance = edit.light.whiteBalance
-            let whiteBalance = documentWhiteBalance.isAsShot
-                ? (r: 1.0, g: 1.0, b: 1.0)
-                : self.whiteBalanceGain(for: documentWhiteBalance)
+            let whiteBalance = self.whiteBalanceGain(from: input.whiteBalance,
+                                                     to: documentWhiteBalance)
             let whiteBalanceIsIdentity = whiteBalance.r == 1 && whiteBalance.g == 1
                 && whiteBalance.b == 1
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0

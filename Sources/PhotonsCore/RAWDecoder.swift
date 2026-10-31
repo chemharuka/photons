@@ -97,12 +97,16 @@ public struct DecodeOptions: Sendable {
     public var scale: Float
     public var draft: Bool
     public var colorSpace: LinearColorSpace
-    /// Retained for source compatibility; **ignored by the decoder since 143**.
+    /// The balance this development is **baked at** (194, two-stage white balance).
     ///
-    /// White balance is no longer a decode setting: `CIRAWFilter.neutralTemperature`/`neutralTint`
-    /// are never written, so every decode is the file's as-shot balance and the document's pair is an
-    /// S1 gain (`WhiteBalanceEstimate`). Keeping the field means `DecodeInputs`/`DecodeCacheKey` can
-    /// still spell a legacy key without a second initializer; the pixels do not depend on it.
+    /// 143 made the balance an S1 gain so a drag could be live, and paid for it with an approximation:
+    /// `WhiteBalanceEstimate` is *our* gain, not the colour engine's. 194 keeps that gain for the drag
+    /// only and puts the settled value back where the truth lives — here. A non-as-shot pair is written
+    /// into `CIRAWFilter.neutralTemperature`/`neutralTint` before the pixels are produced, read back,
+    /// and a rejection is an error rather than a silent as-shot decode.
+    ///
+    /// `.asShot` **assigns nothing**: assigning the reported as-shot pair back is not a no-op (0.15–0.40 %
+    /// of the samples move, 派单 006), so the default decode stays byte-identical to the pre-006 one.
     public var whiteBalance: WhiteBalance
     /// 派单 031: noise reduction / detail applied **inside** the decoder
     /// (`luminanceNoiseReductionAmount`, `colorNoiseReductionAmount`, `sharpnessAmount`,
@@ -296,6 +300,10 @@ public enum DecodeError: LocalizedError {
     /// machine all four read back exactly, so this fires only if Apple changes the properties — but
     /// a slider that cannot change pixels must never be silently accepted.
     case detailRejected(name: String, assigned: Double, readBack: Double)
+    /// A white balance did not read back as assigned (194). `CIRAWFilter` keeps what it is given
+    /// verbatim, so this fires only if a future OS starts clamping — but a settled frame that silently
+    /// fell back to as-shot is exactly the lie the read-back exists to prevent.
+    case whiteBalanceRejected(assigned: String, readBack: String)
 
     public var errorDescription: String? {
         switch self {
@@ -306,6 +314,7 @@ public enum DecodeError: LocalizedError {
         case .renderFailed: return "CIRAWFilter produced no image (or the version was rejected)"
         case .badDimensions(let s): return "unusable dimensions \(s)"
         case .detailRejected(let n, let a, let b): return "\(n) = \(a) was not accepted by the decoder (it reads back \(b))"
+        case .whiteBalanceRejected(let a, let b): return "white balance \(a) was not accepted by the decoder (it reads back \(b))"
         }
     }
 }
@@ -445,8 +454,34 @@ public final class RAWDecoder {
                      tint: saneTint(filter.neutralTint))
     }
 
-    // 143: `applyWhiteBalance` (and the `neutralTemperature`/`neutralTint` writes it performed) is
-    // gone. White balance is no longer a decoder input; see `WhiteBalanceEstimate` and S1.
+    // 194: the settled half of the two-stage white balance writes the pair into the colour engine.
+    // 143 deleted this; a live drag needed no decode, so nothing called it. It is back, and it is the
+    // **only** thing that makes a settled frame the decoder's answer rather than our approximation.
+    //
+    // `CIRAWFilter` accepts out-of-range neutrals without complaint (measured: 99999 K and 100 K are
+    // kept verbatim), so the clamp is ours and the read-back is the only thing that proves the value
+    // that shaped these pixels is the value the document asked for. A mismatch is an error, never a
+    // silent fallback: a white balance the filter ignored would render as "as shot" while the slider
+    // claims 3500 K.
+    static func applyWhiteBalance(_ wb: WhiteBalance, to filter: CIRAWFilter) throws {
+        let wanted = wb.clamped()
+        if let t = wanted.temperature {
+            filter.neutralTemperature = Float(t)
+            let back = Double(filter.neutralTemperature)
+            guard abs(back - t) <= 0.51 else {
+                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%.1f K", t),
+                                                       readBack: String(format: "%.1f K", back))
+            }
+        }
+        if let i = wanted.tint {
+            filter.neutralTint = Float(i)
+            let back = Double(filter.neutralTint)
+            guard abs(back - i) <= 0.51 else {
+                throw DecodeError.whiteBalanceRejected(assigned: String(format: "%+.1f", i),
+                                                       readBack: String(format: "%+.1f", back))
+            }
+        }
+    }
 
     /// The four detail amounts, assigned and read back (派单 031).
     ///
@@ -715,13 +750,21 @@ public final class RAWDecoder {
         filter.scaleFactor = options.scale
         filter.exposure = options.exposureEV
 
-        // ── 前置 ③ white balance: read the file's pair, but **never write it** (143) ─────────────
-        // The decoder always stays at Apple's as-shot balance. A document's `(Kelvin, tint)` is a
-        // scene-linear gain we apply in S1 (`WhiteBalanceEstimate`), so there is no
-        // `neutralTemperature`/`neutralTint` assignment in this class at all — that assignment was
-        // the "predict the decoder" path 118's table and 143 remove. `DecodeOptions.whiteBalance` is
-        // retained only as a source-compatibility field and is deliberately **not read here**.
+        // ── 前置 ③ white balance: read the file's pair; write it only when asked (194) ────────────
+        // The as-shot pair is read before anything is assigned — it is what the inspector shows and
+        // what the document's `nil` means. `.asShot` then assigns **nothing** (assigning the reported
+        // pair back moves 0.15–0.40 % of the samples), which is what keeps every as-shot buffer and
+        // every key byte-identical to the pre-006 decode.
+        //
+        // A non-as-shot pair is the *settled* half of 194's two-stage white balance: the drag runs on
+        // an S1 gain on the buffer already on screen (no decode), and the release writes the value
+        // here and pays one development for the colour engine's own answer. Both halves must never
+        // apply at once — the graph reads this balance off the rung (`RenderInput.whiteBalance`) and
+        // makes S1's gain identity for the buffer that already carries it.
         let asShot = Self.asShotWhiteBalance(filter)
+        if !options.whiteBalance.isAsShot {
+            try Self.applyWhiteBalance(options.whiteBalance, to: filter)
+        }
 
         // ── 前置 ④ which axes are alive, from the instance itself ────────────────────────────
         // 解码模型 (owner, 2026-10-27): Apple answers "does THIS file, at THIS decoder version,
