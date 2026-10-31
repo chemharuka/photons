@@ -1515,6 +1515,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: camera state changes
 
+    /// The camera for the current projection — the pure value the camera-changing commands ask for
+    /// their target state, so `setViewState` stays the only place a change is applied.
+    private func camera() -> LoupeCamera? {
+        guard let framing = framing() else { return nil }
+        return LoupeCamera(viewport: LoupeViewport(framing: framing, state: viewState),
+                           backingScale: backingScale, cropLimit: cropZoomLimit())
+    }
+
     /// Z / space.
     public func toggleActualSize() {
         if viewState.isActualSize { zoomToFit() } else { zoomToActualSize() }
@@ -1532,13 +1540,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The anchored form, for callers that know the point (the double-click, the tests).
     public func zoomToActualSize(aroundView point: CGPoint?) {
-        guard let framing = framing() else { return }
+        guard let camera = camera() else { return }
         pinchZoom = nil
         // 082: 1:1 is a *stop* like any other — a crop session whose frame is smaller than the canvas
         // at 1:1 stops at the frame-inscribed level instead.
-        let target = min(1, cropZoomLimit() ?? Double.infinity)
         let anchor = point ?? canvasCentrePoint()
-        setViewState(framing.zooming(viewState, to: target, aroundView: anchor, backingScale: backingScale),
+        setViewState(camera.actualSize(aroundView: anchor),
                      anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
     }
 
@@ -1547,9 +1554,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// last centre is kept, so Z‑Z returns to where the user was.
     public func zoomToFit() {
         pinchZoom = nil
-        var next = viewState
-        next.mode = .fit
-        setViewState(next)
+        guard let camera = camera() else {
+            var next = viewState
+            next.mode = .fit
+            setViewState(next)
+            return
+        }
+        setViewState(camera.fitted())
     }
 
     // MARK: the zoom ladder (显示 ▸ 倍率)
@@ -1600,8 +1611,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The fit ratio is printed to whole percent (it moves with the window; a tenth of a percent of a
     /// 0.31 viewport is noise), while the stops use `percentLabel`'s one-decimal rule for the thirds.
     public var zoomLabel: String {
-        guard !viewState.isActualSize, let fit = framing()?.fitZoom else { return viewState.zoomLabel }
-        return "适应 \(Int((fit * 100).rounded()))%"
+        camera()?.label ?? viewState.zoomLabel
     }
 
     /// The menu stop the camera is exactly on, or nil (fit) — what the View menu ticks.
@@ -1609,9 +1619,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `1e-9`, not a fudge factor: the camera is only ever parked on a table value, so "on a stop" is
     /// an equality question about the table's own doubles.
     public var currentZoomStop: Double? {
-        guard viewState.isActualSize else { return nil }
-        let zoom = LoupeViewState.clampZoom(viewState.zoom)
-        return LoupeController.zoomStops.first { abs($0 - zoom) < 1e-9 }
+        camera()?.currentStop
     }
 
     /// A menu stop (1 / 2 / 3 / 4): same **anchor**, new scale, one re-render.
@@ -1638,38 +1646,37 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// to rest between stops, so a value that is not in the table is floored onto the one below it
     /// before anything is set. For a caller that names a table value this is the identity.
     public func zoom(to stop: Double, aroundView point: CGPoint?) {
-        guard let framing = framing() else { return }
+        guard let camera = camera() else { return }
         pinchZoom = nil
         // 082: a crop session's ceiling is 「框恰好内接于画布」 — clamped **before** the anchor maths,
         // so the pixel under the cursor is kept for the zoom that actually lands.
-        let ladder = LoupeViewState.snappedLevel(for: LoupeViewState.clampZoom(stop)).zoom
-        let target = min(ladder, cropZoomLimit() ?? Double.infinity)
         let anchor = point ?? canvasCentrePoint()
-        setViewState(framing.zooming(viewState, to: target, aroundView: anchor,
-                                     backingScale: backingScale),
+        setViewState(camera.zoomed(to: stop, aroundView: anchor),
                      anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
     }
 
     /// ⌘+ / ⌘=: the next stop up, or 4:1 from anything between. From `fit` it lands on 100 % — the
     /// same destination as Z, because "zoom in from the whole frame" means full size first.
     public func zoomIn() {
-        guard viewState.isActualSize else { zoomToActualSize(); return }
-        let current = LoupeViewState.clampZoom(viewState.zoom)
-        let next = LoupeController.zoomStops.first { $0 > current + 1e-9 } ?? LoupeViewState.maximumZoom
-        zoom(to: next)
+        guard let camera = camera() else { return }
+        switch camera.stepped(inward: true) {
+        case .actualSize: zoomToActualSize()
+        case .stop(let stop): zoom(to: stop)
+        case .fit: zoomToFit()
+        case .none: break
+        }
     }
 
     /// ⌘−: the next stop down — 100 % → 66.7 % → 50 % → 33.3 % → 25 % → 12.5 %. Below the lowest
     /// **numeric** stop the whole frame is the next step out; `fit` is outside the ladder and is reached
     /// here rather than by a snap, so one more ⌘− from 12.5 % always gives the same picture.
     public func zoomOut() {
-        guard viewState.isActualSize else { return }
-        let current = LoupeViewState.clampZoom(viewState.zoom)
-        guard let next = LoupeController.zoomStops.last(where: { $0 < current - 1e-9 }) else {
-            zoomToFit()
-            return
+        guard let camera = camera() else { return }
+        switch camera.stepped(inward: false) {
+        case .stop(let stop): zoom(to: stop)
+        case .fit: zoomToFit()
+        case .actualSize, .none: break
         }
-        zoom(to: next)
     }
 
     /// Double-click: into 1:1 **at the clicked pixel**, or back to fit. (Both halves of the brief:
@@ -1695,10 +1702,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// (`LoupeCanvasView.isFlipped`) — so it is negated on the way in; without that a drag downwards
     /// moved the picture upwards, which is the bug the user reported.
     public func panImage(byPoints delta: CGSize) {
-        guard viewState.isActualSize, let framing = framing() else { return }
-        let scale = backingScale
-        let content = (x: -Double(delta.width) * scale, y: Double(delta.height) * scale)
-        panBy(contentDelta: content, framing: framing)
+        guard let camera = camera(), viewState.isActualSize else { return }
+        let next = camera.panned(byWindowPoints: delta)
+        guard next != viewState else { return }
+        setViewState(next)
     }
 
     /// Wheel / two-finger scroll. A wheel notch reports ~1 point; a trackpad reports pixels, so the
@@ -1714,15 +1721,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// settings behave differently; normalising on the flag is what makes the result depend only on
     /// which way the fingers went.
     public func scrollPan(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, inverted: Bool) {
-        guard viewState.isActualSize, let framing = framing() else { return }
-        let factor = precise ? backingScale : backingScale * 12
-        let sign: Double = inverted ? 1 : -1
-        let content = (x: -Double(deltaX) * factor * sign, y: -Double(deltaY) * factor * sign)
-        panBy(contentDelta: content, framing: framing)
-    }
-
-    private func panBy(contentDelta: (x: Double, y: Double), framing: LoupeFraming) {
-        let next = framing.panning(viewState, byContent: contentDelta)
+        guard let camera = camera(), viewState.isActualSize else { return }
+        let next = camera.scrolled(deltaX: deltaX, deltaY: deltaY, precise: precise, inverted: inverted)
         guard next != viewState else { return }
         setViewState(next)
     }
@@ -1735,16 +1735,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the cursor stays where it is (`LoupeFraming.zooming`). Any command that names a rung outright
     /// (menu, ⌘=, ⌘−, Z, double-click) clears the accumulator: that is not a pinch continuing.
     public func magnify(by factor: CGFloat, at point: CGPoint) {
-        guard let framing = framing(), factor.isFinite, factor > 0 else { return }
-        let raw = (pinchZoom ?? framing.zoom(of: viewState)) * Double(factor)
+        guard let camera = camera(), factor.isFinite, factor > 0 else { return }
         // The floor of the ladder is 25 %, and 25 % is where a pinch out stops: `fit` is a different
         // mode, entered by its own action, so a gesture cannot slide the camera into it by accident.
-        let level = LoupeViewState.snappedLevel(for: raw)
+        //
         // 082: a crop session's pinch stops at 「框恰好内接于画布」 (the accumulator keeps running, so a
         // pinch back in leaves on the next event).
-        let target = min(level.zoom, cropZoomLimit() ?? Double.infinity)
-        let next = framing.zooming(viewState, to: target, aroundView: point, backingScale: backingScale)
-        pinchZoom = raw
+        let (next, accumulated) = camera.pinched(by: factor, aroundView: point,
+                                                 accumulated: pinchZoom)
+        pinchZoom = accumulated
         setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale))
     }
 
