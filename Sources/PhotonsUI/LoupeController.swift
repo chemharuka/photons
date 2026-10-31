@@ -334,30 +334,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: - 080 · 原图 / 前后对比 (state)
 
+    /// P5a: the 原图 / 前后对比 state machine. It answers only what the next frame is *of*; the
+    /// document, the history and the decode ladder are untouched. `onChange` is wired in `init` to
+    /// `frameModeDidChange`, the one place that moves the generation and asks for a frame.
+    public let compare = LoupeCompareSession()
+
     /// 「显示原图」(`\`). True while the canvas is showing the **decode** rather than the document.
     ///
     /// Nothing about this reaches `EditModel`, `CatalogSession` or the history: it is a fact about
     /// what the next frame is *of*, and the only thing it changes is `frameMode` — which the frame
     /// builder reads. That is the whole mechanism behind 「显示原图不写文档、不产生历史」.
-    public private(set) var showOriginal = false
+    public var showOriginal: Bool { compare.showOriginal }
 
     /// The 前后对比 split, or `nil` when 对比 is off.
     ///
     /// Kept as a `CompareSplit` (axis + fraction) rather than a pair of numbers because the drag
     /// hands exactly that value to the composite, and the axis and the position have to travel
     /// together or a horizontal split can be dragged with the vertical arithmetic.
-    public private(set) var compareSplit: CompareSplit?
+    public var compareSplit: CompareSplit? { compare.split }
 
     /// What the next frame will be of. `showOriginal` wins over 对比 (see `LoupeFrameMode`).
-    public var frameMode: LoupeFrameMode {
-        if showOriginal { return .original }
-        if let split = compareSplit { return .compare(split) }
-        return .edited
-    }
+    public var frameMode: LoupeFrameMode { compare.frameMode }
 
     /// How many times the frame mode changed, and how many frames each mode produced — the numbers a
     /// test reads to tell "the toggle re-rendered once" from "the toggle started a loop".
-    public private(set) var frameModeChanges = 0
+    public var frameModeChanges: Int { compare.modeChanges }
     public private(set) var originalFrames = 0
     public private(set) var compareFrames = 0
 
@@ -368,75 +369,41 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// what the menu row offers. Returns the new state so a caller can assert it.
     @discardableResult
     public func toggleShowOriginal() -> Bool {
-        setShowOriginal(!showOriginal)
-        return showOriginal
+        compare.toggleShowOriginal()
     }
 
     @discardableResult
     public func setShowOriginal(_ on: Bool) -> Bool {
-        guard on != showOriginal else { return showOriginal }
-        showOriginal = on
-        frameModeDidChange()
-        return showOriginal
+        compare.setShowOriginal(on)
     }
 
     /// Y — before/after. Off → on splits the canvas at the current fraction (50 % the first time).
     @discardableResult
     public func toggleCompare() -> Bool {
-        setCompare(compareSplit == nil)
-        return compareSplit != nil
+        compare.toggleCompare()
     }
 
     @discardableResult
     public func setCompare(_ on: Bool) -> Bool {
-        if on {
-            guard compareSplit == nil else { return true }
-            compareSplit = lastCompareSplit ?? .half
-        } else {
-            guard let previous = compareSplit else { return false }
-            lastCompareSplit = previous
-            compareSplit = nil
-        }
-        frameModeDidChange()
-        return compareSplit != nil
+        compare.setCompare(on)
     }
 
     /// ⇧Y — 左右 ↔ 上下. Keeps the fraction, because the user is asking about the *layout* of the
     /// line they already placed.
     public func toggleCompareAxis() {
-        guard var split = compareSplit else { return }
-        split.axis = split.axis == .vertical ? .horizontal : .vertical
-        compareSplit = split
-        lastCompareSplit = split
-        frameModeDidChange()
+        compare.toggleCompareAxis()
     }
 
     public func setCompareAxis(_ axis: CompareSplit.Axis) {
-        guard var split = compareSplit, split.axis != axis else { return }
-        split.axis = axis
-        compareSplit = split
-        lastCompareSplit = split
-        frameModeDidChange()
+        compare.setCompareAxis(axis)
     }
 
     /// Move the line. Called by the drag (and by the menu's 50 % row): **no document, no history, no
     /// decode** — a new line is a new composite of two textures that already exist, so it costs one
     /// render of the pair and nothing else.
     public func setCompareFraction(_ fraction: Double) {
-        guard var split = compareSplit else { return }
-        let next = min(max(fraction.isFinite ? fraction : 0.5, 0), 1)
-        guard abs(next - split.fraction) > 1e-6 else { return }
-        split.fraction = next
-        compareSplit = split
-        lastCompareSplit = split
-        compareSplitDrags += 1
-        frameModeDidChange()
+        compare.setCompareFraction(fraction)
     }
-
-    /// The split a drag remembers when 对比 is switched off and on again.
-    private var lastCompareSplit: CompareSplit?
-    /// How many times the line moved — the counter 「拖动分界线不写文档」 is stated against.
-    public private(set) var compareSplitDrags = 0
 
     /// A mode change is a new intent for the canvas: the in-flight frame (if any) belongs to the old
     /// one, so the generation moves and a frame is asked for. `autoRenderEnabled == false` (tests,
@@ -446,8 +413,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// never the document, so a mode change must not look like an edit (no latency sample, no
     /// settle frame) — and `requestViewportRender` coalesces, so a drag's hundreds of line positions
     /// cost one render at a time.
+    ///
+    /// The count lives in `compare` (P5a); this method only moves the generation.
     private func frameModeDidChange() {
-        frameModeChanges += 1
         generation += 1
         guard autoRenderEnabled else { return }
         requestViewportRender()
@@ -456,10 +424,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // MARK: - 080 · the divider drag
 
     /// True while the pointer is dragging the 分屏 line.
-    public private(set) var isDraggingCompare = false
+    public var isDraggingCompare: Bool { compare.isDragging }
+
+    /// How many times the line moved — the counter 「拖动分界线不写文档」 is stated against.
+    public var compareSplitDrags: Int { compare.splitDrags }
 
     /// How close to the line a click has to land, in points. Wide enough to grab with a mouse, narrow
     /// enough that a click meant for the picture (a pan, a mask) is not taken by the line.
+    ///
+    /// `LoupeCompareSession.dividerHit` uses the same 9.0 literal; keep the two in step.
     public static let compareGrabPoints = 9.0
 
     /// Where along the split axis a canvas point sits, 0…1.
@@ -469,43 +442,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// by the hit test and by the drag, so a line that is grabbable is also a line that moves where
     /// the hand is.
     public func compareFraction(atViewPoint point: CGPoint) -> Double {
-        let bounds = canvasView.bounds
-        guard bounds.width > 1, bounds.height > 1 else { return 0.5 }
-        let x = Double(point.x / bounds.width)
-        let y = Double(point.y / bounds.height)
-        let fraction = (compareSplit?.axis ?? .vertical) == .vertical ? x : y
-        return min(max(fraction, 0), 1)
+        compare.fraction(atViewPoint: point, in: canvasView.bounds)
     }
 
     /// Is this click on the line? `nil` (对比 off) is never a hit.
     public func compareDividerHit(atViewPoint point: CGPoint) -> Bool {
-        guard let split = compareSplit else { return false }
-        let canvas = viewportPixels
-        let extent = split.axis == .vertical ? canvas.width : canvas.height
-        guard extent > 0 else { return false }
-        let lineFraction = Double(split.dividerPixel(canvas: canvas)) / Double(extent)
-        let grab = Self.compareGrabPoints * backingScale / Double(extent)
-        return abs(compareFraction(atViewPoint: point) - lineFraction) <= grab
+        compare.dividerHit(atViewPoint: point, bounds: canvasView.bounds,
+                           canvas: viewportPixels, backingScale: backingScale)
     }
 
     /// A click on the line takes the drag. Returns `false` so the canvas's other gestures (pan, crop,
     /// paint) are untouched when the click was not on it.
     @discardableResult
     public func beginCompareDrag(atViewPoint point: CGPoint) -> Bool {
-        guard compareDividerHit(atViewPoint: point) else { return false }
-        isDraggingCompare = true
-        return true
+        compare.beginDrag(atViewPoint: point, bounds: canvasView.bounds,
+                          canvas: viewportPixels, backingScale: backingScale)
     }
 
     /// Move the line. Nothing is written: the document, the history and the decode ladder are not
     /// touched, and the frame that follows is a composite of two renders whose keys did not move.
     public func continueCompareDrag(atViewPoint point: CGPoint) {
-        guard isDraggingCompare else { return }
-        setCompareFraction(compareFraction(atViewPoint: point))
+        compare.continueDrag(atViewPoint: point, bounds: canvasView.bounds)
     }
 
     public func endCompareDrag() {
-        isDraggingCompare = false
+        compare.endDrag()
     }
 
     /// Ask for a histogram at all — the inspector card's switch.
@@ -1193,6 +1154,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         self.maskCanvas = MaskCanvasController(session: session)
         self.cropTool = CropToolController(session: session)
         super.init(nibName: nil, bundle: nil)
+
+        // P5a: the 原图 / 对比 state machine has no frame path of its own. Every change comes back
+        // here, where the generation moves and one (coalesced) frame is asked for.
+        compare.onChange = { [weak self] in self?.frameModeDidChange() }
 
         // 184: the heal source search reads the decoded, upright buffer. Installing the closure once
         // (not per frame) keeps this out of the frame path; `decoded` is read when the user clicks.
