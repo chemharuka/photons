@@ -257,6 +257,12 @@ public struct RenderOptions: Sendable {
     /// invert). Never set by the app, never part of a key.
     public var legacyDehazeUnboundedRecovery: Bool
 
+    /// **Internal (160).** The caller is the 187 contrast stage's proxy prefix: it renders the
+    /// upstream chain at a different rung but asks for the *same* whole-picture dehaze statistics, so
+    /// the canonical `DehazeStatsCache` entry may be reused even though that internal prefix renders
+    /// with `useCache = false`. Never set by the app, never part of a key.
+    var reuseDehazeStatistics: Bool = false
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -1047,15 +1053,27 @@ private struct DenoiseParamsU {
     var n: SIMD4<Float>      // luma amount, chroma amount, pad, pad
 }
 
-/// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117 / 2026-10-31).
+/// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117 / 2026-10-31 / 160).
+///
+/// 160 — the statistics moved to a **fixed 512-long-edge proxy of the whole picture**, so `c`, `d`
+/// and the content rect `b` no longer describe the render texture for the estimating passes. They
+/// still describe the *canvas* for `apply` (letterbox guard); the proxy grid has its own fields and
+/// the frame veil grid has another, because `apply` runs at full resolution and must sample a veil
+/// whose texel is `qTex = qCanvas·scale` canvas pixels.
 private struct DehazeParamsU {
     var a: SIMD4<Float>   // amount (−1…1), ω, t0, "no haze" threshold for A
-    var b: SIMD4<Float>   // content rect: origin x, origin y, width, height (canvas pixels)
-    var c: SIMD4<Int32>   // canvasW, canvasH, q (block size), qW
-    var d: SIMD4<Int32>   // qH, box axis (0 = h, 1 = v), box segment length, box radius in blocks
+    var b: SIMD4<Float>   // canvas content rect: origin x, origin y, width, height (letterbox guard)
+    var c: SIMD4<Int32>   // proxyW, proxyH, qProxy (block size on the proxy), proxyQW
+    var d: SIMD4<Int32>   // proxyQH, box axis (0 = h, 1 = v), box segment length, box radius in blocks
     var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), 141: S1 exposure gain g
     var j: SIMD4<Int32>   // sourceSize.xy, quarterTurns, pad
     var l: SIMD4<Float>   // the knee, tests-only legacy block-min t, pad, pad
+    // 160 — apply's picture map: frameOrigin.xy, contentOrigin.xy. `imgPx = px + ½ − zw + xy`.
+    var m: SIMD4<Float>
+    // 160 — the picture's own grid in content pixels: frameSize.xy, pad, pad.
+    var n: SIMD4<Float>
+    // 160 — the frame veil grid (`apply` samples it bilinearly): veilW, veilH, qTex, pad.
+    var o: SIMD4<Int32>
 }
 
 private struct DisplayParams {
@@ -3080,6 +3098,10 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
+        // 160 — the statistics proxy is cheap to remeasure and must not outlive an explicit cache
+        // invalidation (the held bytes are small, but the "give it all back" contract is literal).
+        dehazeStats = nil
+        dehazeStatsTextures = nil
         if let e = showMaskEntry {
             pool.disown(e.texture)
             pool.recycle(e.texture)
@@ -3951,6 +3973,10 @@ public final class RenderGraph {
         proxyOptions.useCache = false
         proxyOptions.collectHistogram = false
         proxyOptions.probesDehazeAirlight = false   // never touch this frame's probe
+        // 160 — this prefix re-renders `.dehaze` at another rung. The statistics proxy is canonical
+        // (512, whole picture), so its entry is the same one the frame already (or will) use; reuse
+        // it instead of measuring it a second time just because this prefix is cacheless.
+        proxyOptions.reuseDehazeStatistics = true
         let proxyPlan = self.plan(edit, proxyOptions)
         let key = contrastMapKey(edit, proxyPlan, proxyW: proxyW, proxyH: proxyH)
 
@@ -4233,6 +4259,29 @@ public final class RenderGraph {
     public private(set) var contrastMapBuilds = 0
     /// Frames that sampled an already-built map (the hot-frame path).
     public private(set) var contrastMapHits = 0
+
+    // MARK: - 160 — the dehaze statistics cache
+
+    /// One `DehazeStatsCache` entry: the canonical 512-long-edge proxy's four measured fields,
+    /// keyed by the upstream stage key through the curve. The dehaze amount is deliberately not part
+    /// of it — the constants are facts about the picture, and a slider drag must hit this entry.
+    private struct DehazeStatsEntry {
+        var key: String
+        var proxyW: Int
+        var proxyH: Int
+        var qW: Int
+        var qH: Int
+    }
+    private var dehazeStats: DehazeStatsEntry?
+    /// The measured textures, kept by reference (not by `scratch` label) for the same reason as the
+    /// contrast maps: a label-cache eviction must not turn a hit into an uninitialised texture.
+    private var dehazeStatsTextures: (veil: MTLTexture, dark: MTLTexture,
+                                      airlight: MTLTexture, limited: MTLTexture)?
+    /// Proxy statistics builds. A counter, not a log line: S5/S6 are claims about *not recomputing*
+    /// on a hot frame / a different scale / the export, and this is what makes that checkable.
+    public private(set) var dehazeStatsBuilds = 0
+    /// Frames that reused an already-measured proxy (the hot-frame, cross-scale and export path).
+    public private(set) var dehazeStatsHits = 0
 
     /// A 1×1 array texture and a zeroed descriptor buffer for the global-only contrast dispatch.
     /// The kernel's masked entry point declares both arguments; an empty mask list never reads
@@ -4902,174 +4951,339 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
                                  threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
     }
 
-    // MARK: - S1.9 去雾 (117)
+    // MARK: - S1.9 去雾 (117 / 160)
     //
-    // Ten passes over a `1/q` block field, q = 4:
+    // **160 — the statistics are facts about the whole picture, not about the render texture.**
+    // Through 8 every estimating pass ran on the render texture's own pixel grid: `q = 4` was four
+    // *texture* pixels, so the dark-channel window covered 4 scene px at `scale = 1` and 16 at
+    // `scale = 0.25`; the airlight, 135's `p99(L)` and the guided veil's window all moved with the
+    // zoom. This stage now renders the upstream prefix (`geo → lin → curve`, minus the canvas-sized
+    // mask/heal rasters) at a **canonical 512-long-edge proxy of the whole cropped picture**, cached
+    // by the upstream stage key, and runs every estimating pass there:
     //
-    //   · `s1_9_dehaze_dark`        — block minimum in `.r`, block mean luma in `.g` (rgba16Float);
-    //   · `s1_9_dehaze_airlight`    — one threadgroup scans the block texture for the largest block
-    //                                 minimum and writes a 1 × 1 texture (He's brightest-dark-channel
-    //                                 estimate, cheaply and deterministically);
-    //   · `s1_9_dehaze_limit`       — 135: caps that estimate at `κ·p99(L)` (`κ = 0.95`);
-    //   · `s1_9_dehaze_veil_stats`  — `(l, l², p, l·p)` for the guided filter;
-    //   · `s1_9_dehaze_box` ×2      — the window: a separable running-sum mean of those stats;
-    //   · `s1_9_dehaze_veil`        — `a`, `b` and `veil = a·l + b` (ε = 4e-4·A²);
-    //   · `s1_9_dehaze_box` ×2      — the same mean, on the veil;
-    //   · `s1_9_dehaze_apply`       — full resolution: samples the veil bilinearly, builds the
-    //                                 knee-blended `t` (guided veil ∧ the pixel's own dark channel),
-    //                                 recovers **luminance** (130, hue preserving) with the
-    //                                 `w = 1 − smoothstep(A, 2A, L)` fade, and never clamps the top.
+    //   · `s1_9_dehaze_dark`        — proxy block minimum in `.r`, block mean luma in `.g`;
+    //   · `s1_9_dehaze_airlight`    — one threadgroup over the proxy blocks → 1 × 1 `A`;
+    //   · `s1_9_dehaze_limit`       — 135: `A ≤ κ·p99(L)` on the proxy's own content rect;
+    //   · `s1_9_dehaze_veil_stats`  — `(l, l², p, l·p)` on the proxy blocks;
+    //   · `s1_9_dehaze_box` ×2      — the window, radius = 2 % of the picture's long edge in
+    //                                 **proxy blocks**, so it is one physical length at every scale;
+    //   · `s1_9_dehaze_veil_ab`     — `a`, `b` (ε = 4e-4·A², A from the proxy);
+    //   · `s1_9_dehaze_box` ×2      — the coefficients' own window;
+    //   · `s1_9_dehaze_veil`        — `veil = a·l + b`, still on the proxy;
+    //   · `s1_9_dehaze_veil_upsample` — one block pass: the proxy veil resampled into **this frame's**
+    //                                 veil grid, whose texel is `qTex = max(1, round(4·imageScale))`
+    //                                 canvas px;
+    //   · `s1_9_dehaze_apply`       — full resolution, samples that frame veil bilinearly (`qTex`
+    //                                 canvas px per texel — the §2.5 counterexample is a frame that
+    //                                 keeps the proxy's texel here), then the knee-blended `t` and the
+    //                                 hue-preserving recovery.
     //
-    // Passes 4–9 are at block resolution (1/16 of the canvas's texels), so the six new passes cost
-    // less than one of the two full-resolution passes around them.
+    // `qCanvas = 4` is the block size in **picture** pixels; on the proxy it is
+    // `qProxy = max(1, round(qCanvas·512 / pictureLongEdge))`, and in the render texture it is
+    // `qTex = max(1, round(qCanvas·imageScale))`. The three are the same physical window at every
+    // scale, which is what makes the fit preview, a 1:1 window and the export agree.
+    //
+    // The proxy prefix deliberately omits `.maskAtlas`, `.localApply` and `.heal`: those are
+    // canvas-sized rasters / source-pixel repairs and the contrast stage's 187 proxy omits them for
+    // the same reason. A mask or heal spot therefore does not participate in `A`/`p99`/`veil`; it
+    // still participates in the frame (the apply pass runs on the real, masked/healed input).
+    //
+    // **Cache (160).** `DehazeStatsCache` key = the proxy plan's upstream stage key through the
+    // curve + the proxy rung; the dehaze amount is not in it (the constants do not depend on how
+    // much of them is used), and neither is `contrast` (it runs after the tone map, downstream of
+    // this stage). `useCache == true` serves the same `veil`/`dark`/`airlight`/`limited` textures to
+    // every scale and to the export; `useCache == false` rebuilds every frame, as before.
     //
     // The airlight never comes back to the CPU on the shipped path; `probesDehazeAirlight` adds a
     // 4-byte blit for the acceptance's measurement.
     //
-    // 141 — every pass receives S1's exposure gain in `params.e.w`: the three estimating passes divide
-    // it out (so `A`, `t` and the 135 percentile are facts about the scene, not the EV slider) and the
+    // 141 — every pass receives S1's exposure gain in `params.e.w`: the estimating passes divide it
+    // out (so `A`, `t` and 135's percentile are facts about the scene, not the EV slider) and the
     // apply pass multiplies the recovered light back by it. `g == 1` for a neutral document, so the
     // `E = 0` pixels are bit-identical to the pre-141 stage.
     private func encodeDehaze(cb: MTLCommandBuffer, into out: MTLTexture,
                               from src: MTLTexture, edit: EditModel, plan: Plan,
                               options: RenderOptions) throws {
         let w = plan.canvas.width, h = plan.canvas.height
-        let q = 4
-        let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
-        // 2026-10-31 — the guided filter's window, in **blocks**: 2 % of the long edge (the research
-        // pack's σ), divided by q. 24 MP (6000×4000) at q = 4 gives R = 30 blocks ≈ 120 px; a 4.1 Mpx
-        // canvas (1500×2731) gives R = 14. The `max(1, …)` keeps a thumbnail's window non-empty.
-        let boxRadius = max(1, Int((0.02 * Double(max(w, h)) / Double(q)).rounded()))
+        let qCanvas = 4
+        // 160 — the block in this frame's **canvas** pixels. `imageScale` is canvas px per picture
+        // px (191's number), so this is `qCanvas·scale` including a letterbox squeeze and a decode
+        // ladder, and it is what the apply pass's bilinear radius must be.
+        let qTex = max(1, Int((Double(qCanvas) * plan.imageScale).rounded()))
+
+        // The canonical proxy rung: a function of the **document** only — the cropped picture's own
+        // pixel size, capped at 512 on the long edge. Re-derived here (not read off `plan`) because
+        // `plan` is the caller's frame/window/scale and the whole point is that the constants must
+        // not move with it.
+        let picture = contrastPicture(edit)
+        let proxyLongEdge = 512
+        let proxyScale = min(1.0, Double(proxyLongEdge)
+            / Double(max(picture.width, picture.height)))
+
+        // The proxy plan: whole cropped picture, canonical rung, no window, no canvas letterbox, no
+        // readback, no probes. `useCache = false` because this is an internal prefix; the statistics
+        // cache below is the reuse that matters.
+        var proxyOptions = options
+        proxyOptions.scale = proxyScale
+        proxyOptions.canvas = nil
+        proxyOptions.outputWindow = nil
+        proxyOptions.wantsPixels = false
+        proxyOptions.useCache = false
+        proxyOptions.collectHistogram = false
+        proxyOptions.probesDehazeAirlight = false   // never touch this frame's probe
+        let proxyPlan = self.plan(edit, proxyOptions)
+        // The proxy canvas is the stage input's own grid at the canonical rung. At θ = 0 it is the
+        // picture (long edge 512); a straightened document's canvas is its AABB, and the statistics
+        // run over that canvas exactly as the frame's did before 160 (black corners included).
+        let proxyW = proxyPlan.canvas.width
+        let proxyH = proxyPlan.canvas.height
+        // `qCanvas` **picture** px in proxy pixels is `qCanvas·proxyScale`, independent of the AABB.
+        let qProxy = max(1, Int((Double(qCanvas) * proxyScale).rounded()))
+        let qW = max(1, (proxyW + qProxy - 1) / qProxy)
+        let qH = max(1, (proxyH + qProxy - 1) / qProxy)
+        // 2 % of the picture's long edge, in proxy blocks: `0.02·pictureLong·proxyScale / qProxy`
+        // (the AABB of a straightened picture is bigger, but the window it smooths is the picture's).
+        let boxRadius = max(1, Int((0.02 * Double(max(picture.width, picture.height))
+            * proxyScale / Double(qProxy)).rounded()))
         let boxSegment = 32
+        // The frame veil's block grid: `apply` samples it in canvas space, so its texel is `qTex`
+        // canvas px and its bilinear radius is the same 4 picture px at every scale.
+        let veilW = max(1, (w + qTex - 1) / qTex)
+        let veilH = max(1, (h + qTex - 1) / qTex)
 
         var params = DehazeParamsU(
             a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, 0.1, 0.02),
             b: SIMD4(plan.origin.x, plan.origin.y,
                      Float(plan.content.width), Float(plan.content.height)),
-            c: SIMD4(Int32(w), Int32(h), Int32(q), Int32(qW)),
+            c: SIMD4(Int32(proxyW), Int32(proxyH), Int32(qProxy), Int32(qW)),
             d: SIMD4(Int32(qH), 0, Int32(boxSegment), Int32(boxRadius)),
-            // 141: S1's exposure gain. The four passes divide it out of every measurement and the
-            // apply pass multiplies it back, so the dehaze result commutes with the exposure slider.
-            // WB is not part of this number: it belongs to the light source, not the EV control.
+            // 141: S1's exposure gain. The estimating passes divide it out of every measurement and
+            // the apply pass multiplies it back, so the dehaze result commutes with the exposure.
             e: SIMD4(2.0, options.legacyDehazePerChannel ? 1 : 0, 0.95,
                      Float(edit.light.exposureGain)),
             j: SIMD4(Int32(sourceSize.width), Int32(sourceSize.height),
                      Int32(edit.geometry.quarterTurns), 0),
             // The knee of the `tSmooth`/`tPixel` blend, and the tests-only pre-change `t`.
             l: SIMD4(0.15, options.legacyDehazeBlockVeil ? 1 : 0, 0,
-                     options.legacyDehazeUnboundedRecovery ? 1 : 0))
+                     options.legacyDehazeUnboundedRecovery ? 1 : 0),
+            m: SIMD4(plan.frameOrigin.x, plan.frameOrigin.y, plan.origin.x, plan.origin.y),
+            n: SIMD4(plan.frameSize.x, plan.frameSize.y, 0, 0),
+            o: SIMD4(Int32(veilW), Int32(veilH), Int32(qTex), 0))
 
-        let dark = try scratch("dehaze-dark", width: qW, height: qH, format: .rgba16Float)
-        let airlight = try scratch("dehaze-airlight", width: 1, height: 1, format: .rgba16Float)
-        let limited = try scratch("dehaze-limited", width: 1, height: 1, format: .rgba16Float)
-        // The veil's two ping-pong buffers, at **32-bit** (rgba32Float, +24 MB at 24 MP): the window
-        // means are consumed as `l² − l̄²` and `l·p − l̄·p̄`, a difference of two nearly equal numbers,
-        // and a half-float storage grid (relative 4.9e-4) dominates that difference wherever a window
-        // is flat — which would make `a` rounding noise there, and the exposure test shows it (3 pixels
-        // off by > 1 ULP at `E = −2`, `D = 100`, before this). They start life as the guided filter's
-        // statistics; the veil pass reuses them (its input is dead by then), so the seven new passes
-        // need two block textures, not four.
-        let blockA = try scratch("dehaze-block-a", width: qW, height: qH, format: .rgba32Float)
-        let blockB = try scratch("dehaze-block-b", width: qW, height: qH, format: .rgba32Float)
+        let key = KeyBuilder(proxyPlan.keys.key(for: .curve))
+            .add("dehaze-stats")
+            .add("proxy=\(proxyLongEdge)")
+            .add("px=\(proxyW)x\(proxyH)")
+            .canonical
 
-        /// One separable box pass. `axis` = 0 walks rows (one thread per 32-texel segment of a row),
-        /// 1 walks columns — the `s1_7_box4_h/v` dispatch, with the axis in the uniform instead of the
-        /// function name.
-        func box(_ from: MTLTexture, _ to: MTLTexture, axis: Int32) throws {
-            params.d.y = axis
-            let pipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_box")
-            guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e.setComputePipelineState(pipe)
-            e.setTexture(from, index: 0)
-            e.setTexture(to, index: 1)
-            e.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-            let groups = axis == 0
-                ? MTLSize(width: max(1, qW / boxSegment + 1), height: qH, depth: 1)
-                : MTLSize(width: qW, height: max(1, qH / boxSegment + 1), depth: 1)
-            let threads = axis == 0 ? MTLSize(width: 32, height: 1, depth: 1)
-                                    : MTLSize(width: 1, height: 32, depth: 1)
-            e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
-            e.endEncoding()
+        let veil: MTLTexture
+        let dark: MTLTexture
+        let airlight: MTLTexture
+        let limited: MTLTexture
+        if (options.useCache || options.reuseDehazeStatistics), let entry = dehazeStats,
+           entry.key == key, entry.proxyW == proxyW, entry.proxyH == proxyH,
+           entry.qW == qW, entry.qH == qH, let stored = dehazeStatsTextures {
+            // Hot frame / another scale / export: sample the constants that were already measured.
+            dehazeStatsHits += 1
+            veil = stored.veil
+            dark = stored.dark
+            airlight = stored.airlight
+            limited = stored.limited
+        } else {
+            // The proxy's input. When the caller already rendered this exact canonical proxy (the
+            // contrast stage's 187 prefix at a different rung is not it, so that case re-renders
+            // here), reuse its texture instead of re-encoding the same stages.
+            let canonical = plan.window == nil
+                && plan.canvas == proxyPlan.canvas
+                && plan.content == proxyPlan.content
+                && plan.origin == proxyPlan.origin
+                && plan.frameSize == proxyPlan.frameSize
+                && plan.frameOrigin == proxyPlan.frameOrigin
+            let proxySrc: MTLTexture
+            if canonical {
+                proxySrc = src
+            } else {
+                let proxyA = try scratch("dehaze-proxy-a", width: proxyPlan.canvas.width,
+                                         height: proxyPlan.canvas.height, format: .rgba16Float)
+                let proxyB = try scratch("dehaze-proxy-b", width: proxyPlan.canvas.width,
+                                         height: proxyPlan.canvas.height, format: .rgba16Float)
+                var current = sourceTexture
+                var useA = true
+                var proxyReport: MaskStageReport? = nil
+                for stage in proxyPlan.stages where stage.index <= RenderStage.curve.index {
+                    // Canvas-sized mask rasters and source-pixel repairs are deliberately absent: they
+                    // are not statistics (see the header), and the contrast proxy omits them too.
+                    if stage == .maskAtlas || stage == .localApply || stage == .heal { continue }
+                    let dst = useA ? proxyA : proxyB
+                    try encode(stage, cb: cb, into: dst, from: current, edit: edit,
+                               plan: proxyPlan, options: proxyOptions, table: nil,
+                               report: &proxyReport)
+                    current = dst
+                    useA.toggle()
+                }
+                proxySrc = current
+            }
+
+            let statsDark = try scratch("dehaze-proxy-dark", width: qW, height: qH,
+                                        format: .rgba16Float)
+            let statsAirlight = try scratch("dehaze-proxy-airlight", width: 1, height: 1,
+                                            format: .rgba16Float)
+            let statsLimited = try scratch("dehaze-proxy-limited", width: 1, height: 1,
+                                           format: .rgba16Float)
+            // 32-bit for the window means (`l² − l̄²` is a difference of nearly equal numbers; see
+            // the pre-160 note that is still why these are not half floats).
+            let blockA = try scratch("dehaze-proxy-block-a", width: qW, height: qH,
+                                     format: .rgba32Float)
+            let blockB = try scratch("dehaze-proxy-block-b", width: qW, height: qH,
+                                     format: .rgba32Float)
+            let proxyVeil = try scratch("dehaze-proxy-veil", width: qW, height: qH,
+                                        format: .rgba32Float)
+
+            /// One separable box pass on the proxy. `axis` = 0 walks rows, 1 walks columns.
+            func box(_ from: MTLTexture, _ to: MTLTexture, axis: Int32) throws {
+                params.d.y = axis
+                let pipe = try kernels.pipeline(file: "s1_9_dehaze",
+                                                function: "s1_9_dehaze_box")
+                guard let e = cb.makeComputeCommandEncoder() else {
+                    throw RenderError.commandBufferFailed
+                }
+                e.setComputePipelineState(pipe)
+                e.setTexture(from, index: 0)
+                e.setTexture(to, index: 1)
+                e.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+                let groups = axis == 0
+                    ? MTLSize(width: max(1, qW / boxSegment + 1), height: qH, depth: 1)
+                    : MTLSize(width: qW, height: max(1, qH / boxSegment + 1), depth: 1)
+                let threads = axis == 0 ? MTLSize(width: 32, height: 1, depth: 1)
+                                        : MTLSize(width: 1, height: 32, depth: 1)
+                e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+                e.endEncoding()
+            }
+
+            let pack = try kernels.pipeline(file: "s1_9_dehaze",
+                                            function: "s1_9_dehaze_dark")
+            let e0 = try encoder(cb, pack, in: proxySrc, out: statsDark)
+            e0.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            dispatch(e0, pack, ImageSize(width: qW, height: qH))
+            e0.endEncoding()
+
+            let aPipe = try kernels.pipeline(file: "s1_9_dehaze",
+                                             function: "s1_9_dehaze_airlight")
+            guard let e1 = cb.makeComputeCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            e1.setComputePipelineState(aPipe)
+            e1.setTexture(statsDark, index: 0)
+            e1.setTexture(statsAirlight, index: 1)
+            e1.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            e1.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            e1.endEncoding()
+
+            // 135 — cap A at κ·p99(L) on the GPU. The percentile is measured on the **proxy** (the
+            // canonical whole picture), so it is the same number at every scale; the raw estimate
+            // stays in `statsAirlight` for the test probe.
+            var limitParams = params
+            limitParams.b = SIMD4(0, 0, Float(proxyW), Float(proxyH))
+            let limit = try kernels.pipeline(file: "s1_9_dehaze",
+                                             function: "s1_9_dehaze_limit")
+            guard let e1b = cb.makeComputeCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            e1b.setComputePipelineState(limit)
+            e1b.setTexture(proxySrc, index: 0)
+            e1b.setTexture(statsAirlight, index: 1)
+            e1b.setTexture(statsLimited, index: 2)
+            e1b.setBytes(&limitParams, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            e1b.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1,
+                                                                    depth: 1))
+            e1b.endEncoding()
+
+            // The veil: `(l, l², p, l·p)` → box ×2 → `a`, `b` → box ×2 → `veil = a·l + b`.
+            let statsPipe = try kernels.pipeline(file: "s1_9_dehaze",
+                                                 function: "s1_9_dehaze_veil_stats")
+            guard let e3 = cb.makeComputeCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            e3.setComputePipelineState(statsPipe)
+            e3.setTexture(statsDark, index: 0)
+            e3.setTexture(blockA, index: 1)
+            e3.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            dispatch(e3, statsPipe, ImageSize(width: qW, height: qH))
+            e3.endEncoding()
+
+            try box(blockA, blockB, axis: 0)
+            try box(blockB, blockA, axis: 1)
+
+            let abPipe = try kernels.pipeline(file: "s1_9_dehaze",
+                                              function: "s1_9_dehaze_veil_ab")
+            guard let e4 = cb.makeComputeCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            e4.setComputePipelineState(abPipe)
+            e4.setTexture(blockA, index: 0)       // the window means
+            e4.setTexture(statsLimited, index: 1) // 135's capped A, for ε = 4e-4·A²
+            e4.setTexture(blockB, index: 2)       // (a, b)
+            e4.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            dispatch(e4, abPipe, ImageSize(width: qW, height: qH))
+            e4.endEncoding()
+
+            try box(blockB, blockA, axis: 0)
+            try box(blockA, blockB, axis: 1)
+
+            let veilPipe = try kernels.pipeline(file: "s1_9_dehaze",
+                                                function: "s1_9_dehaze_veil")
+            guard let e5 = cb.makeComputeCommandEncoder() else {
+                throw RenderError.commandBufferFailed
+            }
+            e5.setComputePipelineState(veilPipe)
+            e5.setTexture(blockB, index: 0)   // the boxed coefficients
+            e5.setTexture(statsDark, index: 1) // the guide at proxy-block resolution
+            e5.setTexture(proxyVeil, index: 2) // the veil
+            e5.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+            dispatch(e5, veilPipe, ImageSize(width: qW, height: qH))
+            e5.endEncoding()
+
+            veil = proxyVeil
+            dark = statsDark
+            airlight = statsAirlight
+            limited = statsLimited
+            dehazeStats = DehazeStatsEntry(key: key, proxyW: proxyW, proxyH: proxyH,
+                                           qW: qW, qH: qH)
+            dehazeStatsTextures = (veil: proxyVeil, dark: statsDark,
+                                   airlight: statsAirlight, limited: statsLimited)
+            dehazeStatsBuilds += 1
         }
 
-        let pack = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_dark")
-        let e0 = try encoder(cb, pack, in: src, out: dark)
-        e0.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        dispatch(e0, pack, ImageSize(width: qW, height: qH))
-        e0.endEncoding()
-
-        let aPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_airlight")
-        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e1.setComputePipelineState(aPipe)
-        e1.setTexture(dark, index: 0)
-        e1.setTexture(airlight, index: 1)
-        e1.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        e1.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-        e1.endEncoding()
-
-        // 135 — cap A at κ·p99(L) on the GPU: one threadgroup samples the content rect, bisects the
-        // 1 % tail and writes the effective airlight. The raw estimate stays in `airlight` for the
-        // test probe; the veil and the apply pass read `limited`.
-        let limit = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_limit")
-        guard let e1b = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e1b.setComputePipelineState(limit)
-        e1b.setTexture(src, index: 0)
-        e1b.setTexture(airlight, index: 1)
-        e1b.setTexture(limited, index: 2)
-        e1b.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        e1b.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-        e1b.endEncoding()
-
-        // (2026-10-31) the veil: `(l, l², p, l·p)` → box ×2 (the window means) → `a`, `b` → box ×2 (the
-        // coefficients) → `veil = a·l + b`. Seven block-resolution passes; at 24 MP the block texture is
-        // 1500 × 1000, so the whole group is a fraction of one full-resolution pass.
-        let statsPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil_stats")
-        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e3.setComputePipelineState(statsPipe)
-        e3.setTexture(dark, index: 0)
-        e3.setTexture(blockA, index: 1)
-        e3.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        dispatch(e3, statsPipe, ImageSize(width: qW, height: qH))
-        e3.endEncoding()
-
-        try box(blockA, blockB, axis: 0)
-        try box(blockB, blockA, axis: 1)
-
-        let abPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil_ab")
-        guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e4.setComputePipelineState(abPipe)
-        e4.setTexture(blockA, index: 0)   // the window means
-        e4.setTexture(limited, index: 1)  // 135's capped A, for ε = 4e-4·A²
-        e4.setTexture(blockB, index: 2)   // (a, b)
-        e4.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        dispatch(e4, abPipe, ImageSize(width: qW, height: qH))
-        e4.endEncoding()
-
-        try box(blockB, blockA, axis: 0)
-        try box(blockA, blockB, axis: 1)
-
-        // `veil = a·l + b` into the texture the apply pass samples (`blockA`; the coefficients in
-        // `blockB` are its input, so the two cannot be the same buffer).
-        let veilPipe = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_veil")
-        guard let e5 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e5.setComputePipelineState(veilPipe)
-        e5.setTexture(blockB, index: 0)   // the boxed coefficients
-        e5.setTexture(dark, index: 1)     // the guide at texel resolution
-        e5.setTexture(blockA, index: 2)   // the veil
-        e5.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
-        dispatch(e5, veilPipe, ImageSize(width: qW, height: qH))
-        e5.endEncoding()
+        // One block pass: the canonical proxy veil into this frame's canvas-space veil grid. Its
+        // texel is `qTex` canvas px, so the apply pass's bilinear interpolation is `qTex` wide — the
+        // §2.5 counterexample (statistics on the proxy, sampling still on the texture's old step)
+        // cannot happen here.
+        let frameVeil = try scratch("dehaze-frame-veil", width: veilW, height: veilH,
+                                    format: .rgba32Float)
+        let upsample = try kernels.pipeline(file: "s1_9_dehaze",
+                                            function: "s1_9_dehaze_veil_upsample")
+        guard let eu = cb.makeComputeCommandEncoder() else {
+            throw RenderError.commandBufferFailed
+        }
+        eu.setComputePipelineState(upsample)
+        eu.setTexture(veil, index: 0)
+        eu.setTexture(frameVeil, index: 1)
+        eu.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
+        dispatch(eu, upsample, ImageSize(width: veilW, height: veilH))
+        eu.endEncoding()
 
         let apply = try kernels.pipeline(file: "s1_9_dehaze", function: "s1_9_dehaze_apply")
-        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        guard let e2 = cb.makeComputeCommandEncoder() else {
+            throw RenderError.commandBufferFailed
+        }
         e2.setComputePipelineState(apply)
         e2.setTexture(src, index: 0)
-        e2.setTexture(blockA, index: 1)   // the veil, sampled bilinearly — the old `dark` slot
+        e2.setTexture(frameVeil, index: 1)   // sampled bilinearly, `qTex` canvas px per texel
         e2.setTexture(limited, index: 2)
         e2.setTexture(out, index: 3)
-        e2.setTexture(dark, index: 5)     // the raw block minimum, tests-only legacy `t`
+        e2.setTexture(dark, index: 5)        // the proxy block minimum, tests-only legacy `t`
         e2.setBytes(&params, length: MemoryLayout<DehazeParamsU>.stride, index: 0)
         dispatch(e2, apply, plan.canvas)
         e2.endEncoding()

@@ -368,23 +368,27 @@ final class SharpenScaleTests: XCTestCase {
         XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=3"))
         XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=2"))
 
-        // The list that must NOT have moved, in `RenderStage.order`.
+        // The list that must NOT have moved, in `RenderStage.order`. `dehaze` is **not** in it:
+        // 160 later moved it 8 → 9 (the whole-picture statistics proxy), and this test's own claim
+        // stays "191/192 moved only sharpen" by naming the two movers explicitly.
         let unchanged: [(RenderStage, Int)] = [
             (.geometry, 2), (.sceneLinear, 8), (.maskAtlas, 5), (.localApply, 4), (.heal, 1),
             (.curve, 2), (.contrast, 2), (.toneMap, 5), (.color, 1), (.bw, 1), (.localColor, 1),
-            (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4), (.dehaze, 8),
+            (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4),
             (.vignette, 3), (.grain, 1), (.display, 1),
         ]
         for (stage, version) in unchanged {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), version,
-                           "191 只动了锐化，\(stage.rawValue) 不该变（名单登记的是 \(version)）")
+                           "191/192 只动了锐化，\(stage.rawValue) 不该变（名单登记的是 \(version)）")
         }
-        XCTAssertEqual(unchanged.count + 1, RenderStage.order.count,
+        XCTAssertEqual(StageAlgorithmVersion.dehaze, 9, "160：去雾统计量搬到固定 512 代理")
+        XCTAssertEqual(unchanged.count + 2, RenderStage.order.count,
                        "名单漏了一个阶段，等于没盯住它")
         // The count alone cannot tell "one stage missing" from "one stage twice": spell the set out.
-        // The list must be `RenderStage.order` minus the one stage that moved.
-        XCTAssertEqual(Set(unchanged.map(\.0)), Set(RenderStage.order).subtracting([.sharpen]),
-                       "「没变」名单必须正好是 order 去掉 sharpen —— 不多一条，不少一条")
+        // The list must be `RenderStage.order` minus the two stages that moved.
+        XCTAssertEqual(Set(unchanged.map(\.0)),
+                       Set(RenderStage.order).subtracting([.sharpen, .dehaze]),
+                       "「没变」名单必须正好是 order 去掉 sharpen/dehaze —— 不多一条，不少一条")
         XCTAssertEqual(Set(unchanged.map(\.0)).count, unchanged.count,
                        "「没变」名单里有阶段写了两次")
     }

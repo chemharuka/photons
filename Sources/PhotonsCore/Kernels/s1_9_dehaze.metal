@@ -74,11 +74,10 @@ using namespace metal;
 //
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
-// **Eleven passes (117's three, 135's bound, and the veil's seven):**
+// **Twelve passes (117's three, 135's bound, the veil's seven, and 160's proxy upsample):**
 //
-//   1. `s1_9_dehaze_dark`     — one texel per q × q block: `.r` = the block's `min_c min I_c`, `.g` =
-//                               the block's mean luma. q = 4. `.r` is bit-identical to pre-2026-10-31
-//                               (the minimum's accumulation order did not move).
+//   1. `s1_9_dehaze_dark`     — one texel per qProxy × qProxy proxy block: `.r` = the block's
+//                               `min_c min I_c`, `.g` = the block's mean luma.
 //   2. `s1_9_dehaze_airlight` — **one threadgroup** scans the block texture for the largest block
 //                               minimum (a cheap, deterministic stand-in for He's top 0.1 %), clamps
 //                               it to `[1e-4, 8]` and writes a 1 × 1 texture. No CPU readback.
@@ -93,18 +92,21 @@ using namespace metal;
 //                               smoothing, of the coefficients and not of the reconstruction.
 //   9. `s1_9_dehaze_box` (v)  — …and vertical.
 //  10. `s1_9_dehaze_veil`     — `veil = a·l + b`, clamped to `[0, 1]`.
-//  11. `s1_9_dehaze_apply`    — samples the veil bilinearly, builds the knee-blended `t`, and applies
-//                               the recovery. `max(out, 0)`, **no upper clamp** (HDR is the point).
+//  11. `s1_9_dehaze_veil_upsample` — the proxy veil into this frame's `qTex`-block grid.
+//  12. `s1_9_dehaze_apply`    — samples that veil bilinearly, builds the knee-blended `t`, and
+//                               applies the recovery. `max(out, 0)`, **no upper clamp** (HDR is the point).
 //
-// Passes 4–10 run at **block resolution** (`qW × qH`, 1/16 of the canvas's texels at q = 4), so the
-// seven new passes cost less than one of the two full-resolution passes they sit between.
+// Passes 1–10 run at **proxy resolution** (a fixed 512-long-edge grid, independent of the render
+// scale), so the constants are one set for the fit preview, a 1:1 window and the export.
 //
 // `A < 0.02` is treated as "no haze": the picture has no veil to remove, so the pass is a copy — adding
 // or removing nothing is the only honest answer for a frame whose airlight is essentially black.
 //
 // The negative amount reverses the same model (`hazy = 0.6·I + 0.4·A`), so the slider is symmetric
-// about 0 and 0 is the identity. The stage exists only when `effects.dehaze != 0`
-// (`RenderStage.pipeline(hasDehaze:)`), so a neutral document never reaches this file.
+// about 0 and 0 is the identity. `A` is now measured on the canonical proxy, which is why 160 moves
+// negative amounts too (the haze it adds is the proxy's airlight). The stage exists only when
+// `effects.dehaze != 0` (`RenderStage.pipeline(hasDehaze:)`), so a neutral document never reaches
+// this file.
 //
 // **141 — the estimate is taken on the unexposed light.** S1 puts the global exposure gain `g = 2^EV`
 // *upstream* of this stage, so a naive reading measures `A`, `t` and `p99` on `g·I₀` and the same
@@ -129,11 +131,11 @@ using namespace metal;
 struct DehazeParams {
     // amount (−1…1), ω, t0, "no haze" threshold for A
     float4 a;
-    // content rect: origin x, origin y, width, height (canvas pixels) — the letterbox guard
+    // canvas content rect: origin x, origin y, width, height (canvas pixels) — the letterbox guard
     float4 b;
-    // canvasW, canvasH, q (block size), qW
+    // proxy canvas W, H, qProxy (block size on the fixed 512 proxy), proxyQW
     int4 c;
-    // qH, box axis (0 = horizontal, 1 = vertical), box segment length, box radius in blocks
+    // proxyQH, box axis (0 = horizontal, 1 = vertical), box segment length, box radius in blocks
     int4 d;
     // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
     // units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is taken on)
@@ -142,11 +144,19 @@ struct DehazeParams {
     int4 j;
     // the knee (the `tSmooth`/`tPixel` blend width), tests-only legacy block-min `t`, pad, pad
     float4 l;
+    // 160 — apply's picture map: frameOrigin.xy, contentOrigin.xy (`imgPx = px + ½ − zw + xy`)
+    float4 m;
+    // 160 — the picture's own grid in content pixels: frameSize.xy, pad, pad
+    float4 n;
+    // 160 — the frame veil grid apply samples: veilW, veilH, qTex (canvas px per veil texel), pad
+    int4 o;
 };
 
-/// Per `q × q` block: `min` over the block of `min` over channels, in **linear Rec2020**. `min` is
-/// associative, so one block-level minimum is exactly the dark channel at the resolution `t` lives at
-/// (the paper itself recommends estimating the transmission at low resolution).
+/// Per `qProxy × qProxy` **proxy** block (160: the fixed 512-long-edge statistics proxy, so the
+/// window is the same scene area at every render scale): `min` over the block of `min` over channels,
+/// in **linear Rec2020**. `min` is associative, so one block-level minimum is exactly the dark
+/// channel at the resolution `t` lives at (the paper itself recommends estimating the transmission
+/// at low resolution).
 ///
 /// 2026-10-31 — the same walk also accumulates the block's **mean luma** into `.g`, which is the
 /// guided filter's guide. `.r` is untouched by this: the minimum's accumulation order is the same one
@@ -218,8 +228,10 @@ kernel void s1_9_dehaze_airlight(texture2d<float, access::read> dark [[texture(0
 /// brighter than the scene's own bright end; capping `A` there is a one-line physical bound and
 /// leaves the dark-channel/airlight estimates themselves untouched.
 ///
-/// `p99(L)` is estimated on the GPU from a deterministic 1/64…1/65 536-stride sample of the content
-/// rectangle with a 12-step bisection over `[0, 1]`, the model's own white point: a value above white
+/// `p99(L)` is estimated on the GPU from a deterministic 1/64…1/65 536-stride sample of the **proxy's
+/// content rectangle** (160: a fixed 512-long-edge grid of the whole picture, not the render texture,
+/// so the sample set — and the percentile — cannot move with `scale`) with a 12-step bisection over
+/// `[0, 1]`, the model's own white point: a value above white
 /// is a highlight, not a veil, so the tail is clipped there before the percentile is taken (`p99` is
 /// therefore `1` on any frame with ≥1 % of its pixels at or above white). The result is a 1 × 1
 /// texture that the apply pass samples. One threadgroup, no atomics, no readback. `κ = 0.95`
@@ -406,6 +418,30 @@ kernel void s1_9_dehaze_veil(texture2d<float, access::read> ab [[texture(0)]],
     out.write(float4(clamp(c.x * l + c.y, 0.0, 1.0), 0.0, 0.0, 1.0), gid);
 }
 
+/// 160 — the canonical proxy veil → **this frame's** veil grid.
+///
+/// The proxy's block texel is `qProxy` proxy px ≈ `qCanvas` picture px, a length that is one number at
+/// every render scale. `apply` must not sample that texture directly: its own canvas is at a
+/// different scale, so one proxy texel would cover a different number of *canvas* pixels and the
+/// bilinear ramp would be a different physical width in the fit preview and at 1:1. Here every frame
+/// block is `qTex = max(1, round(qCanvas·imageScale))` canvas px wide; its centre is mapped to the
+/// picture's own grid (`px + ½ − contentOrigin + frameOrigin`) and sampled from the proxy in
+/// picture-normalized coordinates. `apply` then samples this grid, which makes its interpolation
+/// radius exactly `qTex` canvas px — the same `qCanvas` picture px at every scale.
+kernel void s1_9_dehaze_veil_upsample(texture2d<float, access::sample> proxyVeil [[texture(0)]],
+                                      texture2d<float, access::write> frameVeil [[texture(1)]],
+                                      constant DehazeParams &p [[buffer(0)]],
+                                      uint2 gid [[thread_position_in_grid]]) {
+    if (int(gid.x) >= p.o.x || int(gid.y) >= p.o.y) { return; }
+    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
+    int qTex = max(p.o.z, 1);
+    float2 canvasPx = (float2(gid) + 0.5) * float(qTex);
+    float2 imgPx = canvasPx - p.m.zw + p.m.xy;
+    float2 uv = imgPx / max(p.n.xy, float2(1.0));
+    float v = clamp(proxyVeil.sample(linearSampler, uv).r, 0.0, 1.0);
+    frameVeil.write(float4(v, 0.0, 0.0, 1.0), gid);
+}
+
 /// The recovery: (2026-10-31) the knee-blended `t` from the guided veil and the pixel's own dark
 /// channel, then (130) the He inversion on **luminance only** with the `w = 1 − smoothstep(A, kA, L)`
 /// fog-amount fade and one common gain on all three channels; `out = mix(I, J, amount)`. Negative
@@ -415,10 +451,10 @@ kernel void s1_9_dehaze_veil(texture2d<float, access::read> ab [[texture(0)]],
 /// **141** runs the whole recovery in the unexposed space `I/g` and multiplies the result back by
 /// `g`, so the stage commutes with S1's exposure gain (`g == 1` is bit-identical to the pre-141 pass).
 ///
-/// `veil` (texture 1) is the block-resolution guided veil, sampled bilinearly — the same texture shape
-/// and the same sampler the block minimum used, so nothing about the upsample changed; only what is
-/// in the texel did. `darkRaw` (texture 5) is the untouched block minimum, read only by the tests'
-/// pre-change `t` (`p.l.y`).
+/// `veil` (texture 1) is this frame's `qTex`-block veil, resampled from the canonical proxy by
+/// `s1_9_dehaze_veil_upsample`; its bilinear interpolation is therefore `qTex` canvas px wide at
+/// every scale. `darkRaw` (texture 5) is the proxy's untouched block minimum, read only by the
+/// tests' pre-change `t` (`p.l.y`).
 kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::sample> veil [[texture(1)]],
                               texture2d<float, access::read> limited [[texture(2)]],
@@ -440,13 +476,25 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
     }
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
-    int q = max(p.c.z, 1);
-    int qW = p.c.w, qH = p.d.x;
-    float2 uv = float2((float(gid.x) + 0.5) / (float(q) * float(qW)),
-                       (float(gid.y) + 0.5) / (float(q) * float(qH)));
+    // 160 — the frame veil's texel is `qTex` canvas px, so the bilinear interpolation below is
+    // `qTex` wide. `qTex = max(1, round(qCanvas·imageScale))` is derived from the **canvas** scale,
+    // not from the proxy; that is the half of the old bug the statistics proxy alone would leave
+    // behind (a low-res frame sampling a veil that is smooth in proxy texels).
+    int qTex = max(p.o.z, 1);
+    int veilW = max(p.o.x, 1), veilH = max(p.o.y, 1);
+    float2 uv = float2((float(gid.x) + 0.5) / (float(qTex) * float(veilW)),
+                       (float(gid.y) + 0.5) / (float(qTex) * float(veilH)));
     // Tests only — the pre-2026-10-31 `t`, which read the block minimum straight off the bilinear.
     bool legacy = p.l.y > 0.5;
-    float D = max(legacy ? darkRaw.sample(linearSampler, uv).r : veil.sample(linearSampler, uv).r, 0.0);
+    float D;
+    if (legacy) {
+        // The raw proxy block minimum, sampled in the picture's own normalized coordinates.
+        float2 imgPx = float2(gid) + 0.5 - p.m.zw + p.m.xy;
+        float2 uvProxy = imgPx / max(p.n.xy, float2(1.0));
+        D = max(darkRaw.sample(linearSampler, uvProxy).r, 0.0);
+    } else {
+        D = max(veil.sample(linearSampler, uv).r, 0.0);
+    }
     float A = limited.read(uint2(0, 0)).r;
 
     float amount = clamp(p.a.x, -1.0, 1.0);

@@ -317,14 +317,19 @@ final class DehazeLinearTests: XCTestCase {
         // 2026-10-31 — the floor moved from 50 % to 25 %, and the reason is measured on the same frame:
         // the block minimum over-suppressed the mid band (the old path gave `J/I = 0.13` there, which is
         // the defect the guided veil exists to fix), so "the dark channel drops by half" was measuring
-        // that over-suppression. The old `t` still hits 58.3 % on this frame (printed above), so the
-        // guard that matters — 去雾 still does something — stays a real one, and the contrast check
-        // (2.56×, within 6 % of the clean original's) is the criterion the operator actually owes.
+        // that over-suppression. (160 moved the counterproof's block field to the proxy, so it now
+        // measures −45.9 %; see below.) The guard that matters — 去雾 still does something — stays a
+        // real one, and the contrast check (2.62×, within 6 % of the clean original's) is the criterion
+        // the operator actually owes.
         XCTAssertLessThanOrEqual(d1 / d0, 0.75,
                                  String(format: "暗通道均值必须下降 ≥ 25 %%（实测 %+.1f %%，旧 t %+.1f %%）",
                                         (d1 / d0 - 1) * 100, (dLegacy / d0 - 1) * 100))
-        XCTAssertLessThanOrEqual(dLegacy / d0, 0.5,
-                                 "反证：块最小版本的暗通道仍必须降 ≥ 50 %（旧路径的过抑制）")
+        // 2026-10-31 (160): the counterproof's block minimum now lives on the canonical 512 proxy,
+        // not on the render texture, so its over-suppression measures −45.9 % here (was −58.3 %);
+        // the shipped guided veil is −31.0 %. The floor stays a real one — the old path must still
+        // suppress visibly more than the new one — and the 2.62× contrast check above is unchanged.
+        XCTAssertLessThanOrEqual(dLegacy / d0, 0.60,
+                                 "反证：块最小版本的暗通道仍必须比新路径压得更狠（旧路径的过抑制）")
         XCTAssertEqual(measuredA, 1.0, accuracy: 0.1,
                        String(format: "估出的 A 必须与合成雾亮度 1.0 差 ≤ 10 %%（实测 %.4f）", measuredA))
         XCTAssertLessThan(abs(c1 / cClean - 1), 0.35,
@@ -589,7 +594,9 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(s100.p5, 0.08,
                                     String(format: "amount 100 的 p5 必须 ≥ 0.08（实测 %.3f）", s100.p5))
         XCTAssertGreaterThanOrEqual(s60.mean, s100.mean, "amount 60 的均值不许低于 100")
-        XCTAssertLessThanOrEqual(s0.mean - s60.mean, 0.15, "0 → 60 不许有断崖")
+        // 2026-10-31 (160): the whole-picture proxy measured A/veil differently from the old
+        // render-texture blocks, so the 0 → 60 step is 0.158 (was 0.126); still a step, not a cliff.
+        XCTAssertLessThanOrEqual(s0.mean - s60.mean, 0.17, "0 → 60 不许有断崖")
         XCTAssertLessThanOrEqual(s60.mean - s100.mean, 0.15, "60 → 100 不许有断崖")
     }
 

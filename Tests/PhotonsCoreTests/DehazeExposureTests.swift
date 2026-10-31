@@ -259,12 +259,18 @@ final class DehazeExposureTests: XCTestCase {
     /// became symmetric about the airlight (`w` now also fades within `A`'s own resolution). Again a
     /// fingerprint of the current arithmetic and not a golden: the four negative hashes still match
     /// to the digit, which is the evidence that the new fade reaches the recovery and nothing else.
+    ///
+    /// 160 (the whole-picture 512 proxy): the **foggy** frame is 750×500, so its estimates now come
+    /// from a 0.683× proxy and every entry moves — including the negative ones, whose `hazy` branch
+    /// uses the measured `A`. The **chroma** frame is 100×48, i.e. already at the canonical grid, and
+    /// all ten hashes are unchanged to the digit: the evidence that 160 moved the *estimator's grid*
+    /// and not the recovery's arithmetic.
     private static let e0SHA: [String: String] = [
-        "foggy·-100": "0cfbcd45e29b430becf3580355f9ce6784f62d6f8c40e48a10de612b565ac847",
-        "foggy·-60": "9606e7fae6a803fec18c83ff10c8fefd8a815602f407ff0a39833f887835f6ba",
-        "foggy·20": "38b521e8371a542587d95e519ff0e1f40639c324d8038bd357a5c857d9c20d34",
-        "foggy·60": "33ac7bca31851c59b253183bbf126112c5346269268cc057924e299a53b313ba",
-        "foggy·100": "3119ea808727ce986d27e62994e7a6b3d1cfa2c70caa7fec5b05dfd9e833806d",
+        "foggy·-100": "9fe53cdc43f873c012e920e18a1fcdba7c481c70aee0acafa9db5a4d09ca6abd",
+        "foggy·-60": "90fe67a2b12a33a39440134ff42f8ed40320a744e6241d4934585fdabaa5965b",
+        "foggy·20": "bf02cfd545665eb5d989a1fb5abd5c29a08e0b335a3b2ed655697a60382ca439",
+        "foggy·60": "70d77788264550464750ba382a4136d0f2271c9319d0327af601861573588f94",
+        "foggy·100": "3211033044ff7f526fbadd0f621595b0073442e4a6f302879dca3406347b3e57",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
         "chroma·20": "3a29821b67bca34a2773bebb569ef01579c8c3026bb8c35266bf008a01f51592",
