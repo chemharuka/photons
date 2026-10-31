@@ -198,11 +198,21 @@ public enum StageAlgorithmVersion {
     /// slider. A document with both `exposure != 0` and `effects.dehaze != 0` now renders different
     /// pixels for the same stored numbers; `exposure == 0` (g = 1) is bit-identical to 4.
     ///
+    /// **7** — 2026-10-31: `t`'s spatial support is no longer the block minimum's bilinear upsample
+    /// but a **guided-filter veil** (`a·l + b` over the block's mean luma, ε = 4e-4·A², boxed twice)
+    /// combined with a **per-pixel floor** — `t = max(tSmooth, tPixel)` plus a `knee = 0.15` lift
+    /// where the two agree. A block minimum steps by an order of magnitude across a skyline and only
+    /// ramps over one or two blocks, so `J` over-shot on the sky side and under-shot (to black) on the
+    /// dark side of every high-contrast edge; on the reference frame the measured rim fell from the
+    /// two-digit percentage to under 3 % of the step. **Every** document with `effects.dehaze > 0`
+    /// renders different pixels for the same stored number; `dehaze < 0` (which never reads `t`) and
+    /// `dehaze == 0` (no stage) are bit-identical to 6.
+    ///
     /// **6** — 120b: the depth-assisted distribution (`effects.dehazeDepth`, `depthStrength`). The
     /// stage now reads the depth map and modulates `A`/`t` per pixel; `depthStrength == 0` (or no
     /// map) takes the pre-120b branch verbatim and is byte-identical, so the bump changes pixels only
     /// for documents that actually ask for the assist.
-    public static let dehaze = 6
+    public static let dehaze = 7
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
