@@ -3037,6 +3037,12 @@ public struct WhiteBalanceCommands {
     /// dropper wrote a guess". The caller prints the hint either way.
     @discardableResult
     public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
+        // 195 tried inverting the preview's 3×3 here (`WhiteBalanceEstimate.neutral`) on the theory
+        // that the dropper should invert the function it draws with. Measured on L1030433's grey
+        // patch it is **worse**, not better: the 3×3 model's tint axis is not `CIRAWFilter`'s (it
+        // asked 5950 K/+66 and the settled frame carried 16.3 % where the solver's answer left
+        // 13.7 %). So the one body stays 143's solver — the residual is the estimate's, and hiding it
+        // behind a second model would only move the error somewhere the tests do not look.
         guard let solve = WhiteBalanceSolver.neutral(for: sample, reference: reference) else { return nil }
         commit(solve.whiteBalance, label: label)
         return solve
