@@ -591,6 +591,18 @@ public final class RenderResult {
     /// the sample on a 1600×1002 window over a 2400×800 picture). The graph knows where S0 wrote the
     /// picture (`plan.drawnRect`), so nobody has to infer it.
     public let drawnRect: ImageRect
+    /// 192 — the rect of this texture the **canvas** is: the expanded canvas (the rotated crop's
+    /// bounding box) inside a windowed render, the picture itself at every other framing.
+    ///
+    /// `drawnRect` answers "where is the photograph", which is what a measurement wants. The present
+    /// pass needs the other question — "how much of the surface is canvas" — because everything the
+    /// picture quad does not cover is painted with the pass's clear colour, `#0F0F0F`, which belongs
+    /// *outside* the canvas only. A windowed (1:1 and beyond) render of a straightened document drew
+    /// the picture alone, so the canvas' own margin — the turned crop's bounding box minus the crop,
+    /// `(AABB − crop)/2` per side, 33 × 46 px at 25 % of a 2000 px crop — was the matte instead of
+    /// `000000`: 「旋转后缩小，画布外的遮罩侵入了画布」. At every right angle the two rects are equal,
+    /// so 0° and 适应 keep their old geometry to the pixel.
+    public let canvasRect: ImageRect
     /// The part of the frame these pixels are, in content pixels of the full frame at this render's
     /// `scale`; the whole frame when no window was asked for.
     public let window: ImageRect
@@ -641,7 +653,8 @@ public final class RenderResult {
     /// triple" is a fact about the frame, not a recomputation the caller could get subtly wrong.
     public let whiteBalanceGain: SIMD3<Double>
 
-    init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, window: ImageRect,
+    init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, canvasRect: ImageRect? = nil,
+         window: ImageRect,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
@@ -650,6 +663,10 @@ public final class RenderResult {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
+        // Default = the picture: every caller that has no canvas margin to report (θ = 0) and every
+        // pre-192 construction site keeps exactly the rect it had.
+        self.canvasRect = canvasRect ?? drawnRect
+
         self.window = window
         self.keys = keys
         self.trace = trace
@@ -1625,6 +1642,12 @@ public final class RenderGraph {
         /// has to use; `origin + content` is only the same thing when the window does not reach past
         /// the frame.
         let drawnRect: ImageRect
+        /// 192 — where the **canvas** was drawn inside the texture, in canvas pixels: the baseline
+        /// (the rotated crop's bounding box at θ ≠ 0, the picture otherwise) run through the same map
+        /// that placed the picture, i.e. `drawnRect` grown by the AABB inset `(baseline − frame)/2`.
+        /// Equal to `drawnRect` without a window and at every right angle, so nothing that reads it
+        /// changes at θ = 0 or 适应.
+        let canvasRect: ImageRect
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
@@ -1734,6 +1757,8 @@ public final class RenderGraph {
         let frameOrigin: SIMD2<Float>
         let frameInCanvas: ImageSize
         let drawnRect: ImageRect
+        /// 192 — the canvas' own rect in this texture (see `Plan.canvasRect`).
+        let canvasRect: ImageRect
 
         canvas = options.canvas ?? requested
         if canvas == requested {
@@ -1804,6 +1829,31 @@ public final class RenderGraph {
                                        height: Int((Double(frameSize.y)).rounded()))
             drawnRect = pictureRaw.intersected(in: canvas)
         }
+        // 192 — the **canvas'** rect, the same map applied to the baseline (the expanded canvas)
+        // instead of to the frame: `cropRect = drawnRect + inset`, because the picture sits `inset`
+        // into the baseline and the map is the same one. Without a window the picture *is* the
+        // whole content at θ ≠ 0, and at every right angle the inset is 0 — both cases are
+        // `drawnRect` itself, so this is a no-op everywhere the pre-192 code was already right.
+        //
+        // It is clipped to the canvas (a canvas bigger than the viewport is cut by it, which is the
+        // honest picture) **and to `content`** (beyond the letterbox there is no texel of ours to
+        // read; sampling there would clamp the edge and smear the photograph into a band the
+        // presenter would then show as canvas).
+        if window == nil {
+            canvasRect = drawnRect
+        } else {
+            let outset = SIMD2<Float>(inset.x * kx, inset.y * ky)
+            let raw = ImageRect(x: Int((origin.x - frameOrigin.x - outset.x).rounded()),
+                                y: Int((origin.y - frameOrigin.y - outset.y).rounded()),
+                                width: Int((Double(baseline.width) * Double(kx)).rounded()),
+                                height: Int((Double(baseline.height) * Double(ky)).rounded()))
+                .intersected(in: canvas)
+            let contentRect = ImageRect(x: Int(origin.x.rounded()), y: Int(origin.y.rounded()),
+                                        width: content.width, height: content.height)
+            let x0 = max(raw.x, contentRect.x), y0 = max(raw.y, contentRect.y)
+            let x1 = min(raw.maxX, contentRect.maxX), y1 = min(raw.maxY, contentRect.maxY)
+            canvasRect = ImageRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0))
+        }
         // The bounds assertion the派单 asks for, in the form that can fail loudly: a rect that is not
         // inside the canvas would let a measurement read someone else's pixels.
         assert(drawnRect.x >= 0 && drawnRect.y >= 0
@@ -1859,7 +1909,7 @@ public final class RenderGraph {
                     s0Identity: untransformed && !caOn && !lensWarp,
                     s0PureCA: untransformed && caOn && !lensWarp,
                     s0PureTurn: s0PureTurn && !lensWarp,
-                    s0LensWarp: lensWarp, drawnRect: drawnRect)
+                    s0LensWarp: lensWarp, drawnRect: drawnRect, canvasRect: canvasRect)
     }
 
     // MARK: - S1's key (073)
@@ -2531,7 +2581,7 @@ public final class RenderGraph {
             // would hand the next frame's stages a texture the slot still points at.
             if showMaskEntry?.texture !== finalTexture { pool.recycle(finalTexture) }
             return RenderResult(canvas: plan.canvas, content: plan.content,
-                                drawnRect: plan.drawnRect,
+                                drawnRect: plan.drawnRect, canvasRect: plan.canvasRect,
                                 window: plan.windowRect, keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask, histogram: histogramPayload,
@@ -2541,7 +2591,7 @@ public final class RenderGraph {
                                 whiteBalanceGain: appliedWhiteBalance)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
-                            drawnRect: plan.drawnRect,
+                            drawnRect: plan.drawnRect, canvasRect: plan.canvasRect,
                             window: plan.windowRect, keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask, histogram: histogramPayload,

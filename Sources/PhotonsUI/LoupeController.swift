@@ -490,6 +490,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// never over it. The letterbox bands are *in* the texture (S2/S4 write 0 outside the picture), so
         /// this rect is the only thing that says where they are.
         public let photoRect: ImageRect
+        /// 192: the rect this texture's **canvas** occupies — what the present pass must paint, as
+        /// opposed to `photoRect` (where the photograph is). They differ exactly when the document is
+        /// straightened *and* the frame is a window (1:1 and beyond, or zoomed out): there the canvas
+        /// is the turned crop's bounding box, and painting only the picture left its margin to the
+        /// clear colour `#0F0F0F` — 「旋转后缩小，画布外的遮罩侵入了画布」. Equal to `photoRect` at
+        /// every right angle and at 适应, where the picture *is* the whole canvas.
+        public let presentRect: ImageRect
         public let decodeScale: Float
         public let decodeMilliseconds: Double
         public let renderMilliseconds: Double
@@ -2289,7 +2296,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// normalised against. `cancelZoomBridge` re-presents that same texture with `window: .whole`; without
     /// this the matte it paints would cover the photograph, because a canvas-sized frame's letterbox is
     /// inside the texture and the rect is the only thing that says where the picture is.
-    private var canvasPicture: (rect: ImageRect, canvas: ImageSize)?
+    /// 192: `rect` is the **canvas'** rect (what a replay paints), `picture` is the photograph's —
+    /// the two differ at θ ≠ 0, and 169's crop-workspace rescale measures the picture.
+    private var canvasPicture: (rect: ImageRect, picture: ImageRect, canvas: ImageSize)?
 
     /// 188 — the canvas geometry the last present was composed for. `invalidateCanvasGeometryIfMoved`
     /// compares the current document's answer against it and drops the frozen frame when it moves (a
@@ -2521,6 +2530,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             let picture = canvasPicture?.rect
                 ?? ImageRect(x: 0, y: 0, width: texture.width, height: texture.height)
             presentCanvas(presenter, texture: texture, photoRect: picture,
+                          pictureRect: canvasPicture?.picture ?? picture,
                           frameCanvas: canvasPicture?.canvas ?? canvas, window: target,
                           placement: canvasPlacement, backdrop: drawn,
                           backdropWindow: backdropWindow, canvas: canvas, serial: serial,
@@ -2592,6 +2602,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let picture = canvasPicture?.rect
             ?? ImageRect(x: 0, y: 0, width: texture.width, height: texture.height)
         let ok = presentCanvas(presenter, texture: texture, photoRect: picture,
+                               pictureRect: canvasPicture?.picture ?? picture,
                                frameCanvas: canvasPicture?.canvas ?? canvas, window: window,
                                placement: placement, backdrop: drawn,
                                backdropWindow: backdropWindow, canvas: canvas, serial: serial,
@@ -5795,6 +5806,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let drawing: RenderResult
         let renderMs: Double
         var photoRect: ImageRect
+        /// 192 — the rect the present pass paints: the canvas (the turned crop's bounding box at
+        /// θ ≠ 0), not just the photograph. `photoRect` stays the picture's, because a measurement,
+        /// the pointer lattice and the crop overlay all ask about *the photograph*.
+        var presentRect: ImageRect
         switch mode {
         case .edited:
             guard let e = editedShotResult, let out = e.result.output else {
@@ -5804,6 +5819,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             texture = out
             renderMs = e.ms
             photoRect = e.result.drawnRect
+            presentRect = e.result.canvasRect
         case .original:
             let o = try renderOne(.decoded, originalShot, model.disregardingGeometry, measure: false)
             guard let out = o.result.output else {
@@ -5813,6 +5829,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             texture = out
             renderMs = o.ms
             photoRect = o.result.drawnRect
+            presentRect = o.result.canvasRect
             originalFrames += 1
         case .compare(let split):
             guard let e = editedShotResult, let editedTexture = e.result.output else {
@@ -5843,6 +5860,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // with the whole frame is two differently-placed photographs inside one canvas, and the
             // union is the only rect that is outside neither.
             photoRect = Self.union(e.result.drawnRect, o.result.drawnRect, in: e.result.canvas)
+            // Same rule for the canvas: the union of what each side painted as canvas, so a
+            // comparison of a straightened document with its decode still paints every canvas pixel.
+            presentRect = Self.union(e.result.canvasRect, o.result.canvasRect, in: e.result.canvas)
             compareFrames += 1
         }
 
@@ -5873,7 +5893,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }()
         let shotForFrame = mode == .original ? originalShot : editedShot
         return FrameResult(texture: texture, canvas: drawing.canvas, content: drawing.content,
-                           photoRect: photoRect,
+                           photoRect: photoRect, presentRect: presentRect,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
@@ -6070,7 +6090,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// sat at the held frame's unscaled rect while the picture moved).
     @discardableResult
     private func presentCanvas(_ presenter: CanvasPresenter, texture: MTLTexture,
-                               photoRect: ImageRect, frameCanvas: ImageSize,
+                               photoRect: ImageRect, pictureRect: ImageRect? = nil,
+                               frameCanvas: ImageSize,
                                window: PresentWindow, placement: FramePlacement,
                                backdrop: MTLTexture?, backdropWindow: PresentWindow,
                                canvas: ImageSize, serial: Int, zoom: Double, frozen: Bool = false,
@@ -6095,7 +6116,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 068: the canvas the layer is now showing something for. A frozen draw is skipped when this is
         // already the canvas on screen — a gesture that stopped moving must stop drawing.
         lastPresentCanvas = canvas
-        frozenFrame = FrozenFrame(texture: texture, photoRect: photoRect,
+        // 192: the frozen frame keeps the two rects apart — `presentRect` is the quad a replay paints
+        // (the canvas), `photoRect` is where the picture is inside the texture, which is what 169's
+        // crop-workspace rescale has to measure for the overlay to land on the picture edge.
+        frozenFrame = FrozenFrame(texture: texture, photoRect: pictureRect ?? photoRect,
+                                  presentRect: photoRect,
                                   frameCanvas: frameCanvas, canvas: canvas, window: window,
                                   backdropWindow: backdropWindow, placement: placement, zoom: zoom)
         // 188b — a real render *is* the frame's statement about the canvas geometry it was composed for.
@@ -6129,7 +6154,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// and the quads come out of the same derivation as everything else.
     private struct FrozenFrame {
         let texture: MTLTexture
+        /// Where the photograph is inside `texture` (the picture, not the canvas).
         let photoRect: ImageRect
+        /// 192 — the quad the replay paints: the canvas' rect, which is the picture's at θ = 0.
+        let presentRect: ImageRect
         let frameCanvas: ImageSize
         let canvas: ImageSize
         let window: PresentWindow
@@ -6293,7 +6321,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // canvas at the old size may no longer cover it at the new one, and that is exactly when the
         // backdrop is wanted. `nil` (nothing cached for this document) leaves the clear colour.
         let drawn = backdropTexture(for: window)
-        let ok = presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.photoRect,
+        let ok = presentCanvas(presenter, texture: frozen.texture, photoRect: frozen.presentRect,
+                               pictureRect: frozen.photoRect,
                                frameCanvas: frozen.frameCanvas, window: window,
                                placement: frozen.placement,
                                backdrop: drawn, backdropWindow: backdropWindow, canvas: canvas,
@@ -6481,7 +6510,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // supplies — the quad on the canvas follows from it and from the window. There is no optional
         // "pass the rect if you remember" argument any more, which is what used to turn a letterboxed
         // frame into a black band.
-        let ok = presentCanvas(presenter, texture: frame.texture, photoRect: frame.photoRect,
+        let ok = presentCanvas(presenter, texture: frame.texture, photoRect: frame.presentRect,
+                               pictureRect: frame.photoRect,
                                frameCanvas: frame.canvas, window: settledWindow,
                                placement: settledPlacement, backdrop: drawn,
                                backdropWindow: settledBackdropWindow, canvas: canvas, serial: 0,
@@ -6513,7 +6543,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 067: kept — not for the matte (there is none any more) but because it is the **only** thing
         // that says where the photograph is inside the texture on the canvas. Every present that
         // re-draws this frame (a bridge, a teardown, a window drag) derives its quad from it.
-        canvasPicture = (frame.photoRect, canvas)
+        // 192: the *canvas'* rect, because every later present that re-draws this frame (a bridge,
+        // a teardown, a window drag) asks this number "how much of the layer is canvas".
+        canvasPicture = (frame.presentRect, frame.photoRect, canvas)
         // The frame landed at its own canvas: ask for one for the canvas that is on screen, if the
         // renderer can produce it. (A stale frame is presented frozen, not dropped — see above.)
         if staleCanvas, jobViewport() != frame.canvas { requestResizeRender() }
