@@ -2927,7 +2927,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let size = viewport ?? viewportPixels
         // 088: the canvas always shows the **document** while 裁切 is on — a 转动 tick is a draft-only
         // write and must not re-render (or re-frame) the picture. The frame quad is what turns.
-        let edit = session?.edit ?? .neutral
+        //
+        // 197 — the *whole* document: the crop workspace draws the frame, not the kept rectangle, so
+        // the camera has to describe the same picture the frame job renders (`canvasEdit`), or the
+        // overlay would be projected through a crop the pixels no longer have.
+        let edit = cropTool.canvasEdit(from: session?.edit ?? .neutral)
         if let image = decoded {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
@@ -4107,6 +4111,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// called.
     var cropOverlayLayoutForTesting: CropToolLayout? { cropOverlay.layout }
 
+    /// 197 — the document the **frame job** would render at this instant, read out of `makeJob`
+    /// itself: the queue gets exactly this edit, so a test cannot pass on a re-derivation of it.
+    var frameJobEditForTesting: EditModel? { makeJob(kind: .scheduled)?.edit }
+
     /// **Is the frame really on screen?** — the 2026-10-27 card's acceptance.
     ///
     /// `isCropToolActive` is a fact about the tool; it says nothing about the overlay the user is
@@ -4764,7 +4772,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 088: 裁切 mode renders the **document**. A 转动 tick only turns the frame quad, so the
         // pixels stay exactly the ones the drag started on; the release writes the angle once and
         // this line is what makes that write the one frame it costs.
-        let edit = session.edit
+        //
+        // 197 — the document **as the crop workspace draws it**: crop `.full` while the tool is on
+        // (`CropToolController.canvasEdit`). Rendering the document itself is what made 应用 → 再进
+        // 裁切 show only the kept rectangle: the job's edit carries the applied crop, so the canvas
+        // was `CropMath.canvasSize(crop:)` of the crop instead of of the frame. The crop never enters
+        // the decode key (`DecodeInputs` has no crop), so the rung is the same one as before — only
+        // the render key moves, which is what a canvas change should do.
+        let edit = cropTool.canvasEdit(from: session.edit)
         var job = RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                             edit: edit, state: viewState, target: target, generation: gen,
                             changedAt: changedAt)
