@@ -1008,11 +1008,11 @@ public final class CropToolController {
         // is the **lock's reshape** (162 — a document constraint, not a canvas one). Otherwise the
         // stored rect stays bit for bit, so reducing the angle to 0° gives the whole frame back.
         if legal(base) {
-            // `base` is `shaped` after the opt-in photo bound, so it is the rect that is both legal and
-            // photo-legal; write *it*, not the pre-bound `shaped` — a photo clamp that moved the frame
-            // has to reach the stored value too (196: the canvas law is re-measured on `base`).
-            guard base != before else { return false }
-            draft.crop = base
+            // 132: the opt-in photo bound (`clampsToRotatedFrame`) is a **view** fact — it lives in
+            // `effectiveCrop` and must not reach the stored draft, so the pre-bound `shaped` is what
+            // is written back here. `base` is only read to *test* the canvas law against it.
+            guard shaped != before else { return false }
+            draft.crop = shaped
             return true
         }
 

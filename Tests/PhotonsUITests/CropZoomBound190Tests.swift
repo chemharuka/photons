@@ -384,8 +384,10 @@ final class CropZoomBound190Tests: XCTestCase {
             // ① 196 — the law, re-measured on the result: the turned box is **inside the canvas** on
             //   all four sides, whenever the box could fit at all.
             let b = box(after), cnv = Self.canvasPixels
+            // `clampsToRotatedFrame` is a **view** bound (132): it is `effectiveCrop`'s answer, never
+            // the stored draft's, so the draft may stay outside the canvas in those two cases.
             let fits = b.width <= cnv.width + 0.5 && b.height <= cnv.height + 0.5
-            if fits {
+            if fits && !c.photoBound {
                 XCTAssertGreaterThanOrEqual(b.minX, cnv.minX - 0.5,
                                             "\(c.name): hangs off the left — \(b) vs \(cnv)")
                 XCTAssertLessThanOrEqual(b.maxX, cnv.maxX + 0.5,
@@ -394,7 +396,7 @@ final class CropZoomBound190Tests: XCTestCase {
                                             "\(c.name): hangs off the top — \(b) vs \(cnv)")
                 XCTAssertLessThanOrEqual(b.maxY, cnv.maxY + 0.5,
                                          "\(c.name): hangs off the bottom — \(b) vs \(cnv)")
-            } else {
+            } else if !c.photoBound {
                 // 162's other half: a frame whose turned box cannot fit is shrunk to the canvas.
                 XCTAssertLessThanOrEqual(b.width, cnv.width + 0.5, "\(c.name): not shrunk to the canvas")
                 XCTAssertLessThanOrEqual(b.height, cnv.height + 0.5, "\(c.name): not shrunk to the canvas")
