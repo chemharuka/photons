@@ -152,8 +152,26 @@ struct S1Params {
     float4 b;   // recovery, identity, blacks, whites
     float4 c;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
     // 派单 071 — the linear black offset in scene-linear units (x). 147 — the S1 exposure gain (y),
-    // handed to `s1_end_points` so whites' EV window is read on the unexposed light. 2 pad.
+    // handed to `s1_end_points` so whites' EV window is read on the unexposed light.
+    // 195 — z is the "this frame's white balance is a matrix" flag (see the three rows below).
     float4 e;
+    // 195 — the **calibrated white-balance matrix**, row-major, in working primaries, for the drag
+    // preview only. `w` unused.
+    //
+    // Why it exists: 194's drag applied a von Kries **diagonal** (`a.yzw`) while the settled frame is
+    // `CIRAWFilter`'s own adaptation, which is a full 3×3 in camera space; §2 measured the difference
+    // at up to 97 codes (ΔE00 8.9) at 3200 K, so the preview jumped on release. These three rows are
+    // the least-squares fit of that 3×3 (`WhiteBalanceCalibration`, 45 cells, row sums 1 so a neutral
+    // grey keeps its level) interpolated at the requested pair.
+    //
+    // The rows live in `S1Params` rather than a second buffer like 179's `CalParams` because unlike a
+    // calibration — which exists only for the documents that carry one — the white balance is read by
+    // every frame, and a uniform that is written for every frame costs one `setBytes` while a second
+    // binding costs an argument slot in six entry points. An as-shot document writes the identity
+    // rows and `e.z = 0`, and the kernel then runs the pre-195 expression verbatim.
+    float4 w0;
+    float4 w1;
+    float4 w2;
 };
 
 // 179 — 原色校准 (CalibrationGroup): a 3×3 primaries matrix plus the shadows' tint, in its **own**
@@ -245,7 +263,18 @@ static inline void s1_body(texture2d<float, access::read> src,
 
     // ② The gain. The WB gains are literally (1, 1, 1) since white balance became a decode setting
     //    (派单 006) — the old Planckian fit here would be a second correction on top of the decoder's.
-    v *= p.a.x * p.a.yzw;
+    //
+    //    195 — **the drag's white balance is a matrix**, not a triple. `p.e.z` says which spelling this
+    //    frame needs: the settled frame (and every as-shot document) takes the pre-195 line
+    //    verbatim — same operands, same order, same rounding, so every recorded byte is unchanged —
+    //    while a drag multiplies by the calibrated rows. One uniform compare per pixel is the whole
+    //    cost of having both in one entry point; a compile-time flag would double the six
+    //    instantiations for a branch that is uniform across the frame.
+    if (p.e.z > 0.5) {
+        v = float3(dot(p.w0.xyz, v), dot(p.w1.xyz, v), dot(p.w2.xyz, v)) * p.a.x;
+    } else {
+        v *= p.a.x * p.a.yzw;
+    }
 
     // ③④ 073B — the end points. The **weight** is read off the encoded domain's log coordinate L (see
     //    the header for why L and not the code), the **gain and the level** are applied in scene-linear

@@ -45,9 +45,22 @@ public struct RenderInput: @unchecked Sendable {
     /// as-shot document) means exactly that, and gets the pre-194 arithmetic byte for byte.
     public let whiteBalance: WhiteBalance
 
+    /// The file's **as-shot pair** — `CIRAWFilter.neutralTemperature`/`neutralTint` with nothing
+    /// assigned, i.e. the balance the decoder itself chose (`RAWDecoder.DecodeOutcome.capabilities`).
+    ///
+    /// 195 needs it because the drag's matrix is a *ratio*: "the request, relative to the balance the
+    /// pixels are already at". `.asShot` pixels are at the file's as-shot pair, not at 6500 K — the
+    /// probe measured 5872 K/+20 on one file and 5552 K/+24 on another — so anchoring at the nominal
+    /// 6500 K makes every drag start from a white the buffer never had. Measured cost of getting this
+    /// wrong, in scene-linear ΔE00 (mid band): 9.2 → 6.0 at 6500 K, 7.8 → 7.2 at 3200 K, 14.9 → 11.6
+    /// at 6500 K/−30. `.asShot` (the default) means "no pair known": the estimate then falls back to
+    /// the nominal 6500 K exactly as 143/194 did, which is what every synthetic image gets.
+    public let asShotPair: WhiteBalance
+
     public init(image: LinearImage, identity: String, sourceURL: URL? = nil,
                 lensProfile: LensProfile? = nil,
-                whiteBalance: WhiteBalance = .asShot) {
+                whiteBalance: WhiteBalance = .asShot,
+                asShotPair: WhiteBalance = .asShot) {
         self.image = image
         self.identity = identity
         self.sourceURL = sourceURL
@@ -55,6 +68,7 @@ public struct RenderInput: @unchecked Sendable {
             LensProfile.read(from: $0) ?? LensProfile.readPanasonic(from: $0)
         }
         self.whiteBalance = whiteBalance
+        self.asShotPair = asShotPair
     }
 
     /// Does S0 apply the file's own lens warp? DNG: exactly when it carries three distinct planes;
@@ -856,7 +870,15 @@ private struct S1Params {
     // 071: blackOffset, pad, pad, pad — the additive linear trim, applied between the level and the
     // gain. 0 for every document that never used the control, and then the kernel's `kTrim` is false.
     // 147: y is S1's exposure gain `g` — `s1_end_points` reads whites' EV window on `L − log2 g`.
+    // 195: z is 1 when this frame's white balance is the calibrated matrix rather than the diagonal.
     var e: SIMD4<Float>
+    // 195 — mirror of `Kernels/s1_scene_linear.metal`'s three rows, byte for byte: the calibrated
+    // white-balance matrix, row-major, in working primaries. Identity rows for every frame that is
+    // not dragging (and `e.z = 0`), because the matrix is what 194's diagonal could not be: a full
+    // colour adaptation, fitted offline against `CIRAWFilter` itself (97 → ≤3 codes).
+    var w0: SIMD4<Float>
+    var w1: SIMD4<Float>
+    var w2: SIMD4<Float>
 }
 
 /// 179 — mirror of `CalParams` in `Kernels/s1_scene_linear.metal`, byte for byte: three **row-major**
@@ -1571,31 +1593,76 @@ public final class RenderGraph {
     /// for nothing — tests, thumbnails, an as-shot document.
     public var bufferWhiteBalance: WhiteBalance { input.whiteBalance }
 
+    /// **195's A/B hook (tests only).** When set, S1 applies *this* matrix instead of the computed
+    /// preview matrix, so one renderer can measure "the full 3×3" against "its diagonal" against
+    /// "194's solver gain" with every other stage held still — which is the evidence §3 asks for and
+    /// the only way to attribute the residual to the cross terms rather than to something else.
+    /// `nil` (the shipped spelling) is always the computed matrix.
+    public var previewMatrixOverride: Matrix3?
+
+    /// True when the last `whiteBalanceMatrix(from:to:)` refused the model's matrix and used the
+    /// diagonal instead (`WhiteBalanceEstimate.isPlausiblePreviewMatrix`). Reported so a test can say
+    /// *which* pairs the valve fired on rather than leaving it invisible.
+    public private(set) var whiteBalanceFellBackToDiagonal = false
+
     /// The S1 gain for a document's white balance, relative to the buffer's own as-shot estimate.
     public func whiteBalanceGain(for whiteBalance: WhiteBalance)
         -> (r: Double, g: Double, b: Double) {
         WhiteBalanceEstimate.gain(for: whiteBalance, asShot: measuredAsShotIlluminant)
     }
 
-    /// S1's gain on **this** buffer for a document's pair (194, two-stage white balance).
+    /// S1's **white-balance matrix** on **this** buffer for a document's pair (194 two-stage, 195
+    /// calibrated).
     ///
     /// Three cases, in this order, and the order is the honesty:
     ///
     ///  1. **Both as shot** — the identity, exactly the pre-194 arithmetic (a document that follows the
     ///     file's own balance must keep every pixel and every key it had).
     ///  2. **The buffer was developed at the document's pair** — the identity too: the decoder already
-    ///     baked the balance into these pixels, and applying the gain again would correct the frame
-    ///     twice. This is the settled frame.
-    ///  3. Otherwise the gain that moves the buffer's balance to the document's: `gain(for:)` when the
-    ///     buffer is as shot (the first drag of a photo — the pre-194 number, bit for bit), and
-    ///     `relativeGain(from:to:)` when the drag starts from an already-settled buffer.
+    ///     baked the balance into these pixels, and applying it again would correct the frame twice.
+    ///     This is the settled frame, and it is why `whiteBalanceGain` reports `(1, 1, 1)` there.
+    ///  3. Otherwise the **calibrated** matrix that moves the buffer's pair to the document's:
+    ///     `M(document) · M(buffer)⁻¹` from `WhiteBalanceCalibration` — the table §1.5 asks for, fitted
+    ///     against the decoder in scene-linear light, interpolated bilinearly in `(log K, tint)`.
+    ///
+    /// 195 replaced 143's von Kries diagonal here, with `WhiteBalanceEstimate.relativeMatrix` — the
+    /// complete Bradford product the estimate always carried. The diagonal is still in the kernel as
+    /// the `e.z == 0` spelling (so an as-shot document's bytes cannot move); the drag multiplies by
+    /// the whole 3×3, whose cross terms are what §2's 97 codes at 3200 K were missing.
+    public func whiteBalanceMatrix(from buffer: WhiteBalance, to document: WhiteBalance)
+        -> Matrix3 {
+        if document.isAsShot && buffer.isAsShot { return .identity }
+        if document == buffer { return .identity }
+        if let override = previewMatrixOverride { return override }
+        let matrix = WhiteBalanceEstimate.previewMatrix(from: buffer, to: document,
+                                                        asShotPair: input.asShotPair)
+        guard WhiteBalanceEstimate.isPlausiblePreviewMatrix(matrix) else {
+            // 195's valve: the model extrapolated (measured 4.06× blue at 2850 K/+60, 218 codes), so
+            // this frame takes the diagonal the estimate already had instead of a violent matrix.
+            whiteBalanceFellBackToDiagonal = true
+            let g = WhiteBalanceEstimate.relativeGain(from: buffer, to: document,
+                                                      asShot: measuredAsShotIlluminant)
+            return Matrix3(rows: [[g.r, 0, 0], [0, 1, 0], [0, 0, g.b]])
+        }
+        return matrix
+    }
+
+    /// The diagonal of `whiteBalanceMatrix` — the number a frame **reports** as its applied gain
+    /// (`RenderResult.whiteBalanceGain`), green-normalised exactly as 143's gain was.
+    ///
+    /// It is derived from the matrix rather than computed beside it so the two cannot disagree; for a
+    /// settled frame the matrix is the identity and this is `(1, 1, 1)`, which is 194 §3's contract
+    /// ("one application, never two") still holding.
     public func whiteBalanceGain(from buffer: WhiteBalance, to document: WhiteBalance)
         -> (r: Double, g: Double, b: Double) {
-        if document.isAsShot && buffer.isAsShot { return (1, 1, 1) }
-        if document == buffer { return (1, 1, 1) }
-        if buffer.isAsShot { return whiteBalanceGain(for: document) }
-        return WhiteBalanceEstimate.relativeGain(from: buffer, to: document,
-                                                 asShot: measuredAsShotIlluminant)
+        let m = whiteBalanceMatrix(from: buffer, to: document)
+        let g = m[1, 1]
+        guard g.isFinite, abs(g) > 1e-9 else { return (1, 1, 1) }
+        func clamp(_ v: Double) -> Double {
+            guard v.isFinite, v > 0 else { return 1 }
+            return min(max(v / g, 1.0 / 20), 20)
+        }
+        return (clamp(m[0, 0]), 1, clamp(m[2, 2]))
     }
 
     // MARK: plan
@@ -3412,6 +3479,11 @@ public final class RenderGraph {
             let documentWhiteBalance = edit.light.whiteBalance
             let whiteBalance = self.whiteBalanceGain(from: input.whiteBalance,
                                                      to: documentWhiteBalance)
+            // 195 — the matrix the drag multiplies by. The identity for a settled frame, which is why
+            // `applyMatrix` below is false there and the kernel runs 194's line unchanged.
+            let whiteBalanceMatrix = self.whiteBalanceMatrix(from: input.whiteBalance,
+                                                             to: documentWhiteBalance)
+            let applyMatrix = whiteBalanceMatrix != .identity
             let whiteBalanceIsIdentity = whiteBalance.r == 1 && whiteBalance.g == 1
                 && whiteBalance.b == 1
             let identity = edit.light.exposure == 0 && edit.light.highlightRecovery <= 0
@@ -3420,7 +3492,9 @@ public final class RenderGraph {
                 // copy branch away exactly like a level does.
                 && edit.light.blackOffset == 0
                 // 143: a white balance is not the identity either (and `nil` is, by definition).
-                && whiteBalanceIsIdentity
+                // 195: nor is a matrix whose diagonal happens to be 1 — a tint-only move can have one,
+                // and the kernel's `p.b.y` short-circuits the *whole* body, matrix included.
+                && whiteBalanceIsIdentity && !applyMatrix
                 // 179: a calibration is not the identity: the kernel's `p.b.y` short-circuits the whole
                 // body (it is the "copy the source" flag), so a calibrated document must clear it or
                 // the matrix would be skipped for exactly the documents that need it.
@@ -3439,7 +3513,15 @@ public final class RenderGraph {
                 // the key material and the number the kernel adds cannot disagree. 0 → the kernel's
                 // branch is not taken at all.
                 e: SIMD4(Float(edit.light.clampedBlackOffset),
-                         Float(edit.light.exposureGain), 0, 0))
+                         Float(edit.light.exposureGain), applyMatrix ? 1 : 0, 0),
+                // 195 — the calibrated rows. Identity for every frame that is not a drag, so the
+                // numbers are always valid and `e.z` alone chooses the spelling.
+                w0: SIMD4(Float(whiteBalanceMatrix[0, 0]), Float(whiteBalanceMatrix[0, 1]),
+                          Float(whiteBalanceMatrix[0, 2]), 0),
+                w1: SIMD4(Float(whiteBalanceMatrix[1, 0]), Float(whiteBalanceMatrix[1, 1]),
+                          Float(whiteBalanceMatrix[1, 2]), 0),
+                w2: SIMD4(Float(whiteBalanceMatrix[2, 0]), Float(whiteBalanceMatrix[2, 1]),
+                          Float(whiteBalanceMatrix[2, 2]), 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
             // 179 — 原色校准 travels in its **own** buffer, bound only when the document actually

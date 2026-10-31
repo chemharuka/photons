@@ -345,6 +345,71 @@ public enum WhiteBalanceEstimate {
         return target * reference.inverted()
     }
 
+    /// **The drag preview's matrix** — the full 3×3, not its diagonal.
+    ///
+    /// 194's preview reduced this product to three numbers (`gains(from:)` below takes
+    /// `matrix[0,0]/[1,1]/[2,2]`), and §2 of 195 measured what that costs: 16 codes at 6500 K and
+    /// **97 codes / ΔE00 8.9** at 3200 K, because the adaptation's cross-channel terms grow exactly as
+    /// the request leaves neutral. `relativeMatrix` was always the complete product; this function is
+    /// where the pipeline now reads it, so the preview multiplies a pixel by the same 3×3 the model
+    /// always had instead of its shadow.
+    ///
+    /// The reference is the buffer's own balance:
+    ///
+    ///   · **buffer as shot** — `relativeMatrix(request:asShot:)`, i.e. the request adapted *from* the
+    ///     illuminant measured on that buffer (the nominal 6500 K when the frame is neutral), which is
+    ///     the same reference `gain(for:asShot:)` chose. A neutral frame asked for 6500 K therefore
+    ///     cancels to the identity, exactly as before.
+    ///   · **buffer settled at another pair** — `M(document) · M(buffer)⁻¹`. The as-shot reference
+    ///     cancels out of that quotient algebraically, so it is not consulted: a drag from a settled
+    ///     rung continues from where that rung is, and `M(x)·M(x)⁻¹` is the identity the settled frame
+    ///     needs.
+    public static func previewMatrix(from buffer: WhiteBalance, to document: WhiteBalance,
+                                     asShotPair: WhiteBalance = .asShot) -> Matrix3 {
+        guard !document.isAsShot else { return .identity }
+        let target = Request(temperature: document.temperature ?? WhiteBalanceSolver.nominalTemperature,
+                             tint: document.tint ?? 0)
+        guard !buffer.isAsShot else {
+            // The buffer is at the **file's** as-shot pair when we know it (195: the ratio's
+            // denominator), and at the nominal 6500 K otherwise (143/194's reference, kept so a
+            // synthetic image or a caller without the pair behaves exactly as before).
+            let reference = asShotPair.isAsShot
+                ? Request(temperature: WhiteBalanceSolver.nominalTemperature, tint: 0)
+                : Request(temperature: asShotPair.temperature ?? WhiteBalanceSolver.nominalTemperature,
+                          tint: asShotPair.tint ?? 0)
+            return matrix(temperature: target.temperature, tint: target.tint)
+                * matrix(temperature: reference.temperature, tint: reference.tint).inverted()
+        }
+        let source = Request(temperature: buffer.temperature ?? WhiteBalanceSolver.nominalTemperature,
+                             tint: buffer.tint ?? 0)
+        return matrix(temperature: target.temperature, tint: target.tint)
+            * matrix(temperature: source.temperature, tint: source.tint).inverted()
+    }
+
+    /// 195 — **is this preview matrix sane enough to multiply by?**
+    ///
+    /// The valve exists because the model is a *ratio of two Bradford adaptations*, and far from
+    /// neutral that ratio's own extrapolation becomes violent: at 2850 K/+60 it produces a **4.06×**
+    /// blue entry, which does not correct the frame — it burns the highlights (measured 218 codes,
+    /// ΔE00 24). A matrix that large is not a better answer than the diagonal, it is a worse one, so
+    /// the caller falls back to `relativeGain`'s three numbers for that frame.
+    ///
+    /// The bound is `|m| ≤ 3` on every entry, which is deliberately loose: the biggest *legitimate*
+    /// entry measured across the five §3 pairs is 2.70 (3200 K's blue, whose decoder-fitted value is
+    /// 1.63 — the model already over-corrects there by 1.7×), so 3 admits every pair the task names
+    /// and rejects only the cells where the ratio is extrapolating.
+    ///
+    /// **What this is not.** It is not a "row sums must be ≈1" test, even though a chromatic
+    /// adaptation suggests one: a white-balance matrix's rows sum to its **channel gains**, and the
+    /// decoder's own answer at 3200 K has rows summing to 0.51 / 0.85 / 1.70 (measured — see
+    /// `WhiteBalanceModelProbeTests`). A row-sum gate would reject every real request and quietly make
+    /// the whole feature a no-op.
+    public static func isPlausiblePreviewMatrix(_ m: Matrix3) -> Bool {
+        for v in m.values where !v.isFinite || abs(v) > 3 { return false }
+        let g = m[1, 1]
+        return g.isFinite && abs(g) > 1e-6
+    }
+
     /// The full 3×3 matrix for one requested pair, in working RGB: `working⁻¹ · Bradford · working`.
     public static func matrix(temperature: Double, tint: Double) -> Matrix3 {
         let src = illuminantXYZ(temperature: temperature, tint: tint)

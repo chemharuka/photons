@@ -5756,9 +5756,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
         if graph == nil || graphIdentity != identity {
-            graph = try RenderGraph(input: RenderInput(image: image, identity: identity, sourceURL: url,
-                                                      lensProfile: outcome.rung.lensProfile,
-                                                      whiteBalance: inputs.whiteBalance))
+            graph = try RenderGraph(input: RenderInput(
+                image: image, identity: identity, sourceURL: url,
+                lensProfile: outcome.rung.lensProfile,
+                whiteBalance: inputs.whiteBalance,
+                // 195 — the drag's matrix is a ratio against the balance these pixels are already
+                // at, and for an as-shot buffer that is the **file's** pair (measured 5872 K/+20 and
+                // 5552 K/+24 on two fixtures), never the nominal 6500 K.
+                asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
             graphIdentity = identity
             graphPhoto = baseIdentity
             // A new photo (or a new rung of it): its key is a different picture, so the measurement
@@ -7083,7 +7088,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let graph = try RenderGraph(input: RenderInput(image: outcome.rung.image,
                                                        identity: identity,
                                                        sourceURL: request.sourceURL,
-                                                       whiteBalance: inputs.whiteBalance))
+                                                       whiteBalance: inputs.whiteBalance,
+                                                       asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
         histogramLock.lock()
         pictureGraph = graph                 // an older rung's graph is replaced, not reused
         pictureGraphIdentity = identity
