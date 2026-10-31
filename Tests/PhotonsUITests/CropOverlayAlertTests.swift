@@ -120,6 +120,110 @@ final class CropOverlayAlertTests: XCTestCase {
         print("132 §3 · stored crop r \(stored.right) w \(stored.width) · history +\(session.history.snapshots.count - history)")
     }
 
+    /// 197 ② — 用户的顺序：**裁剪 → ↵应用 → 再进裁切 → 缩到 25 % → 把框拖去盖住旋转空角**。
+    ///
+    /// 196 证伪了「角度差一个 quarterTurns」这个假设（`geometry.rotationDegrees` 在竖拍下就是
+    /// 0.0），可用户的「红色越界不变红」仍然成立 —— 因为 ① 让画布只剩裁切区：覆盖层是按**裁剪后的
+    /// 照片**投影的，框在屏幕上盖住的「空角」在源坐标里根本不是照片外。① 修好之后，覆盖层的映射
+    /// 与帧 job 是同一个文档，这条断言才第一次有意义。
+    func testAFrameOverTheLetterboxIsRedAfterReenteringCropOnACroppedDocument() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.close() }
+        let loupe = editor.rootView.loupeController
+        let session = editor.session
+
+        // 裁剪 + 拉直，一次应用。
+        let applied = CropRect(x: 0.2, y: 0.15, width: 0.6, height: 0.7)
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
+        CropUITestSupport.pump(0.05)
+        loupe.cropTool.draft.crop = applied
+        loupe.cropTool.setStraighten(5.4)
+        loupe.refreshCropTool()
+        XCTAssertTrue(loupe.applyCropTool(), "应用 did not commit 裁剪 + 拉直")
+        CropUITestSupport.pump(0.05)
+        XCTAssertEqual(session.edit.geometry.cropRect.width, applied.width, accuracy: 1e-9)
+
+        // 再进裁切，缩到 25 %。
+        XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
+        CropUITestSupport.pump(0.05)
+
+        // 用户的取景：缩到 25 %。这个窗口里 25 % 的画布（10075 px × 0.25 = 2518）比视口（2044）还
+        // 宽，旋转空角根本不在屏幕上，而 ⑦ 会把框 clamp 进可见画布 —— 那一档「盖住黑角」这件事不
+        // 存在，框落在哪里取决于镜头中心（两次跑出来一个在照片内、一个出界），不能当判据。所以
+        // 25 % 只打印，判据取「整块画布可见」的取景（`zoomToFit`，即用户眼睛看到四个空角的那一屏）。
+        loupe.zoom(to: 0.25)
+        CropUITestSupport.pump(0.05)
+        let source = loupe.cropSourceSize
+        let framing = try XCTUnwrap(loupe.framing())
+        let viewport = loupe.viewportPixels
+        let canvas = CropMath.canvasSize(crop: framing.crop, in: source,
+                                         straightenDegrees: framing.straightenDegrees,
+                                         quarterTurns: session.edit.geometry.quarterTurns,
+                                         allowsOutsideSource: true)
+        let canvasRect = ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+        func fits(_ zoom: Double) -> Bool {
+            Double(canvas.width) * zoom <= Double(viewport.width) + 0.5
+                && Double(canvas.height) * zoom <= Double(viewport.height) + 0.5
+        }
+        print("197 ② · 25 % · effectiveZoom \(loupe.effectiveZoom) · 画布整块可见 "
+              + "\(fits(loupe.effectiveZoom)) (canvas×z "
+              + "\(Int(Double(canvas.width) * loupe.effectiveZoom))×"
+              + "\(Int(Double(canvas.height) * loupe.effectiveZoom)) vs viewport "
+              + "\(viewport.keyString)) · source \(source.keyString) "
+              + "· document crop \(session.edit.geometry.cropRect.keyString) "
+              + "· framing crop \(framing.crop.keyString) · θ \(framing.straightenDegrees) "
+              + "· canvas \(canvasRect.keyString)")
+        if !fits(loupe.effectiveZoom) {
+            loupe.zoomToFit()
+            CropUITestSupport.pump(0.05)
+        }
+        let zoom = loupe.effectiveZoom
+        XCTAssertTrue(fits(zoom), "the judging framing must have the whole canvas on screen")
+        print("197 ② · 判据取景 · effectiveZoom \(zoom) · fitScale "
+              + "\(loupe.currentCropWorkspaceFitScale) · 画布整块可见 \(fits(zoom))")
+
+        // ① 框盖住旋转空角（整帧在 5.4° 下必然盖住）⇒ 红。
+        loupe.cropTool.draft.crop = .full
+        loupe.refreshCropTool()
+        CropUITestSupport.pump(0.02)
+        let over = try XCTUnwrap(loupe.cropOverlayLayoutForTesting)
+        let effectiveOver = loupe.cropTool.effectiveCrop(source: source)
+        print("197 ② · 盖空角 · exceedsPicture \(over.exceedsPicture) "
+              + "· model \(loupe.cropTool.frameExceedsPicture(source: source)) "
+              + "· effectiveCrop \(effectiveOver.keyString) "
+              + "· source \(source.keyString) · canvas \(canvasRect.keyString) "
+              + "· overlay \(frameBounds(over)) "
+              + "· overlay corners \(over.corners.map { "(\(Int($0.x)),\(Int($0.y)))" }.joined(separator: " "))")
+        XCTAssertTrue(over.exceedsPicture,
+                      "197 ②: the frame covers the rotated-out corner but the "
+                      + "stroke is not red (model says "
+                      + "\(loupe.cropTool.frameExceedsPicture(source: source)), "
+                      + "effectiveCrop \(effectiveOver.keyString), "
+                      + "source \(source.keyString), canvas \(canvasRect.keyString), "
+                      + "layout \(over.sizeInPoints), viewport \(viewport.keyString), "
+                      + "framing crop \(framing.crop.keyString))")
+
+        // ② 完全在照片里 ⇒ 不红。
+        let inside = CropRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
+        loupe.cropTool.draft.crop = inside
+        loupe.refreshCropTool()
+        CropUITestSupport.pump(0.02)
+        let within = try XCTUnwrap(loupe.cropOverlayLayoutForTesting)
+        let effectiveWithin = loupe.cropTool.effectiveCrop(source: source)
+        print("197 ② · 照片内 · exceedsPicture \(within.exceedsPicture) "
+              + "· model \(loupe.cropTool.frameExceedsPicture(source: source)) "
+              + "· effectiveCrop \(effectiveWithin.keyString) "
+              + "· overlay \(frameBounds(within))")
+        XCTAssertFalse(within.exceedsPicture,
+                       "197 ②: a 0.4× frame inside the picture is being called out of "
+                       + "bounds (effectiveCrop \(effectiveWithin.keyString), "
+                       + "source \(source.keyString))")
+        XCTAssertEqual(loupe.cropTool.draft.crop.left, inside.left, accuracy: 1e-9,
+                       "the alert moved the rect")
+        XCTAssertEqual(loupe.cropTool.draft.crop.width, inside.width, accuracy: 1e-9,
+                       "the alert moved the rect")
+    }
+
     /// The old ⑨ behaviour that used to hide the frame is still reachable through the flag, and it is
     /// the *clamp*, not the overlay, that moves the rect.
     func testTheOptInInscribedRectStillWorks() throws {

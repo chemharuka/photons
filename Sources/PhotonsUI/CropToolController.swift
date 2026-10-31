@@ -730,21 +730,39 @@ public final class CropToolController {
 
     // MARK: the preview
 
-    /// The document the canvas should render while the tool is on: **the whole frame**, with the
-    /// draft's straighten and flips.
+    /// 197 — the document the **canvas** is of while the tool is on: **the whole frame**, with the
+    /// document's own 拉直 / 翻转 / 90° turn.
     ///
     /// Crop goes to `.full` because that is what "裁剪模式下画布显示未裁剪图" means, and the lock goes
     /// to `.original` because the draft rect is already the answer — the frame on screen must be the
     /// picture, not a pre-cropped one. Nothing is written: this value lives for one `makeJob`.
-    public func previewEdit(from edit: EditModel) -> EditModel {
+    ///
+    /// This is the variant the **pixels and the camera** use (`LoupeController.makeJob` /
+    /// `framing`). `previewEdit` below is the *draft's* variant: it also carries the in-flight 拉直
+    /// angle, which is what the canvas-geometry key has to follow (a tick can change
+    /// `CropMath.canvasSize`), but which 088 keeps out of the render — a slider tick turns the frame
+    /// quad only, and the camera must describe the picture the last release rendered.
+    ///
+    /// Before 197 only the geometry key used the preview document and the frame job used the
+    /// **document**, so re-entering 裁切 on a photo that already had a crop rendered just the kept
+    /// rectangle: 应用 → 再进裁切 ⇒ 画布只剩裁切区.
+    public func canvasEdit(from edit: EditModel) -> EditModel {
         guard isActive else { return edit }
         var e = edit
         e.geometry.crop = .full
-        e.geometry.rotationDegrees = CropTool.clampStraighten(draft.straighten)
         e.geometry.aspectLock = .original
         // 072 §F — the flips are the document's, so they are carried, not overridden: a 水平翻转 from
         // 变换 ▸ 水平翻转 while the tool is on has to show on the canvas immediately, and there is no
         // draft copy left that could disagree with it.
+        return e
+    }
+
+    /// The same document with the **draft's** angle — what the overlay and the canvas-geometry key
+    /// describe while the slider is in flight.
+    public func previewEdit(from edit: EditModel) -> EditModel {
+        guard isActive else { return edit }
+        var e = canvasEdit(from: edit)
+        e.geometry.rotationDegrees = CropTool.clampStraighten(draft.straighten)
         return e
     }
 
