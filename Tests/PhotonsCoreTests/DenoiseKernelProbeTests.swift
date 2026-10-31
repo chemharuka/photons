@@ -194,11 +194,12 @@ final class DenoiseKernelProbeTests: XCTestCase {
 
 /// 171 — the grid's own cost at the acceptance's 4.10 Mpx, measured in isolation.
 ///
-/// `DetailFXTests.testEachNonBayerControlCostsAtMostTwoMillisecondsAtP95` measures the **marginal
-/// frame** cost, which on a shared machine is a min-of-many estimator over a load-dependent
-/// baseline. This one times the three grid passes themselves on a command buffer's GPU timestamps —
-/// a number that does not depend on what else is running, and one that can be compared against the
-/// bandwidth estimate in `local/REPORT.md`.
+/// `DetailFXTests.testEachNonBayerControlEntersTheStageOnceAndAddsNoPass` gates the **marginal
+/// frame** as a *shape* (the stage enters once, adds no pass, is absent at amount 0) and only prints
+/// its milliseconds — on a shared machine that marginal is a load-dependent number, and it goes
+/// **negative** often enough that no threshold on it means anything. This test times the three grid
+/// passes themselves on a command buffer's GPU timestamps — a number that does not depend on what
+/// else is running, and one that can be compared against the bandwidth estimate in `local/REPORT.md`.
 final class DenoiseGridCostTests: XCTestCase {
 
     func testGridPassesAtFourMegapixels() throws {
