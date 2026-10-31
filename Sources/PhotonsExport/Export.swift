@@ -163,13 +163,18 @@ public struct ExportOptions: Sendable {
     public var bitDepth: Int          // 8, 10 or 16
     /// 100/111 — the HDR path. `nil` = the pre-HDR encoder path, byte for byte.
     public var hdr: HDRExport?
+    /// 206 — TPDF dither before the 8-bit quantiser. **On by default** (a smooth gradient must not
+    /// band); `false` keeps the exact pre-206 truncation for callers that need the old bytes.
+    /// Only the 8-bit path reads it — 10/16-bit are untouched.
+    public var dither8Bit: Bool
 
     public init(format: ExportFormat = .jpeg, quality: Double = 0.95, bitDepth: Int = 8,
-                hdr: HDRExport? = nil) {
+                hdr: HDRExport? = nil, dither8Bit: Bool = true) {
         self.format = format
         self.quality = quality
         self.bitDepth = bitDepth
         self.hdr = hdr
+        self.dither8Bit = dither8Bit
     }
 
     public static func detect(from url: URL) -> ExportOptions {
@@ -219,8 +224,25 @@ public enum Exporter {
         }
     }
 
+    /// 206 — one deterministic uniform in `[-0.5, 0.5]` per `(x, y, channel, salt)`. Murmur3's
+    /// finaliser spreads the multiply-xor hash so neighbouring pixels are uncorrelated; `salt`
+    /// selects the second independent stream TPDF needs.
+    static func ditherUniform(x: Int, y: Int, channel: Int, salt: UInt32) -> Double {
+        var h = UInt32(truncatingIfNeeded: x) &* 0x9E37_79B1
+        h ^= UInt32(truncatingIfNeeded: y) &* 0x85EB_CA77
+        h ^= UInt32(truncatingIfNeeded: channel) &* 0xC2B2_AE3D
+        h ^= salt
+        h ^= h >> 16
+        h &*= 0x7FEB_352D
+        h ^= h >> 15
+        h &*= 0x846C_A68B
+        h ^= h >> 16
+        return Double(h) / Double(UInt32.max) - 0.5
+    }
+
     public static func cgImage(_ image: DisplayImage, bitDepth: Int,
-                               space override: CGColorSpace? = nil) throws -> CGImage {
+                               space override: CGColorSpace? = nil,
+                               dither: Bool = false) throws -> CGImage {
         guard let space = override ?? colorSpace(for: image.primaries) else {
             throw ExportError.encodeFailed("color space unavailable: \(image.primaries.displayName)")
         }
@@ -229,8 +251,27 @@ public enum Exporter {
 
         if bitDepth == 8 {
             var bytes = [UInt8](repeating: 0, count: count)
-            for i in 0..<count {
-                bytes[i] = UInt8(min(max(Float(image.rgba[i]), 0), 1) * 255 + 0.5)
+            if dither {
+                // 206 — TPDF (two independent uniforms, averaged) over `(x, y, channel)`. A hash,
+                // not a RNG: the same picture must export to the same bytes on every run. The
+                // amplitude is ±0.5 LSB, so the rounding boundary is crossed on purpose but the
+                // picture is never pushed more than one code.
+                for i in 0..<count {
+                    let pixel = i >> 2
+                    let x = pixel % w
+                    let y = pixel / w
+                    let channel = i & 3
+                    let u1 = ditherUniform(x: x, y: y, channel: channel, salt: 0xA511_E9B3)
+                    let u2 = ditherUniform(x: x, y: y, channel: channel, salt: 0x63D8_3595)
+                    let n = (u1 + u2) / 2
+                    let v = Double(min(max(Float(image.rgba[i]), 0), 1)) * 255 + n
+                    bytes[i] = UInt8(min(max(v, 0), 255).rounded())
+                }
+            } else {
+                // The pre-206 expression, kept verbatim so `dither8Bit = false` is byte-identical.
+                for i in 0..<count {
+                    bytes[i] = UInt8(min(max(Float(image.rgba[i]), 0), 1) * 255 + 0.5)
+                }
             }
             guard let provider = CGDataProvider(data: Data(bytes) as CFData),
                   let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
@@ -289,7 +330,8 @@ public enum Exporter {
                                                        halfSize: hdr.halfSize,
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
-                                                       bitDepth: options.bitDepth),
+                                                       bitDepth: options.bitDepth,
+                                                       dither8Bit: options.dither8Bit),
                             metadata: metadata,
                             format: options.format)
                         return result.warnings
@@ -305,7 +347,8 @@ public enum Exporter {
                                                        halfSize: hdr.halfSize,
                                                        headroom: hdr.headroom,
                                                        quality: options.quality,
-                                                       bitDepth: options.bitDepth),
+                                                       bitDepth: options.bitDepth,
+                                                       dither8Bit: options.dither8Bit),
                             metadata: metadata,
                             format: .avif)
                         if apple {
@@ -326,7 +369,7 @@ public enum Exporter {
                 || (options.bitDepth == 16 && options.format.supports16Bit) else {
             throw ExportError.badBitDepth(options.format.rawValue, options.bitDepth)
         }
-        let cg = try cgImage(image, bitDepth: options.bitDepth)
+        let cg = try cgImage(image, bitDepth: options.bitDepth, dither: options.dither8Bit)
 
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
@@ -395,7 +438,7 @@ public enum Exporter {
         if let kind = options.hdr?.kind, kind == .hlg || kind == .pq {
             cg = try HDREncoding.cgImage(for: image, kind: kind)
         } else {
-            cg = try cgImage(image, bitDepth: options.bitDepth)
+            cg = try cgImage(image, bitDepth: options.bitDepth, dither: options.dither8Bit)
         }
         let buffer = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(buffer as CFMutableData,

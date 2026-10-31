@@ -95,6 +95,26 @@ final class ExportPresetTests: XCTestCase {
         XCTAssertEqual(back, preset)
     }
 
+    // MARK: 206 — ppi
+
+    /// A pre-206 preset has no `ppi` key: it decodes to `nil`, re-encodes without the key, and keeps
+    /// the old output. `nil` is the only backwards-compatible default, so it must never be written.
+    func testPPIDefaultsToNilAndIsOmittedFromLegacyJSON() throws {
+        let legacy = Data(#"{"format":"jpg","quality":0.92}"#.utf8)
+        let decoded = try JSONDecoder().decode(ExportPreset.self, from: legacy)
+        XCTAssertNil(decoded.ppi)
+        XCTAssertFalse(String(decoding: try decoded.data(), as: UTF8.self).contains("\"ppi\""),
+                       "nil ppi must not be written, or an old preset would change bytes")
+    }
+
+    func testPPISurvivesJSON() throws {
+        let preset = ExportPreset(format: .jpeg, ppi: 240)
+        let back = try JSONDecoder().decode(ExportPreset.self, from: try preset.data())
+        XCTAssertEqual(back.ppi, 240)
+        XCTAssertEqual(back, preset)
+        XCTAssertTrue(String(decoding: try back.data(), as: UTF8.self).contains("\"ppi\""))
+    }
+
     // MARK: validation
 
     func testValidatedRejectsPercentBelowTen() {

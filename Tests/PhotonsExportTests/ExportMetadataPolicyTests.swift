@@ -187,6 +187,97 @@ final class ExportMetadataPolicyTests: XCTestCase {
         return (outcome, try XCTUnwrap(outcome.fileURL))
     }
 
+    /// 206 追单二 — the pre-206 byte path, with the 8-bit dither named off explicitly. `BatchExporter`
+    /// runs the preset's default (dither on), so a "same bytes as main" pin has to be measured on
+    /// this door; the dithered export is then compared by pixels, not by a magic SHA.
+    private func exportWithoutDither(_ preset: ExportPreset, tag: String,
+                                     schemaVersion: Int = EditModel.currentSchemaVersion) throws -> URL {
+        let item = item(sourceURL: source, schemaVersion: schemaVersion)
+        let directory = out.appendingPathComponent(tag, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("src.\(preset.format.fileExtension)")
+
+        var sourceMetadata = SourceMetadata.read(from: item.sourceURL)
+        if preset.removeLocation, var stripped = sourceMetadata {
+            stripped.gps = [:]
+            if let xmp = stripped.xmp {
+                stripped.xmp = XMPWriter.metadataWithoutLocation(xmp) ?? xmp
+            }
+            sourceMetadata = stripped
+        }
+        let pngAt16 = preset.format == .png && preset.effectiveBitDepth == 16
+        let embedsXMP = preset.metadataLevel == .all && preset.writeXMP
+            && item.edit != nil && preset.format.supportsXMPEmbedding && !pngAt16
+        let metadata = ExportMetadataContext(level: preset.metadataLevel, source: sourceMetadata,
+                                             edit: item.edit, author: item.author,
+                                             copyright: item.copyright, embedXMP: embedsXMP,
+                                             ppi: preset.effectivePPI)
+        var options = preset.exportOptions
+        options.dither8Bit = false
+        try Exporter.write(image(), to: url, options: options, metadata: metadata)
+        return url
+    }
+
+    /// The dithered file must be the same picture: same size, colour space and metadata key shape,
+    /// with every colour channel at most one code away from the undithered file.
+    private func assertOnlyDitherChanged(_ dithered: URL, _ reference: URL,
+                                        file: StaticString = #filePath, line: UInt = #line) throws {
+        let a = try decoded(dithered), b = try decoded(reference)
+        XCTAssertEqual(a.width, b.width, file: file, line: line)
+        XCTAssertEqual(a.height, b.height, file: file, line: line)
+        XCTAssertEqual(a.colorSpace?.name as String?, b.colorSpace?.name as String?,
+                       "colour space moved", file: file, line: line)
+
+        let pa = try properties(of: dithered), pb = try properties(of: reference)
+        XCTAssertEqual(Set(pa.keys), Set(pb.keys), "top-level metadata keys moved",
+                       file: file, line: line)
+        for key in [kCGImagePropertyExifDictionary as String,
+                    kCGImagePropertyTIFFDictionary as String,
+                    kCGImagePropertyGPSDictionary as String,
+                    kCGImagePropertyIPTCDictionary as String] {
+            XCTAssertEqual(keySet(pa[key]), keySet(pb[key]), "\(key) keys moved",
+                           file: file, line: line)
+        }
+
+        let ba = try rgba(a), bb = try rgba(b)
+        var maxDelta = 0, differing = 0
+        for i in stride(from: 0, to: ba.count, by: 4) {
+            for c in 0..<3 {
+                let delta = abs(Int(ba[i + c]) - Int(bb[i + c]))
+                maxDelta = max(maxDelta, delta)
+                if delta != 0 { differing += 1 }
+            }
+        }
+        print("206b dither pixel delta · max \(maxDelta) · differing samples \(differing)")
+        XCTAssertLessThanOrEqual(maxDelta, 1, "dither must move at most one code per channel",
+                                 file: file, line: line)
+    }
+
+    private func keySet(_ value: Any?) -> [String] {
+        if let d = value as? [String: Any] { return d.keys.sorted() }
+        if let d = value as? [CFString: Any] { return d.keys.map { $0 as String }.sorted() }
+        return []
+    }
+
+    private func decoded(_ url: URL) throws -> CGImage {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        return try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    }
+
+    /// 8-bit RGBA in the image's own colour space (no conversion).
+    private func rgba(_ image: CGImage) throws -> [UInt8] {
+        let space = try XCTUnwrap(image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB))
+        var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        guard let context = CGContext(data: &bytes, width: image.width, height: image.height,
+                                      bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                      space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            throw XCTSkip("cannot build the readback context")
+        }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return bytes
+    }
+
     private func sha256(_ url: URL) throws -> String {
         let digest = SHA256.hash(data: try Data(contentsOf: url))
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -219,6 +310,11 @@ final class ExportMetadataPolicyTests: XCTestCase {
     }
 
     // MARK: - 1. legacy preset
+
+    /// 206 追单二 — the two halves of "compatible" that the 8-bit dither split apart:
+    ///   · with `dither8Bit = false` the container is still byte-for-byte a pre-186 `main` file;
+    ///   · with the export default (`true`) the picture is the same — size, colour space, metadata
+    ///     keys, every channel within one code — even though the bytes are not.
     func testLegacyPresetDecodesToAllAndExportsIdentically() throws {
         // A preset written before 186: neither `metadataLevel` (`removeLocation` is 186's own key)
         // nor anything else that only exists today.
@@ -239,17 +335,28 @@ final class ExportMetadataPolicyTests: XCTestCase {
         // The pre-186 bytes themselves, still produced to the byte — by the pre-186 *document*: the
         // same fixture, the same preset, `schemaVersion` 12. That the two exports differ only in the
         // number is the point: 186 owns the policy, the document owns its schema number.
-        let pre186 = try export(decoded, tag: "legacy-schema12", schemaVersion: 12)
-        XCTAssertEqual(try packetSHA(pre186.url), legacyPacketSHA,
+        //
+        // 206 追单二 — `dither8Bit = false` is the knob that reproduces those bytes: the default
+        // (on) export is compared by pixels below, never by a re-measured SHA.
+        let pre186 = try exportWithoutDither(decoded, tag: "legacy-schema12", schemaVersion: 12)
+        XCTAssertEqual(try packetSHA(pre186), legacyPacketSHA,
                        "186 must not move the packet: a schema-12 document must export the pre-186 "
                        + "bytes exactly")
         // The container around it, up to ImageIO's per-process IIM ordering.
-        let legacyFileSHA = try sha256(pre186.url)
+        let legacyFileSHA = try sha256(pre186)
+        print("206b legacy dither-off file SHA \(legacyFileSHA)")
         XCTAssertTrue(legacyFileSHAs.contains(legacyFileSHA),
-                      "legacy preset exported \(legacyFileSHA), which is not one of the shapes "
-                      + "pre-186 `main` writes")
-        XCTAssertEqual(fileXMPPaths(pre186.url).count, 25)
+                      "legacy preset with dither off exported \(legacyFileSHA), which is not one of "
+                      + "the shapes pre-186 `main` writes")
+        XCTAssertEqual(fileXMPPaths(pre186).count, 25)
         XCTAssertEqual(fileXMPPaths(exported.url).count, 25)
+
+        // The default path (8-bit dither on) may not share bytes with pre-206, but it must not move
+        // the picture or the metadata shape.
+        let dithered = try export(decoded, tag: "legacy-dithered", schemaVersion: 12)
+        XCTAssertEqual(try packetSHA(dithered.url), legacyPacketSHA)
+        try assertOnlyDitherChanged(dithered.url, pre186)
+
         // And the same preset, spelled out with today's defaults, produces the same bytes.
         let explicit = try export(preset(policy: .all, writeXMP: true), tag: "legacy-explicit")
         XCTAssertEqual(try packetSHA(explicit.url), schema13PacketSHA)
@@ -328,21 +435,26 @@ final class ExportMetadataPolicyTests: XCTestCase {
     // MARK: - 4. `.none` wins over writeXMP
 
     func testNoneIsByteIdenticalToWriteXMPOff() throws {
-        let on = try export(preset(policy: .none, writeXMP: true), tag: "none-on")
-        let off = try export(preset(policy: .none, writeXMP: false), tag: "none-off")
-        XCTAssertEqual(try sha256(on.url), try sha256(off.url))
-        XCTAssertEqual(try sha256(on.url), noneSHA)
-        for result in [on, off] {
-            XCTAssertNil(result.outcome.xmpURL)
-            let sidecar = result.url.deletingPathExtension().appendingPathExtension("xmp")
+        // 206 追单二 — both sides name `dither8Bit: false`: "these two policies produce the same
+        // bytes" is a byte claim, and the dithered path is covered by the pixel comparison above.
+        let on = try exportWithoutDither(preset(policy: .none, writeXMP: true), tag: "none-on")
+        let off = try exportWithoutDither(preset(policy: .none, writeXMP: false), tag: "none-off")
+        XCTAssertEqual(try sha256(on), try sha256(off))
+        XCTAssertEqual(try sha256(on), noneSHA)
+        for url in [on, off] {
+            let sidecar = url.deletingPathExtension().appendingPathExtension("xmp")
             XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar.path))
         }
 
         // 107's ImageIO-composed packet on `.all`/off is untouched by 186 — same bytes, same keys.
-        let allOff = try export(preset(policy: .all, writeXMP: false), tag: "all-off")
-        XCTAssertEqual(try packetSHA(allOff.url), composedPacketSHA)
-        XCTAssertTrue(composedFileSHAs.contains(try sha256(allOff.url)))
-        XCTAssertEqual(fileXMPPaths(allOff.url).count, 16)
+        let allOff = try exportWithoutDither(preset(policy: .all, writeXMP: false), tag: "all-off")
+        XCTAssertEqual(try packetSHA(allOff), composedPacketSHA)
+        let composedFileSHA = try sha256(allOff)
+        print("206b composed dither-off file SHA \(composedFileSHA)")
+        XCTAssertTrue(composedFileSHAs.contains(composedFileSHA),
+                      "composed file with dither off exported \(composedFileSHA), which is not one "
+                      + "of the shapes ImageIO writes")
+        XCTAssertEqual(fileXMPPaths(allOff).count, 16)
     }
 
     // MARK: - 5. a failed packet leaves no half file

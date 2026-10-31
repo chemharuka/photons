@@ -403,6 +403,10 @@ public struct ExportPreset: Sendable, Equatable {
     public var noUpscale: Bool
     /// Percent of the cropped picture's long edge, at least 10. Only used by `.percent`.
     public var percent: Int?
+    /// 206 — pixels per inch written into the output's TIFF/DPI block. `nil` (the only value a
+    /// pre-206 preset can carry) writes **no** resolution at all, so an old preset keeps exporting
+    /// byte-for-byte what it did before this field existed. 72…600, clamped on use.
+    public var ppi: Int?
     /// Relative output folder under the destination. `""` = write straight into it; supports
     /// `{date}` (`yyyy-MM-dd`) and `{camera}`.
     public var subfolder: String
@@ -435,6 +439,7 @@ public struct ExportPreset: Sendable, Equatable {
                 sizingMode: ExportSizingMode? = nil,
                 noUpscale: Bool = true,
                 percent: Int? = nil,
+                ppi: Int? = nil,
                 subfolder: String = "",
                 conflict: ExportConflict = .rename,
                 metadataLevel: ExportMetadataLevel = .all,
@@ -466,6 +471,7 @@ public struct ExportPreset: Sendable, Equatable {
             ?? (longEdge != nil ? .longEdge : (percent != nil ? .percent : .original))
         self.noUpscale = noUpscale
         self.percent = percent
+        self.ppi = ppi
         self.subfolder = subfolder
         self.conflict = conflict
         self.metadataLevel = metadataLevel
@@ -476,6 +482,16 @@ public struct ExportPreset: Sendable, Equatable {
     }
 
     // MARK: derived
+
+    /// 206 — the range the sheet offers and the writer accepts. A stale/edited preset can carry
+    /// anything; `effectivePPI` clamps instead of failing the export, because a resolution tag is
+    /// never worth losing a picture over.
+    public static let ppiRange = 72...600
+
+    /// 206 — `ppi` clamped to `ppiRange`; `nil` still means "write nothing".
+    public var effectivePPI: Int? {
+        ppi.map { min(max($0, Self.ppiRange.lowerBound), Self.ppiRange.upperBound) }
+    }
 
     /// 180 — 真的会画吗。空白字符按空处理（用户敲一个空格不算水印）。
     public var isWatermarkActive: Bool {
@@ -680,6 +696,7 @@ extension ExportPreset: Codable {
     enum CodingKeys: String, CodingKey {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, nameTemplate
         case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel, removeLocation
+        case ppi
         case sdrToneMapping
         case watermarkText, watermarkPosition, watermarkOpacity
     }
@@ -707,6 +724,7 @@ extension ExportPreset: Codable {
             .flatMap(ExportSizingMode.init(rawValue:)) ?? .original
         self.noUpscale = try c.decodeIfPresent(Bool.self, forKey: .noUpscale) ?? true
         self.percent = try c.decodeIfPresent(Int.self, forKey: .percent)
+        self.ppi = try c.decodeIfPresent(Int.self, forKey: .ppi)
         self.subfolder = try c.decodeIfPresent(String.self, forKey: .subfolder) ?? ""
         self.conflict = try c.decodeIfPresent(String.self, forKey: .conflict)
             .flatMap(ExportConflict.init(rawValue:)) ?? .rename
@@ -741,6 +759,9 @@ extension ExportPreset: Codable {
         if sizingMode != .original { try c.encode(sizingMode.rawValue, forKey: .sizingMode) }
         if !noUpscale { try c.encode(false, forKey: .noUpscale) }
         try c.encodeIfPresent(percent, forKey: .percent)
+        // 206 — omitted while nil, so a pre-206 preset re-encodes byte-for-byte. An out-of-range
+        // value is written as stored; `effectivePPI` clamps it when the file is written.
+        try c.encodeIfPresent(ppi, forKey: .ppi)
         if !subfolder.isEmpty { try c.encode(subfolder, forKey: .subfolder) }
         if conflict != .rename { try c.encode(conflict.rawValue, forKey: .conflict) }
         if metadataLevel != .all { try c.encode(metadataLevel.rawValue, forKey: .metadataLevel) }
