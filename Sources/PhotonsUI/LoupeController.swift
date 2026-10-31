@@ -5482,20 +5482,24 @@ public final class LoupeController: NSViewController, HeadroomSource {
         func renderOne(_ source: RenderSource, _ s: Shot, _ editForRender: EditModel,
                        measure: Bool) throws -> (result: RenderResult, ms: Double) {
             let t = CFAbsoluteTimeGetCurrent()
-            let r = try graph.render(editForRender, options: RenderOptions(
+            // 一次请求 = 一个值：字段和 `RenderOptions` 一一对应，映射只在 `LoupeFrameRequest` 里有一份。
+            let request = LoupeFrameRequest(
+                identity: cacheIdentity,
+                documentHash: "",
+                revision: 0,
+                source: source == .edited ? .edited : .decoded,
+                rungScale: decodeScale,
+                contentRect: s.window,
                 canvas: viewport,
                 scale: s.scale,
-                outputWindow: s.window,
                 display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
-                useCache: useCache,
-                wantsPixels: false,
-                // 132 §9: the crop workspace's fit is a deliberate 90 %; do not let the renderer
-                // scale that margin back up to the viewport.
-                neverUpscalesContent: cropTool.isActive,
-                collectHistogram: measure,
-                histogramSampleLongEdge: (measure || wantsPointerSample)
-                    ? Histogram.frameSampleLongEdge : 0,
-                source: source))
+                neverUpscalesContent: cropTool.isActive)
+            var options = request.renderOptions()
+            options.useCache = useCache
+            options.collectHistogram = measure
+            options.histogramSampleLongEdge = (measure || wantsPointerSample)
+                ? Histogram.frameSampleLongEdge : 0
+            let r = try graph.render(editForRender, options: options)
             return (r, (CFAbsoluteTimeGetCurrent() - t) * 1000)
         }
 
