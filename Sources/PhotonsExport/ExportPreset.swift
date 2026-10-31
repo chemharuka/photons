@@ -2,27 +2,6 @@ import Foundation
 import CoreGraphics
 import PhotonsCore
 
-// MARK: - output sharpening
-//
-// Output sharpening is the *last* thing that happens to the pixels, after the resample, and it is
-// deliberately not part of `EditModel`: a slider in the document is "creative" sharpening that must
-// be visible on screen, while this is the export-time counterpart (the thing that survives JPEG
-// quantisation). Keeping it in the preset means a document rendered for the screen and for a 24 MP
-// JPEG differ only in the preset, which is what D12 asks for.
-public struct OutputSharpening: Sendable, Codable, Equatable {
-    /// Unsharp-mask strength. 0 = off; 0.6 is "mild"; above ~1.5 halos are visible at 100 %.
-    public var amount: Double
-    /// Gaussian radius in output pixels. Below ~0.7 it only touches the finest detail.
-    public var radius: Double
-
-    public init(amount: Double = 0.6, radius: Double = 0.8) {
-        self.amount = amount
-        self.radius = radius
-    }
-
-    public var isEnabled: Bool { amount > 0 && radius > 0 }
-}
-
 // MARK: - new export sections (099)
 
 /// What to do when the target file already exists. `rename` is the default: overwriting destroys a
@@ -163,7 +142,6 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
     case badBitDepth(Int)
     case badLongEdge(Int)
     case badPercent(Int)
-    case badSharpeningRadius(Double)
     case hdrRequiresHEIC(String)
     case badHDRKind(ExportFormat, HDRKind)
     case hdrNeedsBitDepth(ExportFormat, HDRKind, Int, Int)
@@ -186,8 +164,6 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
             return "longEdge must be a positive pixel count, got \(px)"
         case .badPercent(let p):
             return "percent must be at least 10, got \(p)"
-        case .badSharpeningRadius(let r):
-            return "output sharpening radius must be 0.3…3, got \(r)"
         case .hdrRequiresHEIC(let f):
             return "HDR export needs HEIC (gain maps live in the HEIF container), got \(f)"
         case .badHDRKind(let format, let kind):
@@ -418,8 +394,6 @@ public struct ExportPreset: Sendable, Equatable {
     /// carry it). Off by default: a JPEG for the web should not carry a 4 KB metadata blob unless
     /// the user asked for it.
     public var writeXMP: Bool
-    /// `nil` = off. Applied after the resample, to the final pixels.
-    public var sharpen: OutputSharpening?
     /// `{name}` `{date}` `{seq}` `{rating}`; see `ExportNaming`.
     public var nameTemplate: String
     /// Which size rule `longEdge`/`percent` obey. `original` is 111's default: the crop's own size.
@@ -457,7 +431,6 @@ public struct ExportPreset: Sendable, Equatable {
                 hdr: HDRExport? = nil,
                 hdrKind: HDRKind? = nil,
                 writeXMP: Bool = false,
-                sharpen: OutputSharpening? = nil,
                 nameTemplate: String = "{name}",
                 sizingMode: ExportSizingMode? = nil,
                 noUpscale: Bool = true,
@@ -484,7 +457,6 @@ public struct ExportPreset: Sendable, Equatable {
             self.hdr = hdr
         }
         self.writeXMP = writeXMP
-        self.sharpen = sharpen
         self.nameTemplate = nameTemplate
         // 111 review: the size **mode** is derived from the arguments when the caller does not name
         // one — `longEdge: 160` still means 「长边 160」 (as it did before 111), while an explicit
@@ -643,9 +615,6 @@ public struct ExportPreset: Sendable, Equatable {
         // 111 — a percent above 100 is legal when the user allowed upscaling; `noUpscale` caps it at
         // render time instead of rejecting the file.
         if let percent, percent < 10 { throw ExportPresetError.badPercent(percent) }
-        if let sharpen, !(0.3...3.0).contains(sharpen.radius) {
-            throw ExportPresetError.badSharpeningRadius(sharpen.radius)
-        }
         guard (0...100).contains(watermarkOpacity) else {
             throw ExportPresetError.badWatermarkOpacity(watermarkOpacity)
         }
@@ -709,7 +678,7 @@ public struct ExportPreset: Sendable, Equatable {
 extension ExportPreset: Codable {
 
     enum CodingKeys: String, CodingKey {
-        case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, sharpen, nameTemplate
+        case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, nameTemplate
         case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel, removeLocation
         case sdrToneMapping
         case watermarkText, watermarkPosition, watermarkOpacity
@@ -733,7 +702,6 @@ extension ExportPreset: Codable {
             .flatMap(SDRToneMapping.init(rawValue:)) ?? .global
         self.hdr = try c.decodeIfPresent(HDRExport.self, forKey: .hdr)
         self.writeXMP = try c.decodeIfPresent(Bool.self, forKey: .writeXMP) ?? false
-        self.sharpen = try c.decodeIfPresent(OutputSharpening.self, forKey: .sharpen)
         self.nameTemplate = try c.decodeIfPresent(String.self, forKey: .nameTemplate) ?? "{name}"
         self.sizingMode = try c.decodeIfPresent(String.self, forKey: .sizingMode)
             .flatMap(ExportSizingMode.init(rawValue:)) ?? .original
@@ -769,7 +737,6 @@ extension ExportPreset: Codable {
         // clean in tests that round-trip the old fixture).
         try c.encodeIfPresent(hdr, forKey: .hdr)
         try c.encode(writeXMP, forKey: .writeXMP)
-        try c.encodeIfPresent(sharpen, forKey: .sharpen)
         try c.encode(nameTemplate, forKey: .nameTemplate)
         if sizingMode != .original { try c.encode(sizingMode.rawValue, forKey: .sizingMode) }
         if !noUpscale { try c.encode(false, forKey: .noUpscale) }

@@ -295,13 +295,8 @@ public enum BatchExporter {
                     }
                 }
             }
-            // 3. output sharpening, at the final pixel size (that is the point of it).
-            if let sharpen = preset.sharpen, sharpen.isEnabled {
-                image = DisplaySharpen.apply(image, sharpen)
-            }
-
-            // 3b. 163 §1.6 — a half-size gain map needs an even base. Trim right/bottom after the
-            //     final size/sharpening, so the file, the map and the report all describe one picture.
+            // 3. 163 §1.6 — a half-size gain map needs an even base. Trim right/bottom after the
+            //    final size, so the file, the map and the report all describe one picture.
             if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
                 let plan = GainMapSizing.plan(image.size, halfSize: true)
                 if plan.crop.isNeeded {
@@ -332,8 +327,8 @@ public enum BatchExporter {
             }
 
             // 161 §8 — a second read immediately before the write: a cancel that landed between the
-            // render check above and here (sharpening / name allocation on a large image) must not
-            // add one more file after the user's click. Already-written files stay on disk.
+            // render check above and here (name allocation on a large image) must not add one more
+            // file after the user's click. Already-written files stay on disk.
             if cancel?.isCancelled == true {
                 return cancelledOutcome(index: index, item: item)
             }
@@ -578,76 +573,6 @@ public enum DisplayResample {
 
     private static func clip(_ v: Double) -> Float16 {
         Float16(min(max(v, 0), 4))
-    }
-}
-
-// MARK: - output sharpening
-
-/// Unsharp mask on display-encoded pixels: `out = c + amount · (c − blur(c))`, clamped to 0…1.
-///
-/// It runs on what the file will contain — after the resample, after the OETF — because that is the
-/// thing JPEG quantisation will soften. The document's own sharpening (detail group) is a different
-/// stage inside the graph and is untouched by this.
-public enum DisplaySharpen {
-
-    public static func apply(_ image: DisplayImage, _ sharpening: OutputSharpening) -> DisplayImage {
-        guard sharpening.isEnabled else { return image }
-        let w = image.width, h = image.height
-        guard w > 1, h > 1 else { return image }
-
-        let sigma = max(0.3, sharpening.radius)
-        let r = max(1, Int((3 * sigma).rounded(.up)))
-        var kernel = [Float](repeating: 0, count: 2 * r + 1)
-        var sum: Float = 0
-        for i in -r...r {
-            let v = Float(exp(-Double(i * i) / (2 * sigma * sigma)))
-            kernel[i + r] = v
-            sum += v
-        }
-        for i in kernel.indices { kernel[i] /= sum }
-
-        let n = w * h * 4
-        var src = [Float](repeating: 0, count: n)
-        for i in 0..<n { src[i] = Float(image.rgba[i]) }
-        var tmp = [Float](repeating: 0, count: n)
-
-        // Horizontal pass (3 channels: alpha is a mask, not a colour, and blurred alpha on a
-        // noneSkipLast bitmap would be meaningless).
-        for y in 0..<h {
-            let row = y * w
-            for x in 0..<w {
-                let o = (row + x) * 4
-                for c in 0..<3 {
-                    var acc: Float = 0
-                    for k in -r...r {
-                        let xx = min(max(x + k, 0), w - 1)
-                        acc += src[(row + xx) * 4 + c] * kernel[k + r]
-                    }
-                    tmp[o + c] = acc
-                }
-            }
-        }
-
-        var out = image.rgba
-        let amount = Float(sharpening.amount)
-        for y in 0..<h {
-            let row = y * w
-            for x in 0..<w {
-                let o = (row + x) * 4
-                for c in 0..<3 {
-                    var acc: Float = 0
-                    for k in -r...r {
-                        let yy = min(max(y + k, 0), h - 1)
-                        acc += tmp[(yy * w + x) * 4 + c] * kernel[k + r]
-                    }
-                    let original = src[o + c]
-                    let v = original + amount * (original - acc)
-                    out[o + c] = Float16(min(max(v, 0), 1))
-                }
-            }
-        }
-        return DisplayImage(width: w, height: h, rgba: out,
-                            primaries: image.primaries, bitDepth: image.bitDepth)
     }
 }
 

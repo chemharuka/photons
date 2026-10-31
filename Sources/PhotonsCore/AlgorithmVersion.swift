@@ -209,12 +209,19 @@ public enum StageAlgorithmVersion {
     /// content-aware source search — is what bumps this, because it changes the pixels of the same
     /// document without changing a stored number.
     public static let heal = 1
+    /// **2** — 191: the radius, the mask knee and the block window are **image** pixels converted to
+    /// the render's canvas (`σ_canvas = radius·S`, knee `0.01/S…0.04/S`, block `round(4·S)`) instead of
+    /// being read as canvas pixels. Same stored numbers, different pixels on every render whose scale
+    /// is not 1 — a 4 MP fit preview (`S ≈ 0.293`) is now the same physical sharpen as 1:1 instead of
+    /// 3.45× stronger — and the **cache is the reason this moves**: a 185-era cached frame at a
+    /// non-1:1 rung holds the old σ and would be served as if it were the new one. A 1:1 whole-picture
+    /// render (S = 1) is value-identical to 1, so the golden images do not move.
     /// **1** — S3.10's first arithmetic (185, 自研锐化): an unsharp mask on the display-referred pixels
     /// with a two-scale split (细节 weights the < σ/2 px band), a gradient-of-the-blur edge mask
     /// (蒙版) and the block-range limiter that bounds the halo. Start at 1 when a stage is introduced;
     /// the bump rule is the one every comment above spells out (the same stored numbers must produce
     /// different pixels to move this number).
-    public static let sharpen = 1
+    public static let sharpen = 2
     /// **3** — 134: the radius is normalised to half the **diagonal** (the corner is 1.0 at every
     /// aspect ratio), the contour is always circular (the `roundness` field is gone), and `midpoint`
     /// now spans centre → corner (`inner = mid/100`, was `mix(0.25, 1.05, …)` measured in half the

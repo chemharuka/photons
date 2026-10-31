@@ -7,7 +7,7 @@ using namespace metal;
 // This is **not** the decoder-forwarded 机身基线 sharpening (`DetailGroup.sharpening`, which is a
 // `CIRAWFilter` input read at decode time and cannot be previewed without a re-decode). This pass
 // reads the tone-mapped, display-referred pixels S3.9 produced, so a slider drag is one render — and
-// it composes with the export's own output sharpening (S4 / `DisplaySharpen`) instead of replacing it.
+// it is the document's own sharpening rather than an export-time pass.
 //
 // ## The arithmetic
 //
@@ -44,8 +44,11 @@ using namespace metal;
 //   · `sharpAmount`  0…150 → A = amount/100 (0…1.5). **0 means the stage is not encoded at all**
 //     (`RenderStage.pipeline(hasSharpen:)`), so a neutral document's frame, trace and key are the
 //     pre-185 ones byte for byte.
-//   · `sharpRadius`  0.5…3.0 → σ in **content pixels** of the render's own grid, which is what keeps a
-//     0.5-scale fit preview and a 1:1 window sharpening the same picture detail (「按缩放归一」).
+//   · `sharpRadius`  0.5…3.0 → the **document's** σ in *image* pixels. `RenderGraph` converts it to
+//     this canvas (`σ_canvas = radius·S`, floored at 0.5 canvas px), which is what makes a 0.5-scale
+//     fit preview and a 1:1 window sharpen the same picture detail — the comment that used to sit
+//     here claimed the conversion happened, and until 191 it did not (σ was read as canvas px, so a
+//     fit preview was 3.45× stronger than the same document at 1:1).
 //   · `sharpDetail`  0…100 → t above.
 //   · `sharpMasking` 0…100 → ω above.
 
@@ -74,11 +77,17 @@ static inline float s3_10_luma(float3 rgb, float3 w) {
     return dot(max(rgb, 0.0), w);
 }
 
-/// One Gaussian tap, `i` px from the centre. The σ floor keeps a 0.5 px radius from producing a
-/// NaN/0-weight kernel (a σ below a quarter pixel would be the identity, which is the one thing a
+/// One Gaussian tap, `i` px from the centre. The σ floor keeps a sub-pixel radius from producing a
+/// NaN/0-weight kernel (a σ below a quarter plane texel would be the identity, which is the one thing a
 /// sharpen slider must never be while it is above zero).
+///
+/// 191 — the floor is `0.125` **plane texels** (= a quarter canvas pixel), and it is the last line of
+/// defence rather than the working one: `blur_h`/`blur_v` already floor the wide σ at 0.5 canvas px
+/// (`sW ≥ 0.25`) and the fine one at half that (`sF ≥ 0.125`), so on every path that reaches here the
+/// number is unchanged. It is deliberately *not* raised to a whole plane texel: σ = 0.5 there would
+/// silently redefine `radius = 0.5` at S = 1, where the pre-191 arithmetic must stay bit-identical.
 static inline float s3_10_tap(float i, float sigma) {
-    float s = max(sigma, 0.05);
+    float s = max(sigma, 0.125);
     return exp(-0.5 * i * i / (s * s));
 }
 
@@ -108,17 +117,27 @@ kernel void s3_10_sharpen_pack(texture2d<float, access::read> lum [[texture(0)]]
                                uint2 gid [[thread_position_in_grid]]) {
     int qW = p.c.x, qH = p.c.y;
     if (int(gid.x) >= qW || int(gid.y) >= qH) { return; }
-    // `lum` is the half-resolution plane, so a 2 × 2 read of it is the 4 × 4 block of the frame this
-    // texel describes. Reading the plane instead of the frame is what makes this pass cheap: the
-    // frame-wide version moved eleven million texels at stride four and cost 4 ms of a 5.5 ms stage.
+    // `lum` is the half-resolution plane, so a `b × b` read of it is the `q × q` block of the frame this
+    // texel describes (`b = q/2`). Reading the plane instead of the frame is what makes this pass
+    // cheap: the frame-wide version moved eleven million texels at stride four and cost 4 ms of a
+    // 5.5 ms stage.
+    //
+    // 191 — `q` is `4 image pixels` converted to canvas pixels (`RenderGraph`: `max(2, round(4·S))`),
+    // so `b` is 2 at S = 1 (the hard-coded 2 × 2 this pass has always read, byte for byte), 1 at a
+    // half-scale fit and 4 at 2×. Blocks are indexed in **plane** texels: block `i` starts at `i·b`
+    // (not at `2·i`), which is what keeps the window one physical size when `q` is odd — `b = q/2`
+    // rounded down, so the effective window is `2b` canvas px, never less than 2.
     int hw = (p.b.x + 1) / 2, hh = (p.b.y + 1) / 2;
-    int x = int(gid.x) * 2, y = int(gid.y) * 2;
-    float4 a = lum.read(uint2(min(x, hw - 1), min(y, hh - 1)));
-    float4 b = lum.read(uint2(min(x + 1, hw - 1), min(y, hh - 1)));
-    float4 c = lum.read(uint2(min(x, hw - 1), min(y + 1, hh - 1)));
-    float4 d = lum.read(uint2(min(x + 1, hw - 1), min(y + 1, hh - 1)));
-    float lo = min(min(a.y, b.y), min(c.y, d.y));
-    float hi = max(max(a.z, b.z), max(c.z, d.z));
+    int b = max(1, p.b.z / 2);
+    int x = int(gid.x) * b, y = int(gid.y) * b;
+    float lo = INFINITY, hi = -INFINITY;
+    for (int j = 0; j < b; ++j) {
+        for (int i = 0; i < b; ++i) {
+            float4 t = lum.read(uint2(min(x + i, hw - 1), min(y + j, hh - 1)));
+            lo = min(lo, t.y);
+            hi = max(hi, t.z);
+        }
+    }
     bounds.write(float4(lo, hi, 0.0, 1.0), gid);
 }
 
@@ -160,8 +179,11 @@ kernel void s3_10_sharpen_blur_h(texture2d<float, access::read> lum [[texture(0)
                                  uint2 gid [[thread_position_in_grid]]) {
     int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
-    float sW = max(p.a.y, 0.05) * 0.5;
-    float sF = max(sW * 0.5, 0.05);
+    // 191 — the floors are in **canvas** pixels: 0.5 for the wide σ (0.25 plane texels) and half that
+    // for the fine one, so the 2× band ratio survives the floor. `p.a.y` is already ≥ 0.5 canvas px at
+    // every scale (`RenderGraph` floors it there), so at S = 1 these are the pre-191 lines exactly.
+    float sW = max(p.a.y, 0.5) * 0.5;
+    float sF = max(sW * 0.5, 0.125);
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
     float accW = 0.0, accF = 0.0, sumW = 0.0, sumF = 0.0;
@@ -194,8 +216,11 @@ kernel void s3_10_sharpen_blur_v(texture2d<float, access::read> wideH [[texture(
                                  uint2 tgid [[threadgroup_position_in_grid]],
                                  uint2 tg [[threads_per_threadgroup]]) {
     int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
-    float sW = max(p.a.y, 0.05) * 0.5;
-    float sF = max(sW * 0.5, 0.05);
+    // 191 — the floors are in **canvas** pixels: 0.5 for the wide σ (0.25 plane texels) and half that
+    // for the fine one, so the 2× band ratio survives the floor. `p.a.y` is already ≥ 0.5 canvas px at
+    // every scale (`RenderGraph` floors it there), so at S = 1 these are the pre-191 lines exactly.
+    float sW = max(p.a.y, 0.5) * 0.5;
+    float sF = max(sW * 0.5, 0.125);
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
 

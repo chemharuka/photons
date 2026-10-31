@@ -9,7 +9,7 @@ import PhotonsCore
 ///
 /// Everything here runs against synthetic pixels — no RAW fixture, no GPU, no catalog — because the
 /// engine's contract is "given pixels and a preset, produce one file per item and one result per
-/// item". The parts that need a renderer (long edge, sharpening) are exercised by handing the engine
+/// item". The parts that need a renderer (long edge) are exercised by handing the engine
 /// pixels of a known size and reading the file back with ImageIO.
 final class BatchExportTests: XCTestCase {
 
@@ -29,8 +29,8 @@ final class BatchExportTests: XCTestCase {
 
     // MARK: - helpers
 
-    /// A horizontal gradient with a step in the middle: uniform areas are useless for a sharpening
-    /// test, and an exact ramp is easy to reason about for a resample.
+    /// A horizontal gradient with a step in the middle: uniform areas are useless for a resample,
+    /// and an exact ramp is easy to reason about.
     /// The default preset asks for Display P3 (`ExportPreset.colorSpace`), and `BatchExporter`
     /// refuses to retag pixels that were rendered in another space, so the fixture is P3 too.
     private func image(width: Int = 320, height: Int = 240,
@@ -403,37 +403,11 @@ final class BatchExportTests: XCTestCase {
         XCTAssertEqual(report.written.count, 1)
     }
 
-    // MARK: - 9. sharpening (off by default)
-
-    func testOutputSharpeningChangesPixelsAndKeepsTheSize() throws {
-        let pixels = image(width: 200, height: 150)
-        func run(_ sharpen: OutputSharpening?) throws -> URL {
-            let report = BatchExporter.run(items: [item("sharp")],
-                                           preset: ExportPreset(format: .png, sharpen: sharpen),
-                                           outputDirectory: out,
-                                           render: { _, _ in pixels })
-            return try XCTUnwrap(report.written.first?.fileURL)
-        }
-        let plain = try run(nil)
-        let plainAgain = try run(nil)
-        let sharp = try run(OutputSharpening(amount: 1.0, radius: 1.0))
-
-        // Two runs of the same input are byte-identical (PNG is lossless and the encoder is
-        // deterministic), which is what makes the next assertion meaningful.
-        XCTAssertEqual(try Data(contentsOf: plain), try Data(contentsOf: plainAgain))
-        XCTAssertNotEqual(try Data(contentsOf: plain), try Data(contentsOf: sharp))
-
-        let img = try readBack(sharp)
-        XCTAssertEqual(img.width, 200)
-        XCTAssertEqual(img.height, 150)
-    }
-
-    // MARK: - 10. a preset is a file
+    // MARK: - 9. a preset is a file
 
     func testPresetSurvivesJSONAndKeepsEveryField() throws {
         let preset = ExportPreset(name: "Web", format: .heic, longEdge: 2400, quality: 0.8,
                                   bitDepth: 8, colorSpace: .displayP3, writeXMP: true,
-                                  sharpen: OutputSharpening(amount: 0.4, radius: 0.7),
                                   nameTemplate: "{date}/{name}")
         let url = scratch.appendingPathComponent("web.json")
         try preset.save(to: url)
@@ -452,7 +426,6 @@ final class BatchExportTests: XCTestCase {
         XCTAssertEqual(loaded.format, .jpeg)
         XCTAssertEqual(loaded.quality, 0.92, accuracy: 1e-9)
         XCTAssertFalse(loaded.writeXMP)
-        XCTAssertNil(loaded.sharpen)
 
         let typo = scratch.appendingPathComponent("typo.json")
         try Data(#"{"format":"jpgg"}"#.utf8).write(to: typo)
@@ -472,7 +445,7 @@ final class BatchExportTests: XCTestCase {
                        0.5, accuracy: 1e-12)
     }
 
-    // MARK: - 11. formats
+    // MARK: - 10. formats
 
     func testPNGAndAVIFPayloadsAreReadableWhenTheEncoderExists() throws {
         for format in [ExportFormat.png, .avif] {
