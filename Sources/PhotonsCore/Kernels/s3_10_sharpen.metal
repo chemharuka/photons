@@ -45,10 +45,14 @@ using namespace metal;
 //     (`RenderStage.pipeline(hasSharpen:)`), so a neutral document's frame, trace and key are the
 //     pre-185 ones byte for byte.
 //   · `sharpRadius`  0.5…3.0 → the **document's** σ in *image* pixels. `RenderGraph` converts it to
-//     this canvas (`σ_canvas = radius·S`, floored at 0.5 canvas px), which is what makes a 0.5-scale
-//     fit preview and a 1:1 window sharpen the same picture detail — the comment that used to sit
-//     here claimed the conversion happened, and until 191 it did not (σ was read as canvas px, so a
-//     fit preview was 3.45× stronger than the same document at 1:1).
+//     this canvas (`σ_canvas = radius·S`, then `σ_plane = σ_canvas / p` for the `p`-canvas-pixel base
+//     plane, see `sharpenPlaneStride`), with **no σ floor anywhere**: the σ the kernel runs with is
+//     the σ the document asked for, at every zoom. What makes a sub-texel σ survive that honestly is
+//     `s3_10_tap`'s moment-matched kernel rather than a clamp — a σ below one texel is a kernel that
+//     is too *narrow* to widen, and the clamp that used to sit here (0.5 canvas px) is exactly the
+//     bug that made a fit preview 3.4–12.8× stronger than the same document at 1:1: half a canvas
+//     pixel is 2.5 image pixels at a 0.2 fit, and it also collapsed every `radius ≤ 0.5/S` onto one
+//     kernel, so the radius slider was three identical values at fit.
 //   · `sharpDetail`  0…100 → t above.
 //   · `sharpMasking` 0…100 → ω above.
 
@@ -65,7 +69,7 @@ struct SharpenParams {
     int4 b;
     // qW · qH · contentOriginX · contentOriginY
     int4 c;
-    // contentW · contentH · 0 · 0
+    // contentW · contentH · planeStride p (canvas px per plane texel) · 0
     int4 d;
     // luma weights (Rec.709) · mask knee g0
     float4 e;
@@ -77,18 +81,39 @@ static inline float s3_10_luma(float3 rgb, float3 w) {
     return dot(max(rgb, 0.0), w);
 }
 
-/// One Gaussian tap, `i` px from the centre. The σ floor keeps a sub-pixel radius from producing a
-/// NaN/0-weight kernel (a σ below a quarter plane texel would be the identity, which is the one thing a
-/// sharpen slider must never be while it is above zero).
+/// One Gaussian tap, `i` texels from the centre.
 ///
-/// 191 — the floor is `0.125` **plane texels** (= a quarter canvas pixel), and it is the last line of
-/// defence rather than the working one: `blur_h`/`blur_v` already floor the wide σ at 0.5 canvas px
-/// (`sW ≥ 0.25`) and the fine one at half that (`sF ≥ 0.125`), so on every path that reaches here the
-/// number is unchanged. It is deliberately *not* raised to a whole plane texel: σ = 0.5 there would
-/// silently redefine `radius = 0.5` at S = 1, where the pre-191 arithmetic must stay bit-identical.
+/// ## No floor, a *moment-matched* kernel instead
+///
+/// What used to be here was `max(sigma, 0.125)`: a σ clamp whose job was to keep a sub-pixel radius
+/// from producing a zero-support kernel. It is gone, because a clamp is a σ the document never asked
+/// for and it is not scale-free — and because the kernel already has an honest way to be narrower
+/// than a texel:
+///
+///   · **σ ≥ 0.125 texels** — the sampled Gaussian, unchanged bit for bit (this is every radius at
+///     S = 1: the document's smallest, `radius = 0.5`, gives σ_plane = 0.125 exactly, so the branch
+///     below is unreachable on the identity gate's path).
+///   · **σ < 0.125 texels** — three taps whose **variance is σ²** and whose weights **sum to 1**:
+///     the centre carries `1 − σ²` and the two neighbours `σ²/2` each. That is the discrete kernel
+///     closest to a Gaussian of that σ: it is *narrower*, never wider, it keeps the energy (a flat
+///     field still maps to itself, which is the normalisation the header promises), and — the point
+///     of the exercise — it stays **monotone in σ**, so a radius slider below one texel still moves
+///     in one direction instead of collapsing onto a floor. The box/area limit of the Gaussian
+///     (mass concentrated on the nearest texel) is this kernel's σ → 0 end, not a separate branch.
+///   · the two are **blended** over σ ∈ (0, 0.125) so the slider has no step at the branch. The
+///     blend's upper end is the sampled Gaussian, which at 0.125 texels already has zero neighbours,
+///     so the kernel is continuous across the whole range.
+///
+/// At σ → 0 the kernel is the delta, i.e. the identity: that is the honest answer — a radius far
+/// below the base plane's own texel has nothing left to differentiate — and it is why the response
+/// falls off smoothly at a small zoom instead of being inflated by a floor.
 static inline float s3_10_tap(float i, float sigma) {
-    float s = max(sigma, 0.125);
-    return exp(-0.5 * i * i / (s * s));
+    float s = max(sigma, 1e-4);
+    float e = exp(-0.5 * i * i / (s * s));
+    if (s >= 0.125) { return e; }
+    float a = 0.5 * s * s;                       // neighbour weight; variance of the pair == σ²
+    float m = (i * i < 0.25) ? (1.0 - 2.0 * a) : ((i * i < 2.25) ? a : 0.0);
+    return mix(m, e, clamp(s / 0.125, 0.0, 1.0));
 }
 
 /// A **codes** budget expressed in the linear display values this stage works on.
@@ -123,12 +148,15 @@ kernel void s3_10_sharpen_pack(texture2d<float, access::read> lum [[texture(0)]]
     // 5.5 ms stage.
     //
     // 191 — `q` is `4 image pixels` converted to canvas pixels (`RenderGraph`: `max(2, round(4·S))`),
-    // so `b` is 2 at S = 1 (the hard-coded 2 × 2 this pass has always read, byte for byte), 1 at a
-    // half-scale fit and 4 at 2×. Blocks are indexed in **plane** texels: block `i` starts at `i·b`
-    // (not at `2·i`), which is what keeps the window one physical size when `q` is odd — `b = q/2`
-    // rounded down, so the effective window is `2b` canvas px, never less than 2.
-    int hw = (p.b.x + 1) / 2, hh = (p.b.y + 1) / 2;
-    int b = max(1, p.b.z / 2);
+    // and the plane's stride is one texel per `p` canvas px (`max(1, round(2·S))`), so `b = q/p` is 2
+    // at S = 1 (the hard-coded 2 × 2 this pass has always read, byte for byte) and 2 at 2× (q = 8 over
+    // p = 4), i.e. the window is the same 4 image pixels in both. Blocks are indexed in **plane**
+    // texels: block `i` starts at `i·b` (not at `p·i`), which is what keeps the window one physical
+    // size when `q` is not a multiple of `p` — `b = q/p` rounded down, so the effective window is
+    // `b·p` canvas px, never less than `p`. At a fit scale `q` bottoms out at its own floor of two
+    // canvas pixels, so the window is wider in image pixels there — the same statement 191 made.
+    int hw = (p.b.x + p.d.z - 1) / max(p.d.z, 1), hh = (p.b.y + p.d.z - 1) / max(p.d.z, 1);
+    int b = max(1, p.b.z / max(p.d.z, 1));
     int x = int(gid.x) * b, y = int(gid.y) * b;
     float lo = INFINITY, hi = -INFINITY;
     for (int j = 0; j < b; ++j) {
@@ -143,30 +171,54 @@ kernel void s3_10_sharpen_pack(texture2d<float, access::read> lum [[texture(0)]]
 
 // MARK: - 2. plane, separable Gaussian
 
-/// The luma plane at **half resolution**: one texel per 2 × 2 block, the mean of its four luma
+/// The luma plane at **reduced resolution**: one texel per `p × p` block, the mean of its luma
 /// samples.
 ///
-/// Half, because a USM's base layer is by definition the low band — nothing in `G_σ` with σ ≥ 0.25 px
-/// survives a 2 × 2 average, and the apply pass samples this plane bilinearly, so the base it
-/// reconstructs is the smooth field it always was. The two blur passes then move a quarter of the
-/// bytes, which on this hardware is the whole cost (`blur_v` was 3 ms of the 4.10 Mpx frame at full
-/// resolution, and the stage has to fit in 1.2 ms).
+/// `p` is `max(1, round(2·S))` canvas pixels (`RenderGraph.sharpenPlaneStride`), i.e. one texel per
+/// **two image pixels** at every zoom: 2 at 1:1 (the half-resolution plane 185 shipped, byte for
+/// byte), 2 below it down to `S = 0.75`, and 4 at 2× — so the plane's own box is the same physical
+/// width in every rung, which is what keeps the *base layer* scale-free. At a 0.2 fit the box cannot
+/// be two image pixels (the canvas has only 0.2 pixels per image pixel) and `p` is 1: the plane is
+/// the canvas itself, the finest base the canvas can hold. A fixed `p = 2` would make the box 10
+/// image pixels there, and that box — not the σ — is the reason a fit preview used to show a
+/// stronger halo than the same document at 1:1.
+///
+/// Reduced rather than full, because a USM's base layer is by definition the low band — nothing in
+/// `G_σ` with σ ≥ 0.25 px survives a `p × p` average — and the two blur passes then move a quarter of
+/// the bytes, which on this hardware is the whole cost (`blur_v` was 3 ms of the 4.10 Mpx frame at
+/// full resolution, and the stage has to fit in 1.2 ms). The apply pass samples this plane
+/// bilinearly, so at `p = 1` (a fit preview) the extra reconstruction blur is a canvas pixel's worth
+/// and at 2× it is two image pixels' worth — the same physical width as 1:1's.
 kernel void s3_10_sharpen_luma(texture2d<float, access::read> src [[texture(0)]],
                                texture2d<float, access::write> lum [[texture(1)]],
                                constant SharpenParams &p [[buffer(0)]],
                                uint2 gid [[thread_position_in_grid]]) {
     int w = p.b.x, h = p.b.y;
-    int hw = (w + 1) / 2, hh = (h + 1) / 2;
+    int pf = max(p.d.z, 1);
+    int hw = (w + pf - 1) / pf, hh = (h + pf - 1) / pf;
     if (int(gid.x) >= hw || int(gid.y) >= hh) { return; }
-    int x = int(gid.x) * 2, y = int(gid.y) * 2;
-    float a = s3_10_luma(src.read(uint2(x, y)).rgb, p.e.xyz);
-    float b = s3_10_luma(src.read(uint2(min(x + 1, w - 1), y)).rgb, p.e.xyz);
-    float c = s3_10_luma(src.read(uint2(x, min(y + 1, h - 1))).rgb, p.e.xyz);
-    float d = s3_10_luma(src.read(uint2(min(x + 1, w - 1), min(y + 1, h - 1))).rgb, p.e.xyz);
-    // `.r` is the mean every later pass reads; `.g`/`.b` are this 2 × 2 cell's own range, which is the
-    // 4 × 4 block the limiter wants and the reason `s3_10_sharpen_pack` never touches the frame.
-    lum.write(float4((a + b + c + d) * 0.25,
-                     min(min(a, b), min(c, d)), max(max(a, b), max(c, d)), 1.0), gid);
+    if (pf == 2) {
+        // S = 1 and every ≥ 1:1 canvas: byte for byte the 185 expression (same reads, same order).
+        int x = int(gid.x) * 2, y = int(gid.y) * 2;
+        float a = s3_10_luma(src.read(uint2(x, y)).rgb, p.e.xyz);
+        float b = s3_10_luma(src.read(uint2(min(x + 1, w - 1), y)).rgb, p.e.xyz);
+        float c = s3_10_luma(src.read(uint2(x, min(y + 1, h - 1))).rgb, p.e.xyz);
+        float d = s3_10_luma(src.read(uint2(min(x + 1, w - 1), min(y + 1, h - 1))).rgb, p.e.xyz);
+        // `.r` is the mean every later pass reads; `.g`/`.b` are this 2 × 2 cell's own range, which is
+        // the 4 × 4 block the limiter wants and the reason `s3_10_sharpen_pack` never touches the frame.
+        lum.write(float4((a + b + c + d) * 0.25,
+                         min(min(a, b), min(c, d)), max(max(a, b), max(c, d)), 1.0), gid);
+        return;
+    }
+    float sum = 0.0, lo = INFINITY, hi = -INFINITY;
+    int x = int(gid.x) * pf, y = int(gid.y) * pf;
+    for (int j = 0; j < pf; ++j) {
+        for (int i = 0; i < pf; ++i) {
+            float v = s3_10_luma(src.read(uint2(min(x + i, w - 1), min(y + j, h - 1))).rgb, p.e.xyz);
+            sum += v; lo = min(lo, v); hi = max(hi, v);
+        }
+    }
+    lum.write(float4(sum / float(pf * pf), lo, hi, 1.0), gid);
 }
 
 /// Horizontal Gaussian at **both** scales in one dispatch: the two kernels share every tap, so reading
@@ -177,13 +229,15 @@ kernel void s3_10_sharpen_blur_h(texture2d<float, access::read> lum [[texture(0)
                                  texture2d<float, access::write> fineH [[texture(2)]],
                                  constant SharpenParams &p [[buffer(0)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
+    int w = (p.b.x + p.d.z - 1) / max(p.d.z, 1), h = (p.b.y + p.d.z - 1) / max(p.d.z, 1);
     if (int(gid.x) >= w || int(gid.y) >= h) { return; }
-    // 191 — the floors are in **canvas** pixels: 0.5 for the wide σ (0.25 plane texels) and half that
-    // for the fine one, so the 2× band ratio survives the floor. `p.a.y` is already ≥ 0.5 canvas px at
-    // every scale (`RenderGraph` floors it there), so at S = 1 these are the pre-191 lines exactly.
-    float sW = max(p.a.y, 0.5) * 0.5;
-    float sF = max(sW * 0.5, 0.125);
+    // 191 — σ is in **plane texels**: the document's canvas σ divided by this plane's own stride
+    // `p` (canvas px per texel), with **no floor**. The fine plane is exactly half the wide one, so
+    // the ≥ σ/2 px band ratio survives every zoom; a σ below one texel is handled by
+    // `s3_10_tap`'s moment-matched kernel rather than by a clamp that would widen it.
+    int pf = max(p.d.z, 1);
+    float sW = p.a.y / float(pf);
+    float sF = sW * 0.5;
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
     float accW = 0.0, accF = 0.0, sumW = 0.0, sumF = 0.0;
@@ -215,12 +269,14 @@ kernel void s3_10_sharpen_blur_v(texture2d<float, access::read> wideH [[texture(
                                  uint2 tid [[thread_position_in_threadgroup]],
                                  uint2 tgid [[threadgroup_position_in_grid]],
                                  uint2 tg [[threads_per_threadgroup]]) {
-    int w = (p.b.x + 1) / 2, h = (p.b.y + 1) / 2;
-    // 191 — the floors are in **canvas** pixels: 0.5 for the wide σ (0.25 plane texels) and half that
-    // for the fine one, so the 2× band ratio survives the floor. `p.a.y` is already ≥ 0.5 canvas px at
-    // every scale (`RenderGraph` floors it there), so at S = 1 these are the pre-191 lines exactly.
-    float sW = max(p.a.y, 0.5) * 0.5;
-    float sF = max(sW * 0.5, 0.125);
+    int w = (p.b.x + p.d.z - 1) / max(p.d.z, 1), h = (p.b.y + p.d.z - 1) / max(p.d.z, 1);
+    // 191 — σ is in **plane texels**: the document's canvas σ divided by this plane's own stride
+    // `p` (canvas px per texel), with **no floor**. The fine plane is exactly half the wide one, so
+    // the ≥ σ/2 px band ratio survives every zoom; a σ below one texel is handled by
+    // `s3_10_tap`'s moment-matched kernel rather than by a clamp that would widen it.
+    int pf = max(p.d.z, 1);
+    float sW = p.a.y / float(pf);
+    float sF = sW * 0.5;
     int kW = min(int(ceil(2.0 * sW)) + 1, 12);
     int kF = min(int(ceil(2.0 * sF)) + 1, kW);
 

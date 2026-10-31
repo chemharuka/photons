@@ -241,7 +241,14 @@ public enum StageAlgorithmVersion {
     /// (蒙版) and the block-range limiter that bounds the halo. Start at 1 when a stage is introduced;
     /// the bump rule is the one every comment above spells out (the same stored numbers must produce
     /// different pixels to move this number).
-    public static let sharpen = 2
+    ///
+    /// **3** — 192: the σ **floor** is gone, and the base plane's stride follows the render scale. σ
+    /// now runs at exactly `radius_img · S` (the moment-matched sub-texel kernel in `s3_10_tap`
+    /// carries everything below one texel), and the plane is built at one texel per **two image
+    /// pixels** (`max(1, round(2·S))`) instead of a fixed 2 canvas px. Both change the pixels of the
+    /// same document at every rung below 1:1 and above it; S = 1 is value-identical to 2, so the
+    /// golden images do not move.
+    public static let sharpen = 3
     /// **3** — 134: the radius is normalised to half the **diagonal** (the corner is 1.0 at every
     /// aspect ratio), the contour is always circular (the `roundness` field is gone), and `midpoint`
     /// now spans centre → corner (`inner = mid/100`, was `mix(0.25, 1.05, …)` measured in half the
