@@ -448,8 +448,8 @@ final class SharpenStageTests: XCTestCase {
 
     func testMarginalGPUCostAtFourMegapixels() throws {
         // **The millisecond marginal is printed, not asserted.** 185 shipped this as an
-        // `XCTExpectFailure` around a ±2 ms number on a box that swaps; that anti-pattern punishes
-        // success (the test *fails* when the machine is fast enough to meet the budget — it did, on
+        // expected-failure wrapper around a ±2 ms number on a box that swaps; that anti-pattern
+        // punishes success (the test *fails* when the machine is fast enough to meet the budget — it did, on
         // 2026-10-31, with marginals of +9.6 / −4.7 / +0.8 ms for one stage) and excuses failure
         // (a real 10× cost regression would pass as "the expected failure"). Wall-clock marginals
         // even go **negative** under load, so nothing measured here is quotable while other builds
