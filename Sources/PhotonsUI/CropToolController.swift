@@ -950,23 +950,25 @@ public final class CropToolController {
             canvasCoverage(rect, canvas: canvas, source: source, degrees: angle)
         }
 
-        /// 162's promise — the frame must stay **findable** — in document space: at least one of its
-        /// four corners is on the canvas, i.e. a grip is grabbable. 188 spelled this as 「the quad's
-        /// centre is in the viewport」, the same promise *through the view*, and that is what made
-        /// the frame's excursion a distance that changed with the zoom. The canvas is always
-        /// reachable — the camera may walk anywhere on the picture — so a corner on the canvas is
-        /// the honest form of 「还可以抓住」, and it does not read the viewport.
-        func gripsOnCanvas(_ rect: CropRect) -> Bool {
-            let tolerance = 1e-6
-            return documentQuad(rect, source: source, degrees: angle).contains {
-                $0.x >= canvas.minX - tolerance && $0.x <= canvas.maxX + tolerance
-                    && $0.y >= canvas.minY - tolerance && $0.y <= canvas.maxY + tolerance
-            }
-        }
-
-        /// The law of 190: ≥ `canvasCoverageFloor` of the frame over the canvas, and still grabbable.
+        /// The law of 190, stated with **areas only**: at least a quarter of the frame's own area is
+        /// over the canvas. Area (not a corner test) is what makes it well defined for a frame larger
+        /// than the canvas — there coverage is `canvas/frame`, monotonically increasing along the
+        /// pull-back, which is exactly what the bisection needs.
+        ///
+        /// **There is deliberately no reachability clause here.** 188 had one (「the quad's centre is
+        /// in the viewport」) and 190 must not: at 1:1 and 2× the viewport is a *window* of the
+        /// canvas, so a frame that keeps 25 % over the canvas can sit outside it — measured, the
+        /// frame's centre is off-viewport at both zooms while the coverage is exactly 0.25. The two
+        /// clauses cannot both hold, and the coverage clause is the one the user's report is about.
+        /// Do not add it back: it is what made the limit move with the zoom.
+        ///
+        /// The frame stays findable by the mechanism that was always there, not by a new one:
+        /// ① 25 % of it is on the **canvas** (not on the screen), ② 适应 is the entry framing and
+        /// shows the whole canvas (`CropZoomEntryTests`), so zooming back out puts the frame on
+        /// screen again, ③ therefore 「框丢了」 cannot happen. No auto-pan and no auto-fit: that
+        /// would be a new feature, and it is not this task.
         func legal(_ rect: CropRect) -> Bool {
-            coverage(rect) >= Self.canvasCoverageFloor && gripsOnCanvas(rect)
+            coverage(rect) >= Self.canvasCoverageFloor
         }
 
         // **No shrink** (188 deleted the `0…1²`-room search and it is not coming back): the frame is
@@ -974,6 +976,12 @@ public final class CropToolController {
         // 出去」, arrived at by moving, never by resizing. The quad turns about the *source's*
         // centre (`imagePoint`), so a move asked for in document pixels is `R(θ)` of the same move
         // in the rect's own coordinates.
+        //
+        // Returns a rect that satisfies `legal` — including the case the floor cannot be reached at
+        // all (a frame more than four times the canvas' area): then no position is legal, the
+        // canvas' centre is the *maximum* coverage there is, and that is what is returned. `seen()`
+        // is applied by the caller, which re-checks it (the opt-in photo-bound shrink may not undo
+        // this law).
         func pulledBack() -> CropRect {
             let rotation = CropGeometry.RotationMatrix(degrees: angle)
             let corners = documentQuad(base, source: source, degrees: angle)
@@ -993,15 +1001,16 @@ public final class CropToolController {
             // Already legal: nothing to pull back, and `base` is the answer — returning it (rather
             // than `moved(≈0)`) keeps the rect bit for bit, so a legal frame is never rewritten.
             if legal(base) { return base }
-            // A frame larger than the canvas can never reach the floor — the canvas' centre is the
-            // best it can do, and it is still legal in the only sense that matters (grabbable).
-            guard legal(moved(1)) else { return seen(moved(1)) }
+            // Centred, the frame reaches the maximum coverage any position can have — a frame up to
+            // four times the canvas' area still clears the floor there (canvas/frame ≥ 25 %). Beyond
+            // that no position is legal and the centre, the best there is, is what is returned.
+            guard legal(moved(1)) else { return moved(1) }
             var outside = 0.0, inside = 1.0
             for _ in 0..<48 {
                 let mid = (outside + inside) / 2
                 if legal(moved(mid)) { inside = mid } else { outside = mid }
             }
-            return seen(moved(inside))
+            return moved(inside)
         }
 
         // The frame already satisfies the law: the only thing that may still have to be written back
@@ -1013,7 +1022,15 @@ public final class CropToolController {
             return true
         }
 
-        let next = pulledBack()
+        var next = pulledBack()
+        // 190 — `seen()` is the opt-in **photo-bound** shrink (`clampsToRotatedFrame`), and a shrink
+        // is a view: it may not undo the canvas law that was just satisfied. Re-check it here and
+        // refuse a shrink that breaks the law (宁可不缩), so no path can hand back a rect that
+        // fails `legal`.
+        if clampsToRotatedFrame, angle != 0 {
+            let shrunk = seen(next)
+            if legal(shrunk) { next = shrunk }
+        }
         guard next != before else { return false }
         draft.crop = next
         return true
@@ -1063,6 +1080,40 @@ public final class CropToolController {
         let degrees = CropTool.clampStraighten(draft.straighten)
         return canvasCoverage(rect, canvas: documentCanvas(source: src, degrees: degrees),
                               source: src, degrees: degrees)
+    }
+
+    /// **Diagnostic only — not part of the law.** `true` when a corner of the frame is on the canvas,
+    /// or the canvas' centre is inside the frame. 188 used a viewport version of this as a *clamp*
+    /// and that is what made the limit move with the zoom (see `legal`): it is printed by the tests
+    /// to show where the frame's centre sits, and nothing may branch on it.
+    func hasReachableGrip(_ rect: CropRect, source: ImageSize? = nil) -> Bool {
+        let src = source ?? sourceSize
+        let degrees = CropTool.clampStraighten(draft.straighten)
+        return reachableGrip(rect, canvas: documentCanvas(source: src, degrees: degrees),
+                             source: src, degrees: degrees)
+    }
+
+    private func reachableGrip(_ rect: CropRect, canvas: CGRect, source: ImageSize,
+                               degrees: Double) -> Bool {
+        let corners = documentQuad(rect, source: source, degrees: degrees)
+        let tolerance = 1e-6
+        if corners.contains(where: {
+            $0.x >= canvas.minX - tolerance && $0.x <= canvas.maxX + tolerance
+                && $0.y >= canvas.minY - tolerance && $0.y <= canvas.maxY + tolerance
+        }) { return true }
+        // Convex polygon, consistent winding: one sign for every cross product means "inside".
+        guard corners.count == 4 else { return false }
+        let centre = CGPoint(x: canvas.midX, y: canvas.midY)
+        var positive = false, negative = false
+        for index in corners.indices {
+            let a = corners[index], b = corners[(index + 1) % corners.count]
+            let cross = Double(b.x - a.x) * Double(centre.y - a.y)
+                - Double(b.y - a.y) * Double(centre.x - a.x)
+            if cross > 1e-9 { positive = true }
+            if cross < -1e-9 { negative = true }
+            if positive && negative { return false }
+        }
+        return true
     }
     /// The frame's four corners in document pixels — `CropTool.layout`'s quad with the view's
     /// similarity removed. `imagePoint` there is `centre + R(−θ)·(corner − centre)`, so this is the
