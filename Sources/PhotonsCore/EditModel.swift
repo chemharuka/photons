@@ -183,6 +183,14 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// `keyMaterial` has no `.detail` branch, so a slider parked there would change no key and would
     /// silently render nothing.
     public var optics: OpticsGroup
+    /// 179 — **原色校准**: seven numbers (shadows' green↔magenta tint + a hue/saturation pair per
+    /// primary) that become one 3×3 matrix applied at S1's exit. Its own group, and it dirties
+    /// `.sceneLinear` because the matrix is part of that stage's arithmetic — not a new stage.
+    ///
+    /// All zero = the exact unit matrix **and no key token at all**: `matrix()` returns nil, so the
+    /// graph dispatches S1's calibration-free entry point, no uniform is bound and a neutral
+    /// document's S1 material is byte-identical to 178's. See `CalibrationGroup` for the derivation.
+    public var calibration: CalibrationGroup
     /// Local masks (M4). Empty = the graph has no mask stages at all (§3.2): the key chain stays the
     /// M1 seven-link chain and the pixels are byte-identical to M1.
     public var masks: [Mask]
@@ -216,6 +224,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 effects: EffectsGroup = .identity,
                 sharpen: SharpenGroup = .identity,
                 optics: OpticsGroup = .identity,
+                calibration: CalibrationGroup = .identity,
                 masks: [Mask] = [],
                 showMaskID: String? = nil,
                 healSpots: [HealSpot] = []) {
@@ -232,6 +241,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.effects = effects
         self.sharpen = sharpen
         self.optics = optics
+        self.calibration = calibration
         self.masks = masks
         self.showMaskID = showMaskID
         self.healSpots = healSpots
@@ -337,6 +347,12 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// and the key chain for nothing.
     public var hasGrain: Bool { effects.hasGrain }
 
+    /// 179: does S1 run the **calibrated** instantiation? Judged **by value** — all seven numbers at 0
+    /// is the answer "no", and then there is no `;cal` token, no `CalParams` buffer and no matrix in
+    /// the kernel at all. A document that has never opened the card is the pre-179 document, byte for
+    /// byte (the same by-value rule `hasGrain` / `hasDetailFX` follow).
+    public var hasCalibration: Bool { !calibration.isIdentity }
+
     /// 2026-10-28 (P0-6): does S3.9 exist for this document? Judged **by value** — 纹理 or 清晰度
     /// non-zero — exactly the way `hasGrain` judges S3.7. 117 moved 去雾 out of this stage, so it no
     /// longer contributes. A document whose two are 0 keeps the pre-S3.9 stage list, key chain and
@@ -409,6 +425,8 @@ public struct EditModel: Sendable, Equatable, Codable {
         // keeps its whole key chain and its pixels byte for byte.
         v.sharpen = c.val("sharpen", v.sharpen)
         v.optics = c.val("optics", v.optics)
+        // 179: absent = seven zeros = the unit matrix, no key token, no S1 instantiation change.
+        v.calibration = c.val("calibration", v.calibration)
         v.masks = c.val("masks", v.masks)
         v.showMaskID = c.val("showMaskID", v.showMaskID)
         // 派单 006: pre-schema-3 documents used `light.temperature = 6500` / `tint = 0` as "the
@@ -489,6 +507,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             try c.encode(sharpen, forKey: AnyCodingKey("sharpen"))
         }
         try c.encode(optics, forKey: AnyCodingKey("optics"))
+        // 179: written **only when the panel moved** (the `colorGrading`/`healSpots` rule). A neutral
+        // document re-encodes byte for byte — which is not a cosmetic detail: `ThumbRecipe`'s on-disk
+        // key is `sha256(canonical(develop_json) | …)`, so an unconditional key would invalidate every
+        // cached thumbnail on disk for a document that never opened the card.
+        if !calibration.isIdentity {
+            try c.encode(calibration, forKey: AnyCodingKey("calibration"))
+        }
         try c.encode(masks, forKey: AnyCodingKey("masks"))
         try c.encodeIfPresent(showMaskID, forKey: AnyCodingKey("showMaskID"))
         // 2026-10-28 (078 P0-1): written **only when non-empty** (the `colorGrading` rule), so a
@@ -612,6 +637,10 @@ public struct EditModel: Sendable, Equatable, Codable {
         // 029: `α` is a geometry parameter — it moves where R and B are sampled out of the source —
         // so it dirties S0 and, through the key chain, everything below it.
         if optics != old.optics { s.insert(.geometry) }
+        // 179: the calibration's seven numbers *are* S1's arithmetic — its matrix is applied at that
+        // stage's exit — so it dirties `.sceneLinear` and nothing above it. A calibration edit must
+        // not evict S0's decode or the mask atlas (the same scoping `StageAlgorithmVersion` uses).
+        if calibration != old.calibration { s.insert(.sceneLinear) }
         // Masks split across the two new stages: geometry/combination invalidates the atlas,
         // adjustments invalidate only S1.6, and a rename invalidates nothing (§3.2). Both stages go
         // dirty when a mask appears or disappears, because the keys stop existing.
@@ -742,6 +771,13 @@ public struct EditModel: Sendable, Equatable, Codable {
             // byte — the pinned vectors in `WindowTests` / `MaskTests` and every recorded golden depend
             // on it. `boff` is the clamped value, i.e. the number the kernel actually adds.
             if light.blackOffset != 0 { m += ";boff=\(k(light.clampedBlackOffset))" }
+            // 179: the 原色校准 matrix. Appended **only when it is not the unit matrix** (the
+            // `asp`/`car`/`boff` discipline): a document with all seven numbers at 0 renders through
+            // S1's calibration-free instantiation, so its material — and therefore the neutral
+            // goldens' pixels — is byte-identical to 178's. The seven numbers are the key's own
+            // units: **integer tenths of a slider unit**, so two adjacent positions can never print
+            // the same text (OpticsGroup's 084 lesson, `%.5f` cannot separate 0.1 steps).
+            if let cal = calibration.keyToken { m += cal }
             return m
 
         // S1.5 / S1.6 carry two different materials on purpose: `adjustments` must not be able to
@@ -2500,6 +2536,285 @@ public struct OpticsGroup: Sendable, Equatable, Codable {
     /// True when both sliders are on 0 — the panel's own statement of `isIdentity`, in the units it
     /// draws (a document hand-edited to `1e-9` is not "at zero" for either of them).
     public var slidersAtRest: Bool { caRedSliderPosition == 0 && caBlueSliderPosition == 0 }
+}
+
+// MARK: - 179 · 原色校准 (Calibration)
+
+/// 原色校准 — LightCraft's `Calibration` panel (and Lightroom's Develop ▸ 色彩 ▸ 校准): **seven
+/// numbers** that become one 3×3 matrix on the working primaries, applied at S1's exit.
+///
+/// | number | −100…+100 | what it does |
+/// |---|---|---|
+/// | `shadowTint` | green ↔ magenta | only the shadows (a window in log light, luminance kept) |
+/// | `redHue` / `greenHue` / `blueHue` | degrees | rotate that primary around the hue circle |
+/// | `redSat` / `greenSat` / `blueSat` | chroma | push that primary toward grey / toward its edge |
+///
+/// ## Why a matrix, and why at S1's exit
+///
+/// A primary is a *direction* in linear RGB, so "move the red primary" is a 3×3 matrix `M` with
+/// `M·e_r = q_r` (the new red), and no other stage can express it: S3.6's HSL bands work on already
+/// tone-mapped codes, S1.8 is a luminance decomposition. The matrix is applied where the working
+/// primaries are still honest — the end of S1, on `s1_scene_linear`'s own output, in the same place
+/// the CPU already hands S1 a uniform. It is **not** a new stage: no new `RenderStage`, no new link
+/// in the key chain, no new texture. `StageAlgorithmVersion.sceneLinear` moves 7 → 8 because the
+/// stage's arithmetic grew a term.
+///
+/// ## The derivation (`matrix()`), and the reference
+///
+/// Ported from LightCraft (`crates/pipeline/src/colorops.rs#calibration_matrix` /
+/// `#calibrate`, MIT OR Apache-2.0) — one function, rewritten in `Double` on `Matrix3`:
+///
+///   1. take the primary's unit vector `e_i` in **linear Rec.2020** (the working space,
+///      `ColorPrimaries.working`) and convert it to **OkLab** (Ottosson's XYZ→LMS and LMS→Lab
+///      constants, composed with `ColorPrimaries.rec2020.toXYZ`);
+///   2. read it as `L, C, h`; write back `L, C·(1 + sat/100·0.6), h + hue·1°` — hue is dragged at
+///      **constant OkLab lightness and constant *scaled* chroma**, which is what makes a hue slider
+///      a rotation rather than a brightness move;
+///   3. if the result left the cube (a primary rotated at full chroma always does), **reduce chroma
+///      at that same `L, h`** until it is back inside (`0…1` per channel, 40 halvings). This is the
+///      one place this port improves on the reference: LightCraft writes the out-of-gamut column and
+///      clips later, and clipping *is* a hue change — measured, the red primary rotated +30° came
+///      back as **+4.9°** with the clip, and **+30.00°** without it;
+///   4. `P`'s columns are the three new primaries; solve `P·k = (1,1,1)` and scale column `i` by
+///      `k_i`. That is the **white-point constraint**: `M·(1,1,1) = P·k = (1,1,1)` exactly, so a
+///      neutral pixel is a fixed point of the whole matrix and `0.18` grey cannot take a cast.
+///
+/// Two consequences worth writing down, because they are theorems and not tuning:
+///
+///   · **A primary that does not move is untouched.** With `hue = sat = 0` the column is the unit
+///     vector itself (the round trip is skipped), so `G` and `B` pixels of a red-hue move are
+///     literally unchanged, and so is any colour that is only G and B (`cyan = e_g + e_b`).
+///   · **The colour *opposite* a moved primary must move.** `Σ m_i = (1,1,1)` forces
+///     `m_j + m_k = (1,1,1) − m_i`, so with red rotated +30° the cyan patch *has* to shift: a
+///     brute-force search over every in-gamut `m` whose OkLab hue is red + 30° found no candidate
+///     that keeps cyan inside 10.6°, and the constructed matrix measures **+13.4°**. That is the
+///     price of the white point, not a bug in the port (see `CalibrationTests`).
+///
+/// ## The exact identity
+///
+/// `matrix()` returns **nil** when all seven numbers are 0 — not `Matrix3.identity`, and not
+/// "1 ± 1e-16": there is no matrix, the graph dispatches S1's calibration-free entry point, no
+/// uniform is bound, and `keyToken` is nil so the S1 key material is byte-identical to 178's. The
+/// unit matrix is a *structural* fact (the branch), which is the only kind that can survive a
+/// shader compiler.
+public struct CalibrationGroup: Sendable, Equatable, Codable {
+
+    /// The sliders' travel, and the unit the document stores: **−100…+100**, one number per row.
+    /// The document holds the slider number itself (unlike 校正's α): a hue is a hue, and `+30` in
+    /// the panel is `+30` in the file and `+30°` on the colour wheel.
+    public static let sliderRange: ClosedRange<Double> = -100 ... 100
+
+    /// Degrees of OkLab hue per slider unit: **+30 reads +30°**. LightCraft's `CALIB_HUE` is 0.5 rad
+    /// at ±100 (28.6° at full travel, 8.6° at 30); the panel here is calibrated in degrees because
+    /// that is the number the acceptance is written in and the number a colourist can check against
+    /// a wheel.
+    public static let hueDegreesPerUnit = 1.0
+
+    /// Chroma multiplier at ±100 of a saturation row (`1 ± 0.6`, LightCraft's `CALIB_SAT`): full
+    /// travel leaves 40 % of the primary's chroma, or 160 % (gamut-mapped back).
+    public static let saturationScale = 0.6
+
+    /// Green-channel change at `shadowTint = ±100` in the deepest shadows. LightCraft uses 0.3; that
+    /// puts the deepest shadows (`Y = 0.004`) at Δa\* **+1.37**, under the 2-code floor the contract
+    /// asks for, so the travel is 0.5 — measured **+2.47** at `Y = 0.004` and **+4.13** at
+    /// `Y = 0.02`. Above `Y = 0.127` the window is exactly 0, so nothing but the shadows moves.
+    public static let shadowTintScale = 0.5
+
+    /// Shadows' green↔magenta, −100…+100.
+    public var shadowTint: Double
+
+    public var redHue: Double
+    public var redSat: Double
+    public var greenHue: Double
+    public var greenSat: Double
+    public var blueHue: Double
+    public var blueSat: Double
+
+    public static let identity = CalibrationGroup()
+
+    public init(shadowTint: Double = 0,
+                redHue: Double = 0, redSat: Double = 0,
+                greenHue: Double = 0, greenSat: Double = 0,
+                blueHue: Double = 0, blueSat: Double = 0) {
+        self.shadowTint = shadowTint
+        self.redHue = redHue
+        self.redSat = redSat
+        self.greenHue = greenHue
+        self.greenSat = greenSat
+        self.blueHue = blueHue
+        self.blueSat = blueSat
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        var v = CalibrationGroup.identity
+        v.shadowTint = c.val("shadowTint", v.shadowTint)
+        v.redHue = c.val("redHue", v.redHue)
+        v.redSat = c.val("redSat", v.redSat)
+        v.greenHue = c.val("greenHue", v.greenHue)
+        v.greenSat = c.val("greenSat", v.greenSat)
+        v.blueHue = c.val("blueHue", v.blueHue)
+        v.blueSat = c.val("blueSat", v.blueSat)
+        self = v
+    }
+
+    /// All seven at zero — the graph's S1 fast path, the key's silence and the uniform's absence all
+    /// key off exactly this.
+    public var isIdentity: Bool {
+        shadowTint == 0 && redHue == 0 && redSat == 0
+            && greenHue == 0 && greenSat == 0 && blueHue == 0 && blueSat == 0
+    }
+
+    /// The three `(hue, sat)` pairs, in `R, G, B` order — the shape `matrix()` walks.
+    public var primaries: [(hue: Double, sat: Double)] {
+        [(redHue, redSat), (greenHue, greenSat), (blueHue, blueSat)]
+    }
+
+    /// Clamped to the travel (a hand-edited document cannot ask for 400°), as a green multiplier
+    /// factor `−1…+1` for the kernel's uniform.
+    public var clampedShadowTint: Double {
+        guard shadowTint.isFinite else { return 0 }
+        return min(max(shadowTint, Self.sliderRange.lowerBound),
+                   Self.sliderRange.upperBound) / 100
+    }
+
+    private static func clamped(_ v: Double) -> Double {
+        guard v.isFinite else { return 0 }
+        return min(max(v, sliderRange.lowerBound), sliderRange.upperBound)
+    }
+
+    /// The key's own units: **integer tenths of a slider unit** (`25` = position 2.5), the same
+    /// resolution `OpticsGroup.keyDeciles` uses and for the same reason.
+    public static func keyTenths(_ v: Double) -> Int {
+        Int((clamped(v) * 10).rounded())
+    }
+
+    /// The S1 key material's `;cal=` segment, or **nil when everything is at 0** — the whole reason a
+    /// neutral document's key string is unchanged. Only the non-default numbers are spelled, so a
+    /// document that moved 阴影 tint alone carries one short token, not seven zeros.
+    public var keyToken: String? {
+        guard !isIdentity else { return nil }
+        var t = ";cal"
+        if shadowTint != 0 { t += ";t=\(Self.keyTenths(shadowTint))" }
+        for (name, pair) in [("r", (redHue, redSat)), ("g", (greenHue, greenSat)),
+                             ("b", (blueHue, blueSat))] {
+            guard pair.0 != 0 || pair.1 != 0 else { continue }
+            t += ";\(name)=\(Self.keyTenths(pair.0))/\(Self.keyTenths(pair.1))"
+        }
+        return t
+    }
+
+    // MARK: - the matrix
+
+    /// The primaries matrix on **linear Rec.2020**, or **nil** when all seven numbers are 0.
+    ///
+    /// `nil` is the identity: a `Matrix3.identity` here would be "the arithmetic with zeros in it",
+    /// and 071 measured what that costs (a branch in the kernel moved 2980/12309 samples by one ULP).
+    /// A caller that needs nine numbers writes its own unit matrix and says why.
+    public func matrix() -> Matrix3? {
+        guard !isIdentity else { return nil }
+        var columns: [SIMD3<Double>] = []
+        columns.reserveCapacity(3)
+        for (i, pair) in primaries.enumerated() {
+            var e = SIMD3<Double>(0, 0, 0)
+            e[i] = 1
+            let hue = Self.clamped(pair.hue)
+            let sat = Self.clamped(pair.sat)
+            guard hue != 0 || sat != 0 else {
+                // Untouched: the unit vector itself, so the other two primaries are *literally*
+                // unchanged and `Σ m = (1,1,1)` stays exact.
+                columns.append(e)
+                continue
+            }
+            let lab = Self.oklab(fromRec2020: e)
+            let lightness = lab.x
+            let chroma = (lab.y * lab.y + lab.z * lab.z).squareRoot()
+            let h = atan2(lab.z, lab.y)
+            let h2 = h + hue * Self.hueDegreesPerUnit * .pi / 180
+            let c2 = max(chroma * (1 + sat / 100 * Self.saturationScale), 0)
+            columns.append(Self.gamutMappedLightness(lightness, chroma: c2, hue: h2))
+        }
+        let p = Matrix3(rows: [
+            [columns[0].x, columns[1].x, columns[2].x],
+            [columns[0].y, columns[1].y, columns[2].y],
+            [columns[0].z, columns[1].z, columns[2].z],
+        ])
+        // A degenerate triple (three primaries collapsed onto one line) has no white point to solve
+        // for. Saturation −100 on all three rows is the only way to get near it, and the honest answer
+        // there is "no matrix", not a silently-singular one.
+        let det = p.determinant
+        guard det.isFinite, abs(det) > 1e-6 else { return nil }
+        let k = p.inverted().applying(to: SIMD3(1, 1, 1))
+        let m = Matrix3(rows: (0..<3).map { r in
+            (0..<3).map { c in p[r, c] * k[c] }
+        })
+        guard m.values.allSatisfy({ $0.isFinite }) else { return nil }
+        return m
+    }
+
+    /// The matrix in the kernel's layout: three `SIMD4` rows (`xyz` used, `w` zero), plus the tint.
+    ///
+    /// `nil` when `isIdentity`. When only the tint moved this is the exact unit matrix *and* a
+    /// non-zero tint — the two travel in one struct because they are one stage parameter, and the
+    /// unit matrix costs the kernel three dot products it already had to do.
+    public var uniform: (rows: (SIMD4<Double>, SIMD4<Double>, SIMD4<Double>), tint: Double)? {
+        guard !isIdentity else { return nil }
+        let m = matrix() ?? Matrix3(rows: [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        return ((SIMD4(m[0, 0], m[0, 1], m[0, 2], 0),
+                 SIMD4(m[1, 0], m[1, 1], m[1, 2], 0),
+                 SIMD4(m[2, 0], m[2, 1], m[2, 2], 0)),
+                clampedShadowTint)
+    }
+
+    // MARK: - OkLab on the working primaries (the derivation's arithmetic)
+
+    /// Linear Rec.2020 → OkLab. Ottosson's two published matrices, composed with this project's own
+    /// Rec.2020 → XYZ (`ColorPrimaries.rec2020.toXYZ`) so there is no second copy of the primaries.
+    static func oklab(fromRec2020 v: SIMD3<Double>) -> SIMD3<Double> {
+        let lms = toLMS.applying(to: v)
+        let rooted = SIMD3(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z))
+        return lmsToLab.applying(to: rooted)
+    }
+
+    /// OkLab → linear Rec.2020 (the exact inverse of `oklab(fromRec2020:)`).
+    static func rec2020(fromOklab lab: SIMD3<Double>) -> SIMD3<Double> {
+        let rooted = labToLMS.applying(to: lab)
+        let lms = SIMD3(rooted.x * rooted.x * rooted.x,
+                        rooted.y * rooted.y * rooted.y,
+                        rooted.z * rooted.z * rooted.z)
+        return lmsToRec2020.applying(to: lms)
+    }
+
+    /// `L, C, h` at `L` and `h`, with the chroma **reduced** until the colour is inside the unit
+    /// cube. Reducing chroma at constant `L` and `h` is the only move that leaves the hue (the thing
+    /// the slider names) exactly where it was put — see the type's note, step 3.
+    static func gamutMappedLightness(_ lightness: Double, chroma: Double, hue: Double) -> SIMD3<Double> {
+        func at(_ scale: Double) -> SIMD3<Double> {
+            let h = hue
+            return rec2020(fromOklab: SIMD3(lightness, chroma * scale * cos(h), chroma * scale * sin(h)))
+        }
+        let full = at(1)
+        if full.min() >= 0, full.max() <= 1 { return full }
+        var lo = 0.0, hi = 1.0
+        for _ in 0..<40 {
+            let mid = (lo + hi) / 2
+            let q = at(mid)
+            if q.min() >= 0, q.max() <= 1 { lo = mid } else { hi = mid }
+        }
+        return at(lo)
+    }
+
+    /// `XYZ → LMS` (Ottosson 2020), then this project's `Rec.2020 → XYZ`.
+    private static let toLMS: Matrix3 = {
+        Matrix3(rows: [[0.8189330101, 0.3618667424, -0.1288597137],
+                       [0.0329845436, 0.9293118715, 0.0361456387],
+                       [0.0482003018, 0.2643662691, 0.6338517070]]) * ColorPrimaries.rec2020.toXYZ
+    }()
+    private static let lmsToLab = Matrix3(rows: [[0.2104542553, 0.7936177850, -0.0040720468],
+                                                [1.9779984951, -2.4285922050, 0.4505937099],
+                                                [0.0259040371, 0.7827717662, -0.8086757660]])
+    private static let labToLMS = lmsToLab.inverted()
+    private static let lmsToRec2020 = toLMS.inverted()
 }
 
 // MARK: - canonical number formatting for cache keys

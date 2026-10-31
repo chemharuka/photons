@@ -67,6 +67,12 @@ extension EditHistory {
         // and the turn live on, and `RenderGroup.stages` is what turns this bool into "re-render from
         // S0 down" — the same treatment `;car=` gets in `keyMaterial(.geometry)`.
         if !EditParameters.areEqual(before.optics, after.optics) { dirty.insert(.geometry) }
+        // 179 — 原色校准. `.light` is the group whose `stages` contain `.sceneLinear` (its own
+        // `RenderGroup` case would mean touching `History`'s enum and every exhaustive switch for no
+        // behavioural gain: the re-render it triggers is "S1 and everything below", which is exactly
+        // what `.light` already means). This list is the one `applyEdit` short-circuits on, so a line
+        // missing here is seven sliders that write nothing at all (the 078 B8 色差 bug, exactly).
+        if !EditParameters.areEqual(before.calibration, after.calibration) { dirty.insert(.light) }
         if !EditParameters.renderMaterialEqual(before.masks, after.masks) { dirty.insert(.masks) }
         // 2026-10-28 (078 P0-1): 修复画笔. One group, one stage (S1.9): a spot's centre, radius,
         // source offset, mode, feather or opacity all move it, and adding/removing a spot moves it
@@ -382,6 +388,25 @@ enum EditParameters {
         var t = FieldTable<OpticsGroup>()
         t.field("caRed") { areEqual($0.caRed, $1.caRed) }
         t.field("caBlue") { areEqual($0.caBlue, $1.caBlue) }
+        return t
+    }()
+
+    /// 179 — the seven 原色校准 numbers. Load-bearing exactly like the two CA ratios above:
+    /// `dirtyGroups` reads this table, `applyEdit` reads `dirtyGroups`, so a number this leaves out
+    /// is a slider that writes nothing (`FieldCoverageTests` reflects over the struct to hold it).
+    static func areEqual(_ a: CalibrationGroup, _ b: CalibrationGroup) -> Bool {
+        calibrationFields.allEqual(a, b)
+    }
+
+    static let calibrationFields: FieldTable<CalibrationGroup> = {
+        var t = FieldTable<CalibrationGroup>()
+        t.field("shadowTint") { areEqual($0.shadowTint, $1.shadowTint) }
+        t.field("redHue") { areEqual($0.redHue, $1.redHue) }
+        t.field("redSat") { areEqual($0.redSat, $1.redSat) }
+        t.field("greenHue") { areEqual($0.greenHue, $1.greenHue) }
+        t.field("greenSat") { areEqual($0.greenSat, $1.greenSat) }
+        t.field("blueHue") { areEqual($0.blueHue, $1.blueHue) }
+        t.field("blueSat") { areEqual($0.blueSat, $1.blueSat) }
         return t
     }()
 

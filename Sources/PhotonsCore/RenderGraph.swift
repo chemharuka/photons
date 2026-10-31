@@ -864,6 +864,18 @@ private struct S1Params {
     var e: SIMD4<Float>
 }
 
+/// 179 — mirror of `CalParams` in `Kernels/s1_scene_linear.metal`, byte for byte: three **row-major**
+/// rows of the primaries matrix (`xyz` used, `w` unused) plus the shadows' tint in `t.x`.
+///
+/// Its own struct, at `buffer(1)`, written only for a document whose `CalibrationGroup` is not the
+/// unit matrix — see the type note in the kernel for why this is not five more fields in `S1Params`.
+private struct CalParamsU {
+    var r0: SIMD4<Float>
+    var r1: SIMD4<Float>
+    var r2: SIMD4<Float>
+    var t: SIMD4<Float>
+}
+
 private struct S2Params {
     // 085 — dShadow, dMid, dHighlight (all EV, already gated by `S2Regions.travelEV`), identity.
     var b: SIMD4<Float>
@@ -3231,6 +3243,27 @@ public final class RenderGraph {
         abs(blacks) > blacksLevelEntry
     }
 
+    /// 179 — the S1 entry point's **name**, as one function of the four flags that choose it.
+    ///
+    /// Exposed for the same reason `sceneLinearUsesLevelEntry` is: `CalibrationTests` has to be able
+    /// to say "a document with all seven numbers at 0 dispatches `s1_scene_linear`, not
+    /// `s1_scene_linear_cal`" without re-spelling the string table, and a table copied into a test
+    /// proves nothing about the one the encoder uses.
+    ///
+    /// The six names below 179 are unchanged, letter for letter — a calibration-free document's
+    /// wave of the pipeline is the same `MTLComputePipelineState` it has always been.
+    static func s1EntryPoint(knee: Bool, hybrid: Bool, trim: Bool, calibrated: Bool) -> String {
+        var name: String
+        switch (knee, hybrid) {
+        case (false, _): name = "s1_scene_linear"
+        case (true, true): name = "s1_scene_linear_hybrid"
+        case (true, false): name = "s1_scene_linear_knee"
+        }
+        if trim { name += "_trim" }
+        if calibrated { name += "_cal" }
+        return name
+    }
+
     private func encoder(_ cb: MTLCommandBuffer, _ pipeline: MTLComputePipelineState,
                          in src: MTLTexture, out dst: MTLTexture) throws -> MTLComputeCommandEncoder {
         guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3356,15 +3389,10 @@ public final class RenderGraph {
             let knee = edit.light.blacks != 0 || edit.light.whites != 0
             let hybrid = knee && Self.sceneLinearUsesLevelEntry(blacks: edit.light.blacks)
             let trim = edit.light.blackOffset != 0
-            let function: String
-            switch (knee, hybrid, trim) {
-            case (false, _, false): function = "s1_scene_linear"
-            case (false, _, true): function = "s1_scene_linear_trim"
-            case (true, true, false): function = "s1_scene_linear_hybrid"
-            case (true, true, true): function = "s1_scene_linear_hybrid_trim"
-            case (true, false, false): function = "s1_scene_linear_knee"
-            case (true, false, true): function = "s1_scene_linear_knee_trim"
-            }
+            let calibration = edit.calibration
+            let calUniform = calibration.uniform
+            let function = Self.s1EntryPoint(knee: knee, hybrid: hybrid, trim: trim,
+                                            calibrated: calUniform != nil)
             let p = try kernels.pipeline(file: "s1_scene_linear", function: function)
             // ── S1 is end points + exposure + highlight recovery ────────────────────────────────
             // 073B/073C: the sliders are **not** a level any more. `blacks` is a multiplicative EV at
@@ -3394,6 +3422,10 @@ public final class RenderGraph {
                 && edit.light.blackOffset == 0
                 // 143: a white balance is not the identity either (and `nil` is, by definition).
                 && whiteBalanceIsIdentity
+                // 179: a calibration is not the identity: the kernel's `p.b.y` short-circuits the whole
+                // body (it is the "copy the source" flag), so a calibrated document must clear it or
+                // the matrix would be skipped for exactly the documents that need it.
+                && calUniform == nil
             var params = S1Params(
                 a: SIMD4(edit.light.exposureGain,
                          Float(whiteBalance.r), Float(whiteBalance.g), Float(whiteBalance.b)),
@@ -3411,6 +3443,20 @@ public final class RenderGraph {
                          Float(edit.light.exposureGain), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S1Params>.stride, index: 0)
+            // 179 — 原色校准 travels in its **own** buffer, bound only when the document actually
+            // carries one. `nil` here is the whole "does not enter the uniform" requirement: a
+            // document with all seven numbers at 0 has no second buffer, its kernel has no second
+            // argument, and the pass it runs is 178's body verbatim.
+            if let cal = calUniform {
+                var calParams = CalParamsU(r0: SIMD4(Float(cal.rows.0.x), Float(cal.rows.0.y),
+                                                    Float(cal.rows.0.z), 0),
+                                           r1: SIMD4(Float(cal.rows.1.x), Float(cal.rows.1.y),
+                                                    Float(cal.rows.1.z), 0),
+                                           r2: SIMD4(Float(cal.rows.2.x), Float(cal.rows.2.y),
+                                                    Float(cal.rows.2.z), 0),
+                                           t: SIMD4(Float(cal.tint), 0, 0, 0))
+                enc.setBytes(&calParams, length: MemoryLayout<CalParamsU>.stride, index: 1)
+            }
             dispatch(enc, p, plan.canvas)
             enc.endEncoding()
 

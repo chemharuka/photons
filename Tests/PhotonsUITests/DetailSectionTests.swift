@@ -23,12 +23,15 @@ final class DetailSectionTests: XCTestCase {
         // card (细节 → 开发) and left it in the slot it has held since 2026-10-28.
         XCTAssertEqual(titles.firstIndex(of: "曲线").map { $0 + 1 }, develop,
                        "开发 belongs directly under 曲线; got \(titles)")
-        // …and 黑白 sits between 色彩分级 and 曲线, so every offset below 曲线 gained one row:
-        // 曲线 (直接压在 开发 上) is +1, 黑白 +2, 色彩分级 +3, 点颜色 +4, HSL +5, Color +6.
-        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 3 }, develop)
-        XCTAssertEqual(titles.firstIndex(of: "点颜色").map { $0 + 4 }, develop)
-        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 5 }, develop)
-        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 6 }, develop)
+        // …and 校准 + 黑白 sit between 色彩分级 and 曲线 (179 inserted 校准 next to 色彩分级), so every
+        // offset below 曲线 gained one more row: 曲线 (直接压在 开发 上) is +1, 黑白 +3, 校准 +2,
+        // 色彩分级 +4, 点颜色 +5, HSL +6, Color +7.
+        XCTAssertEqual(titles.firstIndex(of: "校准").map { $0 + 3 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "黑白").map { $0 + 2 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 4 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "点颜色").map { $0 + 5 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 6 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 7 }, develop)
         XCTAssertEqual(titles.filter { $0 == "开发" }.count, 1, "one 开发 card, not two")
 
         // 164: the new 细节 card sits between 校正 and 效果.
