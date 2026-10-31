@@ -91,7 +91,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · Photons 白皮书</title>
+<title>{title}</title>
 <meta name="description" content="Photons 的显示架构、处理架构与参数算法（α 阶段）。">
 <link rel="stylesheet" href="assets/whitepaper.css">
 <link rel="icon" href="assets/mark.svg">
@@ -169,7 +169,7 @@ def main() -> None:
             if following else "<span></span>"
         )
         page = PAGE.format(
-            title=html.escape(chapter["title"]),
+            title=html.escape(chapter["title"]) + " · Photons 白皮书",
             revision=revision,
             today=today,
             sidebar=sidebar(chapters, chapter),
