@@ -1040,7 +1040,13 @@ final class MaskTests: XCTestCase {
         let cs = cos(rotation * Double.pi / 180), sn = sin(rotation * Double.pi / 180)
         // 132: at θ ≠ 0 the canvas is the rotated crop's bounding box and the frame is centred in it,
         // so `p.f.xy` is the frame's pixel size and the canvas origin is `(frame − canvas)/2`.
-        let framePixels = edit.geometry.outputPixels(in: ImageSize(width: image.width, height: image.height))
+        // 188: `outputPixels` is now the **canvas** (the info-bar size), so the frame's own pixels are
+        // asked for by name — the two are the same number at every right angle and differ by the AABB
+        // margin at any other, which is exactly the difference this forward model needs.
+        let framePixels = CropMath.frameSize(edit.geometry.renderCrop(source: ImageSize(width: image.width,
+                                                                                       height: image.height)),
+                                             in: ImageSize(width: image.width, height: image.height),
+                                             allowsOutsideSource: true)
         let fx = Double(framePixels.width), fy = Double(framePixels.height)
         let ox = (Double(dump.width) - fx) / 2, oy = (Double(dump.height) - fy) / 2
 

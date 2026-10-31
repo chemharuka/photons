@@ -656,6 +656,15 @@ public struct LoupeFraming: Equatable, Sendable {
         return (width * c + height * s, width * s + height * c)
     }
 
+    /// 188 — the picture's place **inside the expanded canvas**, in source pixels: `(0, 0)` at every
+    /// right angle, `((canvas − crop)/2)` otherwise. The frozen canvas quad the loupe composes is the
+    /// canvas (176), not the crop, so the placement's region has to be measured from here.
+    public var canvasOriginPixels: (x: Double, y: Double) {
+        let extent = rotatedCropExtent
+        return (cropOriginX - max(extent.width - cropWidthPixels, 0) / 2,
+                cropOriginY - max(extent.height - cropHeightPixels, 0) / 2)
+    }
+
     /// The whole source turned by the document's angle — what ordinary 适应 frames.
     public var rotatedSourceExtent: (width: Double, height: Double) {
         Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
@@ -941,11 +950,20 @@ public struct LoupeFraming: Equatable, Sendable {
     /// it (`u ↦ 1 − u`): the whole-picture texture is rendered with the same flip, and a window on the
     /// left of the source is on the right of that texture. Straighten contributes nothing here, for
     /// the reason `outputWindow(of:)` gives: the window lives in the frame, not in the source.
+    ///
+    /// **188 — normalised against the expanded canvas, not the crop.** 176 made the frame texture the
+    /// *canvas* (the turned crop's AABB, [`canvasOriginPixels`]), so dividing the window by
+    /// `cropWidthPixels` multiplied the region by `canvas/crop` a second time: at 5.4° the backdrop's
+    /// quad came out 39 px right, 54 px down and 81 × 108 px small on a 1400 × 1000 canvas. At θ = 0
+    /// the canvas *is* the crop (`rotatedCropExtent` returns its input, so the origin is exactly
+    /// `cropOrigin`), and every number below is the pre-188 one bit for bit.
     public func framePlacement(of mapping: LoupeMapping) -> FramePlacement {
-        let cw = max(cropWidthPixels, 1e-9), ch = max(cropHeightPixels, 1e-9)
-        var u0 = (mapping.cropLeft - cropOriginX) / cw
+        let extent = rotatedCropExtent
+        let origin = canvasOriginPixels
+        let cw = max(extent.width, 1e-9), ch = max(extent.height, 1e-9)
+        var u0 = (mapping.cropLeft - origin.x) / cw
         var u1 = u0 + mapping.cropWidth / cw
-        var v0 = (mapping.cropTop - cropOriginY) / ch
+        var v0 = (mapping.cropTop - origin.y) / ch
         var v1 = v0 + mapping.cropHeight / ch
         if mapping.flipH { (u0, u1) = (1 - u1, 1 - u0) }
         if mapping.flipV { (v0, v1) = (1 - v1, 1 - v0) }
